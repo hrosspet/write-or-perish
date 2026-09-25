@@ -32,6 +32,21 @@ EXT_QUOTE_PLACEHOLDER_PATTERN = r'\{quote_ext:(\d+)\}'
 # Default max depth for recursive quote resolution in direct conversation
 DEFAULT_MAX_DEPTH = 3
 
+# Preamble body for a pinned profile/todo/artifact version whose ai_usage
+# keeps it from the model (#340). The thread keeps its "(ref #N)" line, so
+# the preamble says why the content is missing instead of dropping the ref.
+AI_BLOCKED_ARTIFACT_TEXT = "[AI usage not permitted by author]"
+
+
+def ai_blocked_artifact(row) -> bool:
+    """True when an artifact row (profile, todo, UserArtifact) must not
+    reach a model: its ai_usage is outside AI_ALLOWED. Rows without an
+    ai_usage column (UserPrompt) are never blocked."""
+    from backend.utils.privacy import AI_ALLOWED
+    if not hasattr(row, "ai_usage"):
+        return False
+    return row.ai_usage not in AI_ALLOWED
+
 
 def find_quote_ids(content: str) -> List[int]:
     """
@@ -248,6 +263,7 @@ def resolve_quotes(
     max_depth: int = DEFAULT_MAX_DEPTH,
     _seen_ids: Optional[Set[int]] = None,
     tz_name: Optional[str] = None,
+    block_ai_none: Optional[bool] = None,
 ) -> Tuple[str, List[int]]:
     """
     Replace {quote:ID} placeholders with quoted node content, recursively.
@@ -262,6 +278,9 @@ def resolve_quotes(
         tz_name: IANA timezone the quoted node's creation time is rendered
                  in (UTC when unset) — pass the conversation owner's so it
                  matches the thread's message stamps
+        block_ai_none: Replace quotes of nodes marked ai_usage='none' with a
+                 placeholder. Defaults to *for_llm*; the AI-filtered export
+                 sets it with the human-readable format (#340 review).
 
     Returns:
         Tuple of (resolved_content, list_of_quoted_node_ids)
@@ -274,6 +293,8 @@ def resolve_quotes(
 
     if _seen_ids is None:
         _seen_ids = set()
+    if block_ai_none is None:
+        block_ai_none = for_llm
 
     quote_ids = find_quote_ids(content)
     if not quote_ids:
@@ -306,7 +327,7 @@ def resolve_quotes(
                 return f"[Quoted node deleted: node {node_id}]"
 
         # AI usage check: block content from nodes that don't permit AI usage
-        if for_llm and data.get("ai_usage") == "none":
+        if block_ai_none and data.get("ai_usage") == "none":
             return f"[Quote #{node_id}: AI usage not permitted by author]"
 
         # Cycle detection
@@ -330,6 +351,7 @@ def resolve_quotes(
                 max_depth=max_depth - 1,
                 _seen_ids=new_seen,
                 tz_name=tz_name,
+                block_ai_none=block_ai_none,
             )
             resolved_ids.extend(nested_ids)
 
@@ -524,7 +546,8 @@ class ExportQuoteResolver:
             for atype, aid in artifacts:
                 key = (atype, aid)
                 if key not in self._artifact_contents:
-                    acontent = self._load_artifact_content(atype, aid)
+                    acontent = self._load_artifact_content(
+                        atype, aid, filter_ai_usage=self.filter_ai_usage)
                     if acontent:
                         self._artifact_contents[key] = acontent
                         self._artifact_tokens[key] = (
@@ -539,8 +562,15 @@ class ExportQuoteResolver:
         }
 
     @staticmethod
-    def _load_artifact_content(artifact_type, artifact_id):
-        """Load content for an artifact by type and id."""
+    def _load_artifact_content(artifact_type, artifact_id,
+                               filter_ai_usage=False):
+        """Load content for an artifact by type and id.
+
+        With *filter_ai_usage*, a profile or todo version marked outside
+        AI_ALLOWED yields AI_BLOCKED_ARTIFACT_TEXT instead of its content
+        (#340), the same rule the resolver applies to nodes. Prompts carry
+        no ai_usage.
+        """
         if artifact_type == "prompt":
             from backend.models import UserPrompt
             obj = UserPrompt.query.get(artifact_id)
@@ -548,12 +578,16 @@ class ExportQuoteResolver:
         if artifact_type == "profile":
             from backend.models import UserProfile
             obj = UserProfile.query.get(artifact_id)
-            return obj.get_content() if obj else None
-        if artifact_type == "todo":
+        elif artifact_type == "todo":
             from backend.models import UserTodo
             obj = UserTodo.query.get(artifact_id)
-            return obj.get_content() if obj else None
-        return None
+        else:
+            return None
+        if obj is None:
+            return None
+        if filter_ai_usage and ai_blocked_artifact(obj):
+            return AI_BLOCKED_ARTIFACT_TEXT
+        return obj.get_content()
 
     def _truncate(self):
         """

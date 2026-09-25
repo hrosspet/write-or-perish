@@ -9,7 +9,8 @@ from backend.utils.tokens import approximate_token_count, get_model_context_wind
 from backend.utils.privacy import AI_ALLOWED, accessible_nodes_filter, can_user_access_node
 from backend.utils.quotes import (
     resolve_quotes, has_quotes, ExportQuoteResolver,
-    resolve_quotes_for_export, resolve_ext_quotes, has_ext_quotes
+    resolve_quotes_for_export, resolve_ext_quotes, has_ext_quotes,
+    ai_blocked_artifact, AI_BLOCKED_ARTIFACT_TEXT,
 )
 from backend.utils.timefmt import iso_utc
 from backend.utils.encryption import prefetch_deks
@@ -259,6 +260,15 @@ def _is_flat_tweet_root(node, filter_ai_usage, created_before):
                                        None, keep_tombstones=True))
 
 
+def _preamble_content(row, filter_ai_usage):
+    """A pinned artifact version's preamble body. With *filter_ai_usage*,
+    a row marked outside AI_ALLOWED renders as a placeholder, never its
+    content (#340)."""
+    if filter_ai_usage and ai_blocked_artifact(row):
+        return AI_BLOCKED_ARTIFACT_TEXT
+    return row.get_content()
+
+
 def _artifact_ref_lines(node):
     """Reference lines for whatever context artifacts are pinned on *node*.
 
@@ -309,7 +319,7 @@ def _artifact_ref_lines(node):
 
 
 def _format_node_text(node, index_path, user_id, embedded_quotes,
-                      ai_blocked_ids):
+                      ai_blocked_ids, filter_ai_usage=False):
     """The node's own text block: header, any pinned-artifact refs, then
     content. System-prompt nodes emit refs only (their content IS the
     prompt, shown as a ref)."""
@@ -340,8 +350,13 @@ def _format_node_text(node, index_path, user_id, embedded_quotes,
                 ai_blocked_ids=ai_blocked_ids
             )
         elif user_id:
-            # Fallback to simple resolution (depth 1)
-            content, _ = resolve_quotes(content, user_id, for_llm=False, max_depth=1)
+            # Fallback to simple resolution (depth 1). The unbudgeted
+            # AI-filtered export reaches models too (recent-context first
+            # attempt, uncapped {user_export}), so it blocks quotes of
+            # nodes marked 'none' like the resolver path does.
+            content, _ = resolve_quotes(
+                content, user_id, for_llm=False, max_depth=1,
+                block_ai_none=filter_ai_usage)
     # {quote_ext:ID} (saved references) resolve inline unconditionally —
     # they're small and never nest, so no dedup machinery is needed.
     if user_id and has_ext_quotes(content):
@@ -424,7 +439,8 @@ def format_node_tree(
         if kind == "node":
             processed_nodes.add(current.id)
             parts.append(_format_node_text(
-                current, path, user_id, embedded_quotes, ai_blocked_ids))
+                current, path, user_id, embedded_quotes, ai_blocked_ids,
+                filter_ai_usage=filter_ai_usage))
             children = _filtered_children(
                 current, filter_ai_usage, created_before, included_ids,
                 keep_tombstones=True)
@@ -1170,7 +1186,7 @@ def _build_user_export_incremental(
 
 
 def build_user_export_content(
-    user, max_tokens=None, filter_ai_usage=False,
+    user, max_tokens=None, *, filter_ai_usage,
     created_before=None, created_after=None,
     chronological_order=False, return_metadata=False,
     collapse_artifacts=False,
@@ -1214,9 +1230,14 @@ def build_user_export_content(
         max_tokens: Optional maximum token count. If provided, only includes
                    most recent threads that fit within this limit, and uses
                    smart quote resolution.
-        filter_ai_usage: If True, only include nodes where ai_usage is
-                        'chat' or 'train'. Use True for AI profile
-                        generation, False for user data export.
+        filter_ai_usage: Required, keyword-only. True leaves out every
+                        node, quote and artifact row whose ai_usage is
+                        not 'chat'/'train'; any export that reaches a
+                        model must pass True. False is only for the
+                        user's own download of their data
+                        (/export/threads, export_user_threads), which
+                        includes rows marked 'none'. No default, so a
+                        new caller has to choose.
         created_before: Optional datetime. If provided, only includes
                        nodes created before this timestamp.
         created_after: Optional datetime. If provided, forces the anchor-based
@@ -1459,7 +1480,8 @@ def build_user_export_content(
                     ).count()
                     profile_versions[profile.id] = {
                         "version": pver,
-                        "content": profile.get_content(),
+                        "content": _preamble_content(
+                            profile, filter_ai_usage),
                     }
                 # Todo artifacts
                 todo = n.get_artifact("todo")
@@ -1470,7 +1492,7 @@ def build_user_export_content(
                     ).count()
                     todo_versions[todo.id] = {
                         "version": tver,
-                        "content": todo.get_content(),
+                        "content": _preamble_content(todo, filter_ai_usage),
                     }
                 # User artifacts (memory, scratchpad, predictions,
                 # ai_preferences, custom):
@@ -1487,7 +1509,8 @@ def build_user_export_content(
                         "kind": kind,
                         "title": artifact.title,
                         "version": art_ver,
-                        "content": artifact.get_content(),
+                        "content": _preamble_content(
+                            artifact, filter_ai_usage),
                     }
 
         has_any_preamble = (
@@ -1645,7 +1668,9 @@ def export_threads():
     - Properly formatted with hierarchical structure showing branches
     """
     # Use the core export logic
-    export_content = build_user_export_content(current_user)
+    # The user's own download: rows marked 'none' are included.
+    export_content = build_user_export_content(
+        current_user, filter_ai_usage=False)
 
     if not export_content:
         return Response(

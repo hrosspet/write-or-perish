@@ -695,7 +695,7 @@ def test_export_includes_tombstones_in_mixed_thread(app, alice):
     _db.session.commit()
 
     from backend.routes.export_data import build_user_export_content
-    content = build_user_export_content(alice)
+    content = build_user_export_content(alice, filter_ai_usage=False)
     assert content is not None
     assert "parent body" in content
     assert "[Node deleted by author]" in content
@@ -718,7 +718,7 @@ def test_export_skips_fully_deleted_thread(app, alice):
     other = _make_node(alice, content="other thread")
 
     from backend.routes.export_data import build_user_export_content
-    content = build_user_export_content(alice)
+    content = build_user_export_content(alice, filter_ai_usage=False)
     assert content is not None
     assert "other thread" in content
     # Fully-deleted thread should be entirely absent.
@@ -786,7 +786,8 @@ def test_budgeted_export_preselects_before_loading(app, alice, monkeypatch):
         return real(root_id)
     monkeypatch.setattr(export_data, "_thread_has_alive_node", counting)
 
-    content = export_data.build_user_export_content(alice, max_tokens=400)
+    content = export_data.build_user_export_content(
+        alice, max_tokens=400, filter_ai_usage=False)
     assert content is not None
     assert "entry number 39" in content          # newest first
     assert "entry number 00" not in content      # outside the window
