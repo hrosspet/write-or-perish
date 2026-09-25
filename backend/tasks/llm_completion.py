@@ -53,7 +53,7 @@ from backend.utils.cache_diagnostics import (
 from backend.utils.llm_batch import BatchItemFailed, BatchItemCancelled
 from backend.utils.ca_feed import (
     CA_CHAT_TURN_NOTE, CA_READ_AGAIN_TURN, CA_TWEETS_CHAT_STUB,
-    READ_FURTHER_MARKER,
+    FEED_AI_USAGE, READ_FURTHER_MARKER,
     FeedReplyError, read_reply_ids, record_feed_render,
     ca_turn as _ca_turn,
     refresh_snapshot_for_read, refs_from_render, seen_tweet_ids,
@@ -3120,6 +3120,13 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     "Node %s: read thread (turn %r); forcing chat keys "
                     "over the chain's %r", llm_node_id, ca_turn, key_type)
                 key_type = 'chat'
+            if ca_turn is not None and llm_node.ai_usage == 'train':
+                # The reply is stored as what it is built from (#362).
+                # create_llm_placeholder already lowers it by the same
+                # rule; this catches a placeholder made before that (or a
+                # PoC read prompt it could not see), and the continuation
+                # nodes below copy it.
+                llm_node.ai_usage = FEED_AI_USAGE
             # That verdict is the chain's. What the chain's text resolves
             # to — quoted nodes, saved references, what a tool pulls in
             # mid-turn — joins the payload below and reports here; the

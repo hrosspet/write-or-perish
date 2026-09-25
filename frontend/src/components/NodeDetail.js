@@ -724,7 +724,9 @@ function NodeDetail({ nodeIdOverride }) {
   // under that prompt (the task strips it on read turns). Auto-generate
   // is honoured like Text mode's own entry, and the reply fires
   // server-side, so there is no /nodes/<id>/llm follow-up here.
-  const submitReadReplyMessage = async ({ content, streaming_session_id }) => {
+  // The form's AI usage goes along (a recording carries it on its draft):
+  // it defaults to the thread's, not the read reply's 'chat' (#362).
+  const submitReadReplyMessage = async ({ content, ai_usage, streaming_session_id }) => {
     if (streaming_session_id) {
       const res = await api.post(
         `/drafts/streaming/${streaming_session_id}/save-as-node`,
@@ -733,7 +735,7 @@ function NodeDetail({ nodeIdOverride }) {
       return res.data;
     }
     const res = await api.post(`/textmode/from-node/${id}`, {
-      content, model: selectedModel, auto_generate: autoGenerateActive,
+      content, ai_usage, model: selectedModel, auto_generate: autoGenerateActive,
     });
     return res.data;
   };

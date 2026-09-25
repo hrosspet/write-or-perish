@@ -1253,19 +1253,19 @@ def _start_server_side_llm_chain(draft, session_id, transcript,
        node's own finalization (interim steps included), so interim audio
        is playable while the continuation call is still generating
     """
-    from backend.models import Node, NodeTranscriptChunk
+    from backend.models import Node, NodeTranscriptChunk, User
     from backend.utils.prompts import get_user_prompt_record
-    from backend.utils.llm_nodes import create_llm_placeholder
+    from backend.utils.llm_nodes import create_llm_placeholder, reply_ai_usage
     from backend.utils.context_artifacts import attach_context_artifacts
     from backend.tasks.llm_completion import generate_llm_response
 
     prompt_key = label.lower()  # 'voice'
 
     if parent_id:
-        # Inherit ai_usage from parent node in the thread
+        # Inherit ai_usage from the thread, looking through a read (#362)
         parent_node = Node.query.get(parent_id)
-        ai_usage = (parent_node.ai_usage if parent_node
-                    else draft.ai_usage) or "none"
+        ai_usage = (reply_ai_usage(parent_node, User.query.get(user_id))
+                    if parent_node else draft.ai_usage) or "none"
         user_parent_id = parent_id
     else:
         # New thread — create system node with workflow prompt

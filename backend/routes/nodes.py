@@ -1305,6 +1305,10 @@ def get_node(node_id):
         from backend.utils.ca_feed import read_reply_ids
         alive = [n for n in ancestor_nodes if n.deleted_at is None] + [node]
         read_reply_above = bool(read_reply_ids(alive))
+    # What a new reply under this node starts with (#362): the reply form
+    # pre-selects it. Usually the node's own ai_usage; under a read it is
+    # the thread's with the read looked through.
+    from backend.utils.llm_nodes import reply_ai_usage
     node_data = {
         **focal,
         "child_count": len(serialized_children),
@@ -1312,6 +1316,8 @@ def get_node(node_id):
         "children": serialized_children,
         "in_read_thread": in_read_thread,
         "read_reply_above": read_reply_above,
+        "reply_ai_usage": reply_ai_usage(
+            node, current_user, parent_content=focal.get("content")),
     }
     return jsonify(node_data), 200
 

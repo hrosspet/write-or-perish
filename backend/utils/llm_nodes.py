@@ -10,7 +10,8 @@ from backend.utils.placeholders import (
     validate_ca_tweets_placeholders, validate_user_export_placeholders,
 )
 from backend.utils.ca_feed import (
-    READ_FURTHER_MARKER, READ_PROMPT_KEYS, ca_turn, read_reply_ids,
+    FEED_AI_USAGE, READ_FURTHER_MARKER, READ_PROMPT_KEYS, ca_turn,
+    read_reply_ids,
 )
 
 
@@ -80,7 +81,7 @@ class _Chain:
         self.nodes = [] if node is None else ancestor_chain(
             node.id, Node.id, Node.parent_id, Node.node_type, Node.llm_model,
             Node.deleted_at, Node.prompt_key, Node.tool_calls_meta,
-            max_depth=_MAX_ANCESTRY_HOPS)
+            Node.ai_usage, max_depth=_MAX_ANCESTRY_HOPS)
         self.keys = {n.id: n.prompt_key for n in self.nodes if n.prompt_key}
         linked = [n.id for n in self.nodes if not n.prompt_key]
         if linked:
@@ -194,6 +195,50 @@ def reply_read_turn(parent, meta=None, parent_content=None, chain=None):
                    chain.rendered, requested=requested)
 
 
+def reply_ai_usage(parent_node, user, chain=None, parent_content=None):
+    """The ai_usage a new reply under *parent_node* starts with when the
+    request names none (#362): the parent's, as everywhere, except that a
+    read is looked through. A read's nodes carry 'chat' because they quote
+    other people's tweets (ca_feed.FEED_AI_USAGE); that constrains the
+    read, not what the user writes under it, and the tweets are kept off
+    the training key per request anyway (llm_completion forces chat keys
+    on every turn of a read thread). The walk goes up from the parent and
+    skips:
+
+      - the read prompts (by key; a PoC-era prompt that carries
+        {ca_tweets} in its own text only as the direct parent, whose
+        *parent_content* the caller has decrypted anyway, as in
+        reply_read_turn);
+      - every LLM reply below a read prompt: the read replies, and the
+        chat turns about the picks, which are stored as 'chat' for the
+        tweets in their context (create_llm_placeholder), not by the
+        user's choice;
+      - any other read reply the chain knows (a render, picks, a batch).
+
+    The first node left decides. None left (the read is the thread's
+    root): the user's default_ai_usage. The reply form (GET /nodes/<id>),
+    Voice, Text mode and the streaming path all ask here, so they cannot
+    drift apart.
+    """
+    default = getattr(user, "default_ai_usage", None) or "none"
+    if parent_node is None:
+        return default
+    chain = chain or _Chain(parent_node)
+    nodes = chain.nodes or [parent_node]
+    prompts = {i for i, n in enumerate(nodes)
+               if chain.keys.get(n.id) in READ_PROMPT_KEYS}
+    if not prompts and CA_TWEETS_PATTERN.search(parent_content or ""):
+        prompts = {0}
+    top = max(prompts, default=-1)
+    for i, n in enumerate(nodes):
+        if i in prompts or n.id in chain.reads:
+            continue
+        if i < top and _is_llm(n):
+            continue
+        return n.ai_usage or default
+    return default
+
+
 def create_llm_placeholder(parent_node_id, model_id, human_owner_id,
                            privacy_level="private", ai_usage="chat",
                            placeholder_text="[LLM response generation pending...]",
@@ -277,6 +322,12 @@ def create_llm_placeholder(parent_node_id, model_id, human_owner_id,
             "Reply under node %s: model %s is not offered -> %s",
             parent.id, model_id, new_model_id)
         model_id = new_model_id
+    # Every turn of a read thread has the day's tweets or the picks'
+    # quotes in its context (llm_completion forces chat keys on it), so
+    # the reply is stored as what it is built from, whatever its parent
+    # says (#362). 'none' is left as the caller sent it.
+    if turn is not None and ai_usage == "train":
+        ai_usage = FEED_AI_USAGE
 
     llm_user = User.query.filter_by(username=model_id).first()
     if not llm_user:

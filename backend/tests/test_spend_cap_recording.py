@@ -384,6 +384,50 @@ class TestCappedRecordingIsTranscribed:
         assert entry.get_content() == "the whole transcript"
         assert Node.query.filter_by(node_type="llm").count() == 0
 
+    def test_voice_reply_under_a_read_takes_the_thread(self, st):
+        # #362: a read's nodes are 'chat' for the tweets they quote; a
+        # recorded reply under the read reply takes the user's node above
+        # the read, not the read's 'chat' nor the draft's.
+        from backend.models import FeedRender
+        user = st._test_user
+        user.default_ai_usage = "none"
+        root = Node(user_id=user.id, human_owner_id=user.id,
+                    node_type="user", ai_usage="train")
+        root.set_content("mine")
+        _db.session.add(root)
+        _db.session.flush()
+        prompt = Node(user_id=user.id, human_owner_id=user.id,
+                      parent_id=root.id, node_type="user", ai_usage="chat",
+                      prompt_key="read_thread")
+        prompt.set_content("")
+        _db.session.add(prompt)
+        _db.session.flush()
+        read = Node(user_id=user.id, human_owner_id=user.id,
+                    parent_id=prompt.id, node_type="llm", llm_model="gpt-5",
+                    ai_usage="chat")
+        read.set_content("picks")
+        _db.session.add(read)
+        _db.session.flush()
+        _db.session.add(FeedRender(node_id=read.id))
+        draft = _recording(user, "sess-read", [], st._test_root)
+        draft.ai_usage = "chat"
+        _db.session.commit()
+        saved_llm = sys.modules.get("backend.tasks.llm_completion")
+        sys.modules["backend.tasks.llm_completion"] = MagicMock()
+        try:
+            st._start_server_side_llm_chain(
+                draft, "sess-read", "why #2?", user.id,
+                read.id, "gpt-5", "Voice")
+        finally:
+            if saved_llm is None:
+                sys.modules.pop("backend.tasks.llm_completion", None)
+            else:
+                sys.modules["backend.tasks.llm_completion"] = saved_llm
+
+        entry = Node.query.filter_by(parent_id=read.id).one()
+        assert entry.get_content() == "why #2?"
+        assert entry.ai_usage == "train"
+
     @pytest.mark.parametrize("capped", [True, False])
     def test_voice_finalize_prewarms_only_when_not_capped(self, st, capped):
         # A capped finalize skips the reply, so it must not pay for a cache
