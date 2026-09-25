@@ -1295,6 +1295,7 @@ function NodeDetail({ nodeIdOverride }) {
                 nodeId={node.id}
                 onExternalReadChange={handleExternalReadChange}
                 onExternalFeedbackChange={handleExternalFeedbackChange}
+                showRecommendationFeedback={isLlmNode}
                 contextArtifacts={node.context_artifacts || null}
                 onQuoteClick={handleBubbleClick}
                 onCheckboxToggle={isOwner ? handleCheckboxToggle : undefined}
@@ -1332,6 +1333,7 @@ function NodeDetail({ nodeIdOverride }) {
               nodeId={node.id}
               onExternalReadChange={handleExternalReadChange}
               onExternalFeedbackChange={handleExternalFeedbackChange}
+              showRecommendationFeedback={isLlmNode}
               contextArtifacts={node.context_artifacts || null}
               onQuoteClick={handleBubbleClick}
             />

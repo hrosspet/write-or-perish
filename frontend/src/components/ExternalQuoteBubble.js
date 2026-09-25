@@ -41,8 +41,14 @@ const SOURCE_LABELS = {
  * the verdict that counts for it (`feedback`, `feedback_shared` when it
  * was given in a parallel Read) and, when the model already knew the
  * reader's verdict, `rated_before` for the line under an empty control.
+ *
+ * `showRecommendationFeedback` is set only where Loore quoted the
+ * reference (an LLM reply): the verdict judges a recommendation, and a
+ * reference the user quoted themselves was recommended by nobody (#363).
+ * Without it the owner still gets the read toggle, but no verdict and
+ * no "You rated this" line.
  */
-const ExternalQuoteBubble = ({ quote, nodeId, onReadChange, onFeedbackChange }) => {
+const ExternalQuoteBubble = ({ quote, nodeId, onReadChange, onFeedbackChange, showRecommendationFeedback = false }) => {
   const userCtx = useUser();
   const currentUser = userCtx ? userCtx.user : null;
   const { addToast } = useToast();
@@ -115,24 +121,26 @@ const ExternalQuoteBubble = ({ quote, nodeId, onReadChange, onFeedbackChange }) 
         <span>{postedAt}</span>
         {mine && (
           <span style={ownerSlotStyle}>
-            {quote.rated_before && !quote.feedback && (
+            {showRecommendationFeedback && quote.rated_before && !quote.feedback && (
               <span style={ratedBeforeStyle}>
                 {`You rated this ${quote.rated_before.feedback} on ${formatDate(quote.rated_before.at, { relative: false })}`}
               </span>
             )}
-            <ReferenceFeedback
-              itemId={quote.id}
-              feedback={quote.feedback}
-              nodeId={nodeId}
-              shared={!!quote.feedback_shared}
-              onChange={(fb, data) => {
-                if (onFeedbackChange) onFeedbackChange(quote.id, fb);
-                if (data && data.read_at && !readAt) {
-                  setReadAt(data.read_at);
-                  if (onReadChange) onReadChange(quote.id, data.read_at);
-                }
-              }}
-            />
+            {showRecommendationFeedback && (
+              <ReferenceFeedback
+                itemId={quote.id}
+                feedback={quote.feedback}
+                nodeId={nodeId}
+                shared={!!quote.feedback_shared}
+                onChange={(fb, data) => {
+                  if (onFeedbackChange) onFeedbackChange(quote.id, fb);
+                  if (data && data.read_at && !readAt) {
+                    setReadAt(data.read_at);
+                    if (onReadChange) onReadChange(quote.id, data.read_at);
+                  }
+                }}
+              />
+            )}
             <button
               type="button"
               className="ext-quote-read-toggle"
