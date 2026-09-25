@@ -839,13 +839,22 @@ def update_node(node_id):
         if not validate_ai_usage(ai_usage):
             return jsonify({"error": f"Invalid ai_usage: {ai_usage}"}), 400
         # A read's nodes quote other people's public tweets, which Loore
-        # has no licence to train on (see ca_feed.FEED_AI_USAGE).
+        # has no licence to train on (see ca_feed.FEED_AI_USAGE), and an
+        # LLM reply in a read thread was built with them in its context
+        # (#362).
         if ai_usage == "train":
             from backend.utils.ca_feed import is_feed_node
+            from backend.utils.llm_nodes import built_on_a_read
             if is_feed_node(node):
                 return jsonify({
                     "error": "A Community Archive read cannot be used for "
                              "training: it quotes other people's tweets.",
+                }), 400
+            if built_on_a_read(node):
+                return jsonify({
+                    "error": "This reply cannot be used for training: it "
+                             "was written with a Community Archive read "
+                             "(other people's tweets) in its context.",
                 }), 400
         node.ai_usage = ai_usage
 
@@ -1305,6 +1314,15 @@ def get_node(node_id):
         from backend.utils.ca_feed import read_reply_ids
         alive = [n for n in ancestor_nodes if n.deleted_at is None] + [node]
         read_reply_above = bool(read_reply_ids(alive))
+    # What a new reply under this node starts with (#362): the reply form
+    # pre-selects it. The node's own ai_usage, except in the owner's read
+    # thread, where the walk looks through the read (reply_ai_usage; only
+    # there, so other threads pay no chain queries).
+    reply_usage = node.ai_usage or current_user.default_ai_usage
+    if in_read_thread and (node.human_owner_id or node.user_id) == current_user.id:
+        from backend.utils.llm_nodes import reply_ai_usage
+        reply_usage = reply_ai_usage(
+            node, current_user, parent_content=focal.get("content"))
     node_data = {
         **focal,
         "child_count": len(serialized_children),
@@ -1312,6 +1330,7 @@ def get_node(node_id):
         "children": serialized_children,
         "in_read_thread": in_read_thread,
         "read_reply_above": read_reply_above,
+        "reply_ai_usage": reply_usage,
     }
     return jsonify(node_data), 200
 

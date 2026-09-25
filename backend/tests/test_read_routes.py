@@ -894,7 +894,8 @@ class TestModelWalkQueryCount:
     def test_walks_are_constant_in_thread_depth(self, app355):
         from sqlalchemy import event
         from backend.utils.llm_nodes import (
-            reply_read_turn, resolve_chat_model, resolve_read_model)
+            reply_ai_usage, reply_read_turn, resolve_chat_model,
+            resolve_read_model)
         alice = _make_user("alice", is_admin=True)
         parent = _make_node(alice, content="start")
         for i in range(200):
@@ -911,9 +912,228 @@ class TestModelWalkQueryCount:
             resolve_read_model(tip)
             resolve_chat_model(tip, alice)
             reply_read_turn(tip)
+            reply_ai_usage(tip, alice)
         finally:
             event.remove(_db.engine, "before_cursor_execute", listener)
         # Each call: chain (2) + linked prompt keys (1) + read replies
         # (2), about 5 whatever the depth; a per-level walk made ~1,000
         # on a 400-node thread.
-        assert len(statements) <= 20, len(statements)
+        assert len(statements) <= 28, len(statements)
+
+
+# ── A reply's AI usage under a read (#362) ────────────────────────────
+
+def _thread_with_read(alice, root_usage="train"):
+    """root (the user's own, *root_usage*) → read prompt → read reply, both
+    'chat' as the read routes make them. Returns the nodes by name."""
+    root = _make_node(alice, content="a thought", ai_usage=root_usage)
+    prompt = _make_prompt_node(alice, "read_thread", parent_id=root.id)
+    read = _make_node(alice, parent_id=prompt.id, node_type="llm",
+                      llm_model="gpt-6-sol", content="picks")
+    _render(read)
+    return dict(root=root, prompt=prompt, read=read)
+
+
+class TestReplyAiUsage:
+    def test_under_a_read_the_thread_decides_not_the_read(self, app355):
+        from backend.utils.llm_nodes import reply_ai_usage
+        alice = _make_user("alice", is_admin=True, default_ai_usage="none")
+        t = _thread_with_read(alice)
+        assert (t["prompt"].ai_usage, t["read"].ai_usage) == ("chat", "chat")
+        # The node above the read decides, not the account default.
+        assert reply_ai_usage(t["read"], alice) == "train"
+        assert reply_ai_usage(t["prompt"], alice) == "train"
+
+    def test_a_read_at_the_root_takes_the_account_default(self, app355):
+        from backend.utils.llm_nodes import reply_ai_usage
+        alice = _make_user("alice", is_admin=True, default_ai_usage="train")
+        prompt = _make_prompt_node(alice, "read")
+        read = _make_node(alice, parent_id=prompt.id, node_type="llm",
+                          llm_model="gpt-6-sol", content="nothing today")
+        _db.session.commit()
+        # A pick-less read reply with no render yet: still the read's.
+        assert reply_ai_usage(read, alice) == "train"
+        alice.default_ai_usage = "chat"
+        assert reply_ai_usage(read, alice) == "chat"
+
+    def test_below_the_users_reply_its_choice_carries_on(self, app355):
+        from backend.utils.llm_nodes import reply_ai_usage
+        alice = _make_user("alice", is_admin=True, default_ai_usage="train")
+        t = _thread_with_read(alice)
+        note = _make_node(alice, parent_id=t["read"].id, content="why #2?",
+                          ai_usage="train")
+        # The chat turn about the picks is stored 'chat' for the tweets in
+        # its context; the reply under it takes the user's note, not it.
+        chat = _make_node(alice, parent_id=note.id, node_type="llm",
+                          llm_model="claude-opus-4.6", content="because",
+                          ai_usage="chat")
+        _db.session.commit()
+        assert reply_ai_usage(note, alice) == "train"
+        assert reply_ai_usage(chat, alice) == "train"
+        # A note the user set to 'chat' is theirs to keep.
+        note.ai_usage = "chat"
+        _db.session.commit()
+        assert reply_ai_usage(chat, alice) == "chat"
+
+    def test_outside_a_read_the_parent_decides_as_before(self, app355):
+        from backend.utils.llm_nodes import reply_ai_usage
+        alice = _make_user("alice", default_ai_usage="train")
+        entry = _make_node(alice, content="mine", ai_usage="train")
+        # An LLM reply the user lowered by hand keeps its say.
+        reply = _make_node(alice, parent_id=entry.id, node_type="llm",
+                           llm_model="claude-opus-4.6", content="r",
+                           ai_usage="chat")
+        _db.session.commit()
+        assert reply_ai_usage(entry, alice) == "train"
+        assert reply_ai_usage(reply, alice) == "chat"
+        assert reply_ai_usage(None, alice) == "train"
+
+    def test_a_poc_prompt_is_seen_in_the_parents_own_text(self, app355):
+        from backend.utils.llm_nodes import reply_ai_usage
+        alice = _make_user("alice", is_admin=True, default_ai_usage="none")
+        root = _make_node(alice, content="a thought", ai_usage="train")
+        poc = _make_node(alice, parent_id=root.id, content="Read {ca_tweets}")
+        _db.session.commit()
+        assert reply_ai_usage(poc, alice, parent_content=poc.get_content()) == "train"
+
+    def test_a_placeholder_in_a_read_thread_is_stored_as_chat(self, app355):
+        from backend.utils.llm_nodes import create_llm_placeholder
+        alice = _make_user("alice", is_admin=True, default_ai_usage="train")
+        t = _thread_with_read(alice)
+        note = _make_node(alice, parent_id=t["read"].id, content="why #2?",
+                          ai_usage="train")
+        _db.session.commit()
+        # A chat turn about the picks: the tweets are in its context.
+        node, _ = create_llm_placeholder(note.id, "claude-opus-4.6", alice.id,
+                                         ai_usage="train")
+        assert node.ai_usage == "chat"
+        # 'none' is never raised.
+        node, _ = create_llm_placeholder(note.id, "claude-opus-4.6", alice.id,
+                                         ai_usage="none")
+        assert node.ai_usage == "none"
+        # Outside a read thread the caller's value stands.
+        node, _ = create_llm_placeholder(t["root"].id, "claude-opus-4.6",
+                                         alice.id, ai_usage="train")
+        assert node.ai_usage == "train"
+
+    def test_get_node_returns_the_reply_default(self, app355):
+        client = app355.test_client()
+        alice = _make_user("alice", is_admin=True, default_ai_usage="none")
+        t = _thread_with_read(alice)
+        _login(client, alice.id)
+        data = client.get(f"/api/nodes/{t['read'].id}").get_json()
+        assert data["ai_usage"] == "chat"
+        assert data["reply_ai_usage"] == "train"
+        data = client.get(f"/api/nodes/{t['root'].id}").get_json()
+        assert data["reply_ai_usage"] == "train"
+
+    def test_a_none_the_walk_would_pass_still_holds(self, app355):
+        # 'none' is only ever the user's choice: a chat turn they lowered
+        # to it keeps what they write below out of AI too.
+        from backend.utils.llm_nodes import reply_ai_usage
+        alice = _make_user("alice", is_admin=True, default_ai_usage="train")
+        t = _thread_with_read(alice)
+        note = _make_node(alice, parent_id=t["read"].id, content="why #2?",
+                          ai_usage="train")
+        chat = _make_node(alice, parent_id=note.id, node_type="llm",
+                          llm_model="claude-opus-4.6", content="because",
+                          ai_usage="none")
+        _db.session.commit()
+        assert reply_ai_usage(chat, alice) == "none"
+
+    def test_an_llm_node_above_the_read_still_decides(self, app355):
+        from backend.utils.llm_nodes import reply_ai_usage
+        alice = _make_user("alice", is_admin=True, default_ai_usage="train")
+        root = _make_node(alice, content="a thought", ai_usage="train")
+        earlier = _make_node(alice, parent_id=root.id, node_type="llm",
+                             llm_model="claude-opus-4.6", content="hm",
+                             ai_usage="chat")
+        prompt = _make_prompt_node(alice, "read_thread", parent_id=earlier.id)
+        read = _make_node(alice, parent_id=prompt.id, node_type="llm",
+                          llm_model="gpt-6-sol", content="picks")
+        _db.session.commit()
+        assert reply_ai_usage(read, alice) == "chat"
+
+    def test_get_node_walks_only_in_the_owners_read_thread(self, app355, monkeypatch):
+        import backend.utils.llm_nodes as llm_nodes
+        client = app355.test_client()
+        alice = _make_user("alice", is_admin=True, default_ai_usage="none")
+        bob = _make_user("bob", default_ai_usage="train")
+        t = _thread_with_read(alice)
+        plain = _make_node(alice, content="no read here", ai_usage="train")
+        t["read"].privacy_level = "public"
+        _db.session.commit()
+        walks = []
+        real = llm_nodes.reply_ai_usage
+        monkeypatch.setattr(llm_nodes, "reply_ai_usage",
+                            lambda *a, **k: walks.append(1) or real(*a, **k))
+        _login(client, alice.id)
+        assert client.get(f"/api/nodes/{plain.id}").get_json()["reply_ai_usage"] == "train"
+        assert walks == []
+        assert client.get(f"/api/nodes/{t['read'].id}").get_json()["reply_ai_usage"] == "train"
+        assert walks == [1]
+        # Someone else viewing a public read reply gets its own value.
+        from flask import g
+        g.pop("_login_user", None)  # the fixture's app context outlives requests
+        _login(client, bob.id)
+        data = client.get(f"/api/nodes/{t['read'].id}").get_json()
+        assert data["reply_ai_usage"] == "chat"
+        assert walks == [1]
+
+
+class TestReadBuiltRepliesStayChat:
+    """A reply built with a read in its context is never raised to 'train'
+    afterwards (#362): not in the node editor, not by the cascade."""
+
+    def _thread(self, alice):
+        t = _thread_with_read(alice, root_usage="chat")
+        note = _make_node(alice, parent_id=t["read"].id, content="why #2?",
+                          ai_usage="chat")
+        chat = _make_node(alice, parent_id=note.id, node_type="llm",
+                          llm_model="claude-opus-4.6", content="because",
+                          ai_usage="chat")
+        # A pick-less read reply ("nothing today") under a second prompt.
+        prompt2 = _make_prompt_node(alice, "read_thread", parent_id=chat.id)
+        empty = _make_node(alice, parent_id=prompt2.id, node_type="llm",
+                           llm_model="gpt-6-sol", content="nothing today")
+        _render(empty)
+        return dict(t, note=note, chat=chat, empty=empty)
+
+    def test_built_on_a_read(self, app355):
+        from backend.utils.llm_nodes import built_on_a_read
+        alice = _make_user("alice", is_admin=True)
+        t = self._thread(alice)
+        assert built_on_a_read(t["chat"]) and built_on_a_read(t["empty"])
+        assert built_on_a_read(t["read"])
+        assert not built_on_a_read(t["note"])      # the user's own
+        assert not built_on_a_read(t["root"])
+
+    def test_the_editor_refuses_train(self, app355):
+        client = app355.test_client()
+        alice = _make_user("alice", is_admin=True)
+        t = self._thread(alice)
+        _login(client, alice.id)
+        resp = client.put(f"/api/nodes/{t['chat'].id}",
+                          json={"content": "because", "ai_usage": "train"})
+        assert resp.status_code == 400
+        assert Node.query.get(t["chat"].id).ai_usage == "chat"
+        resp = client.put(f"/api/nodes/{t['note'].id}",
+                          json={"content": "why #2?", "ai_usage": "train"})
+        assert resp.status_code == 200, resp.get_json()
+
+    def test_the_cascade_leaves_them(self, app355):
+        from backend.utils.node_settings import apply_settings_to_descendants
+        alice = _make_user("alice", is_admin=True)
+        t = self._thread(alice)
+        changed = apply_settings_to_descendants(t["root"], alice.id,
+                                                ai_usage="train")
+        _db.session.commit()
+        assert {n.id for n in changed} == {t["note"].id}
+        for name in ("prompt", "read", "chat", "empty"):
+            assert Node.query.get(t[name].id).ai_usage == "chat", name
+        # From below the read prompt the rule holds too.
+        t["note"].ai_usage = "chat"
+        _db.session.commit()
+        changed = apply_settings_to_descendants(t["note"], alice.id,
+                                                ai_usage="train")
+        assert changed == []

@@ -1073,6 +1073,79 @@ class TestTextmodeContinueFromNode:
         assert llm_node.node_type == "llm"
         assert data["task_id"] == "fake-task-id"
 
+    def _read_thread(self, alice):
+        """alice's own node (train) → read prompt → read reply, the read's
+        nodes 'chat' as the read routes make them."""
+        gpt = _make_user("gpt-5")
+        root = _make_node(alice, content="mine", ai_usage="train")
+        prompt = _prompt_node(alice, "read_thread", parent_id=root.id)
+        read = _make_node(gpt, parent_id=prompt.id, content="picks",
+                          node_type="llm", llm_model="gpt-5",
+                          human_owner=alice)
+        from backend.models import FeedRender
+        _db.session.add(FeedRender(node_id=read.id))  # a finished read
+        return read
+
+    def test_under_a_read_the_message_takes_the_thread_not_the_read(self, app):
+        # #362: the read reply is 'chat' for the tweets it quotes; the
+        # user's message under it takes their node above the read.
+        client = app.test_client()
+        alice = _make_user("alice", default_ai_usage="none")
+        read = self._read_thread(alice)
+        _db.session.commit()
+        _login(client, alice.id)
+
+        resp = client.post(f"/api/textmode/from-node/{read.id}",
+                           json={"content": "why #2?", "model": "gpt-5"})
+        assert resp.status_code == 202, resp.get_json()
+        data = resp.get_json()
+        assert Node.query.get(data["prompt_node_id"]).ai_usage == "train"
+        assert Node.query.get(data["user_node_id"]).ai_usage == "train"
+        # The reply about the picks has them in its context.
+        assert Node.query.get(data["llm_node_id"]).ai_usage == "chat"
+
+    def test_a_message_under_the_chat_turn_still_takes_the_thread(self, app):
+        # One level down (#362): the reply about the picks is stored 'chat'
+        # for the tweets in its context; the next message in the Text-mode
+        # session under it takes the user's own message, not that 'chat'.
+        client = app.test_client()
+        alice = _make_user("alice", default_ai_usage="none")
+        read = self._read_thread(alice)
+        _db.session.commit()
+        _login(client, alice.id)
+        first = client.post(f"/api/textmode/from-node/{read.id}",
+                            json={"content": "why #2?", "model": "gpt-5"})
+        first = first.get_json()
+        assert Node.query.get(first["llm_node_id"]).ai_usage == "chat"
+
+        resp = client.post(
+            f"/api/textmode/{first['prompt_node_id']}/message",
+            json={"content": "and #3?", "parent_id": first["llm_node_id"],
+                  "model": "gpt-5"})
+        assert resp.status_code == 202, resp.get_json()
+        data = resp.get_json()
+        assert Node.query.get(data["user_node_id"]).ai_usage == "train"
+        assert Node.query.get(data["llm_node_id"]).ai_usage == "chat"
+
+    def test_the_forms_ai_usage_is_honoured(self, app):
+        client = app.test_client()
+        alice = _make_user("alice", default_ai_usage="train")
+        read = self._read_thread(alice)
+        _db.session.commit()
+        _login(client, alice.id)
+
+        resp = client.post(f"/api/textmode/from-node/{read.id}", json={
+            "content": "keep this out", "ai_usage": "chat",
+            "auto_generate": False})
+        assert resp.status_code == 202, resp.get_json()
+        assert Node.query.get(resp.get_json()["user_node_id"]).ai_usage == "chat"
+        resp = client.post(f"/api/textmode/from-node/{read.id}", json={
+            "content": "x", "ai_usage": "bogus", "auto_generate": False})
+        assert resp.status_code == 400
+        resp = client.post(f"/api/textmode/from-node/{read.id}", json={
+            "content": "x", "ai_usage": "none", "auto_generate": False})
+        assert resp.status_code == 400
+
     def test_inside_an_agentic_thread_nothing_is_added(self, app):
         client = app.test_client()
         alice = _make_user("alice")

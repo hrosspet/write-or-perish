@@ -415,6 +415,40 @@ class TestVoiceFromNodeAiUsageInheritance:
         system_node = Node.query.get(llm_node.parent_id)
         assert system_node.ai_usage == "train"
 
+    def test_under_a_read_reply_takes_the_thread_not_the_read(self, app):
+        """A read's nodes are 'chat' for the tweets they quote (#362):
+        a voice session started from a read reply takes the user's node
+        above the read, and so does a message sent under it."""
+        client = app.test_client()
+        alice = _make_user("alice", default_ai_usage="none")
+        gpt = _make_user("gpt-5")
+        root = _make_node(alice, content="mine", ai_usage="train")
+        prompt = _make_prompt_node(alice, "read_thread", parent_id=root.id)
+        read = _make_node(gpt, parent_id=prompt.id, content="picks",
+                          node_type="llm", llm_model="gpt-5",
+                          human_owner=alice)
+        from backend.models import FeedRender
+        _db.session.add(FeedRender(node_id=read.id))  # a finished read
+        _db.session.commit()
+
+        _login(client, alice.id)
+        resp = client.post(f"/api/voice/from-node/{read.id}",
+                           json={"model": "gpt-5"})
+        assert resp.status_code == 200, resp.get_json()
+        system_node = Node.query.get(resp.get_json()["parent_id"])
+        assert system_node.parent_id == read.id
+        assert system_node.ai_usage == "train"
+
+        resp = client.post("/api/voice/", json={
+            "content": "why #2?", "model": "gpt-5", "parent_id": read.id})
+        assert resp.status_code == 202, resp.get_json()
+        data = resp.get_json()
+        entry = Node.query.get(data["user_node_id"])
+        assert entry.parent_id == read.id
+        assert entry.ai_usage == "train"
+        # Its reply has the picks in its context: stored as 'chat'.
+        assert Node.query.get(data["llm_node_id"]).ai_usage == "chat"
+
 
 class TestVoiceFromNodeAgenticAncestryBridge:
     """Verify that a `textmode` prompt in ancestry counts as an agentic

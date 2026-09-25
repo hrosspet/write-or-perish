@@ -10,6 +10,7 @@ them — the same promise soft_delete_node makes.
 from backend.models import Node
 from backend.utils.ca_feed import is_feed_node
 from backend.utils.encryption import prefetch_deks
+from backend.utils.llm_nodes import llm_ids_built_on_a_read
 from backend.utils.privacy import can_user_edit_node
 
 
@@ -26,12 +27,15 @@ def apply_settings_to_descendants(root, user_id, *, privacy_level=None,
     if privacy_level is None and ai_usage is None:
         return []
     editable = []
+    walked = []
     seen = {root.id}
     frontier = [root.id]
     while frontier:
         level = Node.query.filter(Node.parent_id.in_(frontier)).all()
-        frontier = [n.id for n in level if n.id not in seen]
+        fresh = [n for n in level if n.id not in seen]
+        frontier = [n.id for n in fresh]
         seen.update(frontier)
+        walked.extend(fresh)
         editable.extend(
             n for n in level
             if n.deleted_at is None and can_user_edit_node(n, user_id))
@@ -42,11 +46,14 @@ def apply_settings_to_descendants(root, user_id, *, privacy_level=None,
         # fresh DEK per node — encrypt_content has no batch path.)
         prefetch_deks(
             n.content for n in editable if n.privacy_level != privacy_level)
+    read_built = set()
     if ai_usage == "train":
         # is_feed_node falls back to the node's text for the PoC read
         # shape, so the same batching applies to a cascade that raises
         # usage: unwrap first, then the checks below are cache hits.
         prefetch_deks(n.content for n in editable if n.ai_usage != ai_usage)
+        # The LLM replies built on a read (#362), for the whole subtree.
+        read_built = llm_ids_built_on_a_read(root, walked)
     changed = []
     for n in editable:
         touched = False
@@ -58,10 +65,12 @@ def apply_settings_to_descendants(root, user_id, *, privacy_level=None,
                 n.pinned_by = None
             touched = True
         if ai_usage is not None and n.ai_usage != ai_usage:
-            # A read's nodes never take 'train' (ca_feed.FEED_AI_USAGE):
-            # the cascade leaves them as they are, like the editor
-            # refuses the same change on the node itself.
-            if not (ai_usage == "train" and is_feed_node(n)):
+            # A read's nodes never take 'train' (ca_feed.FEED_AI_USAGE),
+            # nor do the LLM replies built with one in their context
+            # (#362): the cascade leaves them as they are, like the
+            # editor refuses the same change on the node itself.
+            if not (ai_usage == "train"
+                    and (n.id in read_built or is_feed_node(n))):
                 n.ai_usage = ai_usage
                 touched = True
         if touched:

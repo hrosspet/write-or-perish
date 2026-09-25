@@ -4,7 +4,7 @@ from backend.models import Node
 from backend.extensions import db
 from backend.utils.prompts import get_user_prompt_record
 from backend.utils.llm_nodes import (
-    create_llm_placeholder, pick_model_for_generation,
+    create_llm_placeholder, pick_model_for_generation, reply_ai_usage,
 )
 from backend.utils.placeholders import UserExportValidationError
 from backend.utils.context_artifacts import attach_context_artifacts
@@ -40,8 +40,8 @@ def create_voice_from_node(node_id):
     if model_id not in current_app.config["SUPPORTED_MODELS"]:
         return jsonify({"error": f"Unsupported model: {model_id}"}), 400
 
-    # Inherit ai_usage from the target node
-    ai_usage = node.ai_usage or current_user.default_ai_usage
+    # Inherit ai_usage from the target node, looking through a read (#362)
+    ai_usage = reply_ai_usage(node, current_user)
 
     has_prompt = ancestors_have_prompt(node, current_user.id, AGENTIC_PROMPT_KEYS)
     is_llm = is_llm_node(node)
@@ -143,8 +143,8 @@ def create_voice_session():
             return jsonify({"error": "Parent node not found"}), 404
         if parent_node.human_owner_id != current_user.id:
             return jsonify({"error": "Unauthorized"}), 403
-        # Inherit ai_usage from parent node in the thread
-        ai_usage = parent_node.ai_usage or current_user.default_ai_usage
+        # Inherit ai_usage from the thread, looking through a read (#362)
+        ai_usage = reply_ai_usage(parent_node, current_user)
         user_parent_id = parent_id
 
     if not model_id:
