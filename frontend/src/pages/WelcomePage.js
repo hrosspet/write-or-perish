@@ -2,10 +2,23 @@ import React from "react";
 import { Link } from "react-router-dom";
 import Fade from "../utils/Fade";
 import ImportData from "../components/ImportData";
-import CtaButton, { ctaButtonStyle, ctaButtonHoverStyle } from "../components/CtaButton";
+import CtaButton from "../components/CtaButton";
 import PrefillConsentCard from "../components/PrefillConsentCard";
 
-export default function WelcomePage({ onNewEntryClick }) {
+const importButtonStyle = {
+  display: "inline-flex", alignItems: "center", gap: "0.4rem",
+  background: "transparent", border: "none", padding: 0,
+  color: "var(--accent)", cursor: "pointer",
+  fontFamily: "var(--sans)", fontWeight: 400, fontSize: "0.9rem",
+  letterSpacing: "0.04em", whiteSpace: "nowrap",
+};
+
+const importButtonHoverStyle = {
+  textDecoration: "underline",
+  textUnderlineOffset: 3,
+};
+
+export default function WelcomePage() {
   return (
     <div style={{ padding: "0 2rem" }}>
       {/* Hero welcome */}
@@ -45,8 +58,42 @@ export default function WelcomePage({ onNewEntryClick }) {
         </Fade>
       </div>
 
+      {/* Import, as one line ABOVE the main CTA (#306): "Reflect" navigates
+          away, so anything below it goes unseen, and import is how the
+          profile stops starting from zero. Kept small so writing something
+          stays the main invitation. */}
+      <div style={{ maxWidth: 580, margin: "0 auto", padding: "1rem 0 1.2rem" }}>
+        <Fade>
+          <div style={{
+            display: "flex", alignItems: "center", justifyContent: "space-between",
+            flexWrap: "wrap", gap: "0.5rem 1.2rem",
+            border: "1px solid var(--border)", borderRadius: 10,
+            padding: "0.85rem 1.2rem",
+            fontFamily: "var(--sans)", fontWeight: 300, fontSize: "0.9rem",
+            lineHeight: 1.5, color: "var(--text-secondary)",
+          }}>
+            <span>Already have journals, notes, AI chats or tweets?</span>
+            <ImportData
+              buttonLabel={<><span>Import them</span><span aria-hidden="true">&rarr;</span></>}
+              buttonStyle={importButtonStyle}
+              buttonHoverStyle={importButtonHoverStyle}
+            />
+          </div>
+        </Fade>
+      </div>
+
+      {/* Second touch for the tweets opt-in — only for X-login users who
+          never answered on /alpha-thank-you. Renders null otherwise. Above
+          Reflect for the same reason as the import strip: this is the last
+          place the app asks. */}
+      <div style={{ maxWidth: 580, margin: "0 auto" }}>
+        <Fade>
+          <PrefillConsentCard delayHint="Already on X?" style={{ maxWidth: "none", padding: "2.2rem 2rem", textAlign: "center", marginBottom: "1.2rem" }} />
+        </Fade>
+      </div>
+
       {/* The journaling prompt — the main CTA */}
-      <div style={{ maxWidth: 580, margin: "0 auto", padding: "1rem 0 4rem" }}>
+      <div style={{ maxWidth: 580, margin: "0 auto", padding: "0 0 4rem" }}>
         <Fade>
           <div style={{
             background: "var(--bg-card)", border: "1px solid var(--border)",
@@ -76,63 +123,16 @@ export default function WelcomePage({ onNewEntryClick }) {
               What brought you to Loore — and what are you hoping to
               find here?
             </p>
-            <CtaButton onClick={onNewEntryClick}>Start writing</CtaButton>
+            {/* The homepage's voice / text modes are the first-entry
+                experience; the full entry editor is too much at this point. */}
+            <CtaButton to="/">Reflect</CtaButton>
             <p style={{
               fontFamily: "var(--sans)", fontWeight: 300, fontSize: "0.78rem",
               color: "var(--text-muted)", marginTop: "1rem", position: "relative",
             }}>
-              You can type or record a voice note — whatever feels natural.
+              Take the question with you, or start with whatever is on your
+              mind. Type or record a voice note, whichever feels natural.
             </p>
-          </div>
-        </Fade>
-      </div>
-
-      {/* Second touch for the tweets opt-in — only for X-login users who
-          never answered on /alpha-thank-you. Renders null otherwise. */}
-      <div style={{ maxWidth: 580, margin: "0 auto", padding: "0 0 2.5rem" }}>
-        <Fade>
-          <PrefillConsentCard delayHint="Already on X?" style={{ maxWidth: "none", padding: "2.2rem 2rem", textAlign: "center" }} />
-        </Fade>
-      </div>
-
-      {/* Import CTA */}
-      <div style={{ maxWidth: 580, margin: "0 auto", padding: "0 0 2.5rem" }}>
-        <Fade>
-          <div style={{
-            background: "var(--bg-card)", border: "1px solid var(--border)",
-            borderRadius: 14, padding: "2.2rem 2rem", textAlign: "center",
-            position: "relative", overflow: "hidden",
-          }}>
-            {/* Subtle glow behind */}
-            <div style={{
-              position: "absolute", top: "-30%", left: "50%",
-              transform: "translateX(-50%)",
-              width: 300, height: 200, borderRadius: "50%",
-              background: "radial-gradient(circle, var(--accent-glow) 0%, transparent 70%)",
-              pointerEvents: "none", opacity: 0.5,
-            }} />
-
-            <div style={{
-              fontFamily: "var(--sans)", fontSize: "0.68rem", letterSpacing: "0.18em",
-              textTransform: "uppercase", color: "var(--accent)", opacity: 0.6,
-              marginBottom: "1.2rem", position: "relative",
-            }}>Already have a journal?</div>
-            <p style={{
-              fontFamily: "var(--sans)", fontWeight: 300,
-              fontSize: "clamp(1.1rem, 2.5vw, 1.3rem)", lineHeight: 1.6,
-              color: "var(--text-primary)", maxWidth: 440, margin: "0 auto 1.8rem",
-              position: "relative",
-            }}>
-              Import your Obsidian journals, markdown files, or exported tweets.
-              Your lore doesn't start from zero.
-            </p>
-            <div style={{ position: "relative" }}>
-              <ImportData
-                buttonLabel={<><span>Import data</span><span style={{ fontSize: "1.1rem" }}>&rarr;</span></>}
-                buttonStyle={ctaButtonStyle}
-                buttonHoverStyle={ctaButtonHoverStyle}
-              />
-            </div>
           </div>
         </Fade>
       </div>
