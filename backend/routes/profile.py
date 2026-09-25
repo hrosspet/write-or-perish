@@ -10,7 +10,6 @@ from flask import Blueprint
 # Privacy utilities
 from backend.utils.privacy import (
     validate_privacy_level,
-    validate_ai_usage,
     PrivacyLevel,
 )
 from backend.utils.api_keys import get_openai_chat_key
@@ -233,14 +232,12 @@ def create_profile():
         return jsonify({"error": "Content cannot be empty"}), 400
 
     privacy_level = data.get("privacy_level", PrivacyLevel.PRIVATE)
-    # Default a user-authored profile's ai_usage to their global setting,
-    # not a hardcoded 'chat' (#191); an explicit value still wins.
-    ai_usage = data.get("ai_usage", current_user.default_ai_usage)
+    # A profile's ai_usage comes only from the account setting at creation
+    # (#191, #346); the request cannot set it.
+    ai_usage = current_user.default_ai_usage
 
     if not validate_privacy_level(privacy_level):
         return jsonify({"error": f"Invalid privacy_level: {privacy_level}"}), 400
-    if not validate_ai_usage(ai_usage):
-        return jsonify({"error": f"Invalid ai_usage: {ai_usage}"}), 400
 
     profile = UserProfile(
         user_id=current_user.id,
@@ -309,11 +306,8 @@ def update_profile(profile_id):
             return jsonify({"error": f"Invalid privacy_level: {privacy_level}"}), 400
         profile.privacy_level = privacy_level
 
-    if "ai_usage" in data:
-        ai_usage = data["ai_usage"]
-        if not validate_ai_usage(ai_usage):
-            return jsonify({"error": f"Invalid ai_usage: {ai_usage}"}), 400
-        profile.ai_usage = ai_usage
+    # ai_usage is not editable: it comes from the account setting at
+    # creation (#346).
 
     try:
         db.session.commit()

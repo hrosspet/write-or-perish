@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from "react";
 import XLookupConfirmDialog from "./XLookupConfirmDialog";
+import AdminRefusalDialog, { REFUSAL_TITLES } from "./AdminRefusalDialog";
 import { FaTimesCircle, FaFilter, FaCaretDown, FaCaretUp, FaEye, FaEyeSlash } from "react-icons/fa";
 import api from "../api";
 import { formatDate, formatDateTime } from "../utils/date";
@@ -541,6 +542,17 @@ function AdminPanel() {
   // Set when the archive did not have the handle: the dialog offering the
   // paid X lookup for that one whitelist.
   const [xLookupAsk, setXLookupAsk] = useState(null);
+  // A pre-fill / intentions / profile build the backend refused for this
+  // account (#346): { code, message, username }. Shown as a dialog.
+  const [refusal, setRefusal] = useState(null);
+  // True when err is such a refusal (and the dialog now shows it).
+  const showRefusal = (err, userId) => {
+    const data = err.response?.data;
+    if (!data || !REFUSAL_TITLES[data.code]) return false;
+    const u = users.find((x) => x.id === userId);
+    setRefusal({ code: data.code, message: data.error, username: u?.username });
+    return true;
+  };
   // Per-user spend-limit input values, keyed by user id (controlled inputs).
   const [limitEdits, setLimitEdits] = useState({});
   // Column filters: hide rows with $0 in Spent / This Month (independent).
@@ -622,6 +634,7 @@ function AdminPanel() {
       });
       if (res.data.cancelled) refreshStatuses();
     } catch (err) {
+      if (showRefusal(err, userId)) return;
       patchIntent(userId, { error: err.response?.data?.error || "Error starting intentions run." });
     }
   };
@@ -740,6 +753,7 @@ function AdminPanel() {
       if (!res.data.queued) setError(res.data.message);
       fetchUsers();
     } catch (err) {
+      if (showRefusal(err, userId)) return;
       console.error(err);
       setError("Error queueing profile build.");
     }
@@ -906,6 +920,7 @@ function AdminPanel() {
         });
       patchPrefill(userId, { taskId: res.data.task_id, status: "queued", error: null, result: null });
     } catch (err) {
+      if (showRefusal(err, userId)) return;
       patchPrefill(userId, { error: err.response?.data?.error || "Error starting pre-fill." });
     }
   };
@@ -1091,6 +1106,7 @@ function AdminPanel() {
           submitWhitelist(ask.handle, true);
         }}
       />
+      <AdminRefusalDialog refusal={refusal} onClose={() => setRefusal(null)} />
 
       {error && <div style={{ color: "var(--error)" }}>{error}</div>}
       <table style={{ width: "100%", borderCollapse: "collapse", color: "var(--text-primary)" }}>

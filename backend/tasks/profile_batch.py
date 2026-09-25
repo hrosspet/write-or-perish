@@ -33,6 +33,7 @@ from backend.llm_providers import DEFAULT_MAX_OUTPUT_TOKENS, model_input_cap
 from backend.utils.chunk_plan import (
     UPDATE_THRESHOLD_UNITS, next_window_budget, max_units_for_cap)
 from backend.utils.api_keys import get_api_keys_for_usage
+from backend.utils.privacy import account_allows_ai
 from backend.utils.llm_batch import (
     batch_submit, batch_check_and_collect, apply_batch_key_override)
 # Module reference, not `from ... import names`: exports imports
@@ -150,7 +151,9 @@ def _should_seed(user):
                  .order_by(Node.created_at.desc()).first())
     if last_node and (datetime.utcnow() - last_node.created_at) < MIN_INACTIVITY:
         return False
-    latest = _latest_non_integration_profile(user.id)
+    # The base the next step builds on: None when the latest version is
+    # not AI-readable, so the build starts from the writing (#346).
+    latest = _exports.profile_update_base(user.id)
     # An unfinished chain — data beyond the cutoff that is OLDER than the
     # version (a pre-fill or import still being folded in, a chunk lost to
     # a worker restart: 2026-08-27, MarvinKeilbach) — continues regardless
@@ -197,6 +200,12 @@ def _build_next_profile_request(user, allow_chunk=True, chunk_num=1):
 
     Returns {"provider", "request", "meta"} or None.
     """
+    # Checked here, not only by the seeder: this builder also advances a
+    # chain after each collected step, and the account setting may have
+    # changed since the chain started (#346).
+    if not account_allows_ai(user):
+        logger.info(f"User {user.id}: opted out of AI usage; no profile step")
+        return None
     model_id = _model_for(user)
     provider, api_model = _provider_and_model(model_id)
 
@@ -205,7 +214,7 @@ def _build_next_profile_request(user, allow_chunk=True, chunk_num=1):
     # The flag is cleared once the from-scratch chunk 1 commits
     # (_apply_result), so subsequent chunks chain normally.
     prev = (None if user.profile_needs_full_regen
-            else _latest_non_integration_profile(user.id))
+            else _exports.profile_update_base(user.id))
     prev_id = prev.id if prev else None
     cutoff = prev.source_data_cutoff if prev else None
     cumulative = (prev.source_tokens_used or 0) if prev else 0
@@ -569,6 +578,11 @@ def _seed_profile_batches(users=None):
         users = User.profile_eligible_query().all()
     for user in users:
         if user.profile_batch_pending:
+            continue
+        # profile_eligible_query already excludes opted-out accounts, but
+        # the immediate seed (admin Build profile, pre-fill, import
+        # hand-off) passes users in directly (#346).
+        if not account_allows_ai(user):
             continue
         if not use_batch_for_user(user, config):
             continue

@@ -5,7 +5,7 @@ from backend.models import (
     UserArtifact, Thread,
 )
 from backend.extensions import db
-from backend.utils.tokens import approximate_token_count, get_model_context_window
+from backend.utils.tokens import approximate_token_count
 from backend.utils.privacy import AI_ALLOWED, accessible_nodes_filter, can_user_access_node
 from backend.utils.quotes import (
     resolve_quotes, has_quotes, ExportQuoteResolver,
@@ -14,11 +14,9 @@ from backend.utils.quotes import (
 )
 from backend.utils.timefmt import iso_utc
 from backend.utils.encryption import prefetch_deks
-from backend.utils.spend import require_spend_headroom
 from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import subqueryload
 from datetime import datetime
-import os
 
 export_bp = Blueprint("export_bp", __name__)
 
@@ -1691,212 +1689,6 @@ def export_threads():
         }
     )
 
-# approximate_token_count is imported from backend.utils.tokens
-
-@export_bp.route("/export/estimate_profile_tokens", methods=["POST"])
-@login_required
-def estimate_profile_tokens():
-    """
-    Estimate the number of tokens that would be used for profile generation.
-    Returns the estimate without actually calling the LLM.
-
-    Request body:
-        {
-            "model": "gpt-5" | "claude-sonnet-4.5" | etc.
-        }
-
-    Returns:
-        {
-            "estimated_tokens": 12345,
-            "model": "gpt-5",
-            "has_content": true
-        }
-    """
-    # Get and validate the model from request body
-    data = request.get_json() or {}
-    model_id = data.get("model")
-
-    if not model_id:
-        model_id = current_app.config.get("DEFAULT_LLM_MODEL", "claude-opus-4.6")
-
-    # Validate model is supported
-    if model_id not in current_app.config["SUPPORTED_MODELS"]:
-        return jsonify({
-            "error": f"Unsupported model: {model_id}",
-            "supported_models": list(current_app.config["SUPPORTED_MODELS"].keys())
-        }), 400
-
-    # Load the prompt template to calculate its token overhead
-    prompt_template_path = os.path.join(
-        current_app.root_path,
-        "prompts",
-        "profile_generation.txt"
-    )
-
-    try:
-        with open(prompt_template_path, "r", encoding="utf-8") as f:
-            prompt_template = f.read()
-    except FileNotFoundError:
-        current_app.logger.error(f"Prompt template not found at {prompt_template_path}")
-        return jsonify({
-            "error": "Profile generation prompt template not found"
-        }), 500
-
-    # Build full export (no token limit) — the task will retry if too long
-    user_export = build_user_export_content(current_user, max_tokens=None, filter_ai_usage=True)
-
-    if not user_export:
-        return jsonify({
-            "estimated_tokens": 0,
-            "model": model_id,
-            "has_content": False,
-            "error": "No writing found to analyze."
-        }), 200
-
-    # Replace the placeholder with actual user export
-    final_prompt = prompt_template.replace("{user_export}", user_export)
-
-    # Estimate tokens, capped at model's context window
-    estimated_tokens = approximate_token_count(final_prompt)
-    context_window = get_model_context_window(model_id)
-    estimated_tokens = min(estimated_tokens, context_window)
-
-    return jsonify({
-        "estimated_tokens": estimated_tokens,
-        "model": model_id,
-        "has_content": True
-    }), 200
-
-@export_bp.route("/export/integrate_profile", methods=["POST"])
-@login_required
-@require_spend_headroom
-def integrate_profile():
-    """
-    Manually trigger profile integration: collect all iterative/update
-    profile versions and integrate them into a single unified profile.
-
-    Request body:
-        { "model": "claude-opus-4.6" }  (optional)
-
-    Returns:
-        { "task_id": "...", "status": "pending" }
-    """
-    from backend.tasks.exports import integrate_user_profile
-
-    data = request.get_json() or {}
-    model_id = data.get("model")
-    if not model_id:
-        model_id = current_app.config.get(
-            "DEFAULT_LLM_MODEL", "claude-opus-4.6"
-        )
-
-    if model_id not in current_app.config["SUPPORTED_MODELS"]:
-        return jsonify({
-            "error": f"Unsupported model: {model_id}",
-            "supported_models": list(
-                current_app.config["SUPPORTED_MODELS"].keys()
-            )
-        }), 400
-
-    # Check concurrency guard
-    if current_user.profile_generation_task_id:
-        from backend.tasks.exports import _is_task_stale
-        if _is_task_stale(current_user):
-            current_user.profile_generation_task_id = None
-            current_user.profile_generation_task_dispatched_at = None
-            db.session.commit()
-        else:
-            return jsonify({
-                "task_id": current_user.profile_generation_task_id,
-                "status": "already_running",
-            }), 200
-
-    # Find latest non-integration profile that has iterative parents
-    latest_profile = UserProfile.query.filter(
-        UserProfile.user_id == current_user.id,
-        UserProfile.generation_type != 'integration'
-    ).order_by(UserProfile.created_at.desc()).first()
-
-    if not latest_profile:
-        return jsonify({"error": "No profile found to integrate."}), 400
-
-    task = integrate_user_profile.delay(
-        current_user.id, model_id, latest_profile.id
-    )
-
-    from backend.extensions import db as _db
-    current_user.profile_generation_task_id = task.id
-    current_user.profile_generation_task_dispatched_at = datetime.utcnow()
-    _db.session.commit()
-
-    current_app.logger.info(
-        f"Enqueued profile integration task {task.id} "
-        f"for user {current_user.id}"
-    )
-
-    return jsonify({
-        "task_id": task.id,
-        "status": "pending",
-    }), 202
-
-
-@export_bp.route("/export/generate_profile", methods=["POST"])
-@login_required
-@require_spend_headroom
-def generate_profile():
-    """
-    Generate a comprehensive user profile using an LLM to analyze all of the user's writing.
-    Uses the same export logic as /export/threads via build_user_export_content().
-
-    Request body:
-        {
-            "model": "gpt-5" | "claude-sonnet-4.5" | etc.
-        }
-
-    Returns:
-        {
-            "profile": "The generated profile text...",
-            "model_used": "gpt-5",
-            "tokens_used": 12345
-        }
-    """
-    from backend.llm_providers import LLMProvider
-
-    # Get and validate the model from request body
-    data = request.get_json() or {}
-    model_id = data.get("model")
-
-    if not model_id:
-        model_id = current_app.config.get("DEFAULT_LLM_MODEL", "claude-opus-4.6")
-
-    # Validate model is supported
-    if model_id not in current_app.config["SUPPORTED_MODELS"]:
-        return jsonify({
-            "error": f"Unsupported model: {model_id}",
-            "supported_models": list(current_app.config["SUPPORTED_MODELS"].keys())
-        }), 400
-
-    # Quick check if user has any writing to analyze
-    has_threads = Node.query.filter_by(user_id=current_user.id, parent_id=None).first() is not None
-    if not has_threads:
-        return jsonify({
-            "error": "No writing found to analyze. Please create some threads first."
-        }), 400
-
-    # Enqueue async profile generation task
-    from backend.tasks.exports import generate_user_profile
-
-    task = generate_user_profile.delay(current_user.id, model_id)
-
-    current_app.logger.info(f"Enqueued profile generation task {task.id} for user {current_user.id}")
-
-    return jsonify({
-        "message": "Profile generation started",
-        "task_id": task.id,
-        "status": "pending"
-    }), 202
-
-
 def _latest_profile_snapshot(user):
     """id / created_at of the newest saved version. The client detects a
     chunk landing (and the end of a batch chain) by the id changing;
@@ -1978,7 +1770,7 @@ def _sync_progress(user):
     the same staleness rule the dispatchers apply (_is_task_stale:
     finished, PENDING for 15+ min, or running for 1+ h — Celery kills
     every task at 1 h). A stale guard is cleared here too, exactly as
-    POST /export/integrate_profile clears it, so a reload does not report
+    maybe_trigger_profile_update clears it, so a reload does not report
     the same dead task again."""
     from backend.celery_app import celery
     from backend.tasks.exports import _is_task_stale

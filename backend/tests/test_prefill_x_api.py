@@ -206,6 +206,28 @@ def test_prefill_x_impl_refuses_protected_and_unknown(app, monkeypatch):  # noqa
         imports_mod.prefill_x_api_impl(u.id, "bob", {})
 
 
+def test_prefill_impls_refuse_when_the_task_runs(app, monkeypatch):  # noqa: F811
+    """#346: the admin routes refuse first; the impls re-check because the
+    account setting or the consent can change while the task is queued.
+    Nothing is fetched or imported."""
+    from backend.tasks import imports as imports_mod
+    lookup = MagicMock()
+    monkeypatch.setattr(x_api, "lookup_user", lookup)
+    declined = _make_user("hana")
+    declined.prefill_consent = "no"
+    opted_out = _make_user("ivo")
+    opted_out.default_ai_usage = "none"
+    _db.session.commit()
+    for impl in (imports_mod.prefill_x_api_impl,
+                 imports_mod.prefill_community_archive_impl):
+        with pytest.raises(RuntimeError, match="declined"):
+            impl(declined.id, "hana", {})
+        with pytest.raises(RuntimeError, match="opted out"):
+            impl(opted_out.id, "ivo", {})
+    lookup.assert_not_called()
+    assert Node.query.count() == 0
+
+
 def _admin(admin_app):  # noqa: F811
     admin = User(username="root", approved=True, is_admin=True, plan="alpha")
     _db.session.add(admin)

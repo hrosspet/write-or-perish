@@ -42,7 +42,7 @@ _saved_glue = {k: sys.modules.get(k) for k in _GLUE}
 sys.modules["backend.celery_app"] = MagicMock()
 sys.modules.pop("backend.tasks.embeddings", None)
 from backend.tasks.embeddings import (  # noqa: E402
-    _candidate_nodes, _embedding_owner_id,
+    _candidate_external_items, _candidate_nodes, _embedding_owner_id,
 )
 for _k, _v in _saved_glue.items():
     if _v is None:
@@ -163,6 +163,39 @@ def test_candidates_respect_privacy_and_staleness(app):
         assert stale.id in ids       # hash mismatch → candidate
         assert private.id not in ids  # ai_usage none → never embedded
         assert current.id not in ids  # up to date → skipped
+
+
+def test_candidates_skip_owners_whose_account_is_none(app):
+    """#346: nothing new is embedded for an account set to 'none', even
+    for nodes and references still marked 'chat'. AI replies follow their
+    human owner's account, not the llm-<model> author's."""
+    with app.app_context():
+        allowed = User.query.first()
+        opted_out = User(username="optedout", default_ai_usage="none")
+        llm = User(username="llm-x", twitter_id="llm-x",
+                   default_ai_usage="none")
+        _db.session.add_all([opted_out, llm])
+        _db.session.commit()
+        kept = _mk_node(allowed.id, "embed me")
+        skipped = _mk_node(opted_out.id, "old chat node")
+        reply = Node(user_id=llm.id, human_owner_id=allowed.id,
+                     node_type="llm", ai_usage="chat")
+        reply.set_content("an AI reply")
+        _db.session.add(reply)
+        refs = []
+        for i, uid in enumerate((allowed.id, opted_out.id)):
+            item = ExternalItem(user_id=uid, source="web_clip",
+                                external_id=str(i) * 64)
+            item.set_content("a clipped page")
+            _db.session.add(item)
+            refs.append(item)
+        _db.session.commit()
+
+        ids = {node.id for node, _, _, _ in _candidate_nodes(50)}
+        assert kept.id in ids and reply.id in ids
+        assert skipped.id not in ids
+        ref_ids = {item.id for item, _ in _candidate_external_items(50)}
+        assert ref_ids == {refs[0].id}
 
 
 def test_embedding_owner_is_human_not_llm_author(app):

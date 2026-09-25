@@ -282,6 +282,18 @@ def activity():
     return jsonify(activity_report(days=days)), 200
 
 
+def _prefill_refusal_response(user):
+    """A 400 carrying a refusal ``code`` (the admin panel shows it as a
+    warning dialog) when a pre-fill or intentions run must not run for
+    this account (#346), else None."""
+    from backend.utils.privacy import prefill_refusal
+    refusal = prefill_refusal(user)
+    if refusal is None:
+        return None
+    code, message = refusal
+    return jsonify({"error": message, "code": code}), 400
+
+
 @admin_bp.route("/users/<int:user_id>/build_profile", methods=["POST"])
 @login_required
 @admin_required
@@ -292,7 +304,11 @@ def build_profile(user_id):
     and which makes the first chunk build at any size), pins the user to
     the batch path, and seeds immediately. Idempotent while a job is in
     flight."""
+    from backend.utils.privacy import account_allows_ai
     user = User.query.get_or_404(user_id)
+    if not account_allows_ai(user):
+        return jsonify({"error": "User has opted out of AI usage.",
+                        "code": "ai_opt_out"}), 400
     if user.profile_batch_pending:
         return jsonify({"message": "A batch step is already in flight.", "queued": False}), 200
     user.profile_needs_full_regen = True
@@ -319,10 +335,10 @@ def infer_intentions_route(user_id):
             batch first (provider-side + job row), then start the run.
     Returns {"task_id", "mode", "cancelled"} — poll
     /admin/prefill/status/<task_id>."""
-    from backend.utils.privacy import AI_ALLOWED
     user = User.query.get_or_404(user_id)
-    if user.default_ai_usage not in AI_ALLOWED:
-        return jsonify({"error": "User has opted out of AI usage."}), 400
+    refusal = _prefill_refusal_response(user)
+    if refusal:
+        return refusal
     data = request.get_json(silent=True) or {}
     mode = data.get("mode") or "batch"
     if mode not in ("batch", "sync"):
@@ -591,6 +607,9 @@ def prefill_from_community_archive(user_id):
     defaults to the user's username. Returns {"task_id"} — poll
     /admin/prefill/status/<task_id>."""
     user = User.query.get_or_404(user_id)
+    refusal = _prefill_refusal_response(user)
+    if refusal:
+        return refusal
     data = request.get_json() or {}
     handle = (data.get("handle") or user.username or "").strip().lstrip("@")
     if not handle:
@@ -708,6 +727,9 @@ def prefill_from_x_api(user_id):
     /admin/prefill/status/<task_id> (same shape as the CA pre-fill)."""
     from backend.utils import x_api
     user = User.query.get_or_404(user_id)
+    refusal = _prefill_refusal_response(user)
+    if refusal:
+        return refusal
     data = request.get_json() or {}
     handle = (data.get("handle") or user.username or "").strip().lstrip("@")
     if not handle:

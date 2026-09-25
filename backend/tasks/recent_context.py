@@ -10,7 +10,7 @@ from sqlalchemy import func, or_
 
 from backend.celery_app import celery, flask_app
 from backend.models import User, UserProfile, UserRecentContext, Node, APICostLog
-from backend.utils.privacy import AI_ALLOWED
+from backend.utils.privacy import AI_ALLOWED, account_allows_ai
 from backend.extensions import db
 from backend.llm_providers import LLMProvider, PromptTooLongError
 from backend.utils.tokens import reduce_export_tokens, format_date_metadata
@@ -214,6 +214,12 @@ def generate_recent_context(user_id, profile_id=None, data_cutoff_iso=None):
             logger.info(
                 "User %s is spend-capped; skipping recent context", user_id)
             return
+        if not account_allows_ai(user):
+            # Re-checked here: the setting may change after dispatch (#346).
+            logger.info(
+                "User %s has opted out of AI usage; skipping recent context",
+                user_id)
+            return
 
         data_cutoff = (
             datetime.fromisoformat(data_cutoff_iso)
@@ -280,7 +286,7 @@ def generate_recent_context(user_id, profile_id=None, data_cutoff_iso=None):
 
         # Inject profile content (if available)
         profile_content = ""
-        if profile:
+        if profile and profile.ai_usage in AI_ALLOWED:
             profile_content = profile.get_content()
         prompt_text = prompt_template.replace("{user_profile}", profile_content)
         prompt_text = prompt_text.replace("{recent_data}", recent_data)

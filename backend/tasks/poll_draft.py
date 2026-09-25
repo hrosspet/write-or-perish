@@ -25,6 +25,7 @@ from backend.models import (
     UserArtifact, APICostLog,
 )
 from backend.utils.api_keys import get_api_keys_for_usage
+from backend.utils.privacy import AI_ALLOWED, account_allows_ai
 from backend.utils.cost import llm_cost_log_fields
 from backend.utils.llm_batch import (
     batch_submit, batch_check_and_collect, apply_batch_key_override,
@@ -56,17 +57,20 @@ send it. Output ONLY the draft answer — no preamble, no headings.
 
 
 def _derived_context(user):
+    """The latest profile, recent context and intentions. A row whose
+    ai_usage is not AI-readable is left out, not replaced by an older
+    one (#346)."""
     parts = []
     profile = UserProfile.query.filter_by(user_id=user.id).order_by(
         UserProfile.created_at.desc()).first()
-    if profile:
+    if profile and profile.ai_usage in AI_ALLOWED:
         parts.append("## User profile\n\n" + profile.get_content())
     recent = UserRecentContext.query.filter_by(user_id=user.id).order_by(
         UserRecentContext.created_at.desc()).first()
-    if recent:
+    if recent and recent.ai_usage in AI_ALLOWED:
         parts.append("## Recent context\n\n" + recent.get_content())
     intentions = UserArtifact.latest_for(user.id, "intentions")
-    if intentions:
+    if intentions and intentions.ai_usage in AI_ALLOWED:
         parts.append("## Intentions\n\n" + intentions.get_content())
     return "\n\n".join(parts)
 
@@ -90,6 +94,12 @@ def _build_request(resp):
     there's no context to draft from."""
     poll = resp.poll
     user = resp.user
+    if not account_allows_ai(user):
+        # Checked at submit too (routes/updates.py); re-checked here
+        # because the setting can change in between (#346).
+        logger.info("Poll draft for response %s skipped: user opted out "
+                    "of AI usage", resp.id)
+        return None
     model_id = poll.model_id or flask_app.config.get("DEFAULT_LLM_MODEL")
     model_cfg = flask_app.config["SUPPORTED_MODELS"].get(model_id)
     if model_cfg is None:

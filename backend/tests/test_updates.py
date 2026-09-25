@@ -19,7 +19,8 @@ os.environ.setdefault("ENCRYPTION_DISABLED", "true")
 from backend.extensions import db as _db  # noqa: E402
 from backend.models import (  # noqa: E402
     User, UserNotification, Poll, PollResponse, ChangelogReadState,
-    PollDraftBatchJob, APICostLog, UserProfile,
+    PollDraftBatchJob, APICostLog, UserProfile, UserRecentContext,
+    UserArtifact,
 )
 import backend.utils.changelog as changelog_mod  # noqa: E402
 from backend.utils.changelog import (  # noqa: E402
@@ -623,6 +624,46 @@ class TestDraftBatchPipeline:
         assert kwargs["filter_ai_usage"] is True
         assert "RECENT RAW WRITING" in (
             captured["anthropic"][0]["messages"][1]["content"])
+
+    def test_submit_skips_account_opted_out_of_ai(self, pipeline,
+                                                  monkeypatch):
+        """#346: the opt-in route checks the account; the submit re-checks
+        because the setting can change while the task is queued."""
+        submit = MagicMock()
+        monkeypatch.setattr(pipeline, "batch_submit", submit)
+        poll, resp = _make_drafting_response()
+        resp.user.default_ai_usage = "none"
+        _db.session.commit()
+        pipeline._submit_poll_draft(resp.id)
+        assert resp.status == "draft_failed"
+        submit.assert_not_called()
+
+    def test_derived_context_leaves_out_rows_marked_none(self, pipeline):
+        """#346: each row is checked; a 'none' row is left out, not
+        replaced by an older AI-readable one."""
+        poll, resp = _make_drafting_response(with_profile=False)
+        uid = resp.user_id
+        older = UserProfile(user_id=uid, generated_by="m", tokens_used=0,
+                            created_at=datetime(2026, 1, 1))
+        older.set_content("OLDER PROFILE")
+        newest = UserProfile(user_id=uid, generated_by="user", tokens_used=0,
+                             ai_usage="none", created_at=datetime(2026, 2, 1))
+        newest.set_content("SECRET PROFILE")
+        recent = UserRecentContext(user_id=uid, generated_by="m",
+                                   tokens_used=0)
+        recent.set_content("RECENT OK")
+        intentions = UserArtifact(user_id=uid, kind="intentions",
+                                  title="Intentions", generated_by="m",
+                                  tokens_used=0, ai_usage="none")
+        intentions.set_content("SECRET INTENTIONS")
+        _db.session.add_all([older, newest, recent, intentions])
+        _db.session.commit()
+
+        context = pipeline._derived_context(resp.user)
+        assert "RECENT OK" in context
+        for hidden in ("SECRET PROFILE", "OLDER PROFILE",
+                       "SECRET INTENTIONS"):
+            assert hidden not in context
 
     def test_submit_without_context_fails_soft(self, pipeline,
                                                monkeypatch):
