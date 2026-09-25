@@ -7,7 +7,9 @@ each of them. New/edited nodes become searchable within one sweep period.
 
 Only nodes with ai_usage in AI_ALLOWED are embedded: embedding submits
 content to OpenAI, so 'none' nodes are never sent (their keyword search
-still works). Deleted nodes' embeddings are removed.
+still works). Nothing new is embedded for an owner whose account setting
+is 'none' (#346); their existing vectors are kept. Deleted nodes'
+embeddings are removed.
 """
 from celery.utils.log import get_task_logger
 from sqlalchemy import func, or_
@@ -15,7 +17,7 @@ from sqlalchemy import func, or_
 from backend.celery_app import celery, flask_app
 from backend.extensions import db
 from backend.models import (
-    ExternalItem, ExternalItemEmbedding, Node, NodeEmbedding,
+    ExternalItem, ExternalItemEmbedding, Node, NodeEmbedding, User,
 )
 from backend.utils.api_keys import get_openai_chat_key
 from backend.utils.embeddings import (
@@ -53,11 +55,16 @@ def _candidate_nodes(limit):
     rows = (
         db.session.query(Node, NodeEmbedding)
         .outerjoin(NodeEmbedding, NodeEmbedding.node_id == Node.id)
+        # The owner's account setting (see _embedding_owner_id): an
+        # AI reply's author is the llm-<model> account, not the owner.
+        .join(User, User.id == func.coalesce(Node.human_owner_id,
+                                             Node.user_id))
         .filter(
             Node.deleted_at.is_(None),
             Node.content.isnot(None),
             Node.content != "",
             Node.ai_usage.in_(AI_ALLOWED),
+            User.default_ai_usage.in_(AI_ALLOWED),
         )
         .filter(or_(
             NodeEmbedding.id.is_(None),
@@ -94,6 +101,24 @@ def _candidate_nodes(limit):
     if touched:
         db.session.commit()
     return out
+
+
+def _candidate_external_items(limit):
+    """Saved references without an embedding, whose owner's account
+    setting allows AI (#346)."""
+    return (
+        db.session.query(ExternalItem, ExternalItemEmbedding)
+        .outerjoin(ExternalItemEmbedding,
+                   ExternalItemEmbedding.item_id == ExternalItem.id)
+        .join(User, User.id == ExternalItem.user_id)
+        .filter(ExternalItemEmbedding.id.is_(None),
+                User.default_ai_usage.in_(AI_ALLOWED),
+                # A Read pick nobody saved is not a reference (#352).
+                ExternalItem.saved())
+        .order_by(ExternalItem.id.desc())
+        .limit(limit)
+        .all()
+    )
 
 
 @celery.task(name='backend.tasks.embeddings.sweep_embeddings')
@@ -150,17 +175,7 @@ def sweep_embeddings(limit=SWEEP_BATCH_SIZE):
         # External references (#155 component 2): embed imported items
         # the same way. They're user-curated content (bookmarks, CA
         # tweets) — embedding makes them semantically searchable.
-        ext_rows = (
-            db.session.query(ExternalItem, ExternalItemEmbedding)
-            .outerjoin(ExternalItemEmbedding,
-                       ExternalItemEmbedding.item_id == ExternalItem.id)
-            .filter(ExternalItemEmbedding.id.is_(None),
-                    # A Read pick nobody saved is not a reference (#352).
-                    ExternalItem.saved())
-            .order_by(ExternalItem.id.desc())
-            .limit(limit)
-            .all()
-        )
+        ext_rows = _candidate_external_items(limit)
         ext_candidates = []
         for item, _ in ext_rows:
             text = item.get_content()

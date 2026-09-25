@@ -18,6 +18,7 @@ from backend.utils.tokens import (
 )
 from backend.utils.api_keys import get_api_keys_for_usage
 from backend.utils.cost import llm_cost_log_fields
+from backend.utils.privacy import AI_ALLOWED, account_allows_ai
 
 logger = get_task_logger(__name__)
 
@@ -275,159 +276,6 @@ class ProfileGenerationTask(Task):
             logger.error(f"Profile generation failed for user {user_id}: {exc}")
 
 
-@celery.task(base=ProfileGenerationTask, bind=True)
-def generate_user_profile(self, user_id: int, model_id: str):
-    """
-    Asynchronously generate a user profile using LLM analysis.
-
-    Args:
-        user_id: Database ID of the user
-        model_id: Model identifier (e.g., "gpt-5", "claude-sonnet-4.5")
-    """
-    logger.info(f"Starting profile generation task for user {user_id} with model {model_id}")
-
-    with flask_app.app_context():
-        # Get user from database
-        user = User.query.get(user_id)
-        if not user:
-            raise ValueError(f"User {user_id} not found")
-
-        from backend.utils.spend import user_is_capped
-        if user_is_capped(user):
-            logger.warning(
-                "User %s is spend-capped; skipping profile generation", user_id)
-            return
-
-        try:
-            # Validate model is supported
-            if model_id not in flask_app.config["SUPPORTED_MODELS"]:
-                raise ValueError(f"Unsupported model: {model_id}")
-
-            # Step 1: Load prompt template and calculate token budget
-            self.update_state(state='PROGRESS', meta={'progress': 10, 'status': 'Gathering writing samples'})
-
-            prompt_template = _load_prompt(
-                "profile_generation.txt", user_id=user_id
-            )
-
-            api_keys = get_api_keys_for_usage(flask_app.config, 'chat')
-
-            model_cfg = flask_app.config["SUPPORTED_MODELS"][model_id]
-            limit = model_input_cap(model_cfg, DEFAULT_MAX_OUTPUT_TOKENS)
-
-            def _build(budget):
-                # Filter by AI usage: only nodes with ai_usage chat/train
-                export = build_user_export_content(
-                    user, max_tokens=budget, filter_ai_usage=True)
-                if not export:
-                    return None
-                return ([{"role": "user", "content": [
-                    {"type": "text",
-                     "text": prompt_template.replace(
-                         "{user_export}", export)}]}], export)
-
-            # Pre-size by token count: building this export costs minutes
-            # on a large corpus, so a reject-rebuild cycle is the expensive
-            # path — count first (free), shrink once by the real ratio.
-            # The PromptTooLongError retry below stays as the backstop.
-            self.update_state(state='PROGRESS', meta={
-                'progress': 45, 'status': 'Preparing prompt'})
-            from backend.llm_providers import fit_by_count
-            built, max_export_tokens, _real = fit_by_count(
-                model_id, api_keys, limit, None, _build,
-                corpus_tokens=_estimate_source_tokens(user),
-                safety=flask_app.config.get("RETRY_SAFETY_FACTOR", 0.99))
-            if built is None:
-                raise ValueError("No writing found to analyze")
-
-            MAX_RETRIES = 3
-            for attempt in range(MAX_RETRIES + 1):
-                if built is None:
-                    built = _build(max_export_tokens)
-                    if built is None:
-                        raise ValueError("No writing found to analyze")
-                messages, user_export = built
-                built = None  # a retry rebuilds at the reduced budget
-                logger.info(
-                    f"User export built for user {user_id}, length: "
-                    f"{len(user_export)} characters, "
-                    f"~{approximate_token_count(user_export)} tokens "
-                    f"(attempt {attempt + 1})")
-
-                # Step 4: Call LLM API (60% -> 90% progress)
-                self.update_state(state='PROGRESS', meta={'progress': 60, 'status': 'Generating profile'})
-
-                try:
-                    response = LLMProvider.get_completion(model_id, messages, api_keys)
-                    break  # Success
-                except PromptTooLongError as e:
-                    if attempt == MAX_RETRIES:
-                        raise
-                    max_export_tokens = reduce_export_tokens(
-                        max_export_tokens, e.actual_tokens, e.max_tokens,
-                        export_content=user_export
-                    )
-                    logger.warning(
-                        f"Prompt too long ({e.actual_tokens} > {e.max_tokens}), "
-                        f"retrying with max_export_tokens={max_export_tokens} "
-                        f"(attempt {attempt + 2}/{MAX_RETRIES + 1})"
-                    )
-
-            profile_text = response["content"]
-            total_tokens = response["total_tokens"]
-
-            logger.info(f"Profile generated for user {user_id}: {len(profile_text)} characters, {total_tokens} tokens")
-
-            # Log API cost (cache-aware, #286)
-            cost_log = APICostLog(
-                user_id=user.id,
-                model_id=model_id,
-                request_type="profile",
-                **llm_cost_log_fields(model_id, response),
-            )
-            db.session.add(cost_log)
-
-            # Step 5: Save to database (95% progress)
-            self.update_state(state='PROGRESS', meta={'progress': 95, 'status': 'Saving profile'})
-
-            # AI-generated profiles are private; ai_usage follows the user's
-            # global default (gated to 'chat'/'train' in
-            # profile_eligible_query, so an opted-out user never reaches
-            # here — see #191).
-            from backend.utils.privacy import PrivacyLevel
-            new_profile = UserProfile(
-                user_id=user.id,
-                generated_by=model_id,
-                tokens_used=total_tokens,
-                privacy_level=PrivacyLevel.PRIVATE,
-                ai_usage=user.default_ai_usage,
-            )
-            new_profile.set_content(
-                format_date_metadata(
-                    covers_end=new_profile.source_data_cutoff,
-                ) + profile_text
-            )
-            db.session.add(new_profile)
-            db.session.commit()
-
-            logger.info(f"Profile generation successful for user {user_id}, profile ID: {new_profile.id}")
-
-            from backend.utils.notifications import notify_profile_ready
-            notify_profile_ready(user_id)
-
-            return {
-                'user_id': user_id,
-                'profile_id': new_profile.id,
-                'status': 'completed',
-                'total_tokens': total_tokens,
-                'profile_length': len(profile_text)
-            }
-
-        except Exception as e:
-            logger.error(f"Profile generation error for user {user_id}: {e}", exc_info=True)
-            raise
-
-
 def _load_prompt(name, user_id=None):
     """Load a prompt template by name, checking user overrides first."""
     if user_id:
@@ -668,6 +516,12 @@ def update_user_profile(self, user_id: int, model_id: str,
             logger.warning(
                 "User %s is spend-capped; skipping profile update", user_id)
             return
+        if not account_allows_ai(user):
+            logger.info(
+                "User %s has opted out of AI usage; skipping profile update",
+                user_id)
+            return
+        previous_profile_id = ai_readable_base_id(user_id, previous_profile_id)
 
         # Set concurrency guard
         user.profile_generation_task_id = self.request.id
@@ -989,8 +843,10 @@ def build_chunk_prompt(update_template, current_profile_content,
 def build_integration_messages(user_id, last_iterative_profile_id):
     """Build the integration message list — one user message per profile
     version in the chain, then the integration prompt. Returns
-    (messages, chain), or (None, None) if there are < 2 versions to merge."""
-    chain = _collect_iterative_chain(last_iterative_profile_id)
+    (messages, chain), or (None, None) if there are < 2 versions to merge.
+    Versions whose ai_usage is not AI-readable are left out (#346)."""
+    chain = [p for p in _collect_iterative_chain(last_iterative_profile_id)
+             if p.ai_usage in AI_ALLOWED]
     if len(chain) < 2:
         return None, None
 
@@ -1323,6 +1179,42 @@ def _iterative_generation(self, user, model_id, gen_template,
     }
 
 
+def ai_readable_base_id(user_id, previous_profile_id):
+    """The update base as the task receives it, re-checked when the task
+    runs, since its ai_usage may have changed after dispatch (#346). A
+    base that is no longer AI-readable is replaced by the newest version
+    that is (profile_update_base). None (a from-scratch build) stays
+    None."""
+    if not previous_profile_id:
+        return None
+    base = UserProfile.query.get(previous_profile_id)
+    if base is None or base.ai_usage in AI_ALLOWED:
+        return previous_profile_id
+    fallback = profile_update_base(user_id)
+    logger.info(
+        "Profile %s is not AI-readable; updating from profile %s instead",
+        base.id, fallback.id if fallback else None)
+    return fallback.id if fallback else None
+
+
+def profile_update_base(user_id):
+    """The newest AI-readable non-integration profile, which the next
+    update builds on, or None when there is none (the next build starts
+    from the writing).
+
+    A version that is not AI-readable is skipped and never sent to a
+    model: a profile written or edited by hand while the account was set
+    to 'none', or a batch step collected after the account was switched.
+    The chain continues from the version before it, with the normal
+    update gates from that version's cutoff, instead of rebuilding the
+    whole account. Integration drops such versions the same way (#346)."""
+    return UserProfile.query.filter(
+        UserProfile.user_id == user_id,
+        UserProfile.generation_type != 'integration',
+        UserProfile.ai_usage.in_(AI_ALLOWED),
+    ).order_by(UserProfile.created_at.desc()).first()
+
+
 def maybe_trigger_profile_update(user_id, model_id=None,
                                   force_full_regen=False):
     """
@@ -1331,6 +1223,10 @@ def maybe_trigger_profile_update(user_id, model_id=None,
     """
     user = User.query.get(user_id)
     if not user:
+        return None
+    if not account_allows_ai(user):
+        logger.info(
+            f"Skipping profile update for user {user_id}: opted out of AI usage")
         return None
 
     # Check concurrency guard
@@ -1354,11 +1250,7 @@ def maybe_trigger_profile_update(user_id, model_id=None,
         from backend.utils.llm_nodes import default_model_for
         model_id = default_model_for(user)
 
-    # Find latest non-integration profile
-    latest_profile = UserProfile.query.filter(
-        UserProfile.user_id == user_id,
-        UserProfile.generation_type != 'integration'
-    ).order_by(UserProfile.created_at.desc()).first()
+    latest_profile = profile_update_base(user_id)
 
     prev_id = None if force_full_regen else (
         latest_profile.id if latest_profile else None
@@ -1376,57 +1268,6 @@ def maybe_trigger_profile_update(user_id, model_id=None,
     return task.id
 
 
-@celery.task(base=ProfileGenerationTask, bind=True)
-def integrate_user_profile(self, user_id: int, model_id: str,
-                           last_iterative_profile_id: int):
-    """Standalone task for manual profile integration."""
-    logger.info(
-        f"Starting profile integration for user {user_id}, "
-        f"model {model_id}, profile {last_iterative_profile_id}"
-    )
-
-    with flask_app.app_context():
-        user = User.query.get(user_id)
-        if not user:
-            raise ValueError(f"User {user_id} not found")
-
-        from backend.utils.spend import user_is_capped
-        if user_is_capped(user):
-            logger.warning(
-                "User %s is spend-capped; skipping profile integration", user_id)
-            return
-
-        user.profile_generation_task_id = self.request.id
-        user.profile_generation_task_dispatched_at = datetime.utcnow()
-        db.session.commit()
-
-        try:
-            api_keys = get_api_keys_for_usage(flask_app.config, 'chat')
-            result = _do_integration(
-                self, user, model_id,
-                last_iterative_profile_id, api_keys
-            )
-            if not result:
-                return {
-                    'user_id': user_id,
-                    'status': 'completed',
-                    'message': 'Not enough versions to integrate',
-                }
-            return result
-        except Exception as e:
-            logger.error(
-                f"Profile integration error for user {user_id}: {e}",
-                exc_info=True
-            )
-            raise
-        finally:
-            user = User.query.get(user_id)
-            if user:
-                user.profile_generation_task_id = None
-                user.profile_generation_task_dispatched_at = None
-                db.session.commit()
-
-
 def maybe_trigger_incremental_profile_update(user):
     """
     Check if enough new writing has accumulated to trigger an
@@ -1434,6 +1275,9 @@ def maybe_trigger_incremental_profile_update(user):
     """
     from datetime import datetime, timedelta
     from backend.models import Node
+
+    if not account_allows_ai(user):
+        return None
 
     # Only for paid plans
     if (user.plan or "free") not in User.VOICE_MODE_PLANS:
@@ -1460,11 +1304,7 @@ def maybe_trigger_incremental_profile_update(user):
     if last_node and (datetime.utcnow() - last_node.created_at) < MIN_INACTIVITY:
         return None
 
-    # Find latest non-integration profile
-    latest_profile = UserProfile.query.filter(
-        UserProfile.user_id == user.id,
-        UserProfile.generation_type != 'integration'
-    ).order_by(UserProfile.created_at.desc()).first()
+    latest_profile = profile_update_base(user.id)
 
     MIN_INTERVAL = timedelta(hours=1)
 

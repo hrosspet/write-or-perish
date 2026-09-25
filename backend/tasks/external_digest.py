@@ -33,6 +33,7 @@ from backend.models import (
 from backend.llm_providers import LLMProvider
 from backend.utils.api_keys import get_api_keys_for_usage
 from backend.utils.cost import llm_cost_log_fields
+from backend.utils.privacy import account_allows_ai
 from backend.utils.llm_batch import (
     apply_batch_key_override, batch_check_and_collect, batch_submit,
 )
@@ -330,6 +331,7 @@ def sweep_external_digests():
         due = [
             user for user in User.query.filter(User.id.in_(stale_ids)).all()
             if user_local_hour(user) == NIGHTLY_DIGEST_LOCAL_HOUR
+            and account_allows_ai(user)   # #346
         ]
         if not due:
             return {"status": "ok", "submitted": 0}
@@ -421,6 +423,8 @@ def rebuild_external_digest(self, user_id, force=False):
         user = User.query.get(user_id)
         if user is None:
             return {"status": "no_user"}
+        if not account_allows_ai(user):   # #346
+            return {"status": "ai_opt_out"}
         if not force and not digest_is_stale(user_id):
             return {"status": "not_stale"}
 

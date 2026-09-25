@@ -378,6 +378,7 @@ Based on current project state, dependencies, and strategic value, here's the re
     - NodeDetail: Conditionally hide LLM Response button when ai_usage='none' (#38)
 11. ✅ **Tests** - Comprehensive unit tests for privacy validation, authorization, and AI usage checks (backend/tests/)
 12. ✅ **Profile generation filtering** - Only include nodes with ai_usage='chat' or 'train' in AI-generated profiles, while user data exports include all nodes (#37)
+13. ✅ **Account setting as the master switch** (#340, #346) - The AI-filtered export also blocks profile/todo/artifact rows and quotes marked 'none'; `filter_ai_usage` is a required argument and False is only for the user's own download. An account set to 'none' gets no background AI work: profile update/integration/batch steps, recent context, embeddings (nodes + references), references digest, poll drafts, admin pre-fill and intentions, each checked when the job runs. Every job also checks each row's own ai_usage (a 'none' profile is never an update base; the next build starts from the writing). A profile's ai_usage comes only from the account setting at creation. Admin pre-fill and intentions also refuse a declined tweet-seed consent. The UI-less `/export/generate_profile`, `/export/integrate_profile` and `/export/estimate_profile_tokens` routes are removed.
 
 ### Previously Blocking (Now Complete):
 

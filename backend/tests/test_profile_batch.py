@@ -1309,3 +1309,137 @@ def test_seed_build_failure_is_recorded_on_the_user_and_cleared_on_success(app, 
     fresh = User.query.get(u.id)
     assert fresh.profile_seed_error is None
     assert fresh.profile_batch_pending is True
+
+
+# ── #346: account setting and per-row ai_usage ─────────────────────────────
+
+def test_seed_skips_account_opted_out_of_ai(app, monkeypatch):
+    """The immediate seed (admin Build profile, pre-fill, import hand-off)
+    passes users in directly, bypassing profile_eligible_query."""
+    u = _user(profile_force_batch=True, profile_needs_full_regen=True,
+              default_ai_usage="none")
+    db.session.commit()
+    _remaining(monkeypatch, 90000)
+    export = MagicMock(return_value=_chunk("DATA"))
+    monkeypatch.setattr(pb._exports, "build_user_export_content", export)
+    submit = MagicMock(return_value={})
+    monkeypatch.setattr(pb, "batch_submit", submit)
+
+    assert pb._seed_profile_batches(users=[u]) == 0
+    export.assert_not_called()
+    submit.assert_not_called()
+
+
+def test_next_step_not_built_after_account_opts_out(app, monkeypatch):
+    """The poller advances a chain through the same builder: a chain
+    started while AI was allowed stops once the account is set to none."""
+    u = _user(default_ai_usage="none")
+    _prev_profile(u, datetime(2026, 5, 1))
+    db.session.commit()
+    _remaining(monkeypatch, 90000)
+    export = MagicMock(return_value=_chunk())
+    monkeypatch.setattr(pb._exports, "build_user_export_content", export)
+
+    assert pb._build_next_profile_request(u) is None
+    export.assert_not_called()
+
+
+def test_only_version_none_means_build_from_writing(app, monkeypatch):
+    """A profile written by hand while the account was 'none' stays
+    'none' after the account switches back. With no AI-readable version
+    to fall back to, the next build starts from the writing."""
+    u = _user()
+    hand = _prev_profile(u, None, source_tokens=0, gen_type="initial")
+    hand.ai_usage = "none"
+    hand.generated_by = "user"
+    db.session.commit()
+    _remaining(monkeypatch, 90000)
+    monkeypatch.setattr(pb._exports, "build_user_export_content",
+                        MagicMock(return_value=_chunk()))
+    monkeypatch.setattr(pb._exports, "_load_prompt",
+                        lambda *a, **k: "G {user_export}")
+
+    req = pb._build_next_profile_request(u)
+
+    assert req["meta"]["prev_profile_id"] is None
+    assert req["meta"]["generation_type"] in ("initial", "iterative")
+    text = req["request"]["messages"][0]["content"][0]["text"]
+    assert "PREVIOUS PROFILE" not in text and "NEW DATA" in text
+    assert pb._exports.profile_update_base(u.id) is None
+
+
+def test_sync_trigger_skips_account_opted_out_of_ai(app, monkeypatch):
+    u = _user(default_ai_usage="none")
+    db.session.commit()
+    dispatch = MagicMock()
+    monkeypatch.setattr(pb._exports, "update_user_profile", dispatch)
+
+    assert pb._exports.maybe_trigger_profile_update(u.id) is None
+    assert pb._exports.maybe_trigger_incremental_profile_update(u) is None
+    dispatch.delay.assert_not_called()
+
+
+def test_none_tip_falls_back_to_newest_readable_version(app, monkeypatch):
+    """A 'none' tip (hand-written under 'none', or a batch step collected
+    after the switch) is skipped: the chain continues from the version
+    before it instead of rebuilding the whole account."""
+    u = _user()
+    ok = _prev_profile(u, datetime(2026, 5, 1))
+    tip = _prev_profile(u, datetime(2026, 5, 2))
+    tip.ai_usage = "none"
+    tip.set_content("SECRET TIP")
+    db.session.commit()
+    _remaining(monkeypatch, 90000)
+    monkeypatch.setattr(pb._exports, "build_user_export_content",
+                        MagicMock(return_value=_chunk()))
+    monkeypatch.setattr(pb._exports, "build_update_template", lambda uid: (
+        "T {existing_profile}|{new_data}|{source_tokens_past}"
+        "|{source_tokens_new}|{ratio_percent}"))
+
+    assert pb._exports.profile_update_base(u.id).id == ok.id
+    req = pb._build_next_profile_request(u)
+
+    assert req["meta"]["generation_type"] == "update"
+    assert req["meta"]["prev_profile_id"] == ok.id
+    text = req["request"]["messages"][0]["content"][0]["text"]
+    assert "PREVIOUS PROFILE" in text and "SECRET TIP" not in text
+
+
+def test_sync_task_rechecks_base_when_it_runs(app):
+    u = _user()
+    ok = _prev_profile(u, datetime(2026, 5, 1))
+    blocked = _prev_profile(u, datetime(2026, 5, 2))
+    blocked.ai_usage = "none"
+    db.session.commit()
+
+    assert pb._exports.ai_readable_base_id(u.id, ok.id) == ok.id
+    # Marked 'none' after dispatch: the newest readable version instead.
+    assert pb._exports.ai_readable_base_id(u.id, blocked.id) == ok.id
+    assert pb._exports.ai_readable_base_id(u.id, None) is None
+    ok.ai_usage = "none"
+    db.session.commit()
+    assert pb._exports.ai_readable_base_id(u.id, blocked.id) is None
+
+
+def test_integration_leaves_out_none_versions(app, monkeypatch):
+    monkeypatch.setattr(pb._exports, "_load_prompt",
+                        lambda *a, **k: "INTEGRATE {N_MONTHS}")
+    u = _user()
+    root = _prev_profile(u, datetime(2026, 3, 1), gen_type="iterative")
+    mid = _prev_profile(u, datetime(2026, 4, 1))
+    mid.parent_profile_id = root.id
+    mid.ai_usage = "none"
+    mid.set_content("SECRET MIDDLE VERSION")
+    tip = _prev_profile(u, datetime(2026, 5, 1))
+    tip.parent_profile_id = mid.id
+    db.session.commit()
+
+    messages, chain = pb._exports.build_integration_messages(u.id, tip.id)
+    assert [p.id for p in chain] == [root.id, tip.id]
+    assert all("SECRET MIDDLE VERSION" not in m["content"][0]["text"]
+               for m in messages)
+
+    # Fewer than two AI-readable versions: nothing to integrate.
+    tip.ai_usage = "none"
+    db.session.commit()
+    assert pb._exports.build_integration_messages(u.id, tip.id) == (None, None)

@@ -25,6 +25,7 @@ from backend.models import (
     UserArtifact, APICostLog,
 )
 from backend.utils.api_keys import get_api_keys_for_usage
+from backend.utils.privacy import AI_ALLOWED, account_allows_ai
 from backend.utils.cost import llm_cost_log_fields
 from backend.utils.llm_batch import (
     batch_submit, batch_check_and_collect, apply_batch_key_override,
@@ -55,17 +56,26 @@ send it. Output ONLY the draft answer — no preamble, no headings.
 """
 
 
+def _newest_readable(model, user_id, *criteria):
+    """The newest row whose ai_usage is AI-readable. A newer row marked
+    'none' is skipped and the one before it is used, the same rule as
+    the profile update base and recent context (#346)."""
+    return model.query.filter(
+        model.user_id == user_id, model.ai_usage.in_(AI_ALLOWED), *criteria,
+    ).order_by(model.created_at.desc(), model.id.desc()).first()
+
+
 def _derived_context(user):
+    """The newest AI-readable profile, recent context and intentions."""
     parts = []
-    profile = UserProfile.query.filter_by(user_id=user.id).order_by(
-        UserProfile.created_at.desc()).first()
+    profile = _newest_readable(UserProfile, user.id)
     if profile:
         parts.append("## User profile\n\n" + profile.get_content())
-    recent = UserRecentContext.query.filter_by(user_id=user.id).order_by(
-        UserRecentContext.created_at.desc()).first()
+    recent = _newest_readable(UserRecentContext, user.id)
     if recent:
         parts.append("## Recent context\n\n" + recent.get_content())
-    intentions = UserArtifact.latest_for(user.id, "intentions")
+    intentions = _newest_readable(
+        UserArtifact, user.id, UserArtifact.kind == "intentions")
     if intentions:
         parts.append("## Intentions\n\n" + intentions.get_content())
     return "\n\n".join(parts)
@@ -90,6 +100,12 @@ def _build_request(resp):
     there's no context to draft from."""
     poll = resp.poll
     user = resp.user
+    if not account_allows_ai(user):
+        # Checked at submit too (routes/updates.py); re-checked here
+        # because the setting can change in between (#346).
+        logger.info("Poll draft for response %s skipped: user opted out "
+                    "of AI usage", resp.id)
+        return None
     model_id = poll.model_id or flask_app.config.get("DEFAULT_LLM_MODEL")
     model_cfg = flask_app.config["SUPPORTED_MODELS"].get(model_id)
     if model_cfg is None:

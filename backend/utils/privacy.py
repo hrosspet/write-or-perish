@@ -257,6 +257,32 @@ def can_ai_use_node_for_training(node) -> bool:
     return ai_usage == AIUsage.TRAIN
 
 
+def account_allows_ai(user) -> bool:
+    """The account-level switch (#346). When ``default_ai_usage`` is not
+    in AI_ALLOWED, no automatic or background job sends this user's data
+    to a model or an embedding API. Jobs check it when they execute, not
+    only when they are queued, because the setting can change in between.
+
+    Switching the account does not change existing rows, so jobs also
+    check each row's own ``ai_usage``."""
+    return user is not None and user.default_ai_usage in AI_ALLOWED
+
+
+PREFILL_REFUSAL_CODES = ("ai_opt_out", "prefill_declined")
+
+
+def prefill_refusal(user):
+    """Why an admin pre-fill or intentions run must not run for this
+    account: ``(code, message)``, or None when it may. An unanswered
+    consent (NULL) does not block: not every signup answers it (#346)."""
+    if not account_allows_ai(user):
+        return "ai_opt_out", "User has opted out of AI usage."
+    if user.prefill_consent == "no":
+        return ("prefill_declined",
+                "This user declined the tweet seed (pre-fill consent: no).")
+    return None
+
+
 def get_default_privacy_settings() -> dict:
     """Get the default privacy settings for new nodes.
 
