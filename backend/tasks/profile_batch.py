@@ -151,8 +151,8 @@ def _should_seed(user):
                  .order_by(Node.created_at.desc()).first())
     if last_node and (datetime.utcnow() - last_node.created_at) < MIN_INACTIVITY:
         return False
-    # The base the next step builds on: None when the latest version is
-    # not AI-readable, so the build starts from the writing (#346).
+    # The base the next step builds on: the newest AI-readable version
+    # (a version marked 'none' is skipped, #346).
     latest = _exports.profile_update_base(user.id)
     # An unfinished chain — data beyond the cutoff that is OLDER than the
     # version (a pre-fill or import still being folded in, a chunk lost to

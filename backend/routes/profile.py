@@ -11,6 +11,8 @@ from flask import Blueprint
 from backend.utils.privacy import (
     validate_privacy_level,
     PrivacyLevel,
+    AI_ALLOWED,
+    account_allows_ai,
 )
 from backend.utils.api_keys import get_openai_chat_key
 from backend.utils.spend import require_spend_headroom
@@ -269,6 +271,43 @@ def create_profile():
         return jsonify({"error": "Failed to create profile", "details": str(e)}), 500
 
 
+def _save_edit_as_none_version(profile, new_content, data):
+    """A profile edit made while the account is set to 'none', saved as a
+    new version with the account's ai_usage. It covers the same source
+    data as the edited version, so it carries that version's source
+    figures, and it links to it as its parent. The update pipeline skips
+    it as a base (tasks/exports.profile_update_base)."""
+    new_profile = UserProfile(
+        user_id=current_user.id,
+        generated_by="user",
+        tokens_used=0,
+        privacy_level=data.get("privacy_level", profile.privacy_level),
+        ai_usage=current_user.default_ai_usage,
+        source_tokens_used=profile.source_tokens_used,
+        source_data_cutoff=profile.source_data_cutoff,
+        parent_profile_id=profile.id,
+    )
+    new_profile.set_content(new_content)
+    try:
+        db.session.add(new_profile)
+        db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": "Failed to update profile", "details": str(e)}), 500
+    return jsonify({
+        "message": "Profile updated successfully",
+        "profile": {
+            "id": new_profile.id,
+            "content": new_profile.get_content(),
+            "generated_by": new_profile.generated_by,
+            "tokens_used": new_profile.tokens_used,
+            "created_at": iso_utc(new_profile.created_at),
+            "privacy_level": new_profile.privacy_level,
+            "ai_usage": new_profile.ai_usage
+        }
+    }), 200
+
+
 @profile_bp.route("/<int:profile_id>", methods=["PUT"])
 @login_required
 def update_profile(profile_id):
@@ -289,6 +328,17 @@ def update_profile(profile_id):
     if not new_content.strip():
         return jsonify({"error": "Content cannot be empty"}), 400
 
+    if "privacy_level" in data and not validate_privacy_level(data["privacy_level"]):
+        return jsonify({"error": f"Invalid privacy_level: {data['privacy_level']}"}), 400
+
+    # Text written while the account is set to 'none' must not land in an
+    # AI-readable row (#346). Such an edit is saved as a new version marked
+    # 'none'; the edited version keeps its text, its ai_usage and its audio.
+    if (new_content != profile.get_content()
+            and profile.ai_usage in AI_ALLOWED
+            and not account_allows_ai(current_user)):
+        return _save_edit_as_none_version(profile, new_content, data)
+
     # Editing the text makes generated TTS audio stale. The frontend asks
     # the user whether to keep or regenerate and only sends
     # regenerate_tts=true when they choose to regenerate; we then clear the
@@ -301,13 +351,10 @@ def update_profile(profile_id):
 
     # Handle privacy settings updates (optional)
     if "privacy_level" in data:
-        privacy_level = data["privacy_level"]
-        if not validate_privacy_level(privacy_level):
-            return jsonify({"error": f"Invalid privacy_level: {privacy_level}"}), 400
-        profile.privacy_level = privacy_level
+        profile.privacy_level = data["privacy_level"]
 
-    # ai_usage is not editable: it comes from the account setting at
-    # creation (#346).
+    # ai_usage is not editable: it comes from the account setting when the
+    # text is written (#346).
 
     try:
         db.session.commit()

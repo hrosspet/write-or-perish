@@ -1344,9 +1344,10 @@ def test_next_step_not_built_after_account_opts_out(app, monkeypatch):
     export.assert_not_called()
 
 
-def test_none_base_is_not_sent_and_build_starts_from_writing(app, monkeypatch):
+def test_only_version_none_means_build_from_writing(app, monkeypatch):
     """A profile written by hand while the account was 'none' stays
-    'none' after the account switches back; the next build ignores it."""
+    'none' after the account switches back. With no AI-readable version
+    to fall back to, the next build starts from the writing."""
     u = _user()
     hand = _prev_profile(u, None, source_tokens=0, gen_type="initial")
     hand.ai_usage = "none"
@@ -1378,6 +1379,32 @@ def test_sync_trigger_skips_account_opted_out_of_ai(app, monkeypatch):
     dispatch.delay.assert_not_called()
 
 
+def test_none_tip_falls_back_to_newest_readable_version(app, monkeypatch):
+    """A 'none' tip (hand-written under 'none', or a batch step collected
+    after the switch) is skipped: the chain continues from the version
+    before it instead of rebuilding the whole account."""
+    u = _user()
+    ok = _prev_profile(u, datetime(2026, 5, 1))
+    tip = _prev_profile(u, datetime(2026, 5, 2))
+    tip.ai_usage = "none"
+    tip.set_content("SECRET TIP")
+    db.session.commit()
+    _remaining(monkeypatch, 90000)
+    monkeypatch.setattr(pb._exports, "build_user_export_content",
+                        MagicMock(return_value=_chunk()))
+    monkeypatch.setattr(pb._exports, "build_update_template", lambda uid: (
+        "T {existing_profile}|{new_data}|{source_tokens_past}"
+        "|{source_tokens_new}|{ratio_percent}"))
+
+    assert pb._exports.profile_update_base(u.id).id == ok.id
+    req = pb._build_next_profile_request(u)
+
+    assert req["meta"]["generation_type"] == "update"
+    assert req["meta"]["prev_profile_id"] == ok.id
+    text = req["request"]["messages"][0]["content"][0]["text"]
+    assert "PREVIOUS PROFILE" in text and "SECRET TIP" not in text
+
+
 def test_sync_task_rechecks_base_when_it_runs(app):
     u = _user()
     ok = _prev_profile(u, datetime(2026, 5, 1))
@@ -1385,9 +1412,13 @@ def test_sync_task_rechecks_base_when_it_runs(app):
     blocked.ai_usage = "none"
     db.session.commit()
 
-    assert pb._exports.ai_readable_base_id(ok.id) == ok.id
-    assert pb._exports.ai_readable_base_id(blocked.id) is None
-    assert pb._exports.ai_readable_base_id(None) is None
+    assert pb._exports.ai_readable_base_id(u.id, ok.id) == ok.id
+    # Marked 'none' after dispatch: the newest readable version instead.
+    assert pb._exports.ai_readable_base_id(u.id, blocked.id) == ok.id
+    assert pb._exports.ai_readable_base_id(u.id, None) is None
+    ok.ai_usage = "none"
+    db.session.commit()
+    assert pb._exports.ai_readable_base_id(u.id, blocked.id) is None
 
 
 def test_integration_leaves_out_none_versions(app, monkeypatch):

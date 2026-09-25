@@ -521,7 +521,7 @@ def update_user_profile(self, user_id: int, model_id: str,
                 "User %s has opted out of AI usage; skipping profile update",
                 user_id)
             return
-        previous_profile_id = ai_readable_base_id(previous_profile_id)
+        previous_profile_id = ai_readable_base_id(user_id, previous_profile_id)
 
         # Set concurrency guard
         user.profile_generation_task_id = self.request.id
@@ -1179,34 +1179,40 @@ def _iterative_generation(self, user, model_id, gen_template,
     }
 
 
-def ai_readable_base_id(previous_profile_id):
+def ai_readable_base_id(user_id, previous_profile_id):
     """The update base as the task receives it, re-checked when the task
-    runs: None (build from the writing) when that profile is not
-    AI-readable, since it may have changed after dispatch (#346)."""
+    runs, since its ai_usage may have changed after dispatch (#346). A
+    base that is no longer AI-readable is replaced by the newest version
+    that is (profile_update_base). None (a from-scratch build) stays
+    None."""
     if not previous_profile_id:
         return None
     base = UserProfile.query.get(previous_profile_id)
-    if base is not None and base.ai_usage not in AI_ALLOWED:
-        logger.info(
-            "Profile %s is not AI-readable; building from scratch instead "
-            "of updating it", base.id)
-        return None
-    return previous_profile_id
+    if base is None or base.ai_usage in AI_ALLOWED:
+        return previous_profile_id
+    fallback = profile_update_base(user_id)
+    logger.info(
+        "Profile %s is not AI-readable; updating from profile %s instead",
+        base.id, fallback.id if fallback else None)
+    return fallback.id if fallback else None
 
 
 def profile_update_base(user_id):
-    """The latest non-integration profile, which the next update builds
-    on, or None when the next build starts from the writing: there is no
-    profile, or the latest one is not AI-readable (a profile written by
-    hand while the account was set to 'none'). That row is kept; it is
-    only never sent to a model (#346)."""
-    latest = UserProfile.query.filter(
+    """The newest AI-readable non-integration profile, which the next
+    update builds on, or None when there is none (the next build starts
+    from the writing).
+
+    A version that is not AI-readable is skipped and never sent to a
+    model: a profile written or edited by hand while the account was set
+    to 'none', or a batch step collected after the account was switched.
+    The chain continues from the version before it, with the normal
+    update gates from that version's cutoff, instead of rebuilding the
+    whole account. Integration drops such versions the same way (#346)."""
+    return UserProfile.query.filter(
         UserProfile.user_id == user_id,
-        UserProfile.generation_type != 'integration'
+        UserProfile.generation_type != 'integration',
+        UserProfile.ai_usage.in_(AI_ALLOWED),
     ).order_by(UserProfile.created_at.desc()).first()
-    if latest is not None and latest.ai_usage not in AI_ALLOWED:
-        return None
-    return latest
 
 
 def maybe_trigger_profile_update(user_id, model_id=None,
