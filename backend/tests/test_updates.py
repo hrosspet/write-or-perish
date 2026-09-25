@@ -638,9 +638,10 @@ class TestDraftBatchPipeline:
         assert resp.status == "draft_failed"
         submit.assert_not_called()
 
-    def test_derived_context_leaves_out_rows_marked_none(self, pipeline):
-        """#346: each row is checked; a 'none' row is left out, not
-        replaced by an older AI-readable one."""
+    def test_derived_context_skips_rows_marked_none(self, pipeline):
+        """#346: each row is checked; a 'none' row is skipped and the
+        newest AI-readable one before it is used (the profile-update and
+        recent-context rule). With none left, the section is left out."""
         poll, resp = _make_drafting_response(with_profile=False)
         uid = resp.user_id
         older = UserProfile(user_id=uid, generated_by="m", tokens_used=0,
@@ -660,10 +661,10 @@ class TestDraftBatchPipeline:
         _db.session.commit()
 
         context = pipeline._derived_context(resp.user)
-        assert "RECENT OK" in context
-        for hidden in ("SECRET PROFILE", "OLDER PROFILE",
-                       "SECRET INTENTIONS"):
-            assert hidden not in context
+        assert "OLDER PROFILE" in context and "RECENT OK" in context
+        assert "SECRET PROFILE" not in context
+        assert "SECRET INTENTIONS" not in context
+        assert "## Intentions" not in context
 
     def test_submit_without_context_fails_soft(self, pipeline,
                                                monkeypatch):

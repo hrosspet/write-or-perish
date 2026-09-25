@@ -56,21 +56,27 @@ send it. Output ONLY the draft answer — no preamble, no headings.
 """
 
 
+def _newest_readable(model, user_id, *criteria):
+    """The newest row whose ai_usage is AI-readable. A newer row marked
+    'none' is skipped and the one before it is used, the same rule as
+    the profile update base and recent context (#346)."""
+    return model.query.filter(
+        model.user_id == user_id, model.ai_usage.in_(AI_ALLOWED), *criteria,
+    ).order_by(model.created_at.desc(), model.id.desc()).first()
+
+
 def _derived_context(user):
-    """The latest profile, recent context and intentions. A row whose
-    ai_usage is not AI-readable is left out, not replaced by an older
-    one (#346)."""
+    """The newest AI-readable profile, recent context and intentions."""
     parts = []
-    profile = UserProfile.query.filter_by(user_id=user.id).order_by(
-        UserProfile.created_at.desc()).first()
-    if profile and profile.ai_usage in AI_ALLOWED:
+    profile = _newest_readable(UserProfile, user.id)
+    if profile:
         parts.append("## User profile\n\n" + profile.get_content())
-    recent = UserRecentContext.query.filter_by(user_id=user.id).order_by(
-        UserRecentContext.created_at.desc()).first()
-    if recent and recent.ai_usage in AI_ALLOWED:
+    recent = _newest_readable(UserRecentContext, user.id)
+    if recent:
         parts.append("## Recent context\n\n" + recent.get_content())
-    intentions = UserArtifact.latest_for(user.id, "intentions")
-    if intentions and intentions.ai_usage in AI_ALLOWED:
+    intentions = _newest_readable(
+        UserArtifact, user.id, UserArtifact.kind == "intentions")
+    if intentions:
         parts.append("## Intentions\n\n" + intentions.get_content())
     return "\n\n".join(parts)
 
