@@ -105,14 +105,20 @@ test('in an LLM reply the owner gets the verdict and the read toggle', () => {
 test('in the user\'s own node the owner gets only the read toggle (#363)', async () => {
   // Nothing recommended a reference the user quoted themselves, so
   // there is no recommendation to judge: no verdict, and no reminder
-  // of an earlier one.
-  render(<ExternalQuoteBubble
-    quote={quote({ feedback: 'good', rated_before: { feedback: 'bad', at: '2026-09-22T10:00:00Z' } })}
+  // of an earlier one. (feedback null: the reminder would show under
+  // an empty control, so only the flag hides it here.)
+  const { unmount } = render(<ExternalQuoteBubble
+    quote={quote({ feedback: null, rated_before: { feedback: 'bad', at: '2026-09-22T10:00:00Z' } })}
     nodeId={5}
   />);
   expect(screen.queryByRole('button', { name: 'Good quote' })).not.toBeInTheDocument();
   expect(screen.queryByRole('button', { name: 'Bad quote' })).not.toBeInTheDocument();
   expect(screen.queryByText(/You rated this/)).not.toBeInTheDocument();
+  unmount();
+
+  // A verdict stored on the reference is not shown there either.
+  render(<ExternalQuoteBubble quote={quote({ feedback: 'good' })} nodeId={5} />);
+  expect(screen.queryByRole('button', { name: 'Good quote' })).not.toBeInTheDocument();
 
   api.post.mockResolvedValue({ data: { id: 42, read_at: '2026-09-25T08:00:00Z' } });
   fireEvent.click(screen.getByRole('button', { name: 'Mark as read' }));

@@ -24,11 +24,11 @@ const SOURCE_LABELS = {
  * be marked read right where Loore surfaced it. The label alone carries
  * the state ("Mark as unread" = read). Only the user marks a
  * reference read — the AI quoting it is tracked separately as surfacing.
- * Beside it, the good/bad-quote verdict (ReferenceFeedback) — the
- * hit-or-miss half of the recommendation record. `onReadChange(id,
- * readAt)` and `onFeedbackChange(id, feedback)` tell the page, which
- * keeps the list's marks (a read reply's "n unread", "nothing marked
- * yet") in step with the bubbles.
+ * Beside it, where Loore quoted the reference, the good/bad-quote
+ * verdict (ReferenceFeedback) — the hit-or-miss half of the
+ * recommendation record. `onReadChange(id, readAt)` and
+ * `onFeedbackChange(id, feedback)` tell the page, which keeps the list's
+ * marks (a read reply's "n unread") in step with the bubbles.
  *
  * Opening the post is reading it, and so is judging it: the owner's
  * click marks the reference read as the tab opens, a good / bad verdict
@@ -46,7 +46,9 @@ const SOURCE_LABELS = {
  * reference (an LLM reply): the verdict judges a recommendation, and a
  * reference the user quoted themselves was recommended by nobody (#363).
  * Without it the owner still gets the read toggle, but no verdict and
- * no "You rated this" line.
+ * no "You rated this" line. It is decided per node, not per quote's
+ * `recommendation_id`: replies from before #352 quote references with
+ * no recommendation row and would lose the verdict.
  */
 const ExternalQuoteBubble = ({ quote, nodeId, onReadChange, onFeedbackChange, showRecommendationFeedback = false }) => {
   const userCtx = useUser();
