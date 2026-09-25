@@ -304,11 +304,13 @@ def build_profile(user_id):
     and which makes the first chunk build at any size), pins the user to
     the batch path, and seeds immediately. Idempotent while a job is in
     flight."""
-    from backend.utils.privacy import account_allows_ai
     user = User.query.get_or_404(user_id)
-    if not account_allows_ai(user):
-        return jsonify({"error": "User has opted out of AI usage.",
-                        "code": "ai_opt_out"}), 400
+    # Same refusal as pre-fill: this button usually follows one (#346).
+    # Checked here only: the seeder it dispatches also serves the user's
+    # own imports, which a declined tweet seed must not block.
+    refusal = _prefill_refusal_response(user)
+    if refusal:
+        return refusal
     if user.profile_batch_pending:
         return jsonify({"message": "A batch step is already in flight.", "queued": False}), 200
     user.profile_needs_full_regen = True

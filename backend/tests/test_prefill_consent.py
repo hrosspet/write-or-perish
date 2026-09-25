@@ -196,15 +196,32 @@ class TestPrefillRefusal:
             assert resp.status_code == 202
         assert all(t.delay.called for t in tasks.values())
 
-    def test_build_profile_refuses_account_opted_out(self, app, users, monkeypatch):
+    def test_build_profile_refuses_like_prefill(self, app, users, monkeypatch):
+        """Build profile usually follows a pre-fill, so it refuses on the
+        same two grounds."""
         import backend.tasks.profile_batch as pb
         seed = MagicMock()
         monkeypatch.setattr(pb, "seed_profile_batch_for_user", seed)
-        users["tw"].default_ai_usage = "none"
-        _db.session.commit()
         client = app.test_client()
         _login(client, users["admin"].id)
-        resp = client.post(f"/api/admin/users/{users['tw'].id}/build_profile")
+        url = f"/api/admin/users/{users['tw'].id}/build_profile"
+
+        users["tw"].prefill_consent = "no"
+        _db.session.commit()
+        resp = client.post(url)
+        assert resp.status_code == 400
+        assert resp.get_json()["code"] == "prefill_declined"
+
+        users["tw"].prefill_consent = "yes"
+        users["tw"].default_ai_usage = "none"
+        _db.session.commit()
+        resp = client.post(url)
         assert resp.status_code == 400
         assert resp.get_json()["code"] == "ai_opt_out"
         seed.delay.assert_not_called()
+
+        users["tw"].prefill_consent = None
+        users["tw"].default_ai_usage = "chat"
+        _db.session.commit()
+        assert client.post(url).status_code == 202
+        seed.delay.assert_called_once_with(users["tw"].id)
