@@ -14,7 +14,21 @@ PIDFile=/home/hrosspet/write-or-perish/celery-worker.pid
 ExecStart=/bin/bash -c 'source ~/miniconda3/etc/profile.d/conda.sh && conda activate write-or-perish && celery -A backend.celery_app:celery worker --loglevel=info --logfile=/home/hrosspet/write-or-perish/logs/celery-worker.log --pidfile=/home/hrosspet/write-or-perish/celery-worker.pid --detach --concurrency=4'
 
 ExecReload=/bin/kill -s HUP $MAINPID
-ExecStop=/bin/kill -s TERM $MAINPID
+
+# On stop/restart (every deploy), SIGTERM only the Celery main process, which
+# then does a warm shutdown: it stops consuming, waits for the pool processes
+# to finish their running tasks, and returns reserved/ETA messages to the
+# queue. The default KillMode=control-group also SIGTERMed the pool processes,
+# and billiard turns that into sys.exit() inside whatever task was running
+# (issue #312, a Read batch lost on 2026-09-17).
+# The stop script waits 240 s for the drain, then SIGTERMs the pool processes
+# (the old behaviour, applied late): the main process logs the lost task and
+# restores reserved messages. 240 s covers LLM replies, transcription and
+# TTS; imports and profile builds can run longer and are still cut off.
+# TimeoutStopSec is the SIGKILL backstop.
+ExecStop=/bin/bash /home/hrosspet/write-or-perish/scripts/celery-graceful-stop.sh $MAINPID 240
+KillMode=mixed
+TimeoutStopSec=300
 
 Restart=on-failure
 RestartSec=10s

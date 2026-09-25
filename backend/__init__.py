@@ -90,13 +90,11 @@ def create_app():
             #    char cap — a handled, transient condition.
             if "maximum input length" in text:
                 return None
-            # 2) Every service restart (i.e. every deploy) SIGTERMs the Celery
-            #    worker's pool children — graceful shutdown. Billiard logs it,
-            #    and an in-flight task raises WorkerLostError("…signal 15
-            #    (SIGTERM)…"). Expected lifecycle noise. SIGKILL (signal 9:
-            #    OOM / crash) is a different string and still reports.
-            if "signal 15 (SIGTERM)" in text:
-                return None
+            # A WorkerLostError("…signal 15 (SIGTERM)…") used to follow every
+            # deploy and was dropped here as noise. Since #312 a restart lets
+            # running tasks finish; a pool process gets SIGTERM only when a
+            # task outlives the 240 s drain (scripts/celery-graceful-stop.sh),
+            # and that task is lost, so it reports.
             return event
 
         sentry_sdk.init(

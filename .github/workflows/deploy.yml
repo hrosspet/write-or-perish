@@ -111,7 +111,9 @@ jobs:
           scp -i ~/.ssh/deploy_key frontend-build.tar.gz $VM_USER@$VM_HOST:$PROJECT_PATH/
 
           # Execute deployment script on VM
-          ssh -i ~/.ssh/deploy_key $VM_USER@$VM_HOST << 'ENDSSH'
+          # Keepalive: the Celery restart in deploy.sh can print nothing for
+          # up to ~4 minutes while running tasks drain (#312).
+          ssh -o ServerAliveInterval=30 -i ~/.ssh/deploy_key $VM_USER@$VM_HOST << 'ENDSSH'
             set -e  # Exit immediately if any command fails
             cd /home/hrosspet/write-or-perish
 
