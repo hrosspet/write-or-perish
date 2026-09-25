@@ -1926,7 +1926,7 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
     return tool_results
 
 
-def build_user_export_content(user, max_tokens=None, filter_ai_usage=False,
+def build_user_export_content(user, max_tokens=None, *, filter_ai_usage,
                               **kwargs):
     """Import the actual implementation from export_data routes.
 
@@ -1935,7 +1935,7 @@ def build_user_export_content(user, max_tokens=None, filter_ai_usage=False,
     here — an explicit param list once silently dropped `created_after`.
     """
     from backend.routes.export_data import build_user_export_content as _build
-    return _build(user, max_tokens, filter_ai_usage, **kwargs)
+    return _build(user, max_tokens, filter_ai_usage=filter_ai_usage, **kwargs)
 
 
 def get_user_profile_content(user_id, pinned_node=None):

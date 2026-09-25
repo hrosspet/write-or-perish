@@ -940,7 +940,8 @@ class TestEngagedThreadsStrategy:
         alice = _make_user("alice")
         _db.session.commit()
         with pytest.raises(ValueError):
-            _build(alice, include_strategy="bogus")
+            _build(alice, filter_ai_usage=False,
+                   include_strategy="bogus")
 
     def test_authored_threads_default_byte_identical_to_legacy(
         self, app, monkeypatch
@@ -1362,6 +1363,27 @@ class TestUnbudgetedFilteredExportBlocksNoneQuotes:
 
 
 # ── origin: imported nodes are marked, Loore-native ones are not ────────
+
+class TestFilterAiUsageIsRequired:
+    """The unfiltered export includes rows marked 'none' and exists only
+    for the user's own download. filter_ai_usage has no default, so a new
+    caller cannot get the unfiltered export by leaving the argument out."""
+
+    def test_omitting_filter_ai_usage_raises(self, app):
+        alice = _make_user("alice")
+        _db.session.commit()
+        with pytest.raises(TypeError):
+            _build(alice)
+
+    def test_wrappers_require_it_too(self, app):
+        from backend.tasks import exports, llm_completion
+        alice = _make_user("alice")
+        _db.session.commit()
+        for wrapper in (exports.build_user_export_content,
+                        llm_completion.build_user_export_content):
+            with pytest.raises(TypeError):
+                wrapper(alice)
+
 
 class TestOrigin:
     def test_header_marks_imports_only_and_metadata_counts_origins(self, app):

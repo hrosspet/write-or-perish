@@ -1186,7 +1186,7 @@ def _build_user_export_incremental(
 
 
 def build_user_export_content(
-    user, max_tokens=None, filter_ai_usage=False,
+    user, max_tokens=None, *, filter_ai_usage,
     created_before=None, created_after=None,
     chronological_order=False, return_metadata=False,
     collapse_artifacts=False,
@@ -1230,9 +1230,14 @@ def build_user_export_content(
         max_tokens: Optional maximum token count. If provided, only includes
                    most recent threads that fit within this limit, and uses
                    smart quote resolution.
-        filter_ai_usage: If True, only include nodes where ai_usage is
-                        'chat' or 'train'. Use True for AI profile
-                        generation, False for user data export.
+        filter_ai_usage: Required, keyword-only. True leaves out every
+                        node, quote and artifact row whose ai_usage is
+                        not 'chat'/'train'; any export that reaches a
+                        model must pass True. False is only for the
+                        user's own download of their data
+                        (/export/threads, export_user_threads), which
+                        includes rows marked 'none'. No default, so a
+                        new caller has to choose.
         created_before: Optional datetime. If provided, only includes
                        nodes created before this timestamp.
         created_after: Optional datetime. If provided, forces the anchor-based
@@ -1663,7 +1668,9 @@ def export_threads():
     - Properly formatted with hierarchical structure showing branches
     """
     # Use the core export logic
-    export_content = build_user_export_content(current_user)
+    # The user's own download: rows marked 'none' are included.
+    export_content = build_user_export_content(
+        current_user, filter_ai_usage=False)
 
     if not export_content:
         return Response(

@@ -159,11 +159,12 @@ def _is_task_stale(user):
 
 
 # Import from export_data module
-def build_user_export_content(user, max_tokens=None, filter_ai_usage=False,
+def build_user_export_content(user, max_tokens=None, *, filter_ai_usage,
                               **kwargs):
-    """Import the actual implementation from export_data routes."""
+    """Import the actual implementation from export_data routes.
+    `filter_ai_usage` is required: see the real function's docstring."""
     from backend.routes.export_data import build_user_export_content as _build
-    return _build(user, max_tokens, filter_ai_usage, **kwargs)
+    return _build(user, max_tokens, filter_ai_usage=filter_ai_usage, **kwargs)
 
 
 def _estimate_source_tokens(user):
@@ -1577,7 +1578,9 @@ def export_user_threads(self, user_id: int):
         try:
             self.update_state(state='PROGRESS', meta={'progress': 20, 'status': 'Building export'})
 
-            export_content = build_user_export_content(user)
+            # The user's own download: rows marked 'none' are included.
+            export_content = build_user_export_content(
+                user, filter_ai_usage=False)
 
             if not export_content:
                 raise ValueError("No threads found to export")
