@@ -1104,6 +1104,29 @@ class TestTextmodeContinueFromNode:
         # The reply about the picks has them in its context.
         assert Node.query.get(data["llm_node_id"]).ai_usage == "chat"
 
+    def test_a_message_under_the_chat_turn_still_takes_the_thread(self, app):
+        # One level down (#362): the reply about the picks is stored 'chat'
+        # for the tweets in its context; the next message in the Text-mode
+        # session under it takes the user's own message, not that 'chat'.
+        client = app.test_client()
+        alice = _make_user("alice", default_ai_usage="none")
+        read = self._read_thread(alice)
+        _db.session.commit()
+        _login(client, alice.id)
+        first = client.post(f"/api/textmode/from-node/{read.id}",
+                            json={"content": "why #2?", "model": "gpt-5"})
+        first = first.get_json()
+        assert Node.query.get(first["llm_node_id"]).ai_usage == "chat"
+
+        resp = client.post(
+            f"/api/textmode/{first['prompt_node_id']}/message",
+            json={"content": "and #3?", "parent_id": first["llm_node_id"],
+                  "model": "gpt-5"})
+        assert resp.status_code == 202, resp.get_json()
+        data = resp.get_json()
+        assert Node.query.get(data["user_node_id"]).ai_usage == "train"
+        assert Node.query.get(data["llm_node_id"]).ai_usage == "chat"
+
     def test_the_forms_ai_usage_is_honoured(self, app):
         client = app.test_client()
         alice = _make_user("alice", default_ai_usage="train")

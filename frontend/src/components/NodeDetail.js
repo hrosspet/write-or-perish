@@ -726,12 +726,20 @@ function NodeDetail({ nodeIdOverride }) {
   // server-side, so there is no /nodes/<id>/llm follow-up here.
   // The form's AI usage goes along (a recording carries it on its draft):
   // it defaults to the thread's, not the read reply's 'chat' (#362).
-  const submitReadReplyMessage = async ({ content, ai_usage, streaming_session_id }) => {
+  const submitReadReplyMessage = async ({ content, privacy_level, ai_usage, streaming_session_id }) => {
     if (streaming_session_id) {
       const res = await api.post(
         `/drafts/streaming/${streaming_session_id}/save-as-node`,
         { content, agentic: true, auto_generate: autoGenerateActive, model: selectedModel },
       );
+      return res.data;
+    }
+    if (ai_usage === 'none') {
+      // Kept away from AI: a plain note, no Text-mode prompt and no reply
+      // (Text mode requires 'chat' or 'train').
+      const res = await api.post('/nodes/', {
+        content, parent_id: parseInt(id, 10), privacy_level, ai_usage,
+      });
       return res.data;
     }
     const res = await api.post(`/textmode/from-node/${id}`, {

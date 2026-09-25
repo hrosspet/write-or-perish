@@ -59,6 +59,24 @@ def _has_read_marker(node):
                for m in meta)
 
 
+def prompt_keys(nodes):
+    """{node id: prompt key} for the *nodes* started under a prompt: the
+    stamped column, else the linked prompt's key (roots attached before
+    the column existed), the links in one query per 900 nodes."""
+    from backend.models import NodeContextArtifact, UserPrompt
+    keys = {n.id: n.prompt_key for n in nodes if n.prompt_key}
+    linked = [n.id for n in nodes if not n.prompt_key]
+    for start in range(0, len(linked), 900):
+        keys.update(
+            db.session.query(NodeContextArtifact.node_id,
+                             UserPrompt.prompt_key)
+            .join(UserPrompt, UserPrompt.id == NodeContextArtifact.artifact_id)
+            .filter(NodeContextArtifact.node_id.in_(linked[start:start + 900]),
+                    NodeContextArtifact.artifact_type == "prompt")
+            .all())
+    return keys
+
+
 class _Chain:
     """*node*'s ancestor chain, nearest first, with what the model rules
     read loaded in bulk: two queries for the chain
@@ -76,22 +94,12 @@ class _Chain:
     """
 
     def __init__(self, node):
-        from backend.models import NodeContextArtifact, UserPrompt
         from backend.utils.thread_tree import ancestor_chain
         self.nodes = [] if node is None else ancestor_chain(
             node.id, Node.id, Node.parent_id, Node.node_type, Node.llm_model,
             Node.deleted_at, Node.prompt_key, Node.tool_calls_meta,
             Node.ai_usage, max_depth=_MAX_ANCESTRY_HOPS)
-        self.keys = {n.id: n.prompt_key for n in self.nodes if n.prompt_key}
-        linked = [n.id for n in self.nodes if not n.prompt_key]
-        if linked:
-            self.keys.update(
-                db.session.query(NodeContextArtifact.node_id,
-                                 UserPrompt.prompt_key)
-                .join(UserPrompt, UserPrompt.id == NodeContextArtifact.artifact_id)
-                .filter(NodeContextArtifact.node_id.in_(linked),
-                        NodeContextArtifact.artifact_type == "prompt")
-                .all())
+        self.keys = prompt_keys(self.nodes)
         self.rendered = read_reply_ids(self.nodes)
         self.reads = set()
         for i, n in enumerate(self.nodes):
@@ -231,12 +239,51 @@ def reply_ai_usage(parent_node, user, chain=None, parent_content=None):
         prompts = {0}
     top = max(prompts, default=-1)
     for i, n in enumerate(nodes):
-        if i in prompts or n.id in chain.reads:
-            continue
-        if i < top and _is_llm(n):
-            continue
-        return n.ai_usage or default
+        if not (i in prompts or n.id in chain.reads
+                or (i < top and _is_llm(n))):
+            return n.ai_usage or default
+        if n.ai_usage == "none":
+            # Only 'chat' is ever set for the read; 'none' on a node the
+            # walk would pass is the user's own choice, and it holds for
+            # what they write below it.
+            return "none"
     return default
+
+
+def built_on_a_read(node, chain=None):
+    """An LLM reply whose context held a read's tweets (#362): a read
+    reply, or any LLM reply below a read prompt (alive or not: the reply
+    was built while it was there). Stored as 'chat' when created
+    (create_llm_placeholder) and never raised to 'train' afterwards —
+    the node editor refuses it, and llm_ids_built_on_a_read keeps the
+    settings cascade from doing it."""
+    if not _is_llm(node):
+        return False
+    chain = chain or _Chain(node)
+    if node.id in chain.reads:
+        return True
+    return any(chain.keys.get(n.id) in READ_PROMPT_KEYS
+               for n in chain.nodes[1:])
+
+
+def llm_ids_built_on_a_read(root, descendants):
+    """built_on_a_read for a whole subtree at once: the ids of the LLM
+    replies among *descendants* (*root*'s, every parent listed before its
+    children, as a level walk yields them) that sit below a read prompt,
+    whether the prompt is above *root*, is *root* or is inside the
+    subtree. One chain walk for *root* plus the linked prompt keys of
+    the subtree, instead of a chain walk per reply."""
+    chain = _Chain(root)
+    covered = {root.id: any(chain.keys.get(n.id) in READ_PROMPT_KEYS
+                            for n in chain.nodes)}
+    keys = prompt_keys(descendants)
+    found = set()
+    for n in descendants:
+        below = covered.get(n.parent_id, False)
+        if below and _is_llm(n):
+            found.add(n.id)
+        covered[n.id] = below or keys.get(n.id) in READ_PROMPT_KEYS
+    return found
 
 
 def create_llm_placeholder(parent_node_id, model_id, human_owner_id,
