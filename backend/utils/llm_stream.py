@@ -109,9 +109,15 @@ class ReplyStream:
     ``speech`` is the node's NodeSpeech in a voice turn (None otherwise):
     it gets the same text, and a restart is refused once any of it has
     been cut for speaking. ``show`` writes the partial text for the
-    browser."""
+    browser.
+
+    Both are best-effort: a failure there (a KMS wrap, the mid-stream
+    UPDATE, a bug in the speech side) is logged and switches that side
+    off. It must never propagate into the provider's stream loop, which
+    would abort the model call itself."""
 
     def __init__(self, node, canonicalize=None, speech=None, show=True):
+        self._node_id = node.id
         self._parts = []
         self._writer = (PartialTextWriter(node, canonicalize)
                         if show else None)
@@ -121,31 +127,54 @@ class ReplyStream:
     def text(self):
         return "".join(self._parts)
 
+    def _writer_call(self, method, *args):
+        if self._writer is None:
+            return
+        try:
+            getattr(self._writer, method)(*args)
+        except Exception:
+            logger.exception("Partial text for node %s: %s failed; not "
+                             "showing it live any more", self._node_id,
+                             method)
+            self._writer = None
+            try:
+                db.session.rollback()
+            except Exception:
+                logger.exception("Rollback after a partial-text failure")
+
+    def _speech_call(self, method, *args):
+        if self._speech is None:
+            return None
+        try:
+            return getattr(self._speech, method)(*args)
+        except Exception:
+            logger.exception("Live speech for node %s: %s failed; not "
+                             "speaking it while written any more",
+                             self._node_id, method)
+            self._speech = None
+            return None
+
     def on_text(self, text):
         if not text:
             return
         self._parts.append(text)
-        if self._writer is not None:
-            self._writer.feed(text)
-        if self._speech is not None:
-            self._speech.feed(text)
+        self._writer_call("feed", text)
+        self._speech_call("feed", text)
 
     def on_tool_call(self, name):
         # The text before a tool call is the round's whole text: show it
         # all and let the speech finish it now, not after the tool input
         # has streamed too. A round with no text is closed later, with
         # the fallback line it speaks instead.
-        if self._writer is not None:
-            self._writer.flush()
-        if self._speech is not None and self._parts:
-            self._speech.close()
+        self._writer_call("flush")
+        if self._parts:
+            self._speech_call("close")
 
     def on_restart(self):
-        if self._speech is not None and not self._speech.restart():
+        if self._speech is not None and self._speech_call("restart") is False:
             return False
         self._parts = []
-        if self._writer is not None:
-            self._writer.reset()
+        self._writer_call("reset")
         return True
 
     def cut_off(self):

@@ -2,11 +2,12 @@
 
 Runs the real generate_llm_response on the test_retrieval_loop harness,
 with a provider stand-in that feeds the listener before returning."""
+import httpx
 import pytest
 
 from backend.tests.test_retrieval_loop import (  # noqa: F401 (fixture)
     _FakeSelf, _build_chain, _db, _fresh, _llm_task_mod, _resp, app)
-from backend.models import APICostLog, TTSChunk
+from backend.models import APICostLog, Draft, TTSChunk
 from backend.utils import llm_stream, tts_stream
 from backend.utils.llm_stream import CUT_OFF_NOTE
 
@@ -111,7 +112,7 @@ def test_a_restart_clears_the_partial_text(live):
 
 def test_failure_after_text_completes_as_cut_off(live):
     alice, _, user_node, llm_node = _build_chain("textmode")
-    _LiveProvider.reset([(["Half a rep", RuntimeError("overloaded")],
+    _LiveProvider.reset([(["Half a rep", httpx.RemoteProtocolError("peer")],
                           None)])
     _run(user_node, llm_node, alice)
     node = _fresh(llm_node.id)
@@ -121,6 +122,45 @@ def test_failure_after_text_completes_as_cut_off(live):
     # The call never completed: no usage to log.
     assert APICostLog.query.filter_by(
         request_type="conversation").count() == 0
+
+
+def test_non_provider_error_after_text_still_fails(live):
+    # Only the model call failing leaves a cut-off reply; anything else
+    # (a bug, the task's time limit) fails the node as before.
+    alice, _, user_node, llm_node = _build_chain("textmode")
+    _LiveProvider.reset([(["Half a rep", RuntimeError("bug")], None)])
+    with pytest.raises(RuntimeError):
+        _run(user_node, llm_node, alice)
+    node = _fresh(llm_node.id)
+    assert node.llm_task_status == "failed"
+    assert node.streaming_content is None
+
+
+def test_cut_off_todo_block_is_not_proposed(live):
+    alice, _, user_node, llm_node = _build_chain("textmode")
+    _LiveProvider.reset([(
+        ["Updates:\n\n### New Tasks\n- write the int",
+         httpx.RemoteProtocolError("peer")], None)])
+    _run(user_node, llm_node, alice)
+    assert _fresh(llm_node.id).llm_task_status == "completed"
+    assert Draft.query.filter_by(label="todo_pending").count() == 0
+
+
+def test_partial_text_failure_does_not_touch_the_reply(live, monkeypatch):
+    # The listener is best-effort: a failed partial write (a KMS wrap,
+    # the UPDATE) stops the live text, never the model call.
+    def boom(self):
+        raise RuntimeError("kms down")
+    monkeypatch.setattr(llm_stream.PartialTextWriter, "flush", boom)
+    alice, _, user_node, llm_node = _build_chain("textmode")
+    _LiveProvider.reset([(["All of ", "the reply."],
+                          _resp("All of the reply."))])
+    _run(user_node, llm_node, alice)
+    node = _fresh(llm_node.id)
+    assert node.llm_task_status == "completed"
+    assert node.get_content() == "All of the reply."
+    assert APICostLog.query.filter_by(
+        request_type="conversation").count() == 1
 
 
 def test_failure_before_any_text_still_fails(live):
@@ -215,6 +255,8 @@ def test_voice_turn_is_spoken_through_a_tool_round(voice):
     assert voice == []                   # no batch TTS dispatched
     interim = _fresh(llm_node.id)
     answer_node = _fresh(interim.continuation_node_id)
+    # The marker llm-status reports as tts_streaming.
+    assert interim.tts_task_id == answer_node.tts_task_id == "voice-stream"
     for node in (interim, answer_node):
         assert node.tts_task_status == "completed"
         assert node.audio_tts_url and "?v=" in node.audio_tts_url

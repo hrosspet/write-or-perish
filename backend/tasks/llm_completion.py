@@ -3,6 +3,7 @@ Celery task for asynchronous LLM completion.
 """
 import difflib
 import json
+import sys
 import uuid
 import re
 import time
@@ -187,6 +188,31 @@ CONTINUATION_RETRY_DELAYS = (5, 15)
 # it in the task's thread at the end of the turn: their in-memory database
 # is invisible to a second thread.
 TTS_STREAM_THREADED = True
+# Node.tts_task_id of a node spoken while it is written (#367). llm-status
+# reports it as tts_streaming, the browser's cue to attach its TTS stream
+# before the reply is complete. (The server-side voice chain marks every
+# voice placeholder's TTS 'pending' up front, so the status alone doesn't
+# say it.)
+LIVE_TTS_TASK_ID = "voice-stream"
+
+
+def _provider_failure(exc):
+    """Whether *exc* is the model call itself failing — the provider's
+    error, a dropped connection, our readable wrapper after retries — as
+    opposed to anything else raised during a streamed reply (a bug, the
+    task's soft time limit). Only the former leaves a cut-off reply
+    (#367); the classes of backend.llm_providers are looked up at call
+    time so a stubbed module in tests can't break the check."""
+    import anthropic
+    import httpx
+    import openai
+    classes = [anthropic.APIError, openai.APIError, httpx.TransportError]
+    providers = sys.modules.get("backend.llm_providers")
+    for name in ("ProviderUnavailableError", "OpenAIStreamError"):
+        cls = getattr(providers, name, None)
+        if isinstance(cls, type) and issubclass(cls, BaseException):
+            classes.append(cls)
+    return isinstance(exc, tuple(classes))
 
 
 def _start_voice_tts_stream(llm_node, user_id, source_mode):
@@ -209,6 +235,7 @@ def _start_voice_tts_stream(llm_node, user_id, source_mode):
         flask_app, user_id, audio_root_path(),
         audio=OpenAITTSAudio(api_key), threaded=TTS_STREAM_THREADED)
     llm_node.tts_task_status = 'processing'
+    llm_node.tts_task_id = LIVE_TTS_TASK_ID
     db.session.commit()
     turn.open_node(llm_node)
     return turn
@@ -3241,8 +3268,8 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     return call(reply)
                 except (PromptTooLongError, Retry, Reject):
                     raise
-                except Exception:
-                    if not reply.text.strip():
+                except Exception as e:
+                    if not reply.text.strip() or not _provider_failure(e):
                         raise
                     logger.warning(
                         "Reply for node %s cut off by a provider failure "
@@ -3943,8 +3970,10 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                             tr["response_truncated"] = True
                     f_tool_meta = tool_results
 
-                # Step 5c: Auto-detect proposals in LLM text (agentic)
-                if is_agentic:
+                # Step 5c: Auto-detect proposals in LLM text (agentic). Not
+                # in a reply cut off mid-way: a half-written block would
+                # become a proposal and supersede the pending one.
+                if is_agentic and not resp.get("cut_off"):
                     auto_drafts = _auto_create_drafts(
                         f_llm_text, target_node, node_chain, user_id
                     )
@@ -4195,6 +4224,8 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         tts_task_status=('processing'
                                          if speech_turn is not None
                                          else None),
+                        tts_task_id=(LIVE_TTS_TASK_ID
+                                     if speech_turn is not None else None),
                         privacy_level=current_node.privacy_level,
                         ai_usage=current_node.ai_usage,
                     )

@@ -2077,6 +2077,7 @@ def get_llm_status(node_id):
         # (spoken while written) — the browser attaches its TTS stream.
         "streaming": bool(node.streaming_content),
         "tts_task_status": node.tts_task_status,
+        "tts_streaming": node.tts_task_id == "voice-stream",
     }
 
     # Include content when completed (needed by VoicePage polling) and
