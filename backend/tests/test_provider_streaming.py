@@ -109,9 +109,14 @@ def test_retries_are_bounded(providers, monkeypatch):
     calls = []
     monkeypatch.setattr(providers, "Anthropic", _client(
         [_status_error(200, OVERLOADED) for _ in range(3)], calls))
-    with pytest.raises(anthropic.APIStatusError):
+    with pytest.raises(providers.ProviderUnavailableError) as exc_info:
         providers.LLMProvider._call_anthropic("m", MSGS, "k")
     assert len(calls) == 3
+    # The node's error is shown to the user: readable, not the raw event
+    # body; the provider's error stays on the chain for the logs.
+    message = str(exc_info.value)
+    assert "Anthropic" in message and "overloaded_error" not in message
+    assert isinstance(exc_info.value.__cause__, anthropic.APIStatusError)
 
 
 def test_request_level_error_is_not_retried_here(providers, monkeypatch):
@@ -234,6 +239,54 @@ def test_openai_mid_stream_failure_is_retried(providers, monkeypatch,
     ], calls))
     assert _oai_call(providers)["content"] == "hi"
     assert len(calls) == 2
+
+
+def test_openai_exhausted_retries_raise_readable_error(providers,
+                                                       monkeypatch):
+    calls = []
+    monkeypatch.setattr(providers, "OpenAI", _oai_client(
+        [[_oai_failed("server_error")] for _ in range(3)], calls))
+    with pytest.raises(providers.ProviderUnavailableError) as exc_info:
+        _oai_call(providers)
+    assert len(calls) == 3
+    assert "OpenAI" in str(exc_info.value)
+    assert isinstance(exc_info.value.__cause__, providers.OpenAIStreamError)
+
+
+@pytest.mark.parametrize("script", [
+    [_event("response.completed", response=_oai_response())],
+    [_oai_failed("invalid_prompt")],
+])
+def test_openai_http_client_is_closed(providers, monkeypatch, script):
+    # We pass our own HTTP client (for keepalive), and the SDK closes only
+    # the ones it creates — so the call must close it, on success or not.
+    http_clients = []
+    fake = _oai_client([script], [])
+
+    class _Recording(fake):
+        def __init__(self, api_key=None, **kwargs):
+            super().__init__(api_key, **kwargs)
+            http_clients.append(kwargs["http_client"])
+
+    monkeypatch.setattr(providers, "OpenAI", _Recording)
+    try:
+        _oai_call(providers)
+    except providers.OpenAIStreamError:
+        pass
+    assert len(http_clients) == 1 and http_clients[0].is_closed
+
+
+def test_openai_failed_event_overflow_maps_to_prompt_too_long(providers,
+                                                              monkeypatch):
+    # A context overflow reported as a response.failed event, rather than
+    # an error the SDK raises, must still reach the export-shrinking retry.
+    calls = []
+    monkeypatch.setattr(providers, "OpenAI", _oai_client(
+        [[_oai_failed("context_length_exceeded")]], calls))
+    with pytest.raises(providers.PromptTooLongError):
+        providers.LLMProvider._call_openai(
+            "gpt-x", MSGS, "k", context_window=1_000)
+    assert len(calls) == 1
 
 
 def test_openai_non_transient_failure_is_not_retried(providers, monkeypatch):

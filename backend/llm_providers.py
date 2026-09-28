@@ -52,6 +52,21 @@ class OpenAIStreamError(RuntimeError):
         self.code = code
 
 
+class ProviderUnavailableError(RuntimeError):
+    """A streamed call that failed after it started (an overload, a
+    dropped connection) on every mid-stream retry. The message is written
+    for the user, as the node's error; the provider's own error is the
+    ``__cause__``, for the logs."""
+
+    def __init__(self, provider):
+        super().__init__(
+            f"The model provider ({provider}) kept failing while writing "
+            "this reply — it was overloaded or the connection dropped — so "
+            "this reply is empty. This is usually temporary: sending the "
+            "same request again in a few minutes should work.")
+        self.provider = provider
+
+
 def _openai_mid_stream_error(exc):
     """An OpenAI error the SDK raised while reading a stream: an event
     whose data carries an ``error`` becomes a plain APIError (no HTTP
@@ -60,6 +75,14 @@ def _openai_mid_stream_error(exc):
     return (isinstance(exc, openai.APIError)
             and not isinstance(exc, (openai.APIStatusError,
                                      openai.APIConnectionError)))
+
+
+def _openai_request_error(exc):
+    """An error about the request itself, wherever it arrived: a 400
+    before the stream starts, or, once the stream has started, an error
+    the SDK raised from an event or a ``response.failed`` event."""
+    return (isinstance(exc, (openai.BadRequestError, OpenAIStreamError))
+            or _openai_mid_stream_error(exc))
 
 
 def _retryable_stream_error(exc):
@@ -81,13 +104,17 @@ def _retryable_stream_error(exc):
 def _retry_mid_stream(call, provider):
     """Run ``call`` (one streamed request, collected to its final result),
     retrying mid-stream failures per STREAM_RETRY_DELAYS. Request-level
-    errors are left to the SDK's own retries so the two don't stack."""
+    errors are left to the SDK's own retries so the two don't stack. When
+    the retries run out, raises ProviderUnavailableError instead of the
+    provider's raw error, which would otherwise reach the user as is."""
     for retry_delay in (*STREAM_RETRY_DELAYS, None):
         try:
             return call()
         except Exception as e:
-            if retry_delay is None or not _retryable_stream_error(e):
+            if not _retryable_stream_error(e):
                 raise
+            if retry_delay is None:
+                raise ProviderUnavailableError(provider) from e
             logger.warning(
                 "%s stream failed mid-way (%s); retrying in %ss",
                 provider, e, retry_delay)
@@ -288,13 +315,6 @@ class LLMProvider:
         Returns:
             Dict with content, total_tokens, and tool_calls
         """
-        client = OpenAI(
-            api_key=api_key,
-            http_client=openai.DefaultHttpxClient(
-                transport=httpx.HTTPTransport(
-                    socket_options=_keepalive_socket_options())),
-        )
-
         # Convert chat-format messages to Responses input items: content
         # block type is role-dependent (input_text for user/system,
         # output_text for assistant); plain strings pass through as-is.
@@ -353,18 +373,25 @@ class LLMProvider:
                 "comparison_response_id": cache_comparison_response_id}}
 
         def _send():
-            return _retry_mid_stream(
-                lambda: _openai_final_response(client, kwargs), "OpenAI")
+            # The HTTP client is ours, so we close it: the SDK closes only
+            # a client it created itself, and only once it is garbage
+            # collected.
+            with openai.DefaultHttpxClient(
+                    transport=httpx.HTTPTransport(
+                        socket_options=_keepalive_socket_options())
+            ) as http_client:
+                client = OpenAI(api_key=api_key, http_client=http_client)
+                return _retry_mid_stream(
+                    lambda: _openai_final_response(client, kwargs), "OpenAI")
 
-        # A request error arrives as a 400 before the stream starts, or as
-        # an error event after it (_openai_mid_stream_error); both are
-        # handled the same way.
+        # A request error arrives as a 400 before the stream starts, or
+        # after it as an error the SDK raises or a response.failed event
+        # (_openai_request_error); all are handled the same way.
         try:
             try:
                 response = _send()
-            except openai.APIError as e:
-                if not (isinstance(e, openai.BadRequestError)
-                        or _openai_mid_stream_error(e)):
+            except (openai.APIError, OpenAIStreamError) as e:
+                if not _openai_request_error(e):
                     raise
                 # Analytics must never cost a turn: if OpenAI rejects the
                 # option itself, send the call again without it.
@@ -378,9 +405,8 @@ class LLMProvider:
                     "retrying without cache diagnostics: %s", model, e)
                 kwargs.pop("extra_body")
                 response = _send()
-        except openai.APIError as e:
-            if not (isinstance(e, openai.BadRequestError)
-                    or _openai_mid_stream_error(e)):
+        except (openai.APIError, OpenAIStreamError) as e:
+            if not _openai_request_error(e):
                 raise
             mapped = LLMProvider._openai_overflow_error(
                 e, input_items, context_window)
@@ -452,9 +478,10 @@ class LLMProvider:
     @staticmethod
     def _openai_overflow_error(e, input_items, context_window):
         """
-        Map an OpenAI request error (a 400, or the same error delivered as
-        a stream error event) to PromptTooLongError when it is a context
-        overflow; otherwise return the original error to re-raise.
+        Map an OpenAI request error (a 400, or the same error delivered in
+        the stream — see _openai_request_error) to PromptTooLongError when
+        it is a context overflow; otherwise return the original error to
+        re-raise.
 
         The Responses API's overflow error may carry no token counts
         (unlike chat completions), so when the message has none we fall
