@@ -6,6 +6,7 @@ pinned artifacts, and _call_anthropic content-block passthrough with
 cache_control survival + cache usage fields (mocked Anthropic client).
 """
 import os
+import socket
 import sys
 from unittest.mock import MagicMock
 
@@ -568,8 +569,15 @@ def test_call_openai_surfaces_cache_write_subset(app, monkeypatch):
     with app.app_context():
         result = providers.LLMProvider._call_openai(
             "gpt-5.6-sol", [{"role": "user", "content": "x"}], "k")
-    # Not streamed: the whole 32k-budget generation must fit one read.
+    # Not streamed: the whole 32k-budget generation must fit one read, on
+    # a connection kept alive through GCP's 10-minute idle cutoff.
     assert client_kwargs["timeout"].read == providers.OPENAI_TIMEOUT_SECS
+    assert client_kwargs["http_client"] is not None
+    options = providers._keepalive_socket_options()
+    assert (socket.SOL_SOCKET, socket.SO_KEEPALIVE, True) in options
+    idle = getattr(socket, "TCP_KEEPIDLE", None)
+    if idle is not None:
+        assert (socket.IPPROTO_TCP, idle, 60) in options
     assert result["input_tokens"] == 6018
     assert result["cached_tokens"] == 2815
     assert result["cache_write_subset_tokens"] == 3000

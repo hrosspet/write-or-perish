@@ -6,6 +6,7 @@ This module provides a unified interface for calling different LLM providers
 """
 import logging
 import re
+import socket
 import time
 
 import anthropic
@@ -42,6 +43,22 @@ _RETRYABLE_STREAM_ERROR_TYPES = frozenset({
 # read timeout. The SDK default (600 s) is too short for a reply that
 # uses most of the 32k budget below ~55 tokens/s.
 OPENAI_TIMEOUT_SECS = 1200
+
+
+def _keepalive_socket_options():
+    """TCP keepalive for a connection that carries no bytes while the model
+    generates (a non-streamed OpenAI call). GCP's VPC firewall drops the
+    tracked state of a connection idle for 10 minutes, after which the
+    response can't get back and the call hangs until its read timeout.
+    Probes every 60 s keep it tracked. The Anthropic SDK sets the same
+    options on its own client; the OpenAI SDK sets none."""
+    options = [(socket.SOL_SOCKET, socket.SO_KEEPALIVE, True)]
+    for name, value in (("TCP_KEEPIDLE", 60), ("TCP_KEEPINTVL", 60),
+                        ("TCP_KEEPCNT", 5)):
+        const = getattr(socket, name, None)
+        if const is not None:
+            options.append((socket.IPPROTO_TCP, const, value))
+    return options
 
 
 def _retryable_stream_error(exc):
@@ -212,8 +229,13 @@ class LLMProvider:
         Returns:
             Dict with content, total_tokens, and tool_calls
         """
-        client = OpenAI(api_key=api_key, timeout=httpx.Timeout(
-            OPENAI_TIMEOUT_SECS, connect=5.0))
+        client = OpenAI(
+            api_key=api_key,
+            timeout=httpx.Timeout(OPENAI_TIMEOUT_SECS, connect=5.0),
+            http_client=openai.DefaultHttpxClient(
+                transport=httpx.HTTPTransport(
+                    socket_options=_keepalive_socket_options())),
+        )
 
         # Convert chat-format messages to Responses input items: content
         # block type is role-dependent (input_text for user/system,
