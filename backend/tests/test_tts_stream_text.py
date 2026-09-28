@@ -7,8 +7,9 @@ import pytest
 
 from backend.utils.audio_processing import section_aware_chunk_text
 from backend.utils.tts_stream_text import (
-    AUDIO_PER_CHAR, FIRST_CHUNK_CHARS, GEN_RATE, OVERHEAD, ChunkPlanner,
-    SpeechSchedule, SpokenTextProjector)
+    AUDIO_PER_CHAR, FIRST_CHUNK_CHARS, GEN_RATE, MIN_FIRST_CHUNK_CHARS,
+    OVERHEAD, REFILL_LEAD_SECS, ChunkPlanner, SpeechSchedule,
+    SpokenTextProjector)
 
 
 def _project(pieces, proposals=True):
@@ -259,9 +260,20 @@ def test_jit_cut_needs_min_chars():
                           "going until the chunk is long enough.")
 
 
-def test_schedule_idle_until_audio_is_queued():
+def test_short_chunks_while_the_queue_is_empty_or_running_out():
     schedule = SpeechSchedule()
-    assert schedule.idle(0.0)
+    # Nothing queued: cut the first sentences that make a chunk.
+    assert schedule.next_cut(0.0, 50) == (
+        FIRST_CHUNK_CHARS, True, MIN_FIRST_CHUNK_CHARS, None)
+    # A short first chunk (6 s) is queued: wait for a full chunk, but
+    # wake in time to cut a short one before the queue runs out.
     schedule.played(6.0, 10.0)
-    assert not schedule.idle(15.9)
-    assert schedule.idle(16.0)
+    assert schedule.next_cut(10.0, 50) == (
+        FIRST_CHUNK_CHARS, False, 0, 16.0 - REFILL_LEAD_SECS)
+    assert schedule.next_cut(16.0 - REFILL_LEAD_SECS, 50)[1:3] == (
+        True, MIN_FIRST_CHUNK_CHARS)
+    # Warm (plenty queued): the size rule's own just-in-time cut decides.
+    schedule.played(30.0, 11.0)
+    limit, jit, min_chars, wake_at = schedule.next_cut(11.0, 100)
+    assert (limit, jit, wake_at) == schedule.plan(11.0, 100)
+    assert min_chars == 0

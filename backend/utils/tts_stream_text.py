@@ -466,6 +466,11 @@ FIRST_CHUNK_CHARS = min(int(3.0 * GEN_RATE), TTS_MAX_CHARS)
 # deadline, for error in the drain estimate (the server can't see the
 # browser's player). A guess, not measured.
 JIT_MARGIN_SECS = 1.0
+# INTRODUCED CONSTANT (#371): how long before the queue runs out a short
+# chunk (>= MIN_FIRST_CHUNK_CHARS) is cut from whatever sentences are
+# there. From the #371 measurements: TTS first byte ~0.9 s + ~0.8 s for
+# 80 chars + publish and the SSE poll ~0.6 s.
+REFILL_LEAD_SECS = 2.5
 
 
 class SpeechSchedule:
@@ -480,10 +485,12 @@ class SpeechSchedule:
     on. State is per turn: the browser plays the interim node and the
     continuation from one queue.
 
-    The TTS worker adds one rule on top (#371): while nothing is queued
-    (``idle``), it cuts the first sentences as soon as they make
-    MIN_FIRST_CHUNK_CHARS instead of waiting for a full first chunk, so
-    a streamed reply starts sooner than the batch schedule's would."""
+    ``next_cut`` adds one rule on top for the streaming worker (#371):
+    while nothing is queued, or the queue will run out before a full
+    chunk could land, the sentences that are there are cut as soon as
+    they make MIN_FIRST_CHUNK_CHARS. So a streamed reply starts sooner
+    than the batch schedule's would, and a slowly written one doesn't
+    fall silent after its short first chunk."""
 
     def __init__(self):
         self.drain_at = None
@@ -502,9 +509,20 @@ class SpeechSchedule:
                    - JIT_MARGIN_SECS)
         return limit, now >= wake_at, wake_at
 
-    def idle(self, now):
-        """Nothing is queued: the listener is waiting in silence."""
-        return self.drain_at is None or self.drain_at <= now
+    def next_cut(self, now, pending_chars):
+        """(limit, jit, min_chars, wake_at) for the streaming worker: the
+        size rule (``plan``), plus the short-chunk rule of the class
+        docstring when ``plan`` isn't cutting early anyway."""
+        limit, jit, wake_at = self.plan(now, pending_chars)
+        if jit:
+            return limit, True, 0, wake_at
+        refill_at = (None if self.drain_at is None
+                     else self.drain_at - REFILL_LEAD_SECS)
+        if refill_at is None or now >= refill_at:
+            return limit, True, MIN_FIRST_CHUNK_CHARS, wake_at
+        if wake_at is None:
+            wake_at = refill_at
+        return limit, False, 0, wake_at
 
     def played(self, duration, now):
         """A chunk of *duration* seconds reached the queue at *now*."""
