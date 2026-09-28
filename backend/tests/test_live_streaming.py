@@ -323,6 +323,33 @@ def test_voice_failure_marks_the_open_node_tts_failed(voice):
     assert node.tts_task_status == "failed"
 
 
+def test_first_chunk_is_cut_at_the_first_sentences(live, tmp_path):
+    """#371: with nothing queued the worker speaks the first sentences as
+    soon as they make MIN_FIRST_CHUNK_CHARS, not a ~318-char chunk."""
+    import time
+    alice, _, user_node, llm_node = _build_chain("voice")
+    node = _fresh(llm_node.id)
+    node.tts_task_status = "processing"
+    _db.session.commit()
+    _FakeAudio.spoken = []
+    turn = tts_stream.VoiceTTSStream(
+        live, alice.id, tmp_path, audio=_FakeAudio(), threaded=True)
+    speech = turn.open_node(node)
+    sentence = "This sentence is about forty characters. "
+    for _ in range(3):
+        speech.feed(sentence)
+    deadline = time.monotonic() + 5
+    while not _FakeAudio.spoken and time.monotonic() < deadline:
+        time.sleep(0.01)
+    for _ in range(20):
+        speech.feed(sentence)
+    speech.release()
+    turn.finish()
+    texts = [t for t, _ in _FakeAudio.spoken]
+    assert texts[0] == (sentence * 2).strip()
+    assert " ".join(texts) == (sentence * 23).strip()
+
+
 def test_worker_thread_speaks_as_text_arrives(live, tmp_path):
     """The real thread: chunks are cut while the text still streams,
     stay in order, and together speak the whole text."""

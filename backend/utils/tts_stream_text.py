@@ -408,19 +408,20 @@ class ChunkPlanner:
             split = _split_at_word(text, limit)
         return split
 
-    def take(self, limit, jit=False):
+    def take(self, limit, jit=False, min_chars=0):
         """The next chunk of at most *limit* chars, or None when there
         isn't one yet. Ended sections are cut first, whatever their size;
         the open section only once it holds more than *limit* chars (the
         cut then falls at a sentence boundary within the limit), or, with
         *jit* (text is arriving slowly and the queue is about to run
-        out), at its last confirmed sentence boundary."""
-        chunk = self._take(limit, jit)
+        out), at its last confirmed sentence boundary, if that leaves a
+        chunk of at least *min_chars*."""
+        chunk = self._take(limit, jit, min_chars)
         if chunk is not None:
             self.cut += 1
         return chunk
 
-    def _take(self, limit, jit):
+    def _take(self, limit, jit, min_chars):
         if self._sealed:
             item = self._sealed[0]
             text, title, index, end = item
@@ -443,7 +444,7 @@ class ChunkPlanner:
                 return None   # the boundary isn't confirmed yet
         elif jit:
             split = _last_confirmed_boundary(text)
-            if not split:
+            if not split or len(text[:split].strip()) < min_chars:
                 return None
         else:
             return None
@@ -477,7 +478,12 @@ class SpeechSchedule:
     stall is predicted; after a real stall (a tool round, a slow stream)
     it restarts from the arrival time instead of assuming playback went
     on. State is per turn: the browser plays the interim node and the
-    continuation from one queue."""
+    continuation from one queue.
+
+    The TTS worker adds one rule on top (#371): while nothing is queued
+    (``idle``), it cuts the first sentences as soon as they make
+    MIN_FIRST_CHUNK_CHARS instead of waiting for a full first chunk, so
+    a streamed reply starts sooner than the batch schedule's would."""
 
     def __init__(self):
         self.drain_at = None
@@ -495,6 +501,10 @@ class SpeechSchedule:
         wake_at = (self.drain_at - OVERHEAD - pending_chars / GEN_RATE
                    - JIT_MARGIN_SECS)
         return limit, now >= wake_at, wake_at
+
+    def idle(self, now):
+        """Nothing is queued: the listener is waiting in silence."""
+        return self.drain_at is None or self.drain_at <= now
 
     def played(self, duration, now):
         """A chunk of *duration* seconds reached the queue at *now*."""

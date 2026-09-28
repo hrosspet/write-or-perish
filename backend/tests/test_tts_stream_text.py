@@ -246,3 +246,22 @@ def test_schedule_cold_then_warm():
     # After a stall playback resumes when the next chunk lands.
     schedule.played(5.0, 40.0)
     assert schedule.drain_at == 45.0
+
+
+def test_jit_cut_needs_min_chars():
+    planner, projector = ChunkPlanner(), SpokenTextProjector()
+    planner.add(projector.feed("Short one. Another sentence follows"))
+    assert planner.take(1000, jit=True, min_chars=80) is None
+    planner.add(projector.feed(
+        " and keeps going until the chunk is long enough. Then more"))
+    chunk = planner.take(1000, jit=True, min_chars=80)
+    assert chunk.text == ("Short one. Another sentence follows and keeps "
+                          "going until the chunk is long enough.")
+
+
+def test_schedule_idle_until_audio_is_queued():
+    schedule = SpeechSchedule()
+    assert schedule.idle(0.0)
+    schedule.played(6.0, 10.0)
+    assert not schedule.idle(15.9)
+    assert schedule.idle(16.0)

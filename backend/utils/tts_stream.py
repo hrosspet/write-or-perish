@@ -28,7 +28,7 @@ from backend.models import Node, TTSChunk
 from backend.utils.encryption import encrypt_file
 from backend.utils import voice_timing
 from backend.utils.tts_stream_text import (
-    ChunkPlanner, SpeechSchedule, SpokenTextProjector)
+    MIN_FIRST_CHUNK_CHARS, ChunkPlanner, SpeechSchedule, SpokenTextProjector)
 
 logger = logging.getLogger(__name__)
 
@@ -215,7 +215,16 @@ class VoiceTTSStream:
             now = self._clock()
             limit, jit, wake_at = self._schedule.plan(
                 now, speech.planner.pending_chars)
-            chunk = speech.planner.take(limit, jit)
+            min_chars = 0
+            if self._schedule.idle(now):
+                # #371: nothing is playing. Speak the first sentences as
+                # soon as they make a sensible chunk instead of waiting
+                # for a full one: a short TTS call returns sooner.
+                jit, min_chars = True, MIN_FIRST_CHUNK_CHARS
+            elif wake_at is None:
+                # Wake when the queue runs out, for the rule above.
+                wake_at = self._schedule.drain_at
+            chunk = speech.planner.take(limit, jit, min_chars)
             if chunk is not None:
                 index = speech.next_index
                 speech.next_index += 1
