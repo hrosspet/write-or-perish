@@ -111,13 +111,17 @@ TTS_VOICE = "alloy"
 # calls measured on 2026-09-28, two took ~1.6 s and one 300 s (first byte
 # after 17 s, then a trickle). One such call held up a voice reply's audio
 # for minutes (#367), and a batch run the same way. A call that runs past
-# its deadline is dropped and sent once more.
+# its deadline is dropped and sent again. The SDK's own retries are off (a
+# stalled attempt would otherwise be retried inside the deadline's back),
+# so the transient errors it used to retry are retried here.
 # INTRODUCED CONSTANTS (#367): generation runs ~106 chars/s, so the
 # deadline (20 s + 0.02 s/char: ~26 s for a first chunk, ~100 s for a full
-# 4096-char chunk) leaves several times the normal duration. Not tuned.
+# 4096-char chunk) leaves several times the normal duration; three attempts
+# and the pauses between them match the SDK's defaults. Not tuned.
 TTS_CALL_DEADLINE_SECS = 20.0
 TTS_CALL_DEADLINE_SECS_PER_CHAR = 0.02
-TTS_CALL_ATTEMPTS = 2
+TTS_CALL_ATTEMPTS = 3
+TTS_RETRY_PAUSES_SECS = (1.0, 2.0)
 
 
 class TTSStallError(RuntimeError):
@@ -140,23 +144,35 @@ def _stream_speech(client, text, path, deadline):
                         f"TTS call still running after {deadline:.0f}s")
 
 
+def _retryable_tts_error(exc):
+    """A failure worth sending the call again for: a stall, a dropped or
+    timed-out connection, or a status the SDK itself retries (408, 409,
+    429, 5xx)."""
+    if isinstance(exc, (TTSStallError, openai.APIConnectionError,
+                        httpx.TransportError)):
+        return True
+    return (isinstance(exc, openai.APIStatusError)
+            and (exc.status_code in (408, 409, 429)
+                 or exc.status_code >= 500))
+
+
 def synthesize_to_file(client, text, path, section_end=False):
-    """One TTS call written to *path* as MP3 (retried once if it stalls).
-    Returns the AudioSegment; a chunk that closes a chapter gets the
-    chapter-end silence, re-exported so chunked playback (which streams
-    the file directly) has it too."""
+    """One TTS call written to *path* as MP3 (sent again if it stalls or
+    fails transiently). Returns the AudioSegment; a chunk that closes a
+    chapter gets the chapter-end silence, re-exported so chunked playback
+    (which streams the file directly) has it too."""
     deadline = (TTS_CALL_DEADLINE_SECS
                 + TTS_CALL_DEADLINE_SECS_PER_CHAR * len(text))
     for attempt in range(1, TTS_CALL_ATTEMPTS + 1):
         try:
             _stream_speech(client, text, path, deadline)
             break
-        except (TTSStallError, openai.APITimeoutError,
-                httpx.TimeoutException) as e:
-            if attempt == TTS_CALL_ATTEMPTS:
+        except Exception as e:
+            if attempt == TTS_CALL_ATTEMPTS or not _retryable_tts_error(e):
                 raise
-            logger.warning("TTS call for %s chars stalled (%s); sending it "
+            logger.warning("TTS call for %s chars failed (%s); sending it "
                            "again", len(text), e)
+            time.sleep(TTS_RETRY_PAUSES_SECS[attempt - 1])
     segment = AudioSegment.from_file(str(path), format="mp3")
     if section_end:
         segment = segment + AudioSegment.silent(

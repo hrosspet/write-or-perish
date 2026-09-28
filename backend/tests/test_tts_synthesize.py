@@ -1,10 +1,13 @@
-"""A TTS call that stalls is dropped and sent once more (#367): OpenAI's
-TTS occasionally trickles a short clip out over minutes, which held up a
-voice reply's audio for as long."""
+"""A TTS call that stalls is dropped and sent again (#367): OpenAI's TTS
+occasionally trickles a short clip out over minutes, which held up a voice
+reply's audio for as long. With the SDK's own retries off, the transient
+errors it used to retry are retried here."""
 import os
 import sys
 from unittest.mock import MagicMock
 
+import httpx
+import openai
 import pytest
 
 os.environ.setdefault("SECRET_KEY", "test-secret")
@@ -41,7 +44,8 @@ class _Clock:
 
 
 def _client(scripts, calls):
-    """Each speech call replays a script of (seconds, bytes) blocks."""
+    """Each speech call replays a script of (seconds, bytes) blocks, or
+    raises it when the script is an exception."""
     class _Resp:
         def __init__(self, blocks):
             self.blocks = blocks
@@ -62,7 +66,10 @@ def _client(scripts, calls):
             @staticmethod
             def create(**kwargs):
                 calls.append(kwargs)
-                return _Resp(scripts.pop(0))
+                script = scripts.pop(0)
+                if isinstance(script, Exception):
+                    raise script
+                return _Resp(script)
 
     class _Client:
         def with_options(self, **options):
@@ -79,7 +86,14 @@ def _client(scripts, calls):
 def fake(monkeypatch):
     _Clock.now = 0.0
     monkeypatch.setattr(tts.time, "monotonic", _Clock.monotonic)
+    monkeypatch.setattr(tts, "TTS_RETRY_PAUSES_SECS", (0, 0))
     monkeypatch.setattr(tts, "AudioSegment", MagicMock())
+
+
+def _status(cls, code):
+    request = httpx.Request("POST", "https://api.openai.com/v1/audio/speech")
+    return cls("boom", response=httpx.Response(code, request=request),
+               body=None)
 
 
 def test_a_stalled_call_is_sent_again(fake, tmp_path):
@@ -97,11 +111,36 @@ def test_a_stalled_call_is_sent_again(fake, tmp_path):
     assert options[0]["timeout"] == pytest.approx(20.0 + 0.02 * 12)
 
 
-def test_it_gives_up_after_the_second_stall(fake, tmp_path):
+def test_it_gives_up_after_the_third_stall(fake, tmp_path):
     trickle = [(10.0, b"a")] * 5
+    calls = []
     with pytest.raises(tts.TTSStallError):
-        tts.synthesize_to_file(_client([list(trickle), list(trickle)], []),
-                               "Hello there.", tmp_path / "c.mp3")
+        tts.synthesize_to_file(
+            _client([list(trickle) for _ in range(3)], calls),
+            "Hello there.", tmp_path / "c.mp3")
+    assert len([c for c in calls if "input" in c]) == 3
+
+
+@pytest.mark.parametrize("error", [
+    _status(openai.InternalServerError, 503),
+    _status(openai.RateLimitError, 429),
+    openai.APIConnectionError(request=httpx.Request("POST", "https://x")),
+    httpx.RemoteProtocolError("peer closed"),
+])
+def test_transient_errors_are_sent_again(fake, tmp_path, error):
+    calls = []
+    tts.synthesize_to_file(_client([error, [(1.0, b"x")]], calls), "Hi.",
+                           tmp_path / "c.mp3")
+    assert len([c for c in calls if "input" in c]) == 2
+
+
+def test_a_bad_request_is_not_sent_again(fake, tmp_path):
+    calls = []
+    with pytest.raises(openai.BadRequestError):
+        tts.synthesize_to_file(
+            _client([_status(openai.BadRequestError, 400), [(1.0, b"x")]],
+                    calls), "Hi.", tmp_path / "c.mp3")
+    assert len([c for c in calls if "input" in c]) == 1
 
 
 def test_a_normal_call_is_sent_once(fake, tmp_path):
