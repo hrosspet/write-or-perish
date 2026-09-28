@@ -317,10 +317,13 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
   // changes phase to 'playback' which would kill polling before slow LLM
   // responses arrive; polling self-stops on completed/failed status, and
   // is disabled when llmNodeId is cleared on cancel/continue)
-  const { data: llmData, status: llmStatus } = useAsyncTaskPolling(
+  const { data: llmData, status: llmStatus, error: llmError } = useAsyncTaskPolling(
     llmNodeId ? `/nodes/${llmNodeId}/llm-status` : null,
     { enabled: !!llmNodeId, interval: 1500 }
   );
+  // Node whose failure was already toasted: the effect below re-runs on
+  // unrelated dep changes while the status stays 'failed'.
+  const failureToastedForNodeRef = useRef(null);
 
   // Surface server-side warnings (e.g. typoed {user_export} keys) as toasts
   useLlmTaskWarnings(llmData, llmStatus);
@@ -554,6 +557,12 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
         setPhase('ready');
       });
     } else if (llmStatus === 'failed') {
+      // The red dot alone didn't say why; the server's error is written
+      // for the user (e.g. "break the request into smaller steps").
+      if (failureToastedForNodeRef.current !== llmNodeId) {
+        failureToastedForNodeRef.current = llmNodeId;
+        addToast(llmError || 'Response generation failed', 8000);
+      }
       setHasError(true);
       setPhase('ready');
     }
