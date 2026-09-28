@@ -39,6 +39,12 @@ logger = get_task_logger(__name__)
 # the provider TTL; tune together.
 PREWARM_ONGOING_MIN_SECONDS = 300
 
+# How often finalize_draft_streaming checks whether the last chunks are
+# transcribed. The voice reply can't start before that wait ends.
+# INTRODUCED CONSTANT (#371): it was 2 s, which cost ~1 s per voice turn
+# on average (measured 0.5-1.7 s); one status query per poll is cheap.
+FINALIZE_POLL_SECS = 0.25
+
 # Toast text when a Voice recording finishes after the user hit the monthly
 # spend cap (#341): the entry is saved, the reply is skipped.
 VOICE_REPLY_SKIPPED_SPEND_CAP = (
@@ -1071,8 +1077,9 @@ def finalize_draft_streaming(self, session_id: str, total_chunks: int,
 
         # Wait for all chunks to complete (with timeout)
         max_wait_seconds = 600  # 10 minutes max wait
-        poll_interval = 2  # seconds
+        waited_since = time.monotonic()
         elapsed = 0
+        last_counts = None
 
         while elapsed < max_wait_seconds:
             # Check chunk statuses
@@ -1081,17 +1088,20 @@ def finalize_draft_streaming(self, session_id: str, total_chunks: int,
             failed = [c for c in chunks if c.status == 'failed']
             pending = [c for c in chunks if c.status in ['pending', 'processing', 'stored']]
 
-            logger.info(
-                f"Session {session_id}: {len(completed)} completed, "
-                f"{len(failed)} failed, {len(pending)} pending of {total_chunks}"
-            )
+            counts = (len(completed), len(failed), len(pending))
+            if counts != last_counts:
+                last_counts = counts
+                logger.info(
+                    f"Session {session_id}: {len(completed)} completed, "
+                    f"{len(failed)} failed, {len(pending)} pending of {total_chunks}"
+                )
 
             # All chunks processed (either completed or failed)
             if len(completed) + len(failed) >= total_chunks:
                 break
 
-            time.sleep(poll_interval)
-            elapsed += poll_interval
+            time.sleep(FINALIZE_POLL_SECS)
+            elapsed = time.monotonic() - waited_since
 
             # Refresh the session to get updated data
             db.session.expire_all()
@@ -1099,8 +1109,7 @@ def finalize_draft_streaming(self, session_id: str, total_chunks: int,
         timing["transcribed"] = time.time()
         done_at = [c.completed_at for c in chunks if c.completed_at]
         if done_at:
-            # The loop above polls every 2 s: when the last chunk was
-            # actually done.
+            # When the last chunk was actually done (the loop polls).
             timing["last_chunk_done"] = max(done_at).replace(
                 tzinfo=timezone.utc).timestamp()
         if draft.created_at:
@@ -1113,12 +1122,12 @@ def finalize_draft_streaming(self, session_id: str, total_chunks: int,
         # Log whether we exited by completion or timeout
         if elapsed >= max_wait_seconds:
             logger.warning(
-                f"Session {session_id}: TIMED OUT after {elapsed}s waiting for chunks. "
+                f"Session {session_id}: TIMED OUT after {elapsed:.0f}s waiting for chunks. "
                 f"Expected {total_chunks}, got {len(completed)} completed + {len(failed)} failed"
             )
         else:
             logger.info(
-                f"Session {session_id}: All chunks processed in {elapsed}s"
+                f"Session {session_id}: All chunks processed in {elapsed:.1f}s"
             )
 
         # The draft instance was expired by db.session.expire_all() in the
