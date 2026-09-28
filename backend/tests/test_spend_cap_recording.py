@@ -207,6 +207,58 @@ class TestResumeIsAllowedWhenCapped:
             session_id=session_id, chunk_index=5).one()
         assert chunk.status == "stored"
 
+    def test_duplicate_upload_racing_the_first_is_not_an_error(
+            self, client, alice, monkeypatch):
+        # #371: a hidden page sends each chunk twice at once (sendBeacon +
+        # the normal upload, #88). The copy whose existence check ran
+        # before the other's insert must not fail with a 500.
+        session_id = "sess-race"
+        draft = Draft(user_id=alice.id, session_id=session_id,
+                      streaming_status="recording",
+                      streaming_mime_type="audio/webm")
+        draft.set_content("")
+        _db.session.add(draft)
+        _db.session.add(NodeTranscriptChunk(
+            session_id=session_id, chunk_index=5, status="stored"))
+        _db.session.commit()
+        from backend.routes import drafts as drafts_routes
+        (drafts_routes.AUDIO_STORAGE_ROOT
+         / f"drafts/{alice.id}/{session_id}").mkdir(parents=True,
+                                                    exist_ok=True)
+        real_query = NodeTranscriptChunk.query
+        missed = []
+
+        class _RacingQuery:
+            """The first existence check misses the other copy's row."""
+            def filter_by(self, **kw):
+                q = real_query.filter_by(**kw)
+                if missed:
+                    return q
+                missed.append(kw)
+                return type("_Q", (), {"first": lambda _self: None})()
+
+            def __getattr__(self, name):
+                return getattr(real_query, name)
+
+        monkeypatch.setattr(NodeTranscriptChunk, "query", _RacingQuery())
+
+        resp = client.post(
+            f"/drafts/streaming/{session_id}/audio-chunk",
+            data={
+                "chunk": (BytesIO(FRAGMENT_BYTES), "chunk.webm"),
+                "chunk_index": "5",
+                "mime_type": "audio/webm",
+            },
+            content_type="multipart/form-data",
+        )
+
+        assert missed, "the race was not simulated"
+        assert resp.status_code == 200, resp.get_data(as_text=True)
+        assert resp.get_json()["message"] == "Chunk already uploaded"
+        monkeypatch.undo()
+        assert NodeTranscriptChunk.query.filter_by(
+            session_id=session_id, chunk_index=5).count() == 1
+
     def test_status_carries_the_streaming_warning(self, client, alice):
         # The voice frontend's polling fallback needs the warning too.
         draft = Draft(user_id=alice.id, session_id="sess-warn",

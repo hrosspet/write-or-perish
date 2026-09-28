@@ -1,5 +1,6 @@
 from flask import Blueprint, jsonify, request, current_app
 from flask_login import login_required, current_user
+from sqlalchemy.exc import IntegrityError
 from backend.models import Draft, Node, NodeTranscriptChunk
 from backend.extensions import db
 from backend.utils.privacy import can_user_edit_node
@@ -539,6 +540,14 @@ def init_streaming():
     }), 201
 
 
+def _chunk_already_uploaded(chunk_index, chunk):
+    return jsonify({
+        "message": "Chunk already uploaded",
+        "chunk_index": chunk_index,
+        "status": chunk.status
+    }), 200
+
+
 @drafts_bp.route("/streaming/<session_id>/audio-chunk", methods=["POST"])
 @login_required
 def upload_streaming_chunk(session_id):
@@ -704,11 +713,7 @@ def upload_streaming_chunk(session_id):
             db.session.commit()
             transcript_chunk = existing_chunk
         else:
-            return jsonify({
-                "message": "Chunk already uploaded",
-                "chunk_index": chunk_index,
-                "status": existing_chunk.status
-            }), 200
+            return _chunk_already_uploaded(chunk_index, existing_chunk)
     else:
         transcript_chunk = NodeTranscriptChunk(
             session_id=session_id,
@@ -717,7 +722,20 @@ def upload_streaming_chunk(session_id):
             status='stored'
         )
         db.session.add(transcript_chunk)
-        db.session.commit()
+        try:
+            db.session.commit()
+        except IntegrityError:
+            # The same chunk arrived twice at once: a hidden page sends
+            # each chunk by sendBeacon and by the normal upload (#88).
+            # The copy that lost the race is a duplicate, not a failure
+            # (a 500 made the client retry after 2 s, delaying the voice
+            # reply when the recording was stopped from the lock screen).
+            db.session.rollback()
+            existing_chunk = NodeTranscriptChunk.query.filter_by(
+                session_id=session_id, chunk_index=chunk_index).first()
+            if existing_chunk is None:
+                raise
+            return _chunk_already_uploaded(chunk_index, existing_chunk)
 
     # Check if we have enough stored chunks for a batch (20 × 15s = 5min)
     BATCH_SIZE = 20
