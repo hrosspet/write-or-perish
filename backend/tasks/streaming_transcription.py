@@ -1101,6 +1101,12 @@ def finalize_draft_streaming(self, session_id: str, total_chunks: int,
             # All chunks processed (either completed or failed)
             if len(completed) + len(failed) >= total_chunks:
                 break
+            if (not chunks and total_chunks and not Draft.query.filter_by(
+                    session_id=session_id).count()):
+                # The session was discarded (the draft and its chunk rows
+                # are gone): nothing will complete, and the re-fetch below
+                # skips it.
+                break
 
             time.sleep(FINALIZE_POLL_SECS)
             elapsed = time.monotonic() - waited_since

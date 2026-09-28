@@ -557,3 +557,30 @@ class TestFinalizeWait:
         result = st.finalize_draft_streaming(MagicMock(), "sess-5", 1)
 
         assert result["status"] == "draft_deleted"
+
+    def test_discarded_session_ends_the_wait(self, st, monkeypatch):
+        # A discard deletes the draft and its chunk rows: the wait stops
+        # at once instead of polling until its 10-minute timeout.
+        import time
+        from types import SimpleNamespace
+        user = st._test_user
+        _recording(user, "sess-6", [0, 1], st._test_root)
+        NodeTranscriptChunk.query.filter_by(session_id="sess-6").update(
+            {"status": "processing"})
+        _db.session.commit()
+        sleeps = []
+
+        def sleep(secs):
+            sleeps.append(secs)
+            for table in (NodeTranscriptChunk.__table__, Draft.__table__):
+                _db.session.execute(table.delete().where(
+                    table.c.session_id == "sess-6"))
+            _db.session.commit()
+
+        monkeypatch.setattr(st, "time", SimpleNamespace(
+            time=time.time, monotonic=time.monotonic, sleep=sleep))
+
+        result = st.finalize_draft_streaming(MagicMock(), "sess-6", 2)
+
+        assert result["status"] == "draft_deleted"
+        assert len(sleeps) == 1
