@@ -207,58 +207,6 @@ class TestResumeIsAllowedWhenCapped:
             session_id=session_id, chunk_index=5).one()
         assert chunk.status == "stored"
 
-    def test_duplicate_upload_racing_the_first_is_not_an_error(
-            self, client, alice, monkeypatch):
-        # #371: a hidden page sends each chunk twice at once (sendBeacon +
-        # the normal upload, #88). The copy whose existence check ran
-        # before the other's insert must not fail with a 500.
-        session_id = "sess-race"
-        draft = Draft(user_id=alice.id, session_id=session_id,
-                      streaming_status="recording",
-                      streaming_mime_type="audio/webm")
-        draft.set_content("")
-        _db.session.add(draft)
-        _db.session.add(NodeTranscriptChunk(
-            session_id=session_id, chunk_index=5, status="stored"))
-        _db.session.commit()
-        from backend.routes import drafts as drafts_routes
-        (drafts_routes.AUDIO_STORAGE_ROOT
-         / f"drafts/{alice.id}/{session_id}").mkdir(parents=True,
-                                                    exist_ok=True)
-        real_query = NodeTranscriptChunk.query
-        missed = []
-
-        class _RacingQuery:
-            """The first existence check misses the other copy's row."""
-            def filter_by(self, **kw):
-                q = real_query.filter_by(**kw)
-                if missed:
-                    return q
-                missed.append(kw)
-                return type("_Q", (), {"first": lambda _self: None})()
-
-            def __getattr__(self, name):
-                return getattr(real_query, name)
-
-        monkeypatch.setattr(NodeTranscriptChunk, "query", _RacingQuery())
-
-        resp = client.post(
-            f"/drafts/streaming/{session_id}/audio-chunk",
-            data={
-                "chunk": (BytesIO(FRAGMENT_BYTES), "chunk.webm"),
-                "chunk_index": "5",
-                "mime_type": "audio/webm",
-            },
-            content_type="multipart/form-data",
-        )
-
-        assert missed, "the race was not simulated"
-        assert resp.status_code == 200, resp.get_data(as_text=True)
-        assert resp.get_json()["message"] == "Chunk already uploaded"
-        monkeypatch.undo()
-        assert NodeTranscriptChunk.query.filter_by(
-            session_id=session_id, chunk_index=5).count() == 1
-
     def test_status_carries_the_streaming_warning(self, client, alice):
         # The voice frontend's polling fallback needs the warning too.
         draft = Draft(user_id=alice.id, session_id="sess-warn",
@@ -490,3 +438,122 @@ class TestCappedRecordingIsTranscribed:
         _db.session.refresh(node)
         assert node.transcription_status == "completed"
         assert "uploaded words" in node.get_content()
+
+
+class TestDuplicateChunkUpload:
+    """#371: a hidden page sends each chunk twice at once (sendBeacon +
+    the normal upload, #88). The second copy must not fail."""
+
+    def _session(self, alice, stored_row=True):
+        import uuid
+        self.SESSION = f"sess-dup-{uuid.uuid4().hex[:8]}"
+        draft = Draft(user_id=alice.id, session_id=self.SESSION,
+                      streaming_status="recording",
+                      streaming_mime_type="audio/webm")
+        draft.set_content("")
+        _db.session.add(draft)
+        if stored_row:
+            _db.session.add(NodeTranscriptChunk(
+                session_id=self.SESSION, chunk_index=5, status="stored"))
+        _db.session.commit()
+        from backend.routes import drafts as drafts_routes
+        chunk_dir = (drafts_routes.AUDIO_STORAGE_ROOT
+                     / f"drafts/{alice.id}/{self.SESSION}")
+        chunk_dir.mkdir(parents=True, exist_ok=True)
+        return chunk_dir
+
+    def _upload(self, client, payload=FRAGMENT_BYTES):
+        return client.post(
+            f"/drafts/streaming/{self.SESSION}/audio-chunk",
+            data={
+                "chunk": (BytesIO(payload), "chunk.webm"),
+                "chunk_index": "5",
+                "mime_type": "audio/webm",
+            },
+            content_type="multipart/form-data",
+        )
+
+    def test_late_copy_leaves_the_stored_file_alone(self, client, alice):
+        chunk_dir = self._session(alice)
+        stored = chunk_dir / "chunk_0005.webm"
+        stored.write_bytes(b"first copy")
+
+        resp = self._upload(client, payload=FRAGMENT_BYTES + b"x")
+
+        assert resp.status_code == 200, resp.get_data(as_text=True)
+        assert resp.get_json()["message"] == "Chunk already uploaded"
+        assert stored.read_bytes() == b"first copy"
+        assert sorted(p.name for p in chunk_dir.iterdir()) == [
+            "chunk_0005.webm"]
+
+    @pytest.mark.parametrize("missed_checks", [1, 2])
+    def test_copy_racing_the_first_is_not_an_error(
+            self, client, alice, monkeypatch, missed_checks):
+        # The other copy's row is committed while this one stores its
+        # file: seen by the second existence check (1), or only by the
+        # insert's unique constraint (2).
+        chunk_dir = self._session(alice)
+        real_query = NodeTranscriptChunk.query
+        missed = []
+
+        class _RacingQuery:
+            def filter_by(self, **kw):
+                q = real_query.filter_by(**kw)
+                if len(missed) >= missed_checks:
+                    return q
+                missed.append(kw)
+                return type("_Q", (), {"first": lambda _self: None})()
+
+            def __getattr__(self, name):
+                return getattr(real_query, name)
+
+        monkeypatch.setattr(NodeTranscriptChunk, "query", _RacingQuery())
+
+        resp = self._upload(client)
+
+        assert len(missed) == missed_checks, "the race was not simulated"
+        assert resp.status_code == 200, resp.get_data(as_text=True)
+        assert resp.get_json()["message"] == "Chunk already uploaded"
+        monkeypatch.undo()
+        assert NodeTranscriptChunk.query.filter_by(
+            session_id=self.SESSION, chunk_index=5).count() == 1
+        # This copy's file was moved into place; no upload file is left.
+        assert sorted(p.name for p in chunk_dir.iterdir()) == [
+            "chunk_0005.webm"]
+
+    def test_first_copy_is_stored(self, client, alice):
+        chunk_dir = self._session(alice, stored_row=False)
+        resp = self._upload(client)
+        assert resp.status_code == 202, resp.get_data(as_text=True)
+        assert (chunk_dir / "chunk_0005.webm").read_bytes() == FRAGMENT_BYTES
+        assert sorted(p.name for p in chunk_dir.iterdir()) == [
+            "chunk_0005.webm"]
+
+
+class TestFinalizeWait:
+    def test_draft_discarded_while_chunks_transcribe(self, st, monkeypatch):
+        # finalize_draft_streaming re-fetches the draft after its wait: one
+        # discarded meanwhile is skipped, not an error (#371 review).
+        import time
+        from types import SimpleNamespace
+        user = st._test_user
+        _recording(user, "sess-5", [0], st._test_root)
+        NodeTranscriptChunk.query.filter_by(session_id="sess-5").one() \
+            .status = "processing"
+        _db.session.commit()
+
+        def sleep(_secs):
+            row = NodeTranscriptChunk.query.filter_by(session_id="sess-5").one()
+            row.status = "completed"
+            row.completed_at = datetime.utcnow()
+            # As another process would: behind the session's back.
+            _db.session.execute(Draft.__table__.delete().where(
+                Draft.__table__.c.session_id == "sess-5"))
+            _db.session.commit()
+
+        monkeypatch.setattr(st, "time", SimpleNamespace(
+            time=time.time, monotonic=time.monotonic, sleep=sleep))
+
+        result = st.finalize_draft_streaming(MagicMock(), "sess-5", 1)
+
+        assert result["status"] == "draft_deleted"

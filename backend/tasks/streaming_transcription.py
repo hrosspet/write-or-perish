@@ -993,6 +993,8 @@ def finalize_draft_streaming(self, session_id: str, total_chunks: int,
         draft = Draft.query.filter_by(session_id=session_id).first()
         if not draft:
             raise ValueError(f"Draft not found for session {session_id}")
+        # Read now: the draft may be discarded while the chunks transcribe.
+        recording_started = draft.created_at
 
         # #187: pre-warm the Anthropic prompt cache while the trailing
         # chunks transcribe. Fresh Voice threads only (for an ongoing
@@ -1112,10 +1114,10 @@ def finalize_draft_streaming(self, session_id: str, total_chunks: int,
             # When the last chunk was actually done (the loop polls).
             timing["last_chunk_done"] = max(done_at).replace(
                 tzinfo=timezone.utc).timestamp()
-        if draft.created_at:
+        if recording_started:
             timing["recording_secs"] = round(
                 timing["finalize_start"]
-                - draft.created_at.replace(tzinfo=timezone.utc).timestamp(),
+                - recording_started.replace(tzinfo=timezone.utc).timestamp(),
                 1)
         timing["chunks"] = total_chunks
 
