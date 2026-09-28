@@ -69,20 +69,35 @@ class ProviderUnavailableError(RuntimeError):
         self.provider = provider
 
 
+def _budget_exhausted(exc):
+    """A 429 that means a spent budget, not a rate limit. It lasts until
+    billing changes or the month resets, so neither a retry nor a few
+    minutes' wait helps. OpenAI: ``insufficient_quota``. Anthropic: the
+    usage tier's monthly spend cap, a ``rate_limit_error`` marked
+    ``details.error_code == "enforced_spend_limit_reached"`` (docs: Rate
+    limits → Reaching your spend cap). A spend limit set in the Console
+    is a 400 instead, which nothing here treats as temporary anyway."""
+    if "insufficient_quota" in (getattr(exc, "code", None),
+                                getattr(exc, "type", None)):
+        return True
+    body = getattr(exc, "body", None)
+    error = body.get("error") if isinstance(body, dict) else None
+    details = error.get("details") if isinstance(error, dict) else None
+    return (isinstance(details, dict)
+            and details.get("error_code") == "enforced_spend_limit_reached")
+
+
 def _transient_request_error(exc):
     """A request-level failure that is usually temporary, raised once the
     SDK's own retries have run out: no connection (or a timeout), a 429
-    rate limit, or a 5xx (Anthropic's 529 overload among them). OpenAI's
-    429 ``insufficient_quota`` is left out: an exhausted quota is not
-    temporary. (Anthropic's spend-limit pause is a 400, so it is never
-    matched here.)"""
+    rate limit, or a 5xx (Anthropic's 529 overload among them). A 429 for
+    an exhausted budget is left out (_budget_exhausted)."""
     if isinstance(exc, (anthropic.APIConnectionError,
                         openai.APIConnectionError)):
         return True
     if not isinstance(exc, (anthropic.APIStatusError, openai.APIStatusError)):
         return False
-    if "insufficient_quota" in (getattr(exc, "code", None),
-                                getattr(exc, "type", None)):
+    if _budget_exhausted(exc):
         return False
     return exc.status_code == 429 or exc.status_code >= 500
 
@@ -109,9 +124,12 @@ def _retryable_stream_error(exc):
     """A failure that happened after the stream started, which the SDK does
     not retry: a raw transport error from reading the body, an Anthropic
     SSE error event (raised as APIStatusError with the stream's 200
-    status), or an OpenAI failure event with a transient code."""
+    status), or an OpenAI failure event with a transient code. An
+    exhausted budget is never retried, whichever way it arrives."""
     if isinstance(exc, httpx.TransportError):
         return True
+    if _budget_exhausted(exc):
+        return False
     if (isinstance(exc, anthropic.APIStatusError)
             and exc.status_code == 200 and isinstance(exc.body, dict)):
         error = exc.body.get("error") or {}

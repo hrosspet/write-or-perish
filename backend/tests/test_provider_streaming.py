@@ -135,6 +135,15 @@ SPEND_LIMIT = {"type": "error", "error": {
     "type": "invalid_request_error",
     "message": "You have reached your specified workspace API usage "
                "limits. You will regain access on 2026-10-01 at 00:00 UTC."}}
+# The usage tier's monthly spend cap: a 429 like a rate limit, but it
+# lasts until the month resets (docs: Rate limits → Reaching your spend cap).
+SPEND_CAP = {"type": "error", "error": {
+    "type": "rate_limit_error",
+    "message": "You have reached your API usage limits: your organization "
+               "has crossed its monthly API usage threshold, set based on "
+               "your organization's API tier. You will regain access on "
+               "2026-09-01 at 00:00 UTC.",
+    "details": {"error_code": "enforced_spend_limit_reached"}}}
 
 
 @pytest.mark.parametrize("error", [
@@ -162,6 +171,8 @@ def test_request_level_transient_error_is_readable_not_retried(
 @pytest.mark.parametrize("error", [
     # A spend-limit pause lasts until the month resets: not "temporary".
     _sdk_status_error(anthropic.Anthropic, 400, SPEND_LIMIT),
+    _sdk_status_error(anthropic.Anthropic, 429, SPEND_CAP),
+    _status_error(200, SPEND_CAP),  # the same, if it came mid-stream
     _sdk_status_error(anthropic.Anthropic, 401, {"type": "error", "error": {
         "type": "authentication_error", "message": "invalid x-api-key"}}),
 ])
