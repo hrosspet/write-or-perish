@@ -53,18 +53,38 @@ class OpenAIStreamError(RuntimeError):
 
 
 class ProviderUnavailableError(RuntimeError):
-    """A streamed call that failed after it started (an overload, a
-    dropped connection) on every mid-stream retry. The message is written
-    for the user, as the node's error; the provider's own error is the
-    ``__cause__``, for the logs."""
+    """A call that kept failing for a reason that is usually temporary —
+    the provider overloaded, rate-limited or unreachable — on every retry:
+    the SDK's own for the request, ours once the stream has started. The
+    message is written for the user, as the node's error; the provider's
+    own error is the ``__cause__``, for the logs."""
 
     def __init__(self, provider):
         super().__init__(
-            f"The model provider ({provider}) kept failing while writing "
-            "this reply — it was overloaded or the connection dropped — so "
-            "this reply is empty. This is usually temporary: sending the "
-            "same request again in a few minutes should work.")
+            f"The model provider ({provider}) couldn't complete this reply "
+            "— it was overloaded, rate-limited or unreachable, and retrying "
+            "didn't help — so this reply is empty. This is usually "
+            "temporary: sending the same request again in a few minutes "
+            "should work.")
         self.provider = provider
+
+
+def _transient_request_error(exc):
+    """A request-level failure that is usually temporary, raised once the
+    SDK's own retries have run out: no connection (or a timeout), a 429
+    rate limit, or a 5xx (Anthropic's 529 overload among them). OpenAI's
+    429 ``insufficient_quota`` is left out: an exhausted quota is not
+    temporary. (Anthropic's spend-limit pause is a 400, so it is never
+    matched here.)"""
+    if isinstance(exc, (anthropic.APIConnectionError,
+                        openai.APIConnectionError)):
+        return True
+    if not isinstance(exc, (anthropic.APIStatusError, openai.APIStatusError)):
+        return False
+    if "insufficient_quota" in (getattr(exc, "code", None),
+                                getattr(exc, "type", None)):
+        return False
+    return exc.status_code == 429 or exc.status_code >= 500
 
 
 def _openai_mid_stream_error(exc):
@@ -104,13 +124,17 @@ def _retryable_stream_error(exc):
 def _retry_mid_stream(call, provider):
     """Run ``call`` (one streamed request, collected to its final result),
     retrying mid-stream failures per STREAM_RETRY_DELAYS. Request-level
-    errors are left to the SDK's own retries so the two don't stack. When
-    the retries run out, raises ProviderUnavailableError instead of the
-    provider's raw error, which would otherwise reach the user as is."""
+    errors are left to the SDK's own retries so the two don't stack. A
+    temporary failure that outlasts either kind of retry raises
+    ProviderUnavailableError instead of the provider's raw error, which
+    would otherwise reach the user as is."""
     for retry_delay in (*STREAM_RETRY_DELAYS, None):
         try:
             return call()
         except Exception as e:
+            if _transient_request_error(e):
+                # The SDK has already retried it; not again here.
+                raise ProviderUnavailableError(provider) from e
             if not _retryable_stream_error(e):
                 raise
             if retry_delay is None:

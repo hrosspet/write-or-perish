@@ -1,10 +1,13 @@
 """Both providers over their streaming APIs (#366), collected to the final
 response: mid-stream failures the SDKs do not retry are retried here, a
-request-level error is not, and a cut-off reply counts as truncated."""
+request-level error is not, a temporary failure that outlasts the retries
+reaches the user as a readable message, and a cut-off reply counts as
+truncated."""
 import sys
 
 import anthropic
 import httpx
+import openai
 import pytest
 
 
@@ -119,13 +122,57 @@ def test_retries_are_bounded(providers, monkeypatch):
     assert isinstance(exc_info.value.__cause__, anthropic.APIStatusError)
 
 
-def test_request_level_error_is_not_retried_here(providers, monkeypatch):
-    # A 529 on the initial request was already retried by the SDK.
+def _sdk_status_error(client_cls, status, body):
+    """The exception the SDK itself raises for a request-level HTTP error
+    (its own status → class mapping, e.g. 529 → OverloadedError)."""
+    request = httpx.Request("POST", "https://api.example.com/v1")
+    response = httpx.Response(status, request=request)
+    return client_cls(api_key="k")._make_status_error(
+        str(body), body=body, response=response)
+
+
+SPEND_LIMIT = {"type": "error", "error": {
+    "type": "invalid_request_error",
+    "message": "You have reached your specified workspace API usage "
+               "limits. You will regain access on 2026-10-01 at 00:00 UTC."}}
+
+
+@pytest.mark.parametrize("error", [
+    _sdk_status_error(anthropic.Anthropic, 529, OVERLOADED),
+    _sdk_status_error(anthropic.Anthropic, 500, {"type": "error", "error": {
+        "type": "api_error", "message": "Internal server error"}}),
+    _sdk_status_error(anthropic.Anthropic, 429, {"type": "error", "error": {
+        "type": "rate_limit_error", "message": "Rate limited"}}),
+    anthropic.APIConnectionError(request=httpx.Request(
+        "POST", "https://api.anthropic.com/v1/messages")),
+])
+def test_request_level_transient_error_is_readable_not_retried(
+        providers, monkeypatch, error):
+    # The SDK already retried the request; after that the user gets the
+    # readable message, and we do not retry on top.
     calls = []
     monkeypatch.setattr(providers, "Anthropic", _client(
-        [_status_error(529, OVERLOADED), _message()], calls))
-    with pytest.raises(anthropic.APIStatusError):
+        [error, _message()], calls))
+    with pytest.raises(providers.ProviderUnavailableError) as exc_info:
         providers.LLMProvider._call_anthropic("m", MSGS, "k")
+    assert len(calls) == 1
+    assert exc_info.value.__cause__ is error
+
+
+@pytest.mark.parametrize("error", [
+    # A spend-limit pause lasts until the month resets: not "temporary".
+    _sdk_status_error(anthropic.Anthropic, 400, SPEND_LIMIT),
+    _sdk_status_error(anthropic.Anthropic, 401, {"type": "error", "error": {
+        "type": "authentication_error", "message": "invalid x-api-key"}}),
+])
+def test_request_level_lasting_error_stays_raw(providers, monkeypatch,
+                                               error):
+    calls = []
+    monkeypatch.setattr(providers, "Anthropic", _client(
+        [error, _message()], calls))
+    with pytest.raises(anthropic.APIStatusError) as exc_info:
+        providers.LLMProvider._call_anthropic("m", MSGS, "k")
+    assert exc_info.value is error
     assert len(calls) == 1
 
 
@@ -253,6 +300,31 @@ def test_openai_exhausted_retries_raise_readable_error(providers,
     assert isinstance(exc_info.value.__cause__, providers.OpenAIStreamError)
 
 
+def _oai_status_error(status, type_, code):
+    return _sdk_status_error(openai.OpenAI, status, {"error": {
+        "message": "boom", "type": type_, "param": None, "code": code}})
+
+
+@pytest.mark.parametrize("error,readable", [
+    (_oai_status_error(429, "requests", "rate_limit_exceeded"), True),
+    (_oai_status_error(503, "server_error", None), True),
+    # An exhausted quota needs billing, not a few minutes' wait.
+    (_oai_status_error(429, "insufficient_quota", "insufficient_quota"),
+     False),
+])
+def test_openai_request_level_error(providers, monkeypatch, error,
+                                    readable):
+    calls = []
+    monkeypatch.setattr(providers, "OpenAI", _oai_client(
+        [[error], [_event("response.completed",
+                          response=_oai_response())]], calls))
+    expected = (providers.ProviderUnavailableError if readable
+                else openai.RateLimitError)
+    with pytest.raises(expected):
+        _oai_call(providers)
+    assert len(calls) == 1
+
+
 @pytest.mark.parametrize("script", [
     [_event("response.completed", response=_oai_response())],
     [_oai_failed("invalid_prompt")],
@@ -310,7 +382,6 @@ def test_openai_stream_without_terminal_event_fails(providers, monkeypatch):
 def _oai_sdk_stream_error(code, message):
     """What the OpenAI SDK raises for a stream event whose data carries an
     ``error``: a plain APIError, no HTTP status."""
-    import openai
     request = httpx.Request("POST", "https://api.openai.com/v1/responses")
     return openai.APIError(message, request,
                            body={"code": code, "message": message})
