@@ -14,6 +14,7 @@ batch task does.
 Nothing about a node's TTS is written by the LLM thread after it opens
 the node ('processing'); from then on the worker owns the tts fields.
 """
+import functools
 import logging
 import os
 import pathlib
@@ -25,6 +26,7 @@ from datetime import datetime
 from backend.extensions import db
 from backend.models import Node, TTSChunk
 from backend.utils.encryption import encrypt_file
+from backend.utils import voice_timing
 from backend.utils.tts_stream_text import (
     ChunkPlanner, SpeechSchedule, SpokenTextProjector)
 
@@ -43,9 +45,10 @@ class OpenAITTSAudio:
         from openai import OpenAI
         self._client = OpenAI(api_key=api_key)
 
-    def synthesize(self, text, path, section_end):
+    def synthesize(self, text, path, section_end, mark=None):
         from backend.tasks.tts import synthesize_to_file
-        return synthesize_to_file(self._client, text, path, section_end)
+        return synthesize_to_file(self._client, text, path, section_end,
+                                  mark=mark)
 
     @staticmethod
     def duration(segment):
@@ -72,12 +75,16 @@ class NodeSpeech:
         self.released = False   # the node is committed (links included)
         self.dropped = False    # stop: failed, deleted or abandoned
         self.next_index = 0
+        self.first_text_seen = False
         self.cache_bust = None
         self.segments = []
         self.durations = []
 
     # ── called by the LLM thread ────────────────────────────────────────
     def feed(self, text):
+        if not self.first_text_seen:
+            self.first_text_seen = True
+            voice_timing.mark(self.node_id, "first_text")
         with self._turn.cv:
             if not self.planner.closed:
                 self.planner.add(self.projector.feed(text))
@@ -249,6 +256,12 @@ class VoiceTTSStream:
                 self._mark_failed(speech.node_id)
 
     def _speak(self, speech, index, chunk):
+        # #371: the first chunk of each node is timed (the first node's is
+        # the turn's first audio).
+        mark = None
+        if index == 0:
+            voice_timing.mark(speech.node_id, "chunk_cut")
+            mark = functools.partial(voice_timing.mark, speech.node_id)
         node = db.session.get(Node, speech.node_id)
         if node is None or node.deleted_at is not None:
             raise RuntimeError("node deleted mid-generation")
@@ -266,7 +279,8 @@ class VoiceTTSStream:
         target_dir = self._audio_root / speech.dir_rel
         target_dir.mkdir(parents=True, exist_ok=True)
         path = target_dir / f"tts_chunk_{index}.mp3"
-        segment = self._audio.synthesize(chunk.text, path, chunk.section_end)
+        segment = self._audio.synthesize(chunk.text, path, chunk.section_end,
+                                         mark=mark)
         duration = self._audio.duration(segment)
         encrypt_file(str(path))
         row.audio_url = self._media_url(speech, path.name)
@@ -274,6 +288,10 @@ class VoiceTTSStream:
         row.status = "completed"
         row.completed_at = datetime.utcnow()
         db.session.commit()
+        if index == 0:
+            voice_timing.mark(speech.node_id, "chunk_published",
+                              first_chunk_chars=len(chunk.text),
+                              first_chunk_secs=round(duration, 2))
         speech.segments.append(segment)
         speech.durations.append(duration)
         with self.cv:

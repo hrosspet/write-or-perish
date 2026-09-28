@@ -103,14 +103,22 @@ TTS_MODEL = "gpt-4o-mini-tts"
 TTS_VOICE = "alloy"
 
 
-def synthesize_to_file(client, text, path, section_end=False):
+def synthesize_to_file(client, text, path, section_end=False, mark=None):
     """One TTS call written to *path* as MP3. Returns the AudioSegment; a
     chunk that closes a chapter gets the chapter-end silence, re-exported
-    so chunked playback (which streams the file directly) has it too."""
+    so chunked playback (which streams the file directly) has it too.
+    *mark(stage)*, when given, is called at the first and the last byte
+    of the audio (#371 timing)."""
     with client.audio.speech.with_streaming_response.create(
         model=TTS_MODEL, input=text, voice=TTS_VOICE
     ) as resp:
-        resp.stream_to_file(path)
+        with open(path, "wb") as f:
+            for data in resp.iter_bytes():
+                if mark is not None and f.tell() == 0:
+                    mark("tts_first_byte")
+                f.write(data)
+    if mark is not None:
+        mark("tts_last_byte")
     segment = AudioSegment.from_file(str(path), format="mp3")
     if section_end:
         segment = segment + AudioSegment.silent(

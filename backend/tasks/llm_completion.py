@@ -45,6 +45,7 @@ from backend.utils.session_helpers import (
 )
 from backend.utils.timefmt import local_stamp, strip_edge_timestamps
 from backend.utils.llm_stream import ReplyStream
+from backend.utils import voice_timing
 from backend.utils.api_keys import (
     determine_api_key_type, get_api_keys_for_usage, PayloadLicence,
 )
@@ -2736,6 +2737,8 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
     logger.info(f"Starting LLM completion task for parent {parent_node_id}, updating node {llm_node_id}, model={model_id}")
 
     with flask_app.app_context():
+        if source_mode == "voice":
+            voice_timing.mark(llm_node_id, "llm_task_start", model=model_id)
         parent_node = Node.query.get(parent_node_id)
         llm_node = Node.query.get(llm_node_id)
 
@@ -3257,6 +3260,8 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 has already read or heard it."""
                 speech = (speech_turn.node(target_node.id)
                           if speech_turn is not None and stream else None)
+                if speech is not None:
+                    voice_timing.mark(target_node.id, "llm_request")
                 if not (stream and streaming_replies) and speech is None:
                     return call(None)
                 reply = ReplyStream(

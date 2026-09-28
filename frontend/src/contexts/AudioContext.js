@@ -465,7 +465,9 @@ export const AudioProvider = ({ children }) => {
   // Load and play a queue of audio URLs (for chunked playback)
   // serverDurations: optional array of durations from backend (accurate via ffprobe)
   // When provided, these are used instead of browser metadata detection
-  const loadAudioQueue = useCallback(async (urls, audioData, serverDurations = null) => {
+  // onPlaying: called once when the first chunk's audio actually starts
+  // (the element's `playing` event; voice timing, #371).
+  const loadAudioQueue = useCallback(async (urls, audioData, serverDurations = null, { onPlaying } = {}) => {
     if (!urls || urls.length === 0) return;
 
     // If there's already audio playing, pause it first
@@ -485,6 +487,9 @@ export const AudioProvider = ({ children }) => {
     } else {
       preloadedElement = new Audio(urls[0]);
       preloadedElement.preload = 'auto';
+    }
+    if (onPlaying) {
+      preloadedElement.addEventListener('playing', onPlaying, { once: true });
     }
 
     setLoading(true);

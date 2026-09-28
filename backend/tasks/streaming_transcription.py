@@ -17,7 +17,8 @@ from openai import OpenAI
 import pathlib
 import os
 import shutil
-from datetime import datetime
+import time
+from datetime import datetime, timezone
 
 from backend.celery_app import celery, flask_app
 from backend.models import Node, NodeTranscriptChunk, Draft, APICostLog
@@ -28,6 +29,7 @@ from backend.utils.webm_utils import concat_fragmented_media
 from backend.utils.api_keys import get_openai_chat_key
 from backend.utils.encryption import decrypt_file_to_temp
 from backend.utils.cost import calculate_audio_cost_microdollars
+from backend.utils import voice_timing
 
 logger = get_task_logger(__name__)
 
@@ -977,6 +979,9 @@ def finalize_draft_streaming(self, session_id: str, total_chunks: int,
         model: LLM model ID (for server-side LLM chain)
     """
     logger.info(f"Finalizing draft streaming for session {session_id}, {total_chunks} chunks")
+    # #371: where a voice turn's wait goes; marked under the reply node
+    # once it exists (_start_server_side_llm_chain).
+    timing = {"finalize_start": time.time()}
 
     with flask_app.app_context():
         draft = Draft.query.filter_by(session_id=session_id).first()
@@ -1065,7 +1070,6 @@ def finalize_draft_streaming(self, session_id: str, total_chunks: int,
             db.session.commit()
 
         # Wait for all chunks to complete (with timeout)
-        import time
         max_wait_seconds = 600  # 10 minutes max wait
         poll_interval = 2  # seconds
         elapsed = 0
@@ -1091,6 +1095,20 @@ def finalize_draft_streaming(self, session_id: str, total_chunks: int,
 
             # Refresh the session to get updated data
             db.session.expire_all()
+
+        timing["transcribed"] = time.time()
+        done_at = [c.completed_at for c in chunks if c.completed_at]
+        if done_at:
+            # The loop above polls every 2 s: when the last chunk was
+            # actually done.
+            timing["last_chunk_done"] = max(done_at).replace(
+                tzinfo=timezone.utc).timestamp()
+        if draft.created_at:
+            timing["recording_secs"] = round(
+                timing["finalize_start"]
+                - draft.created_at.replace(tzinfo=timezone.utc).timestamp(),
+                1)
+        timing["chunks"] = total_chunks
 
         # Log whether we exited by completion or timeout
         if elapsed >= max_wait_seconds:
@@ -1179,6 +1197,7 @@ def finalize_draft_streaming(self, session_id: str, total_chunks: int,
                     draft, session_id, full_transcript,
                     user_id, parent_id, model, label,
                     cache_split_offset=cache_split_offset,
+                    timing=timing,
                 )
             except Exception as e:
                 logger.error(
@@ -1238,7 +1257,7 @@ def _create_system_node_early(user_id, prompt_key, draft):
 
 def _start_server_side_llm_chain(draft, session_id, transcript,
                                  user_id, parent_id, model, label,
-                                 cache_split_offset=None):
+                                 cache_split_offset=None, timing=None):
     """
     Create nodes and kick off LLM + TTS generation server-side.
 
@@ -1385,6 +1404,16 @@ def _start_server_side_llm_chain(draft, session_id, transcript,
     draft.llm_node_id = llm_node.id
     draft.streaming_status = 'completed'
     db.session.commit()
+
+    if timing:
+        # #371: the finalize task's marks, under the reply node.
+        facts = {k: timing[k] for k in ("recording_secs", "chunks")
+                 if k in timing}
+        for stage in ("finalize_start", "last_chunk_done", "transcribed"):
+            if stage in timing:
+                voice_timing.mark(llm_node.id, stage, t=timing[stage],
+                                  **(facts if stage == "transcribed" else {}))
+        voice_timing.mark(llm_node.id, "llm_enqueued")
 
     # LLM generation; TTS is dispatched inside the task at each node's own
     # finalization (source_mode='voice'), interim steps included.

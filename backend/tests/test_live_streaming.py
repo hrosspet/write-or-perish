@@ -200,9 +200,13 @@ class _FakeAudio:
     def __init__(self, api_key=None):
         pass
 
-    def synthesize(self, text, path, section_end):
+    def synthesize(self, text, path, section_end, mark=None):
         _FakeAudio.spoken.append((text, section_end))
+        if mark:
+            mark("tts_first_byte")
         path.write_bytes(b"mp3")
+        if mark:
+            mark("tts_last_byte")
         return _Segment(text)
 
     @staticmethod
@@ -271,6 +275,30 @@ def test_voice_turn_is_spoken_through_a_tool_round(voice):
     assert texts[2] == "Later.\n\nThe rest."
     # The chunk closing a chapter gets the chapter pause; the last doesn't.
     assert [end for _, end in _FakeAudio.spoken] == [False, True, False]
+
+
+def test_voice_turn_marks_where_the_wait_goes(voice, monkeypatch):
+    """#371: the LLM task and the TTS worker mark the first chunk's
+    stages under the reply node, in order."""
+    from backend.tests.test_voice_timing import FakeRedis
+    from backend.utils import voice_timing
+    fake = FakeRedis()
+    monkeypatch.setattr(voice_timing, "_redis", lambda: fake)
+    alice, _, user_node, llm_node = _build_chain("voice")
+    _LiveProvider.reset([
+        (["Good morning. ", "Here is the plan."],
+         _resp("Good morning. Here is the plan.")),
+    ])
+    _run(user_node, llm_node, alice, mode="voice")
+
+    rec = voice_timing.record(llm_node.id)
+    order = ["llm_task_start", "llm_request", "first_text", "chunk_cut",
+             "tts_first_byte", "tts_last_byte", "chunk_published"]
+    assert sorted(rec["marks"], key=rec["marks"].get) == order
+    assert rec["facts"]["model"] == "gpt-5"
+    assert rec["facts"]["first_chunk_chars"] == str(
+        len(_FakeAudio.spoken[0][0]))
+    assert {"b1", "b2", "c", "d", "e", "f"} <= set(rec["stages"])
 
 
 def test_textless_tool_round_speaks_its_fallback_line(voice):
