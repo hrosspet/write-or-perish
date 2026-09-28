@@ -31,27 +31,101 @@ DEFAULT_MAX_OUTPUT_TOKENS = 32000
 TRUNCATED_STOP_REASONS = frozenset({"max_tokens",
                                     "model_context_window_exceeded"})
 
-# Sleeps before retrying an Anthropic stream that failed mid-way (an error
-# event after the 200, e.g. overloaded, or a dropped connection). The SDK
-# retries only the initial request; create() used to get these failures
+# Sleeps before retrying a stream that failed mid-way (an error event
+# after the 200, e.g. overloaded, or a dropped connection). The SDKs retry
+# only the initial request; non-streamed calls used to get these failures
 # as HTTP errors and retry them. Module-level so tests can zero them.
-ANTHROPIC_STREAM_RETRY_DELAYS = (2, 8)
-_RETRYABLE_STREAM_ERROR_TYPES = frozenset({
+STREAM_RETRY_DELAYS = (2, 8)
+_RETRYABLE_ANTHROPIC_ERROR_TYPES = frozenset({
     "overloaded_error", "api_error", "rate_limit_error"})
+_RETRYABLE_OPENAI_ERROR_CODES = frozenset({
+    "server_error", "rate_limit_exceeded"})
 
-# OpenAI calls are not streamed, so the whole generation must fit in one
-# read timeout. The SDK default (600 s) is too short for a reply that
-# uses most of the 32k budget below ~55 tokens/s.
+# Both providers stream, so this is the longest silence allowed between
+# stream events, not a cap on the whole call. Raised from the SDKs' 600 s
+# because a reasoning phase may send nothing for minutes.
 OPENAI_TIMEOUT_SECS = 1200
 
 
+class OpenAIStreamError(RuntimeError):
+    """A streamed OpenAI response that failed after the request was
+    accepted: an ``error`` or ``response.failed`` event, or a stream that
+    ended without a final response."""
+
+    def __init__(self, message, code=None):
+        super().__init__(f"OpenAI stream failed ({code}): {message}")
+        self.code = code
+
+
+def _openai_mid_stream_error(exc):
+    """An OpenAI error the SDK raised while reading a stream: an event
+    whose data carries an ``error`` becomes a plain APIError (no HTTP
+    status). Errors a non-streamed call got as a 400 — a context overflow
+    among them — can arrive this way once the request has been accepted."""
+    return (isinstance(exc, openai.APIError)
+            and not isinstance(exc, (openai.APIStatusError,
+                                     openai.APIConnectionError)))
+
+
+def _retryable_stream_error(exc):
+    """A failure that happened after the stream started, which the SDK does
+    not retry: a raw transport error from reading the body, an Anthropic
+    SSE error event (raised as APIStatusError with the stream's 200
+    status), or an OpenAI failure event with a transient code."""
+    if isinstance(exc, httpx.TransportError):
+        return True
+    if (isinstance(exc, anthropic.APIStatusError)
+            and exc.status_code == 200 and isinstance(exc.body, dict)):
+        error = exc.body.get("error") or {}
+        return error.get("type") in _RETRYABLE_ANTHROPIC_ERROR_TYPES
+    if isinstance(exc, OpenAIStreamError) or _openai_mid_stream_error(exc):
+        return exc.code in _RETRYABLE_OPENAI_ERROR_CODES
+    return False
+
+
+def _retry_mid_stream(call, provider):
+    """Run ``call`` (one streamed request, collected to its final result),
+    retrying mid-stream failures per STREAM_RETRY_DELAYS. Request-level
+    errors are left to the SDK's own retries so the two don't stack."""
+    for retry_delay in (*STREAM_RETRY_DELAYS, None):
+        try:
+            return call()
+        except Exception as e:
+            if retry_delay is None or not _retryable_stream_error(e):
+                raise
+            logger.warning(
+                "%s stream failed mid-way (%s); retrying in %ss",
+                provider, e, retry_delay)
+            time.sleep(retry_delay)
+
+
+def _openai_final_response(client, kwargs):
+    """Send a Responses API call as a stream and return its final Response
+    — the same object a non-streamed create() returns, carried by the
+    terminal event. Nothing reads the stream live: streaming keeps data
+    flowing on a long generation instead of one silent wait for the whole
+    reply."""
+    with client.responses.create(**kwargs, stream=True) as stream:
+        for event in stream:
+            if event.type in ("response.completed", "response.incomplete"):
+                return event.response
+            if event.type == "response.failed":
+                error = getattr(event.response, "error", None)
+                raise OpenAIStreamError(
+                    getattr(error, "message", "response failed"),
+                    getattr(error, "code", None))
+            if event.type == "error":
+                raise OpenAIStreamError(event.message, event.code)
+    raise OpenAIStreamError("stream ended without a final response")
+
+
 def _keepalive_socket_options():
-    """TCP keepalive for a connection that carries no bytes while the model
-    generates (a non-streamed OpenAI call). GCP's VPC firewall drops the
-    tracked state of a connection idle for 10 minutes, after which the
-    response can't get back and the call hangs until its read timeout.
-    Probes every 60 s keep it tracked. The Anthropic SDK sets the same
-    options on its own client; the OpenAI SDK sets none."""
+    """TCP keepalive for an OpenAI connection that may carry no bytes for
+    minutes (a reasoning phase sends no stream events). GCP's VPC firewall
+    drops the tracked state of a connection idle for 10 minutes, after
+    which the rest of the reply can't get back and the call hangs until
+    its read timeout. Probes every 60 s keep it tracked. The Anthropic SDK
+    sets the same options on its own client; the OpenAI SDK sets none."""
     options = [(socket.SOL_SOCKET, socket.SO_KEEPALIVE, True)]
     for name, value in (("TCP_KEEPIDLE", 60), ("TCP_KEEPINTVL", 60),
                         ("TCP_KEEPCNT", 5)):
@@ -59,19 +133,6 @@ def _keepalive_socket_options():
         if const is not None:
             options.append((socket.IPPROTO_TCP, const, value))
     return options
-
-
-def _retryable_stream_error(exc):
-    """A failure that happened after the stream started, which the SDK does
-    not retry: a raw transport error from reading the body, or an SSE error
-    event (raised as APIStatusError with the stream's 200 status)."""
-    if isinstance(exc, httpx.TransportError):
-        return True
-    if (isinstance(exc, anthropic.APIStatusError)
-            and exc.status_code == 200 and isinstance(exc.body, dict)):
-        error = exc.body.get("error") or {}
-        return error.get("type") in _RETRYABLE_STREAM_ERROR_TYPES
-    return False
 
 
 def model_input_cap(model_cfg, max_output_tokens=None):
@@ -294,10 +355,20 @@ class LLMProvider:
             kwargs["extra_body"] = {"prompt_cache_options": {
                 "comparison_response_id": cache_comparison_response_id}}
 
+        def _send():
+            return _retry_mid_stream(
+                lambda: _openai_final_response(client, kwargs), "OpenAI")
+
+        # A request error arrives as a 400 before the stream starts, or as
+        # an error event after it (_openai_mid_stream_error); both are
+        # handled the same way.
         try:
             try:
-                response = client.responses.create(**kwargs)
-            except openai.BadRequestError as e:
+                response = _send()
+            except openai.APIError as e:
+                if not (isinstance(e, openai.BadRequestError)
+                        or _openai_mid_stream_error(e)):
+                    raise
                 # Analytics must never cost a turn: if OpenAI rejects the
                 # option itself, send the call again without it.
                 about = f"{getattr(e, 'param', None) or ''} {e}"
@@ -309,8 +380,11 @@ class LLMProvider:
                     "OpenAI rejected prompt_cache_options (model=%s); "
                     "retrying without cache diagnostics: %s", model, e)
                 kwargs.pop("extra_body")
-                response = client.responses.create(**kwargs)
-        except openai.BadRequestError as e:
+                response = _send()
+        except openai.APIError as e:
+            if not (isinstance(e, openai.BadRequestError)
+                    or _openai_mid_stream_error(e)):
+                raise
             mapped = LLMProvider._openai_overflow_error(
                 e, input_items, context_window)
             if mapped is e:
@@ -381,8 +455,9 @@ class LLMProvider:
     @staticmethod
     def _openai_overflow_error(e, input_items, context_window):
         """
-        Map an OpenAI BadRequestError to PromptTooLongError when it is a
-        context overflow; otherwise return the original error to re-raise.
+        Map an OpenAI request error (a 400, or the same error delivered as
+        a stream error event) to PromptTooLongError when it is a context
+        overflow; otherwise return the original error to re-raise.
 
         The Responses API's overflow error may carry no token counts
         (unlike chat completions), so when the message has none we fall
@@ -561,18 +636,11 @@ class LLMProvider:
             # non-streaming request whose max_tokens implies >10 minutes
             # (~21k tokens), and a streamed connection stays alive through
             # a long thinking phase instead of idling toward a timeout.
-            for retry_delay in (*ANTHROPIC_STREAM_RETRY_DELAYS, None):
-                try:
-                    with client.messages.stream(**kwargs) as stream:
-                        response = stream.get_final_message()
-                    break
-                except Exception as e:
-                    if retry_delay is None or not _retryable_stream_error(e):
-                        raise
-                    logger.warning(
-                        "Anthropic stream failed mid-way (%s); retrying in "
-                        "%ss", e, retry_delay)
-                    time.sleep(retry_delay)
+            def _collect():
+                with client.messages.stream(**kwargs) as stream:
+                    return stream.get_final_message()
+
+            response = _retry_mid_stream(_collect, "Anthropic")
         except anthropic.BadRequestError as e:
             error_msg = str(e)
             match = re.search(

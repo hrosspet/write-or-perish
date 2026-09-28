@@ -64,6 +64,23 @@ def app():
 
 # ── Provider call ────────────────────────────────────────────────────────
 
+class _CompletedStream(list):
+    """A Responses API event stream holding only the terminal event, for
+    fakes of client.responses.create(..., stream=True)."""
+
+    def __init__(self, response):
+        event = type("Event", (), {})()
+        event.type = "response.completed"
+        event.response = response
+        super().__init__([event])
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
 def _load_providers():
     """A private copy of backend/llm_providers.py. Sibling test modules
     stub or re-import backend.llm_providers in sys.modules; loading the
@@ -110,7 +127,7 @@ def _fake_openai(monkeypatch, diagnostics=None, reject_option=False):
                     response=httpx.Response(400, request=httpx.Request(
                         "POST", "https://api.openai.com/v1/responses")),
                     body=None)
-            return FakeResponse()
+            return _CompletedStream(FakeResponse())
 
     class FakeClient:
         def __init__(self, api_key=None, **kwargs):

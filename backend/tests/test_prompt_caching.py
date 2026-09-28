@@ -327,6 +327,23 @@ def test_render_system_message_resolves_pinned_placeholders(app):
         assert render_system_message(node, uid) == text
 
 
+class _CompletedStream(list):
+    """A Responses API event stream holding only the terminal event, for
+    fakes of client.responses.create(..., stream=True)."""
+
+    def __init__(self, response):
+        event = type("Event", (), {})()
+        event.type = "response.completed"
+        event.response = response
+        super().__init__([event])
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
 # ── Provider block passthrough (#187) ────────────────────────────────────
 
 def test_call_anthropic_preserves_blocks_and_cache_usage(app, monkeypatch):
@@ -556,7 +573,8 @@ def test_call_openai_surfaces_cache_write_subset(app, monkeypatch):
 
     class FakeResponses:
         def create(self, **kwargs):
-            return FakeResponse()
+            assert kwargs["stream"] is True
+            return _CompletedStream(FakeResponse())
 
     client_kwargs = {}
 
