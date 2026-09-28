@@ -15,7 +15,12 @@ from flask import current_app
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MAX_OUTPUT_TOKENS = 10000
+# Room for thinking AND the answer. Models that always think (Opus 5.5)
+# spend output tokens on reasoning before the first visible token; at the
+# old 10k cap a long-input turn (a pasted chapter) could spend all of it
+# thinking and come back with no text and no tool call. max_tokens is only
+# a ceiling — it costs nothing unless the model uses it.
+DEFAULT_MAX_OUTPUT_TOKENS = 32000
 
 
 def model_input_cap(model_cfg, max_output_tokens=None):
@@ -494,7 +499,13 @@ class LLMProvider:
                 "format": {"type": "json_schema", "schema": output_schema}}
 
         try:
-            response = client.messages.create(**kwargs)
+            # Streamed, then collected into the same Message create()
+            # returns. Nothing reads the stream live: the SDK refuses a
+            # non-streaming request whose max_tokens implies >10 minutes
+            # (~21k tokens), and a streamed connection stays alive through
+            # a long thinking phase instead of idling toward a timeout.
+            with client.messages.stream(**kwargs) as stream:
+                response = stream.get_final_message()
         except anthropic.BadRequestError as e:
             error_msg = str(e)
             match = re.search(

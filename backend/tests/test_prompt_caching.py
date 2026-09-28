@@ -350,10 +350,22 @@ def test_call_anthropic_preserves_blocks_and_cache_usage(app, monkeypatch):
         usage = FakeUsage()
         stop_reason = "end_turn"
 
-    class FakeMessages:
-        def create(self, **kwargs):
-            captured.update(kwargs)
+    class FakeStream:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def get_final_message(self):
             return FakeResponse()
+
+    class FakeMessages:
+        # Streamed: the SDK refuses a non-streaming
+        # request at the 32k output budget.
+        def stream(self, **kwargs):
+            captured.update(kwargs)
+            return FakeStream()
 
     class FakeClient:
         def __init__(self, api_key=None):
@@ -385,6 +397,7 @@ def test_call_anthropic_preserves_blocks_and_cache_usage(app, monkeypatch):
     assert result["cache_read_input_tokens"] == 5000
     assert result["cache_creation_input_tokens"] == 300
     assert result["input_tokens"] == 100
+    assert captured["max_tokens"] == providers.DEFAULT_MAX_OUTPUT_TOKENS
 
 
 # ── OpenAI cached-input pricing (#189) ───────────────────────────────────

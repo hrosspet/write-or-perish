@@ -155,6 +155,26 @@ RETRIEVAL_TOOLS = {"read_artifact", "read_todo", "semantic_search",
 # leave one-line preambles ("noting this in memory") as the whole answer.
 MAX_RETRIEVAL_ROUNDS = 5
 
+
+class EmptyTruncatedReplyError(RuntimeError):
+    """The model hit its output limit before writing any text or tool call
+    — typically a model that always thinks, spending the whole budget on
+    reasoning over a long input. Saving that as a completed reply showed
+    the user a blank node and silently dropped the artifact write they
+    asked for. A retry of the same request tends to hit the same limit,
+    so the message steers toward a smaller request, not a retry."""
+
+    USER_MESSAGE = (
+        "The model used up its whole output limit working through this "
+        "request before it could write a reply, so nothing was saved. "
+        "Sending the same request again will likely hit the same limit — "
+        "try breaking it into smaller steps (e.g. one section or one "
+        "question at a time, or the review and the artifact update as "
+        "separate messages).")
+
+    def __init__(self):
+        super().__init__(self.USER_MESSAGE)
+
 # Retry schedule for the loop's CONTINUATION calls: sleep lengths between
 # attempts (len == number of retries). A transient provider error (overload,
 # timeout) used to kill the whole turn, stranding the continuation node at
@@ -3773,6 +3793,18 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 db.session.commit()
                 _log_api_cost(resp, target_node)
 
+                # Nothing to save: the output limit ran out before the model
+                # wrote a word or a tool call. Fail the node (the cost row
+                # above still commits with the failure) instead of storing a
+                # blank reply marked completed.
+                if (f_truncated and not f_llm_text.strip()
+                        and not f_tool_calls):
+                    logger.warning(
+                        "Empty truncated reply: model=%s node=%s "
+                        "output_tokens=%s", model_id, target_node.id,
+                        resp.get("output_tokens"))
+                    raise EmptyTruncatedReplyError()
+
                 # Step 5: Update the placeholder LLM node with the response
                 self.update_state(state='PROGRESS', meta={
                     'progress': 95, 'status': 'Finalizing'})
@@ -4219,7 +4251,8 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             if batch_entry is not None:
                 # The batch outlives this run. While it is submitted only
                 # the provider's verdict on the item (BatchItemFailed), a
-                # reply the collect cannot use (FeedReplyError: the stored
+                # reply the collect cannot use (FeedReplyError, or an empty
+                # cut-off reply — EmptyTruncatedReplyError: the stored
                 # result is immutable, so every re-collect would fail the
                 # same way) and the poll cap fail the node; anything else
                 # (a restart mid-render, KMS, the network, a 5xx on
@@ -4230,7 +4263,8 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     error_message = (
                         f"Batch {batch_id} had not ended after "
                         f"{CA_BATCH_MAX_POLLS} polls")
-                elif not isinstance(e, (BatchItemFailed, FeedReplyError)):
+                elif not isinstance(e, (BatchItemFailed, FeedReplyError,
+                                        EmptyTruncatedReplyError)):
                     logger.warning(
                         "Node %s: error with batch %s submitted (poll %s); "
                         "polling again: %s", llm_node_id, batch_id,

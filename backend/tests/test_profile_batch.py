@@ -817,22 +817,23 @@ def test_content_class_picks_the_tweet_prior_for_imported_corpora(app):
 
 
 def test_build_next_request_cap_only_raises_the_chunk_count(app, monkeypatch):
-    """A measured 4 tokens per unit on a 200k window caps a window near
-    45k units: 350k units plan into 8 equal chunks of 43,750 instead of 4
-    of 87,500 — the cap splits the whole remainder evenly (#259)."""
+    """A measured 4 tokens per unit on a 200k window (168k input after the
+    32k output reserve) caps a window near 40k units: 350k units plan into
+    9 equal chunks of 38,888 instead of 4 of 87,500 — the cap splits the
+    whole remainder evenly (#259)."""
     u = _user()
     u.profile_token_ratio, u.profile_token_ratio_family = 4.0, "claude_new"
     db.session.commit()
     _remaining(monkeypatch, 350_000)
-    export = MagicMock(return_value=_chunk(units=43_750))
+    export = MagicMock(return_value=_chunk(units=38_888))
     monkeypatch.setattr(pb._exports, "build_user_export_content", export)
     monkeypatch.setattr(pb._exports, "_load_prompt",
                         lambda *a, **k: "GEN {user_export}")
 
     req = pb._build_next_profile_request(u)
 
-    assert export.call_args.kwargs["max_tokens"] == 43_750
-    assert req["meta"]["chunk_units"] == 43_750
+    assert export.call_args.kwargs["max_tokens"] == 38_888
+    assert req["meta"]["chunk_units"] == 38_888
 
 
 def test_apply_result_records_units_and_calibrates(app, monkeypatch):
