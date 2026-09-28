@@ -542,3 +542,46 @@ export function useTTSStreamSSE(entityId, options = {}) {
     reset,
   };
 }
+
+/**
+ * useLlmTextStream - an LLM reply's text while it is generated (#367).
+ *
+ * Subscribes to /api/sse/nodes/<id>/llm-stream: a snapshot (the whole
+ * text so far) on connect and whenever the model call restarted, deltas
+ * as text is appended, and done once the node stops generating (the final
+ * content then comes from the node / llm-status, not from here).
+ *
+ * @param {number|null} nodeId - the pending LLM node
+ * @param {Object} options
+ * @param {boolean} options.enabled - whether to connect
+ * @param {string} options.initialText - text already known (the node
+ *   fetch carries streaming_content), shown until the first event
+ * @returns {{ text: string, done: object|null }}
+ */
+export function useLlmTextStream(nodeId, { enabled = false, initialText = '' } = {}) {
+  const [text, setText] = useState(initialText || '');
+  const [done, setDone] = useState(null);
+
+  // A different node starts from its own text.
+  useEffect(() => {
+    setText(initialText || '');
+    setDone(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [nodeId]);
+
+  const backendUrl = process.env.REACT_APP_BACKEND_URL || '';
+  const url = nodeId ? `${backendUrl}/api/sse/nodes/${nodeId}/llm-stream` : null;
+
+  const eventHandlers = useMemo(() => ({
+    snapshot: (data) => setText(data.text || ''),
+    delta: (data) => setText(prev => prev + (data.text || '')),
+    done: (data) => setDone(data || {}),
+    heartbeat: () => {},
+  }), []);
+
+  // Stop listening once the node is done: the server closes the stream,
+  // and EventSource would otherwise reconnect just to hear "done" again.
+  useSSE(url, { enabled: enabled && !done, eventHandlers });
+
+  return { text, done };
+}

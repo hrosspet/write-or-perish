@@ -11,6 +11,7 @@ import SemanticNeighbors from "./SemanticNeighbors";
 import { useUser } from "../contexts/UserContext";
 import { useToast } from "../contexts/ToastContext";
 import { useAsyncTaskPolling } from "../hooks/useAsyncTaskPolling";
+import { useLlmTextStream } from "../hooks/useSSE";
 import api from "../api";
 import { useCheckboxToggle, useTaskInsert } from "../utils/markdown";
 import { contextAllowsAi } from "../utils/aiUsage";
@@ -61,6 +62,17 @@ function RenderChildTree({ nodes, onBubbleClick, buildActions }) {
     </div>
   );
 }
+
+// A reply's text while it is written (#367), as it can be shown before
+// the final render: quote markers become cards only once the reply is
+// complete (their quotes are resolved from the stored content), and share
+// fences only turn into a card then — until then the piece shows as text.
+const SHARE_FENCE_LINE_RE = /^:::(?:share(?:[ \t]+[A-Za-z]+)?)?[ \t]*\r?$/i;
+const partialReplyText = (text) => (text || '')
+  .replace(/\{quote(?:_ext)?:\d+\}/g, '')
+  .split('\n')
+  .filter(line => !SHARE_FENCE_LINE_RE.test(line))
+  .join('\n');
 
 // The browser tab's title for a node: its first line, or a state word
 // while an AI reply is still being generated.
@@ -180,6 +192,17 @@ function NodeDetail({ nodeIdOverride }) {
       interval: isBatchWait ? 15000 : 2000,
       maxDuration: isBatchWait ? 25 * 60 * 60 * 1000 : 30 * 60 * 1000,
     }
+  );
+
+  // #367: a pending reply's text while the model writes it. The node
+  // fetch carries the text so far; the stream brings the rest. (A batch
+  // read is never streamed.)
+  const replyStreaming = !!node && (node.node_type === 'llm' || !!node.llm_model)
+    && (node.llm_task_status === 'pending' || node.llm_task_status === 'processing')
+    && !isBatchWait;
+  const { text: streamText } = useLlmTextStream(
+    replyStreaming ? node.id : null,
+    { enabled: replyStreaming, initialText: node?.streaming_content || '' },
   );
 
   useEffect(() => {
@@ -350,6 +373,13 @@ function NodeDetail({ nodeIdOverride }) {
         navigate(`/node/${completedId}`);
       }
       setLlmTaskNodeId(null);
+    } else if (llmData?.streaming
+               && String(llmData.node_id) === String(llmTaskNodeId)
+               && String(llmTaskNodeId) !== String(id)) {
+      // #367: the reply has started — watch it being written on its own
+      // node instead of a spinner under the entry.
+      setLlmTaskNodeId(null);
+      navigate(`/node/${llmTaskNodeId}?awaitLlm=${llmTaskNodeId}`);
     } else if (llmData?.stage === 'batch'
                && String(llmTaskNodeId) !== String(id)) {
       // The turn is queued in a provider batch: the generate button's job
@@ -1259,7 +1289,37 @@ function NodeDetail({ nodeIdOverride }) {
         {isReadReply && node.read_window && (
           <ReadWindowLine window={node.read_window} />
         )}
-        {isLlmPending ? (
+        {isLlmPending && partialReplyText(streamText).trim() ? (
+          // #367: the reply as far as it's written, then the same pulsing
+          // dots — the text is still coming.
+          <div>
+            <QuotedContent
+              content={partialReplyText(streamText)}
+              quotes={{}}
+              externalQuotes={{}}
+              nodeId={node.id}
+              contextArtifacts={node.context_artifacts || null}
+              onQuoteClick={handleBubbleClick}
+            />
+            <span aria-label="Still writing" style={{
+              display: 'inline-flex', gap: '3px', padding: '6px 0',
+            }}>
+              {[0, 1, 2].map(i => (
+                <span key={i} style={{
+                  width: '5px', height: '5px', borderRadius: '50%',
+                  background: 'var(--text-muted)',
+                  animation: `wopPulseDot 1.2s ease-in-out ${i * 0.15}s infinite`,
+                }} />
+              ))}
+            </span>
+            <style>{`
+              @keyframes wopPulseDot {
+                0%, 60%, 100% { opacity: 0.3; transform: translateY(0); }
+                30% { opacity: 1; transform: translateY(-2px); }
+              }
+            `}</style>
+          </div>
+        ) : isLlmPending ? (
           <div style={{
             display: 'flex', alignItems: 'center', gap: '10px',
             color: 'var(--text-muted)',
