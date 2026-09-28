@@ -587,9 +587,7 @@ def test_call_openai_surfaces_cache_write_subset(app, monkeypatch):
     with app.app_context():
         result = providers.LLMProvider._call_openai(
             "gpt-5.6-sol", [{"role": "user", "content": "x"}], "k")
-    # Not streamed: the whole 32k-budget generation must fit one read, on
-    # a connection kept alive through GCP's 10-minute idle cutoff.
-    assert client_kwargs["timeout"].read == providers.OPENAI_TIMEOUT_SECS
+    # A silent reasoning phase must survive GCP's 10-minute idle cutoff.
     assert client_kwargs["http_client"] is not None
     options = providers._keepalive_socket_options()
     assert (socket.SOL_SOCKET, socket.SO_KEEPALIVE, True) in options

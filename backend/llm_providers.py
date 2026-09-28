@@ -41,11 +41,6 @@ _RETRYABLE_ANTHROPIC_ERROR_TYPES = frozenset({
 _RETRYABLE_OPENAI_ERROR_CODES = frozenset({
     "server_error", "rate_limit_exceeded"})
 
-# Both providers stream, so this is the longest silence allowed between
-# stream events, not a cap on the whole call. Raised from the SDKs' 600 s
-# because a reasoning phase may send nothing for minutes.
-OPENAI_TIMEOUT_SECS = 1200
-
 
 class OpenAIStreamError(RuntimeError):
     """A streamed OpenAI response that failed after the request was
@@ -121,11 +116,14 @@ def _openai_final_response(client, kwargs):
 
 def _keepalive_socket_options():
     """TCP keepalive for an OpenAI connection that may carry no bytes for
-    minutes (a reasoning phase sends no stream events). GCP's VPC firewall
+    minutes: a reasoning phase sends no stream events (~55 reasoning
+    tokens/s, so a phase using the whole 32k budget stays silent for up to
+    ~10 min — within the SDK's 600 s read timeout). GCP's VPC firewall
     drops the tracked state of a connection idle for 10 minutes, after
     which the rest of the reply can't get back and the call hangs until
-    its read timeout. Probes every 60 s keep it tracked. The Anthropic SDK
-    sets the same options on its own client; the OpenAI SDK sets none."""
+    that read timeout. Probes every 60 s keep it tracked. The Anthropic
+    SDK sets the same options on its own client; the OpenAI SDK sets
+    none."""
     options = [(socket.SOL_SOCKET, socket.SO_KEEPALIVE, True)]
     for name, value in (("TCP_KEEPIDLE", 60), ("TCP_KEEPINTVL", 60),
                         ("TCP_KEEPCNT", 5)):
@@ -292,7 +290,6 @@ class LLMProvider:
         """
         client = OpenAI(
             api_key=api_key,
-            timeout=httpx.Timeout(OPENAI_TIMEOUT_SECS, connect=5.0),
             http_client=openai.DefaultHttpxClient(
                 transport=httpx.HTTPTransport(
                     socket_options=_keepalive_socket_options())),
