@@ -159,7 +159,9 @@ def _tts_stream_generator(app, entity_cls, entity_id, chunk_fk_attr,
     last_sent_chunk = last_chunk
     heartbeat_interval = 15  # seconds
     last_heartbeat = time.time()
-    max_idle_time = 600  # 10 minutes max connection time
+    # A voice reply spoken while it is written (#367) opens this stream
+    # before the model has finished thinking, so allow for that.
+    max_idle_time = 1800
     start_time = time.time()
     chunk_filter = {chunk_fk_attr: entity_id}
 
@@ -199,10 +201,20 @@ def _tts_stream_generator(app, entity_cls, entity_id, chunk_fk_attr,
                 last_sent_chunk = chunk.chunk_index
 
             if entity.tts_task_status == 'completed':
-                yield format_sse_message({
+                done = {
                     "message": "TTS generation complete",
                     "tts_url": entity.audio_tts_url
-                }, event="all_complete")
+                }
+                if isinstance(entity, Node):
+                    # A voice turn's next node (#158 chain): the browser
+                    # moves on without waiting for the llm-status poll;
+                    # the text's start labels the node's chapter, which
+                    # a reply spoken while written (#367) couldn't have
+                    # when its first chunk played.
+                    done["continuation_node_id"] = \
+                        entity.continuation_node_id
+                    done["preview"] = (entity.get_content() or "")[:200]
+                yield format_sse_message(done, event="all_complete")
                 break
 
             if entity.tts_task_status == 'failed':
@@ -279,6 +291,88 @@ def tts_stream(node_id):
     last_chunk = request.args.get('last_chunk', -1, type=int)
     app = current_app._get_current_object()
     return _tts_stream_response(app, Node, node_id, 'node_id', 'Node', last_chunk)
+
+
+def text_stream_events(sent, text):
+    """The llm-stream events that bring a client holding *sent* (None
+    before the first event) up to *text*, and what it then holds: a delta
+    when *text* extends it, else a snapshot (the call restarted and the
+    text was rewritten)."""
+    if sent is None or not text.startswith(sent):
+        return ([("snapshot", {"text": text})] if (text or sent) else []), \
+            text
+    if len(text) > len(sent):
+        return [("delta", {"text": text[len(sent):]})], text
+    return [], sent
+
+
+@sse_bp.route("/nodes/<int:node_id>/llm-stream")
+@login_required
+def llm_stream(node_id):
+    """
+    SSE stream of an LLM reply's text while it is generated (#367).
+
+    Events:
+    - snapshot: {"text"} — the whole text so far (on connect, and whenever
+      it isn't an extension of what was sent: the model call restarted)
+    - delta: {"text"} — text appended since the last event
+    - done: {"status", "continuation_node_id", "error"} — the node is no
+      longer being generated; the final content comes from the node
+    - heartbeat: keep-alive
+
+    Polls the node's streaming_content (written by the task about twice a
+    second); the text is decrypted here, one DEK per generation.
+    """
+    node = Node.query.get_or_404(node_id)
+    from backend.utils.privacy import can_user_access_node
+    if not can_user_access_node(node, current_user.id) and not getattr(
+            current_user, "is_admin", False):
+        return jsonify({"error": "Unauthorized"}), 403
+
+    app = current_app._get_current_object()
+
+    def generate():
+        sent = None
+        heartbeat_interval = 15
+        last_heartbeat = time.time()
+        start_time = time.time()
+        while True:
+            if time.time() - start_time > 1800:
+                yield format_sse_message(
+                    {"message": "Connection timeout"}, event="close")
+                break
+            with app.app_context():
+                current = db.session.get(Node, node_id)
+                if current is None or current.deleted_at is not None:
+                    yield format_sse_message(
+                        {"error": "Node not found"}, event="error")
+                    break
+                if current.llm_task_status not in ('pending', 'processing'):
+                    yield format_sse_message({
+                        "status": current.llm_task_status,
+                        "continuation_node_id": current.continuation_node_id,
+                        "error": current.llm_task_error,
+                    }, event="done")
+                    break
+                events, sent = text_stream_events(
+                    sent, current.get_streaming_content())
+                for event, data in events:
+                    yield format_sse_message(data, event=event)
+                if time.time() - last_heartbeat > heartbeat_interval:
+                    yield format_sse_message(
+                        {"timestamp": time.time()}, event="heartbeat")
+                    last_heartbeat = time.time()
+            time.sleep(0.5)
+
+    return Response(
+        generate(),
+        mimetype='text/event-stream',
+        headers={
+            'Cache-Control': 'no-cache',
+            'Connection': 'keep-alive',
+            'X-Accel-Buffering': 'no'
+        }
+    )
 
 
 @sse_bp.route("/profiles/<int:profile_id>/tts-stream")

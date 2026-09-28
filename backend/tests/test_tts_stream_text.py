@@ -7,8 +7,8 @@ import pytest
 
 from backend.utils.audio_processing import section_aware_chunk_text
 from backend.utils.tts_stream_text import (
-    FIRST_CHUNK_CHARS, O, P, R, ChunkPlanner, SpeechSchedule,
-    SpokenTextProjector)
+    AUDIO_PER_CHAR, FIRST_CHUNK_CHARS, GEN_RATE, OVERHEAD, ChunkPlanner,
+    SpeechSchedule, SpokenTextProjector)
 
 
 def _project(pieces, proposals=True):
@@ -33,8 +33,8 @@ def _spoken(text, proposals=True):
 
 
 def _random_splits(text, rng):
-    cuts = sorted(rng.sample(range(1, len(text)), min(len(text) - 1,
-                                                       rng.randint(1, 12))))
+    count = min(len(text) - 1, rng.randint(1, 12))
+    cuts = sorted(rng.sample(range(1, len(text)), count))
     return [text[a:b] for a, b in zip([0] + cuts, cuts + [len(text)])]
 
 
@@ -193,10 +193,10 @@ def _batch_parity(text):
         if chunk is None:
             assert planner.done
             return out, stalled
-        now += O + len(chunk.text) / R
+        now += OVERHEAD + len(chunk.text) / GEN_RATE
         if schedule.drain_at is not None and now > schedule.drain_at:
             stalled = True
-        schedule.played(len(chunk.text) * P, now)
+        schedule.played(len(chunk.text) * AUDIO_PER_CHAR, now)
         out.append((chunk.text, chunk.section_title, chunk.section_index))
 
 
@@ -238,8 +238,8 @@ def test_schedule_cold_then_warm():
     assert schedule.plan(0.0, 5000) == (FIRST_CHUNK_CHARS, False, None)
     schedule.played(20.0, 10.0)            # 20 s of audio at t=10
     limit, jit, wake_at = schedule.plan(10.0, 100)
-    assert limit == int((20.0 - O) * R) and jit is False
-    assert wake_at == pytest.approx(30.0 - O - 100 / R - 1.0)
+    assert limit == int((20.0 - OVERHEAD) * GEN_RATE) and jit is False
+    assert wake_at == pytest.approx(30.0 - OVERHEAD - 100 / GEN_RATE - 1.0)
     assert schedule.plan(wake_at + 0.1, 100)[1] is True
     # Nothing can land before the queue runs out: cold again.
     assert schedule.plan(29.0, 100)[0] == FIRST_CHUNK_CHARS

@@ -455,11 +455,12 @@ class ChunkPlanner:
 
 # ── When to cut, and how big ────────────────────────────────────────────
 # Same timing model as section_aware_chunk_text (#140 calibration): TTS
-# generates R chars/s plus a fixed O s per chunk, audio plays P s per char.
-R = TTS_GEN_CHARS_PER_SEC
-P = TTS_AUDIO_SECS_PER_CHAR
-O = TTS_CHUNK_OVERHEAD_SECS
-FIRST_CHUNK_CHARS = min(int(3.0 * R), TTS_MAX_CHARS)
+# generates GEN_RATE chars/s plus a fixed OVERHEAD s per chunk, and the
+# audio plays AUDIO_PER_CHAR s per char.
+GEN_RATE = TTS_GEN_CHARS_PER_SEC
+AUDIO_PER_CHAR = TTS_AUDIO_SECS_PER_CHAR
+OVERHEAD = TTS_CHUNK_OVERHEAD_SECS
+FIRST_CHUNK_CHARS = min(int(3.0 * GEN_RATE), TTS_MAX_CHARS)
 # INTRODUCED CONSTANT (#367): slack on the "cut now or the queue runs out"
 # deadline, for error in the drain estimate (the server can't see the
 # browser's player). A guess, not measured.
@@ -485,13 +486,14 @@ class SpeechSchedule:
         """(limit, jit, wake_at) for a chunk taken at *now*: the size
         limit, whether to cut whatever is ready because the queue is
         about to run out, and when that moment comes (None when cold)."""
-        if self.drain_at is None or self.drain_at - now <= O:
+        if self.drain_at is None or self.drain_at - now <= OVERHEAD:
             # Cold: nothing queued, or nothing can land before the queue
             # runs out. A small chunk restarts playback fast.
             return FIRST_CHUNK_CHARS, False, None
-        window = self.drain_at - now - O
-        limit = max(min(int(max(window, 2.0) * R), TTS_MAX_CHARS), 1)
-        wake_at = self.drain_at - O - pending_chars / R - JIT_MARGIN_SECS
+        window = self.drain_at - now - OVERHEAD
+        limit = max(min(int(max(window, 2.0) * GEN_RATE), TTS_MAX_CHARS), 1)
+        wake_at = (self.drain_at - OVERHEAD - pending_chars / GEN_RATE
+                   - JIT_MARGIN_SECS)
         return limit, now >= wake_at, wake_at
 
     def played(self, duration, now):
