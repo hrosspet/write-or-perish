@@ -2072,10 +2072,8 @@ def get_llm_status(node_id):
         # finalized as an interim retrieval step and the answer lives on the
         # linked continuation node.
         "continuation_node_id": node.continuation_node_id,
-        # #367: the reply has text on the node already (the llm-stream SSE
-        # shows it), and voice TTS that started before the reply finished
-        # (spoken while written) — the browser attaches its TTS stream.
-        "streaming": bool(node.streaming_content),
+        # #367: voice TTS that started before the reply finished (spoken
+        # while written) — the browser attaches its TTS stream.
         "tts_task_status": node.tts_task_status,
         "tts_streaming": node.tts_task_id == "voice-stream",
     }

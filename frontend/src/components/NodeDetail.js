@@ -293,16 +293,28 @@ function NodeDetail({ nodeIdOverride }) {
   }, [loading, focalId]);
 
   // If we arrived with ?awaitLlm=NID (e.g. from WritePage), pick up the
-  // pending LLM task and let the polling navigate to it on completion.
+  // pending LLM task and poll it here.
   // Re-runs when `id` changes so internal navigations to another node
   // with ?awaitLlm= also take effect (react-router reuses the component).
+  // An entry that arrives with its reply pending (?awaitLlm= another
+  // node) goes on to that reply at once (#367): it shows the model
+  // thinking, then the text as it is written. The entry keeps its own
+  // history step (the param is dropped first, so a back press lands on
+  // the entry and stays there). Handled once: StrictMode runs this twice
+  // in development, and a second hand-off would push the reply again.
+  const awaitLlmHandledRef = useRef(null);
   useEffect(() => {
     const awaitLlm = searchParams.get('awaitLlm');
-    if (awaitLlm) {
-      setLlmTaskNodeId(parseInt(awaitLlm, 10));
+    if (awaitLlm && awaitLlmHandledRef.current !== awaitLlm) {
+      awaitLlmHandledRef.current = awaitLlm;
       const next = new URLSearchParams(searchParams);
       next.delete('awaitLlm');
       setSearchParams(next, { replace: true });
+      if (String(awaitLlm) === String(id)) {
+        setLlmTaskNodeId(parseInt(awaitLlm, 10));
+      } else {
+        navigate(`/node/${awaitLlm}?awaitLlm=${awaitLlm}`);
+      }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
@@ -373,13 +385,6 @@ function NodeDetail({ nodeIdOverride }) {
         navigate(`/node/${completedId}`);
       }
       setLlmTaskNodeId(null);
-    } else if (llmData?.streaming
-               && String(llmData.node_id) === String(llmTaskNodeId)
-               && String(llmTaskNodeId) !== String(id)) {
-      // #367: the reply has started — watch it being written on its own
-      // node instead of a spinner under the entry.
-      setLlmTaskNodeId(null);
-      navigate(`/node/${llmTaskNodeId}?awaitLlm=${llmTaskNodeId}`);
     } else if (llmData?.stage === 'batch'
                && String(llmTaskNodeId) !== String(id)) {
       // The turn is queued in a provider batch: the generate button's job
@@ -689,11 +694,13 @@ function NodeDetail({ nodeIdOverride }) {
     addToast(apiErr || err.message || "Error requesting LLM response.", 8000);
   };
 
+  // The reply is watched on its own node from the start (#367): the
+  // model thinking, then the text as it is written.
   const handleLLMResponse = () => {
     setError("");
     setLlmRequesting(true);
     requestLlmFor(id)
-      .then((newNodeId) => setLlmTaskNodeId(newNodeId))
+      .then((newNodeId) => navigate(`/node/${newNodeId}?awaitLlm=${newNodeId}`))
       .catch(handleLlmRequestError)
       .finally(() => setLlmRequesting(false));
   };
@@ -728,10 +735,9 @@ function NodeDetail({ nodeIdOverride }) {
       const chain = [node, ...(node.ancestors || [])];
       const llmNodeId = await tryAutoGenerateFor(newNodeId, chain);
       if (llmNodeId) {
-        // Land on the NEW USER node so it gets its own URL/history step
-        // (a back press then walks the actual entries); ?awaitLlm keeps
-        // the pending LLM response polling anchored here and navigates
-        // to the response on completion.
+        // Through the NEW USER node so it gets its own URL/history step
+        // (a back press then walks the actual entries); ?awaitLlm takes
+        // the view on from there to the pending response.
         navigate(`/node/${newNodeId}?awaitLlm=${llmNodeId}`);
       } else {
         navigate(`/node/${newNodeId}`);
@@ -826,10 +832,9 @@ function NodeDetail({ nodeIdOverride }) {
     try {
       const chain = [updated, ...(updated.ancestors || [])];
       const llmNodeId = await tryAutoGenerateFor(updated.id, chain);
-      // Focal is already the edited node — start polling in place (no
-      // navigation), so the edited node keeps its history entry and the
-      // completion effect pushes the response when it lands.
-      if (llmNodeId) setLlmTaskNodeId(llmNodeId);
+      // The edited node keeps its history entry; the response is watched
+      // on its own node from the start (#367).
+      if (llmNodeId) navigate(`/node/${llmNodeId}?awaitLlm=${llmNodeId}`);
     } catch (err) {
       handleLlmRequestError(err);
     }
