@@ -883,6 +883,20 @@ export const AudioProvider = ({ children }) => {
     );
   }, []);
 
+  // Retitle the chapter anchored at a queue chunk index. A voice reply
+  // spoken while it is written (#367) starts playing before its text is
+  // complete, so its chain chapter gets a placeholder title at its first
+  // chunk and the real one once the node is done.
+  const renameChapter = useCallback((chunkIndex, title) => {
+    setCurrentAudio((prev) => (prev && prev.chapters
+      ? {
+          ...prev,
+          chapters: prev.chapters.map((c) => (
+            c.chunk_index === chunkIndex ? { ...c, title } : c)),
+        }
+      : prev));
+  }, []);
+
   const value = {
     currentAudio,
     isPlaying,
@@ -903,6 +917,7 @@ export const AudioProvider = ({ children }) => {
     loadAudio,
     loadAudioQueue,
     updateChapters,
+    renameChapter,
     appendChunkToQueue,
     play,
     pause,

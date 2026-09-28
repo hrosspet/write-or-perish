@@ -139,13 +139,38 @@ def _retryable_stream_error(exc):
     return False
 
 
-def _retry_mid_stream(call, provider):
+class StreamListener:
+    """Receives a reply while it streams (#367). The provider calls these
+    from the thread running the call, in order; the defaults ignore
+    everything, so a listener overrides only what it needs.
+
+    - on_text(text): a piece of the reply's visible text. Joined, the
+      pieces are the reply's final ``content`` (thinking is never sent).
+    - on_tool_call(name): the model has started a tool call. The text
+      before it is complete; the call's input is still streaming.
+    - on_restart(): a mid-stream failure is about to be retried from
+      scratch, so the text sent so far will be written again. Return
+      False to refuse (e.g. it has already been spoken); the call then
+      raises ProviderUnavailableError instead of retrying."""
+
+    def on_text(self, text):
+        pass
+
+    def on_tool_call(self, name):
+        pass
+
+    def on_restart(self):
+        return True
+
+
+def _retry_mid_stream(call, provider, listener=None):
     """Run ``call`` (one streamed request, collected to its final result),
     retrying mid-stream failures per STREAM_RETRY_DELAYS. Request-level
     errors are left to the SDK's own retries so the two don't stack. A
     temporary failure that outlasts either kind of retry raises
     ProviderUnavailableError instead of the provider's raw error, which
-    would otherwise reach the user as is."""
+    would otherwise reach the user as is. A retry restarts the reply, so
+    a *listener* is asked first (StreamListener.on_restart)."""
     for retry_delay in (*STREAM_RETRY_DELAYS, None):
         try:
             return call()
@@ -157,20 +182,32 @@ def _retry_mid_stream(call, provider):
                 raise
             if retry_delay is None:
                 raise ProviderUnavailableError(provider) from e
+            if listener is not None and not listener.on_restart():
+                logger.warning(
+                    "%s stream failed mid-way (%s); not retrying: the "
+                    "reply so far can't be taken back", provider, e)
+                raise ProviderUnavailableError(provider) from e
             logger.warning(
                 "%s stream failed mid-way (%s); retrying in %ss",
                 provider, e, retry_delay)
             time.sleep(retry_delay)
 
 
-def _openai_final_response(client, kwargs):
+def _openai_final_response(client, kwargs, listener=None):
     """Send a Responses API call as a stream and return its final Response
     — the same object a non-streamed create() returns, carried by the
-    terminal event. Nothing reads the stream live: streaming keeps data
-    flowing on a long generation instead of one silent wait for the whole
-    reply."""
+    terminal event. Streaming keeps data flowing on a long generation
+    instead of one silent wait for the whole reply; a *listener* also gets
+    the text and tool-call starts as they arrive (#367)."""
     with client.responses.create(**kwargs, stream=True) as stream:
         for event in stream:
+            if listener is not None:
+                if event.type == "response.output_text.delta":
+                    listener.on_text(event.delta)
+                elif (event.type == "response.output_item.added"
+                      and getattr(event.item, "type", None)
+                      == "function_call"):
+                    listener.on_tool_call(event.item.name)
             if event.type in ("response.completed", "response.incomplete"):
                 return event.response
             if event.type == "response.failed":
@@ -181,6 +218,18 @@ def _openai_final_response(client, kwargs):
             if event.type == "error":
                 raise OpenAIStreamError(event.message, event.code)
     raise OpenAIStreamError("stream ended without a final response")
+
+
+def _anthropic_event_to_listener(event, listener):
+    """Pass one raw Anthropic stream event on to a StreamListener. Only
+    the raw events: the SDK also yields derived ones ("text", "thinking",
+    ...), which would repeat the text."""
+    if event.type == "content_block_delta":
+        if getattr(event.delta, "type", None) == "text_delta":
+            listener.on_text(event.delta.text)
+    elif event.type == "content_block_start":
+        if getattr(event.content_block, "type", None) == "tool_use":
+            listener.on_tool_call(event.content_block.name)
 
 
 def _keepalive_socket_options():
@@ -270,7 +319,8 @@ class LLMProvider:
                        max_tokens: int = None, tools: list = None,
                        prompt_cache_key: str = None,
                        output_schema: dict = None,
-                       cache_comparison_response_id: str = None) -> dict:
+                       cache_comparison_response_id: str = None,
+                       listener: StreamListener = None) -> dict:
         """
         Generate a completion using the specified model.
 
@@ -286,6 +336,9 @@ class LLMProvider:
                 response to compare the prompt cache against (#348). Sent
                 only to models with "cache_diagnostics" in their config;
                 ignored for every other model.
+            listener: Optional StreamListener that gets the reply's text
+                and tool-call starts while it streams (#367). The return
+                value is the same with or without one.
 
         Returns:
             Dict with:
@@ -320,11 +373,13 @@ class LLMProvider:
                 tools=tools, prompt_cache_key=prompt_cache_key,
                 context_window=config.get("context_window"),
                 output_schema=output_schema,
-                cache_comparison_response_id=cache_comparison_response_id)
+                cache_comparison_response_id=cache_comparison_response_id,
+                listener=listener)
         elif provider == "anthropic":
             return LLMProvider._call_anthropic(
                 api_model, messages, api_keys["anthropic"], max_tokens,
-                tools=tools, output_schema=output_schema)
+                tools=tools, output_schema=output_schema,
+                listener=listener)
         else:
             raise ValueError(f"Unknown provider: {provider}")
 
@@ -334,7 +389,8 @@ class LLMProvider:
                      prompt_cache_key: str = None,
                      context_window: int = None,
                      output_schema: dict = None,
-                     cache_comparison_response_id: str = None) -> dict:
+                     cache_comparison_response_id: str = None,
+                     listener: StreamListener = None) -> dict:
         """
         Call OpenAI via the Responses API (/v1/responses).
 
@@ -424,7 +480,8 @@ class LLMProvider:
             ) as http_client:
                 client = OpenAI(api_key=api_key, http_client=http_client)
                 return _retry_mid_stream(
-                    lambda: _openai_final_response(client, kwargs), "OpenAI")
+                    lambda: _openai_final_response(client, kwargs, listener),
+                    "OpenAI", listener)
 
         # A request error arrives as a 400 before the stream starts, or
         # after it as an error the SDK raises or a response.failed event
@@ -651,7 +708,8 @@ class LLMProvider:
     @staticmethod
     def _call_anthropic(model: str, messages: list, api_key: str,
                         max_tokens: int = None, tools: list = None,
-                        output_schema: dict = None) -> dict:
+                        output_schema: dict = None,
+                        listener: StreamListener = None) -> dict:
         """
         Call Anthropic API with the given model and messages.
 
@@ -698,15 +756,18 @@ class LLMProvider:
 
         try:
             # Streamed, then collected into the same Message create()
-            # returns. Nothing reads the stream live: the SDK refuses a
-            # non-streaming request whose max_tokens implies >10 minutes
-            # (~21k tokens), and a streamed connection stays alive through
-            # a long thinking phase instead of idling toward a timeout.
+            # returns: the SDK refuses a non-streaming request whose
+            # max_tokens implies >10 minutes (~21k tokens), and a streamed
+            # connection stays alive through a long thinking phase instead
+            # of idling toward a timeout. A listener reads it live (#367).
             def _collect():
                 with client.messages.stream(**kwargs) as stream:
+                    if listener is not None:
+                        for event in stream:
+                            _anthropic_event_to_listener(event, listener)
                     return stream.get_final_message()
 
-            response = _retry_mid_stream(_collect, "Anthropic")
+            response = _retry_mid_stream(_collect, "Anthropic", listener)
         except anthropic.BadRequestError as e:
             error_msg = str(e)
             match = re.search(

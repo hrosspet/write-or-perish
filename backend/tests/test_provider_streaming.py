@@ -422,3 +422,137 @@ def test_openai_sdk_raised_transient_error_is_retried(providers, monkeypatch):
     ], calls))
     assert _oai_call(providers)["content"] == "hi"
     assert len(calls) == 2
+
+
+# ── Live listener (#367): the reply's text while it streams ─────────────
+
+class _Recorder:
+    def __init__(self, allow_restart=True):
+        self.allow_restart = allow_restart
+        self.events = []
+
+    def on_text(self, text):
+        self.events.append(("text", text))
+
+    def on_tool_call(self, name):
+        self.events.append(("tool", name))
+
+    def on_restart(self):
+        self.events.append(("restart",))
+        return self.allow_restart
+
+
+def _anthropic_events(pieces, tool=None):
+    """Raw Anthropic stream events for text pieces, plus the SDK's derived
+    'text' events, which must not be passed on twice."""
+    events = []
+    for piece in pieces:
+        events.append(_event("content_block_delta",
+                             delta=_event("text_delta", text=piece)))
+        events.append(_event("text", text=piece, snapshot=piece))
+    events.append(_event("content_block_delta",
+                         delta=_event("thinking_delta", thinking="hmm")))
+    if tool:
+        events.append(_event("content_block_start",
+                             content_block=_event("tool_use", name=tool)))
+    return events
+
+
+def _streaming_client(scripts, calls):
+    """Anthropic stand-in whose stream yields events, then its outcome:
+    an exception raised while iterating, or the final message."""
+    class _Stream:
+        def __init__(self, script):
+            self.events, self.outcome = script
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def __iter__(self):
+            yield from self.events
+            if isinstance(self.outcome, Exception):
+                raise self.outcome
+
+        def get_final_message(self):
+            return self.outcome
+
+    class _Messages:
+        def stream(self, **kwargs):
+            calls.append(kwargs)
+            return _Stream(scripts.pop(0))
+
+    class _Client:
+        def __init__(self, api_key=None):
+            self.messages = _Messages()
+
+    return _Client
+
+
+def test_anthropic_listener_gets_text_and_tool_start(providers, monkeypatch):
+    listener = _Recorder()
+    monkeypatch.setattr(providers, "Anthropic", _streaming_client(
+        [(_anthropic_events(["Let me ", "check."], tool="semantic_search"),
+          _message())], []))
+    providers.LLMProvider._call_anthropic("m", MSGS, "k", listener=listener)
+    assert listener.events == [("text", "Let me "), ("text", "check."),
+                               ("tool", "semantic_search")]
+
+
+def test_anthropic_restart_asks_the_listener(providers, monkeypatch):
+    listener = _Recorder()
+    calls = []
+    monkeypatch.setattr(providers, "Anthropic", _streaming_client([
+        (_anthropic_events(["Par"]), _status_error(200, OVERLOADED)),
+        (_anthropic_events(["Full"]), _message()),
+    ], calls))
+    providers.LLMProvider._call_anthropic("m", MSGS, "k", listener=listener)
+    assert len(calls) == 2
+    assert listener.events == [("text", "Par"), ("restart",),
+                               ("text", "Full")]
+
+
+def test_anthropic_refused_restart_raises(providers, monkeypatch):
+    # Text already spoken can't be taken back: no retry, a readable error.
+    listener = _Recorder(allow_restart=False)
+    calls = []
+    monkeypatch.setattr(providers, "Anthropic", _streaming_client([
+        (_anthropic_events(["Spoken"]), _status_error(200, OVERLOADED)),
+        (_anthropic_events(["Other"]), _message()),
+    ], calls))
+    with pytest.raises(providers.ProviderUnavailableError):
+        providers.LLMProvider._call_anthropic(
+            "m", MSGS, "k", listener=listener)
+    assert len(calls) == 1
+
+
+def test_openai_listener_gets_text_and_tool_start(providers, monkeypatch):
+    listener = _Recorder()
+    monkeypatch.setattr(providers, "OpenAI", _oai_client([[
+        _event("response.created"),
+        _event("response.output_text.delta", delta="h"),
+        _event("response.output_text.delta", delta="i"),
+        _event("response.output_item.added",
+               item=_event("function_call", name="read_todo")),
+        _event("response.output_item.added", item=_event("reasoning")),
+        _event("response.completed", response=_oai_response()),
+    ]], []))
+    providers.LLMProvider._call_openai("gpt-x", MSGS, "k", listener=listener)
+    assert listener.events == [("text", "h"), ("text", "i"),
+                               ("tool", "read_todo")]
+
+
+def test_openai_refused_restart_raises(providers, monkeypatch):
+    listener = _Recorder(allow_restart=False)
+    calls = []
+    monkeypatch.setattr(providers, "OpenAI", _oai_client([
+        [_event("response.output_text.delta", delta="h"),
+         _oai_failed("server_error")],
+        [_event("response.completed", response=_oai_response())],
+    ], calls))
+    with pytest.raises(providers.ProviderUnavailableError):
+        providers.LLMProvider._call_openai(
+            "gpt-x", MSGS, "k", listener=listener)
+    assert len(calls) == 1

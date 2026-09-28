@@ -413,6 +413,13 @@ class Node(db.Model):
     # Tool call metadata for LLM nodes (JSON list of tool call logs)
     tool_calls_meta = db.Column(db.Text, nullable=True)
 
+    # The reply's text so far while an LLM node is being generated (#367),
+    # for display only. `content` stays final-only, so embeddings, exports,
+    # context building and the scrubs never see partial text. Encrypted
+    # like `content` (one DEK per generation); written without bumping
+    # updated_at; cleared in the same commit that sets the final content.
+    streaming_content = db.Column(db.Text, nullable=True)
+
     # Session kind of an agentic thread root: the UserPrompt.prompt_key
     # ('voice' / 'textmode') the prompt was attached under. Stamped by
     # attach_context_artifacts and KEPT when a per-thread prompt edit
@@ -590,6 +597,12 @@ class Node(db.Model):
         if self.content is None:
             return ""
         return decrypt_content(self.content)
+
+    def get_streaming_content(self) -> str:
+        """The reply's partial text while it is generated (#367), or ""."""
+        if not self.streaming_content:
+            return ""
+        return decrypt_content(self.streaming_content)
 
 @event.listens_for(Node, "before_insert")
 @event.listens_for(Node, "before_update")

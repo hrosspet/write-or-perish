@@ -1039,6 +1039,11 @@ def _focal_own_fields(node):
         # prompt (#66).
         "has_tts": bool(node.audio_tts_url),
     }
+    # The reply's text so far while it is generated (#367): a reload
+    # mid-generation shows it at once; the llm-stream SSE takes over.
+    if node.llm_task_status in ("pending", "processing") \
+            and node.streaming_content:
+        data["streaming_content"] = node.get_streaming_content()
     # Include tool call metadata for LLM nodes
     if node.tool_calls_meta:
         import json as _json
@@ -2067,6 +2072,10 @@ def get_llm_status(node_id):
         # finalized as an interim retrieval step and the answer lives on the
         # linked continuation node.
         "continuation_node_id": node.continuation_node_id,
+        # #367: voice TTS that started before the reply finished (spoken
+        # while written) — the browser attaches its TTS stream.
+        "tts_task_status": node.tts_task_status,
+        "tts_streaming": node.tts_task_id == "voice-stream",
     }
 
     # Include content when completed (needed by VoicePage polling) and
