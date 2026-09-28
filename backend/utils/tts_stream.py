@@ -81,10 +81,13 @@ class NodeSpeech:
         self.durations = []
 
     # ── called by the LLM thread ────────────────────────────────────────
-    def feed(self, text):
+    def _mark_first_text(self):
         if not self.first_text_seen:
             self.first_text_seen = True
             voice_timing.mark(self.node_id, "first_text")
+
+    def feed(self, text):
+        self._mark_first_text()
         with self._turn.cv:
             if not self.planner.closed:
                 self.planner.add(self.projector.feed(text))
@@ -93,6 +96,8 @@ class NodeSpeech:
     def close(self, extra_text=None):
         """The node's text is complete (*extra_text*: text the reply's
         own stream didn't carry, e.g. a tool round's fallback line)."""
+        if extra_text:
+            self._mark_first_text()
         with self._turn.cv:
             if self.planner.closed:
                 return
