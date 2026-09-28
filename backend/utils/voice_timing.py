@@ -112,7 +112,7 @@ def _write(node_id, marks, facts):
                                     for k, v in facts.items()})
         pipe.expire(key, TTL_SECONDS)
         pipe.execute()
-    except redis.RedisError:
+    except Exception:  # timing never breaks a turn
         logger.warning("voice-timing node=%s: Redis write failed", node_id,
                        exc_info=True)
 
@@ -132,7 +132,7 @@ def record(node_id):
     try:
         r = _redis()
         raw = r.hgetall(f"{_PREFIX}{node_id}") if r is not None else {}
-    except redis.RedisError:
+    except Exception:  # timing never breaks a turn
         logger.warning("voice-timing node=%s: Redis read failed", node_id,
                        exc_info=True)
         raw = {}
@@ -167,7 +167,7 @@ def remember_turn(user_id, node_id):
         r.zadd(key, {str(node_id): time.time()})
         r.zremrangebyrank(key, 0, -RECENT_TURNS - 1)
         r.expire(key, TTL_SECONDS)
-    except redis.RedisError:
+    except Exception:  # timing never breaks a turn
         logger.warning("voice-timing user=%s: Redis write failed", user_id,
                        exc_info=True)
 
@@ -179,7 +179,7 @@ def recent_turns(user_id, limit=RECENT_TURNS):
         if r is None:
             return []
         ids = r.zrevrange(f"{_USER_PREFIX}{user_id}", 0, limit - 1)
-    except redis.RedisError:
+    except Exception:  # timing never breaks a turn
         logger.warning("voice-timing user=%s: Redis read failed", user_id,
                        exc_info=True)
         return []

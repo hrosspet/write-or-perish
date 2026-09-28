@@ -16,13 +16,22 @@ export function startTurn() {
   turn = { nodeId: null, marks: { rec_stop: now() }, sent: false };
 }
 
+// The turn was cancelled or replaced: nothing more is marked for it.
+export function endTurn() {
+  turn = null;
+}
+
 // The turn's first reply node, which keys its record on the server.
 export function setTurnNode(nodeId) {
   if (turn && turn.nodeId == null && nodeId != null) turn.nodeId = nodeId;
 }
 
-export function mark(stage) {
-  if (turn && !(stage in turn.marks)) turn.marks[stage] = now();
+// nodeId, when given, must be the turn's first reply node (a chunk of a
+// turn that was never marked must not land in another turn's record).
+export function mark(stage, nodeId = null) {
+  if (!turn || stage in turn.marks) return;
+  if (nodeId != null && turn.nodeId !== nodeId) return;
+  turn.marks[stage] = now();
 }
 
 // Server clock minus the browser's, from the fastest of a few round trips.

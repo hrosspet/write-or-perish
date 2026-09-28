@@ -46,6 +46,18 @@ describe('voiceTiming', () => {
     expect(body.rtt_ms).toBe(40);
   });
 
+  it('ignores a chunk of another node, and a cancelled turn', async () => {
+    voiceTiming.startTurn();
+    voiceTiming.setTurnNode(42);
+    voiceTiming.mark('chunk_ready', 99);     // not this turn's node
+    await voiceTiming.markPlaying();
+    expect(api.post).not.toHaveBeenCalled();
+    voiceTiming.endTurn();
+    voiceTiming.mark('chunk_ready', 42);
+    await voiceTiming.markPlaying();
+    expect(api.post).not.toHaveBeenCalled();
+  });
+
   it('ignores playback that is not a voice turn’s first chunk', async () => {
     voiceTiming.startTurn();
     voiceTiming.setTurnNode(42);

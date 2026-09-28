@@ -358,7 +358,7 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
       awaitingNextNodeRef.current = false;
       if (firstChunkRef.current) {
         firstChunkRef.current = false;
-        voiceTiming.mark('chunk_ready');
+        voiceTiming.mark('chunk_ready', llmNodeId);
         stopSilentAudio(); // Real audio takes over
         const chapterTitle = takeChapterTitle();
         if (chapterTitle === STREAMED_CHAPTER_PLACEHOLDER) {
@@ -802,6 +802,7 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
   }, [streaming, stopSilentAudio, audio, model]);
 
   const handleContinue = useCallback((extraReset) => {
+    voiceTiming.endTurn();
     audio.stop();
     ttsSSE.disconnect();
     ttsSSE.reset();
@@ -845,6 +846,7 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
     if (lastUserNodeIdRef.current) {
       threadParentIdRef.current = lastUserNodeIdRef.current;
     }
+    voiceTiming.endTurn();
     stopSilentAudio();
     audio.stop();
     ttsSSE.disconnect();
