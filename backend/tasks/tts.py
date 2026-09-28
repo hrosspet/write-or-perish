@@ -6,10 +6,6 @@ and can be played as soon as it's ready, without waiting for all chunks.
 """
 import json
 import re
-import time
-
-import httpx
-import openai
 from celery import Task
 from celery.utils.log import get_task_logger
 from openai import OpenAI
@@ -107,56 +103,14 @@ TTS_MODEL = "gpt-4o-mini-tts"
 TTS_VOICE = "alloy"
 
 
-# A TTS call occasionally stalls on OpenAI's side: of three identical
-# calls measured on 2026-09-28, two took ~1.6 s and one 300 s (first byte
-# after 17 s, then a trickle). One such call held up a voice reply's audio
-# for minutes (#367), and a batch run the same way. A call that runs past
-# its deadline is dropped and sent once more.
-# INTRODUCED CONSTANTS (#367): generation runs ~106 chars/s, so the
-# deadline (20 s + 0.02 s/char: ~26 s for a first chunk, ~100 s for a full
-# 4096-char chunk) leaves several times the normal duration. Not tuned.
-TTS_CALL_DEADLINE_SECS = 20.0
-TTS_CALL_DEADLINE_SECS_PER_CHAR = 0.02
-TTS_CALL_ATTEMPTS = 2
-
-
-class TTSStallError(RuntimeError):
-    """A TTS call that ran past its deadline."""
-
-
-def _stream_speech(client, text, path, deadline):
-    """Stream one TTS call to *path*, giving up after *deadline* seconds —
-    also when the bytes keep trickling in, which a read timeout (reset by
-    every byte) doesn't catch."""
-    started = time.monotonic()
-    with client.with_options(max_retries=0, timeout=deadline) \
-            .audio.speech.with_streaming_response.create(
-                model=TTS_MODEL, input=text, voice=TTS_VOICE) as resp:
-        with open(path, "wb") as out:
-            for block in resp.iter_bytes():
-                out.write(block)
-                if time.monotonic() - started > deadline:
-                    raise TTSStallError(
-                        f"TTS call still running after {deadline:.0f}s")
-
-
 def synthesize_to_file(client, text, path, section_end=False):
-    """One TTS call written to *path* as MP3 (retried once if it stalls).
-    Returns the AudioSegment; a chunk that closes a chapter gets the
-    chapter-end silence, re-exported so chunked playback (which streams
-    the file directly) has it too."""
-    deadline = (TTS_CALL_DEADLINE_SECS
-                + TTS_CALL_DEADLINE_SECS_PER_CHAR * len(text))
-    for attempt in range(1, TTS_CALL_ATTEMPTS + 1):
-        try:
-            _stream_speech(client, text, path, deadline)
-            break
-        except (TTSStallError, openai.APITimeoutError,
-                httpx.TimeoutException) as e:
-            if attempt == TTS_CALL_ATTEMPTS:
-                raise
-            logger.warning("TTS call for %s chars stalled (%s); sending it "
-                           "again", len(text), e)
+    """One TTS call written to *path* as MP3. Returns the AudioSegment; a
+    chunk that closes a chapter gets the chapter-end silence, re-exported
+    so chunked playback (which streams the file directly) has it too."""
+    with client.audio.speech.with_streaming_response.create(
+        model=TTS_MODEL, input=text, voice=TTS_VOICE
+    ) as resp:
+        resp.stream_to_file(path)
     segment = AudioSegment.from_file(str(path), format="mp3")
     if section_end:
         segment = segment + AudioSegment.silent(
