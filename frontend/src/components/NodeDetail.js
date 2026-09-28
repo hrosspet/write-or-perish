@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useLayoutEffect, useRef, useCallback } from "react";
-import { useParams, useNavigate, useSearchParams, Link } from "react-router-dom";
+import { useParams, useNavigate, useSearchParams, useLocation, Link } from "react-router-dom";
 import { FaThumbtack, FaMicrophone, FaSpinner, FaBookOpen } from "react-icons/fa";
 import NodeFooter from "./NodeFooter";
 import SpeakerIcon from "./SpeakerIcon";
@@ -74,6 +74,11 @@ const partialReplyText = (text) => (text || '')
   .filter(line => !SHARE_FENCE_LINE_RE.test(line))
   .join('\n');
 
+// History state for a move from a node to its own pending reply: the
+// entry before this one is the reply's parent. A reply that fails then
+// goes back to it instead of adding it to the history a second time.
+const FROM_PARENT = { fromParent: true };
+
 // The browser tab's title for a node: its first line, or a state word
 // while an AI reply is still being generated.
 const tabTitleFor = (node) => {
@@ -96,6 +101,7 @@ function NodeDetail({ nodeIdOverride }) {
   // comes from params. Everything downstream just uses `id`.
   const id = nodeIdOverride || paramId;
   const navigate = useNavigate();
+  const location = useLocation();
   const [searchParams, setSearchParams] = useSearchParams();
   const { user: currentUser } = useUser();
   const { addToast } = useToast();
@@ -309,11 +315,12 @@ function NodeDetail({ nodeIdOverride }) {
       awaitLlmHandledRef.current = awaitLlm;
       const next = new URLSearchParams(searchParams);
       next.delete('awaitLlm');
-      setSearchParams(next, { replace: true });
+      setSearchParams(next, { replace: true, state: location.state });
       if (String(awaitLlm) === String(id)) {
         setLlmTaskNodeId(parseInt(awaitLlm, 10));
       } else {
-        navigate(`/node/${awaitLlm}?awaitLlm=${awaitLlm}`);
+        navigate(`/node/${awaitLlm}?awaitLlm=${awaitLlm}`,
+                 { state: FROM_PARENT });
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -367,7 +374,7 @@ function NodeDetail({ nodeIdOverride }) {
         // llmTaskNodeId state would be lost (this matches WritePage's
         // handoff). The awaitLlm effect picks it up after the remount.
         setLlmTaskNodeId(null);
-        navigate(`/node/${contId}?awaitLlm=${contId}`);
+        navigate(`/node/${contId}?awaitLlm=${contId}`, { state: FROM_PARENT });
         return;
       }
       if (completedId && String(completedId) === String(id)) {
@@ -411,12 +418,16 @@ function NodeDetail({ nodeIdOverride }) {
       addToast(llmError || 'LLM response generation failed', 8000);
       // awaitLlm flows can park the view on the pending LLM node itself;
       // on failure that's an empty dead node — hop to its parent (the
-      // user's entry), replacing the dead history entry so a back press
-      // walks real nodes.
+      // user's entry). Arrived from the parent: go back to it. Otherwise
+      // replace the dead history entry, so a back press walks real nodes.
       if (String(llmTaskNodeId) === String(id)) {
         const parent = node?.ancestors?.[node.ancestors.length - 1];
         if (parent && !parent.deleted) {
-          navigate(`/node/${parent.id}`, { replace: true });
+          if (location.state?.fromParent) {
+            navigate(-1);
+          } else {
+            navigate(`/node/${parent.id}`, { replace: true });
+          }
         }
       }
       setLlmTaskNodeId(null);
@@ -700,7 +711,8 @@ function NodeDetail({ nodeIdOverride }) {
     setError("");
     setLlmRequesting(true);
     requestLlmFor(id)
-      .then((newNodeId) => navigate(`/node/${newNodeId}?awaitLlm=${newNodeId}`))
+      .then((newNodeId) => navigate(`/node/${newNodeId}?awaitLlm=${newNodeId}`,
+                                    { state: FROM_PARENT }))
       .catch(handleLlmRequestError)
       .finally(() => setLlmRequesting(false));
   };
@@ -834,7 +846,10 @@ function NodeDetail({ nodeIdOverride }) {
       const llmNodeId = await tryAutoGenerateFor(updated.id, chain);
       // The edited node keeps its history entry; the response is watched
       // on its own node from the start (#367).
-      if (llmNodeId) navigate(`/node/${llmNodeId}?awaitLlm=${llmNodeId}`);
+      if (llmNodeId) {
+        navigate(`/node/${llmNodeId}?awaitLlm=${llmNodeId}`,
+                 { state: FROM_PARENT });
+      }
     } catch (err) {
       handleLlmRequestError(err);
     }
