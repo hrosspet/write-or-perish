@@ -6,8 +6,10 @@ This module provides a unified interface for calling different LLM providers
 """
 import logging
 import re
+import time
 
 import anthropic
+import httpx
 import openai
 from anthropic import Anthropic
 from openai import OpenAI
@@ -21,6 +23,38 @@ logger = logging.getLogger(__name__)
 # thinking and come back with no text and no tool call. max_tokens is only
 # a ceiling — it costs nothing unless the model uses it.
 DEFAULT_MAX_OUTPUT_TOKENS = 32000
+
+# Stop reasons that mean the reply was cut off, not finished. Claude 4.5+
+# models also stop at the context window (input + max_tokens may exceed
+# it), which leaves a prompt sized near the window with little output room.
+TRUNCATED_STOP_REASONS = frozenset({"max_tokens",
+                                    "model_context_window_exceeded"})
+
+# Sleeps before retrying an Anthropic stream that failed mid-way (an error
+# event after the 200, e.g. overloaded, or a dropped connection). The SDK
+# retries only the initial request; create() used to get these failures
+# as HTTP errors and retry them. Module-level so tests can zero them.
+ANTHROPIC_STREAM_RETRY_DELAYS = (2, 8)
+_RETRYABLE_STREAM_ERROR_TYPES = frozenset({
+    "overloaded_error", "api_error", "rate_limit_error"})
+
+# OpenAI calls are not streamed, so the whole generation must fit in one
+# read timeout. The SDK default (600 s) is too short for a reply that
+# uses most of the 32k budget below ~55 tokens/s.
+OPENAI_TIMEOUT_SECS = 1200
+
+
+def _retryable_stream_error(exc):
+    """A failure that happened after the stream started, which the SDK does
+    not retry: a raw transport error from reading the body, or an SSE error
+    event (raised as APIStatusError with the stream's 200 status)."""
+    if isinstance(exc, httpx.TransportError):
+        return True
+    if (isinstance(exc, anthropic.APIStatusError)
+            and exc.status_code == 200 and isinstance(exc.body, dict)):
+        error = exc.body.get("error") or {}
+        return error.get("type") in _RETRYABLE_STREAM_ERROR_TYPES
+    return False
 
 
 def model_input_cap(model_cfg, max_output_tokens=None):
@@ -178,7 +212,8 @@ class LLMProvider:
         Returns:
             Dict with content, total_tokens, and tool_calls
         """
-        client = OpenAI(api_key=api_key)
+        client = OpenAI(api_key=api_key, timeout=httpx.Timeout(
+            OPENAI_TIMEOUT_SECS, connect=5.0))
 
         # Convert chat-format messages to Responses input items: content
         # block type is role-dependent (input_text for user/system,
@@ -504,8 +539,18 @@ class LLMProvider:
             # non-streaming request whose max_tokens implies >10 minutes
             # (~21k tokens), and a streamed connection stays alive through
             # a long thinking phase instead of idling toward a timeout.
-            with client.messages.stream(**kwargs) as stream:
-                response = stream.get_final_message()
+            for retry_delay in (*ANTHROPIC_STREAM_RETRY_DELAYS, None):
+                try:
+                    with client.messages.stream(**kwargs) as stream:
+                        response = stream.get_final_message()
+                    break
+                except Exception as e:
+                    if retry_delay is None or not _retryable_stream_error(e):
+                        raise
+                    logger.warning(
+                        "Anthropic stream failed mid-way (%s); retrying in "
+                        "%ss", e, retry_delay)
+                    time.sleep(retry_delay)
         except anthropic.BadRequestError as e:
             error_msg = str(e)
             match = re.search(
@@ -534,10 +579,10 @@ class LLMProvider:
         # Calculate total tokens (Anthropic reports input/output separately)
         total_tokens = response.usage.input_tokens + response.usage.output_tokens
         stop_reason = response.stop_reason
-        truncated = stop_reason == "max_tokens"
+        truncated = stop_reason in TRUNCATED_STOP_REASONS
         logger.info(f"Anthropic API response: model={model}, input_tokens={response.usage.input_tokens}, output_tokens={response.usage.output_tokens}, stop_reason={stop_reason}")
         if truncated:
-            logger.warning(f"Anthropic response truncated (max_tokens reached): model={model}, output_tokens={response.usage.output_tokens}")
+            logger.warning(f"Anthropic response truncated ({stop_reason}): model={model}, output_tokens={response.usage.output_tokens}")
 
         cache_read = getattr(response.usage, "cache_read_input_tokens", 0) or 0
         cache_write = getattr(

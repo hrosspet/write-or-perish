@@ -368,7 +368,7 @@ def test_call_anthropic_preserves_blocks_and_cache_usage(app, monkeypatch):
             return FakeStream()
 
     class FakeClient:
-        def __init__(self, api_key=None):
+        def __init__(self, api_key=None, **kwargs):
             self.messages = FakeMessages()
 
     monkeypatch.setattr(providers, "Anthropic", FakeClient)
@@ -557,14 +557,19 @@ def test_call_openai_surfaces_cache_write_subset(app, monkeypatch):
         def create(self, **kwargs):
             return FakeResponse()
 
+    client_kwargs = {}
+
     class FakeClient:
-        def __init__(self, api_key=None):
+        def __init__(self, api_key=None, **kwargs):
+            client_kwargs.update(kwargs)
             self.responses = FakeResponses()
 
     monkeypatch.setattr(providers, "OpenAI", FakeClient)
     with app.app_context():
         result = providers.LLMProvider._call_openai(
             "gpt-5.6-sol", [{"role": "user", "content": "x"}], "k")
+    # Not streamed: the whole 32k-budget generation must fit one read.
+    assert client_kwargs["timeout"].read == providers.OPENAI_TIMEOUT_SECS
     assert result["input_tokens"] == 6018
     assert result["cached_tokens"] == 2815
     assert result["cache_write_subset_tokens"] == 3000

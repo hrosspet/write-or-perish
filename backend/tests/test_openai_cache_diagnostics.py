@@ -113,7 +113,7 @@ def _fake_openai(monkeypatch, diagnostics=None, reject_option=False):
             return FakeResponse()
 
     class FakeClient:
-        def __init__(self, api_key=None):
+        def __init__(self, api_key=None, **kwargs):
             self.responses = FakeResponses()
 
     monkeypatch.setattr(providers, "OpenAI", FakeClient)
@@ -168,7 +168,7 @@ def test_rejected_baseline_id_named_only_by_param_retries(app, monkeypatch):
     real_create = None
 
     class Rejecting:
-        def __init__(self, api_key=None):
+        def __init__(self, api_key=None, **kwargs):
             self.responses = self
 
         def create(self, **kwargs):
@@ -193,7 +193,7 @@ def test_other_bad_requests_are_not_retried(app, monkeypatch):
     providers, calls = _fake_openai(monkeypatch)
 
     class Broken:
-        def __init__(self, api_key=None):
+        def __init__(self, api_key=None, **kwargs):
             self.responses = self
 
         def create(self, **kwargs):

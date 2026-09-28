@@ -166,7 +166,7 @@ class EmptyTruncatedReplyError(RuntimeError):
 
     USER_MESSAGE = (
         "The model used up its whole output limit working through this "
-        "request before it could write a reply, so nothing was saved. "
+        "request before it could write a reply, so this reply is empty. "
         "Sending the same request again will likely hit the same limit — "
         "try breaking it into smaller steps (e.g. one section or one "
         "question at a time, or the review and the artifact update as "
@@ -174,6 +174,7 @@ class EmptyTruncatedReplyError(RuntimeError):
 
     def __init__(self):
         super().__init__(self.USER_MESSAGE)
+
 
 # Retry schedule for the loop's CONTINUATION calls: sleep lengths between
 # attempts (len == number of retries). A transient provider error (overload,
