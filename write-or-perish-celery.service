@@ -21,12 +21,16 @@ ExecReload=/bin/kill -s HUP $MAINPID
 # queue. The default KillMode=control-group also SIGTERMed the pool processes,
 # and billiard turns that into sys.exit() inside whatever task was running
 # (issue #312, a Read batch lost on 2026-09-17).
-# The stop script waits 240 s for the drain, then SIGTERMs the pool processes
+# The stop script waits 90 s for the drain, then SIGTERMs the pool processes
 # (the old behaviour, applied late): the main process logs the lost task and
-# restores reserved messages. 240 s covers LLM replies, transcription and
-# TTS; imports and profile builds can run longer and are still cut off.
+# restores reserved messages. While the old worker drains, no new task starts,
+# so the grace is also how long a reply or voice turn can wait during a deploy.
+# 90 s (maintainer's call, 2026-09-29) covers nearly all LLM replies,
+# transcription and TTS; imports and profile builds can run longer and are
+# still cut off (the profile schedule redoes a lost chunk). Separate workers
+# for long jobs: #379.
 # TimeoutStopSec is the SIGKILL backstop.
-ExecStop=/bin/bash /home/hrosspet/write-or-perish/scripts/celery-graceful-stop.sh $MAINPID 240
+ExecStop=/bin/bash /home/hrosspet/write-or-perish/scripts/celery-graceful-stop.sh $MAINPID 90
 KillMode=mixed
 TimeoutStopSec=300
 

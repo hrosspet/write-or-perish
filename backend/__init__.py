@@ -76,7 +76,7 @@ def create_app():
             # A WorkerLostError("…signal 15 (SIGTERM)…") used to follow every
             # deploy and was dropped here as noise. Since #312 a restart lets
             # running tasks finish; a pool process gets SIGTERM only when a
-            # task outlives the 240 s drain (scripts/celery-graceful-stop.sh),
+            # task outlives the 90 s drain (scripts/celery-graceful-stop.sh),
             # and that task is lost, so it reports.
             return event
 

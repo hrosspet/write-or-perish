@@ -6,7 +6,7 @@
 # 1. SIGTERM the Celery main process: a warm shutdown. It stops consuming,
 #    waits for the pool processes to finish their running tasks, returns
 #    reserved and ETA messages to the queue, and exits.
-# 2. If it is still draining after the grace period (default 240 s), SIGTERM
+# 2. If it is still draining after the grace period (default 90 s), SIGTERM
 #    the pool processes. That is what the old KillMode=control-group did at
 #    once: the running task gets SystemExit, and the main process, still
 #    alive, logs the lost task and restores its reserved messages. Without
@@ -18,7 +18,7 @@
 set -u
 
 MAINPID="${1:-}"
-GRACE="${2:-240}"
+GRACE="${2:-90}"
 
 [ -n "$MAINPID" ] || exit 0
 kill -TERM "$MAINPID" 2>/dev/null || exit 0
