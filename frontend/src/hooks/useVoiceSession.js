@@ -28,7 +28,9 @@ const TTS_TRIGGER_WATCHDOG_MS = 20000;
 // is given to finish arriving by SSE before the stream counts as dead.
 // The SSE reads the database once a second, so it can be that far behind
 // /tts-status; closing it then lost the last chunk and all_complete. 3 s
-// is that second plus network slack; not measured.
+// is that second plus network slack; not measured. Not applied when the
+// page returns to the foreground: that is when iOS has most likely killed
+// the stream, and a reconnect to a live one is harmless (it replays).
 const TTS_SSE_CATCH_UP_MS = 3000;
 
 // Chapter title of a node whose audio starts before its text is complete
@@ -720,7 +722,8 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
     let completedSeenAt = null;
     let catchUpTimer = null;
 
-    const reconcile = async () => {
+    // foreground: called because the page became visible again.
+    const reconcile = async ({ foreground = false } = {}) => {
       if (cancelled) return;
       if (
         phase === 'processing' &&
@@ -743,7 +746,7 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
           if (res.data.status === 'completed' && res.data.node?.audio_tts_url) {
             if (completedSeenAt == null) completedSeenAt = Date.now();
             const waited = Date.now() - completedSeenAt;
-            if (waited < TTS_SSE_CATCH_UP_MS) {
+            if (!foreground && waited < TTS_SSE_CATCH_UP_MS) {
               // The stream may still be delivering the last chunks. Look
               // again once it has had the time; all_complete arriving
               // meanwhile ends this effect and the timer with it.
@@ -776,7 +779,7 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
 
     const intervalId = setInterval(reconcile, TTS_RECOVERY_POLL_MS);
     const handleVisibilityChange = () => {
-      if (document.visibilityState === 'visible') reconcile();
+      if (document.visibilityState === 'visible') reconcile({ foreground: true });
     };
     document.addEventListener('visibilitychange', handleVisibilityChange);
     return () => {
