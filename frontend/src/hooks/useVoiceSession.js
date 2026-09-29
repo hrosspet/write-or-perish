@@ -24,6 +24,14 @@ const TTS_RECOVERY_POLL_MS = 7000;
 // How long an armed /tts POST may stay silent (no 200/202 outcome, no SSE
 // activity) before we assume the request was lost and re-fire it.
 const TTS_TRIGGER_WATCHDOG_MS = 20000;
+// INTRODUCED CONSTANT: how long a node that /tts-status reports completed
+// is given to finish arriving by SSE before the stream counts as dead.
+// The SSE reads the database once a second, so it can be that far behind
+// /tts-status; closing it then lost the last chunk and all_complete. 3 s
+// is that second plus network slack; not measured. Not applied when the
+// page returns to the foreground: that is when iOS has most likely killed
+// the stream, and a reconnect to a live one is harmless (it replays).
+const TTS_SSE_CATCH_UP_MS = 3000;
 
 // Chapter title of a node whose audio starts before its text is complete
 // (#367: spoken while written); replaced with the real one when it's done.
@@ -686,11 +694,12 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
   //  - trigger watchdog: LLM completed but the /tts POST produced no
   //    outcome (no 200/202, no SSE activity) within
   //    TTS_TRIGGER_WATCHDOG_MS → re-arm and re-run the trigger effect.
-  //  - dead-SSE fallback: SSE enabled but the server says TTS already
-  //    completed → deliver the full file via REST; if SSE chunks for this
-  //    node were already queued, force an SSE reconnect instead (the
-  //    stream replays every chunk; received-index + queue-URL dedup make
-  //    the replay safe).
+  //  - dead-SSE fallback: SSE enabled but the server has said TTS
+  //    completed for TTS_SSE_CATCH_UP_MS → deliver the full file via
+  //    REST; if SSE chunks for this node were already queued, force an
+  //    SSE reconnect instead (the stream replays every chunk, then
+  //    all_complete; received-index + queue-URL dedup make the replay
+  //    safe).
   // Latest values for the reconcile closure. The effect below must depend
   // only on the primitives that define "undelivered turn" (phase,
   // ttsGenerating, llmNodeId) — llm-status polling re-renders every 1.5s
@@ -708,8 +717,13 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
     if (phase !== 'processing' && !ttsGenerating) return;
 
     let cancelled = false;
+    // When /tts-status first said this node's TTS completed while the SSE
+    // was still open (see TTS_SSE_CATCH_UP_MS).
+    let completedSeenAt = null;
+    let catchUpTimer = null;
 
-    const reconcile = async () => {
+    // foreground: called because the page became visible again.
+    const reconcile = async ({ foreground = false } = {}) => {
       if (cancelled) return;
       if (
         phase === 'processing' &&
@@ -730,6 +744,16 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
           const res = await api.get(`/nodes/${llmNodeId}/tts-status`, { timeout: 10000 });
           if (cancelled) return;
           if (res.data.status === 'completed' && res.data.node?.audio_tts_url) {
+            if (completedSeenAt == null) completedSeenAt = Date.now();
+            const waited = Date.now() - completedSeenAt;
+            if (!foreground && waited < TTS_SSE_CATCH_UP_MS) {
+              // The stream may still be delivering the last chunks. Look
+              // again once it has had the time; all_complete arriving
+              // meanwhile ends this effect and the timer with it.
+              clearTimeout(catchUpTimer);
+              catchUpTimer = setTimeout(reconcile, TTS_SSE_CATCH_UP_MS - waited);
+              return;
+            }
             if (sseDeliveredForNodeRef.current === llmNodeId) {
               // Part of this node's audio already arrived via SSE — a
               // full-file load would duplicate it. Reconnect and let the
@@ -755,12 +779,13 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
 
     const intervalId = setInterval(reconcile, TTS_RECOVERY_POLL_MS);
     const handleVisibilityChange = () => {
-      if (document.visibilityState === 'visible') reconcile();
+      if (document.visibilityState === 'visible') reconcile({ foreground: true });
     };
     document.addEventListener('visibilitychange', handleVisibilityChange);
     return () => {
       cancelled = true;
       clearInterval(intervalId);
+      clearTimeout(catchUpTimer);
       document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
   }, [phase, ttsGenerating, llmNodeId]);

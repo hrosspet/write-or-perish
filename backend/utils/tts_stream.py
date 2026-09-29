@@ -37,6 +37,11 @@ logger = logging.getLogger(__name__)
 FINISH_TIMEOUT_SECS = 30 * 60
 
 
+class NodeDeleted(Exception):
+    """The node was deleted while its reply was spoken: its TTS stops.
+    Expected (the user deleted it), so it is logged as a warning."""
+
+
 class OpenAITTSAudio:
     """The real audio side: OpenAI TTS to MP3, pydub for durations and
     the joined file. Swapped for a fake in tests."""
@@ -263,9 +268,13 @@ class VoiceTTSStream:
                     self._finish_node(speech)
                 else:
                     self._mark_failed(speech.node_id)
-            except Exception:
-                logger.exception("Voice TTS failed for node %s",
-                                 speech.node_id)
+            except Exception as e:
+                if isinstance(e, NodeDeleted):
+                    logger.warning("Voice TTS stopped for node %s: deleted "
+                                   "mid-generation", speech.node_id)
+                else:
+                    logger.exception("Voice TTS failed for node %s",
+                                     speech.node_id)
                 db.session.rollback()
                 with self.cv:
                     speech.dropped = True
@@ -283,7 +292,7 @@ class VoiceTTSStream:
             mark = functools.partial(voice_timing.mark, speech.node_id)
         node = db.session.get(Node, speech.node_id)
         if node is None or node.deleted_at is not None:
-            raise RuntimeError("node deleted mid-generation")
+            raise NodeDeleted()
         row = TTSChunk(node_id=speech.node_id, chunk_index=index,
                        section_index=chunk.section_index,
                        section_title=(chunk.section_title or None)
