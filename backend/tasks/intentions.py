@@ -82,9 +82,9 @@ def _build_messages(user, template, budget, chronological):
     return messages, export, approximate_token_count(export)
 
 
-def _save(user, content, input_tokens, output_tokens, total_tokens, batch):
+def _add_cost_log(user, input_tokens, output_tokens, batch):
     from backend.extensions import db
-    from backend.models import UserArtifact, APICostLog
+    from backend.models import APICostLog
     from backend.utils.cost import calculate_llm_cost_microdollars
     cost = calculate_llm_cost_microdollars(
         MODEL_ID, input_tokens, output_tokens, batch=batch)
@@ -92,6 +92,31 @@ def _save(user, content, input_tokens, output_tokens, total_tokens, batch):
         user_id=user.id, model_id=MODEL_ID, request_type="intentions_infer",
         input_tokens=input_tokens, output_tokens=output_tokens,
         cost_microdollars=cost))
+    return cost
+
+
+def _refuse_empty_truncated(user, response, batch):
+    """Cut off at the output limit before any text (#368): write the cost
+    row, save no artifact version (the previous one stays current) and
+    raise EmptyTruncatedOutputError."""
+    from backend.extensions import db
+    from backend.llm_providers import (
+        is_empty_truncated, EmptyTruncatedOutputError)
+    if not is_empty_truncated(response):
+        return
+    out_t = response.get("output_tokens", 0)
+    _add_cost_log(user, response.get("input_tokens", 0), out_t, batch)
+    db.session.commit()
+    logger.warning("intentions user %s: output cut off before any text "
+                   "(output_tokens=%s); nothing saved", user.id, out_t)
+    raise EmptyTruncatedOutputError(
+        f"intentions for user {user.id}", MODEL_ID, out_t)
+
+
+def _save(user, content, input_tokens, output_tokens, total_tokens, batch):
+    from backend.extensions import db
+    from backend.models import UserArtifact
+    cost = _add_cost_log(user, input_tokens, output_tokens, batch)
     artifact = UserArtifact(
         user_id=user.id, kind=KIND,
         title=UserArtifact.DEFAULT_KINDS.get(KIND, "Intentions"),
@@ -237,6 +262,7 @@ def run_infer_intentions_sync_impl(user_id, progress=None):
     in_t = response.get("input_tokens", 0)
     out_t = response.get("output_tokens", 0)
     total = response.get("total_tokens") or (in_t + out_t)
+    _refuse_empty_truncated(user, response, batch=False)
     saved = _save(user, response["content"], in_t, out_t, total, batch=False)
     logger.info("intentions user %s: saved v%s from sync run (%s llm tokens, $%.4f)",
                 user.id, saved["version"], saved["llm_tokens"], saved["cost_usd"])
@@ -312,6 +338,7 @@ def apply_intentions_item(user, item, result):
     item. Saves the artifact at batch price. Idempotent enough for poll
     overlap: a second apply would add a version, so the poller marks the
     job collected in the same pass (like profile items)."""
+    _refuse_empty_truncated(user, result, batch=True)
     saved = _save(user, result["content"],
                   result.get("input_tokens", 0),
                   result.get("output_tokens", 0),

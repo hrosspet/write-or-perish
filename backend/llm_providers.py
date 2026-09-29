@@ -31,6 +31,35 @@ DEFAULT_MAX_OUTPUT_TOKENS = 32000
 TRUNCATED_STOP_REASONS = frozenset({"max_tokens",
                                     "model_context_window_exceeded"})
 
+
+def is_empty_truncated(response):
+    """True when a response (live or batch-collected) was cut off at the
+    output limit before the model wrote any text or tool call — typically
+    a model that always thinks spending the whole budget on reasoning.
+
+    The same test the chat path's _finalize applies inline (#366; it runs
+    on the text after edge timestamps are stripped). Background jobs that
+    see it save nothing and fail the job (#368)."""
+    if not response.get("truncated"):
+        return False
+    return (not (response.get("content") or "").strip()
+            and not response.get("tool_calls"))
+
+
+class EmptyTruncatedOutputError(RuntimeError):
+    """A background job's model output was cut off before any text
+    (is_empty_truncated). The job saves nothing, so the previous version
+    of what it maintains stays current, and fails so a later run can try
+    again (#368). The cost row for the call is still written."""
+
+    def __init__(self, job, model_id=None, output_tokens=None):
+        self.job = job
+        super().__init__(
+            f"{job}: model output was cut off at the output limit before "
+            f"any text (model={model_id}, output_tokens={output_tokens}); "
+            f"nothing was saved")
+
+
 # Sleeps before retrying a stream that failed mid-way (an error event
 # after the 200, e.g. overloaded, or a dropped connection). The SDKs retry
 # only the initial request; non-streamed calls used to get these failures

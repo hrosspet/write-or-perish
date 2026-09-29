@@ -11,7 +11,7 @@ from backend.models import User, UserProfile, APICostLog
 from backend.extensions import db
 from backend.llm_providers import (
     LLMProvider, PromptTooLongError, DEFAULT_MAX_OUTPUT_TOKENS,
-    model_input_cap)
+    model_input_cap, is_empty_truncated, EmptyTruncatedOutputError)
 
 from backend.utils.tokens import (
     approximate_token_count, reduce_export_tokens, format_date_metadata,
@@ -370,12 +370,7 @@ def _save_profile(user, model_id, profile_text, response,
 
     total_tokens = response["total_tokens"]
 
-    cost_log = APICostLog(
-        user_id=user.id, model_id=model_id,
-        request_type="profile_batch" if batch else "profile",
-        **llm_cost_log_fields(model_id, response, batch=batch),
-    )
-    db.session.add(cost_log)
+    _add_profile_cost_log(user, model_id, response, batch=batch)
 
     new_profile = UserProfile(
         user_id=user.id, generated_by=model_id,
@@ -400,6 +395,38 @@ def _save_profile(user, model_id, profile_text, response,
     db.session.add(new_profile)
     db.session.commit()
     return new_profile
+
+
+def _add_profile_cost_log(user, model_id, response, batch=False):
+    db.session.add(APICostLog(
+        user_id=user.id, model_id=model_id,
+        request_type="profile_batch" if batch else "profile",
+        **llm_cost_log_fields(model_id, response, batch=batch),
+    ))
+
+
+def refuse_empty_truncated_profile(user, model_id, response, job,
+                                   batch=False):
+    """Guard before a profile version is saved from model output (#368).
+
+    When the output was cut off at the output limit before any text, an
+    empty version saved here would become the chain tip — the "previous
+    profile" the next chunk or update builds on — and the profile would
+    lose everything before it. Instead: write the cost row (the call was
+    billed), save no version, and raise EmptyTruncatedOutputError so the
+    job fails. The last good version stays the tip, and the next run
+    resumes from it."""
+    if not is_empty_truncated(response):
+        return
+    _add_profile_cost_log(user, model_id, response, batch=batch)
+    db.session.commit()
+    logger.warning(
+        "Empty truncated profile output for user %s (%s, model %s, "
+        "output_tokens=%s): no version saved, the previous one stays",
+        user.id, job, model_id, response.get("output_tokens"))
+    raise EmptyTruncatedOutputError(
+        f"profile {job} for user {user.id}", model_id,
+        response.get("output_tokens"))
 
 
 def retip_profile_chain(user_id, version):
@@ -917,6 +944,7 @@ def _do_integration(self, user, model_id, last_iterative_profile_id,
     })
 
     response = LLMProvider.get_completion(model_id, messages, api_keys)
+    refuse_empty_truncated_profile(user, model_id, response, "integration")
 
     last_profile = chain[-1]
     new_profile = _save_profile(
@@ -1083,6 +1111,10 @@ def _chunked_profile_loop(self, user, model_id, update_template,
             status_label=f'{status_prefix}: Chunk {chunk_num}',
             max_tokens=max_output_tokens,
         )
+        # An empty cut-off chunk ends the run here, before it can become
+        # the base of the next chunk; the chunks saved so far stay (#368).
+        refuse_empty_truncated_profile(
+            user, model_id, response, f"chunk {chunk_num}")
 
         observed = record_token_ratio(
             user, model_id, chunk_units, response.get("input_tokens"))

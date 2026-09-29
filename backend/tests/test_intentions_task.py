@@ -151,6 +151,31 @@ def test_apply_intentions_item_saves_at_batch_price(app, wired):  # noqa: F811
     assert UserArtifact.query.filter_by(user_id=u.id, kind="intentions").count() == 1
 
 
+def test_empty_truncated_output_saves_no_version(app, wired, monkeypatch):  # noqa: F811
+    """#368: output cut off before any text — batch or sync — saves no
+    artifact version (the previous one stays current), raises, and keeps
+    the cost row."""
+    from backend.llm_providers import EmptyTruncatedOutputError
+    import backend.llm_providers as lp
+    u = _make_user("ivan")
+    _db.session.commit()
+    item = {"custom_id": f"int-u{u.id}", "user_id": u.id, "kind": "intentions",
+            "budget": 1_000_000, "resubmitted": False}
+    with pytest.raises(EmptyTruncatedOutputError):
+        it.apply_intentions_item(u, item, {
+            "content": "", "truncated": True,
+            "input_tokens": 100_000, "output_tokens": 32_000})
+    monkeypatch.setattr(lp.LLMProvider, "get_completion", staticmethod(
+        lambda model_id, messages, keys, **kw: {
+            "content": " ", "truncated": True, "total_tokens": 132_000,
+            "input_tokens": 100_000, "output_tokens": 32_000}))
+    with pytest.raises(EmptyTruncatedOutputError):
+        it.run_infer_intentions_sync_impl(u.id)
+    assert UserArtifact.query.filter_by(user_id=u.id, kind="intentions").count() == 0
+    assert APICostLog.query.filter_by(
+        user_id=u.id, request_type="intentions_infer").count() == 2
+
+
 def _job_for(item):
     from datetime import datetime
     j = ProfileBatchJob(provider_key="anthropic", batch_id="b-old",

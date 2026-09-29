@@ -366,6 +366,12 @@ def _apply_result(user, item, result, submitted_at):
     deterministic chunk-1 cutoff), and matching those historic rows
     discarded every result and re-submitted chunk 1 forever."""
     response = _response_from_result(result)
+    # An empty cut-off result saves nothing and raises (#368): the poller
+    # counts a failed attempt, and the re-seed builds on the last good
+    # version instead of an empty chain tip.
+    _exports.refuse_empty_truncated_profile(
+        user, item["model_id"], response,
+        f"batch {item.get('kind', 'chunk')}", batch=True)
     cutoff = (datetime.fromisoformat(item["source_data_cutoff"])
               if item.get("source_data_cutoff") else None)
 

@@ -1444,3 +1444,75 @@ def test_integration_leaves_out_none_versions(app, monkeypatch):
     tip.ai_usage = "none"
     db.session.commit()
     assert pb._exports.build_integration_messages(u.id, tip.id) == (None, None)
+
+
+# ── #368: an empty result cut off at the output limit ────────────────────
+
+def test_poll_empty_truncated_chunk_saves_nothing_and_counts_attempt(
+        app, monkeypatch):
+    """A chunk cut off before any text must not become the chain tip (the
+    base the next chunk builds on). Nothing is saved, no next step is
+    submitted, the attempt counts as failed, the cost row is kept."""
+    u = _user()
+    prev = _prev_profile(u, datetime(2026, 5, 1))
+    job, item = _chunk_job(u, prev)
+    monkeypatch.setattr(pb, "batch_check_and_collect", lambda bids, keys: (
+        {item["custom_id"]: {"content": "", "truncated": True,
+                             "input_tokens": 2000, "output_tokens": 32000}},
+        {}, {}))
+    submit = MagicMock(return_value={})
+    monkeypatch.setattr(pb, "batch_submit", submit)
+
+    pb._poll_profile_batches()
+
+    assert UserProfile.query.filter_by(user_id=u.id).all() == [prev]
+    assert pb._exports.profile_update_base(u.id).id == prev.id
+    u2 = User.query.get(u.id)
+    assert u2.profile_batch_attempts == 1
+    assert u2.profile_batch_pending is False
+    submit.assert_not_called()
+    assert ProfileBatchJob.query.get(job.id).status == "collected"
+    log = APICostLog.query.filter_by(user_id=u.id).one()
+    assert log.request_type == "profile_batch"
+    assert log.output_tokens == 32000
+
+
+def test_poll_empty_truncated_integration_saves_nothing(app, monkeypatch):
+    u = _user()
+    tip = _prev_profile(u, datetime(2026, 6, 1))
+    job, item = _integration_job(u, tip)
+    monkeypatch.setattr(pb, "batch_check_and_collect", lambda bids, keys: (
+        {item["custom_id"]: {"content": "  \n", "truncated": True,
+                             "input_tokens": 100, "output_tokens": 32000}},
+        {}, {}))
+    monkeypatch.setattr(pb, "batch_submit", MagicMock(return_value={}))
+    import backend.utils.notifications as notif
+    notify = MagicMock()
+    monkeypatch.setattr(notif, "notify_profile_ready", notify)
+
+    pb._poll_profile_batches()
+
+    assert UserProfile.query.filter_by(
+        user_id=u.id, generation_type="integration").count() == 0
+    assert User.query.get(u.id).profile_batch_attempts == 1
+    notify.assert_not_called()
+    assert APICostLog.query.filter_by(user_id=u.id).count() == 1
+
+
+def test_apply_result_truncated_with_text_is_still_saved(app, monkeypatch):
+    """Only an EMPTY cut-off result is refused; a cut-off result with text
+    is saved as before."""
+    u = _user()
+    db.session.commit()
+    monkeypatch.setattr(pb._exports, "build_user_export_content",
+                        MagicMock(return_value=None))
+    item = {"custom_id": "x", "user_id": u.id, "kind": "chunk",
+            "prev_profile_id": None, "generation_type": "iterative",
+            "prev_cumulative": 0, "origin_stats": None,
+            "source_data_cutoff": "2026-06-01T00:00:00",
+            "model_id": "test-model", "chunk_units": 1000}
+    result = {"content": "PARTIAL PROFILE", "truncated": True,
+              "input_tokens": 3000, "output_tokens": 32000}
+    pb._apply_result(u, item, result, datetime.utcnow() - timedelta(minutes=1))
+    assert "PARTIAL PROFILE" in UserProfile.query.filter_by(
+        user_id=u.id).one().get_content()
