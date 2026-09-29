@@ -27,8 +27,12 @@ logger = logging.getLogger(__name__)
 TTL_SECONDS = 7 * 24 * 3600
 _PREFIX = "voice_timing:"
 _USER_PREFIX = "voice_timing_user:"
+# Every user's turns, as "<user_id>:<node_id>", for the admin view.
+_ALL_KEY = "voice_timing_all"
 # How many of a user's turns are kept in their list of recent turns.
 RECENT_TURNS = 50
+# How many turns (all users) the admin view can reach.
+ALL_TURNS = 1000
 
 # The stages, in the order a turn passes them: (name, from, to). The
 # letters are the ones #371 uses; a1-a3 and b1-b2 split a and b.
@@ -173,15 +177,20 @@ def log_summary(rec):
 
 
 def remember_turn(user_id, node_id):
-    """Add *node_id* to *user_id*'s recent turns (newest last)."""
+    """Add *node_id* to *user_id*'s recent turns and to everyone's
+    (newest last)."""
     try:
         r = _redis()
         if r is None:
             return
+        now = time.time()
         key = f"{_USER_PREFIX}{user_id}"
-        r.zadd(key, {str(node_id): time.time()})
+        r.zadd(key, {str(node_id): now})
         r.zremrangebyrank(key, 0, -RECENT_TURNS - 1)
         r.expire(key, TTL_SECONDS)
+        r.zadd(_ALL_KEY, {f"{user_id}:{node_id}": now})
+        r.zremrangebyrank(_ALL_KEY, 0, -ALL_TURNS - 1)
+        r.expire(_ALL_KEY, TTL_SECONDS)
     except Exception:  # timing never breaks a turn
         logger.warning("voice-timing user=%s: Redis write failed", user_id,
                        exc_info=True)
@@ -199,6 +208,29 @@ def recent_turns(user_id, limit=RECENT_TURNS):
                        exc_info=True)
         return []
     return [int(i) for i in ids]
+
+
+def recent_turns_all(since, limit=ALL_TURNS):
+    """Everyone's turns reported since *since* (epoch secs), newest
+    first, as (user_id, node_id)."""
+    try:
+        r = _redis()
+        if r is None:
+            return []
+        members = r.zrevrangebyscore(_ALL_KEY, "+inf", since,
+                                     start=0, num=limit)
+    except Exception:  # timing never breaks a turn
+        logger.warning("voice-timing: Redis read of all turns failed",
+                       exc_info=True)
+        return []
+    out = []
+    for member in members:
+        user_id, _, node_id = member.partition(":")
+        try:
+            out.append((int(user_id), int(node_id)))
+        except ValueError:
+            continue
+    return out
 
 
 def medians(records):

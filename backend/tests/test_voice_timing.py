@@ -46,6 +46,14 @@ class FakeRedis:
         for member in members[start:stop + 1]:
             del self.zsets[key][member]
 
+    def zrevrangebyscore(self, key, high, low, start=0, num=None):
+        scores = self.zsets.get(key, {})
+        high = float("inf") if high == "+inf" else float(high)
+        members = [m for m in reversed(self._by_score(key))
+                   if float(low) <= scores[m] <= high] \
+            if key in self.zsets else []
+        return members[start:None if num is None else start + num]
+
     def zrevrange(self, key, start, stop):
         members = list(reversed(self._by_score(key))) \
             if key in self.zsets else []
