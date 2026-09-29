@@ -10,7 +10,8 @@ from backend.utils.placeholders import (
     validate_ca_tweets_placeholders, validate_user_export_placeholders,
 )
 from backend.utils.ca_feed import (
-    READ_FURTHER_MARKER, READ_PROMPT_KEYS, ca_turn, read_reply_ids,
+    FEED_AI_USAGE, READ_FURTHER_MARKER, READ_PROMPT_KEYS, ca_turn,
+    read_reply_ids,
 )
 
 
@@ -80,7 +81,7 @@ class _Chain:
         self.nodes = [] if node is None else ancestor_chain(
             node.id, Node.id, Node.parent_id, Node.node_type, Node.llm_model,
             Node.deleted_at, Node.prompt_key, Node.tool_calls_meta,
-            max_depth=_MAX_ANCESTRY_HOPS)
+            Node.ai_usage, max_depth=_MAX_ANCESTRY_HOPS)
         self.keys = {n.id: n.prompt_key for n in self.nodes if n.prompt_key}
         linked = [n.id for n in self.nodes if not n.prompt_key]
         if linked:
@@ -194,6 +195,46 @@ def reply_read_turn(parent, meta=None, parent_content=None, chain=None):
                    chain.rendered, requested=requested)
 
 
+def reply_ai_usage(parent_node, user, chain=None, parent_content=None):
+    """The ai_usage a new reply under *parent_node* starts with when the
+    request names none (#362): the parent's, as everywhere, except that
+    the Read's own nodes are looked through. Those are 'chat' by
+    construction because they quote other people's tweets
+    (ca_feed.FEED_AI_USAGE); that describes them, not what is written
+    under them, and the tweets are kept off the training key per request
+    anyway (llm_completion). The walk goes up from the parent and skips:
+
+      - the read prompts (by key; a PoC-era prompt that carries
+        {ca_tweets} in its own text only as the direct parent, whose
+        *parent_content* the caller has decrypted anyway, as in
+        reply_read_turn);
+      - the read replies: the recommendation nodes that present the
+        picks (_Chain.reads — a render, picks or a batch, a "Read
+        further" marker, or an LLM reply directly under a read prompt).
+
+    The first node left decides, whatever its value, whether the user
+    wrote it or it is an LLM reply after the recommendation (those carry
+    the thread's setting like any other reply, 2026-09-29). None left
+    (the read is the thread's root): the user's default_ai_usage. The
+    reply form (GET /nodes/<id>), Voice, Text mode and the streaming path
+    all ask here, so they cannot drift apart.
+    """
+    default = getattr(user, "default_ai_usage", None) or "none"
+    if parent_node is None:
+        return default
+    chain = chain or _Chain(parent_node)
+    nodes = chain.nodes or [parent_node]
+    prompts = {i for i, n in enumerate(nodes)
+               if chain.keys.get(n.id) in READ_PROMPT_KEYS}
+    if not prompts and CA_TWEETS_PATTERN.search(parent_content or ""):
+        prompts = {0}
+    for i, n in enumerate(nodes):
+        if i in prompts or n.id in chain.reads:
+            continue
+        return n.ai_usage or default
+    return default
+
+
 def create_llm_placeholder(parent_node_id, model_id, human_owner_id,
                            privacy_level="private", ai_usage="chat",
                            placeholder_text="[LLM response generation pending...]",
@@ -277,6 +318,15 @@ def create_llm_placeholder(parent_node_id, model_id, human_owner_id,
             "Reply under node %s: model %s is not offered -> %s",
             parent.id, model_id, new_model_id)
         model_id = new_model_id
+    # The Read's own recommendation reply (a read or a read further,
+    # whichever way it was asked for) presents the picks, quoting the
+    # tweets verbatim: it is 'chat' by construction, like the read
+    # routes stamp it. A chat turn after it takes the thread's setting
+    # like any other reply (#362, 2026-09-29): the tweets it re-sends
+    # are kept off the training key per call (llm_completion). 'none' is
+    # left as the caller sent it.
+    if turn in ("read", "read_again") and ai_usage == "train":
+        ai_usage = FEED_AI_USAGE
 
     llm_user = User.query.filter_by(username=model_id).first()
     if not llm_user:

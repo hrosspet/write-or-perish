@@ -8,7 +8,7 @@ from backend.utils.timefmt import iso_utc
 from backend.utils.prompts import get_user_prompt_record
 from backend.utils.placeholders import UserExportValidationError
 from backend.utils.llm_nodes import (
-    create_llm_placeholder, pick_model_for_generation,
+    create_llm_placeholder, pick_model_for_generation, reply_ai_usage,
 )
 from backend.utils.context_artifacts import attach_context_artifacts
 from backend.utils.session_helpers import attach_agentic_prompt_under
@@ -244,7 +244,7 @@ def add_message(conversation_id):
     if not is_descendant:
         return jsonify({"error": "parent_id does not belong to this conversation"}), 400
 
-    ai_usage = last_node.ai_usage or current_user.default_ai_usage
+    ai_usage = reply_ai_usage(last_node, current_user)
     privacy_level = last_node.privacy_level or "private"
 
     # Create user message node
@@ -339,8 +339,12 @@ def continue_from_node(node_id):
     (tools, artifacts, mode notes); inside an agentic thread nothing is
     added. The text counterpart of POST /voice/from-node.
 
-    Body: { content: string, model?: string, auto_generate?: bool }.
-    Privacy and AI usage come from the node (a read reply's is 'chat').
+    Body: { content: string, model?: string, auto_generate?: bool,
+            ai_usage?: string }.
+    Privacy comes from the node. AI usage is the one the reply form sent,
+    else the thread's with the read looked through (reply_ai_usage,
+    #362): a read reply is 'chat' for the tweets it quotes, which says
+    nothing about what the user writes under it.
 
     The one caller today is the reply box under a read reply (#323): a
     conversation about the picks says a lot about what the user is
@@ -366,7 +370,9 @@ def continue_from_node(node_id):
             "char_cap": NODE_CHAR_CAP,
         }), 422
 
-    ai_usage = node.ai_usage or current_user.default_ai_usage
+    ai_usage = data.get("ai_usage") or reply_ai_usage(node, current_user)
+    if not validate_ai_usage(ai_usage):
+        return jsonify({"error": f"Invalid ai_usage: {ai_usage}"}), 400
     if ai_usage == 'none':
         return jsonify({
             "error": "Text mode requires ai_usage of 'chat' or 'train'",
