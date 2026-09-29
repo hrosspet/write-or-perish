@@ -82,6 +82,26 @@ def test_stages_add_up_to_the_total():
     assert stages["b"] == stages["b1"] + stages["b2"]
 
 
+def test_a_tapped_turn_has_no_h_or_total():
+    """iOS never autoplays: the wait for the tap is the user's, not the
+    pipeline's (#371)."""
+    marks = {"rec_stop": 0.0, "chunk_ready": 12.0, "play_pressed": 20.0,
+             "playing": 20.3}
+    stages = voice_timing.stage_seconds(marks)
+    assert "h" not in stages and "total" not in stages
+    assert stages["ready"] == 12.0
+    assert stages["tap"] == 0.3
+    # Autoplay blocked, then the lock screen's own play button.
+    stages = voice_timing.stage_seconds(
+        {"rec_stop": 0.0, "chunk_ready": 12.0, "autoplay_blocked": 12.1,
+         "playing": 30.0})
+    assert "h" not in stages and "total" not in stages and "tap" not in stages
+    # Autoplay: all of it counts.
+    stages = voice_timing.stage_seconds(
+        {"rec_stop": 0.0, "chunk_ready": 12.0, "playing": 12.3})
+    assert stages["h"] == 0.3 and stages["total"] == 12.3
+
+
 def test_medians_skip_missing_stages():
     records = [{"stages": {"c": 1.0, "d": 4.0}},
                {"stages": {"c": 3.0}},

@@ -41,20 +41,31 @@ STAGES = (
     ("b1", "llm_task_start", "llm_request"),
     ("b2", "llm_request", "first_text"),
     ("c", "first_text", "chunk_cut"),
+    ("c1", "first_text", "text_min_chunk"),
+    ("c2", "text_min_chunk", "chunk_cut"),
     ("d", "chunk_cut", "tts_first_byte"),
     ("e", "tts_first_byte", "tts_last_byte"),
     ("f", "tts_last_byte", "chunk_published"),
     ("g", "chunk_published", "chunk_ready"),
     ("h", "chunk_ready", "playing"),
     ("total", "rec_stop", "playing"),
+    ("ready", "rec_stop", "chunk_ready"),
 )
+
+# A turn whose playback waited for a tap (iOS never autoplays: the
+# browser marks autoplay_blocked, and play_pressed for the app's own play
+# button) has the user's reaction time in h and total. Those two are left
+# out of its record; ``tap`` (tap -> playing, when the app's button was
+# used) and ``ready`` still measure it.
+TAP_STAGES = (("tap", "play_pressed", "playing"),)
+_NOT_WITH_TAP = frozenset({"h", "total"})
 
 # Marks the browser may send. finalize_acked, llm_node_known and
 # tts_attach are not stage boundaries; they show where inside a and g the
 # browser was waiting.
 BROWSER_MARKS = frozenset({
     "rec_stop", "finalize_acked", "llm_node_known", "tts_attach",
-    "chunk_ready", "playing",
+    "chunk_ready", "autoplay_blocked", "play_pressed", "playing",
 })
 
 _client = None
@@ -118,9 +129,13 @@ def _write(node_id, marks, facts):
 
 
 def stage_seconds(marks):
-    """{stage: seconds} for every stage whose two marks exist."""
+    """{stage: seconds} for every stage whose two marks exist (h and total
+    not for a turn started from a tap, see TAP_STAGES)."""
     out = {}
-    for name, start, end in STAGES:
+    tapped = "play_pressed" in marks or "autoplay_blocked" in marks
+    for name, start, end in STAGES + TAP_STAGES:
+        if tapped and name in _NOT_WITH_TAP:
+            continue
         if start in marks and end in marks:
             out[name] = round(marks[end] - marks[start], 3)
     return out
@@ -189,7 +204,7 @@ def recent_turns(user_id, limit=RECENT_TURNS):
 def medians(records):
     """{stage: median seconds} over the records that have the stage."""
     out = {}
-    for name, _start, _end in STAGES:
+    for name, _start, _end in STAGES + TAP_STAGES:
         values = sorted(r["stages"][name] for r in records
                         if name in r["stages"])
         if not values:

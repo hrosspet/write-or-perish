@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useState, useRef, useCallback } from 'react';
 import { useToast } from './ToastContext';
+import * as voiceTiming from '../utils/voiceTiming';
 
 const AudioContext = createContext();
 
@@ -377,7 +378,12 @@ export const AudioProvider = ({ children }) => {
     };
 
     if (shouldAutoPlay) {
-      audio.play().catch(err => console.error('Error playing chunk:', err));
+      audio.play().catch(err => {
+        // iOS: the voice turn's audio waits for a tap (the lock screen's
+        // play button included), which its timing must not count (#371).
+        if (err && err.name === 'NotAllowedError') voiceTiming.mark('autoplay_blocked');
+        console.error('Error playing chunk:', err);
+      });
     }
   }, [calculateCumulativeTime, startTimeTracking, stopTimeTracking, recalculateTotalDuration, cleanupAudio, addToast, setWaitingForChunks]);
 
@@ -599,6 +605,9 @@ export const AudioProvider = ({ children }) => {
   }, [preloadChunkDurations, playChunkAtTime, setWaitingForChunks]);
 
   const play = useCallback(async () => {
+    // A voice turn's audio started by hand (iOS never autoplays): its
+    // timing leaves the wait for the tap out of h and total (#371).
+    voiceTiming.mark('play_pressed');
     if (audioRef.current && !isPlaying) {
       try {
         await audioRef.current.play();

@@ -28,7 +28,7 @@ from backend.models import Node, TTSChunk
 from backend.utils.encryption import encrypt_file
 from backend.utils import voice_timing
 from backend.utils.tts_stream_text import (
-    ChunkPlanner, SpeechSchedule, SpokenTextProjector)
+    MIN_FIRST_CHUNK_CHARS, ChunkPlanner, SpeechSchedule, SpokenTextProjector)
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +76,10 @@ class NodeSpeech:
         self.dropped = False    # stop: failed, deleted or abandoned
         self.next_index = 0
         self.first_text_seen = False
+        # #371: how the text reached the worker before the first cut.
+        self.fed_chars = 0
+        self.feeds = 0
+        self.first_cut_stats = None
         self.cache_bust = None
         self.segments = []
         self.durations = []
@@ -89,9 +93,14 @@ class NodeSpeech:
     def feed(self, text):
         self._mark_first_text()
         with self._turn.cv:
+            before = self.fed_chars
+            self.fed_chars += len(text)
+            self.feeds += 1
             if not self.planner.closed:
                 self.planner.add(self.projector.feed(text))
                 self._turn.cv.notify_all()
+        if before < MIN_FIRST_CHUNK_CHARS <= before + len(text):
+            voice_timing.mark(self.node_id, "text_min_chunk")
 
     def close(self, extra_text=None):
         """The node's text is complete (*extra_text*: text the reply's
@@ -224,6 +233,10 @@ class VoiceTTSStream:
             if chunk is not None:
                 index = speech.next_index
                 speech.next_index += 1
+                if index == 0:
+                    speech.first_cut_stats = {
+                        "chars_fed_at_cut": speech.fed_chars,
+                        "feeds_at_cut": speech.feeds}
                 return ("chunk", speech, index, chunk)
             if speech.planner.done and speech.released:
                 self._nodes.popleft()
@@ -265,7 +278,8 @@ class VoiceTTSStream:
         # the turn's first audio).
         mark = None
         if index == 0:
-            voice_timing.mark(speech.node_id, "chunk_cut")
+            voice_timing.mark(speech.node_id, "chunk_cut",
+                              **(speech.first_cut_stats or {}))
             mark = functools.partial(voice_timing.mark, speech.node_id)
         node = db.session.get(Node, speech.node_id)
         if node is None or node.deleted_at is not None:

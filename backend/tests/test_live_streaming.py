@@ -286,19 +286,28 @@ def test_voice_turn_marks_where_the_wait_goes(voice, monkeypatch):
     monkeypatch.setattr(voice_timing, "_redis", lambda: fake)
     alice, _, user_node, llm_node = _build_chain("voice")
     _LiveProvider.reset([
-        (["Good morning. ", "Here is the plan."],
-         _resp("Good morning. Here is the plan.")),
+        (["Good morning. ", "Here is the plan for today, with the "
+          "three things that matter most first."],
+         _resp("Good morning. Here is the plan for today, with the three "
+               "things that matter most first.")),
     ])
     _run(user_node, llm_node, alice, mode="voice")
 
     rec = voice_timing.record(llm_node.id)
     order = ["llm_task_start", "llm_request", "first_text", "chunk_cut",
              "tts_first_byte", "tts_last_byte", "chunk_published"]
-    assert sorted(rec["marks"], key=rec["marks"].get) == order
+    marks = {k: v for k, v in rec["marks"].items() if k in order}
+    assert sorted(marks, key=marks.get) == order
+    # The 80th character arrived with the second piece of text.
+    assert (rec["marks"]["first_text"] <= rec["marks"]["text_min_chunk"]
+            <= rec["marks"]["chunk_cut"])
     assert rec["facts"]["model"] == "gpt-5"
     assert rec["facts"]["first_chunk_chars"] == str(
         len(_FakeAudio.spoken[0][0]))
-    assert {"b1", "b2", "c", "d", "e", "f"} <= set(rec["stages"])
+    # Inline, the whole reply is fed before the worker cuts.
+    assert rec["facts"]["chars_fed_at_cut"] == "87"
+    assert rec["facts"]["feeds_at_cut"] == "2"
+    assert {"b1", "b2", "c", "c1", "c2", "d", "e", "f"} <= set(rec["stages"])
 
 
 def test_textless_tool_round_speaks_its_fallback_line(voice):
