@@ -34,6 +34,7 @@ from backend.utils.chunk_plan import (
     UPDATE_THRESHOLD_UNITS, next_window_budget, max_units_for_cap)
 from backend.utils.api_keys import get_api_keys_for_usage
 from backend.utils.privacy import account_allows_ai
+from backend.utils import refusal_backoff
 from backend.utils.llm_batch import (
     batch_submit, batch_check_and_collect, apply_batch_key_override)
 # Module reference, not `from ... import names`: exports imports
@@ -141,6 +142,11 @@ def _should_seed(user):
     """Whether the user has crossed the trigger gates right now. Mirrors
     maybe_trigger_incremental_profile_update (inactivity, interval, tokens)
     without dispatching."""
+    # The refusal backoff outranks every gate, the regen flag included: a
+    # refused chunk leaves them all open, and a pinned (force-batch)
+    # account is never stopped by MAX_BATCH_ATTEMPTS (#368).
+    if refusal_backoff.profile_in_backoff(user.id):
+        return False
     # A pending full rebuild overrides the volume/interval gates: the
     # rebuild was explicitly requested (regen button, failure recovery,
     # repair script) and the gates measure "new tokens since cutoff" —
@@ -366,10 +372,11 @@ def _apply_result(user, item, result, submitted_at):
     deterministic chunk-1 cutoff), and matching those historic rows
     discarded every result and re-submitted chunk 1 forever."""
     response = _response_from_result(result)
-    # An empty cut-off result saves nothing and raises (#368): the poller
-    # counts a failed attempt, and the re-seed builds on the last good
-    # version instead of an empty chain tip.
-    _exports.refuse_empty_truncated_profile(
+    # A cut-off result (empty or partial) saves nothing and raises (#368):
+    # the poller counts a failed attempt, and the re-seed — after the
+    # refusal backoff in _should_seed — builds on the last good version
+    # instead of an empty or incomplete chain tip.
+    _exports.refuse_truncated_profile(
         user, item["model_id"], response,
         f"batch {item.get('kind', 'chunk')}", batch=True)
     cutoff = (datetime.fromisoformat(item["source_data_cutoff"])

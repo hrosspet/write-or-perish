@@ -19,6 +19,8 @@ from backend.utils.tokens import (
 from backend.utils.api_keys import get_api_keys_for_usage
 from backend.utils.cost import llm_cost_log_fields
 from backend.utils.privacy import AI_ALLOWED, account_allows_ai
+from backend.utils import refusal_backoff
+from backend.utils.refusal_backoff import REFUSED_REF
 
 logger = get_task_logger(__name__)
 
@@ -371,6 +373,10 @@ def _save_profile(user, model_id, profile_text, response,
     total_tokens = response["total_tokens"]
 
     _add_profile_cost_log(user, model_id, response, batch=batch)
+    # A saved version ends a refusal streak (#368) and whatever error the
+    # admin column showed for it.
+    if user.profile_seed_error:
+        user.profile_seed_error = None
 
     new_profile = UserProfile(
         user_id=user.id, generated_by=model_id,
@@ -397,36 +403,56 @@ def _save_profile(user, model_id, profile_text, response,
     return new_profile
 
 
-def _add_profile_cost_log(user, model_id, response, batch=False):
+def _add_profile_cost_log(user, model_id, response, batch=False,
+                          refused=False):
     db.session.add(APICostLog(
         user_id=user.id, model_id=model_id,
         request_type="profile_batch" if batch else "profile",
+        # A refused call is a consecutive failure for the backoff (#368).
+        request_ref=REFUSED_REF if refused else None,
         **llm_cost_log_fields(model_id, response, batch=batch),
     ))
 
 
-def refuse_empty_truncated_profile(user, model_id, response, job,
-                                   batch=False):
+def refuse_truncated_profile(user, model_id, response, job, batch=False):
     """Guard before a profile version is saved from model output (#368).
 
-    When the output was cut off at the output limit before any text, an
-    empty version saved here would become the chain tip — the "previous
-    profile" the next chunk or update builds on — and the profile would
-    lose everything before it. Instead: write the cost row (the call was
-    billed), save no version, and raise EmptyTruncatedOutputError so the
-    job fails. The last good version stays the tip, and the next run
-    resumes from it."""
-    if not is_empty_truncated(response):
+    A version cut off at the output limit — empty, or stopped mid-document
+    — would become the chain tip, the "previous profile" the next chunk
+    or update builds on, and the profile would lose everything the cut-off
+    left out. Instead: write the cost row (the call was billed, marked
+    refused for the backoff), save no version, and raise
+    EmptyTruncatedOutputError so the job fails. The last good version
+    stays the tip, and the next run resumes from it once the backoff
+    (utils/refusal_backoff.py) allows."""
+    if not response.get("truncated"):
         return
-    _add_profile_cost_log(user, model_id, response, batch=batch)
+    _add_profile_cost_log(user, model_id, response, batch=batch,
+                          refused=True)
     db.session.commit()
-    logger.warning(
-        "Empty truncated profile output for user %s (%s, model %s, "
-        "output_tokens=%s): no version saved, the previous one stays",
-        user.id, job, model_id, response.get("output_tokens"))
+    empty = is_empty_truncated(response)
+    n, until = refusal_backoff.backoff_until(
+        user.id, refusal_backoff.PROFILE_REQUEST_TYPES,
+        refusal_backoff.latest_profile_at(user.id))
+    if n >= refusal_backoff.MAX_REFUSALS:
+        # Surfaces in the admin Profile column (seed_error); cleared by
+        # the next saved version.
+        user.profile_seed_error = (
+            f"Output cut off {n} times in a row; next try after "
+            f"{until:%Y-%m-%d %H:%M} UTC")[:255]
+        db.session.commit()
+        logger.error(
+            "User %s: profile output cut off %d times in a row (%s, model "
+            "%s); retrying only after %s", user.id, n, job, model_id, until)
+    else:
+        logger.warning(
+            "Truncated profile output for user %s (%s, model %s, empty=%s, "
+            "output_tokens=%s): no version saved, the previous one stays; "
+            "refusal %d, next try after %s", user.id, job, model_id, empty,
+            response.get("output_tokens"), n, until)
     raise EmptyTruncatedOutputError(
         f"profile {job} for user {user.id}", model_id,
-        response.get("output_tokens"))
+        response.get("output_tokens"), empty=empty)
 
 
 def retip_profile_chain(user_id, version):
@@ -944,7 +970,7 @@ def _do_integration(self, user, model_id, last_iterative_profile_id,
     })
 
     response = LLMProvider.get_completion(model_id, messages, api_keys)
-    refuse_empty_truncated_profile(user, model_id, response, "integration")
+    refuse_truncated_profile(user, model_id, response, "integration")
 
     last_profile = chain[-1]
     new_profile = _save_profile(
@@ -1111,9 +1137,10 @@ def _chunked_profile_loop(self, user, model_id, update_template,
             status_label=f'{status_prefix}: Chunk {chunk_num}',
             max_tokens=max_output_tokens,
         )
-        # An empty cut-off chunk ends the run here, before it can become
-        # the base of the next chunk; the chunks saved so far stay (#368).
-        refuse_empty_truncated_profile(
+        # A cut-off chunk (empty or partial) ends the run here, before it
+        # can become the base of the next chunk; the chunks saved so far
+        # stay (#368).
+        refuse_truncated_profile(
             user, model_id, response, f"chunk {chunk_num}")
 
         observed = record_token_ratio(
@@ -1334,6 +1361,11 @@ def maybe_trigger_incremental_profile_update(user):
         .order_by(Node.created_at.desc()).first()
     MIN_INACTIVITY = timedelta(minutes=30)
     if last_node and (datetime.utcnow() - last_node.created_at) < MIN_INACTIVITY:
+        return None
+
+    # After a refused (cut-off) output the gates below stay open — nothing
+    # was saved — so without this the same billed call repeats hourly (#368).
+    if refusal_backoff.profile_in_backoff(user.id):
         return None
 
     latest_profile = profile_update_base(user.id)

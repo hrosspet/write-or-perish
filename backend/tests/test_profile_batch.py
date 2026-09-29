@@ -1499,13 +1499,13 @@ def test_poll_empty_truncated_integration_saves_nothing(app, monkeypatch):
     assert APICostLog.query.filter_by(user_id=u.id).count() == 1
 
 
-def test_apply_result_truncated_with_text_is_still_saved(app, monkeypatch):
-    """Only an EMPTY cut-off result is refused; a cut-off result with text
-    is saved as before."""
+def test_apply_result_refuses_partial_truncated_chunk(app, monkeypatch):
+    """A cut-off chunk WITH text is refused too: a profile stopped at the
+    output limit is incomplete, and it would become the next base."""
+    from backend.llm_providers import EmptyTruncatedOutputError
+    from backend.utils.refusal_backoff import REFUSED_REF
     u = _user()
     db.session.commit()
-    monkeypatch.setattr(pb._exports, "build_user_export_content",
-                        MagicMock(return_value=None))
     item = {"custom_id": "x", "user_id": u.id, "kind": "chunk",
             "prev_profile_id": None, "generation_type": "iterative",
             "prev_cumulative": 0, "origin_stats": None,
@@ -1513,6 +1513,73 @@ def test_apply_result_truncated_with_text_is_still_saved(app, monkeypatch):
             "model_id": "test-model", "chunk_units": 1000}
     result = {"content": "PARTIAL PROFILE", "truncated": True,
               "input_tokens": 3000, "output_tokens": 32000}
-    pb._apply_result(u, item, result, datetime.utcnow() - timedelta(minutes=1))
-    assert "PARTIAL PROFILE" in UserProfile.query.filter_by(
-        user_id=u.id).one().get_content()
+    with pytest.raises(EmptyTruncatedOutputError):
+        pb._apply_result(u, item, result,
+                         datetime.utcnow() - timedelta(minutes=1))
+    db.session.rollback()   # only what was committed counts
+    assert UserProfile.query.filter_by(user_id=u.id).count() == 0
+    log = APICostLog.query.filter_by(user_id=u.id).one()
+    assert log.request_ref == REFUSED_REF
+
+
+def _refusal(user, ago, request_type="profile_batch"):
+    from backend.utils.refusal_backoff import REFUSED_REF
+    db.session.add(APICostLog(
+        user_id=user.id, model_id="test-model", request_type=request_type,
+        request_ref=REFUSED_REF, input_tokens=1, output_tokens=1,
+        cost_microdollars=0, created_at=datetime.utcnow() - ago))
+    db.session.commit()
+
+
+def test_should_seed_backs_off_after_a_refusal_even_with_regen_flag(app):
+    """#368: a refused chunk leaves every gate open (here the regen flag
+    of a from-scratch build). The backoff holds the seeder for 1 h after
+    the first refusal, then lets it through."""
+    u = _user(profile_needs_full_regen=True)
+    db.session.commit()
+    assert pb._should_seed(u) is True
+    _refusal(u, timedelta(minutes=30))
+    assert pb._should_seed(u) is False
+    # The same refusal, older than the 1 h wait: seeding resumes.
+    APICostLog.query.filter_by(user_id=u.id).update(
+        {"created_at": datetime.utcnow() - timedelta(hours=1, minutes=1)})
+    db.session.commit()
+    assert pb._should_seed(u) is True
+
+
+def test_pinned_account_stops_after_max_refusals(app, monkeypatch):
+    """A force-batch account is never stopped by MAX_BATCH_ATTEMPTS; the
+    refusal backoff stops it: after the third refusal in a row it waits
+    7 days, even though the 4 h wait of refusal 2 has long passed."""
+    u = _user(profile_force_batch=True, profile_needs_full_regen=True,
+              profile_batch_attempts=pb.MAX_BATCH_ATTEMPTS + 5)
+    app.config["PROFILE_USE_BATCH"] = True
+    db.session.commit()
+    _remaining(monkeypatch, 90000)
+    monkeypatch.setattr(pb._exports, "build_user_export_content",
+                        MagicMock(return_value=_chunk("DATA")))
+    monkeypatch.setattr(pb._exports, "_load_prompt",
+                        lambda *a, **k: "G {user_export}")
+    submitted = []
+    monkeypatch.setattr(pb, "batch_submit", lambda reqs, keys, kind: (
+        submitted.append(reqs) or {k: f"b-{k}" for k in reqs}))
+    for hours in (30, 29, 25):
+        _refusal(u, timedelta(hours=hours))
+    assert pb._seed_profile_batches(users=[u]) == 0
+    assert submitted == []
+    # Control: without the refusals the same account is seeded.
+    APICostLog.query.filter_by(user_id=u.id).delete()
+    db.session.commit()
+    assert pb._seed_profile_batches(users=[u]) == 1
+
+
+def test_saved_version_ends_the_refusal_streak(app):
+    """Only refusals newer than the newest saved version count."""
+    u = _user(profile_needs_full_regen=True)
+    db.session.commit()
+    for minutes in (50, 40, 30):
+        _refusal(u, timedelta(minutes=minutes))
+    assert pb._should_seed(u) is False
+    _prev_profile(u, datetime(2026, 6, 1))   # created now, after them
+    db.session.commit()
+    assert pb._should_seed(u) is True

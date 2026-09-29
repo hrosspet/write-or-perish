@@ -19,6 +19,7 @@ from backend.utils.tokens import reduce_export_tokens, format_date_metadata
 from backend.utils.api_keys import get_api_keys_for_usage
 from backend.utils.cost import llm_cost_log_fields
 from backend.utils.chunk_plan import UPDATE_THRESHOLD_UNITS
+from backend.utils import refusal_backoff
 
 logger = get_task_logger(__name__)
 
@@ -115,6 +116,11 @@ def _should_generate_recent_context(user):
         .first()
     )
     if last_node and (datetime.utcnow() - last_node.created_at) < MIN_INACTIVITY:
+        return False, None, None
+
+    # After a refused (cut-off) output nothing was saved, so the gates below
+    # stay open and the same call would repeat every 10 minutes (#368).
+    if refusal_backoff.recent_context_in_backoff(user_id):
         return False, None, None
 
     # Find current profile (if any)
@@ -374,11 +380,19 @@ def _generate_recent_context_impl(user_id, profile_id=None,
     # Cut off before any text (#368): keep the previous recent context
     # rather than replace it with an empty one, and fail the task.
     if is_empty_truncated(response):
-        db.session.commit()   # the cost row: the call was billed
-        logger.warning(
-            "Empty truncated recent-context output for user %s "
-            "(model %s, output_tokens=%s): nothing saved, the previous "
-            "one stays", user_id, model_id, response.get("output_tokens"))
+        # The cost row (the call was billed), marked as a refusal for the
+        # backoff in _should_generate_recent_context.
+        cost_log.request_ref = refusal_backoff.REFUSED_REF
+        db.session.commit()
+        n, until = refusal_backoff.backoff_until(
+            user_id, refusal_backoff.RECENT_CONTEXT_REQUEST_TYPES,
+            refusal_backoff.latest_recent_context_at(user_id))
+        log = (logger.error if n >= refusal_backoff.MAX_REFUSALS
+               else logger.warning)
+        log("Empty truncated recent-context output for user %s (model %s, "
+            "output_tokens=%s): nothing saved, the previous one stays; "
+            "refusal %d in a row, next try after %s", user_id, model_id,
+            response.get("output_tokens"), n, until)
         raise EmptyTruncatedOutputError(
             f"recent context for user {user_id}", model_id,
             response.get("output_tokens"))
