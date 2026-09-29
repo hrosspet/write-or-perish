@@ -8,6 +8,7 @@ import { useMediaSession } from './useMediaSession';
 import { useOnlineStatus } from './useOnlineStatus';
 import { useToast } from '../contexts/ToastContext';
 import api from '../api';
+import * as voiceTiming from '../utils/voiceTiming';
 
 // iOS devices can't autoplay audio regardless of warmup, and playing silent audio
 // while the mic stream is active crashes Bluetooth headphones on multi-device setups.
@@ -287,6 +288,8 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
       // node, skip the frontend POST and use the server-provided node ID.
       if (data.llmNodeId) {
         console.log('[VoiceSession] Server-side LLM chain: llmNodeId=', data.llmNodeId);
+        voiceTiming.setTurnNode(data.llmNodeId);
+        voiceTiming.mark('llm_node_known');
         setLlmNodeId(data.llmNodeId);
         return;
       }
@@ -355,6 +358,7 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
       awaitingNextNodeRef.current = false;
       if (firstChunkRef.current) {
         firstChunkRef.current = false;
+        voiceTiming.mark('chunk_ready', llmNodeId);
         stopSilentAudio(); // Real audio takes over
         const chapterTitle = takeChapterTitle();
         if (chapterTitle === STREAMED_CHAPTER_PLACEHOLDER) {
@@ -371,7 +375,8 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
             chapters: chapterTitle
               ? [{ title: chapterTitle, start_time: 0, chunk_index: 0 }] : [],
           },
-          [data.duration]
+          [data.duration],
+          { onPlaying: voiceTiming.markPlaying }
         );
         audio.setGeneratingTTS(true);
         // Show playback UI as soon as first chunk arrives.
@@ -520,6 +525,7 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
     if (!llmData.tts_streaming) return;
     if (ttsTriggeredForNodeRef.current === llmNodeId) return;
     console.log('[VoiceSession] TTS attach while the reply streams:', { llmNodeId });
+    voiceTiming.mark('tts_attach');
     ttsTriggeredForNodeRef.current = llmNodeId;
     firstChunkRef.current = !continuingChainRef.current;
     nextChapterTitleRef.current = STREAMED_CHAPTER_PLACEHOLDER;
@@ -775,6 +781,7 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
   }, [streaming, startSilentAudio]);
 
   const handleStop = useCallback(() => {
+    voiceTiming.startTurn();
     setIsStopping(true);
     // Unlock audio on desktop Safari/Chrome during user gesture.
     // Skip on iOS — autoplay is blocked there regardless, and the silent audio
@@ -789,11 +796,13 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
     // only thing preventing the OS from suspending JS while the final chunk
     // upload and finalize request are in flight.
     streaming.stopStreaming(extraParams).finally(() => {
+      voiceTiming.mark('finalize_acked');
       stopSilentAudio();
     });
   }, [streaming, stopSilentAudio, audio, model]);
 
   const handleContinue = useCallback((extraReset) => {
+    voiceTiming.endTurn();
     audio.stop();
     ttsSSE.disconnect();
     ttsSSE.reset();
@@ -837,6 +846,7 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
     if (lastUserNodeIdRef.current) {
       threadParentIdRef.current = lastUserNodeIdRef.current;
     }
+    voiceTiming.endTurn();
     stopSilentAudio();
     audio.stop();
     ttsSSE.disconnect();

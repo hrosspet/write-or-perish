@@ -200,9 +200,13 @@ class _FakeAudio:
     def __init__(self, api_key=None):
         pass
 
-    def synthesize(self, text, path, section_end):
+    def synthesize(self, text, path, section_end, mark=None):
         _FakeAudio.spoken.append((text, section_end))
+        if mark:
+            mark("tts_first_byte")
         path.write_bytes(b"mp3")
+        if mark:
+            mark("tts_last_byte")
         return _Segment(text)
 
     @staticmethod
@@ -273,6 +277,39 @@ def test_voice_turn_is_spoken_through_a_tool_round(voice):
     assert [end for _, end in _FakeAudio.spoken] == [False, True, False]
 
 
+def test_voice_turn_marks_where_the_wait_goes(voice, monkeypatch):
+    """#371: the LLM task and the TTS worker mark the first chunk's
+    stages under the reply node, in order."""
+    from backend.tests.test_voice_timing import FakeRedis
+    from backend.utils import voice_timing
+    fake = FakeRedis()
+    monkeypatch.setattr(voice_timing, "_redis", lambda: fake)
+    alice, _, user_node, llm_node = _build_chain("voice")
+    _LiveProvider.reset([
+        (["Good morning. ", "Here is the plan for today, with the "
+          "three things that matter most first."],
+         _resp("Good morning. Here is the plan for today, with the three "
+               "things that matter most first.")),
+    ])
+    _run(user_node, llm_node, alice, mode="voice")
+
+    rec = voice_timing.record(llm_node.id)
+    order = ["llm_task_start", "llm_request", "first_text", "chunk_cut",
+             "tts_first_byte", "tts_last_byte", "chunk_published"]
+    marks = {k: v for k, v in rec["marks"].items() if k in order}
+    assert sorted(marks, key=marks.get) == order
+    # The 80th character arrived with the second piece of text.
+    assert (rec["marks"]["first_text"] <= rec["marks"]["text_min_chunk"]
+            <= rec["marks"]["chunk_cut"])
+    assert rec["facts"]["model"] == "gpt-5"
+    assert rec["facts"]["first_chunk_chars"] == str(
+        len(_FakeAudio.spoken[0][0]))
+    # Inline, the whole reply is fed before the worker cuts.
+    assert rec["facts"]["chars_fed_at_cut"] == "87"
+    assert rec["facts"]["feeds_at_cut"] == "2"
+    assert {"b1", "b2", "c", "c1", "c2", "d", "e", "f"} <= set(rec["stages"])
+
+
 def test_textless_tool_round_speaks_its_fallback_line(voice):
     alice, _, user_node, llm_node = _build_chain("voice")
     _LiveProvider.reset([
@@ -293,6 +330,33 @@ def test_voice_failure_marks_the_open_node_tts_failed(voice):
     node = _fresh(llm_node.id)
     assert node.llm_task_status == "failed"
     assert node.tts_task_status == "failed"
+
+
+def test_first_chunk_is_cut_at_the_first_sentences(live, tmp_path):
+    """#371: with nothing queued the worker speaks the first sentences as
+    soon as they make MIN_FIRST_CHUNK_CHARS, not a ~318-char chunk."""
+    import time
+    alice, _, user_node, llm_node = _build_chain("voice")
+    node = _fresh(llm_node.id)
+    node.tts_task_status = "processing"
+    _db.session.commit()
+    _FakeAudio.spoken = []
+    turn = tts_stream.VoiceTTSStream(
+        live, alice.id, tmp_path, audio=_FakeAudio(), threaded=True)
+    speech = turn.open_node(node)
+    sentence = "This sentence is about forty characters. "
+    for _ in range(3):
+        speech.feed(sentence)
+    deadline = time.monotonic() + 5
+    while not _FakeAudio.spoken and time.monotonic() < deadline:
+        time.sleep(0.01)
+    for _ in range(20):
+        speech.feed(sentence)
+    speech.release()
+    turn.finish()
+    texts = [t for t, _ in _FakeAudio.spoken]
+    assert texts[0] == (sentence * 2).strip()
+    assert " ".join(texts) == (sentence * 23).strip()
 
 
 def test_worker_thread_speaks_as_text_arrives(live, tmp_path):

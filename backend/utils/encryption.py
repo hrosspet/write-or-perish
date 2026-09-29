@@ -468,6 +468,27 @@ def encrypt_file(filepath: str) -> str:
         raise
 
 
+def encrypt_file_atomically(src, dest) -> str:
+    """Encrypt *src*, a file only this caller writes, and move the result
+    onto *dest* (``dest + '.enc'`` when encryption is on). Two writers of
+    the same *dest* (a chunk uploaded twice at once, #371) then never
+    read, encrypt or delete each other's half-written file; the last move
+    wins. *src* is gone afterwards either way. Returns the final path."""
+    src, dest = str(src), str(dest)
+    try:
+        out = encrypt_file(src)
+        final = dest + ('.enc' if out.endswith('.enc') else '')
+        os.replace(out, final)
+        return final
+    except Exception:
+        for leftover in (src, src + '.enc'):
+            try:
+                os.remove(leftover)
+            except OSError:
+                pass
+        raise
+
+
 def decrypt_file(filepath: str) -> bytes:
     """
     Decrypt a file from disk using envelope encryption.

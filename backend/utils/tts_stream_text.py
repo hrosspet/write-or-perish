@@ -408,19 +408,20 @@ class ChunkPlanner:
             split = _split_at_word(text, limit)
         return split
 
-    def take(self, limit, jit=False):
+    def take(self, limit, jit=False, min_chars=0):
         """The next chunk of at most *limit* chars, or None when there
         isn't one yet. Ended sections are cut first, whatever their size;
         the open section only once it holds more than *limit* chars (the
         cut then falls at a sentence boundary within the limit), or, with
         *jit* (text is arriving slowly and the queue is about to run
-        out), at its last confirmed sentence boundary."""
-        chunk = self._take(limit, jit)
+        out), at its last confirmed sentence boundary, if that leaves a
+        chunk of at least *min_chars*."""
+        chunk = self._take(limit, jit, min_chars)
         if chunk is not None:
             self.cut += 1
         return chunk
 
-    def _take(self, limit, jit):
+    def _take(self, limit, jit, min_chars):
         if self._sealed:
             item = self._sealed[0]
             text, title, index, end = item
@@ -443,7 +444,7 @@ class ChunkPlanner:
                 return None   # the boundary isn't confirmed yet
         elif jit:
             split = _last_confirmed_boundary(text)
-            if not split:
+            if not split or len(text[:split].strip()) < min_chars:
                 return None
         else:
             return None
@@ -465,6 +466,11 @@ FIRST_CHUNK_CHARS = min(int(3.0 * GEN_RATE), TTS_MAX_CHARS)
 # deadline, for error in the drain estimate (the server can't see the
 # browser's player). A guess, not measured.
 JIT_MARGIN_SECS = 1.0
+# INTRODUCED CONSTANT (#371): how long before the queue runs out a short
+# chunk (>= MIN_FIRST_CHUNK_CHARS) is cut from whatever sentences are
+# there. From the #371 measurements: TTS first byte ~0.9 s + ~0.8 s for
+# 80 chars + publish and the SSE poll ~0.6 s.
+REFILL_LEAD_SECS = 2.5
 
 
 class SpeechSchedule:
@@ -477,7 +483,14 @@ class SpeechSchedule:
     stall is predicted; after a real stall (a tool round, a slow stream)
     it restarts from the arrival time instead of assuming playback went
     on. State is per turn: the browser plays the interim node and the
-    continuation from one queue."""
+    continuation from one queue.
+
+    ``next_cut`` adds one rule on top for the streaming worker (#371):
+    while nothing is queued, or the queue will run out before a full
+    chunk could land, the sentences that are there are cut as soon as
+    they make MIN_FIRST_CHUNK_CHARS. So a streamed reply starts sooner
+    than the batch schedule's would, and a slowly written one doesn't
+    fall silent after its short first chunk."""
 
     def __init__(self):
         self.drain_at = None
@@ -495,6 +508,21 @@ class SpeechSchedule:
         wake_at = (self.drain_at - OVERHEAD - pending_chars / GEN_RATE
                    - JIT_MARGIN_SECS)
         return limit, now >= wake_at, wake_at
+
+    def next_cut(self, now, pending_chars):
+        """(limit, jit, min_chars, wake_at) for the streaming worker: the
+        size rule (``plan``), plus the short-chunk rule of the class
+        docstring when ``plan`` isn't cutting early anyway."""
+        limit, jit, wake_at = self.plan(now, pending_chars)
+        if jit:
+            return limit, True, 0, wake_at
+        refill_at = (None if self.drain_at is None
+                     else self.drain_at - REFILL_LEAD_SECS)
+        if refill_at is None or now >= refill_at:
+            return limit, True, MIN_FIRST_CHUNK_CHARS, wake_at
+        if wake_at is None:
+            wake_at = refill_at
+        return limit, False, 0, wake_at
 
     def played(self, duration, now):
         """A chunk of *duration* seconds reached the queue at *now*."""
