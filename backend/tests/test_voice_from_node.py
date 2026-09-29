@@ -446,8 +446,9 @@ class TestVoiceFromNodeAiUsageInheritance:
         entry = Node.query.get(data["user_node_id"])
         assert entry.parent_id == read.id
         assert entry.ai_usage == "train"
-        # Its reply has the picks in its context: stored as 'chat'.
-        assert Node.query.get(data["llm_node_id"]).ai_usage == "chat"
+        # Its AI answer takes the thread's setting too (voice review
+        # 2026-09-29).
+        assert Node.query.get(data["llm_node_id"]).ai_usage == "train"
 
 
 class TestVoiceFromNodeAgenticAncestryBridge:

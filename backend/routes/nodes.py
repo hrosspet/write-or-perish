@@ -839,22 +839,13 @@ def update_node(node_id):
         if not validate_ai_usage(ai_usage):
             return jsonify({"error": f"Invalid ai_usage: {ai_usage}"}), 400
         # A read's nodes quote other people's public tweets, which Loore
-        # has no licence to train on (see ca_feed.FEED_AI_USAGE), and an
-        # LLM reply in a read thread was built with them in its context
-        # (#362).
+        # has no licence to train on (see ca_feed.FEED_AI_USAGE).
         if ai_usage == "train":
             from backend.utils.ca_feed import is_feed_node
-            from backend.utils.llm_nodes import built_on_a_read
             if is_feed_node(node):
                 return jsonify({
                     "error": "A Community Archive read cannot be used for "
                              "training: it quotes other people's tweets.",
-                }), 400
-            if built_on_a_read(node):
-                return jsonify({
-                    "error": "This reply cannot be used for training: it "
-                             "was written with a Community Archive read "
-                             "(other people's tweets) in its context.",
                 }), 400
         node.ai_usage = ai_usage
 

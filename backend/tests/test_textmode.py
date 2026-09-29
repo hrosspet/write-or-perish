@@ -1101,13 +1101,14 @@ class TestTextmodeContinueFromNode:
         data = resp.get_json()
         assert Node.query.get(data["prompt_node_id"]).ai_usage == "train"
         assert Node.query.get(data["user_node_id"]).ai_usage == "train"
-        # The reply about the picks has them in its context.
-        assert Node.query.get(data["llm_node_id"]).ai_usage == "chat"
+        # The AI answer takes the thread's setting too (voice review
+        # 2026-09-29); only the recommendation reply is 'chat'.
+        assert Node.query.get(data["llm_node_id"]).ai_usage == "train"
 
     def test_a_message_under_the_chat_turn_still_takes_the_thread(self, app):
-        # One level down (#362): the reply about the picks is stored 'chat'
-        # for the tweets in its context; the next message in the Text-mode
-        # session under it takes the user's own message, not that 'chat'.
+        # One level down (#362): the AI answer about the picks carries the
+        # thread's 'train', and so does the next message under it and its
+        # own answer.
         client = app.test_client()
         alice = _make_user("alice", default_ai_usage="none")
         read = self._read_thread(alice)
@@ -1116,7 +1117,7 @@ class TestTextmodeContinueFromNode:
         first = client.post(f"/api/textmode/from-node/{read.id}",
                             json={"content": "why #2?", "model": "gpt-5"})
         first = first.get_json()
-        assert Node.query.get(first["llm_node_id"]).ai_usage == "chat"
+        assert Node.query.get(first["llm_node_id"]).ai_usage == "train"
 
         resp = client.post(
             f"/api/textmode/{first['prompt_node_id']}/message",
@@ -1125,7 +1126,7 @@ class TestTextmodeContinueFromNode:
         assert resp.status_code == 202, resp.get_json()
         data = resp.get_json()
         assert Node.query.get(data["user_node_id"]).ai_usage == "train"
-        assert Node.query.get(data["llm_node_id"]).ai_usage == "chat"
+        assert Node.query.get(data["llm_node_id"]).ai_usage == "train"
 
     def test_the_forms_ai_usage_is_honoured(self, app):
         client = app.test_client()

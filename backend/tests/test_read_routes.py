@@ -956,24 +956,28 @@ class TestReplyAiUsage:
         alice.default_ai_usage = "chat"
         assert reply_ai_usage(read, alice) == "chat"
 
-    def test_below_the_users_reply_its_choice_carries_on(self, app355):
+    def test_below_the_users_reply_the_nearest_node_decides(self, app355):
+        # Voice review 2026-09-29: an LLM reply after the recommendation
+        # carries the thread's setting, so the walk no longer skips it.
         from backend.utils.llm_nodes import reply_ai_usage
         alice = _make_user("alice", is_admin=True, default_ai_usage="train")
         t = _thread_with_read(alice)
         note = _make_node(alice, parent_id=t["read"].id, content="why #2?",
                           ai_usage="train")
-        # The chat turn about the picks is stored 'chat' for the tweets in
-        # its context; the reply under it takes the user's note, not it.
         chat = _make_node(alice, parent_id=note.id, node_type="llm",
                           llm_model="claude-opus-4.6", content="because",
-                          ai_usage="chat")
+                          ai_usage="train")
         _db.session.commit()
         assert reply_ai_usage(note, alice) == "train"
         assert reply_ai_usage(chat, alice) == "train"
-        # A note the user set to 'chat' is theirs to keep.
-        note.ai_usage = "chat"
+        # A value the user set by hand on either is theirs to keep.
+        chat.ai_usage = "chat"
         _db.session.commit()
         assert reply_ai_usage(chat, alice) == "chat"
+        note.ai_usage = "chat"
+        chat.ai_usage = "train"
+        _db.session.commit()
+        assert reply_ai_usage(chat, alice) == "train"
 
     def test_outside_a_read_the_parent_decides_as_before(self, app355):
         from backend.utils.llm_nodes import reply_ai_usage
@@ -996,24 +1000,47 @@ class TestReplyAiUsage:
         _db.session.commit()
         assert reply_ai_usage(poc, alice, parent_content=poc.get_content()) == "train"
 
-    def test_a_placeholder_in_a_read_thread_is_stored_as_chat(self, app355):
+    def test_an_ai_reply_to_the_users_reply_takes_the_threads_train(self, app355):
+        # Voice review 2026-09-29: only the recommendation reply is 'chat'
+        # by construction; the AI answer to the user's reply under it is
+        # 'train' when the thread is.
+        from backend.utils.llm_nodes import create_llm_placeholder, reply_ai_usage
+        alice = _make_user("alice", is_admin=True, default_ai_usage="none")
+        t = _thread_with_read(alice)
+        note = _make_node(alice, parent_id=t["read"].id, content="why #2?",
+                          ai_usage=reply_ai_usage(t["read"], alice))
+        _db.session.commit()
+        assert note.ai_usage == "train"
+        node, _ = create_llm_placeholder(note.id, "claude-opus-4.6", alice.id,
+                                         ai_usage=note.ai_usage,
+                                         enqueue=False)
+        assert node.ai_usage == "train"
+        # Through the route behind the thread page's "LLM Response".
+        client = app355.test_client()
+        _login(client, alice.id)
+        resp = client.post(f"/api/nodes/{note.id}/llm",
+                           json={"model": "claude-opus-4.6"})
+        assert resp.status_code == 202, resp.get_json()
+        assert Node.query.get(resp.get_json()["node_id"]).ai_usage == "train"
+
+    def test_the_recommendation_node_stays_chat(self, app355):
+        # The read reply that presents the picks is 'chat' however it is
+        # asked for: under the read prompt (a read) or directly under a
+        # read reply (a read again). 'none' is never raised.
         from backend.utils.llm_nodes import create_llm_placeholder
         alice = _make_user("alice", is_admin=True, default_ai_usage="train")
         t = _thread_with_read(alice)
-        note = _make_node(alice, parent_id=t["read"].id, content="why #2?",
-                          ai_usage="train")
-        _db.session.commit()
-        # A chat turn about the picks: the tweets are in its context.
-        node, _ = create_llm_placeholder(note.id, "claude-opus-4.6", alice.id,
-                                         ai_usage="train")
-        assert node.ai_usage == "chat"
-        # 'none' is never raised.
-        node, _ = create_llm_placeholder(note.id, "claude-opus-4.6", alice.id,
-                                         ai_usage="none")
+        for parent in (t["prompt"], t["read"]):
+            node, _ = create_llm_placeholder(parent.id, "gpt-6-sol", alice.id,
+                                             ai_usage="train", enqueue=False)
+            assert node.ai_usage == "chat", parent
+        node, _ = create_llm_placeholder(t["read"].id, "gpt-6-sol", alice.id,
+                                         ai_usage="none", enqueue=False)
         assert node.ai_usage == "none"
         # Outside a read thread the caller's value stands.
         node, _ = create_llm_placeholder(t["root"].id, "claude-opus-4.6",
-                                         alice.id, ai_usage="train")
+                                         alice.id, ai_usage="train",
+                                         enqueue=False)
         assert node.ai_usage == "train"
 
     def test_get_node_returns_the_reply_default(self, app355):
@@ -1027,19 +1054,29 @@ class TestReplyAiUsage:
         data = client.get(f"/api/nodes/{t['root'].id}").get_json()
         assert data["reply_ai_usage"] == "train"
 
-    def test_a_none_the_walk_would_pass_still_holds(self, app355):
-        # 'none' is only ever the user's choice: a chat turn they lowered
-        # to it keeps what they write below out of AI too.
+    def test_a_skipped_read_node_set_to_none_does_not_decide(self, app355):
+        # Voice review 2026-09-29: the rule "a skipped node set to 'none'
+        # makes the reply 'none'" is gone. The Read's own nodes pass
+        # nothing on, whatever their value.
         from backend.utils.llm_nodes import reply_ai_usage
-        alice = _make_user("alice", is_admin=True, default_ai_usage="train")
+        alice = _make_user("alice", is_admin=True, default_ai_usage="chat")
         t = _thread_with_read(alice)
-        note = _make_node(alice, parent_id=t["read"].id, content="why #2?",
-                          ai_usage="train")
-        chat = _make_node(alice, parent_id=note.id, node_type="llm",
-                          llm_model="claude-opus-4.6", content="because",
+        t["prompt"].ai_usage = "none"
+        t["read"].ai_usage = "none"
+        _db.session.commit()
+        assert reply_ai_usage(t["read"], alice) == "train"
+        # With the read at the root: the account default.
+        prompt = _make_prompt_node(alice, "read")
+        read = _make_node(alice, parent_id=prompt.id, node_type="llm",
+                          llm_model="gpt-6-sol", content="picks",
+                          ai_usage="none")
+        _render(read)
+        assert reply_ai_usage(read, alice) == "chat"
+        # A node that is not the Read's still decides, 'none' included.
+        note = _make_node(alice, parent_id=read.id, content="later",
                           ai_usage="none")
         _db.session.commit()
-        assert reply_ai_usage(chat, alice) == "none"
+        assert reply_ai_usage(note, alice) == "none"
 
     def test_an_llm_node_above_the_read_still_decides(self, app355):
         from backend.utils.llm_nodes import reply_ai_usage
@@ -1081,59 +1118,52 @@ class TestReplyAiUsage:
         assert walks == [1]
 
 
-class TestReadBuiltRepliesStayChat:
-    """A reply built with a read in its context is never raised to 'train'
-    afterwards (#362): not in the node editor, not by the cascade."""
+class TestNoLockBelowARead:
+    """Voice review 2026-09-29: AI replies below a Read are not locked to
+    'chat'. The editor and the "apply to my replies" cascade treat them
+    like any other reply; only the Read's own nodes (the prompt and a read
+    reply with picks, ca_feed.is_feed_node) still refuse 'train'."""
 
     def _thread(self, alice):
         t = _thread_with_read(alice, root_usage="chat")
+        from backend.models import ExternalItem, FeedPick
+        item = ExternalItem(user_id=alice.id, source="community_archive",
+                            external_id="t1", author_handle="someone")
+        item.set_content("a tweet")
+        _db.session.add(item)
+        _db.session.flush()
+        _db.session.add(FeedPick(node_id=t["read"].id, user_id=alice.id,
+                                 external_item_id=item.id, rank=1))
         note = _make_node(alice, parent_id=t["read"].id, content="why #2?",
                           ai_usage="chat")
         chat = _make_node(alice, parent_id=note.id, node_type="llm",
                           llm_model="claude-opus-4.6", content="because",
                           ai_usage="chat")
-        # A pick-less read reply ("nothing today") under a second prompt.
-        prompt2 = _make_prompt_node(alice, "read_thread", parent_id=chat.id)
-        empty = _make_node(alice, parent_id=prompt2.id, node_type="llm",
-                           llm_model="gpt-6-sol", content="nothing today")
-        _render(empty)
-        return dict(t, note=note, chat=chat, empty=empty)
+        _db.session.commit()
+        return dict(t, note=note, chat=chat)
 
-    def test_built_on_a_read(self, app355):
-        from backend.utils.llm_nodes import built_on_a_read
-        alice = _make_user("alice", is_admin=True)
-        t = self._thread(alice)
-        assert built_on_a_read(t["chat"]) and built_on_a_read(t["empty"])
-        assert built_on_a_read(t["read"])
-        assert not built_on_a_read(t["note"])      # the user's own
-        assert not built_on_a_read(t["root"])
-
-    def test_the_editor_refuses_train(self, app355):
+    def test_the_editor_allows_train_on_an_ai_reply_below_a_read(self, app355):
         client = app355.test_client()
         alice = _make_user("alice", is_admin=True)
         t = self._thread(alice)
         _login(client, alice.id)
         resp = client.put(f"/api/nodes/{t['chat'].id}",
                           json={"content": "because", "ai_usage": "train"})
-        assert resp.status_code == 400
-        assert Node.query.get(t["chat"].id).ai_usage == "chat"
-        resp = client.put(f"/api/nodes/{t['note'].id}",
-                          json={"content": "why #2?", "ai_usage": "train"})
         assert resp.status_code == 200, resp.get_json()
+        assert Node.query.get(t["chat"].id).ai_usage == "train"
+        # The recommendation node itself still refuses it.
+        resp = client.put(f"/api/nodes/{t['read'].id}",
+                          json={"content": "picks", "ai_usage": "train"})
+        assert resp.status_code == 400
+        assert Node.query.get(t["read"].id).ai_usage == "chat"
 
-    def test_the_cascade_leaves_them(self, app355):
+    def test_the_cascade_raises_replies_below_a_read(self, app355):
         from backend.utils.node_settings import apply_settings_to_descendants
         alice = _make_user("alice", is_admin=True)
         t = self._thread(alice)
         changed = apply_settings_to_descendants(t["root"], alice.id,
                                                 ai_usage="train")
         _db.session.commit()
-        assert {n.id for n in changed} == {t["note"].id}
-        for name in ("prompt", "read", "chat", "empty"):
+        assert {n.id for n in changed} == {t["note"].id, t["chat"].id}
+        for name in ("prompt", "read"):
             assert Node.query.get(t[name].id).ai_usage == "chat", name
-        # From below the read prompt the rule holds too.
-        t["note"].ai_usage = "chat"
-        _db.session.commit()
-        changed = apply_settings_to_descendants(t["note"], alice.id,
-                                                ai_usage="train")
-        assert changed == []

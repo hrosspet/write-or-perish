@@ -3207,12 +3207,16 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     "Node %s: read thread (turn %r); forcing chat keys "
                     "over the chain's %r", llm_node_id, ca_turn, key_type)
                 key_type = 'chat'
-            if ca_turn is not None and llm_node.ai_usage == 'train':
-                # The reply is stored as what it is built from (#362).
-                # create_llm_placeholder already lowers it by the same
-                # rule; this catches a placeholder made before that (or a
-                # PoC read prompt it could not see), and the continuation
-                # nodes below copy it.
+            if (ca_turn in ("read", "read_again")
+                    and llm_node.ai_usage == 'train'):
+                # The recommendation reply presents the picks, quoting
+                # the tweets verbatim: it is 'chat' by construction
+                # (#362). create_llm_placeholder already stamps it by the
+                # same rule; this catches a placeholder made another way
+                # (a PoC read prompt it could not see), and the
+                # continuation nodes below copy it. A chat turn keeps the
+                # thread's setting: its call is on the chat key above,
+                # the stored value is the user's.
                 llm_node.ai_usage = FEED_AI_USAGE
             # That verdict is the chain's. What the chain's text resolves
             # to — quoted nodes, saved references, what a tool pulls in
