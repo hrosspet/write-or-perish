@@ -429,6 +429,59 @@ def test_textmode_no_retrieval_single_node(app):
     assert APICostLog.query.count() == 1
 
 
+def _cut_off_empty():
+    """A reply that hit max_tokens before any text or tool call — a model
+    that always thinks spending the whole output budget on reasoning."""
+    r = _resp("", inp=36000, out=32000, total=68000)
+    r["truncated"] = True
+    return r
+
+
+def test_empty_truncated_reply_fails_node_with_advice(app):
+    """An empty cut-off reply fails the node instead of saving a blank
+    reply marked completed; the error steers toward a smaller request
+    (a retry would hit the same limit), and the call is still billed."""
+    alice, system, user_node, llm_node = _build_chain("textmode")
+    _ScriptedProvider.reset([_cut_off_empty()])
+
+    with pytest.raises(_llm_task_mod.EmptyTruncatedReplyError):
+        generate_llm_response(
+            _FakeSelf(), user_node.id, llm_node.id, "gpt-5", alice.id,
+            source_mode="textmode",
+        )
+
+    node = _fresh(llm_node.id)
+    assert node.llm_task_status == "failed"
+    assert "smaller steps" in node.llm_task_error
+    assert APICostLog.query.count() == 1
+
+
+def test_empty_truncated_continuation_fails_only_continuation(app):
+    """After a tool round, an empty cut-off continuation fails the
+    continuation node; the completed interim step (and its write) stays."""
+    alice, system, user_node, llm_node = _build_chain("textmode")
+    _ScriptedProvider.reset([
+        _resp("Updating the outline.", tool_calls=[{
+            "id": "t1", "name": "update_artifact",
+            "input": {"kind": "outline", "updated_content": "# Outline"},
+        }]),
+        _cut_off_empty(),
+    ])
+
+    with pytest.raises(_llm_task_mod.EmptyTruncatedReplyError):
+        generate_llm_response(
+            _FakeSelf(), user_node.id, llm_node.id, "gpt-5", alice.id,
+            source_mode="textmode",
+        )
+
+    interim = _fresh(llm_node.id)
+    assert interim.llm_task_status == "completed"
+    assert UserArtifact.latest_for(alice.id, "outline") is not None
+    cont = Node.query.get(interim.continuation_node_id)
+    assert cont.llm_task_status == "failed"
+    assert "smaller steps" in cont.llm_task_error
+
+
 def test_textmode_retrieval_budget_caps_at_max_rounds(app):
     """The loop stops after MAX_RETRIEVAL_ROUNDS interim rounds and finalizes
     even if the model keeps requesting retrieval."""

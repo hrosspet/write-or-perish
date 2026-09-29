@@ -1,4 +1,5 @@
 import logging
+import time
 from datetime import datetime, timedelta
 from functools import wraps
 from flask import Blueprint, request, jsonify, abort, current_app
@@ -977,3 +978,44 @@ def close_poll(poll_id):
         poll.closed_at = datetime.utcnow()
         db.session.commit()
     return jsonify({"id": poll.id, "closed_at": iso_utc(poll.closed_at)}), 200
+
+
+@admin_bp.route("/voice-timing", methods=["GET"])
+@login_required
+@admin_required
+def voice_timing_all():
+    """Where every user's voice-turn wait goes (#371): per-stage medians
+    over all turns and per user, plus the turns themselves (timings,
+    lengths and the model; no content). ?days= (1-7, default 7: records
+    live 7 days) and ?limit= (turns, default 200)."""
+    from backend.utils import voice_timing
+    days = min(max(request.args.get("days", 7, type=int), 1), 7)
+    limit = min(max(request.args.get("limit", 200, type=int), 1),
+                voice_timing.ALL_TURNS)
+    turns = voice_timing.recent_turns_all(time.time() - days * 86400,
+                                          limit)
+    names = dict(db.session.query(User.id, User.username).filter(
+        User.id.in_({user_id for user_id, _ in turns})).all()) \
+        if turns else {}
+    records, by_user = [], {}
+    for user_id, node_id in turns:
+        rec = voice_timing.record(node_id)
+        rec["user_id"] = user_id
+        rec["username"] = names.get(user_id)
+        records.append(rec)
+        by_user.setdefault(user_id, []).append(rec)
+    users = sorted(({
+        "user_id": user_id,
+        "username": names.get(user_id),
+        "turns": len(recs),
+        "median": voice_timing.medians(recs),
+    } for user_id, recs in by_user.items()),
+        key=lambda u: -u["turns"])
+    return jsonify({
+        "days": days,
+        "stages": {name: f"{start} -> {end}" for name, start, end
+                   in voice_timing.STAGES + voice_timing.TAP_STAGES},
+        "median": voice_timing.medians(records),
+        "users": users,
+        "turns": records,
+    }), 200

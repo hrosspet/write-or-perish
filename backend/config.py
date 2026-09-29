@@ -100,6 +100,18 @@ class Config:
     SHARE_V1 = os.environ.get(
         "SHARE_V1", "true").lower() in ("1", "true", "yes")
 
+    # --- Replies while they are written (#367) ---
+    # STREAMING_REPLIES: an LLM reply's text shows on its node as it
+    # arrives (Node.streaming_content + the llm-stream SSE). On by
+    # default; the env var is the kill switch (read by the worker).
+    STREAMING_REPLIES = os.environ.get(
+        "STREAMING_REPLIES", "true").lower() in ("1", "true", "yes")
+    # STREAMING_VOICE_TTS: voice mode speaks a reply while it is written
+    # instead of after it is complete. Dark until a staging pass: off
+    # unless set.
+    STREAMING_VOICE_TTS = os.environ.get(
+        "STREAMING_VOICE_TTS", "false").lower() in ("1", "true", "yes")
+
     # --- Dev-update channel: changelog + notifications + polls (#207) ---
     # Intrinsically quiet (nothing shows unless something is unread), so it
     # deploys on. This env var is the emergency KILL SWITCH only: set

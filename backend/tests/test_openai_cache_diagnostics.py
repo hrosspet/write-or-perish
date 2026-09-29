@@ -64,6 +64,23 @@ def app():
 
 # ── Provider call ────────────────────────────────────────────────────────
 
+class _CompletedStream(list):
+    """A Responses API event stream holding only the terminal event, for
+    fakes of client.responses.create(..., stream=True)."""
+
+    def __init__(self, response):
+        event = type("Event", (), {})()
+        event.type = "response.completed"
+        event.response = response
+        super().__init__([event])
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
 def _load_providers():
     """A private copy of backend/llm_providers.py. Sibling test modules
     stub or re-import backend.llm_providers in sys.modules; loading the
@@ -110,10 +127,10 @@ def _fake_openai(monkeypatch, diagnostics=None, reject_option=False):
                     response=httpx.Response(400, request=httpx.Request(
                         "POST", "https://api.openai.com/v1/responses")),
                     body=None)
-            return FakeResponse()
+            return _CompletedStream(FakeResponse())
 
     class FakeClient:
-        def __init__(self, api_key=None):
+        def __init__(self, api_key=None, **kwargs):
             self.responses = FakeResponses()
 
     monkeypatch.setattr(providers, "OpenAI", FakeClient)
@@ -168,7 +185,7 @@ def test_rejected_baseline_id_named_only_by_param_retries(app, monkeypatch):
     real_create = None
 
     class Rejecting:
-        def __init__(self, api_key=None):
+        def __init__(self, api_key=None, **kwargs):
             self.responses = self
 
         def create(self, **kwargs):
@@ -193,7 +210,7 @@ def test_other_bad_requests_are_not_retried(app, monkeypatch):
     providers, calls = _fake_openai(monkeypatch)
 
     class Broken:
-        def __init__(self, api_key=None):
+        def __init__(self, api_key=None, **kwargs):
             self.responses = self
 
         def create(self, **kwargs):

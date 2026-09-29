@@ -1,3 +1,5 @@
+import time
+
 from flask import Blueprint, jsonify, request, current_app
 from flask_login import login_required, current_user
 from backend.models import Node
@@ -8,6 +10,7 @@ from backend.utils.llm_nodes import (
 )
 from backend.utils.placeholders import UserExportValidationError
 from backend.utils.context_artifacts import attach_context_artifacts
+from backend.utils import voice_timing
 from backend.utils.session_helpers import (
     ancestors_have_prompt, is_llm_node, create_llm_placeholder_node,
     AGENTIC_PROMPT_KEYS,
@@ -215,3 +218,62 @@ def create_voice_session():
         "llm_node_id": llm_node.id,
         "task_id": task_id,
     }), 202
+
+
+# ── Where a voice turn's wait goes (#371 step 0) ─────────────────────────
+
+@voice_bp.route("/timing/clock", methods=["GET"])
+@login_required
+def voice_timing_clock():
+    """The server's wall clock (epoch seconds): the browser measures its
+    offset from it before it reports its marks."""
+    return jsonify({"t": time.time()})
+
+
+@voice_bp.route("/timing", methods=["POST"])
+@login_required
+def report_voice_timing():
+    """The browser's marks for a voice turn, keyed by the turn's first
+    reply node: ``{"node_id", "marks": {stage: ms in the browser's
+    clock}, "offset_ms", "rtt_ms"}`` (offset_ms: server clock minus the
+    browser's). Returns the turn's record, the backend's marks included."""
+    data = request.get_json(silent=True) or {}
+    node_id = data.get("node_id")
+    node = Node.query.get(node_id) if isinstance(node_id, int) else None
+    if node is None or node.human_owner_id != current_user.id:
+        return jsonify({"error": "Node not found"}), 404
+    try:
+        offset = float(data.get("offset_ms") or 0) / 1000
+        rtt = float(data.get("rtt_ms") or 0)
+    except (TypeError, ValueError):
+        return jsonify({"error": "Bad clock values"}), 400
+    marks = data.get("marks")
+    if not isinstance(marks, dict):
+        return jsonify({"error": "Bad marks"}), 400
+    for stage, t_ms in marks.items():
+        if (stage in voice_timing.BROWSER_MARKS
+                and isinstance(t_ms, (int, float))):
+            voice_timing.mark(node.id, stage, t=t_ms / 1000 + offset)
+    voice_timing.note(node.id, clock_offset_ms=round(offset * 1000),
+                      clock_rtt_ms=round(rtt))
+    voice_timing.remember_turn(current_user.id, node.id)
+    rec = voice_timing.record(node.id)
+    voice_timing.log_summary(rec)
+    return jsonify(rec)
+
+
+@voice_bp.route("/timing", methods=["GET"])
+@login_required
+def list_voice_timing():
+    """The current user's recent voice turns (newest first) with the
+    median of each stage. ``?limit=N`` (default 20)."""
+    limit = request.args.get("limit", 20, type=int)
+    limit = max(1, min(limit, voice_timing.RECENT_TURNS))
+    records = [voice_timing.record(node_id) for node_id
+               in voice_timing.recent_turns(current_user.id, limit)]
+    return jsonify({
+        "stages": {name: f"{start} -> {end}"
+                   for name, start, end in voice_timing.STAGES},
+        "median": voice_timing.medians(records),
+        "turns": records,
+    })

@@ -62,9 +62,8 @@ export default function WritePage() {
   const handleSuccess = (data) => {
     const llmNodeId = data?.llm_node_id;
     if (llmNodeId && data?.user_node_id) {
-      // Land on the user's entry so it gets its own URL/history step;
-      // NodeDetail picks up the pending LLM response via ?awaitLlm and
-      // navigates to it on completion.
+      // Through the user's entry so it gets its own URL/history step;
+      // NodeDetail takes ?awaitLlm on to the pending LLM response.
       navigate(`/node/${data.user_node_id}?awaitLlm=${llmNodeId}`);
     } else if (llmNodeId) {
       navigate(`/node/${llmNodeId}?awaitLlm=${llmNodeId}`);

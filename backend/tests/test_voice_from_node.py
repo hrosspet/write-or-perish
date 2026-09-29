@@ -530,3 +530,57 @@ class TestVoiceFromNodeAgenticAncestryBridge:
         assert data["llm_node_id"] == llm_node.id
         # No new prompt node should have been appended anywhere in the tree
         assert self._count_prompt_ancestors(llm_node.id) == 1
+
+
+# ── Tests: voice turn timing (#371 step 0) ─────────────────────────────
+
+class TestVoiceTiming:
+    @pytest.fixture
+    def turn(self, app, monkeypatch):
+        from backend.tests.test_voice_timing import FakeRedis
+        from backend.utils import voice_timing
+        fake = FakeRedis()
+        monkeypatch.setattr(voice_timing, "_redis", lambda: fake)
+        alice = _make_user("alice")
+        llm_user = _make_user("gpt-5", twitter_id="llm-gpt-5")
+        user_msg = _make_node(alice, content="spoken")
+        llm_node = _make_node(
+            llm_user, parent_id=user_msg.id, content="reply",
+            node_type="llm", llm_model="gpt-5", human_owner=alice)
+        _db.session.commit()
+        voice_timing.mark(llm_node.id, "chunk_published", t=1000.0)
+        return alice, llm_node
+
+    def test_browser_marks_join_the_backend_record(self, app, turn):
+        alice, llm_node = turn
+        client = app.test_client()
+        _login(client, alice.id)
+        resp = client.post("/api/voice/timing", json={
+            "node_id": llm_node.id,
+            # Browser clock 2 s behind the server's.
+            "marks": {"chunk_ready": 998_500, "playing": 998_800,
+                      "not_a_stage": 1, "rec_stop": "soon"},
+            "offset_ms": 2000, "rtt_ms": 40,
+        })
+        assert resp.status_code == 200
+        rec = resp.get_json()
+        assert rec["marks"] == {"chunk_published": 1000.0,
+                                "chunk_ready": 1000.5, "playing": 1000.8}
+        assert rec["stages"] == {"g": 0.5, "h": 0.3}
+        assert rec["facts"]["clock_rtt_ms"] == "40"
+
+        listing = client.get("/api/voice/timing").get_json()
+        assert [t["node_id"] for t in listing["turns"]] == [llm_node.id]
+        assert listing["median"] == {"g": 0.5, "h": 0.3}
+        assert listing["stages"]["g"] == "chunk_published -> chunk_ready"
+
+    def test_someone_elses_node_is_refused(self, app, turn):
+        _, llm_node = turn
+        bob = _make_user("bob")
+        _db.session.commit()
+        client = app.test_client()
+        _login(client, bob.id)
+        resp = client.post("/api/voice/timing", json={
+            "node_id": llm_node.id, "marks": {"playing": 1}})
+        assert resp.status_code == 404
+        assert client.get("/api/voice/timing").get_json()["turns"] == []
