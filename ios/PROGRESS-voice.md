@@ -1,7 +1,7 @@
 # M3 Voice and audio: progress and hand-off
 
 Branch `ios-app-voice` (from `ios-app` at M1, with `origin/ios-app` M2 merged on
-2026-10-01). M5 folds this file into `PROGRESS.md`. Spec: design doc §9, map C
+2026-10-01, last at `b8417c7`). M5 folds this file into `PROGRESS.md`. Spec: design doc §9, map C
 (§8 is the native design).
 
 **Status: done** in the simulator; the locked-phone behaviour, Bluetooth, calls
@@ -12,7 +12,7 @@ and real background suspension need the device checklist in `ios/README.md`.
 - Simulator used: "Loore Voice iPhone 17" (iPhone 17, iOS 26.3),
   `F23E45D8-25E5-4A27-A31E-31149C9D540A`. Prefix Xcode commands with
   `export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer;`.
-- Unit tests: `cd ios && xcodegen && xcodebuild … -scheme Loore test` (235 tests
+- Unit tests: `cd ios && xcodegen && xcodebuild … -scheme Loore test` (240 tests
   with M2's, one skipped: the format-probe helper).
 - A whole voice turn without a microphone: `-LooreDebugAudioFile <clip>` (make one
   with `say -o clip.m4a --file-format=m4af --data-format=aac "…"`). The file plays
@@ -209,3 +209,6 @@ replayed from the existing file (not billed).
    `node.hasTTS = true`.
 5. Design docs (`CLAUDE.md` list): mark M3 done.
 6. Report finding 1 to Peter (backend follow-up).
+7. Commit `73e60d7` (the second merge of `origin/ios-app`) lacks the
+   `Co-Authored-By`/`Claude-Session` lines (made with `--no-edit`; not rewritten,
+   per the no-amend rule).
