@@ -81,7 +81,7 @@ final class NodeFormModelTests: StubbedAppTestCase {
         await model.submit()
         XCTAssertTrue(model.showTtsDialog)
         XCTAssertTrue(calls.isEmpty)
-        model.showTtsDialog = false
+        model.cancelDialog()
         await model.submit(regenerateTts: true)
         XCTAssertEqual(result()?.editedNode?.content, "new")
         XCTAssertEqual(body(of: "PUT /api/nodes/9")?["regenerate_tts"] as? Bool, true)
@@ -312,6 +312,80 @@ final class ThreadModelTests: StubbedAppTestCase {
         let model = await loadedModel()
         XCTAssertFalse(model.canPin)
         XCTAssertEqual(model.pinTitle, "Cannot pin a private node")
+    }
+
+    // MARK: Watching a pending reply (map D §5.5–5.6)
+
+    private let pendingJSON = """
+    {"id":77,"content":"[LLM response generation pending...]","node_type":"llm","llm_model":"gpt-6-luna",
+     "llm_task_status":"pending","user":{"id":99,"username":"gpt-6-luna"},"parent_user_id":5,
+     "privacy_level":"private","ai_usage":"chat","streaming_content":"So far",
+     "ancestors":[{"id":10,"content":"entry","node_type":"user","user_id":5,"ai_usage":"chat","privacy_level":"private"}]}
+    """
+
+    private func watch(status: String) async -> ThreadModel {
+        let pending = pendingJSON
+        StubURLProtocol.install { request in
+            switch request.url?.path(percentEncoded: true) ?? "" {
+            case "/api/nodes/77": return .json(200, pending)
+            case "/api/nodes/77/llm-status": return .json(200, status)
+            default: return .json(200, "{}")
+            }
+        }
+        let tab = app.router.selectedTab
+        app.router.setPath([.thread(id: 10, awaitLLM: nil), .thread(id: 77, awaitLLM: 77)], for: tab)
+        let model = ThreadModel(nodeId: 77, awaitLLM: 77, app: app)
+        await model.start()
+        return model
+    }
+
+    private func eventually(_ condition: @escaping () -> Bool) async -> Bool {
+        for _ in 0..<40 {
+            if condition() { return true }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        return condition()
+    }
+
+    func testAPendingReplyShowsItsTextSoFar() async {
+        let model = await watch(status: #"{"node_id":77,"status":"processing"}"#)
+        XCTAssertTrue(model.isLLMPending)
+        XCTAssertEqual(model.streamText, "So far")
+        XCTAssertEqual(model.tabTitle, "Thinking…")
+        model.stop()
+    }
+
+    func testACompletedReplyIsPatchedInPlace() async {
+        let model = await watch(status: #"{"node_id":77,"status":"completed","content":"Final text","tool_calls_meta":[]}"#)
+        let done = await eventually { model.node?.llmTaskStatus == .completed }
+        XCTAssertTrue(done)
+        XCTAssertEqual(model.node?.content, "Final text")
+        XCTAssertEqual(app.router.path(for: app.router.selectedTab).count, 2)
+        model.stop()
+    }
+
+    func testAContinuationIsFollowed() async {
+        let model = await watch(status: #"{"node_id":77,"status":"completed","continuation_node_id":78}"#)
+        let followed = await eventually {
+            self.app.router.path(for: self.app.router.selectedTab).last == .thread(id: 78, awaitLLM: 78)
+        }
+        XCTAssertTrue(followed)
+        model.stop()
+    }
+
+    func testAFailedReplyToastsAndGoesBackToItsEntry() async {
+        let model = await watch(status: #"{"node_id":77,"status":"failed","error":"Provider overloaded"}"#)
+        let back = await eventually { self.app.router.path(for: self.app.router.selectedTab) == [.thread(id: 10, awaitLLM: nil)] }
+        XCTAssertTrue(back)
+        XCTAssertEqual(app.toasts.toasts.last?.message, "Provider overloaded")
+        model.stop()
+    }
+
+    func testAFailedReplyWithoutTextSaysTaskFailed() async {
+        let model = await watch(status: #"{"node_id":77,"status":"failed"}"#)
+        let toasted = await eventually { self.app.toasts.toasts.last?.message == "Task failed" }
+        XCTAssertTrue(toasted)
+        model.stop()
     }
 
     func testChildRowsIndentOnlyWhenThereAreSiblings() throws {

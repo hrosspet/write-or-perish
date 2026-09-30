@@ -37,7 +37,7 @@ final class ThreadWritingUITests: XCTestCase {
     }
 
     private func waitForFocal(_ app: XCUIApplication) {
-        XCTAssertTrue(app.descendants(matching: .any)["thread.focal"].waitForExistence(timeout: 20), "thread did not load")
+        XCTAssertTrue(app.descendants(matching: .any)["thread.focal"].firstMatch.waitForExistence(timeout: 20), "thread did not load")
         sleep(2)
     }
 
@@ -95,15 +95,9 @@ final class ThreadWritingUITests: XCTestCase {
     func testThreadKebabActionsOpenAndCancel() throws {
         let app = try launch(route: "/node/201076")
         waitForFocal(app)
-        let focalKebab = app.buttons.matching(identifier: "More actions").element(boundBy: app.buttons.matching(identifier: "More actions").count - 1)
-        // The focal kebab is the last "More actions" above the reply form: find it by position.
+        let focal = app.buttons["thread.focalKebab"]
+        let focalFrame = app.descendants(matching: .any)["thread.focal"].firstMatch.frame
         let kebabs = app.buttons.matching(NSPredicate(format: "label == 'More actions'"))
-        var focal = focalKebab
-        let focalFrame = app.descendants(matching: .any)["thread.focal"].frame
-        for i in 0..<kebabs.count {
-            let k = kebabs.element(boundBy: i)
-            if k.frame.midY > focalFrame.minY && k.frame.midY < focalFrame.maxY { focal = k }
-        }
         focal.tap()
         sleep(1)
         snapshot("m2-kebab-focal")
@@ -137,7 +131,7 @@ final class ThreadWritingUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["What's on your mind?"].waitForExistence(timeout: 20))
         sleep(2)
         snapshot("m2-textmode")
-        let field = app.textFields["nodeForm.text"].exists ? app.textFields["nodeForm.text"] : app.textViews["nodeForm.text"]
+        let field = app.textFields["nodeForm.text.new"].exists ? app.textFields["nodeForm.text.new"] : app.textViews["nodeForm.text.new"]
         if field.waitForExistence(timeout: 3) {
             field.tap()
             sleep(1)

@@ -40,6 +40,9 @@ final class ThreadModel {
     // UI state
     private(set) var pinLoading = false
     private(set) var voiceLoading = false
+    private(set) var readLoading = false
+    /// The Read button's own model (read models only, #355); nil until its picker loads.
+    var readModel: String?
     var toolActionsExpanded = false
     var replyTarget: NodeTarget?
     var editTarget: NodeTarget?
@@ -48,6 +51,7 @@ final class ThreadModel {
     var showEditForm = false
     var pendingPromptDelete: (targetId: Int, withDescendants: Bool)?
     var showPromptDeleteDialog = false
+    private(set) var deleteChecking = false
 
     @ObservationIgnored private var awaitHandled = false
     @ObservationIgnored private var pollTask: Task<Void, Never>?
@@ -459,6 +463,39 @@ final class ThreadModel {
         app.open(.thread(id: userId, awaitLLM: result.llmNodeId))
     }
 
+    // MARK: Read (admin Community Archive feature, map D §5.9)
+
+    static let readFurtherTitle = "Another pass over the day's tweets, against everything in this thread so far — your marks on these picks included."
+    static let readEntryTitle = "Loore reads the last day of Community Archive tweets and shows you the ones relevant to this thread"
+
+    var readLabel: String { readReplyAbove ? "Read further" : "Read" }
+
+    func readActions(craftMode: Bool) -> Bool {
+        isOwner && inReadThread && node?.aiUsage != .off && !isLLMPending
+    }
+
+    /// `POST /api/read/from-node/<id>` (billed): a read turn under this node.
+    func readFromNode(autoGenerate: Bool) {
+        guard let app, !readLoading else { return }
+        readLoading = true
+        pageError = nil
+        Task {
+            do {
+                struct Answer: Decodable { var llm_node_id: Int?; var prompt_node_id: Int? }
+                var body: [String: JSONValue] = ["auto_generate": .bool(autoGenerateActive(autoGenerate))]
+                if let readModel { body["model"] = .string(readModel) }
+                let answer: Answer = try await app.api.post(APIPath.readFromNode(nodeId), json: .object(body))
+                readLoading = false
+                if let id = answer.llm_node_id ?? answer.prompt_node_id { app.open(.thread(id: id, awaitLLM: nil)) }
+            } catch {
+                readLoading = false
+                if SpendCap.isSpendCapError(error) { return }
+                app.toasts.show((error as? APIError)?.userMessage(fallback: "Could not start the read.")
+                                ?? "Could not start the read.", duration: 6)
+            }
+        }
+    }
+
     // MARK: Voice hand-off
 
     func startVoice() {
@@ -645,21 +682,27 @@ final class ThreadModel {
 
     // MARK: Delete (map D §4.8)
 
+    /// The dialog stays up while the orphaned-prompt check runs, so the
+    /// follow-up replaces it in place (one presenter for both).
     func confirmDelete(withDescendants: Bool) {
-        guard let app, let target = deleteTarget else { return }
-        deleteTarget = nil
+        guard let app, let target = deleteTarget, !deleteChecking else { return }
         guard threadRootIsSystemPrompt, target.id != threadRootId else {
+            deleteTarget = nil
             performDelete(target.id, withDescendants: withDescendants, includePrompt: false)
             return
         }
+        deleteChecking = true
         Task {
             let impact: DeleteImpactResponse? = try? await app.api.get(APIPath.deleteImpact(target.id), query: [
                 URLQueryItem(name: "delete_descendants", value: withDescendants ? "true" : "false"),
             ])
+            deleteChecking = false
             if impact?.orphanedSystemPromptId != nil {
                 pendingPromptDelete = (target.id, withDescendants)
                 showPromptDeleteDialog = true
+                deleteTarget = nil
             } else {
+                deleteTarget = nil
                 performDelete(target.id, withDescendants: withDescendants, includePrompt: false)
             }
         }

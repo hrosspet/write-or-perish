@@ -122,6 +122,15 @@ private struct ThreadContent: View {
                     } action: { model.startVoice() }
                     .disabled(model.voiceLoading)
                     .accessibilityHint("Continue this conversation by voice")
+                    if app.capabilities.isAdmin {
+                        TopRightButton(title: model.readLoading ? "Starting…"
+                                       : (model.inReadThread ? model.readLabel : "Relevant tweets")) {
+                            Image(systemName: "book").font(.system(size: 11))
+                        } action: { model.readFromNode(autoGenerate: autoGenerate) }
+                        .disabled(model.readLoading)
+                        .accessibilityHint(model.inReadThread && model.readReplyAbove ? ThreadModel.readFurtherTitle
+                                           : ThreadModel.readEntryTitle)
+                    }
                     if craftMode {
                         TopRightButton(title: "Auto-generate") {
                             LoorePillSwitch(isOn: autoGenerate)
@@ -149,6 +158,7 @@ private struct ThreadContent: View {
                         BubbleAction(label: "Edit") { model.beginEdit(model.target(focal: node)) },
                         BubbleAction(label: "Delete", destructive: true) { model.beginDelete(model.target(focal: node)) },
                     ])
+                    .accessibilityIdentifier("thread.focalKebab")
                 } else {
                     Color.clear.frame(width: KebabMenu.width)
                 }
@@ -175,6 +185,9 @@ private struct ThreadContent: View {
                 }
                 if showCraftBar && !(model.inReadThread && !model.readReplyAbove) {
                     llmResponseRow(node).padding(.top, 8)
+                }
+                if model.readActions(craftMode: craftMode) {
+                    readRow(node).padding(.top, 8)
                 }
                 if model.llmTaskNodeId != nil && !showCraftBar && !model.isLLMPending {
                     HStack(spacing: 8) {
@@ -219,6 +232,32 @@ private struct ThreadContent: View {
     private func humanOwner(_ node: NodeDetail) -> String? {
         guard node.nodeType == .llm, node.parentUserId != nil else { return nil }
         return node.ancestors.last(where: { $0.nodeType != .llm })?.username
+    }
+
+    /// "Read" / "Read further" with its own read-model picker (admin read threads).
+    private func readRow(_ node: NodeDetail) -> some View {
+        let busy = model.readLoading || model.llmRequesting || model.llmTaskNodeId != nil
+        return HStack(spacing: 0) {
+            Button { model.readFromNode(autoGenerate: autoGenerate) } label: {
+                Text(model.readLoading ? "Starting…" : model.readLabel)
+                    .font(LooreFont.button)
+                    .foregroundStyle(LooreColor.textSecondary)
+                    .padding(.vertical, 10)
+                    .padding(.horizontal, 16)
+                    .overlay(UnevenRoundedRectangle(topLeadingRadius: LooreRadius.control,
+                                                    bottomLeadingRadius: LooreRadius.control)
+                        .strokeBorder(LooreColor.border))
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .disabled(busy)
+            .accessibilityHint(model.readReplyAbove ? ThreadModel.readFurtherTitle : ThreadModel.readEntryTitle)
+            ModelPicker(nodeId: node.id, selectedModel: $model.readModel, purpose: .read, disabled: busy)
+                .frame(maxWidth: 200)
+                .padding(.leading, -1)
+            Spacer(minLength: 0)
+        }
+        .fixedSize(horizontal: false, vertical: true)
     }
 
     private func llmResponseRow(_ node: NodeDetail) -> some View {

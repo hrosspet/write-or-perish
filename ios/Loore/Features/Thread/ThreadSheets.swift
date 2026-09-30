@@ -34,7 +34,11 @@ struct ThreadSheets: ViewModifier {
                 PromptEditConfirmDialog(
                     onConfirm: {
                         model.showPromptEditConfirm = false
-                        model.showEditForm = true
+                        // Let the dialog's cover go before the sheet comes.
+                        Task {
+                            try? await Task.sleep(nanoseconds: 450_000_000)
+                            model.showEditForm = true
+                        }
                     },
                     onCancel: {
                         model.showPromptEditConfirm = false
@@ -46,19 +50,25 @@ struct ThreadSheets: ViewModifier {
                         app.open(.prompts)
                     })
             }
-            .looreDialog(isPresented: Binding(get: { model.deleteTarget != nil },
-                                               set: { if !$0 { model.deleteTarget = nil } })) {
-                DeleteConfirmDialog(mode: .single(hasChildren: model.deleteTarget?.hasChildren ?? false),
-                                    onConfirm: { model.confirmDelete(withDescendants: $0) },
-                                    onCancel: { model.deleteTarget = nil })
-            }
-            .looreDialog(isPresented: $model.showPromptDeleteDialog) {
-                DeleteConfirmDialog(mode: .prompt(listedIn: model.threadRootIsPublic ? "your public page" : "your Log"),
-                                    onConfirm: { model.confirmPromptDelete(includePrompt: $0) },
-                                    onCancel: {
-                                        model.showPromptDeleteDialog = false
-                                        model.pendingPromptDelete = nil
-                                    })
+            .looreDialog(isPresented: Binding(get: { model.deleteTarget != nil || model.showPromptDeleteDialog },
+                                               set: { if !$0 {
+                                                   model.deleteTarget = nil
+                                                   model.showPromptDeleteDialog = false
+                                                   model.pendingPromptDelete = nil
+                                               } })) {
+                if model.showPromptDeleteDialog {
+                    DeleteConfirmDialog(mode: .prompt(listedIn: model.threadRootIsPublic ? "your public page" : "your Log"),
+                                        onConfirm: { model.confirmPromptDelete(includePrompt: $0) },
+                                        onCancel: {
+                                            model.showPromptDeleteDialog = false
+                                            model.pendingPromptDelete = nil
+                                        })
+                } else {
+                    DeleteConfirmDialog(mode: .single(hasChildren: model.deleteTarget?.hasChildren ?? false),
+                                        onConfirm: { model.confirmDelete(withDescendants: $0) },
+                                        onCancel: { model.deleteTarget = nil })
+                    .disabled(model.deleteChecking)
+                }
             }
     }
 }
