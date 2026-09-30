@@ -345,7 +345,7 @@ final class VoiceTurnController {
                 self.endTurnWithError(fatal, sound: true)
                 return
             }
-            if outcome.produced == 0 {
+            if outcome.produced == 0 && outcome.prior == 0 {
                 await self.backend.discard(sessionId: sid)
                 self.recorder.forget(sessionId: sid)
                 guard gen == self.generation else { return }

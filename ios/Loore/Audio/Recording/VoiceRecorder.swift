@@ -49,7 +49,7 @@ final class VoiceRecorder: VoiceRecording {
             guard let self, sid == self.sessionId else { return }
             self.onFatal?(message)
         }
-        uploader.open(sessionId: sessionId, uploadURL: uploadURL)
+        uploader.open(sessionId: sessionId, uploadURL: uploadURL, firstIndex: firstChunkIndex)
         writer = try makeWriter(firstIndex: firstChunkIndex)
         let source = makeSource()
         let converter = PCMConverter()

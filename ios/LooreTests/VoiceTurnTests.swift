@@ -514,3 +514,13 @@ final class VoiceTurnTests: XCTestCase {
         XCTAssertEqual(ChapterTitle.numeral(9), "10")
     }
 }
+
+@MainActor
+final class ResumedSessionTotalsTests: XCTestCase {
+    func testResumedSessionCountsTheChunksAlreadyStored() {
+        let outcome = ChunkUploader.Outcome(produced: 2, stored: 2, failed: [], fatalMessage: nil, prior: 1)
+        XCTAssertEqual(outcome.totalForFinalize, 3)
+        let partial = ChunkUploader.Outcome(produced: 3, stored: 2, failed: [5], fatalMessage: nil, prior: 4)
+        XCTAssertEqual(partial.totalForFinalize, 6)
+    }
+}

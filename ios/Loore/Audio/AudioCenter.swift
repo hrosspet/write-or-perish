@@ -22,10 +22,13 @@ final class AudioCenter {
     private(set) var loadingSource: ChunkQueuePlayer.Source?
 
     @ObservationIgnored private weak var app: AppState?
+    /// Listen-aloud results per target and content (web SpeakerIcon's cached URLs).
+    @ObservationIgnored var listenCache: [ListenCacheKey: ListenCacheEntry] = [:]
+    var appState: AppState? { app }
     @ObservationIgnored private var voiceController: VoiceTurnController?
     @ObservationIgnored private var observers: [NSObjectProtocol] = []
-    @ObservationIgnored private var listenTask: Task<Void, Never>?
-    @ObservationIgnored private let log = Logger(subsystem: "org.loore.app", category: "audio")
+    @ObservationIgnored var listenTask: Task<Void, Never>?
+    @ObservationIgnored let log = Logger(subsystem: "org.loore.app", category: "audio")
 
     init() {
         player.willPlay = { [weak self] in self?.prepareSessionForPlayback() }
@@ -88,11 +91,21 @@ final class AudioCenter {
 
     var hasVoiceController: Bool { voiceController != nil }
 
+    /// Debug builds with `-LooreDebugAudioFile`: the recorder reads a file, not the mic.
+    var usesDebugAudioFile: Bool {
+        #if DEBUG
+        return app?.launch.debugAudioFile != nil
+        #else
+        return false
+        #endif
+    }
+
     /// Sign-out: stop everything and forget the conversation.
     func signedOut() {
         voiceController?.tearDown()
         voiceController = nil
         listenTask?.cancel()
+        listenCache = [:]
         loadingSource = nil
         player.close()
         sounds.stopCue()
@@ -191,7 +204,7 @@ extension AudioCenter: VoiceAudio {
     func activateForRecording() throws {
         // A listen-aloud queue stops when a recording starts (web: audio.stop()).
         if player.source != .voice && player.isLoaded { player.close() }
-        try session.activateForRecording()
+        try session.activateForRecording(microphone: !usesDebugAudioFile)
     }
 
     func activateForReply() {
@@ -258,11 +271,13 @@ extension ChunkQueuePlayer: VoiceQueue {
 /// Local notifications (no backend needed): "Recording paused — tap to resume"
 /// and the 59-minute warning (design doc §9.5).
 enum LocalNotifier {
-    static func requestAuthorizationIfNeeded() {
-        UNUserNotificationCenter.current().getNotificationSettings { settings in
-            guard settings.authorizationStatus == .notDetermined else { return }
-            UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
-        }
+    /// Asked once, at the first record tap and before recording starts, so the
+    /// system alert never covers a recording in progress.
+    static func requestAuthorizationIfNeeded() async {
+        let center = UNUserNotificationCenter.current()
+        let settings = await center.notificationSettings()
+        guard settings.authorizationStatus == .notDetermined else { return }
+        _ = try? await center.requestAuthorization(options: [.alert, .sound])
     }
 
     static func post(_ notice: LocalNotice) {
@@ -284,6 +299,12 @@ extension AudioCenter {
     /// Signed in with cookies restored: finish uploads a killed app left behind.
     func didSignIn() {
         ChunkUploader.shared.resumePending()
+        #if DEBUG
+        // `-LooreDebugListenNode <id>`: play a node's audio in the global player
+        // at launch (the speaker icon's path) until the thread view lands (M2).
+        let id = UserDefaults.standard.integer(forKey: "LooreDebugListenNode")
+        if id > 0 { listen(to: .node(id), content: nil) }
+        #endif
     }
 }
 

@@ -71,9 +71,16 @@ final class AudioSessionController {
     }
 
     /// At the record tap (foreground).
-    func activateForRecording() throws {
-        try session.setCategory(.playAndRecord, mode: .default,
-                                options: [.allowBluetoothHFP, .allowBluetoothA2DP, .defaultToSpeaker])
+    /// - Parameter microphone: false for the Debug audio-file source, which needs
+    ///   no input: in the simulator a `.playAndRecord` session opens the Mac's
+    ///   microphone and waits on macOS's consent prompt.
+    func activateForRecording(microphone: Bool = true) throws {
+        if microphone {
+            try session.setCategory(.playAndRecord, mode: .default,
+                                    options: [.allowBluetoothHFP, .allowBluetoothA2DP, .defaultToSpeaker])
+        } else {
+            try session.setCategory(.playback, mode: .spokenAudio, options: [])
+        }
         try? session.setPrefersNoInterruptionsFromSystemAlerts(true)
         try session.setActive(true)
         mode = .recording

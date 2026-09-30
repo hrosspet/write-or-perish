@@ -67,7 +67,7 @@ struct MiniPlayerView: View {
                         .fixedSize()
                     if player.generatingTTS { PulsingDot(size: 6) }
                 }
-                AudioProgressBar(player: player, height: 5)
+                AudioProgressBar(player: player, height: 5, track: LooreColor.bgSurface)
                     .frame(minWidth: 40)
             }
         }

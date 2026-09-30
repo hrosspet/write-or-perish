@@ -237,8 +237,8 @@ struct VoiceView: View {
         Task {
             if app.launch.debugAudioFile == nil {
                 guard await ensureMicrophone() else { return }
+                await LocalNotifier.requestAuthorizationIfNeeded()
             }
-            LocalNotifier.requestAuthorizationIfNeeded()
             voice.start()
         }
     }
@@ -384,13 +384,14 @@ struct AudioProgressBar: View {
     let player: ChunkQueuePlayer
     var height: CGFloat = 6
     var showTicks = false
+    var track: Color = LooreColor.bgCard
 
     var body: some View {
         GeometryReader { proxy in
             let total = player.totalDuration
             let fraction = total > 0 ? min(1, player.cumulativeTime / total) : 0
             ZStack(alignment: .leading) {
-                Capsule().fill(LooreColor.bgCard)
+                Capsule().fill(track)
                 Capsule().fill(LooreColor.accent).frame(width: proxy.size.width * fraction)
                 if showTicks && total > 0 && player.chapters.count > 1 {
                     ForEach(Array(player.chapters.dropFirst().enumerated()), id: \.offset) { _, chapter in

@@ -158,47 +158,81 @@ enum ThinkingCueLevel: String, CaseIterable, Identifiable {
 }
 
 /// Plays the looping thinking cue and the one-shot chimes on the app's audio session.
+///
+/// `AVAudioPlayer` set-up talks to the audio server and can block (a route
+/// change, or the simulator waiting on the Mac's microphone consent), so every
+/// player call runs on a private serial queue: a slow audio device never
+/// freezes the UI or the voice turn.
 @MainActor
 final class SoundPlayer {
-    private var cue: AVAudioPlayer?
-    private var oneShots: [AVAudioPlayer] = []
-    private lazy var cueData = ToneSynth.thinkingCue()
-    private let log = Logger(subsystem: "org.loore.app", category: "sounds")
-
+    private let worker = SoundWorker()
     private(set) var cuePlaying = false
 
     /// Starts the loop (no-op when already running or when the level is Off).
     func startCue(level: ThinkingCueLevel = .current) {
         guard level != .off else { return }
-        if cuePlaying { cue?.volume = level.volume; return }
-        do {
-            let player = try AVAudioPlayer(data: cueData)
-            player.numberOfLoops = -1
-            player.volume = level.volume
-            player.prepareToPlay()
-            player.play()
-            cue = player
-            cuePlaying = true
-        } catch {
-            log.error("cue could not start")
+        cuePlaying = true
+        worker.startCue(volume: level.volume)
+    }
+
+    func stopCue() {
+        cuePlaying = false
+        worker.stopCue()
+    }
+
+    func play(_ data: @escaping @Sendable () -> Data, volume: Float = 1) {
+        worker.play(data, volume: volume)
+    }
+
+    func playError() { play { ToneSynth.errorSound() } }
+    func playInterruptionAlert() { play { ToneSynth.interruptionAlert() } }
+    func playLongRecordingWarning() { play { ToneSynth.longRecordingWarning() } }
+}
+
+/// The queue-confined side of `SoundPlayer`.
+private final class SoundWorker: @unchecked Sendable {
+    private let queue = DispatchQueue(label: "org.loore.audio.sounds", qos: .userInitiated)
+    private var cue: AVAudioPlayer?
+    private var oneShots: [AVAudioPlayer] = []
+    private lazy var cueData = ToneSynth.thinkingCue()
+    private let log = Logger(subsystem: "org.loore.app", category: "sounds")
+
+    func startCue(volume: Float) {
+        queue.async { [self] in
+            if let cue {
+                cue.volume = volume
+                if !cue.isPlaying { cue.play() }
+                return
+            }
+            do {
+                let player = try AVAudioPlayer(data: cueData)
+                player.numberOfLoops = -1
+                player.volume = volume
+                player.play()
+                cue = player
+                log.info("thinking cue on")
+            } catch {
+                log.error("cue could not start")
+            }
         }
     }
 
     func stopCue() {
-        cue?.stop()
-        cue = nil
-        cuePlaying = false
+        queue.async { [self] in
+            guard let cue else { return }
+            cue.stop()
+            self.cue = nil
+            log.info("thinking cue off")
+        }
     }
 
-    func play(_ data: Data, volume: Float = 1) {
-        guard let player = try? AVAudioPlayer(data: data) else { return }
-        player.volume = volume
-        player.play()
-        oneShots.removeAll { !$0.isPlaying }
-        oneShots.append(player)
+    func play(_ data: @escaping @Sendable () -> Data, volume: Float) {
+        queue.async { [self] in
+            guard let player = try? AVAudioPlayer(data: data()) else { return }
+            player.volume = volume
+            player.play()
+            oneShots.removeAll { !$0.isPlaying }
+            oneShots.append(player)
+        }
     }
-
-    func playError() { play(ToneSynth.errorSound()) }
-    func playInterruptionAlert() { play(ToneSynth.interruptionAlert()) }
-    func playLongRecordingWarning() { play(ToneSynth.longRecordingWarning()) }
 }

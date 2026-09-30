@@ -40,6 +40,8 @@ final class ChunkUploader: NSObject {
         var chunks: [Int: ChunkRecord] = [:]
         /// Set when the recorder stopped: no more chunks will come.
         var closed = false
+        /// Chunks the session already had on the server (a resumed recording).
+        var firstIndex = 0
     }
 
     /// What `settle` reports before finalize.
@@ -48,10 +50,13 @@ final class ChunkUploader: NSObject {
         var stored: Int
         var failed: [Int]
         var fatalMessage: String?
+        /// Chunks stored before this recording resumed the session (web `existingChunkCount`).
+        var prior = 0
 
-        /// `total_chunks` for finalize: the count actually stored when some were
-        /// given up (otherwise the server waits 10 minutes for them, C §10.4).
-        var totalForFinalize: Int { failed.isEmpty ? produced : stored }
+        /// `total_chunks` for finalize: the session's chunk count, counting only
+        /// the stored ones when some were given up (otherwise the server waits
+        /// 10 minutes for them, C §10.4).
+        var totalForFinalize: Int { prior + (failed.isEmpty ? produced : stored) }
     }
 
     /// Sends one prepared upload; injectable for tests.
@@ -105,7 +110,9 @@ final class ChunkUploader: NSObject {
     /// Starts tracking a session (before its first chunk).
     func open(sessionId: String, uploadURL: URL, firstIndex: Int = 0) {
         if manifests[sessionId] == nil {
-            manifests[sessionId] = Manifest(sessionId: sessionId, uploadURL: uploadURL)
+            var manifest = Manifest(sessionId: sessionId, uploadURL: uploadURL)
+            manifest.firstIndex = firstIndex
+            manifests[sessionId] = manifest
             persist(sessionId)
         }
     }
@@ -157,7 +164,8 @@ final class ChunkUploader: NSObject {
         return Outcome(produced: chunks.count,
                        stored: chunks.filter { $0.status == .stored }.count,
                        failed: chunks.filter { $0.status == .failed || $0.status == .fatal }.map(\.index).sorted(),
-                       fatalMessage: fatal ? fatalMessages[sessionId] : nil)
+                       fatalMessage: fatal ? fatalMessages[sessionId] : nil,
+                       prior: manifests[sessionId]?.firstIndex ?? 0)
     }
 
     /// Forgets a session and deletes its files (after finalize, or on discard).
@@ -175,7 +183,11 @@ final class ChunkUploader: NSObject {
         for dir in dirs {
             let file = dir.appendingPathComponent("manifest.json")
             guard let data = try? Data(contentsOf: file),
-                  let manifest = try? JSONDecoder().decode(Manifest.self, from: data) else { continue }
+                  let manifest = try? JSONDecoder().decode(Manifest.self, from: data) else {
+                // Unreadable (or from an older build): nothing we can resume.
+                try? fileManager.removeItem(at: dir)
+                continue
+            }
             if manifests[manifest.sessionId] != nil { continue }
             let open = manifest.chunks.values.contains { $0.status == .pending }
             if !open {
