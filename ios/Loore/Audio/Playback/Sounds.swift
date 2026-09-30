@@ -168,6 +168,13 @@ final class SoundPlayer {
     private let worker = SoundWorker()
     private(set) var cuePlaying = false
 
+    /// Builds the cue player ahead of time (at the record tap), so Stop only
+    /// has to call `play()` and the audio never pauses as the mic stops.
+    func prepareCue(level: ThinkingCueLevel = .current) {
+        guard level != .off else { return }
+        worker.prepareCue(volume: level.volume)
+    }
+
     /// Starts the loop (no-op when already running or when the level is Off).
     func startCue(level: ThinkingCueLevel = .current) {
         guard level != .off else { return }
@@ -197,6 +204,16 @@ private final class SoundWorker: @unchecked Sendable {
     private lazy var cueData = ToneSynth.thinkingCue()
     private let log = Logger(subsystem: "org.loore.app", category: "sounds")
 
+    private var prepared: AVAudioPlayer?
+
+    func prepareCue(volume: Float) {
+        queue.async { [self] in
+            guard cue == nil, prepared == nil else { return }
+            prepared = makeCue(volume: volume)
+            prepared?.prepareToPlay()
+        }
+    }
+
     func startCue(volume: Float) {
         queue.async { [self] in
             if let cue {
@@ -204,16 +221,12 @@ private final class SoundWorker: @unchecked Sendable {
                 if !cue.isPlaying { cue.play() }
                 return
             }
-            do {
-                let player = try AVAudioPlayer(data: cueData)
-                player.numberOfLoops = -1
-                player.volume = volume
-                player.play()
-                cue = player
-                log.info("thinking cue on")
-            } catch {
-                log.error("cue could not start")
-            }
+            guard let player = prepared ?? makeCue(volume: volume) else { return }
+            prepared = nil
+            player.volume = volume
+            player.play()
+            cue = player
+            log.info("thinking cue on")
         }
     }
 
@@ -223,6 +236,18 @@ private final class SoundWorker: @unchecked Sendable {
             cue.stop()
             self.cue = nil
             log.info("thinking cue off")
+        }
+    }
+
+    private func makeCue(volume: Float) -> AVAudioPlayer? {
+        do {
+            let player = try AVAudioPlayer(data: cueData)
+            player.numberOfLoops = -1
+            player.volume = volume
+            return player
+        } catch {
+            log.error("cue could not start")
+            return nil
         }
     }
 

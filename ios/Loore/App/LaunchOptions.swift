@@ -9,6 +9,8 @@ import Foundation
 /// | `-LooreSessionCookie <value>` | inject a Flask `session` cookie (signed in the backend container) |
 /// | `-LooreRoute /node/123` | open a screen directly after sign-in |
 /// | `-LooreDebugAudioFile <path>` | feed an audio file into the recorder instead of the mic (M3) |
+/// | `-LooreDebugVoiceAutoStart YES` | with the audio file on `/voice`: record at once (read from UserDefaults) |
+/// | `-LooreDebugListenNode <id>` | play a node's audio in the global player at launch (UserDefaults) |
 /// | `-LooreTheme light\|dark` | force the theme for this launch (screenshots) |
 /// | `-LooreResetState YES` | forget stored cookies and preferences at launch |
 /// | `-LooreSkipUpdates YES` | do not fetch `/api/updates` at launch (screenshots) |

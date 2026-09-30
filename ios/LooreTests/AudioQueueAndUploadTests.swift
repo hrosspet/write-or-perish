@@ -154,6 +154,21 @@ final class ChunkUploaderTests: XCTestCase {
         XCTAssertEqual(outcome.totalForFinalize, 2)
     }
 
+    func testOfflineStopDoesNotRetryEveryChunkInFull() async throws {
+        var attempts: [Int: Int] = [:]
+        uploader.transport = { [unowned self] request, file in
+            attempts[self.index(of: request, file: file), default: 0] += 1
+            throw URLError(.notConnectedToInternet)
+        }
+        uploader.open(sessionId: "s7", uploadURL: URL(string: "http://x/c")!)
+        for i in 0..<4 { uploader.enqueue(sessionId: "s7", chunk: chunk(i)) }
+        let outcome = await uploader.settle(sessionId: "s7")
+        XCTAssertEqual(attempts[0], 5)
+        XCTAssertEqual(attempts[1], 1)
+        XCTAssertEqual(attempts[3], 1)
+        XCTAssertEqual(outcome.failed, [0, 1, 2, 3])
+    }
+
     func testTransportErrorsAreRetried() async throws {
         var calls = 0
         uploader.transport = { request, _ in
@@ -219,5 +234,40 @@ final class ChunkUploaderTests: XCTestCase {
         XCTAssertEqual(sentIndexes, [0])
         XCTAssertEqual(outcome.stored, 1)
         uploader.forget(sessionId: "s6")
+    }
+}
+
+import MediaPlayer
+
+@MainActor
+final class NowPlayingTests: XCTestCase {
+    func testLockScreenCommandsFollowThePhase() {
+        let controller = NowPlayingController()
+        let center = MPRemoteCommandCenter.shared()
+        var calls: [String] = []
+        controller.handlers = .init(play: { calls.append("play") }, pause: { calls.append("pause") },
+                                    next: { calls.append("next") })
+
+        controller.update(.recording(elapsed: 83, paused: false))
+        XCTAssertEqual(MPNowPlayingInfoCenter.default().nowPlayingInfo?[MPMediaItemPropertyTitle] as? String, "Recording 1:23")
+        XCTAssertTrue(center.nextTrackCommand.isEnabled && center.pauseCommand.isEnabled && center.playCommand.isEnabled)
+        XCTAssertFalse(center.skipForwardCommand.isEnabled)
+
+        controller.update(.thinking(title: "Voice…"))
+        XCTAssertEqual(MPNowPlayingInfoCenter.default().nowPlayingInfo?[MPMediaItemPropertyTitle] as? String, "Voice…")
+        XCTAssertTrue(center.nextTrackCommand.isEnabled)
+        XCTAssertFalse(center.playCommand.isEnabled || center.pauseCommand.isEnabled)
+
+        controller.update(.playback(title: "Voice", elapsed: 3, duration: 20, rate: 1.5, playing: true))
+        let info = MPNowPlayingInfoCenter.default().nowPlayingInfo
+        XCTAssertEqual(info?[MPMediaItemPropertyPlaybackDuration] as? Double, 20)
+        XCTAssertEqual(info?[MPNowPlayingInfoPropertyPlaybackRate] as? Double, 1.5)
+        XCTAssertTrue(center.skipForwardCommand.isEnabled && center.changePlaybackRateCommand.isEnabled)
+        XCTAssertFalse(center.nextTrackCommand.isEnabled)
+        XCTAssertEqual(center.skipBackwardCommand.preferredIntervals, [10])
+
+        controller.update(.none)
+        XCTAssertNil(MPNowPlayingInfoCenter.default().nowPlayingInfo)
+        XCTAssertFalse(center.playCommand.isEnabled)
     }
 }

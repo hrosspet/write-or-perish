@@ -174,6 +174,7 @@ final class ChunkUploader: NSObject {
         workers[sessionId] = nil
         manifests[sessionId] = nil
         fatalMessages[sessionId] = nil
+        degraded.remove(sessionId)
         try? fileManager.removeItem(at: directory(for: sessionId))
     }
 
@@ -203,6 +204,10 @@ final class ChunkUploader: NSObject {
     // MARK: Worker
 
     private var fatalMessages: [String: String] = [:]
+    /// Sessions where a chunk already used up its retries (the network is
+    /// down): later chunks get one attempt each, then go to the background
+    /// session, so Stop does not wait 30 s per chunk.
+    private var degraded: Set<String> = []
 
     private func startWorker(_ sessionId: String) {
         guard workers[sessionId] == nil else { return }
@@ -233,6 +238,7 @@ final class ChunkUploader: NSObject {
             let result = await attemptUpload(sessionId, index: index)
             switch result {
             case .stored:
+                degraded.remove(sessionId)
                 mark(sessionId, index, .stored)
                 try? fileManager.removeItem(at: bodyFile(sessionId, index))
                 return
@@ -245,8 +251,9 @@ final class ChunkUploader: NSObject {
                 mark(sessionId, index, .failed)
                 return
             case .retry:
-                if attempt >= Self.retryDelays.count {
+                if attempt >= Self.retryDelays.count || degraded.contains(sessionId) {
                     log.error("chunk \(index) failed after \(attempt + 1) attempts; handing to the background session")
+                    degraded.insert(sessionId)
                     mark(sessionId, index, .failed)
                     startBackgroundUpload(sessionId, index: index)
                     return

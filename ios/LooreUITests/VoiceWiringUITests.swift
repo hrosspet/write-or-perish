@@ -78,4 +78,23 @@ final class VoiceWiringUITests: XCTestCase {
         let discard = app.buttons["Discard draft"]
         if discard.exists { discard.tap() }
     }
+
+    /// Thread → "Voice Mode" on a completed AI reply: the Voice screen opens in
+    /// Thinking and the existing reply plays by itself (`POST /tts` answers 200).
+    func testVoiceModeFromAThreadPlaysTheReply() throws {
+        let nodeId = try XCTUnwrap(env["LOORE_NODE_ID"].flatMap(Int.init), "set TEST_RUNNER_LOORE_NODE_ID")
+        let app = try launch(route: "/node/\(nodeId)")
+        let voiceMode = app.buttons["Voice Mode"]
+        XCTAssertTrue(app.buttons["speaker.\(nodeId)"].waitForExistence(timeout: 20), "thread did not load")
+        // The header sits above the ancestors; the thread opens at the focal card.
+        for _ in 0..<4 where !voiceMode.isHittable { app.swipeDown() }
+        XCTAssertTrue(voiceMode.waitForExistence(timeout: 5), "no Voice Mode button")
+        voiceMode.tap()
+        let playPause = app.buttons["voice.playPause"]
+        XCTAssertTrue(playPause.waitForExistence(timeout: 60), "the reply did not start")
+        sleep(3)
+        XCTAssertEqual(playPause.label, "Pause")
+        snapshot("wiring-06-voice-from-thread")
+        XCTAssertFalse(app.buttons["miniPlayer.playPause"].exists, "no mini-player on the Voice screen")
+    }
 }

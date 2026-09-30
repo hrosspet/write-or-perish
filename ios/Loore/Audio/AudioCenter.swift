@@ -210,6 +210,7 @@ extension AudioCenter: VoiceAudio {
         // A listen-aloud queue stops when a recording starts (web: audio.stop()).
         if player.source != .voice && player.isLoaded { player.close() }
         try session.activateForRecording(microphone: !usesDebugAudioFile)
+        sounds.prepareCue()
     }
 
     func activateForReply() {
