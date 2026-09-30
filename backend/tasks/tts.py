@@ -8,6 +8,7 @@ import json
 import re
 import time
 import httpx
+import openai
 import sentry_sdk
 from celery import Task
 from celery.utils.log import get_task_logger
@@ -123,6 +124,13 @@ TTS_SLOW_CHECK_SECS = 30
 TTS_SLOW_MIN_REALTIME = 1.0
 TTS_SLOW_RETRIES = 2
 
+# Temporary, #382: the SDK's own retries are off for the TTS call, so
+# each attempt is one request timed from its start; the loop in
+# synthesize_to_file resends what the SDK would have retried.
+_TTS_RETRIED_SDK_ERRORS = (openai.APIConnectionError,  # incl. timeouts
+                           openai.InternalServerError,
+                           openai.RateLimitError)
+
 _now = time.monotonic
 
 
@@ -134,12 +142,17 @@ class TTSSlowCall(Exception):
     """Temporary, #382: the call was cancelled for being too slow."""
 
 
+class TTSCallFailed(Exception):
+    """Temporary, #382: every attempt at a TTS call failed."""
+
+
 def _stream_speech(client, text, path, mark=None):
     """One TTS call streamed to *path*. Raises TTSCutOff or TTSSlowCall
     instead of leaving incomplete audio as the result."""
     started = _now()
     received = 0
-    with client.audio.speech.with_streaming_response.create(
+    with client.with_options(max_retries=0).audio.speech \
+            .with_streaming_response.create(
         model=TTS_MODEL, input=text, voice=TTS_VOICE,
         timeout=httpx.Timeout(TTS_SLOW_CHECK_SECS, connect=5.0),
     ) as resp:
@@ -181,24 +194,31 @@ def synthesize_to_file(client, text, path, section_end=False, mark=None):
     *mark(stage)*, when given, is called at the first and the last byte
     of the audio (#371 timing).
 
-    A call that is too slow or ran to OpenAI's cutoff is sent again
-    (#382); when every attempt fails, the partial file is removed and the
-    error raised, so the chunk fails rather than playing cut audio."""
+    A call that is too slow, ran to OpenAI's cutoff, or failed with an
+    error the SDK would retry is sent again (#382); when every attempt
+    fails, the partial file is removed and TTSCallFailed raised, so the
+    chunk fails rather than playing cut audio. Only slow calls are
+    reported to Sentry: that count tells #382 when OpenAI is fast again."""
     attempts = TTS_SLOW_RETRIES + 1
     for attempt in range(1, attempts + 1):
         try:
             _stream_speech(client, text, path, mark=mark)
             break
-        except (TTSSlowCall, TTSCutOff) as e:
+        except (TTSSlowCall, TTSCutOff) + _TTS_RETRIED_SDK_ERRORS as e:
             if attempt == attempts:
                 Path(path).unlink(missing_ok=True)
-                raise TTSSlowCall(
+                raise TTSCallFailed(
                     f"TTS call failed after {attempts} attempts; "
-                    f"last: {e}") from e
-            logger.warning("Slow TTS call cancelled (attempt %s of %s, "
-                           "%s chars): %s", attempt, attempts, len(text), e)
-            sentry_sdk.capture_message("Slow TTS call cancelled",
-                                       level="warning")
+                    f"last: {e!r}") from e
+            slow = isinstance(
+                e, (TTSSlowCall, TTSCutOff, openai.APITimeoutError))
+            logger.warning("%s (attempt %s of %s, %s chars): %r",
+                           "Slow TTS call cancelled" if slow
+                           else "TTS call failed, resending",
+                           attempt, attempts, len(text), e)
+            if slow:
+                sentry_sdk.capture_message("Slow TTS call cancelled",
+                                           level="warning")
     segment = AudioSegment.from_file(str(path), format="mp3")
     if section_end:
         segment = segment + AudioSegment.silent(

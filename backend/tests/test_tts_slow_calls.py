@@ -6,10 +6,11 @@ cut mid-word. ``synthesize_to_file`` must never return such audio as
 complete: a slow call is cancelled and resent, a call that ran to the
 cutoff is resent, and when every attempt fails the chunk fails.
 
-Imports the real tts module against stub glue (celery / openai / pydub /
+Imports the real tts module against stub glue (celery / pydub /
 backend.celery_app), then restores it, including the ``backend.tasks.tts``
 package attribute, so the rest of the suite is unaffected — same pattern
-as test_tts_strip.py.
+as test_tts_strip.py. openai is the real package: the code under test
+catches its exception classes.
 """
 import os
 import sys
@@ -17,10 +18,14 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import httpx
+import openai
 import pytest
 
 os.environ.setdefault("SECRET_KEY", "test-secret")
 os.environ.setdefault("ENCRYPTION_DISABLED", "true")
+
+# Imported before the stubs, so it keeps the real pydub for later tests.
+import backend.utils.audio_processing  # noqa: E402,F401
 
 # celery.Task must be a real base class so `class TTSTask(Task)` imports.
 _celery_stub = MagicMock()
@@ -30,7 +35,6 @@ _GLUE = {
     "celery": _celery_stub,
     "celery.utils": MagicMock(),
     "celery.utils.log": MagicMock(),
-    "openai": MagicMock(),
     "pydub": MagicMock(),
     "backend.celery_app": MagicMock(),
 }
@@ -95,22 +99,33 @@ class FakeResponse:
 
 
 class FakeClient:
-    """Answers each create() with the next script."""
+    """Answers each create() with the next script; a script that is an
+    exception is raised by create() itself (no response headers)."""
 
     def __init__(self, clock, *scripts):
         self._clock = clock
         self._scripts = list(scripts)
         self.calls = []
+        self.options = []
         self.responses = []
         self.audio = SimpleNamespace(speech=SimpleNamespace(
             with_streaming_response=SimpleNamespace(create=self._create)))
 
+    def with_options(self, **kwargs):
+        self.options.append(kwargs)
+        return self
+
     def _create(self, **kwargs):
         self.calls.append(kwargs)
-        resp = FakeResponse(self._clock, self._scripts.pop(0),
-                            f"req-{len(self.calls)}")
+        script = self._scripts.pop(0)
+        if isinstance(script, Exception):
+            raise script
+        resp = FakeResponse(self._clock, script, f"req-{len(self.calls)}")
         self.responses.append(resp)
         return resp
+
+
+_REQ = httpx.Request("POST", "https://api.openai.com/v1/audio/speech")
 
 
 @pytest.fixture
@@ -136,6 +151,9 @@ def test_fast_call_is_kept_and_logged_with_its_request_id(env, tmp_path):
 
     assert len(client.calls) == 1
     assert client.calls[0]["timeout"].read == tts.TTS_SLOW_CHECK_SECS
+    # One request per attempt: the SDK's own retries would hide inside
+    # the attempt's clock.
+    assert client.options == [{"max_retries": 0}]
     assert path.stat().st_size == 60 * SEC
     env.sentry.capture_message.assert_not_called()
     assert "req-1" in env.logger.info.call_args.args
@@ -179,6 +197,32 @@ def test_call_that_sends_nothing_is_resent(env, tmp_path):
     assert path.stat().st_size == 60 * SEC
 
 
+def test_call_without_response_headers_is_resent_and_counted(env, tmp_path):
+    # No headers within the read timeout: the SDK raises APITimeoutError
+    # from create() (its own retries are off).
+    client = FakeClient(env.clock, openai.APITimeoutError(request=_REQ),
+                        FAST)
+    path = tmp_path / "tts_chunk_0.mp3"
+
+    tts.synthesize_to_file(client, "Some text.", path)
+
+    assert len(client.calls) == 2
+    env.sentry.capture_message.assert_called_once_with(
+        "Slow TTS call cancelled", level="warning")
+
+
+def test_server_error_is_resent_but_not_counted_as_slow(env, tmp_path):
+    error = openai.InternalServerError(
+        "boom", response=httpx.Response(500, request=_REQ), body=None)
+    client = FakeClient(env.clock, error, FAST)
+    path = tmp_path / "tts_chunk_0.mp3"
+
+    tts.synthesize_to_file(client, "Some text.", path)
+
+    assert len(client.calls) == 2
+    env.sentry.capture_message.assert_not_called()
+
+
 def test_call_that_ran_to_the_cutoff_is_resent(env, tmp_path):
     # Faster than realtime throughout, but it ended at OpenAI's cutoff:
     # the audio is cut and must not be kept.
@@ -198,7 +242,7 @@ def test_every_attempt_slow_fails_and_removes_the_partial_file(env, tmp_path):
     path = tmp_path / "tts_chunk_0.mp3"
     mark = MagicMock()
 
-    with pytest.raises(tts.TTSSlowCall, match="failed after 3 attempts"):
+    with pytest.raises(tts.TTSCallFailed, match="failed after 3 attempts"):
         tts.synthesize_to_file(client, "Some text.", path, mark=mark)
 
     assert len(client.calls) == 3
