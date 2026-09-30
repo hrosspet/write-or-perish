@@ -17,7 +17,7 @@ struct MainTabView: View {
                 .tabItem { Label(AppTab.artifacts.title, systemImage: "doc.text").environment(\.symbolVariants, .none) }
                 .tag(AppTab.artifacts)
 
-            TabStack(tab: .log) { PlaceholderScreen(route: .log) }
+            TabStack(tab: .log) { LogView() }
                 .tabItem { Label(AppTab.log.title, systemImage: "book.closed").environment(\.symbolVariants, .none) }
                 .tag(AppTab.log)
 
@@ -68,6 +68,12 @@ struct RouteDestination: View {
             HomeView()
         case .account:
             AccountView()
+        case .thread(let id, let awaitLLM):
+            ThreadView(nodeId: id, awaitLLM: awaitLLM)
+        case .log:
+            LogView()
+        case .textMode:
+            TextModeView()
         default:
             PlaceholderScreen(route: route)
         }

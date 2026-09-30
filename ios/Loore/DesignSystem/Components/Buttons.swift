@@ -83,7 +83,7 @@ extension ButtonStyle where Self == LooreButtonStyle {
 /// The stacked, left-aligned choice button of the web's dialogs: bold first line,
 /// muted subline, `bg-deep` fill, 1px border (Delete, CraftMode, Rename, …).
 struct ChoiceButton: View {
-    enum Tone { case accent, normal, destructive }
+    enum Tone { case accent, primary, normal, destructive }
 
     let title: String
     var subtitle: String?
@@ -115,6 +115,7 @@ struct ChoiceButton: View {
     private var titleColor: Color {
         switch tone {
         case .accent: return LooreColor.accent
+        case .primary: return LooreColor.textPrimary
         case .normal: return LooreColor.textSecondary
         case .destructive: return LooreColor.error
         }

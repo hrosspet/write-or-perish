@@ -16,6 +16,8 @@ final class AppSignals {
         case profileGenerationStarted
         /// A node was created (new entry, reply): lists may refresh.
         case nodeCreated(Int)
+        /// Nodes were deleted or a thread renamed: the Log refetches.
+        case logChanged
     }
 
     private(set) var todoChanged = 0
@@ -23,6 +25,7 @@ final class AppSignals {
     private(set) var profileGenerationStarted = 0
     private(set) var lastCreatedNodeId: Int?
     private(set) var nodeCreated = 0
+    private(set) var logChanged = 0
 
     func post(_ signal: Signal) {
         switch signal {
@@ -32,6 +35,8 @@ final class AppSignals {
         case .nodeCreated(let id):
             lastCreatedNodeId = id
             nodeCreated += 1
+        case .logChanged:
+            logChanged += 1
         }
     }
 }
@@ -61,6 +66,8 @@ final class AppState {
     let toasts = ToastCenter()
     let signals = AppSignals()
     let launch: LaunchOptions
+    /// Node-link titles for markdown bodies (session cache, M2).
+    let nodeTitles = NodeTitleStore()
 
     private(set) var phase: Phase = .launching
     private(set) var user: CurrentUser?
@@ -91,6 +98,12 @@ final class AppState {
         sse = SSEClient(api: api)
         theme = ThemeManager(defaults: defaults, forced: launch.theme)
         installEventHandler()
+        nodeTitles.fetch = { [weak self] ids in
+            guard let api = await self?.api else { throw CancellationError() }
+            let query = [URLQueryItem(name: "ids", value: ids.map(String.init).joined(separator: ","))]
+            let answer: NodeTitlesResponse = try await api.get(APIPath.nodeTitles, query: query)
+            return answer.titles.values
+        }
     }
 
     // MARK: Derived state
@@ -274,6 +287,7 @@ final class AppState {
         updatesFetched = false
         router.reset()
         toasts.clear()
+        nodeTitles.reset()
     }
 
     /// Debug environment switcher: signs out of the current backend first
