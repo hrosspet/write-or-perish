@@ -21,6 +21,7 @@ struct SignInView: View {
     private enum Field { case email, link }
 
     var body: some View {
+        GeometryReader { proxy in
         ScrollView {
             VStack(spacing: 0) {
                 Text("LOORE")
@@ -35,11 +36,13 @@ struct SignInView: View {
                     .looreFadeIn(delay: 0.25, offset: 16)
             }
             .padding(.horizontal, LooreSpacing.lg)
-            .padding(.vertical, 56)
+            .padding(.vertical, 40)
             .frame(maxWidth: 440)
-            .frame(maxWidth: .infinity)
+            // Centred vertically like the web's login page; scrolls when taller.
+            .frame(maxWidth: .infinity, minHeight: proxy.size.height)
         }
         .scrollDismissesKeyboard(.interactively)
+        }
         .background(SignInBackdrop())
         .sheet(isPresented: $showXLogin) {
             WebLoginSheet(environment: app.environment) { result in

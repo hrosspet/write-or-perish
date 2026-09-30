@@ -277,10 +277,10 @@ struct CraftModeDialog: View {
                 VStack(alignment: .leading, spacing: 4) {
                     bullet("privacy and AI usage on each entry")
                     bullet("a switch for auto-generating responses, model picker and voice upload on threads")
-                    bullet("prompt editing and data export in the ⋮ menu")
+                    bullet("prompt editing and data export in More")
                 }
                 .padding(.leading, 4)
-                DialogBodyText(text: "Everything it adds carries the sliders icon. Turn it off any time in the ⋮ menu or under Account.")
+                DialogBodyText(text: "Everything it adds carries the sliders icon. Turn it off any time in More or under Account.")
             }
             .padding(.bottom, 8)
             VStack(spacing: 8) {

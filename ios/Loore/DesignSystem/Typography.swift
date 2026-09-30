@@ -56,8 +56,8 @@ enum LooreFont {
     // Presets (map A §5.2)
     /// Page titles: serif 300, 2rem.
     static let pageTitle = serif(32, .light, relativeTo: .largeTitle)
-    /// Home hero "What's on your mind?": serif 300, ~2.4rem on a phone.
-    static let hero = serif(36, .light, relativeTo: .largeTitle)
+    /// Home hero "What's on your mind?": serif 300, `clamp(1.8rem, 4.5vw, 2.8rem)` = 1.8rem on a phone.
+    static let hero = serif(28.8, .light, relativeTo: .largeTitle)
     /// Dialog titles: serif 400, 1.4rem.
     static let dialogTitle = serif(22.4, .regular, relativeTo: .title2)
     /// Card titles (Home cards): serif 1.5rem.

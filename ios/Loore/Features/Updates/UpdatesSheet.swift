@@ -15,9 +15,14 @@ struct UpdatesSheet: View {
         _notifications = State(initialValue: payload.notifications)
         _polls = State(initialValue: payload.polls)
         _changelog = State(initialValue: payload.changelog)
+        detents = payload.totalCount == 1 && payload.polls.isEmpty && payload.changelog.isEmpty
+            ? [.medium, .large] : [.large]
     }
 
     private var remaining: Int { notifications.count + polls.count + changelog.count }
+
+    /// Sized like the web card: half height for a single short item, full otherwise.
+    private let detents: Set<PresentationDetent>
 
     var body: some View {
         ScrollView {
@@ -53,7 +58,7 @@ struct UpdatesSheet: View {
         }
         .scrollDismissesKeyboard(.interactively)
         .background(LooreColor.bgCard.ignoresSafeArea())
-        .presentationDetents([.large])
+        .presentationDetents(detents)
         .presentationDragIndicator(.visible)
         .presentationBackground(LooreColor.bgCard)
         .onChange(of: remaining) { _, count in
@@ -172,8 +177,10 @@ private struct NotificationItemView: View {
                 Button("Later") { mark("skip") }.buttonStyle(UpdatesButtonStyle())
                 if let link = notification.link, !link.isEmpty {
                     Button("Take a look") { takeALook(link) }.buttonStyle(UpdatesButtonStyle())
+                        .accessibilityIdentifier("updates.takeALook")
                 }
                 Button("Got it") { mark("read") }.buttonStyle(UpdatesButtonStyle(accent: true))
+                    .accessibilityIdentifier("updates.gotIt")
             }
         }
     }

@@ -14,6 +14,7 @@ struct TermsView: View {
                 .fill(.ultraThinMaterial)
                 .overlay(LooreColor.dialogBackdrop)
                 .ignoresSafeArea()
+            // Like the web modal: the card stays put and its text scrolls inside it.
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
                     ForEach(Array(TermsText.blocks.enumerated()), id: \.offset) { _, block in
@@ -33,13 +34,14 @@ struct TermsView: View {
                         .accessibilityIdentifier("terms.agree")
                 }
                 .padding(LooreSpacing.dialog)
-                .background(LooreColor.bgCard, in: RoundedRectangle(cornerRadius: LooreRadius.large))
-                .overlay(RoundedRectangle(cornerRadius: LooreRadius.large).strokeBorder(LooreColor.border))
-                .frame(maxWidth: 800)
-                .padding(.horizontal, LooreSpacing.sm)
-                .padding(.vertical, LooreSpacing.lg)
-                .frame(maxWidth: .infinity)
             }
+            .scrollBounceBehavior(.basedOnSize)
+            .background(LooreColor.bgCard)
+            .clipShape(RoundedRectangle(cornerRadius: LooreRadius.large))
+            .overlay(RoundedRectangle(cornerRadius: LooreRadius.large).strokeBorder(LooreColor.border))
+            .frame(maxWidth: 800)
+            .padding(.horizontal, LooreSpacing.sm)
+            .padding(.vertical, LooreSpacing.md)
             .tint(LooreColor.accent)
         }
         .accessibilityAddTraits(.isModal)
@@ -74,7 +76,7 @@ private struct TermsBlockView: View {
         case .summaryBox(let title, let items):
             VStack(alignment: .leading, spacing: 8) {
                 Text(title)
-                    .font(LooreFont.sans(17.6, .medium))
+                    .font(LooreFont.sans(17.6, .bold))
                     .foregroundStyle(LooreColor.textSecondary)
                 ForEach(Array(items.enumerated()), id: \.offset) { index, item in
                     HStack(alignment: .firstTextBaseline, spacing: 6) {
@@ -104,7 +106,7 @@ private struct TermsBlockView: View {
             .padding(.bottom, 8)
         case .sectionTitle(let text):
             Text(text)
-                .font(LooreFont.sans(15, .semibold))
+                .font(LooreFont.sans(15, .bold))
                 .foregroundStyle(LooreColor.textSecondary)
                 .padding(.top, 24)
                 .padding(.bottom, 8)
@@ -192,6 +194,9 @@ private struct TermsInline: View {
         var result = (try? AttributedString(markdown: text, options: options)) ?? AttributedString(text)
         for run in result.runs {
             if let intent = run.inlinePresentationIntent, intent.contains(.stronglyEmphasized) {
+                // The web's <strong> on a 300 body is weight 400 ("bolder"), in text-primary.
+                // Drop the intent so SwiftUI does not embolden the font a second time.
+                result[run.range].inlinePresentationIntent = intent.subtracting(.stronglyEmphasized)
                 result[run.range].foregroundColor = LooreColor.textPrimary
                 result[run.range].font = LooreFont.sans(14.7, .regular)
             }

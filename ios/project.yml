@@ -20,8 +20,6 @@ settings:
     TARGETED_DEVICE_FAMILY: "1"
     IPHONEOS_DEPLOYMENT_TARGET: "17.0"
     CODE_SIGN_STYLE: Automatic
-    # Peter sets his (free) Apple ID team once in Xcode; see ios/README.md.
-    DEVELOPMENT_TEAM: ""
     ENABLE_USER_SCRIPT_SANDBOXING: YES
     DEAD_CODE_STRIPPING: YES
 
@@ -37,6 +35,10 @@ targets:
   Loore:
     type: application
     platform: iOS
+    # Team id and bundle id overrides: Config/Signing.local.xcconfig (git-ignored).
+    configFiles:
+      Debug: Config/Signing.xcconfig
+      Release: Config/Signing.xcconfig
     sources:
       - path: Loore
         excludes:
@@ -48,7 +50,7 @@ targets:
         product: ZIPFoundation
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: org.loore.app
+        PRODUCT_BUNDLE_IDENTIFIER: $(LOORE_BUNDLE_ID)
         PRODUCT_NAME: Loore
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor

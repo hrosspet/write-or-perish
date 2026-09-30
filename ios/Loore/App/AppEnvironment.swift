@@ -75,7 +75,9 @@ enum AppEnvironment: String, CaseIterable, Identifiable, Sendable {
     }
 
     /// The environment for this launch: Release is always Production. In Debug,
-    /// the `-LooreEnvironment` launch argument wins, then the switcher's stored choice, then Local.
+    /// the `-LooreEnvironment` launch argument wins, then the switcher's stored choice,
+    /// then Local in the simulator and Production on a device (a phone cannot reach
+    /// the Mac's `localhost`).
     static func resolveCurrent(launch: LaunchOptions = .current) -> AppEnvironment {
         #if DEBUG
         if let fromArgs = launch.environment { return fromArgs }
@@ -83,7 +85,11 @@ enum AppEnvironment: String, CaseIterable, Identifiable, Sendable {
            let env = AppEnvironment(rawValue: stored) {
             return env
         }
+        #if targetEnvironment(simulator)
         return .local
+        #else
+        return .production
+        #endif
         #else
         return .production
         #endif

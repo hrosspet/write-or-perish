@@ -14,21 +14,21 @@ struct MainTabView: View {
                 .accessibilityIdentifier("tab.reflect")
 
             TabStack(tab: .artifacts) { PlaceholderScreen(route: .profile) }
-                .tabItem { Label(AppTab.artifacts.title, systemImage: "doc.text") }
+                .tabItem { Label(AppTab.artifacts.title, systemImage: "doc.text").environment(\.symbolVariants, .none) }
                 .tag(AppTab.artifacts)
 
             TabStack(tab: .log) { PlaceholderScreen(route: .log) }
-                .tabItem { Label(AppTab.log.title, systemImage: "book.closed") }
+                .tabItem { Label(AppTab.log.title, systemImage: "book.closed").environment(\.symbolVariants, .none) }
                 .tag(AppTab.log)
 
             if app.capabilities.showsCommons {
                 TabStack(tab: .commons) { PlaceholderScreen(route: .commons) }
-                    .tabItem { Label(AppTab.commons.title, systemImage: "person.2") }
+                    .tabItem { Label(AppTab.commons.title, systemImage: "person.2").environment(\.symbolVariants, .none) }
                     .tag(AppTab.commons)
             }
 
             TabStack(tab: .more) { MoreView() }
-                .tabItem { Label(AppTab.more.title, systemImage: "ellipsis") }
+                .tabItem { Label(AppTab.more.title, systemImage: "ellipsis").environment(\.symbolVariants, .none) }
                 .tag(AppTab.more)
         }
         .onChange(of: app.capabilities.showsCommons) { _, shows in

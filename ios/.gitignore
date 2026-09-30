@@ -9,3 +9,6 @@ build/
 DerivedData/
 *.xcresult
 xcuserdata/
+
+# Personal signing overrides (team id, bundle id)
+Config/Signing.local.xcconfig
