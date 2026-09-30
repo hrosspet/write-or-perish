@@ -147,6 +147,20 @@ final class VoiceTurnController {
         threadParentId = id
     }
 
+    /// The proposal card changed the reply's text (it saves the node itself).
+    func setReplyContent(_ content: String) {
+        replyContent = content
+    }
+
+    /// Keeps `tool_calls_meta` in step after an accept on the proposal card.
+    func updateToolMeta(_ name: String, _ updates: [String: JSONValue]) {
+        guard var meta = toolCallsMeta else { return }
+        for i in meta.indices where meta[i].name == name {
+            meta[i].raw.merge(updates) { _, new in new }
+        }
+        toolCallsMeta = meta
+    }
+
     /// Record tap (web `handleStart`). The caller checks the spend cap first.
     func start() {
         guard state == .idle || state == .done else { return }

@@ -227,6 +227,5 @@ final class LiveVoiceBackend: VoiceBackend {
 }
 
 private extension JSONValue {
-    static func int(_ value: Int) -> JSONValue { .number(Double(value)) }
     static func double(_ value: Double) -> JSONValue { .number(value) }
 }

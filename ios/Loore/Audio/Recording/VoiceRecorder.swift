@@ -15,6 +15,8 @@ import os
 final class VoiceRecorder: VoiceRecording {
     var onSourceEnded: (() -> Void)?
     var onFatal: ((String) -> Void)?
+    /// Sees every chunk in order (dictation keeps a local copy for "Save audio").
+    var chunkObserver: ((RecordedChunk) -> Void)?
 
     private let uploader: ChunkUploader
     private let debugFile: URL?
@@ -97,6 +99,7 @@ final class VoiceRecorder: VoiceRecording {
     private func drainInbox() {
         guard let sessionId else { return }
         for chunk in inbox.popAll() {
+            chunkObserver?(chunk)
             uploader.enqueue(sessionId: sessionId, chunk: chunk)
         }
     }

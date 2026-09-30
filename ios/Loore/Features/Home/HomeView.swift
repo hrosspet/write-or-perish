@@ -1,11 +1,11 @@
 import SwiftUI
 
 /// Reflect (web `HomePage`, route `/`): greeting, "What's on your mind?", and
-/// the mode cards. M1 builds the layout; the Voice and Text screens behind the
-/// cards arrive in M2/M3, and the admin-only Read card in M2.
+/// the mode cards: Voice (M3), Text, Share (flag), Read (admins).
 struct HomeView: View {
     @Environment(AppState.self) private var app
     @State private var greeting = LooreDateFormat.greeting()
+    @State private var readStarting = false
 
     var body: some View {
         ScrollView {
@@ -61,6 +61,38 @@ struct HomeView: View {
             }
             .accessibilityIdentifier("home.share")
         }
+        if app.capabilities.isAdmin {
+            WorkflowCard(title: "Read", description: readStarting ? "Starting…" : "What's worth your time today.",
+                         delay: 0.76) {
+                HomeIcons.read
+            } action: {
+                startRead()
+            }
+            .disabled(readStarting)
+            .accessibilityIdentifier("home.read")
+        }
+    }
+
+    /// Admin-only Community Archive read (`POST /api/read/start`, billed):
+    /// the click creates the thread and lands on the reply (or the prompt).
+    private func startRead() {
+        guard !readStarting else { return }
+        readStarting = true
+        let stored = UserDefaults.standard.object(forKey: DefaultsKey.autoGenerate)
+        let autoGenerate = stored == nil ? true : UserDefaults.standard.bool(forKey: DefaultsKey.autoGenerate)
+        Task {
+            do {
+                struct Answer: Decodable { var llm_node_id: Int?; var prompt_node_id: Int? }
+                let answer: Answer = try await app.api.post(APIPath.readStart, json: .object(["auto_generate": .bool(autoGenerate)]))
+                readStarting = false
+                if let id = answer.llm_node_id ?? answer.prompt_node_id { app.open(.thread(id: id, awaitLLM: nil)) }
+            } catch {
+                readStarting = false
+                if SpendCap.isSpendCapError(error) { return }
+                app.toasts.show((error as? APIError)?.userMessage(fallback: "Could not start the read.")
+                                ?? "Could not start the read.", duration: 6)
+            }
+        }
     }
 }
 
@@ -115,6 +147,21 @@ struct CardPressStyle: ButtonStyle {
 /// The Home cards' line icons, from `HomePage.js`.
 enum HomeIcons {
     private static let box = CGSize(width: 42, height: 42)
+
+    /// An open book, one page marked (the web's Read card icon).
+    static var read: some View {
+        ZStack {
+            SVGShape("M6 11 C11 9.5 16 9.8 21 12.5 C26 9.8 31 9.5 36 11 L36 32 C31 30.5 26 30.8 21 33.5 C16 30.8 11 30.5 6 32 Z", viewBox: box)
+                .stroke(LooreColor.accent, style: StrokeStyle(lineWidth: 1.4, lineJoin: .round))
+            SVGShape("M21 12.5 L21 33.5", viewBox: box)
+                .stroke(LooreColor.accent.opacity(0.7), lineWidth: 1.1)
+            SVGShape("M10 16.5 C13 15.8 15.5 16 18 17.2 M10 21 C13 20.3 15.5 20.5 18 21.7 M10 25.5 C13 24.8 15.5 25 18 26.2 M24 16.5 C27 15.8 29.5 16 32 17.2 M24 21 C27 20.3 29.5 20.5 32 21.7", viewBox: box)
+                .stroke(LooreColor.accent.opacity(0.6), style: StrokeStyle(lineWidth: 1, lineCap: .round))
+            Circle().fill(LooreColor.accent).frame(width: 3.2, height: 3.2).position(x: 28, y: 26)
+        }
+        .frame(width: 42, height: 42)
+        .accessibilityHidden(true)
+    }
 
     static var text: some View {
         ZStack {

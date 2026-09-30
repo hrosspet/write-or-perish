@@ -216,12 +216,11 @@ private struct ChangelogItemView: View {
                 .font(itemTitleFont)
                 .foregroundStyle(LooreColor.textPrimary)
                 .padding(.top, 6)
-            SimpleMarkdownText(markdown: section.body, font: LooreFont.sans(14.4, .light))
-                .padding(.top, 14)
-                .environment(\.openURL, OpenURLAction { url in
-                    followLink(url.absoluteString)
-                    return .handled
-                })
+            MarkdownView(markdown: section.body, style: .changelog.with { $0.fontSize = 14.4 }) { link in
+                followLink(link)
+                return true
+            }
+            .padding(.top, 14)
             ItemButtons {
                 Button("Later") { mark("skip") }.buttonStyle(UpdatesButtonStyle())
                 Button("Got it") { mark("read") }.buttonStyle(UpdatesButtonStyle(accent: true))

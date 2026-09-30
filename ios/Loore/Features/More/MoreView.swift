@@ -11,6 +11,7 @@ struct MoreView: View {
     @State private var exporting = false
     @State private var exportFile: ExportFile?
     @State private var confirmLogout = false
+    @State private var writingNewEntry = false
 
     var body: some View {
         let caps = app.capabilities
@@ -45,7 +46,8 @@ struct MoreView: View {
                     craftModeRow
                     if caps.craftMode {
                         VStack(spacing: 0) {
-                            MenuRow(title: "Write new entry", craft: true) { app.open(.textMode) }
+                            MenuRow(title: "Write new entry", craft: true) { writingNewEntry = true }
+                                .accessibilityIdentifier("more.writeNew")
                             MenuRow(title: exporting ? "Exporting…" : "Export data", craft: true) { export() }
                                 .disabled(exporting)
                                 .accessibilityIdentifier("more.export")
@@ -90,6 +92,9 @@ struct MoreView: View {
         .confirmationDialog("Log out of Loore?", isPresented: $confirmLogout, titleVisibility: .visible) {
             Button("Logout", role: .destructive) { Task { await app.signOut() } }
             Button("Cancel", role: .cancel) {}
+        }
+        .sheet(isPresented: $writingNewEntry) {
+            WriteNewEntrySheet()
         }
         .sheet(item: $exportFile) { file in
             ShareSheet(items: [file.url]) {

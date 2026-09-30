@@ -152,7 +152,9 @@ struct VoiceView: View {
             VoicePlayerControls(player: player)
             VoiceChapterList(player: player)
             VoiceProposalSlot(content: voice.replyContent, nodeId: voice.lastReplyNodeId,
-                              toolCallsMeta: voice.toolCallsMeta)
+                              toolCallsMeta: voice.toolCallsMeta,
+                              onContentChange: { voice.setReplyContent($0) },
+                              onApplied: { voice.updateToolMeta($0, $1) })
             Spacer().frame(height: 32)
             OfflineNotice()
             VoiceRoundButton(size: 56, enabled: online, dimmed: 0.7, action: continueConversation) {
@@ -457,15 +459,22 @@ struct VoiceChapterList: View {
     }
 }
 
-/// Where the reply's proposal card goes (web `ProposalInline` with
-/// `tool_calls_meta`). The card and its parser are M2's (design doc §8
-/// "Proposals"); until they land this shows nothing. See ios/PROGRESS-voice.md.
+/// The reply's proposal card (web `ProposalInline` with `tool_calls_meta`,
+/// `size="roomy"` on the Voice page): M2's `ProposalCard` (compact) under the
+/// player when the final reply carries proposal sections.
 struct VoiceProposalSlot: View {
     let content: String?
     let nodeId: Int?
     let toolCallsMeta: [ToolCallMeta]?
+    var onContentChange: (String) -> Void = { _ in }
+    var onApplied: (String, [String: JSONValue]) -> Void = { _, _ in }
 
     var body: some View {
-        EmptyView()
+        if let content, let nodeId, ProposalParser.hasProposalSections(content) {
+            ProposalCard(content: content, nodeId: nodeId, toolCallsMeta: toolCallsMeta,
+                         onContentChange: onContentChange, onApplied: onApplied)
+                .frame(maxWidth: 520)
+                .padding(.top, 8)
+        }
     }
 }

@@ -1,5 +1,3 @@
-import Network
-import Observation
 import SwiftUI
 
 /// The Voice page's ECG line (web `EcgAnimation`, viewBox 280×168): drawn in
@@ -137,25 +135,6 @@ struct RecordGlyph: View {
     var enabled = true
     var body: some View {
         Circle().fill(enabled ? LooreColor.accent : LooreColor.textMuted).frame(width: 16, height: 16)
-    }
-}
-
-/// Online/offline (web `useOnlineStatus`): record buttons are disabled offline.
-@MainActor
-@Observable
-final class NetworkStatus {
-    static let shared = NetworkStatus()
-    private(set) var isOnline = true
-    @ObservationIgnored private let monitor = NWPathMonitor()
-
-    private init() {
-        monitor.pathUpdateHandler = { [weak self] path in
-            let online = path.status == .satisfied
-            DispatchQueue.main.async {
-                MainActor.assumeIsolated { self?.isOnline = online }
-            }
-        }
-        monitor.start(queue: DispatchQueue(label: "org.loore.network-status"))
     }
 }
 

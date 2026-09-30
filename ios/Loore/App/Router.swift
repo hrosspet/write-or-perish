@@ -33,6 +33,35 @@ final class Router {
         paths[tab ?? selectedTab] = []
     }
 
+    /// Pops the top screen of the current tab (the web's `navigate(-1)`).
+    func pop() {
+        guard var path = paths[selectedTab], !path.isEmpty else { return }
+        path.removeLast()
+        paths[selectedTab] = path
+    }
+
+    /// The route under the top of the current tab's stack.
+    var previousRoute: AppRoute? {
+        let path = paths[selectedTab] ?? []
+        return path.count >= 2 ? path[path.count - 2] : nil
+    }
+
+    /// Replaces the top of the current tab's stack (`navigate(…, {replace: true})`).
+    /// On a tab root, pushes instead.
+    func replaceTop(with route: AppRoute) {
+        var path = paths[selectedTab] ?? []
+        if path.isEmpty { path.append(route) } else { path[path.count - 1] = route }
+        paths[selectedTab] = path
+    }
+
+    /// Swaps the last occurrence of `old` in the current tab's stack for `new`
+    /// (drops a consumed `?awaitLlm=` so a back step does not repeat the hand-off).
+    func replaceLast(_ old: AppRoute, with new: AppRoute) {
+        guard var path = paths[selectedTab], let index = path.lastIndex(of: old) else { return }
+        path[index] = new
+        paths[selectedTab] = path
+    }
+
     func reset() {
         selectedTab = .reflect
         paths = [:]

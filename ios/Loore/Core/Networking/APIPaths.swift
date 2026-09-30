@@ -58,6 +58,25 @@ enum APIPath {
     static func nodeTTSChapters(_ id: Int) -> String { "/api/nodes/\(id)/tts-chapters" }
     static func transcriptionStatus(_ id: Int) -> String { "/api/nodes/\(id)/transcription-status" }
     static func feedPicks(_ id: Int) -> String { "/api/nodes/\(id)/feed-picks" }
+    static let uploadInit = "/api/nodes/upload/init"
+    static let uploadChunk = "/api/nodes/upload/chunk"
+    static let uploadFinalize = "/api/nodes/upload/finalize"
+    static let uploadCleanup = "/api/nodes/upload/cleanup"
+
+    // MARK: Saved references quoted in replies (`{quote_ext:N}`)
+    static func externalItemRead(_ id: Int) -> String { "/api/external/items/\(id)/read" }
+    static func externalItemFeedback(_ id: Int) -> String { "/api/external/items/\(id)/feedback" }
+
+    // MARK: Proposal accepts
+    static let todoApplyDraft = "/api/todo/apply-draft"
+    static let githubCreateIssue = "/api/github/create-issue"
+    static let feedbackSubmit = "/api/feedback/submit"
+    static let shareSaveProposal = "/api/share/save-proposal"
+
+    // MARK: Read (admin feature)
+    static let readStart = "/api/read/start"
+    static func readFromNode(_ id: Int) -> String { "/api/read/from-node/\(id)" }
+    static func readRerun(_ id: Int) -> String { "/api/read/\(id)/rerun" }
 
     // MARK: Log and search
     static let log = "/api/log"

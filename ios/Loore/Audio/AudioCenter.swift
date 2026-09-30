@@ -25,6 +25,8 @@ final class AudioCenter {
     /// Listen-aloud results per target and content (web SpeakerIcon's cached URLs).
     @ObservationIgnored var listenCache: [ListenCacheKey: ListenCacheEntry] = [:]
     var appState: AppState? { app }
+    /// The writing form's recorder while it runs (interruptions go to it).
+    @ObservationIgnored weak var activeDictation: DictationController?
     @ObservationIgnored private var voiceController: VoiceTurnController?
     @ObservationIgnored private var observers: [NSObjectProtocol] = []
     @ObservationIgnored var listenTask: Task<Void, Never>?
@@ -136,9 +138,11 @@ final class AudioCenter {
         switch event {
         case .interruptionBegan:
             if voiceActive { voiceController?.systemInterruptionBegan() }
+            activeDictation?.systemInterruptionBegan()
             if player.isPlaying { player.pause(); resumeAfterInterruption = true }
         case .interruptionEnded(let shouldResume):
             if voiceActive { voiceController?.systemInterruptionEnded() }
+            activeDictation?.systemInterruptionEnded()
             if resumeAfterInterruption && shouldResume {
                 try? session.reactivate()
                 player.play()
@@ -149,6 +153,7 @@ final class AudioCenter {
         case .mediaServicesReset:
             sounds.stopCue()
             if voiceActive { voiceController?.systemInterruptionBegan() }
+            activeDictation?.systemInterruptionBegan()
             if player.isPlaying { player.pause() }
         }
     }
