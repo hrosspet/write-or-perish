@@ -53,6 +53,31 @@ enum LooreFont {
 
     static func rem(_ value: CGFloat) -> CGFloat { value * 16 }
 
+    /// Outfit has no italic face; browsers slant it synthetically (about 12°)
+    /// for `font-style: italic`, and so does this. Scaled for Dynamic Type
+    /// when created (views rebuild on a size change).
+    static func sansOblique(_ size: CGFloat, _ weight: LooreFontFace.SansWeight = .light,
+                            relativeTo style: Font.TextStyle = .body) -> Font {
+        let textStyle: UIFont.TextStyle
+        switch style {
+        case .largeTitle: textStyle = .largeTitle
+        case .title: textStyle = .title1
+        case .title2: textStyle = .title2
+        case .title3: textStyle = .title3
+        case .headline: textStyle = .headline
+        case .subheadline: textStyle = .subheadline
+        case .callout: textStyle = .callout
+        case .footnote: textStyle = .footnote
+        case .caption: textStyle = .caption1
+        case .caption2: textStyle = .caption2
+        default: textStyle = .body
+        }
+        let slant = CGAffineTransform(a: 1, b: 0, c: 0.21, d: 1, tx: 0, ty: 0)
+        let descriptor = UIFontDescriptor(fontAttributes: [.name: LooreFontFace.sansName(weight), .matrix: slant])
+        let base = UIFont(descriptor: descriptor, size: size)
+        return Font(UIFontMetrics(forTextStyle: textStyle).scaledFont(for: base))
+    }
+
     // Presets (map A §5.2)
     /// Page titles: serif 300, 2rem.
     static let pageTitle = serif(32, .light, relativeTo: .largeTitle)

@@ -309,12 +309,12 @@ struct InlineText: View {
         Text(InlineAttributedBuilder(context: context, softBreakAsSpace: softBreakAsSpace,
                                      baseSize: fontSize ?? style.fontSize, isHeading: isHeading)
                 .build(inlines))
-            .font(font ?? style.baseFont)
+            .font(font ?? (context.italic ? LooreFont.sansOblique(style.fontSize, style.weight, relativeTo: style.textStyle)
+                                          : style.baseFont))
             .foregroundStyle(color ?? style.color)
             .lineSpacing(isHeading ? 0 : style.lineSpacing)
             .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .italic(context.italic && !isHeading)
     }
 }
 
@@ -344,8 +344,10 @@ struct InlineAttributedBuilder {
             return traits.italic ? base.italic() : base
         }
         let weight: LooreFontFace.SansWeight = traits.bold ? .bold : context.style.weight
-        let base = LooreFont.sans(baseSize, weight, relativeTo: context.style.textStyle)
-        return traits.italic || context.italic ? base.italic() : base
+        if traits.italic || context.italic {
+            return LooreFont.sansOblique(baseSize, weight, relativeTo: context.style.textStyle)
+        }
+        return LooreFont.sans(baseSize, weight, relativeTo: context.style.textStyle)
     }
 
     private func styled(_ text: String, _ traits: Traits, link: URL?) -> AttributedString {

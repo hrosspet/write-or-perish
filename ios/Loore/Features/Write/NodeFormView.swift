@@ -119,7 +119,8 @@ private struct NodeFormBody: View {
             .disabled(!config.isEdit && model.uploadedFile != nil)
             .padding(.vertical, 14)
             .padding(.horizontal, 16)
-            .frame(minHeight: config.compact ? 90 : 120, alignment: .topLeading)
+            .frame(minHeight: config.compact ? 90 : min(400, max(120, UIScreen.main.bounds.height * 0.4)),
+                   alignment: .topLeading)
             .background(LooreColor.bgInput, in: RoundedRectangle(cornerRadius: LooreRadius.small))
             .overlay(RoundedRectangle(cornerRadius: LooreRadius.small)
                 .strokeBorder(focused ? LooreColor.accentDim : LooreColor.border))

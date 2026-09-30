@@ -136,14 +136,17 @@ struct ProposalCard: View {
                             .font(LooreFont.serif(17.6, .regular))
                             .foregroundStyle(LooreColor.accentDim.opacity(0.6))
                             .frame(width: 20)
-                        Text(item.text)
-                            .font(LooreFont.sans(13.6, .light))
-                            .foregroundStyle(LooreColor.textPrimary)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                        if !item.hint.isEmpty {
-                            Text(item.hint).font(LooreFont.sans(11.5, .light)).foregroundStyle(LooreColor.textMuted)
-                                .multilineTextAlignment(.trailing)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(item.text)
+                                .font(LooreFont.sans(13.6, .light))
+                                .foregroundStyle(LooreColor.textPrimary)
+                                .fixedSize(horizontal: false, vertical: true)
+                            if !item.hint.isEmpty {
+                                Text(item.hint).font(LooreFont.sans(11.5, .light)).foregroundStyle(LooreColor.textMuted)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
                         }
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     }
                     .padding(.vertical, 10)
                     .padding(.horizontal, 12)

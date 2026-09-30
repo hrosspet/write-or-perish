@@ -57,8 +57,7 @@ struct UnavailableChip: View {
 
     var body: some View {
         Text(text)
-            .font(LooreFont.sans(14.4, .regular))
-            .italic()
+            .font(LooreFont.sansOblique(14.4, .regular))
             .foregroundStyle(LooreColor.textMuted)
             .padding(.vertical, 4)
             .padding(.horizontal, 8)
@@ -84,8 +83,7 @@ struct InlineQuoteBubble: View {
             let truncated = text.jsLength > 250 ? text.jsPrefix(250) + "..." : text
             VStack(alignment: .leading, spacing: 0) {
                 Text("Quoted from @\(quote.username ?? "")")
-                    .font(LooreFont.sans(13.6, .regular))
-                    .italic()
+                    .font(LooreFont.sansOblique(13.6, .regular))
                     .foregroundStyle(LooreColor.textMuted)
                     .padding(.bottom, 6)
                 MarkdownView(markdown: truncated, style: .quote)
@@ -146,8 +144,7 @@ struct ExternalQuoteBubble: View {
         let mine = app.user?.id != nil && quote.userId == app.user?.id
         return VStack(alignment: .leading, spacing: 0) {
             Text("Saved from @\(quote.authorHandle ?? "unknown") · \(Self.sourceLabels[quote.source ?? ""] ?? quote.source ?? "")")
-                .font(LooreFont.sans(13.6, .regular))
-                .italic()
+                .font(LooreFont.sansOblique(13.6, .regular))
                 .foregroundStyle(LooreColor.textMuted)
                 .padding(.bottom, 6)
             MarkdownView(markdown: text, style: .quote)
@@ -162,7 +159,7 @@ struct ExternalQuoteBubble: View {
                        let verdict = rated["feedback"]?.stringValue {
                         let at = rated["at"]?.stringValue.flatMap(LooreDate.parse)
                         Text("You rated this \(verdict) on \(LooreDateFormat.date(at, relative: false))")
-                            .italic()
+                            .font(LooreFont.sansOblique(12.8, .light))
                     }
                     ReferenceFeedbackControl(itemId: quote.id, feedback: quote.feedback, nodeId: nodeId,
                                              shared: quote.feedbackShared == true) { verdict, answeredReadAt in

@@ -85,12 +85,12 @@ private struct ThreadContent: View {
                     .looreReadableWidth()
                 }
                 .scrollDismissesKeyboard(.interactively)
-                .onAppear {
+                .task(id: node.id) {
+                    // Once per focal node, after the first layout (web: scrollIntoView, block start).
                     guard !scrolledToFocal, !node.ancestors.isEmpty else { return }
                     scrolledToFocal = true
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-                        withAnimation(LooreMotion.quick) { proxy.scrollTo("focal", anchor: .top) }
-                    }
+                    try? await Task.sleep(nanoseconds: 350_000_000)
+                    withAnimation(LooreMotion.quick) { proxy.scrollTo("focal", anchor: .top) }
                 }
             }
             .modifier(ThreadSheets(model: model, autoGenerate: $autoGenerate))
@@ -328,8 +328,7 @@ private struct FocalCard: View {
         } else if model.isLLMPending {
             HStack(spacing: 10) {
                 Text(model.isBatchWait ? "Processing" : "Thinking")
-                    .font(LooreFont.sans(15.2, .light))
-                    .italic()
+                    .font(LooreFont.sansOblique(15.2, .light))
                     .foregroundStyle(LooreColor.textMuted)
                 PulsingDots()
             }

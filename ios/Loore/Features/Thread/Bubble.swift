@@ -168,44 +168,61 @@ struct BubbleView: View {
 
     private func placeholderLine(_ text: String) -> some View {
         Text(text)
-            .font(LooreFont.sans(15.2, .regular))
-            .italic()
+            .font(LooreFont.sansOblique(15.2, .regular))
             .foregroundStyle(LooreColor.textMuted)
             .padding(.bottom, 9.6)
     }
 
+    private var footer: some View {
+        NodeFooterView(
+            username: data.username, createdAt: data.createdAt, childCount: data.childCount,
+            humanOwnerUsername: data.humanOwnerUsername, llmModel: data.llmModel, origin: data.origin,
+            isPublic: data.isPublic,
+            onReply: data.isPlaceholder ? nil : actions.first(where: { $0.kind == .reply })?.action)
+    }
+
+    /// Footer left, tags right; on a narrow card the tags drop below.
     private var footerRow: some View {
-        HStack(alignment: .center, spacing: 8) {
-            NodeFooterView(
-                username: data.username, createdAt: data.createdAt, childCount: data.childCount,
-                humanOwnerUsername: data.humanOwnerUsername, llmModel: data.llmModel, origin: data.origin,
-                isPublic: data.isPublic,
-                onReply: data.isPlaceholder ? nil : actions.first(where: { $0.kind == .reply })?.action)
-            Spacer(minLength: 0)
-            if !data.isPlaceholder {
-                HStack(spacing: 6) {
-                    if data.pinned { LooreTag(text: "Pinned") }
-                    if let key = data.promptKey {
-                        LooreTag(text: BubblePreview.promptLabel(key))
-                    } else if data.hasOriginalAudio {
-                        LooreTag(text: "Voice Note")
-                    }
-                    if BubblePreview.canExpand(content: data.content, text: data.text) {
-                        Button {
-                            withAnimation(LooreMotion.quick) { expanded.toggle() }
-                        } label: {
-                            Image(systemName: expanded ? "chevron.up" : "chevron.down")
-                                .font(.system(size: 12, weight: .semibold))
-                                .foregroundStyle(LooreColor.textMuted)
-                                .frame(width: 32, height: 28)
-                                .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel(expanded ? "Collapse preview" : "Expand preview")
-                    }
-                }
-                .padding(.top, 12)
+        ViewThatFits(in: .horizontal) {
+            HStack(alignment: .center, spacing: 8) {
+                footer.fixedSize()
+                Spacer(minLength: 0)
+                tags.fixedSize()
             }
+            VStack(alignment: .leading, spacing: 0) {
+                footer
+                HStack {
+                    Spacer(minLength: 0)
+                    tags
+                }
+            }
+        }
+    }
+
+    @ViewBuilder private var tags: some View {
+        if !data.isPlaceholder {
+            HStack(spacing: 6) {
+                if data.pinned { LooreTag(text: "Pinned") }
+                if let key = data.promptKey {
+                    LooreTag(text: BubblePreview.promptLabel(key))
+                } else if data.hasOriginalAudio {
+                    LooreTag(text: "Voice Note")
+                }
+                if BubblePreview.canExpand(content: data.content, text: data.text) {
+                    Button {
+                        withAnimation(LooreMotion.quick) { expanded.toggle() }
+                    } label: {
+                        Image(systemName: expanded ? "chevron.up" : "chevron.down")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(LooreColor.textMuted)
+                            .frame(width: 32, height: 28)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(expanded ? "Collapse preview" : "Expand preview")
+                }
+            }
+            .padding(.top, 12)
         }
     }
 }

@@ -306,6 +306,17 @@ final class AppState {
         phase = .signedOut
     }
 
+    #if DEBUG
+    /// Unit tests: route every call through a stubbed client and sign in `user`.
+    func useForTesting(api: APIClient, user: CurrentUser?) {
+        self.api = api
+        sse = SSEClient(api: api)
+        installEventHandler()
+        self.user = user
+        phase = user == nil ? .signedOut : .signedIn
+    }
+    #endif
+
     // MARK: API events
 
     private func installEventHandler() {
