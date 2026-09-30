@@ -9,6 +9,7 @@ import XCTest
 /// - `LOORE_AUDIO_FILE`: absolute path of a short spoken clip (`say -o clip.m4a …`).
 /// - `LOORE_VOICE_RECOVERY`: `continue` or `discard` when an unfinished recording is offered (default `discard`).
 /// - `LOORE_VOICE_ROUTE`: optional, e.g. `/voice?parent=123` to reply in a thread (default `/voice`).
+/// - `LOORE_VOICE_CONTINUE`: `1` = after the reply, press Continue for a second turn (billed twice).
 /// - `LOORE_SCREENSHOT_DIR`: optional; screenshots are written there as PNGs.
 final class VoiceUITests: XCTestCase {
     private var env: [String: String] { ProcessInfo.processInfo.environment }
@@ -77,9 +78,26 @@ final class VoiceUITests: XCTestCase {
         print("VOICE-UITEST playPause=\(playPause.label) time=\(firstTime.exists ? firstTime.label : "?")")
 
         // Let the reply finish (or cap the wait), then show the end state.
-        let end = Date().addingTimeInterval(150)
-        while playPause.label == "Pause" && Date() < end { sleep(3) }
+        waitForEnd(playPause)
         snapshot("voice-06-end")
         XCTAssertTrue(app.buttons["voice.continue"].exists)
+
+        guard env["LOORE_VOICE_CONTINUE"] == "1" else { return }
+        app.buttons["voice.continue"].tap()
+        XCTAssertTrue(app.buttons["voice.stop"].waitForExistence(timeout: 10), "Continue did not start recording")
+        sleep(4)
+        snapshot("voice-07-continue-recording")
+        XCTAssertTrue(app.staticTexts["voice.thinking"].waitForExistence(timeout: 40), "second turn never reached Thinking")
+        XCTAssertTrue(playPause.waitForExistence(timeout: 240), "the second reply never started")
+        XCTAssertEqual(playPause.label, "Pause", "the second reply should play without a tap")
+        sleep(4)
+        snapshot("voice-08-second-reply")
+        waitForEnd(playPause)
+        snapshot("voice-09-second-end")
+    }
+
+    private func waitForEnd(_ playPause: XCUIElement) {
+        let end = Date().addingTimeInterval(150)
+        while playPause.exists && playPause.label == "Pause" && Date() < end { sleep(3) }
     }
 }
