@@ -151,6 +151,11 @@ final class FMP4SegmentWriter: NSObject, AVAssetWriterDelegate, @unchecked Senda
         }
     }
 
+    /// The writer stopped working (e.g. after a media-services reset).
+    var hasFailed: Bool {
+        queue.sync { writer.status == .failed }
+    }
+
     /// The index the next chunk will get.
     var nextChunkIndex: Int {
         lock.lock()

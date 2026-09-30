@@ -61,6 +61,8 @@ final class AppState {
     let toasts = ToastCenter()
     let signals = AppSignals()
     let launch: LaunchOptions
+    /// Audio session, the shared queue player, the voice conversation (M3).
+    let audio = AudioCenter()
 
     private(set) var phase: Phase = .launching
     private(set) var user: CurrentUser?
@@ -91,6 +93,7 @@ final class AppState {
         sse = SSEClient(api: api)
         theme = ThemeManager(defaults: defaults, forced: launch.theme)
         installEventHandler()
+        audio.attach(self)
     }
 
     // MARK: Derived state
@@ -156,6 +159,7 @@ final class AppState {
         syncTimezoneIfNeeded()
         fetchUpdatesIfNeeded()
         openLaunchRouteIfReady()
+        audio.didSignIn()
     }
 
     /// Replaces the user after a `PUT /api/dashboard/user` (the web's `setUser(res.data.user)`).
@@ -266,6 +270,7 @@ final class AppState {
     }
 
     private func resetSessionState() {
+        audio.signedOut()
         user = nil
         phase = .signedOut
         spendCapped = false

@@ -40,6 +40,9 @@ struct AccountView: View {
                 }
                 .buttonStyle(.loorePrimary)
 
+                VoiceSettingsSection()
+                    .padding(.top, 12)
+
                 versionLabel
                     .padding(.top, 24)
             }

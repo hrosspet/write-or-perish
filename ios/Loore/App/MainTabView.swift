@@ -54,6 +54,7 @@ struct TabStack<Root: View>: View {
                     RouteDestination(route: route)
                 }
         }
+        .safeAreaInset(edge: .bottom, spacing: 0) { MiniPlayerView() }
     }
 }
 
@@ -68,6 +69,8 @@ struct RouteDestination: View {
             HomeView()
         case .account:
             AccountView()
+        case .voice(let parentId, let resumeLLMId):
+            VoiceView(parentId: parentId, resumeLLMId: resumeLLMId)
         default:
             PlaceholderScreen(route: route)
         }
