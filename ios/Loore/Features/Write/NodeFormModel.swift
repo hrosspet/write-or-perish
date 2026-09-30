@@ -112,11 +112,15 @@ final class NodeFormModel {
     var isRecording = false
     private(set) var isRecoveringAudio = false
 
-    // Dialog chain (TTS → apply-to-replies → split → public reply).
-    var showTtsDialog = false
-    var showScopeDialog = false
-    var showSplitDialog = false
-    var showPublicReplyDialog = false
+    // Dialog chain (TTS → apply-to-replies → split → public reply). One
+    // presenter shows whichever is current, so a chain swaps the card in place
+    // (two full-screen covers cannot dismiss and present at once).
+    enum Dialog: Equatable { case tts, scope, split, publicReply }
+    var dialog: Dialog?
+    var showTtsDialog: Bool { dialog == .tts }
+    var showScopeDialog: Bool { dialog == .scope }
+    var showSplitDialog: Bool { dialog == .split }
+    var showPublicReplyDialog: Bool { dialog == .publicReply }
     private(set) var pendingPaste: String?
     @ObservationIgnored private var splitAcknowledged = false
     @ObservationIgnored private var pendingRegenerateTts: Bool?
@@ -232,7 +236,7 @@ final class NodeFormModel {
                 return
             }
             pendingPaste = new
-            showSplitDialog = true
+            dialog = .split
             return
         }
         if !new.jsTrimmed.isEmpty {
@@ -279,25 +283,26 @@ final class NodeFormModel {
 
     // MARK: Dialog answers
 
+    func cancelDialog() {
+        dialog = nil
+    }
+
     func answerTts(_ regenerate: Bool) {
-        showTtsDialog = false
         Task { await submit(regenerateTts: regenerate) }
     }
 
     func answerScope(_ applyToReplies: Bool) {
-        showScopeDialog = false
         Task { await submit(regenerateTts: pendingRegenerateTts, applyToReplies: applyToReplies) }
     }
 
     func answerPublicReply() {
-        showPublicReplyDialog = false
         Task { await submit(publicConfirmed: true) }
     }
 
     func confirmSplit() {
-        showSplitDialog = false
         splitAcknowledged = true
         if let paste = pendingPaste {
+            dialog = nil
             content = paste
             drafts.save(paste)
             hasDraft = true
@@ -308,7 +313,7 @@ final class NodeFormModel {
     }
 
     func cancelSplit() {
-        showSplitDialog = false
+        dialog = nil
         pendingPaste = nil
     }
 
@@ -318,36 +323,39 @@ final class NodeFormModel {
                 applyToReplies: Bool? = nil) async {
         let edit = config.edit
         if !(edit == nil && uploadedFile != nil) && content.jsTrimmed.isEmpty {
+            dialog = nil
             error = "Content is required."
             return
         }
         if let edit, edit.hasGeneratedTTS, regenerateTts == nil, content != edit.initialContent {
-            showTtsDialog = true
+            dialog = .tts
             return
         }
         if let edit, edit.hasChildren, applyToReplies == nil,
            (edit.initialPrivacy != nil && privacy != edit.initialPrivacy)
             || (edit.initialAIUsage != nil && aiUsage != edit.initialAIUsage) {
             pendingRegenerateTts = regenerateTts
-            showScopeDialog = true
+            dialog = .scope
             return
         }
         if content.jsLength > nodeCharCap && uploadedFile == nil {
             if edit != nil || (config.submitOverride != nil && streamingSessionId == nil) {
+                dialog = nil
                 error = "This entry is \(jsLocaleNumber(content.jsLength)) characters — above the \(jsLocaleNumber(nodeCharCap))-character limit. Please move part of it into separate entries."
                 return
             }
             if !splitAcknowledged && !splitConfirmed {
-                showSplitDialog = true
+                dialog = .split
                 return
             }
         }
         if edit == nil, parentPrivacy == .public, !publicConfirmed,
            defaults.string(forKey: DefaultsKey.publicReplyAck) != "true" {
-            showPublicReplyDialog = true
+            dialog = .publicReply
             return
         }
 
+        dialog = nil
         loading = true
         error = nil
         do {

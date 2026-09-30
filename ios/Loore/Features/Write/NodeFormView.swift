@@ -43,6 +43,9 @@ private struct NodeFormBody: View {
 
     private var config: NodeFormConfig { model.config }
 
+    /// Test identifiers: "nodeForm.text.edit", ".inline" (thread) or ".new".
+    private var idSuffix: String { config.isEdit ? "edit" : config.compact ? "inline" : "new" }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             editor
@@ -79,21 +82,23 @@ private struct NodeFormBody: View {
             }
             buttons.padding(.top, 8)
         }
-        .looreDialog(isPresented: $model.showTtsDialog) {
-            RegenerateTtsDialog(onChoice: model.answerTts, onCancel: { model.showTtsDialog = false })
-        }
-        .looreDialog(isPresented: $model.showScopeDialog) {
-            ApplyToRepliesDialog(
-                privacyChanged: config.edit?.initialPrivacy != nil && model.privacy != config.edit?.initialPrivacy,
-                aiUsageChanged: config.edit?.initialAIUsage != nil && model.aiUsage != config.edit?.initialAIUsage,
-                onChoice: model.answerScope, onCancel: { model.showScopeDialog = false })
-        }
-        .looreDialog(isPresented: $model.showPublicReplyDialog) {
-            PublicReplyDialog(onConfirm: model.answerPublicReply, onCancel: { model.showPublicReplyDialog = false })
-        }
-        .looreDialog(isPresented: $model.showSplitDialog) {
-            SplitContentDialog(charCount: model.pendingPaste?.jsLength ?? model.content.jsLength,
-                               onConfirm: model.confirmSplit, onCancel: model.cancelSplit)
+        .looreDialog(isPresented: Binding(get: { model.dialog != nil }, set: { if !$0 { model.cancelDialog() } })) {
+            switch model.dialog {
+            case .tts?:
+                RegenerateTtsDialog(onChoice: model.answerTts, onCancel: model.cancelDialog)
+            case .scope?:
+                ApplyToRepliesDialog(
+                    privacyChanged: config.edit?.initialPrivacy != nil && model.privacy != config.edit?.initialPrivacy,
+                    aiUsageChanged: config.edit?.initialAIUsage != nil && model.aiUsage != config.edit?.initialAIUsage,
+                    onChoice: model.answerScope, onCancel: model.cancelDialog)
+            case .publicReply?:
+                PublicReplyDialog(onConfirm: model.answerPublicReply, onCancel: model.cancelDialog)
+            case .split?:
+                SplitContentDialog(charCount: model.pendingPaste?.jsLength ?? model.content.jsLength,
+                                   onConfirm: model.confirmSplit, onCancel: model.cancelSplit)
+            case nil:
+                EmptyView()
+            }
         }
         .fileImporter(isPresented: $pickingFile, allowedContentTypes: [.audio, .mpeg4Movie, .movie]) { result in
             if case .success(let url) = result { model.pickFile(url) }
@@ -127,7 +132,7 @@ private struct NodeFormBody: View {
             .contentShape(Rectangle())
             .onTapGesture { focused = true }
             .accessibilityLabel(config.placeholder ?? "What's present for you right now...")
-            .accessibilityIdentifier("nodeForm.text")
+            .accessibilityIdentifier("nodeForm.text.\(idSuffix)")
     }
 
     @ViewBuilder private var statusLines: some View {
@@ -172,7 +177,7 @@ private struct NodeFormBody: View {
             .buttonStyle(.loorePrimary)
             .disabled(model.loading || !model.isOnline || model.isRecording)
             .keyboardShortcut(.return, modifiers: .command)
-            .accessibilityIdentifier("nodeForm.send")
+            .accessibilityIdentifier("nodeForm.send.\(idSuffix)")
             if model.hasDraft {
                 Button("Discard draft") { model.discardDraft() }
                     .buttonStyle(.looreOutline)

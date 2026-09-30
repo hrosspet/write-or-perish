@@ -601,9 +601,9 @@ private struct TableBlockView: View {
                         InlineText(inlines: cell, context: cellStyle.with { $0.style.weight = .semibold },
                                    color: context.style.color, softBreakAsSpace: true)
                             .fixedSize()
-                            .frame(maxWidth: .infinity, alignment: alignment(column))
                             .padding(.vertical, 6)
                             .padding(.horizontal, 10)
+                            .gridColumnAlignment(horizontal(column))
                     }
                 }
                 Rectangle().fill(LooreColor.border).frame(height: 2).gridCellUnsizedAxes(.horizontal)
@@ -615,12 +615,21 @@ private struct TableBlockView: View {
                         ForEach(Array(row.enumerated()), id: \.offset) { column, cell in
                             InlineText(inlines: cell, context: cellStyle, softBreakAsSpace: true)
                                 .frame(minWidth: 40, maxWidth: 320, alignment: alignment(column))
+                                .fixedSize(horizontal: false, vertical: true)
                                 .padding(.vertical, 6)
                                 .padding(.horizontal, 10)
                         }
                     }
                 }
             }
+        }
+    }
+
+    private func horizontal(_ column: Int) -> HorizontalAlignment {
+        switch alignment(column) {
+        case .trailing: return .trailing
+        case .center: return .center
+        default: return .leading
         }
     }
 
