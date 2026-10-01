@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import UIKit
 
 /// A page shown in a sheet: a public web page (Safari view) or an authenticated
 /// web view carrying the app's cookies (Admin, Connect X).
@@ -74,6 +75,20 @@ final class Router {
         paths[selectedTab] = path
     }
 
+    enum ExternalHandling: Equatable { case safari, system, ignore }
+
+    /// How an outside link opens. `SFSafariViewController` raises an exception
+    /// for anything but http(s) (review M16: a reference URL without a scheme
+    /// crashed the app), so other links never reach it: `mailto:` goes to the
+    /// system, everything else (no scheme, other apps' schemes) is ignored.
+    static func externalHandling(_ url: URL) -> ExternalHandling {
+        switch url.scheme?.lowercased() {
+        case "http", "https": return url.host?.isEmpty == false ? .safari : .ignore
+        case "mailto": return .system
+        default: return .ignore
+        }
+    }
+
     func reset() {
         selectedTab = .reflect
         paths = [:]
@@ -89,7 +104,11 @@ final class Router {
             presentedWeb = WebPresentation(url: environment.frontendURL(path: path), kind: .safari)
             return
         case .external(let url):
-            presentedWeb = WebPresentation(url: url, kind: .safari)
+            switch Self.externalHandling(url) {
+            case .safari: presentedWeb = WebPresentation(url: url, kind: .safari)
+            case .system: UIApplication.shared.open(url)
+            case .ignore: break
+            }
             return
         case .admin:
             selectedTab = .more

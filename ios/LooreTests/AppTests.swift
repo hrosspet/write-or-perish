@@ -78,6 +78,27 @@ final class AppRouteTests: XCTestCase {
         router.open(.admin, environment: env, commonsAvailable: false)
         XCTAssertEqual(router.presentedWeb?.kind, .authenticated)
     }
+
+    /// Review M16: `SFSafariViewController` throws for anything but http(s).
+    @MainActor
+    func testOnlyWebLinksReachTheSafariView() throws {
+        func handling(_ link: String) throws -> Router.ExternalHandling {
+            Router.externalHandling(try XCTUnwrap(URL(string: link), link))
+        }
+        XCTAssertEqual(try handling("https://x.com/u/status/1"), .safari)
+        XCTAssertEqual(try handling("HTTP://example.com"), .safari)
+        XCTAssertEqual(try handling("mailto:someone@example.com"), .system)
+        for link in ["x.com/u/status/1", "javascript:alert(1)", "shortcuts://run", "file:///etc/hosts",
+                     "ftp://example.com/a", "tel:123", "http:no-host"] {
+            XCTAssertEqual(try handling(link), .ignore, link)
+        }
+
+        let router = Router()
+        router.open(.external(try XCTUnwrap(URL(string: "x.com/u/status/1"))), environment: env, commonsAvailable: false)
+        XCTAssertNil(router.presentedWeb, "a link without a scheme is ignored, not handed to Safari")
+        router.open(.external(try XCTUnwrap(URL(string: "https://x.com/u/status/1"))), environment: env, commonsAvailable: false)
+        XCTAssertEqual(router.presentedWeb?.kind, .safari)
+    }
 }
 
 final class DesignSystemTests: XCTestCase {
