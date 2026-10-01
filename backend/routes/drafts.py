@@ -43,6 +43,7 @@ def _session_dir(user_id, session_id):
     """drafts/<user_id>/<session_id> under AUDIO_STORAGE_ROOT."""
     return storage_path(AUDIO_STORAGE_ROOT, "drafts", user_id, session_id)
 
+
 # Proposal-pending drafts (created by the agentic loop's _auto_create_drafts,
 # consumed by apply_* / the proposal REST routes) live in the same Draft table
 # but are NOT composing/input drafts. They are keyed on the proposal node's id
