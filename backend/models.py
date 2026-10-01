@@ -1267,6 +1267,13 @@ class ExternalItem(db.Model):
     url = db.Column(db.String(512), nullable=True)
     posted_at = db.Column(db.DateTime, nullable=True)
     fetched_at = db.Column(db.DateTime, default=datetime.utcnow)
+    # When this row became a saved reference of its current source: on
+    # insert, or when a Read pick's row is saved (save_pick_row). Unlike
+    # fetched_at, a re-clip that replaces the stored text does not move
+    # it. The X bookmark sync reads it to tell bookmarks stored before
+    # its last completed run from ones stored since (#310). NULL on rows
+    # from before the column existed; readers fall back to fetched_at.
+    saved_at = db.Column(db.DateTime, nullable=True, default=datetime.utcnow)
     # Surfacing history (quote-as-response). Tracked EAGERLY at emission
     # time — content is encrypted at rest, so "which items were quoted"
     # cannot be derived from node content after the fact. Served to the
@@ -1367,6 +1374,14 @@ class ExternalAccount(db.Model):
     # reports THIS after a manual sync — diffing item counts around a
     # background task raced its per-page commits and under-reported.
     last_sync_created = db.Column(db.Integer, nullable=True)
+    # True while a sync that has stored bookmarks has not run to its end
+    # (a 429, a 5xx, a worker killed by a deploy); NULL otherwise. The
+    # next sync then does not stop at the first known page, which would
+    # leave the unread part missing for good (#310): it reads on until
+    # a page holds only bookmarks saved at or before last_synced_at (or
+    # to the end, when no sync has finished yet). Committed together
+    # with the first stored page, so a killed worker leaves it set too.
+    sync_incomplete = db.Column(db.Boolean, nullable=True)
 
     user = db.relationship("User", backref="external_accounts")
 
