@@ -81,8 +81,11 @@ final class VoiceTurnController {
         var longRecording: Double = 59 * 60
         /// No llm-status answer for this long ends the turn (M12; heuristic).
         var llmErrorGiveUp: Double = 2 * 60
-        /// Most thinking-cue time per turn; after it the wait is silent (M12; heuristic).
-        var cueCap: Double = 5 * 60
+        /// Most thinking-cue time in one wait (Stop → first chunk, or a drain); after
+        /// it that wait is silent (M12; heuristic). Per wait, not per turn: a long turn
+        /// with tool rounds and slow TTS chunks must keep the cue, or iOS suspends a
+        /// locked app mid-reply. Runaway turns end through the give-up timers above.
+        var cueCap: Double = 10 * 60
     }
 
     // MARK: Dependencies
@@ -917,6 +920,7 @@ final class VoiceTurnController {
     /// Audio is playing again (first chunk, or after a drain).
     func queueStartedPlaying() {
         cueOff()
+        cueUsed = 0  // the wait is over; the next wait gets the whole cue budget
         if state == .draining { state = .playing }
         audio.refreshNowPlaying()
     }
@@ -943,8 +947,8 @@ final class VoiceTurnController {
 
     // MARK: Thinking cue
 
-    /// Starts (or re-asserts, after an interruption) the cue, within the turn's
-    /// cue budget (`timings.cueCap`, M12).
+    /// Starts (or re-asserts, after an interruption) the cue, within the current
+    /// wait's cue budget (`timings.cueCap`, M12).
     private func cueOn() {
         if cueSince != nil {
             audio.startCue()

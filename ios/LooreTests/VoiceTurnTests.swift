@@ -475,7 +475,7 @@ final class VoiceTurnTests: XCTestCase {
         XCTAssertEqual(notices.toasts, ["Can't reach Loore to get the reply. It will be in the thread once it's ready."])
     }
 
-    func testCueTimeIsCappedPerTurn() async throws {
+    func testCueTimeIsCappedPerWait() async throws {
         turn.timings.cueCap = 0.2
         backend.statuses = [try status("completed", llm: 101)]
         backend.llmStatuses[101] = [try llm(101, "processing")]
@@ -485,7 +485,22 @@ final class VoiceTurnTests: XCTestCase {
         await wait("cue capped") { !audio.cueOn }
         XCTAssertEqual(turn.state, .awaitingAudio, "the turn still waits, silently")
         turn.systemInterruptionEnded()
-        XCTAssertFalse(audio.cueOn, "the budget is spent for this turn")
+        XCTAssertFalse(audio.cueOn, "the budget is spent for this wait")
+    }
+
+    func testAWaitAfterPlaybackGetsAFreshCueBudget() async throws {
+        turn.timings.cueCap = 0.2
+        backend.statuses = [try status("completed", llm: 101)]
+        backend.llmStatuses[101] = [try llm(101, "processing", tts: "processing", streaming: true)]
+        await recordAndStop()
+        await wait("cue capped") { !audio.cueOn && turn.state == .awaitingAudio }
+        await wait("attached") { backend.streams[101] != nil }
+        backend.push(101, "chunk_ready", #"{"chunk_index":0,"audio_url":"/media/g0.mp3","duration":2}"#)
+        await wait("playing") { turn.state == .playing }
+        turn.queueStartedPlaying()
+        audio.fakeQueue.waitingForChunks = true
+        turn.queueDrained()
+        XCTAssertTrue(audio.cueOn, "a new wait after audio played gets its own cue budget")
     }
 
     func testPausingDuringADrainSilencesTheCue() async throws {
