@@ -82,14 +82,18 @@ def _build_messages(user, template, budget, chronological):
     return messages, export, approximate_token_count(export)
 
 
-def _add_cost_log(user, input_tokens, output_tokens, batch):
+def _add_cost_log(user, input_tokens, output_tokens, batch, refused=False):
     from backend.extensions import db
     from backend.models import APICostLog
     from backend.utils.cost import calculate_llm_cost_microdollars
+    from backend.utils.refusal_backoff import REFUSED_REF
     cost = calculate_llm_cost_microdollars(
         MODEL_ID, input_tokens, output_tokens, batch=batch)
     db.session.add(APICostLog(
         user_id=user.id, model_id=MODEL_ID, request_type="intentions_infer",
+        # A refused run's row is what the admin column reads as "failed"
+        # (routes/admin._intentions_status_map), for batch and sync runs.
+        request_ref=REFUSED_REF if refused else None,
         input_tokens=input_tokens, output_tokens=output_tokens,
         cost_microdollars=cost))
     return cost
@@ -105,7 +109,8 @@ def _refuse_empty_truncated(user, response, batch):
     if not is_empty_truncated(response):
         return
     out_t = response.get("output_tokens", 0)
-    _add_cost_log(user, response.get("input_tokens", 0), out_t, batch)
+    _add_cost_log(user, response.get("input_tokens", 0), out_t, batch,
+                  refused=True)
     db.session.commit()
     logger.warning("intentions user %s: output cut off before any text "
                    "(output_tokens=%s); nothing saved", user.id, out_t)
@@ -388,19 +393,23 @@ def _failed_item_tokens(provider_key, batch_id, custom_id, keys):
     return None, None
 
 
+def mark_intentions_item_gave_up(item, job):
+    """Persist a terminal failure of this item on its job so the admin
+    column shows "failed" (otherwise the abandoned run is invisible — the
+    job is marked collected and no new artifact version appears)."""
+    from backend.extensions import db
+    job.items = [{**i, "gave_up": True} if i.get("custom_id") == item.get("custom_id")
+                 else i for i in job.items]
+    db.session.commit()
+
+
 def handle_failed_intentions_item(user, item, job, keys):
     """Called by the poller when a kind="intentions" item ended without a
     result. One calibrated resubmit — a new persisted job — sized from the
     provider's real token count when the error carries it (Anthropic does),
     else a 70% shrink. A resubmitted item that fails again gives up."""
     if item.get("resubmitted"):
-        # Persist the terminal failure so the admin column can show it
-        # (otherwise the abandoned run is invisible — the job is marked
-        # collected and no artifact ever appears).
-        from backend.extensions import db
-        job.items = [{**i, "gave_up": True} if i.get("custom_id") == item.get("custom_id")
-                     else i for i in job.items]
-        db.session.commit()
+        mark_intentions_item_gave_up(item, job)
         logger.warning("intentions user %s: batch failed again after resubmit — giving up", user.id)
         return
     template, cap, chronological = _template_and_params()
