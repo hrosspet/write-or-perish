@@ -23,11 +23,10 @@ struct NodeFormView: View {
                 let m = NodeFormModel(config: config, app: app)
                 m.onSuccess = onSuccess
                 model = m
+                // Not tied to a view task: a re-render must not cancel the draft load.
+                Task { await m.start() }
             }
             model?.onSuccess = onSuccess
-        }
-        .task(id: model == nil) {
-            await model?.start()
         }
         .onDisappear {
             model?.stop()

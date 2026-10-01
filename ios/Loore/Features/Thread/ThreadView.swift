@@ -89,7 +89,7 @@ private struct ThreadContent: View {
                     // Once per focal node, after the first layout (web: scrollIntoView, block start).
                     guard !scrolledToFocal, !node.ancestors.isEmpty else { return }
                     scrolledToFocal = true
-                    try? await Task.sleep(nanoseconds: 350_000_000)
+                    try? await Task.sleep(nanoseconds: 600_000_000)
                     withAnimation(LooreMotion.quick) { proxy.scrollTo("focal", anchor: .top) }
                 }
             }
@@ -208,7 +208,7 @@ private struct ThreadContent: View {
                     Task { await model.inlineReplySent(result, autoGenerate: $autoGenerate) }
                 }
             }
-            .id(formToken)
+            .id("\(formToken)-\(craftMode)") // a new form when sent or when craft mode flips
             .padding(.top, 4)
             .padding(.bottom, 12)
         }

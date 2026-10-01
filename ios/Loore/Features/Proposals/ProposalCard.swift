@@ -462,12 +462,12 @@ struct ProposalCard: View {
         case nil: ProposalButton(title: "Save to shares") { saveShare(index) }
         case "started": StatusText(text: "Saving…", color: LooreColor.textMuted)
         case "completed":
-            HStack(spacing: 0) {
-                StatusText(text: "Saved as a private draft", color: LooreColor.success)
-                StatusText(text: " — publish from your ", color: LooreColor.textMuted)
-                Button("Share page") { app.open(.share) }
-                    .buttonStyle(.plain).font(LooreFont.sans(11.5, .regular)).foregroundStyle(LooreColor.accent)
-            }
+            (Text("Saved as a private draft").foregroundColor(LooreColor.success)
+             + Text(" — publish from your ").foregroundColor(LooreColor.textMuted)
+             + Text("Share page").foregroundColor(LooreColor.accent))
+                .font(LooreFont.sans(11.5, .regular))
+                .onTapGesture { app.open(.share) }
+                .accessibilityAddTraits(.isLink)
         default: StatusText(text: shareErrors[index] ?? "Saving the share failed", color: LooreColor.accent)
         }
     }

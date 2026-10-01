@@ -20,7 +20,7 @@ struct TextModeView: View {
                     formToken += 1
                     Self.open(result, app: app)
                 }
-                .id(formToken)
+                .id("\(formToken)-\(app.capabilities.craftMode)")
             }
             .padding(.horizontal, LooreSpacing.gutter)
             .padding(.top, 60)
