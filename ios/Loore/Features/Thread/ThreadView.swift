@@ -116,14 +116,17 @@ private struct ThreadContent: View {
                 .foregroundStyle(LooreColor.textPrimary)
                 .accessibilityAddTraits(.isHeader)
             Spacer(minLength: 8)
-            if model.isOwner && node.aiUsage != .off && !model.isPublicThread {
+            // Voice Mode shows on every owned thread: where AI usage is `none` the
+            // Voice screen says why it is closed. The read and auto-generate
+            // controls keep the AI-usage rule.
+            if model.isOwner && !model.isPublicThread {
                 VStack(alignment: .trailing, spacing: 6) {
                     TopRightButton(title: model.voiceLoading ? "Starting…" : "Voice Mode") {
                         Image(systemName: "mic.fill").font(.system(size: 11)).accessibilityHidden(true)
                     } action: { model.startVoice() }
                     .disabled(model.voiceLoading)
                     .accessibilityHint("Continue this conversation by voice")
-                    if app.capabilities.isAdmin {
+                    if app.capabilities.isAdmin && node.aiUsage != .off {
                         TopRightButton(title: model.readLoading ? "Starting…"
                                        : (model.inReadThread ? model.readLabel : "Relevant tweets")) {
                             Image(systemName: "book").font(.system(size: 11)).accessibilityHidden(true)
@@ -132,7 +135,7 @@ private struct ThreadContent: View {
                         .accessibilityHint(model.inReadThread && model.readReplyAbove ? ThreadModel.readFurtherTitle
                                            : ThreadModel.readEntryTitle)
                     }
-                    if craftMode {
+                    if craftMode && node.aiUsage != .off {
                         TopRightButton(title: "Auto-generate") {
                             LoorePillSwitch(isOn: autoGenerate)
                         } action: { autoGenerate.toggle() }

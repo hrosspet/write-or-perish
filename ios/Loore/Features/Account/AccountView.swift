@@ -152,6 +152,7 @@ private struct AccountForm: View {
             selectRow("Default AI usage", field: "default_ai_usage", helper: "Controls how AI can use your new entries by default.",
                       options: [("none", "None"), ("chat", "Chat"), ("train", "Train")],
                       value: user.defaultAIUsage.rawString) { .string($0) }
+                .id(VoiceAIBlock.accountAnchor)
             AccountRow(labelView: AnyView(HStack(spacing: 6) { CraftIcon(size: 13); Text("Craft mode") }),
                        helper: "Shows extra controls for people who want to steer the details: privacy and AI usage on each entry, the auto-generate switch and model picker on threads, audio upload, prompt editing and data export. Off is the simpler Loore. Menu items and controls added by craft mode carry the sliders icon.") {
                 onOffSelect(field: "craft_mode", isOn: app.capabilities.craftMode, onTitle: "On")

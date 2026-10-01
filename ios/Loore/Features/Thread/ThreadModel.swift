@@ -549,6 +549,12 @@ final class ThreadModel {
             } catch {
                 voiceLoading = false
                 if SpendCap.isSpendCapError(error) { return }
+                if VoiceAIBlock.from(error, fallback: .thread) != nil {
+                    // AI usage is `none` in this thread: the Voice screen says why
+                    // and where to change it (web: navigate to /voice?parent=<id>).
+                    app.open(.voice(parentId: nodeId, resumeLLMId: nil))
+                    return
+                }
                 pageError = (error as? APIError)?.userMessage(fallback: "Error starting voice session.")
                     ?? "Error starting voice session."
             }

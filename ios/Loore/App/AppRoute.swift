@@ -33,7 +33,7 @@ enum AppRoute: Hashable, Sendable {
     case reference(id: Int)
     case prompts
     case prompt(key: String)
-    /// `anchor` is the web hash: email, x, model, craft, references.
+    /// `anchor` is the web hash: email, x, model, references, ai-usage, craft.
     case account(anchor: String?)
     case importData(anchor: String?)
     case share

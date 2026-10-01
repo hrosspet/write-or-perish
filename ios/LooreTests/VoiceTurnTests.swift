@@ -19,6 +19,7 @@ final class FakeVoiceBackend: VoiceBackend {
     var streamRequests: [(Int, Int?)] = []
     var timingPosts: [(Int, [String: Double])] = []
     var legacyResult: VoiceSessionResponse?
+    var legacyError: Error?
 
     func startSession(parentId: Int?, aiUsage: String) async throws -> StreamingInitResponse {
         log.append("init parent=\(parentId.map(String.init) ?? "nil") ai=\(aiUsage)")
@@ -40,6 +41,7 @@ final class FakeVoiceBackend: VoiceBackend {
     func legacyVoice(content: String, model: String?, aiUsage: String?, parentId: Int?,
                      sessionId: String?) async throws -> VoiceSessionResponse {
         log.append("legacy")
+        if let legacyError { throw legacyError }
         guard let legacyResult else { throw APIError.server(status: 500, body: nil) }
         return legacyResult
     }
@@ -606,6 +608,83 @@ final class VoiceTurnTests: XCTestCase {
         XCTAssertTrue(recorder.calls.isEmpty)
         XCTAssertEqual(notices.capped, 1)
         XCTAssertTrue(notices.toasts.first?.hasPrefix("You've reached your monthly usage limit") == true)
+    }
+
+    // AI usage `none` (server code ai_usage_none): the screen explains, nothing records.
+
+    private func aiUsageNone(scope: String?) -> APIError {
+        var body = #"{"error":"Voice mode needs AI to listen and reply.","code":"ai_usage_none""#
+        if let scope { body += #","scope":"\#(scope)""# }
+        return APIError.from(status: 403, contentType: "application/json", data: Data((body + "}").utf8))
+    }
+
+    func testAIUsageNoneOnInitNeverOpensTheMic() async throws {
+        backend.startResult = .failure(aiUsageNone(scope: "thread"))
+        turn.start()
+        await wait("idle") { turn.state == .idle }
+        XCTAssertTrue(recorder.calls.isEmpty, "the mic never opens")
+        XCTAssertEqual(turn.aiBlock, VoiceAIBlock(scope: .thread))
+        XCTAssertTrue(notices.toasts.isEmpty, "the screen explains instead of a toast")
+        XCTAssertFalse(turn.hasError)
+        XCTAssertEqual(turn.phase, .ready)
+        XCTAssertFalse(backend.log.contains("discard"), "no draft was created")
+    }
+
+    func testAIUsageNoneWithoutScopeFallsBackByThread() async throws {
+        let fresh = VoiceTurnController(backend: backend, recorder: recorder, audio: audio, notices: notices)
+        fresh.aiUsage = { "none" }
+        backend.startResult = .failure(aiUsageNone(scope: nil))
+        fresh.start()
+        await wait("idle") { fresh.state == .idle && fresh.aiBlock != nil }
+        XCTAssertEqual(fresh.aiBlock, VoiceAIBlock(scope: .account))
+        XCTAssertEqual(backend.log.first, "init parent=nil ai=none")
+
+        backend.startResult = .failure(aiUsageNone(scope: nil))
+        turn.start()
+        await wait("idle") { turn.state == .idle && turn.aiBlock != nil }
+        XCTAssertEqual(turn.aiBlock, VoiceAIBlock(scope: .thread), "a turn under a parent is a thread")
+    }
+
+    func testAIBlockClearsForAFreshCheckAndOnTearDown() async throws {
+        backend.startResult = .failure(aiUsageNone(scope: "account"))
+        turn.start()
+        await wait("blocked") { turn.aiBlock != nil }
+        turn.clearAIBlock()
+        XCTAssertNil(turn.aiBlock)
+
+        turn.start()
+        await wait("blocked again") { turn.aiBlock != nil }
+        turn.tearDown()
+        XCTAssertNil(turn.aiBlock)
+
+        // Allowed again (the setting changed): the next start records.
+        backend.startResult = .success(StreamingInitResponse(sessionId: "sid-2", draftId: 8, sseURL: nil))
+        turn.start()
+        await wait("recording") { turn.state == .recording }
+        XCTAssertNil(turn.aiBlock)
+    }
+
+    func testLegacyReplyRefusedForAIUsageNoneBlocksQuietly() async throws {
+        backend.statuses = [try status("completed")]
+        backend.legacyError = aiUsageNone(scope: "thread")
+        await recordAndStop()
+        await wait("idle") { turn.state == .idle && turn.aiBlock != nil }
+        XCTAssertTrue(backend.log.contains("legacy"))
+        XCTAssertEqual(turn.aiBlock, VoiceAIBlock(scope: .thread))
+        XCTAssertTrue(notices.toasts.isEmpty)
+        XCTAssertFalse(audio.cueOn)
+    }
+
+    func testRecordingSavedWithoutAReplyIsToasted() async throws {
+        // Finalize of a Voice draft whose reply is not allowed (the setting changed
+        // mid-recording): the entry is saved, no reply node, the server's warning.
+        let warning = "Your recording is saved. Loore didn't reply because AI usage is set to None."
+        backend.statuses = [try status("completed", warning: warning)]
+        await recordAndStop()
+        await wait("idle") { turn.state == .idle }
+        XCTAssertEqual(notices.toasts, [warning])
+        XCTAssertFalse(backend.log.contains("legacy"))
+        XCTAssertNil(turn.aiBlock)
     }
 
     func testMicrophoneFailureDiscardsTheDraft() async throws {

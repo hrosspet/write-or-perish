@@ -45,6 +45,9 @@ final class VoiceTurnController {
     private(set) var replyContent: String?
     private(set) var toolCallsMeta: [ToolCallMeta]?
     private(set) var threadParentId: Int?
+    /// The server refused to start because AI usage is `none` (`ai_usage_none`):
+    /// the Voice screen shows why instead of the record button.
+    private(set) var aiBlock: VoiceAIBlock?
     /// Between an interim node's audio and its continuation's first chunk.
     private(set) var awaitingNextNode = false
 
@@ -157,6 +160,13 @@ final class VoiceTurnController {
         threadParentId = id
     }
 
+    /// A Voice screen checks AI usage afresh (a new screen, or a return after the
+    /// setting may have changed): a refusal from an earlier start no longer applies.
+    func clearAIBlock() {
+        guard state == .idle || state == .done else { return }
+        aiBlock = nil
+    }
+
     /// The proposal card changed the reply's text (it saves the node itself).
     func setReplyContent(_ content: String) {
         replyContent = content
@@ -226,6 +236,14 @@ final class VoiceTurnController {
                     if SpendCap.isSpendCapError(error) {
                         self.notices.spendCapped()
                         self.notices.toast(SpendCap.toastMessage(.record), duration: 8)
+                        self.state = .idle
+                        self.audio.deactivate()
+                        self.audio.refreshNowPlaying()
+                    } else if let block = VoiceAIBlock.from(
+                        error, fallback: self.threadParentId == nil ? .account : .thread) {
+                        // AI usage is `none`: no draft exists and the mic never opens.
+                        // The screen explains instead of a toast and the red dot.
+                        self.aiBlock = block
                         self.state = .idle
                         self.audio.deactivate()
                         self.audio.refreshNowPlaying()
@@ -492,7 +510,10 @@ final class VoiceTurnController {
             beginReply(answer.llmNodeId, gen)
         } catch {
             guard gen == generation else { return }
-            if let apiError = error as? APIError, apiError.status == 400 {
+            if let block = VoiceAIBlock.from(error, fallback: threadParentId == nil ? .account : .thread) {
+                aiBlock = block
+                finishQuietly()
+            } else if let apiError = error as? APIError, apiError.status == 400 {
                 endTurnWithError(apiError.userMessage(fallback: "Could not start the reply."), sound: false)
             } else {
                 endTurnWithError(nil, sound: false)
@@ -998,6 +1019,7 @@ final class VoiceTurnController {
         if state == .recording || state == .starting { recorder.cancel() }
         resetTurn(keepQueue: false)
         state = .idle
+        aiBlock = nil
         audio.deactivate()
         audio.refreshNowPlaying()
     }

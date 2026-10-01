@@ -4,7 +4,9 @@ import SwiftUI
 /// Voice mode (web `VoicePage`, route `/voice?resume=&parent=`): record → Thinking →
 /// the reply plays by itself, then Continue. The conversation lives in
 /// `app.audio.voice`, so it survives tab switches; popping the screen ends it,
-/// like the web page's unmount.
+/// like the web page's unmount. Where AI usage is `none` (the account's default
+/// for a fresh conversation, or the thread it would continue) the screen says
+/// why instead of offering the record button (`VoiceAIBlock`).
 struct VoiceView: View {
     let parentId: Int?
     let resumeLLMId: Int?
@@ -15,6 +17,9 @@ struct VoiceView: View {
     @State private var recoveryChecked = false
     @State private var resumeAfterRecovery = false
     @State private var route: VoiceRouteParameters
+    /// The server's answer for the route's thread (`GET /api/voice/availability`).
+    @State private var threadAvailability: VoiceAvailability?
+    @State private var availabilityChecked = false
 
     init(parentId: Int?, resumeLLMId: Int?) {
         self.parentId = parentId
@@ -25,6 +30,17 @@ struct VoiceView: View {
     private var voice: VoiceTurnController { app.audio.voice }
     private var player: ChunkQueuePlayer { app.audio.player }
     private var online: Bool { NetworkStatus.shared.isOnline }
+
+    /// The thread the route continues: `parent`, else the resumed reply.
+    private var routeThreadId: Int? { parentId ?? resumeLLMId }
+
+    /// Why Voice mode is closed here, or nil. Never while a turn runs.
+    private var aiBlock: VoiceAIBlock? {
+        guard !voice.isActive else { return nil }
+        return voice.aiBlock ?? VoiceAIBlock.decide(threadId: routeThreadId,
+                                                    accountAIUsage: app.user?.defaultAIUsage,
+                                                    availability: threadAvailability)
+    }
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
@@ -53,19 +69,24 @@ struct VoiceView: View {
         .navigationBarTitleDisplayMode(.inline)
         .onAppear(perform: appear)
         .onDisappear(perform: disappear)
-        .task { await checkInterrupted() }
+        .task {
+            await checkAvailability()
+            await checkInterrupted()
+        }
     }
 
     // MARK: Phases
 
     @ViewBuilder private var content: some View {
-        if !recoveryChecked {
+        if !recoveryChecked || !availabilityChecked {
             Color.clear.frame(height: 1)
         } else if let draft = interrupted, voice.phase != .recording {
             recoveryBanner(draft)
         } else {
             switch voice.phase {
-            case .ready, .recording: recordingPhase
+            case .ready:
+                if let block = aiBlock { aiBlockView(block) } else { recordingPhase }
+            case .recording: recordingPhase
             case .processing: processingPhase
             case .playback: playbackPhase
             }
@@ -212,6 +233,49 @@ struct VoiceView: View {
             .accessibilityIdentifier("voice.recovery.discard")
     }
 
+    /// Instead of the record button where AI usage is `none` (web `VoicePage`).
+    private func aiBlockView(_ block: VoiceAIBlock) -> some View {
+        VStack(spacing: 0) {
+            Text(VoiceAIBlock.title)
+                .font(LooreFont.serif(19.2, .light, italic: true, relativeTo: .title2))
+                .foregroundStyle(LooreColor.textMuted)
+                .padding(.bottom, 40)
+                .accessibilityAddTraits(.isHeader)
+            EcgView(active: false, showScanline: false, dim: true)
+            Text(block.body)
+                .font(LooreFont.sans(14.4, .light))
+                .foregroundStyle(LooreColor.textSecondary)
+                .lineSpacing(5)
+                .frame(maxWidth: 340)
+                .padding(.bottom, 32)
+                .accessibilityIdentifier("voice.aiBlock")
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 16) { aiBlockButtons(block) }
+                VStack(spacing: 12) { aiBlockButtons(block) }
+            }
+        }
+        .multilineTextAlignment(.center)
+    }
+
+    @ViewBuilder private func aiBlockButtons(_ block: VoiceAIBlock) -> some View {
+        Button("Account settings") {
+            app.open(.account(anchor: VoiceAIBlock.accountAnchor))
+        }
+        .buttonStyle(RecoveryButtonStyle(accent: true))
+        .accessibilityIdentifier("voice.aiBlock.account")
+        if block.scope == .thread, let threadId = routeThreadId {
+            Button("Back to the thread") {
+                if VoiceAIBlock.backPops(previous: app.router.previousRoute) {
+                    app.router.pop()
+                } else {
+                    app.router.replaceTop(with: .thread(id: threadId, awaitLLM: nil))
+                }
+            }
+            .buttonStyle(RecoveryButtonStyle(accent: false))
+            .accessibilityIdentifier("voice.aiBlock.back")
+        }
+    }
+
     private var textModeButton: some View {
         Button {
             if let id = voice.lastReplyNodeId {
@@ -237,7 +301,25 @@ struct VoiceView: View {
 
     private func appear() {
         app.audio.voiceScreenVisible = true
-        route.applyOnce(to: voice)
+        // Before the first check the route waits: a blocked thread's reply is not resumed.
+        if availabilityChecked && aiBlock == nil { route.applyOnce(to: voice) }
+    }
+
+    /// Whether Voice mode may run here, once per screen and again on every return
+    /// while it is closed (the setting may have changed meanwhile). The account's
+    /// default is read from the user; a thread asks the server. The route's
+    /// `parent` / `resume` are applied only when Voice mode is open.
+    private func checkAvailability() async {
+        defer {
+            availabilityChecked = true
+            if aiBlock == nil { route.applyOnce(to: voice) }
+        }
+        if availabilityChecked && aiBlock == nil { return }
+        voice.clearAIBlock()
+        guard let threadId = routeThreadId else { return }
+        threadAvailability = try? await app.api.get(
+            APIPath.voiceAvailability, query: [URLQueryItem(name: "parent", value: String(threadId))],
+            as: VoiceAvailability.self)
     }
 
     private func disappear() {
@@ -250,6 +332,7 @@ struct VoiceView: View {
     }
 
     private func startRecording() {
+        guard aiBlock == nil else { return }
         // Block before any recording starts: a long recording stopped only at
         // the end would be lost work (web #85).
         if app.spendCapped {
@@ -318,7 +401,7 @@ struct VoiceView: View {
     /// Debug: `-LooreDebugVoiceAutoStart YES` with `-LooreDebugAudioFile` records at once.
     private func autoStartIfRequested() {
         #if DEBUG
-        guard app.launch.debugAudioFile != nil, interrupted == nil, voice.state == .idle,
+        guard app.launch.debugAudioFile != nil, interrupted == nil, voice.state == .idle, aiBlock == nil,
               UserDefaults.standard.bool(forKey: "LooreDebugVoiceAutoStart") else { return }
         startRecording()
         #endif
