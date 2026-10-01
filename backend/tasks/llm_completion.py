@@ -241,9 +241,11 @@ def _start_voice_tts_stream(llm_node, user_id, source_mode):
     key). Marks the node's TTS 'processing' first — the SSE the browser
     opens for it refuses otherwise — and the batch path then leaves the
     node alone."""
+    from backend.utils.privacy import speech_allowed
     if (source_mode != "voice"
             or not flask_app.config.get("STREAMING_VOICE_TTS")
-            or llm_node.audio_tts_url):
+            or llm_node.audio_tts_url
+            or not speech_allowed(llm_node)):
         return None
     from backend.utils.api_keys import get_openai_chat_key
     api_key = get_openai_chat_key(flask_app.config)

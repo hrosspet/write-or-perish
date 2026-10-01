@@ -2020,8 +2020,8 @@ def generate_tts(node_id):
             "node_id": node.id
         }), 202
 
-    # New speech sends the text to a model: not for an entry whose
-    # ai_usage is 'none' (a model's reply is always spoken).
+    # New speech sends the text to a model: not for a node whose
+    # ai_usage is 'none', a model's reply included.
     if not speech_allowed(node):
         return jsonify({"error": SPEECH_REFUSED_MESSAGE}), 403
 
