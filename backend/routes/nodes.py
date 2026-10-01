@@ -2629,30 +2629,6 @@ def cleanup_chunked_upload():
 
 
 # ---------------------------------------------------------------------------
-# Media serving endpoint (simple/dev only – not for production)
-# ---------------------------------------------------------------------------
-
-
-@nodes_bp.route("/media/<path:filename>", methods=["GET"])
-def serve_audio_file(filename):
-    """Serve files from the AUDIO_STORAGE_ROOT with support for range requests.
-
-    This is a **development‑only** helper to unblock tests.  In production the
-    app would be served by the web server (e.g. nginx) or a cloud storage
-    bucket.  Range requests are *not* implemented; whole file is returned.
-
-    Note: The production media blueprint (media_bp at /media) handles
-    encrypted .enc files. This endpoint is only used in tests.
-    """
-    file_path = AUDIO_STORAGE_ROOT / filename
-    if not file_path.is_file():
-        return jsonify({"error": "File not found"}), 404
-    from flask import send_file
-
-    return send_file(file_path)
-
-
-# ---------------------------------------------------------------------------
 # Streaming Transcription endpoints (real-time transcription during recording)
 # ---------------------------------------------------------------------------
 
