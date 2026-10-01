@@ -217,6 +217,25 @@ final class NodeFormModelTests: StubbedAppTestCase {
         XCTAssertEqual(app.toasts.toasts.last?.message, "refused")
     }
 
+    /// Review M7: the size is read inside the file's security-scoped access.
+    func testAPickedFilesSizeIsReadWhileItsAccessIsOpen() throws {
+        var events: [String] = []
+        var open = false
+        let size = NodeFormModel.pickedFileSize(URL(fileURLWithPath: "/elsewhere/talk.m4a"),
+                                                startAccess: { _ in events.append("start"); open = true; return true },
+                                                stopAccess: { _ in events.append("stop"); open = false },
+                                                readSize: { _ in events.append(open ? "size (open)" : "size (closed)"); return 150 << 20 })
+        XCTAssertEqual(events, ["start", "size (open)", "stop"])
+        XCTAssertEqual(size, 150 << 20)
+
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent("pick-\(UUID().uuidString).m4a")
+        try Data(count: 12_345).write(to: file)
+        defer { try? FileManager.default.removeItem(at: file) }
+        let (model, _) = form(NodeFormConfig(parentId: nil))
+        model.pickFile(file)
+        XCTAssertEqual(model.uploadedFile?.size, 12_345)
+    }
+
     func testFreshEntriesRememberPrivacyAndAIUsage() {
         let (model, _) = form(NodeFormConfig(parentId: nil))
         model.privacy = .public

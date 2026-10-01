@@ -262,7 +262,7 @@ final class NodeFormModel {
 
     func pickFile(_ url: URL) {
         let name = url.lastPathComponent
-        let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+        let size = Self.pickedFileSize(url)
         if size > PickedAudioFile.maxBytes {
             error = "File size must be under 200 MB"
             return
@@ -275,6 +275,19 @@ final class NodeFormModel {
         error = nil
         uploadedFile = PickedAudioFile(url: url, name: name, size: size)
         content = ""
+    }
+
+    /// A picked file's size. A file outside the app's sandbox (Files, iCloud Drive)
+    /// can be read only while its security-scoped access is open; read before
+    /// that, the size came back as 0, which skipped the 200 MB check and the
+    /// chunked upload.
+    static func pickedFileSize(_ url: URL,
+                               startAccess: (URL) -> Bool = { $0.startAccessingSecurityScopedResource() },
+                               stopAccess: (URL) -> Void = { $0.stopAccessingSecurityScopedResource() },
+                               readSize: (URL) -> Int? = { try? $0.resourceValues(forKeys: [.fileSizeKey]).fileSize }) -> Int {
+        let access = startAccess(url)
+        defer { if access { stopAccess(url) } }
+        return readSize(url) ?? 0
     }
 
     /// The Upload press: refused up front when the monthly cap is reached (#341).
