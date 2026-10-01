@@ -173,10 +173,17 @@ private struct ConfirmImportDialog: View {
                 .buttonStyle(.loorePrimary)
                 .disabled(model.busy)
                 .accessibilityIdentifier("import.confirm")
-                Button("Cancel") { model.cancel() }
-                    .buttonStyle(.looreOutline)
-                    .disabled(model.busy)
-                    .accessibilityIdentifier("import.cancel")
+                if model.pollingTask {
+                    // The import is queued on the server: closing only stops watching it.
+                    Button("Close") { model.closeWhilePolling() }
+                        .buttonStyle(.looreOutline)
+                        .accessibilityIdentifier("import.closePolling")
+                } else {
+                    Button("Cancel") { model.cancel() }
+                        .buttonStyle(.looreOutline)
+                        .disabled(model.busy)
+                        .accessibilityIdentifier("import.cancel")
+                }
             }
             .padding(.top, 4)
         }

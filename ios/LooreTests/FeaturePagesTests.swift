@@ -488,6 +488,45 @@ final class ImportTests: StubbedAppTestCase {
         XCTAssertNil(model.pickerFinished(.failure(CocoaError(.fileReadNoPermission))))
     }
 
+    // MARK: A Twitter import that stops reporting (review M8)
+
+    private func twitterModel(status: String) -> ImportModel {
+        StubURLProtocol.install { request in
+            if request.url?.path == "/api/import/twitter/confirm" { return .json(200, #"{"task_id":"t1","total":5}"#) }
+            return .json(200, status)
+        }
+        let model = ImportModel(app: app)
+        model.analysis = ImportAnalysis(kind: .twitter, raw: ["import_token": "tok"])
+        model.pollInterval = 0.05
+        return model
+    }
+
+    func testAStalledTwitterImportStopsWithTheCheckYourLogMessage() async {
+        let model = twitterModel(status: #"{"status":"running","done":1,"total":5}"#)
+        model.stallLimit = 0.3
+        await model.confirm()
+        XCTAssertEqual(model.error, ImportModel.lostTrackMessage)
+        XCTAssertFalse(model.busy)
+        XCTAssertFalse(model.pollingTask)
+    }
+
+    func testTheDialogClosesWhileATwitterImportIsPolled() async {
+        let model = twitterModel(status: #"{"status":"queued"}"#)
+        let running = Task { await model.confirm() }
+        for _ in 0..<40 where !model.pollingTask { try? await Task.sleep(nanoseconds: 25_000_000) }
+        XCTAssertTrue(model.pollingTask)
+        XCTAssertTrue(model.busy)
+        model.closeWhilePolling()
+        await running.value
+        XCTAssertNil(model.analysis)
+        XCTAssertFalse(model.busy)
+        XCTAssertNil(model.error)
+        XCTAssertEqual(app.toasts.toasts.last?.message, ImportModel.continuesMessage)
+        let polls = calls.filter { $0.hasPrefix("GET /api/import/status/") }.count
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertEqual(calls.filter { $0.hasPrefix("GET /api/import/status/") }.count, polls, "polling stopped")
+    }
+
     func testTheNamedConversationsFileWins() throws {
         let url = try zip("a.zip", ["export/conversations.json": "[{\"a\":1}]", "export/big.json": "[" + String(repeating: "1,", count: 500) + "1]"])
         let out = try ImportFiles.extractConversations(from: url, into: dir)

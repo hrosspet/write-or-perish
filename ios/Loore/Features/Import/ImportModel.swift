@@ -136,6 +136,12 @@ final class ImportModel {
     static let stageLabels: [Stage: String] = [.extracting: "Extracting…", .analyzing: "Analyzing…", .importing: "Importing…"]
     /// A confirm that outlives nginx's 60 s window (design doc §10).
     static let timeoutMessage = "The import took longer than the connection allows. It may still finish on the server: check your Log in a few minutes before importing again (a repeat skips what already arrived)."
+    static let lostTrackMessage = "Lost track of the import — check your Log to see whether it finished."
+    static let continuesMessage = "The import continues in the background. Check your Log in a few minutes."
+    /// A Twitter import whose status shows no progress for this long stops being
+    /// polled (the web polls until the page is reloaded). Heuristic chosen for the
+    /// app, not taken from the web or the backend.
+    static let twitterStallLimit: TimeInterval = 10 * 60
 
     private let app: AppState
     private let log = Logger(subsystem: "org.loore.app", category: "import")
@@ -158,6 +164,12 @@ final class ImportModel {
     /// `409 deleted_content_matches`: the count to show; the retry repeats the confirm.
     var deletedMatches: Int?
     var result: ImportResult?
+    /// A queued Twitter import is being polled: the dialog can be closed meanwhile.
+    private(set) var pollingTask = false
+    /// Polling cadence and the stall limit (tests shorten them).
+    var pollInterval: TimeInterval = 1.5
+    var stallLimit: TimeInterval = ImportModel.twitterStallLimit
+    private var pollGeneration = 0
 
     init(app: AppState) {
         self.app = app
@@ -334,11 +346,19 @@ final class ImportModel {
         return false
     }
 
-    /// `GET /api/import/status/<task>` every 1.5 s.
+    /// `GET /api/import/status/<task>` every 1.5 s, until the task ends, the user
+    /// closes the dialog (`closeWhilePolling`), or nothing changes for `stallLimit`.
     private func pollTwitter(_ taskId: String) async {
+        pollGeneration += 1
+        let generation = pollGeneration
+        pollingTask = true
+        defer { if generation == pollGeneration { pollingTask = false } }
+        var lastChange = Date()
+        var lastSeen: String?
         while !Task.isCancelled {
             do {
                 let status: [String: JSONValue] = try await app.api.get(APIPath.importStatus(taskId), poll: true)
+                guard generation == pollGeneration else { return }
                 switch status["status"]?.stringValue {
                 case "completed":
                     let resultObject = (try? JSONSerialization.jsonObject(
@@ -353,12 +373,35 @@ final class ImportModel {
                 default:
                     break
                 }
+                let seen = "\(status["status"]?.stringValue ?? "")|\(status["done"]?.intValue ?? -1)"
+                if seen != lastSeen {
+                    lastSeen = seen
+                    lastChange = Date()
+                } else if Date().timeIntervalSince(lastChange) >= stallLimit {
+                    fail(Self.lostTrackMessage)
+                    return
+                }
             } catch {
-                fail("Lost track of the import — check your Log to see whether it finished.")
+                guard generation == pollGeneration else { return }
+                fail(Self.lostTrackMessage)
                 return
             }
-            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            try? await Task.sleep(nanoseconds: UInt64(pollInterval * 1_000_000_000))
+            guard generation == pollGeneration else { return }
         }
+    }
+
+    /// Close on the confirm dialog while a Twitter import is polled: the import
+    /// keeps running on the server; the app stops watching it.
+    func closeWhilePolling() {
+        guard pollingTask else { return }
+        pollGeneration += 1
+        pollingTask = false
+        analysis = nil
+        stage = nil
+        progress = nil
+        error = nil
+        app.toasts.show(Self.continuesMessage)
     }
 
     /// "Restore deleted content" / "Keep it deleted": retry with `on_deleted`.
