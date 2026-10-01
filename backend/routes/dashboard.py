@@ -58,14 +58,21 @@ def get_latest_profile(user):
     return None
 
 
-def _serialize_node_for_list(node):
-    """Serialize a node for dashboard list views (Log has its own)."""
+def _serialize_node_for_list(node, viewer_id=None):
+    """Serialize a node for dashboard list views (Log has its own).
+
+    *viewer_id*: when another user is looking (the public dashboard), a
+    system prompt root's card shows its first child only if that child is
+    accessible to the viewer."""
     # If this is a system prompt root, skip to the first child
     display_node = node
     prompt_key = None
     if node.is_system_prompt:
         prompt_key = node.get_prompt_key()
-        first_child = Node.query.filter_by(parent_id=node.id).order_by(Node.created_at.asc()).first()
+        children = Node.query.filter(Node.parent_id == node.id)
+        if viewer_id is not None:
+            children = children.filter(accessible_nodes_filter(Node, viewer_id))
+        first_child = children.order_by(Node.created_at.asc()).first()
         if first_child:
             display_node = first_child
 
@@ -192,7 +199,8 @@ def get_public_dashboard(username):
         Node.pinned_at.isnot(None),
         accessible_nodes_filter(Node, current_user.id)
     ).order_by(Node.pinned_at.desc()).all()
-    pinned_list = [_serialize_node_for_list(n) for n in pinned_nodes]
+    pinned_list = [_serialize_node_for_list(n, current_user.id)
+                   for n in pinned_nodes]
 
     query = Node.query.filter(
         Node.user_id == user.id,
@@ -201,7 +209,8 @@ def get_public_dashboard(username):
     ).order_by(Node.created_at.desc())
     pagination = query.paginate(page=page, per_page=per_page, error_out=False)
 
-    nodes_list = [_serialize_node_for_list(node) for node in pagination.items]
+    nodes_list = [_serialize_node_for_list(node, current_user.id)
+                  for node in pagination.items]
 
     dashboard = {
         "user": {
@@ -214,7 +223,10 @@ def get_public_dashboard(username):
         "has_more": pagination.has_next,
         "page": page,
         "total_nodes": pagination.total,
-        "latest_profile": get_latest_profile(user)
+        # The AI-written profile is private to its owner: no public page
+        # shows it, and other users get null here.
+        "latest_profile": (get_latest_profile(user)
+                           if user.id == current_user.id else None),
     }
     return jsonify(dashboard), 200
 
