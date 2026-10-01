@@ -492,6 +492,167 @@ class TestNodeAudioRoutes:
         assert resp.status_code == 200
 
 
+# ── /api/nodes/upload/* (chunked upload) ─────────────────────────────────
+
+# Formats the clients send: web "<ms>-<base36>", iOS "<ms>-<UUID prefix>".
+_WEB_UPLOAD_ID = "1727712000000-k3j2h1g0f"
+_IOS_UPLOAD_ID = "1727712000000-1a2b3c4d-"
+
+
+def _bad_upload_ids(data, json=True):
+    alice = data.alice.id
+    ids = (
+        f"../../user/{alice}/node/{data.private.id}",
+        f"../{alice}/{_WEB_UPLOAD_ID}",
+        "..", ".", "a/b", "up.1", "/tmp", "%2e%2e", "up-1\n",
+        "x" * 65,
+    )
+    # A JSON body can carry a value that is not a string at all.
+    return ids + (12345, ["up-1"]) if json else ids
+
+
+def _tree(root):
+    """Every file and folder under *root*, with file contents."""
+    return {p.relative_to(root).as_posix():
+            (p.read_bytes() if p.is_file() else None)
+            for p in root.rglob("*")}
+
+
+@pytest.fixture
+def transcription(monkeypatch):
+    fake = types.ModuleType("backend.tasks.transcription")
+    fake.transcribe_audio = MagicMock()
+    fake.transcribe_audio.delay.return_value.id = "task-1"
+    monkeypatch.setitem(sys.modules, "backend.tasks.transcription", fake)
+    return fake
+
+
+def _init_upload(app, user, upload_id, total_chunks=1, filesize=4):
+    return _call(app, user, "POST", "/api/nodes/upload/init", json={
+        "filename": "talk.m4a", "filesize": filesize,
+        "total_chunks": total_chunks, "upload_id": upload_id})
+
+
+def _send_chunk(app, user, upload_id, node_id, index, payload):
+    from io import BytesIO
+    return _call(app, user, "POST", "/api/nodes/upload/chunk", data={
+        "chunk": (BytesIO(payload), "blob"), "chunk_index": str(index),
+        "upload_id": upload_id, "node_id": str(node_id),
+    }, content_type="multipart/form-data")
+
+
+@pytest.fixture
+def uploads(app, data):
+    """alice has an upload in progress; bob has started one of his own."""
+    resp = _init_upload(app, data.alice, _WEB_UPLOAD_ID)
+    assert resp.status_code == 201
+    alice_node = resp.get_json()["node_id"]
+    assert _send_chunk(app, data.alice, _WEB_UPLOAD_ID, alice_node, 0,
+                       b"ALCE").status_code == 200
+    resp = _init_upload(app, data.bob, _IOS_UPLOAD_ID)
+    assert resp.status_code == 201
+    data.alice_upload_dir = (
+        app.media_root / f"chunks/{data.alice.id}/{_WEB_UPLOAD_ID}")
+    data.bob_node = resp.get_json()["node_id"]
+    return data
+
+
+class TestChunkedUploadFolder:
+    """Each upload route reads, writes and deletes only inside the
+    caller's own chunks/<user id>/<upload_id> folder."""
+
+    def test_init_refuses_bad_upload_ids(self, app, uploads):
+        before, nodes = _tree(app.media_root.parent), Node.query.count()
+        for upload_id in _bad_upload_ids(uploads):
+            resp = _init_upload(app, uploads.bob, upload_id)
+            assert resp.status_code == 400, upload_id
+        assert Node.query.count() == nodes
+        assert _tree(app.media_root.parent) == before
+
+    def test_chunk_refuses_bad_upload_ids(self, app, uploads):
+        before = _tree(app.media_root.parent)
+        for upload_id in _bad_upload_ids(uploads, json=False):
+            resp = _send_chunk(app, uploads.bob, upload_id, uploads.bob_node,
+                               0, b"BOB!")
+            assert resp.status_code == 400, upload_id
+        assert _tree(app.media_root.parent) == before
+
+    def test_finalize_refuses_bad_upload_ids(self, app, uploads):
+        before = _tree(app.media_root.parent)
+        for upload_id in _bad_upload_ids(uploads):
+            resp = _call(app, uploads.bob, "POST", "/api/nodes/upload/finalize",
+                         json={"upload_id": upload_id,
+                               "node_id": uploads.bob_node})
+            assert resp.status_code == 400, upload_id
+        assert _tree(app.media_root.parent) == before
+
+    def test_cleanup_refuses_bad_upload_ids(self, app, uploads):
+        before = _tree(app.media_root.parent)
+        for upload_id in _bad_upload_ids(uploads):
+            resp = _call(app, uploads.bob, "POST", "/api/nodes/upload/cleanup",
+                         json={"upload_id": upload_id})
+            assert resp.status_code == 400, upload_id
+        assert _tree(app.media_root.parent) == before
+        assert (app.media_root / uploads.files["private_tts"]).exists()
+        assert uploads.alice_upload_dir.is_dir()
+
+    def test_another_users_upload_id_names_the_callers_own_folder(
+            self, app, uploads):
+        before = _tree(uploads.alice_upload_dir)
+        resp = _send_chunk(app, uploads.bob, _WEB_UPLOAD_ID, uploads.bob_node,
+                           0, b"BOB!")
+        assert resp.status_code == 404
+        resp = _call(app, uploads.bob, "POST", "/api/nodes/upload/finalize",
+                     json={"upload_id": _WEB_UPLOAD_ID,
+                           "node_id": uploads.bob_node})
+        assert resp.status_code == 404
+        resp = _call(app, uploads.bob, "POST", "/api/nodes/upload/cleanup",
+                     json={"upload_id": _WEB_UPLOAD_ID})
+        assert resp.status_code == 200
+        assert _tree(uploads.alice_upload_dir) == before
+
+    def test_symlinked_upload_folder_is_refused(self, app, uploads):
+        target = app.media_root / f"user/{uploads.alice.id}/node/{uploads.private.id}"
+        (app.media_root / f"chunks/{uploads.bob.id}/linked").symlink_to(
+            target, target_is_directory=True)
+        resp = _call(app, uploads.bob, "POST", "/api/nodes/upload/cleanup",
+                     json={"upload_id": "linked"})
+        assert resp.status_code == 400
+        assert (app.media_root / uploads.files["private_tts"]).exists()
+
+    @pytest.mark.parametrize("upload_id", [
+        _WEB_UPLOAD_ID, _IOS_UPLOAD_ID, "x" * 64, "up_1"])
+    def test_upload_runs_end_to_end(self, app, data, transcription, upload_id):
+        resp = _init_upload(app, data.bob, upload_id, total_chunks=2,
+                            filesize=8)
+        assert resp.status_code == 201, resp.get_data(as_text=True)
+        assert resp.get_json()["upload_id"] == upload_id
+        node_id = resp.get_json()["node_id"]
+        chunk_dir = app.media_root / f"chunks/{data.bob.id}/{upload_id}"
+        assert chunk_dir.is_dir()
+
+        for index, payload in enumerate((b"abcd", b"efgh")):
+            resp = _send_chunk(app, data.bob, upload_id, node_id, index,
+                               payload)
+            assert resp.status_code == 200, resp.get_data(as_text=True)
+        resp = _call(app, data.bob, "POST", "/api/nodes/upload/finalize",
+                     json={"upload_id": upload_id, "node_id": node_id})
+        assert resp.status_code == 200, resp.get_data(as_text=True)
+
+        original = app.media_root / f"user/{data.bob.id}/node/{node_id}/original.m4a"
+        assert original.read_bytes() == b"abcdefgh"
+        assert not chunk_dir.exists()
+        transcription.transcribe_audio.delay.assert_called_once()
+
+    def test_cleanup_removes_the_callers_own_upload(self, app, uploads):
+        resp = _call(app, uploads.bob, "POST", "/api/nodes/upload/cleanup",
+                     json={"upload_id": _IOS_UPLOAD_ID})
+        assert resp.status_code == 200
+        assert not (app.media_root
+                    / f"chunks/{uploads.bob.id}/{_IOS_UPLOAD_ID}").exists()
+        assert uploads.alice_upload_dir.is_dir()
+
+
 # ── Removed routes ───────────────────────────────────────────────────────
 
 class TestRemovedRoutes:
