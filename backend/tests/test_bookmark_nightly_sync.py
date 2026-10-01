@@ -843,51 +843,191 @@ def test_interrupted_first_import_resumes_to_the_end(app, monkeypatch):
     assert calls == [10] and result["created"] == 0
 
 
-def test_interrupted_catch_up_sync_fills_the_gap(app, monkeypatch):
-    """#310 review: an account that HAS synced before (reconnected, or
-    unparked after #313) comes back with 300 new bookmarks above the 200
-    it has. The catch-up sync 429s after storing 30 of them. last_synced_at
-    keeps its old value, so without a marker the next sync would read one
-    known page and stop, and the 270 between would never be imported.
-    The marker makes it read to the end, then clears with last_synced_at."""
+def _synced_account_with_old_bookmarks(uid, n_old, days_ago=60):
+    """An account whose last sync finished *days_ago* days ago, with
+    *n_old* bookmarks saved by that sync (saved_at a minute before it).
+    Returns (account, last_synced_at, old_ids)."""
     from datetime import datetime, timedelta
-    uid = User.query.first().id
     account = _mk_account(uid, expired=False)
-    synced_before = datetime.utcnow() - timedelta(days=60)
-    account.last_synced_at = synced_before
+    synced = datetime.utcnow() - timedelta(days=days_ago)
+    account.last_synced_at = synced
     _db.session.commit()
-    known = [f"k{i}" for i in range(200)]
+    old = [f"k{i}" for i in range(n_old)]
     _sync_mod._upsert_items(uid, "twitter_bookmark", [
         {"external_id": k, "content": "t", "author_handle": "u",
-         "url": None, "posted_at": None} for k in known])
-    ids = [f"n{i}" for i in range(300)] + known
+         "url": None, "posted_at": None} for k in old])
+    ExternalItem.query.filter_by(user_id=uid).update({
+        "saved_at": synced - timedelta(minutes=1),
+        "fetched_at": synced - timedelta(minutes=1)})
+    _db.session.commit()
+    return account, synced, old
 
-    calls = _fake_x_bookmarks(monkeypatch, ids, fail_on_request=2)
+
+def _cost_refs(uid):
+    return [r.request_ref for r in APICostLog.query.filter_by(
+        user_id=uid, request_type="x_bookmark_sync").order_by(
+        APICostLog.id).all()]
+
+
+def test_interrupted_nightly_sync_resumes_only_to_the_last_finished_one(
+        app, monkeypatch):
+    """Peter's voice review (2026-10-01): an account that has synced for
+    months, 5 new bookmarks, and the nightly sync 429s on its second
+    request. The resume must not read to the end (up to 800 posts, ~$4):
+    it reads past the 5 bookmarks saved since the last finished sync and
+    stops at the first page of bookmarks saved before it. 20 posts."""
+    uid = User.query.first().id
+    account, synced, old = _synced_account_with_old_bookmarks(uid, 600)
+    ids = [f"n{i}" for i in range(5)] + old
+
+    calls = _fake_x_bookmarks(monkeypatch, ids, fail_on_request=1)
+    with pytest.raises(requests.HTTPError):
+        _sync_mod.sync_twitter_bookmarks(_FakeSelf(), uid)
+    assert calls == [10, 10]  # the second request is the 429
+    _db.session.expire_all()
+    assert ExternalAccount.query.get(account.id).sync_incomplete is True
+
+    calls = _fake_x_bookmarks(monkeypatch, ids)
+    result = _sync_mod.sync_twitter_bookmarks(_FakeSelf(), uid)
+    # Page 1: the 5 saved since + 5 old (not all old, size frozen);
+    # page 2: all old, stop.
+    assert calls == [10, 10]
+    assert result["requests"] == 2 and result["posts_read"] == 20
+    assert result["created"] == 0
+    _db.session.expire_all()
+    account = ExternalAccount.query.get(account.id)
+    assert account.sync_incomplete is None
+    assert account.last_synced_at > synced
+    assert _cost_refs(uid) == ["posts:10/pages:1", "posts:20/pages:2"]
+
+    calls = _fake_x_bookmarks(monkeypatch, ids)
+    _sync_mod.sync_twitter_bookmarks(_FakeSelf(), uid)
+    assert calls == [10]  # an ordinary quiet night again
+
+
+def test_interrupted_catch_up_sync_fills_the_gap(app, monkeypatch):
+    """#310 review: an account that HAS synced before (reconnected, or
+    unparked after #313) comes back with 300 new bookmarks above the 600
+    it has. The catch-up sync 429s after storing 30 of them. Without the
+    marker the next sync would read one known page and stop, and the 270
+    between would never be imported. The resume reads past the 30, imports
+    the 270 and stops one page into the bookmarks saved before the last
+    finished sync: 450 posts, not the 800 a read to the end would cost."""
+    uid = User.query.first().id
+    account, synced, old = _synced_account_with_old_bookmarks(uid, 600)
+    ids = [f"n{i}" for i in range(300)] + old
+
+    _fake_x_bookmarks(monkeypatch, ids, fail_on_request=2)
     with pytest.raises(requests.HTTPError):
         _sync_mod.sync_twitter_bookmarks(_FakeSelf(), uid)
     _db.session.expire_all()
     account = ExternalAccount.query.get(account.id)
     assert account.sync_incomplete is True
-    assert account.last_synced_at == synced_before
+    assert account.last_synced_at == synced
     assert ExternalItem.query.filter_by(
-        user_id=uid, source="twitter_bookmark").count() == 230
+        user_id=uid, source="twitter_bookmark").count() == 630
 
     calls = _fake_x_bookmarks(monkeypatch, ids)
     result = _sync_mod.sync_twitter_bookmarks(_FakeSelf(), uid)
-    assert calls == [10, 20, 40, 80, 100, 100, 100, 100]  # to the end
-    assert result["posts_read"] == 500
+    # Grows through the 300 new ones; the page with the first old ones
+    # (250-349) freezes the size; the next one (350-449) is all old.
+    assert calls == [10, 20, 40, 80, 100, 100, 100]
+    assert result["posts_read"] == 450
     assert result["created"] == 270
     assert ExternalItem.query.filter_by(
-        user_id=uid, source="twitter_bookmark").count() == 500
+        user_id=uid, source="twitter_bookmark").count() == 900
     _db.session.expire_all()
     account = ExternalAccount.query.get(account.id)
     assert account.sync_incomplete is None
-    assert account.last_synced_at > synced_before
+    assert account.last_synced_at > synced
 
     # Finished: the next quiet night is one small page again.
     calls = _fake_x_bookmarks(monkeypatch, ids)
     _sync_mod.sync_twitter_bookmarks(_FakeSelf(), uid)
     assert calls == [10]
+
+
+def test_repeated_failure_costs_only_what_came_since_the_last_finished_sync(
+        app, monkeypatch):
+    """A sync that fails at the same request every night must not re-read
+    to the end each night. 60 bookmarks came since the last finished sync;
+    the fourth request 429s every time. Each attempt reads the same 70
+    posts (the 60, plus 10 old ones on the page that crosses into them),
+    about $0.35, and the account keeps its marker and its old date."""
+    uid = User.query.first().id
+    account, synced, old = _synced_account_with_old_bookmarks(uid, 600)
+    ids = [f"n{i}" for i in range(60)] + old
+
+    for _ in range(3):
+        calls = _fake_x_bookmarks(monkeypatch, ids, fail_on_request=3)
+        with pytest.raises(requests.HTTPError):
+            _sync_mod.sync_twitter_bookmarks(_FakeSelf(), uid)
+        assert calls == [10, 20, 40, 40]
+    assert _cost_refs(uid) == ["posts:70/pages:3"] * 3
+    assert ExternalItem.query.filter_by(
+        user_id=uid, source="twitter_bookmark").count() == 660
+    _db.session.expire_all()
+    account = ExternalAccount.query.get(account.id)
+    assert account.sync_incomplete is True
+    assert account.last_synced_at == synced
+
+
+@pytest.mark.parametrize("saved_at_set,fetched_at_recent", [
+    (True, True),    # re-clipped since: fetched_at moved, saved_at did not
+    (False, False),  # a row from before saved_at existed: fetched_at
+])
+def test_resume_reads_saved_at_and_falls_back_to_fetched_at(
+        app, monkeypatch, saved_at_set, fetched_at_recent):
+    """A re-clip that replaces a bookmark's text moves fetched_at (the
+    digest reads it as a change) but not saved_at, so a re-clipped old
+    bookmark still ends a resume. Rows saved before the column existed
+    have no saved_at; fetched_at stands in for it."""
+    from datetime import datetime
+    uid = User.query.first().id
+    account, synced, old = _synced_account_with_old_bookmarks(uid, 100)
+    update = {}
+    if not saved_at_set:
+        update["saved_at"] = None
+    if fetched_at_recent:
+        update["fetched_at"] = datetime.utcnow()
+    ExternalItem.query.filter_by(user_id=uid).update(update)
+    account.sync_incomplete = True
+    _db.session.commit()
+
+    calls = _fake_x_bookmarks(monkeypatch, old)
+    result = _sync_mod.sync_twitter_bookmarks(_FakeSelf(), uid)
+    assert calls == [10]
+    assert result["posts_read"] == 10
+
+
+def test_resume_reads_past_a_read_pick_saved_since(app, monkeypatch):
+    """A tweet a Read picked weeks ago and the user bookmarked only now:
+    its row is older than the last finished sync, but it became a saved
+    bookmark in the interrupted sync, so saved_at moves then and the
+    resume does not take it for an old bookmark."""
+    from datetime import timedelta
+    from backend.models import READ_PICK_SOURCE
+    uid = User.query.first().id
+    account, synced, old = _synced_account_with_old_bookmarks(uid, 100)
+    for i in range(10):
+        row = ExternalItem(
+            user_id=uid, source=READ_PICK_SOURCE, external_id=f"p{i}",
+            author_handle="u", fetched_at=synced - timedelta(days=5),
+            saved_at=synced - timedelta(days=5))
+        row.set_content("t")
+        _db.session.add(row)
+    _db.session.commit()
+    ids = [f"p{i}" for i in range(10)] + [f"n{i}" for i in range(15)] + old
+
+    _fake_x_bookmarks(monkeypatch, ids, fail_on_request=1)
+    with pytest.raises(requests.HTTPError):
+        _sync_mod.sync_twitter_bookmarks(_FakeSelf(), uid)
+
+    calls = _fake_x_bookmarks(monkeypatch, ids)
+    result = _sync_mod.sync_twitter_bookmarks(_FakeSelf(), uid)
+    assert result["created"] == 15
+    # 10 picks saved since, 20 (15 new + 5 old), 20 all old: stop.
+    assert calls == [10, 20, 20]
 
 
 def test_killed_worker_leaves_the_marker_set(app, monkeypatch):
