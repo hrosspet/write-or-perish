@@ -48,6 +48,7 @@ Write or Perish evolves from journaling app to **distributed intelligence networ
 - ✅ **Apply settings to replies** — Changing an entry's privacy or AI usage when it has replies offers "this node only" or "this node and all my replies" (your own entries and AI responses you requested; other people's replies untouched)
 
 **In Progress:**
+- 🔧 **Native iPhone app (PR #384, 2026-10-01; awaiting device testing)** — a SwiftUI app at parity with the desktop web app against the unchanged backend (`ios/`, design in `docs/IOS-APP-DESIGN.md`). Why: on a locked iPhone Safari cannot start a reply's audio by itself; the app keeps its audio session alive from the record tap to the end of the reply, with a soft "thinking" cue while it waits, lock-screen controls and background uploads. Every member screen is native (Home, Voice, Text, Log, threads with replies and proposals, Profile/Todo/artifacts with history, References, Prompts, Account, Import, Share, Commons, onboarding); Admin and the public pages open as web views. Built and checked in the simulator against the local backend; the locked-phone behaviour, AirPods and calls need Peter's iPhone, and streaming voice TTS, Commons and real X OAuth need a staging pass (checklists in `ios/README.md`)
 - 🔧 **Text mode** — Non-voice agentic interaction for text-first users (last major feature before wider alpha)
 - 🔧 **Onboarding flow** — First-login walkthrough for privacy settings, core UX, and feedback channel
 - 🔧 **Expanded agentic tool use** — Intentions tracking, feedback submission, memory/artifact management

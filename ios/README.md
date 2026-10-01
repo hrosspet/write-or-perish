@@ -1,9 +1,16 @@
 # Loore for iPhone
 
 A native SwiftUI app with the same features as the desktop web app, against the
-same backend. The design is in [`docs/IOS-APP-DESIGN.md`](../docs/IOS-APP-DESIGN.md);
-the milestone log, deviations from the web and known gaps are in
+same backend. Why native: on a locked iPhone, Safari cannot start a reply's audio
+by itself; the app keeps its audio session alive from the record tap to the end of
+the reply. The design is in [`docs/IOS-APP-DESIGN.md`](../docs/IOS-APP-DESIGN.md);
+the milestone log, the parity table, deviations from the web and known gaps are in
 [`PROGRESS.md`](PROGRESS.md).
+
+Contents: [Requirements](#requirements) · [Simulator](#build-and-run-in-the-simulator) ·
+[Install on your iPhone](#install-on-your-iphone-free-apple-id) · [Signing in](#signing-in) ·
+[Backends](#backends) · [Debug launch arguments](#debug-launch-arguments) · [Tests](#tests) ·
+[Device checklist](#only-a-real-iphone-can-test) · [Staging checklist](#check-on-staging) · [Fonts](#fonts)
 
 ## Requirements
 
@@ -31,33 +38,49 @@ xcodebuild -project Loore.xcodeproj -scheme Loore \
   -destination 'platform=iOS Simulator,name=iPhone 17' build
 ```
 
-In the simulator a Debug build talks to the local Docker backend
-(`make dev`: `http://localhost:5010`). On a phone a Debug build talks to
-production. Switch backends in a Debug build: More → Account → touch and hold
-the version line.
+In the simulator a Debug build talks to the local Docker backend (`make dev`:
+`http://localhost:5010`). Sign in as the test user with the helpers under
+[Backends](#backends).
 
 ## Install on your iPhone (free Apple ID)
 
-1. Xcode → Settings → Accounts → **+** → Apple ID. Sign in; a "Personal Team" appears.
-2. Find your team id: Xcode → Settings → Accounts → select the team (the 10-character id),
-   or leave step 3 out and pick the team in the target's Signing tab each time.
-3. Create `ios/Config/Signing.local.xcconfig` (git-ignored, survives `xcodegen`):
+A free Apple ID is enough. It gives a "Personal Team" whose builds run for 7 days
+(then press Run again) and allows three such apps on a phone at a time. A paid
+membership lifts the 7-day limit and adds TestFlight and push notifications; the app
+needs neither.
+
+1. **Add your Apple ID to Xcode.** Xcode → Settings → Accounts → **+** → Apple ID →
+   sign in. A team named "<your name> (Personal Team)" appears.
+2. **Find your team id.** `cd ios && xcodegen && open Loore.xcodeproj`, select the
+   **Loore** target → **Signing & Capabilities** → Team: pick your Personal Team. Then
+   **Build Settings** → search "Development Team": the 10-character value is your team
+   id. (XcodeGen overwrites this choice the next time it runs; step 3 keeps it.)
+3. **Save your signing settings** in `ios/Config/Signing.local.xcconfig` (git-ignored,
+   survives `xcodegen`):
    ```
    DEVELOPMENT_TEAM = ABCDE12345
-   // Only if Xcode says the bundle id is taken:
+   // Only if Xcode says the bundle id is not available:
    // LOORE_BUNDLE_ID = org.loore.app.yourname
    ```
-4. `cd ios && xcodegen && open Loore.xcodeproj`.
-5. Connect the iPhone by cable (or the same Wi-Fi after the first pairing), pick it as
-   the run destination, press Run. The first time:
-   - iPhone: Settings → Privacy & Security → **Developer Mode** → on, restart.
-   - iPhone: Settings → General → VPN & Device Management → your Apple ID → **Trust**.
-6. For everyday use, build Release (production backend, no debug tools):
-   Product → Scheme → Edit Scheme → Run → Build Configuration → **Release**.
+   Run `xcodegen` again and reopen the project.
+4. **Connect the iPhone** by cable, unlock it and tap **Trust** on "Trust This
+   Computer?". In Xcode pick the iPhone as the run destination (top bar).
+5. **Turn on Developer Mode** (once): on the iPhone, Settings → Privacy & Security →
+   **Developer Mode** → on, then restart and confirm. The switch appears only after
+   Xcode has seen the phone.
+6. **Choose the build.** For everyday use build **Release** (production backend, no
+   debug tools): Product → Scheme → Edit Scheme… → Run → Build Configuration →
+   **Release**. Keep **Debug** for the device checklist when you want the debug tools
+   (on a phone it also starts on production; see [Backends](#backends)).
+7. **Press Run.** The first launch stops at "Untrusted Developer": on the iPhone,
+   Settings → General → **VPN & Device Management** → your Apple ID → **Trust**, then
+   open Loore from the home screen.
+8. **Allow the microphone** at the first recording and **notifications** when asked
+   (they say "Recording paused — tap to resume" after an interruption).
 
-A free Apple ID's signature lasts **7 days**: after that the app does not open
-until you press Run again from Xcode. A paid developer membership lifts this and
-adds TestFlight.
+After 7 days the app stops opening: connect the phone and press Run again (nothing is
+lost; your writing lives on the server). After the first cable install Xcode can also
+reach the phone over the same Wi-Fi.
 
 ## Signing in
 
@@ -68,31 +91,48 @@ The backend only knows cookies, and email sign-in links open the web. So:
 3. Back in the app: paste it (the paste button, or into the field) → **Sign in**.
 
 A link that *creates* an account works once: if it was opened in Safari first,
-send a new one. Links last 15 minutes. **Sign in with X** runs X's login inside
-the app.
+send a new one. Links last 15 minutes. A link minted for another page (the Activate
+& Welcome email's `/welcome`, an email confirmation) opens that page once you are
+in. **Sign in with X** runs X's login inside the app.
 
 The sign-in lasts 30 days, as on the web, then you sign in again.
 
-### Local backend (development)
+## Backends
 
-The simulator reaches the Mac's `localhost`. Helpers for the **test user only**
-(user 5, `seowriter`; other local users hold real data):
+| Build | Simulator | iPhone |
+|---|---|---|
+| Release | Production (`loore.org`) | Production |
+| Debug | Local (`localhost:5010`) | Production |
+
+In a Debug build, switch backends with More → Account → touch and hold the version
+line (Local / Staging / Production; switching signs out). Release builds have no
+switcher and ignore every launch argument.
+
+**Local backend (development).** The simulator reaches the Mac's `localhost`.
+Helpers for the **test user only** (user 5, `seowriter`; other local users hold real
+data, so never sign in as them):
 
 ```sh
-ios/scripts/local_backend.sh magic-link       # a fresh sign-in link to paste
-ios/scripts/local_backend.sh session-cookie   # for -LooreSessionCookie
-ios/scripts/local_backend.sh state terms_old  # see the script for test states
+ios/scripts/local_backend.sh magic-link            # a fresh sign-in link to paste
+ios/scripts/local_backend.sh magic-link /welcome   # … that lands on a page
+ios/scripts/local_backend.sh session-cookie        # for -LooreSessionCookie
+ios/scripts/local_backend.sh state terms_old       # see the script for test states
 xcrun simctl pbcopy booted <<< "$(ios/scripts/local_backend.sh magic-link)"   # onto the simulator's clipboard
 ```
 
-A phone on the same Wi-Fi can use the local backend too: set
-`loore.debug.localBackendURL` / `loore.debug.localFrontendURL` (e.g.
-`http://your-mac.local:5010` and `:3001`) with `-loore.debug.localBackendURL <url>`
-launch arguments, and allow Local Network access when iOS asks.
+A phone on the same Wi-Fi can use the local backend too: launch a Debug build with
+`-loore.debug.localBackendURL http://your-mac.local:5010 -loore.debug.localFrontendURL http://your-mac.local:3001`
+(Edit Scheme → Run → Arguments), switch to Local, and allow Local Network access when
+iOS asks. The local backend runs with streaming voice TTS off.
+
+**Staging** (`staging.loore.org`): Debug build → switch to Staging → sign in with a
+link mailed by staging. Staging's database is recreated on every deploy, so the
+account has to exist (and be approved) there first.
 
 ## Debug launch arguments
 
-Debug builds only (Edit Scheme → Run → Arguments, or `xcrun simctl launch`):
+Debug builds only (Edit Scheme → Run → Arguments, or `xcrun simctl launch`). In a
+Release build they are compiled out.
 
 | Argument | Effect |
 |---|---|
@@ -104,7 +144,7 @@ Debug builds only (Edit Scheme → Run → Arguments, or `xcrun simctl launch`):
 | `-LooreSkipUpdates YES` | don't show the Updates sheet |
 | `-LooreDebugAudioFile <path>` | feed an audio file to the recorder instead of the mic (voice mode and dictation); the file's end acts as Stop |
 | `-LooreDebugVoiceAutoStart YES` | with `-LooreDebugAudioFile` and `-LooreRoute /voice`: start recording at once |
-| `-LooreDebugListenNode <id>` | play a node's audio in the global player at launch (the speaker icon's path) |
+| `-LooreDebugListenNode <id>` | play a node's audio in the global player at launch (the speaker icon's path; billed if the node has no audio yet) |
 | `-LooreDebugImportFile <path>` + `-LooreDebugImportKind markdown\|claude\|chatgpt\|twitter` | Import page: a "Debug: import …" button that imports that file instead of opening the file picker |
 
 ## Tests
@@ -112,16 +152,17 @@ Debug builds only (Edit Scheme → Run → Arguments, or `xcrun simctl launch`):
 ```sh
 cd ios && xcodegen
 xcodebuild -project Loore.xcodeproj -scheme Loore \
-  -destination 'platform=iOS Simulator,name=iPhone 17' test      # unit tests
+  -destination 'platform=iOS Simulator,name=iPhone 17' test      # 334 unit tests
 python3 ios/scripts/check_terms_text.py                          # Terms text == TermsModal.js
 ```
 
 CI (`.github/workflows/ios.yml`) runs both on pull requests that touch `ios/**`.
 
-### UI smoke tests (local backend)
+### UI tests (local backend)
 
-Not run in CI: they need the Docker backend. Inputs go through `TEST_RUNNER_`
-environment variables:
+Not run in CI: they need the Docker backend and the test user. Inputs go through
+`TEST_RUNNER_` environment variables; a test whose input is missing skips. Run one
+class with `-only-testing:LooreUITests/<Class>`:
 
 ```sh
 cd ios
@@ -132,40 +173,51 @@ xcodebuild -project Loore.xcodeproj -scheme LooreUITests \
   -destination 'platform=iOS Simulator,name=iPhone 17' test
 ```
 
-`testTermsGateAccept` and `testUpdatesSheetTakeALookThenGotIt` also need
-`TEST_RUNNER_LOORE_EXPECT=terms` / `updates` and the matching `state` first
-(`terms_old`, `add_notification`); restore with `state restore del_notifications`.
+| Class | What it walks | Extra inputs |
+|---|---|---|
+| `SmokeFlowsUITests` (M1) | pasted magic link → tabs; More, craft dialog, light mode, Account; Terms gate; Updates sheet | `LOORE_EXPECT=terms` / `updates` with `state terms_old` / `add_notification` first; then `state restore del_notifications` |
+| `ThreadWritingUITests`, `WritingFlowUITests`, `M2ScreensUITests` (M2) | Log, threads, kebabs, writing, drafts, proposals, search | `LOORE_THREAD_IDS`, `LOORE_SHARE_NODE`, `LOORE_DRAFT_NODE`, `LOORE_REPLY_NODE`; billed steps only with `LOORE_ALLOW_BILLED=1` |
+| `M4ScreensUITests` (M4) | Todo, Profile, artifacts, references, prompts, Account, Confirm email, import, Share, Welcome | `LOORE_IMPORT_DIR`, `LOORE_KEEP_SHARE_IDS`; a test user with no todo or profile; afterwards `state m4_cleanup` |
+| `M5ParityUITests` (M5) | signed-out About link, a sign-in link landing on Welcome, a permalink opening the native thread, a toast above the mini-player | `LOORE_WELCOME_LINK` (`magic-link /welcome`), `LOORE_PERMALINK` (a live `/@user/slug` of the test user), `LOORE_LISTEN_NODE` (a node whose audio already exists) |
+| `VoiceUITests`, `VoiceWiringUITests` (M3) | a voice turn, Continue; speaker, download, dictation, Voice Mode from a thread | billed, see below |
 
-M2 flows (thread, writing, Log, search, proposals) are in `ThreadWritingUITests`,
-`WritingFlowUITests` and `M2ScreensUITests` (run one class with
-`-only-testing:LooreUITests/<Class>`). They cancel every dialog and delete what
-they create. Steps that bill the backend's AI keys run only with
-`TEST_RUNNER_LOORE_ALLOW_BILLED=1`: pick the cheapest model, and note that the
-auto-generate path uses the test user's *preferred* model (as the web does).
-Some take node ids of the test user: `TEST_RUNNER_LOORE_THREAD_IDS`,
-`TEST_RUNNER_LOORE_SHARE_NODE`, `TEST_RUNNER_LOORE_DRAFT_NODE`,
-`TEST_RUNNER_LOORE_REPLY_NODE`. Craft mode is switched on through More and
-back off at the end; if a run stops halfway, switch it off again (More → Craft mode).
+Notes: the M2 tests cancel every dialog and delete what they create; craft mode is
+switched on through More and back off (if a run stops halfway, switch it off again).
+The auto-generate path uses the test user's *preferred* model, as the web does, so
+pick the cheapest one before a billed run. M4 imports run with AI usage None, so no
+profile update starts; the backend has no delete for profiles, todos or artifacts,
+which is what `state m4_cleanup` is for. M4's import test needs `LOORE_IMPORT_DIR`
+holding `notes.zip` (two `.md` files containing "M4 import test"),
+`chatgpt-renamed.zip` (a ChatGPT conversations array under another name) and
+`notazip.zip`. No test opens the Commons tab locally: it lists other users' public
+posts.
 
-M4 flows (feature pages) are in `M4ScreensUITests`. None of them bills an AI
-provider (imports run with AI usage None, so no profile update starts). They
-need a test user with no todo and no profile, `TEST_RUNNER_LOORE_IMPORT_DIR`
-(a folder with `notes.zip` holding two `.md` files whose text contains
-"M4 import test", `chatgpt-renamed.zip` with a ChatGPT conversations array
-under another name, and `notazip.zip`), and `TEST_RUNNER_LOORE_KEEP_SHARE_IDS`
-(the test user's existing share ids, never deleted). The backend has no delete
-for profiles, todos or artifacts: afterwards run
-`scripts/local_backend.sh state m4_cleanup`, which removes the test user's
-todo and profile rows, the `m4-test` artifact and the imported test notes.
+### Voice UI tests in the simulator (billed, run on purpose)
+
+```sh
+cd ios
+say -o /tmp/clip.m4a --file-format=m4af --data-format=aac "A short test recording about the river."
+TEST_RUNNER_LOORE_SESSION_COOKIE="$(scripts/local_backend.sh session-cookie)" \
+TEST_RUNNER_LOORE_AUDIO_FILE=/tmp/clip.m4a \
+TEST_RUNNER_LOORE_VOICE_ROUTE="/voice?parent=<a test-user node>" \
+xcodebuild -project Loore.xcodeproj -scheme LooreUITests \
+  -destination 'platform=iOS Simulator,name=iPhone 17' test -only-testing:LooreUITests/VoiceUITests
+```
+
+Use a `parent` while other agents or people use the same test user: a text entry
+saved elsewhere deletes the user's top-level draft, which can be a live voice
+recording (PROGRESS.md, "Backend findings"). Recording with the real microphone in
+the simulator makes macOS ask for microphone access for Simulator.
 
 ## Only a real iPhone can test
 
-The simulator cannot lock, has no Bluetooth or phone calls, and never suspends
-the app the way a phone does. Voice turns are billed (transcription, reply, TTS):
-use short recordings. Before each item: a Debug build on the phone (Production
-backend by default, or Local over Wi-Fi, see "Local backend"), signed in, voice
-mode enabled, Account → Voice → "Sound while Loore thinks" on Soft.
+The simulator cannot lock, has no Bluetooth or phone calls, never suspends the app
+the way a phone does, and draws emoji as "?" boxes. Voice turns are billed
+(transcription, reply, TTS): use short recordings. Before each item: the app on the
+phone (Release, or Debug for the debug tools), signed in, voice mode enabled,
+Account → Voice → "Sound while Loore thinks" on Soft.
 
+**Voice and audio (the reason for the app)**
 - [ ] **Locked phone, reply by itself.** Reflect → Voice → record ~10 s → press
       the side button to lock → stop from the lock screen (⏭ "next track") or wait
       and stop before locking. Expected: a soft low swell while it thinks
@@ -174,13 +226,13 @@ mode enabled, Account → Voice → "Sound while Loore thinks" on Soft.
 - [ ] **Locked phone, stop from the lock screen.** Record, lock, then on the lock
       screen: pause (title "Paused m:ss"), play (resumes, "Recording m:ss"),
       ⏭ (stop and send). The reply must play by itself.
-- [ ] **Thinking cue off.** Account → Voice → Off (the warning appears). Repeat
-      the locked turn. Expected: silence while thinking; iOS may suspend the app,
-      and the reply may need a tap after unlocking (the app reconciles on
-      foreground). Set it back to Soft. Also try Very soft: quieter, same flow.
+- [ ] **Thinking cue volumes.** Account → Voice → Very soft: quieter, same flow. Off
+      (the warning appears): repeat the locked turn; silence while thinking, iOS may
+      suspend the app and the reply may need a tap after unlocking (the app catches
+      up when it comes back). Set it back to Soft.
 - [ ] **AirPods.** Connect AirPods, record (mic over Bluetooth HFP), stop. The
-      reply should play in good (A2DP) quality, not telephone quality. If the reply
-      does not play while locked with AirPods, note it: the fallback is to stay in
+      reply should play in good (A2DP) quality, not telephone quality, also while
+      locked. If it does not play while locked, note it: the fallback is to stay in
       `.playAndRecord` after Stop (`AudioSessionController.switchToPlaybackAfterRecording`).
 - [ ] **Phone call during a recording.** Record, call the phone from another one,
       decline or take the call. Expected: recording pauses, a chime (maybe only after
@@ -207,24 +259,48 @@ mode enabled, Account → Voice → "Sound while Loore thinks" on Soft.
 - [ ] **Listen aloud.** A node's speaker icon plays in the mini-player above the tab
       bar; lock the phone: lock-screen controls work; the mini-player's Stop keeps
       it visible, ✕ closes it.
+
+**Everything else**
+- [ ] Sign in by pasting a link from Mail; quit and reopen: still signed in.
 - [ ] Sign in with X (needs a real X account).
+- [ ] Emoji in entries, replies and the Updates sheet render.
+- [ ] VoiceOver: walk Home, Voice, a thread (open a Log card, reply, kebab), Log,
+      Profile; every button says what it does.
+- [ ] Larger Text (Settings → Accessibility → Display & Text Size) at the largest
+      size: Home, Voice, a thread, Log, Profile, Account have no clipped controls.
+- [ ] A Release build reaches production and has no "touch and hold" switcher on
+      Account's version line.
 
-### Voice UI tests in the simulator (billed, run on purpose)
+## Check on staging
 
-```sh
-cd ios
-say -o /tmp/clip.m4a --file-format=m4af --data-format=aac "A short test recording about the river."
-TEST_RUNNER_LOORE_SESSION_COOKIE="$(scripts/local_backend.sh session-cookie)" \
-TEST_RUNNER_LOORE_AUDIO_FILE=/tmp/clip.m4a \
-TEST_RUNNER_LOORE_VOICE_ROUTE="/voice?parent=<a test-user node>" \
-xcodebuild -project Loore.xcodeproj -scheme LooreUITests \
-  -destination 'platform=iOS Simulator,name=iPhone 17' test -only-testing:LooreUITests/VoiceUITests
-```
+Things the local test user has no data for, or that only staging and production
+run. Debug build → switch to Staging (see [Backends](#backends)).
 
-Use a `parent` while other agents or people use the same test user: a text entry
-saved elsewhere deletes the user's top-level draft, which can be a live voice
-recording (see PROGRESS.md, "Backend findings"). Recording with the real
-microphone in the simulator makes macOS ask for microphone access for Simulator.
+- [ ] **Streaming voice TTS** (`STREAMING_VOICE_TTS` is on in staging and production,
+      off locally): a voice turn starts speaking while the reply is still being
+      written; chapters appear with placeholder titles that are renamed when the reply
+      completes; a locked turn still plays by itself.
+- [ ] **Commons**: the tab lists public posts, "Load more..." pages, a card opens the
+      thread; Share → publish a test draft → it appears in Commons and on My public
+      page; a `/@user/slug` link in an entry opens the native thread; then revoke it.
+- [ ] **A running profile build**: start one (an import with AI usage Chat or Train,
+      or an admin "build profile"): the Profile page shows the progress line
+      ("… · n%" or "Chunk n of ~N"), the toast arrives when it finishes, the new
+      version is in history.
+- [ ] **Read-reply picks** (admin account): Home → Read, and Read further in a read
+      thread: the window line, the picks with their quote bubbles, read marks and
+      Good/Bad verdicts, "Mark all as read", and the reply box under a read reply.
+- [ ] **Real X OAuth**: Account → Connect X → X's login → back with "Connected as
+      @…"; Disconnect X. Import → X Bookmarks: Connect X, then Sync bookmarks; the
+      references count rises.
+- [ ] **YouTube references**: a saved YouTube link shows the player on the
+      reference page ("Show stored text" toggles the text).
+- [ ] **Default-updated prompt banner** (after a deploy that changes a default
+      prompt the user had edited): Prompts shows the dot; the prompt page offers View
+      new default / Accept / Dismiss.
+- [ ] **Updates sheet** with a real changelog entry (markdown body, internal links).
+- [ ] **Spend cap** with a capped test account: the "LIMIT REACHED" banner on a 402,
+      and recording refused up front with the toast.
 
 ## Fonts
 

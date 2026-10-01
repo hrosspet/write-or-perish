@@ -2,7 +2,7 @@
 
 **Date:** 2026-09-30
 **Branch:** `ios-app`
-**Status:** approved to build (Peter chose "run straight through": the decisions below were made without a review checkpoint and are listed in §15 for review in the PR)
+**Status:** built (M1–M5 on `ios-app`, PR #384, 2026-10-01; awaiting device testing and a staging pass). It was approved to build with Peter choosing "run straight through": the decisions below were made without a review checkpoint and are listed in §15 for review in the PR. What differs from this design is in §16 "As built"; every difference from the web is in `ios/PROGRESS.md`.
 
 This document says what the native iPhone app is, how it is built, and in what order. What the web app does today is described in five detailed maps under `ios/docs/web-app-map/` (A–E, written 2026-09-30 from `origin/main` `2774ab2`). This document refers to them by section, e.g. "C §8.3" = map C, section 8.3.
 
@@ -268,3 +268,19 @@ Each milestone is one agent session on the `ios-app` branch (M3 and M4 in parall
 6. Reply audio over A2DP by switching the session category at Stop (§9.1), subject to device testing.
 7. Memory-only HTTP cache and file protection for anything on disk (§3).
 8. Markdown via swift-markdown with an in-app renderer (§8).
+
+---
+
+## 16. As built (2026-10-01)
+
+The app follows this design; the significant differences:
+
+1. **Recording (§9.2).** AVFoundation refuses to encode with `.indefinite` segments, so the app encodes AAC itself (`AVAudioConverter`) and the `AVAssetWriter` runs in passthrough, flushing a segment every 15 s of audio and on pause or interruption. The chunks are exactly the contract in §9.2 (proven against the local backend before anything else was built). A user's pause keeps the same writer, so it does not open a server subsession as the web's resume does.
+2. **Environments (§2).** Debug builds default to Local only in the simulator; on a phone they start on Production (a phone cannot reach the Mac's `localhost`). Release builds compile out the switcher and every launch argument.
+3. **Voice turn (§9).** The microphone permission is asked before `init` (no orphan drafts on denial); a `cancelled` reply ends the turn; a draft started in desktop Chrome (WebM) cannot be continued natively and says so; the Voice screen's proposal card is the compact one.
+4. **Navigation (§5, §6).** `/@user/slug` permalinks open the native thread for a signed-in member (resolved through `GET /api/commons/permalink`), as the web does; Commons cards open the thread by id. A pasted sign-in link opens its landing page (`/welcome`, `/confirm-email`). Search opens from the Log and References magnifiers (⌘K there with a hardware keyboard), not app-wide. Logout asks for confirmation.
+5. **Feature pages (§10).** Version history is a sheet (list, then detail) instead of a side drawer; Profile, Todo and artifacts switch in place under the bubble row; Import refuses files over 200 MB before uploading and explains a confirm that outlives nginx's 60 s.
+6. **Design system (§7).** Colours are code-defined dynamic colours rather than asset-catalog sets; Outfit ships as the upstream static TTFs (the variable file's instances have no PostScript names iOS can select).
+7. **Not built:** the admin-only `SemanticNeighbors` rail and read rerun controls in the thread (admins can use the web for those).
+
+Verification so far is the simulator against the local backend (334 unit tests, XCUITest flows, side-by-side screenshots with the web). The device checklist and the staging checklist are in `ios/README.md`.
