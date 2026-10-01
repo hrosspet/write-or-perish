@@ -874,22 +874,49 @@ def _load_node_chain(parent_node, user_id):
     The chain holds only what *user_id* (the user the reply is for) can
     see: the walk stops below the first ancestor they cannot see (or
     could not see before it was deleted), so nothing above it reaches
-    the model."""
+    the model.
+
+    Nor does it hold a node whose ai_usage keeps AI out (not chat /
+    train): such a node is left out entirely. The reply routes and the
+    task refuse a reply under one before this runs (llm_nodes
+    .reply_refusal); this is the last line, so a path that misses the
+    rule still sends nothing marked 'none'. With nothing left the reply
+    is refused (AIUsageRefused)."""
     from backend.utils.encryption import prefetch_deks
     from backend.utils.privacy import can_user_see_node_or_tombstone
     if user_id is None:
         raise ValueError("_load_node_chain needs the requesting user's id")
-    node_chain = []
+    visible = []
     current = parent_node
     while current and can_user_see_node_or_tombstone(current, user_id):
-        node_chain.insert(0, current)
+        visible.insert(0, current)
         current = current.parent
-    if not node_chain:
+    if not visible:
         raise ValueError(
             f"Node {getattr(parent_node, 'id', None)} is not visible to "
             f"user {user_id}")
+    node_chain = [n for n in visible if n.ai_usage in AI_ALLOWED]
+    if len(node_chain) < len(visible):
+        logger.warning(
+            "Context for node %s: left out %s node(s) whose ai_usage keeps "
+            "AI out: %s", getattr(parent_node, 'id', None),
+            len(visible) - len(node_chain),
+            [n.id for n in visible if n.ai_usage not in AI_ALLOWED])
+    if not node_chain:
+        from backend.utils.llm_nodes import AIUsageRefused
+        raise AIUsageRefused()
     prefetch_deks(n.content for n in node_chain)
     return node_chain
+
+
+def _turn_still_readable(node_ids):
+    """True while every alive node in *node_ids* lets AI read it (chat /
+    train), read from the database rather than the session's copies: the
+    owner can change a setting while a turn runs."""
+    rows = (db.session.query(Node.ai_usage)
+            .filter(Node.id.in_(list(node_ids)), Node.deleted_at.is_(None))
+            .all())
+    return all(ai_usage in AI_ALLOWED for (ai_usage,) in rows)
 
 
 def _get_previous_source_mode(node_chain):
@@ -2767,6 +2794,10 @@ def prewarm_anthropic_cache(system_node_id, user_id, model_id,
             from backend.utils.privacy import can_user_access_node
             if not can_user_access_node(system_node, user_id):
                 return {"status": "skipped", "reason": "no_system_node"}
+            # The warm sends the prompt (and a fresh thread's transcript,
+            # which shares its ai_usage) to the model.
+            if system_node.ai_usage not in AI_ALLOWED:
+                return {"status": "skipped", "reason": "ai_usage"}
             sys_content = system_node.get_content() or ""
             if (USER_EXPORT_PATTERN.search(sys_content)
                     or CA_TWEETS_PATTERN.search(sys_content)
@@ -2942,6 +2973,28 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 llm_node.llm_task_status = 'failed'
                 db.session.commit()
                 return
+
+            # No reply where AI may not read, asked again when the run
+            # starts: a setting can change while the task is queued, and a
+            # re-dispatch (read rerun, resumed batch) does not pass through
+            # create_llm_placeholder. A batch already sent is collected.
+            if batch_entry is None:
+                from backend.utils.llm_nodes import reply_refusal
+                refused = reply_refusal(parent_node, user_id,
+                                        llm_node.ai_usage)
+                if refused is not None:
+                    logger.warning(
+                        "Node %s: reply refused, AI usage keeps the thread "
+                        "away from AI", llm_node_id)
+                    llm_node.llm_task_status = 'failed'
+                    llm_node.llm_task_error = refused.message
+                    db.session.commit()
+                    return {
+                        'parent_node_id': parent_node_id,
+                        'llm_node_id': llm_node_id,
+                        'status': 'refused',
+                        'reason': refused.code,
+                    }
 
             # Update status on the new llm_node
             llm_node.llm_task_status = 'processing'
@@ -4527,6 +4580,15 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                             }
                             return _live_call(
                                 current_node, _continuation_completion)
+
+                    # The continuation sends the thread again: asked again
+                    # (a setting can change mid-turn). A refusal fails this
+                    # continuation node through the handler below; the
+                    # interim step stays as it is.
+                    if not _turn_still_readable(
+                            [n.id for n in node_chain] + [llm_node.id]):
+                        from backend.utils.llm_nodes import AIUsageRefused
+                        raise AIUsageRefused()
 
                     # Transient provider errors (overload, timeout) used to
                     # propagate here and kill the turn, stranding this

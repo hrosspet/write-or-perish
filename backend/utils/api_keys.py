@@ -36,8 +36,9 @@ def determine_api_key_type(node_chain: list, logger=None) -> str:
         if ai_usage == AIUsage.CHAT:
             return 'chat'
 
-    # If we get here, all nodes either have 'train' or 'none'
-    # 'none' shouldn't reach LLM calls (handled in frontend), but default to 'chat' if it does
+    # If we get here, all nodes either have 'train' or 'none'.
+    # 'none' does not reach LLM calls (the reply routes refuse it and the
+    # completion task's context leaves it out), but default to 'chat' if it does
     for node in user_nodes:
         ai_usage = getattr(node, 'ai_usage', AIUsage.NONE)
         if ai_usage == AIUsage.NONE:
