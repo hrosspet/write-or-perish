@@ -10,6 +10,7 @@ struct MoreView: View {
     @State private var craftGlow = false
     @State private var exporting = false
     @State private var exportFile: ExportFile?
+    @State private var exportOnDisk: URL?
     @State private var confirmLogout = false
     @State private var writingNewEntry = false
 
@@ -96,7 +97,7 @@ struct MoreView: View {
         .sheet(isPresented: $writingNewEntry) {
             WriteNewEntrySheet()
         }
-        .sheet(item: $exportFile) { file in
+        .sheet(item: $exportFile, onDismiss: removeExport) { file in
             ShareSheet(items: [file.url]) {
                 try? FileManager.default.removeItem(at: file.url)
             }
@@ -148,6 +149,12 @@ struct MoreView: View {
         .accessibilityIdentifier("more.craftMode")
     }
 
+    /// The export is deleted when the share sheet closes (M2).
+    private func removeExport() {
+        if let exportOnDisk { PrivateFiles.remove(exportOnDisk) }
+        exportOnDisk = nil
+    }
+
     /// "Export data" (craft): `GET /api/export/threads` to a temporary file, then the share sheet.
     private func export() {
         guard !exporting else { return }
@@ -164,6 +171,7 @@ struct MoreView: View {
                 try? FileManager.default.removeItem(at: target)
                 try FileManager.default.moveItem(at: tempURL, to: target)
                 exportFile = ExportFile(url: target)
+                exportOnDisk = target
             } catch {
                 app.toasts.show("Export failed. Please try again.")
             }

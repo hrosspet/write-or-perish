@@ -307,6 +307,8 @@ struct VoiceView: View {
     private func discard(_ draft: InterruptedDraft) {
         interrupted = nil
         Task { _ = try? await app.api.data(for: APIRequest(.delete, APIPath.streamingDiscard(draft.sessionId))) }
+        // Chunks of it still queued on this phone go too (M2).
+        ChunkUploader.shared.forget(sessionId: draft.sessionId)
         if resumeAfterRecovery {
             resumeAfterRecovery = false
             player.play()

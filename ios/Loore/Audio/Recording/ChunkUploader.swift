@@ -20,9 +20,10 @@ import os
 ///   server does not have. A chunk still missing stays queued on disk (the
 ///   next launch retries it) and is reported, so the caller does not finalize
 ///   without it.
-/// - `init_parse_failed` on chunk 0 is fatal (the session is dead); other 4xx
-///   answers are given up without retry.
-/// - A relaunch resumes whatever is left (`resumePending()`).
+/// - `init_parse_failed` on chunk 0 is fatal (the session is dead, its audio is
+///   deleted at once); other 4xx answers are given up without retry.
+/// - A relaunch resumes whatever is left (`resumePending()`); sign-out deletes
+///   the whole queue (`reset()`).
 @MainActor
 final class ChunkUploader: NSObject {
     static let shared = ChunkUploader()
@@ -131,6 +132,8 @@ final class ChunkUploader: NSObject {
             log.error("enqueue for an unknown session")
             return
         }
+        // A dead session (fatal answer): its audio is not kept.
+        if manifest.chunks.values.contains(where: { $0.status == .fatal }) { return }
         var form = MultipartFormData()
         form.addFile("chunk", filename: "chunk_\(chunk.index).mp4", mimeType: "audio/mp4", data: chunk.data)
         form.addField("chunk_index", String(chunk.index))
@@ -203,6 +206,11 @@ final class ChunkUploader: NSObject {
                 continue
             }
             if manifests[manifest.sessionId] != nil { continue }
+            // A dead session (fatal answer) is never resumed (M2).
+            if manifest.chunks.values.contains(where: { $0.status == .fatal }) {
+                try? fileManager.removeItem(at: dir)
+                continue
+            }
             var resumed = manifest
             // Given-up chunks whose body is still here get another chance (B1).
             for (index, record) in manifest.chunks where record.status == .failed
@@ -220,6 +228,23 @@ final class ChunkUploader: NSObject {
             persist(manifest.sessionId)
             log.info("resuming uploads for a session left by a previous launch")
             startWorker(manifest.sessionId)
+        }
+    }
+
+    /// Sign-out: stop every upload (foreground and background, which carry this
+    /// user's cookie) and delete the queue, so nothing of this user's audio stays
+    /// on disk or is sent with the next user's cookies (M2).
+    func reset() {
+        workers.values.forEach { $0.cancel() }
+        workers = [:]
+        manifests = [:]
+        fatalMessages = [:]
+        degraded = []
+        if useBackgroundSession {
+            backgroundSession.getAllTasks { tasks in tasks.forEach { $0.cancel() } }
+        }
+        for dir in (try? fileManager.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)) ?? [] {
+            try? fileManager.removeItem(at: dir)
         }
     }
 
@@ -307,6 +332,10 @@ final class ChunkUploader: NSObject {
     private func failFatally(_ sessionId: String, _ index: Int, _ message: String) {
         mark(sessionId, index, .fatal)
         fatalMessages[sessionId] = message
+        // Nothing of a dead session can be sent: delete its audio now (M2).
+        for chunk in manifests[sessionId]?.chunks.keys.map({ $0 }) ?? [] {
+            try? fileManager.removeItem(at: bodyFile(sessionId, chunk))
+        }
         onFatal?(sessionId, message)
     }
 

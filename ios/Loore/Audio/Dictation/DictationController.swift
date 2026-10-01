@@ -19,8 +19,9 @@ final class DictationController {
     private(set) var state: State = .idle
     private(set) var isInterrupted = false
     private(set) var elapsed: Double = 0
-    /// The recording so far as one `.m4a` (fragmented MP4) for "Save audio".
-    private(set) var recordingFile: URL?
+    /// A recording exists for "Save audio" (kept in memory; a file is written
+    /// only when the user saves it, M2).
+    private(set) var hasRecording = false
 
     struct Callbacks {
         /// Before recording starts (the form keeps its current text).
@@ -71,7 +72,7 @@ final class DictationController {
         let gen = generation
         callbacks.started()
         state = .initializing
-        recordingFile = nil
+        hasRecording = false
         recordedData = Data()
         warned = false
         elapsed = 0
@@ -147,9 +148,20 @@ final class DictationController {
 
     private func keep(_ chunk: RecordedChunk) {
         recordedData.append(chunk.data)
+        hasRecording = true
+    }
+
+    /// "Save audio": the recording so far as one `.m4a` (fragmented MP4), for the
+    /// share sheet; the caller deletes it when the sheet closes.
+    func writeRecordingFile() -> URL? {
+        guard hasRecording else { return nil }
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("loore-dictation.m4a")
-        try? recordedData.write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
-        recordingFile = url
+        do {
+            try recordedData.write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+            return url
+        } catch {
+            return nil
+        }
     }
 
     /// The draft's transcription stream: live `content_update`, then `all_complete`.

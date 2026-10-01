@@ -260,6 +260,58 @@ final class ChunkUploaderTests: XCTestCase {
         XCTAssertNotNil(outcome.fatalMessage)
     }
 
+    // M2: a dead session keeps no audio on disk and is not "resumed" at every launch.
+    func testFatalSessionKeepsNoAudioAndIsNotResumed() async throws {
+        uploader.transport = { request, _ in
+            let body = #"{"error":"Could not parse init segment","detail":"x","code":"init_parse_failed"}"#
+            return (Data(body.utf8), HTTPURLResponse(url: request.url!, statusCode: 400, httpVersion: nil, headerFields: nil)!)
+        }
+        uploader.open(sessionId: "s10", uploadURL: URL(string: "http://x/c")!)
+        uploader.enqueue(sessionId: "s10", chunk: chunk(0))
+        uploader.enqueue(sessionId: "s10", chunk: chunk(1))
+        _ = await uploader.settle(sessionId: "s10")
+        uploader.enqueue(sessionId: "s10", chunk: chunk(2))
+        let dir = root.appendingPathComponent("s10")
+        let bodies = ((try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []).filter { $0.hasSuffix(".body") }
+        XCTAssertEqual(bodies, [], "no audio of a dead session stays on disk")
+
+        let relaunched = ChunkUploader(root: root, useBackgroundSession: false)
+        var sent = 0
+        relaunched.transport = { request, _ in
+            sent += 1
+            return (Data(), HTTPURLResponse(url: request.url!, statusCode: 202, httpVersion: nil, headerFields: nil)!)
+        }
+        relaunched.resumePending()
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(sent, 0)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: dir.path))
+    }
+
+    // M2: sign-out deletes the queue; the next user never sends (or keeps) these chunks.
+    func testResetDeletesTheQueueSoTheNextUserSendsNothing() async throws {
+        uploader.transport = { _, _ in
+            try await Task.sleep(nanoseconds: 30_000_000_000)
+            throw URLError(.timedOut)
+        }
+        uploader.open(sessionId: "s11", uploadURL: URL(string: "http://x/c")!)
+        uploader.enqueue(sessionId: "s11", chunk: chunk(0))
+        uploader.enqueue(sessionId: "s11", chunk: chunk(1))
+        try await Task.sleep(nanoseconds: 20_000_000)
+        uploader.reset()
+        try await Task.sleep(nanoseconds: 20_000_000)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: root.path), [])
+
+        let nextUser = ChunkUploader(root: root, useBackgroundSession: false)
+        var sent = 0
+        nextUser.transport = { request, _ in
+            sent += 1
+            return (Data(), HTTPURLResponse(url: request.url!, statusCode: 202, httpVersion: nil, headerFields: nil)!)
+        }
+        nextUser.resumePending()
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(sent, 0)
+    }
+
     func testDuplicateAnswerCountsAsStored() async throws {
         uploader.transport = { request, _ in
             (Data(#"{"message":"Chunk already uploaded"}"#.utf8),
@@ -369,5 +421,32 @@ final class PlaybackFailureTests: XCTestCase {
         XCTAssertTrue(finished, "the queue skips unplayable chunks and ends (a voice turn reaches done)")
         XCTAssertEqual(errors, [ListenFormats.webMMessage], "one toast per queue")
         XCTAssertFalse(player.isPlaying)
+    }
+}
+
+// M2: what a killed app left in tmp/ is swept at launch and sign-out.
+final class PrivateFilesTests: XCTestCase {
+    func testSweepRemovesOnlyTheAppsTemporaryFiles() throws {
+        let fm = FileManager.default
+        let dir = fm.temporaryDirectory.appendingPathComponent("sweep-test-\(UUID().uuidString)")
+        try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: dir) }
+        let ours = ["loore-dictation.m4a", "loore-export-2026-10-01.txt", "import-\(UUID().uuidString)",
+                    UUID().uuidString, "CFNetworkDownload_abc.tmp", "org.loore.app-Inbox"]
+        for name in ours + ["keep.txt"] {
+            try Data("x".utf8).write(to: dir.appendingPathComponent(name))
+        }
+        PrivateFiles.sweepTemporary(in: dir)
+        XCTAssertEqual(try fm.contentsOfDirectory(atPath: dir.path), ["keep.txt"])
+    }
+
+    func testRemovingADownloadAlsoRemovesItsFolder() throws {
+        let fm = FileManager.default
+        let folder = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        let file = folder.appendingPathComponent("node-1-tts.mp3")
+        try Data("x".utf8).write(to: file)
+        PrivateFiles.remove(file)
+        XCTAssertFalse(fm.fileExists(atPath: folder.path))
     }
 }

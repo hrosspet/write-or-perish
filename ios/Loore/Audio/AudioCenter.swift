@@ -68,6 +68,8 @@ final class AudioCenter {
     /// Connects to the app (API client, cookies, toasts). Called once by `AppState`.
     func attach(_ app: AppState) {
         self.app = app
+        // What a killed app left in tmp/ (exports, downloads, imports, dictation).
+        PrivateFiles.sweepTemporary()
         player.cookiesProvider = { [weak app] in app?.api.backendCookies() ?? [] }
         player.urlResolver = { [weak app] raw in
             if raw.hasPrefix("http://") || raw.hasPrefix("https://") || raw.hasPrefix("file://") { return URL(string: raw) }
@@ -109,10 +111,14 @@ final class AudioCenter {
         #endif
     }
 
-    /// Sign-out: stop everything and forget the conversation.
+    /// Sign-out: stop everything, forget the conversation, and delete this user's
+    /// audio and temporary files (upload queue, dictation, exports, downloads; M2).
     func signedOut() {
         voiceController?.tearDown()
         voiceController = nil
+        activeDictation?.cancel()
+        ChunkUploader.shared.reset()
+        PrivateFiles.sweepTemporary()
         listenTask?.cancel()
         listenCache = [:]
         loadingSource = nil
