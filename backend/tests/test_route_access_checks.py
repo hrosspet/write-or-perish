@@ -301,6 +301,134 @@ class TestMediaFiles:
         assert resp.status_code == 404
 
 
+# Ways a client can spell a ".." segment in the URL path.
+_DOTDOT_FORMS = ("..", "%2e%2e", "%2E%2E", ".%2e", "%2e.")
+
+
+def _assert_refused(resp):
+    assert resp.status_code == 404
+    assert resp.data != b"audio-bytes"
+    assert "public" not in resp.headers.get("Cache-Control", "")
+
+
+class TestMediaAccessIsDecidedOnTheResolvedPath:
+    """The access rule is decided on the path the file is opened from,
+    after ``..`` segments and symlinks are resolved."""
+
+    @pytest.mark.parametrize("dotdot", _DOTDOT_FORMS)
+    def test_path_from_own_folder_into_another_users_file_is_refused(
+            self, app, data, dotdot):
+        _write(app, f"user/{data.bob.id}/node/{data.bob_own.id}/tts.mp3")
+        url = (f"/media/user/{data.bob.id}/{dotdot}/{data.alice.id}/node/"
+               f"{data.private.id}/tts.mp3")
+        _assert_refused(_call(app, data.bob, "GET", url))
+
+    @pytest.mark.parametrize("dotdot", _DOTDOT_FORMS)
+    def test_path_from_public_node_folder_into_private_node_is_refused(
+            self, app, data, dotdot):
+        url = (f"/media/user/{data.alice.id}/node/{data.public.id}/{dotdot}/"
+               f"{data.private.id}/tts.mp3")
+        for user in (None, data.bob):
+            _assert_refused(_call(app, user, "GET", url))
+
+    def test_dot_segments_are_refused_even_for_the_owner(self, app, data):
+        alice, private = data.alice.id, data.private.id
+        for url in (
+            f"/media/user/{alice}/node/{private}/../{private}/tts.mp3",
+            f"/media/user/{alice}/./node/{private}/tts.mp3",
+            f"/media/user/{alice}/%2e/node/{private}/tts.mp3",
+            f"/media/user/{alice}/node/{private}/%252e%252e/{private}/tts.mp3",
+        ):
+            assert _call(app, data.alice, "GET", url).status_code == 404, url
+
+    def test_symlink_to_another_users_file_is_refused(self, app, data):
+        link = (app.media_root
+                / f"user/{data.bob.id}/node/{data.bob_own.id}/tts.mp3")
+        link.parent.mkdir(parents=True)
+        link.symlink_to(app.media_root / data.files["private_tts"])
+        url = f"/media/user/{data.bob.id}/node/{data.bob_own.id}/tts.mp3"
+        _assert_refused(_call(app, data.bob, "GET", url))
+        # The owner of the file it points to still gets it.
+        resp = _call(app, data.alice, "GET", url)
+        assert resp.status_code == 200
+        assert resp.headers["Cache-Control"].startswith("private")
+
+    def test_symlink_out_of_the_media_root_is_refused(self, app, data):
+        outside = app.media_root.parent / "outside.mp3"
+        outside.write_bytes(b"outside")
+        link = app.media_root / f"user/{data.alice.id}/node/{data.private.id}/x.mp3"
+        link.symlink_to(outside)
+        resp = _call(app, data.alice, "GET",
+                     f"/media/user/{data.alice.id}/node/{data.private.id}/x.mp3")
+        assert resp.status_code == 404
+        assert resp.data != b"outside"
+
+
+@pytest.fixture
+def encrypted(app, data, monkeypatch):
+    """Encryption on with a stand-in for KMS, and the private, public and
+    chunk files stored the way production stores them: ``<name>.enc``."""
+    from backend.utils import encryption
+    monkeypatch.setenv("ENCRYPTION_DISABLED", "false")
+    monkeypatch.setenv("GCP_KMS_KEY_NAME",
+                       "projects/t/locations/l/keyRings/r/cryptoKeys/k")
+    monkeypatch.setattr(encryption, "_wrap_dek", lambda dek: b"wrapped:" + dek)
+    monkeypatch.setattr(encryption, "_unwrap_dek",
+                        lambda w: w[len(b"wrapped:"):])
+    for key in ("private_tts", "public_tts", "private_chunk"):
+        path = app.media_root / data.files[key]
+        assert encryption.encrypt_file(str(path)) == str(path) + ".enc"
+        assert not path.exists()
+    return data
+
+
+class TestEncryptedMediaFiles:
+
+    def test_owner_gets_decrypted_private_file(self, app, encrypted):
+        for key in ("private_tts", "private_chunk"):
+            resp = _call(app, encrypted.alice, "GET",
+                         f"/media/{encrypted.files[key]}?v=3")
+            assert resp.status_code == 200, key
+            assert resp.data == b"audio-bytes", key
+            assert resp.headers["Cache-Control"].startswith("private"), key
+
+    def test_range_request_on_encrypted_file(self, app, encrypted):
+        resp = _call(app, encrypted.alice, "GET",
+                     f"/media/{encrypted.files['private_tts']}?v=3",
+                     headers={"Range": "bytes=0-4"})
+        assert resp.status_code == 206
+        assert resp.data == b"audio"
+        assert resp.headers["Content-Range"] == "bytes 0-4/11"
+        assert resp.headers["Content-Type"] == "audio/mpeg"
+        assert resp.headers["Cache-Control"].startswith("private")
+
+    def test_public_encrypted_file_is_served_to_everyone(self, app, encrypted):
+        resp = _call(app, None, "GET", f"/media/{encrypted.files['public_tts']}")
+        assert resp.status_code == 200
+        assert resp.data == b"audio-bytes"
+        assert resp.headers["Cache-Control"].startswith("public")
+
+    def test_other_users_get_404_for_encrypted_private_file(self, app, encrypted):
+        url = f"/media/{encrypted.files['private_tts']}"
+        for user in (None, encrypted.bob):
+            _assert_refused(_call(app, user, "GET", url))
+
+    @pytest.mark.parametrize("dotdot", _DOTDOT_FORMS)
+    def test_dot_segments_into_encrypted_private_file_are_refused(
+            self, app, encrypted, dotdot):
+        d = encrypted
+        _write(app, f"user/{d.bob.id}/node/{d.bob_own.id}/tts.mp3")
+        _assert_refused(_call(
+            app, d.bob, "GET",
+            f"/media/user/{d.bob.id}/{dotdot}/{d.alice.id}/node/"
+            f"{d.private.id}/tts.mp3"))
+        for user in (None, d.bob):
+            _assert_refused(_call(
+                app, user, "GET",
+                f"/media/user/{d.alice.id}/node/{d.public.id}/{dotdot}/"
+                f"{d.private.id}/tts.mp3"))
+
+
 # ── /api/nodes/<id>/audio, /audio-chunks, /audio-download, /tts ──────────
 
 class TestNodeAudioRoutes:
