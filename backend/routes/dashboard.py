@@ -2,6 +2,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from flask import Blueprint, jsonify, request, current_app
 from flask_login import login_required, current_user
+from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from backend.models import Node, User, UserProfile
 from backend.extensions import db
@@ -58,12 +59,29 @@ def get_latest_profile(user):
     return None
 
 
-def _serialize_node_for_list(node, viewer_id=None):
+def _visible_child_counts(nodes, viewer_id):
+    """{node id: number of its children *viewer_id* can access} for
+    *nodes*, in one grouped COUNT query (no row loads, no decryption).
+    Nodes without such a child are absent."""
+    ids = [n.id for n in nodes]
+    if not ids:
+        return {}
+    return dict(
+        db.session.query(Node.parent_id, func.count(Node.id))
+        .filter(Node.parent_id.in_(ids),
+                accessible_nodes_filter(Node, viewer_id))
+        .group_by(Node.parent_id).all()
+    )
+
+
+def _serialize_node_for_list(node, viewer_id=None, child_counts=None):
     """Serialize a node for dashboard list views (Log has its own).
 
     *viewer_id*: when another user is looking (the public dashboard), a
     system prompt root's card shows its first child only if that child is
-    accessible to the viewer."""
+    accessible to the viewer. *child_counts* (from _visible_child_counts)
+    then gives the card's child_count, so it counts only children the
+    viewer can see; without it every child row counts."""
     # If this is a system prompt root, skip to the first child
     display_node = node
     prompt_key = None
@@ -90,7 +108,8 @@ def _serialize_node_for_list(node, viewer_id=None):
         "id": display_node.id,
         "preview": preview,
         "node_type": display_node.node_type,
-        "child_count": len(node.children),
+        "child_count": (len(node.children) if child_counts is None
+                        else child_counts.get(node.id, 0)),
         "created_at": iso_utc(display_node.created_at),
         "pinned_at": iso_utc(node.pinned_at),
         "username": node.user.username if node.user else "Unknown",
@@ -199,7 +218,9 @@ def get_public_dashboard(username):
         Node.pinned_at.isnot(None),
         accessible_nodes_filter(Node, current_user.id)
     ).order_by(Node.pinned_at.desc()).all()
-    pinned_list = [_serialize_node_for_list(n, current_user.id)
+    pinned_counts = _visible_child_counts(pinned_nodes, current_user.id)
+    pinned_list = [_serialize_node_for_list(n, current_user.id,
+                                            pinned_counts)
                    for n in pinned_nodes]
 
     query = Node.query.filter(
@@ -209,7 +230,8 @@ def get_public_dashboard(username):
     ).order_by(Node.created_at.desc())
     pagination = query.paginate(page=page, per_page=per_page, error_out=False)
 
-    nodes_list = [_serialize_node_for_list(node, current_user.id)
+    counts = _visible_child_counts(pagination.items, current_user.id)
+    nodes_list = [_serialize_node_for_list(node, current_user.id, counts)
                   for node in pagination.items]
 
     dashboard = {

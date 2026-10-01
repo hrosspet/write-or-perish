@@ -630,3 +630,29 @@ class TestNotFoundForInvisibleNodes:
             resp = _call(app, data.bob, method,
                          f"/api/drafts/?node_id={data.private.id}")
             assert resp.status_code == 404, method
+
+
+# ── Public dashboard child counts ────────────────────────────────────────
+
+class TestPublicDashboardChildCount:
+
+    def test_child_count_covers_only_children_the_viewer_can_see(
+            self, app, data):
+        root = _node(data.alice, "ALICE PUBLIC ROOT", privacy_level="public")
+        _node(data.alice, "alice private child", parent=root)
+        _node(data.alice, "alice public child", parent=root,
+              privacy_level="public")
+        gone = _node(data.alice, "deleted child", parent=root,
+                     privacy_level="public")
+        gone.deleted_at = datetime.utcnow()
+        _db.session.commit()
+
+        def count(viewer):
+            resp = _call(app, viewer, "GET", "/api/dashboard/alice")
+            assert resp.status_code == 200
+            card = next(n for n in resp.get_json()["nodes"]
+                        if n["id"] == root.id)
+            return card["child_count"]
+
+        assert count(data.bob) == 1
+        assert count(data.alice) == 2
