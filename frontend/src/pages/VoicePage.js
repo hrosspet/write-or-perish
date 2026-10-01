@@ -260,17 +260,47 @@ export function VoiceNeedsAi({ scope, threadId }) {
   );
 }
 
+// Said on the banner of an interrupted recording where Voice mode is
+// blocked and finishing it gets no reply: continuing reopens the mic only
+// to finish that recording, and finalize saves it as an entry without a
+// reply (backend VOICE_REPLY_SKIPPED_AI_USAGE, shown as a toast after).
+export const FINISH_WITHOUT_REPLY_TEXT = "AI usage is set to None, so Loore "
+  + "won't reply. If you continue, your recording is saved as an entry when "
+  + "you finish.";
+
+// GET /voice/availability for the thread *parent* continues (none: the
+// account's Default AI usage decides): null when Voice may record there and
+// reply, else the scope that keeps it away from AI. Rejects when the server
+// cannot be asked.
+function fetchVoiceRefusal(parent) {
+  return api.get('/voice/availability', parent != null ? { params: { parent } } : {})
+    .then((res) => {
+      const data = res.data || {};
+      if (data.allowed !== false) return null;
+      return data.scope === 'thread' ? 'thread' : 'account';
+    });
+}
+
 // Voice mode records only where a reply may follow: a fresh thread when the
 // account's Default AI usage lets AI read it, a continued one (?parent= /
 // ?resume=) when the server says the thread does (GET /voice/availability,
 // the rule streaming init applies). A refusal while recording starts (a
 // setting changed elsewhere) leads to the same message.
+//
+// An interrupted recording is still offered where Voice mode is blocked:
+// this page is the web's only place to finish or discard one (Voice or
+// dictation), so the check runs here and its banner comes before the block,
+// as in the iPhone app.
 export default function VoicePage() {
   const [searchParams] = useSearchParams();
   const { user } = useUser();
   const threadId = searchParams.get('parent') || searchParams.get('resume');
   // undefined while the server is asked; null: record; else the scope.
   const [refusal, setRefusal] = useState(threadId ? undefined : null);
+  const recovery = useInterruptedRecovery();
+  // Continue was chosen on an interrupted recording while blocked: the
+  // session stays mounted to finish it, and its ready phase shows the block.
+  const [finishing, setFinishing] = useState(false);
 
   useEffect(() => {
     if (!threadId) {
@@ -279,13 +309,9 @@ export default function VoicePage() {
     }
     let cancelled = false;
     setRefusal(undefined);
-    api.get('/voice/availability', { params: { parent: threadId } })
-      .then((res) => {
-        if (cancelled) return;
-        const data = res.data || {};
-        setRefusal(data.allowed === false
-          ? (data.scope === 'thread' ? 'thread' : 'account')
-          : null);
+    fetchVoiceRefusal(threadId)
+      .then((scope) => {
+        if (!cancelled) setRefusal(scope);
       })
       .catch(() => {
         // Offline, or a server without the route: record as before; the
@@ -298,16 +324,55 @@ export default function VoicePage() {
 
   const accountRefuses = !threadId && !!user && !isAiAllowed(user.default_ai_usage);
   const shown = accountRefuses ? 'account' : refusal;
-  if (shown === undefined) {
+  if (shown === undefined || (shown && !recovery.checked)) {
     return <div style={containerStyle} />;
   }
-  if (shown) {
+  if (shown && !recovery.interruptedDraft && !finishing) {
     return <VoiceNeedsAi scope={shown} threadId={threadId} />;
   }
-  return <VoiceSession onAiUsageRefused={setRefusal} />;
+  return (
+    <VoiceSession
+      recovery={recovery}
+      blocked={shown || null}
+      threadId={threadId}
+      onAiUsageRefused={setRefusal}
+      onFinishInterrupted={() => setFinishing(true)}
+    />
+  );
 }
 
-function VoiceSession({ onAiUsageRefused }) {
+// Whether finishing *draft* (an interrupted recording) gets a reply, asked
+// only where Voice mode is blocked so the banner can say what Continue leads
+// to. Finalize applies the Voice rule to the thread the recording continues:
+// the draft's own parent, else the page's (useVoiceSession keeps it), else
+// the account's Default AI usage. undefined while asking (or no draft);
+// null: a reply follows; else the scope that keeps it away from AI.
+function useFinishRefusal(draft, pageParentId) {
+  const parent = draft ? (draft.parent_id ?? pageParentId ?? null) : null;
+  const [finishRefusal, setFinishRefusal] = useState(undefined);
+  useEffect(() => {
+    setFinishRefusal(undefined);
+    if (!draft) return undefined;
+    let cancelled = false;
+    fetchVoiceRefusal(parent)
+      .then((scope) => {
+        if (!cancelled) setFinishRefusal(scope);
+      })
+      .catch(() => {
+        // Unknown: no note. Finalize still refuses a reply AI usage keeps
+        // out, and says so in its toast.
+        if (!cancelled) setFinishRefusal(null);
+      });
+    return () => { cancelled = true; };
+  }, [draft, parent]);
+  return finishRefusal;
+}
+
+// *blocked*: the scope VoicePage blocks Voice mode for (null when it may
+// record). The session is mounted while blocked only to finish an
+// interrupted recording; its ready phase then shows the block, never the
+// record button, and a ?resume= reply is not played.
+function VoiceSession({ recovery, blocked, threadId, onAiUsageRefused, onFinishInterrupted }) {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const resumeId = searchParams.get('resume');
@@ -316,7 +381,8 @@ function VoiceSession({ onAiUsageRefused }) {
   const {
     interruptedDraft, checked: recoveryChecked,
     handleDiscard, clearInterrupted,
-  } = useInterruptedRecovery();
+  } = recovery;
+  const finishRefusal = useFinishRefusal(blocked ? interruptedDraft : null, parentId);
 
   const [toolCallsMeta, setToolCallsMeta] = useState(null);
   const [llmContent, setLlmContent] = useState(null);
@@ -334,7 +400,7 @@ function VoiceSession({ onAiUsageRefused }) {
   } = useVoiceSession({
     apiEndpoint: '/voice',
     ttsTitle: 'Voice',
-    initialLlmNodeId: resumeId ? Number(resumeId) : null,
+    initialLlmNodeId: resumeId && !blocked ? Number(resumeId) : null,
     initialParentId: parentId ? Number(parentId) : null,
     model: selectedModel,
     aiUsage: user?.default_ai_usage || 'none',
@@ -457,13 +523,17 @@ function VoiceSession({ onAiUsageRefused }) {
   if (showRecovery) {
     return (
       <div style={containerStyle}>
-        {textModeButton}
+        {!blocked && textModeButton}
         <RecoveryBanner
           draft={interruptedDraft}
+          note={blocked && finishRefusal ? FINISH_WITHOUT_REPLY_TEXT : null}
           onContinue={() => {
             // No spend-cap check: resuming finishes a recording that has
-            // already started, which is always allowed (#341).
+            // already started, which is always allowed (#341). Where Voice
+            // mode is blocked, the same holds: this reopens the mic only for
+            // that recording, and finalize decides whether a reply follows.
             const { session_id, id, chunk_count, parent_id, streaming_mime_type } = interruptedDraft;
+            if (blocked && onFinishInterrupted) onFinishInterrupted();
             clearInterrupted();
             handleResumeSession({
               sessionId: session_id,
@@ -484,6 +554,12 @@ function VoiceSession({ onAiUsageRefused }) {
         </RecoveryBanner>
       </div>
     );
+  }
+
+  // Blocked: no fresh turn. Shown after an interrupted recording was
+  // finished or could not be resumed.
+  if (blocked && phase === 'ready') {
+    return <VoiceNeedsAi scope={blocked} threadId={threadId} />;
   }
 
   // --- READY / RECORDING STATE ---
