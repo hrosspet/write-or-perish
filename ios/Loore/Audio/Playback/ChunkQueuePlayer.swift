@@ -65,6 +65,8 @@ final class ChunkQueuePlayer {
     @ObservationIgnored var onStartedPlaying: (() -> Void)?
     /// State changed (Now Playing refresh).
     @ObservationIgnored var onStateChange: (() -> Void)?
+    /// After `play()` (true) or `pause()` (false): voice silences or resumes its cue.
+    @ObservationIgnored var onTransport: ((Bool) -> Void)?
     /// Before `play()` starts audio: the owner activates the audio session.
     @ObservationIgnored var willPlay: (() -> Void)?
     @ObservationIgnored var cookiesProvider: () -> [HTTPCookie] = { [] }
@@ -185,12 +187,14 @@ final class ChunkQueuePlayer {
         isPlaying = true
         if !waitingForChunks { startPlayer() }
         onStateChange?()
+        onTransport?(true)
     }
 
     func pause() {
         isPlaying = false
         player.pause()
         onStateChange?()
+        onTransport?(false)
     }
 
     func togglePlayPause() {

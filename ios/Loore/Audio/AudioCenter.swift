@@ -47,6 +47,10 @@ final class AudioCenter {
                 self.session.deactivate()
             }
         }
+        player.onTransport = { [weak self] playing in
+            guard let self, self.player.source == .voice else { return }
+            if playing { self.voiceController?.playbackResumed() } else { self.voiceController?.playbackPaused() }
+        }
         player.onStartedPlaying = { [weak self] in
             guard let self, self.player.source == .voice else { return }
             self.voiceController?.queueStartedPlaying()

@@ -61,6 +61,10 @@ protocol VoiceRecording: AnyObject {
 protocol VoiceQueue: AnyObject {
     var hasAudio: Bool { get }
     var entryCount: Int { get }
+    /// The user wants audio to play (false after a pause).
+    var isPlaying: Bool { get }
+    /// The queue ran out and waits for more chunks.
+    var waitingForChunks: Bool { get }
     var generatingTTS: Bool { get set }
     func loadFirst(url: String, duration: Double?, chapterTitle: String?, onPlaying: @escaping () -> Void)
     @discardableResult func append(url: String, duration: Double?, chapterTitle: String?) -> Bool

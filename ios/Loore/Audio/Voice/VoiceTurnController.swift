@@ -79,6 +79,10 @@ final class VoiceTurnController {
         var errorDot: Double = 3
         var tick: Double = 0.25
         var longRecording: Double = 59 * 60
+        /// No llm-status answer for this long ends the turn (M12; heuristic).
+        var llmErrorGiveUp: Double = 2 * 60
+        /// Most thinking-cue time per turn; after it the wait is silent (M12; heuristic).
+        var cueCap: Double = 5 * 60
     }
 
     // MARK: Dependencies
@@ -123,6 +127,10 @@ final class VoiceTurnController {
     @ObservationIgnored private var sseTask: Task<Void, Never>?
     @ObservationIgnored private var reconcileTask: Task<Void, Never>?
     @ObservationIgnored private var errorDotTask: Task<Void, Never>?
+    @ObservationIgnored private var cueCapTask: Task<Void, Never>?
+    /// When the cue started (nil while off) and the cue time this turn used up.
+    @ObservationIgnored private var cueSince: Date?
+    @ObservationIgnored private var cueUsed: Double = 0
     @ObservationIgnored let timing: VoiceTiming
 
     init(backend: VoiceBackend, recorder: VoiceRecording, audio: VoiceAudio, notices: VoiceNotices,
@@ -299,8 +307,11 @@ final class VoiceTurnController {
     func systemInterruptionEnded() {
         if state == .recording && isInterrupted {
             audio.playInterruptionAlert()
-        } else if state == .draining || state == .awaitingAudio || state == .transcribing || state == .stopping {
-            audio.startCue()
+        } else if state == .awaitingAudio || state == .transcribing || state == .stopping {
+            cueOn()
+        } else if state == .draining && audio.queue.isPlaying {
+            // Not when the reply is paused (M12); a resumed player restarts it.
+            cueOn()
         }
     }
 
@@ -344,7 +355,8 @@ final class VoiceTurnController {
         state = .stopping
         endInterruption()
         // The cue first, so audio never stops between the mic and the reply.
-        audio.startCue()
+        cueUsed = 0
+        cueOn()
         audio.refreshNowPlaying()
         tickTask?.cancel()
         flowTask = Task { [weak self] in
@@ -484,7 +496,8 @@ final class VoiceTurnController {
         initialResume = true
         threadParentId = parentId
         audio.activateForReply()
-        audio.startCue()
+        cueUsed = 0
+        cueOn()
         beginReply(nodeId, generation)
     }
 
@@ -503,13 +516,38 @@ final class VoiceTurnController {
         llmTask = Task { [weak self] in
             guard let self else { return }
             let deadline = Date().addingTimeInterval(self.timings.llmGiveUp)
+            var lastAnswer = Date()
             while !Task.isCancelled, gen == self.generation, self.currentNodeId == nodeId, Date() < deadline {
-                if let status = try? await self.backend.llmStatus(nodeId: nodeId) {
+                do {
+                    let status = try await self.backend.llmStatus(nodeId: nodeId)
                     guard gen == self.generation, self.currentNodeId == nodeId, !Task.isCancelled else { return }
+                    lastAnswer = Date()
                     if await self.handleLLMStatus(status, nodeId, gen) { return }
+                } catch {
+                    guard gen == self.generation, self.currentNodeId == nodeId, !Task.isCancelled else { return }
+                    if Date().timeIntervalSince(lastAnswer) > self.timings.llmErrorGiveUp {
+                        self.giveUpOnReply("Can't reach Loore to get the reply. It will be in the thread once it's ready.")
+                        return
+                    }
                 }
                 try? await Task.sleep(nanoseconds: UInt64(self.timings.llmPoll * 1_000_000_000))
             }
+            guard !Task.isCancelled, gen == self.generation, self.currentNodeId == nodeId else { return }
+            self.giveUpOnReply("The reply is taking too long. It will be in the thread once it's ready.")
+        }
+    }
+
+    /// llm-status kept failing or the reply never finished: end the turn instead
+    /// of thinking (and cueing) forever (M12). Audio already queued stays playable.
+    private func giveUpOnReply(_ message: String) {
+        log.error("giving up on the reply")
+        closeStream()
+        if turnHasAudio {
+            notices.toast(message, duration: 8)
+            flagError()
+            finishGenerating()
+        } else {
+            endTurnWithError(message, sound: false)
         }
     }
 
@@ -727,7 +765,7 @@ final class VoiceTurnController {
         if !turnHasAudio || awaitingNextNode || !audio.queue.hasAudio || state == .awaitingAudio {
             // Nothing (more) to play: leave "Thinking…".
             awaitingNextNode = false
-            audio.stopCue()
+            cueOff()
             if state != .playing { state = .done }
             if !turnHasAudio { audio.deactivate() }
         }
@@ -744,7 +782,7 @@ final class VoiceTurnController {
         nodes[next] = NodeTrack()
         pollReply(next, gen)
         if state == .awaitingAudio || state == .draining {
-            audio.startCue()
+            cueOn()
         }
         audio.refreshNowPlaying()
     }
@@ -861,13 +899,13 @@ final class VoiceTurnController {
     func queueDrained() {
         guard state == .playing else { return }
         state = .draining
-        audio.startCue()
+        cueOn()
         audio.refreshNowPlaying()
     }
 
     /// Audio is playing again (first chunk, or after a drain).
     func queueStartedPlaying() {
-        audio.stopCue()
+        cueOff()
         if state == .draining { state = .playing }
         audio.refreshNowPlaying()
     }
@@ -876,9 +914,52 @@ final class VoiceTurnController {
     func queueFinished() {
         guard state == .playing || state == .draining else { return }
         state = .done
-        audio.stopCue()
+        cueOff()
         audio.deactivate()
         audio.refreshNowPlaying()
+    }
+
+    /// The user paused the reply (screen, lock screen, AirPods out): no cue
+    /// while the paused queue waits for chunks (M12).
+    func playbackPaused() {
+        if state == .draining { cueOff() }
+    }
+
+    /// Play again while the queue still waits for chunks: the cue resumes.
+    func playbackResumed() {
+        if state == .draining && audio.queue.waitingForChunks { cueOn() }
+    }
+
+    // MARK: Thinking cue
+
+    /// Starts (or re-asserts, after an interruption) the cue, within the turn's
+    /// cue budget (`timings.cueCap`, M12).
+    private func cueOn() {
+        if cueSince != nil {
+            audio.startCue()
+            return
+        }
+        let left = timings.cueCap - cueUsed
+        guard left > 0 else { return }
+        cueSince = Date()
+        audio.startCue()
+        cueCapTask?.cancel()
+        cueCapTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(left * 1_000_000_000))
+            guard !Task.isCancelled, let self else { return }
+            self.log.info("thinking cue reached its cap for this turn")
+            self.cueOff()
+        }
+    }
+
+    private func cueOff() {
+        cueCapTask?.cancel()
+        cueCapTask = nil
+        if let since = cueSince {
+            cueUsed += Date().timeIntervalSince(since)
+            cueSince = nil
+        }
+        audio.stopCue()
     }
 
     // MARK: Cancel and reset
@@ -908,7 +989,7 @@ final class VoiceTurnController {
         [flowTask, tickTask, llmTask, sseTask, reconcileTask].forEach { $0?.cancel() }
         flowTask = nil; tickTask = nil; llmTask = nil; sseTask = nil; reconcileTask = nil
         if state == .recording || state == .starting { recorder.cancel() }
-        audio.stopCue()
+        cueOff()
         if !keepQueue {
             audio.queue.stop()
             audio.queue.generatingTTS = false
@@ -926,7 +1007,7 @@ final class VoiceTurnController {
     }
 
     private func finishQuietly() {
-        audio.stopCue()
+        cueOff()
         state = .idle
         audio.deactivate()
         audio.refreshNowPlaying()
@@ -936,7 +1017,7 @@ final class VoiceTurnController {
         if let message { notices.toast(message, duration: 8) }
         if sound { audio.playErrorSound() }
         [llmTask, sseTask, reconcileTask, tickTask].forEach { $0?.cancel() }
-        audio.stopCue()
+        cueOff()
         audio.queue.generatingTTS = false
         state = .idle
         flagError()
