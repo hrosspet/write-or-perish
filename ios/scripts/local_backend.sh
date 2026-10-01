@@ -12,7 +12,8 @@
 # (approved + terms current), tz_utc, add_notification (an unread "fix_ready"
 # notification linking to /log), del_notifications, craft_off, m4_cleanup (removes
 # what M4ScreensUITests leave: the test user's todo and profile rows, the
-# `m4-test` artifact, and nodes holding "M4 import test"; the backend has no
+# `m4-test` artifact, and nodes holding "M4 import test" or the published-then-
+# revoked "M4 test share"; the backend has no
 # delete route for profiles, todos or artifacts).
 #
 # The output is a credential for the local test user: keep it out of commits.
@@ -85,7 +86,8 @@ with app.app_context():
                     + UserProfile.query.filter_by(user_id=$TEST_USER_ID).all()
                     + UserArtifact.query.filter_by(user_id=$TEST_USER_ID, kind="m4-test").all()
                     + [n for n in Node.query.filter_by(user_id=$TEST_USER_ID).all()
-                       if "M4 import test" in (n.get_content() or "")])
+                       if "M4 import test" in (n.get_content() or "")
+                       or "M4 test share" in (n.get_content() or "")])
             for row in rows:
                 db.session.delete(row)
             print("m4_cleanup removed %d rows" % len(rows))
