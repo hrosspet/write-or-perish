@@ -133,6 +133,17 @@ xcodebuild -project Loore.xcodeproj -scheme LooreUITests \
 `TEST_RUNNER_LOORE_EXPECT=terms` / `updates` and the matching `state` first
 (`terms_old`, `add_notification`); restore with `state restore del_notifications`.
 
+M2 flows (thread, writing, Log, search, proposals) are in `ThreadWritingUITests`,
+`WritingFlowUITests` and `M2ScreensUITests` (run one class with
+`-only-testing:LooreUITests/<Class>`). They cancel every dialog and delete what
+they create. Steps that bill the backend's AI keys run only with
+`TEST_RUNNER_LOORE_ALLOW_BILLED=1`: pick the cheapest model, and note that the
+auto-generate path uses the test user's *preferred* model (as the web does).
+Some take node ids of the test user: `TEST_RUNNER_LOORE_THREAD_IDS`,
+`TEST_RUNNER_LOORE_SHARE_NODE`, `TEST_RUNNER_LOORE_DRAFT_NODE`,
+`TEST_RUNNER_LOORE_REPLY_NODE`. Craft mode is switched on through More and
+back off at the end; if a run stops halfway, switch it off again (More → Craft mode).
+
 ## Only a real iPhone can test
 
 For M3 onwards (design doc §12):
