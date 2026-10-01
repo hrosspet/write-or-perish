@@ -223,7 +223,7 @@ xcodebuild -project Loore.xcodeproj -scheme LooreUITests \
 
 Use a `parent` while other agents or people use the same test user: a text entry
 saved elsewhere deletes the user's top-level draft, which can be a live voice
-recording (see PROGRESS-voice.md, "Backend findings"). Recording with the real
+recording (see PROGRESS.md, "Backend findings"). Recording with the real
 microphone in the simulator makes macOS ask for microphone access for Simulator.
 
 ## Fonts

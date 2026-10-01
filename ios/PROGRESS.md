@@ -3,94 +3,78 @@
 The spec is [`docs/IOS-APP-DESIGN.md`](../docs/IOS-APP-DESIGN.md) (§13 milestones).
 The web app's behaviour is mapped in `ios/docs/web-app-map/A–E`. Precedence: for
 how the web behaves, the web code wins; for what the app should do, the design doc.
+Build, install and the device / staging checklists are in [`README.md`](README.md).
 
 | Milestone | Branch | Status |
 |---|---|---|
 | M1 Foundation | `ios-app` | **done** (2026-10-01) |
 | M2 Thread and writing | `ios-app` | **done** (2026-10-01) |
-| M3 Voice and audio | `ios-app-voice`, merged into `ios-app` (`d69bd0b`) | **done** (2026-10-01; notes in `PROGRESS-voice.md`) |
+| M3 Voice and audio | `ios-app-voice`, merged into `ios-app` (`d69bd0b`) | **done** in the simulator (2026-10-01); locked-phone behaviour needs the device checklist |
 | M4 Feature pages | `ios-app` (built after M3 was merged) | **done** (2026-10-01) |
-| M5 Integration and parity | `ios-app` | next |
+| M5 Integration and parity | `ios-app` | in progress |
+
+Not yet done anywhere: a run on a real iPhone (README "Only a real iPhone can test") and a
+pass on staging (README "Check on staging").
 
 ---
 
 ## How to work on this (read first)
 
 **Environment**
-- Worktree `.claude/worktrees/ios-app`, branch `ios-app`. Draft PR "Native iPhone app (SwiftUI)".
+- Worktree `.claude/worktrees/ios-app`, branch `ios-app`. PR #384 "Native iPhone app (SwiftUI)".
 - Xcode 26.3 is at `/Applications/Xcode.app` but `xcode-select` points at the CLT and sudo
   is unavailable: prefix every Xcode command with
   `export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer;`.
 - `simctl` commands that boot or install need the sandbox disabled in the agent shell.
 - If `xcrun simctl list runtimes` is empty although `xcrun simctl runtime list` shows the
   iOS 26.3 disk image "Ready", run `xcrun simctl runtime scan-and-mount` (sandbox off) once.
-- Simulators: M1 used "Loore iPhone 17" (`CDAD3013-…`), M2 "Loore M2 iPhone 17"
-  (`0A4086FA-7D51-4ACF-ADDF-C90377075FEE`), M3 "Loore Voice iPhone 17", M4 "Loore iPhone 17" again. Use your own; create one with
+- Simulators used: M1 and M4 "Loore iPhone 17" (`CDAD3013-…`), M2 "Loore M2 iPhone 17"
+  (`0A4086FA-…`), M3 "Loore Voice iPhone 17" (`F23E45D8-…`), M5 "Loore M5 iPhone 17"
+  (`AB8027B7-…`). Use your own; create one with
   `xcrun simctl create "<name>" com.apple.CoreSimulator.SimDeviceType.iPhone-17 com.apple.CoreSimulator.SimRuntime.iOS-26-3`.
 - This simulator runtime draws **every emoji as a "?" box**, even in the system font (checked with
   an `ImageRenderer` test); it is the runtime, not the app. Check emoji on a device.
-- User 5 is shared with the other milestone agents: its `preferred_model` and `craft_mode` can change
+- User 5 is shared with other agents: its `preferred_model` and `craft_mode` can change
   under you. Check `GET /api/dashboard/` before a billed step (the auto-generate path sends the
-  preferred model, as on the web); restore anything you switch.
+  preferred model, as on the web); restore anything you switch. For voice runs M3 set
+  `preferred_model` to `gpt-6-luna` (the cheapest) and back to `claude-opus-5.5` afterwards.
 
 **Build and test**
 ```sh
 cd ios && xcodegen          # always after adding/removing files
 xcodebuild -project Loore.xcodeproj -scheme Loore -destination 'platform=iOS Simulator,id=<UDID>' \
-  -derivedDataPath build/DerivedData test          # 332 unit tests, ~8 s of test time
+  -derivedDataPath build/DerivedData test          # unit tests (one skipped: the format-probe helper)
 python3 ios/scripts/check_terms_text.py            # from the repo root
 ```
 `build/` is git-ignored. Install + launch for screenshots:
 `xcrun simctl install <UDID> build/DerivedData/Build/Products/Debug-iphonesimulator/Loore.app`,
 `xcrun simctl launch <UDID> org.loore.app -LooreEnvironment local -LooreResetState YES -LooreSessionCookie "$(ios/scripts/local_backend.sh session-cookie)" -LooreTheme dark -LooreSkipUpdates YES`,
-`xcrun simctl io <UDID> screenshot <scratch>/x.png`.
+`xcrun simctl io <UDID> screenshot <scratch>/x.png`. UI test classes and their inputs: README "UI tests".
 
 **Signing in on the simulator (test user 5 `seowriter` only)**
 - Fastest: `-LooreSessionCookie "$(ios/scripts/local_backend.sh session-cookie)"`.
 - The real flow: `ios/scripts/local_backend.sh magic-link` → paste in the app
   (Sign in → "I already have a sign-in link"), or run the UI smoke test
-  `testSignInWithPastedMagicLink` (README "UI smoke tests").
+  `testSignInWithPastedMagicLink`.
 - Test states (terms out of date, unapproved, an unread notification):
   `ios/scripts/local_backend.sh state …`; always finish with `state restore del_notifications`.
-- User 5 has an email address already (not changed by M1), is approved, plan alpha,
-  `share_v1_enabled` true, not admin, no X login. Its content is test text (rivers, glaciers).
+- User 5 has an email address, is approved, plan alpha, `share_v1_enabled` true, not admin, no X
+  login. Its content is test text (rivers, glaciers).
 - Web reference screenshots: headless Chrome with a throwaway profile and the same session
-  cookie on `localhost:3001` (M1 drove it over CDP with a small Node script, kept out of the repo).
+  cookie on `localhost:3001` (driven over CDP with a small Node script, kept out of the repo).
+
+**A voice turn without a microphone**
+- `-LooreDebugAudioFile <clip>` (make one with
+  `say -o clip.m4a --file-format=m4af --data-format=aac "…"`) plays the file into the recorder at
+  real time; its end acts as Stop. Debug-file recordings use a `.playback` session, because in the
+  simulator a `.playAndRecord` session opens the Mac's microphone and blocks on macOS's consent
+  prompt.
+- Every voice turn is billed (transcription + reply + TTS). Use a `parent` node: a text entry saved
+  elsewhere as the same user deletes the user's top-level draft, which can be a live voice recording
+  (see "Backend findings").
 
 **Where things are**
 ```
-ios/Loore/Markdown/             M2: the one markdown renderer — MarkdownView (+MarkdownStyle presets,
-                                ChecklistActions), MarkdownModel (swift-markdown → render tree, GFM autolinks,
-                                HTML as code, list tightness), MarkdownEdits (utils/markdown.js port), JSRegex,
-                                ContentSegments + QuotedContentView (quote/artifact markers, quote bubbles),
-                                NodeLinks (+NodeTitleStore on AppState.nodeTitles)
-ios/Loore/Features/Thread/      M2: ThreadView/ThreadModel/ThreadSheets, Bubble (BubbleView, BubbleData,
-                                BubblePreview, KebabMenu, NodeFooterView), ModelPicker (+ModelCatalog),
-                                NodeAudioControls (M3 hook)
-ios/Loore/Features/Write/       M2: NodeFormView/NodeFormModel (+DictationButton, M3 hook), DraftAutosaver,
-                                PrivacySelector (+SelectField, FieldLabel, LabeledPillToggle), WritingDialogs,
-                                TextModeView (+WriteNewEntrySheet)
-ios/Loore/Features/Proposals/   M2: ProposalParser (ProposalInline.js port), ProposalCard (compact)
-ios/Loore/Features/Log/         M2: LogView
-ios/Loore/Features/Search/      M2: SearchView (+SearchSnippet, SearchResult)
-ios/Loore/Features/Workspace/   M4: WorkspaceView (Artifacts tab root; document switched in place), ArtifactsNavRow,
-                                doc header pieces (VersionChip, HistoryLink, DocMetaLine, DocEditor, DocEditButtons),
-                                VersionHistorySheet (+DiffRowsView), WorkspaceStores (ArtifactsStore,
-                                ProfileGenerationWatcher)
-ios/Loore/Features/{Profile,Todo,Artifacts}/  M4: ProfilePage (+SourceMix), TodoPage + TodoModel (+TodoSections),
-                                ArtifactsPage + IntentionsView (+IntentionsParser, ArtifactKinds)
-ios/Loore/Features/References/  M4: ReferencesView, ReferenceDetailView (+edit sheet), Embeds (tweet, YouTube),
-                                ReadReplyViews (FeedPicksView + FeedPicksModel, ReadWindowLine, ReadReplyTail),
-                                ReferenceUtils (references.js port)
-ios/Loore/Features/Prompts/     M4: PromptsView, PromptDetailView
-ios/Loore/Features/Account/     M4: AccountView, AccountModel (M1's environment switcher and M3's Voice section kept)
-ios/Loore/Features/Import/      M4: ImportView (+ExternalImportSection, NewTokenDialog), ImportDataSection (dialogs),
-                                ImportModel, ImportFiles (ZIPFoundation streaming, multipart files)
-ios/Loore/Features/{Share,Commons}/  M4: ShareView, CommonsView (+CommonsModel)
-ios/Loore/Features/Onboarding/  M4 adds WelcomeView, ConfirmEmailView (+ConfirmEmailModel, ConfirmEmailPasteSheet)
-ios/Loore/Features/Web/         M4 adds CookieWebFlowSheet (Connect X, X bookmarks connect)
-ios/Loore/Core/Util/            M4 adds LineDiff (+VersionDiff; diff.js port) and VersionLabels
-ios/Loore/Core/Models/          M4 adds Workspace, References, ShareCommons
 ios/project.yml                 XcodeGen spec (packages: swift-markdown 0.7.3, ZIPFoundation 0.9.20)
 ios/Config/Signing.xcconfig     team id / bundle id (+ git-ignored Signing.local.xcconfig)
 ios/Loore/App/                  LooreApp, AppState, RootView (gating), MainTabView (tabs, RouteDestination),
@@ -98,25 +82,62 @@ ios/Loore/App/                  LooreApp, AppState, RootView (gating), MainTabVi
 ios/Loore/Core/Networking/      APIClient (+APIRequest, MultipartFormData), APIError, APIPaths, SSE, Poller
 ios/Loore/Core/Auth/            AuthService, CookieVault, KeychainStore, MagicLink, WebLoginView (X)
 ios/Loore/Core/Models/          LooreDate, JSONValue, OpenEnum (+enums), User, Nodes, Replies, Drafts,
-                                Updates, StreamEvents, DecodingHelpers
-ios/Loore/Core/Util/            DateFormatting (date.js port), SpendCap (spendCap.js port)
+                                Updates, StreamEvents, DecodingHelpers, Workspace, References, ShareCommons
+ios/Loore/Core/Util/            DateFormatting (date.js port), SpendCap (spendCap.js port), LineDiff
+                                (+VersionDiff; diff.js port), VersionLabels
 ios/Loore/DesignSystem/         Tokens (colours, spacing, radii, motion, FadeIn), Typography, Theme,
                                 Components/ (Buttons, Surfaces, Feedback [dialogs, toasts, pill switch,
-                                spend banner], Glyphs [SVG paths, logo, craft icon, X logo],
-                                SimpleMarkdownText)
-ios/Loore/Features/             Onboarding (SignIn, Terms + TermsText, Waitlist + PrefillConsentCard),
-                                Updates (UpdatesSheet), Home (HomeView, PlaceholderScreen), More,
-                                Account (placeholder + debug environment switcher), Web (Safari, cookie web view)
+                                spend banner], Glyphs [SVG paths, logo, craft icon, X logo])
+ios/Loore/Markdown/             the one markdown renderer — MarkdownView (+MarkdownStyle presets,
+                                ChecklistActions), MarkdownModel (swift-markdown → render tree, GFM autolinks,
+                                HTML as code, list tightness), MarkdownEdits (utils/markdown.js port), JSRegex,
+                                ContentSegments + QuotedContentView (quote/artifact markers, quote bubbles),
+                                NodeLinks (+NodeTitleStore on AppState.nodeTitles)
+ios/Loore/Audio/                M3: Recording/ (SegmentPackager + MP4Boxes, FMP4SegmentWriter + AACEncoder +
+                                PCMConverter, AudioSources [mic, Debug file], VoiceRecorder, ChunkUploader),
+                                Voice/ (VoiceTurnController, VoiceTurnDependencies + LiveVoiceBackend),
+                                Playback/ (ChunkQueuePlayer + ChunkQueueMath, Sounds [cue, chimes],
+                                ListenAloud [+AudioDownloader]), Session/ (AudioSessionController,
+                                NowPlayingController), Dictation/ (DictationController), AudioCenter
+                                (owns all of it as AppState.audio; LooreAppDelegate for background sessions)
+ios/Loore/Features/Home/        HomeView (+Read card), PlaceholderScreen (only routes that never push)
+ios/Loore/Features/Onboarding/  SignIn, Terms + TermsText, Waitlist + PrefillConsentCard, WelcomeView,
+                                ConfirmEmailView (+model, paste sheet)
+ios/Loore/Features/Updates/     UpdatesSheet
+ios/Loore/Features/More/        MoreView (the ⋮ menu), CraftModeDialog, ShareSheet
+ios/Loore/Features/Thread/      ThreadView/ThreadModel/ThreadSheets (+NodeAudioControls), Bubble (BubbleView,
+                                BubbleData, BubblePreview, KebabMenu, NodeFooterView), ModelPicker (+ModelCatalog)
+ios/Loore/Features/Write/       NodeFormView/NodeFormModel, DraftAutosaver, PrivacySelector (+SelectField,
+                                FieldLabel, LabeledPillToggle), WritingDialogs, TextModeView (+WriteNewEntrySheet)
+ios/Loore/Features/Proposals/   ProposalParser (ProposalInline.js port), ProposalCard (compact)
+ios/Loore/Features/Log/         LogView
+ios/Loore/Features/Search/      SearchView (+SearchSnippet, SearchResult)
+ios/Loore/Features/Voice/       M3: VoiceView (+VoiceVisuals), MiniPlayerView, VoiceSettingsSection,
+                                NodeAudioButtons (SpeakerButton, DownloadAudioButton), StreamingMicButton
+ios/Loore/Features/Workspace/   WorkspaceView (Artifacts tab root; document switched in place), ArtifactsNavRow,
+                                doc header pieces, VersionHistorySheet (+DiffRowsView), WorkspaceStores
+                                (ArtifactsStore, ProfileGenerationWatcher)
+ios/Loore/Features/{Profile,Todo,Artifacts}/  ProfilePage (+SourceMix), TodoPage + TodoModel (+TodoSections),
+                                ArtifactsPage + IntentionsView (+IntentionsParser, ArtifactKinds)
+ios/Loore/Features/References/  ReferencesView, ReferenceDetailView (+edit sheet), Embeds (tweet, YouTube),
+                                ReadReplyViews (FeedPicks, ReadWindowLine, ReadReplyTail), ReferenceUtils
+ios/Loore/Features/Prompts/     PromptsView, PromptDetailView
+ios/Loore/Features/Account/     AccountView, AccountModel (Debug environment switcher, Voice section)
+ios/Loore/Features/Import/      ImportView (+ExternalImportSection, NewTokenDialog), ImportDataSection,
+                                ImportModel, ImportFiles (ZIPFoundation streaming, multipart files)
+ios/Loore/Features/{Share,Commons}/  ShareView, CommonsView (+CommonsModel)
+ios/Loore/Features/Web/         SafariView, AuthenticatedWebView, CookieWebFlowSheet (Connect X, X bookmarks)
 ios/LooreTests/                 unit tests + Fixtures/ (captured from user 5, trimmed, email scrubbed)
-ios/LooreUITests/               smoke flows against the local backend (not in CI)
+ios/LooreUITests/               flows against the local backend (not in CI)
 ios/scripts/                    check_terms_text.py, local_backend.sh
 ```
 
-**Conventions the next milestones should keep**
+**Conventions**
 - Paths: add every endpoint to `APIPath` (it owns the trailing-slash rule; `APIPath.canonical`).
 - Calls: `try await app.api.get/post/put/patch/delete(path, json:)` returning a `Decodable`;
   `EmptyResponse` when the answer is ignored; `api.fireAndForget` for the web's `.catch(() => {})`.
   Status polls: `get(..., poll: true)` (no-cache, 10 s timeout) inside `Poller.run/runStatus`.
+  Large uploads: `api.upload(_:fromFile:)` with a body written by `ImportFiles.multipartBody`.
 - Errors: catch `APIError`; `.userMessage(fallback:)` gives the server's words. 401/402/403-not-approved
   are handled globally (sign-out, spend banner, re-gate) — call sites just stop.
 - SSE: `app.sse.subscribe(path:resumeQuery:)` → `SSEMessage`; decode events with
@@ -125,45 +146,45 @@ ios/scripts/                    check_terms_text.py, local_backend.sh
 - Models: explicit `CodingKeys`, `c.tolerant(...)` for every non-id field, open enums
   (`AIUsage.off` is the wire value "none"). Never use `.convertFromSnakeCase` (it rewrites
   dictionary keys such as artifact kinds and source names).
-- Navigation: routes are `AppRoute`; `app.open(route)` / `app.openLink(link)`. To land a native
-  screen, add its case to `RouteDestination` (MainTabView.swift) and stop using `PlaceholderScreen` for it.
-  Tab roots are in `MainTabView` (Artifacts → Profile, Log, Commons are placeholders now).
+- Navigation: routes are `AppRoute`; `app.open(route)` / `app.openLink(link)`. A route's screen is its case
+  in `RouteDestination` (MainTabView.swift). `app.open(.profile / .todo / .artifacts(kind:) / .newArtifact)`
+  selects `router.workspace` and pops the Artifacts tab (web `ArtifactsNav`); a workspace route pushed
+  elsewhere shows a standalone workspace (`WorkspaceView(pinned:)`).
 - UI: tokens only (`LooreColor`, `LooreFont`, `LooreSpacing`, `LooreRadius`, `LooreMotion`);
   cards `.looreCard()`, page titles `PageHeader`, dialogs `.looreDialog(isPresented:)` +
   `LooreDialogCard` + `ChoiceButton`, toasts `app.toasts.show(text, duration:)`,
   `app.notifySpendBlocked()` before refusing a cost action, pills `LoorePill`, tags `LooreTag`.
-- Cross-screen signals: `app.signals.post(.todoChanged)` etc.; observe the counters with `.onChange`.
-- Per-device preferences use the web's localStorage names (`DefaultsKey`).
-- No content in logs (ids, statuses, byte counts only).
-
-**Conventions M2 added**
-- Markdown anywhere: `MarkdownView(markdown:style:checklist:onLink:)`; node content with quote and
-  artifact markers: `QuotedContentView`. Pick or derive a `MarkdownStyle` preset (`.focal`, `.bubble`,
-  `.quote`, `.proposal`, `.changelog`); `flowText` makes soft breaks spaces (authored docs only).
-- Text matching for list edits: `MarkdownEdits` (same strings as the web). Port JS regexes with `JSRegex`
-  (UTF-16, ASCII `\w`), lengths with `.jsLength`, cuts with `.jsPrefix`.
-- Italics in Outfit: `LooreFont.sansOblique` (Outfit has no italic face; `.italic()` does nothing).
+  Shared building blocks: `RenameThreadDialog`, `NodeFormSheet`, `FieldLabel`/`SelectField`,
+  `NetworkStatus`, `NodeTitleStore`, `InlineArtifactSection.formatTokens`, `JSRegex`.
 - Chained dialogs: present them through **one** `.looreDialog` whose content switches (two
   full-screen covers cannot dismiss and present in the same update; the second one is dropped).
 - Work a view starts on appear that must not be cancelled by a re-render goes in its own `Task`,
   not `.task(id:)` (a cancelled `URLSession` call is a silent failure).
-- Test identifiers: `thread.focal`, `thread.focalKebab`, `thread.llmResponse`, `nodeForm.text.<new|inline|edit>`,
-  `nodeForm.send.<…>`, `search.field`, `more.writeNew`, `home.read`.
-
-**Conventions M4 added**
-- The Artifacts tab root is `WorkspaceView`; `app.open(.profile / .todo / .artifacts(kind:) / .newArtifact)`
-  selects `router.workspace` and pops that tab (web `ArtifactsNav` navigation). A workspace route pushed
-  elsewhere shows a standalone workspace (`WorkspaceView(pinned:)`).
+- Markdown anywhere: `MarkdownView(markdown:style:checklist:onLink:)`; node content with quote and
+  artifact markers: `QuotedContentView`. Pick or derive a `MarkdownStyle` preset (`.focal`, `.bubble`,
+  `.quote`, `.proposal`, `.changelog`); `flowText` makes soft breaks spaces (authored docs only).
+  Checklists: `ChecklistActions` + `MarkdownEdits.toggleCheckbox / insertItemAfter / appendItemToSection`.
+- Text matching for list edits: `MarkdownEdits` (same strings as the web). Port JS regexes with `JSRegex`
+  (UTF-16, ASCII `\w`), lengths with `.jsLength`, cuts with `.jsPrefix`.
+- Italics in Outfit: `LooreFont.sansOblique` (Outfit has no italic face; `.italic()` does nothing).
+- Cross-screen signals: `app.signals.post(.todoChanged)` etc. (`artifactsChanged`, `profileGenerationStarted`,
+  `nodeCreated`, `logChanged`, `referencesChanged`); observe the counters with `.onChange`.
+  Stores on `AppState`: `audio`, `nodeTitles`, `artifacts`, `profileWatcher`.
 - Any versioned document: a `VersionHistorySource` (title, versions, content, revert) and `VersionHistorySheet`.
+- Audio: everything goes through `app.audio` (`AudioCenter`). Listen-aloud: `SpeakerButton(target: .node /
+  .profile / .item, content:, onTtsGenerated:)` + `DownloadAudioButton`; dictation: `StreamingMicButton`
+  driving `NodeFormModel.dictationStarted/Transcript/Finished/Failed`.
+- Signed-in web flows that end on a frontend page: `CookieWebFlowSheet(startURL:onLanding:)`.
 - A container with `.accessibilityIdentifier` needs `.accessibilityElement(children: .contain)` first, or
   SwiftUI copies the identifier onto every child and UI tests cannot find the buttons inside.
-- Signed-in web flows that end on a frontend page: `CookieWebFlowSheet(startURL:onLanding:)`.
-- Large uploads: `api.upload(_:fromFile:)` with a body written by `ImportFiles.multipartBody`.
-- New signals: `referencesChanged`. Stores on `AppState`: `artifacts`, `profileWatcher`.
+- Test identifiers: `thread.focal`, `thread.focalKebab`, `thread.llmResponse`, `nodeForm.text.<new|inline|edit>`,
+  `nodeForm.send.<…>`, `search.field`, `more.writeNew`, `home.read`, `tab.reflect`, `more.*`.
+- Per-device preferences use the web's localStorage names (`DefaultsKey`).
+- No content in logs (ids, statuses, byte counts only).
 
 ---
 
-## Done in M1
+## Done in M1 (foundation)
 
 - XcodeGen project; Swift 5 mode, iOS 17+, iPhone; Info.plist (audio background mode,
   microphone text, local networking, fonts); app icon from `loore-logo.png`; launch colour.
@@ -181,14 +202,13 @@ ios/scripts/                    check_terms_text.py, local_backend.sh
   "What happens next", About/Logout menu); blocking Terms (verbatim, checked by script);
   Updates sheet once per launch (notifications, polls with the two-step opt-in, changelog);
   spend-cap flag from `spend_blocked`; time-zone PATCH for approved users.
-- Tab shell with Home (greeting, Voice/Text/Share cards) and placeholders that open the web
-  page in a cookie-injected web view meanwhile.
+- Tab shell with Home (greeting, Voice/Text/Share cards).
 - More: Import · Admin (web view, admins) · Account · My public page (flag) · References ·
   Light mode · Craft mode (+ dialog, toast, glow, persistence) · Write new entry · Export
   data (share sheet) · Prompts · About (Safari views) · Logout.
 - Debug launch arguments (`LaunchOptions`), `ios/README.md`, this file.
 
-### Verified on the simulator (iPhone 17, iOS 26.3, local Docker backend, user 5)
+**Verified in M1** (iPhone 17, iOS 26.3, local Docker backend, user 5)
 - Unit tests: 106 pass (dates, date.js/spendCap.js ports, error mapping, paths, API client
   headers/bodies/events, SSE parser and client incl. reconnect/stall/JSON answers, poller,
   model decoding against fixtures, cookie vault, magic-link parsing, web-login routing,
@@ -203,9 +223,9 @@ ios/scripts/                    check_terms_text.py, local_backend.sh
 - Side-by-side with headless-Chrome screenshots of the web: login, Home, ⋮ menu vs More,
   craft dialog, alpha-thank-you.
 - The backend accepted the app's cookies everywhere (magic-link 302 cookies, injected session).
-- No billed calls were made.
+- No billed calls.
 
-## Done in M2
+## Done in M2 (thread and writing)
 
 - **Markdown renderer** (design §8, map D §3): swift-markdown parse (no smart punctuation) → render
   tree → SwiftUI. GFM tables (horizontal scroll, column alignment), strikethrough, task lists,
@@ -217,12 +237,12 @@ ios/scripts/                    check_terms_text.py, local_backend.sh
   `QuotedContent` (`{quote:N}`, `{quote_ext:N}`, `{user_*}`, guidance markers). Node links show the
   node's title (`GET /nodes/titles`, coalesced per run-loop turn, cached, failures not cached).
   Owner checklists: round boxes, toggle by the web's stripped-text matching, "+" insert below.
-  Used in the thread, expanded bubbles, quote cards, artifact sections, proposal cards and the
-  Updates sheet (`SimpleMarkdownText` deleted).
+  Used in the thread, expanded bubbles, quote cards, artifact sections, proposal cards, the
+  Updates sheet and every M4 page.
 - **Home**: admin-only Read card (`POST /api/read/start`).
 - **Log**: cursor paging (auto-load at the end, "Load more...", retry), dedupe, Rename thread,
   Delete thread, search button (⌘K), pull to refresh; refreshes after creates/deletes.
-- **Thread**: header with Voice Mode (→ `/voice`, M3) and Auto-generate (craft); admin Read /
+- **Thread**: header with Voice Mode (→ `/voice`) and Auto-generate (craft); admin Read /
   Read further; ancestors; focal card (system-prompt header, pending "Thinking"/"Processing" with
   pulsing dots, streamed text, proposals, "Actions taken" with every tool label); footer with pin
   rules and titles; LLM Response + model picker (craft / public threads); in-progress line;
@@ -247,10 +267,8 @@ ios/scripts/                    check_terms_text.py, local_backend.sh
   the four accepts (todo apply + polling, issue, feedback, share save), state from `tool_calls_meta`.
 - **Search** sheet: 300 ms debounce, semantic (admins: keyword + paging), date range, `<mark>`
   highlights, node and reference rows.
-- **M3 hooks**: `NodeAudioControls` (focal footer speaker/download, `ThreadSheets.swift`) and
-  `DictationButton` (shown, disabled) + `NodeFormModel.dictationStarted/Transcript/Finished/Failed`.
 
-### Verified in M2 (simulator "Loore M2 iPhone 17", local Docker backend, user 5)
+**Verified in M2** (simulator "Loore M2 iPhone 17", local Docker backend, user 5)
 - Unit tests: 197 pass (M1's 106 + 91): `ProposalParserTests` (ProposalInline.test.js one-to-one),
   `MarkdownEditsTests` (markdown.test.js), `MarkdownParserTests` (MarkdownBody.test.js and
   MarkdownBody.stable.test.js #321 equivalents, autolinks, tables, tightness), `BubblePreviewTests`
@@ -260,26 +278,101 @@ ios/scripts/                    check_terms_text.py, local_backend.sh
   `SearchSnippetTests`.
 - UI flows (screenshots in the session scratch dir, compared with headless-Chrome shots of the web at
   402×874): Log (cards, kebab, rename and delete dialogs), search (empty, dates, a "rivers" query and
-  opening a result), threads 201102 (system prompt with artifact chips), 201105/201121 (proposal
-  cards; tick/untick saved; Apply on a superseded proposal shows the server's 404 text), 201071/
-  201076 (ancestors, reply tree), 201000 (tombstone), 200961; kebab/Edit/Reply/Delete; a Text-mode
-  entry with a checklist (tick and "+" saved), edit, delete with "Delete the system prompt too?";
-  craft mode on/off (selectors, Upload, LLM Response bar, model picker with "More models…", Write
-  New Entry); draft saved, restored after relaunch, discarded; light theme; a temporary entry with
-  every markdown construct and a node link; quote bubbles (`{quote:N}` and an inaccessible one);
-  a `:::share` block saved as a private draft.
-- Billed calls: **3 LLM replies** — LLM Response on GPT-6 Luna (watched to completion), a Text-mode
-  reply on GPT-6 Luna (watched streaming: partial text + dots → final), an inline reply with
-  auto-generate (went to Opus 5.5: the shared user's preferred model had been switched back during
-  the run) — plus one semantic search embedding. Test entries, the share draft and craft mode were
-  cleaned up / restored.
+  opening a result), threads with a system prompt and artifact chips, proposal cards (tick/untick
+  saved; Apply on a superseded proposal shows the server's 404 text), ancestors, reply tree,
+  tombstone; kebab/Edit/Reply/Delete; a Text-mode entry with a checklist (tick and "+" saved), edit,
+  delete with "Delete the system prompt too?"; craft mode on/off (selectors, Upload, LLM Response
+  bar, model picker with "More models…", Write New Entry); draft saved, restored after relaunch,
+  discarded; light theme; a temporary entry with every markdown construct and a node link; quote
+  bubbles (`{quote:N}` and an inaccessible one); a `:::share` block saved as a private draft.
+- Billed calls: **3 LLM replies** (two on GPT-6 Luna; one auto-generate reply went to Opus 5.5 because
+  the shared user's preferred model had been switched back during the run) plus one semantic search
+  embedding. Test entries, the share draft and craft mode were cleaned up / restored.
 - Bugs found and fixed by these runs: chained dialogs dropped the follow-up (one presenter now);
   the inline form's draft load was cancelled by a re-render (draft not restored); forms kept their
   craft-off controls after craft mode was switched on; bubble footers squeezed the author away
   next to wide tags; italics had no effect in Outfit.
 
+## Done in M3 (voice and audio)
 
-## Done in M4
+Spec: design doc §9, map C (§8 is the native design).
+
+**Recording format, proven first.** `AVAudioConverter` (AAC-LC 64 kbps, 48 kHz mono) →
+`AVAssetWriter(contentType: .mpeg4Movie)`, `outputFileTypeProfile = .mpeg4AppleHLS`, segment interval
+`.indefinite` in passthrough, `flushSegment()` every 15 s of audio and on pause/interruption.
+Chunk 0 = initialization segment + first media segment. Evidence (local backend, 2026-10-01): chunk 0
+was 41 829 bytes with top-level boxes `ftyp`(28) `moov`(584) `moof` `mdat`, and the server's own
+`extract_mp4_init_segment` returned a 612-byte init; chunks 1–2 were bare `moof`+`mdat`. The server's
+`concat_fragmented_media` remux gave one AAC 48 kHz mono file (14.9 s of the 15.0 s clip); a batch
+starting at chunk 1 with the persisted init decoded too. Upload: three chunks `202 stored`, a duplicate
+`200 Chunk already uploaded`; finalize `202`; `/status` → `completed`, 3/3 chunks, transcript word for word.
+
+`ios/Loore/Audio/`
+- `Recording/SegmentPackager.swift`: chunk contract; `MP4Boxes` (box walker, the server's chunk-0 rule,
+  the `ftyp` subsession test). `Recording/FMP4SegmentWriter.swift`: `AACEncoder` + passthrough fMP4
+  writer + `PCMConverter` (any input → 48 kHz mono Int16). `Recording/AudioSources.swift`:
+  `MicrophoneSource` (AVAudioEngine tap, restarts after a configuration change), Debug `AudioFileSource`.
+- `Recording/VoiceRecorder.swift`: source → converter → writer → upload queue; pause keeps capture
+  running (drops samples); interruption flushes and holds; a failed writer is replaced on resume (its
+  first chunk opens a server subsession).
+- `Recording/ChunkUploader.swift`: persisted queue in Application Support
+  (`completeUntilFirstUserAuthentication`), chunk 0 first, the web's 2/4/8/16 s retries, background
+  `URLSession` copy on give-up and on backgrounding, resumed after a relaunch (`AppState.didLoad` →
+  `audio.didSignIn()`), `init_parse_failed` fatal, `total_chunks` = stored count when chunks were
+  given up (plus the chunks a resumed session already had).
+- `Voice/VoiceTurnController.swift`: the turn state machine (C §8.5): init (402 → toast), record, stop
+  (cue first, then mic), finalize (400 "not in recording state" = success), `/status` every 1 s (never
+  the draft SSE, never before finalize), empty transcript / warning / legacy `POST /api/voice`,
+  llm-status every 1.5 s, the TTS attach rule, `POST /tts` once on completion, JSON stream answers,
+  chains into one queue with chapters (placeholder `…` renamed from `all_complete.preview`), drains
+  (cue), REST recovery (#242: trigger watchdog 20 s, reconcile 7 s + foreground, 3 s catch-up, 60 s
+  net), `cancelled` terminal, cancel/continue, 59-minute warning, interruptions (chime, 24 h toast,
+  local notification), timing marks (`VoiceTiming` sends them with the clock offset).
+- `Playback/ChunkQueuePlayer.swift` + `ChunkQueueMath.swift`: `AVQueuePlayer` queue, cumulative time,
+  seek across chunks, chapters, rates 1/1.25/1.5/2 (time-domain pitch), duration correction, dedupe by
+  URL, cookies on every media request (`AVURLAssetHTTPCookiesKey`), `.mp4` MIME override.
+- `Playback/Sounds.swift`: the thinking cue (G3+D4 swell, 4 s loop, −24 dBFS file; Soft ≈ −30,
+  Very soft ≈ −38 dBFS) and the web's chimes, generated in code, played on a private queue; the cue
+  player is prepared at the record tap.
+- `Playback/ListenAloud.swift`: the SpeakerIcon logic (recording first, chunked recordings as a queue,
+  TTS + chapters, else `POST /tts` + stream) and `AudioDownloader` (DownloadAudioIcon logic, web file names).
+- `Session/AudioSessionController.swift`: `.playAndRecord` at the record tap, `.playback`/`.spokenAudio`
+  after Stop and for listening, `setPrefersNoInterruptionsFromSystemAlerts` while recording,
+  interruption / route / media-reset events. `Session/NowPlayingController.swift`: lock screen per phase
+  (recording, thinking, playback) with remote commands.
+- `Dictation/DictationController.swift`: recording into a writing form (no label, draft SSE for live
+  text, finalize, `/status` after finalize).
+
+`ios/Loore/Features/Voice/`: `VoiceView` (VoicePage parity: ready/recording/Thinking/playback, ECG and
+waveform, recording timer, interruption text, error dot, offline notice, player with ±10 s, progress bar
+with chapter ticks, chapter list with Roman numerals, proposal card, Continue, Text Mode, recovery
+banner), `MiniPlayerView` (global player above the tab bar, hidden on Voice), `VoiceSettingsSection`
+(Account → Voice), `NodeAudioButtons` (`SpeakerButton`, `DownloadAudioButton`), `StreamingMicButton`
+(dictation button with the web's states). M2's hooks were filled: `NodeAudioControls` (thread footer)
+and `DictationButton` (writing form).
+
+**Verified in M3** (simulator "Loore Voice iPhone 17", local backend, user 5)
+- Unit tests: 240 with M2's (one skipped). New: fMP4 packaging and a real encode (chunk 0 = init + first
+  segment, later chunks without `ftyp`, durations, flush on pause); the turn state machine against a
+  fake API (19 cases: happy path incl. cue-before-mic order and timing marks, continue, chains, drains,
+  JSON stream answer, POST /tts 200, empty transcript, warning, spend cap, mic failure, reply failure,
+  fatal upload, given-up chunks, retried finalize, cancel ignores late events, interruption, 59-minute
+  warning, resumed draft, WebM draft); queue maths; uploader (order, cookies, retries, offline degrade,
+  fatal, duplicate, relaunch); sounds; lock-screen command mapping.
+- Turn 1 (`VoiceUITests`, reply under a test-user node): recording → Thinking → the reply played without
+  a tap (`Pause`, 0:08 after 8 s) → end 0:13/0:13 → Continue. Turns 2 and 3 (Continue): the app log
+  shows `thinking cue on` at Stop and `thinking cue off` when the first chunk played (6.3 s and 8.4 s
+  later); both replies started by themselves. Server timing (Stop → playing): 9.7 s, 6.3 s, 8.4 s;
+  transcription 1.7–2.8 s; first chunk ready → playing 0.05–0.27 s.
+- `VoiceWiringUITests`: thread footer speaker → mini-player plays the reply; download → share sheet
+  with `node-<id>-tts.mp3`; "Voice Mode" on a thread reply → Voice screen plays it; dictation from the
+  debug file into a reply form (279-character transcript in the editor; draft discarded).
+- Recovery banner ("Unfinished Voice recording", Continue / Discard) for a real interrupted draft;
+  Account → Voice with the Off warning.
+- Billed calls: 3 full voice turns (transcription + `gpt-6-luna` reply + TTS) and 2 transcription-only
+  calls (the format probe, the dictation test). One TTS was replayed from the existing file.
+
+## Done in M4 (feature pages)
 
 Every route classed CORE or SECONDARY in map A §1 now has a native screen; `PlaceholderScreen` is only
 reached by routes that never push (admin, waitlist, web pages).
@@ -294,7 +387,7 @@ reached by routes that never push (admin, waitlist, web pages).
 - **References**: list (cards with reference footer and tags, page paging, Open source, Delete), detail (title
   with speaker, tweet embed via widgets.js, YouTube nocookie embed, stored text toggle, footer and tags,
   surfacing line, Good/Bad verdict, read toggle, Edit sheet with the cap and regenerate-audio question, Delete).
-  In the thread: legacy FeedPicks, ReadWindowLine and the ReadReplyTail (M2 gap).
+  In the thread: legacy FeedPicks, ReadWindowLine and the ReadReplyTail.
 - **Prompts** (craft): list with the "default updated" dot, detail with edit (monospace), the default-updated
   banner (view / accept / dismiss), history.
 - **Account**: username (validation), email (one request in flight, pending notice, resend / new link, cancel,
@@ -317,7 +410,7 @@ reached by routes that never push (admin, waitlist, web pages).
 - Fixes to earlier screens found on the way: collapsed card bodies collapse whitespace like the web (Log too);
   dialog cards keep narrow content left-aligned.
 
-### Verified in M4 (simulator "Loore iPhone 17", local Docker backend, user 5)
+**Verified in M4** (simulator "Loore iPhone 17", local Docker backend, user 5)
 - Unit tests: 332 pass (M3's 240 + 92): LineDiff/Intentions/ReferenceUtils/WorkspaceUtils (jest ports), Account
   (AccountPage.test.js), ConfirmEmail (ConfirmEmailPage.test.js), ProfileGenerationWatcher (its test.js +
   outcome rules), ReadReply + FeedPicks (their test.js), TodoModel (re-fetch before PATCH keeps the AI's item,
@@ -335,11 +428,18 @@ reached by routes that never push (admin, waitlist, web pages).
   conversation found), not-a-zip error; Share draft → publish → revoke → delete; Welcome import sheet.
 - Light theme checked on Account, Intentions and a reference (the tweet embed follows the theme).
 - No billed calls (imports ran with AI usage None, which starts no profile update; no speaker taps). User 5
-  restored: shares, reference 1032 marks, settings unchanged; test todo/profile/artifact/notes removed with
+  restored: shares, reference marks, settings unchanged; test todo/profile/artifact/notes removed with
   `local_backend.sh state m4_cleanup`.
+
+## M5 (integration and parity)
+
+In progress: parity walk, accessibility pass, release-safety checks, docs, PR.
+
+---
 
 ## Deviations from the web
 
+**Sign-in, shell and global UI (M1)**
 - **Magic link is pasted into the app** (design §4): extra "I already have a sign-in link"
   step and paste field, plus a note that sign-up links work once.
 - **More is a tab/screen**, not a dropdown; it also lists **References** (the web has no entry).
@@ -351,15 +451,16 @@ reached by routes that never push (admin, waitlist, web pages).
   Bold runs are Outfit 400 in `text-primary` (the web's `<strong>` on a 300 body).
 - **Updates sheet** is a bottom sheet (half height for a single notification) instead of a
   centred card; external links open in Safari.
-- **Home**: cards stack vertically on a phone (as the web does at that width); no Read card yet (M2).
+- **Home**: cards stack vertically on a phone (as the web does at that width).
 - **Tab icons**: the Reflect tab uses the Loore mark; others are outline SF Symbols. No counts or badges.
 - **Debug builds on a device default to Production** (simulator: Local); the design says Debug → Local.
 - **Colours are code-defined dynamic `UIColor`s** (`Tokens.swift`) instead of asset-catalog colour
   sets (the launch colour and AccentColor are in the catalog).
 - **Fonts**: Outfit comes from the upstream project's static TTFs, not the Google Fonts variable
   file (its named instances have no PostScript names, so iOS cannot select weights).
-- **Placeholders** offer "Open on the web" (authenticated web view) until each native screen lands.
-- **Markdown (M2)**: `{quote:N}` markers show a "Loading quote…" chip until quotes load (the web shows
+
+**Markdown, thread and writing (M2)**
+- **Markdown**: `{quote:N}` markers show a "Loading quote…" chip until quotes load (the web shows
   the raw marker); because content is always split at markers, markdown never spans a marker
   (the web's final rendering, without its stateful-regex quirk). Footnotes are not parsed
   (swift-markdown has no footnote extension). Images sit on their own rows inside a paragraph.
@@ -367,7 +468,7 @@ reached by routes that never push (admin, waitlist, web pages).
   "[Node inaccessible]"; the web keeps them as links). External links open in an in-app Safari
   view; `mailto:` and other schemes go to the system. The checklist "+" is always shown at 55 %
   opacity (the web shows it on hover).
-- **Thread (M2)**: kebabs are iOS menus (Delete in the system's destructive red); the focal section is
+- **Thread**: kebabs are iOS menus (Delete in the system's destructive red); the focal section is
   indented 8 pt (web 20 px) and each reply-tree level 24 pt (web 32 px) to fit a phone; the
   navigation title is the web's tab title but hidden (the page has its "Thread" heading; the title
   shows in the back button's menu); the delete dialog stays up while the orphaned-prompt check runs
@@ -376,125 +477,132 @@ reached by routes that never push (admin, waitlist, web pages).
   are not shown; auto-generate sends `preferred_model` when no picker is visible; the auto-generate
   check ignores the new reply's own AI usage; a split entry's reply goes under the head; clearing
   the text does not clear the server draft; a pin error replaces the page.
-- **Model picker (M2)**: a popover list (the web's custom listbox): featured models, "More models…"
+- **Model picker**: a popover list (the web's custom listbox): featured models, "More models…"
   expanding in place to the grouped list.
-- **Writing (M2)**: selects are iOS menus; the text field grows with its content (3–12 lines inline,
+- **Writing**: selects are iOS menus; the text field grows with its content (3–12 lines inline,
   at least 40 % of the screen in Text mode). Paste over the cap is detected as a jump of more than
   one character past 100,000 (SwiftUI has no paste event). Write New Entry, Reply and Edit Text are
   sheets (swipe down closes; the draft keeps the text). Forms are rebuilt when craft mode changes.
-- **Log (M2)**: refreshes after entries are created or deleted and on pull-to-refresh, not on every
+- **Log**: refreshes after entries are created or deleted and on pull-to-refresh, not on every
   visit (the tab stays alive); "Delete thread" is a destructive menu item.
-- **Search (M2)**: a sheet from the Log's magnifier (⌘K with a hardware keyboard); dates are optional
+- **Search**: a sheet from the Log's magnifier (⌘K with a hardware keyboard); dates are optional
   date pickers ("yyyy-mm-dd" until set).
 
-- **Workspace (M4)**: Profile, Todo and artifacts switch in place under the bubbles (no back step between
+**Voice and audio (M3)**
+- **Encoding**: AVFoundation refuses to encode with `.indefinite` segments (-11875 "only supports
+  passthrough", HLS and CMAF profiles alike), so the app encodes AAC itself and the writer runs in
+  passthrough. Same output format.
+- **Pause**: timestamps stay continuous and the writer is kept, so a native pause does not open a server
+  subsession (the web's resume does). After a system interruption the same writer continues; only a
+  media-services reset starts a new one (ftyp chunk → subsession).
+- **Lock-screen pause title** is "Paused m:ss" (the web adds "— play, then unlock"; natively the mic
+  restarts from the lock screen while the session is alive).
+- **Thinking cue**: audible cue between Stop and the first chunk and whenever the queue drains while TTS
+  is generating (design §9.4; no web counterpart), with Account → Voice → Soft / Very soft / Off.
+- **Mic permission** is asked before `init` (the web asks after init and discards the draft on denial):
+  no orphan drafts. Notification permission is asked at the first record tap, before recording starts.
+- **`cancelled`** reply status ends the turn (the web stays on "Thinking...").
+- **A WebM draft** (started in desktop Chrome) cannot be continued natively: a toast says so instead of
+  the web's `mime_mismatch` failure.
+- **Offline stop**: after one chunk used up its retries, later chunks get one attempt each and go to the
+  background session (the web retries each in full).
+- **Dictation "Save audio"** appears once the first 15 s chunk exists (the web keeps an in-memory partial
+  from the start) and is named `.m4a` (the web names MP4 audio `.webm`).
+- **Proposal card** on the Voice screen is M2's compact card (the web uses `roomy`).
+- **Leaving Voice**: popping the screen ends the conversation (web unmount); switching tabs keeps it running.
+- **59-minute warning** in voice mode too (the web has it only in text mode, #243).
+- Speaker icon title falls back to "Node N" (parity) because nodes pass no heading.
+
+**Feature pages (M4)**
+- **Workspace**: Profile, Todo and artifacts switch in place under the bubbles (no back step between
   documents, as with tabs); the version drawer is a sheet with a list and a detail page; revert failures toast
   "Couldn't revert." (web: console only); an artifact kind is validated against the backend's slug rule before
   Save and a save error shows the server's reason (web: console only); the todo row "+" is always shown at 55 %.
-- **Todo saves (M4, design §10)**: tick / row add / quick-add re-fetch the todo and apply the same text-keyed
+- **Todo saves** (design §10): tick / row add / quick-add re-fetch the todo and apply the same text-keyed
   edit to the fresh content before `PATCH`; the list re-fetches after "todo changed" and on return to the app.
   Edit-mode Save (`PUT`) writes a new version as typed (the replaced version stays in history).
-- **References (M4)**: embeds run in small web views (widgets.js with a 15 s give-up → stored text; YouTube
+- **References**: embeds run in small web views (widgets.js with a 15 s give-up → stored text; YouTube
   nocookie iframe with the frontend origin as referrer); the verdict/read row sits under the surfacing line, as
   the web wraps it at phone width; Edit is a sheet.
-- **Account (M4)**: Connect X and X bookmarks connect run in a cookie-seeded web view that closes on the frontend
+- **Account**: Connect X and X bookmarks connect run in a cookie-seeded web view that closes on the frontend
   landing; then the user reloads (Account) or the card refreshes (Import). "Paste the link" for an email
   confirmation is added to the pending-email notice and the waitlist (design §4.6); the confirmation shows in a
   sheet. "Sign out and use the other account" signs out (the link is pasted again after signing in). The default
   privacy menu has no disabled "Circles (coming soon)" row. The model picker is M2's full-width control.
-- **Import (M4)**: native file picker; a JSON candidate counts as an array when its first non-blank byte is `[`
+- **Import**: native file picker; a JSON candidate counts as an array when its first non-blank byte is `[`
   and its last `]` (not parsed whole); files above 200 MB are refused before upload ("This file is larger than
   200 MB, the most Loore accepts in one upload."; ChatGPT keeps the web's 413 text); a confirm that hits nginx's
   60 s (504/502/timeout) says the import may still finish and to check the Log before importing again; a lost
   Twitter task says "check your Log" instead of "reload the page"; after "Import Finished" the app reloads the
   user and starts the profile watcher when the confirm handed a build off (the web reloads the page). "Click"
   copy became "Tap" in the token dialog.
-- **Commons (M4)**: cards open the thread by node id (map E §8.2 iOS note), not the permalink.
+- **Commons**: cards open the thread by node id (map E §8.2 iOS note), not the permalink.
 
-## Known gaps (after M1)
+---
 
-- **Sign in with X** is built but untested (needs X credentials and a real X account); it runs in a
+## Known gaps
+
+**Needs a real iPhone** (README "Only a real iPhone can test")
+- Locked-phone voice turns, lock-screen controls, interruptions (calls, Siri), background uploads after the
+  app is killed, AirPods (HFP → A2DP switch), the 59-minute mark, cue volumes.
+- Emoji (this simulator runtime draws every emoji as a "?" box).
+- Sign in with X is built but untested (needs X credentials and a real X account); it runs in a
   non-persistent `WKWebView` and ends when the web view reaches the frontend origin.
-- Waitlist email form not exercised visually (user 5 already has a confirmed address; M1 did not
-  change it). The code path mirrors `AlphaThankYouPage.js` and posts `POST /api/dashboard/email`.
-- Spend-cap banner not seen on screen (no capped user locally); the 402 mapping and event are unit-tested.
-- Poll items in the Updates sheet not exercised against the backend ("Draft with AI" is billed).
-- Admin web view opens `/admin` with the session cookie; not viewed as an admin (user 5 is not one,
-  and admin pages show other users' data).
-- Email confirmation by pasted `/confirm-email` link (design §4.6) belongs to the Account screen (M4).
-- `ProfileGenerationWatcher` (app-wide profile-progress poller) is M4.
-- Not built in M1 (by plan): voice, feature pages (M2 built thread, writing, markdown, replies, search).
 
-## Known gaps (after M2)
-
-- **Emoji** render as "?" boxes in this simulator runtime (system font included); unverified on a device.
-- **Admin read feature** (map D §5.9): the Home Read card and the thread's Read / Read further buttons
-  (with the read-model picker) are built but untested (user 5 is not an admin). Not built: the admin
-  rerun controls and the `SemanticNeighbors` rail (FeedPicks, ReadReplyTail and ReadWindowLine came in M4).
-- **Not exercised against the backend**: audio file upload and chunked upload (billed transcription;
-  no file in the simulator), recovered-audio drafts, the todo apply *success* path (a billed merge on
-  the reply's Opus model; the 404 path is verified), Create issue and Send feedback (would file a
-  real issue / message), continuation chains (only unit-tested; cannot be forced), spend-cap and
-  offline states, `{quote_ext:N}` bubbles (user 5 has no saved references).
-- The Updates sheet's changelog bodies now go through `MarkdownView` (`flowText`); not re-seen on
-  screen in M2 (user 5 has no unread changelog entry).
-- A long thread's accessibility tree makes XCUITest queries slow; on 201121 a tap on "Apply changes
-  to my Todo" did not register in the UI test (the same steps work on a shorter proposal).
-- Voice Mode in the thread posts `/voice/from-node` (billed when it starts a reply) and opens the
-  Voice placeholder until M3.
-
-## Known gaps (after M4)
-
-- **Commons** was never opened as the test user locally (it lists other users' public posts): checked with a
-  fixture render and decoding tests only. Check on staging.
-- **No data for**: read replies (FeedPicks, ReadWindowLine, ReadReplyTail are unit-tested only), a YouTube clip,
+**Needs staging or data the local test user lacks** (README "Check on staging")
+- Commons was never opened as the test user locally (it lists other users' public posts): checked with a
+  fixture render and decoding tests only.
+- Streaming voice TTS: the local backend runs with `STREAMING_VOICE_TTS` off, so turns used batch TTS
+  (attach while `pending`, chunks after completion). The streaming path (`tts_streaming: true`, placeholder
+  chapters) is unit-tested only; the flag is on in staging and production.
+- No data for: read replies (FeedPicks, ReadWindowLine, ReadReplyTail are unit-tested only), a YouTube clip,
   an updated default prompt (banner), a running profile build (indicator; the watcher is unit-tested), filled
-  intentions (fixture render only).
-- **Not run against the backend**: sending / resending / cancelling an email change (would mail a link), real X
-  OAuth (needs X credentials; only the immediate local landing was seen), X bookmarks connect and sync, Community
-  Archive fetch and bookmarks JSON import (they rebuild the billed references digest), Claude and Twitter archive
-  confirms, clipper token create/revoke, prompt edit / accept default, reference edit save, listen-aloud on
-  profiles and references (billed TTS).
-- **Big archives**: the zip is read in a streaming way, but the analyze answer (all conversations) is held in
+  intentions (fixture render only), `{quote_ext:N}` bubbles in a thread.
+- Real X OAuth (Connect X; only the immediate local landing was seen), X bookmarks connect and sync.
+- Admin: the web view and the admin read feature (Home Read card, the thread's Read / Read further with the
+  read-model picker) are built but unseen as an admin (user 5 is not one; admin pages show other users'
+  data). Not built: the admin rerun controls and the `SemanticNeighbors` rail.
+
+**Not run against the backend** (billed, or would send mail / file issues)
+- Audio file upload and chunked upload, recovered-audio drafts, the todo apply *success* path (a billed merge),
+  Create issue and Send feedback, continuation chains and within-turn voice chains (unit-tested only), the
+  recovery banner's Continue against the server (unit-tested), spend-cap and offline states (the 402 mapping and
+  event are unit-tested), poll items in the Updates sheet ("Draft with AI" is billed).
+- Sending / resending / cancelling an email change (would mail a link), the waitlist email form, Community
+  Archive fetch and bookmarks JSON import (they rebuild the billed references digest), Claude and Twitter
+  archive confirms, clipper token create/revoke, prompt edit / accept default, reference edit save,
+  listen-aloud on profiles and references (billed TTS).
+
+**Behaviour gaps**
+- `NodeAudioControls.onTtsGenerated` is not connected to `ThreadModel` (the web sets `has_tts` on the node so a
+  later edit offers "Regenerate audio").
+- Listen-aloud has none of the Voice page's REST recovery (parity with the web).
+- A dictation form that goes away mid-recording stops capture but leaves the audio session active until the
+  next audio action.
+- Big archives: the zip is read in a streaming way, but the analyze answer (all conversations) is held in
   memory to post it back, as the web does; a 200 MB `conversations.json` needs several hundred MB of RAM.
 - The Updates sheet has no persistent "What's new" entry (map E §9 suggestion; not built).
+- A long thread's accessibility tree makes XCUITest queries slow; on one long proposal thread a tap on
+  "Apply changes to my Todo" did not register in the UI test (the same steps work on a shorter proposal).
+- The Updates sheet's changelog bodies go through `MarkdownView` (`flowText`); not seen on screen with a real
+  unread changelog entry.
 
-## Notes for M3 (voice and audio)
-- Speaker / download on nodes: replace `NodeAudioControls` (`Features/Thread/ThreadSheets.swift`);
-  it receives the node id, content, public flag, AI usage and `hasTTS` (refresh the thread's
-  `node.hasTTS` after generating, as the web's `onTtsGenerated`).
-- Dictation: replace `DictationButton` (`Features/Write/NodeFormView.swift`) and drive the model's
-  `dictationStarted()`, `dictationTranscript(_:)`, `dictationFinished(sessionId:transcript:)`,
-  `dictationFailed(_:spendCapped:)`; Send then uses `save-as-node` (already implemented, incl. the
-  Text-mode and read-reply overrides). The button must honour `model.audioDisabledReason` and the
-  spend-cap pre-check (`model.uploadPressed()` shows the pattern for Upload).
-- `ProposalCard` is the compact variant only; the Voice page's roomy variant needs a size parameter
-  (labels "GitHub Issue Proposal", "Create GitHub Issue", "Feedback for the Team", "Save to your
-  shares", pulsing AI dot). The parser and accept flows are shared.
-- `ThreadModel.startVoice()` opens `.voice(parentId:resumeLLMId:)` exactly as the web navigates.
+---
 
-## Notes for M4 (feature pages) — done in M4 (kept for the record)
-- Render every markdown body with `MarkdownView` (Profile, Todo, artifacts, references, prompts);
-  `MarkdownStyle` takes the page's font size/weight/colour. Todo checklists: pass `ChecklistActions`
-  and use `MarkdownEdits.toggleCheckbox / insertItemAfter / appendItemToSection` (Todo quick-add)
-  so lines match the web's. A single-line inline variant (`MarkdownBody inline`) is not built:
-  use `InlineText` or add it.
-- References list: `BubbleView` has no footer/tag slots yet (the web's `footer` / `tag` props);
-  add them. `DeleteConfirmDialog` needs the `reference` mode ("Delete reference?").
-  `ReferenceFeedbackControl` (Good/Bad quote) is in `Markdown/QuotedContentView.swift`; move it if
-  the reference page wants it elsewhere. `SearchView(scope: .external)` is the References search.
-- Account's preferred-model picker: `ModelPicker(nodeId: nil, …)` asks `/nodes/default-model`.
-- `RenameThreadDialog`, `NodeFormSheet`, `LooreTag`, `FieldLabel`/`SelectField`, `NetworkStatus`,
-  `NodeTitleStore`, `InlineArtifactSection.formatTokens` and `JSRegex` are shared building blocks.
-- Version-history diff (`utils/diff.js` + tests) is still to port (M4).
+## Backend findings (no backend changes made)
 
-## Notes for M5
-- M3 and M4 are both on `ios-app` now (M4 was built after M3's merge): fold `PROGRESS-voice.md` into this file.
-- Walk map A §1 against the app: every CORE/SECONDARY route is native; PUBLIC/MARKETING and admin stay web views.
-- Check on staging (flags on, more data): Commons, the profile watcher with a real build, read-reply picks,
-  Connect X, X bookmarks, the default-updated prompt banner, YouTube references.
-- `M4ScreensUITests` assume a test user with no todo/profile; clean up with `state m4_cleanup`.
-- Update the design docs named in `CLAUDE.md` (M2 did not).
+1. **`DELETE /api/drafts/` without `parent_id` deletes the user's first top-level draft, which can be a live
+   voice recording.** Seen twice in M3 testing: another client (the M2 agent testing the writing form as the
+   same user) saved and discarded a top-level text draft 8 s after this app's voice `init`; the voice draft was
+   deleted, chunk uploads got 404 and finalize 404. In production this is a web tab or a second device
+   submitting a new entry while a top-level voice recording runs (related to #320). Suggested fix: exclude
+   drafts with a `session_id` in `delete_draft` (and in `save_draft`'s lookup).
+2. Proposed follow-ups that would help the app (universal links, sliding sign-in, `.mp4` content type, push,
+   numeric sign-in code): design doc §14.
+
+## Record-keeping
+
 - XCUITest flows need the local backend and are not in CI.
-- The first two M1 commits carry their `Co-Authored-By`/`Claude-Session` lines mid-message
-  (a quoting slip; not rewritten, per the no-amend rule).
+- `M4ScreensUITests` assume a test user with no todo/profile; clean up with `state m4_cleanup`.
+- The first two M1 commits carry their `Co-Authored-By`/`Claude-Session` lines mid-message, and the M3 merge
+  commit `73e60d7` (made with `--no-edit`) has none: not rewritten, per the no-amend rule.
