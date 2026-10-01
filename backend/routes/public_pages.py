@@ -187,7 +187,9 @@ def _article_document(root, author_user):
         "url": profile_url,
     }
     twitter_id = author_user.twitter_id or ""
-    if twitter_id.isdigit():
+    # Only for accounts that signed up with X: an X account connected later
+    # to sign in (#311) is not something the user chose to show publicly.
+    if twitter_id.isdigit() and author_user.x_connected_at is None:
         # The numeric X id survives handle renames; /i/user/<id> resolves
         # to the current profile.
         author_person["sameAs"] = [f"https://x.com/i/user/{twitter_id}"]

@@ -1,5 +1,9 @@
 """
 Celery task for asynchronous audio transcription.
+
+No monthly spend-cap check here (#341): an upload the server accepted is
+transcribed to the end. The upload endpoints refuse a capped user before
+any file is stored.
 """
 from celery import Task
 from celery.utils.log import get_task_logger
@@ -59,14 +63,6 @@ def transcribe_audio(self, node_id: int, audio_file_path: str, filename: str = N
         node = Node.query.get(node_id)
         if not node:
             raise ValueError(f"Node {node_id} not found")
-
-        from backend.utils.spend import user_is_capped
-        if user_is_capped(node.user_id):
-            logger.warning(
-                "User %s is spend-capped; skipping transcription", node.user_id)
-            node.transcription_status = 'failed'
-            db.session.commit()
-            return
 
         # Update status to processing
         node.transcription_status = 'processing'

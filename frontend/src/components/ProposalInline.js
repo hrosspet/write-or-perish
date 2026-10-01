@@ -140,6 +140,12 @@ export function hasProposalSections(text) {
   return hasTodo || hasIssue || hasFeedback || hasShare;
 }
 
+// Headings for sections moveProposalItem has to create, keyed by the
+// section keys the toggles pass. Order and casing follow the prompts
+// (orient.txt / voice.txt / agentic.txt).
+const PROPOSAL_SECTION_ORDER = ['completed', 'new task'];
+const PROPOSAL_SECTION_TITLES = { completed: 'Completed', 'new task': 'New Tasks' };
+
 /**
  * Move a todo-list item between `###` sections in raw LLM content.
  * Used by the interactive proposal toggles to flip a task between
@@ -150,6 +156,10 @@ export function hasProposalSections(text) {
  * heading text (e.g. 'completed', 'new task').
  * `itemText` is the stripped display text to match raw lines against.
  * Returns the original content unchanged if the item can't be found.
+ * If the target section doesn't exist (e.g. a proposal with only
+ * `### New Tasks`), it is created next to the source section in the
+ * prompts' order — Completed before New Tasks — so the item is never
+ * dropped (#377).
  */
 export function moveProposalItem(content, itemText, fromSection, toSection, { prepend = false } = {}) {
   const lines = content.split('\n');
@@ -201,6 +211,21 @@ export function moveProposalItem(content, itemText, fromSection, toSection, { pr
     }
     if (toInsert >= 0) {
       lines.splice(toInsert, 0, rawLine);
+    }
+  } else {
+    const heading = `### ${PROPOSAL_SECTION_TITLES[toSection] || toSection}`;
+    const rank = (key) => PROPOSAL_SECTION_ORDER.indexOf(key);
+    if (rank(toSection) >= 0 && rank(toSection) < rank(fromSection)) {
+      // Target comes first: new section goes right above the source heading.
+      lines.splice(from.start, 0, heading, rawLine, '');
+    } else {
+      // Target comes after: new section goes below the source section's last
+      // non-blank line (the item was removed, so its end shifted up by one).
+      let last = from.start;
+      for (let i = from.start + 1; i < from.end - 1; i++) {
+        if (lines[i].trim()) last = i;
+      }
+      lines.splice(last + 1, 0, '', heading, rawLine);
     }
   }
 

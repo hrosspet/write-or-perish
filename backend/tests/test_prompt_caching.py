@@ -6,6 +6,7 @@ pinned artifacts, and _call_anthropic content-block passthrough with
 cache_control survival + cache usage fields (mocked Anthropic client).
 """
 import os
+import socket
 import sys
 from unittest.mock import MagicMock
 
@@ -147,6 +148,40 @@ def test_cost_opus_5_5_from_real_config():
                     cache_write_tokens=1_000_000) == 5_000_000
         assert cost("claude-opus-5.5", 1_000_000, 1_000_000,
                     batch=True) == 12_000_000
+
+
+@pytest.mark.parametrize("model_id, page", [
+    # $/MTok (input, cached input, cache writes, output) from the OpenAI
+    # pricing page, verified 2026-09-23: short context, then >272k input.
+    ("gpt-6-sol", {"short": (2.00, 0.20, 2.50, 10.00),
+                   "long": (4.00, 0.40, 5.00, 15.00)}),
+    ("gpt-6-luna", {"short": (0.10, 0.01, 0.125, 0.50),
+                    "long": (0.20, 0.02, 0.25, 0.75)}),
+])
+def test_cost_gpt_6_from_real_config(model_id, page):
+    # Reads the real config entry, like the Opus 5.5 test above. A price
+    # of $X/MTok is X microdollars per token, so N tokens cost X * N.
+    from backend.config import Config
+    app = Flask(__name__)
+    app.config["SUPPORTED_MODELS"] = {
+        model_id: Config.SUPPORTED_MODELS[model_id]}
+    with app.app_context():
+        def cost(n_in, n_out, **kw):
+            return calculate_llm_cost_microdollars(model_id, n_in, n_out, **kw)
+        n = 100_000  # under the 272k tier
+        inp, cached, write, out = page["short"]
+        assert cost(n, 0) == round(inp * n)
+        assert cost(n, 0, cached_input_tokens=n) == round(cached * n)
+        assert cost(n, 0, cache_write_subset_tokens=n) == round(write * n)
+        assert cost(0, 1_000_000) == round(out * 1_000_000)
+        n = 1_000_000  # over the 272k tier: the whole request reprices
+        inp, cached, write, out = page["long"]
+        assert cost(n, 0) == round(inp * n)
+        assert cost(n, 0, cached_input_tokens=n) == round(cached * n)
+        assert cost(n, 0, cache_write_subset_tokens=n) == round(write * n)
+        assert cost(n, n) == round((inp + out) * n)
+        assert cost(n, n, batch=True) == round((inp + out) * n / 2)
+
 
 def test_gated_voice_tools_warm_matches_generation():
     # The pre-warm and generation BOTH build their tool list via
@@ -292,6 +327,23 @@ def test_render_system_message_resolves_pinned_placeholders(app):
         assert render_system_message(node, uid) == text
 
 
+class _CompletedStream(list):
+    """A Responses API event stream holding only the terminal event, for
+    fakes of client.responses.create(..., stream=True)."""
+
+    def __init__(self, response):
+        event = type("Event", (), {})()
+        event.type = "response.completed"
+        event.response = response
+        super().__init__([event])
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
 # ── Provider block passthrough (#187) ────────────────────────────────────
 
 def test_call_anthropic_preserves_blocks_and_cache_usage(app, monkeypatch):
@@ -316,13 +368,25 @@ def test_call_anthropic_preserves_blocks_and_cache_usage(app, monkeypatch):
         usage = FakeUsage()
         stop_reason = "end_turn"
 
-    class FakeMessages:
-        def create(self, **kwargs):
-            captured.update(kwargs)
+    class FakeStream:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def get_final_message(self):
             return FakeResponse()
 
+    class FakeMessages:
+        # Streamed: the SDK refuses a non-streaming
+        # request at the 32k output budget.
+        def stream(self, **kwargs):
+            captured.update(kwargs)
+            return FakeStream()
+
     class FakeClient:
-        def __init__(self, api_key=None):
+        def __init__(self, api_key=None, **kwargs):
             self.messages = FakeMessages()
 
     monkeypatch.setattr(providers, "Anthropic", FakeClient)
@@ -351,6 +415,7 @@ def test_call_anthropic_preserves_blocks_and_cache_usage(app, monkeypatch):
     assert result["cache_read_input_tokens"] == 5000
     assert result["cache_creation_input_tokens"] == 300
     assert result["input_tokens"] == 100
+    assert captured["max_tokens"] == providers.DEFAULT_MAX_OUTPUT_TOKENS
 
 
 # ── OpenAI cached-input pricing (#189) ───────────────────────────────────
@@ -508,16 +573,27 @@ def test_call_openai_surfaces_cache_write_subset(app, monkeypatch):
 
     class FakeResponses:
         def create(self, **kwargs):
-            return FakeResponse()
+            assert kwargs["stream"] is True
+            return _CompletedStream(FakeResponse())
+
+    client_kwargs = {}
 
     class FakeClient:
-        def __init__(self, api_key=None):
+        def __init__(self, api_key=None, **kwargs):
+            client_kwargs.update(kwargs)
             self.responses = FakeResponses()
 
     monkeypatch.setattr(providers, "OpenAI", FakeClient)
     with app.app_context():
         result = providers.LLMProvider._call_openai(
             "gpt-5.6-sol", [{"role": "user", "content": "x"}], "k")
+    # A silent reasoning phase must survive GCP's 10-minute idle cutoff.
+    assert client_kwargs["http_client"] is not None
+    options = providers._keepalive_socket_options()
+    assert (socket.SOL_SOCKET, socket.SO_KEEPALIVE, True) in options
+    idle = getattr(socket, "TCP_KEEPIDLE", None)
+    if idle is not None:
+        assert (socket.IPPROTO_TCP, idle, 60) in options
     assert result["input_tokens"] == 6018
     assert result["cached_tokens"] == 2815
     assert result["cache_write_subset_tokens"] == 3000

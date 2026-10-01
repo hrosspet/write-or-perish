@@ -25,8 +25,10 @@ from flask_login import current_user, login_required
 from backend.extensions import db
 from backend.models import (
     ApiToken, ExternalAccount, ExternalItem, ExternalItemEmbedding,
-    TTSChunk, UserNotification,
+    FeedPick, READ_PICK_SOURCE, TTSChunk, TWEET_SOURCES, UserNotification,
 )
+from backend.utils import reference_log
+from backend.utils.reference_rows import save_pick_row
 from backend.utils.api_tokens import (
     SCOPE_EXTERNAL_WRITE, generate_api_token, token_or_login_required,
 )
@@ -82,7 +84,10 @@ def list_items():
     page = request.args.get("page", 1, type=int)
     per_page = min(request.args.get("per_page", 50, type=int), 200)
 
-    query = ExternalItem.query.filter_by(user_id=current_user.id)
+    # Saved references only: a tweet a Read picked that the user did not
+    # save is not one (#352).
+    query = ExternalItem.query.filter(
+        ExternalItem.user_id == current_user.id, ExternalItem.saved())
     if source:
         query = query.filter_by(source=source)
     total = query.count()
@@ -98,7 +103,8 @@ def list_items():
 
     counts = dict(
         db.session.query(ExternalItem.source, db.func.count())
-        .filter_by(user_id=current_user.id)
+        .filter(ExternalItem.user_id == current_user.id,
+                ExternalItem.saved())
         .group_by(ExternalItem.source).all()
     )
     return jsonify({
@@ -184,12 +190,25 @@ def update_item(item_id):
 def delete_item(item_id):
     """Remove a reference. Its embedding goes with it (explicitly, since
     SQLite tests don't enforce the FK cascade). A {quote_ext} marker that
-    pointed at it renders as inaccessible, like a deleted node's quote."""
+    pointed at it renders as inaccessible, like a deleted node's quote.
+
+    A tweet that a Read picked stays as the Read pick (#352): the row
+    goes back to READ_PICK_SOURCE, out of the references, and the Read
+    reply keeps quoting it with its marks and the pick's record."""
     item = ExternalItem.query.filter_by(
         id=item_id, user_id=current_user.id).first()
     if item is None:
         return jsonify({"error": "not found"}), 404
     ExternalItemEmbedding.query.filter_by(item_id=item.id).delete()
+    was_picked = item.is_saved and db.session.query(FeedPick.id).filter_by(
+        external_item_id=item.id, kind=reference_log.KIND_READ).first()
+    if was_picked and ExternalItem.query.filter_by(
+            user_id=item.user_id, source=READ_PICK_SOURCE,
+            external_id=item.external_id).first() is None:
+        item.source = READ_PICK_SOURCE
+        db.session.commit()
+        return jsonify({"deleted": True, "id": item_id,
+                        "kept_as_pick": True}), 200
     TTSChunk.query.filter_by(item_id=item.id).delete()
     db.session.delete(item)
     db.session.commit()
@@ -302,15 +321,32 @@ def get_item_tts_chapters(item_id):
 @login_required
 def mark_item_read(item_id):
     """POST marks the reference read (idempotent: an already-read item
-    keeps its original read_at); DELETE clears the mark."""
+    keeps its original read_at); DELETE clears the mark.
+
+    Body (optional): {node_id, via}. node_id is the reply the reference
+    was shown in, via "open" says the mark came from opening the post.
+    Each call is logged for the recommendation record (#352): an open
+    always, a read or unread mark when it changes the state."""
     item = ExternalItem.query.filter_by(
         id=item_id, user_id=current_user.id).first()
     if item is None:
         return jsonify({"error": "not found"}), 404
+    data = request.get_json(silent=True) or {}
+    node_id = reference_log.reply_node_id(data.get("node_id"),
+                                          current_user.id)
     if request.method == "POST":
+        if data.get("via") == "open":
+            reference_log.record_action(
+                item, reference_log.ACTION_OPEN, node_id=node_id)
+        elif item.read_at is None:
+            reference_log.record_action(
+                item, reference_log.ACTION_READ, node_id=node_id)
         if item.read_at is None:
             item.read_at = datetime.utcnow()
     else:
+        if item.read_at is not None:
+            reference_log.record_action(
+                item, reference_log.ACTION_UNREAD, node_id=node_id)
         item.read_at = None
     db.session.commit()
     return jsonify({
@@ -338,6 +374,12 @@ def set_item_feedback(item_id):
     value = data.get("feedback")
     if value is not None and value not in FEEDBACK_VALUES:
         return jsonify({"error": "feedback must be 'good', 'bad' or null"}), 400
+    # Logged with the reply it was given in (node_id, optional): which
+    # recommendations it counts for is decided in reference_log (#352).
+    reference_log.record_action(
+        item, reference_log.ACTION_VERDICT, value=value,
+        node_id=reference_log.reply_node_id(data.get("node_id"),
+                                            current_user.id))
     item.feedback = value
     item.feedback_at = datetime.utcnow() if value else None
     if value and item.read_at is None:
@@ -706,6 +748,23 @@ def clip():
             "truncated": truncated if updated else False,
         }), 200
 
+    if source in TWEET_SOURCES:
+        # A tweet a Read picked becomes the saved reference in place, so
+        # the read mark and verdict given on the pick stay with it (#352).
+        pick_row = ExternalItem.query.filter_by(
+            user_id=user.id, source=READ_PICK_SOURCE,
+            external_id=external_id).first()
+        if pick_row is not None:
+            save_pick_row(pick_row, source)
+            _upgrade_clip(pick_row, content, title, author, posted_at)
+            if author_protected:
+                pick_row.public_source = False
+            db.session.commit()
+            return jsonify({
+                "created": True, "id": pick_row.id, "source": source,
+                "title": pick_row.title, "truncated": truncated,
+            }), 201
+
     item = ExternalItem(
         user_id=user.id, source=source, external_id=external_id,
         author_handle=author, title=title, url=canon,
@@ -732,7 +791,7 @@ def clip_status():
     user = g.api_user
     counts = dict(
         db.session.query(ExternalItem.source, db.func.count())
-        .filter_by(user_id=user.id)
+        .filter(ExternalItem.user_id == user.id, ExternalItem.saved())
         .group_by(ExternalItem.source).all()
     )
     return jsonify({
