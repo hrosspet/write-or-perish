@@ -8,7 +8,7 @@ Contents
 - §0 Conventions that apply to every endpoint (hosts, cookies, 401/403/402, dates, trailing slashes, limits)
 - §1 `api.js` and per-environment configuration
 - §2 Endpoint catalogue (2.1 auth, 2.2 nodes + media, 2.3 drafts/recording/voice/textmode/read/SSE, 2.4 account and workspace, 2.5 import/export/references/share/commons/admin)
-- §3 Auth end to end (cookies, magic link, X OAuth, Connect X, logout, gating, email change, CORS/CSRF)
+- §3 Auth end to end (cookies, magic link, X OAuth, Connect X, logout, gating, email change, CORS)
 - §4 Native auth options (no backend change vs small backend change) and the recommendation
 - §5 Data model (enums, entities, relations, where each JSON shape is defined, proposals)
 - §6 Async task patterns (polling, profile progress, warnings, spend cap, error codes, SSE summary)
@@ -20,11 +20,11 @@ Contents
 - **Auth is cookie-only.** Every `/api/*` route that needs a user uses Flask-Login sessions (`@login_required` or a `current_user` check). There is no bearer-token auth for the app; the only bearer tokens (`loore_…`, scope `external:write`) are for the Chrome clipper and are accepted on two external-reference write routes only (`backend/utils/api_tokens.py`).
 - **Unauthenticated behaviour differs by path prefix** (`backend/__init__.py` `unauthorized()`):
   - path starts with `/api` → `401 {"error": "Unauthorized"}`.
-  - any other `@login_required` path (e.g. `/auth/logout`, possibly some `/media/...` routes) → `302` to `/auth/login`, which itself starts the X OAuth flow (302 to `/auth/twitter` → 302 to api.twitter.com). A native client must not follow redirects blindly on non-`/api` paths; treat a 302 whose `Location` contains `/auth/login` or `twitter.com` as "signed out".
+  - any other `@login_required` path (e.g. `/auth/logout`) → `302` to `/auth/login`, which itself starts the X OAuth flow (302 to `/auth/twitter` → 302 to api.twitter.com). A native client must not follow redirects blindly on non-`/api` paths; treat a 302 whose `Location` contains `/auth/login` or `twitter.com` as "signed out".
 - **Approval gate** (`block_unapproved_users` before_request): a signed-in user with `approved == false` gets `403 {"error": "Your account is not approved. Please wait for approval."}` on every `/api` call except: any `GET /api/dashboard*`, `PUT /api/dashboard/user*`, `POST|DELETE /api/dashboard/email` and `/api/dashboard/email/*`, anything under `/api/terms`, plus `/auth/*` and public-page endpoints.
 - **Spend cap** (per-user monthly USD cap): any cost-incurring call from a capped user returns `402 {"error": "monthly_spend_limit_reached", "message": "You've reached your monthly usage limit for the free alpha. It resets at the start of next month."}`. Raised by `@require_spend_headroom` (or an inline check) on: `POST /api/nodes/` in multipart (audio file) mode, `POST /api/nodes/<id>/llm`, `POST /api/nodes/<id>/tts`, `POST /api/nodes/upload/init`, `POST /api/nodes/streaming/init`, `POST /api/drafts/streaming/init`, `POST /api/profile/<id>/tts`, `POST /api/external/items/<id>/tts`; and by the app-wide `SpendCapExceeded` error handler on any path that creates an LLM placeholder node (textmode/voice/read starts etc.). The reset is the first day of the next month, UTC.
-- **No server-side rate limiting.** No Flask-Limiter, no route returns 429. Provider-side failures (OpenAI/Anthropic 429, org spend limit, overload) do not become HTTP errors: the async task fails and the raw exception text lands in the node's `llm_task_error`, which `GET /api/nodes/<id>/llm-status` returns with `status: "failed"`.
-- **No CSRF protection, no Origin/Referer checks.** CORS (`flask-cors`) allows only `FRONTEND_URL` with credentials; CORS is enforced by browsers only, so native `URLSession` calls are unaffected.
+- **Provider failures.** Provider-side failures (OpenAI/Anthropic 429, org spend limit, overload) do not become HTTP errors: the async task fails and the raw exception text lands in the node's `llm_task_error`, which `GET /api/nodes/<id>/llm-status` returns with `status: "failed"`.
+- **CORS** (`flask-cors`) allows only `FRONTEND_URL` with credentials; CORS is enforced by browsers only, so native `URLSession` calls are unaffected.
 - **Timestamps.** Almost every route serializes with `backend/utils/timefmt.iso_utc`: naive UTC datetimes as `datetime.isoformat() + "Z"`. Python's `isoformat()` emits **microseconds (6 digits) when non-zero and no fraction when zero**: `"2026-09-30T12:34:56.123456Z"` or `"2026-09-30T12:34:56Z"`. A few timezone-aware columns (e.g. `prefill_consent_at`) come out with `+00:00` instead of `Z`. `/api/updates` changelog entries carry a date-only `"2026-09-30"`. The `/api/log` cursor is an opaque string built from a naive isoformat (`"<iso>|<id>"`); pass it back unchanged. Swift: write one tolerant date decoder (try fractional, then non-fractional, then `+00:00`, then date-only); `ISO8601DateFormatter` with `.withFractionalSeconds` must not be assumed to accept 6 digits on every iOS version, so trim the fraction to 3 digits before parsing.
 - **Trailing slashes.** Routes declared as `"/"` under a prefix (e.g. `GET /api/dashboard/`, `POST /api/nodes/`, `GET/POST/DELETE /api/drafts/`) are canonical with the slash; the slashless form gets a `308` to the slash form. This applies to `/api/dashboard/`, `/api/nodes/` (POST), `/api/drafts/` (GET/POST/DELETE), `/api/todo/` (GET/PATCH/PUT), `/api/artifacts/` (GET), `/api/profile/` (POST), `/api/prompts/` (GET), `/api/voice/` (POST). URLSession follows 308 keeping method and body, but call the canonical form to save a round trip. The opposite case: `GET /api/updates` has no slash and `/api/updates/` is a 404.
 - **Request headers the web app sends.** `X-Timezone: <IANA tz>` on every request (a hint used for LLM time grounding; the authoritative value is persisted with `PATCH /api/dashboard/timezone`). Status polls add `Cache-Control: no-cache`. JSON bodies use `Content-Type: application/json`.
@@ -239,7 +239,7 @@ Notes: the whole subtree is returned (no depth limit, no pagination); children a
 
 ##### `POST /api/nodes/`
 - Backend: routes/nodes.py:create_node
-- Auth: login. The app only sends a `parent_id` the user can see (as the web does).
+- Auth: login.
 - Called from: `NodeForm.js` (new text node; small audio upload), `NodeDetail.js` (`submitReadReplyMessage` when `ai_usage == "none"`), `WritePage.js` (craft-mode fallback when AI is not allowed).
 - Path note: trailing slash. `POST /api/nodes` (no slash) gets a 308 to `/api/nodes/`.
 - Request, JSON mode (`Content-Type: application/json`):
@@ -446,7 +446,7 @@ Notes: the whole subtree is returned (no depth limit, no pagination); children a
 
 #### 2.2.5 Audio, TTS, transcription
 
-Audio URLs returned by these endpoints are site-relative (`/media/...`). The web prefixes them with `REACT_APP_BACKEND_URL` (e.g. `https://loore.org`). See `GET /media/<path>` for auth (there is none).
+Audio URLs returned by these endpoints are site-relative (`/media/...`). The web prefixes them with `REACT_APP_BACKEND_URL` (e.g. `https://loore.org`). See `GET /media/<path>` (§2.2.8).
 
 ##### `GET /api/nodes/<int:node_id>/audio`
 - Backend: routes/nodes.py:get_audio_urls
@@ -486,7 +486,7 @@ Audio URLs returned by these endpoints are site-relative (`/media/...`). The web
 - Errors: 409 `{"error":"Original audio exists – TTS not required"}`; 500 `{"error":"TTS not configured (missing API key)"}`; 402 spend cap; 404 (HTML).
 - Follow-up: subscribe to `GET /api/sse/nodes/<id>/tts-stream` (events `chunk_ready` with `audio_url`, `duration`, `section_index`, and `all_complete` with `tts_url`), with `GET tts-status` as fallback. The web waits for this POST to return before opening the SSE (else the SSE may see no pending task).
 - Frontend: 402 → reset silently; other errors → error state with `error`. A network-level failure (no HTTP response) in voice mode is retried by the watchdog because the endpoint is idempotent.
-- Note: the web hides the speaker for `ai_usage == "none"` nodes; the backend does not check `ai_usage` here.
+- Note: the web hides the speaker for `ai_usage == "none"` nodes.
 
 ##### `GET /api/nodes/<int:node_id>/tts-status`
 - Backend: routes/nodes.py:get_tts_status
@@ -534,7 +534,7 @@ Client algorithm (`uploadFileInChunks`):
 
 ##### `POST /api/nodes/upload/init`
 - Backend: routes/nodes.py:init_chunked_upload
-- Auth: login + `require_spend_headroom` (402 before any node exists; chunk/finalize are not cap-checked).
+- Auth: login + `require_spend_headroom` (402 before any node exists).
 - Request JSON: `{ filename: String (required, allowed extension), filesize: Int (required, bytes, ≤ 200 MB), total_chunks: Int (required), upload_id: String (required), parent_id?: Int, node_type?: String ("user"), privacy_level?: String ("private"), ai_usage?: String ("none") }`. Web sends `parent_id, node_type: "user", privacy_level, ai_usage`.
 - Response 201: `{ node_id: Int, upload_id: String }`. Creates a placeholder node (`"[Voice note – upload in progress]"`, `transcription_status: "pending"`).
 - Errors: 400 `{"error":"Missing required fields"}`; 415 `{"error":"Unsupported file type"}`; 413 `{"error":"File too large"}`; 400 invalid privacy/ai_usage; parent guard 400/404/410; 402.
@@ -614,7 +614,7 @@ Client algorithm (`uploadFileInChunks`):
 #### 2.2.8 Media files
 
 ##### `GET /media/<path:filename>`
-- Backend: routes/media.py:serve_media (production path: nginx proxies `/media/` to Flask with `proxy_buffering off` and adds `Cache-Control: max-age=86400, public`).
+- Backend: routes/media.py:serve_media (production path: nginx proxies `/media/` to Flask with `proxy_buffering off`).
 - Auth: the app sends the session cookies with every media request (see `docs/IOS-APP-DESIGN.md` §9.3).
 - Called from: the web audio player (`<audio src>` / queue) with URLs from `/audio`, `/audio-chunks`, `tts_url`, SSE `chunk_ready.audio_url`; `DownloadAudioIcon` via `fetch`.
 - Response: plain file on disk → Flask `send_file` (Werkzeug conditional/Range support, mimetype guessed from extension). Encrypted file (`<path>.enc` on disk; URLs never include `.enc`) → decrypted in memory and served with `Accept-Ranges: bytes`, `Content-Disposition: inline; filename="<name>"`, `Content-Length`; a `Range: bytes=start-end` header returns 206 with `Content-Range`. MIME map for decrypted files: `.mp3 audio/mpeg`, `.webm audio/webm`, `.wav audio/wav`, `.m4a audio/mp4`, `.ogg audio/ogg`, `.flac audio/flac`, anything else (including `.mp4`) `application/octet-stream`.
@@ -736,11 +736,10 @@ A recording is a Draft row with a `session_id` (UUID string). Audio is uploaded 
     "sse_url": "/api/sse/drafts/<session_id>/transcription-stream" }
   ```
 - Errors: 402 spend cap (web: toast "record" message, back to idle, `err.spendCapped`).
-- Notes: parent_id is not validated here.
 
 ##### `POST /api/drafts/streaming/<session_id>/audio-chunk` (FILE UPLOAD)
 - Backend: routes/drafts.py:upload_streaming_chunk
-- Auth: login; the session must belong to the caller. Not cap-checked (a started recording is never cut off).
+- Auth: login; the session must belong to the caller.
 - Called from: hooks/useStreamingTranscription.js `uploadChunkWithRetry` (axios, `timeout: 600000`), plus a `navigator.sendBeacon` copy when the page is hidden.
 - Request: `multipart/form-data`:
   - `chunk`: file part, the raw MediaRecorder blob; web filename `chunk_<index>.webm|.mp4` (the server ignores the filename).
@@ -791,7 +790,7 @@ A recording is a Draft row with a `session_id` (UUID string). Audio is uploaded 
 
 ##### `POST /api/drafts/streaming/<session_id>/finalize`
 - Backend: routes/drafts.py:finalize_streaming
-- Auth: login; own session; draft must be `recording`. Not cap-checked (the Voice reply is skipped with a warning instead).
+- Auth: login; own session; draft must be `recording`. For a capped user the Voice reply is skipped with a warning.
 - Called from: useStreamingTranscription `stopStreaming` (axios `timeout: 120000`), after the recorder's last `ondataavailable` and after all pending uploads settle.
 - Request JSON: `{ "total_chunks": int (required; = highest chunk_index + 1), "label"?: "Voice", "parent_id"?: int, "model"?: string }`. When `label` is `"Reflect"|"Orient"|"Voice"` and `model` is missing, the server resolves one.
 - Response 202: `{ "message": "Finalization started", "task_id": string, "draft_id": int, "total_chunks": int }`
@@ -1235,7 +1234,7 @@ LatestProfile = {                      // newest UserProfile row (including pipe
 - Backend: routes/dashboard.py:get_public_dashboard
 - Auth: login_required; GET is exempt from approval gating.
 - Called from: nobody (the web route `/dashboard/:username` now redirects client-side to the public profile page).
-- Response 200: same envelope as above but `user` is only `{"id", "username", "description"}`, and nodes are filtered to those the viewer can access. `latest_profile` is the TARGET user's latest profile including full content (a privacy oddity; not used by the frontend).
+- Response 200: same envelope as above but `user` is only `{"id", "username", "description"}`, and nodes are filtered to those the viewer can access. Not used by the frontend.
 - Errors: 404 (HTML 404 from `first_or_404`) for an unknown username.
 
 ##### `PUT /api/dashboard/user`
@@ -1733,7 +1732,7 @@ PollResponse = { "status": "drafting" | "draft" | "draft_failed" | "sent" | "dec
 
 | Route | Note |
 |---|---|
-| `GET /api/dashboard/<username>` | Old public dashboard; web route now redirects. Returns another user's latest profile content. |
+| `GET /api/dashboard/<username>` | Old public dashboard; web route now redirects. |
 | `GET /api/profile/<id>/tts-status` | Superseded by SSE `/api/sse/profiles/<id>/tts-stream`; usable as a polling fallback. |
 | `GET /api/artifacts/<kind>` | Web uses the list endpoint; handy for native single-artifact loads. |
 | `GET /health`, `GET /ready`, `GET /api/health`, `GET /api/ready` | Monitoring only. |
@@ -2255,11 +2254,11 @@ How a request is authenticated (Flask-Login 0.6.3 `_load_user`): `session["_user
 
 Session protection is Flask-Login's default `"basic"`: when IP or User-Agent differ from the values at login, the session is only marked non-fresh; nothing uses `fresh_login_required`, so IP/UA changes (mobile networks, cookies copied from a WKWebView with a different UA) have no effect.
 
-Logout (`GET /auth/logout`) calls `logout_user()`, which clears the session keys and tells the browser to delete `remember_token`. The remember token value itself stays valid server-side (Flask-Login has no revocation list).
+Logout (`GET /auth/logout`) calls `logout_user()`, which clears the session keys and tells the browser to delete `remember_token`.
 
 ### 3.2 Magic link (email) sign-in and sign-up
 
-1. **Send.** `POST /auth/magic-link/send`, JSON `{"email": "<addr>", "next_url": "<relative path, optional>"}`. No auth, no CSRF.
+1. **Send.** `POST /auth/magic-link/send`, JSON `{"email": "<addr>", "next_url": "<relative path, optional>"}`. No auth.
    - Email is trimmed and lower-cased; invalid → `400 {"error": "Please enter a valid email address."}`.
    - `next_url` must be a safe relative path (`/...`, not `//`, no scheme/host); otherwise it is silently dropped.
    - Token = itsdangerous `URLSafeTimedSerializer(SECRET_KEY)` over `{"email", "next_url"?}` with salt `"magic-link"`. If an account with that email exists, `sha256(token)` and expiry (now + `MAGIC_LINK_EXPIRY_SECONDS`, default 900 s) are stored on the user; for an unknown email nothing is stored.
@@ -2315,9 +2314,9 @@ Admin detection: `user.is_admin` (boolean DB column, from the dashboard payload)
 - `ConfirmEmailPage.js` reads `?token=` and, once signed in as the account that asked, calls `POST /api/dashboard/email/confirm {"token"}`. Signed out, it asks the person to sign in (with `returnUrl=/confirm-email?token=…`); signed in as the wrong account it offers `/auth/logout?next=/confirm-email?token=…`.
 - `DELETE /api/dashboard/email/pending` cancels a pending change; `DELETE /api/dashboard/email` removes the address. Shapes in §2.
 
-### 3.8 CORS and CSRF
+### 3.8 CORS
 
-`CORS(app, supports_credentials=True, origins=[FRONTEND_URL])`. No CSRF tokens, no Origin/Referer checks, no `SameSite=Strict`. Nothing here blocks a native client sending cookies from `URLSession`. The only anti-forgery check in the codebase is the X OAuth request-token binding in `backend/oauth.py`.
+`CORS(app, supports_credentials=True, origins=[FRONTEND_URL])`. CORS is enforced by browsers only; nothing here blocks a native client sending cookies from `URLSession`.
 
 ## 4. Native auth options
 
@@ -2571,5 +2570,3 @@ All under `backend/tests/`. Run with `cd backend && python -m pytest`. One line 
 14. Playback: desktop recordings are WebM/Opus, which AVFoundation does not play. `GET /api/nodes/<id>/audio-download?format=mp3` converts, but only for streaming-transcription nodes, synchronously (slow for long recordings, subject to the 60 s nginx timeout). TTS files are MP3 and play natively.
 15. A Voice turn's reply id arrives only in the draft SSE `all_complete` or `GET …/status`; the draft is deleted just before `all_complete`, so a client that misses it while backgrounded gets 404s and must recover the reply from the thread via the nodes API.
 16. SSE: named single-line events, no `id:`/`retry:`, resume via `?last_chunk=`, heartbeats every 15 s, server lifetime caps (10 min to 2 h), and each open stream costs the server a DB poll every 0.5–1 s. iOS will kill streams in the background; the app must reconcile by polling on foreground, as the web does.
-
-Other findings from this mapping were reported to Peter separately.

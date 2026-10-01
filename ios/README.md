@@ -45,7 +45,7 @@ the version line.
    ```
    DEVELOPMENT_TEAM = ABCDE12345
    // Only if Xcode says the bundle id is taken:
-   // LOORE_BUNDLE_ID = org.loore.app.peter
+   // LOORE_BUNDLE_ID = org.loore.app.yourname
    ```
 4. `cd ios && xcodegen && open Loore.xcodeproj`.
 5. Connect the iPhone by cable (or the same Wi-Fi after the first pairing), pick it as
@@ -87,7 +87,7 @@ xcrun simctl pbcopy booted <<< "$(ios/scripts/local_backend.sh magic-link)"   # 
 
 A phone on the same Wi-Fi can use the local backend too: set
 `loore.debug.localBackendURL` / `loore.debug.localFrontendURL` (e.g.
-`http://Peters-Mac.local:5010` and `:3001`) with `-loore.debug.localBackendURL <url>`
+`http://your-mac.local:5010` and `:3001`) with `-loore.debug.localBackendURL <url>`
 launch arguments, and allow Local Network access when iOS asks.
 
 ## Debug launch arguments

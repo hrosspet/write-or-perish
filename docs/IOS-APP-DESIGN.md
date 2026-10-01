@@ -175,7 +175,7 @@ Map C is the specification; §8 of it is the native design. The decisions:
 ### 9.3 Reply audio
 - TTS attach rule exactly as C §8.1 ("TTS attach rule"): attach `tts-stream` as soon as the reply id is known and TTS is pending/processing; handle the JSON answer; `POST /tts` once when the node completes without `all_complete`; follow `continuation_node_id` into the same queue; close on `failed`; handle `cancelled` as terminal (the web gets stuck there).
 - **Player**: one `ChunkQueuePlayer` (`AVQueuePlayer` + durations array for cumulative time, chapters, seek across chunks, rate 1/1.25/1.5/2 with `.timeDomain` pitch), shared by voice mode and the global mini-player (C §8.4 option A). Dedupe by `(node_id, chunk_index)` and URL.
-- **Send the session cookies with every media request** (`AVURLAssetHTTPCookiesKey`, and `URLSession` for downloads), even though `/media` does not currently require them, so the app keeps working when media access is tightened.
+- **Send the session cookies with every media request** (`AVURLAssetHTTPCookiesKey`, and `URLSession` for downloads).
 - Original recordings: `.mp4` originals are served as `application/octet-stream` → use `AVURLAssetOverrideMIMETypeKey: "audio/mp4"`; WebM/Opus originals (desktop recordings) → play the MP3 from `audio-download?format=mp3` (C §10.7).
 
 ### 9.4 Staying alive between Stop and the first chunk
@@ -255,8 +255,6 @@ Each milestone is one agent session on the `ios-app` branch (M3 and M4 in parall
 3. **Content type for `.mp4` media** (currently `application/octet-stream`, C §10.7).
 4. **Push notifications** ("Your reply is ready") as a fallback when iOS suspends the app anyway; needs APNs and a paid Apple Developer membership.
 5. A short numeric sign-in code as an alternative to pasting the link (B §4.2).
-
-Access-control issues found while mapping were reported to Peter separately and are not part of this work.
 
 ---
 
