@@ -26,7 +26,6 @@ struct ImportDataSection: View {
 
 private struct ImportOptions: View {
     @Bindable var model: ImportModel
-    @State private var pickerKind: ImportKind?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 9.6) {
@@ -61,7 +60,7 @@ private struct ImportOptions: View {
                 }
                 #endif
                 ForEach(ImportKind.allCases) { kind in
-                    Button { pickerKind = kind } label: {
+                    Button { model.openPicker(kind) } label: {
                         Text(kind.buttonTitle)
                             .font(LooreFont.sans(14.7, .light))
                             .foregroundStyle(LooreColor.textSecondary)
@@ -76,12 +75,9 @@ private struct ImportOptions: View {
                 }
             }
         }
-        .fileImporter(isPresented: Binding(get: { pickerKind != nil }, set: { if !$0 { pickerKind = nil } }),
-                      allowedContentTypes: [.zip]) { outcome in
-            let kind = pickerKind
-            pickerKind = nil
-            guard let kind, case .success(let url) = outcome else { return }
-            Task { await model.picked(url, kind: kind) }
+        .fileImporter(isPresented: $model.showingPicker, allowedContentTypes: [.zip]) { outcome in
+            guard let pick = model.pickerFinished(outcome) else { return }
+            Task { await model.picked(pick.url, kind: pick.kind) }
         }
         // One presenter whose content switches (chained dialogs, PROGRESS.md M2 note).
         .looreDialog(isPresented: Binding(get: { model.analysis != nil || model.result != nil },

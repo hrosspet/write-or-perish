@@ -177,7 +177,7 @@ xcodebuild -project Loore.xcodeproj -scheme LooreUITests \
 |---|---|---|
 | `SmokeFlowsUITests` (M1) | pasted magic link → tabs; More, craft dialog, light mode, Account; Terms gate; Updates sheet | `LOORE_EXPECT=terms` / `updates` with `state terms_old` / `add_notification` first; then `state restore del_notifications` |
 | `ThreadWritingUITests`, `WritingFlowUITests`, `M2ScreensUITests` (M2) | Log, threads, kebabs, writing, drafts, proposals, search | `LOORE_THREAD_IDS`, `LOORE_SHARE_NODE`, `LOORE_DRAFT_NODE`, `LOORE_REPLY_NODE`; billed steps only with `LOORE_ALLOW_BILLED=1` |
-| `M4ScreensUITests` (M4) | Todo, Profile, artifacts, references, prompts, Account, Confirm email, import, Share, Welcome | `LOORE_IMPORT_DIR`, `LOORE_KEEP_SHARE_IDS`; a test user with no todo or profile; afterwards `state m4_cleanup` |
+| `M4ScreensUITests` (M4) | Todo, Profile, artifacts, references, prompts, Account, Confirm email, import, Share, Welcome | `LOORE_IMPORT_DIR`, `LOORE_KEEP_SHARE_IDS`, `LOORE_PICKER_FILE` (a markdown zip in the simulator's Files → On My iPhone, for the real file picker); a test user with no todo or profile; afterwards `state m4_cleanup` |
 | `M5ParityUITests` (M5) | signed-out About link, a sign-in link landing on Welcome, a permalink opening the native thread, a toast above the mini-player | `LOORE_WELCOME_LINK` (`magic-link /welcome`), `LOORE_PERMALINK` (a live `/@user/slug` of the test user), `LOORE_LISTEN_NODE` (a node whose audio already exists) |
 | `VoiceUITests`, `VoiceWiringUITests` (M3) | a voice turn, Continue; speaker, download, dictation, Voice Mode from a thread | billed, see below |
 

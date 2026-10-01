@@ -344,6 +344,35 @@ final class M4ScreensUITests: XCTestCase {
         sleep(2)
     }
 
+    /// Review M3: the real system file picker (every other import test uses the
+    /// Debug button). `TEST_RUNNER_LOORE_PICKER_FILE` names a markdown zip placed in
+    /// the simulator's Files → On My iPhone; the test stops at the confirm dialog.
+    func testImportThroughTheSystemFilePicker() throws {
+        let name = try XCTUnwrap(env["LOORE_PICKER_FILE"].flatMap { $0.isEmpty ? nil : $0 },
+                                 "set TEST_RUNNER_LOORE_PICKER_FILE")
+        let app = try launch(route: "/import")
+        XCTAssertTrue(app.buttons["import.markdown"].waitForExistence(timeout: 20))
+        app.buttons["import.markdown"].tap()
+        let stem = (name as NSString).deletingPathExtension
+        var file = app.descendants(matching: .any).matching(NSPredicate(format: "label BEGINSWITH %@", stem)).firstMatch
+        if !file.waitForExistence(timeout: 10) {
+            // The picker opened somewhere else: go to On My iPhone.
+            let browse = app.buttons["Browse"]
+            if browse.exists { browse.tap() }
+            let local = app.descendants(matching: .any)["On My iPhone"].firstMatch
+            XCTAssertTrue(local.waitForExistence(timeout: 10))
+            local.tap()
+            file = app.descendants(matching: .any).matching(NSPredicate(format: "label BEGINSWITH %@", stem)).firstMatch
+        }
+        XCTAssertTrue(file.waitForExistence(timeout: 10))
+        snapshot("m3-picker")
+        file.tap()
+        if app.buttons["Open"].waitForExistence(timeout: 2) { app.buttons["Open"].tap() }
+        XCTAssertTrue(app.buttons["import.confirm"].waitForExistence(timeout: 30), "the picked file did not start the import")
+        snapshot("m3-picker-confirm")
+        app.buttons["import.cancel"].tap()
+    }
+
     // MARK: Welcome
 
     func testWelcomeImportSheet() throws {

@@ -142,8 +142,12 @@ final class ImportModel {
 
     private(set) var stage: Stage?
     var error: String?
-    /// Set to open the file picker for this importer.
-    var picking: ImportKind?
+    /// The importer whose file picker is open. Kept apart from `showingPicker`:
+    /// SwiftUI sets the picker's `isPresented` to false *before* it calls
+    /// `onCompletion`, so the kind must not be cleared with it.
+    private(set) var picking: ImportKind?
+    /// Drives the system file picker.
+    var showingPicker = false
     var analysis: ImportAnalysis?
     var importType = "separate_nodes"
     var dateOrdering = "modified"
@@ -162,6 +166,19 @@ final class ImportModel {
     var busy: Bool { stage != nil }
 
     // MARK: Pick and analyze
+
+    func openPicker(_ kind: ImportKind) {
+        picking = kind
+        showingPicker = true
+    }
+
+    /// The file picker's `onCompletion`: the picked file and the importer it was opened for.
+    func pickerFinished(_ outcome: Result<URL, Error>) -> (url: URL, kind: ImportKind)? {
+        let kind = picking
+        picking = nil
+        guard let kind, case .success(let url) = outcome else { return nil }
+        return (url, kind)
+    }
 
     func picked(_ url: URL, kind: ImportKind) async {
         error = nil

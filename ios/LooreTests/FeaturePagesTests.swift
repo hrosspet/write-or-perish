@@ -472,6 +472,22 @@ final class ImportTests: StubbedAppTestCase {
         return url
     }
 
+    /// Review M3: SwiftUI sets the picker's `isPresented` to false before it calls
+    /// `onCompletion`; the importer kind must survive that.
+    func testThePickedFileKeepsItsImporterAfterThePickerCloses() {
+        let model = ImportModel(app: app)
+        model.openPicker(.chatgpt)
+        XCTAssertTrue(model.showingPicker)
+        model.showingPicker = false // SwiftUI, before onCompletion
+        let file = URL(fileURLWithPath: "/tmp/export.zip")
+        let pick = model.pickerFinished(.success(file))
+        XCTAssertEqual(pick?.url, file)
+        XCTAssertEqual(pick?.kind, .chatgpt)
+        XCTAssertNil(model.pickerFinished(.success(file)), "used once")
+        model.openPicker(.twitter)
+        XCTAssertNil(model.pickerFinished(.failure(CocoaError(.fileReadNoPermission))))
+    }
+
     func testTheNamedConversationsFileWins() throws {
         let url = try zip("a.zip", ["export/conversations.json": "[{\"a\":1}]", "export/big.json": "[" + String(repeating: "1,", count: 500) + "1]"])
         let out = try ImportFiles.extractConversations(from: url, into: dir)
