@@ -5,7 +5,6 @@ from backend.models import (
     UserRecentContext, UserArtifact, Thread,
 )
 from backend.extensions import db
-from sqlalchemy import func
 from backend.utils.timefmt import iso_utc
 from backend.utils.slugs import permalink_for
 from datetime import datetime
@@ -366,20 +365,20 @@ def make_preview(text, length=200):
     return text[:length] + ("..." if len(text) > length else "")
 
 
-def compute_descendant_counts(node):
-    """
-    Recursively computes the total number of descendants (children,
-    grandchildren, etc.) for 'node' and stores it in node._descendant_count.
-    Returns the computed count.
-    """
-    total = 0
-    if node.children:
-        for child in node.children:
-            # For each child, compute its descendant count first, then add 1 (for the child itself)
-            child_descendants = compute_descendant_counts(child)
-            total += 1 + child_descendants
-    node._descendant_count = total  # cache the value on the instance
-    return total
+def _order_and_count_children(children_data):
+    """Sort serialized children with the largest visible subtree first
+    (stable, so ties keep creation order) and return the number of alive
+    nodes the viewer sees below the parent: each child that is not a
+    tombstone plus that child's own descendant_count. Counting from the
+    serialized tree means hidden rows (another user's private reply, a
+    pruned tombstone, anything under a hidden node) never reach the
+    count, and the walk costs no queries of its own."""
+    children_data.sort(key=lambda d: d.get("descendant_count", 0),
+                       reverse=True)
+    return sum(
+        (0 if d.get("deleted") else 1) + d.get("descendant_count", 0)
+        for d in children_data
+    )
 
 
 def _prompt_version_number(prompt):
@@ -558,9 +557,6 @@ def serialize_node_recursive(n, user_id=None, parent_user_id=None):
         return s is not None and not s.get("inaccessible")
 
     visible_children = [c for c in n.children if _child_visible(c)]
-    sorted_children = sorted(
-        visible_children, key=lambda c: c._descendant_count, reverse=True,
-    )
     # Mirror the focal serializer's parent_user_id derivation (nodes.py
     # ~line 822) so the frontend's ownedByMe check works the same way
     # at every depth.
@@ -572,9 +568,10 @@ def serialize_node_recursive(n, user_id=None, parent_user_id=None):
             serialize_node_recursive(
                 child, user_id, parent_user_id=n_as_parent_user_id,
             )
-            for child in sorted_children
+            for child in visible_children
         ) if serialized is not None
     ]
+    descendant_count = _order_and_count_children(children_data)
 
     if status is not None:
         # Tombstone — content already omitted by serialize_node_status.
@@ -586,7 +583,7 @@ def serialize_node_recursive(n, user_id=None, parent_user_id=None):
         return {
             **status,
             "child_count": len(children_data),
-            "descendant_count": n._descendant_count,
+            "descendant_count": descendant_count,
             "children": children_data,
         }
 
@@ -594,13 +591,14 @@ def serialize_node_recursive(n, user_id=None, parent_user_id=None):
         "id": n.id,
         "content": n.get_content(),
         "node_type": n.node_type,
-        "child_count": len(visible_children),
+        # Children as rendered: pruned tombstones dropped out above.
+        "child_count": len(children_data),
         "created_at": iso_utc(n.created_at),
         "updated_at": iso_utc(n.updated_at),
         "username": n.user.username if n.user else "Unknown",
         "llm_model": n.llm_model,
         "origin": n.origin,
-        "descendant_count": n._descendant_count,
+        "descendant_count": descendant_count,
         "user_id": n.user_id,
         "parent_user_id": parent_user_id,
         "children": children_data,
@@ -1039,19 +1037,6 @@ _ARTIFACT_MODELS = {
 }
 
 
-def _child_counts(node_ids):
-    """{parent_id: number of child rows} for *node_ids* in one query —
-    the same number as ``len(node.children)`` (tombstones included)
-    without loading a full row per child."""
-    if not node_ids:
-        return {}
-    return dict(
-        db.session.query(Node.parent_id, func.count(Node.id))
-        .filter(Node.parent_id.in_(node_ids))
-        .group_by(Node.parent_id).all()
-    )
-
-
 def _render_set_ciphertexts(nodes):
     """Every encrypted blob that serializing *nodes* will decrypt: the
     nodes' own content plus the context artifacts pinned to them.
@@ -1268,11 +1253,12 @@ def get_node(node_id):
         n = stack.pop()
         render_set.append(n)
         stack.extend(n.children)
-    ancestor_child_counts = _child_counts([a.id for a in ancestor_nodes])
+    # Ancestors' child counts cover only the children this viewer can
+    # access (one grouped COUNT), not every child row.
+    from backend.utils.thread_tree import visible_child_counts
+    ancestor_child_counts = visible_child_counts(
+        [a.id for a in ancestor_nodes], current_user.id)
     prefetch_deks(_render_set_ciphertexts(render_set))
-
-    # Compute descendant counts once for the entire subtree.
-    compute_descendant_counts(node)
 
     # Build ancestors. Soft-deleted ancestors the viewer had pre-deletion
     # access to render as tombstones — without this the breadcrumb chain
@@ -1289,8 +1275,14 @@ def get_node(node_id):
     # the same test routes/read.py applies (ca_feed.in_read_thread),
     # taken here from content the loop decrypts anyway.
     read_prompt_above = False
+    tombstone_below = False
     for current in ancestor_nodes:
         status = serialize_node_status(current, current_user.id)
+        # The count above skips deleted children, but the chain child just
+        # below, when it is a tombstone in this breadcrumb, is visible.
+        child_count = (ancestor_child_counts.get(current.id, 0)
+                       + (1 if tombstone_below else 0))
+        tombstone_below = bool(status and status.get("deleted"))
         if status is None:  # alive + accessible
             ancestor_content = current.get_content()
             if not read_prompt_above and (
@@ -1312,7 +1304,7 @@ def get_node(node_id):
                 "content": ancestor_content,
                 "preview": make_preview(ancestor_content),
                 "node_type": current.node_type,
-                "child_count": ancestor_child_counts.get(current.id, 0),
+                "child_count": child_count,
                 "created_at": iso_utc(current.created_at),
                 "user_id": current.user_id,
                 "parent_user_id": ancestor_parent_user_id,
@@ -1331,7 +1323,7 @@ def get_node(node_id):
         elif status.get("deleted"):
             ancestor_data = {
                 **status,
-                "child_count": ancestor_child_counts.get(current.id, 0),
+                "child_count": child_count,
                 "ai_usage": current.ai_usage,
                 "privacy_level": current.privacy_level,
             }
@@ -1353,8 +1345,6 @@ def get_node(node_id):
         return s is not None and not s.get("inaccessible")
 
     visible_children = [c for c in node.children if _child_visible(c)]
-    sorted_children = sorted(visible_children, key=lambda child: child._descendant_count, reverse=True)
-    accessible_children = visible_children  # for the child_count field below
 
     # Compute the focal node's effective owner so first-level children
     # carry the right parent_user_id without an N+1.
@@ -1370,9 +1360,10 @@ def get_node(node_id):
                 child, current_user.id,
                 parent_user_id=focal_as_parent_user_id,
             )
-            for child in sorted_children
+            for child in visible_children
         ) if serialized is not None
     ]
+    _order_and_count_children(serialized_children)
     focal = _focal_own_fields(node)
     in_read_thread = bool(
         read_prompt_above

@@ -568,3 +568,106 @@ class TestPublicDashboardChildCount:
 
         assert count(data.bob) == 1
         assert count(data.alice) == 2
+
+
+# ── Thread view counts ───────────────────────────────────────────────────
+
+def _alive_below(d):
+    """Alive nodes in the serialized subtree below *d* (tombstones only
+    anchor what is under them)."""
+    return sum((0 if c.get("deleted") else 1) + _alive_below(c)
+               for c in d.get("children", []))
+
+
+def _assert_counts_match_tree(d):
+    """child_count and descendant_count of *d* and of every node under it
+    describe the tree that was returned, nothing more."""
+    assert d["child_count"] == len(d["children"]), d["id"]
+    if "descendant_count" in d:
+        assert d["descendant_count"] == _alive_below(d), d["id"]
+    for c in d["children"]:
+        _assert_counts_match_tree(c)
+
+
+class TestThreadViewCounts:
+    """GET /api/nodes/<id> counts only children and descendants the viewer
+    can see, like the public dashboard cards."""
+
+    @pytest.fixture
+    def tree(self, data):
+        a = data.alice
+        root = _node(a, "ALICE PUBLIC ROOT", privacy_level="public")
+        hidden = _node(a, "alice private reply 1", parent=root)
+        _node(a, "public under private", parent=hidden,
+              privacy_level="public")
+        _node(a, "alice private reply 2", parent=root)
+        reply = _node(a, "alice public reply", parent=root,
+                      privacy_level="public")
+        _node(a, "private under public", parent=reply)
+        shown = _node(a, "public under public", parent=reply,
+                      privacy_level="public")
+        _node(a, "public leaf", parent=shown, privacy_level="public")
+        return types.SimpleNamespace(root=root, hidden=hidden, reply=reply,
+                                     shown=shown)
+
+    def _get(self, app, viewer, node):
+        resp = _call(app, viewer, "GET", f"/api/nodes/{node.id}")
+        assert resp.status_code == 200
+        return resp.get_json()
+
+    def test_other_user_counts_only_what_they_can_see(self, app, data, tree):
+        opened = self._get(app, data.bob, tree.reply)
+        assert [a["child_count"] for a in opened["ancestors"]] == [1]
+        assert opened["child_count"] == 1
+        assert opened["children"][0]["descendant_count"] == 1
+        _assert_counts_match_tree(opened)
+
+        root = self._get(app, data.bob, tree.root)
+        assert root["child_count"] == 1
+        assert root["children"][0]["id"] == tree.reply.id
+        assert root["children"][0]["descendant_count"] == 2
+        _assert_counts_match_tree(root)
+
+    def test_owner_counts_are_unchanged(self, app, data, tree):
+        opened = self._get(app, data.alice, tree.reply)
+        assert [a["child_count"] for a in opened["ancestors"]] == [3]
+        assert opened["child_count"] == 2
+
+        root = self._get(app, data.alice, tree.root)
+        assert root["child_count"] == 3
+        by_id = {c["id"]: c for c in root["children"]}
+        assert by_id[tree.reply.id]["descendant_count"] == 3
+        assert by_id[tree.hidden.id]["descendant_count"] == 1
+        # Largest subtree first.
+        assert root["children"][0]["id"] == tree.reply.id
+        _assert_counts_match_tree(root)
+
+    def test_deleted_children_count_as_the_tree_shows_them(
+            self, app, data, tree):
+        a = data.alice
+        leaf = _node(a, "deleted leaf", parent=tree.root,
+                     privacy_level="public")
+        anchor = _node(a, "deleted with a reply", parent=tree.reply,
+                       privacy_level="public")
+        below = _node(a, "alive under deleted", parent=anchor,
+                      privacy_level="public")
+        leaf.deleted_at = anchor.deleted_at = datetime.utcnow()
+        _db.session.commit()
+
+        for viewer in (data.bob, data.alice):
+            root = self._get(app, viewer, tree.root)
+            _assert_counts_match_tree(root)
+            reply = self._get(app, viewer, tree.reply)
+            # The deleted leaf is pruned; the deleted node with a live
+            # reply shows as a tombstone and is counted as a child.
+            assert leaf.id not in [c["id"] for c in root["children"]]
+            assert anchor.id in [c["id"] for c in reply["children"]]
+            # Seen from below, each ancestor's count matches what the
+            # viewer gets when opening that ancestor.
+            deep = self._get(app, viewer, below)
+            entries = {e["id"]: e for e in deep["ancestors"]}
+            assert entries[anchor.id]["deleted"] is True
+            assert entries[tree.reply.id]["child_count"] == \
+                reply["child_count"]
+            assert entries[tree.root.id]["child_count"] == \
+                root["child_count"]
