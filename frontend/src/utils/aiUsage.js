@@ -20,3 +20,21 @@ export function contextAllowsAi(nodes) {
   if (!Array.isArray(nodes) || nodes.length === 0) return true;
   return nodes.every(n => n && AI_ALLOWED.has(n.ai_usage));
 }
+
+// The server refuses a reply, or a Voice turn, where AI may not read the
+// thread: 403 {"error", "code": "ai_usage_none", "scope": "account" |
+// "thread"} (backend/utils/llm_nodes.py AIUsageRefused).
+export const AI_USAGE_NONE_CODE = 'ai_usage_none';
+
+/** True for the server's ai_usage refusal (see AI_USAGE_NONE_CODE). */
+export function isAiUsageRefusedError(err) {
+  const data = err && err.response && err.response.data;
+  return !!data && data.code === AI_USAGE_NONE_CODE;
+}
+
+/** "account" or "thread": whose setting the refusal came from. */
+export function aiUsageRefusalScope(err) {
+  const scope = err && err.response && err.response.data
+    && err.response.data.scope;
+  return scope === 'thread' ? 'thread' : 'account';
+}

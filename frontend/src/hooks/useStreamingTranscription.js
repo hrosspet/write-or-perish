@@ -4,6 +4,7 @@ import { useDraftTranscriptionSSE } from './useSSE';
 import { useToast } from '../contexts/ToastContext';
 import api from '../api';
 import { isSpendCapError, spendCapToastMessage } from '../utils/spendCap';
+import { isAiUsageRefusedError, aiUsageRefusalScope } from '../utils/aiUsage';
 
 /**
  * Play an error sound using the Web Audio API.
@@ -694,6 +695,20 @@ export function useStreamingTranscription(options = {}) {
         if (onError) onError(err);
         throw err;
       }
+      if (isAiUsageRefusedError(err)) {
+        // A Voice recording where AI may not read (AI usage 'none' on the
+        // account or the thread): the server refused before any draft
+        // existed and before the mic opened. Nothing failed; the parent
+        // shows why instead of the record button. No toast here.
+        setSessionState('idle');
+        try {
+          err.aiUsageRefused = true;
+          err.aiUsageScope = aiUsageRefusalScope(err);
+          err.startup = true;
+        } catch (_) { /* sealed error object */ }
+        if (onError) onError(err);
+        throw err;
+      }
       setSessionState('error');
       setErrorMessage(err.message);
       if (onError) {
@@ -720,9 +735,9 @@ export function useStreamingTranscription(options = {}) {
 
     } catch (err) {
       console.error('Failed to start streaming:', err);
-      // Refused by the spend cap: initSession already returned to idle and
-      // told the parent. The mic was never requested.
-      if (err?.spendCapped) return;
+      // Refused by the spend cap or by AI usage: initSession already
+      // returned to idle and told the parent. The mic was never requested.
+      if (err?.spendCapped || err?.aiUsageRefused) return;
       // Always land in a terminal state. The error path here means recording
       // never started, so the session must not be left in 'recording' or
       // 'initializing' (which would strand the parent UI). 'error' is set

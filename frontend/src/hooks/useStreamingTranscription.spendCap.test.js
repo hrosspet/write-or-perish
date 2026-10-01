@@ -74,3 +74,38 @@ test('any other init failure still ends in the error state', async () => {
   expect(mockAddToast).not.toHaveBeenCalled();
   expect(onError.mock.calls[0][0].spendCapped).toBeUndefined();
 });
+
+// 2026-10-01: a Voice recording where AI may not read (AI usage 'none' on
+// the account or the thread) is refused by init with 403
+// {"code": "ai_usage_none", "scope"}. Like the cap: no mic, back to idle,
+// and the parent learns why (it shows the explanation, so no toast here).
+const aiUsageError = (scope) => {
+  const err = new Error('Request failed with status code 403');
+  err.response = {
+    status: 403,
+    data: { error: 'Voice mode needs AI', code: 'ai_usage_none', scope },
+  };
+  return err;
+};
+
+test.each(['account', 'thread'])(
+  'an ai_usage_none refusal (%s) never opens the mic and returns to idle',
+  async (scope) => {
+    mockPost.mockRejectedValue(aiUsageError(scope));
+    const onError = jest.fn();
+    const { result } = renderHook(() => useStreamingTranscription({
+      onError, label: 'Voice', aiUsage: 'none',
+    }));
+
+    await act(async () => { await result.current.startStreaming(); });
+
+    expect(mockStartRecording).not.toHaveBeenCalled();
+    expect(result.current.sessionState).toBe('idle');
+    expect(mockAddToast).not.toHaveBeenCalled();
+    expect(onError).toHaveBeenCalledTimes(1);
+    const err = onError.mock.calls[0][0];
+    expect(err.aiUsageRefused).toBe(true);
+    expect(err.aiUsageScope).toBe(scope);
+    expect(err.startup).toBe(true);
+  },
+);

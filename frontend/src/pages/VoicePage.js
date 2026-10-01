@@ -1,5 +1,5 @@
 import React, { useState, useCallback, useRef, useEffect } from 'react';
-import { useSearchParams, useNavigate } from 'react-router-dom';
+import { useSearchParams, useNavigate, Link } from 'react-router-dom';
 import { FaPlay, FaPause, FaUndo, FaRedo, FaKeyboard } from 'react-icons/fa';
 import { useVoiceSession } from '../hooks/useVoiceSession';
 import { useUser } from '../contexts/UserContext';
@@ -9,6 +9,7 @@ import OfflineBanner from '../components/OfflineBanner';
 import ProposalInline from '../components/ProposalInline';
 import { useToast } from '../contexts/ToastContext';
 import { isSpendBlocked, notifySpendBlocked, spendCapToastMessage } from '../utils/spendCap';
+import { isAiAllowed } from '../utils/aiUsage';
 import api from '../api';
 
 // Chain-chapter numerals — turns cap at a handful of nodes (tool-round
@@ -182,7 +183,131 @@ function Spinner() {
   );
 }
 
+const containerStyle = {
+  display: 'flex',
+  flexDirection: 'column',
+  alignItems: 'center',
+  justifyContent: 'center',
+  minHeight: 'calc(100vh - 120px)',
+  padding: '40px 24px',
+  background: 'radial-gradient(ellipse at 50% 40%, rgba(196,149,106,0.06) 0%, transparent 70%)',
+  position: 'relative',
+};
+
+// Shown instead of the record button when AI usage keeps the account (a
+// fresh thread) or the thread Voice would continue away from AI. Voice mode
+// sends what is said to a model to get a reply, so it does not record
+// there. Same text as the server's refusal (backend/utils/llm_nodes.py) and
+// the iPhone app.
+export const VOICE_NEEDS_AI_TEXT = {
+  account: "Voice mode needs AI to listen and reply. Your Default AI usage "
+    + "is set to None, so Loore keeps your entries away from AI. You can "
+    + "change it in Account settings.",
+  thread: "Voice mode needs AI to listen and reply. AI usage in this thread "
+    + "is set to None, so Loore keeps it away from AI. You can change it "
+    + "when you edit the thread's entries, and the default for new entries "
+    + "in Account settings.",
+};
+
+const needsAiLinkStyle = {
+  fontFamily: 'var(--sans)',
+  fontSize: '0.9rem',
+  fontWeight: 300,
+  color: 'var(--accent)',
+  textDecoration: 'none',
+  borderBottom: '1px solid var(--border)',
+  paddingBottom: '2px',
+};
+
+export function VoiceNeedsAi({ scope, threadId }) {
+  return (
+    <div style={containerStyle}>
+      <p style={{
+        fontFamily: 'var(--serif)',
+        fontStyle: 'italic',
+        fontSize: 'clamp(1.2rem, 2.5vw, 1.6rem)',
+        fontWeight: 300,
+        color: 'var(--text-muted)',
+        margin: '0 0 32px 0',
+        textAlign: 'center',
+      }}>
+        Voice mode needs AI
+      </p>
+      <EcgAnimation active={false} dim={true} showScanline={false} />
+      <p style={{
+        fontFamily: 'var(--sans)',
+        fontSize: '0.95rem',
+        fontWeight: 300,
+        color: 'var(--text-secondary)',
+        lineHeight: 1.7,
+        maxWidth: '380px',
+        margin: '0 0 28px 0',
+        textAlign: 'center',
+      }}>
+        {VOICE_NEEDS_AI_TEXT[scope] || VOICE_NEEDS_AI_TEXT.account}
+      </p>
+      <div style={{ display: 'flex', gap: '24px', flexWrap: 'wrap', justifyContent: 'center' }}>
+        {scope === 'thread' && threadId && (
+          <Link to={`/node/${threadId}`} style={needsAiLinkStyle}>
+            Back to the thread
+          </Link>
+        )}
+        <Link to="/account#ai-usage" style={needsAiLinkStyle}>
+          Account settings
+        </Link>
+      </div>
+    </div>
+  );
+}
+
+// Voice mode records only where a reply may follow: a fresh thread when the
+// account's Default AI usage lets AI read it, a continued one (?parent= /
+// ?resume=) when the server says the thread does (GET /voice/availability,
+// the rule streaming init applies). A refusal while recording starts (a
+// setting changed elsewhere) leads to the same message.
 export default function VoicePage() {
+  const [searchParams] = useSearchParams();
+  const { user } = useUser();
+  const threadId = searchParams.get('parent') || searchParams.get('resume');
+  // undefined while the server is asked; null: record; else the scope.
+  const [refusal, setRefusal] = useState(threadId ? undefined : null);
+
+  useEffect(() => {
+    if (!threadId) {
+      setRefusal(null);
+      return undefined;
+    }
+    let cancelled = false;
+    setRefusal(undefined);
+    api.get('/voice/availability', { params: { parent: threadId } })
+      .then((res) => {
+        if (cancelled) return;
+        const data = res.data || {};
+        setRefusal(data.allowed === false
+          ? (data.scope === 'thread' ? 'thread' : 'account')
+          : null);
+      })
+      .catch(() => {
+        // Offline, or a server without the route: record as before; the
+        // server still refuses a turn it may not reply to (init's 403
+        // brings this message back).
+        if (!cancelled) setRefusal(null);
+      });
+    return () => { cancelled = true; };
+  }, [threadId]);
+
+  const accountRefuses = !threadId && !!user && !isAiAllowed(user.default_ai_usage);
+  const shown = accountRefuses ? 'account' : refusal;
+  if (shown === undefined) {
+    return <div style={containerStyle} />;
+  }
+  if (shown) {
+    return <VoiceNeedsAi scope={shown} threadId={threadId} />;
+  }
+  return <VoiceSession onAiUsageRefused={setRefusal} />;
+}
+
+function VoiceSession({ onAiUsageRefused }) {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const resumeId = searchParams.get('resume');
@@ -213,6 +338,7 @@ export default function VoicePage() {
     initialParentId: parentId ? Number(parentId) : null,
     model: selectedModel,
     aiUsage: user?.default_ai_usage || 'none',
+    onAiUsageRefused,
     onLLMComplete: (nodeId, content, isResume) => {
       lastLlmNodeIdRef.current = nodeId;
       setLlmContent(content);
@@ -258,17 +384,6 @@ export default function VoicePage() {
     if (isFinite(newTime)) {
       audio.seekToCumulativeTime(newTime);
     }
-  };
-
-  const containerStyle = {
-    display: 'flex',
-    flexDirection: 'column',
-    alignItems: 'center',
-    justifyContent: 'center',
-    minHeight: 'calc(100vh - 120px)',
-    padding: '40px 24px',
-    background: 'radial-gradient(ellipse at 50% 40%, rgba(196,149,106,0.06) 0%, transparent 70%)',
-    position: 'relative',
   };
 
   // Rendered in every phase so the user can escape to Text Mode. Anchored
