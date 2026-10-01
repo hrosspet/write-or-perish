@@ -70,7 +70,7 @@ final class ChunkUploader: NSObject {
 
     /// Sends one prepared upload; injectable for tests.
     var transport: (URLRequest, URL) async throws -> (Data, HTTPURLResponse) = { request, file in
-        let (data, response) = try await URLSession.shared.upload(for: request, fromFile: file)
+        let (data, response) = try await ChunkUploader.foregroundSession.upload(for: request, fromFile: file)
         guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
         return (data, http)
     }
@@ -93,9 +93,22 @@ final class ChunkUploader: NSObject {
         let config = URLSessionConfiguration.background(withIdentifier: Self.backgroundIdentifier)
         config.sessionSendsLaunchEvents = true
         config.isDiscretionary = false
-        config.httpCookieStorage = .shared
+        Self.dropCookieStorage(config)
         return URLSession(configuration: config, delegate: BackgroundDelegate(owner: self), delegateQueue: .main)
     }()
+    /// Uploads carry the cookie header set by `cookieHeader` (the app's in-memory jar).
+    /// Neither session may keep cookies of its own: `HTTPCookieStorage.shared` writes
+    /// them, including a refreshed `session` cookie, to a file on disk (review M1).
+    static let foregroundSession: URLSession = {
+        let config = URLSessionConfiguration.default
+        dropCookieStorage(config)
+        config.urlCache = nil
+        return URLSession(configuration: config)
+    }()
+    private static func dropCookieStorage(_ config: URLSessionConfiguration) {
+        config.httpCookieStorage = nil
+        config.httpShouldSetCookies = false
+    }
     private let useBackgroundSession: Bool
 
     init(root: URL? = nil, useBackgroundSession: Bool = true) {
