@@ -85,16 +85,21 @@ const SpeakerIcon = ({ nodeId, profileId, itemId, content, isPublic, aiUsage, on
     const section = data.section_index != null ? data.section_index : null;
 
     if (sseChunkCountRef.current === 1) {
-      // First chunk: start playback immediately via loadAudioQueue
+      // First chunk: start playback now, the chapters follow. The queue
+      // must exist before the next chunk_ready: a stream whose TTS is
+      // already complete sends every chunk at once, and chunks appended
+      // while this waited for the chapters were dropped when it loaded.
       setLoading(false);
       lastSectionRef.current = section;
+      chaptersRef.current = [];
+      loadAudioQueue(
+        [chunkUrl],
+        { title: fullTitle, id, type: entityType, chapters: [] },
+        chunkDuration != null ? [chunkDuration] : null
+      );
       fetchChapters().then((chapters) => {
         chaptersRef.current = chapters;
-        loadAudioQueue(
-          [chunkUrl],
-          { title: fullTitle, id, type: entityType, chapters },
-          chunkDuration != null ? [chunkDuration] : null
-        );
+        updateChapters(id, entityType, chapters);
       });
     } else {
       // Subsequent chunks: append to the active queue

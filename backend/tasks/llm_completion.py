@@ -56,7 +56,7 @@ from backend.utils.cache_diagnostics import (
 from backend.utils.llm_batch import BatchItemFailed, BatchItemCancelled
 from backend.utils.ca_feed import (
     CA_CHAT_TURN_NOTE, CA_READ_AGAIN_TURN, CA_TWEETS_CHAT_STUB,
-    READ_FURTHER_MARKER,
+    FEED_AI_USAGE, READ_FURTHER_MARKER,
     FeedReplyError, read_reply_ids, record_feed_render,
     ca_turn as _ca_turn,
     refresh_snapshot_for_read, refs_from_render, seen_tweet_ids,
@@ -3207,6 +3207,17 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     "Node %s: read thread (turn %r); forcing chat keys "
                     "over the chain's %r", llm_node_id, ca_turn, key_type)
                 key_type = 'chat'
+            if (ca_turn in ("read", "read_again")
+                    and llm_node.ai_usage == 'train'):
+                # The recommendation reply presents the picks, quoting
+                # the tweets verbatim: it is 'chat' by construction
+                # (#362). create_llm_placeholder already stamps it by the
+                # same rule; this catches a placeholder made another way
+                # (a PoC read prompt it could not see), and the
+                # continuation nodes below copy it. A chat turn keeps the
+                # thread's setting: its call is on the chat key above,
+                # the stored value is the user's.
+                llm_node.ai_usage = FEED_AI_USAGE
             # That verdict is the chain's. What the chain's text resolves
             # to — quoted nodes, saved references, what a tool pulls in
             # mid-turn — joins the payload below and reports here; the

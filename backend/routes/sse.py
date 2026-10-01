@@ -15,6 +15,14 @@ import time
 
 sse_bp = Blueprint("sse_bp", __name__)
 
+# TTS statuses a tts-stream is served for. A completed entity's stream
+# replays its chunks from last_chunk on, then all_complete: a client that
+# reconnects after the TTS finished (its stream was cut, or it closed it
+# as stalled a moment before the last chunk arrived) gets the rest of the
+# audio and the end of the stream, which a JSON answer can't give an
+# EventSource.
+STREAMABLE_TTS_STATUSES = ('pending', 'processing', 'completed')
+
 
 def format_sse_message(data, event=None):
     """Format data as an SSE message."""
@@ -280,7 +288,7 @@ def tts_stream(node_id):
         if not can_user_access_node(node, current_user.id):
             return jsonify({"error": "Unauthorized"}), 403
 
-    if node.tts_task_status not in ['pending', 'processing']:
+    if node.tts_task_status not in STREAMABLE_TTS_STATUSES:
         if node.audio_tts_url:
             return jsonify({
                 "status": "completed",
@@ -395,7 +403,7 @@ def profile_tts_stream(profile_id):
     if profile.user_id != current_user.id and not getattr(current_user, "is_admin", False):
         return jsonify({"error": "Unauthorized"}), 403
 
-    if profile.tts_task_status not in ['pending', 'processing']:
+    if profile.tts_task_status not in STREAMABLE_TTS_STATUSES:
         if profile.audio_tts_url:
             return jsonify({
                 "status": "completed",
@@ -566,7 +574,7 @@ def item_tts_stream(item_id):
     if item is None:
         return jsonify({"error": "not found"}), 404
 
-    if item.tts_task_status not in ['pending', 'processing']:
+    if item.tts_task_status not in STREAMABLE_TTS_STATUSES:
         if item.audio_tts_url:
             return jsonify({"status": "completed",
                             "tts_url": item.audio_tts_url}), 200

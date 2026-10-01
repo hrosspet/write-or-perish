@@ -383,3 +383,29 @@ def test_worker_thread_speaks_as_text_arrives(live, tmp_path):
     assert [r.chunk_index for r in _chunks(node.id)] == list(
         range(len(texts)))
     assert _fresh(node.id).tts_task_status == "completed"
+
+
+def test_node_deleted_mid_turn_stops_its_tts_with_a_warning(
+        live, tmp_path, caplog):
+    """Deleting the node is the user's doing, not a failure to report."""
+    import logging
+    from datetime import datetime
+    alice, _, user_node, llm_node = _build_chain("voice")
+    node = _fresh(llm_node.id)
+    node.tts_task_status = "processing"
+    _db.session.commit()
+    _FakeAudio.spoken = []
+    turn = tts_stream.VoiceTTSStream(
+        live, alice.id, tmp_path, audio=_FakeAudio(), threaded=False)
+    speech = turn.open_node(node)
+    speech.feed("A reply the user deleted while it was spoken. ")
+    node.deleted_at = datetime.utcnow()
+    _db.session.commit()
+    speech.release()
+    with caplog.at_level(logging.WARNING, logger=tts_stream.__name__):
+        turn.finish()
+    assert _FakeAudio.spoken == []
+    records = [r for r in caplog.records if r.name == tts_stream.__name__]
+    assert [r.levelno for r in records] == [logging.WARNING]
+    assert "deleted mid-generation" in records[0].getMessage()
+    assert _fresh(node.id).tts_task_status == "failed"
