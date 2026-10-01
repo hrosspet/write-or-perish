@@ -20,6 +20,7 @@ from backend.utils.privacy import (
 from backend.routes.terms import CURRENT_TERMS_VERSION
 from backend.utils.reserved_usernames import validate_username
 from backend.utils.spend import user_is_capped
+from backend.utils.llm_nodes import effective_preferred_model, is_active_model
 
 logger = logging.getLogger(__name__)
 dashboard_bp = Blueprint("dashboard_bp", __name__)
@@ -128,7 +129,7 @@ def get_dashboard():
             "plan": current_user.plan,
             "voice_mode_enabled": voice_mode_enabled,
             "craft_mode": current_user.craft_mode,
-            "preferred_model": current_user.preferred_model,
+            "preferred_model": effective_preferred_model(current_user),
             "profile_generation_task_id": current_user.profile_generation_task_id,
             # Batch-pipeline builds set no task id (#258); the watcher starts
             # polling /export/profile-progress on either flag.
@@ -136,6 +137,7 @@ def get_dashboard():
             "default_privacy_level": current_user.default_privacy_level,
             "default_ai_usage": current_user.default_ai_usage,
             "twitter_login": bool(current_user.twitter_id),
+            "twitter_handle": current_user.twitter_handle,
             "pending_email": current_user.pending_email,
             "pending_email_expired": _pending_email_expired(current_user),
             "prefill_consent": current_user.prefill_consent,
@@ -401,14 +403,53 @@ def remove_email():
     """Drop the account's email (#260). Only allowed when the account keeps
     another way in (Sign in with X) — otherwise it would lock the user
     out."""
+    only_way_in = jsonify({"error": "This email is your only way to sign in. "
+                                    "Add another address first."}), 400
     if not current_user.twitter_id:
-        return jsonify({"error": "This email is your only way to sign in. "
-                                 "Add another address first."}), 400
-    current_user.email = None
-    _clear_pending_email(current_user)
+        return only_way_in
+    # Conditional on the X login still being there: a Disconnect X running
+    # at the same time (another tab) must not leave neither.
+    written = (User.query
+               .filter(User.id == current_user.id, User.twitter_id.isnot(None))
+               .update({"email": None, "pending_email": None,
+                        "email_change_token_hash": None,
+                        "email_change_expires_at": None},
+                       synchronize_session=False))
     db.session.commit()
+    db.session.refresh(current_user)
+    if not written:
+        return only_way_in
     return jsonify({"message": "Email removed.",
                     **_email_state(current_user)}), 200
+
+
+@dashboard_bp.route("/x", methods=["DELETE"])
+@login_required
+def disconnect_x():
+    """Drop the account's X login (#311), the counterpart of Connect X
+    (/auth/x/connect). Only allowed when the account keeps another way in
+    (its email), as remove_email above is the other way round. Nothing
+    imported from X is touched; the X account can then be connected here
+    again, or signed in with on its own, which makes a new account."""
+    only_way_in = jsonify({"error": "X is your only way to sign in. "
+                                    "Add an email first."}), 400
+    if not current_user.email:
+        return only_way_in
+    # Conditional on the email still being there (see remove_email).
+    written = (User.query
+               .filter(User.id == current_user.id, User.email.isnot(None))
+               .update({"twitter_id": None, "twitter_handle": None,
+                        "x_connected_at": None},
+                       synchronize_session=False))
+    db.session.commit()
+    db.session.refresh(current_user)
+    if not written:
+        return only_way_in
+    # The session's X token belongs to the account just disconnected.
+    from backend.routes.auth import _drop_x_token
+    _drop_x_token()
+    return jsonify({"message": "X disconnected.", "twitter_login": False,
+                    "twitter_handle": None}), 200
 
 
 # New endpoint to update the user’s display handle and description.
@@ -461,7 +502,10 @@ def update_user():
             data["external_content_enabled"])
 
     if "preferred_model" in data:
-        current_user.preferred_model = data["preferred_model"]
+        model_id = data["preferred_model"]
+        if model_id and not is_active_model(model_id):
+            return jsonify({"error": f"Model not offered: {model_id}"}), 400
+        current_user.preferred_model = model_id
 
     if "default_privacy_level" in data:
         val = data["default_privacy_level"]
@@ -517,12 +561,13 @@ def update_user():
                 "plan": current_user.plan,
                 "voice_mode_enabled": voice_mode_enabled,
                 "craft_mode": current_user.craft_mode,
-                "preferred_model": current_user.preferred_model,
+                "preferred_model": effective_preferred_model(current_user),
                 "profile_generation_task_id": current_user.profile_generation_task_id,
                 "profile_batch_pending": bool(current_user.profile_batch_pending),
                 "default_privacy_level": current_user.default_privacy_level,
                 "default_ai_usage": current_user.default_ai_usage,
                 "twitter_login": bool(current_user.twitter_id),
+                "twitter_handle": current_user.twitter_handle,
                 "pending_email": current_user.pending_email,
                 "pending_email_expired": _pending_email_expired(current_user),
                 "prefill_consent": current_user.prefill_consent,

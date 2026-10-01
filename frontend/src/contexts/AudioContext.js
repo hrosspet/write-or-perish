@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useState, useRef, useCallback } from 'react';
 import { useToast } from './ToastContext';
+import * as voiceTiming from '../utils/voiceTiming';
 
 const AudioContext = createContext();
 
@@ -377,7 +378,12 @@ export const AudioProvider = ({ children }) => {
     };
 
     if (shouldAutoPlay) {
-      audio.play().catch(err => console.error('Error playing chunk:', err));
+      audio.play().catch(err => {
+        // iOS: the voice turn's audio waits for a tap (the lock screen's
+        // play button included), which its timing must not count (#371).
+        if (err && err.name === 'NotAllowedError') voiceTiming.mark('autoplay_blocked');
+        console.error('Error playing chunk:', err);
+      });
     }
   }, [calculateCumulativeTime, startTimeTracking, stopTimeTracking, recalculateTotalDuration, cleanupAudio, addToast, setWaitingForChunks]);
 
@@ -465,7 +471,9 @@ export const AudioProvider = ({ children }) => {
   // Load and play a queue of audio URLs (for chunked playback)
   // serverDurations: optional array of durations from backend (accurate via ffprobe)
   // When provided, these are used instead of browser metadata detection
-  const loadAudioQueue = useCallback(async (urls, audioData, serverDurations = null) => {
+  // onPlaying: called once when the first chunk's audio actually starts
+  // (the element's `playing` event; voice timing, #371).
+  const loadAudioQueue = useCallback(async (urls, audioData, serverDurations = null, { onPlaying } = {}) => {
     if (!urls || urls.length === 0) return;
 
     // If there's already audio playing, pause it first
@@ -485,6 +493,9 @@ export const AudioProvider = ({ children }) => {
     } else {
       preloadedElement = new Audio(urls[0]);
       preloadedElement.preload = 'auto';
+    }
+    if (onPlaying) {
+      preloadedElement.addEventListener('playing', onPlaying, { once: true });
     }
 
     setLoading(true);
@@ -594,6 +605,9 @@ export const AudioProvider = ({ children }) => {
   }, [preloadChunkDurations, playChunkAtTime, setWaitingForChunks]);
 
   const play = useCallback(async () => {
+    // A voice turn's audio started by hand (iOS never autoplays): its
+    // timing leaves the wait for the tap out of h and total (#371).
+    voiceTiming.mark('play_pressed');
     if (audioRef.current && !isPlaying) {
       try {
         await audioRef.current.play();
@@ -883,6 +897,20 @@ export const AudioProvider = ({ children }) => {
     );
   }, []);
 
+  // Retitle the chapter anchored at a queue chunk index. A voice reply
+  // spoken while it is written (#367) starts playing before its text is
+  // complete, so its chain chapter gets a placeholder title at its first
+  // chunk and the real one once the node is done.
+  const renameChapter = useCallback((chunkIndex, title) => {
+    setCurrentAudio((prev) => (prev && prev.chapters
+      ? {
+          ...prev,
+          chapters: prev.chapters.map((c) => (
+            c.chunk_index === chunkIndex ? { ...c, title } : c)),
+        }
+      : prev));
+  }, []);
+
   const value = {
     currentAudio,
     isPlaying,
@@ -903,6 +931,7 @@ export const AudioProvider = ({ children }) => {
     loadAudio,
     loadAudioQueue,
     updateChapters,
+    renameChapter,
     appendChunkToQueue,
     play,
     pause,

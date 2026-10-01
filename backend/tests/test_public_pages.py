@@ -181,6 +181,20 @@ def test_article_meta_tags(app):
     assert "noindex" not in html
 
 
+@pytest.mark.parametrize("connected, shown", [(False, True), (True, False)])
+def test_x_account_named_only_for_x_signups(app, connected, shown):
+    """sameAs points at the author's X account when the account signed up
+    with X (its username came from the handle). An X login attached later
+    with Connect X (#311) is for signing in and publishes nothing."""
+    author = _user("author")
+    author.twitter_id = "123456"
+    author.x_connected_at = datetime(2026, 9, 23) if connected else None
+    _db.session.commit()
+    _publish("author", ARTICLE, "on-lore")
+    html = app.test_client().get("/@author/on-lore").get_data(as_text=True)
+    assert ("https://x.com/i/user/123456" in html) is shown
+
+
 def test_two_articles_have_distinct_meta(app):
     _publish("author", "# First piece\n\nAlpha body.", "first-piece")
     _publish("author", "# Second piece\n\nBeta body.", "second-piece")

@@ -13,7 +13,7 @@ python-dotenv>=1.0.0
 # >=1.99.2 for prompt_cache_key (#189); 2.44 is what dev runs against
 openai>=2.44.0,<3
 tiktoken>=0.8
-anthropic>=0.72.0
+anthropic>=0.77.0
 pydub>=0.25.1
 Werkzeug>=2.2.0
 gunicorn==23.0.0

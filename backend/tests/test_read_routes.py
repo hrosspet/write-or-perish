@@ -59,8 +59,9 @@ def _make_app():
     app.config["SECRET_KEY"] = "test-secret"
     app.config["TESTING"] = True
     app.config["DEFAULT_LLM_MODEL"] = "gpt-5"
+    app.config["READ_DEFAULT_MODEL"] = "gpt-5"
     app.config["SUPPORTED_MODELS"] = {
-        "gpt-5": {"provider": "openai", "api_model": "gpt-5"},
+        "gpt-5": {"provider": "openai", "api_model": "gpt-5", "read": True},
     }
 
     _db.init_app(app)
@@ -73,6 +74,8 @@ def _make_app():
 
     from backend.routes.read import read_bp
     app.register_blueprint(read_bp, url_prefix="/api/read")
+    from backend.routes.nodes import nodes_bp
+    app.register_blueprint(nodes_bp, url_prefix="/api/nodes")
 
     return app
 
@@ -697,3 +700,470 @@ class TestStripAgenticPrompts:
         _db.session.commit()
         chain, dropped = strip_agentic_prompts([voice], keep=voice)
         assert dropped == [] and chain == [voice]
+
+
+# ── Model choice (#355) ───────────────────────────────────────────────
+
+MODELS_355 = {
+    "claude-opus-4.6": {"provider": "anthropic", "display_name": "Opus 4.6",
+                        "featured": True},
+    "claude-opus-5": {"provider": "anthropic", "display_name": "Opus 5",
+                      "deprecated": True},
+    "gpt-6-luna": {"provider": "openai", "display_name": "GPT-6 Luna",
+                   "read": True},
+    "gpt-6-sol": {"provider": "openai", "display_name": "GPT-6 Sol",
+                  "read": True},
+}
+
+
+@pytest.fixture
+def app355(app):
+    app.config["SUPPORTED_MODELS"] = MODELS_355
+    app.config["DEFAULT_LLM_MODEL"] = "claude-opus-4.6"
+    app.config["READ_DEFAULT_MODEL"] = "gpt-6-luna"
+    return app
+
+
+def _read_thread(alice, read_model="gpt-6-sol", chat_model="claude-opus-4.6"):
+    """root → read prompt → read reply (read_model) → note → chat reply
+    (chat_model) → note. Returns the nodes by name."""
+    root = _make_node(alice, content="a thought")
+    prompt = _make_prompt_node(alice, "read_thread", parent_id=root.id)
+    read = _make_node(alice, parent_id=prompt.id, node_type="llm",
+                      llm_model=read_model, content="picks")
+    note = _make_node(alice, parent_id=read.id, content="about #2")
+    chat = _make_node(alice, parent_id=note.id, node_type="llm",
+                      llm_model=chat_model, content="sure")
+    note2 = _make_node(alice, parent_id=chat.id, content="and #3?")
+    _db.session.commit()
+    return dict(root=root, prompt=prompt, read=read, note=note, chat=chat,
+                note2=note2)
+
+
+class TestModelChoice:
+    def test_chat_default_skips_the_read_reply(self, app355):
+        from backend.utils.llm_nodes import resolve_chat_model
+        alice = _make_user("alice", is_admin=True)
+        t = _read_thread(alice)
+        # Under the read reply's note the nearest reply is the Sol read:
+        # the chat default must not inherit it.
+        assert resolve_chat_model(t["note"], alice) == ("claude-opus-4.6", "default")
+        alice.preferred_model = "claude-opus-4.6"
+        assert resolve_chat_model(t["note"], alice)[1] == "user_preference"
+        assert resolve_chat_model(t["note2"], alice) == ("claude-opus-4.6", "predecessor")
+
+    def test_read_default_skips_the_chat_reply(self, app355):
+        from backend.utils.llm_nodes import resolve_read_model
+        alice = _make_user("alice", is_admin=True)
+        t = _read_thread(alice)
+        assert resolve_read_model(t["note2"]) == ("gpt-6-sol", "predecessor")
+        assert resolve_read_model(t["root"]) == ("gpt-6-luna", "default")
+        assert resolve_read_model(None) == ("gpt-6-luna", "default")
+
+    def test_read_default_ignores_a_read_on_a_non_read_model(self, app355):
+        from backend.utils.llm_nodes import resolve_read_model
+        alice = _make_user("alice", is_admin=True)
+        t = _read_thread(alice, read_model="claude-opus-4.6")
+        assert resolve_read_model(t["note2"]) == ("gpt-6-luna", "default")
+
+    def test_read_route_refuses_a_chat_model(self, app355):
+        client = app355.test_client()
+        alice = _make_user("alice", is_admin=True)
+        _db.session.commit()
+        _login(client, alice.id)
+        resp = client.post("/api/read/start", json={"model": "claude-opus-4.6"})
+        assert resp.status_code == 400
+        assert "GPT-6 Luna" in resp.get_json()["error"]
+
+    def test_read_further_without_a_model_takes_the_threads_read_model(self, app355):
+        client = app355.test_client()
+        alice = _make_user("alice", is_admin=True)
+        t = _read_thread(alice)
+        _login(client, alice.id)
+        resp = client.post(f"/api/read/from-node/{t['note2'].id}", json={})
+        assert resp.status_code == 202, resp.get_json()
+        assert Node.query.get(resp.get_json()["llm_node_id"]).llm_model == "gpt-6-sol"
+
+    def test_placeholder_under_a_read_reply_runs_on_a_read_model(self, app355):
+        from backend.utils.llm_nodes import create_llm_placeholder
+        alice = _make_user("alice", is_admin=True)
+        t = _read_thread(alice)
+        _render(t["read"])  # a finished read has its render pinned
+        # Directly under the read reply a reply is another read.
+        node, _ = create_llm_placeholder(t["read"].id, "claude-opus-4.6", alice.id)
+        assert node.llm_model == "gpt-6-sol"
+        # Under the prompt (below a typed note) it is the first read.
+        pnote = _make_node(alice, parent_id=t["prompt"].id, content="first")
+        _db.session.commit()
+        node, _ = create_llm_placeholder(pnote.id, "claude-opus-4.6", alice.id)
+        assert node.llm_model == "gpt-6-luna"
+        # A note after the read reply makes it a chat: the model stays.
+        node, _ = create_llm_placeholder(t["note"].id, "claude-opus-4.6", alice.id)
+        assert node.llm_model == "claude-opus-4.6"
+
+
+def _mark(node, *entries):
+    import json as _json
+    node.tool_calls_meta = _json.dumps([{"name": e} for e in entries])
+    _db.session.commit()
+
+
+def _render(node):
+    """Give *node* a pinned render: a read reply the task counts."""
+    from backend.models import FeedRender
+    _db.session.add(FeedRender(node_id=node.id))
+    _db.session.commit()
+
+
+class TestPlaceholderAgreesWithTheTask:
+    """The placeholder guard applies the task's own rule (ca_feed.ca_turn),
+    so failed or unrendered reads count the same on both sides (#356
+    review, finding 2)."""
+
+    def test_after_a_failed_first_read_the_next_reply_is_still_the_read(self, app355):
+        from backend.utils.llm_nodes import create_llm_placeholder, reply_read_turn
+        alice = _make_user("alice", is_admin=True)
+        root = _make_node(alice, content="a thought")
+        prompt = _make_prompt_node(alice, "read_thread", parent_id=root.id)
+        failed = _make_node(alice, parent_id=prompt.id, node_type="llm",
+                            llm_model="gpt-6-luna", content="failed")
+        failed.llm_task_status = "failed"
+        note = _make_node(alice, parent_id=failed.id, content="try again")
+        _db.session.commit()
+        assert reply_read_turn(note) == "read"
+        node, _ = create_llm_placeholder(note.id, "claude-opus-4.6", alice.id)
+        assert node.llm_model == "gpt-6-luna"
+
+    def test_a_reply_on_a_failed_read_further_is_a_chat(self, app355):
+        from backend.utils.llm_nodes import create_llm_placeholder, reply_read_turn
+        alice = _make_user("alice", is_admin=True)
+        t = _read_thread(alice)
+        _render(t["read"])
+        further = _make_node(alice, parent_id=t["note2"].id, node_type="llm",
+                             llm_model="gpt-6-sol", content="failed")
+        _mark(further, "_read")
+        assert reply_read_turn(further) == "chat"
+        node, _ = create_llm_placeholder(further.id, "claude-opus-4.6", alice.id)
+        assert node.llm_model == "claude-opus-4.6"
+
+    def test_directly_under_a_rendered_read_it_is_another_read(self, app355):
+        from backend.utils.llm_nodes import reply_read_turn
+        alice = _make_user("alice", is_admin=True)
+        t = _read_thread(alice)
+        _render(t["read"])
+        assert reply_read_turn(t["read"]) == "read_again"
+        assert reply_read_turn(t["note"]) == "chat"
+        assert reply_read_turn(t["root"]) is None
+
+    def test_a_deprecated_model_sent_explicitly_is_replaced(self, app355):
+        from backend.utils.llm_nodes import create_llm_placeholder
+        alice = _make_user("alice", is_admin=True, preferred_model="claude-opus-5")
+        root = _make_node(alice, content="a thought")
+        _db.session.commit()
+        node, _ = create_llm_placeholder(root.id, "claude-opus-5", alice.id)
+        # The saved preference is deprecated too: LLM_NAME decides.
+        assert node.llm_model == "claude-opus-4.6"
+
+
+class TestModelEndpoints:
+    def test_models_carry_the_flags_and_skip_deprecated(self, app355):
+        client = app355.test_client()
+        alice = _make_user("alice")
+        _db.session.commit()
+        _login(client, alice.id)
+        models = {m["id"]: m for m in client.get("/api/nodes/models").get_json()["models"]}
+        assert "claude-opus-5" not in models
+        assert models["claude-opus-4.6"]["featured"] is True
+        assert models["gpt-6-luna"]["read"] is True
+
+    def test_purpose_read_and_a_deprecated_preference(self, app355):
+        client = app355.test_client()
+        alice = _make_user("alice", is_admin=True, preferred_model="claude-opus-5")
+        t = _read_thread(alice)
+        _login(client, alice.id)
+        read = client.get(f"/api/nodes/{t['note2'].id}/suggested-model?purpose=read").get_json()
+        assert read == {"suggested_model": "gpt-6-sol", "source": "predecessor"}
+        fresh = client.get("/api/nodes/default-model?purpose=read").get_json()
+        assert fresh["suggested_model"] == "gpt-6-luna"
+        chat = client.get("/api/nodes/default-model").get_json()
+        assert chat == {"suggested_model": "claude-opus-4.6", "source": "default"}
+        assert client.get("/api/nodes/default-model?purpose=x").status_code == 400
+
+
+class TestModelWalkQueryCount:
+    def test_walks_are_constant_in_thread_depth(self, app355):
+        from sqlalchemy import event
+        from backend.utils.llm_nodes import (
+            reply_ai_usage, reply_read_turn, resolve_chat_model,
+            resolve_read_model)
+        alice = _make_user("alice", is_admin=True)
+        parent = _make_node(alice, content="start")
+        for i in range(200):
+            reply = _make_node(alice, parent_id=parent.id, node_type="llm",
+                               llm_model="claude-opus-5", content="r")
+            parent = _make_node(alice, parent_id=reply.id, content="u")
+        _db.session.commit()
+        _db.session.expire_all()
+        tip = Node.query.get(parent.id)
+        statements = []
+        listener = lambda *a, **k: statements.append(1)  # noqa: E731
+        event.listen(_db.engine, "before_cursor_execute", listener)
+        try:
+            resolve_read_model(tip)
+            resolve_chat_model(tip, alice)
+            reply_read_turn(tip)
+            reply_ai_usage(tip, alice)
+        finally:
+            event.remove(_db.engine, "before_cursor_execute", listener)
+        # Each call: chain (2) + linked prompt keys (1) + read replies
+        # (2), about 5 whatever the depth; a per-level walk made ~1,000
+        # on a 400-node thread.
+        assert len(statements) <= 28, len(statements)
+
+
+# ── A reply's AI usage under a read (#362) ────────────────────────────
+
+def _thread_with_read(alice, root_usage="train"):
+    """root (the user's own, *root_usage*) → read prompt → read reply, both
+    'chat' as the read routes make them. Returns the nodes by name."""
+    root = _make_node(alice, content="a thought", ai_usage=root_usage)
+    prompt = _make_prompt_node(alice, "read_thread", parent_id=root.id)
+    read = _make_node(alice, parent_id=prompt.id, node_type="llm",
+                      llm_model="gpt-6-sol", content="picks")
+    _render(read)
+    return dict(root=root, prompt=prompt, read=read)
+
+
+class TestReplyAiUsage:
+    def test_under_a_read_the_thread_decides_not_the_read(self, app355):
+        from backend.utils.llm_nodes import reply_ai_usage
+        alice = _make_user("alice", is_admin=True, default_ai_usage="none")
+        t = _thread_with_read(alice)
+        assert (t["prompt"].ai_usage, t["read"].ai_usage) == ("chat", "chat")
+        # The node above the read decides, not the account default.
+        assert reply_ai_usage(t["read"], alice) == "train"
+        assert reply_ai_usage(t["prompt"], alice) == "train"
+
+    def test_a_read_at_the_root_takes_the_account_default(self, app355):
+        from backend.utils.llm_nodes import reply_ai_usage
+        alice = _make_user("alice", is_admin=True, default_ai_usage="train")
+        prompt = _make_prompt_node(alice, "read")
+        read = _make_node(alice, parent_id=prompt.id, node_type="llm",
+                          llm_model="gpt-6-sol", content="nothing today")
+        _db.session.commit()
+        # A pick-less read reply with no render yet: still the read's.
+        assert reply_ai_usage(read, alice) == "train"
+        alice.default_ai_usage = "chat"
+        assert reply_ai_usage(read, alice) == "chat"
+
+    def test_below_the_users_reply_the_nearest_node_decides(self, app355):
+        # Voice review 2026-09-29: an LLM reply after the recommendation
+        # carries the thread's setting, so the walk no longer skips it.
+        from backend.utils.llm_nodes import reply_ai_usage
+        alice = _make_user("alice", is_admin=True, default_ai_usage="train")
+        t = _thread_with_read(alice)
+        note = _make_node(alice, parent_id=t["read"].id, content="why #2?",
+                          ai_usage="train")
+        chat = _make_node(alice, parent_id=note.id, node_type="llm",
+                          llm_model="claude-opus-4.6", content="because",
+                          ai_usage="train")
+        _db.session.commit()
+        assert reply_ai_usage(note, alice) == "train"
+        assert reply_ai_usage(chat, alice) == "train"
+        # A value the user set by hand on either is theirs to keep.
+        chat.ai_usage = "chat"
+        _db.session.commit()
+        assert reply_ai_usage(chat, alice) == "chat"
+        note.ai_usage = "chat"
+        chat.ai_usage = "train"
+        _db.session.commit()
+        assert reply_ai_usage(chat, alice) == "train"
+
+    def test_outside_a_read_the_parent_decides_as_before(self, app355):
+        from backend.utils.llm_nodes import reply_ai_usage
+        alice = _make_user("alice", default_ai_usage="train")
+        entry = _make_node(alice, content="mine", ai_usage="train")
+        # An LLM reply the user lowered by hand keeps its say.
+        reply = _make_node(alice, parent_id=entry.id, node_type="llm",
+                           llm_model="claude-opus-4.6", content="r",
+                           ai_usage="chat")
+        _db.session.commit()
+        assert reply_ai_usage(entry, alice) == "train"
+        assert reply_ai_usage(reply, alice) == "chat"
+        assert reply_ai_usage(None, alice) == "train"
+
+    def test_a_poc_prompt_is_seen_in_the_parents_own_text(self, app355):
+        from backend.utils.llm_nodes import reply_ai_usage
+        alice = _make_user("alice", is_admin=True, default_ai_usage="none")
+        root = _make_node(alice, content="a thought", ai_usage="train")
+        poc = _make_node(alice, parent_id=root.id, content="Read {ca_tweets}")
+        _db.session.commit()
+        assert reply_ai_usage(poc, alice, parent_content=poc.get_content()) == "train"
+
+    def test_an_ai_reply_to_the_users_reply_takes_the_threads_train(self, app355):
+        # Voice review 2026-09-29: only the recommendation reply is 'chat'
+        # by construction; the AI answer to the user's reply under it is
+        # 'train' when the thread is.
+        from backend.utils.llm_nodes import create_llm_placeholder, reply_ai_usage
+        alice = _make_user("alice", is_admin=True, default_ai_usage="none")
+        t = _thread_with_read(alice)
+        note = _make_node(alice, parent_id=t["read"].id, content="why #2?",
+                          ai_usage=reply_ai_usage(t["read"], alice))
+        _db.session.commit()
+        assert note.ai_usage == "train"
+        node, _ = create_llm_placeholder(note.id, "claude-opus-4.6", alice.id,
+                                         ai_usage=note.ai_usage,
+                                         enqueue=False)
+        assert node.ai_usage == "train"
+        # Through the route behind the thread page's "LLM Response".
+        client = app355.test_client()
+        _login(client, alice.id)
+        resp = client.post(f"/api/nodes/{note.id}/llm",
+                           json={"model": "claude-opus-4.6"})
+        assert resp.status_code == 202, resp.get_json()
+        assert Node.query.get(resp.get_json()["node_id"]).ai_usage == "train"
+
+    def test_the_recommendation_node_stays_chat(self, app355):
+        # The read reply that presents the picks is 'chat' however it is
+        # asked for: under the read prompt (a read) or directly under a
+        # read reply (a read again). 'none' is never raised.
+        from backend.utils.llm_nodes import create_llm_placeholder
+        alice = _make_user("alice", is_admin=True, default_ai_usage="train")
+        t = _thread_with_read(alice)
+        for parent in (t["prompt"], t["read"]):
+            node, _ = create_llm_placeholder(parent.id, "gpt-6-sol", alice.id,
+                                             ai_usage="train", enqueue=False)
+            assert node.ai_usage == "chat", parent
+        node, _ = create_llm_placeholder(t["read"].id, "gpt-6-sol", alice.id,
+                                         ai_usage="none", enqueue=False)
+        assert node.ai_usage == "none"
+        # Outside a read thread the caller's value stands.
+        node, _ = create_llm_placeholder(t["root"].id, "claude-opus-4.6",
+                                         alice.id, ai_usage="train",
+                                         enqueue=False)
+        assert node.ai_usage == "train"
+
+    def test_get_node_returns_the_reply_default(self, app355):
+        client = app355.test_client()
+        alice = _make_user("alice", is_admin=True, default_ai_usage="none")
+        t = _thread_with_read(alice)
+        _login(client, alice.id)
+        data = client.get(f"/api/nodes/{t['read'].id}").get_json()
+        assert data["ai_usage"] == "chat"
+        assert data["reply_ai_usage"] == "train"
+        data = client.get(f"/api/nodes/{t['root'].id}").get_json()
+        assert data["reply_ai_usage"] == "train"
+
+    def test_a_skipped_read_node_set_to_none_does_not_decide(self, app355):
+        # Voice review 2026-09-29: the rule "a skipped node set to 'none'
+        # makes the reply 'none'" is gone. The Read's own nodes pass
+        # nothing on, whatever their value.
+        from backend.utils.llm_nodes import reply_ai_usage
+        alice = _make_user("alice", is_admin=True, default_ai_usage="chat")
+        t = _thread_with_read(alice)
+        t["prompt"].ai_usage = "none"
+        t["read"].ai_usage = "none"
+        _db.session.commit()
+        assert reply_ai_usage(t["read"], alice) == "train"
+        # With the read at the root: the account default.
+        prompt = _make_prompt_node(alice, "read")
+        read = _make_node(alice, parent_id=prompt.id, node_type="llm",
+                          llm_model="gpt-6-sol", content="picks",
+                          ai_usage="none")
+        _render(read)
+        assert reply_ai_usage(read, alice) == "chat"
+        # A node that is not the Read's still decides, 'none' included.
+        note = _make_node(alice, parent_id=read.id, content="later",
+                          ai_usage="none")
+        _db.session.commit()
+        assert reply_ai_usage(note, alice) == "none"
+
+    def test_an_llm_node_above_the_read_still_decides(self, app355):
+        from backend.utils.llm_nodes import reply_ai_usage
+        alice = _make_user("alice", is_admin=True, default_ai_usage="train")
+        root = _make_node(alice, content="a thought", ai_usage="train")
+        earlier = _make_node(alice, parent_id=root.id, node_type="llm",
+                             llm_model="claude-opus-4.6", content="hm",
+                             ai_usage="chat")
+        prompt = _make_prompt_node(alice, "read_thread", parent_id=earlier.id)
+        read = _make_node(alice, parent_id=prompt.id, node_type="llm",
+                          llm_model="gpt-6-sol", content="picks")
+        _db.session.commit()
+        assert reply_ai_usage(read, alice) == "chat"
+
+    def test_get_node_walks_only_in_the_owners_read_thread(self, app355, monkeypatch):
+        import backend.utils.llm_nodes as llm_nodes
+        client = app355.test_client()
+        alice = _make_user("alice", is_admin=True, default_ai_usage="none")
+        bob = _make_user("bob", default_ai_usage="train")
+        t = _thread_with_read(alice)
+        plain = _make_node(alice, content="no read here", ai_usage="train")
+        t["read"].privacy_level = "public"
+        _db.session.commit()
+        walks = []
+        real = llm_nodes.reply_ai_usage
+        monkeypatch.setattr(llm_nodes, "reply_ai_usage",
+                            lambda *a, **k: walks.append(1) or real(*a, **k))
+        _login(client, alice.id)
+        assert client.get(f"/api/nodes/{plain.id}").get_json()["reply_ai_usage"] == "train"
+        assert walks == []
+        assert client.get(f"/api/nodes/{t['read'].id}").get_json()["reply_ai_usage"] == "train"
+        assert walks == [1]
+        # Someone else viewing a public read reply gets its own value.
+        from flask import g
+        g.pop("_login_user", None)  # the fixture's app context outlives requests
+        _login(client, bob.id)
+        data = client.get(f"/api/nodes/{t['read'].id}").get_json()
+        assert data["reply_ai_usage"] == "chat"
+        assert walks == [1]
+
+
+class TestNoLockBelowARead:
+    """Voice review 2026-09-29: AI replies below a Read are not locked to
+    'chat'. The editor and the "apply to my replies" cascade treat them
+    like any other reply; only the Read's own nodes (the prompt and a read
+    reply with picks, ca_feed.is_feed_node) still refuse 'train'."""
+
+    def _thread(self, alice):
+        t = _thread_with_read(alice, root_usage="chat")
+        from backend.models import ExternalItem, FeedPick
+        item = ExternalItem(user_id=alice.id, source="community_archive",
+                            external_id="t1", author_handle="someone")
+        item.set_content("a tweet")
+        _db.session.add(item)
+        _db.session.flush()
+        _db.session.add(FeedPick(node_id=t["read"].id, user_id=alice.id,
+                                 external_item_id=item.id, rank=1))
+        note = _make_node(alice, parent_id=t["read"].id, content="why #2?",
+                          ai_usage="chat")
+        chat = _make_node(alice, parent_id=note.id, node_type="llm",
+                          llm_model="claude-opus-4.6", content="because",
+                          ai_usage="chat")
+        _db.session.commit()
+        return dict(t, note=note, chat=chat)
+
+    def test_the_editor_allows_train_on_an_ai_reply_below_a_read(self, app355):
+        client = app355.test_client()
+        alice = _make_user("alice", is_admin=True)
+        t = self._thread(alice)
+        _login(client, alice.id)
+        resp = client.put(f"/api/nodes/{t['chat'].id}",
+                          json={"content": "because", "ai_usage": "train"})
+        assert resp.status_code == 200, resp.get_json()
+        assert Node.query.get(t["chat"].id).ai_usage == "train"
+        # The recommendation node itself still refuses it.
+        resp = client.put(f"/api/nodes/{t['read'].id}",
+                          json={"content": "picks", "ai_usage": "train"})
+        assert resp.status_code == 400
+        assert Node.query.get(t["read"].id).ai_usage == "chat"
+
+    def test_the_cascade_raises_replies_below_a_read(self, app355):
+        from backend.utils.node_settings import apply_settings_to_descendants
+        alice = _make_user("alice", is_admin=True)
+        t = self._thread(alice)
+        changed = apply_settings_to_descendants(t["root"], alice.id,
+                                                ai_usage="train")
+        _db.session.commit()
+        assert {n.id for n in changed} == {t["note"].id, t["chat"].id}
+        for name in ("prompt", "read"):
+            assert Node.query.get(t[name].id).ai_usage == "chat", name

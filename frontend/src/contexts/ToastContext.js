@@ -34,8 +34,9 @@ export function ToastProvider({ children }) {
           position: 'fixed',
           // Sit above the mobile floating audio player when it's shown:
           // GlobalAudioPlayer publishes its occupied height as
-          // --floating-player-offset (0px when absent). #28.
-          bottom: 'calc(24px + var(--floating-player-offset, 0px))',
+          // --floating-player-offset (0px when absent). #28. Same for the
+          // spend-cap banner (--spendcap-banner-offset). #341.
+          bottom: 'calc(24px + var(--floating-player-offset, 0px) + var(--spendcap-banner-offset, 0px))',
           left: '50%',
           transform: 'translateX(-50%)',
           zIndex: 9999,

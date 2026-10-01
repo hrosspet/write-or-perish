@@ -24,8 +24,10 @@ const COMBINED_PATTERN = /(\{quote_ext:\d+\}|\{quote:\d+\}|\{user_(?:profile|tod
  *   quotes: Object mapping quote IDs to quote data (or null if not accessible)
  *   contextArtifacts: Object with "profile" and/or "todo" keys containing artifact data
  *   onQuoteClick: Callback when a quote is clicked (receives quote ID)
+ *   nodeId: the node the content belongs to; external-reference bubbles
+ *     log what the reader does with them against it (#352)
  */
-const QuotedContent = ({ content, quotes, externalQuotes, contextArtifacts, onQuoteClick, onCheckboxToggle, onAddTask, onExternalReadChange, onExternalFeedbackChange }) => {
+const QuotedContent = ({ content, quotes, externalQuotes, contextArtifacts, onQuoteClick, onCheckboxToggle, onAddTask, onExternalReadChange, onExternalFeedbackChange, nodeId }) => {
   if (!content) {
     return null;
   }
@@ -125,6 +127,7 @@ const QuotedContent = ({ content, quotes, externalQuotes, contextArtifacts, onQu
             <div key={index} className="ext-quote-slot">
               <ExternalQuoteBubble
                 quote={quoteData}
+                nodeId={nodeId}
                 onReadChange={onExternalReadChange}
                 onFeedbackChange={onExternalFeedbackChange}
               />

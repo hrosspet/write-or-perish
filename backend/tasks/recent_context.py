@@ -10,7 +10,7 @@ from sqlalchemy import func, or_
 
 from backend.celery_app import celery, flask_app
 from backend.models import User, UserProfile, UserRecentContext, Node, APICostLog
-from backend.utils.privacy import AI_ALLOWED
+from backend.utils.privacy import AI_ALLOWED, account_allows_ai
 from backend.extensions import db
 from backend.llm_providers import LLMProvider, PromptTooLongError
 from backend.utils.tokens import reduce_export_tokens, format_date_metadata
@@ -214,6 +214,12 @@ def generate_recent_context(user_id, profile_id=None, data_cutoff_iso=None):
             logger.info(
                 "User %s is spend-capped; skipping recent context", user_id)
             return
+        if not account_allows_ai(user):
+            # Re-checked here: the setting may change after dispatch (#346).
+            logger.info(
+                "User %s has opted out of AI usage; skipping recent context",
+                user_id)
+            return
 
         data_cutoff = (
             datetime.fromisoformat(data_cutoff_iso)
@@ -234,11 +240,8 @@ def generate_recent_context(user_id, profile_id=None, data_cutoff_iso=None):
         # fallback must be a valid SUPPORTED_MODELS key — the old hardcoded
         # "claude-opus-4-6" (hyphen) is the *api_model*, not the internal id
         # ("claude-opus-4.6"), so it failed get_completion's lookup.
-        default_model = flask_app.config.get(
-            "DEFAULT_LLM_MODEL", "claude-opus-5")
-        model_id = user.preferred_model or default_model
-        if model_id not in flask_app.config.get("SUPPORTED_MODELS", {}):
-            model_id = default_model
+        from backend.utils.llm_nodes import default_model_for
+        model_id = default_model_for(user)
 
         # Build data: ALL nodes since profile cutoff
         from backend.routes.export_data import (
@@ -283,7 +286,7 @@ def generate_recent_context(user_id, profile_id=None, data_cutoff_iso=None):
 
         # Inject profile content (if available)
         profile_content = ""
-        if profile:
+        if profile and profile.ai_usage in AI_ALLOWED:
             profile_content = profile.get_content()
         prompt_text = prompt_template.replace("{user_profile}", profile_content)
         prompt_text = prompt_text.replace("{recent_data}", recent_data)

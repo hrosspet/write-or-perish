@@ -315,6 +315,25 @@ def test_nightly_sweep_submits_one_batch_request_per_stale_user_in_their_night(
     assert len(submitted) == 1
 
 
+def test_account_opted_out_of_ai_gets_no_digest(app, monkeypatch):
+    """#346: neither the nightly sweep nor a manual rebuild sends the
+    references of an account set to 'none' to a model."""
+    user = User.query.first()
+    user.timezone = _tz_at_hour(_digest.NIGHTLY_DIGEST_LOCAL_HOUR)
+    user.default_ai_usage = "none"
+    _db.session.commit()
+    _mk_item(user.id, "clip")
+    submitted = _stub_batch_submit(monkeypatch)
+    calls = _stub_llm(monkeypatch)
+
+    assert _digest.sweep_external_digests() == {"status": "ok",
+                                                "submitted": 0}
+    assert submitted == []
+    assert _digest.rebuild_external_digest(
+        _FakeSelf(), user.id, force=True) == {"status": "ai_opt_out"}
+    assert calls == []
+
+
 def _pending_job(user, corpus_at, provider_key="anthropic",
                  batch_id="batch_x", submitted_at=None):
     job = ExternalDigestBatchJob(

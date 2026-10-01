@@ -207,6 +207,16 @@ def test_opted_out_user_refused(app, wired):  # noqa: F811
         it.start_infer_intentions_impl(u.id)
 
 
+def test_declined_prefill_consent_refused_when_task_runs(app, wired):  # noqa: F811
+    """#346: the admin route refuses too; the task re-checks because the
+    answer can change while the run is queued."""
+    u = _make_user("gina")
+    u.prefill_consent = "no"
+    _db.session.commit()
+    with pytest.raises(RuntimeError, match="declined"):
+        it.start_infer_intentions_impl(u.id)
+
+
 # ── Sync mode ("run now") + cancel ──────────────────────────────────────────
 
 def test_sync_mode_calls_model_once_and_saves_at_full_price(app, wired, monkeypatch):  # noqa: F811

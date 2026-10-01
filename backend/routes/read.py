@@ -55,7 +55,7 @@ from backend.models import Node
 from backend.extensions import db
 from backend.utils.prompts import get_user_prompt_record
 from backend.utils.llm_nodes import (
-    create_llm_placeholder, pick_model_for_generation,
+    create_llm_placeholder, is_read_model, resolve_read_model,
 )
 from backend.utils.placeholders import (
     UserExportValidationError, ca_tweets_allowed, ca_tweets_denied_message,
@@ -72,12 +72,20 @@ THREAD_PROMPT_KEY = 'read_thread'
 
 
 def _resolve_model(anchor_node):
+    """A read runs only on a read model (#355): the one the request names,
+    else the thread's last read's, else READ_DEFAULT_MODEL. Never the
+    chat default: a conversation on Opus does not carry into a read."""
     data = request.get_json(silent=True) or {}
     model_id = data.get("model")
     if not model_id:
-        model_id = pick_model_for_generation(anchor_node, current_user)
-    if model_id not in current_app.config["SUPPORTED_MODELS"]:
-        return None, (jsonify({"error": f"Unsupported model: {model_id}"}), 400)
+        return resolve_read_model(anchor_node)[0], None
+    if not is_read_model(model_id):
+        names = [cfg.get("display_name", key)
+                 for key, cfg in current_app.config["SUPPORTED_MODELS"].items()
+                 if is_read_model(key)]
+        return None, (jsonify({
+            "error": f"Reads run on {', '.join(names)}; not on {model_id}.",
+        }), 400)
     return model_id, None
 
 
