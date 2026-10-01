@@ -21,11 +21,12 @@ const importButtonHoverStyle = {
 export default function WelcomePage() {
   return (
     <div style={{ padding: "0 2rem" }}>
-      {/* Hero welcome */}
+      {/* Hero welcome. Natural height, not a vh-tall centred box: the page
+          is one column, and a min-height here left a large blank band between
+          the greeting and the import line on tall screens. */}
       <div style={{
-        minHeight: "55vh", display: "flex", flexDirection: "column",
-        alignItems: "center", justifyContent: "center",
-        textAlign: "center", padding: "4rem 0 2rem",
+        display: "flex", flexDirection: "column", alignItems: "center",
+        textAlign: "center", padding: "clamp(2.5rem, 8vh, 5rem) 0 2.25rem",
       }}>
         <Fade>
           <img
@@ -50,6 +51,7 @@ export default function WelcomePage() {
           <p style={{
             fontFamily: "var(--sans)", fontWeight: 300, fontSize: "1.05rem",
             lineHeight: 1.8, color: "var(--text-secondary)", maxWidth: 500,
+            margin: 0,
           }}>
             You're one of the first people here. This is an alpha —
             things are raw, evolving, alive. Your experience and your
@@ -62,7 +64,7 @@ export default function WelcomePage() {
           away, so anything below it goes unseen, and import is how the
           profile stops starting from zero. Kept small so writing something
           stays the main invitation. */}
-      <div style={{ maxWidth: 580, margin: "0 auto", padding: "1rem 0 1.2rem" }}>
+      <div style={{ maxWidth: 580, margin: "0 auto", padding: "0 0 1.2rem" }}>
         <Fade>
           <div style={{
             display: "flex", alignItems: "center", justifyContent: "space-between",
@@ -93,7 +95,7 @@ export default function WelcomePage() {
       </div>
 
       {/* The journaling prompt — the main CTA */}
-      <div style={{ maxWidth: 580, margin: "0 auto", padding: "0 0 4rem" }}>
+      <div style={{ maxWidth: 580, margin: "0 auto", padding: "0 0 2.25rem" }}>
         <Fade>
           <div style={{
             background: "var(--bg-card)", border: "1px solid var(--border)",
@@ -126,19 +128,12 @@ export default function WelcomePage() {
             {/* The homepage's voice / text modes are the first-entry
                 experience; the full entry editor is too much at this point. */}
             <CtaButton to="/">Reflect</CtaButton>
-            <p style={{
-              fontFamily: "var(--sans)", fontWeight: 300, fontSize: "0.78rem",
-              color: "var(--text-muted)", marginTop: "1rem", position: "relative",
-            }}>
-              Take the question with you, or start with whatever is on your
-              mind. Type or record a voice note, whichever feels natural.
-            </p>
           </div>
         </Fade>
       </div>
 
       {/* How To link */}
-      <div style={{ maxWidth: 580, margin: "0 auto", padding: "0 0 3rem", textAlign: "center" }}>
+      <div style={{ maxWidth: 580, margin: "0 auto", padding: "0 0 2rem", textAlign: "center" }}>
         <Fade delay={0.08}>
           <Link to="/how-to" style={{
             fontFamily: "var(--sans)", fontWeight: 300, fontSize: "0.88rem",
