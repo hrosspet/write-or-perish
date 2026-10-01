@@ -715,9 +715,11 @@ def create_node():
             rel_path = node.audio_original_url.replace("/media/", "")
             local_path = str(AUDIO_STORAGE_ROOT / rel_path)
 
-            # Enqueue task. The reply model rides along only when a reply
-            # was asked for, so a worker still on the old signature during
-            # a deploy never sees an unknown kwarg.
+            # Enqueue task. The reply model is passed only when a reply was
+            # asked for, so a plain upload is safe during a deploy. An upload
+            # that asks for a reply in the ~3 s between the gunicorn reload
+            # and the Celery restart can still reach an old worker, which
+            # fails the transcription on the unknown kwarg (accepted, #347).
             task = transcribe_audio.delay(
                 node.id, local_path, file.filename,
                 **({"auto_reply_model": auto_reply_model}
