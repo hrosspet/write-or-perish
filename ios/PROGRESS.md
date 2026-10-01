@@ -809,3 +809,31 @@ Notes:
   `httpCookieAcceptPolicy = .never` there is left to the audio branch.
 - M6: the Reply form keeps the web's fallback (account defaults) when the parent fetch fails for another reason. The
   server builds the nested answer recursively too (`serialize_node_recursive`); its depth limit was not checked.
+
+## AI usage "none": no Voice mode, no speech (companion to the backend PR)
+
+The backend change "Never generate AI replies for content marked 'none'; Voice mode explains instead" (branch
+`fix/no-replies-for-none`) refuses a reply wherever the node replied to, or a node above it, is not chat/train.
+The app follows it. 390 unit tests pass (one skipped), 17 of them new (`VoiceAIBlockTests`,
+`SpeakerAIUsageTests`, five in `VoiceTurnTests`). No billed calls.
+
+- **Voice screen block** (`Audio/Voice/VoiceAIBlock.swift`, `VoiceView`): instead of the record button, "Voice mode
+  needs AI" and why, when a fresh conversation's account Default AI usage is None (read from the user), or when
+  the thread the route continues (`parent`, else `resume`) is not AI-readable (`GET /api/voice/availability?parent=`).
+  No answer from that route (an older server, offline) is not a block. The route's `parent` / `resume` are applied
+  only once Voice mode is open, so a blocked thread's reply is not resumed. Buttons: "Account settings" (Account
+  scrolled to the new `ai-usage` anchor on the Default AI usage row) and, for a thread, "Back to the thread" (pops
+  when a thread is under Voice, else the thread replaces Voice). The check runs again on every return while
+  blocked. The copy is the web's, word for word (`testCopyMatchesTheWeb`).
+- **`ai_usage_none` from the server** (403, `code`, `scope` account/thread): `streaming/init` refused → the turn
+  goes back to ready with the block (no draft, the mic never opens, no toast or red dot); the legacy `POST
+  /api/voice` refused → the same; the thread's Voice Mode button refused by `voice/from-node` → opens the Voice
+  screen on that thread, which shows the block (the web navigates to `/voice?parent=<id>`).
+- **Voice Mode button** shows on every owned, non-public thread, also on 'none' nodes (the block lives on the
+  Voice screen); Read and Auto-generate keep the AI-usage rule.
+- **Finalize of a Voice draft with no reply allowed** (setting changed mid-recording): the server saves the
+  transcript as an entry and answers `warning`; the app already toasts it and returns to ready.
+- **Speaker icon** (`SpeakerButton.speechOff`): off for any node whose AI usage is not chat/train, model replies
+  included (the server dropped the reply exemption in `speech_allowed`), and for a profile version whose
+  `ai_usage` the server sends. The dashboard's `latest_profile` does not send `ai_usage` today, so the profile
+  icon stays on there (parity with the web, whose icon gates nodes only).
