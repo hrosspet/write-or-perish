@@ -11,7 +11,7 @@ Build, install and the device / staging checklists are in [`README.md`](README.m
 | M2 Thread and writing | `ios-app` | **done** (2026-10-01) |
 | M3 Voice and audio | `ios-app-voice`, merged into `ios-app` (`d69bd0b`) | **done** in the simulator (2026-10-01); locked-phone behaviour needs the device checklist |
 | M4 Feature pages | `ios-app` (built after M3 was merged) | **done** (2026-10-01) |
-| M5 Integration and parity | `ios-app` | in progress (parity walk and accessibility pass done) |
+| M5 Integration and parity | `ios-app` | in progress (parity walk, accessibility pass, release checks done) |
 
 Not yet done anywhere: a run on a real iPhone (README "Only a real iPhone can test") and a
 pass on staging (README "Check on staging").
@@ -446,6 +446,16 @@ reached by routes that never push (admin, waitlist, web pages).
   - `SmokeFlowsUITests` no longer opens the Commons tab (locally it lists other users' public posts).
 - **Publish scan**: the web-app maps and the design doc no longer describe server-side gaps found while mapping;
   personal names removed from the README and the signing example.
+- **Release safety**: a Release build compiles for the simulator and for devices (`CODE_SIGNING_ALLOWED=NO`).
+  `LaunchOptions` has no fields and no parser outside `#if DEBUG`, so every launch argument
+  (`-LooreSessionCookie`, `-LooreRoute`, `-LooreEnvironment`, `-LooreTheme`, `-LooreResetState`,
+  `-LooreSkipUpdates`, `-LooreDebugAudioFile`, `-LooreDebugListenNode`, `-LooreDebugVoiceAutoStart`,
+  `-LooreDebugImportFile`), the session-cookie injection, the environment switcher (and `switchEnvironment`),
+  the local-backend URL overrides, the debug audio-file source and the test hooks (`useForTesting`) are compiled
+  out; `strings` on both Release binaries finds none of the argument names. Release always resolves to
+  Production; the Local and Staging cases remain as unreachable enum values (their hosts are also needed to
+  recognise loore.org links). A Release build launched with `-LooreSessionCookie … -LooreRoute /log` stays on
+  the sign-in screen.
 - **Accessibility pass** (an audit of every view, then fixes):
   - VoiceOver: every icon-only control already had a label (about 40); added the missing ones: the search
     date fields ("From date" / "To date"), the editors (Profile, Todo, artifact, prompt, share, reference text),

@@ -90,7 +90,9 @@ final class AppState {
     var pendingUpdates: UpdatesPayload?
 
     private var updatesFetched = false
+    #if DEBUG
     private var launchRouteHandled = false
+    #endif
     /// Where the pasted sign-in link pointed (web `next_url`), opened once the user can see the app.
     private var pendingLandingPath: String?
     private let secureStore: SecureStore
@@ -109,7 +111,11 @@ final class AppState {
         self.api = api
         auth = AuthService(api: api, vault: CookieVault(store: secureStore, environment: env))
         sse = SSEClient(api: api)
+        #if DEBUG
         theme = ThemeManager(defaults: defaults, forced: launch.theme)
+        #else
+        theme = ThemeManager(defaults: defaults, forced: nil)
+        #endif
         installEventHandler()
         audio.attach(self)
         profileWatcher.showToast = { [weak self] text, duration in self?.toasts.show(text, duration: duration) }
@@ -144,18 +150,24 @@ final class AppState {
 
     /// Restores the sign-in and loads the user. Called once from the root view.
     func start() async {
+        #if DEBUG
         if launch.resetState {
             auth.vault.clear()
             for key in [DefaultsKey.theme, DefaultsKey.craftMode] { defaults.removeObject(forKey: key) }
             theme.forget()
             for cookie in api.cookieStorage.cookies ?? [] { api.cookieStorage.deleteCookie(cookie) }
         }
+        #endif
         auth.startObservingCookies()
+        #if DEBUG
         if let cookie = launch.sessionCookie {
             auth.injectSessionCookie(cookie)
         } else {
             auth.restoreStoredCookies()
         }
+        #else
+        auth.restoreStoredCookies()
+        #endif
         guard auth.hasAuthCookies else {
             phase = .signedOut
             return
@@ -231,7 +243,10 @@ final class AppState {
 
     /// Once per launch, when approved and the terms are current: `GET /api/updates`.
     func fetchUpdatesIfNeeded() {
-        guard let user, user.approved, user.termsUpToDate, !updatesFetched, !launch.skipUpdates else { return }
+        guard let user, user.approved, user.termsUpToDate, !updatesFetched else { return }
+        #if DEBUG
+        if launch.skipUpdates { return }
+        #endif
         updatesFetched = true
         Task {
             guard let payload: UpdatesPayload = try? await api.get(APIPath.updates) else { return }
@@ -241,10 +256,12 @@ final class AppState {
 
     private func openLaunchRouteIfReady() {
         guard let user, user.approved, user.termsUpToDate else { return }
+        #if DEBUG
         if !launchRouteHandled, let path = launch.route {
             launchRouteHandled = true
             if let route = AppRoute.parse(path, environment: environment) { open(route) }
         }
+        #endif
         if let path = pendingLandingPath {
             pendingLandingPath = nil
             if let route = AppRoute.parse(path, environment: environment) { open(route) }
@@ -348,6 +365,7 @@ final class AppState {
         profileWatcher.stop()
     }
 
+    #if DEBUG
     /// Debug environment switcher: signs out of the current backend first
     /// (design doc §2: "Switching environment signs out").
     func switchEnvironment(to env: AppEnvironment) async {
@@ -363,6 +381,7 @@ final class AppState {
         auth.startObservingCookies()
         phase = .signedOut
     }
+    #endif
 
     #if DEBUG
     /// Unit tests: route every call through a stubbed client and sign in `user`.

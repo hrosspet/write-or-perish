@@ -255,7 +255,7 @@ struct VoiceView: View {
             return
         }
         Task {
-            if app.launch.debugAudioFile == nil {
+            if !app.audio.usesDebugAudioFile {
                 guard await ensureMicrophone() else { return }
                 await LocalNotifier.requestAuthorizationIfNeeded()
             }

@@ -59,6 +59,7 @@ final class AuthService {
         !CookieVault.authCookies(from: api.backendCookies(), host: environment.host).isEmpty
     }
 
+    #if DEBUG
     /// Debug `-LooreSessionCookie`: a Flask `session` cookie signed in the backend container.
     func injectSessionCookie(_ value: String) {
         let stored = StoredCookie(name: "session", value: value, domain: environment.host,
@@ -68,6 +69,7 @@ final class AuthService {
             vault.capture(from: [cookie])
         }
     }
+    #endif
 
     // MARK: Magic link
 

@@ -1,7 +1,8 @@
 import Foundation
 
-/// Debug-only launch arguments (design doc §12). Release builds ignore every one
-/// of them: `LaunchOptions.current` is empty outside `#if DEBUG`.
+/// Debug-only launch arguments (design doc §12). In Release builds the type has
+/// no fields and no parser: every use sits inside `#if DEBUG`, so none of these
+/// facilities is compiled into a Release build.
 ///
 /// | Argument | Effect |
 /// |---|---|
@@ -16,6 +17,7 @@ import Foundation
 /// | `-LooreSkipUpdates YES` | do not fetch `/api/updates` at launch (screenshots) |
 /// | `-LooreDebugImportFile <path>` + `-LooreDebugImportKind <kind>` | Import page: a button that imports that file instead of the picker (UserDefaults) |
 struct LaunchOptions: Equatable, Sendable {
+    #if DEBUG
     var environment: AppEnvironment?
     var sessionCookie: String?
     var route: String?
@@ -23,6 +25,7 @@ struct LaunchOptions: Equatable, Sendable {
     var theme: String?
     var resetState = false
     var skipUpdates = false
+    #endif
 
     static let current: LaunchOptions = {
         #if DEBUG
@@ -34,6 +37,7 @@ struct LaunchOptions: Equatable, Sendable {
 
     init() {}
 
+    #if DEBUG
     /// Parses `-Key value` pairs. Unknown arguments are ignored.
     init(arguments: [String]) {
         var values: [String: String] = [:]
@@ -60,4 +64,5 @@ struct LaunchOptions: Equatable, Sendable {
         guard let v = value?.lowercased() else { return false }
         return ["1", "yes", "true"].contains(v)
     }
+    #endif
 }
