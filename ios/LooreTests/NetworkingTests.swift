@@ -161,6 +161,28 @@ final class APIClientTests: XCTestCase {
         XCTAssertEqual(box.events, [.unauthorized, .spendCapped(message: "capped"), .notApproved])
     }
 
+    /// Review M1: the in-memory jar posts no `NSHTTPCookieManagerCookiesChanged`;
+    /// an answer that sets cookies must still reach the Keychain copy.
+    @MainActor
+    func testAnAnswerThatSetsACookieUpdatesTheVault() async throws {
+        let client = makeStubbedClient()
+        let vault = CookieVault(store: InMemorySecureStore(), environment: .production)
+        let auth = AuthService(api: client, vault: vault)
+        auth.startObservingCookies()
+        let header = "session=refreshed; Domain=loore.org; Path=/; HttpOnly; Secure"
+        let jar = client.cookieStorage
+        StubURLProtocol.install { request in
+            // URLSession stores a real answer's cookies in the jar; a stubbed protocol's it does not.
+            HTTPCookie.cookies(withResponseHeaderFields: ["Set-Cookie": header], for: request.url!).forEach(jar.setCookie)
+            return .json(200, "{}", headers: ["Set-Cookie": header])
+        }
+        let changed = expectation(forNotification: APIClient.cookiesChanged, object: client)
+        let _: EmptyResponse = try await client.get(APIPath.dashboard)
+        await fulfillment(of: [changed], timeout: 2)
+        for _ in 0..<20 where vault.load() == nil { try await Task.sleep(nanoseconds: 50_000_000) }
+        XCTAssertEqual(vault.load()?.cookie(named: "session")?.value, "refreshed")
+    }
+
     func testDecodingFailureIsReported() async {
         StubURLProtocol.install { _ in .json(200, #"{"unexpected": true}"#) }
         let client = makeStubbedClient()

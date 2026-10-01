@@ -117,6 +117,12 @@ final class AppState {
         theme = ThemeManager(defaults: defaults, forced: nil)
         #endif
         installEventHandler()
+        APIClient.clearSharedCookieStorage()
+        // The voice uploader sets the `Cookie` header itself; it reads the app's
+        // in-memory jar (the default would read `HTTPCookieStorage.shared`).
+        ChunkUploader.shared.cookieHeader = { [weak self] url in
+            HTTPCookie.requestHeaderFields(with: self?.api.cookieStorage.cookies(for: url) ?? [])
+        }
         audio.attach(self)
         profileWatcher.showToast = { [weak self] text, duration in self?.toasts.show(text, duration: duration) }
         profileWatcher.clearUserFlags = { [weak self] in

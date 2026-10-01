@@ -56,8 +56,10 @@ struct APIRequest: Sendable {
 
 /// The app's HTTP client (design doc §3 "APIClient").
 ///
-/// - One `URLSession` on the shared `HTTPCookieStorage` (the Flask `session` and
-///   `remember_token` cookies are the only auth).
+/// - One `URLSession` with an in-memory cookie jar (the Flask `session` and
+///   `remember_token` cookies are the only auth). The Keychain (`CookieVault`)
+///   is the only place they persist: `HTTPCookieStorage.shared` would write the
+///   `remember_token` to `Library/Cookies`, a plaintext file in device backups.
 /// - Memory-only `URLCache`: journal content never touches the disk cache.
 /// - `X-Timezone` on every request; `Cache-Control: no-cache` on polls.
 /// - Canonical trailing slashes (`APIPath.canonical`).
@@ -85,8 +87,22 @@ final class APIClient: @unchecked Sendable {
         return decoder
     }
 
-    static func makeConfiguration(cookieStorage: HTTPCookieStorage = .shared) -> URLSessionConfiguration {
-        let config = URLSessionConfiguration.default
+    /// A cookie jar that lives only in memory (an ephemeral configuration's).
+    static func makeCookieStorage() -> HTTPCookieStorage {
+        URLSessionConfiguration.ephemeral.httpCookieStorage!
+    }
+
+    /// Earlier builds kept the auth cookies in `HTTPCookieStorage.shared`, which
+    /// writes every cookie with an expiry to disk. Nothing in the app uses that
+    /// jar (the voice uploader sets its `Cookie` header from the app's jar), so it
+    /// is emptied at launch and at sign-out and refuses cookies from answers.
+    static func clearSharedCookieStorage(_ storage: HTTPCookieStorage = .shared) {
+        storage.cookieAcceptPolicy = .never
+        storage.removeCookies(since: .distantPast)
+    }
+
+    static func makeConfiguration(cookieStorage: HTTPCookieStorage) -> URLSessionConfiguration {
+        let config = URLSessionConfiguration.ephemeral
         config.httpCookieStorage = cookieStorage
         config.httpShouldSetCookies = true
         config.httpCookieAcceptPolicy = .always
@@ -99,7 +115,7 @@ final class APIClient: @unchecked Sendable {
 
     init(environment: AppEnvironment,
          configuration: URLSessionConfiguration? = nil,
-         cookieStorage: HTTPCookieStorage = .shared) {
+         cookieStorage: HTTPCookieStorage = APIClient.makeCookieStorage()) {
         self.environment = environment
         self.cookieStorage = cookieStorage
         let config = configuration ?? Self.makeConfiguration(cookieStorage: cookieStorage)
@@ -179,6 +195,7 @@ final class APIClient: @unchecked Sendable {
             throw APIError.transport(code: -1, description: "Not an HTTP response")
         }
         log.debug("\(request.method.rawValue, privacy: .public) \(request.path, privacy: .public) → \(http.statusCode) (\(data.count) bytes)")
+        noteSetCookie(http)
         if (200..<300).contains(http.statusCode) || (300..<400).contains(http.statusCode) {
             return (data, http)
         }
@@ -281,6 +298,7 @@ final class APIClient: @unchecked Sendable {
             throw APIError.transport(code: -1, description: "Not an HTTP response")
         }
         log.debug("\(request.method.rawValue, privacy: .public) \(request.path, privacy: .public) upload → \(http.statusCode)")
+        noteSetCookie(http)
         if (200..<300).contains(http.statusCode) { return (data, http) }
         let error = APIError.from(status: http.statusCode,
                                   contentType: http.value(forHTTPHeaderField: "Content-Type"), data: data)
@@ -291,6 +309,16 @@ final class APIClient: @unchecked Sendable {
         default: break
         }
         throw error
+    }
+
+    /// Posted (object: the client) after an answer set cookies. The in-memory jar
+    /// does not post `NSHTTPCookieManagerCookiesChanged`; `AuthService` listens to
+    /// this instead to keep the Keychain copy current.
+    static let cookiesChanged = Notification.Name("org.loore.app.APIClient.cookiesChanged")
+
+    private func noteSetCookie(_ response: HTTPURLResponse) {
+        guard response.value(forHTTPHeaderField: "Set-Cookie") != nil else { return }
+        NotificationCenter.default.post(name: Self.cookiesChanged, object: self)
     }
 
     /// Cookies the app holds for its backend (used to seed web views and media requests).

@@ -101,6 +101,31 @@ final class CookieVaultTests: XCTestCase {
         XCTAssertEqual(names, ["session", "remember_token"])
     }
 
+    /// Review M1: `HTTPCookieStorage.shared` writes the `remember_token` (it has an
+    /// expiry) to a plaintext, backed-up file. The app's jar must be in memory.
+    @MainActor
+    func testTheAppJarIsInMemoryAndTheSharedJarIsCleared() {
+        let token = StoredCookie(name: "remember_token", value: "5|m1-probe", domain: "loore.org",
+                                 expires: Date().addingTimeInterval(30 * day), isSecure: true)
+            .makeCookie(sessionOnly: false)!
+        let shared = HTTPCookieStorage.shared
+        shared.setCookie(token) // what an earlier build left behind
+        let app = AppState(launch: LaunchOptions(), secureStore: InMemorySecureStore(),
+                           defaults: UserDefaults(suiteName: "loore-tests-\(UUID().uuidString)")!)
+        XCTAssertFalse((shared.cookies ?? []).contains { $0.value == "5|m1-probe" }, "cleared at launch")
+
+        let api = app.api
+        XCTAssertFalse(api.cookieStorage === shared)
+        XCTAssertTrue(api.session.configuration.httpCookieStorage === api.cookieStorage)
+        api.cookieStorage.setCookie(token)
+        XCTAssertFalse((shared.cookies ?? []).contains { $0.value == "5|m1-probe" })
+
+        // The voice uploader's Cookie header comes from the app's jar.
+        let header = ChunkUploader.shared.cookieHeader(URL(string: "https://loore.org/api/drafts/x/audio-chunk")!)
+        XCTAssertEqual(header["Cookie"], "remember_token=5|m1-probe")
+        api.cookieStorage.deleteCookie(token)
+    }
+
     func testDomainMatching() {
         XCTAssertTrue(CookieVault.domain("loore.org", matches: "loore.org"))
         XCTAssertTrue(CookieVault.domain(".loore.org", matches: "staging.loore.org"))

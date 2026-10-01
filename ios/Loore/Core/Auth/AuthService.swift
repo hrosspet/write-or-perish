@@ -11,8 +11,8 @@ struct AuthFailure: LocalizedError, Equatable {
 /// Sign-in, cookie persistence and sign-out (design doc §4, map B §3–§4).
 ///
 /// Auth is cookie-only: the Flask `session` and `remember_token` cookies live in
-/// `HTTPCookieStorage.shared` while the app runs and in the Keychain (`CookieVault`)
-/// between launches.
+/// the API client's in-memory jar while the app runs and in the Keychain
+/// (`CookieVault`) between launches. No cookie is written to disk.
 @MainActor
 final class AuthService {
     let api: APIClient
@@ -38,7 +38,7 @@ final class AuthService {
     func startObservingCookies() {
         guard cookieObserver == nil else { return }
         cookieObserver = NotificationCenter.default.addObserver(
-            forName: .NSHTTPCookieManagerCookiesChanged, object: api.cookieStorage, queue: .main
+            forName: APIClient.cookiesChanged, object: api, queue: .main
         ) { [weak self] _ in
             MainActor.assumeIsolated { self?.captureCookies() }
         }
@@ -173,6 +173,7 @@ final class AuthService {
         for cookie in api.cookieStorage.cookies ?? [] {
             api.cookieStorage.deleteCookie(cookie)
         }
+        APIClient.clearSharedCookieStorage()
         api.session.configuration.urlCache?.removeAllCachedResponses()
         URLCache.shared.removeAllCachedResponses()
         let dataStore = WKWebsiteDataStore.default()
