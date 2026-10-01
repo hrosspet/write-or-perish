@@ -362,8 +362,9 @@ final class VoiceTurnController {
         flowTask = Task { [weak self] in
             guard let self else { return }
             let outcome = await self.recorder.stop()
-            self.audio.switchToPlayback()
+            // After the guard: a turn torn down meanwhile must not reactivate the session (M11).
             guard gen == self.generation else { return }
+            self.audio.switchToPlayback()
             self.elapsed = self.recorder.elapsed
             if let fatal = outcome.fatalMessage {
                 self.endTurnWithError(fatal, sound: true)
@@ -967,6 +968,9 @@ final class VoiceTurnController {
     /// The ✕ under "Thinking…", or lock-screen "next track" while thinking
     /// (web `handleCancelProcessing`). The server keeps generating.
     func cancelProcessing() {
+        // Not while Stop is still uploading: that would drop the recording before
+        // finalize (a second "next" press, M11). The web cancels only once thinking.
+        guard state != .stopping else { return }
         timing.endTurn()
         resetTurn(keepQueue: false)
         state = .idle

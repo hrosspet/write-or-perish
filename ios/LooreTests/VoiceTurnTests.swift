@@ -100,9 +100,12 @@ final class FakeRecorder: VoiceRecording {
     func pause() { calls.append("pause") }
     func resume() throws { calls.append("resume") }
     func interrupt() { calls.append("interrupt") }
+    /// Seconds `stop()` takes (the last uploads).
+    var stopDelay: Double = 0
     func stop() async -> ChunkUploader.Outcome {
         calls.append("stop")
         audio?.events.append("recorder.stop")
+        if stopDelay > 0 { try? await Task.sleep(nanoseconds: UInt64(stopDelay * 1_000_000_000)) }
         return outcome
     }
     func cancel() { calls.append("cancel") }
@@ -504,6 +507,29 @@ final class VoiceTurnTests: XCTestCase {
         audio.fakeQueue.isPlaying = true
         turn.playbackResumed()
         XCTAssertTrue(audio.cueOn, "play while still waiting: the cue again")
+    }
+
+    // M11: a "next" (cancel) while Stop uploads the last chunks must not drop the recording.
+    func testCancelDuringStopIsIgnoredAndTheTurnFinalizes() async throws {
+        recorder.stopDelay = 0.1
+        backend.statuses = [try status("completed", llm: 101)]
+        backend.llmStatuses[101] = [try llm(101, "processing")]
+        await recordAndStop()
+        XCTAssertEqual(turn.state, .stopping)
+        turn.cancelProcessing()
+        XCTAssertEqual(turn.state, .stopping)
+        await wait("finalized") { backend.log.contains { $0.hasPrefix("finalize") } }
+        await wait("thinking") { turn.state == .awaitingAudio }
+    }
+
+    func testLeavingDuringStopDoesNotReactivateTheSession() async throws {
+        recorder.stopDelay = 0.1
+        await recordAndStop()
+        turn.tearDown()
+        XCTAssertEqual(audio.events.last, "deactivate")
+        try await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertFalse(audio.events.contains("category.playback"))
+        XCTAssertFalse(backend.log.contains { $0.hasPrefix("finalize") })
     }
 
     // MARK: Endings

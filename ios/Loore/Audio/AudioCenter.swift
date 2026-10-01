@@ -179,7 +179,13 @@ final class AudioCenter {
                                             next: { [weak voice] in voice?.stop() })
                 nowPlaying.update(.recording(elapsed: voice.elapsed, paused: voice.isPaused))
                 return
-            case .stopping, .transcribing, .awaitingAudio:
+            case .stopping:
+                // A second "next" while the last chunks upload does nothing (M11; web
+                // stays in recording until the transcript, so next just stops again).
+                nowPlaying.handlers = .init(next: { [weak voice] in voice?.stop() })
+                nowPlaying.update(.thinking(title: "Voice…"))
+                return
+            case .transcribing, .awaitingAudio:
                 nowPlaying.handlers = .init(next: { [weak voice] in voice?.cancelProcessing() })
                 nowPlaying.update(.thinking(title: "Voice…"))
                 return
