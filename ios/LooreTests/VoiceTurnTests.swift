@@ -429,12 +429,17 @@ final class VoiceTurnTests: XCTestCase {
         XCTAssertFalse(backend.log.contains { $0.hasPrefix("finalize") })
     }
 
-    func testGivenUpChunksAreLeftOutOfTotalChunks() async throws {
+    // B1: a chunk the server does not have is never left out of a finalize.
+    func testMissingChunksKeepTheRecordingInsteadOfFinalizing() async throws {
         recorder.outcome = .init(produced: 4, stored: 3, failed: [2], fatalMessage: nil)
         backend.statuses = [try status("completed", content: "")]
         await recordAndStop()
         await wait("idle") { turn.state == .idle }
-        XCTAssertTrue(backend.log.contains { $0.hasPrefix("finalize total=3") })
+        XCTAssertFalse(backend.log.contains { $0.hasPrefix("finalize") })
+        XCTAssertFalse(backend.log.contains("discard"))
+        XCTAssertFalse(recorder.calls.contains("forget"), "the queued chunks stay on the phone")
+        XCTAssertEqual(notices.toasts, [VoiceTurnController.missingChunksMessage])
+        XCTAssertFalse(audio.cueOn)
     }
 
     func testRetriedFinalizeAnsweringNotRecordingCountsAsSuccess() async throws {

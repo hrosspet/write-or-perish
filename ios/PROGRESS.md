@@ -652,7 +652,10 @@ Totals (a range of routes counts as one row): routes 15 parity Â· 11 deviation Â
 - **A WebM draft** (started in desktop Chrome) cannot be continued natively: a toast says so instead of
   the web's `mime_mismatch` failure.
 - **Offline stop**: after one chunk used up its retries, later chunks get one attempt each and go to the
-  background session (the web retries each in full).
+  background session (the web retries each in full). Chunk 0 is never given up while recording and nothing
+  is sent before it. At Stop every missing chunk gets one more attempt; if any is still missing the
+  recording is not finalized (the web finalizes with what arrived): the chunks stay queued on the phone and
+  the draft stays on the server for the recovery banner.
 - **Dictation "Save audio"** appears once the first 15 s chunk exists (the web keeps an in-memory partial
   from the start) and is named `.m4a` (the web names MP4 audio `.webm`).
 - **Proposal card** on the Voice screen is M2's compact card (the web uses `roomy`).

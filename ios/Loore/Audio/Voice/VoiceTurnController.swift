@@ -366,6 +366,12 @@ final class VoiceTurnController {
                 self.finishQuietly()
                 return
             }
+            if !outcome.failed.isEmpty {
+                // Finalizing now would leave those chunks out of the transcript (B1).
+                // They stay queued on the phone; the draft stays on the server.
+                self.endTurnWithError(Self.missingChunksMessage, sound: true)
+                return
+            }
             do {
                 try await self.backend.finalize(sessionId: sid, totalChunks: outcome.totalForFinalize,
                                                 parentId: self.threadParentId, model: self.model())
@@ -383,6 +389,9 @@ final class VoiceTurnController {
             await self.waitForTranscript(sid, gen)
         }
     }
+
+    /// Stop found chunks the server does not have (no connection): nothing is finalized.
+    static let missingChunksMessage = "Part of your recording hasn't reached Loore yet (no connection?). It is kept on this phone and uploads when you're back online: then open Voice to continue or discard it."
 
     static func isAlreadyFinalizing(_ error: APIError) -> Bool {
         error.status == 400 && (error.userMessage(fallback: "").contains("not in recording state"))

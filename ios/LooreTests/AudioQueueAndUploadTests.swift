@@ -147,26 +147,85 @@ final class ChunkUploaderTests: XCTestCase {
         uploader.open(sessionId: "s2", uploadURL: URL(string: "http://x/c")!)
         for i in 0..<3 { uploader.enqueue(sessionId: "s2", chunk: chunk(i)) }
         let outcome = await uploader.settle(sessionId: "s2")
-        XCTAssertEqual(attempts[1], 5, "4 retries = 5 attempts (web uploadChunkWithRetry)")
+        XCTAssertEqual(attempts[1], 6, "4 retries = 5 attempts (web uploadChunkWithRetry), plus one more at Stop")
         XCTAssertEqual(attempts[0], 1)
         XCTAssertEqual(outcome.failed, [1])
         XCTAssertEqual(outcome.stored, 2)
-        XCTAssertEqual(outcome.totalForFinalize, 2)
     }
 
     func testOfflineStopDoesNotRetryEveryChunkInFull() async throws {
         var attempts: [Int: Int] = [:]
         uploader.transport = { [unowned self] request, file in
-            attempts[self.index(of: request, file: file), default: 0] += 1
+            let i = self.index(of: request, file: file)
+            attempts[i, default: 0] += 1
+            if i == 0 {
+                return (Data(), HTTPURLResponse(url: request.url!, statusCode: 202, httpVersion: nil, headerFields: nil)!)
+            }
             throw URLError(.notConnectedToInternet)
         }
         uploader.open(sessionId: "s7", uploadURL: URL(string: "http://x/c")!)
         for i in 0..<4 { uploader.enqueue(sessionId: "s7", chunk: chunk(i)) }
         let outcome = await uploader.settle(sessionId: "s7")
-        XCTAssertEqual(attempts[0], 5)
-        XCTAssertEqual(attempts[1], 1)
-        XCTAssertEqual(attempts[3], 1)
-        XCTAssertEqual(outcome.failed, [0, 1, 2, 3])
+        XCTAssertEqual(attempts[1], 6, "5 attempts, then one more at Stop")
+        XCTAssertEqual(attempts[2], 2, "one attempt once the network is known down, one more at Stop")
+        XCTAssertEqual(attempts[3], 2)
+        XCTAssertEqual(outcome.failed, [1, 2, 3])
+    }
+
+    // B1: a later chunk must never reach the server before chunk 0 (the init segment).
+    func testChunkZeroIsNeverOvertakenOrGivenUpWhileRecording() async throws {
+        var sentOrder: [Int] = []
+        uploader.transport = { [unowned self] request, file in
+            let i = self.index(of: request, file: file)
+            sentOrder.append(i)
+            let failing = i == 0 && sentOrder.filter { $0 == 0 }.count <= 7
+            return (Data(), HTTPURLResponse(url: request.url!, statusCode: failing ? 503 : 202, httpVersion: nil, headerFields: nil)!)
+        }
+        uploader.open(sessionId: "s8", uploadURL: URL(string: "http://x/c")!)
+        uploader.enqueue(sessionId: "s8", chunk: chunk(0))
+        uploader.enqueue(sessionId: "s8", chunk: chunk(1))
+        let deadline = Date().addingTimeInterval(3)
+        while uploader.outcome("s8").stored < 2 && Date() < deadline {
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        let outcome = await uploader.settle(sessionId: "s8")
+        XCTAssertEqual(sentOrder, Array(repeating: 0, count: 8) + [1], "chunk 0 retried past the 5 attempts; chunk 1 waited")
+        XCTAssertEqual(outcome.stored, 2)
+        XCTAssertEqual(outcome.failed, [])
+    }
+
+    // B1: chunk 0 still failing at Stop: chunk 1 (which would succeed) is held
+    // back, both are reported missing and kept on disk, and the next launch sends them in order.
+    func testChunkZeroFailingAtStopHoldsBackLaterChunksAndKeepsThem() async throws {
+        var attempts: [Int: Int] = [:]
+        uploader.transport = { [unowned self] request, file in
+            let i = self.index(of: request, file: file)
+            attempts[i, default: 0] += 1
+            return (Data(), HTTPURLResponse(url: request.url!, statusCode: i == 0 ? 503 : 202, httpVersion: nil, headerFields: nil)!)
+        }
+        uploader.open(sessionId: "s9", uploadURL: URL(string: "http://x/c")!)
+        uploader.enqueue(sessionId: "s9", chunk: chunk(0))
+        uploader.enqueue(sessionId: "s9", chunk: chunk(1))
+        let outcome = await uploader.settle(sessionId: "s9")
+        XCTAssertEqual(attempts[0], 6, "5 attempts, then one more at Stop")
+        XCTAssertNil(attempts[1], "never sent before chunk 0")
+        XCTAssertEqual(outcome.stored, 0)
+        XCTAssertEqual(outcome.failed, [0, 1], "missing: the caller must not finalize")
+        let files = try FileManager.default.contentsOfDirectory(atPath: root.appendingPathComponent("s9").path).sorted()
+        XCTAssertEqual(files, ["chunk_0.body", "chunk_1.body", "manifest.json"])
+
+        let relaunched = ChunkUploader(root: root, useBackgroundSession: false)
+        relaunched.delay = { _ in 0.001 }
+        var sentIndexes: [Int] = []
+        relaunched.transport = { [unowned self] request, file in
+            sentIndexes.append(self.index(of: request, file: file))
+            return (Data(), HTTPURLResponse(url: request.url!, statusCode: 202, httpVersion: nil, headerFields: nil)!)
+        }
+        relaunched.resumePending()
+        let resumed = await relaunched.settle(sessionId: "s9")
+        XCTAssertEqual(sentIndexes, [0, 1])
+        XCTAssertEqual(resumed.stored, 2)
+        XCTAssertEqual(resumed.failed, [])
     }
 
     func testTransportErrorsAreRetried() async throws {

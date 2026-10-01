@@ -225,6 +225,12 @@ final class DictationController {
                 self.callbacks.failed(nil, false)
                 return
             }
+            if !outcome.failed.isEmpty {
+                // Finalizing now would leave those chunks out of the transcript (B1).
+                app.audio.sounds.playError()
+                self.fail(VoiceTurnController.missingChunksMessage)
+                return
+            }
             do {
                 var request = APIRequest.json(.post, APIPath.streamingFinalize(sid),
                                               .object(["total_chunks": .int(outcome.totalForFinalize)]))
