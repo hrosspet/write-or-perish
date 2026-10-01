@@ -116,7 +116,7 @@ final class AppState {
             self?.user?.profileBatchPending = false
         }
         profileWatcher.fetch = { [weak self] taskId in
-            guard let api = await self?.api else { throw CancellationError() }
+            guard let api = self?.api else { throw CancellationError() }
             let query = taskId.map { [URLQueryItem(name: "task_id", value: $0)] } ?? []
             return try await api.get(APIPath.profileProgress, query: query, poll: true)
         }

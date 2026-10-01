@@ -1,5 +1,6 @@
 import XCTest
 import ZIPFoundation
+import SwiftUI
 @testable import Loore
 
 // M4: the jest suites for the feature pages that pin logic
@@ -537,5 +538,71 @@ final class FeaturePageModelTests: XCTestCase {
         router.open(.artifacts(kind: nil), environment: env, commonsAvailable: true)
         XCTAssertEqual(router.workspace, .artifact("memory"))
         XCTAssertEqual(router.path(for: .artifacts), [])
+    }
+}
+
+/// The Commons cannot be opened as the test user locally (it lists other
+/// users' public posts), so its card is rendered from a hand-made fixture.
+/// With `TEST_RUNNER_LOORE_SNAPSHOT_DIR` set, the image is written there.
+@MainActor
+final class CommonsRenderingTests: StubbedAppTestCase {
+    func testCommonsCardsRender() throws {
+        let items = [
+            CommonsItem(id: 1, username: "riverwalker", content: "## Notes from the bank\n\nThe river was **high** after the rain.",
+                        createdAt: Date(), replyCount: 2),
+            CommonsItem(id: 2, username: "glacier", content: "Ice moves slowly; so do drafts.", createdAt: nil, replyCount: 1),
+            CommonsItem(id: 3, username: "quiet", content: "Nothing to add.", createdAt: nil, replyCount: 0),
+        ]
+        let view = VStack(spacing: 16) {
+            ForEach(items) { item in CommonsCard(item: item) {} }
+        }
+        .padding(24)
+        .frame(width: 402)
+        .background(LooreColor.bgDeep)
+        .environment(app)
+        .environment(\.colorScheme, .dark)
+        let renderer = ImageRenderer(content: view)
+        renderer.scale = 3
+        let image = try XCTUnwrap(renderer.uiImage)
+        XCTAssertGreaterThan(image.size.height, 300)
+        if let dir = ProcessInfo.processInfo.environment["LOORE_SNAPSHOT_DIR"], !dir.isEmpty {
+            try image.pngData()?.write(to: URL(fileURLWithPath: dir).appendingPathComponent("commons-cards.png"))
+        }
+    }
+
+    func testIntentionsViewRenders() throws {
+        let content = """
+        # Endorsed
+
+        ## Finish the field guide
+        *active — endorsed 2026-09-01*
+        Write the river chapters before winter.
+        - 2026-09-20: drafted two chapters
+
+        ## Learn Czech
+        *fulfilled*
+
+        # Inferred
+
+        ## Walk more
+        *inferred, unconfirmed*
+        Mentions walks often.
+
+        ## Old plan
+        *released*
+        """
+        let view = IntentionsView(content: content)
+            .padding(24)
+            .frame(width: 402)
+            .background(LooreColor.bgDeep)
+            .environment(app)
+            .environment(\.colorScheme, .dark)
+        let renderer = ImageRenderer(content: view)
+        renderer.scale = 3
+        let image = try XCTUnwrap(renderer.uiImage)
+        XCTAssertGreaterThan(image.size.height, 400)
+        if let dir = ProcessInfo.processInfo.environment["LOORE_SNAPSHOT_DIR"], !dir.isEmpty {
+            try image.pngData()?.write(to: URL(fileURLWithPath: dir).appendingPathComponent("intentions-view.png"))
+        }
     }
 }

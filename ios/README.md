@@ -105,6 +105,7 @@ Debug builds only (Edit Scheme → Run → Arguments, or `xcrun simctl launch`):
 | `-LooreDebugAudioFile <path>` | feed an audio file to the recorder instead of the mic (voice mode and dictation); the file's end acts as Stop |
 | `-LooreDebugVoiceAutoStart YES` | with `-LooreDebugAudioFile` and `-LooreRoute /voice`: start recording at once |
 | `-LooreDebugListenNode <id>` | play a node's audio in the global player at launch (the speaker icon's path) |
+| `-LooreDebugImportFile <path>` + `-LooreDebugImportKind markdown\|claude\|chatgpt\|twitter` | Import page: a "Debug: import …" button that imports that file instead of opening the file picker |
 
 ## Tests
 
@@ -145,6 +146,17 @@ Some take node ids of the test user: `TEST_RUNNER_LOORE_THREAD_IDS`,
 `TEST_RUNNER_LOORE_SHARE_NODE`, `TEST_RUNNER_LOORE_DRAFT_NODE`,
 `TEST_RUNNER_LOORE_REPLY_NODE`. Craft mode is switched on through More and
 back off at the end; if a run stops halfway, switch it off again (More → Craft mode).
+
+M4 flows (feature pages) are in `M4ScreensUITests`. None of them bills an AI
+provider (imports run with AI usage None, so no profile update starts). They
+need a test user with no todo and no profile, `TEST_RUNNER_LOORE_IMPORT_DIR`
+(a folder with `notes.zip` holding two `.md` files whose text contains
+"M4 import test", `chatgpt-renamed.zip` with a ChatGPT conversations array
+under another name, and `notazip.zip`), and `TEST_RUNNER_LOORE_KEEP_SHARE_IDS`
+(the test user's existing share ids, never deleted). The backend has no delete
+for profiles, todos or artifacts: afterwards run
+`scripts/local_backend.sh state m4_cleanup`, which removes the test user's
+todo and profile rows, the `m4-test` artifact and the imported test notes.
 
 ## Only a real iPhone can test
 

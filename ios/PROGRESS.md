@@ -8,9 +8,9 @@ how the web behaves, the web code wins; for what the app should do, the design d
 |---|---|---|
 | M1 Foundation | `ios-app` | **done** (2026-10-01) |
 | M2 Thread and writing | `ios-app` | **done** (2026-10-01) |
-| M3 Voice and audio | `ios-app-voice` | in progress (started in parallel with M2) |
-| M4 Feature pages | `ios-app-pages` | next, parallel with M3 |
-| M5 Integration and parity | `ios-app` | last |
+| M3 Voice and audio | `ios-app-voice`, merged into `ios-app` (`d69bd0b`) | **done** (2026-10-01; notes in `PROGRESS-voice.md`) |
+| M4 Feature pages | `ios-app` (built after M3 was merged) | **done** (2026-10-01) |
+| M5 Integration and parity | `ios-app` | next |
 
 ---
 
@@ -25,7 +25,7 @@ how the web behaves, the web code wins; for what the app should do, the design d
 - If `xcrun simctl list runtimes` is empty although `xcrun simctl runtime list` shows the
   iOS 26.3 disk image "Ready", run `xcrun simctl runtime scan-and-mount` (sandbox off) once.
 - Simulators: M1 used "Loore iPhone 17" (`CDAD3013-…`), M2 "Loore M2 iPhone 17"
-  (`0A4086FA-7D51-4ACF-ADDF-C90377075FEE`), M3 "Loore Voice iPhone 17". Use your own; create one with
+  (`0A4086FA-7D51-4ACF-ADDF-C90377075FEE`), M3 "Loore Voice iPhone 17", M4 "Loore iPhone 17" again. Use your own; create one with
   `xcrun simctl create "<name>" com.apple.CoreSimulator.SimDeviceType.iPhone-17 com.apple.CoreSimulator.SimRuntime.iOS-26-3`.
 - This simulator runtime draws **every emoji as a "?" box**, even in the system font (checked with
   an `ImageRenderer` test); it is the runtime, not the app. Check emoji on a device.
@@ -37,7 +37,7 @@ how the web behaves, the web code wins; for what the app should do, the design d
 ```sh
 cd ios && xcodegen          # always after adding/removing files
 xcodebuild -project Loore.xcodeproj -scheme Loore -destination 'platform=iOS Simulator,id=<UDID>' \
-  -derivedDataPath build/DerivedData test          # 197 unit tests, ~5 s of test time
+  -derivedDataPath build/DerivedData test          # 332 unit tests, ~8 s of test time
 python3 ios/scripts/check_terms_text.py            # from the repo root
 ```
 `build/` is git-ignored. Install + launch for screenshots:
@@ -73,6 +73,24 @@ ios/Loore/Features/Write/       M2: NodeFormView/NodeFormModel (+DictationButton
 ios/Loore/Features/Proposals/   M2: ProposalParser (ProposalInline.js port), ProposalCard (compact)
 ios/Loore/Features/Log/         M2: LogView
 ios/Loore/Features/Search/      M2: SearchView (+SearchSnippet, SearchResult)
+ios/Loore/Features/Workspace/   M4: WorkspaceView (Artifacts tab root; document switched in place), ArtifactsNavRow,
+                                doc header pieces (VersionChip, HistoryLink, DocMetaLine, DocEditor, DocEditButtons),
+                                VersionHistorySheet (+DiffRowsView), WorkspaceStores (ArtifactsStore,
+                                ProfileGenerationWatcher)
+ios/Loore/Features/{Profile,Todo,Artifacts}/  M4: ProfilePage (+SourceMix), TodoPage + TodoModel (+TodoSections),
+                                ArtifactsPage + IntentionsView (+IntentionsParser, ArtifactKinds)
+ios/Loore/Features/References/  M4: ReferencesView, ReferenceDetailView (+edit sheet), Embeds (tweet, YouTube),
+                                ReadReplyViews (FeedPicksView + FeedPicksModel, ReadWindowLine, ReadReplyTail),
+                                ReferenceUtils (references.js port)
+ios/Loore/Features/Prompts/     M4: PromptsView, PromptDetailView
+ios/Loore/Features/Account/     M4: AccountView, AccountModel (M1's environment switcher and M3's Voice section kept)
+ios/Loore/Features/Import/      M4: ImportView (+ExternalImportSection, NewTokenDialog), ImportDataSection (dialogs),
+                                ImportModel, ImportFiles (ZIPFoundation streaming, multipart files)
+ios/Loore/Features/{Share,Commons}/  M4: ShareView, CommonsView (+CommonsModel)
+ios/Loore/Features/Onboarding/  M4 adds WelcomeView, ConfirmEmailView (+ConfirmEmailModel, ConfirmEmailPasteSheet)
+ios/Loore/Features/Web/         M4 adds CookieWebFlowSheet (Connect X, X bookmarks connect)
+ios/Loore/Core/Util/            M4 adds LineDiff (+VersionDiff; diff.js port) and VersionLabels
+ios/Loore/Core/Models/          M4 adds Workspace, References, ShareCommons
 ios/project.yml                 XcodeGen spec (packages: swift-markdown 0.7.3, ZIPFoundation 0.9.20)
 ios/Config/Signing.xcconfig     team id / bundle id (+ git-ignored Signing.local.xcconfig)
 ios/Loore/App/                  LooreApp, AppState, RootView (gating), MainTabView (tabs, RouteDestination),
@@ -131,6 +149,17 @@ ios/scripts/                    check_terms_text.py, local_backend.sh
   not `.task(id:)` (a cancelled `URLSession` call is a silent failure).
 - Test identifiers: `thread.focal`, `thread.focalKebab`, `thread.llmResponse`, `nodeForm.text.<new|inline|edit>`,
   `nodeForm.send.<…>`, `search.field`, `more.writeNew`, `home.read`.
+
+**Conventions M4 added**
+- The Artifacts tab root is `WorkspaceView`; `app.open(.profile / .todo / .artifacts(kind:) / .newArtifact)`
+  selects `router.workspace` and pops that tab (web `ArtifactsNav` navigation). A workspace route pushed
+  elsewhere shows a standalone workspace (`WorkspaceView(pinned:)`).
+- Any versioned document: a `VersionHistorySource` (title, versions, content, revert) and `VersionHistorySheet`.
+- A container with `.accessibilityIdentifier` needs `.accessibilityElement(children: .contain)` first, or
+  SwiftUI copies the identifier onto every child and UI tests cannot find the buttons inside.
+- Signed-in web flows that end on a frontend page: `CookieWebFlowSheet(startURL:onLanding:)`.
+- Large uploads: `api.upload(_:fromFile:)` with a body written by `ImportFiles.multipartBody`.
+- New signals: `referencesChanged`. Stores on `AppState`: `artifacts`, `profileWatcher`.
 
 ---
 
@@ -249,6 +278,66 @@ ios/scripts/                    check_terms_text.py, local_backend.sh
   craft-off controls after craft mode was switched on; bubble footers squeezed the author away
   next to wide tags; italics had no effect in Outfit.
 
+
+## Done in M4
+
+Every route classed CORE or SECONDARY in map A §1 now has a native screen; `PlaceholderScreen` is only
+reached by routes that never push (admin, waitlist, web pages).
+- **Workspace** (Artifacts tab): ArtifactsNav bubbles (store refreshed on `artifactsChanged`), Profile (meta line
+  with source mix, empty state, edit with the regenerate-audio question, `PUT` in place / `POST` first, history
+  with revert, generation indicator fed by the app-wide `ProfileGenerationWatcher`, listen-aloud speaker), Todo
+  (sections, nested items collapsed, tick, row "+", quick-add to Today, raw edit, history, revert; every in-place
+  save re-fetches first), Artifacts (built-in and custom kinds, synthetic unknown kind, create form with the slug
+  sanitiser and validation, description required, unsaved-changes guard, `viewed` ping, Intentions view, history).
+- **Version history**: list → detail sheet; line diff with word refinement, folded unchanged runs, Changes/Full
+  text (heavy rewrites open in Full), "Initial version", revert; prompts' file default as v0.
+- **References**: list (cards with reference footer and tags, page paging, Open source, Delete), detail (title
+  with speaker, tweet embed via widgets.js, YouTube nocookie embed, stored text toggle, footer and tags,
+  surfacing line, Good/Bad verdict, read toggle, Edit sheet with the cap and regenerate-audio question, Delete).
+  In the thread: legacy FeedPicks, ReadWindowLine and the ReadReplyTail (M2 gap).
+- **Prompts** (craft): list with the "default updated" dot, detail with edit (monospace), the default-updated
+  banner (view / accept / dismiss), history.
+- **Account**: username (validation), email (one request in flight, pending notice, resend / new link, cancel,
+  remove with X, "Paste the link" for the confirmation), X (Connect in a signed-in web view with the outcome
+  messages, Disconnect), plan, settings that save on change (model, privacy, external references, public sharing,
+  AI usage, craft mode), AI Preferences link, M3's Voice section, version line with the Debug switcher, anchors.
+- **Confirm email** (pasted link, from Account or the waitlist) with every outcome; **Welcome** (hero, first
+  entry → Write New Entry, prefill consent card, import sheet, How-to link, closing lines).
+- **Import**: the four archive importers (file picker; Claude/ChatGPT `conversations.json` streamed out of the
+  zip with ZIPFoundation, the largest JSON array as fallback; Markdown/Twitter zips streamed into the multipart
+  body), analyze → confirm dialogs (privacy Private, AI None), 409 restore-or-skip, Twitter task polling with
+  progress, Import Finished (then the user is reloaded and the profile watcher starts when a build was handed
+  off), the web's errors; Import References (Community Archive fetch + count polling, X bookmarks sync / connect /
+  reconnect, bookmarks JSON, Chrome clipper tokens with the one-time token dialog).
+- **Share** (drafts, publish with the inline "Where should this go?" confirmation, revoke, edit, delete) and
+  **Commons** (feed, click-to-load paging, cards open the thread), both behind `share_v1_enabled`.
+- Ports: `diff.js`, `intentions.js`, `references.js`, `artifactKinds.js`, `parseTodoSections`,
+  `formatSourceMix`, the version labels (with their jest cases; 2,491 extra checks against the JS outputs were
+  run once in a scratch harness).
+- Fixes to earlier screens found on the way: collapsed card bodies collapse whitespace like the web (Log too);
+  dialog cards keep narrow content left-aligned.
+
+### Verified in M4 (simulator "Loore iPhone 17", local Docker backend, user 5)
+- Unit tests: 332 pass (M3's 240 + 92): LineDiff/Intentions/ReferenceUtils/WorkspaceUtils (jest ports), Account
+  (AccountPage.test.js), ConfirmEmail (ConfirmEmailPage.test.js), ProfileGenerationWatcher (its test.js +
+  outcome rules), ReadReply + FeedPicks (their test.js), TodoModel (re-fetch before PATCH keeps the AI's item,
+  quick-add, revert + toast), Import (zip reading, multipart, confirm bodies, 409 retry, ChatGPT errors,
+  results), payload decoding and workspace routes, fixture renders of Commons cards and the Intentions view.
+- Side by side with headless-Chrome shots of the web at 402×874 (scratch dir): Profile and Todo (empty and
+  filled), Memory, Intentions (empty), new artifact form, References list and a tweet reference, Prompts and a
+  prompt, Account, Import, Share, Welcome, Confirm email, Todo history drawer vs sheet.
+- `M4ScreensUITests` (all pass): Todo create → tick → expand → quick-add → row add → edit (v2) → history diff →
+  revert (v3); Profile write → edit → history; artifact create (slug sanitised) → edit → unsaved-changes dialog
+  → diff / full text; reference embed → read toggle on/off → edit and delete dialogs (cancelled); prompt history
+  vs the file default; Account username validation, Connect X round trip (local backend lands on
+  `x_login=cancelled` at once); stale confirmation token → "Not confirmed"; markdown import (2 imported), the same
+  archive again (0 imported, 2 skipped, note), a ChatGPT zip without a `conversations.json` name (1
+  conversation found), not-a-zip error; Share draft → publish → revoke → delete; Welcome import sheet.
+- Light theme checked on Account, Intentions and a reference (the tweet embed follows the theme).
+- No billed calls (imports ran with AI usage None, which starts no profile update; no speaker taps). User 5
+  restored: shares, reference 1032 marks, settings unchanged; test todo/profile/artifact/notes removed with
+  `local_backend.sh state m4_cleanup`.
+
 ## Deviations from the web
 
 - **Magic link is pasted into the app** (design §4): extra "I already have a sign-in link"
@@ -298,6 +387,30 @@ ios/scripts/                    check_terms_text.py, local_backend.sh
 - **Search (M2)**: a sheet from the Log's magnifier (⌘K with a hardware keyboard); dates are optional
   date pickers ("yyyy-mm-dd" until set).
 
+- **Workspace (M4)**: Profile, Todo and artifacts switch in place under the bubbles (no back step between
+  documents, as with tabs); the version drawer is a sheet with a list and a detail page; revert failures toast
+  "Couldn't revert." (web: console only); an artifact kind is validated against the backend's slug rule before
+  Save and a save error shows the server's reason (web: console only); the todo row "+" is always shown at 55 %.
+- **Todo saves (M4, design §10)**: tick / row add / quick-add re-fetch the todo and apply the same text-keyed
+  edit to the fresh content before `PATCH`; the list re-fetches after "todo changed" and on return to the app.
+  Edit-mode Save (`PUT`) writes a new version as typed (the replaced version stays in history).
+- **References (M4)**: embeds run in small web views (widgets.js with a 15 s give-up → stored text; YouTube
+  nocookie iframe with the frontend origin as referrer); the verdict/read row sits under the surfacing line, as
+  the web wraps it at phone width; Edit is a sheet.
+- **Account (M4)**: Connect X and X bookmarks connect run in a cookie-seeded web view that closes on the frontend
+  landing; then the user reloads (Account) or the card refreshes (Import). "Paste the link" for an email
+  confirmation is added to the pending-email notice and the waitlist (design §4.6); the confirmation shows in a
+  sheet. "Sign out and use the other account" signs out (the link is pasted again after signing in). The default
+  privacy menu has no disabled "Circles (coming soon)" row. The model picker is M2's full-width control.
+- **Import (M4)**: native file picker; a JSON candidate counts as an array when its first non-blank byte is `[`
+  and its last `]` (not parsed whole); files above 200 MB are refused before upload ("This file is larger than
+  200 MB, the most Loore accepts in one upload."; ChatGPT keeps the web's 413 text); a confirm that hits nginx's
+  60 s (504/502/timeout) says the import may still finish and to check the Log before importing again; a lost
+  Twitter task says "check your Log" instead of "reload the page"; after "Import Finished" the app reloads the
+  user and starts the profile watcher when the confirm handed a build off (the web reloads the page). "Click"
+  copy became "Tap" in the token dialog.
+- **Commons (M4)**: cards open the thread by node id (map E §8.2 iOS note), not the permalink.
+
 ## Known gaps (after M1)
 
 - **Sign in with X** is built but untested (needs X credentials and a real X account); it runs in a
@@ -316,9 +429,8 @@ ios/scripts/                    check_terms_text.py, local_backend.sh
 
 - **Emoji** render as "?" boxes in this simulator runtime (system font included); unverified on a device.
 - **Admin read feature** (map D §5.9): the Home Read card and the thread's Read / Read further buttons
-  (with the read-model picker) are built but untested (user 5 is not an admin). Not built: legacy
-  `FeedPicks`, `ReadReplyTail` ("Mark all as read"), the admin rerun controls, `ReadWindowLine`,
-  the `SemanticNeighbors` rail.
+  (with the read-model picker) are built but untested (user 5 is not an admin). Not built: the admin
+  rerun controls and the `SemanticNeighbors` rail (FeedPicks, ReadReplyTail and ReadWindowLine came in M4).
 - **Not exercised against the backend**: audio file upload and chunked upload (billed transcription;
   no file in the simulator), recovered-audio drafts, the todo apply *success* path (a billed merge on
   the reply's Opus model; the 404 path is verified), Create issue and Send feedback (would file a
@@ -330,6 +442,22 @@ ios/scripts/                    check_terms_text.py, local_backend.sh
   to my Todo" did not register in the UI test (the same steps work on a shorter proposal).
 - Voice Mode in the thread posts `/voice/from-node` (billed when it starts a reply) and opens the
   Voice placeholder until M3.
+
+## Known gaps (after M4)
+
+- **Commons** was never opened as the test user locally (it lists other users' public posts): checked with a
+  fixture render and decoding tests only. Check on staging.
+- **No data for**: read replies (FeedPicks, ReadWindowLine, ReadReplyTail are unit-tested only), a YouTube clip,
+  an updated default prompt (banner), a running profile build (indicator; the watcher is unit-tested), filled
+  intentions (fixture render only).
+- **Not run against the backend**: sending / resending / cancelling an email change (would mail a link), real X
+  OAuth (needs X credentials; only the immediate local landing was seen), X bookmarks connect and sync, Community
+  Archive fetch and bookmarks JSON import (they rebuild the billed references digest), Claude and Twitter archive
+  confirms, clipper token create/revoke, prompt edit / accept default, reference edit save, listen-aloud on
+  profiles and references (billed TTS).
+- **Big archives**: the zip is read in a streaming way, but the analyze answer (all conversations) is held in
+  memory to post it back, as the web does; a 200 MB `conversations.json` needs several hundred MB of RAM.
+- The Updates sheet has no persistent "What's new" entry (map E §9 suggestion; not built).
 
 ## Notes for M3 (voice and audio)
 - Speaker / download on nodes: replace `NodeAudioControls` (`Features/Thread/ThreadSheets.swift`);
@@ -345,7 +473,7 @@ ios/scripts/                    check_terms_text.py, local_backend.sh
   shares", pulsing AI dot). The parser and accept flows are shared.
 - `ThreadModel.startVoice()` opens `.voice(parentId:resumeLLMId:)` exactly as the web navigates.
 
-## Notes for M4 (feature pages)
+## Notes for M4 (feature pages) — done in M4 (kept for the record)
 - Render every markdown body with `MarkdownView` (Profile, Todo, artifacts, references, prompts);
   `MarkdownStyle` takes the page's font size/weight/colour. Todo checklists: pass `ChecklistActions`
   and use `MarkdownEdits.toggleCheckbox / insertItemAfter / appendItemToSection` (Todo quick-add)
@@ -361,7 +489,11 @@ ios/scripts/                    check_terms_text.py, local_backend.sh
 - Version-history diff (`utils/diff.js` + tests) is still to port (M4).
 
 ## Notes for M5
-- Merging M3/M4 touches the M2 hooks above and `RouteDestination` (`.voice`, M4 routes).
+- M3 and M4 are both on `ios-app` now (M4 was built after M3's merge): fold `PROGRESS-voice.md` into this file.
+- Walk map A §1 against the app: every CORE/SECONDARY route is native; PUBLIC/MARKETING and admin stay web views.
+- Check on staging (flags on, more data): Commons, the profile watcher with a real build, read-reply picks,
+  Connect X, X bookmarks, the default-updated prompt banner, YouTube references.
+- `M4ScreensUITests` assume a test user with no todo/profile; clean up with `state m4_cleanup`.
 - Update the design docs named in `CLAUDE.md` (M2 did not).
 - XCUITest flows need the local backend and are not in CI.
 - The first two M1 commits carry their `Co-Authored-By`/`Claude-Session` lines mid-message

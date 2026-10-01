@@ -10,7 +10,10 @@
 #
 # State modes: terms_old (accepted terms out of date), unapproved, restore
 # (approved + terms current), tz_utc, add_notification (an unread "fix_ready"
-# notification linking to /log), del_notifications, craft_off.
+# notification linking to /log), del_notifications, craft_off, m4_cleanup (removes
+# what M4ScreensUITests leave: the test user's todo and profile rows, the
+# `m4-test` artifact, and nodes holding "M4 import test"; the backend has no
+# delete route for profiles, todos or artifacts).
 #
 # The output is a credential for the local test user: keep it out of commits.
 set -e
@@ -57,7 +60,7 @@ from backend import create_app
 app = create_app()
 with app.app_context():
     from backend.extensions import db
-    from backend.models import User, UserNotification
+    from backend.models import User, UserNotification, UserTodo, UserProfile, UserArtifact, Node
     u = db.session.get(User, $TEST_USER_ID)
     assert u.username == "$TEST_USERNAME"
     for mode in "$MODES".split():
@@ -77,6 +80,15 @@ with app.app_context():
             UserNotification.query.filter_by(user_id=$TEST_USER_ID, title="Export works again").delete()
         elif mode == "craft_off":
             u.craft_mode = False
+        elif mode == "m4_cleanup":
+            rows = (UserTodo.query.filter_by(user_id=$TEST_USER_ID).all()
+                    + UserProfile.query.filter_by(user_id=$TEST_USER_ID).all()
+                    + UserArtifact.query.filter_by(user_id=$TEST_USER_ID, kind="m4-test").all()
+                    + [n for n in Node.query.filter_by(user_id=$TEST_USER_ID).all()
+                       if "M4 import test" in (n.get_content() or "")])
+            for row in rows:
+                db.session.delete(row)
+            print("m4_cleanup removed %d rows" % len(rows))
         else:
             raise SystemExit("unknown mode: " + mode)
     db.session.commit()
