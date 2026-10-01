@@ -754,3 +754,27 @@ Totals (a range of routes counts as one row): routes 15 parity · 11 deviation �
 - `M4ScreensUITests` assume a test user with no todo/profile; clean up with `state m4_cleanup`.
 - The first two M1 commits carry their `Co-Authored-By`/`Claude-Session` lines mid-message, and the M3 merge
   commit `73e60d7` (made with `--no-edit`) has none: not rewritten, per the no-amend rule.
+
+## Review fixes (app)
+
+Findings from the PR #384 review (comment 5924901081) outside `Audio/` and `Features/Voice/`
+(the audio findings are fixed on a separate branch). One commit per finding; unit tests 334 → 351.
+
+| Finding | Commit | Fix | Tests |
+|---|---|---|---|
+| B2 todo edits overwrite each other | `34f670c` | `TodoModel` chains each edit's re-fetch + `PATCH` after the previous one; shown = server's latest + edits in flight; a failure reverts only itself | two quick ticks, quick-add + tick, failed tick + good tick |
+| M1 `remember_token` in a backed-up cookie file | `d3bb5ed` | `APIClient` on an ephemeral config with an in-memory jar; `CookieVault` is the only persistence; Set-Cookie answers notify `AuthService` (`APIClient.cookiesChanged`); `HTTPCookieStorage.shared` emptied at launch and sign-out and set to refuse cookies; the uploader's `cookieHeader` is set from `AppState` to read the app jar | jar not shared, shared jar cleared, uploader header, vault follows Set-Cookie; magic-link UI test + relaunch in the simulator, no token in `Library/Cookies` |
+| M3 import never starts from the real picker | `6790333` | importer kind kept in `ImportModel.picking`, picker driven by `showingPicker` | SwiftUI order replayed; UI test `testImportThroughTheSystemFilePicker` (`LOORE_PICKER_FILE`) |
+| M4 profile save overwrites a generated version | `69cae62` | edit records its base version; a newer latest at Save asks: save as new version (`POST /profile`) / discard / keep editing | `ProfilePage.saveTarget`; profile + todo UI flows |
+| M5 draft autosave stops off screen | `dd82e30` | `onDisappear` saves what is pending, `onAppear` restarts the interval, `.background` saves inside a background task; `flush()` waits for a save in flight | three `DraftAutosaverTests`; UI test `testDraftTypedRightBeforeATabSwitchIsSaved` |
+| M6 threads 256+ levels deep fail to decode | `78f0e8a` | `NodeTreeDecoding`: iterative scan cuts each node's `children` out, decodes one flat array, rebuilds bottom-up; used by `ThreadModel` and the Reply form (`APIClient.nodeDetail`) | 300-level chain, flat = nested on fixtures, deep `ThreadModel` load |
+| M7 picked file size read before access | `830c424` | size read inside security-scoped access (`NodeFormModel.pickedFileSize`) | call order with fakes; real temp file. Needs a device check |
+| M8 stuck Twitter import traps the user | `e94ba1e` | "Close" while polling (import continues on the server); stop with the check-your-Log message after **10 min without progress (new heuristic, `ImportModel.twitterStallLimit`)** | stall stop; close stops polling |
+| M16 non-http(s) link crashes | `79fdae2` | `Router.externalHandling`: http(s) → Safari view, `mailto:` → system, anything else ignored | handling table; schemeless `.external` |
+
+Notes:
+- M1: the background upload session still names `HTTPCookieStorage.shared` (`ChunkUploader`, under `Audio/`); the
+  jar is empty and refuses cookies, so nothing is written. Setting `httpShouldSetCookies = false` and
+  `httpCookieAcceptPolicy = .never` there is left to the audio branch.
+- M6: the Reply form keeps the web's fallback (account defaults) when the parent fetch fails for another reason. The
+  server builds the nested answer recursively too (`serialize_node_recursive`); its depth limit was not checked.
