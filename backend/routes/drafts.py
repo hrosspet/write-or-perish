@@ -9,7 +9,9 @@ import pathlib
 import os
 import shutil
 from datetime import datetime
-from backend.utils.audio_storage import move_draft_audio_to_node_dir
+from backend.utils.audio_storage import (
+    is_storage_id, move_session_audio_to_node, storage_path,
+)
 from backend.utils.encryption import encrypt_file_atomically
 from backend.utils.llm_nodes import pick_model_for_generation
 from backend.utils.spend import require_spend_headroom
@@ -21,6 +23,26 @@ from backend.utils.streaming_session import (
 )
 
 drafts_bp = Blueprint("drafts_bp", __name__)
+
+
+@drafts_bp.before_request
+def _refuse_malformed_session_id():
+    """A <session_id> in the URL names a folder on disk: one that is not a
+    plain folder name (audio_storage.is_storage_id) gets the same 404 as
+    a session that does not exist."""
+    session_id = (request.view_args or {}).get("session_id")
+    if session_id is not None and not is_storage_id(session_id):
+        return jsonify({
+            "error": "Streaming session not found",
+            "code": "session_not_found",
+        }), 404
+    return None
+
+
+def _session_dir(user_id, session_id):
+    """drafts/<user_id>/<session_id> under AUDIO_STORAGE_ROOT."""
+    return storage_path(AUDIO_STORAGE_ROOT, "drafts", user_id, session_id)
+
 
 # Proposal-pending drafts (created by the agentic loop's _auto_create_drafts,
 # consumed by apply_* / the proposal REST routes) live in the same Draft table
@@ -62,6 +84,17 @@ def _parent_error(parent_id):
     return parent_visibility_error(Node.query.get(pid), current_user.id)
 
 
+def _editable_node(node_id):
+    """(node, None) when the current user may edit the node *node_id*
+    (can_user_edit_node), else (None, a 404 response): a node the user
+    cannot edit gets the same 404 as one that does not exist. A deleted
+    node the user could edit is returned; callers handle deletion."""
+    node = Node.query.get(node_id)
+    if node is None or not can_user_edit_node(node):
+        return None, (jsonify({"error": "Node not found"}), 404)
+    return node, None
+
+
 # Audio storage root - same as in nodes.py
 AUDIO_STORAGE_ROOT = pathlib.Path(
     os.environ.get("AUDIO_STORAGE_PATH", "data/audio")
@@ -94,21 +127,18 @@ def get_draft():
     node_id = request.args.get("node_id", type=int)
     parent_id = request.args.get("parent_id", type=int)
 
-    # Validate node_id if provided - user must own the node OR be LLM requester (parent node owner)
+    # Validate node_id if provided - user must own the node OR be LLM
+    # requester (parent node owner); any other node answers 404.
     if node_id:
-        node = Node.query.get(node_id)
-        if not node:
-            return jsonify({"error": "Node not found"}), 404
+        node, err = _editable_node(node_id)
+        if err is not None:
+            return err
         # Soft-deleted target — treat as gone (per plan §17). The
         # underlying Draft row is left alone so a future "rescue
         # interrupted drafts" UI could surface it; at the GET-by-target
         # entry point, behave as if no draft exists.
         if node.deleted_at is not None:
             return jsonify({"error": "Node not found"}), 404
-
-        # Check authorization using shared utility function
-        if not can_user_edit_node(node):
-            return jsonify({"error": "Not authorized to access drafts for this node"}), 403
 
     # Plan §17 parent_id branch: if the parent has been soft-deleted,
     # we still want to surface the user's in-progress writing — but
@@ -306,26 +336,25 @@ def save_draft():
     node_id = data.get("node_id")
     parent_id = data.get("parent_id")
 
-    # Validate node_id if provided - user must own the node OR be LLM requester (parent node owner)
+    # Validate node_id if provided - user must own the node OR be LLM
+    # requester (parent node owner); any other node answers 404.
     if node_id:
-        node = Node.query.get(node_id)
-        if not node:
-            return jsonify({"error": "Node not found"}), 404
+        node, err = _editable_node(node_id)
+        if err is not None:
+            return err
         # Soft-deleted edit target — match the create endpoint's 410
         # so the frontend can treat parent/edit-target deletions
         # uniformly (clear local state, surface a warning).
         if node.deleted_at is not None:
             return jsonify({"error": "Node has been deleted"}), 410
 
-        # Check authorization using shared utility function
-        if not can_user_edit_node(node):
-            return jsonify({"error": "Not authorized to edit this node"}), 403
-
-    # Validate parent_id if provided - parent must exist
+    # Validate parent_id if provided - the user must be able to see the
+    # parent (404 like a missing one otherwise), as when creating a node.
     if parent_id:
-        parent = Node.query.get(parent_id)
-        if not parent:
-            return jsonify({"error": "Parent node not found"}), 404
+        err = _parent_error(parent_id)
+        if err is not None:
+            return err
+        parent = Node.query.get(int(parent_id))
         if parent.deleted_at is not None:
             return jsonify({"error": "Parent node has been deleted"}), 410
 
@@ -392,15 +421,12 @@ def delete_draft():
     node_id = request.args.get("node_id", type=int)
     parent_id = request.args.get("parent_id", type=int)
 
-    # Validate node_id if provided - user must own the node OR be LLM requester (parent node owner)
+    # Validate node_id if provided - user must own the node OR be LLM
+    # requester (parent node owner); any other node answers 404.
     if node_id:
-        node = Node.query.get(node_id)
-        if not node:
-            return jsonify({"error": "Node not found"}), 404
-
-        # Check authorization using shared utility function
-        if not can_user_edit_node(node):
-            return jsonify({"error": "Not authorized to delete drafts for this node"}), 403
+        _node, err = _editable_node(node_id)
+        if err is not None:
+            return err
 
     # Build query for the user's draft matching the context. Exclude proposal
     # drafts so deleting the composing draft under a proposal node can't take
@@ -458,7 +484,7 @@ def discard_streaming_draft(session_id):
     NodeTranscriptChunk.query.filter_by(session_id=session_id).delete()
 
     # Delete audio files
-    audio_dir = AUDIO_STORAGE_ROOT / f"drafts/{draft.user_id}/{session_id}"
+    audio_dir = _session_dir(draft.user_id, draft.session_id)
     if audio_dir.exists():
         shutil.rmtree(audio_dir)
 
@@ -493,7 +519,10 @@ def _cleanup_stale_drafts(user_id):
 
     deleted = 0
     for draft in stale_drafts:
-        audio_dir = AUDIO_STORAGE_ROOT / f"drafts/{user_id}/{draft.session_id}"
+        try:
+            audio_dir = _session_dir(user_id, draft.session_id)
+        except ValueError:
+            continue
         if audio_dir.exists():
             current_app.logger.warning(
                 f"Draft {draft.id} (session {draft.session_id}) was "
@@ -569,7 +598,7 @@ def init_streaming():
     db.session.commit()
 
     # Create directory for chunk storage
-    chunk_dir = AUDIO_STORAGE_ROOT / f"drafts/{current_user.id}/{session_id}"
+    chunk_dir = _session_dir(current_user.id, session_id)
     chunk_dir.mkdir(parents=True, exist_ok=True)
 
     current_app.logger.info(
@@ -680,7 +709,7 @@ def upload_streaming_chunk(session_id):
     ext = ".mp4" if form_mime_family == "audio/mp4" else ".webm"
 
     # Save chunk to disk
-    chunk_dir = AUDIO_STORAGE_ROOT / f"drafts/{current_user.id}/{session_id}"
+    chunk_dir = _session_dir(current_user.id, draft.session_id)
     if not chunk_dir.exists():
         return jsonify({"error": "Streaming session directory not found"}), 404
 
@@ -1235,18 +1264,9 @@ def save_streaming_as_node(session_id):
     tip_node = _split_parts[-1] if _split_parts else node
     db.session.commit()
 
-    # Move audio files from drafts folder to nodes folder
-    draft_audio_dir = AUDIO_STORAGE_ROOT / f"drafts/{current_user.id}/{session_id}"
-    node_audio_dir = AUDIO_STORAGE_ROOT / f"nodes/{current_user.id}/{node.id}"
-
-    move_draft_audio_to_node_dir(
-        draft_audio_dir, node_audio_dir, current_app.logger,
-    )
-
-    # Update transcript chunks to reference the node
-    NodeTranscriptChunk.query.filter_by(session_id=session_id).update({
-        "node_id": node.id
-    })
+    # Move the session's audio files and transcript chunk rows to the node
+    move_session_audio_to_node(
+        draft, node, current_app.logger, root=AUDIO_STORAGE_ROOT)
 
     # Delete the draft
     db.session.delete(draft)

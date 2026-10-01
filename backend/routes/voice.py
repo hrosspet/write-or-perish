@@ -9,6 +9,7 @@ from backend.utils.llm_nodes import (
     create_llm_placeholder, pick_model_for_generation, reply_ai_usage,
 )
 from backend.utils.placeholders import UserExportValidationError
+from backend.utils.audio_storage import is_storage_id
 from backend.utils.context_artifacts import attach_context_artifacts
 from backend.utils import voice_timing
 from backend.utils.session_helpers import (
@@ -138,6 +139,8 @@ def create_voice_session():
     session_id = data.get("session_id")
     if not content or not content.strip():
         return jsonify({"error": "Content is required"}), 400
+    if session_id and not is_storage_id(session_id):
+        return jsonify({"error": "Invalid session_id"}), 400
 
     parent_node = None
     if parent_id:
@@ -191,6 +194,7 @@ def create_voice_session():
     db.session.flush()
 
     if session_id:
+        # Moves the user's own draft session only (see the helper).
         from backend.utils.audio_storage import (
             attach_streaming_audio_to_node,
         )

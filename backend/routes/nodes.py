@@ -5,7 +5,6 @@ from backend.models import (
     UserRecentContext, UserArtifact, Thread,
 )
 from backend.extensions import db
-from sqlalchemy import func
 from backend.utils.timefmt import iso_utc
 from backend.utils.slugs import permalink_for
 from datetime import datetime
@@ -27,6 +26,8 @@ from backend.utils.privacy import (
     can_user_see_node_or_tombstone,
     can_user_view_tombstone,
     can_user_edit_node,
+    speech_allowed,
+    SPEECH_REFUSED_MESSAGE,
     PrivacyLevel,
     AIUsage
 )
@@ -44,7 +45,9 @@ from backend.utils.api_keys import get_openai_chat_key
 from backend.utils.spend import require_spend_headroom
 from backend.utils.webm_utils import get_webm_duration
 from backend.utils.encryption import encrypt_file, decrypt_file_to_temp
-from backend.utils.audio_storage import list_streaming_audio_files
+from backend.utils.audio_storage import (
+    list_streaming_audio_files, storage_path,
+)
 from backend.utils.llm_nodes import (
     create_llm_placeholder, pick_model_for_generation,
     resolve_chat_model, resolve_read_model,
@@ -76,7 +79,8 @@ def voice_mode_required(f):
 def _visible_node(node_id):
     """The node when the current user may see it (the rule GET /<id>
     applies), else None. Callers answer None with _node_not_found(), so a
-    node the user cannot see looks the same as one that does not exist."""
+    node the user cannot see looks the same as one that does not exist.
+    Admins get no exception: they see what any other user sees."""
     node = Node.query.get(node_id)
     if node is None or not can_user_access_node(node, current_user.id):
         return None
@@ -362,20 +366,20 @@ def make_preview(text, length=200):
     return text[:length] + ("..." if len(text) > length else "")
 
 
-def compute_descendant_counts(node):
-    """
-    Recursively computes the total number of descendants (children,
-    grandchildren, etc.) for 'node' and stores it in node._descendant_count.
-    Returns the computed count.
-    """
-    total = 0
-    if node.children:
-        for child in node.children:
-            # For each child, compute its descendant count first, then add 1 (for the child itself)
-            child_descendants = compute_descendant_counts(child)
-            total += 1 + child_descendants
-    node._descendant_count = total  # cache the value on the instance
-    return total
+def _order_and_count_children(children_data):
+    """Sort serialized children with the largest visible subtree first
+    (stable, so ties keep creation order) and return the number of alive
+    nodes the viewer sees below the parent: each child that is not a
+    tombstone plus that child's own descendant_count. Counting from the
+    serialized tree means hidden rows (another user's private reply, a
+    pruned tombstone, anything under a hidden node) never reach the
+    count, and the walk costs no queries of its own."""
+    children_data.sort(key=lambda d: d.get("descendant_count", 0),
+                       reverse=True)
+    return sum(
+        (0 if d.get("deleted") else 1) + d.get("descendant_count", 0)
+        for d in children_data
+    )
 
 
 def _prompt_version_number(prompt):
@@ -554,9 +558,6 @@ def serialize_node_recursive(n, user_id=None, parent_user_id=None):
         return s is not None and not s.get("inaccessible")
 
     visible_children = [c for c in n.children if _child_visible(c)]
-    sorted_children = sorted(
-        visible_children, key=lambda c: c._descendant_count, reverse=True,
-    )
     # Mirror the focal serializer's parent_user_id derivation (nodes.py
     # ~line 822) so the frontend's ownedByMe check works the same way
     # at every depth.
@@ -568,9 +569,10 @@ def serialize_node_recursive(n, user_id=None, parent_user_id=None):
             serialize_node_recursive(
                 child, user_id, parent_user_id=n_as_parent_user_id,
             )
-            for child in sorted_children
+            for child in visible_children
         ) if serialized is not None
     ]
+    descendant_count = _order_and_count_children(children_data)
 
     if status is not None:
         # Tombstone — content already omitted by serialize_node_status.
@@ -582,7 +584,7 @@ def serialize_node_recursive(n, user_id=None, parent_user_id=None):
         return {
             **status,
             "child_count": len(children_data),
-            "descendant_count": n._descendant_count,
+            "descendant_count": descendant_count,
             "children": children_data,
         }
 
@@ -590,13 +592,14 @@ def serialize_node_recursive(n, user_id=None, parent_user_id=None):
         "id": n.id,
         "content": n.get_content(),
         "node_type": n.node_type,
-        "child_count": len(visible_children),
+        # Children as rendered: pruned tombstones dropped out above.
+        "child_count": len(children_data),
         "created_at": iso_utc(n.created_at),
         "updated_at": iso_utc(n.updated_at),
         "username": n.user.username if n.user else "Unknown",
         "llm_model": n.llm_model,
         "origin": n.origin,
-        "descendant_count": n._descendant_count,
+        "descendant_count": descendant_count,
         "user_id": n.user_id,
         "parent_user_id": parent_user_id,
         "children": children_data,
@@ -1035,19 +1038,6 @@ _ARTIFACT_MODELS = {
 }
 
 
-def _child_counts(node_ids):
-    """{parent_id: number of child rows} for *node_ids* in one query —
-    the same number as ``len(node.children)`` (tombstones included)
-    without loading a full row per child."""
-    if not node_ids:
-        return {}
-    return dict(
-        db.session.query(Node.parent_id, func.count(Node.id))
-        .filter(Node.parent_id.in_(node_ids))
-        .group_by(Node.parent_id).all()
-    )
-
-
 def _render_set_ciphertexts(nodes):
     """Every encrypted blob that serializing *nodes* will decrypt: the
     nodes' own content plus the context artifacts pinned to them.
@@ -1264,11 +1254,12 @@ def get_node(node_id):
         n = stack.pop()
         render_set.append(n)
         stack.extend(n.children)
-    ancestor_child_counts = _child_counts([a.id for a in ancestor_nodes])
+    # Ancestors' child counts cover only the children this viewer can
+    # access (one grouped COUNT), not every child row.
+    from backend.utils.thread_tree import visible_child_counts
+    ancestor_child_counts = visible_child_counts(
+        [a.id for a in ancestor_nodes], current_user.id)
     prefetch_deks(_render_set_ciphertexts(render_set))
-
-    # Compute descendant counts once for the entire subtree.
-    compute_descendant_counts(node)
 
     # Build ancestors. Soft-deleted ancestors the viewer had pre-deletion
     # access to render as tombstones — without this the breadcrumb chain
@@ -1285,8 +1276,14 @@ def get_node(node_id):
     # the same test routes/read.py applies (ca_feed.in_read_thread),
     # taken here from content the loop decrypts anyway.
     read_prompt_above = False
+    tombstone_below = False
     for current in ancestor_nodes:
         status = serialize_node_status(current, current_user.id)
+        # The count above skips deleted children, but the chain child just
+        # below, when it is a tombstone in this breadcrumb, is visible.
+        child_count = (ancestor_child_counts.get(current.id, 0)
+                       + (1 if tombstone_below else 0))
+        tombstone_below = bool(status and status.get("deleted"))
         if status is None:  # alive + accessible
             ancestor_content = current.get_content()
             if not read_prompt_above and (
@@ -1308,7 +1305,7 @@ def get_node(node_id):
                 "content": ancestor_content,
                 "preview": make_preview(ancestor_content),
                 "node_type": current.node_type,
-                "child_count": ancestor_child_counts.get(current.id, 0),
+                "child_count": child_count,
                 "created_at": iso_utc(current.created_at),
                 "user_id": current.user_id,
                 "parent_user_id": ancestor_parent_user_id,
@@ -1327,7 +1324,7 @@ def get_node(node_id):
         elif status.get("deleted"):
             ancestor_data = {
                 **status,
-                "child_count": ancestor_child_counts.get(current.id, 0),
+                "child_count": child_count,
                 "ai_usage": current.ai_usage,
                 "privacy_level": current.privacy_level,
             }
@@ -1349,8 +1346,6 @@ def get_node(node_id):
         return s is not None and not s.get("inaccessible")
 
     visible_children = [c for c in node.children if _child_visible(c)]
-    sorted_children = sorted(visible_children, key=lambda child: child._descendant_count, reverse=True)
-    accessible_children = visible_children  # for the child_count field below
 
     # Compute the focal node's effective owner so first-level children
     # carry the right parent_user_id without an N+1.
@@ -1366,9 +1361,10 @@ def get_node(node_id):
                 child, current_user.id,
                 parent_user_id=focal_as_parent_user_id,
             )
-            for child in sorted_children
+            for child in visible_children
         ) if serialized is not None
     ]
+    _order_and_count_children(serialized_children)
     focal = _focal_own_fields(node)
     in_read_thread = bool(
         read_prompt_above
@@ -1421,11 +1417,10 @@ def resolve_node_quotes(node_id):
             "has_quotes": true
         }
     """
-    node = Node.query.get_or_404(node_id)
-
-    # Check if user has permission to access this node
-    if not can_user_access_node(node, current_user.id):
-        return jsonify({"error": "Not authorized to access this node"}), 403
+    # A node the user cannot see gets the same 404 as a missing one.
+    node = _visible_node(node_id)
+    if node is None:
+        return _node_not_found()
 
     content = node.get_content()
     # Node quotes + external-reference quotes ({quote_ext:ID}) in one pass
@@ -2023,6 +2018,11 @@ def generate_tts(node_id):
             "node_id": node.id
         }), 202
 
+    # New speech sends the text to a model: not for an entry whose
+    # ai_usage is 'none' (a model's reply is always spoken).
+    if not speech_allowed(node):
+        return jsonify({"error": SPEECH_REFUSED_MESSAGE}), 403
+
     # Check if OpenAI API key is configured
     api_key = get_openai_chat_key(current_app.config)
     if not api_key:
@@ -2062,12 +2062,9 @@ def generate_tts(node_id):
 @login_required
 def get_transcription_status(node_id):
     """Get the current transcription status for a node."""
-    node = Node.query.get_or_404(node_id)
-
-    # Check ownership (can_user_access_node handles LLM nodes by walking
-    # up the parent chain to find the human owner)
-    if not can_user_access_node(node) and not getattr(current_user, "is_admin", False):
-        return jsonify({"error": "Unauthorized"}), 403
+    node = _visible_node(node_id)
+    if node is None:
+        return _node_not_found()
 
     # Get task status from Celery if still processing
     task_info = None
@@ -2143,12 +2140,9 @@ def _reply_below_transcript(node, max_parts=50):
 @login_required
 def get_llm_status(node_id):
     """Get the current LLM completion status for a node."""
-    node = Node.query.get_or_404(node_id)
-
-    # Check ownership (can_user_access_node handles LLM nodes by walking
-    # up the parent chain to find the human owner)
-    if not can_user_access_node(node) and not getattr(current_user, "is_admin", False):
-        return jsonify({"error": "Unauthorized"}), 403
+    node = _visible_node(node_id)
+    if node is None:
+        return _node_not_found()
 
     # Get task status from Celery if still processing
     task_info = None
@@ -2245,12 +2239,9 @@ def get_llm_status(node_id):
 @login_required
 def get_tts_status(node_id):
     """Get the current TTS generation status for a node."""
-    node = Node.query.get_or_404(node_id)
-
-    # Check ownership (can_user_access_node handles LLM nodes by walking
-    # up the parent chain to find the human owner)
-    if not can_user_access_node(node) and not getattr(current_user, "is_admin", False):
-        return jsonify({"error": "Unauthorized"}), 403
+    node = _visible_node(node_id)
+    if node is None:
+        return _node_not_found()
 
     # Get task status from Celery if still processing
     task_info = None
@@ -2742,7 +2733,8 @@ def init_streaming_transcription():
     db.session.commit()
 
     # Create directory for chunk storage
-    chunk_dir = AUDIO_STORAGE_ROOT / f"streaming/{current_user.id}/{session_id}"
+    chunk_dir = storage_path(
+        AUDIO_STORAGE_ROOT, "streaming", current_user.id, session_id)
     chunk_dir.mkdir(parents=True, exist_ok=True)
 
     current_app.logger.info(
@@ -2804,8 +2796,9 @@ def upload_audio_chunk(node_id):
     if node.streaming_session_id != session_id:
         return jsonify({"error": "Session ID mismatch"}), 400
 
-    # Save chunk to disk
-    chunk_dir = AUDIO_STORAGE_ROOT / f"streaming/{current_user.id}/{session_id}"
+    # Save chunk to disk (session_id equals the node's own, checked above)
+    chunk_dir = storage_path(
+        AUDIO_STORAGE_ROOT, "streaming", current_user.id, session_id)
     if not chunk_dir.exists():
         return jsonify({"error": "Streaming session not found"}), 404
 
@@ -2945,11 +2938,10 @@ def get_streaming_status(node_id):
 
     Returns status of all chunks and overall transcription progress.
     """
-    node = Node.query.get_or_404(node_id)
-
-    # Check ownership
-    if node.user_id != current_user.id and not getattr(current_user, "is_admin", False):
-        return jsonify({"error": "Unauthorized"}), 403
+    # Owner only, admins included; anyone else gets the missing-node 404.
+    node = Node.query.get(node_id)
+    if node is None or node.user_id != current_user.id:
+        return _node_not_found()
 
     if not node.streaming_transcription:
         return jsonify({"error": "Node is not in streaming transcription mode"}), 400
@@ -3230,10 +3222,9 @@ def get_tts_chapters(node_id):
     chunk durations) so the player can jump within the merged file and
     map chapters onto the chunked queue alike.
     """
-    node = Node.query.get_or_404(node_id)
-    if not can_user_access_node(node) and not getattr(
-            current_user, "is_admin", False):
-        return jsonify({"error": "Unauthorized"}), 403
+    node = _visible_node(node_id)
+    if node is None:
+        return _node_not_found()
 
     from backend.models import TTSChunk
     from backend.utils.audio_processing import tts_chapters

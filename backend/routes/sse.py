@@ -25,6 +25,13 @@ sse_bp = Blueprint("sse_bp", __name__)
 STREAMABLE_TTS_STATUSES = ('pending', 'processing', 'completed')
 
 
+def _not_found(what):
+    """The answer for an object the current user may not open, the same
+    as for one that does not exist. Admins get no exception: they open
+    only what any other user could."""
+    return jsonify({"error": f"{what} not found"}), 404
+
+
 def format_sse_message(data, event=None):
     """Format data as an SSE message."""
     msg = ""
@@ -49,11 +56,9 @@ def transcription_stream(node_id):
     Query params:
     - last_chunk: Index of the last chunk the client has received
     """
-    node = Node.query.get_or_404(node_id)
-
-    # Check ownership
-    if node.user_id != current_user.id and not getattr(current_user, "is_admin", False):
-        return jsonify({"error": "Unauthorized"}), 403
+    node = db.session.get(Node, node_id)
+    if node is None or node.user_id != current_user.id:
+        return _not_found("Node")
 
     # Check if streaming transcription is enabled for this node
     if not node.streaming_transcription:
@@ -281,13 +286,11 @@ def tts_stream(node_id):
     Query params:
     - last_chunk: Index of the last chunk the client has received
     """
-    node = Node.query.get_or_404(node_id)
-
-    # Check ownership or voice mode access
-    if node.user_id != current_user.id and not getattr(current_user, "is_admin", False):
-        from backend.utils.privacy import can_user_access_node
-        if not can_user_access_node(node, current_user.id):
-            return jsonify({"error": "Unauthorized"}), 403
+    node = db.session.get(Node, node_id)
+    from backend.utils.privacy import can_user_access_node
+    if node is None or (node.user_id != current_user.id
+                        and not can_user_access_node(node, current_user.id)):
+        return _not_found("Node")
 
     if node.tts_task_status not in STREAMABLE_TTS_STATUSES:
         if node.audio_tts_url:
@@ -332,11 +335,10 @@ def llm_stream(node_id):
     Polls the node's streaming_content (written by the task about twice a
     second); the text is decrypted here, one DEK per generation.
     """
-    node = Node.query.get_or_404(node_id)
+    node = db.session.get(Node, node_id)
     from backend.utils.privacy import can_user_access_node
-    if not can_user_access_node(node, current_user.id) and not getattr(
-            current_user, "is_admin", False):
-        return jsonify({"error": "Unauthorized"}), 403
+    if node is None or not can_user_access_node(node, current_user.id):
+        return _not_found("Node")
 
     app = current_app._get_current_object()
 
@@ -399,10 +401,9 @@ def profile_tts_stream(profile_id):
     Query params:
     - last_chunk: Index of the last chunk the client has received
     """
-    profile = UserProfile.query.get_or_404(profile_id)
-
-    if profile.user_id != current_user.id and not getattr(current_user, "is_admin", False):
-        return jsonify({"error": "Unauthorized"}), 403
+    profile = db.session.get(UserProfile, profile_id)
+    if profile is None or profile.user_id != current_user.id:
+        return _not_found("Profile")
 
     if profile.tts_task_status not in STREAMABLE_TTS_STATUSES:
         if profile.audio_tts_url:
@@ -439,13 +440,8 @@ def draft_transcription_stream(session_id):
     - last_chunk: Index of the last chunk the client has received
     """
     draft = Draft.query.filter_by(session_id=session_id).first()
-
-    if not draft:
-        return jsonify({"error": "Streaming session not found"}), 404
-
-    # Check ownership
-    if draft.user_id != current_user.id and not getattr(current_user, "is_admin", False):
-        return jsonify({"error": "Unauthorized"}), 403
+    if draft is None or draft.user_id != current_user.id:
+        return _not_found("Streaming session")
 
     # Get the last chunk index the client has seen
     last_chunk = request.args.get('last_chunk', -1, type=int)
