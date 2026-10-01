@@ -379,3 +379,95 @@ class TestRemovedRoutes:
                      f"/api/nodes/media/{data.files['private_tts']}")
         assert resp.status_code == 404
         assert resp.data != b"audio-bytes"
+
+
+# ── Creating nodes under a client-supplied parent ────────────────────────
+
+class TestCreateUnderParent:
+
+    def test_reply_under_private_node_of_another_user_is_refused(self, app, data):
+        resp = _call(app, data.bob, "POST", "/api/nodes/",
+                     json={"content": "bob reply",
+                           "parent_id": data.private.id})
+        assert resp.status_code == 404
+        assert Node.query.filter_by(parent_id=data.private.id,
+                                    user_id=data.bob.id).count() == 0
+
+    def test_reply_under_visible_parents_still_works(self, app, data):
+        resp = _call(app, data.bob, "POST", "/api/nodes/",
+                     json={"content": "bob public reply",
+                           "parent_id": data.public.id,
+                           "privacy_level": "public"})
+        assert resp.status_code == 201
+        resp = _call(app, data.alice, "POST", "/api/nodes/",
+                     json={"content": "alice reply",
+                           "parent_id": data.private.id})
+        assert resp.status_code == 201
+
+    def test_link_requires_access_to_both_nodes(self, app, data):
+        resp = _call(app, data.bob, "POST",
+                     f"/api/nodes/{data.private.id}/link",
+                     json={"linked_node_id": data.bob_own.id})
+        assert resp.status_code == 404
+        resp = _call(app, data.bob, "POST",
+                     f"/api/nodes/{data.bob_own.id}/link",
+                     json={"linked_node_id": data.private.id})
+        assert resp.status_code == 404
+        assert Node.query.filter_by(node_type="link").count() == 0
+
+        resp = _call(app, data.bob, "POST",
+                     f"/api/nodes/{data.bob_own.id}/link",
+                     json={"linked_node_id": data.public.id})
+        assert resp.status_code == 201
+
+    def test_streaming_draft_init_refuses_invisible_parent(self, app, data):
+        resp = _call(app, data.bob, "POST", "/api/drafts/streaming/init",
+                     json={"parent_id": data.private.id})
+        assert resp.status_code == 404
+        assert Draft.query.filter_by(user_id=data.bob.id).count() == 0
+
+    def test_streaming_finalize_refuses_invisible_parent(
+            self, app, data, monkeypatch):
+        fake = types.ModuleType("backend.tasks.streaming_transcription")
+        fake.finalize_draft_streaming = MagicMock()
+        fake.finalize_draft_streaming.delay.return_value.id = "task-1"
+        monkeypatch.setitem(
+            sys.modules, "backend.tasks.streaming_transcription", fake)
+        draft = Draft(user_id=data.bob.id, session_id="session-b",
+                      streaming_status="recording")
+        draft.set_content("")
+        _db.session.add(draft)
+        _db.session.commit()
+
+        resp = _call(app, data.bob, "POST",
+                     "/api/drafts/streaming/session-b/finalize",
+                     json={"total_chunks": 1, "label": "Voice",
+                           "model": "gpt-5", "parent_id": data.private.id})
+        assert resp.status_code == 404
+        fake.finalize_draft_streaming.delay.assert_not_called()
+
+    def test_save_as_node_refuses_invisible_parent(self, app, data):
+        draft = Draft(user_id=data.bob.id, session_id="session-c",
+                      streaming_status="completed",
+                      parent_id=data.private.id)
+        draft.set_content("bob recording")
+        _db.session.add(draft)
+        _db.session.commit()
+
+        resp = _call(app, data.bob, "POST",
+                     "/api/drafts/streaming/session-c/save-as-node", json={})
+        assert resp.status_code == 404
+        assert Node.query.filter_by(parent_id=data.private.id,
+                                    user_id=data.bob.id).count() == 0
+
+    def test_textmode_chain_stops_at_nodes_the_user_cannot_see(self, app, data):
+        """A node of bob's that hangs below alice's private thread (e.g.
+        created before parents were checked) must not hand bob the
+        thread's content."""
+        mid = _node(data.alice, "ALICE MID ENTRY", parent=data.private)
+        bob_child = _node(data.bob, "bob child", parent=mid)
+
+        resp = _call(app, data.bob, "GET",
+                     f"/api/textmode/from-node/{bob_child.id}")
+        assert resp.status_code == 200
+        assert "ALICE" not in resp.get_data(as_text=True)

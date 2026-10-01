@@ -23,6 +23,7 @@ from backend.utils.privacy import (
     validate_ai_usage,
     get_default_privacy_settings,
     can_user_access_node,
+    can_user_see_node_or_tombstone,
     can_user_view_tombstone,
     can_user_edit_node,
     PrivacyLevel,
@@ -1683,15 +1684,16 @@ def add_linked_node(node_id):
     additional_text = data.get("content", "")  # Optional extra text.
     if not linked_node_id:
         return jsonify({"error": "linked_node_id is required"}), 400
-    # Validate that the node to be linked exists and is alive (privacy filter
-    # also excludes soft-deleted, but we want a distinct 410 if specifically
-    # the target is deleted vs 404 if it never existed).
+    # Validate that the node to be linked exists, is visible to the user
+    # and is alive. A node the user cannot see gets the same 404 as one
+    # that does not exist; a deleted one the user could see gets a 410.
     linked_node = Node.query.get(linked_node_id)
-    if not linked_node:
+    if linked_node is None or not can_user_see_node_or_tombstone(
+            linked_node, current_user.id):
         return jsonify({"error": "Linked node not found"}), 404
     if linked_node.deleted_at is not None:
         return jsonify({"error": "Linked node has been deleted"}), 410
-    # Race A guard: lock parent and reject if soft-deleted.
+    # Race A guard: lock parent and reject if soft-deleted or not visible.
     from backend.utils.node_deletion import assert_parent_alive
     err = assert_parent_alive(node_id)
     if err is not None:

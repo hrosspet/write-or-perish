@@ -864,18 +864,30 @@ def get_user_ai_preferences_content(user_id, pinned_node=None, usage=None):
     return None
 
 
-def _load_node_chain(parent_node):
+def _load_node_chain(parent_node, user_id):
     """Root-first ancestor chain ending at *parent_node*, with every
     node's DEK unwrapped in one concurrent batch. The message builder
     decrypts each node of the chain; on a cold Celery worker a 120-deep
     thread paid ~80 ms of KMS latency per node, in sequence, before the
-    model was even called."""
+    model was even called.
+
+    The chain holds only what *user_id* (the user the reply is for) can
+    see: the walk stops below the first ancestor they cannot see (or
+    could not see before it was deleted), so nothing above it reaches
+    the model."""
     from backend.utils.encryption import prefetch_deks
+    from backend.utils.privacy import can_user_see_node_or_tombstone
+    if user_id is None:
+        raise ValueError("_load_node_chain needs the requesting user's id")
     node_chain = []
     current = parent_node
-    while current:
+    while current and can_user_see_node_or_tombstone(current, user_id):
         node_chain.insert(0, current)
         current = current.parent
+    if not node_chain:
+        raise ValueError(
+            f"Node {getattr(parent_node, 'id', None)} is not visible to "
+            f"user {user_id}")
     prefetch_deks(n.content for n in node_chain)
     return node_chain
 
@@ -2397,7 +2409,7 @@ def _ca_batch_poll(task, llm_node, parent_node, meta, entry, user_id):
     key_type = entry.get("key_type")
     if not key_type:
         key_type = determine_api_key_type(
-            _load_node_chain(parent_node), logger=logger)
+            _load_node_chain(parent_node, user_id), logger=logger)
         entry["key_type"] = key_type  # once; written with the heartbeat
     api_keys = llm_batch.apply_batch_key_override(
         get_api_keys_for_usage(flask_app.config, key_type),
@@ -2752,6 +2764,9 @@ def prewarm_anthropic_cache(system_node_id, user_id, model_id,
             system_node = Node.query.get(system_node_id)
             if system_node is None:
                 return {"status": "skipped", "reason": "no_system_node"}
+            from backend.utils.privacy import can_user_access_node
+            if not can_user_access_node(system_node, user_id):
+                return {"status": "skipped", "reason": "no_system_node"}
             sys_content = system_node.get_content() or ""
             if (USER_EXPORT_PATTERN.search(sys_content)
                     or CA_TWEETS_PATTERN.search(sys_content)
@@ -2941,7 +2956,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             llm_node.llm_task_progress = 20
             db.session.commit()
 
-            node_chain = _load_node_chain(parent_node)
+            node_chain = _load_node_chain(parent_node, user_id)
 
             # Step 2: Build messages array
             self.update_state(state='PROGRESS', meta={'progress': 30, 'status': 'Preparing messages'})

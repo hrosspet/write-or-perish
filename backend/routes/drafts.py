@@ -47,6 +47,21 @@ def _exclude_proposal_drafts(query):
     )
 
 
+def _parent_error(parent_id):
+    """An error response when *parent_id* names a node the current user
+    may not build on (missing, or not visible to them: 404), else None.
+    No parent is fine. A parent the user could see before it was deleted
+    passes: callers keep their own handling of deleted parents."""
+    if not parent_id:
+        return None
+    try:
+        pid = int(parent_id)
+    except (TypeError, ValueError):
+        return jsonify({"error": "Invalid parent_id"}), 400
+    from backend.utils.node_deletion import parent_visibility_error
+    return parent_visibility_error(Node.query.get(pid), current_user.id)
+
+
 # Audio storage root - same as in nodes.py
 AUDIO_STORAGE_ROOT = pathlib.Path(
     os.environ.get("AUDIO_STORAGE_PATH", "data/audio")
@@ -524,6 +539,9 @@ def init_streaming():
     data = request.get_json() or {}
 
     parent_id = data.get("parent_id")
+    err = _parent_error(parent_id)
+    if err is not None:
+        return err
     privacy_level = data.get("privacy_level", "private")
     ai_usage = data.get("ai_usage", "none")
     label = data.get("label")  # 'Reflect', 'Orient', etc.
@@ -881,6 +899,9 @@ def finalize_streaming(session_id):
     total_chunks = data.get("total_chunks")
     label = data.get("label")  # e.g. "Reflect", "Orient"
     parent_id = data.get("parent_id")  # thread parent for LLM chain
+    err = _parent_error(parent_id)
+    if err is not None:
+        return err
     model = data.get("model")  # LLM model for server-side generation
     if not model and label in ("Reflect", "Orient", "Voice"):
         # Resolve a model when the client didn't send one (e.g. user has no
@@ -1122,6 +1143,10 @@ def save_streaming_as_node(session_id):
 
     if draft.streaming_status not in ["completed", "finalizing"]:
         return jsonify({"error": "Streaming session is not complete"}), 400
+
+    err = _parent_error(draft.parent_id)
+    if err is not None:
+        return err
 
     data = request.get_json() or {}
     content = data.get("content", draft.get_content())

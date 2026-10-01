@@ -153,8 +153,23 @@ class ParentDeletedError(ValueError):
     """
 
 
-def assert_parent_alive(parent_id) -> Optional[Tuple[object, int]]:
-    """Race A guard: lock the parent row, then verify it isn't soft-deleted.
+def parent_visibility_error(parent, user_id: int) -> Optional[Tuple[object, int]]:
+    """A 404 response when *user_id* may not build on *parent*, else None.
+
+    A node can only be created under a parent the user can see (or could
+    see before it was deleted), the same rule as GET /api/nodes/<id>. A
+    parent the user cannot see gets the same 404 as one that does not
+    exist."""
+    from backend.utils.privacy import can_user_see_node_or_tombstone
+    if parent is None or not can_user_see_node_or_tombstone(parent, user_id):
+        return jsonify({"error": "Parent node not found"}), 404
+    return None
+
+
+def assert_parent_alive(parent_id, user_id: Optional[int] = None
+                        ) -> Optional[Tuple[object, int]]:
+    """Race A guard: lock the parent row, then verify that the user may
+    see it and that it isn't soft-deleted.
 
     Use at the top of any route that creates a child node. Acquiring the
     row lock here serializes against the soft-delete endpoint's locking
@@ -163,9 +178,11 @@ def assert_parent_alive(parent_id) -> Optional[Tuple[object, int]]:
 
     Args:
         parent_id: int / str / None. If None, no check (root-level node).
+        user_id: The user creating the child (defaults to current_user.id).
 
     Returns:
-        None if it's safe to proceed (no parent, or parent is alive).
+        None if it's safe to proceed (no parent, or parent is alive and
+        visible to the user).
         (response, status) tuple if the caller should return immediately.
     """
     if parent_id is None or parent_id == "":
@@ -175,9 +192,14 @@ def assert_parent_alive(parent_id) -> Optional[Tuple[object, int]]:
     except (TypeError, ValueError):
         return jsonify({"error": "Invalid parent_id"}), 400
 
+    if user_id is None:
+        from flask_login import current_user
+        user_id = current_user.id
+
     parent = lock_node(pid)
-    if parent is None:
-        return jsonify({"error": "Parent node not found"}), 404
+    err = parent_visibility_error(parent, user_id)
+    if err is not None:
+        return err
     if parent.deleted_at is not None:
         return jsonify({"error": "Parent node has been deleted"}), 410
     return None
