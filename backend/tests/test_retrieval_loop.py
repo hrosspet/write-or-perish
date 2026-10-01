@@ -1691,6 +1691,88 @@ def test_artifact_substantial_rewrite_echoes_full_text(app):
     assert "+- new fact 199" not in second_texts
 
 
+# ── A version AI may not read is never read, echoed or written over ─────
+# The user's latest memory is 'none' (saved while their Default AI usage
+# was None). The context leaves it out, so a model may try to write one.
+# The write is refused whole: the 'none' text reaches no tool result, diff
+# or follow-up call, and the user's version stays the latest.
+
+_NONE_MEMORY = "## Facts\n- SECRET LINE KEPT FROM AI\n- second line"
+
+
+def _all_sent_texts():
+    return "\n".join(m["text"] for c in _ScriptedProvider.calls
+                     for m in c["messages"])
+
+
+@pytest.mark.parametrize("tool_input", [
+    {"kind": "memory",
+     "edits": [{"old_text": "- second line", "new_text": "- a new line"}]},
+    {"kind": "memory", "updated_content": "## Facts\n- written by the model"},
+], ids=["edits", "full_text"])
+def test_artifact_write_over_a_none_version_is_refused(app, tool_input):
+    alice, system, user_node, llm_node = _build_chain("textmode")
+    kept = _mk_artifact(alice.id, "memory", _NONE_MEMORY, title="Memory",
+                        ai_usage="none")
+    _db.session.commit()
+
+    second_texts, entry = _run_update(alice, user_node, llm_node, tool_input)
+
+    assert entry["status"] == "error"
+    assert "kept away from AI" in entry["error"]
+    assert "update_artifact failed" in second_texts
+    assert "kept away from AI" in second_texts
+    # Neither read nor echoed: no call carried any of its text.
+    assert "SECRET LINE" not in _all_sent_texts()
+    assert "SECRET LINE" not in entry["error"]
+    # Not written over: the user's version is still the latest and only one.
+    assert UserArtifact.latest_for(alice.id, "memory").id == kept.id
+    assert UserArtifact.query.filter_by(
+        user_id=alice.id, kind="memory").count() == 1
+
+
+def test_artifact_write_over_a_chat_version_updates_as_before(app):
+    """Only the latest version decides: an older 'none' version does not
+    block a write, and the diff is taken against the readable latest."""
+    alice, system, user_node, llm_node = _build_chain("textmode")
+    _mk_artifact(alice.id, "memory", _NONE_MEMORY, title="Memory",
+                 ai_usage="none")
+    _mk_artifact(alice.id, "memory", "## Facts\n- has a dog", title="Memory",
+                 ai_usage="chat")
+    _db.session.commit()
+
+    second_texts, entry = _run_update(alice, user_node, llm_node, {
+        "kind": "memory",
+        "edits": [{"old_text": "- has a dog", "new_text": "- has two dogs"}],
+    })
+
+    assert entry["status"] == "success"
+    assert (UserArtifact.latest_for(alice.id, "memory").get_content()
+            == "## Facts\n- has two dogs")
+    assert "Your changes to 'memory'" in second_texts
+    assert "+- has two dogs" in second_texts
+    assert "SECRET LINE" not in _all_sent_texts()
+
+
+def test_artifact_echo_never_diffs_against_a_none_version(app):
+    """The echo checks the previous version itself: one AI may not read
+    gives the new text alone, never a diff with its lines."""
+    alice = _mk_user("alice", approved=True, plan="alpha")
+    prev = _mk_artifact(alice.id, "memory", _NONE_MEMORY, ai_usage="none")
+    new = _mk_artifact(alice.id, "memory", "fresh memory from the model")
+    _db.session.commit()
+
+    echo = _llm_task_mod._artifact_update_echo({
+        "name": "update_artifact", "status": "success",
+        "artifact_id": new.id, "kind": "memory",
+        "previous_artifact_id": prev.id,
+    })
+
+    assert "fresh memory from the model" in echo
+    assert "SECRET LINE" not in echo
+    assert "second line" not in echo
+
+
 # ── #222: the prompt always ends on a user turn ──────────────────────────
 
 def test_reply_under_llm_node_ends_with_user_turn(app):

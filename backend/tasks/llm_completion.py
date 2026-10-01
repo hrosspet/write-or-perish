@@ -729,6 +729,15 @@ RESERVED_ARTIFACT_KINDS = {
     "recent_context": "Recent context is system-generated and can't be edited.",
 }
 
+# update_artifact on a kind whose latest version AI may not read (ai_usage
+# 'none'). Refused whole: edits would read that version, a diff echo would
+# send it to the next call, and a full replacement would put a model's
+# version over the user's newer one (Peter, 2026-10-01: content marked
+# 'none' is never sent to a model). The user's version stays the latest.
+ARTIFACT_KEPT_FROM_AI_ERROR = (
+    "The user's latest version of '{kind}' is kept away from AI (AI usage "
+    "None), so it can't be read or changed here. Nothing was saved.")
+
 
 def _todo_index_line(user_id, pinned_node=None):
     """Index line for the user's todo list, or None if it's AI-blocked.
@@ -1306,7 +1315,8 @@ def _artifact_update_echo(tr, licence=None):
     NEVER persisted to plaintext tool_calls_meta. Returns None for
     non-update or failed entries and for no-op writes. The rows the echo
     shows — the new version, and the previous one a diff takes its
-    context lines from — report to *licence* (#326)."""
+    context lines from — report to *licence* (#326). A previous version
+    AI may not read is never diffed against: the echo is the new text."""
     if tr.get("name") != "update_artifact" or tr.get("status") != "success":
         return None
     artifact = UserArtifact.query.get(tr.get("artifact_id"))
@@ -1320,6 +1330,13 @@ def _artifact_update_echo(tr, licence=None):
             _note_artifact_content(licence, artifact)
         return f"[You created '{kind}' with this content:\n{new_text}]"
     previous = UserArtifact.query.get(prev_id)
+    if previous is not None and previous.ai_usage not in AI_ALLOWED:
+        # A version AI may not read never reaches a diff (update_artifact
+        # refuses to write over one; this keeps the echo safe on its own).
+        if licence is not None:
+            _note_artifact_content(licence, artifact)
+        return (f"[Your write to '{kind}' — its full new content:\n"
+                f"{new_text}]")
     old_text = (previous.get_content() or "") if previous else ""
     # Drop the ---/+++ file headers; keep the @@ hunks.
     diff_lines = list(difflib.unified_diff(
@@ -1839,8 +1856,14 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
                     )
                 else:
                     previous = UserArtifact.latest_for(user_id, kind)
-                    new_text, write_err = _resolve_artifact_write(
-                        inp, previous)
+                    if (previous is not None
+                            and previous.ai_usage not in AI_ALLOWED):
+                        new_text = None
+                        write_err = ARTIFACT_KEPT_FROM_AI_ERROR.format(
+                            kind=kind)
+                    else:
+                        new_text, write_err = _resolve_artifact_write(
+                            inp, previous)
                     if write_err:
                         result["status"] = "error"
                         result["error"] = write_err
