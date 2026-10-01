@@ -46,7 +46,7 @@ from backend.utils.spend import require_spend_headroom
 from backend.utils.webm_utils import get_webm_duration
 from backend.utils.encryption import encrypt_file, decrypt_file_to_temp
 from backend.utils.audio_storage import (
-    is_storage_id, list_streaming_audio_files, storage_path,
+    list_streaming_audio_files, storage_path,
 )
 from backend.utils.llm_nodes import (
     create_llm_placeholder, pick_model_for_generation,
@@ -93,21 +93,6 @@ def _node_not_found():
 # Root folder (can be overridden via env var)
 AUDIO_STORAGE_ROOT = pathlib.Path(os.environ.get("AUDIO_STORAGE_PATH", "data/audio")).resolve()
 AUDIO_STORAGE_ROOT.mkdir(parents=True, exist_ok=True)
-
-
-def _upload_dir(upload_id):
-    """The folder that holds the current user's chunked upload
-    *upload_id*, or None when the id is not a plain folder name
-    (audio_storage.is_storage_id). Callers answer None with
-    _invalid_upload_id()."""
-    if not is_storage_id(upload_id):
-        return None
-    return storage_path(AUDIO_STORAGE_ROOT, "chunks", current_user.id,
-                        upload_id)
-
-
-def _invalid_upload_id():
-    return jsonify({"error": "Invalid upload_id"}), 400
 
 # OpenAI API limits for audio transcription
 OPENAI_MAX_AUDIO_BYTES = 25 * 1024 * 1024  # 25 MB
@@ -2364,9 +2349,6 @@ def init_chunked_upload():
     # Validate required fields
     if not all([filename, filesize, total_chunks, upload_id]):
         return jsonify({"error": "Missing required fields"}), 400
-    chunk_dir = _upload_dir(upload_id)
-    if chunk_dir is None:
-        return _invalid_upload_id()
 
     # Validate file type
     if not _allowed_file(filename):
@@ -2416,6 +2398,7 @@ def init_chunked_upload():
     db.session.commit()
 
     # Create directory for chunk storage
+    chunk_dir = AUDIO_STORAGE_ROOT / f"chunks/{current_user.id}/{upload_id}"
     chunk_dir.mkdir(parents=True, exist_ok=True)
 
     # Store upload metadata
@@ -2469,9 +2452,6 @@ def upload_chunk():
 
     if not all([chunk_index is not None, upload_id, node_id]):
         return jsonify({"error": "Missing required fields"}), 400
-    chunk_dir = _upload_dir(upload_id)
-    if chunk_dir is None:
-        return _invalid_upload_id()
 
     try:
         chunk_index = int(chunk_index)
@@ -2485,6 +2465,7 @@ def upload_chunk():
         return jsonify({"error": "Unauthorized"}), 403
 
     # Save chunk
+    chunk_dir = AUDIO_STORAGE_ROOT / f"chunks/{current_user.id}/{upload_id}"
     if not chunk_dir.exists():
         return jsonify({"error": "Upload session not found"}), 404
 
@@ -2536,9 +2517,6 @@ def finalize_chunked_upload():
 
     if not all([upload_id, node_id]):
         return jsonify({"error": "Missing required fields"}), 400
-    chunk_dir = _upload_dir(upload_id)
-    if chunk_dir is None:
-        return _invalid_upload_id()
 
     try:
         node_id = int(node_id)
@@ -2551,6 +2529,7 @@ def finalize_chunked_upload():
         return jsonify({"error": "Unauthorized"}), 403
 
     # Load metadata
+    chunk_dir = AUDIO_STORAGE_ROOT / f"chunks/{current_user.id}/{upload_id}"
     if not chunk_dir.exists():
         return jsonify({"error": "Upload session not found"}), 404
 
@@ -2572,8 +2551,7 @@ def finalize_chunked_upload():
     filename = metadata["filename"]
     ext = filename.rsplit(".", 1)[-1] if "." in filename else "webm"
 
-    target_dir = storage_path(
-        AUDIO_STORAGE_ROOT, "user", current_user.id, "node", node.id)
+    target_dir = AUDIO_STORAGE_ROOT / f"user/{current_user.id}/node/{node.id}"
     target_dir.mkdir(parents=True, exist_ok=True)
     target_path = target_dir / f"original.{ext}"
 
@@ -2655,9 +2633,7 @@ def cleanup_chunked_upload():
     if not upload_id:
         return jsonify({"error": "Missing upload_id"}), 400
 
-    chunk_dir = _upload_dir(upload_id)
-    if chunk_dir is None:
-        return _invalid_upload_id()
+    chunk_dir = AUDIO_STORAGE_ROOT / f"chunks/{current_user.id}/{upload_id}"
 
     if chunk_dir.exists():
         import shutil

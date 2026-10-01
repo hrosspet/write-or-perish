@@ -17,11 +17,10 @@ AUDIO_STORAGE_ROOT = pathlib.Path(
     os.environ.get("AUDIO_STORAGE_PATH", "data/audio")
 ).resolve()
 
-# A folder name under the storage root that comes from a request: a
-# chunked upload's id (the client picks it: the web sends
-# "<ms>-<base36>", the iOS app "<ms>-<uuid prefix>") or a streaming
-# session's id (a server uuid4). Letters, digits, '-' and '_', starting
-# with a letter or digit, so it is always one plain folder name.
+# A folder name under the storage root that arrives in a request, such
+# as a streaming session's id (a server uuid4 the client sends back).
+# Letters, digits, '-' and '_', starting with a letter or digit, so it is
+# always one plain folder name.
 _STORAGE_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
 
 

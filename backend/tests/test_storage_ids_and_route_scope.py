@@ -1,5 +1,5 @@
-"""Upload and session ids are plain names, streaming audio moves only
-between one user's own draft and node, speech follows ai_usage, and routes
+"""Streaming session ids are plain folder names, streaming audio moves
+only between one user's own draft and node, speech follows ai_usage, and routes
 answer a node the user cannot see like a missing one.
 
 Two users: alice owns the content, bob is another signed-in user with
@@ -215,7 +215,6 @@ def fake_tasks(monkeypatch):
     """Celery task modules the routes import lazily."""
     mods = {}
     for name, attrs in {
-        "backend.tasks.transcription": ["transcribe_audio"],
         "backend.tasks.tts": ["generate_tts_audio",
                               "generate_tts_audio_for_profile"],
         "backend.tasks.llm_completion": ["generate_llm_response"],
@@ -281,8 +280,8 @@ class TestStoragePath:
         sid = str(uuid.uuid4())
         assert storage_path(tmp_path, "drafts", 3, sid) == \
             tmp_path / "drafts" / "3" / sid
-        assert storage_path(tmp_path, "chunks", 3, "1727000000000-ab12cd34e") \
-            == tmp_path / "chunks" / "3" / "1727000000000-ab12cd34e"
+        assert storage_path(tmp_path, "nodes", 3, 41) == \
+            tmp_path / "nodes" / "3" / "41"
 
     @pytest.mark.parametrize("bad", [
         "..", ".", "", "a/b", "../2", "/etc", "a\\b", ".hidden", "-x",
@@ -291,101 +290,14 @@ class TestStoragePath:
     def test_refuses_anything_but_a_plain_name_or_id(self, tmp_path, bad):
         from backend.utils.audio_storage import storage_path
         with pytest.raises(ValueError):
-            storage_path(tmp_path, "chunks", 3, bad)
+            storage_path(tmp_path, "drafts", 3, bad)
 
     def test_storage_id_check(self):
         from backend.utils.audio_storage import is_storage_id
         assert is_storage_id(str(uuid.uuid4()))
-        assert is_storage_id("1727000000000-ab12cd34e")      # web upload id
-        assert is_storage_id("1727000000000-1a2b3c4d-")      # iOS upload id
+        assert is_storage_id("sess-1_a")
         for bad in ("..", "a/b", "", None, 5, "a.b", "x" * 65):
             assert not is_storage_id(bad), bad
-
-
-# ── Chunked upload ids ───────────────────────────────────────────────────
-
-class TestChunkedUploadIds:
-
-    def _escape(self, app, data):
-        """An upload id that names alice's node folder from bob's
-        chunks/<bob>/ folder, which exists once bob has started any
-        upload."""
-        (app.audio_root / f"chunks/{data.bob.id}/earlier").mkdir(parents=True)
-        return f"../../user/{data.alice.id}/node/{data.private.id}"
-
-    def test_init_refuses_an_upload_id_that_is_not_a_plain_name(
-            self, app, data):
-        before = Node.query.count()
-        resp = _call(app, data.bob, "POST", "/api/nodes/upload/init", json={
-            "filename": "a.webm", "filesize": 10, "total_chunks": 1,
-            "upload_id": self._escape(app, data)})
-        assert resp.status_code == 400
-        assert Node.query.count() == before
-        assert not (data.alice_file.parent / "metadata.json").exists()
-
-    def test_chunk_refuses_an_upload_id_that_is_not_a_plain_name(
-            self, app, data):
-        resp = _call(app, data.bob, "POST", "/api/nodes/upload/chunk", data={
-            "chunk": (__import__("io").BytesIO(b"x"), "c.bin"),
-            "chunk_index": "0", "node_id": str(data.bob_own.id),
-            "upload_id": self._escape(app, data)},
-            content_type="multipart/form-data")
-        assert resp.status_code == 400
-        assert sorted(p.name for p in data.alice_file.parent.iterdir()) == \
-            ["original.webm"]
-
-    def test_finalize_refuses_an_upload_id_that_is_not_a_plain_name(
-            self, app, data):
-        resp = _call(app, data.bob, "POST", "/api/nodes/upload/finalize",
-                     json={"upload_id": self._escape(app, data),
-                           "node_id": data.bob_own.id})
-        assert resp.status_code == 400
-        assert data.alice_file.exists()
-
-    def test_cleanup_refuses_an_upload_id_that_is_not_a_plain_name(
-            self, app, data):
-        self._escape(app, data)
-        resp = _call(app, data.bob, "POST", "/api/nodes/upload/cleanup",
-                     json={"upload_id": f"../../user/{data.alice.id}"})
-        assert resp.status_code == 400
-        assert data.alice_file.exists()
-
-    @pytest.mark.parametrize("upload_id", [
-        "1727000000000-ab12cd34e",    # web: Date.now()-base36
-        "1727000000000-1a2b3c4d-",    # iOS: ms-UUID prefix
-    ])
-    def test_upload_with_client_ids_still_works(
-            self, app, data, fake_tasks, upload_id):
-        resp = _call(app, data.alice, "POST", "/api/nodes/upload/init", json={
-            "filename": "a.webm", "filesize": 6, "total_chunks": 2,
-            "upload_id": upload_id})
-        assert resp.status_code == 201, resp.get_json()
-        node_id = resp.get_json()["node_id"]
-        import io
-        for i, part in enumerate((b"abc", b"def")):
-            resp = _call(app, data.alice, "POST", "/api/nodes/upload/chunk",
-                         data={"chunk": (io.BytesIO(part), "c.bin"),
-                               "chunk_index": str(i), "node_id": str(node_id),
-                               "upload_id": upload_id},
-                         content_type="multipart/form-data")
-            assert resp.status_code == 200, resp.get_json()
-        resp = _call(app, data.alice, "POST", "/api/nodes/upload/finalize",
-                     json={"upload_id": upload_id, "node_id": node_id})
-        assert resp.status_code == 200, resp.get_json()
-        stored = (app.audio_root / f"user/{data.alice.id}/node/{node_id}"
-                  / "original.webm")
-        assert stored.read_bytes() == b"abcdef"
-        assert not (app.audio_root / f"chunks/{data.alice.id}/{upload_id}"
-                    ).exists()
-        fake_tasks.transcription.transcribe_audio.delay.assert_called_once()
-
-    def test_cleanup_with_a_plain_upload_id_still_works(self, app, data):
-        d = app.audio_root / f"chunks/{data.alice.id}/1727-abc"
-        d.mkdir(parents=True)
-        resp = _call(app, data.alice, "POST", "/api/nodes/upload/cleanup",
-                     json={"upload_id": "1727-abc"})
-        assert resp.status_code == 200
-        assert not d.exists()
 
 
 # ── Streaming session ids ────────────────────────────────────────────────
