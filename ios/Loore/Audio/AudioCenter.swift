@@ -51,6 +51,9 @@ final class AudioCenter {
             guard let self, self.player.source == .voice else { return }
             if playing { self.voiceController?.playbackResumed() } else { self.voiceController?.playbackPaused() }
         }
+        player.onPlaybackError = { [weak self] message in
+            _ = self?.app?.toasts.show(message, duration: 6)
+        }
         player.onStartedPlaying = { [weak self] in
             guard let self, self.player.source == .voice else { return }
             self.voiceController?.queueStartedPlaying()
@@ -67,7 +70,7 @@ final class AudioCenter {
         self.app = app
         player.cookiesProvider = { [weak app] in app?.api.backendCookies() ?? [] }
         player.urlResolver = { [weak app] raw in
-            if raw.hasPrefix("http://") || raw.hasPrefix("https://") { return URL(string: raw) }
+            if raw.hasPrefix("http://") || raw.hasPrefix("https://") || raw.hasPrefix("file://") { return URL(string: raw) }
             return app?.environment.url(path: raw)
         }
     }

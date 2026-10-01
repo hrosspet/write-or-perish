@@ -330,3 +330,44 @@ final class NowPlayingTests: XCTestCase {
         XCTAssertFalse(center.playCommand.isEnabled)
     }
 }
+
+// M14: unplayable audio (WebM, 404, network) is reported and skipped, not silent.
+@MainActor
+final class PlaybackFailureTests: XCTestCase {
+    func testWebMIsRecognisedAndMessagesFollowTheWeb() {
+        XCTAssertTrue(ListenFormats.isWebM("/media/nodes/5/9/chunk_0001.webm"))
+        XCTAssertTrue(ListenFormats.isWebM("/media/nodes/5/9/original.WEBM.enc?v=2"))
+        XCTAssertFalse(ListenFormats.isWebM("/media/nodes/5/9/batch_0-19.mp4"))
+        XCTAssertEqual(ChunkQueuePlayer.playbackErrorMessage(url: URL(string: "http://x/media/a.webm"), error: nil),
+                       ListenFormats.webMMessage)
+        XCTAssertEqual(ChunkQueuePlayer.playbackErrorMessage(url: URL(string: "http://x/media/a.mp3"),
+                                                             error: URLError(.notConnectedToInternet)),
+                       "Network error loading audio. Try again.")
+        XCTAssertEqual(ChunkQueuePlayer.playbackErrorMessage(url: URL(string: "http://x/media/a.mp3"), error: nil),
+                       "Audio playback failed.")
+    }
+
+    func testAnUnplayableItemIsReportedOnceAndTheQueueFinishes() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("playback-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let a = dir.appendingPathComponent("chunk_0000.webm")
+        let b = dir.appendingPathComponent("chunk_0001.webm")
+        try Data(repeating: 0x42, count: 4096).write(to: a)
+        try Data(repeating: 0x42, count: 4096).write(to: b)
+
+        let player = ChunkQueuePlayer()
+        var errors: [String] = []
+        var finished = false
+        player.onPlaybackError = { errors.append($0) }
+        player.onFinished = { finished = true }
+        player.load(urls: [a.absoluteString, b.absoluteString], durations: [15, 15], title: "Rec", source: .node(1))
+        let deadline = Date().addingTimeInterval(5)
+        while !finished && Date() < deadline {
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        XCTAssertTrue(finished, "the queue skips unplayable chunks and ends (a voice turn reaches done)")
+        XCTAssertEqual(errors, [ListenFormats.webMMessage], "one toast per queue")
+        XCTAssertFalse(player.isPlaying)
+    }
+}
