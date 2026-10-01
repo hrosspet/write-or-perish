@@ -265,6 +265,34 @@ final class APIClient: @unchecked Sendable {
         return (fileURL, http)
     }
 
+    /// Sends a (possibly large) body from a file, streamed by `URLSession`
+    /// instead of held in memory (imports). Same error mapping as `data(for:)`.
+    func upload(_ request: APIRequest, fromFile fileURL: URL) async throws -> (Data, HTTPURLResponse) {
+        var urlRequest = urlRequest(for: request)
+        urlRequest.httpBody = nil
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await session.upload(for: urlRequest, fromFile: fileURL)
+        } catch {
+            throw APIError.from(transport: error)
+        }
+        guard let http = response as? HTTPURLResponse else {
+            throw APIError.transport(code: -1, description: "Not an HTTP response")
+        }
+        log.debug("\(request.method.rawValue, privacy: .public) \(request.path, privacy: .public) upload → \(http.statusCode)")
+        if (200..<300).contains(http.statusCode) { return (data, http) }
+        let error = APIError.from(status: http.statusCode,
+                                  contentType: http.value(forHTTPHeaderField: "Content-Type"), data: data)
+        switch error {
+        case .unauthorized: emit(.unauthorized)
+        case .spendCap(let message): emit(.spendCapped(message: message))
+        case .notApproved: emit(.notApproved)
+        default: break
+        }
+        throw error
+    }
+
     /// Cookies the app holds for its backend (used to seed web views and media requests).
     func backendCookies() -> [HTTPCookie] {
         cookieStorage.cookies(for: environment.backendOrigin) ?? []

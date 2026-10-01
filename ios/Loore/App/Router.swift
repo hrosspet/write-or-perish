@@ -12,6 +12,15 @@ struct WebPresentation: Identifiable, Hashable {
     var title: String?
 }
 
+/// A document of the Artifacts workspace (map E §1).
+enum WorkspaceDocument: Hashable, Sendable {
+    case profile
+    case todo
+    case artifact(String)
+    /// The new-artifact form (`/artifacts?create=1`).
+    case create
+}
+
 /// Tab selection and per-tab navigation stacks (design doc §5).
 @MainActor
 @Observable
@@ -20,6 +29,9 @@ final class Router {
     /// Each tab's pushed routes (its `NavigationStack` path).
     var paths: [AppTab: [AppRoute]] = [:]
     var presentedWeb: WebPresentation?
+    /// The document the Artifacts tab's workspace shows (web `/profile`, `/todo`,
+    /// `/artifacts/:kind`); bubbles and routes switch it in place.
+    var workspace: WorkspaceDocument = .profile
 
     func path(for tab: AppTab) -> [AppRoute] {
         paths[tab] ?? []
@@ -66,6 +78,7 @@ final class Router {
         selectedTab = .reflect
         paths = [:]
         presentedWeb = nil
+        workspace = .profile
     }
 
     /// Opens `route`: switches to its tab and pushes it, or presents it as a web page.
@@ -92,7 +105,10 @@ final class Router {
         var tab = route.preferredTab ?? selectedTab
         if tab == .commons && !commonsAvailable { tab = .reflect }
         selectedTab = tab
-        if route.isTabRoot && route.preferredTab == tab {
+        if let document = route.workspaceDocument, tab == .artifacts {
+            paths[tab] = []
+            workspace = document
+        } else if route.isTabRoot && route.preferredTab == tab {
             paths[tab] = []
         } else {
             // Includes `.commons` without the flag: pushed on Reflect, where it

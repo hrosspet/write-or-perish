@@ -339,7 +339,18 @@ private struct FocalCard: View {
                 .foregroundStyle(LooreColor.textMuted)
                 .padding(.bottom, 9.6)
             }
+            if model.isReadReply, let window = node.readWindow {
+                ReadWindowLine(window: window)
+            }
             content
+            if !model.isLLMPending && model.isOwner && (node.feedPicksCount ?? 0) > 0
+                && !JSRegex.test(node.content, #"\{quote_ext:\d+\}"#) {
+                FeedPicksView(nodeId: node.id)
+            }
+            if !model.isLLMPending && model.isOwner && model.isReadReply && node.llmTaskStatus == .completed {
+                ReadReplyTail(nodeId: node.id, unread: model.readPicksUnread, total: model.readPickIds.count,
+                              loaded: model.readPicksLoaded) { model.readPicksMarkedAll($0) }
+            }
             if let meta = node.toolCallsMeta?.filter({ !$0.isInternal }), !meta.isEmpty {
                 ToolCallsDisclosure(meta: meta, expanded: $model.toolActionsExpanded)
             }

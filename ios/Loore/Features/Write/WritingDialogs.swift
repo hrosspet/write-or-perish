@@ -116,6 +116,8 @@ struct DeleteConfirmDialog: View {
     enum Mode: Equatable {
         case single(hasChildren: Bool)
         case thread
+        /// A saved reference (References list and page).
+        case reference
         /// The follow-up when the delete would leave only the system prompt.
         case prompt(listedIn: String)
     }
@@ -135,6 +137,15 @@ struct DeleteConfirmDialog: View {
                                  tone: .accent) { onConfirm(true) }
                     ChoiceButton(title: "Keep the system prompt", subtitle: "You can continue the session from it.",
                                  tone: .primary) { onConfirm(false) }
+                    ChoiceButton(title: "Cancel", action: onCancel)
+                }
+            }
+        case .reference:
+            LooreDialogCard(title: "Delete reference?") {
+                DialogBodyText(text: "It leaves your saved references and search. The original stays where it is.")
+                VStack(spacing: 8) {
+                    ChoiceButton(title: "Delete", tone: .accent) { onConfirm(false) }
+                        .accessibilityIdentifier("reference.confirmDelete")
                     ChoiceButton(title: "Cancel", action: onCancel)
                 }
             }

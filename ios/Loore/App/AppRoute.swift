@@ -27,6 +27,8 @@ enum AppRoute: Hashable, Sendable {
     case todo
     /// nil = the web's default kind (`memory`).
     case artifacts(kind: String?)
+    /// `/artifacts?create=1`: the new-artifact form.
+    case newArtifact
     case references
     case reference(id: Int)
     case prompts
@@ -95,7 +97,7 @@ enum AppRoute: Hashable, Sendable {
         case ("profile", 1), ("dashboard", 1): return .profile
         case ("dashboard", 2): return .webPage(path: "/@\(parts[1])")
         case ("todo", 1): return .todo
-        case ("artifacts", 1): return .artifacts(kind: nil)
+        case ("artifacts", 1): return query["create"] == "1" ? .newArtifact : .artifacts(kind: nil)
         case ("artifacts", 2): return .artifacts(kind: parts[1])
         case ("ai-preferences", 1): return .artifacts(kind: "ai_preferences")
         case ("references", 1): return .references
@@ -125,7 +127,7 @@ enum AppRoute: Hashable, Sendable {
     var preferredTab: AppTab? {
         switch self {
         case .home, .voice, .textMode, .welcome, .share: return .reflect
-        case .profile, .todo, .artifacts: return .artifacts
+        case .profile, .todo, .artifacts, .newArtifact: return .artifacts
         case .log: return .log
         case .commons: return .commons
         case .account, .importData, .references, .reference, .prompts, .prompt, .admin, .confirmEmail:
@@ -136,10 +138,23 @@ enum AppRoute: Hashable, Sendable {
     }
 
     /// Routes that are a tab's root screen (opening them pops that tab to root).
+    /// The documents workspace (Profile, Todo, artifacts) is the Artifacts tab's
+    /// root; the router switches its document in place (web `ArtifactsNav`).
     var isTabRoot: Bool {
         switch self {
-        case .home, .profile, .log, .commons: return true
+        case .home, .profile, .todo, .artifacts, .newArtifact, .log, .commons: return true
         default: return false
+        }
+    }
+
+    /// The workspace document a Profile/Todo/artifact route selects.
+    var workspaceDocument: WorkspaceDocument? {
+        switch self {
+        case .profile: return .profile
+        case .todo: return .todo
+        case .artifacts(let kind): return .artifact(kind ?? "memory")
+        case .newArtifact: return .create
+        default: return nil
         }
     }
 

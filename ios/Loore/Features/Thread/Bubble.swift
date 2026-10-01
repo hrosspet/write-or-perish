@@ -106,6 +106,10 @@ struct BubbleAction: Identifiable {
 struct BubbleView: View {
     let data: BubbleData
     var actions: [BubbleAction] = []
+    /// A caller's tag shown before the built-in ones (web `tag` prop; References).
+    var tag: String?
+    /// Replaces `NodeFooter` (web `footer` prop; References pass `ReferenceFooter`).
+    var footerOverride: AnyView?
     var onOpen: (() -> Void)?
     @State private var expanded = false
 
@@ -173,7 +177,15 @@ struct BubbleView: View {
             .padding(.bottom, 9.6)
     }
 
-    private var footer: some View {
+    @ViewBuilder private var footer: some View {
+        if let footerOverride {
+            footerOverride
+        } else {
+            nodeFooter
+        }
+    }
+
+    private var nodeFooter: some View {
         NodeFooterView(
             username: data.username, createdAt: data.createdAt, childCount: data.childCount,
             humanOwnerUsername: data.humanOwnerUsername, llmModel: data.llmModel, origin: data.origin,
@@ -202,6 +214,7 @@ struct BubbleView: View {
     @ViewBuilder private var tags: some View {
         if !data.isPlaceholder {
             HStack(spacing: 6) {
+                if let tag { LooreTag(text: tag) }
                 if data.pinned { LooreTag(text: "Pinned") }
                 if let key = data.promptKey {
                     LooreTag(text: BubblePreview.promptLabel(key))

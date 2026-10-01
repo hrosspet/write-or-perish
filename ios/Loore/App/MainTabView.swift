@@ -13,7 +13,7 @@ struct MainTabView: View {
                 .tag(AppTab.reflect)
                 .accessibilityIdentifier("tab.reflect")
 
-            TabStack(tab: .artifacts) { PlaceholderScreen(route: .profile) }
+            TabStack(tab: .artifacts) { WorkspaceView() }
                 .tabItem { Label(AppTab.artifacts.title, systemImage: "doc.text").environment(\.symbolVariants, .none) }
                 .tag(AppTab.artifacts)
 
@@ -22,7 +22,7 @@ struct MainTabView: View {
                 .tag(AppTab.log)
 
             if app.capabilities.showsCommons {
-                TabStack(tab: .commons) { PlaceholderScreen(route: .commons) }
+                TabStack(tab: .commons) { CommonsView() }
                     .tabItem { Label(AppTab.commons.title, systemImage: "person.2").environment(\.symbolVariants, .none) }
                     .tag(AppTab.commons)
             }
@@ -58,8 +58,8 @@ struct TabStack<Root: View>: View {
     }
 }
 
-/// Maps a route to its screen. Later milestones replace the placeholders here
-/// (M2: thread, text mode, log; M3: voice; M4: the feature pages).
+/// Maps a route to its screen. `PlaceholderScreen` remains only for routes
+/// that never push (admin, waitlist, web pages open as sheets).
 struct RouteDestination: View {
     let route: AppRoute
 
@@ -67,8 +67,8 @@ struct RouteDestination: View {
         switch route {
         case .home:
             HomeView()
-        case .account:
-            AccountView()
+        case .account(let anchor):
+            AccountView(anchor: anchor)
         case .voice(let parentId, let resumeLLMId):
             VoiceView(parentId: parentId, resumeLLMId: resumeLLMId)
         case .thread(let id, let awaitLLM):
@@ -77,6 +77,26 @@ struct RouteDestination: View {
             LogView()
         case .textMode:
             TextModeView()
+        case .profile, .todo, .artifacts, .newArtifact:
+            WorkspaceView(pinned: route.workspaceDocument)
+        case .references:
+            ReferencesView()
+        case .reference(let id):
+            ReferenceDetailView(itemId: id)
+        case .prompts:
+            PromptsView()
+        case .prompt(let key):
+            PromptDetailView(promptKey: key)
+        case .importData(let anchor):
+            ImportView(anchor: anchor)
+        case .share:
+            ShareView()
+        case .commons:
+            CommonsView()
+        case .welcome:
+            WelcomeView()
+        case .confirmEmail(let token):
+            ConfirmEmailView(token: token)
         default:
             PlaceholderScreen(route: route)
         }

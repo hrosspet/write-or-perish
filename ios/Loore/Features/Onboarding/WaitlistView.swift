@@ -12,6 +12,7 @@ struct WaitlistView: View {
     /// "Use a different address": the form again over a pending address.
     @State private var editing = false
     @State private var resent = false
+    @State private var pastingConfirmation = false
     @FocusState private var emailFocused: Bool
 
     /// The only hint about an address that already belongs to another account
@@ -190,6 +191,12 @@ struct WaitlistView: View {
             }
             .disabled(loading)
             .padding(.top, 14)
+            // The app's own step (design doc §4.6): the mailed link only counts in this session.
+            Button("I have the link: paste it") { pastingConfirmation = true }
+                .buttonStyle(.looreLink)
+                .padding(.top, 8)
+                .accessibilityIdentifier("waitlist.pasteConfirmation")
+                .sheet(isPresented: $pastingConfirmation) { ConfirmEmailPasteSheet() }
         }
         .looreCard(padding: EdgeInsets(top: 22, leading: 30, bottom: 22, trailing: 30))
         .frame(maxWidth: 460)

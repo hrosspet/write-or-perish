@@ -18,6 +18,8 @@ final class AppSignals {
         case nodeCreated(Int)
         /// Nodes were deleted or a thread renamed: the Log refetches.
         case logChanged
+        /// Saved references were added, edited or deleted: the References list refetches.
+        case referencesChanged
     }
 
     private(set) var todoChanged = 0
@@ -26,6 +28,7 @@ final class AppSignals {
     private(set) var lastCreatedNodeId: Int?
     private(set) var nodeCreated = 0
     private(set) var logChanged = 0
+    private(set) var referencesChanged = 0
 
     func post(_ signal: Signal) {
         switch signal {
@@ -37,6 +40,8 @@ final class AppSignals {
             nodeCreated += 1
         case .logChanged:
             logChanged += 1
+        case .referencesChanged:
+            referencesChanged += 1
         }
     }
 }
@@ -70,6 +75,10 @@ final class AppState {
     let audio = AudioCenter()
     /// Node-link titles for markdown bodies (session cache, M2).
     let nodeTitles = NodeTitleStore()
+    /// The ArtifactsNav bubble list (M4).
+    let artifacts = ArtifactsStore()
+    /// App-wide profile-generation poller (M4, web `ProfileGenerationWatcher`).
+    let profileWatcher = ProfileGenerationWatcher()
 
     private(set) var phase: Phase = .launching
     private(set) var user: CurrentUser?
@@ -101,6 +110,16 @@ final class AppState {
         theme = ThemeManager(defaults: defaults, forced: launch.theme)
         installEventHandler()
         audio.attach(self)
+        profileWatcher.showToast = { [weak self] text, duration in self?.toasts.show(text, duration: duration) }
+        profileWatcher.clearUserFlags = { [weak self] in
+            self?.user?.profileGenerationTaskId = nil
+            self?.user?.profileBatchPending = false
+        }
+        profileWatcher.fetch = { [weak self] taskId in
+            guard let api = await self?.api else { throw CancellationError() }
+            let query = taskId.map { [URLQueryItem(name: "task_id", value: $0)] } ?? []
+            return try await api.get(APIPath.profileProgress, query: query, poll: true)
+        }
         nodeTitles.fetch = { [weak self] ids in
             guard let api = await self?.api else { throw CancellationError() }
             let query = [URLQueryItem(name: "ids", value: ids.map(String.init).joined(separator: ","))]
@@ -173,6 +192,7 @@ final class AppState {
         fetchUpdatesIfNeeded()
         openLaunchRouteIfReady()
         audio.didSignIn()
+        if newUser.approved { profileWatcher.userLoaded(newUser) }
     }
 
     /// Replaces the user after a `PUT /api/dashboard/user` (the web's `setUser(res.data.user)`).
@@ -183,6 +203,12 @@ final class AppState {
 
     func applyEmailState(_ state: EmailState) {
         user?.apply(state)
+    }
+
+    /// After `DELETE /api/dashboard/x` (the web's `setUser({twitter_login:false, twitter_handle:null})`).
+    func markXDisconnected() {
+        user?.twitterLogin = false
+        user?.twitterHandle = nil
     }
 
     /// `PATCH /api/dashboard/timezone` when the device zone differs (approved users only:
@@ -293,6 +319,8 @@ final class AppState {
         router.reset()
         toasts.clear()
         nodeTitles.reset()
+        artifacts.reset()
+        profileWatcher.stop()
     }
 
     /// Debug environment switcher: signs out of the current backend first

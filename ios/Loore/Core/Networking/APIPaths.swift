@@ -104,12 +104,58 @@ enum APIPath {
 
     // MARK: Workspace (M4)
     static let profile = "/api/profile/"
+    static let profileVersions = "/api/profile/versions"
+    static func profileVersion(_ id: Int) -> String { "/api/profile/versions/\(id)" }
+    static func profileItem(_ id: Int) -> String { "/api/profile/\(id)" }
+    static func profileRevert(_ id: Int) -> String { "/api/profile/revert/\(id)" }
     static let profileProgress = "/api/export/profile-progress"
     static let todo = "/api/todo/"
+    static let todoVersions = "/api/todo/versions"
+    static func todoVersion(_ id: Int) -> String { "/api/todo/versions/\(id)" }
+    static func todoRevert(_ id: Int) -> String { "/api/todo/revert/\(id)" }
     static let artifacts = "/api/artifacts/"
+    static func artifact(_ kind: String) -> String { "/api/artifacts/\(escape(kind))" }
+    static func artifactViewed(_ kind: String) -> String { "/api/artifacts/\(escape(kind))/viewed" }
+    static func artifactVersions(_ kind: String) -> String { "/api/artifacts/\(escape(kind))/versions" }
+    static func artifactVersion(_ id: Int) -> String { "/api/artifacts/versions/\(id)" }
+    static func artifactRevert(_ kind: String, _ id: Int) -> String { "/api/artifacts/\(escape(kind))/revert/\(id)" }
     static let prompts = "/api/prompts/"
+    static func prompt(_ key: String) -> String { "/api/prompts/\(escape(key))" }
+    static func promptVersions(_ key: String) -> String { "/api/prompts/\(escape(key))/versions" }
+    static func promptVersion(_ key: String, _ id: Int) -> String { "/api/prompts/\(escape(key))/versions/\(id)" }
+    static func promptDefault(_ key: String) -> String { "/api/prompts/\(escape(key))/default" }
+    static func promptRevert(_ key: String, _ id: Int) -> String { "/api/prompts/\(escape(key))/revert/\(id)" }
+    static func promptRevertToDefault(_ key: String) -> String { "/api/prompts/\(escape(key))/revert-to-default" }
+    static func promptAcknowledgeDefault(_ key: String) -> String { "/api/prompts/\(escape(key))/acknowledge-default" }
     static let share = "/api/share"
+    static func shareItem(_ id: Int) -> String { "/api/share/\(id)" }
+    static func sharePublish(_ id: Int) -> String { "/api/share/\(id)/publish" }
+    static func shareRevoke(_ id: Int) -> String { "/api/share/\(id)/revoke" }
+    static let commonsFeed = "/api/commons/feed"
     static let exportThreads = "/api/export/threads"
+
+    // MARK: References and external sources (M4)
+    static let externalItems = "/api/external/items"
+    static func externalItem(_ id: Int) -> String { "/api/external/items/\(id)" }
+    static func feedPicksRead(_ id: Int) -> String { "/api/nodes/\(id)/feed-picks/read" }
+    static let twitterStatus = "/api/external/twitter/status"
+    static let twitterSync = "/api/external/twitter/sync"
+    static let twitterConnect = "/api/external/twitter/connect"
+    static let communityArchiveFetch = "/api/external/community-archive/fetch"
+    static let bookmarksImport = "/api/external/bookmarks/import"
+    static let apiTokens = "/api/external/tokens"
+    static func apiToken(_ id: Int) -> String { "/api/external/tokens/\(id)" }
+
+    // MARK: Import (M4)
+    static let importMarkdownAnalyze = "/api/import/analyze"
+    static let importMarkdownConfirm = "/api/import/confirm"
+    static let importClaudeAnalyze = "/api/import/claude/analyze"
+    static let importClaudeConfirm = "/api/import/claude/confirm"
+    static let importChatGPTAnalyze = "/api/import/chatgpt/analyze"
+    static let importChatGPTConfirm = "/api/import/chatgpt/confirm"
+    static let importTwitterAnalyze = "/api/import/twitter/analyze"
+    static let importTwitterConfirm = "/api/import/twitter/confirm"
+    static func importStatus(_ taskId: String) -> String { "/api/import/status/\(escape(taskId))" }
 
     // MARK: Server-sent events
     static func sseLLMStream(_ nodeId: Int) -> String { "/api/sse/nodes/\(nodeId)/llm-stream" }

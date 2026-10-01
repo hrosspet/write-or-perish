@@ -219,6 +219,35 @@ final class ThreadModel {
         quotes.external[itemId] = copy
     }
 
+    // MARK: Read reply picks (web NodeDetail `pickIds`, ReadReplyTail)
+
+    /// A read reply's picks: its `{quote_ext:N}` markers, in order, once each.
+    var readPickIds: [Int] {
+        guard isReadReply, let content = node?.content else { return [] }
+        var seen = Set<Int>()
+        return JSRegex.allMatches(content, #"\{quote_ext:\d+\}"#)
+            .compactMap { Int($0.filter(\.isNumber)) }
+            .filter { seen.insert($0).inserted }
+    }
+
+    /// Every pick's quote has been looked up (`pid in externalQuotes`).
+    var readPicksLoaded: Bool {
+        quotes.loaded && readPickIds.allSatisfy { quotes.external.keys.contains($0) }
+    }
+
+    var readPicksUnread: Int {
+        readPickIds.filter { id in (quotes.external[id] ?? nil).map { $0.readAt == nil } ?? false }.count
+    }
+
+    /// "Mark all as read" answered `{item_id: read_at}`.
+    func readPicksMarkedAll(_ readAt: [Int: Date]) {
+        for (id, date) in readAt {
+            guard var item = quotes.external[id] ?? nil else { continue }
+            item.readAt = date
+            quotes.external[id] = item
+        }
+    }
+
     // MARK: Awaited replies (`?awaitLlm=`)
 
     /// An entry that arrives with its reply pending goes on to the reply at once
