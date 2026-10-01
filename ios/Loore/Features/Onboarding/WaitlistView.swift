@@ -75,6 +75,7 @@ struct WaitlistView: View {
                             .foregroundStyle(LooreColor.textSecondary)
                             .multilineTextAlignment(.center)
                         Button("Read the vision →") { app.open(.webPage(path: "/vision")) }
+                            .accessibilityLabel("Read the vision")
                             .buttonStyle(.looreLink)
                     }
                     .looreFadeIn(delay: 0.42)

@@ -433,6 +433,7 @@ struct ProposalCard: View {
                         Button {
                             UIPasteboard.general.string = share.content
                             copiedIndex = index
+                            UIAccessibility.post(notification: .announcement, argument: "Copied")
                             Task {
                                 try? await Task.sleep(nanoseconds: 1_500_000_000)
                                 if copiedIndex == index { copiedIndex = nil }

@@ -188,6 +188,8 @@ struct ExternalQuoteBubble: View {
         }
         .contentShape(Rectangle())
         .onTapGesture { open(quote, mine: mine) }
+        .accessibilityElement(children: .contain)
+        .accessibilityAction(named: "Open original post") { open(quote, mine: mine) }
         .padding(.vertical, 10)
     }
 
@@ -360,6 +362,7 @@ struct InlineArtifactSection: View {
     private func header(chevron: String, text: String) -> some View {
         HStack(spacing: 6) {
             Text(chevron).font(LooreFont.sans(11.2, .regular)).foregroundStyle(LooreColor.textMuted)
+                .accessibilityHidden(true)
             Text(text).font(LooreFont.sans(13.6, .medium)).foregroundStyle(LooreColor.textSecondary)
             Spacer(minLength: 0)
         }

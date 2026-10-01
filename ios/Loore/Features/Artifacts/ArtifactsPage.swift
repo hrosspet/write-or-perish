@@ -151,7 +151,7 @@ struct ArtifactsPage: View {
             DocEditor(text: $editContent, minHeight: 300,
                       placeholder: kind == "memory" && !creating ? "Facts the AI should remember about you..."
                           : "Artifact content (markdown)...",
-                      identifier: "artifact.editor")
+                      identifier: "artifact.editor", label: "Artifact text")
             if let saveError {
                 Text(saveError).font(LooreFont.meta).foregroundStyle(LooreColor.accent)
             }

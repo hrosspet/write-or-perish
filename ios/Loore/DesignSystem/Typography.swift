@@ -53,6 +53,11 @@ enum LooreFont {
 
     static func rem(_ value: CGFloat) -> CGFloat { value * 16 }
 
+    /// Monospaced text (tokens, prompt sources) that scales with Dynamic Type.
+    static func mono(_ size: CGFloat, relativeTo style: Font.TextStyle = .body) -> Font {
+        .custom("Menlo", size: size, relativeTo: style)
+    }
+
     /// Outfit has no italic face; browsers slant it synthetically (about 12°)
     /// for `font-style: italic`, and so does this. Scaled for Dynamic Type
     /// when created (views rebuild on a size change).

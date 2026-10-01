@@ -90,8 +90,11 @@ struct PublicReplyDialog: View {
                 HStack(spacing: 8) {
                     Image(systemName: dontShowAgain ? "checkmark.square" : "square")
                         .font(.system(size: 15, weight: .light))
+                        .accessibilityHidden(true)
                     Text("Don't show this again")
                 }
+                .accessibilityAddTraits(.isToggle)
+                .accessibilityValue(dontShowAgain ? "On" : "Off")
                 .font(LooreFont.sans(13.1, .light))
                 .foregroundStyle(LooreColor.textMuted)
                 .contentShape(Rectangle())

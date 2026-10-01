@@ -99,6 +99,7 @@ struct ConfirmEmailView: View {
                 .overlay(alignment: .bottom) { Rectangle().fill(LooreColor.accentGlow).frame(height: 1) }
                 .frame(minHeight: 44)
         }
+        .accessibilityLabel(title.replacingOccurrences(of: " →", with: ""))
         .buttonStyle(.plain)
         .accessibilityIdentifier("confirmEmail.action")
     }

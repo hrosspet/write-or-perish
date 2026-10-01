@@ -201,6 +201,7 @@ struct SearchView: View {
     private var inputRow: some View {
         HStack(spacing: 12) {
             Text("\u{2315}").font(.system(size: 18)).foregroundStyle(LooreColor.textMuted)
+                .accessibilityHidden(true)
             TextField("", text: $query, prompt: loorePrompt(external ? "Search your references..." : "Search your entries..."))
                 .font(LooreFont.sans(16, .regular))
                 .foregroundStyle(LooreColor.textPrimary)
@@ -220,9 +221,9 @@ struct SearchView: View {
     private var dateRow: some View {
         HStack(spacing: 10) {
             Text("From").foregroundStyle(LooreColor.textMuted)
-            DateField(date: $from)
+            DateField(date: $from, label: "From date")
             Text("to").foregroundStyle(LooreColor.textMuted)
-            DateField(date: $to)
+            DateField(date: $to, label: "To date")
             if from != nil || to != nil {
                 Button("Clear") { from = nil; to = nil }
                     .buttonStyle(.plain).foregroundStyle(LooreColor.textMuted)
@@ -353,14 +354,17 @@ struct SearchView: View {
 /// A compact optional date field (the web's `<input type="date">`).
 private struct DateField: View {
     @Binding var date: Date?
+    let label: String
 
     var body: some View {
         if let value = date {
-            DatePicker("", selection: Binding(get: { value }, set: { date = $0 }), displayedComponents: .date)
+            DatePicker(label, selection: Binding(get: { value }, set: { date = $0 }), displayedComponents: .date)
                 .labelsHidden()
                 .tint(LooreColor.accent)
         } else {
             Button("yyyy-mm-dd") { date = Date() }
+                .accessibilityLabel(label)
+                .accessibilityHint("Not set. Double-tap to pick a date.")
                 .buttonStyle(.plain)
                 .foregroundStyle(LooreColor.textMuted)
                 .padding(.horizontal, 8)

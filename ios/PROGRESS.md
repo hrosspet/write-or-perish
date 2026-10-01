@@ -11,7 +11,7 @@ Build, install and the device / staging checklists are in [`README.md`](README.m
 | M2 Thread and writing | `ios-app` | **done** (2026-10-01) |
 | M3 Voice and audio | `ios-app-voice`, merged into `ios-app` (`d69bd0b`) | **done** in the simulator (2026-10-01); locked-phone behaviour needs the device checklist |
 | M4 Feature pages | `ios-app` (built after M3 was merged) | **done** (2026-10-01) |
-| M5 Integration and parity | `ios-app` | in progress (parity walk done) |
+| M5 Integration and parity | `ios-app` | in progress (parity walk and accessibility pass done) |
 
 Not yet done anywhere: a run on a real iPhone (README "Only a real iPhone can test") and a
 pass on staging (README "Check on staging").
@@ -446,6 +446,26 @@ reached by routes that never push (admin, waitlist, web pages).
   - `SmokeFlowsUITests` no longer opens the Commons tab (locally it lists other users' public posts).
 - **Publish scan**: the web-app maps and the design doc no longer describe server-side gaps found while mapping;
   personal names removed from the README and the signing example.
+- **Accessibility pass** (an audit of every view, then fixes):
+  - VoiceOver: every icon-only control already had a label (about 40); added the missing ones: the search
+    date fields ("From date" / "To date"), the editors (Profile, Todo, artifact, prompt, share, reference text),
+    the username field, the dictation button ("Record" / "Stop recording" with the elapsed time / "Resume
+    recording"), the Voice screen's error dot ("Something went wrong."), "audio still generating" on both
+    players' time labels, the current chapter in the mini-player, "Actions taken" with expanded/collapsed,
+    ✓/✗ tool results as "Succeeded"/"Failed", quick-add's open/close state, checkbox rows as toggles. Hidden:
+    decorative glyphs and symbols inside labelled buttons (search magnifier, chevrons, keyboard/mic/book icons,
+    "→" arrows). Actions: external quote cards ("Open original post") and published share cards ("Open public
+    thread"). Toasts and "Copied" are announced.
+  - Dynamic Type: `FlowLayout` wraps a child wider than its row instead of letting it run off-screen (the
+    ArtifactsNav bubbles, title rows); `AdaptiveStack` (HStack that becomes a VStack at accessibility sizes)
+    for the thread header, LLM Response / Read rows, Account's username and email rows and the spend-cap banner;
+    the node footer puts the author above a wrapping row of date, replies and icons; the mini-player puts time
+    and progress under its buttons; the writing form's buttons wrap; Voice's "Text Mode" scrolls with the page,
+    its recovery buttons stack, chapter titles get three lines; Voice Mode / Auto-generate buttons grow instead
+    of clipping; monospaced text (`LooreFont.mono`) and the navigation-bar fonts scale (bars capped).
+  - Reduce Motion: the pulsing dot stays steady; toasts, the spend-cap banner and the mini-player fade without
+    sliding; the thread's scroll to the focal node and Account/Import anchor scrolls jump instead of animating.
+    (`FadeIn`, the dialog scale-in, ECG, waveform, pulsing dots/text and the craft glow already respected it.)
 
 **Verified in M5** (simulator "Loore M5 iPhone 17", local Docker backend, user 5)
 - Unit tests: 334 pass, one skipped (M4's 332 + the landing path, the speaker's audio flag; permalink parsing
@@ -453,6 +473,14 @@ reached by routes that never push (admin, waitlist, web pages).
 - `M5ParityUITests` (all pass): signed-out "Vision" opens the web page; a sign-in link minted with `/welcome`
   lands on Welcome; `/@seowriter/<slug>` opens the native thread; a toast sits above the playing mini-player
   (craft mode switched on for the toast and back off).
+- Large text: Home, Voice, Thread, Log, Profile, Account and the mini-player screenshotted at Accessibility XL
+  and XXXL (scratch dir): no clipped controls or horizontal overflow after the fixes (Account overflowed before).
+- UI tests re-run after the accessibility changes (all pass): `M5ParityUITests`, `SmokeFlowsUITests`
+  (session-cookie launch + More), `ThreadWritingUITests` (Log, threads render, kebabs), `M2ScreensUITests`
+  (craft forms, light theme), `M4ScreensUITests` (Todo, Profile, Account, prompt history, references; the
+  reference card is now tapped on its title, since its centre can land on the footer's source link),
+  `VoiceWiringUITests` (speaker + download on a reply with stored audio). Afterwards `state m4_cleanup`; user 5's
+  settings unchanged. No billed calls in M5.
 - Web-view routes opened with `-LooreRoute`: `/admin` (authenticated web view, signed in; the server refuses the
   data to a non-admin), `/vision`, `/@seowriter` (Safari views), a permalink whose node is gone (falls back to the
   web page).
@@ -651,6 +679,9 @@ Totals (a range of routes counts as one row): routes 15 parity · 11 deviation �
 - Locked-phone voice turns, lock-screen controls, interruptions (calls, Siri), background uploads after the
   app is killed, AirPods (HFP → A2DP switch), the 59-minute mark, cue volumes.
 - Emoji (this simulator runtime draws every emoji as a "?" box).
+- A VoiceOver walk-through: labels were checked in code and through XCUITest queries only. In particular, Log /
+  thread / reference cards are containers whose children VoiceOver reads; opening one relies on a double-tap
+  reaching the card's tap gesture.
 - Sign in with X is built but untested (needs X credentials and a real X account); it runs in a
   non-persistent `WKWebView` and ends when the web view reaches the frontend origin.
 

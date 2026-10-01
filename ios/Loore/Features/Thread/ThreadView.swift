@@ -43,6 +43,7 @@ private struct ThreadContent: View {
     @Bindable var model: ThreadModel
     @Binding var autoGenerate: Bool
     @Environment(AppState.self) private var app
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var scrolledToFocal = false
     @State private var formToken = 0
 
@@ -90,7 +91,7 @@ private struct ThreadContent: View {
                     guard !scrolledToFocal, !node.ancestors.isEmpty else { return }
                     scrolledToFocal = true
                     try? await Task.sleep(nanoseconds: 600_000_000)
-                    withAnimation(LooreMotion.quick) { proxy.scrollTo("focal", anchor: .top) }
+                    withAnimation(reduceMotion ? nil : LooreMotion.quick) { proxy.scrollTo("focal", anchor: .top) }
                 }
             }
             .modifier(ThreadSheets(model: model, autoGenerate: $autoGenerate))
@@ -109,7 +110,7 @@ private struct ThreadContent: View {
     // MARK: Header
 
     private func header(_ node: NodeDetail) -> some View {
-        HStack(alignment: .bottom, spacing: 16) {
+        AdaptiveStack(spacing: 16, verticalSpacing: 12, alignment: .bottom) {
             Text("Thread")
                 .font(LooreFont.serif(28.8, .light, relativeTo: .largeTitle))
                 .foregroundStyle(LooreColor.textPrimary)
@@ -118,14 +119,14 @@ private struct ThreadContent: View {
             if model.isOwner && node.aiUsage != .off && !model.isPublicThread {
                 VStack(alignment: .trailing, spacing: 6) {
                     TopRightButton(title: model.voiceLoading ? "Starting…" : "Voice Mode") {
-                        Image(systemName: "mic.fill").font(.system(size: 11))
+                        Image(systemName: "mic.fill").font(.system(size: 11)).accessibilityHidden(true)
                     } action: { model.startVoice() }
                     .disabled(model.voiceLoading)
                     .accessibilityHint("Continue this conversation by voice")
                     if app.capabilities.isAdmin {
                         TopRightButton(title: model.readLoading ? "Starting…"
                                        : (model.inReadThread ? model.readLabel : "Relevant tweets")) {
-                            Image(systemName: "book").font(.system(size: 11))
+                            Image(systemName: "book").font(.system(size: 11)).accessibilityHidden(true)
                         } action: { model.readFromNode(autoGenerate: autoGenerate) }
                         .disabled(model.readLoading)
                         .accessibilityHint(model.inReadThread && model.readReplyAbove ? ThreadModel.readFurtherTitle
@@ -238,7 +239,7 @@ private struct ThreadContent: View {
     /// "Read" / "Read further" with its own read-model picker (admin read threads).
     private func readRow(_ node: NodeDetail) -> some View {
         let busy = model.readLoading || model.llmRequesting || model.llmTaskNodeId != nil
-        return HStack(spacing: 0) {
+        return AdaptiveStack(spacing: 0, verticalSpacing: 6) {
             Button { model.readFromNode(autoGenerate: autoGenerate) } label: {
                 Text(model.readLoading ? "Starting…" : model.readLabel)
                     .font(LooreFont.button)
@@ -264,7 +265,7 @@ private struct ThreadContent: View {
     private func llmResponseRow(_ node: NodeDetail) -> some View {
         let busy = model.llmRequesting || model.llmTaskNodeId != nil
         let underReadReply = model.isReadReply && node.llmTaskStatus == .completed
-        return HStack(spacing: 0) {
+        return AdaptiveStack(spacing: 0, verticalSpacing: 6) {
             Button(action: model.llmResponsePressed) {
                 HStack(spacing: 8) {
                     if busy { ProgressView().controlSize(.mini).tint(LooreColor.textSecondary) }
@@ -309,7 +310,10 @@ private struct TopRightButton<Trailing: View>: View {
             .font(LooreFont.sans(12.5, .light))
             .foregroundStyle(LooreColor.textMuted)
             .padding(.horizontal, 12)
-            .frame(width: 160, height: 32)
+            .padding(.vertical, 4)
+            // 160×32 like the web; grows with large text instead of clipping it.
+            .frame(minWidth: 160, minHeight: 32)
+            .fixedSize()
             .overlay(RoundedRectangle(cornerRadius: LooreRadius.control).strokeBorder(LooreColor.border))
             .contentShape(Rectangle())
         }
@@ -327,7 +331,7 @@ private struct FocalCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             if node.systemPrompt.isSystemPrompt, let title = node.systemPrompt.promptTitle {
-                HStack(spacing: 6) {
+                FlowLayout(spacing: 6, lineSpacing: 2) {
                     Text(title + (node.systemPrompt.promptVersionNumber.map { " v\($0)" } ?? ""))
                     if let v = node.systemPrompt.contextArtifacts?.profile {
                         Text("· Profile v\(v.versionNumber.map(String.init) ?? "")").opacity(0.7)
@@ -452,6 +456,8 @@ private struct ToolCallsDisclosure: View {
                     .foregroundStyle(LooreColor.textMuted)
             }
             .buttonStyle(.plain)
+            .accessibilityLabel("Actions taken (\(meta.count))")
+            .accessibilityValue(expanded ? "Expanded" : "Collapsed")
             if expanded {
                 VStack(alignment: .leading, spacing: 6) {
                     ForEach(Array(meta.enumerated()), id: \.offset) { _, tc in
@@ -468,6 +474,7 @@ private struct ToolCallsDisclosure: View {
     private func row(_ tc: ToolCallMeta) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 4) {
             Text(tc.status == "success" ? "✓" : "✗")
+                .accessibilityLabel(tc.status == "success" ? "Succeeded:" : "Failed:")
             label(tc)
             if let err = tc["error"]?.stringValue, !err.isEmpty {
                 Text(" — \(err)").foregroundStyle(LooreColor.accent)

@@ -214,6 +214,7 @@ private struct MenuRow: View {
                 Image(systemName: "chevron.right")
                     .font(.system(size: 11, weight: .light))
                     .opacity(0.5)
+                    .accessibilityHidden(true)
             }
             .menuRowStyle()
         }

@@ -223,19 +223,18 @@ struct ToastStack: View {
 struct SpendCapBanner: View {
     let message: String
     let onDismiss: () -> Void
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         HStack(alignment: .center, spacing: 12) {
-            Text("LIMIT REACHED")
-                .font(LooreFont.eyebrow)
-                .tracking(1.3)
-                .foregroundStyle(LooreColor.accent)
-                .fixedSize()
-            Text(message)
-                .font(LooreFont.sans(14.4, .light))
-                .foregroundStyle(LooreColor.textSecondary)
-                .lineSpacing(3)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            AdaptiveStack(spacing: 12) {
+                Text("LIMIT REACHED")
+                    .font(LooreFont.eyebrow)
+                    .tracking(1.3)
+                    .foregroundStyle(LooreColor.accent)
+                    .fixedSize()
+                messageText
+            }
             Button(action: onDismiss) {
                 Text("×").font(LooreFont.sans(19, .light)).foregroundStyle(LooreColor.textMuted)
             }
@@ -249,6 +248,14 @@ struct SpendCapBanner: View {
         .shadow(color: LooreColor.shadow.opacity(0.25), radius: 10, y: 4)
         .frame(maxWidth: 680)
         .padding(.horizontal, LooreSpacing.md)
-        .transition(.opacity.combined(with: .offset(y: 8)))
+        .transition(reduceMotion ? .opacity : .opacity.combined(with: .offset(y: 8)))
+    }
+
+    private var messageText: some View {
+        Text(message)
+            .font(LooreFont.sans(14.4, .light))
+            .foregroundStyle(LooreColor.textSecondary)
+            .lineSpacing(3)
+            .frame(maxWidth: .infinity, alignment: .leading)
     }
 }

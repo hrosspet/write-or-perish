@@ -319,6 +319,7 @@ private struct ReferenceEditSheet: View {
                         .onChange(of: title) { _, new in if new.jsLength > 512 { title = new.jsPrefix(512) } }
                         .accessibilityIdentifier("referenceEdit.title")
                     TextEditor(text: $content)
+                        .accessibilityLabel("Reference text")
                         .font(LooreFont.sans(15.2, .light))
                         .foregroundStyle(LooreColor.textPrimary)
                         .lineSpacing(5)

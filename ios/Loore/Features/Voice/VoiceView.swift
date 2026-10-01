@@ -10,6 +10,7 @@ struct VoiceView: View {
     let resumeLLMId: Int?
 
     @Environment(AppState.self) private var app
+    @Environment(\.dynamicTypeSize) private var typeSize
     @State private var interrupted: InterruptedDraft?
     @State private var recoveryChecked = false
     @State private var resumeAfterRecovery = false
@@ -21,6 +22,13 @@ struct VoiceView: View {
     var body: some View {
         ZStack(alignment: .topTrailing) {
             ScrollView {
+                if typeSize.isAccessibilitySize {
+                    // Large text: the button scrolls with the page instead of covering its heading.
+                    textModeButton
+                        .frame(maxWidth: .infinity, alignment: .trailing)
+                        .padding(.top, 12)
+                        .padding(.trailing, 20)
+                }
                 content
                     .frame(maxWidth: .infinity)
                     .padding(.horizontal, LooreSpacing.lg)
@@ -28,9 +36,11 @@ struct VoiceView: View {
                     .containerRelativeFrame(.vertical, alignment: .center) { length, _ in length }
             }
             .scrollBounceBehavior(.basedOnSize)
-            textModeButton
-                .padding(.top, 12)
-                .padding(.trailing, 20)
+            if !typeSize.isAccessibilitySize {
+                textModeButton
+                    .padding(.top, 12)
+                    .padding(.trailing, 20)
+            }
         }
         .loorePageBackground(glow: true)
         .navigationBarTitleDisplayMode(.inline)
@@ -88,6 +98,9 @@ struct VoiceView: View {
                 OfflineNotice()
                 if voice.hasError {
                     PulsingDot(color: LooreColor.error).padding(.bottom, 16)
+                        // The web shows only the red dot; VoiceOver users get words for it.
+                        .accessibilityElement(children: .ignore)
+                        .accessibilityLabel("Something went wrong.")
                 }
             }
             recordControl
@@ -173,18 +186,23 @@ struct VoiceView: View {
                 .foregroundStyle(LooreColor.textSecondary)
                 .multilineTextAlignment(.center)
                 .padding(.bottom, 32)
-            HStack(spacing: 16) {
-                Button("Continue recording") {
-                    interrupted = nil
-                    voice.resumeInterrupted(draft)
-                }
-                .buttonStyle(RecoveryButtonStyle(accent: true))
-                .accessibilityIdentifier("voice.recovery.continue")
-                Button("Discard") { discard(draft) }
-                    .buttonStyle(RecoveryButtonStyle(accent: false))
-                    .accessibilityIdentifier("voice.recovery.discard")
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 16) { recoveryButtons(draft) }
+                VStack(spacing: 12) { recoveryButtons(draft) }
             }
         }
+    }
+
+    @ViewBuilder private func recoveryButtons(_ draft: InterruptedDraft) -> some View {
+        Button("Continue recording") {
+            interrupted = nil
+            voice.resumeInterrupted(draft)
+        }
+        .buttonStyle(RecoveryButtonStyle(accent: true))
+        .accessibilityIdentifier("voice.recovery.continue")
+        Button("Discard") { discard(draft) }
+            .buttonStyle(RecoveryButtonStyle(accent: false))
+            .accessibilityIdentifier("voice.recovery.discard")
     }
 
     private var textModeButton: some View {
@@ -196,7 +214,7 @@ struct VoiceView: View {
             }
         } label: {
             HStack(spacing: 6) {
-                Image(systemName: "keyboard").font(.system(size: 11))
+                Image(systemName: "keyboard").font(.system(size: 11)).accessibilityHidden(true)
                 Text("Text Mode").font(LooreFont.sans(12.5, .light))
             }
             .foregroundStyle(LooreColor.textMuted)
@@ -370,6 +388,8 @@ struct VoicePlayerControls: View {
                     Text(AudioTimeFormat.clock(player.totalDuration))
                     if player.generatingTTS { PulsingDot(size: 6) }
                 }
+                .accessibilityElement(children: .combine)
+                .accessibilityValue(player.generatingTTS ? "Audio still generating" : "")
             }
             .font(LooreFont.sans(12, .light))
             .foregroundStyle(LooreColor.textMuted)
@@ -424,6 +444,7 @@ struct AudioProgressBar: View {
 /// One movement per chain node: Roman numeral + first words; the one under
 /// the playhead is lit; tap to jump and play (web VoicePage chapters).
 struct VoiceChapterList: View {
+    @Environment(\.dynamicTypeSize) private var typeSize
     let player: ChunkQueuePlayer
 
     var body: some View {
@@ -440,7 +461,7 @@ struct VoiceChapterList: View {
                                 .foregroundStyle(active == i ? LooreColor.accent : LooreColor.textMuted)
                             Text(chapter.title)
                                 .foregroundStyle(active == i ? LooreColor.textSecondary : LooreColor.textMuted)
-                                .lineLimit(1)
+                                .lineLimit(typeSize.isAccessibilitySize ? 3 : 1)
                                 .truncationMode(.tail)
                                 .frame(maxWidth: 280, alignment: .leading)
                         }

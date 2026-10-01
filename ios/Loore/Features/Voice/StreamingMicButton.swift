@@ -36,13 +36,15 @@ struct StreamingMicButton: View {
                 .buttonStyle(.looreOutline)
                 .disabled(blocked)
                 .opacity(disabled || idleOffline ? 0.35 : 1)
+                .accessibilityLabel(spokenLabel(state: state, interrupted: interrupted, idleOffline: idleOffline))
+                .accessibilityValue(state == .recording && !interrupted ? AudioTimeFormat.clock(dictation?.elapsed ?? 0) : "")
                 .accessibilityHint(model.audioDisabledReason ?? (idleOffline ? "You're offline — reconnect to record audio." : ""))
                 .accessibilityIdentifier("nodeForm.record")
 
                 if interrupted && state == .recording {
                     Button { controller?.stop() } label: {
                         HStack(spacing: 4) {
-                            Image(systemName: "stop.fill").font(.system(size: 11))
+                            Image(systemName: "stop.fill").font(.system(size: 11)).accessibilityHidden(true)
                             Text("Stop & save")
                         }
                     }
@@ -52,7 +54,7 @@ struct StreamingMicButton: View {
                 if controller?.recordingFile != nil {
                     Button { sharing = true } label: {
                         HStack(spacing: 4) {
-                            Image(systemName: "arrow.down.circle").font(.system(size: 12))
+                            Image(systemName: "arrow.down.circle").font(.system(size: 12)).accessibilityHidden(true)
                             Text("Save audio")
                         }
                     }
@@ -63,6 +65,17 @@ struct StreamingMicButton: View {
         }
         .sheet(isPresented: $sharing) {
             if let file = controller?.recordingFile { ShareSheet(items: [file]) }
+        }
+    }
+
+    /// What VoiceOver says for the record button (its icons are hidden; the
+    /// recording state shows only a clock).
+    private func spokenLabel(state: DictationController.State, interrupted: Bool, idleOffline: Bool) -> String {
+        switch state {
+        case .idle, .initializing: return idleOffline ? "Offline" : "Record"
+        case .recording: return interrupted ? "Resume recording" : "Stop recording"
+        case .finalizing: return "Finalizing"
+        case .error: return "Error. Retry recording"
         }
     }
 

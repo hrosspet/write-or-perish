@@ -186,6 +186,8 @@ struct DocEditor: View {
     var placeholder: String?
     var monospaced = false
     var identifier = "doc.editor"
+    /// What VoiceOver calls the editor (its placeholder is not read as a label).
+    var label = "Document text"
     @FocusState private var focused: Bool
 
     var body: some View {
@@ -205,6 +207,7 @@ struct DocEditor: View {
                 .scrollContentBackground(.hidden)
                 .padding(12)
                 .focused($focused)
+                .accessibilityLabel(label)
                 .accessibilityIdentifier(identifier)
         }
         .frame(minHeight: minHeight)
@@ -214,7 +217,7 @@ struct DocEditor: View {
     }
 
     private var font: Font {
-        monospaced ? .system(size: 13, weight: .regular, design: .monospaced) : LooreFont.sans(13.6, .light)
+        monospaced ? LooreFont.mono(13) : LooreFont.sans(13.6, .light)
     }
 }
 

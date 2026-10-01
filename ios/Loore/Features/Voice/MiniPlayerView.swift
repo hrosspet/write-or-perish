@@ -7,6 +7,7 @@ import SwiftUI
 /// dot, a tap-to-seek bar, and ✕ Close (full teardown).
 struct MiniPlayerView: View {
     @Environment(AppState.self) private var app
+    @Environment(\.dynamicTypeSize) private var typeSize
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
@@ -45,36 +46,19 @@ struct MiniPlayerView: View {
                 .accessibilityLabel("Close player")
                 .accessibilityIdentifier("miniPlayer.close")
             }
-            HStack(spacing: 10) {
-                controlButton(player.isPlaying ? "pause.fill" : "play.fill", label: player.isPlaying ? "Pause" : "Play",
-                              color: LooreColor.accent, size: 16) {
-                    if player.isPlaying { player.pause() } else if player.atEnd { player.seek(to: 0); player.play() } else { player.play() }
+            if typeSize.isAccessibilitySize {
+                // Large text: the buttons on one row, time and progress below.
+                HStack(spacing: 10) { controls }
+                HStack(spacing: 8) {
+                    timeLabel
+                    progressBar
                 }
-                .accessibilityIdentifier("miniPlayer.playPause")
-                controlButton("stop.fill", label: "Stop", size: 13) { player.stop() }
-                controlButton("gobackward.10", label: "Skip back 10 seconds", size: 14) { player.skip(by: -10) }
-                controlButton("goforward.10", label: "Skip forward 10 seconds", size: 14) { player.skip(by: 10) }
-                Button { player.cycleRate() } label: {
-                    Text(rateText)
-                        .font(LooreFont.sans(11, .medium))
-                        .foregroundStyle(LooreColor.textPrimary)
-                        .frame(minWidth: 38)
-                        .padding(.vertical, 2)
-                        .overlay(RoundedRectangle(cornerRadius: 4).stroke(LooreColor.border, lineWidth: 1))
+            } else {
+                HStack(spacing: 10) {
+                    controls
+                    timeLabel
+                    progressBar
                 }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Change playback speed, now \(rateText)")
-                HStack(spacing: 4) {
-                    Text("\(AudioTimeFormat.clock(player.cumulativeTime)) / \(AudioTimeFormat.clock(player.totalDuration))")
-                        .font(LooreFont.sans(11, .light))
-                        .foregroundStyle(LooreColor.textMuted)
-                        .monospacedDigit()
-                        .lineLimit(1)
-                        .fixedSize()
-                    if player.generatingTTS { PulsingDot(size: 6) }
-                }
-                AudioProgressBar(player: player, height: 5, track: LooreColor.bgSurface)
-                    .frame(minWidth: 40)
             }
         }
         .padding(.horizontal, 14)
@@ -86,6 +70,46 @@ struct MiniPlayerView: View {
         .frame(maxWidth: .infinity)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("miniPlayer")
+    }
+
+    @ViewBuilder private var controls: some View {
+        controlButton(player.isPlaying ? "pause.fill" : "play.fill", label: player.isPlaying ? "Pause" : "Play",
+                      color: LooreColor.accent, size: 16) {
+            if player.isPlaying { player.pause() } else if player.atEnd { player.seek(to: 0); player.play() } else { player.play() }
+        }
+        .accessibilityIdentifier("miniPlayer.playPause")
+        controlButton("stop.fill", label: "Stop", size: 13) { player.stop() }
+        controlButton("gobackward.10", label: "Skip back 10 seconds", size: 14) { player.skip(by: -10) }
+        controlButton("goforward.10", label: "Skip forward 10 seconds", size: 14) { player.skip(by: 10) }
+        Button { player.cycleRate() } label: {
+            Text(rateText)
+                .font(LooreFont.sans(11, .medium))
+                .foregroundStyle(LooreColor.textPrimary)
+                .frame(minWidth: 38)
+                .padding(.vertical, 2)
+                .overlay(RoundedRectangle(cornerRadius: 4).stroke(LooreColor.border, lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Change playback speed, now \(rateText)")
+    }
+
+    private var timeLabel: some View {
+        HStack(spacing: 4) {
+            Text("\(AudioTimeFormat.clock(player.cumulativeTime)) / \(AudioTimeFormat.clock(player.totalDuration))")
+                .font(LooreFont.sans(11, .light))
+                .foregroundStyle(LooreColor.textMuted)
+                .monospacedDigit()
+                .lineLimit(1)
+                .fixedSize()
+            if player.generatingTTS { PulsingDot(size: 6) }
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityValue(player.generatingTTS ? "Audio still generating" : "")
+    }
+
+    private var progressBar: some View {
+        AudioProgressBar(player: player, height: 5, track: LooreColor.bgSurface)
+            .frame(minWidth: 40)
     }
 
     private var rateText: String {
@@ -112,6 +136,7 @@ struct MiniPlayerView: View {
             .frame(maxWidth: 140)
         }
         .accessibilityLabel("Chapter")
+        .accessibilityValue(player.currentChapterIndex.map { player.chapters[$0].title } ?? "")
     }
 
     private func controlButton(_ symbol: String, label: String, color: Color = LooreColor.textPrimary,

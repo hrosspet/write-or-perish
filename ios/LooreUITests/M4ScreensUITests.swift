@@ -189,7 +189,8 @@ final class M4ScreensUITests: XCTestCase {
         let card = element(app, "reference.card.\(itemId)")
         XCTAssertTrue(card.waitForExistence(timeout: 20))
         snapshot("m4-references")
-        card.tap()
+        // Tap the title, not the centre: the footer's source link opens the original post.
+        card.coordinate(withNormalizedOffset: CGVector(dx: 0.3, dy: 0.2)).tap()
         let toggle = app.buttons["reference.readToggle"]
         XCTAssertTrue(toggle.waitForExistence(timeout: 10))
         sleep(6) // the tweet embed

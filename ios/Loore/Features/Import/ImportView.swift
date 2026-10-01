@@ -5,6 +5,7 @@ import UniformTypeIdentifiers
 /// `anchor` `x-bookmarks` scrolls to the X card.
 struct ImportView: View {
     var anchor: String?
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -28,7 +29,7 @@ struct ImportView: View {
             .onAppear {
                 guard let anchor else { return }
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                    withAnimation { proxy.scrollTo(anchor, anchor: .top) }
+                    withAnimation(reduceMotion ? nil : .default) { proxy.scrollTo(anchor, anchor: .top) }
                 }
             }
         }
@@ -169,11 +170,11 @@ struct ExternalImportSection: View {
         card("Chrome clipper") {
             help("Save any open tab into your references with one key press. The extension reads the page in your browser, sends the text to Loore, and closes the tab. Clips are references, not your writing: they are searchable and quotable, and never enter your profile.")
             (Text("Install: open ")
-             + Text("[chrome://extensions](loore-app://copy)").font(.system(size: 12.8, design: .monospaced))
+             + Text("[chrome://extensions](loore-app://copy)").font(LooreFont.mono(12.8))
                 .foregroundColor(LooreColor.textSecondary)
              + Text(addressCopied ? " (Copied)" : "")
              + Text(", turn on Developer mode, choose “Load unpacked” and pick the ")
-             + Text("extension/").font(.system(size: 12.8, design: .monospaced)).foregroundColor(LooreColor.textSecondary)
+             + Text("extension/").font(LooreFont.mono(12.8)).foregroundColor(LooreColor.textSecondary)
              + Text(" folder of the Loore repository. Then paste a token below into the extension’s options. A token can only add references; it cannot read anything."))
                 .font(LooreFont.sans(12.8, .light))
                 .foregroundStyle(LooreColor.textMuted)
@@ -194,7 +195,7 @@ struct ExternalImportSection: View {
                     ForEach(tokens) { token in
                         FlowLayout(spacing: 10, lineSpacing: 4) {
                             Text("loore_\(token.prefix)…")
-                                .font(.system(size: 12.8, design: .monospaced))
+                                .font(LooreFont.mono(12.8))
                                 .foregroundStyle(LooreColor.textSecondary)
                             Text("created \(day(token.createdAt) ?? "?")")
                             Text(day(token.lastUsedAt).map { "last used \($0)" } ?? "never used")
@@ -405,6 +406,7 @@ struct NewTokenDialog: View {
             Button {
                 UIPasteboard.general.string = token
                 copied = true
+                UIAccessibility.post(notification: .announcement, argument: "Copied")
                 Task {
                     try? await Task.sleep(nanoseconds: 1_500_000_000)
                     copied = false
@@ -412,7 +414,7 @@ struct NewTokenDialog: View {
             } label: {
                 HStack(alignment: .top) {
                     Text(token)
-                        .font(.system(size: 13, design: .monospaced))
+                        .font(LooreFont.mono(13))
                         .foregroundStyle(LooreColor.textPrimary)
                         .multilineTextAlignment(.leading)
                         .frame(maxWidth: .infinity, alignment: .leading)

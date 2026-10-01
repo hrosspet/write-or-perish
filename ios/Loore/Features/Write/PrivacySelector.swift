@@ -109,6 +109,7 @@ struct SelectField<Value: Hashable>: View {
                 Image(systemName: "chevron.up.chevron.down")
                     .font(.system(size: 11, weight: .regular))
                     .foregroundStyle(LooreColor.textMuted)
+                    .accessibilityHidden(true)
             }
             .font(LooreFont.sans(14.4, .light))
             .foregroundStyle(LooreColor.textSecondary)

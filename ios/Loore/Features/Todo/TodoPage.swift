@@ -84,7 +84,7 @@ struct TodoPage: View {
             emptyState
         }
         if editing {
-            DocEditor(text: $editContent, identifier: "todo.editor")
+            DocEditor(text: $editContent, identifier: "todo.editor", label: "Todo list")
             DocEditButtons(saving: saving, onSave: save, onCancel: {
                 editing = false
                 if let todo { editContent = todo.content }
@@ -108,8 +108,8 @@ struct TodoPage: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("Quick-add task")
-        .accessibilityHint("Quick-add task to Today")
+        .accessibilityLabel(quickAddOpen ? "Close quick-add" : "Quick-add task")
+        .accessibilityHint(quickAddOpen ? "" : "Quick-add task to Today")
         .accessibilityIdentifier("todo.quickAdd")
     }
 

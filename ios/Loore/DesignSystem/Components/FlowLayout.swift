@@ -18,7 +18,7 @@ struct FlowLayout: Layout {
         for row in arrange(width: bounds.width, subviews: subviews) {
             var x = bounds.minX
             for index in row.indices {
-                let size = subviews[index].sizeThatFits(.unspecified)
+                let size = measure(subviews[index], width: bounds.width)
                 subviews[index].place(at: CGPoint(x: x, y: y + (row.height - size.height) / 2),
                                       proposal: ProposedViewSize(size))
                 x += size.width + spacing
@@ -37,7 +37,7 @@ struct FlowLayout: Layout {
         var rows: [Row] = []
         var current = Row()
         for index in subviews.indices {
-            let size = subviews[index].sizeThatFits(.unspecified)
+            let size = measure(subviews[index], width: width)
             let needed = current.indices.isEmpty ? size.width : current.width + spacing + size.width
             if needed > width, !current.indices.isEmpty {
                 rows.append(current)
@@ -49,5 +49,30 @@ struct FlowLayout: Layout {
         }
         if !current.indices.isEmpty { rows.append(current) }
         return rows
+    }
+
+    /// A child's natural size, or, when that is wider than the row (a long title at a
+    /// large text size), its size wrapped to the row's width.
+    private func measure(_ subview: LayoutSubview, width: CGFloat) -> CGSize {
+        let natural = subview.sizeThatFits(.unspecified)
+        guard width.isFinite, natural.width > width else { return natural }
+        return subview.sizeThatFits(ProposedViewSize(width: width, height: nil))
+    }
+}
+
+/// An `HStack` that becomes a leading-aligned `VStack` at the accessibility text
+/// sizes, for rows of text and controls that cannot fit side by side then.
+struct AdaptiveStack<Content: View>: View {
+    var spacing: CGFloat = 8
+    var verticalSpacing: CGFloat = 6
+    var alignment: VerticalAlignment = .center
+    @ViewBuilder var content: () -> Content
+    @Environment(\.dynamicTypeSize) private var typeSize
+
+    var body: some View {
+        let layout = typeSize.isAccessibilitySize
+            ? AnyLayout(VStackLayout(alignment: .leading, spacing: verticalSpacing))
+            : AnyLayout(HStackLayout(alignment: alignment, spacing: spacing))
+        layout(content)
     }
 }

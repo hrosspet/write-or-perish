@@ -75,6 +75,7 @@ struct CommonsView: View {
                     .accessibilityAddTraits(.isHeader)
                 Spacer()
                 Button("Share →") { app.open(.share) }
+                    .accessibilityLabel("Share")
                     .buttonStyle(.plain)
                     .font(LooreFont.sans(12.5, .light))
                     .foregroundStyle(LooreColor.textMuted)

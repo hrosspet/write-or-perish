@@ -81,7 +81,7 @@ struct ProfilePage: View {
             emptyState
         }
         if editing {
-            DocEditor(text: $editContent, identifier: "profile.editor")
+            DocEditor(text: $editContent, identifier: "profile.editor", label: "Profile text")
             DocEditButtons(saving: saving, onSave: { save() }, onCancel: { editing = false })
         } else if let profile {
             MarkdownView(markdown: profile.content, style: .profile)

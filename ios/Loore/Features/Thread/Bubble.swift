@@ -280,36 +280,65 @@ struct NodeFooterView<Extras: View>: View {
     @ViewBuilder var extras: () -> Extras
 
     @Environment(AppState.self) private var app
+    @Environment(\.dynamicTypeSize) private var typeSize
 
     var body: some View {
-        HStack(spacing: 6) {
-            Button(action: openAuthor) {
-                Text(displayName).lineLimit(1)
-            }
-            .buttonStyle(.plain)
-            if let origin, !origin.isEmpty {
-                dot
-                Text("via \(origin)").lineLimit(1)
-                    .accessibilityLabel("Imported from \(origin)")
-            }
-            dot
-            Text(LooreDateFormat.dateTime(createdAt)).lineLimit(1).fixedSize()
-            dot
-            if let onReply {
-                Button(action: onReply) { replyIcon }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Reply")
+        Group {
+            if typeSize.isAccessibilitySize {
+                // One row cannot hold author, date and the icons at these sizes:
+                // author (and origin) on top, the rest wrapping below.
+                VStack(alignment: .leading, spacing: 4) {
+                    author
+                    if let origin, !origin.isEmpty { originText(origin) }
+                    FlowLayout(spacing: 10, lineSpacing: 4) {
+                        Text(LooreDateFormat.dateTime(createdAt))
+                        reply
+                        if Extras.self != EmptyView.self { extras() }
+                    }
+                }
             } else {
-                replyIcon
-            }
-            if Extras.self != EmptyView.self {
-                dot
-                HStack(spacing: 10) { extras() }
+                HStack(spacing: 6) {
+                    author
+                    if let origin, !origin.isEmpty {
+                        dot
+                        originText(origin)
+                    }
+                    dot
+                    Text(LooreDateFormat.dateTime(createdAt)).lineLimit(1).fixedSize()
+                    dot
+                    reply
+                    if Extras.self != EmptyView.self {
+                        dot
+                        HStack(spacing: 10) { extras() }
+                    }
+                }
             }
         }
         .font(LooreFont.meta)
         .foregroundStyle(LooreColor.textMuted)
         .padding(.top, 12)
+    }
+
+    private var author: some View {
+        Button(action: openAuthor) {
+            Text(displayName).lineLimit(typeSize.isAccessibilitySize ? 2 : 1)
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func originText(_ origin: String) -> some View {
+        Text("via \(origin)").lineLimit(1)
+            .accessibilityLabel("Imported from \(origin)")
+    }
+
+    @ViewBuilder private var reply: some View {
+        if let onReply {
+            Button(action: onReply) { replyIcon }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Reply")
+        } else {
+            replyIcon
+        }
     }
 
     private var dot: some View {

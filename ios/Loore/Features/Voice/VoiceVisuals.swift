@@ -96,6 +96,7 @@ struct PulsingDot: View {
     var color: Color = LooreColor.accent
     var size: CGFloat = 8
     @State private var dim = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         Circle()
@@ -103,6 +104,8 @@ struct PulsingDot: View {
             .frame(width: size, height: size)
             .opacity(dim ? 0.3 : 1)
             .onAppear {
+                // Reduce Motion: a steady dot instead of the endless pulse.
+                guard !reduceMotion else { return }
                 withAnimation(.easeInOut(duration: 0.75).repeatForever(autoreverses: true)) { dim = true }
             }
             .accessibilityHidden(true)

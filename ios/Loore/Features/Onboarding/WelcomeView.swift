@@ -40,6 +40,7 @@ struct WelcomeView: View {
 
                 Button { app.open(.webPage(path: "/how-to")) } label: {
                     Text("See practical tips & workflows →")
+                        .accessibilityLabel("See practical tips & workflows")
                         .font(LooreFont.sans(14.1, .light))
                         .foregroundStyle(LooreColor.accent)
                         .padding(.bottom, 2)

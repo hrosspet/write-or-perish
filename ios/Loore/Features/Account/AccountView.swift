@@ -9,6 +9,7 @@ struct AccountView: View {
     var anchor: String?
 
     @Environment(AppState.self) private var app
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var model: AccountModel?
     @State private var showEnvironmentSwitcher = false
     @State private var connectingX = false
@@ -49,7 +50,7 @@ struct AccountView: View {
                 if model == nil { model = AccountModel(app: app) }
                 if let anchor {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                        withAnimation { proxy.scrollTo(anchor, anchor: .top) }
+                        withAnimation(reduceMotion ? nil : .default) { proxy.scrollTo(anchor, anchor: .top) }
                     }
                 }
             }
@@ -102,6 +103,7 @@ private struct AccountForm: View {
     let pasteConfirmation: () -> Void
 
     @Environment(AppState.self) private var app
+    @Environment(\.dynamicTypeSize) private var typeSize
     @State private var preferredModel: String?
 
     var body: some View {
@@ -174,8 +176,9 @@ private struct AccountForm: View {
 
     private var usernameRow: some View {
         AccountRow(label: "Username", helper: "Letters, numbers, and underscores only.", message: model.usernameMessage) {
-            HStack(spacing: 8) {
+            AdaptiveStack(spacing: 8) {
                 TextField("", text: $model.username)
+                    .accessibilityLabel("Username")
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
                     .submitLabel(.done)
@@ -194,7 +197,7 @@ private struct AccountForm: View {
     private var emailRow: some View {
         AccountRow(label: "Email", message: model.emailMessage) {
             VStack(alignment: .leading, spacing: 4) {
-                HStack(spacing: 8) {
+                AdaptiveStack(spacing: 8) {
                     TextField("", text: $model.emailInput,
                               prompt: loorePrompt(user.email ?? "Add an email to sign in with"))
                         .keyboardType(.emailAddress)
@@ -212,12 +215,12 @@ private struct AccountForm: View {
                     }
                     .buttonStyle(.loorePrimary)
                     .disabled(model.emailSaving || model.emailInput.jsTrimmed.isEmpty)
-                    .fixedSize()
+                    .fixedSize(horizontal: !typeSize.isAccessibilitySize, vertical: true)
                 }
                 if let notice = model.pendingNotice, let pending = user.pendingEmail {
                     VStack(alignment: .leading, spacing: 4) {
                         Text(notice)
-                        HStack(spacing: 4) {
+                        FlowLayout(spacing: 4, lineSpacing: 2) {
                             inlineAction(model.resendTitle) { Task { await model.sendEmailLink(pending, resend: true) } }
                             Text("·")
                             inlineAction("Cancel") { Task { await model.cancelPendingEmail() } }
@@ -230,7 +233,7 @@ private struct AccountForm: View {
                 }
             }
         } footer: {
-            HStack(spacing: 4) {
+            FlowLayout(spacing: 4, lineSpacing: 2) {
                 Text(model.emailHelper)
                 if model.showsRemoveEmail {
                     inlineAction("Remove email") { Task { await model.removeEmail() } }
@@ -250,7 +253,7 @@ private struct AccountForm: View {
                     .accessibilityIdentifier("account.connectX")
             }
         } footer: {
-            HStack(spacing: 4) {
+            FlowLayout(spacing: 4, lineSpacing: 2) {
                 Text(model.xHelper)
                 if model.showsDisconnectX {
                     inlineAction("Disconnect X") { Task { await model.disconnectX() } }

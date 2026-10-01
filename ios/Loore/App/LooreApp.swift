@@ -28,16 +28,19 @@ enum BarAppearance {
         nav.configureWithOpaqueBackground()
         nav.backgroundColor = LooreColor.bgDeepUI
         nav.shadowColor = .clear
+        // Bar fonts follow the text size chosen at launch (capped so the bars keep their height).
         nav.titleTextAttributes = [
             .foregroundColor: LooreColor.textPrimaryUI,
-            .font: UIFont.loore(LooreFontFace.serifName(.regular), size: 20),
+            .font: scaled(UIFont.loore(LooreFontFace.serifName(.regular), size: 20), .headline, max: 28),
         ]
         nav.largeTitleTextAttributes = [
             .foregroundColor: LooreColor.textPrimaryUI,
-            .font: UIFont.loore(LooreFontFace.serifName(.light), size: 34),
+            .font: scaled(UIFont.loore(LooreFontFace.serifName(.light), size: 34), .largeTitle, max: 44),
         ]
         let navButton = UIBarButtonItemAppearance()
-        navButton.normal.titleTextAttributes = [.font: UIFont.loore(LooreFontFace.sansName(.regular), size: 16)]
+        navButton.normal.titleTextAttributes = [
+            .font: scaled(UIFont.loore(LooreFontFace.sansName(.regular), size: 16), .body, max: 24),
+        ]
         nav.buttonAppearance = navButton
         nav.backButtonAppearance = navButton
         UINavigationBar.appearance().standardAppearance = nav
@@ -64,5 +67,9 @@ enum BarAppearance {
         tab.compactInlineLayoutAppearance = item
         UITabBar.appearance().standardAppearance = tab
         UITabBar.appearance().scrollEdgeAppearance = tab
+    }
+
+    private static func scaled(_ font: UIFont, _ style: UIFont.TextStyle, max: CGFloat) -> UIFont {
+        UIFontMetrics(forTextStyle: style).scaledFont(for: font, maximumPointSize: max)
     }
 }

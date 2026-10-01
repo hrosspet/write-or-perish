@@ -94,6 +94,7 @@ struct ShareView: View {
             }
             Spacer()
             Button("Commons →") { app.open(.commons) }
+                .accessibilityLabel("Commons")
                 .buttonStyle(.plain)
                 .font(LooreFont.sans(13.6, .light))
                 .foregroundStyle(LooreColor.textMuted)
@@ -130,7 +131,7 @@ struct ShareView: View {
     private var editForm: some View {
         VStack(alignment: .leading, spacing: 12) {
             DocEditor(text: $editContent, minHeight: 160, placeholder: "What would you like to give outward? (markdown)",
-                      identifier: "share.editor")
+                      identifier: "share.editor", label: "Share text")
             HStack(spacing: 8) {
                 Menu {
                     ForEach(Self.shareTypes, id: \.self) { type in
@@ -141,7 +142,7 @@ struct ShareView: View {
                 } label: {
                     HStack(spacing: 6) {
                         Text(editType)
-                        Image(systemName: "chevron.up.chevron.down").font(.system(size: 10))
+                        Image(systemName: "chevron.up.chevron.down").font(.system(size: 10)).accessibilityHidden(true)
                     }
                     .font(LooreFont.sans(13.6, .light))
                     .foregroundStyle(LooreColor.textSecondary)
@@ -190,6 +191,10 @@ struct ShareView: View {
         }
         .padding(.bottom, 16)
         .accessibilityElement(children: .contain)
+        .accessibilityAction(named: "Open public thread") {
+            guard linksToThread, let nodeId = share.publicNodeId else { return }
+            app.open(.thread(id: nodeId, awaitLLM: nil))
+        }
             .accessibilityIdentifier("share.card.\(share.id)")
     }
 

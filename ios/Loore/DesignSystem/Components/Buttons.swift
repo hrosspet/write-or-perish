@@ -131,7 +131,7 @@ struct CTAButton: View {
         Button(action: action) {
             HStack(spacing: 8) {
                 Text(title)
-                Text("→")
+                Text("→").accessibilityHidden(true)
             }
             .font(LooreFont.sans(15.2, .regular))
             .tracking(0.9)

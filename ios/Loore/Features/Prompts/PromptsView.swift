@@ -124,6 +124,7 @@ struct PromptDetailView: View {
         Button("← All prompts") {
             if app.router.previousRoute == .prompts { app.router.pop() } else { app.open(.prompts) }
         }
+        .accessibilityLabel("All prompts")
         .buttonStyle(.plain)
         .font(LooreFont.sans(12, .light))
         .foregroundStyle(LooreColor.textMuted)
@@ -148,7 +149,7 @@ struct PromptDetailView: View {
             banner
         }
         if editing {
-            DocEditor(text: $editContent, minHeight: 500, monospaced: true, identifier: "prompt.editor")
+            DocEditor(text: $editContent, minHeight: 500, monospaced: true, identifier: "prompt.editor", label: "Prompt text")
             DocEditButtons(saving: saving, onSave: save, onCancel: {
                 editing = false
                 editContent = prompt.content
@@ -174,7 +175,7 @@ struct PromptDetailView: View {
             if let newDefaultContent {
                 ScrollView {
                     Text(newDefaultContent)
-                        .font(.system(size: 12.8, design: .monospaced))
+                        .font(LooreFont.mono(12.8))
                         .foregroundStyle(LooreColor.textSecondary)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .textSelection(.enabled)

@@ -131,8 +131,11 @@ private struct ConfirmImportDialog: View {
                     Button { model.includeReplies.toggle() } label: {
                         HStack(spacing: 8) {
                             Image(systemName: model.includeReplies ? "checkmark.square" : "square")
+                                .accessibilityHidden(true)
                             Text("Include replies (\(analysis.replyCount))")
                         }
+                        .accessibilityAddTraits(.isToggle)
+                        .accessibilityValue(model.includeReplies ? "On" : "Off")
                         .font(LooreFont.sans(14.4, .light))
                         .foregroundStyle(LooreColor.textSecondary)
                     }
@@ -244,6 +247,7 @@ private struct ConfirmImportDialog: View {
                     HStack(alignment: .top, spacing: 8) {
                         Image(systemName: selection.wrappedValue == value ? "largecircle.fill.circle" : "circle")
                             .foregroundStyle(selection.wrappedValue == value ? LooreColor.accent : LooreColor.textMuted)
+                            .accessibilityHidden(true)
                         Text(title)
                             .foregroundStyle(LooreColor.textSecondary)
                             .fixedSize(horizontal: false, vertical: true)

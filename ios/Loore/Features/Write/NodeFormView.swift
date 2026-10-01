@@ -35,6 +35,7 @@ struct NodeFormView: View {
 }
 
 private struct NodeFormBody: View {
+    @Environment(\.dynamicTypeSize) private var typeSize
     @Bindable var model: NodeFormModel
     @Environment(AppState.self) private var app
     @FocusState private var focused: Bool
@@ -166,7 +167,11 @@ private struct NodeFormBody: View {
     }
 
     private var buttons: some View {
-        HStack(spacing: 8) {
+        // Large text: the buttons wrap onto more rows instead of running off the screen.
+        let layout = typeSize.isAccessibilitySize
+            ? AnyLayout(FlowLayout(spacing: 8, lineSpacing: 8))
+            : AnyLayout(HStackLayout(spacing: 8))
+        return layout {
             Button {
                 focused = false
                 Task { await model.submit() }
