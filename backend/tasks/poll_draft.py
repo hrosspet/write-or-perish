@@ -27,6 +27,7 @@ from backend.models import (
 from backend.utils.api_keys import get_api_keys_for_usage
 from backend.utils.privacy import AI_ALLOWED, account_allows_ai
 from backend.utils.cost import llm_cost_log_fields
+from backend.llm_providers import is_empty_truncated
 from backend.utils.llm_batch import (
     batch_submit, batch_check_and_collect, apply_batch_key_override,
 )
@@ -217,6 +218,15 @@ def _save_draft_result(item, result):
         request_ref=f"poll:{item['poll_id']}",
         **llm_cost_log_fields(item["model_id"], result, batch=True),
     ))
+    if is_empty_truncated(result):
+        # Cut off before any text (#368): no empty draft; the response
+        # fails like a missing item and the user writes their own.
+        logger.warning(
+            "Poll draft for response %s cut off before any text (model %s, "
+            "output_tokens=%s); marking it failed", resp.id,
+            item["model_id"], result.get("output_tokens"))
+        _fail_response(resp)
+        return
     resp.set_content(result["content"].strip())
     resp.generated_by = item["model_id"]
     resp.status = "draft"

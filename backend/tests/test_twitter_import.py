@@ -730,6 +730,9 @@ def test_import_invalidates_only_the_versions_it_touches(app, monkeypatch):
     seed.reset_mock()
     assert hand_off(y, None, 50_000) is None
     assert seed.call_args.args == (y.id,)
+    # An import's seed skips the refusal backoff (#368): a build it
+    # triggers runs even if the profile job is waiting or stopped.
+    assert seed.call_args.kwargs == {"ignore_backoff": True}
     assert User.query.get(y.id).profile_needs_full_regen is False
 
     # Sync account: same decisions, dispatched directly.
@@ -747,6 +750,7 @@ def test_import_invalidates_only_the_versions_it_touches(app, monkeypatch):
     monkeypatch.setattr(ex, "maybe_trigger_incremental_profile_update", heartbeat)
     assert hand_off(z, datetime(2026, 9, 1), 50_000) == "gated"
     assert heartbeat.call_args.args[0].id == z.id
+    assert heartbeat.call_args.kwargs == {"ignore_backoff": True}
     # The Twitter wrapper goes through the same hand-off.
     fresh = _make_user("sync_fresh")
     _db.session.commit()
