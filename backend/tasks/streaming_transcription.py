@@ -24,7 +24,9 @@ from backend.celery_app import celery, flask_app
 from backend.models import Node, NodeTranscriptChunk, Draft, APICostLog
 from backend.extensions import db
 from backend.utils.audio_processing import compress_audio_if_needed, get_audio_duration
-from backend.utils.audio_storage import move_draft_audio_to_node_dir
+from backend.utils.audio_storage import (
+    move_session_audio_to_node, storage_path,
+)
 from backend.utils.webm_utils import concat_fragmented_media
 from backend.utils.api_keys import get_openai_chat_key
 from backend.utils.encryption import decrypt_file_to_temp
@@ -350,7 +352,8 @@ def finalize_streaming(self, node_id: int, session_id: str, total_chunks: int):
         audio_storage_root = pathlib.Path(
             os.environ.get("AUDIO_STORAGE_PATH", "data/audio")
         ).resolve()
-        chunk_dir = audio_storage_root / f"streaming/{node.user_id}/{session_id}"
+        chunk_dir = storage_path(
+            audio_storage_root, "streaming", node.user_id, session_id)
 
         if chunk_dir.exists():
             try:
@@ -626,7 +629,8 @@ def transcribe_chunk_batch(self, session_id: str, chunk_indices: list):
             else ".webm"
         )
 
-        chunk_dir = audio_storage_root / f"drafts/{draft.user_id}/{session_id}"
+        chunk_dir = storage_path(
+            audio_storage_root, "drafts", draft.user_id, draft.session_id)
 
         # Collect and decrypt chunk files (keyed by index — sub-batch
         # partitioning below needs per-chunk paths, #124)
@@ -1351,21 +1355,14 @@ def _start_server_side_llm_chain(draft, session_id, transcript,
     _split_parts = split_node_into_chain(user_node)
     tip_node = _split_parts[-1] if _split_parts else user_node
 
-    # Move streaming audio to user node — inline version of
-    # attach_streaming_audio_to_node that does NOT delete the draft
+    # Move streaming audio and transcript-chunk rows to the user node.
+    # Unlike attach_streaming_audio_to_node this does NOT delete the draft
     # (we still need it for the SSE all_complete event).
     audio_storage_root = pathlib.Path(
         os.environ.get("AUDIO_STORAGE_PATH", "data/audio")
     ).resolve()
-    draft_audio_dir = audio_storage_root / f"drafts/{user_id}/{session_id}"
-
-    node_audio_dir = audio_storage_root / f"nodes/{user_id}/{user_node.id}"
-    move_draft_audio_to_node_dir(draft_audio_dir, node_audio_dir, logger)
-
-    # Point transcript-chunk rows at the node
-    NodeTranscriptChunk.query.filter_by(
-        session_id=session_id,
-    ).update({"node_id": user_node.id})
+    move_session_audio_to_node(
+        draft, user_node, logger, root=audio_storage_root)
     user_node.streaming_transcription = True
 
     # LLM placeholder (don't enqueue yet — we'll chain it).

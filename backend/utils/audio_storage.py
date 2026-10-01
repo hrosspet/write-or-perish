@@ -1,10 +1,11 @@
 """
-Shared helper for moving streaming audio chunks from a draft session
-to a node.  Used by voice route so that the original recording is
-available for playback in the Log view.
+Audio storage helpers: building paths under the storage root, and moving
+a streaming draft session's audio and transcript rows to the node it
+becomes (so the original recording plays in the Log view).
 """
 import os
 import pathlib
+import re
 import shutil
 
 from flask import current_app
@@ -15,6 +16,46 @@ from backend.models import Draft, NodeTranscriptChunk
 AUDIO_STORAGE_ROOT = pathlib.Path(
     os.environ.get("AUDIO_STORAGE_PATH", "data/audio")
 ).resolve()
+
+# A folder name under the storage root that comes from a request: a
+# chunked upload's id (the client picks it: the web sends
+# "<ms>-<base36>", the iOS app "<ms>-<uuid prefix>") or a streaming
+# session's id (a server uuid4). Letters, digits, '-' and '_', starting
+# with a letter or digit, so it is always one plain folder name.
+_STORAGE_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
+
+
+def is_storage_id(value) -> bool:
+    """True when *value* is a string that may name a folder under the
+    storage root (see _STORAGE_ID_RE)."""
+    return isinstance(value, str) and _STORAGE_ID_RE.fullmatch(value) is not None
+
+
+def storage_path(root, *parts) -> pathlib.Path:
+    """``root/part/part/...`` for the folders and files audio is kept in,
+    e.g. ``storage_path(root, "drafts", user_id, session_id)``.
+
+    Every part must be a non-negative int (a user or node id) or a string
+    that passes is_storage_id(); anything else raises ValueError. The
+    joined path is also checked to stay inside *root*, so no part can
+    name a folder outside it."""
+    segments = []
+    for part in parts:
+        if isinstance(part, bool):
+            raise ValueError(f"Invalid storage path part: {part!r}")
+        if isinstance(part, int):
+            if part < 0:
+                raise ValueError(f"Invalid storage path part: {part!r}")
+            part = str(part)
+        if not is_storage_id(part):
+            raise ValueError(f"Invalid storage path part: {part!r}")
+        segments.append(part)
+    root = pathlib.Path(root)
+    path = root.joinpath(*segments)
+    base = os.path.normpath(str(root))
+    if os.path.commonpath([base, os.path.normpath(str(path))]) != base:
+        raise ValueError(f"Storage path outside {root}: {path}")
+    return path
 
 
 def clear_tts_artifacts(entity) -> bool:
@@ -121,44 +162,59 @@ def move_draft_audio_to_node_dir(
         logger.warning(f"Failed to move audio files: {e}")
 
 
+def move_session_audio_to_node(draft, node, logger, root=None) -> None:
+    """Move *draft*'s streaming session to *node*: its audio files from
+    ``drafts/<uid>/<session>/`` to ``nodes/<uid>/<node id>/`` and its
+    transcript chunk rows (the rows with the draft's session id) onto the
+    node. The caller has made sure the draft and the node belong to the
+    same user, and commits. *root* defaults to AUDIO_STORAGE_ROOT."""
+    root = AUDIO_STORAGE_ROOT if root is None else root
+    move_draft_audio_to_node_dir(
+        storage_path(root, "drafts", draft.user_id, draft.session_id),
+        storage_path(root, "nodes", draft.user_id, node.id),
+        logger,
+    )
+    NodeTranscriptChunk.query.filter_by(
+        session_id=draft.session_id,
+    ).update({"node_id": node.id})
+
+
 def attach_streaming_audio_to_node(session_id, node, user_id):
     """
     Move audio chunks from a draft streaming session to a node.
 
     * Moves files: drafts/{user_id}/{session_id}/ -> nodes/{user_id}/{node.id}/
-    * Updates NodeTranscriptChunk rows to reference the node
+    * Updates the session's NodeTranscriptChunk rows to reference the node
     * Marks the node as ``streaming_transcription = True``
     * Deletes the draft record
 
-    This is a best-effort operation: if the draft or audio directory
-    doesn't exist the node still works (just without playback of the
-    original recording).
+    Only *user_id*'s own draft session moves, and only onto a node of
+    theirs: nothing happens when the session id is malformed, the draft
+    is not theirs, or the node belongs to someone else. This is a
+    best-effort operation: without the draft the node still works (just
+    without playback of the original recording).
     """
-    if not session_id:
+    if not is_storage_id(session_id):
+        return
+    if node.user_id != user_id:
+        current_app.logger.warning(
+            "Not attaching session %s of user %s to node %s of user %s",
+            session_id, user_id, node.id, node.user_id)
         return
 
     draft = Draft.query.filter_by(
         session_id=session_id,
         user_id=user_id,
     ).first()
+    if draft is None:
+        return
 
-    draft_audio_dir = AUDIO_STORAGE_ROOT / f"drafts/{user_id}/{session_id}"
-
-    node_audio_dir = AUDIO_STORAGE_ROOT / f"nodes/{user_id}/{node.id}"
-    move_draft_audio_to_node_dir(
-        draft_audio_dir, node_audio_dir, current_app.logger,
-    )
-
-    # Point transcript-chunk rows at the node
-    NodeTranscriptChunk.query.filter_by(
-        session_id=session_id,
-    ).update({"node_id": node.id})
+    move_session_audio_to_node(draft, node, current_app.logger)
 
     # Mark the node so the playback path knows it has chunked audio
     node.streaming_transcription = True
 
     # Clean up the draft
-    if draft:
-        db.session.delete(draft)
+    db.session.delete(draft)
 
     db.session.commit()

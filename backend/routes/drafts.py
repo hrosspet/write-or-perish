@@ -9,7 +9,9 @@ import pathlib
 import os
 import shutil
 from datetime import datetime
-from backend.utils.audio_storage import move_draft_audio_to_node_dir
+from backend.utils.audio_storage import (
+    is_storage_id, move_session_audio_to_node, storage_path,
+)
 from backend.utils.encryption import encrypt_file_atomically
 from backend.utils.llm_nodes import pick_model_for_generation
 from backend.utils.spend import require_spend_headroom
@@ -21,6 +23,25 @@ from backend.utils.streaming_session import (
 )
 
 drafts_bp = Blueprint("drafts_bp", __name__)
+
+
+@drafts_bp.before_request
+def _refuse_malformed_session_id():
+    """A <session_id> in the URL names a folder on disk: one that is not a
+    plain folder name (audio_storage.is_storage_id) gets the same 404 as
+    a session that does not exist."""
+    session_id = (request.view_args or {}).get("session_id")
+    if session_id is not None and not is_storage_id(session_id):
+        return jsonify({
+            "error": "Streaming session not found",
+            "code": "session_not_found",
+        }), 404
+    return None
+
+
+def _session_dir(user_id, session_id):
+    """drafts/<user_id>/<session_id> under AUDIO_STORAGE_ROOT."""
+    return storage_path(AUDIO_STORAGE_ROOT, "drafts", user_id, session_id)
 
 # Proposal-pending drafts (created by the agentic loop's _auto_create_drafts,
 # consumed by apply_* / the proposal REST routes) live in the same Draft table
@@ -458,7 +479,7 @@ def discard_streaming_draft(session_id):
     NodeTranscriptChunk.query.filter_by(session_id=session_id).delete()
 
     # Delete audio files
-    audio_dir = AUDIO_STORAGE_ROOT / f"drafts/{draft.user_id}/{session_id}"
+    audio_dir = _session_dir(draft.user_id, draft.session_id)
     if audio_dir.exists():
         shutil.rmtree(audio_dir)
 
@@ -493,7 +514,10 @@ def _cleanup_stale_drafts(user_id):
 
     deleted = 0
     for draft in stale_drafts:
-        audio_dir = AUDIO_STORAGE_ROOT / f"drafts/{user_id}/{draft.session_id}"
+        try:
+            audio_dir = _session_dir(user_id, draft.session_id)
+        except ValueError:
+            continue
         if audio_dir.exists():
             current_app.logger.warning(
                 f"Draft {draft.id} (session {draft.session_id}) was "
@@ -569,7 +593,7 @@ def init_streaming():
     db.session.commit()
 
     # Create directory for chunk storage
-    chunk_dir = AUDIO_STORAGE_ROOT / f"drafts/{current_user.id}/{session_id}"
+    chunk_dir = _session_dir(current_user.id, session_id)
     chunk_dir.mkdir(parents=True, exist_ok=True)
 
     current_app.logger.info(
@@ -680,7 +704,7 @@ def upload_streaming_chunk(session_id):
     ext = ".mp4" if form_mime_family == "audio/mp4" else ".webm"
 
     # Save chunk to disk
-    chunk_dir = AUDIO_STORAGE_ROOT / f"drafts/{current_user.id}/{session_id}"
+    chunk_dir = _session_dir(current_user.id, draft.session_id)
     if not chunk_dir.exists():
         return jsonify({"error": "Streaming session directory not found"}), 404
 
@@ -1235,18 +1259,9 @@ def save_streaming_as_node(session_id):
     tip_node = _split_parts[-1] if _split_parts else node
     db.session.commit()
 
-    # Move audio files from drafts folder to nodes folder
-    draft_audio_dir = AUDIO_STORAGE_ROOT / f"drafts/{current_user.id}/{session_id}"
-    node_audio_dir = AUDIO_STORAGE_ROOT / f"nodes/{current_user.id}/{node.id}"
-
-    move_draft_audio_to_node_dir(
-        draft_audio_dir, node_audio_dir, current_app.logger,
-    )
-
-    # Update transcript chunks to reference the node
-    NodeTranscriptChunk.query.filter_by(session_id=session_id).update({
-        "node_id": node.id
-    })
+    # Move the session's audio files and transcript chunk rows to the node
+    move_session_audio_to_node(
+        draft, node, current_app.logger, root=AUDIO_STORAGE_ROOT)
 
     # Delete the draft
     db.session.delete(draft)
