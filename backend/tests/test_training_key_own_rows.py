@@ -67,10 +67,6 @@ def _seed_row(alice, placeholder, usage):
     kind = placeholder.strip("{}").replace("user_", "", 1)
     if kind in ("memory", "scratchpad", "intentions", "ai_preferences"):
         _mk_artifact(alice.id, kind, OWN, ai_usage=usage)
-    elif kind == "artifacts_index":
-        # The index lists a custom artifact by its title and description.
-        _mk_artifact(alice.id, "reading-list", "the list itself",
-                     title=OWN, ai_usage=usage)
     elif kind == "todo":
         _mk_todo(alice.id, OWN, ai_usage=usage)
     elif kind == "profile":
@@ -92,9 +88,11 @@ def _seed_row(alice, placeholder, usage):
     _db.session.commit()
 
 
+# {user_artifacts_index} is licensed by the account's setting instead of
+# by its rows; see the index tests below.
 PLACEHOLDERS = [
     "{user_memory}", "{user_scratchpad}", "{user_intentions}",
-    "{user_ai_preferences}", "{user_artifacts_index}", "{user_todo}",
+    "{user_ai_preferences}", "{user_todo}",
     "{user_profile}", "{user_recent}", "{user_recent_raw}",
 ]
 
@@ -187,6 +185,61 @@ def test_a_cached_system_render_replays_its_verdict(app, keys, monkeypatch, usag
     assert _keys_used() == [expected]
 
 
+# ── the artifacts index follows the account setting ─────────────────────
+
+def _listed_artifact(alice, usage):
+    """A custom artifact the index lists by its title (OWN)."""
+    _mk_artifact(alice.id, "reading-list", "THE LIST ITSELF",
+                 title=OWN, ai_usage=usage)
+    _db.session.commit()
+
+
+@pytest.mark.parametrize("account, row, expected", [
+    # An old 'chat' artifact the model never opens does not keep a Train
+    # account's thread off the training key.
+    ("train", "chat", "sk-train"),
+    ("train", "train", "sk-train"),
+    # The index is licensed by the account, whatever the rows say.
+    ("chat", "train", "sk-chat"),
+])
+def test_the_artifacts_index_follows_the_account_setting(app, keys, account, row, expected):  # noqa: F811
+    alice, system, user_node, llm_node = _train_chain("textmode")
+    alice.default_ai_usage = account
+    _db.session.commit()
+    _set_prompt(system, "system prompt body\n{user_artifacts_index}")
+    _listed_artifact(alice, row)
+
+    _ScriptedProvider.reset([_resp("Hello.")])
+    generate_llm_response(_FakeSelf(), user_node.id, llm_node.id, "gpt-5",
+                          alice.id, source_mode="textmode")
+
+    assert OWN in _payload(0)                  # the title went out
+    assert "THE LIST ITSELF" not in _payload(0)
+    assert _keys_used() == [expected]
+
+
+def test_opening_a_listed_chat_artifact_counts_by_its_own_row(app, keys):  # noqa: F811
+    """The index follows the account, but content the model reads counts
+    by that artifact's own ai_usage."""
+    alice, system, user_node, llm_node = _train_chain("textmode")
+    _train_user(alice)
+    _set_prompt(system, "system prompt body\n{user_artifacts_index}")
+    _listed_artifact(alice, "chat")
+
+    _ScriptedProvider.reset([
+        _resp("Opening it.", tool_calls=[{
+            "id": "t1", "name": "read_artifact",
+            "input": {"kind": "reading-list"}}]),
+        _resp("Done."),
+    ])
+    generate_llm_response(_FakeSelf(), user_node.id, llm_node.id, "gpt-5",
+                          alice.id, source_mode="textmode")
+
+    assert "THE LIST ITSELF" not in _payload(0)
+    assert "THE LIST ITSELF" in _payload(1)
+    assert _keys_used() == ["sk-train", "sk-chat"]
+
+
 # ── read_artifact / read_todo mid-turn ───────────────────────────────────
 
 @pytest.mark.parametrize("tool, kind, usage, follow_up_key", [
@@ -194,9 +247,10 @@ def test_a_cached_system_render_replays_its_verdict(app, keys, monkeypatch, usag
     ("read_artifact", "memory", "chat", "sk-chat"),
     ("read_todo", None, "train", "sk-train"),
     ("read_todo", None, "chat", "sk-chat"),
-    # The digest summarizes other people's writing: never the training
-    # key, whatever its row says.
-    ("read_artifact", UserArtifact.EXTERNAL_DIGEST_KIND, "train", "sk-chat"),
+    # The saved-references digest counts by its own stamped ai_usage,
+    # like any other artifact (Peter, 2026-10-01).
+    ("read_artifact", "external_digest", "train", "sk-train"),
+    ("read_artifact", "external_digest", "chat", "sk-chat"),
 ])
 def test_a_tool_pull_of_an_own_row_moves_only_its_continuation(app, keys, tool, kind, usage, follow_up_key):  # noqa: F811
     alice, system, user_node, llm_node = _train_chain("textmode")
@@ -575,3 +629,20 @@ def test_the_pre_warm_stores_the_same_filtered_verdict(app, monkeypatch):  # noq
     cached = prompt_cache.get_cached_render(
         app.config, system, _llm_task_mod._render_variant(alice.id))
     assert cached is not None and cached.unlicensed is None
+
+
+def test_an_account_switched_to_chat_after_caching_takes_the_index_to_chat(app, keys, monkeypatch):  # noqa: F811
+    """The index's verdict comes from the account setting, which is part
+    of the render variant: after a switch the cached 'train' render is a
+    miss."""
+    alice, llm_node, _, fake = _cached_voice_thread(
+        monkeypatch, "system prompt body\n{user_artifacts_index}",
+        lambda alice: _listed_artifact(alice, "chat"))
+
+    alice.default_ai_usage = "chat"             # the Account page switch
+    _db.session.commit()
+    _turn_two(alice, llm_node)
+
+    assert OWN in _payload(0)
+    assert _keys_used() == ["sk-chat"]
+    assert len(fake.store) == 2                 # re-rendered under a new key

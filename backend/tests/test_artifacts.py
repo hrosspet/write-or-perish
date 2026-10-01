@@ -1032,3 +1032,33 @@ def test_update_artifact_tool_stamps_train_only_in_a_train_thread_of_a_train_own
             llm_node, [node], user.id)[0]
         assert r["status"] == "success"
         assert UserArtifact.latest_for(user.id, "memory").ai_usage == expected
+
+
+def test_switching_the_account_to_train_changes_no_existing_artifact(
+        app, client):
+    """Decision 3 (Peter, 2026-10-01): a switch to Train restamps nothing
+    (the Account handler only sets default_ai_usage). A version written
+    afterwards takes the new setting; a revert copies the version it
+    reproduces."""
+    user = User.query.first()
+    user.default_ai_usage = "chat"
+    _db.session.commit()
+    assert client.put("/api/artifacts/memory",
+                      json={"content": "old"}).status_code == 200
+    old = UserArtifact.latest_for(user.id, "memory")
+    old_id = old.id
+    assert old.ai_usage == "chat"
+
+    user.default_ai_usage = "train"             # PUT /api/dashboard/user
+    _db.session.commit()
+    assert UserArtifact.query.get(old_id).ai_usage == "chat"
+
+    assert client.put("/api/artifacts/memory",
+                      json={"content": "new"}).status_code == 200
+    new = UserArtifact.latest_for(user.id, "memory")
+    assert new.id != old_id and new.ai_usage == "train"
+    assert UserArtifact.query.get(old_id).ai_usage == "chat"
+
+    assert client.post(
+        f"/api/artifacts/memory/revert/{old_id}").status_code in (200, 201)
+    assert UserArtifact.latest_for(user.id, "memory").ai_usage == "chat"

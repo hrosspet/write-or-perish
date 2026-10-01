@@ -137,10 +137,23 @@ def _render_variant(user_id):
     its own: "killswitch off" and "toggle off, killswitch on" both read
     e0 while rendering different text, so without it an emergency flip
     would keep serving the archive-search guidance for the TTL, telling
-    the model to use a tool that left the list on the same restart."""
+    the model to use a tool that left the list on the same restart.
+    The `u` part is the account's AI-usage setting, which licenses the
+    artifacts index (#326): it changes the verdict, not the text."""
     return (f"a{int(archive_search_enabled(flask_app.config))}"
+            f"u{_account_ai_usage(user_id)}"
             f"s{int(_share_enabled_for_user(user_id))}"
             f"e{int(_external_references_for_user(user_id))}")
+
+
+def _account_ai_usage(user_id):
+    """The account's AI-usage setting. The artifacts index is licensed by
+    it (#326), so it is part of the render variant above: a switch takes
+    a fresh cache key rather than replaying the old verdict."""
+    owner = User.query.get(user_id)
+    return (owner.default_ai_usage if owner is not None else None) or "none"
+
+
 USER_ARTIFACTS_INDEX_PLACEHOLDER = "{user_artifacts_index}"
 # The four resolved together by get_user_artifacts_context.
 _ARTIFACT_PLACEHOLDERS = (
@@ -756,8 +769,8 @@ def get_user_artifacts_context(user_id, pinned_node=None, usage=None,
 
     Each row that reaches the text reports to *usage* (a ContextUsage,
     #326) under its placeholder: memory, scratchpad and intentions by
-    their content, the index's rows by their title and description. The
-    todo line carries a token count only, so it does not report.
+    their own ai_usage. The index reports the account's AI-usage setting
+    instead of its rows' (Peter, 2026-10-01).
     *rendered* is the set of the four placeholders the text being
     rendered actually carries (None = all of them): a row whose
     placeholder is absent never reaches the payload, so it does not
@@ -798,9 +811,6 @@ def get_user_artifacts_context(user_id, pinned_node=None, usage=None,
         if kind in ALWAYS_INLINE_KINDS:
             continue
         present.add(kind)
-        if _reports(USER_ARTIFACTS_INDEX_PLACEHOLDER):
-            usage.note_row(USER_ARTIFACTS_INDEX_PLACEHOLDER, artifact,
-                           f"the {kind} artifact's index entry")
         tokens = approximate_token_count(artifact.get_content() or "")
         desc = (artifact.description or "").strip()
         desc_part = f": {desc}" if desc else ""
@@ -816,6 +826,16 @@ def get_user_artifacts_context(user_id, pinned_node=None, usage=None,
         desc_part = f": {desc}" if desc else ""
         index_lines.append(f"- {kind} — \"{title}\"{desc_part} (empty)")
     index_text = "\n".join(index_lines) if index_lines else "(none)"
+    if _reports(USER_ARTIFACTS_INDEX_PLACEHOLDER):
+        # The index (titles and descriptions) follows the account's
+        # AI-usage setting, not each listed row's (Peter, 2026-10-01): an
+        # old 'chat' artifact the model never opens does not keep a Train
+        # account's threads off the training key. Opening one
+        # (read_artifact) still counts by that row. The setting is in the
+        # render variant, so a cached verdict cannot outlive a switch.
+        usage.licence(USER_ARTIFACTS_INDEX_PLACEHOLDER).note_usage(
+            _account_ai_usage(user_id), "the account's AI-usage setting "
+            "(artifacts index)")
     return memory_content, scratchpad_content, intentions_content, index_text
 
 
@@ -1009,16 +1029,10 @@ def _detect_share_proposal(text):
 
 
 def _note_artifact_content(licence, artifact):
-    """Report an artifact whose content joins the payload (#326): by its
-    row, except the saved-references digest, which summarizes other
-    people's writing — saved references never go out on the training key
-    (#325), and neither does a digest of them, whatever its row says."""
-    if artifact.kind == UserArtifact.EXTERNAL_DIGEST_KIND:
-        licence.to_chat(f"the {artifact.kind} artifact summarizes "
-                        "other people's writing")
-    else:
-        licence.note_usage(artifact.ai_usage,
-                           f"the {artifact.kind} artifact")
+    """Report an artifact whose content joins the payload (#326) by its
+    own row's ai_usage. The saved-references digest counts the same way:
+    by the ai_usage stamped on the version (Peter, 2026-10-01)."""
+    licence.note_usage(artifact.ai_usage, f"the {artifact.kind} artifact")
 
 
 def _retrieval_injection_text(tr, with_labels=False, licence=None):
