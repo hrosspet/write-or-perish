@@ -3,6 +3,7 @@ import UIKit
 
 @main
 struct LooreApp: App {
+    @UIApplicationDelegateAdaptor(LooreAppDelegate.self) private var appDelegate
     @State private var appState = AppState()
 
     init() {

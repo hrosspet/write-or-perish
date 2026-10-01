@@ -66,6 +66,8 @@ final class AppState {
     let toasts = ToastCenter()
     let signals = AppSignals()
     let launch: LaunchOptions
+    /// Audio session, the shared queue player, the voice conversation (M3).
+    let audio = AudioCenter()
     /// Node-link titles for markdown bodies (session cache, M2).
     let nodeTitles = NodeTitleStore()
 
@@ -98,6 +100,7 @@ final class AppState {
         sse = SSEClient(api: api)
         theme = ThemeManager(defaults: defaults, forced: launch.theme)
         installEventHandler()
+        audio.attach(self)
         nodeTitles.fetch = { [weak self] ids in
             guard let api = await self?.api else { throw CancellationError() }
             let query = [URLQueryItem(name: "ids", value: ids.map(String.init).joined(separator: ","))]
@@ -169,6 +172,7 @@ final class AppState {
         syncTimezoneIfNeeded()
         fetchUpdatesIfNeeded()
         openLaunchRouteIfReady()
+        audio.didSignIn()
     }
 
     /// Replaces the user after a `PUT /api/dashboard/user` (the web's `setUser(res.data.user)`).
@@ -279,6 +283,7 @@ final class AppState {
     }
 
     private func resetSessionState() {
+        audio.signedOut()
         user = nil
         phase = .signedOut
         spendCapped = false

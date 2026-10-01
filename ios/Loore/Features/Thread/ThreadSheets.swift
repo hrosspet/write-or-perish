@@ -109,19 +109,21 @@ struct NodeFormSheet: View {
     }
 }
 
-/// M3 HOOK — the focal footer's speaker (listen) and download buttons.
-/// The web shows them when `user.voice_mode_enabled` or the node is public,
-/// disabled with "TTS disabled — No AI access" when AI usage is none
-/// (map D §2.3, map C). M3: replace this body with `SpeakerIcon` +
-/// `DownloadAudioIcon` on the shared player; `hasTTS` is the focal node's flag.
+/// The focal footer's speaker (listen) and download buttons (web `SpeakerIcon` +
+/// `DownloadAudioIcon`, M3): shown with voice mode or on a public node, at 35 %
+/// and inert when AI usage is none; audio plays in the global mini-player.
 struct NodeAudioControls: View {
     let nodeId: Int
     let content: String
     let isPublic: Bool
     let aiUsage: AIUsage
     let hasTTS: Bool
+    /// New TTS was generated from the speaker (web sets `has_tts` on the node).
+    var onTtsGenerated: (() -> Void)?
 
     var body: some View {
-        EmptyView()
+        SpeakerButton(target: .node(nodeId), content: content, isPublic: isPublic, aiUsage: aiUsage,
+                      onTtsGenerated: onTtsGenerated)
+        DownloadAudioButton(nodeId: nodeId, isPublic: isPublic, aiUsage: aiUsage)
     }
 }

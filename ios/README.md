@@ -102,7 +102,9 @@ Debug builds only (Edit Scheme → Run → Arguments, or `xcrun simctl launch`):
 | `-LooreTheme light\|dark` | force the theme for this launch |
 | `-LooreResetState YES` | forget stored cookies and preferences |
 | `-LooreSkipUpdates YES` | don't show the Updates sheet |
-| `-LooreDebugAudioFile <path>` | feed an audio file to the recorder instead of the mic (from M3) |
+| `-LooreDebugAudioFile <path>` | feed an audio file to the recorder instead of the mic (voice mode and dictation); the file's end acts as Stop |
+| `-LooreDebugVoiceAutoStart YES` | with `-LooreDebugAudioFile` and `-LooreRoute /voice`: start recording at once |
+| `-LooreDebugListenNode <id>` | play a node's audio in the global player at launch (the speaker icon's path) |
 
 ## Tests
 
@@ -146,16 +148,71 @@ back off at the end; if a run stops halfway, switch it off again (More → Craft
 
 ## Only a real iPhone can test
 
-For M3 onwards (design doc §12):
+The simulator cannot lock, has no Bluetooth or phone calls, and never suspends
+the app the way a phone does. Voice turns are billed (transcription, reply, TTS):
+use short recordings. Before each item: a Debug build on the phone (Production
+backend by default, or Local over Wi-Fi, see "Local backend"), signed in, voice
+mode enabled, Account → Voice → "Sound while Loore thinks" on Soft.
 
-- [ ] A voice turn with the phone locked: the reply starts playing by itself.
-- [ ] AirPods: recording over HFP, the reply over A2DP.
-- [ ] A phone call during a recording.
-- [ ] Lock-screen controls in each phase (recording, thinking, playback).
-- [ ] A 60-minute recording.
-- [ ] Background upload finishing after the app was killed.
-- [ ] Thinking-cue volume settings (Soft / Very soft / Off).
+- [ ] **Locked phone, reply by itself.** Reflect → Voice → record ~10 s → press
+      the side button to lock → stop from the lock screen (⏭ "next track") or wait
+      and stop before locking. Expected: a soft low swell while it thinks
+      (lock screen shows "Voice…"), then the reply plays without touching the phone;
+      the lock screen shows "Voice" with play/pause and ±10 s.
+- [ ] **Locked phone, stop from the lock screen.** Record, lock, then on the lock
+      screen: pause (title "Paused m:ss"), play (resumes, "Recording m:ss"),
+      ⏭ (stop and send). The reply must play by itself.
+- [ ] **Thinking cue off.** Account → Voice → Off (the warning appears). Repeat
+      the locked turn. Expected: silence while thinking; iOS may suspend the app,
+      and the reply may need a tap after unlocking (the app reconciles on
+      foreground). Set it back to Soft. Also try Very soft: quieter, same flow.
+- [ ] **AirPods.** Connect AirPods, record (mic over Bluetooth HFP), stop. The
+      reply should play in good (A2DP) quality, not telephone quality. If the reply
+      does not play while locked with AirPods, note it: the fallback is to stay in
+      `.playAndRecord` after Stop (`AudioSessionController.switchToPlaybackAfterRecording`).
+- [ ] **Phone call during a recording.** Record, call the phone from another one,
+      decline or take the call. Expected: recording pauses, a chime (maybe only after
+      the call), a notification "Recording paused — tap to resume", the red message on
+      the Voice screen; Resume continues the same recording; the transcript contains
+      both parts.
+- [ ] **Siri / another app takes the mic.** Same as the call: pause + notification.
+- [ ] **Lock-screen controls in each phase.** Recording (play/pause/⏭), thinking
+      (only ⏭ = cancel; the server still finishes the reply), playback (play/pause,
+      ±10 s, scrubbing, speed from the ⋯ menu where iOS offers it).
+- [ ] **60-minute recording.** Record for 59 minutes (phone locked is fine): at
+      59:00 a rising two-note chime, a notification and a toast; stop at ~60:00 and
+      check the transcript has the whole hour.
+- [ ] **Background upload after the app is killed.** Start recording online (the
+      first 15 s chunk uploads), turn on airplane mode at ~20 s, record to ~45 s,
+      stop. After ~30 s the app says the recording could not be sent and is kept.
+      Force-quit Loore, turn airplane mode off, wait a minute (the background
+      upload session finishes the queued chunks without the app), open Loore →
+      Voice: "Unfinished Voice recording" → Continue → record a few seconds → stop.
+      The reply's transcript contains all three parts.
+- [ ] **Headphones unplugged / AirPods removed during playback** pause the reply.
+- [ ] **Dictation.** In a thread's reply box: Record, lock the phone for 30 s,
+      unlock, stop: the transcript lands in the box; "Save audio" shares an `.m4a`.
+- [ ] **Listen aloud.** A node's speaker icon plays in the mini-player above the tab
+      bar; lock the phone: lock-screen controls work; the mini-player's Stop keeps
+      it visible, ✕ closes it.
 - [ ] Sign in with X (needs a real X account).
+
+### Voice UI tests in the simulator (billed, run on purpose)
+
+```sh
+cd ios
+say -o /tmp/clip.m4a --file-format=m4af --data-format=aac "A short test recording about the river."
+TEST_RUNNER_LOORE_SESSION_COOKIE="$(scripts/local_backend.sh session-cookie)" \
+TEST_RUNNER_LOORE_AUDIO_FILE=/tmp/clip.m4a \
+TEST_RUNNER_LOORE_VOICE_ROUTE="/voice?parent=<a test-user node>" \
+xcodebuild -project Loore.xcodeproj -scheme LooreUITests \
+  -destination 'platform=iOS Simulator,name=iPhone 17' test -only-testing:LooreUITests/VoiceUITests
+```
+
+Use a `parent` while other agents or people use the same test user: a text entry
+saved elsewhere deletes the user's top-level draft, which can be a live voice
+recording (see PROGRESS-voice.md, "Backend findings"). Recording with the real
+microphone in the simulator makes macOS ask for microphone access for Simulator.
 
 ## Fonts
 

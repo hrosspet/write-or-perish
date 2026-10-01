@@ -198,25 +198,12 @@ private struct NodeFormBody: View {
     }
 }
 
-/// M3 HOOK — dictation into the writing form. The recorder arrives with the
-/// voice milestone (design doc §8/§9: text-mode path, finalize without the
-/// Voice label, then `save-as-node` on Send). Until then the button is shown
-/// but disabled. M3: replace this view's body with the streaming mic button
-/// and drive `model.dictationStarted/Transcript/Finished/Failed`.
+/// Dictation into the writing form (M3): the streaming recorder in
+/// `Features/Voice/StreamingMicButton.swift` drives `model.dictation*`.
 struct DictationButton: View {
     let model: NodeFormModel
 
     var body: some View {
-        Button {
-        } label: {
-            HStack(spacing: 6) {
-                Image(systemName: "mic").font(.system(size: 13, weight: .regular))
-                Text("Record")
-            }
-        }
-        .buttonStyle(.looreOutline)
-        .disabled(true)
-        .accessibilityHint("Recording into a text entry arrives in a later update.")
-        .accessibilityIdentifier("nodeForm.record")
+        StreamingMicButton(model: model)
     }
 }
