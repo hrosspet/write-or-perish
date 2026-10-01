@@ -1293,7 +1293,7 @@ def _start_server_side_llm_chain(draft, session_id, transcript,
        node's own finalization (interim steps included), so interim audio
        is playable while the continuation call is still generating
     """
-    from backend.models import Node, NodeTranscriptChunk, User
+    from backend.models import Node, User
     from backend.utils.prompts import get_user_prompt_record
     from backend.utils.llm_nodes import create_llm_placeholder, reply_ai_usage
     from backend.utils.context_artifacts import attach_context_artifacts
