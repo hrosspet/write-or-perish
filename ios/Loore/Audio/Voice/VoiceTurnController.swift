@@ -76,7 +76,6 @@ final class VoiceTurnController {
         var reconcile: Double = 7
         var triggerWatchdog: Double = 20
         var catchUpGrace: Double = 3
-        var safetyNet: Double = 60
         var errorDot: Double = 3
         var tick: Double = 0.25
         var longRecording: Double = 59 * 60
@@ -94,7 +93,6 @@ final class VoiceTurnController {
 
     private struct NodeTrack {
         var completed = false
-        var completedAt: Date?
         var content: String?
         var continuation: Int?
         var attached = false
@@ -529,7 +527,6 @@ final class VoiceTurnController {
         switch status.status {
         case .completed?:
             track.completed = true
-            track.completedAt = Date()
             track.content = status.content ?? ""
             track.continuation = status.continuationNodeId
             nodes[nodeId] = track
@@ -794,7 +791,9 @@ final class VoiceTurnController {
     // MARK: Recovery (#242)
 
     /// Reconciles against REST every 7 s while the turn is undelivered, and on
-    /// foreground: lost /tts trigger, dead or lagging stream, 60 s safety net.
+    /// foreground: lost /tts trigger, dead or lagging stream. No 60 s safety net:
+    /// the web's only switches screens for its autoplay block, and ending the
+    /// turn there dropped a late first chunk (M13).
     private func startReconcile(_ gen: Int) {
         reconcileTask?.cancel()
         reconcileTask = Task { [weak self] in
@@ -829,13 +828,6 @@ final class VoiceTurnController {
         }
         if track.completed && !track.attached && !track.restDelivered && !track.allComplete && track.ttsAttemptAt == nil {
             await triggerTTS(nodeId, gen)
-            return
-        }
-        // 60 s safety net: completed, stream on, still no audio for this node.
-        if state == .awaitingAudio, track.completed, track.attached, !track.hadAudio,
-           let at = track.completedAt, Date().timeIntervalSince(at) > timings.safetyNet {
-            log.info("no audio 60 s after completion; showing the player")
-            finishGenerating()
             return
         }
         guard track.attached else { return }

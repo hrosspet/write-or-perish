@@ -187,7 +187,7 @@ final class VoiceTurnTests: XCTestCase {
         turn.model = { "gpt-6-luna" }
         turn.aiUsage = { "chat" }
         turn.timings = .init(statusPoll: 0.01, statusGiveUp: 5, llmPoll: 0.01, llmGiveUp: 5, reconcile: 0.05,
-                             triggerWatchdog: 0.2, catchUpGrace: 0.05, safetyNet: 1, errorDot: 0.05, tick: 0.01,
+                             triggerWatchdog: 0.2, catchUpGrace: 0.05, errorDot: 0.05, tick: 0.01,
                              longRecording: 59 * 60)
     }
 
@@ -428,6 +428,23 @@ final class VoiceTurnTests: XCTestCase {
         XCTAssertFalse(turn.hasError)
         backend.push(101, "chunk_ready", #"{"chunk_index":1,"audio_url":"/media/f1.mp3","duration":2}"#)
         await wait("second chunk") { audio.fakeQueue.urls.count == 2 }
+    }
+
+    // M13: a first chunk that arrives long after completion (slow TTS) still plays.
+    func testLateFirstChunkAfterCompletionStillPlays() async throws {
+        backend.statuses = [try status("completed", llm: 101)]
+        backend.llmStatuses[101] = [try llm(101, "processing", tts: "pending"),
+                                    try llm(101, "completed", tts: "processing", content: "Slow.")]
+        backend.ttsTrigger[101] = .started
+        await recordAndStop()
+        await wait("completed") { turn.lastReplyNodeId == 101 }
+        // Longer than the old 60 s net at test scale (1 s); reconcile keeps running.
+        try await Task.sleep(nanoseconds: 1_300_000_000)
+        XCTAssertEqual(turn.state, .awaitingAudio)
+        XCTAssertTrue(audio.cueOn, "still thinking, still audible")
+        backend.push(101, "chunk_ready", #"{"chunk_index":0,"audio_url":"/media/late0.mp3","duration":2}"#)
+        await wait("playing") { turn.state == .playing }
+        XCTAssertEqual(audio.fakeQueue.urls, ["/media/late0.mp3"])
     }
 
     // MARK: Endings

@@ -649,6 +649,8 @@ Totals (a range of routes counts as one row): routes 15 parity · 11 deviation �
 - **Mic permission** is asked before `init` (the web asks after init and discards the draft on denial):
   no orphan drafts. Notification permission is asked at the first record tap, before recording starts.
 - **`cancelled`** reply status ends the turn (the web stays on "Thinking...").
+- **No 60 s safety net**: the web switches to its player 60 s after completion when no chunk came (for its
+  autoplay block); the app keeps "Thinking…", the stream, reconcile and the cue until audio arrives.
 - **A WebM draft** (started in desktop Chrome) cannot be continued natively: a toast says so instead of
   the web's `mime_mismatch` failure.
 - **Offline stop**: after one chunk used up its retries, later chunks get one attempt each and go to the
