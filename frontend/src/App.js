@@ -228,7 +228,7 @@ function App() {
               (unapproved) signups confirm theirs here, and it asks for sign-in itself. */}
           <Route path="/confirm-email" element={<ConfirmEmailPage />} />
           {/* Welcome - protected (for newly approved users) */}
-          <Route path="/welcome" element={<ProtectedRoute><WelcomePage onNewEntryClick={() => setShowNewEntry(true)} /></ProtectedRoute>} />
+          <Route path="/welcome" element={<ProtectedRoute><WelcomePage /></ProtectedRoute>} />
           {/* Workflow routes */}
           <Route path="/voice" element={<ProtectedRoute><VoicePage /></ProtectedRoute>} />
           <Route path="/textmode" element={<ProtectedRoute><WritePage /></ProtectedRoute>} />

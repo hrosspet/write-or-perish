@@ -772,6 +772,11 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
                 onClick={() => setShowPicker(!showPicker)}
                 onMouseEnter={() => setHovered(true)}
                 onMouseLeave={() => setHovered(false)}
+                // Keyboard focus shows the hover style: the global
+                // `button { outline: none }` leaves a borderless button
+                // (the Welcome page's) with no focus indication otherwise.
+                onFocus={(e) => { if (e.target.matches(':focus-visible')) setHovered(true); }}
+                onBlur={() => setHovered(false)}
                 disabled={importing}
                 style={{
                   ...btnStyle,
