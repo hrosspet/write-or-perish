@@ -72,3 +72,21 @@ test('chunks that arrive at once all reach the queue, in order', async () => {
   await act(async () => { mockResolveChapters({ status: 200, data: { chapters } }); });
   expect(mockAudio.updateChapters).toHaveBeenCalledWith(5, 'node', chapters);
 });
+
+// AI usage 'none': no new speech for an entry, a model's reply or a profile
+// version (the server refuses it as well, speech_allowed).
+test.each([
+  [{ nodeId: 5 }],
+  [{ profileId: 9 }],
+])('the icon is off where AI usage is none (%o)', (ids) => {
+  const { getByRole } = render(
+    <SpeakerIcon {...ids} content="text" aiUsage="none" />);
+  expect(getByRole('button')).toBeDisabled();
+  expect(getByRole('button')).toHaveAttribute('title', 'TTS disabled — No AI access');
+});
+
+test('the icon is on for a profile version AI may read', () => {
+  const { getByRole } = render(
+    <SpeakerIcon profileId={9} content="text" aiUsage="chat" />);
+  expect(getByRole('button')).not.toBeDisabled();
+});
