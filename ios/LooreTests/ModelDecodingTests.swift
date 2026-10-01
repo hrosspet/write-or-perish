@@ -123,6 +123,63 @@ final class ModelDecodingTests: XCTestCase {
         XCTAssertNil(node.replyAIUsage)
     }
 
+    // MARK: Deep reply trees (review M6)
+
+    /// A focal node with a single chain of `depth` replies below it.
+    static func chain(depth: Int) -> String {
+        var json = #"{"id": 1, "content": "root", "node_type": "user", "child_count": 1, "children": ["#
+        for level in 1...depth {
+            // Content that looks like structure must not confuse the scan.
+            json += #"{"id": \#(level + 1), "content": "level \#(level) {\"children\": [ ] } \\", "#
+            json += #""node_type": "\#(level.isMultiple(of: 2) ? "llm" : "user")", "child_count": 1, "#
+            json += #""descendant_count": \#(depth - level), "tool_calls_meta": [{"children": [1, 2]}], "children": ["#
+        }
+        json += String(repeating: "]}", count: depth) + "]}"
+        return json
+    }
+
+    func testADeepThreadDecodesWithoutTheNestingLimit() throws {
+        let data = Data(Self.chain(depth: 300).utf8)
+        XCTAssertThrowsError(try decoder.decode(NodeDetail.self, from: data), "Foundation's parser stops at 512 levels")
+        let node = try NodeTreeDecoding.decodeNodeDetail(data, decoder: decoder)
+        var depth = 0
+        var level = node.children.first
+        var last: TreeNode?
+        while let current = level {
+            depth += 1
+            XCTAssertEqual(current.id, depth + 1)
+            last = current
+            level = current.children.first
+        }
+        XCTAssertEqual(depth, 300)
+        XCTAssertEqual(last?.content, #"level 300 {"children": [ ] } \"#)
+        XCTAssertEqual(last?.nodeType, .llm)
+        XCTAssertEqual(ChildRow.flatten(node.children).count, 300)
+    }
+
+    func testTheFlatDecodingMatchesTheNestedOne() throws {
+        let fixtureData = try fixture("node_detail.json")
+        let tolerant = #"""
+        {"id": 1, "content": "root", "node_type": "user", "children": [
+          {"id": 2, "content": "a", "children": [{"id": 3, "children": []}, {"content": "no id", "children": []}]},
+          {"id": 4, "content": "b \"quoted\" {[", "children": [{"id": 5, "content": "c", "children": []}]},
+          {"id": 6, "inaccessible": true}
+        ], "ancestors": [{"id": 0, "children": [{"id": 99}]}]}
+        """#
+        for data in [fixtureData, Data(tolerant.utf8)] {
+            let nested = try decoder.decode(NodeDetail.self, from: data)
+            let flat = try NodeTreeDecoding.decodeNodeDetail(data, decoder: decoder)
+            XCTAssertEqual(flat.id, nested.id)
+            XCTAssertEqual(flat.content, nested.content)
+            XCTAssertEqual(flat.ancestors, nested.ancestors)
+            XCTAssertEqual(flat.children, nested.children)
+        }
+        let flat = try NodeTreeDecoding.decodeNodeDetail(Data(tolerant.utf8), decoder: decoder)
+        XCTAssertEqual(flat.children.map(\.id), [2, 4, 6])
+        XCTAssertEqual(flat.children[0].children, [], "a child that does not decode drops its siblings, as before")
+        XCTAssertEqual(flat.children[1].children.map(\.id), [5])
+    }
+
     func testNodeUpdateResponseWithoutTree() throws {
         let answer = try decode(NodeUpdateResponse.self, #"{"message": "Node updated", "node": {"id": 7, "content": "x", "node_type": "user"}, "descendants_updated": 2}"#)
         XCTAssertEqual(answer.node.id, 7)

@@ -155,7 +155,7 @@ final class ThreadModel {
         guard let app else { return }
         loading = node == nil
         do {
-            let fetched: NodeDetail = try await app.api.get(APIPath.node(nodeId))
+            let fetched = try await app.api.nodeDetail(nodeId)
             node = fetched
             pageError = nil
             loading = false

@@ -253,6 +253,20 @@ final class APIClient: @unchecked Sendable {
         try await send(APIRequest(.delete, path, query: query))
     }
 
+    /// `GET /api/nodes/<id>`: the node with its whole reply tree, decoded without
+    /// Foundation's JSON nesting limit (`NodeTreeDecoding`, review M6).
+    func nodeDetail(_ id: Int) async throws -> NodeDetail {
+        let path = APIPath.node(id)
+        let (data, _) = try await data(for: APIRequest(.get, path))
+        do {
+            return try NodeTreeDecoding.decodeNodeDetail(data, decoder: decoder)
+        } catch let error as DecodingError {
+            throw APIError.decoding("\(path): \(Self.describe(error))")
+        } catch {
+            throw APIError.decoding("\(path): \(error.localizedDescription)")
+        }
+    }
+
     /// Fire-and-forget calls (the web's `.catch(() => {})`): errors are dropped.
     func fireAndForget(_ request: APIRequest) {
         Task { _ = try? await self.data(for: request) }

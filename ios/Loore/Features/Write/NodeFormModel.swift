@@ -169,7 +169,7 @@ final class NodeFormModel {
         started = true
         async let draftLoad: Void = drafts.load()
         if let parentId = config.parentId, !config.isEdit {
-            if let parent: NodeDetail = try? await app.api.get(APIPath.node(parentId)) {
+            if let parent = try? await app.api.nodeDetail(parentId) {
                 parentPrivacy = parent.privacyLevel
                 privacy = parent.privacyLevel
                 aiUsage = parent.replyAIUsage ?? parent.aiUsage

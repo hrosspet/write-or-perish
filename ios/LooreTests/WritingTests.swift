@@ -456,6 +456,13 @@ final class ThreadModelTests: StubbedAppTestCase {
         model.stop()
     }
 
+    /// Review M6: a node with 300 levels of replies below it opens.
+    func testADeepThreadOpens() async {
+        let model = await loadedModel(ModelDecodingTests.chain(depth: 300), id: 1)
+        XCTAssertNil(model.pageError)
+        XCTAssertEqual(model.node?.children.first?.id, 2)
+    }
+
     func testChildRowsIndentOnlyWhenThereAreSiblings() throws {
         let children = try decode([TreeNode].self, """
         [{"id":1,"children":[{"id":2,"children":[]},{"id":3,"children":[{"id":4,"children":[]}]}]}]
