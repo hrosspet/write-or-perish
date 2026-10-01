@@ -14,6 +14,12 @@ may see that object:
   id and is served to that user only.
 - Any other path is refused.
 
+The requested path is resolved once (``..`` segments and symlinks
+followed) and must land inside the media root; the access rule is decided
+on that resolved path, and that same resolved file is the one opened, so
+the file checked is always the file served. A path with an empty, ``.``
+or ``..`` segment is refused before any of that.
+
 A refused request gets the same 404 as a missing file, so the response
 does not say whether a file exists. Files only signed-in viewers may fetch
 are sent with ``Cache-Control: private`` so no shared cache stores them.
@@ -24,7 +30,7 @@ encryption is enabled. HTTP Range requests are supported for seeking.
 
 from flask import Blueprint, jsonify, send_file, Response, request, current_app
 from flask_login import current_user
-from werkzeug.security import safe_join
+from urllib.parse import unquote
 import os
 import pathlib
 
@@ -59,10 +65,55 @@ def _node_id_in(parts):
     return int(raw) if raw.isdigit() else None
 
 
-def _cache_control_for(filename):
-    """The Cache-Control value to serve *filename* with, or None when the
-    current viewer may not fetch it."""
-    parts = filename.split("/")
+def _has_dot_segment(filename):
+    """True when *filename*, as received or decoded once more, has an
+    empty, ``.`` or ``..`` segment. No stored media path has one."""
+    for path in (filename, unquote(filename)):
+        if any(seg in ("", ".", "..") for seg in path.replace("\\", "/").split("/")):
+            return True
+    return False
+
+
+def _resolve_in_media_root(path):
+    """*path* with symlinks and ``..`` resolved, and that path relative to
+    the media root (POSIX form); None when it is not inside the root."""
+    root = MEDIA_ROOT.resolve()
+    try:
+        resolved = pathlib.Path(os.path.realpath(path))
+        rel = resolved.relative_to(root)
+    except (ValueError, OSError):
+        return None
+    if not rel.parts:
+        return None
+    return resolved, rel.as_posix()
+
+
+def _locate(filename):
+    """The file a request for *filename* is served from, as
+    ``(resolved path, path relative to the media root, encrypted)``, or
+    None when there is no such file inside the media root.
+
+    The plain file is preferred; otherwise its ``.enc`` sibling, which is
+    resolved on its own so it too must stay inside the root."""
+    if _has_dot_segment(filename):
+        return None
+    plain = _resolve_in_media_root(MEDIA_ROOT.resolve() / filename)
+    if plain is None:
+        return None
+    if plain[0].is_file():
+        return plain[0], plain[1], False
+    encrypted = _resolve_in_media_root(
+        plain[0].with_name(plain[0].name + ".enc"))
+    if encrypted is not None and encrypted[0].is_file():
+        return encrypted[0], encrypted[1], True
+    return None
+
+
+def _cache_control_for(rel_path):
+    """The Cache-Control value to serve the file at *rel_path* (resolved,
+    relative to the media root) with, or None when the current viewer may
+    not fetch it."""
+    parts = rel_path.split("/")
     if len(parts) < 3 or parts[0] not in OWNER_DIRS or not parts[1].isdigit():
         return None
     owner_id = int(parts[1])
@@ -134,37 +185,33 @@ def _serve_bytes_with_range(data: bytes, mime_type: str, filename: str):
 
 @media_bp.route("/<path:filename>")
 def serve_media(filename):
-    # Refuse anything that would resolve outside MEDIA_ROOT.
-    if safe_join(str(MEDIA_ROOT), filename) is None:
+    located = _locate(filename)
+    if located is None:
         return _not_found()
+    file_path, rel_path, encrypted = located
 
-    cache_control = _cache_control_for(filename)
+    # Decide on the resolved path of the file that will be opened.
+    cache_control = _cache_control_for(rel_path)
     if cache_control is None:
         return _not_found()
 
-    file_path = MEDIA_ROOT / filename
-
-    # Check if file exists (either plain or encrypted)
-    encrypted_path = file_path.with_suffix(file_path.suffix + '.enc')
-
-    if file_path.is_file():
-        # Plain file exists, serve it directly
+    if not encrypted:
         response = send_file(file_path)
 
-    elif encrypted_path.is_file():
-        # Encrypted file exists, decrypt and serve
+    else:
         from backend.utils.encryption import decrypt_file, is_encryption_enabled
 
         if not is_encryption_enabled():
             return jsonify({"error": "Encrypted file found but encryption is disabled"}), 500
 
         try:
-            decrypted_content = decrypt_file(str(encrypted_path))
+            decrypted_content = decrypt_file(str(file_path))
         except Exception as e:
             return jsonify({"error": f"Failed to decrypt file: {str(e)}"}), 500
 
-        # Determine mime type from original extension
-        ext = file_path.suffix.lower()
+        # Determine mime type from the extension before ".enc"
+        plain_name = file_path.name[:-len(".enc")]
+        ext = pathlib.PurePosixPath(plain_name).suffix.lower()
         mime_types = {
             '.mp3': 'audio/mpeg',
             '.webm': 'audio/webm',
@@ -176,11 +223,8 @@ def serve_media(filename):
         mime_type = mime_types.get(ext, 'application/octet-stream')
 
         response = _serve_bytes_with_range(
-            decrypted_content, mime_type, file_path.name
+            decrypted_content, mime_type, plain_name
         )
-
-    else:
-        return _not_found()
 
     response.headers["Cache-Control"] = cache_control
     return response

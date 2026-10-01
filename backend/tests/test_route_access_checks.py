@@ -301,6 +301,134 @@ class TestMediaFiles:
         assert resp.status_code == 404
 
 
+# Ways a client can spell a ".." segment in the URL path.
+_DOTDOT_FORMS = ("..", "%2e%2e", "%2E%2E", ".%2e", "%2e.")
+
+
+def _assert_refused(resp):
+    assert resp.status_code == 404
+    assert resp.data != b"audio-bytes"
+    assert "public" not in resp.headers.get("Cache-Control", "")
+
+
+class TestMediaAccessIsDecidedOnTheResolvedPath:
+    """The access rule is decided on the path the file is opened from,
+    after ``..`` segments and symlinks are resolved."""
+
+    @pytest.mark.parametrize("dotdot", _DOTDOT_FORMS)
+    def test_path_from_own_folder_into_another_users_file_is_refused(
+            self, app, data, dotdot):
+        _write(app, f"user/{data.bob.id}/node/{data.bob_own.id}/tts.mp3")
+        url = (f"/media/user/{data.bob.id}/{dotdot}/{data.alice.id}/node/"
+               f"{data.private.id}/tts.mp3")
+        _assert_refused(_call(app, data.bob, "GET", url))
+
+    @pytest.mark.parametrize("dotdot", _DOTDOT_FORMS)
+    def test_path_from_public_node_folder_into_private_node_is_refused(
+            self, app, data, dotdot):
+        url = (f"/media/user/{data.alice.id}/node/{data.public.id}/{dotdot}/"
+               f"{data.private.id}/tts.mp3")
+        for user in (None, data.bob):
+            _assert_refused(_call(app, user, "GET", url))
+
+    def test_dot_segments_are_refused_even_for_the_owner(self, app, data):
+        alice, private = data.alice.id, data.private.id
+        for url in (
+            f"/media/user/{alice}/node/{private}/../{private}/tts.mp3",
+            f"/media/user/{alice}/./node/{private}/tts.mp3",
+            f"/media/user/{alice}/%2e/node/{private}/tts.mp3",
+            f"/media/user/{alice}/node/{private}/%252e%252e/{private}/tts.mp3",
+        ):
+            assert _call(app, data.alice, "GET", url).status_code == 404, url
+
+    def test_symlink_to_another_users_file_is_refused(self, app, data):
+        link = (app.media_root
+                / f"user/{data.bob.id}/node/{data.bob_own.id}/tts.mp3")
+        link.parent.mkdir(parents=True)
+        link.symlink_to(app.media_root / data.files["private_tts"])
+        url = f"/media/user/{data.bob.id}/node/{data.bob_own.id}/tts.mp3"
+        _assert_refused(_call(app, data.bob, "GET", url))
+        # The owner of the file it points to still gets it.
+        resp = _call(app, data.alice, "GET", url)
+        assert resp.status_code == 200
+        assert resp.headers["Cache-Control"].startswith("private")
+
+    def test_symlink_out_of_the_media_root_is_refused(self, app, data):
+        outside = app.media_root.parent / "outside.mp3"
+        outside.write_bytes(b"outside")
+        link = app.media_root / f"user/{data.alice.id}/node/{data.private.id}/x.mp3"
+        link.symlink_to(outside)
+        resp = _call(app, data.alice, "GET",
+                     f"/media/user/{data.alice.id}/node/{data.private.id}/x.mp3")
+        assert resp.status_code == 404
+        assert resp.data != b"outside"
+
+
+@pytest.fixture
+def encrypted(app, data, monkeypatch):
+    """Encryption on with a stand-in for KMS, and the private, public and
+    chunk files stored the way production stores them: ``<name>.enc``."""
+    from backend.utils import encryption
+    monkeypatch.setenv("ENCRYPTION_DISABLED", "false")
+    monkeypatch.setenv("GCP_KMS_KEY_NAME",
+                       "projects/t/locations/l/keyRings/r/cryptoKeys/k")
+    monkeypatch.setattr(encryption, "_wrap_dek", lambda dek: b"wrapped:" + dek)
+    monkeypatch.setattr(encryption, "_unwrap_dek",
+                        lambda w: w[len(b"wrapped:"):])
+    for key in ("private_tts", "public_tts", "private_chunk"):
+        path = app.media_root / data.files[key]
+        assert encryption.encrypt_file(str(path)) == str(path) + ".enc"
+        assert not path.exists()
+    return data
+
+
+class TestEncryptedMediaFiles:
+
+    def test_owner_gets_decrypted_private_file(self, app, encrypted):
+        for key in ("private_tts", "private_chunk"):
+            resp = _call(app, encrypted.alice, "GET",
+                         f"/media/{encrypted.files[key]}?v=3")
+            assert resp.status_code == 200, key
+            assert resp.data == b"audio-bytes", key
+            assert resp.headers["Cache-Control"].startswith("private"), key
+
+    def test_range_request_on_encrypted_file(self, app, encrypted):
+        resp = _call(app, encrypted.alice, "GET",
+                     f"/media/{encrypted.files['private_tts']}?v=3",
+                     headers={"Range": "bytes=0-4"})
+        assert resp.status_code == 206
+        assert resp.data == b"audio"
+        assert resp.headers["Content-Range"] == "bytes 0-4/11"
+        assert resp.headers["Content-Type"] == "audio/mpeg"
+        assert resp.headers["Cache-Control"].startswith("private")
+
+    def test_public_encrypted_file_is_served_to_everyone(self, app, encrypted):
+        resp = _call(app, None, "GET", f"/media/{encrypted.files['public_tts']}")
+        assert resp.status_code == 200
+        assert resp.data == b"audio-bytes"
+        assert resp.headers["Cache-Control"].startswith("public")
+
+    def test_other_users_get_404_for_encrypted_private_file(self, app, encrypted):
+        url = f"/media/{encrypted.files['private_tts']}"
+        for user in (None, encrypted.bob):
+            _assert_refused(_call(app, user, "GET", url))
+
+    @pytest.mark.parametrize("dotdot", _DOTDOT_FORMS)
+    def test_dot_segments_into_encrypted_private_file_are_refused(
+            self, app, encrypted, dotdot):
+        d = encrypted
+        _write(app, f"user/{d.bob.id}/node/{d.bob_own.id}/tts.mp3")
+        _assert_refused(_call(
+            app, d.bob, "GET",
+            f"/media/user/{d.bob.id}/{dotdot}/{d.alice.id}/node/"
+            f"{d.private.id}/tts.mp3"))
+        for user in (None, d.bob):
+            _assert_refused(_call(
+                app, user, "GET",
+                f"/media/user/{d.alice.id}/node/{d.public.id}/{dotdot}/"
+                f"{d.private.id}/tts.mp3"))
+
+
 # ── /api/nodes/<id>/audio, /audio-chunks, /audio-download, /tts ──────────
 
 class TestNodeAudioRoutes:
@@ -362,6 +490,167 @@ class TestNodeAudioRoutes:
         resp = _call(app, data.alice, "GET",
                      f"/api/nodes/{data.private.id}/suggested-model")
         assert resp.status_code == 200
+
+
+# ── /api/nodes/upload/* (chunked upload) ─────────────────────────────────
+
+# Formats the clients send: web "<ms>-<base36>", iOS "<ms>-<UUID prefix>".
+_WEB_UPLOAD_ID = "1727712000000-k3j2h1g0f"
+_IOS_UPLOAD_ID = "1727712000000-1a2b3c4d-"
+
+
+def _bad_upload_ids(data, json=True):
+    alice = data.alice.id
+    ids = (
+        f"../../user/{alice}/node/{data.private.id}",
+        f"../{alice}/{_WEB_UPLOAD_ID}",
+        "..", ".", "a/b", "up.1", "/tmp", "%2e%2e", "up-1\n",
+        "x" * 65,
+    )
+    # A JSON body can carry a value that is not a string at all.
+    return ids + (12345, ["up-1"]) if json else ids
+
+
+def _tree(root):
+    """Every file and folder under *root*, with file contents."""
+    return {p.relative_to(root).as_posix():
+            (p.read_bytes() if p.is_file() else None)
+            for p in root.rglob("*")}
+
+
+@pytest.fixture
+def transcription(monkeypatch):
+    fake = types.ModuleType("backend.tasks.transcription")
+    fake.transcribe_audio = MagicMock()
+    fake.transcribe_audio.delay.return_value.id = "task-1"
+    monkeypatch.setitem(sys.modules, "backend.tasks.transcription", fake)
+    return fake
+
+
+def _init_upload(app, user, upload_id, total_chunks=1, filesize=4):
+    return _call(app, user, "POST", "/api/nodes/upload/init", json={
+        "filename": "talk.m4a", "filesize": filesize,
+        "total_chunks": total_chunks, "upload_id": upload_id})
+
+
+def _send_chunk(app, user, upload_id, node_id, index, payload):
+    from io import BytesIO
+    return _call(app, user, "POST", "/api/nodes/upload/chunk", data={
+        "chunk": (BytesIO(payload), "blob"), "chunk_index": str(index),
+        "upload_id": upload_id, "node_id": str(node_id),
+    }, content_type="multipart/form-data")
+
+
+@pytest.fixture
+def uploads(app, data):
+    """alice has an upload in progress; bob has started one of his own."""
+    resp = _init_upload(app, data.alice, _WEB_UPLOAD_ID)
+    assert resp.status_code == 201
+    alice_node = resp.get_json()["node_id"]
+    assert _send_chunk(app, data.alice, _WEB_UPLOAD_ID, alice_node, 0,
+                       b"ALCE").status_code == 200
+    resp = _init_upload(app, data.bob, _IOS_UPLOAD_ID)
+    assert resp.status_code == 201
+    data.alice_upload_dir = (
+        app.media_root / f"chunks/{data.alice.id}/{_WEB_UPLOAD_ID}")
+    data.bob_node = resp.get_json()["node_id"]
+    return data
+
+
+class TestChunkedUploadFolder:
+    """Each upload route reads, writes and deletes only inside the
+    caller's own chunks/<user id>/<upload_id> folder."""
+
+    def test_init_refuses_bad_upload_ids(self, app, uploads):
+        before, nodes = _tree(app.media_root.parent), Node.query.count()
+        for upload_id in _bad_upload_ids(uploads):
+            resp = _init_upload(app, uploads.bob, upload_id)
+            assert resp.status_code == 400, upload_id
+        assert Node.query.count() == nodes
+        assert _tree(app.media_root.parent) == before
+
+    def test_chunk_refuses_bad_upload_ids(self, app, uploads):
+        before = _tree(app.media_root.parent)
+        for upload_id in _bad_upload_ids(uploads, json=False):
+            resp = _send_chunk(app, uploads.bob, upload_id, uploads.bob_node,
+                               0, b"BOB!")
+            assert resp.status_code == 400, upload_id
+        assert _tree(app.media_root.parent) == before
+
+    def test_finalize_refuses_bad_upload_ids(self, app, uploads):
+        before = _tree(app.media_root.parent)
+        for upload_id in _bad_upload_ids(uploads):
+            resp = _call(app, uploads.bob, "POST", "/api/nodes/upload/finalize",
+                         json={"upload_id": upload_id,
+                               "node_id": uploads.bob_node})
+            assert resp.status_code == 400, upload_id
+        assert _tree(app.media_root.parent) == before
+
+    def test_cleanup_refuses_bad_upload_ids(self, app, uploads):
+        before = _tree(app.media_root.parent)
+        for upload_id in _bad_upload_ids(uploads):
+            resp = _call(app, uploads.bob, "POST", "/api/nodes/upload/cleanup",
+                         json={"upload_id": upload_id})
+            assert resp.status_code == 400, upload_id
+        assert _tree(app.media_root.parent) == before
+        assert (app.media_root / uploads.files["private_tts"]).exists()
+        assert uploads.alice_upload_dir.is_dir()
+
+    def test_another_users_upload_id_names_the_callers_own_folder(
+            self, app, uploads):
+        before = _tree(uploads.alice_upload_dir)
+        resp = _send_chunk(app, uploads.bob, _WEB_UPLOAD_ID, uploads.bob_node,
+                           0, b"BOB!")
+        assert resp.status_code == 404
+        resp = _call(app, uploads.bob, "POST", "/api/nodes/upload/finalize",
+                     json={"upload_id": _WEB_UPLOAD_ID,
+                           "node_id": uploads.bob_node})
+        assert resp.status_code == 404
+        resp = _call(app, uploads.bob, "POST", "/api/nodes/upload/cleanup",
+                     json={"upload_id": _WEB_UPLOAD_ID})
+        assert resp.status_code == 200
+        assert _tree(uploads.alice_upload_dir) == before
+
+    def test_symlinked_upload_folder_is_refused(self, app, uploads):
+        target = app.media_root / f"user/{uploads.alice.id}/node/{uploads.private.id}"
+        (app.media_root / f"chunks/{uploads.bob.id}/linked").symlink_to(
+            target, target_is_directory=True)
+        resp = _call(app, uploads.bob, "POST", "/api/nodes/upload/cleanup",
+                     json={"upload_id": "linked"})
+        assert resp.status_code == 400
+        assert (app.media_root / uploads.files["private_tts"]).exists()
+
+    @pytest.mark.parametrize("upload_id", [
+        _WEB_UPLOAD_ID, _IOS_UPLOAD_ID, "x" * 64, "up_1"])
+    def test_upload_runs_end_to_end(self, app, data, transcription, upload_id):
+        resp = _init_upload(app, data.bob, upload_id, total_chunks=2,
+                            filesize=8)
+        assert resp.status_code == 201, resp.get_data(as_text=True)
+        assert resp.get_json()["upload_id"] == upload_id
+        node_id = resp.get_json()["node_id"]
+        chunk_dir = app.media_root / f"chunks/{data.bob.id}/{upload_id}"
+        assert chunk_dir.is_dir()
+
+        for index, payload in enumerate((b"abcd", b"efgh")):
+            resp = _send_chunk(app, data.bob, upload_id, node_id, index,
+                               payload)
+            assert resp.status_code == 200, resp.get_data(as_text=True)
+        resp = _call(app, data.bob, "POST", "/api/nodes/upload/finalize",
+                     json={"upload_id": upload_id, "node_id": node_id})
+        assert resp.status_code == 200, resp.get_data(as_text=True)
+
+        original = app.media_root / f"user/{data.bob.id}/node/{node_id}/original.m4a"
+        assert original.read_bytes() == b"abcdefgh"
+        assert not chunk_dir.exists()
+        transcription.transcribe_audio.delay.assert_called_once()
+
+    def test_cleanup_removes_the_callers_own_upload(self, app, uploads):
+        resp = _call(app, uploads.bob, "POST", "/api/nodes/upload/cleanup",
+                     json={"upload_id": _IOS_UPLOAD_ID})
+        assert resp.status_code == 200
+        assert not (app.media_root
+                    / f"chunks/{uploads.bob.id}/{_IOS_UPLOAD_ID}").exists()
+        assert uploads.alice_upload_dir.is_dir()
 
 
 # ── Removed routes ───────────────────────────────────────────────────────

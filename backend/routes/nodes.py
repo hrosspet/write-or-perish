@@ -11,6 +11,7 @@ from backend.utils.slugs import permalink_for
 from datetime import datetime
 from openai import OpenAI
 import os
+import re
 # Additional imports for Voice‑Mode functionality
 from functools import wraps
 from werkzeug.utils import secure_filename
@@ -2310,6 +2311,29 @@ def get_tts_status(node_id):
 # Chunked upload endpoints
 # ---------------------------------------------------------------------------
 
+# The client names each chunked upload, and the name becomes a folder under
+# chunks/<user id>/. The web app sends "<ms>-<base36>" and the iOS app
+# "<ms>-<UUID prefix>"; only letters, digits, "-" and "_" are accepted.
+_UPLOAD_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
+
+
+def _upload_chunk_dir(upload_id):
+    """The folder that stages the current user's upload *upload_id*, or
+    None when *upload_id* is not a valid id or the folder, with symlinks
+    resolved, would not sit directly in the user's own chunks folder.
+    Every upload route builds the path here and nowhere else."""
+    if not isinstance(upload_id, str) or not _UPLOAD_ID_RE.fullmatch(upload_id):
+        return None
+    user_chunks = (AUDIO_STORAGE_ROOT / "chunks" / str(current_user.id)).resolve()
+    chunk_dir = (user_chunks / upload_id).resolve()
+    if chunk_dir.parent != user_chunks:
+        return None
+    return chunk_dir
+
+
+def _invalid_upload_id():
+    return jsonify({"error": "Invalid upload_id"}), 400
+
 
 @nodes_bp.route("/upload/init", methods=["POST"])
 @login_required
@@ -2349,6 +2373,9 @@ def init_chunked_upload():
     # Validate required fields
     if not all([filename, filesize, total_chunks, upload_id]):
         return jsonify({"error": "Missing required fields"}), 400
+    chunk_dir = _upload_chunk_dir(upload_id)
+    if chunk_dir is None:
+        return _invalid_upload_id()
 
     # Validate file type
     if not _allowed_file(filename):
@@ -2398,7 +2425,6 @@ def init_chunked_upload():
     db.session.commit()
 
     # Create directory for chunk storage
-    chunk_dir = AUDIO_STORAGE_ROOT / f"chunks/{current_user.id}/{upload_id}"
     chunk_dir.mkdir(parents=True, exist_ok=True)
 
     # Store upload metadata
@@ -2452,6 +2478,9 @@ def upload_chunk():
 
     if not all([chunk_index is not None, upload_id, node_id]):
         return jsonify({"error": "Missing required fields"}), 400
+    chunk_dir = _upload_chunk_dir(upload_id)
+    if chunk_dir is None:
+        return _invalid_upload_id()
 
     try:
         chunk_index = int(chunk_index)
@@ -2465,7 +2494,6 @@ def upload_chunk():
         return jsonify({"error": "Unauthorized"}), 403
 
     # Save chunk
-    chunk_dir = AUDIO_STORAGE_ROOT / f"chunks/{current_user.id}/{upload_id}"
     if not chunk_dir.exists():
         return jsonify({"error": "Upload session not found"}), 404
 
@@ -2517,6 +2545,9 @@ def finalize_chunked_upload():
 
     if not all([upload_id, node_id]):
         return jsonify({"error": "Missing required fields"}), 400
+    chunk_dir = _upload_chunk_dir(upload_id)
+    if chunk_dir is None:
+        return _invalid_upload_id()
 
     try:
         node_id = int(node_id)
@@ -2529,7 +2560,6 @@ def finalize_chunked_upload():
         return jsonify({"error": "Unauthorized"}), 403
 
     # Load metadata
-    chunk_dir = AUDIO_STORAGE_ROOT / f"chunks/{current_user.id}/{upload_id}"
     if not chunk_dir.exists():
         return jsonify({"error": "Upload session not found"}), 404
 
@@ -2632,8 +2662,9 @@ def cleanup_chunked_upload():
 
     if not upload_id:
         return jsonify({"error": "Missing upload_id"}), 400
-
-    chunk_dir = AUDIO_STORAGE_ROOT / f"chunks/{current_user.id}/{upload_id}"
+    chunk_dir = _upload_chunk_dir(upload_id)
+    if chunk_dir is None:
+        return _invalid_upload_id()
 
     if chunk_dir.exists():
         import shutil
