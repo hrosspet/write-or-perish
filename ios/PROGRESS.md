@@ -582,6 +582,32 @@ Totals (a range of routes counts as one row): routes 15 parity · 11 deviation �
 
 ---
 
+## Review fixes (audio)
+
+PR #384 review, voice/audio findings (branch `ios-fix-audio`, merged into `ios-app`). Each commit adds the unit
+test that would have caught it; 355 unit tests pass (one skipped). No billed calls.
+
+| Finding | Fix | Commit |
+|---|---|---|
+| B1 chunk left out at finalize; chunk 0 lost = no transcript | chunk 0 never given up while recording, nothing sent before it; one more attempt per missing chunk at Stop; still missing → no finalize, chunks stay queued, the user is told | `2e21622` |
+| M9 `POST /tts` while the stream is attached | skipped for streamed replies; a 200 after chunks reconnects the stream; errors non-fatal while attached | `c2886c2` |
+| M13 60 s net abandoned the reply | net removed (deviation listed) | `0be0430` |
+| M12 cue loops indefinitely | turn ends at the llm-status deadline or after 2 min without an answer; cue capped at 5 min per turn; pause in a drain stops the cue, play restarts it | `36ffb28` |
+| M11 "next" during Stop cancelled before finalize | next is a no-op in `.stopping`; `switchToPlayback()` after the generation guard | `568220c` |
+| M10 route re-applied on return to Voice | `VoiceRouteParameters` applies `parent`/`resume` once per screen | `d343192` |
+| M15 failed mic restart was silent | one retry after 0.5 s, then an interruption (Resume, chime, toast, notification) in voice and dictation | `77f18cc` |
+| M14 WebM did not play; failures silent | WebM recordings play the server's MP3 (seen on a local WebM node); failed items toast once and are skipped | `1bb8128` |
+| M2 private files stayed on disk | dictation audio in memory until "Save audio"; share files deleted on dismiss; `tmp/` swept at launch and sign-out; sign-out deletes the upload queue and cancels its background tasks; fatal sessions keep no audio; Discard forgets local chunks | `9b3f426` |
+
+**New heuristics (flagged):** `Timings.llmErrorGiveUp` = 2 min without an llm-status answer ends the turn;
+`Timings.cueCap` = 5 min of thinking cue per turn; `MicrophoneSource.restartRetryDelay` = 0.5 s.
+
+**Not changed, related:** the Minor "Resume numbering" finding (resumed chunks start at `chunk_count`) matters
+more now, because B1 sends a recording with missing chunks to the recovery banner instead of finalizing it.
+Sign-out does not warn about unsent chunks (the review's optional logout warning was not built).
+
+---
+
 ## Deviations from the web
 
 **Sign-in, shell and global UI (M1)**
