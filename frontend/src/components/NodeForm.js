@@ -13,6 +13,9 @@ import { useOnlineStatus } from "../hooks/useOnlineStatus";
 import { useToast } from "../contexts/ToastContext";
 import api from "../api";
 import { uploadFileInChunks } from "../utils/chunkedUpload";
+import {
+  isSpendBlocked, notifySpendBlocked, isSpendCapError, spendCapToastMessage,
+} from "../utils/spendCap";
 import useSubmitShortcut from "../hooks/useSubmitShortcut";
 
 const NodeForm = forwardRef(
@@ -171,9 +174,12 @@ const NodeForm = forwardRef(
             const parent = response.data;
             setParentPrivacy(parent.privacy_level || "private");
             if (!initialPrivacyLevel && !initialAiUsage) {
-              // Set privacy settings to match parent's settings
+              // Set privacy settings to match parent's settings. AI usage
+              // is the backend's reply default (#362): the parent's, but
+              // under a Read the thread's, since a Read's nodes are 'chat'
+              // only for the tweets they quote.
               setPrivacyLevel(parent.privacy_level || "private");
-              setAiUsage(parent.ai_usage || "none");
+              setAiUsage(parent.reply_ai_usage || parent.ai_usage || "none");
             }
           })
           .catch((err) => {
@@ -460,9 +466,9 @@ const NodeForm = forwardRef(
           }
           if (res.data.llm_error) addToast(res.data.llm_error, 10000);
           if (res.data.llm_node_id) {
-            // Land on the USER node so the entry gets its own URL/history
-            // step; ?awaitLlm hands the pending LLM response to NodeDetail's
-            // polling, which navigates to it on completion.
+            // Through the USER node so the entry gets its own URL/history
+            // step; ?awaitLlm hands the pending LLM response to NodeDetail,
+            // which goes on to it.
             onSuccess({
               id: res.data.user_node_id,
               awaitLlm: res.data.llm_node_id,
@@ -651,7 +657,14 @@ const NodeForm = forwardRef(
         setLoading(false);
       } catch (err) {
         console.error("Error in NodeForm:", err);
-        setError(err.response?.data?.error || err.message || "Error submitting form.");
+        if (uploadedFile && isSpendCapError(err)) {
+          // The client-side cap flag was stale; the server refused the
+          // upload before storing anything (#341). The banner is up; the
+          // toast says what happened to this press.
+          addToast(spendCapToastMessage('upload'), 8000);
+        } else {
+          setError(err.response?.data?.error || err.message || "Error submitting form.");
+        }
         setLoading(false);
         setIsUploading(false);
         setUploadProgress(0);
@@ -1050,7 +1063,11 @@ const NodeForm = forwardRef(
                     setHasDraft(true);
                   }}
                   onError={(err) => {
-                    setError(err.message || 'Streaming transcription failed');
+                    // A start refused by the monthly spend cap is not a
+                    // failure; the recorder already showed a toast (#341).
+                    if (!err?.spendCapped) {
+                      setError(err.message || 'Streaming transcription failed');
+                    }
                     setLoading(false);
                     setIsStreamingRecording(false);
                   }}
@@ -1074,7 +1091,17 @@ const NodeForm = forwardRef(
                     >
                       <button
                         type="button"
-                        onClick={() => fileInputRef.current?.click()}
+                        onClick={() => {
+                          // Refuse before the file picker opens: a capped
+                          // user would otherwise pick and send a file only
+                          // to have it refused (#341).
+                          if (isSpendBlocked()) {
+                            notifySpendBlocked();
+                            addToast(spendCapToastMessage('upload'), 8000);
+                            return;
+                          }
+                          fileInputRef.current?.click();
+                        }}
                         disabled={isStreamingRecording || aiUsage === 'none' || !isOnline}
                         style={{ padding: '8px 16px', cursor: isStreamingRecording || aiUsage === 'none' || !isOnline ? 'not-allowed' : 'pointer', opacity: isStreamingRecording || aiUsage === 'none' || !isOnline ? 0.35 : 1, pointerEvents: isStreamingRecording || aiUsage === 'none' || !isOnline ? 'none' : 'auto' }}
                       >

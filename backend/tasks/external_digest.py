@@ -33,6 +33,7 @@ from backend.models import (
 from backend.llm_providers import LLMProvider
 from backend.utils.api_keys import get_api_keys_for_usage
 from backend.utils.cost import llm_cost_log_fields
+from backend.utils.privacy import account_allows_ai
 from backend.utils.llm_batch import (
     apply_batch_key_override, batch_check_and_collect, batch_submit,
 )
@@ -99,8 +100,10 @@ The corpus:
 
 
 def _newest_item_at(user_id):
+    # Saved references only: a Read pick nobody saved is not in the
+    # corpus, and a day's picks must not make the digest stale (#352).
     return db.session.query(func.max(ExternalItem.fetched_at)).filter(
-        ExternalItem.user_id == user_id).scalar()
+        ExternalItem.user_id == user_id, ExternalItem.saved()).scalar()
 
 
 def _digest_built_at(user_id):
@@ -127,26 +130,24 @@ def digest_is_stale(user_id):
 
 
 def _digest_model_id(user):
-    default_model = flask_app.config.get(
-        "DEFAULT_LLM_MODEL", "claude-opus-5")
-    model_id = user.preferred_model or default_model
-    if model_id not in flask_app.config.get("SUPPORTED_MODELS", {}):
-        model_id = default_model
-    return model_id
+    from backend.utils.llm_nodes import default_model_for
+    return default_model_for(user)
 
 
 def _render_digest_prompt(user_id):
     """The digest prompt over the user's current corpus, or None when
     they have no items. Returns (prompt_text, total_items). Decrypts up
     to MAX_DIGEST_ITEMS items — the one place that reads the corpus."""
-    items = ExternalItem.query.filter_by(user_id=user_id).order_by(
+    items = ExternalItem.query.filter(
+        ExternalItem.user_id == user_id, ExternalItem.saved()).order_by(
         ExternalItem.posted_at.desc().nullslast(),
         ExternalItem.fetched_at.desc(),
     ).limit(MAX_DIGEST_ITEMS).all()
     if not items:
         return None
 
-    total = ExternalItem.query.filter_by(user_id=user_id).count()
+    total = ExternalItem.query.filter(
+        ExternalItem.user_id == user_id, ExternalItem.saved()).count()
 
     lines = []
     used = 0
@@ -239,7 +240,8 @@ def _stale_user_ids():
     newest_by_user = dict(
         db.session.query(
             ExternalItem.user_id, func.max(ExternalItem.fetched_at)
-        ).group_by(ExternalItem.user_id).all()
+        ).filter(ExternalItem.saved())
+        .group_by(ExternalItem.user_id).all()
     )
     built_by_user = dict(
         db.session.query(
@@ -329,6 +331,7 @@ def sweep_external_digests():
         due = [
             user for user in User.query.filter(User.id.in_(stale_ids)).all()
             if user_local_hour(user) == NIGHTLY_DIGEST_LOCAL_HOUR
+            and account_allows_ai(user)   # #346
         ]
         if not due:
             return {"status": "ok", "submitted": 0}
@@ -420,6 +423,8 @@ def rebuild_external_digest(self, user_id, force=False):
         user = User.query.get(user_id)
         if user is None:
             return {"status": "no_user"}
+        if not account_allows_ai(user):   # #346
+            return {"status": "ai_opt_out"}
         if not force and not digest_is_stale(user_id):
             return {"status": "not_stale"}
 

@@ -149,16 +149,17 @@ def _prepare(user_id):
     from flask import current_app
     from backend.models import User
     from backend.utils.api_keys import get_api_keys_for_usage
-    from backend.utils.privacy import AI_ALLOWED
+    from backend.utils.privacy import prefill_refusal
     from backend.llm_providers import fit_by_count
 
     user = User.query.get(user_id)
     if not user:
         raise RuntimeError(f"User {user_id} not found")
-    if user.default_ai_usage not in AI_ALLOWED:
+    refusal = prefill_refusal(user)
+    if refusal:
+        # Opted out of AI usage, or declined the tweet seed (#346).
         raise RuntimeError(
-            f"user {user_id} has default_ai_usage='{user.default_ai_usage}' "
-            f"(opted out) — not sending their data to any LLM")
+            f"user {user_id}: {refusal[1]} Not sending their data to any LLM.")
     template, cap, chronological = _template_and_params()
     config = current_app.config
     api_keys = get_api_keys_for_usage(config, "chat")

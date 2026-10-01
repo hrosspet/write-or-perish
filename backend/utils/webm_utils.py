@@ -24,6 +24,7 @@ import shutil
 import struct
 import subprocess
 import tempfile
+import uuid
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -162,7 +163,7 @@ def persist_init_segment(
     """
     # Local import avoids circular imports; encryption depends on this
     # module's sibling files.
-    from backend.utils.encryption import encrypt_file
+    from backend.utils.encryption import encrypt_file_atomically
 
     ext = chunk_path.suffix.lower()
     with open(chunk_path, 'rb') as f:
@@ -175,22 +176,15 @@ def persist_init_segment(
         raise ValueError(f"Unsupported chunk extension: {ext}")
 
     init_path = chunk_dir / init_segment_name(ext, index)
-    with open(init_path, 'wb') as f:
+    # Written under a name of its own, then encrypted and moved into place
+    # (init{ext}.enc, or init{ext} with encryption disabled): the same
+    # chunk may be stored by two requests at once (#371). On any failure
+    # (e.g. a KMS outage) the temp file is removed, so no plaintext init
+    # is left for a later batch to treat as its own.
+    tmp_path = chunk_dir / f"upload-{uuid.uuid4().hex}{ext}"
+    with open(tmp_path, 'wb') as f:
         f.write(init_bytes)
-    try:
-        # encrypt_file is a no-op returning the original path when
-        # encryption is disabled; no return value to track. On success it
-        # removes the plaintext init file and writes init{ext}.enc.
-        encrypt_file(str(init_path))
-    except Exception:
-        # KMS outage or any other encrypt failure — don't leave a
-        # plaintext init file on disk for a subsequent batch to pick up
-        # and mistakenly treat as its own (unencrypted) init segment.
-        try:
-            init_path.unlink(missing_ok=True)
-        except OSError:
-            pass
-        raise
+    encrypt_file_atomically(tmp_path, init_path)
 
 
 def _walk_segment_children(data: bytes):

@@ -45,6 +45,7 @@ from backend.utils.encryption import encrypt_file, decrypt_file_to_temp
 from backend.utils.audio_storage import list_streaming_audio_files
 from backend.utils.llm_nodes import (
     create_llm_placeholder, pick_model_for_generation,
+    resolve_chat_model, resolve_read_model,
 )
 from backend.utils.placeholders import UserExportValidationError
 
@@ -626,6 +627,13 @@ def create_node():
         # ------------------------------------------------------------------
         # Voice‑Mode upload path
         # ------------------------------------------------------------------
+        # A capped user cannot start an upload (#341); the text path
+        # below stays open. The frontend checks before the file picker
+        # opens, but its flag can be stale within a session.
+        from backend.utils.spend import spend_cap_response, user_is_capped
+        if user_is_capped(current_user):
+            return spend_cap_response()
+
         if "audio_file" not in request.files:
             return jsonify({"error": "Field 'audio_file' is required"}), 400
 
@@ -1090,6 +1098,11 @@ def _focal_own_fields(node):
         # prompt (#66).
         "has_tts": bool(node.audio_tts_url),
     }
+    # The reply's text so far while it is generated (#367): a reload
+    # mid-generation shows it at once; the llm-stream SSE takes over.
+    if node.llm_task_status in ("pending", "processing") \
+            and node.streaming_content:
+        data["streaming_content"] = node.get_streaming_content()
     # Include tool call metadata for LLM nodes
     if node.tool_calls_meta:
         import json as _json
@@ -1104,7 +1117,7 @@ def _focal_own_fields(node):
                for m in data.get("tool_calls_meta") or []):
             from backend.models import FeedPick
             data["feed_picks_count"] = FeedPick.query.filter_by(
-                node_id=node.id).count()
+                node_id=node.id, kind="read").count()
     data.update(_system_prompt_fields(node))
     # A Community Archive read reply: the thread page shows what the read
     # covered (the window, from the pinned render) and offers to read
@@ -1115,6 +1128,25 @@ def _focal_own_fields(node):
             data["read_reply"] = True
             data["read_window"] = read_window_fields(node.feed_render)
     return data
+
+
+def _recommendation_fields(rec, item, counted):
+    """The per-recommendation marks a quote bubble or pick shows (#352):
+    `feedback` becomes the verdict that counts for this recommendation
+    (see utils/reference_log), `feedback_shared` says it was given
+    elsewhere (a parallel read), and `rated_before` carries the verdict
+    the model could already see when it chose, for the "You rated this …"
+    line beside an empty control."""
+    from backend.utils.reference_log import rated_before
+    out = counted.get(rec.id)
+    before = rated_before(rec, item)
+    return {
+        "feedback": out.verdict if out else item.feedback,
+        "feedback_shared": bool(out and out.verdict_shared),
+        "rated_before": ({"feedback": before["verdict"],
+                          "at": iso_utc(before["at"])} if before else None),
+        "recommendation_id": rec.id,
+    }
 
 
 @nodes_bp.route("/<int:node_id>/feed-picks", methods=["GET"])
@@ -1129,12 +1161,18 @@ def get_feed_picks(node_id):
     owner_id = node.human_owner_id or node.user_id
     if owner_id != current_user.id:
         return jsonify({"error": "Unauthorized"}), 403
-    rows = (FeedPick.query.filter_by(node_id=node.id)
+    from backend.utils.reference_log import outcomes
+    rows = (FeedPick.query.filter_by(node_id=node.id, kind="read")
             .order_by(FeedPick.rank.asc()).all())
+    counted = outcomes(rows)
     picks = []
     for row in rows:
         item = _serialize_item(row.item)
         item["content"] = row.item.get_content() or ""
+        # The verdict that counts for THIS pick (#352): its own, or one
+        # given on the same tweet in a parallel read — not merely the
+        # tweet's latest, which a later quote may have set.
+        item.update(_recommendation_fields(row, row.item, counted))
         picks.append({
             "rank": row.rank,
             "relevance": row.relevance,
@@ -1157,10 +1195,12 @@ def mark_feed_picks_read(node_id):
     owner_id = node.human_owner_id or node.user_id
     if owner_id != current_user.id:
         return jsonify({"error": "Unauthorized"}), 403
+    from backend.utils.reference_log import ACTION_READ, record_action
     now = datetime.utcnow()
     read_at = {}
-    for row in FeedPick.query.filter_by(node_id=node.id).all():
+    for row in FeedPick.query.filter_by(node_id=node.id, kind="read").all():
         if row.item.read_at is None:
+            record_action(row.item, ACTION_READ, node_id=node.id, at=now)
             row.item.read_at = now
         read_at[row.item.id] = iso_utc(row.item.read_at)
     db.session.commit()
@@ -1329,6 +1369,15 @@ def get_node(node_id):
         from backend.utils.ca_feed import read_reply_ids
         alive = [n for n in ancestor_nodes if n.deleted_at is None] + [node]
         read_reply_above = bool(read_reply_ids(alive))
+    # What a new reply under this node starts with (#362): the reply form
+    # pre-selects it. The node's own ai_usage, except in the owner's read
+    # thread, where the walk looks through the read (reply_ai_usage; only
+    # there, so other threads pay no chain queries).
+    reply_usage = node.ai_usage or current_user.default_ai_usage
+    if in_read_thread and (node.human_owner_id or node.user_id) == current_user.id:
+        from backend.utils.llm_nodes import reply_ai_usage
+        reply_usage = reply_ai_usage(
+            node, current_user, parent_content=focal.get("content"))
     node_data = {
         **focal,
         "child_count": len(serialized_children),
@@ -1336,6 +1385,7 @@ def get_node(node_id):
         "children": serialized_children,
         "in_read_thread": in_read_thread,
         "read_reply_above": read_reply_above,
+        "reply_ai_usage": reply_usage,
     }
     return jsonify(node_data), 200
 
@@ -1381,6 +1431,19 @@ def resolve_node_quotes(node_id):
     ext_owner_id = node.human_owner_id or node.user_id
     ext_quote_data = get_ext_quote_data(ext_quote_ids, ext_owner_id) \
         if ext_quote_ids else {}
+    if ext_quote_ids and ext_owner_id == current_user.id:
+        # The owner's controls show the verdict that counts for the
+        # recommendation this reply made (#352), where it has one.
+        from backend.models import FeedPick
+        from backend.utils.reference_log import outcomes
+        recs = FeedPick.query.filter(
+            FeedPick.node_id == node.id,
+            FeedPick.external_item_id.in_(ext_quote_ids)).all()
+        counted = outcomes(recs)
+        for rec in recs:
+            data = ext_quote_data.get(rec.external_item_id)
+            if data is not None:
+                data.update(_recommendation_fields(rec, rec.item, counted))
 
     return jsonify({
         "quotes": quote_data,
@@ -1484,91 +1547,62 @@ def get_node_titles():
 @nodes_bp.route("/models", methods=["GET"])
 @login_required
 def get_models():
-    """Return the list of available (non-deprecated) models for the frontend."""
+    """The active (non-deprecated) models for the pickers, newest first
+    within each provider. ``featured`` models make the short list;
+    ``read`` models are the only ones the Read button offers (#355)."""
     supported = current_app.config["SUPPORTED_MODELS"]
     models = [
-        {"id": model_id, "name": cfg["display_name"], "provider": cfg["provider"]}
+        {"id": model_id, "name": cfg["display_name"],
+         "provider": cfg["provider"],
+         "featured": bool(cfg.get("featured")),
+         "read": bool(cfg.get("read"))}
         for model_id, cfg in supported.items()
-        if not cfg.get("deprecated")
+        if "provider" in cfg and not cfg.get("deprecated")
     ]
     return jsonify({"models": models}), 200
+
+
+def _model_purpose():
+    """``?purpose=`` of the default-model endpoints: "chat" (a reply,
+    the default) or "read" (the Read button); None when invalid."""
+    purpose = request.args.get("purpose") or "chat"
+    return purpose if purpose in ("chat", "read") else None
 
 
 # Get the default model from server config
 @nodes_bp.route("/default-model", methods=["GET"])
 @login_required
 def get_default_model():
-    """Return the LLM model that would be used for a fresh thread.
-
-    Falls through user.preferred_model → server config DEFAULT_LLM_MODEL,
-    matching the backend's actual selection logic when no parent context
-    exists (see ``pick_model_for_generation``).
-    """
-    supported = current_app.config["SUPPORTED_MODELS"]
-    pref = getattr(current_user, "preferred_model", None)
-    if pref:
-        cfg = supported.get(pref)
-        if cfg and not cfg.get("deprecated"):
-            return jsonify({
-                "suggested_model": pref,
-                "source": "user_preference",
-            }), 200
-    default_model = current_app.config.get("DEFAULT_LLM_MODEL", "claude-opus-5")
-    return jsonify({
-        "suggested_model": default_model,
-        "source": "default"
-    }), 200
+    """Return the LLM model that would be used for a fresh thread:
+    user.preferred_model → DEFAULT_LLM_MODEL, or READ_DEFAULT_MODEL for
+    ``?purpose=read`` (see resolve_chat_model / resolve_read_model)."""
+    purpose = _model_purpose()
+    if purpose is None:
+        return jsonify({"error": "purpose must be 'chat' or 'read'"}), 400
+    if purpose == "read":
+        model_id, source = resolve_read_model(None)
+    else:
+        model_id, source = resolve_chat_model(None, current_user)
+    return jsonify({"suggested_model": model_id, "source": source}), 200
 
 
 # Get the suggested model for a new LLM response based on the thread's context
 @nodes_bp.route("/<int:node_id>/suggested-model", methods=["GET"])
 @login_required
 def get_suggested_model(node_id):
-    """
-    Return the suggested model for a new LLM response based on the thread's context.
-
-    Logic:
-    1. Walk up the thread ancestry from the given node
-    2. Find the most recent node with node_type='llm' AND llm_model IS NOT NULL
-    3. If found AND the model is active (not deprecated), return that model
-    4. If the model is deprecated or legacy, fall through to default
-    5. If no predecessor found, return system default
-    """
+    """The model a new reply under *node_id* defaults to: the same walk
+    the reply routes apply when no model is sent. ``?purpose=read`` asks
+    for the Read button's default instead. ``source`` is "predecessor"
+    when an earlier reply in the thread decided it."""
     node = Node.query.get_or_404(node_id)
-    supported = current_app.config["SUPPORTED_MODELS"]
-
-    # Walk up the ancestry to find the most recent LLM node
-    current = node
-    while current:
-        if current.node_type == "llm" and current.llm_model:
-            cfg = supported.get(current.llm_model)
-            # Check if the model is supported and not deprecated
-            if cfg and not cfg.get("deprecated"):
-                return jsonify({
-                    "suggested_model": current.llm_model,
-                    "source": "predecessor"
-                }), 200
-            # Deprecated or legacy model — fall through
-            elif cfg or current.llm_model == "gpt-4.5-preview":
-                break
-        current = current.parent
-
-    # No usable predecessor — try the user's account preference
-    pref = getattr(current_user, "preferred_model", None)
-    if pref:
-        cfg = supported.get(pref)
-        if cfg and not cfg.get("deprecated"):
-            return jsonify({
-                "suggested_model": pref,
-                "source": "user_preference",
-            }), 200
-
-    # Fall back to server default
-    default_model = current_app.config.get("DEFAULT_LLM_MODEL", "claude-opus-5")
-    return jsonify({
-        "suggested_model": default_model,
-        "source": "default"
-    }), 200
+    purpose = _model_purpose()
+    if purpose is None:
+        return jsonify({"error": "purpose must be 'chat' or 'read'"}), 400
+    if purpose == "read":
+        model_id, source = resolve_read_model(node)
+    else:
+        model_id, source = resolve_chat_model(node, current_user)
+    return jsonify({"suggested_model": model_id, "source": source}), 200
 
 # Request an LLM response based on the thread (the ancestors' texts are joined as a prompt).
 @nodes_bp.route("/<int:node_id>/llm", methods=["POST"])
@@ -2145,6 +2179,10 @@ def get_llm_status(node_id):
         # finalized as an interim retrieval step and the answer lives on the
         # linked continuation node.
         "continuation_node_id": node.continuation_node_id,
+        # #367: voice TTS that started before the reply finished (spoken
+        # while written) — the browser attaches its TTS stream.
+        "tts_task_status": node.tts_task_status,
+        "tts_streaming": node.tts_task_id == "voice-stream",
     }
 
     # Include content when completed (needed by VoicePage polling) and
@@ -2174,7 +2212,7 @@ def get_llm_status(node_id):
     if batch and node.llm_task_status == "completed":
         from backend.models import FeedPick
         response_data["feed_picks_count"] = FeedPick.query.filter_by(
-            node_id=node.id).count()
+            node_id=node.id, kind="read").count()
 
     # Include user-facing task warnings (rendered as toasts by
     # frontend useLlmTaskWarnings hook). Always include the key so the
@@ -2255,10 +2293,13 @@ def get_tts_status(node_id):
 
 @nodes_bp.route("/upload/init", methods=["POST"])
 @login_required
+@require_spend_headroom
 def init_chunked_upload():
     """Initialize a chunked upload session.
 
-    Creates a placeholder node and prepares for chunk reception.
+    Creates a placeholder node and prepares for chunk reception. A capped
+    user gets 402 before the node exists (#341); the chunks and finalize of
+    an upload accepted here are not cap-checked.
 
     Request body:
     {
@@ -2618,6 +2659,7 @@ def serve_audio_file(filename):
 
 @nodes_bp.route("/streaming/init", methods=["POST"])
 @login_required
+@require_spend_headroom
 def init_streaming_transcription():
     """Initialize a streaming transcription session.
 

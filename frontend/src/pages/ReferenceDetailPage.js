@@ -265,7 +265,8 @@ function ReferenceDetailPage() {
             {item.read_at ? ` · you read it ${formatDate(item.read_at)}` : ''}
             {item.edited_at ? ` · edited ${formatDate(item.edited_at)}` : ''}
           </span>
-          <span style={{ display: 'inline-flex', alignItems: 'center', gap: '18px' }}>
+          {/* No gap: ReferenceFeedback spaces itself from the button. */}
+          <span style={{ display: 'inline-flex', alignItems: 'center' }}>
             <ReferenceFeedback
               itemId={item.id}
               feedback={item.feedback}

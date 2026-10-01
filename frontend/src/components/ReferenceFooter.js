@@ -5,7 +5,7 @@ import { authorLabel } from '../utils/references';
 
 // The card footer for a saved reference: who, when, and where it came
 // from. Same style as NodeFooter, none of its node-only affordances.
-const isTweet = (item) => item.source === 'twitter_bookmark' || item.source === 'community_archive';
+const isTweet = (item) => ['twitter_bookmark', 'community_archive', 'read_pick'].includes(item.source);
 
 function ReferenceFooter({ item }) {
   const author = authorLabel(item);

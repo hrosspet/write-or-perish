@@ -39,3 +39,33 @@ def test_unknown_name_lists_the_keys():
 def test_missing_name_fails():
     with pytest.raises(RuntimeError):
         validate_default_model({"SUPPORTED_MODELS": MODELS})
+
+
+def test_deprecated_default_fails():
+    models = {"claude-opus-4.6": {"provider": "anthropic"},
+              "claude-opus-5": {"provider": "anthropic", "deprecated": True}}
+    with pytest.raises(RuntimeError) as e:
+        validate_default_model({"DEFAULT_LLM_MODEL": "claude-opus-5",
+                                "SUPPORTED_MODELS": models})
+    assert "deprecated" in str(e.value)
+    assert "claude-opus-4.6" in str(e.value)
+
+
+def test_read_default_must_be_a_read_model():
+    models = {"claude-opus-4.6": {"provider": "anthropic"},
+              "gpt-6-luna": {"provider": "openai", "read": True}}
+    validate_default_model({"DEFAULT_LLM_MODEL": "claude-opus-4.6",
+                            "READ_DEFAULT_MODEL": "gpt-6-luna",
+                            "SUPPORTED_MODELS": models})
+    with pytest.raises(RuntimeError):
+        validate_default_model({"DEFAULT_LLM_MODEL": "claude-opus-4.6",
+                                "READ_DEFAULT_MODEL": "claude-opus-4.6",
+                                "SUPPORTED_MODELS": models})
+
+
+def test_the_shipped_config_passes():
+    from backend.config import Config
+    validate_default_model({
+        "DEFAULT_LLM_MODEL": "claude-opus-4.6",
+        "READ_DEFAULT_MODEL": Config.READ_DEFAULT_MODEL,
+        "SUPPORTED_MODELS": Config.SUPPORTED_MODELS})

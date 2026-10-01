@@ -3,7 +3,7 @@
 One-time backfill: generate each user's Intentions artifact from their archive,
 using the `intentions_detection.txt` prompt.
 
-Mirrors profile generation (backend/tasks/exports.py:generate_user_profile):
+Mirrors profile generation (the generate_user_profile task, removed in #346):
 it builds the {user_export} via the same engaged-threads topology, runs the
 prompt against an LLM, and saves the result as a NEW version of the user's
 `intentions` UserArtifact — with the same metadata profile generation records:

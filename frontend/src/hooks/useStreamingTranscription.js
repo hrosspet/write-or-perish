@@ -3,6 +3,7 @@ import { useStreamingMediaRecorder } from './useStreamingMediaRecorder';
 import { useDraftTranscriptionSSE } from './useSSE';
 import { useToast } from '../contexts/ToastContext';
 import api from '../api';
+import { isSpendCapError, spendCapToastMessage } from '../utils/spendCap';
 
 /**
  * Play an error sound using the Web Audio API.
@@ -437,6 +438,7 @@ export function useStreamingTranscription(options = {}) {
               sessionId: sessionIdRef.current,
               content: res.data.content,
               llmNodeId: res.data.llm_node_id || null,
+              warning: res.data.warning || null,
             });
           }
           return; // Done — don't schedule another poll
@@ -548,6 +550,21 @@ export function useStreamingTranscription(options = {}) {
 
     } catch (err) {
       console.error('Failed to initialize streaming session:', err);
+      if (isSpendCapError(err)) {
+        // Monthly spend cap (#341): the server refused before any draft
+        // existed and before the mic opened. Nothing failed, so go back
+        // to idle and say why (the api.js interceptor already raised the
+        // banner). `spendCapped` + `startup` let the parent reset its UI
+        // without treating this as an error.
+        setSessionState('idle');
+        addToast(spendCapToastMessage('record'), 8000);
+        try {
+          err.spendCapped = true;
+          err.startup = true;
+        } catch (_) { /* sealed error object */ }
+        if (onError) onError(err);
+        throw err;
+      }
       setSessionState('error');
       setErrorMessage(err.message);
       if (onError) {
@@ -555,7 +572,7 @@ export function useStreamingTranscription(options = {}) {
       }
       throw err;
     }
-  }, [parentId, privacyLevel, aiUsage, label, onError]);
+  }, [parentId, privacyLevel, aiUsage, label, onError, addToast]);
 
   // Start streaming transcription
   // overrideParentId: optional parent ID to use instead of the hook's parentId
@@ -569,6 +586,9 @@ export function useStreamingTranscription(options = {}) {
 
     } catch (err) {
       console.error('Failed to start streaming:', err);
+      // Refused by the spend cap: initSession already returned to idle and
+      // told the parent. The mic was never requested.
+      if (err?.spendCapped) return;
       // Always land in a terminal state. The error path here means recording
       // never started, so the session must not be left in 'recording' or
       // 'initializing' (which would strand the parent UI). 'error' is set

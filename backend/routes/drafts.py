@@ -1,5 +1,6 @@
 from flask import Blueprint, jsonify, request, current_app
 from flask_login import login_required, current_user
+from sqlalchemy.exc import IntegrityError
 from backend.models import Draft, Node, NodeTranscriptChunk
 from backend.extensions import db
 from backend.utils.privacy import can_user_edit_node
@@ -8,8 +9,9 @@ import pathlib
 import os
 import shutil
 from backend.utils.audio_storage import move_draft_audio_to_node_dir
-from backend.utils.encryption import encrypt_file
+from backend.utils.encryption import encrypt_file_atomically
 from backend.utils.llm_nodes import pick_model_for_generation
+from backend.utils.spend import require_spend_headroom
 from backend.utils.webm_utils import (
     chunk_is_init_bearing, persist_init_segment,
 )
@@ -107,8 +109,12 @@ def get_draft():
 
     # Exclude drafts already processed by server-side LLM chain
     # (Reflect/Orient workflows create nodes automatically but leave
-    # the draft alive for the SSE all_complete event)
-    query = query.filter(Draft.llm_node_id.is_(None))
+    # the draft alive for the SSE all_complete event). A draft with a
+    # streaming_warning was saved as a node too, only without a reply
+    # (spend cap, #341, or a refused placeholder): restoring it would
+    # save the same transcript a second time.
+    query = query.filter(Draft.llm_node_id.is_(None),
+                         Draft.streaming_warning.is_(None))
 
     if node_id:
         # Editing an existing node
@@ -440,7 +446,9 @@ def _cleanup_stale_drafts(user_id):
     stale_drafts = Draft.query.filter(
         Draft.user_id == user_id,
         Draft.session_id.isnot(None),
-        Draft.llm_node_id.isnot(None),
+        # streaming_warning: saved as a node with the reply skipped (#341)
+        db.or_(Draft.llm_node_id.isnot(None),
+               Draft.streaming_warning.isnot(None)),
     ).all()
 
     deleted = 0
@@ -448,9 +456,9 @@ def _cleanup_stale_drafts(user_id):
         audio_dir = AUDIO_STORAGE_ROOT / f"drafts/{user_id}/{draft.session_id}"
         if audio_dir.exists():
             current_app.logger.warning(
-                f"Draft {draft.id} (session {draft.session_id}) has "
-                f"llm_node_id={draft.llm_node_id} but audio files were "
-                f"not moved: {list(audio_dir.iterdir())}"
+                f"Draft {draft.id} (session {draft.session_id}) was "
+                f"saved as a node (llm_node_id={draft.llm_node_id}) but "
+                f"audio files were not moved: {list(audio_dir.iterdir())}"
             )
             continue
         db.session.delete(draft)
@@ -465,12 +473,17 @@ def _cleanup_stale_drafts(user_id):
 
 @drafts_bp.route("/streaming/init", methods=["POST"])
 @login_required
+@require_spend_headroom
 def init_streaming():
     """
     Initialize a streaming transcription session.
 
     Creates a Draft record to store the streaming session and transcript.
     NO node is created until the user explicitly saves.
+
+    A capped user gets 402 here, before the frontend opens the mic (#341).
+    Resuming an interrupted session never calls init, and its chunks
+    (audio-chunk, transcribe-remaining, finalize) are not cap-checked.
 
     Request body:
     {
@@ -525,6 +538,14 @@ def init_streaming():
         "draft_id": draft.id,
         "sse_url": f"/api/sse/drafts/{session_id}/transcription-stream"
     }), 201
+
+
+def _chunk_already_uploaded(chunk_index, chunk):
+    return jsonify({
+        "message": "Chunk already uploaded",
+        "chunk_index": chunk_index,
+        "status": chunk.status
+    }), 200
 
 
 @drafts_bp.route("/streaming/<session_id>/audio-chunk", methods=["POST"])
@@ -604,14 +625,27 @@ def upload_streaming_chunk(session_id):
     if not chunk_dir.exists():
         return jsonify({"error": "Streaming session directory not found"}), 404
 
+    # A copy of a chunk that is already stored is a duplicate: a hidden
+    # page sends every chunk by sendBeacon and by the normal upload (#88).
+    # Answer it before touching the files (#371).
+    existing_chunk = NodeTranscriptChunk.query.filter_by(
+        session_id=session_id, chunk_index=chunk_index).first()
+    if existing_chunk and existing_chunk.status != 'failed':
+        return _chunk_already_uploaded(chunk_index, existing_chunk)
+
     chunk_filename = f"chunk_{chunk_index:04d}{ext}"
     chunk_path = chunk_dir / chunk_filename
-    chunk_file.save(chunk_path)
+    # Two copies can still arrive at once: each writes a file of its own,
+    # which is encrypted and then moved into place, so neither reads or
+    # deletes the other's half-written file. (Not "chunk_*": playback
+    # lists those.)
+    upload_path = chunk_dir / f"upload-{uuid.uuid4().hex}{ext}"
+    chunk_file.save(upload_path)
 
     # Chunk 0 carries the format's init segment — the bytes that every
     # later batch needs as a prefix to remain a valid file (WebM:
     # EBML/Segment/Tracks; fMP4: ftyp+moov). Extract and persist it now,
-    # before encrypt_file() deletes the plaintext chunk.
+    # before the upload file is encrypted and moved into place.
     #
     # Reject the upload if extraction fails: batch 1 (chunks 0..19) would
     # still succeed because chunk 0 carries its own header, but any batch
@@ -627,14 +661,14 @@ def upload_streaming_chunk(session_id):
         # misattributed to a parse failure the user can't do anything
         # about.
         try:
-            persist_init_segment(chunk_path, chunk_dir)
+            persist_init_segment(upload_path, chunk_dir)
         except (ValueError, OSError) as exc:
             current_app.logger.error(
                 f"Failed to extract init segment from chunk 0 of "
                 f"session {session_id}: {exc}"
             )
             try:
-                chunk_path.unlink()
+                upload_path.unlink()
             except OSError:
                 pass
             # 400 Bad Request: the client sent bytes the server can't
@@ -645,11 +679,14 @@ def upload_streaming_chunk(session_id):
                 "detail": str(exc),
                 "code": "init_parse_failed",
             }), 400
+        except Exception:
+            upload_path.unlink(missing_ok=True)
+            raise
         # Only persist the family mime AFTER successful init extraction —
         # if persist_init_segment raised, we don't want a half-committed
         # mime that'd survive a future early-commit refactor.
         draft.streaming_mime_type = form_mime_family
-    elif chunk_is_init_bearing(chunk_path):
+    elif chunk_is_init_bearing(upload_path):
         # A chunk N>0 that carries its own stream header came from a
         # fresh MediaRecorder — the user resumed a recovered recording
         # (#124). Persist its init under an index-suffixed name so
@@ -662,7 +699,7 @@ def upload_streaming_chunk(session_id):
         # rejecting would lose it outright, while keeping it preserves
         # at worst today's behavior for this subsession.
         try:
-            persist_init_segment(chunk_path, chunk_dir, index=chunk_index)
+            persist_init_segment(upload_path, chunk_dir, index=chunk_index)
             current_app.logger.info(
                 f"Session {session_id}: chunk {chunk_index} opens a new "
                 f"subsession (resumed recording); init persisted"
@@ -672,9 +709,12 @@ def upload_streaming_chunk(session_id):
                 f"Failed to extract subsession init from chunk "
                 f"{chunk_index} of session {session_id}: {exc}"
             )
+        except Exception:
+            upload_path.unlink(missing_ok=True)
+            raise
 
     # Encrypt the audio chunk at rest
-    encrypted_path = encrypt_file(str(chunk_path))
+    encrypted_path = encrypt_file_atomically(upload_path, chunk_path)
 
     # Create transcript chunk record (linked to session, not node)
     # Chunks are stored on disk first; transcription is batched every 20 chunks
@@ -692,11 +732,7 @@ def upload_streaming_chunk(session_id):
             db.session.commit()
             transcript_chunk = existing_chunk
         else:
-            return jsonify({
-                "message": "Chunk already uploaded",
-                "chunk_index": chunk_index,
-                "status": existing_chunk.status
-            }), 200
+            return _chunk_already_uploaded(chunk_index, existing_chunk)
     else:
         transcript_chunk = NodeTranscriptChunk(
             session_id=session_id,
@@ -705,7 +741,20 @@ def upload_streaming_chunk(session_id):
             status='stored'
         )
         db.session.add(transcript_chunk)
-        db.session.commit()
+        try:
+            db.session.commit()
+        except IntegrityError:
+            # The same chunk arrived twice at once: a hidden page sends
+            # each chunk by sendBeacon and by the normal upload (#88).
+            # The copy that lost the race is a duplicate, not a failure
+            # (a 500 made the client retry after 2 s, delaying the voice
+            # reply when the recording was stopped from the lock screen).
+            db.session.rollback()
+            existing_chunk = NodeTranscriptChunk.query.filter_by(
+                session_id=session_id, chunk_index=chunk_index).first()
+            if existing_chunk is None:
+                raise
+            return _chunk_already_uploaded(chunk_index, existing_chunk)
 
     # Check if we have enough stored chunks for a batch (20 × 15s = 5min)
     BATCH_SIZE = 20
@@ -952,6 +1001,11 @@ def get_streaming_status(session_id):
     }
     if draft.llm_node_id:
         status_data["llm_node_id"] = draft.llm_node_id
+    # Same field the SSE all_complete event carries: the frontend's polling
+    # fallback (iOS drops SSE when backgrounded) needs it too, or it treats
+    # a skipped reply as "no server-side chain" and saves the entry again.
+    if draft.streaming_warning:
+        status_data["warning"] = draft.streaming_warning
     return jsonify(status_data)
 
 
