@@ -27,7 +27,9 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 
 
 def validate_default_model(config):
-    """Refuse to boot on an ``LLM_NAME`` that is not a SUPPORTED_MODELS key.
+    """Refuse to boot on an ``LLM_NAME`` that is not an active (non-
+    deprecated) SUPPORTED_MODELS key, or on a READ_DEFAULT_MODEL that is
+    not an active read model.
 
     The keys are the dotted display ids (``claude-opus-4.6``); the API ids
     use dashes (``claude-opus-4-6``). Setting the API id in the env file
@@ -39,6 +41,21 @@ def validate_default_model(config):
     model_id = config.get("DEFAULT_LLM_MODEL")
     supported = config.get("SUPPORTED_MODELS") or {}
     if model_id in supported:
+        # A deprecated default is in no picker and never inherited, so
+        # every user without a preference would start on a model the UI
+        # cannot show, and the periodic tasks would keep running on it
+        # (#355).
+        if supported[model_id].get("deprecated"):
+            raise RuntimeError(
+                f"LLM_NAME={model_id!r} is deprecated. Active models: "
+                f"{', '.join(k for k, v in supported.items() if 'provider' in v and not v.get('deprecated'))}")
+        read_default = config.get("READ_DEFAULT_MODEL")
+        read_cfg = supported.get(read_default) or {}
+        if read_default and (not read_cfg.get("read")
+                             or read_cfg.get("deprecated")):
+            raise RuntimeError(
+                f"READ_DEFAULT_MODEL={read_default!r} is not an active "
+                f"model flagged 'read'.")
         return
     hint = ""
     dotted = (model_id or "").replace("-", ".")
@@ -73,13 +90,11 @@ def create_app():
             #    char cap — a handled, transient condition.
             if "maximum input length" in text:
                 return None
-            # 2) Every service restart (i.e. every deploy) SIGTERMs the Celery
-            #    worker's pool children — graceful shutdown. Billiard logs it,
-            #    and an in-flight task raises WorkerLostError("…signal 15
-            #    (SIGTERM)…"). Expected lifecycle noise. SIGKILL (signal 9:
-            #    OOM / crash) is a different string and still reports.
-            if "signal 15 (SIGTERM)" in text:
-                return None
+            # A WorkerLostError("…signal 15 (SIGTERM)…") used to follow every
+            # deploy and was dropped here as noise. Since #312 a restart lets
+            # running tasks finish; a pool process gets SIGTERM only when a
+            # task outlives the 90 s drain (scripts/celery-graceful-stop.sh),
+            # and that task is lost, so it reports.
             return event
 
         sentry_sdk.init(

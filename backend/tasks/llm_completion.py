@@ -3,6 +3,7 @@ Celery task for asynchronous LLM completion.
 """
 import difflib
 import json
+import sys
 import uuid
 import re
 import time
@@ -43,16 +44,22 @@ from backend.utils.session_helpers import (
     chain_has_agentic_prompt, strip_agentic_prompts,
 )
 from backend.utils.timefmt import local_stamp, strip_edge_timestamps
+from backend.utils.llm_stream import ReplyStream
+from backend.utils import voice_timing
 from backend.utils.api_keys import (
     determine_api_key_type, get_api_keys_for_usage, ContextUsage,
     PayloadLicence,
 )
 from backend.utils.cost import llm_cost_log_fields
+from backend.utils.cache_diagnostics import (
+    ConversationCacheDiagnostics, system_prefix_hash,
+)
 from backend.utils.llm_batch import BatchItemFailed, BatchItemCancelled
 from backend.utils.ca_feed import (
     CA_CHAT_TURN_NOTE, CA_READ_AGAIN_TURN, CA_TWEETS_CHAT_STUB,
-    READ_FURTHER_MARKER,
+    FEED_AI_USAGE, READ_FURTHER_MARKER,
     FeedReplyError, read_reply_ids, record_feed_render,
+    ca_turn as _ca_turn,
     refresh_snapshot_for_read, refs_from_render, seen_tweet_ids,
 )
 from backend.utils.tool_meta import update_tool_meta, parse_github_issue
@@ -157,11 +164,88 @@ RETRIEVAL_TOOLS = {"read_artifact", "read_todo", "semantic_search",
 # leave one-line preambles ("noting this in memory") as the whole answer.
 MAX_RETRIEVAL_ROUNDS = 5
 
+
+class EmptyTruncatedReplyError(RuntimeError):
+    """The model hit its output limit before writing any text or tool call
+    — typically a model that always thinks, spending the whole budget on
+    reasoning over a long input. Saving that as a completed reply showed
+    the user a blank node and silently dropped the artifact write they
+    asked for. A retry of the same request tends to hit the same limit,
+    so the message steers toward a smaller request, not a retry."""
+
+    USER_MESSAGE = (
+        "The model used up its whole output limit working through this "
+        "request before it could write a reply, so this reply is empty. "
+        "Sending the same request again will likely hit the same limit — "
+        "try breaking it into smaller steps (e.g. one section or one "
+        "question at a time, or the review and the artifact update as "
+        "separate messages).")
+
+    def __init__(self):
+        super().__init__(self.USER_MESSAGE)
+
+
 # Retry schedule for the loop's CONTINUATION calls: sleep lengths between
 # attempts (len == number of retries). A transient provider error (overload,
 # timeout) used to kill the whole turn, stranding the continuation node at
 # 'processing' forever. Module-level so tests can zero the delays.
 CONTINUATION_RETRY_DELAYS = (5, 15)
+
+# The voice TTS worker runs in its own thread (#367). Tests set False to run
+# it in the task's thread at the end of the turn: their in-memory database
+# is invisible to a second thread.
+TTS_STREAM_THREADED = True
+# Node.tts_task_id of a node spoken while it is written (#367). llm-status
+# reports it as tts_streaming, the browser's cue to attach its TTS stream
+# before the reply is complete. (The server-side voice chain marks every
+# voice placeholder's TTS 'pending' up front, so the status alone doesn't
+# say it.)
+LIVE_TTS_TASK_ID = "voice-stream"
+
+
+def _provider_failure(exc):
+    """Whether *exc* is the model call itself failing — the provider's
+    error, a dropped connection, our readable wrapper after retries — as
+    opposed to anything else raised during a streamed reply (a bug, the
+    task's soft time limit). Only the former leaves a cut-off reply
+    (#367); the classes of backend.llm_providers are looked up at call
+    time so a stubbed module in tests can't break the check."""
+    import anthropic
+    import httpx
+    import openai
+    classes = [anthropic.APIError, openai.APIError, httpx.TransportError]
+    providers = sys.modules.get("backend.llm_providers")
+    for name in ("ProviderUnavailableError", "OpenAIStreamError"):
+        cls = getattr(providers, name, None)
+        if isinstance(cls, type) and issubclass(cls, BaseException):
+            classes.append(cls)
+    return isinstance(exc, tuple(classes))
+
+
+def _start_voice_tts_stream(llm_node, user_id, source_mode):
+    """A voice turn's live TTS worker (#367), or None when the reply isn't
+    spoken while it is written (not voice, STREAMING_VOICE_TTS off, no TTS
+    key). Marks the node's TTS 'processing' first — the SSE the browser
+    opens for it refuses otherwise — and the batch path then leaves the
+    node alone."""
+    if (source_mode != "voice"
+            or not flask_app.config.get("STREAMING_VOICE_TTS")
+            or llm_node.audio_tts_url):
+        return None
+    from backend.utils.api_keys import get_openai_chat_key
+    api_key = get_openai_chat_key(flask_app.config)
+    if not api_key:
+        return None
+    from backend.utils.tts_stream import (
+        OpenAITTSAudio, VoiceTTSStream, audio_root_path)
+    turn = VoiceTTSStream(
+        flask_app, user_id, audio_root_path(),
+        audio=OpenAITTSAudio(api_key), threaded=TTS_STREAM_THREADED)
+    llm_node.tts_task_status = 'processing'
+    llm_node.tts_task_id = LIVE_TTS_TASK_ID
+    db.session.commit()
+    turn.open_node(llm_node)
+    return turn
 
 
 def _dispatch_voice_tts(node_id, user_id):
@@ -229,11 +313,23 @@ def _canonicalize_quote_labels(text, quote_labels):
     return _LABEL_QUOTE_RE.sub(repl, text)
 
 
-def _bump_surfaced_references(text, user_id, already_bumped):
+def _bump_surfaced_references(text, user_id, already_bumped, node=None,
+                              decided_at=None, picked_by=None,
+                              already_logged=None):
     """Eagerly record surfacing history for every {quote_ext:ID} in *text*
     (content is encrypted at rest, so this can't be derived later). Bumps
     each item at most once per turn via *already_bumped*. Committed by the
-    caller's surrounding commit."""
+    caller's surrounding commit.
+
+    With *node* (the node *text* is stored on), each quoted reference is
+    also logged as a recommendation of this reply (FeedPick kind 'quote',
+    #352) — the model that chose it, when the turn started, what it could
+    know of the user's marks — once per reference per turn
+    (*already_logged*). A Read reply's picks already have their rows."""
+    if node is not None and already_logged is not None:
+        from backend.utils.reference_log import log_quotes
+        log_quotes(node, text, user_id, decided_at, picked_by,
+                   already_logged)
     ids = [i for i in find_ext_quote_ids(text) if i not in already_bumped]
     if not ids:
         return
@@ -2003,7 +2099,7 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
     return tool_results
 
 
-def build_user_export_content(user, max_tokens=None, filter_ai_usage=False,
+def build_user_export_content(user, max_tokens=None, *, filter_ai_usage,
                               **kwargs):
     """Import the actual implementation from export_data routes.
 
@@ -2012,7 +2108,7 @@ def build_user_export_content(user, max_tokens=None, filter_ai_usage=False,
     here — an explicit param list once silently dropped `created_after`.
     """
     from backend.routes.export_data import build_user_export_content as _build
-    return _build(user, max_tokens, filter_ai_usage, **kwargs)
+    return _build(user, max_tokens, filter_ai_usage=filter_ai_usage, **kwargs)
 
 
 def get_user_profile_content(user_id, pinned_node=None, usage=None):
@@ -2184,46 +2280,6 @@ def _read_requested(node):
     meta, _ = _batch_meta(node)
     return any(isinstance(m, dict) and m.get("name") == READ_FURTHER_MARKER
                for m in meta)
-
-
-def _ca_turn(node_chain, ca_node, parent_node, reply_ids, requested=False):
-    """Which turn of a read thread this reply is (backend/utils/ca_feed.py);
-    *ca_node* is the newest read prompt in the chain, *reply_ids* the ids
-    of the chain's read replies (ca_feed.read_reply_ids), *requested*
-    whether the Read button asked for this reply (_read_requested):
-
-    "read"       no reply has answered the read prompt yet: the day is
-                 rendered and the model answers with a verdict and picks
-                 (also when the user typed something under the prompt
-                 before asking for the reply).
-    "read_again" the Read button asked for it from anywhere in the
-                 thread (*requested*), or the reply was asked for directly
-                 under a read reply: another read, further into the day.
-                 The day is rendered again (minus what the reader has seen
-                 since); the earlier picks, the reader's marks on them and
-                 whatever was written since are in the context, and
-                 whether to repeat an unread pick is the model's call.
-    "chat"       a user message came after a read reply: a conversation
-                 about the picks. The day is not rendered; the placeholder
-                 reads as a stub, the picks and marks stay in the context.
-                 Unlike a read it may run under the agentic prompt (a
-                 Text-mode session under the read reply, #323).
-    """
-    replies = []
-    after_prompt = False
-    for n in node_chain:
-        if n is ca_node:
-            after_prompt = True
-            continue
-        if after_prompt and n.deleted_at is None and n.id in reply_ids:
-            replies.append(n)
-    if not replies:
-        return "read"
-    if requested:
-        return "read_again"
-    if parent_node is not None and replies[-1].id == parent_node.id:
-        return "read_again"
-    return "chat"
 
 
 CA_BATCH_PROVIDERS = ("anthropic", "openai")
@@ -2674,6 +2730,11 @@ def prewarm_anthropic_cache(system_node_id, user_id, model_id,
     """
     with flask_app.app_context():
         try:
+            # The cap can flip between the dispatch in finalize and this
+            # task; a capped user gets no reply, so the warm would be wasted.
+            from backend.utils.spend import user_is_capped
+            if user_is_capped(user_id):
+                return {"status": "skipped", "reason": "spend_capped"}
             system_node = Node.query.get(system_node_id)
             if system_node is None:
                 return {"status": "skipped", "reason": "no_system_node"}
@@ -2786,6 +2847,8 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
     logger.info(f"Starting LLM completion task for parent {parent_node_id}, updating node {llm_node_id}, model={model_id}")
 
     with flask_app.app_context():
+        if source_mode == "voice":
+            voice_timing.mark(llm_node_id, "llm_task_start", model=model_id)
         parent_node = Node.query.get(parent_node_id)
         llm_node = Node.query.get(llm_node_id)
 
@@ -2817,6 +2880,8 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
         # the error handler below re-queues instead of failing the node.
         batch_meta, batch_entry = _batch_meta(llm_node)
         batch_resp = None
+        # #367: a voice turn's TTS worker, speaking replies as they stream.
+        speech_turn = None
 
         try:
             # The poll comes before anything else is loaded: one provider
@@ -2853,6 +2918,9 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             llm_node.llm_task_status = 'processing'
             llm_node.llm_task_progress = 10
             db.session.commit()
+            if batch_resp is None:
+                speech_turn = _start_voice_tts_stream(
+                    llm_node, user_id, source_mode)
 
             # Step 1: Build the chain of nodes for context
             self.update_state(state='PROGRESS', meta={'progress': 20, 'status': 'Building context'})
@@ -3261,6 +3329,17 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     "Node %s: read thread (turn %r); forcing chat keys "
                     "over the chain's %r", llm_node_id, ca_turn, key_type)
                 key_type = 'chat'
+            if (ca_turn in ("read", "read_again")
+                    and llm_node.ai_usage == 'train'):
+                # The recommendation reply presents the picks, quoting
+                # the tweets verbatim: it is 'chat' by construction
+                # (#362). create_llm_placeholder already stamps it by the
+                # same rule; this catches a placeholder made another way
+                # (a PoC read prompt it could not see), and the
+                # continuation nodes below copy it. A chat turn keeps the
+                # thread's setting: its call is on the chat key above,
+                # the stored value is the user's.
+                llm_node.ai_usage = FEED_AI_USAGE
             # That verdict is the chain's. What the chain's text resolves
             # to — quoted nodes, saved references, what a tool pulls in
             # mid-turn — joins the payload below and reports here; the
@@ -3297,6 +3376,53 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 raise ValueError("Anthropic API key is not configured.")
             elif provider == "openai" and not api_keys["openai"]:
                 raise ValueError("OpenAI API key is not configured.")
+
+            # #348: OpenAI Prompt Cache Diagnostics. The first call compares
+            # itself to the last OpenAI call on this node's ancestor path,
+            # each tool round to the round before.
+            cache_diag = ConversationCacheDiagnostics(
+                enabled=(provider == "openai"
+                         and bool(model_config.get("cache_diagnostics"))),
+                user_id=user_id, node_chain=node_chain)
+
+            # Turn-scoped relative-quote labels: a short label ("A") maps to
+            # ("node"|"external", id) — assigned when search results are
+            # labeled, consumed by canonicalization wherever the model's
+            # text is stored or shown (the streamed partial text too, so
+            # it lives from the first call on).
+            quote_labels = {}
+            streaming_replies = flask_app.config.get(
+                "STREAMING_REPLIES", True)
+
+            def _live_call(target_node, call, stream=True):
+                """One model call writing *target_node*'s reply, shown (and
+                in voice, spoken) while it streams (#367). ``call(listener)``
+                makes it. A call that fails after text arrived returns
+                that text as a cut-off reply instead of raising: the user
+                has already read or heard it."""
+                speech = (speech_turn.node(target_node.id)
+                          if speech_turn is not None and stream else None)
+                if speech is not None:
+                    voice_timing.mark(target_node.id, "llm_request")
+                if not (stream and streaming_replies) and speech is None:
+                    return call(None)
+                reply = ReplyStream(
+                    target_node,
+                    canonicalize=lambda raw: _canonicalize_quote_labels(
+                        raw, quote_labels),
+                    speech=speech, show=stream and streaming_replies)
+                try:
+                    return call(reply)
+                except (PromptTooLongError, Retry, Reject):
+                    raise
+                except Exception as e:
+                    if not reply.text.strip() or not _provider_failure(e):
+                        raise
+                    logger.warning(
+                        "Reply for node %s cut off by a provider failure "
+                        "after %d chars", target_node.id, len(reply.text),
+                        exc_info=True)
+                    return reply.cut_off()
 
             MAX_RETRIES = 3
             for attempt in range(MAX_RETRIES + 1):
@@ -3803,13 +3929,22 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 if needs_ca:
                     from backend.utils.ca_feed import FEED_SCHEMA
                     feed_schema = FEED_SCHEMA
+                cache_diag.system_hash = system_prefix_hash(
+                    messages, system_msg_index)
                 try:
-                    response = LLMProvider.get_completion(
-                        model_id, messages, api_keys,
-                        tools=agentic_tools,
-                        prompt_cache_key=f"loore-t{thread_root_id}",
-                        output_schema=feed_schema,
-                    )
+                    # A structured feed reply is JSON: never streamed.
+                    response = _live_call(
+                        llm_node,
+                        lambda listener: cache_diag.call(
+                            lambda baseline_id: LLMProvider.get_completion(
+                                model_id, messages, api_keys,
+                                tools=agentic_tools,
+                                prompt_cache_key=f"loore-t{thread_root_id}",
+                                output_schema=feed_schema,
+                                cache_comparison_response_id=baseline_id,
+                                listener=listener,
+                            )),
+                        stream=feed_schema is None)
                     if needs_ca:
                         response = _collect_feed_reply(
                             llm_node, response, ca_refs)
@@ -3828,9 +3963,12 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     )
             # ── Helpers shared by the single-shot and retrieval paths ──────
 
-            def _log_api_cost(resp):
+            def _log_api_cost(resp, node):
                 """Log an APICostLog row for one model call. Every model call
                 costs money — the retrieval loop logs once per round.
+                *node* is the LLM node the call's text was written to; the
+                row points at it (request_ref) so the next turn can find its
+                cache-diagnostics baseline (#348).
 
                 Pricing and the unified column semantics (full-prompt
                 input_tokens, cache read/write columns across providers,
@@ -3852,22 +3990,27 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         "OpenAI prompt cache: %d/%d input tokens cached, "
                         "%d written",
                         cached_input_toks, in_toks, cache_write_subset_toks)
+                diag_fields = cache_diag.log_fields(resp, node.id)
                 db.session.add(APICostLog(
                     user_id=user_id,
                     model_id=model_id,
                     request_type="conversation",
                     **llm_cost_log_fields(model_id, resp),
+                    **diag_fields,
                 ))
 
-            # Turn-scoped relative-quote state. quote_labels maps a short
-            # label ("A") to ("node"|"external", id) — assigned when search
-            # results are labeled, consumed by canonicalization wherever the
-            # model's text is stored. bumped_ext_ids guards the eager
-            # surfacing-history bump to once per item per turn. Initialized
-            # HERE (not in the loop) because _finalize also runs on the
-            # single-shot path that never enters the loop.
-            quote_labels = {}
+            # Turn-scoped quote state (quote_labels is set up before the
+            # first call). bumped_ext_ids guards the eager surfacing-history
+            # bump to once per item per turn. Initialized HERE (not in the
+            # loop) because _finalize also runs on the single-shot path that
+            # never enters the loop.
             bumped_ext_ids = set()
+            # References this turn's replies quote, logged as
+            # recommendations once each (#352). The model chose them
+            # during this turn: its placeholder's creation is the moment
+            # its view of the user's marks was fixed.
+            logged_ext_ids = set()
+            quotes_decided_at = llm_node.created_at
 
             def _finalize(target_node, resp):
                 """Write *resp* as the final answer on *target_node* using the
@@ -3904,7 +4047,22 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     'progress': 90, 'status': 'Logging cost'})
                 target_node.llm_task_progress = 90
                 db.session.commit()
-                _log_api_cost(resp)
+                # A reply cut off by a provider failure has no usage
+                # figures to log (the call never completed).
+                if not resp.get("cut_off"):
+                    _log_api_cost(resp, target_node)
+
+                # Nothing to save: the output limit ran out before the model
+                # wrote a word or a tool call. Fail the node (the cost row
+                # above still commits with the failure) instead of storing a
+                # blank reply marked completed.
+                if (f_truncated and not f_llm_text.strip()
+                        and not f_tool_calls):
+                    logger.warning(
+                        "Empty truncated reply: model=%s node=%s "
+                        "output_tokens=%s", model_id, target_node.id,
+                        resp.get("output_tokens"))
+                    raise EmptyTruncatedReplyError()
 
                 # Step 5: Update the placeholder LLM node with the response
                 self.update_state(state='PROGRESS', meta={
@@ -3935,9 +4093,13 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 # past its first commit and is run again, as a batch collect
                 # is, bumps once).
                 _bump_surfaced_references(
-                    f_llm_text, user_id, bumped_ext_ids)
+                    f_llm_text, user_id, bumped_ext_ids, node=target_node,
+                    decided_at=quotes_decided_at, picked_by=model_id,
+                    already_logged=logged_ext_ids)
 
                 target_node.set_content(f_llm_text)
+                # The partial text goes in the same commit as the final.
+                target_node.streaming_content = None
                 # chars/4, NOT the provider's output_tokens: Node.token_count
                 # is the platform's stable information-content measure (gates,
                 # chunk windowing, balance decisions all sum it). Provider
@@ -3961,8 +4123,10 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                             tr["response_truncated"] = True
                     f_tool_meta = tool_results
 
-                # Step 5c: Auto-detect proposals in LLM text (agentic)
-                if is_agentic:
+                # Step 5c: Auto-detect proposals in LLM text (agentic). Not
+                # in a reply cut off mid-way: a half-written block would
+                # become a proposal and supersede the pending one.
+                if is_agentic and not resp.get("cut_off"):
                     auto_drafts = _auto_create_drafts(
                         f_llm_text, target_node, node_chain, user_id
                     )
@@ -4003,12 +4167,17 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 # Voice: mark TTS pending in the SAME commit as completion so
                 # the frontend's POST /tts (fired the moment it polls
                 # 'completed') sees the in-flight promise and doesn't
-                # double-enqueue.
-                f_dispatch_tts = (source_mode == "voice"
+                # double-enqueue. A reply spoken while it streamed (#367)
+                # already has its TTS under way.
+                f_speech = (speech_turn.node(target_node.id)
+                            if speech_turn is not None else None)
+                f_dispatch_tts = (source_mode == "voice" and f_speech is None
                                   and not target_node.audio_tts_url)
                 if f_dispatch_tts:
                     target_node.tts_task_status = 'pending'
                 db.session.commit()
+                if f_speech is not None:
+                    f_speech.release()
                 if f_dispatch_tts:
                     _dispatch_voice_tts(target_node.id, user_id)
 
@@ -4105,10 +4274,12 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     # Interim text is stored (and rendered) — record any
                     # references it already quotes.
                     _bump_surfaced_references(
-                        interim_text, user_id, bumped_ext_ids)
+                        interim_text, user_id, bumped_ext_ids,
+                        node=current_node, decided_at=quotes_decided_at,
+                        picked_by=model_id, already_logged=logged_ext_ids)
 
                     # Cost for THIS model call (every call costs).
-                    _log_api_cost(response)
+                    _log_api_cost(response, current_node)
 
                     # Execute ALL tool calls on the interim node.
                     tool_results = _execute_tool_calls(
@@ -4184,6 +4355,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     # auto-detect — that belongs to the final answer only).
                     current_node.set_content(
                         interim_text or interim_fallback)
+                    current_node.streaming_content = None
                     current_node.token_count = approximate_token_count(
                         interim_text or interim_fallback)
                     current_node.tool_calls_meta = json.dumps(tool_results)
@@ -4200,6 +4372,13 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         node_type="llm",
                         llm_model=model_id,
                         llm_task_status='processing',
+                        # Spoken while it streams (#367): the browser opens
+                        # its TTS stream as soon as it moves on to it.
+                        tts_task_status=('processing'
+                                         if speech_turn is not None
+                                         else None),
+                        tts_task_id=(LIVE_TTS_TASK_ID
+                                     if speech_turn is not None else None),
                         privacy_level=current_node.privacy_level,
                         ai_usage=current_node.ai_usage,
                     )
@@ -4214,11 +4393,22 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     # its TTS immediately so the user can play it while the
                     # continuation call below is still generating. Status is
                     # set in the same commit as completion (see _finalize).
+                    interim_speech = (speech_turn.node(current_node.id)
+                                      if speech_turn is not None else None)
                     interim_dispatch_tts = (source_mode == "voice"
+                                            and interim_speech is None
                                             and not current_node.audio_tts_url)
                     if interim_dispatch_tts:
                         current_node.tts_task_status = 'pending'
+                    if interim_speech is not None:
+                        # A text-less round speaks its fallback line.
+                        interim_speech.close(
+                            extra_text=None if interim_text
+                            else interim_fallback)
                     db.session.commit()
+                    if interim_speech is not None:
+                        interim_speech.release()
+                        speech_turn.open_node(continuation)
                     if interim_dispatch_tts:
                         _dispatch_voice_tts(current_node.id, user_id)
 
@@ -4271,16 +4461,23 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     # PromptTooLong surfaced to the user), drop this round's
                     # injection and let the model answer with what it has.
 
-                    def _call_continuation():
-                        try:
-                            return LLMProvider.get_completion(
+                    def _continuation_completion(listener):
+                        return cache_diag.call(
+                            lambda baseline_id: LLMProvider.get_completion(
                                 model_id, messages, api_keys,
                                 tools=agentic_tools,
-                                # #189: same per-thread key as the first call
-                                # so loop continuations route to the same
-                                # OpenAI cache.
+                                # #189: same per-thread key as the first
+                                # call so loop continuations route to
+                                # the same OpenAI cache.
                                 prompt_cache_key=f"loore-t{thread_root_id}",
-                            )
+                                cache_comparison_response_id=baseline_id,
+                                listener=listener,
+                            ))
+
+                    def _call_continuation():
+                        try:
+                            return _live_call(
+                                current_node, _continuation_completion)
                         except PromptTooLongError:
                             logger.warning(
                                 "Continuation prompt too long after tool "
@@ -4299,14 +4496,8 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                                         "the entries you referenced.]"),
                                 }],
                             }
-                            return LLMProvider.get_completion(
-                                model_id, messages, api_keys,
-                                tools=agentic_tools,
-                                # #189: same per-thread key as the first call
-                                # so loop continuations route to the same
-                                # OpenAI cache.
-                                prompt_cache_key=f"loore-t{thread_root_id}",
-                            )
+                            return _live_call(
+                                current_node, _continuation_completion)
 
                     # Transient provider errors (overload, timeout) used to
                     # propagate here and kill the turn, stranding this
@@ -4344,7 +4535,8 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             if batch_entry is not None:
                 # The batch outlives this run. While it is submitted only
                 # the provider's verdict on the item (BatchItemFailed), a
-                # reply the collect cannot use (FeedReplyError: the stored
+                # reply the collect cannot use (FeedReplyError, or an empty
+                # cut-off reply — EmptyTruncatedReplyError: the stored
                 # result is immutable, so every re-collect would fail the
                 # same way) and the poll cap fail the node; anything else
                 # (a restart mid-render, KMS, the network, a 5xx on
@@ -4355,7 +4547,8 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     error_message = (
                         f"Batch {batch_id} had not ended after "
                         f"{CA_BATCH_MAX_POLLS} polls")
-                elif not isinstance(e, (BatchItemFailed, FeedReplyError)):
+                elif not isinstance(e, (BatchItemFailed, FeedReplyError,
+                                        EmptyTruncatedReplyError)):
                     logger.warning(
                         "Node %s: error with batch %s submitted (poll %s); "
                         "polling again: %s", llm_node_id, batch_id,
@@ -4378,5 +4571,13 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             # 'processing' forever.
             current_node.llm_task_status = 'failed'
             current_node.llm_task_error = error_message
+            current_node.streaming_content = None
             db.session.commit()
+            if speech_turn is not None:
+                speech_turn.abort()
             raise error
+        finally:
+            # The turn's remaining audio (the tail of the last reply) is
+            # generated before the task ends.
+            if speech_turn is not None:
+                speech_turn.finish()

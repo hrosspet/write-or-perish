@@ -398,7 +398,7 @@ def test_interrupted_collect_polls_again_and_never_resubmits(app, monkeypatch, t
     assert entry["status"] == "ended"
     assert entry["collected_at"]
     item = ExternalItem.query.filter_by(
-        user_id=alice.id, source="community_archive", external_id="222").one()
+        user_id=alice.id, source="read_pick", external_id="222").one()
     assert node.get_content() == (
         "One thing today.\n\n"
         "Meets your question about pacing.\n\n"
@@ -431,7 +431,7 @@ def test_collect_that_dies_inside_the_finalize_counts_once(app, monkeypatch, tmp
     assert _entry(node)["status"] == "submitted"
     assert APICostLog.query.count() == 0
     item = ExternalItem.query.filter_by(
-        user_id=alice.id, source="community_archive", external_id="222").one()
+        user_id=alice.id, source="read_pick", external_id="222").one()
     assert item.surfaced_count == 0
 
     _run(_Task(), alice, read, llm_node)
@@ -443,7 +443,7 @@ def test_collect_that_dies_inside_the_finalize_counts_once(app, monkeypatch, tmp
     assert APICostLog.query.count() == 1
     assert FeedPick.query.filter_by(node_id=node.id).count() == 1
     item = ExternalItem.query.filter_by(
-        user_id=alice.id, source="community_archive", external_id="222").one()
+        user_id=alice.id, source="read_pick", external_id="222").one()
     assert item.surfaced_count == 1
 
 
@@ -642,7 +642,7 @@ def test_withdrawn_batch_that_ran_anyway_is_collected_and_billed(app, monkeypatc
     assert node.llm_task_status == "completed"
     assert APICostLog.query.count() == 1
     item = ExternalItem.query.filter_by(
-        user_id=alice.id, source="community_archive", external_id="222").one()
+        user_id=alice.id, source="read_pick", external_id="222").one()
     assert node.get_content().endswith(f"{{quote_ext:{item.id}}}")
     entry = _entry(node)
     assert entry["status"] == "ended"

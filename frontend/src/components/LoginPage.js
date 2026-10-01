@@ -10,6 +10,8 @@ const ERROR_MESSAGES = {
   link_already_used: "This sign-in link has already been used. Please request a new one.",
   // Signing in on the way to /confirm-email never creates an account (#260).
   confirm_needs_account: "No Loore account signs in that way yet. Sign in to the account you asked from, not with the address you are confirming.",
+  // An X callback this browser did not start (backend/oauth.py): refused.
+  x_try_again: "Sign in with X did not finish in this browser. Please try again.",
 };
 
 const loginStyles = `
@@ -323,6 +325,23 @@ function LoginPage() {
             </svg>
             Sign in with X
           </button>
+
+          {/* #311: an X sign-in with an X account no Loore account knows
+              makes a new one. On the way to /confirm-email it makes none
+              (the subtitle covers that case). */}
+          {!confirmingEmail && (
+            <p style={{
+              color: "var(--text-muted)",
+              fontSize: "0.78rem",
+              fontFamily: "var(--sans)",
+              fontWeight: 300,
+              lineHeight: 1.5,
+              margin: "0 0 4px",
+            }}>
+              Sign in with X makes a new account unless your X is already connected to one.
+              To add X to an email account, sign in with email, then use Connect X under Account.
+            </p>
+          )}
 
           {!showEmailForm && !emailSent && (
             <>

@@ -343,6 +343,7 @@ def anthropic_batch_collect_one(api_key, batch_id, custom_id):
     billed), one canceled before it ran raises BatchItemCancelled (not
     billed), and an errored / expired item raises BatchItemFailed."""
     from anthropic import Anthropic
+    from backend.llm_providers import TRUNCATED_STOP_REASONS
     client = Anthropic(api_key=api_key)
     batch = client.messages.batches.retrieve(batch_id)
     log.info("Anthropic batch %s: status=%s counts=%s", batch_id,
@@ -373,7 +374,7 @@ def anthropic_batch_collect_one(api_key, batch_id, custom_id):
             "cache_creation_input_tokens": getattr(
                 usage, "cache_creation_input_tokens", 0) or 0,
             "tool_calls": [],
-            "truncated": msg.stop_reason == "max_tokens",
+            "truncated": msg.stop_reason in TRUNCATED_STOP_REASONS,
             "batch": True,
             "batch_id": batch_id,
         }

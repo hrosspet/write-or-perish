@@ -320,6 +320,34 @@ def encrypt_content(plaintext: str) -> str:
         raise
 
 
+def new_dek():
+    """A fresh DEK and its KMS-wrapped form, for a writer that encrypts
+    many versions of one text (a reply's partial text while it streams,
+    #367): one KMS wrap for the whole run instead of one per write.
+    Returns None when encryption is disabled. The DEK is put in the
+    unwrap cache, so this process decrypts its own writes without KMS."""
+    if not is_encryption_enabled():
+        return None
+    dek = os.urandom(DEK_SIZE)
+    wrapped_b64 = base64.b64encode(_wrap_dek(dek)).decode("ascii")
+    _cache_put(wrapped_b64, dek)
+    return dek, wrapped_b64
+
+
+def encrypt_with_dek(plaintext: str, dek_pair) -> str:
+    """Encrypt *plaintext* with a DEK from new_dek(), in the same v2
+    envelope decrypt_content() reads. A fresh nonce per call, so reusing
+    the DEK across writes is safe. With no DEK (encryption disabled)
+    returns the plaintext."""
+    if not plaintext or dek_pair is None:
+        return plaintext
+    dek, wrapped_b64 = dek_pair
+    nonce = os.urandom(NONCE_SIZE)
+    ciphertext = AESGCM(dek).encrypt(nonce, plaintext.encode("utf-8"), None)
+    payload_b64 = base64.b64encode(nonce + ciphertext).decode("ascii")
+    return f"{ENCRYPTED_PREFIX_V2}{wrapped_b64}:{payload_b64}"
+
+
 def decrypt_content(ciphertext: str) -> str:
     """
     Decrypt content. Supports both v1 (direct KMS) and v2 (envelope) formats.
@@ -437,6 +465,27 @@ def encrypt_file(filepath: str) -> str:
     except Exception as e:
         import logging
         logging.getLogger(__name__).error(f"File encryption failed: {e}")
+        raise
+
+
+def encrypt_file_atomically(src, dest) -> str:
+    """Encrypt *src*, a file only this caller writes, and move the result
+    onto *dest* (``dest + '.enc'`` when encryption is on). Two writers of
+    the same *dest* (a chunk uploaded twice at once, #371) then never
+    read, encrypt or delete each other's half-written file; the last move
+    wins. *src* is gone afterwards either way. Returns the final path."""
+    src, dest = str(src), str(dest)
+    try:
+        out = encrypt_file(src)
+        final = dest + ('.enc' if out.endswith('.enc') else '')
+        os.replace(out, final)
+        return final
+    except Exception:
+        for leftover in (src, src + '.enc'):
+            try:
+                os.remove(leftover)
+            except OSError:
+                pass
         raise
 
 

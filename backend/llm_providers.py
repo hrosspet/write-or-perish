@@ -6,8 +6,11 @@ This module provides a unified interface for calling different LLM providers
 """
 import logging
 import re
+import socket
+import time
 
 import anthropic
+import httpx
 import openai
 from anthropic import Anthropic
 from openai import OpenAI
@@ -15,7 +18,237 @@ from flask import current_app
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MAX_OUTPUT_TOKENS = 10000
+# Room for thinking AND the answer. Models that always think (Opus 5.5)
+# spend output tokens on reasoning before the first visible token; at the
+# old 10k cap a long-input turn (a pasted chapter) could spend all of it
+# thinking and come back with no text and no tool call. max_tokens is only
+# a ceiling — it costs nothing unless the model uses it.
+DEFAULT_MAX_OUTPUT_TOKENS = 32000
+
+# Stop reasons that mean the reply was cut off, not finished. Claude 4.5+
+# models also stop at the context window (input + max_tokens may exceed
+# it), which leaves a prompt sized near the window with little output room.
+TRUNCATED_STOP_REASONS = frozenset({"max_tokens",
+                                    "model_context_window_exceeded"})
+
+# Sleeps before retrying a stream that failed mid-way (an error event
+# after the 200, e.g. overloaded, or a dropped connection). The SDKs retry
+# only the initial request; non-streamed calls used to get these failures
+# as HTTP errors and retry them. Module-level so tests can zero them.
+STREAM_RETRY_DELAYS = (2, 8)
+_RETRYABLE_ANTHROPIC_ERROR_TYPES = frozenset({
+    "overloaded_error", "api_error", "rate_limit_error"})
+_RETRYABLE_OPENAI_ERROR_CODES = frozenset({
+    "server_error", "rate_limit_exceeded"})
+
+
+class OpenAIStreamError(RuntimeError):
+    """A streamed OpenAI response that failed after the request was
+    accepted: an ``error`` or ``response.failed`` event, or a stream that
+    ended without a final response."""
+
+    def __init__(self, message, code=None):
+        super().__init__(f"OpenAI stream failed ({code}): {message}")
+        self.code = code
+
+
+class ProviderUnavailableError(RuntimeError):
+    """A call that kept failing for a reason that is usually temporary —
+    the provider overloaded, rate-limited or unreachable — on every retry:
+    the SDK's own for the request, ours once the stream has started. The
+    message is written for the user, as the node's error; the provider's
+    own error is the ``__cause__``, for the logs."""
+
+    def __init__(self, provider):
+        super().__init__(
+            f"The model provider ({provider}) couldn't complete this reply "
+            "— it was overloaded, rate-limited or unreachable, and retrying "
+            "didn't help — so this reply is empty. This is usually "
+            "temporary: sending the same request again in a few minutes "
+            "should work.")
+        self.provider = provider
+
+
+def _budget_exhausted(exc):
+    """A 429 that means a spent budget, not a rate limit. It lasts until
+    billing changes or the month resets, so neither a retry nor a few
+    minutes' wait helps. OpenAI: ``insufficient_quota``. Anthropic: the
+    usage tier's monthly spend cap, a ``rate_limit_error`` marked
+    ``details.error_code == "enforced_spend_limit_reached"`` (docs: Rate
+    limits → Reaching your spend cap). A spend limit set in the Console
+    is a 400 instead, which nothing here treats as temporary anyway."""
+    if "insufficient_quota" in (getattr(exc, "code", None),
+                                getattr(exc, "type", None)):
+        return True
+    body = getattr(exc, "body", None)
+    error = body.get("error") if isinstance(body, dict) else None
+    details = error.get("details") if isinstance(error, dict) else None
+    return (isinstance(details, dict)
+            and details.get("error_code") == "enforced_spend_limit_reached")
+
+
+def _transient_request_error(exc):
+    """A request-level failure that is usually temporary, raised once the
+    SDK's own retries have run out: no connection (or a timeout), a 429
+    rate limit, or a 5xx (Anthropic's 529 overload among them). A 429 for
+    an exhausted budget is left out (_budget_exhausted)."""
+    if isinstance(exc, (anthropic.APIConnectionError,
+                        openai.APIConnectionError)):
+        return True
+    if not isinstance(exc, (anthropic.APIStatusError, openai.APIStatusError)):
+        return False
+    if _budget_exhausted(exc):
+        return False
+    return exc.status_code == 429 or exc.status_code >= 500
+
+
+def _openai_mid_stream_error(exc):
+    """An OpenAI error the SDK raised while reading a stream: an event
+    whose data carries an ``error`` becomes a plain APIError (no HTTP
+    status). Errors a non-streamed call got as a 400 — a context overflow
+    among them — can arrive this way once the request has been accepted."""
+    return (isinstance(exc, openai.APIError)
+            and not isinstance(exc, (openai.APIStatusError,
+                                     openai.APIConnectionError)))
+
+
+def _openai_request_error(exc):
+    """An error about the request itself, wherever it arrived: a 400
+    before the stream starts, or, once the stream has started, an error
+    the SDK raised from an event or a ``response.failed`` event."""
+    return (isinstance(exc, (openai.BadRequestError, OpenAIStreamError))
+            or _openai_mid_stream_error(exc))
+
+
+def _retryable_stream_error(exc):
+    """A failure that happened after the stream started, which the SDK does
+    not retry: a raw transport error from reading the body, an Anthropic
+    SSE error event (raised as APIStatusError with the stream's 200
+    status), or an OpenAI failure event with a transient code. An
+    exhausted budget is never retried, whichever way it arrives."""
+    if isinstance(exc, httpx.TransportError):
+        return True
+    if _budget_exhausted(exc):
+        return False
+    if (isinstance(exc, anthropic.APIStatusError)
+            and exc.status_code == 200 and isinstance(exc.body, dict)):
+        error = exc.body.get("error") or {}
+        return error.get("type") in _RETRYABLE_ANTHROPIC_ERROR_TYPES
+    if isinstance(exc, OpenAIStreamError) or _openai_mid_stream_error(exc):
+        return exc.code in _RETRYABLE_OPENAI_ERROR_CODES
+    return False
+
+
+class StreamListener:
+    """Receives a reply while it streams (#367). The provider calls these
+    from the thread running the call, in order; the defaults ignore
+    everything, so a listener overrides only what it needs.
+
+    - on_text(text): a piece of the reply's visible text. Joined, the
+      pieces are the reply's final ``content`` (thinking is never sent).
+    - on_tool_call(name): the model has started a tool call. The text
+      before it is complete; the call's input is still streaming.
+    - on_restart(): a mid-stream failure is about to be retried from
+      scratch, so the text sent so far will be written again. Return
+      False to refuse (e.g. it has already been spoken); the call then
+      raises ProviderUnavailableError instead of retrying."""
+
+    def on_text(self, text):
+        pass
+
+    def on_tool_call(self, name):
+        pass
+
+    def on_restart(self):
+        return True
+
+
+def _retry_mid_stream(call, provider, listener=None):
+    """Run ``call`` (one streamed request, collected to its final result),
+    retrying mid-stream failures per STREAM_RETRY_DELAYS. Request-level
+    errors are left to the SDK's own retries so the two don't stack. A
+    temporary failure that outlasts either kind of retry raises
+    ProviderUnavailableError instead of the provider's raw error, which
+    would otherwise reach the user as is. A retry restarts the reply, so
+    a *listener* is asked first (StreamListener.on_restart)."""
+    for retry_delay in (*STREAM_RETRY_DELAYS, None):
+        try:
+            return call()
+        except Exception as e:
+            if _transient_request_error(e):
+                # The SDK has already retried it; not again here.
+                raise ProviderUnavailableError(provider) from e
+            if not _retryable_stream_error(e):
+                raise
+            if retry_delay is None:
+                raise ProviderUnavailableError(provider) from e
+            if listener is not None and not listener.on_restart():
+                logger.warning(
+                    "%s stream failed mid-way (%s); not retrying: the "
+                    "reply so far can't be taken back", provider, e)
+                raise ProviderUnavailableError(provider) from e
+            logger.warning(
+                "%s stream failed mid-way (%s); retrying in %ss",
+                provider, e, retry_delay)
+            time.sleep(retry_delay)
+
+
+def _openai_final_response(client, kwargs, listener=None):
+    """Send a Responses API call as a stream and return its final Response
+    — the same object a non-streamed create() returns, carried by the
+    terminal event. Streaming keeps data flowing on a long generation
+    instead of one silent wait for the whole reply; a *listener* also gets
+    the text and tool-call starts as they arrive (#367)."""
+    with client.responses.create(**kwargs, stream=True) as stream:
+        for event in stream:
+            if listener is not None:
+                if event.type == "response.output_text.delta":
+                    listener.on_text(event.delta)
+                elif (event.type == "response.output_item.added"
+                      and getattr(event.item, "type", None)
+                      == "function_call"):
+                    listener.on_tool_call(event.item.name)
+            if event.type in ("response.completed", "response.incomplete"):
+                return event.response
+            if event.type == "response.failed":
+                error = getattr(event.response, "error", None)
+                raise OpenAIStreamError(
+                    getattr(error, "message", "response failed"),
+                    getattr(error, "code", None))
+            if event.type == "error":
+                raise OpenAIStreamError(event.message, event.code)
+    raise OpenAIStreamError("stream ended without a final response")
+
+
+def _anthropic_event_to_listener(event, listener):
+    """Pass one raw Anthropic stream event on to a StreamListener. Only
+    the raw events: the SDK also yields derived ones ("text", "thinking",
+    ...), which would repeat the text."""
+    if event.type == "content_block_delta":
+        if getattr(event.delta, "type", None) == "text_delta":
+            listener.on_text(event.delta.text)
+    elif event.type == "content_block_start":
+        if getattr(event.content_block, "type", None) == "tool_use":
+            listener.on_tool_call(event.content_block.name)
+
+
+def _keepalive_socket_options():
+    """TCP keepalive for an OpenAI connection that may carry no bytes for
+    minutes: a reasoning phase sends no stream events (~55 reasoning
+    tokens/s, so a phase using the whole 32k budget stays silent for up to
+    ~10 min — within the SDK's 600 s read timeout). GCP's VPC firewall
+    drops the tracked state of a connection idle for 10 minutes, after
+    which the rest of the reply can't get back and the call hangs until
+    that read timeout. Probes every 60 s keep it tracked. The Anthropic
+    SDK sets the same options on its own client; the OpenAI SDK sets
+    none."""
+    options = [(socket.SOL_SOCKET, socket.SO_KEEPALIVE, True)]
+    for name, value in (("TCP_KEEPIDLE", 60), ("TCP_KEEPINTVL", 60),
+                        ("TCP_KEEPCNT", 5)):
+        const = getattr(socket, name, None)
+        if const is not None:
+            options.append((socket.IPPROTO_TCP, const, value))
+    return options
 
 
 def model_input_cap(model_cfg, max_output_tokens=None):
@@ -41,6 +274,31 @@ def model_input_cap(model_cfg, max_output_tokens=None):
     return cap
 
 
+def _cache_diagnostics(response):
+    """OpenAI's prompt_cache_diagnostics off a Responses API response, as a
+    plain dict with the four documented keys, or None when the response
+    has none (#348). The SDK keeps the untyped field as a dict; a later
+    SDK that types it gives an object, so both are read."""
+    raw = getattr(response, "prompt_cache_diagnostics", None)
+    if raw is None:
+        return None
+
+    def get(key):
+        if isinstance(raw, dict):
+            return raw.get(key)
+        return getattr(raw, key, None)
+
+    diag_type = get("type")
+    if not diag_type:
+        return None
+    return {
+        "type": diag_type,
+        "reason": get("reason"),
+        "comparison_reusable_tokens": get("comparison_reusable_tokens"),
+        "cache_missed_tokens": get("cache_missed_tokens"),
+    }
+
+
 class PromptTooLongError(Exception):
     """Raised when the prompt exceeds the model's context window."""
 
@@ -60,7 +318,9 @@ class LLMProvider:
     def get_completion(model_id: str, messages: list, api_keys: dict,
                        max_tokens: int = None, tools: list = None,
                        prompt_cache_key: str = None,
-                       output_schema: dict = None) -> dict:
+                       output_schema: dict = None,
+                       cache_comparison_response_id: str = None,
+                       listener: StreamListener = None) -> dict:
         """
         Generate a completion using the specified model.
 
@@ -72,12 +332,22 @@ class LLMProvider:
             tools: Optional list of tool definitions (Anthropic format)
             output_schema: Optional JSON schema the reply must match
                 (structured output; the same shape the batch path takes)
+            cache_comparison_response_id: Optional id of an earlier OpenAI
+                response to compare the prompt cache against (#348). Sent
+                only to models with "cache_diagnostics" in their config;
+                ignored for every other model.
+            listener: Optional StreamListener that gets the reply's text
+                and tool-call starts while it streams (#367). The return
+                value is the same with or without one.
 
         Returns:
             Dict with:
                 - content (str): The generated text
                 - total_tokens (int): Total tokens used
                 - tool_calls (list): Tool call results [{id, name, input}]
+                - response_id (str): OpenAI only, the response's id
+                - cache_diagnostics (dict): OpenAI only, when a comparison
+                  id was sent and the response carried a verdict
 
         Raises:
             ValueError: If model is unsupported or provider is unknown
@@ -96,15 +366,20 @@ class LLMProvider:
             max_tokens = min(max_tokens, model_max, DEFAULT_MAX_OUTPUT_TOKENS)
 
         if provider == "openai":
+            if not config.get("cache_diagnostics"):
+                cache_comparison_response_id = None
             return LLMProvider._call_openai(
                 api_model, messages, api_keys["openai"], max_tokens,
                 tools=tools, prompt_cache_key=prompt_cache_key,
                 context_window=config.get("context_window"),
-                output_schema=output_schema)
+                output_schema=output_schema,
+                cache_comparison_response_id=cache_comparison_response_id,
+                listener=listener)
         elif provider == "anthropic":
             return LLMProvider._call_anthropic(
                 api_model, messages, api_keys["anthropic"], max_tokens,
-                tools=tools, output_schema=output_schema)
+                tools=tools, output_schema=output_schema,
+                listener=listener)
         else:
             raise ValueError(f"Unknown provider: {provider}")
 
@@ -113,7 +388,9 @@ class LLMProvider:
                      max_tokens: int = None, tools: list = None,
                      prompt_cache_key: str = None,
                      context_window: int = None,
-                     output_schema: dict = None) -> dict:
+                     output_schema: dict = None,
+                     cache_comparison_response_id: str = None,
+                     listener: StreamListener = None) -> dict:
         """
         Call OpenAI via the Responses API (/v1/responses).
 
@@ -129,12 +406,13 @@ class LLMProvider:
             tools: Optional tool definitions (Anthropic format, converted here)
             context_window: Model context window, used to report a context
                 overflow when the API error carries no token counts
+            cache_comparison_response_id: baseline response id for Prompt
+                Cache Diagnostics (#348); the caller has checked the model
+                supports it
 
         Returns:
             Dict with content, total_tokens, and tool_calls
         """
-        client = OpenAI(api_key=api_key)
-
         # Convert chat-format messages to Responses input items: content
         # block type is role-dependent (input_text for user/system,
         # output_text for assistant); plain strings pass through as-is.
@@ -185,9 +463,50 @@ class LLMProvider:
                 "type": "json_schema", "name": "feed_reply",
                 "schema": output_schema, "strict": True}}
 
+        # #348: Prompt Cache Diagnostics. The SDK pin (<3) has no typed
+        # parameter, so it goes in the request body as is; the verdict
+        # comes back as an untyped field on the response.
+        if cache_comparison_response_id:
+            kwargs["extra_body"] = {"prompt_cache_options": {
+                "comparison_response_id": cache_comparison_response_id}}
+
+        def _send():
+            # The HTTP client is ours, so we close it: the SDK closes only
+            # a client it created itself, and only once it is garbage
+            # collected.
+            with openai.DefaultHttpxClient(
+                    transport=httpx.HTTPTransport(
+                        socket_options=_keepalive_socket_options())
+            ) as http_client:
+                client = OpenAI(api_key=api_key, http_client=http_client)
+                return _retry_mid_stream(
+                    lambda: _openai_final_response(client, kwargs, listener),
+                    "OpenAI", listener)
+
+        # A request error arrives as a 400 before the stream starts, or
+        # after it as an error the SDK raises or a response.failed event
+        # (_openai_request_error); all are handled the same way.
         try:
-            response = client.responses.create(**kwargs)
-        except openai.BadRequestError as e:
+            try:
+                response = _send()
+            except (openai.APIError, OpenAIStreamError) as e:
+                if not _openai_request_error(e):
+                    raise
+                # Analytics must never cost a turn: if OpenAI rejects the
+                # option itself, send the call again without it.
+                about = f"{getattr(e, 'param', None) or ''} {e}"
+                if ("extra_body" not in kwargs
+                        or not ("prompt_cache" in about
+                                or "comparison_response" in about)):
+                    raise
+                logger.warning(
+                    "OpenAI rejected prompt_cache_options (model=%s); "
+                    "retrying without cache diagnostics: %s", model, e)
+                kwargs.pop("extra_body")
+                response = _send()
+        except (openai.APIError, OpenAIStreamError) as e:
+            if not _openai_request_error(e):
+                raise
             mapped = LLMProvider._openai_overflow_error(
                 e, input_items, context_window)
             if mapped is e:
@@ -235,7 +554,7 @@ class LLMProvider:
                 f"written={cache_write_tokens} of "
                 f"{response.usage.input_tokens} input tokens")
 
-        return {
+        result = {
             "content": content,
             "total_tokens": response.usage.total_tokens,
             "input_tokens": response.usage.input_tokens,
@@ -244,13 +563,24 @@ class LLMProvider:
             "cache_write_subset_tokens": cache_write_tokens,
             "tool_calls": tool_calls,
             "truncated": truncated,
+            "response_id": getattr(response, "id", None),
         }
+        # Whether the comparison actually went out (it is dropped on the
+        # retry above), so a row never claims a baseline it did not send.
+        result["cache_comparison_sent"] = "extra_body" in kwargs
+        if "extra_body" in kwargs:
+            diagnostics = _cache_diagnostics(response)
+            if diagnostics:
+                result["cache_diagnostics"] = diagnostics
+        return result
 
     @staticmethod
     def _openai_overflow_error(e, input_items, context_window):
         """
-        Map an OpenAI BadRequestError to PromptTooLongError when it is a
-        context overflow; otherwise return the original error to re-raise.
+        Map an OpenAI request error (a 400, or the same error delivered in
+        the stream — see _openai_request_error) to PromptTooLongError when
+        it is a context overflow; otherwise return the original error to
+        re-raise.
 
         The Responses API's overflow error may carry no token counts
         (unlike chat completions), so when the message has none we fall
@@ -378,7 +708,8 @@ class LLMProvider:
     @staticmethod
     def _call_anthropic(model: str, messages: list, api_key: str,
                         max_tokens: int = None, tools: list = None,
-                        output_schema: dict = None) -> dict:
+                        output_schema: dict = None,
+                        listener: StreamListener = None) -> dict:
         """
         Call Anthropic API with the given model and messages.
 
@@ -424,7 +755,19 @@ class LLMProvider:
                 "format": {"type": "json_schema", "schema": output_schema}}
 
         try:
-            response = client.messages.create(**kwargs)
+            # Streamed, then collected into the same Message create()
+            # returns: the SDK refuses a non-streaming request whose
+            # max_tokens implies >10 minutes (~21k tokens), and a streamed
+            # connection stays alive through a long thinking phase instead
+            # of idling toward a timeout. A listener reads it live (#367).
+            def _collect():
+                with client.messages.stream(**kwargs) as stream:
+                    if listener is not None:
+                        for event in stream:
+                            _anthropic_event_to_listener(event, listener)
+                    return stream.get_final_message()
+
+            response = _retry_mid_stream(_collect, "Anthropic", listener)
         except anthropic.BadRequestError as e:
             error_msg = str(e)
             match = re.search(
@@ -453,10 +796,10 @@ class LLMProvider:
         # Calculate total tokens (Anthropic reports input/output separately)
         total_tokens = response.usage.input_tokens + response.usage.output_tokens
         stop_reason = response.stop_reason
-        truncated = stop_reason == "max_tokens"
+        truncated = stop_reason in TRUNCATED_STOP_REASONS
         logger.info(f"Anthropic API response: model={model}, input_tokens={response.usage.input_tokens}, output_tokens={response.usage.output_tokens}, stop_reason={stop_reason}")
         if truncated:
-            logger.warning(f"Anthropic response truncated (max_tokens reached): model={model}, output_tokens={response.usage.output_tokens}")
+            logger.warning(f"Anthropic response truncated ({stop_reason}): model={model}, output_tokens={response.usage.output_tokens}")
 
         cache_read = getattr(response.usage, "cache_read_input_tokens", 0) or 0
         cache_write = getattr(

@@ -1,5 +1,5 @@
-import React, { useState, useEffect, useRef, useCallback } from "react";
-import { useParams, useNavigate, useSearchParams, Link } from "react-router-dom";
+import React, { useState, useEffect, useLayoutEffect, useRef, useCallback } from "react";
+import { useParams, useNavigate, useSearchParams, useLocation, Link } from "react-router-dom";
 import { FaThumbtack, FaMicrophone, FaSpinner, FaBookOpen } from "react-icons/fa";
 import NodeFooter from "./NodeFooter";
 import SpeakerIcon from "./SpeakerIcon";
@@ -11,6 +11,7 @@ import SemanticNeighbors from "./SemanticNeighbors";
 import { useUser } from "../contexts/UserContext";
 import { useToast } from "../contexts/ToastContext";
 import { useAsyncTaskPolling } from "../hooks/useAsyncTaskPolling";
+import { useLlmTextStream } from "../hooks/useSSE";
 import api from "../api";
 import { useCheckboxToggle, useTaskInsert } from "../utils/markdown";
 import { contextAllowsAi } from "../utils/aiUsage";
@@ -62,6 +63,22 @@ function RenderChildTree({ nodes, onBubbleClick, buildActions }) {
   );
 }
 
+// A reply's text while it is written (#367), as it can be shown before
+// the final render: quote markers become cards only once the reply is
+// complete (their quotes are resolved from the stored content), and share
+// fences only turn into a card then — until then the piece shows as text.
+const SHARE_FENCE_LINE_RE = /^:::(?:share(?:[ \t]+[A-Za-z]+)?)?[ \t]*\r?$/i;
+const partialReplyText = (text) => (text || '')
+  .replace(/\{quote(?:_ext)?:\d+\}/g, '')
+  .split('\n')
+  .filter(line => !SHARE_FENCE_LINE_RE.test(line))
+  .join('\n');
+
+// History state for a move from a node to its own pending reply: the
+// entry before this one is the reply's parent. A reply that fails then
+// goes back to it instead of adding it to the history a second time.
+const FROM_PARENT = { fromParent: true };
+
 // The browser tab's title for a node: its first line, or a state word
 // while an AI reply is still being generated.
 const tabTitleFor = (node) => {
@@ -84,6 +101,7 @@ function NodeDetail({ nodeIdOverride }) {
   // comes from params. Everything downstream just uses `id`.
   const id = nodeIdOverride || paramId;
   const navigate = useNavigate();
+  const location = useLocation();
   const [searchParams, setSearchParams] = useSearchParams();
   const { user: currentUser } = useUser();
   const { addToast } = useToast();
@@ -93,6 +111,10 @@ function NodeDetail({ nodeIdOverride }) {
   const [error, setError] = useState("");
   const [showEditOverlay, setShowEditOverlay] = useState(false);
   const [selectedModel, setSelectedModel] = useState(currentUser?.preferred_model || null);
+  // The Read button's own model: reads run only on the read models
+  // (#355), so it never shares the LLM Response picker's choice. Null
+  // until its picker loads; the backend then picks (resolve_read_model).
+  const [readModel, setReadModel] = useState(null);
   const [llmTaskNodeId, setLlmTaskNodeId] = useState(null);
   // True from the click until POST /nodes/:id/llm answers: the spinner is
   // otherwise driven by the returned node id, so the round trip (a cold
@@ -100,6 +122,10 @@ function NodeDetail({ nodeIdOverride }) {
   const [llmRequesting, setLlmRequesting] = useState(false);
   const [quotes, setQuotes] = useState({});
   const [externalQuotes, setExternalQuotes] = useState({});
+  // Bumped when another bubble in the thread is edited or deleted: the
+  // focal content (and so its quote markers) is unchanged, but a quoted
+  // node may be that bubble, so the resolved quotes must be refetched.
+  const [quotesVersion, setQuotesVersion] = useState(0);
   const [pinLoading, setPinLoading] = useState(false);
   const [voiceLoading, setVoiceLoading] = useState(false);
   const [readLoading, setReadLoading] = useState(false);
@@ -174,6 +200,17 @@ function NodeDetail({ nodeIdOverride }) {
     }
   );
 
+  // #367: a pending reply's text while the model writes it. The node
+  // fetch carries the text so far; the stream brings the rest. (A batch
+  // read is never streamed.)
+  const replyStreaming = !!node && (node.node_type === 'llm' || !!node.llm_model)
+    && (node.llm_task_status === 'pending' || node.llm_task_status === 'processing')
+    && !isBatchWait;
+  const { text: streamText } = useLlmTextStream(
+    replyStreaming ? node.id : null,
+    { enabled: replyStreaming, initialText: node?.streaming_content || '' },
+  );
+
   useEffect(() => {
     setLoading(true);
     setError("");
@@ -223,13 +260,13 @@ function NodeDetail({ nodeIdOverride }) {
     if (node) document.title = tabTitleFor(node);
   }, [node]);
 
-  // Fetch quote data when node loads (if content contains {quote:ID} placeholders)
+  // Fetch quote data when node loads (if content contains {quote:ID} /
+  // {quote_ext:ID} placeholders). Keyed on the markers themselves, not the
+  // node object: a checklist toggle or an in-place patch replaces the
+  // object without changing which quotes the content holds (#321).
+  const quoteMarkers = (node?.content?.match(/\{quote(?:_ext)?:\d+\}/g) || []).join(',');
   useEffect(() => {
-    if (!node || !node.content) return;
-
-    // Check if content contains {quote:ID} / {quote_ext:ID} patterns
-    const quotePattern = /\{quote(?:_ext)?:(\d+)\}/;
-    if (!quotePattern.test(node.content)) return;
+    if (!quoteMarkers) return;
 
     // Fetch quotes for this node
     api
@@ -246,26 +283,45 @@ function NodeDetail({ nodeIdOverride }) {
         console.error("Error fetching quotes:", err);
         // Don't show error to user - quotes will just not render
       });
-  }, [id, node]);
+  }, [id, quoteMarkers, quotesVersion]);
 
-  // Scroll to the highlighted node after loading
+  // Scroll to the focal node once, after its thread loads. Keyed on the
+  // id: checklist toggles, the "+" insert, edits and in-place LLM patches
+  // all replace the node object, and each of those used to scroll the page
+  // back to the top of the focal node (#321).
+  const focalId = node?.id;
+  const scrolledToIdRef = useRef(null);
   useEffect(() => {
-    if (!loading && node && highlightedNodeRef.current) {
-      highlightedNodeRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    }
-  }, [loading, node]);
+    if (loading || focalId == null || !highlightedNodeRef.current) return;
+    if (scrolledToIdRef.current === focalId) return;
+    scrolledToIdRef.current = focalId;
+    highlightedNodeRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }, [loading, focalId]);
 
   // If we arrived with ?awaitLlm=NID (e.g. from WritePage), pick up the
-  // pending LLM task and let the polling navigate to it on completion.
+  // pending LLM task and poll it here.
   // Re-runs when `id` changes so internal navigations to another node
   // with ?awaitLlm= also take effect (react-router reuses the component).
+  // An entry that arrives with its reply pending (?awaitLlm= another
+  // node) goes on to that reply at once (#367): it shows the model
+  // thinking, then the text as it is written. The entry keeps its own
+  // history step (the param is dropped first, so a back press lands on
+  // the entry and stays there). Handled once: StrictMode runs this twice
+  // in development, and a second hand-off would push the reply again.
+  const awaitLlmHandledRef = useRef(null);
   useEffect(() => {
     const awaitLlm = searchParams.get('awaitLlm');
-    if (awaitLlm) {
-      setLlmTaskNodeId(parseInt(awaitLlm, 10));
+    if (awaitLlm && awaitLlmHandledRef.current !== awaitLlm) {
+      awaitLlmHandledRef.current = awaitLlm;
       const next = new URLSearchParams(searchParams);
       next.delete('awaitLlm');
-      setSearchParams(next, { replace: true });
+      setSearchParams(next, { replace: true, state: location.state });
+      if (String(awaitLlm) === String(id)) {
+        setLlmTaskNodeId(parseInt(awaitLlm, 10));
+      } else {
+        navigate(`/node/${awaitLlm}?awaitLlm=${awaitLlm}`,
+                 { state: FROM_PARENT });
+      }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
@@ -318,7 +374,7 @@ function NodeDetail({ nodeIdOverride }) {
         // llmTaskNodeId state would be lost (this matches WritePage's
         // handoff). The awaitLlm effect picks it up after the remount.
         setLlmTaskNodeId(null);
-        navigate(`/node/${contId}?awaitLlm=${contId}`);
+        navigate(`/node/${contId}?awaitLlm=${contId}`, { state: FROM_PARENT });
         return;
       }
       if (completedId && String(completedId) === String(id)) {
@@ -362,12 +418,16 @@ function NodeDetail({ nodeIdOverride }) {
       addToast(llmError || 'LLM response generation failed', 8000);
       // awaitLlm flows can park the view on the pending LLM node itself;
       // on failure that's an empty dead node — hop to its parent (the
-      // user's entry), replacing the dead history entry so a back press
-      // walks real nodes.
+      // user's entry). Arrived from the parent: go back to it. Otherwise
+      // replace the dead history entry, so a back press walks real nodes.
       if (String(llmTaskNodeId) === String(id)) {
         const parent = node?.ancestors?.[node.ancestors.length - 1];
         if (parent && !parent.deleted) {
-          navigate(`/node/${parent.id}`, { replace: true });
+          if (location.state?.fromParent) {
+            navigate(-1);
+          } else {
+            navigate(`/node/${parent.id}`, { replace: true });
+          }
         }
       }
       setLlmTaskNodeId(null);
@@ -380,6 +440,48 @@ function NodeDetail({ nodeIdOverride }) {
   const saveNodeContent = useCallback((newContent) => api.put(`/nodes/${id}`, { content: newContent }), [id]);
   const handleCheckboxToggle = useCheckboxToggle(getNodeContent, setNodeContent, saveNodeContent);
   const handleTaskInsert = useTaskInsert(getNodeContent, setNodeContent, saveNodeContent);
+
+  // The action row: [LLM Response | model] [Read further | model]. When
+  // the second group wraps onto a line of its own (a phone), the row
+  // becomes a two-column grid, buttons in one column and pickers in the
+  // other, so the two button/picker divides line up. Back to one line when
+  // there is room again (the width both groups took side by side is kept
+  // from when the wrap was seen).
+  const [actionsStacked, setActionsStacked] = useState(false);
+  const actionRowEl = useRef(null);
+  const actionRowObserver = useRef(null);
+  const actionsFlatWidth = useRef(0);
+  const checkActionsStacked = useCallback(() => {
+    const row = actionRowEl.current;
+    if (!row) return;
+    const groups = row.querySelectorAll('[data-action-group]');
+    if (groups.length < 2) {
+      setActionsStacked(false);
+      return;
+    }
+    const style = window.getComputedStyle(row);
+    if (style.display === 'grid') {
+      if (row.clientWidth >= actionsFlatWidth.current) setActionsStacked(false);
+      return;
+    }
+    const [first, second] = groups;
+    if (second.offsetTop > first.offsetTop) {
+      actionsFlatWidth.current = first.offsetWidth + second.offsetWidth
+        + (parseFloat(style.columnGap) || 0);
+      setActionsStacked(true);
+    }
+  }, []);
+  const actionRowRef = useCallback((el) => {
+    actionRowObserver.current?.disconnect();
+    actionRowObserver.current = null;
+    actionRowEl.current = el;
+    if (el && typeof ResizeObserver !== 'undefined') {
+      actionRowObserver.current = new ResizeObserver(() => checkActionsStacked());
+      actionRowObserver.current.observe(el);
+    }
+  }, [checkActionsStacked]);
+  // After every render: a new model label can change the widths.
+  useLayoutEffect(() => { checkActionsStacked(); });
 
   if (loading) return <div style={{ color: "var(--text-muted)", padding: "20px" }}>Loading node...</div>;
   if (error) return <div style={{ color: "var(--accent)", padding: "20px" }}>{error}</div>;
@@ -547,7 +649,10 @@ function NodeDetail({ nodeIdOverride }) {
         if (!wasFocal && !focalCascaded) {
           // Non-focal target: refetch the focal node so the just-deleted
           // ancestor/child surfaces as a tombstone preview in place.
-          return api.get(`/nodes/${id}`).then((r) => setNode(r.data));
+          return api.get(`/nodes/${id}`).then((r) => {
+            setNode(r.data);
+            setQuotesVersion((v) => v + 1);
+          });
         }
         // Walk up to the closest alive ancestor. For the focal-target
         // case, that's everything in node.ancestors; for the cascade
@@ -600,11 +705,14 @@ function NodeDetail({ nodeIdOverride }) {
     addToast(apiErr || err.message || "Error requesting LLM response.", 8000);
   };
 
+  // The reply is watched on its own node from the start (#367): the
+  // model thinking, then the text as it is written.
   const handleLLMResponse = () => {
     setError("");
     setLlmRequesting(true);
     requestLlmFor(id)
-      .then((newNodeId) => setLlmTaskNodeId(newNodeId))
+      .then((newNodeId) => navigate(`/node/${newNodeId}?awaitLlm=${newNodeId}`,
+                                    { state: FROM_PARENT }))
       .catch(handleLlmRequestError)
       .finally(() => setLlmRequesting(false));
   };
@@ -639,10 +747,9 @@ function NodeDetail({ nodeIdOverride }) {
       const chain = [node, ...(node.ancestors || [])];
       const llmNodeId = await tryAutoGenerateFor(newNodeId, chain);
       if (llmNodeId) {
-        // Land on the NEW USER node so it gets its own URL/history step
-        // (a back press then walks the actual entries); ?awaitLlm keeps
-        // the pending LLM response polling anchored here and navigates
-        // to the response on completion.
+        // Through the NEW USER node so it gets its own URL/history step
+        // (a back press then walks the actual entries); ?awaitLlm takes
+        // the view on from there to the pending response.
         navigate(`/node/${newNodeId}?awaitLlm=${llmNodeId}`);
       } else {
         navigate(`/node/${newNodeId}`);
@@ -665,7 +772,9 @@ function NodeDetail({ nodeIdOverride }) {
   // under that prompt (the task strips it on read turns). Auto-generate
   // is honoured like Text mode's own entry, and the reply fires
   // server-side, so there is no /nodes/<id>/llm follow-up here.
-  const submitReadReplyMessage = async ({ content, streaming_session_id }) => {
+  // The form's AI usage goes along (a recording carries it on its draft):
+  // it defaults to the thread's, not the read reply's 'chat' (#362).
+  const submitReadReplyMessage = async ({ content, privacy_level, ai_usage, streaming_session_id }) => {
     if (streaming_session_id) {
       const res = await api.post(
         `/drafts/streaming/${streaming_session_id}/save-as-node`,
@@ -673,8 +782,16 @@ function NodeDetail({ nodeIdOverride }) {
       );
       return res.data;
     }
+    if (ai_usage === 'none') {
+      // Kept away from AI: a plain note, no Text-mode prompt and no reply
+      // (Text mode requires 'chat' or 'train').
+      const res = await api.post('/nodes/', {
+        content, parent_id: parseInt(id, 10), privacy_level, ai_usage,
+      });
+      return res.data;
+    }
     const res = await api.post(`/textmode/from-node/${id}`, {
-      content, model: selectedModel, auto_generate: autoGenerateActive,
+      content, ai_usage, model: selectedModel, auto_generate: autoGenerateActive,
     });
     return res.data;
   };
@@ -712,6 +829,7 @@ function NodeDetail({ nodeIdOverride }) {
       try {
         const refreshed = await api.get(`/nodes/${id}`).then((r) => r.data);
         setNode(refreshed);
+        setQuotesVersion((v) => v + 1);
       } catch (err) {
         console.error(err);
       }
@@ -736,10 +854,12 @@ function NodeDetail({ nodeIdOverride }) {
     try {
       const chain = [updated, ...(updated.ancestors || [])];
       const llmNodeId = await tryAutoGenerateFor(updated.id, chain);
-      // Focal is already the edited node — start polling in place (no
-      // navigation), so the edited node keeps its history entry and the
-      // completion effect pushes the response when it lands.
-      if (llmNodeId) setLlmTaskNodeId(llmNodeId);
+      // The edited node keeps its history entry; the response is watched
+      // on its own node from the start (#367).
+      if (llmNodeId) {
+        navigate(`/node/${llmNodeId}?awaitLlm=${llmNodeId}`,
+                 { state: FROM_PARENT });
+      }
     } catch (err) {
       handleLlmRequestError(err);
     }
@@ -776,7 +896,7 @@ function NodeDetail({ nodeIdOverride }) {
   // auto-generate on, the batch reply parks under it and we land on the
   // pending reply, which this page polls as "Processing…" until the
   // picks arrive. With it off, only the prompt is attached and we land
-  // on it, where the model picker and LLM Response wait for the user.
+  // on it, where Read and its model picker wait for the user.
   // Inside a read thread the same call reads further (no prompt, a read
   // turn under this node; the click is the request, so auto-generate
   // does not apply) and we land on the pending reply.
@@ -785,7 +905,7 @@ function NodeDetail({ nodeIdOverride }) {
     setError("");
     api
       .post(`/read/from-node/${id}`, {
-        model: selectedModel,
+        model: readModel || undefined,
         auto_generate: autoGenerateActive,
       })
       .then((response) => {
@@ -908,7 +1028,9 @@ function NodeDetail({ nodeIdOverride }) {
     prev[itemId] ? { ...prev, [itemId]: { ...prev[itemId], read_at: readAt } } : prev
   ));
   const handleExternalFeedbackChange = (itemId, feedback) => setExternalQuotes(prev => (
-    prev[itemId] ? { ...prev, [itemId]: { ...prev[itemId], feedback } } : prev
+    prev[itemId]
+      ? { ...prev, [itemId]: { ...prev[itemId], feedback, feedback_shared: false } }
+      : prev
   ));
   const handlePicksMarkedAll = (readAt) => setExternalQuotes(prev => {
     const next = { ...prev };
@@ -964,9 +1086,9 @@ function NodeDetail({ nodeIdOverride }) {
   // "Read further" — the conversation under the picks can get long and
   // nothing is pinned to the viewport (small screens), so the action
   // travels with the node the user is on. It shows whenever the owner
-  // could act, not only in craft mode; LLM Response and the model
-  // picker keep the craft-bar rule, and the picker sets the model for
-  // both buttons. Directly under a finished read reply LLM Response is
+  // could act, not only in craft mode; LLM Response keeps the craft-bar
+  // rule. Each carries its own model picker: reads run only on the read
+  // models (#355). Directly under a finished read reply LLM Response is
   // disabled: a reply asked for there is another read (the task's
   // parent rule), and the way to talk about the picks is a comment
   // first, whose own row then offers LLM Response again.
@@ -975,18 +1097,45 @@ function NodeDetail({ nodeIdOverride }) {
     && !isLlmPending;
   // Before the first picks (the read prompt itself, or a note typed
   // under it) a reply asked for here would be that first read, so the
-  // generic LLM Response is not offered at all: the row is the model
-  // picker and "Read".
+  // generic LLM Response is not offered at all: the row is "Read" and
+  // its model picker.
   const showLlmResponse = showCraftBar && !(inReadThread && !readReplyAbove);
+  // Each action carries its own model picker, joined to its right edge:
+  // [LLM Response | Opus 4.6 v]  [Read further | GPT-6 Luna v] (#355).
+  // Stacked (see actionsStacked), a group lends its button and picker to
+  // the row's grid; each then fills its column, label centred, chevron at
+  // the right edge.
+  const actionGroupStyle = actionsStacked
+    ? { display: 'contents' }
+    : { display: 'inline-flex', alignItems: 'stretch' };
+  const joinedButtonStyle = {
+    borderTopRightRadius: 0, borderBottomRightRadius: 0, borderRight: 'none',
+    justifyContent: 'center',
+  };
+  const joinedPickerStyle = {
+    borderTopLeftRadius: 0, borderBottomLeftRadius: 0,
+    flex: 1, justifyContent: 'space-between',
+  };
+  const readBusy = readLoading || llmRequesting || !!llmTaskNodeId;
   const readButton = (
-    <button
-      onClick={handleReadFromNode}
-      disabled={readLoading || llmRequesting || !!llmTaskNodeId}
-      title={readTitle}
-      style={{ display: 'inline-flex', alignItems: 'center', gap: '8px' }}
-    >
-      {readLoading ? 'Starting…' : readLabel}
-    </button>
+    <span data-action-group style={actionGroupStyle}>
+      <button
+        onClick={handleReadFromNode}
+        disabled={readBusy}
+        title={readTitle}
+        style={{ display: 'inline-flex', alignItems: 'center', gap: '8px', ...joinedButtonStyle }}
+      >
+        {readLoading ? 'Starting…' : readLabel}
+      </button>
+      <ModelSelector
+        nodeId={node.id}
+        purpose="read"
+        selectedModel={readModel}
+        onModelChange={setReadModel}
+        disabled={readBusy}
+        style={joinedPickerStyle}
+      />
+    </span>
   );
   const llmResponseTitle = underReadReply
     ? "To chat about the recommendations, send your reply first. To read further, use the button on the right."
@@ -1170,7 +1319,37 @@ function NodeDetail({ nodeIdOverride }) {
         {isReadReply && node.read_window && (
           <ReadWindowLine window={node.read_window} />
         )}
-        {isLlmPending ? (
+        {isLlmPending && partialReplyText(streamText).trim() ? (
+          // #367: the reply as far as it's written, then the same pulsing
+          // dots — the text is still coming.
+          <div>
+            <QuotedContent
+              content={partialReplyText(streamText)}
+              quotes={{}}
+              externalQuotes={{}}
+              nodeId={node.id}
+              contextArtifacts={node.context_artifacts || null}
+              onQuoteClick={handleBubbleClick}
+            />
+            <span aria-label="Still writing" style={{
+              display: 'inline-flex', gap: '3px', padding: '6px 0',
+            }}>
+              {[0, 1, 2].map(i => (
+                <span key={i} style={{
+                  width: '5px', height: '5px', borderRadius: '50%',
+                  background: 'var(--text-muted)',
+                  animation: `wopPulseDot 1.2s ease-in-out ${i * 0.15}s infinite`,
+                }} />
+              ))}
+            </span>
+            <style>{`
+              @keyframes wopPulseDot {
+                0%, 60%, 100% { opacity: 0.3; transform: translateY(0); }
+                30% { opacity: 1; transform: translateY(-2px); }
+              }
+            `}</style>
+          </div>
+        ) : isLlmPending ? (
           <div style={{
             display: 'flex', alignItems: 'center', gap: '10px',
             color: 'var(--text-muted)',
@@ -1203,6 +1382,7 @@ function NodeDetail({ nodeIdOverride }) {
                 content={displayContent}
                 quotes={quotes}
                 externalQuotes={externalQuotes}
+                nodeId={node.id}
                 onExternalReadChange={handleExternalReadChange}
                 onExternalFeedbackChange={handleExternalFeedbackChange}
                 contextArtifacts={node.context_artifacts || null}
@@ -1239,6 +1419,7 @@ function NodeDetail({ nodeIdOverride }) {
               content={proposalAfter}
               quotes={quotes}
               externalQuotes={externalQuotes}
+              nodeId={node.id}
               onExternalReadChange={handleExternalReadChange}
               onExternalFeedbackChange={handleExternalFeedbackChange}
               contextArtifacts={node.context_artifacts || null}
@@ -1388,16 +1569,26 @@ function NodeDetail({ nodeIdOverride }) {
           <DownloadAudioIcon nodeId={node.id} isPublic={node.privacy_level === 'public'} aiUsage={node.ai_usage} />
         </NodeFooter>
         {(showCraftBar || readActions) && (
-          <div style={{ marginTop: "8px", display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+          <div
+            ref={actionRowRef}
+            style={actionsStacked
+              ? {
+                marginTop: "8px", display: 'grid', rowGap: '8px',
+                gridTemplateColumns: 'max-content max-content', justifyContent: 'start',
+              }
+              : { marginTop: "8px", display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}
+          >
             {showLlmResponse && (
-              /* The span carries the tooltip: a disabled button gets no
-                 hover events in some browsers. */
-              <span title={llmResponseTitle} style={{ display: 'inline-flex' }}>
+              /* The group span carries the tooltip, for the button and its
+                 model picker alike (they are one control, disabled
+                 together): a disabled button or select gets no hover
+                 events in some browsers. */
+              <span data-action-group title={llmResponseTitle} style={actionGroupStyle}>
                 <button
                   onClick={handleLLMResponse}
                   disabled={llmRequesting || !!llmTaskNodeId || underReadReply}
                   aria-disabled={underReadReply || undefined}
-                  style={{ display: 'inline-flex', alignItems: 'center', gap: '8px' }}
+                  style={{ display: 'inline-flex', alignItems: 'center', gap: '8px', ...joinedButtonStyle }}
                 >
                   {(llmRequesting || llmTaskNodeId) ? (
                     <>
@@ -1407,22 +1598,20 @@ function NodeDetail({ nodeIdOverride }) {
                     </>
                   ) : 'LLM Response'}
                 </button>
+                <ModelSelector
+                  nodeId={node.id}
+                  selectedModel={selectedModel}
+                  onModelChange={setSelectedModel}
+                  disabled={llmRequesting || !!llmTaskNodeId || underReadReply}
+                  style={joinedPickerStyle}
+                />
               </span>
             )}
-            {/* Before the first picks "Read" stands where LLM Response
-                usually is, left of the model picker: the response action
-                users know, under its own name. After them "Read further"
-                sits to the right, beside the (disabled or live) LLM
-                Response. */}
-            {readActions && !showLlmResponse && readButton}
-            {showCraftBar && (
-              <ModelSelector
-                nodeId={node.id}
-                selectedModel={selectedModel}
-                onModelChange={setSelectedModel}
-              />
-            )}
-            {readActions && showLlmResponse && readButton}
+            {/* Before the first picks "Read" stands alone, where LLM
+                Response usually is: the response action users know, under
+                its own name. After them "Read further" sits to the right
+                of the (disabled or live) LLM Response. */}
+            {readActions && readButton}
           </div>
         )}
         {llmTaskNodeId && !showCraftBar && !isLlmPending && (

@@ -186,16 +186,17 @@ def test_single_chunk_from_scratch_is_saved_as_initial(app, monkeypatch):
 
 
 def test_cap_raises_the_chunk_count_from_the_measured_ratio(app, monkeypatch):
-    """A measured 4 tokens per unit on a 200k window caps a window near
-    45k units: 350k units plan into 8 chunks of 43,750, not 4 of 87,500."""
+    """A measured 4 tokens per unit on a 200k window (168k input after the
+    32k output reserve) caps a window near 40k units: 350k units plan into
+    9 chunks of 38,888, not 4 of 87,500."""
     import backend.tasks.exports as exports
     app.config["SUPPORTED_MODELS"]["m"]["context_window"] = 200_000
     u = _user(profile_token_ratio=4.0, profile_token_ratio_family="claude_new")
     _, budgets, _ = _run_loop(
         exports, monkeypatch, u,
-        remainders=[350_000, 0], windows=[_window(43_750, 1)],
+        remainders=[350_000, 0], windows=[_window(38_888, 1)],
         initial_profile_content="BASE", generation_type="update")
-    assert budgets == [43_750]
+    assert budgets == [38_888]
 
 
 def test_model_input_cap():
@@ -205,12 +206,12 @@ def test_model_input_cap():
     assert model_input_cap(sol) == 272_000            # the pricing tier binds first
     assert model_input_cap({"context_window": 1_050_000,
                             "max_input_tokens": 922_000}) == 922_000
-    assert model_input_cap({"context_window": 1_000_000}) == 990_000
+    assert model_input_cap({"context_window": 1_000_000}) == 968_000
     assert model_input_cap({"context_window": 200_000,
                             "max_output_tokens": 4096}) == 200_000 - 4096
-    assert model_input_cap({"context_window": 200_000}, 50_000) == 190_000  # capped at the default
+    assert model_input_cap({"context_window": 200_000}, 50_000) == 168_000  # capped at the default
     assert model_input_cap({"context_window": 200_000}, 2_000) == 198_000
-    assert model_input_cap({}) == 190_000
+    assert model_input_cap({}) == 168_000
     # The margin the planner takes off it.
     assert CAP_MARGIN == 0.05
 

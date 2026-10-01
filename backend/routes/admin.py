@@ -1,4 +1,5 @@
 import logging
+import time
 from datetime import datetime, timedelta
 from functools import wraps
 from flask import Blueprint, request, jsonify, abort, current_app
@@ -282,6 +283,18 @@ def activity():
     return jsonify(activity_report(days=days)), 200
 
 
+def _prefill_refusal_response(user):
+    """A 400 carrying a refusal ``code`` (the admin panel shows it as a
+    warning dialog) when a pre-fill or intentions run must not run for
+    this account (#346), else None."""
+    from backend.utils.privacy import prefill_refusal
+    refusal = prefill_refusal(user)
+    if refusal is None:
+        return None
+    code, message = refusal
+    return jsonify({"error": message, "code": code}), 400
+
+
 @admin_bp.route("/users/<int:user_id>/build_profile", methods=["POST"])
 @login_required
 @admin_required
@@ -293,6 +306,12 @@ def build_profile(user_id):
     the batch path, and seeds immediately. Idempotent while a job is in
     flight."""
     user = User.query.get_or_404(user_id)
+    # Same refusal as pre-fill: this button usually follows one (#346).
+    # Checked here only: the seeder it dispatches also serves the user's
+    # own imports, which a declined tweet seed must not block.
+    refusal = _prefill_refusal_response(user)
+    if refusal:
+        return refusal
     if user.profile_batch_pending:
         return jsonify({"message": "A batch step is already in flight.", "queued": False}), 200
     user.profile_needs_full_regen = True
@@ -319,10 +338,10 @@ def infer_intentions_route(user_id):
             batch first (provider-side + job row), then start the run.
     Returns {"task_id", "mode", "cancelled"} — poll
     /admin/prefill/status/<task_id>."""
-    from backend.utils.privacy import AI_ALLOWED
     user = User.query.get_or_404(user_id)
-    if user.default_ai_usage not in AI_ALLOWED:
-        return jsonify({"error": "User has opted out of AI usage."}), 400
+    refusal = _prefill_refusal_response(user)
+    if refusal:
+        return refusal
     data = request.get_json(silent=True) or {}
     mode = data.get("mode") or "batch"
     if mode not in ("batch", "sync"):
@@ -591,6 +610,9 @@ def prefill_from_community_archive(user_id):
     defaults to the user's username. Returns {"task_id"} — poll
     /admin/prefill/status/<task_id>."""
     user = User.query.get_or_404(user_id)
+    refusal = _prefill_refusal_response(user)
+    if refusal:
+        return refusal
     data = request.get_json() or {}
     handle = (data.get("handle") or user.username or "").strip().lstrip("@")
     if not handle:
@@ -708,6 +730,9 @@ def prefill_from_x_api(user_id):
     /admin/prefill/status/<task_id> (same shape as the CA pre-fill)."""
     from backend.utils import x_api
     user = User.query.get_or_404(user_id)
+    refusal = _prefill_refusal_response(user)
+    if refusal:
+        return refusal
     data = request.get_json() or {}
     handle = (data.get("handle") or user.username or "").strip().lstrip("@")
     if not handle:
@@ -953,3 +978,44 @@ def close_poll(poll_id):
         poll.closed_at = datetime.utcnow()
         db.session.commit()
     return jsonify({"id": poll.id, "closed_at": iso_utc(poll.closed_at)}), 200
+
+
+@admin_bp.route("/voice-timing", methods=["GET"])
+@login_required
+@admin_required
+def voice_timing_all():
+    """Where every user's voice-turn wait goes (#371): per-stage medians
+    over all turns and per user, plus the turns themselves (timings,
+    lengths and the model; no content). ?days= (1-7, default 7: records
+    live 7 days) and ?limit= (turns, default 200)."""
+    from backend.utils import voice_timing
+    days = min(max(request.args.get("days", 7, type=int), 1), 7)
+    limit = min(max(request.args.get("limit", 200, type=int), 1),
+                voice_timing.ALL_TURNS)
+    turns = voice_timing.recent_turns_all(time.time() - days * 86400,
+                                          limit)
+    names = dict(db.session.query(User.id, User.username).filter(
+        User.id.in_({user_id for user_id, _ in turns})).all()) \
+        if turns else {}
+    records, by_user = [], {}
+    for user_id, node_id in turns:
+        rec = voice_timing.record(node_id)
+        rec["user_id"] = user_id
+        rec["username"] = names.get(user_id)
+        records.append(rec)
+        by_user.setdefault(user_id, []).append(rec)
+    users = sorted(({
+        "user_id": user_id,
+        "username": names.get(user_id),
+        "turns": len(recs),
+        "median": voice_timing.medians(recs),
+    } for user_id, recs in by_user.items()),
+        key=lambda u: -u["turns"])
+    return jsonify({
+        "days": days,
+        "stages": {name: f"{start} -> {end}" for name, start, end
+                   in voice_timing.STAGES + voice_timing.TAP_STAGES},
+        "median": voice_timing.medians(records),
+        "users": users,
+        "turns": records,
+    }), 200

@@ -101,6 +101,15 @@ def refresh_community_archive_snapshot():
     return {"export_id": export_id}
 
 
+def _raise_if_prefill_refused(user):
+    """Checked again when the task runs, not only by the admin route: the
+    account setting or the consent can change while it is queued (#346)."""
+    from backend.utils.privacy import prefill_refusal
+    refusal = prefill_refusal(user)
+    if refusal:
+        raise RuntimeError(refusal[1])
+
+
 def prefill_community_archive_impl(user_id, handle, options, update_state=None,
                                    seed_now=True):
     """Fetch @handle's tweets from the Community Archive (REST for small
@@ -124,6 +133,7 @@ def prefill_community_archive_impl(user_id, handle, options, update_state=None,
     user = User.query.get(user_id)
     if not user:
         raise RuntimeError(f"User {user_id} not found")
+    _raise_if_prefill_refused(user)
     from backend.utils.x_identity import resolve_x_id, XIdUnresolved
     try:
         # A background task, not a request: the archive's own timeout, not
@@ -408,6 +418,7 @@ def prefill_x_api_impl(user_id, handle, options, update_state=None, seed_now=Tru
     user = User.query.get(user_id)
     if not user:
         raise RuntimeError(f"User {user_id} not found")
+    _raise_if_prefill_refused(user)
     creds = (current_app.config.get("TWITTER_API_KEY"),
              current_app.config.get("TWITTER_API_SECRET"))
     from backend.utils.x_identity import resolve_x_id, XIdUnresolved

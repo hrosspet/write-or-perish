@@ -7,10 +7,54 @@ import api from "../api";
 import useSubmitShortcut from "../hooks/useSubmitShortcut";
 import { emailState } from "../utils/emailState";
 
+const backendUrl = process.env.REACT_APP_BACKEND_URL || "";
+
+// Where Connect X (#311) comes back to: /account?x_login=<outcome>#x.
+const X_LOGIN_MESSAGES = {
+  linked: { type: "success", text: "X connected. Sign in with X now opens this account." },
+  cancelled: { type: "info", text: "X was not connected." },
+  failed: { type: "error", text: "Could not read your X account. Please try again." },
+  other_x: { type: "error", text: "This account is already connected to a different X account." },
+  taken: {
+    type: "error",
+    text: "That X account already signs in to another Loore account, so it can't be connected here. If that account was made by accident, write to info@loore.org and we'll remove it so you can connect X here.",
+  },
+  taken_placeholder: {
+    type: "error",
+    text: "An account was already set up for that X account, and no one has signed in to it yet. Write to info@loore.org and we'll join it with this one.",
+  },
+};
+
 export default function AccountPage() {
   const { user, setUser } = useUser();
   const navigate = useNavigate();
   const location = useLocation();
+
+  // Connect X outcome: read once, then drop it from the URL so a reload
+  // doesn't repeat the message.
+  const [xMsg, setXMsg] = useState(
+    () => X_LOGIN_MESSAGES[new URLSearchParams(location.search).get("x_login")] || null
+  );
+  const [xSaving, setXSaving] = useState(false);
+  useEffect(() => {
+    if (new URLSearchParams(location.search).has("x_login")) {
+      navigate({ pathname: location.pathname, hash: location.hash }, { replace: true });
+    }
+  }, [location.search, location.pathname, location.hash, navigate]);
+
+  const disconnectX = async () => {
+    setXSaving(true);
+    setXMsg(null);
+    try {
+      await api.delete("/dashboard/x");
+      setUser((prev) => ({ ...prev, twitter_login: false, twitter_handle: null }));
+      setXMsg({ type: "success", text: "X disconnected. You sign in with email." });
+    } catch (e) {
+      setXMsg({ type: "error", text: e.response?.data?.error || "Could not disconnect X." });
+    } finally {
+      setXSaving(false);
+    }
+  };
 
   // Deep-link anchors (e.g. /account#model from the changelog): scroll
   // the target row into view on arrival. BrowserRouter doesn't handle
@@ -398,6 +442,73 @@ export default function AccountPage() {
                 }}
               >
                 Remove email
+              </button>
+            </>
+          )}
+        </div>
+      </div>
+
+      {/* Connect X (#311). The button leaves for X and comes back here
+          with ?x_login=<outcome>#x; scrollMarginTop clears the navbar. */}
+      <div id="x" style={{ ...rowStyle, scrollMarginTop: "72px" }}>
+        <div style={labelStyle}>X</div>
+        {user.twitter_login ? (
+          <div
+            style={{
+              ...inputStyle,
+              backgroundColor: "transparent",
+              border: "1px solid var(--border)",
+              opacity: 0.6,
+            }}
+          >
+            {user.twitter_handle ? `Connected as @${user.twitter_handle}` : "Connected"}
+          </div>
+        ) : (
+          <a
+            href={`${backendUrl}/auth/x/connect`}
+            style={{
+              display: "inline-block",
+              padding: "8px 16px",
+              borderRadius: "6px",
+              border: "1px solid var(--accent)",
+              color: "var(--accent)",
+              fontFamily: "var(--sans)",
+              fontWeight: 300,
+              fontSize: "0.85rem",
+              textDecoration: "none",
+            }}
+          >
+            Connect X
+          </a>
+        )}
+        {xMsg && (
+          <div
+            style={{
+              ...helperStyle,
+              color: xMsg.type === "error" ? "var(--accent)" : "var(--text-muted)",
+            }}
+          >
+            {xMsg.text}
+          </div>
+        )}
+        <div style={helperStyle}>
+          {user.twitter_login
+            ? "Sign in with X opens this account."
+            : "Lets you sign in with X as well. X will ask you to allow Loore."}
+          {user.twitter_login && user.email && (
+            <>
+              {" "}
+              <button
+                type="button"
+                onClick={disconnectX}
+                disabled={xSaving}
+                style={{
+                  background: "none", border: "none", padding: 0,
+                  color: "var(--text-muted)", textDecoration: "underline",
+                  cursor: "pointer", fontFamily: "var(--sans)", fontSize: "inherit",
+                }}
+              >
+                Disconnect X
               </button>
             </>
           )}

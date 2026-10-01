@@ -8,10 +8,14 @@ MAX_PICKS picks, each a tweet number from the render with the model's
 quote-tweet of it (its own words, addressed to the reader, on why this
 tweet meets their situation), a relevance estimate and a recommend flag.
 
-On collect, every pick becomes a saved reference (ExternalItem, source
-'community_archive') so the user's read mark and good/bad verdict work
-on it like on any other reference, and a FeedPick row keeps what the
-model claimed, so the claims can be judged against the verdicts later.
+On collect, every pick gets an ExternalItem row so the user's read mark
+and good/bad verdict work on it like on a reference: the tweet's own row
+when the user already has one (a bookmark, a clip, an earlier pick),
+else a new row with source READ_PICK_SOURCE, which is not a saved
+reference (#352: the references list, digest, embeddings and search skip
+it, and saving the tweet later turns that row into the reference in
+place). A FeedPick row keeps what the model claimed, and the reference
+log (utils/reference_log) what the reader did, so picks can be judged.
 
 The reply node's text is the whole rendered feed: the verdict, then each
 quote-tweet followed by a {quote_ext:ID} marker for the tweet it quotes.
@@ -29,8 +33,9 @@ earlier picks and the user's marks on them, and whether to repeat a
 pick is its call). A user message after a read reply makes the next
 reply a CHAT turn: the picks and marks are in the context, the day of
 tweets is not (see llm_completion._ca_turn). What the reader has already
-seen — read-marked picks, X bookmarks, clipped tweets — is dropped from
-the render before the model sees it (seen_tweet_ids), and each render's
+read — any tweet row marked read, a pick, a bookmark or a clip — is
+dropped from the render before the model sees it (seen_tweet_ids); a
+bookmark or clip not marked read stays in, and each render's
 numbering is pinned on the reply (FeedRender) so a batch collected hours
 later resolves its numbers against what was actually sent.
 """
@@ -63,12 +68,6 @@ CA_READ_AGAIN_TURN = (
 # inside a read thread: the task reads it as "this turn is a read", not
 # a chat about the picks (routes/read.py, llm_completion._ca_turn).
 READ_FURTHER_MARKER = "_read"
-
-# References the reader saved from X themselves: seen by definition. A
-# clipped tweet is stored under the bookmark source (web_clip.classify_clip).
-# Nothing writes twitter_like yet (the frontend already labels it); listed
-# so a saved like counts as seen the day something does.
-SEEN_SOURCES = ("twitter_bookmark", "twitter_like")
 
 # The closing note of a chat turn in a read thread: the read prompt above
 # still asks for a verdict and picks, this turn answers the message.
@@ -156,7 +155,7 @@ def is_feed_node(node):
     key = node.get_prompt_key() if hasattr(node, "get_prompt_key") else None
     if key in READ_PROMPT_KEYS:
         return True
-    if bool(getattr(node, "feed_picks", None)):
+    if has_read_picks(node):
         return True
     return bool(CA_TWEETS_PATTERN.search(node.get_content() or ""))
 
@@ -172,7 +171,16 @@ def is_read_reply(node):
         return True  # no query
     if getattr(node, "feed_render", None) is not None:
         return True
-    return bool(getattr(node, "feed_picks", None))
+    return has_read_picks(node)
+
+
+def has_read_picks(node):
+    """The node named Read picks. Not a quote row: an agentic reply that
+    quoted a reference is logged in the same table (kind 'quote', #352)
+    and is no read reply."""
+    from backend.utils.reference_log import KIND_READ
+    return any(p.kind == KIND_READ
+               for p in (getattr(node, "feed_picks", None) or []))
 
 
 def in_read_thread(node):
@@ -214,25 +222,68 @@ def read_reply_ids(node_chain):
         found.update(r[0] for r in db.session.query(FeedRender.node_id)
                      .filter(FeedRender.node_id.in_(rest)).all())
         found.update(r[0] for r in db.session.query(FeedPick.node_id)
-                     .filter(FeedPick.node_id.in_(rest)).distinct().all())
+                     .filter(FeedPick.node_id.in_(rest),
+                             FeedPick.kind == "read").distinct().all())
     return frozenset(found)
 
 
+def ca_turn(node_chain, ca_node, parent_node, reply_ids, requested=False):
+    """Which turn of a read thread this reply is. The completion task and
+    the placeholder guard (utils/llm_nodes.reply_read_turn, which picks
+    the model) both apply this, so they cannot disagree (#355);
+    *ca_node* is the newest read prompt in the chain, *reply_ids* the ids
+    of the chain's read replies (ca_feed.read_reply_ids), *requested*
+    whether the Read button asked for this reply (_read_requested):
+
+    "read"       no reply has answered the read prompt yet: the day is
+                 rendered and the model answers with a verdict and picks
+                 (also when the user typed something under the prompt
+                 before asking for the reply).
+    "read_again" the Read button asked for it from anywhere in the
+                 thread (*requested*), or the reply was asked for directly
+                 under a read reply: another read, further into the day.
+                 The day is rendered again (minus what the reader has seen
+                 since); the earlier picks, the reader's marks on them and
+                 whatever was written since are in the context, and
+                 whether to repeat an unread pick is the model's call.
+    "chat"       a user message came after a read reply: a conversation
+                 about the picks. The day is not rendered; the placeholder
+                 reads as a stub, the picks and marks stay in the context.
+                 Unlike a read it may run under the agentic prompt (a
+                 Text-mode session under the read reply, #323).
+    """
+    replies = []
+    after_prompt = False
+    for n in node_chain:
+        if n is ca_node:
+            after_prompt = True
+            continue
+        if after_prompt and n.deleted_at is None and n.id in reply_ids:
+            replies.append(n)
+    if not replies:
+        return "read"
+    if requested:
+        return "read_again"
+    if parent_node is not None and replies[-1].id == parent_node.id:
+        return "read_again"
+    return "chat"
+
+
 def seen_tweet_ids(user_id):
-    """Tweet ids the reader has already seen, to drop from a render before
-    the model sees the day: every reference they saved from X (bookmarks,
-    likes, clipped tweets) and every archive pick they marked as read.
-    An earlier pick they have NOT marked stays a candidate — inside the
-    same thread the model sees it with its marks and decides itself
+    """Tweet ids to drop from a render before the model sees the day:
+    every tweet the reader marked read, whatever row carries it — a Read
+    pick, an X bookmark, a clipped tweet, an archive import (a verdict
+    marks read too). A saved tweet not marked read stays in: saving it is
+    not reading it, and a pick of it shows the saved reference's marks.
+    An earlier pick they have NOT marked stays a candidate too — inside
+    the same thread the model sees it with its marks and decides itself
     whether to pick it again."""
-    from sqlalchemy import and_, or_
     from backend.extensions import db
-    from backend.models import ExternalItem
+    from backend.models import ExternalItem, TWEET_SOURCES
     rows = (db.session.query(ExternalItem.external_id)
             .filter(ExternalItem.user_id == user_id,
-                    or_(ExternalItem.source.in_(SEEN_SOURCES),
-                        and_(ExternalItem.source == "community_archive",
-                             ExternalItem.read_at.isnot(None))))
+                    ExternalItem.source.in_(TWEET_SOURCES),
+                    ExternalItem.read_at.isnot(None))
             .all())
     return {r[0] for r in rows if r[0]}
 
@@ -439,37 +490,44 @@ def tweet_url(username, tweet_id):
 
 
 def save_feed_picks(user_id, node, picks, picked_by=None):
-    """Persist the picks of one reply: upsert each tweet as a saved
-    reference (dedupes on tweet id against an earlier pick, a bookmark
-    sync or a clip of the same tweet under this source) and write one
+    """Persist the picks of one reply: one ExternalItem per tweet — the
+    user's own row for it when there is one (a bookmark, a clip, an
+    import, an earlier pick: utils/reference_rows.find_tweet_row), else a
+    new READ_PICK_SOURCE row, which is not a saved reference — and one
     FeedPick per tweet, stamped with who chose it (``picked_by``, default
-    the reply node's model). Adds to the session; the caller commits.
-    Returns the FeedPick rows in rank order.
+    the reply node's model), when (the read's submit, FeedRender) and what
+    the model could know of the reader's marks then. Adds to the session;
+    the caller commits. Returns the FeedPick rows in rank order.
 
     Surfacing history is not bumped here: the rendered reply quotes each
     tweet with {quote_ext:ID}, and the finalize path records a surfacing
     for every reference a reply quotes, the same as for any other turn."""
     from backend.extensions import db
-    from backend.models import ExternalItem, FeedPick
+    from backend.models import ExternalItem, FeedPick, READ_PICK_SOURCE
+    from backend.utils.reference_log import KIND_READ, stamp_prior
+    from backend.utils.reference_rows import find_tweet_row
 
     # Idempotent per reply: a redelivered collect (or a retry that re-ran
     # inline) must not insert the picks twice.
-    existing = (FeedPick.query.filter_by(node_id=node.id)
+    existing = (FeedPick.query.filter_by(node_id=node.id, kind=KIND_READ)
                 .order_by(FeedPick.rank.asc()).all())
     if existing:
         log.info("Feed picks for node %s already saved (%d); keeping them",
                  node.id, len(existing))
         return existing
 
+    # The model chose when the read was sent; the collect can come hours
+    # later, after the reader has rated a parallel read's picks.
+    render = getattr(node, "feed_render", None)
+    decided_at = ((render.created_at if render is not None else None)
+                  or node.created_at or datetime.utcnow())
     rows = []
     for pick in picks:
         ref = pick["ref"]
-        item = ExternalItem.query.filter_by(
-            user_id=user_id, source="community_archive",
-            external_id=str(ref["tweet_id"])).first()
+        item = find_tweet_row(user_id, ref["tweet_id"])
         if item is None:
             item = ExternalItem(
-                user_id=user_id, source="community_archive",
+                user_id=user_id, source=READ_PICK_SOURCE,
                 external_id=str(ref["tweet_id"]),
                 author_handle=ref["username"],
                 url=tweet_url(ref["username"], ref["tweet_id"]),
@@ -481,11 +539,12 @@ def save_feed_picks(user_id, node, picks, picked_by=None):
             db.session.flush()
         row = FeedPick(
             user_id=user_id, node_id=node.id, external_item_id=item.id,
-            rank=pick["rank"], relevance=pick["relevance"],
+            kind=KIND_READ, rank=pick["rank"], relevance=pick["relevance"],
             recommended=pick["recommend"],
             picked_by=picked_by or getattr(node, "llm_model", None),
         )
         row.set_why(pick["qt"])
+        stamp_prior(row, item, decided_at)
         db.session.add(row)
         rows.append(row)
     return rows

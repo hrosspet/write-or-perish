@@ -9,7 +9,7 @@ import { formatDateTime } from '../utils/date';
  * ReadWindowLine sits above the verdict and answers the reader's first
  * question when the picks look stale: which day was this, exactly. The
  * bounds come from the render the reply was made from, in the reader's
- * local time, with the count of tweets they had already seen and so
+ * local time, with the count of tweets they had already read and so
  * never reached the model.
  *
  * ReadReplyTail sits under the picks and carries the list's read
@@ -29,7 +29,7 @@ export const ReadWindowLine = ({ window: w }) => {
   return (
     <p className="read-window">
       {`Tweets from ${from} to ${to} (your time): ${count(w.tweets)} by ${count(w.accounts)} accounts.`}
-      {w.excluded > 0 && ` ${count(w.excluded)} you had already seen were left out.`}
+      {w.excluded > 0 && ` ${count(w.excluded)} you had already read were left out.`}
     </p>
   );
 };
