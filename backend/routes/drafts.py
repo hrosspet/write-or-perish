@@ -83,6 +83,17 @@ def _parent_error(parent_id):
     return parent_visibility_error(Node.query.get(pid), current_user.id)
 
 
+def _editable_node(node_id):
+    """(node, None) when the current user may edit the node *node_id*
+    (can_user_edit_node), else (None, a 404 response): a node the user
+    cannot edit gets the same 404 as one that does not exist. A deleted
+    node the user could edit is returned; callers handle deletion."""
+    node = Node.query.get(node_id)
+    if node is None or not can_user_edit_node(node):
+        return None, (jsonify({"error": "Node not found"}), 404)
+    return node, None
+
+
 # Audio storage root - same as in nodes.py
 AUDIO_STORAGE_ROOT = pathlib.Path(
     os.environ.get("AUDIO_STORAGE_PATH", "data/audio")
@@ -115,21 +126,18 @@ def get_draft():
     node_id = request.args.get("node_id", type=int)
     parent_id = request.args.get("parent_id", type=int)
 
-    # Validate node_id if provided - user must own the node OR be LLM requester (parent node owner)
+    # Validate node_id if provided - user must own the node OR be LLM
+    # requester (parent node owner); any other node answers 404.
     if node_id:
-        node = Node.query.get(node_id)
-        if not node:
-            return jsonify({"error": "Node not found"}), 404
+        node, err = _editable_node(node_id)
+        if err is not None:
+            return err
         # Soft-deleted target — treat as gone (per plan §17). The
         # underlying Draft row is left alone so a future "rescue
         # interrupted drafts" UI could surface it; at the GET-by-target
         # entry point, behave as if no draft exists.
         if node.deleted_at is not None:
             return jsonify({"error": "Node not found"}), 404
-
-        # Check authorization using shared utility function
-        if not can_user_edit_node(node):
-            return jsonify({"error": "Not authorized to access drafts for this node"}), 403
 
     # Plan §17 parent_id branch: if the parent has been soft-deleted,
     # we still want to surface the user's in-progress writing — but
@@ -327,26 +335,25 @@ def save_draft():
     node_id = data.get("node_id")
     parent_id = data.get("parent_id")
 
-    # Validate node_id if provided - user must own the node OR be LLM requester (parent node owner)
+    # Validate node_id if provided - user must own the node OR be LLM
+    # requester (parent node owner); any other node answers 404.
     if node_id:
-        node = Node.query.get(node_id)
-        if not node:
-            return jsonify({"error": "Node not found"}), 404
+        node, err = _editable_node(node_id)
+        if err is not None:
+            return err
         # Soft-deleted edit target — match the create endpoint's 410
         # so the frontend can treat parent/edit-target deletions
         # uniformly (clear local state, surface a warning).
         if node.deleted_at is not None:
             return jsonify({"error": "Node has been deleted"}), 410
 
-        # Check authorization using shared utility function
-        if not can_user_edit_node(node):
-            return jsonify({"error": "Not authorized to edit this node"}), 403
-
-    # Validate parent_id if provided - parent must exist
+    # Validate parent_id if provided - the user must be able to see the
+    # parent (404 like a missing one otherwise), as when creating a node.
     if parent_id:
-        parent = Node.query.get(parent_id)
-        if not parent:
-            return jsonify({"error": "Parent node not found"}), 404
+        err = _parent_error(parent_id)
+        if err is not None:
+            return err
+        parent = Node.query.get(int(parent_id))
         if parent.deleted_at is not None:
             return jsonify({"error": "Parent node has been deleted"}), 410
 
@@ -413,15 +420,12 @@ def delete_draft():
     node_id = request.args.get("node_id", type=int)
     parent_id = request.args.get("parent_id", type=int)
 
-    # Validate node_id if provided - user must own the node OR be LLM requester (parent node owner)
+    # Validate node_id if provided - user must own the node OR be LLM
+    # requester (parent node owner); any other node answers 404.
     if node_id:
-        node = Node.query.get(node_id)
-        if not node:
-            return jsonify({"error": "Node not found"}), 404
-
-        # Check authorization using shared utility function
-        if not can_user_edit_node(node):
-            return jsonify({"error": "Not authorized to delete drafts for this node"}), 403
+        _node, err = _editable_node(node_id)
+        if err is not None:
+            return err
 
     # Build query for the user's draft matching the context. Exclude proposal
     # drafts so deleting the composing draft under a proposal node can't take

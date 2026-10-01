@@ -565,3 +565,68 @@ class TestSpeechFollowsAiUsage:
             node_type="llm", ai_usage="none"))
         # A saved reference has no ai_usage setting.
         assert speech_allowed(types.SimpleNamespace(source="clip"))
+
+
+# ── A node the user cannot see answers like a missing one ───────────────
+
+class TestNotFoundForInvisibleNodes:
+
+    def _deleted_private(self, data):
+        n = _node(data.alice, "ALICE DELETED ENTRY")
+        n.deleted_at = datetime.utcnow()
+        _db.session.commit()
+        return n
+
+    def test_resolve_quotes(self, app, data):
+        url = f"/api/nodes/{data.private.id}/resolve-quotes"
+        refused = _call(app, data.bob, "GET", url)
+        missing = _call(app, data.bob, "GET",
+                        "/api/nodes/999999/resolve-quotes")
+        assert refused.status_code == missing.status_code == 404
+        assert "ALICE" not in refused.get_data(as_text=True)
+        assert _call(app, data.alice, "GET", url).status_code == 200
+
+    def test_save_draft_for_a_node_the_user_cannot_edit(self, app, data):
+        deleted = self._deleted_private(data)
+        missing = _call(app, data.bob, "POST", "/api/drafts/",
+                        json={"content": "x", "node_id": 999999})
+        assert missing.status_code == 404
+        for nid in (data.private.id, deleted.id):
+            resp = _call(app, data.bob, "POST", "/api/drafts/",
+                         json={"content": "x", "node_id": nid})
+            assert resp.status_code == 404, nid
+            assert resp.get_json() == missing.get_json()
+        assert Draft.query.filter_by(user_id=data.bob.id).count() == 0
+
+    def test_save_draft_under_a_parent_the_user_cannot_see(self, app, data):
+        deleted = self._deleted_private(data)
+        missing = _call(app, data.bob, "POST", "/api/drafts/",
+                        json={"content": "x", "parent_id": 999999})
+        assert missing.status_code == 404
+        for pid in (data.private.id, deleted.id):
+            resp = _call(app, data.bob, "POST", "/api/drafts/",
+                         json={"content": "x", "parent_id": pid})
+            assert resp.status_code == 404, pid
+            assert resp.get_json() == missing.get_json()
+        assert Draft.query.filter_by(user_id=data.bob.id).count() == 0
+
+    def test_owner_still_saves_drafts_and_sees_deleted_targets_as_410(
+            self, app, data):
+        deleted = self._deleted_private(data)
+        resp = _call(app, data.alice, "POST", "/api/drafts/",
+                     json={"content": "x", "parent_id": data.private.id})
+        assert resp.status_code == 200
+        resp = _call(app, data.alice, "POST", "/api/drafts/",
+                     json={"content": "x", "node_id": data.private.id})
+        assert resp.status_code == 200
+        for field in ("node_id", "parent_id"):
+            resp = _call(app, data.alice, "POST", "/api/drafts/",
+                         json={"content": "x", field: deleted.id})
+            assert resp.status_code == 410, field
+
+    def test_load_and_delete_draft_for_a_node_the_user_cannot_edit(
+            self, app, data):
+        for method in ("GET", "DELETE"):
+            resp = _call(app, data.bob, method,
+                         f"/api/drafts/?node_id={data.private.id}")
+            assert resp.status_code == 404, method

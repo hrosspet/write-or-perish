@@ -1439,11 +1439,10 @@ def resolve_node_quotes(node_id):
             "has_quotes": true
         }
     """
-    node = Node.query.get_or_404(node_id)
-
-    # Check if user has permission to access this node
-    if not can_user_access_node(node, current_user.id):
-        return jsonify({"error": "Not authorized to access this node"}), 403
+    # A node the user cannot see gets the same 404 as a missing one.
+    node = _visible_node(node_id)
+    if node is None:
+        return _node_not_found()
 
     content = node.get_content()
     # Node quotes + external-reference quotes ({quote_ext:ID}) in one pass
