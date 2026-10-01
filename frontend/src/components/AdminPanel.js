@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from "react";
 import XLookupConfirmDialog from "./XLookupConfirmDialog";
+import ProfileBuildConfirmDialog from "./ProfileBuildConfirmDialog";
 import AdminRefusalDialog, { REFUSAL_TITLES } from "./AdminRefusalDialog";
 import { FaTimesCircle, FaFilter, FaCaretDown, FaCaretUp, FaEye, FaEyeSlash } from "react-icons/fa";
 import api from "../api";
@@ -542,6 +543,9 @@ function AdminPanel() {
   // Set when the archive did not have the handle: the dialog offering the
   // paid X lookup for that one whitelist.
   const [xLookupAsk, setXLookupAsk] = useState(null);
+  // Build profile on a user held by the refusal backoff (#368): the
+  // confirmation dialog's user, or null.
+  const [buildAsk, setBuildAsk] = useState(null);
   // A pre-fill / intentions / profile build the backend refused for this
   // account (#346): { code, message, username }. Shown as a dialog.
   const [refusal, setRefusal] = useState(null);
@@ -747,9 +751,10 @@ function AdminPanel() {
     return [cancelNote, main].filter(Boolean).join(" · ");
   };
 
-  const buildProfile = async (userId) => {
+  const buildProfile = async (userId, force = false) => {
     try {
-      const res = await api.post(`/admin/users/${userId}/build_profile`);
+      const res = await api.post(`/admin/users/${userId}/build_profile`,
+        force ? { force: true } : undefined);
       if (!res.data.queued) setError(res.data.message);
       fetchUsers();
     } catch (err) {
@@ -1106,6 +1111,17 @@ function AdminPanel() {
           submitWhitelist(ask.handle, true);
         }}
       />
+      <ProfileBuildConfirmDialog
+        open={!!buildAsk}
+        username={buildAsk?.username}
+        backoff={buildAsk?.profile_backoff}
+        onClose={() => setBuildAsk(null)}
+        onConfirm={() => {
+          const ask = buildAsk;
+          setBuildAsk(null);
+          buildProfile(ask.id, true);
+        }}
+      />
       <AdminRefusalDialog refusal={refusal} onClose={() => setRefusal(null)} />
 
       {error && <div style={{ color: "var(--error)" }}>{error}</div>}
@@ -1277,6 +1293,16 @@ function AdminPanel() {
                 {(!u.profile || u.profile.state === "none") && (
                   <span style={{ color: "var(--text-muted)" }}>—</span>
                 )}
+                {u.profile_backoff && (
+                  <div
+                    style={{ color: u.profile_backoff.state === "stopped" ? "var(--error)" : "var(--warning)" }}
+                    title={u.profile_backoff.state === "stopped"
+                      ? "The model's output was cut off twice in a row, so the profile job is stopped for this user: the hourly seeder skips it. An import that triggers a rebuild, a saved version, or Build profile (after confirming) starts it again."
+                      : `The model's output was cut off once; the next automatic try is after ${formatDateTime(u.profile_backoff.until)}. A second cut-off stops the profile job.`}
+                  >
+                    {u.profile_backoff.state === "stopped" ? "⛔ stopped: output cut off" : "⏸ retry after cut-off"}
+                  </div>
+                )}
                 {u.intentions && u.intentions.state === "generating" && (
                   <div style={{ color: "var(--warning)" }}
                        title={`Intentions batch ${u.intentions.batch?.batch_id || ""} submitted ${u.intentions.batch?.submitted_at || ""} — persisted, survives restarts; the poller collects it on a ~60 s beat, the provider's SLA is 24 h`}>
@@ -1305,7 +1331,7 @@ function AdminPanel() {
                 )}
                 {u.intentions && u.intentions.state !== "generating" && (
                   <div style={{ color: u.intentions.state === "failed" ? "var(--error)" : "var(--text-muted)" }}
-                       title={u.intentions.state === "failed" ? "The last intentions run gave up (batch failed twice) — check the worker log, then re-run (batch or now)" : u.intentions.last_created_at ? `latest intentions version ${u.intentions.last_created_at}` : undefined}>
+                       title={u.intentions.state === "failed" ? "The last intentions run gave up (batch failed twice, or the output was cut off before any text) — check the worker log, then re-run (batch or now)" : u.intentions.last_created_at ? `latest intentions version ${u.intentions.last_created_at}` : undefined}>
                     {u.intentions.state === "failed"
                       ? <>✗ intentions failed</>
                       : <>✓ intentions v{u.intentions.versions}</>}
@@ -1368,7 +1394,7 @@ function AdminPanel() {
                   Pre-fill from X
                 </button>{" "}
                 <button
-                  onClick={() => buildProfile(u.id)}
+                  onClick={() => (u.profile_backoff ? setBuildAsk(u) : buildProfile(u.id))}
                   disabled={u.profile_batch_pending}
                   title="Force a from-scratch batch profile build now, ignoring the token gate (for small corpora you want profiled anyway)"
                 >
