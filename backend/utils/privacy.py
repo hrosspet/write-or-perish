@@ -274,6 +274,30 @@ def can_ai_use_node_for_training(node) -> bool:
     return ai_usage == AIUsage.TRAIN
 
 
+def speech_allowed(entity) -> bool:
+    """Whether text-to-speech may send *entity*'s text to the speech model.
+
+    - A model's reply (a node with node_type 'llm') may always be spoken:
+      its text came from a model, and voice mode speaks every reply, also
+      in a thread whose ai_usage is 'none'.
+    - Any other row that has an ai_usage (the user's own entries, profile
+      versions) is spoken only when its ai_usage lets AI read it, the rule
+      the speaker icon applies to entries on the web and in the app.
+    - Rows without an ai_usage (saved references) may be spoken.
+
+    Speech that already exists is not affected: callers check this only
+    before generating new speech."""
+    if getattr(entity, "node_type", None) == "llm":
+        return True
+    if not hasattr(entity, "ai_usage"):
+        return True
+    return entity.ai_usage in AI_ALLOWED
+
+
+SPEECH_REFUSED_MESSAGE = (
+    "AI usage is set to none here, so no speech can be generated.")
+
+
 def account_allows_ai(user) -> bool:
     """The account-level switch (#346). When ``default_ai_usage`` is not
     in AI_ALLOWED, no automatic or background job sends this user's data

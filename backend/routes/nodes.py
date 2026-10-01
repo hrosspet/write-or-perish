@@ -26,6 +26,8 @@ from backend.utils.privacy import (
     can_user_see_node_or_tombstone,
     can_user_view_tombstone,
     can_user_edit_node,
+    speech_allowed,
+    SPEECH_REFUSED_MESSAGE,
     PrivacyLevel,
     AIUsage
 )
@@ -2038,6 +2040,11 @@ def generate_tts(node_id):
             "status": node.tts_task_status,
             "node_id": node.id
         }), 202
+
+    # New speech sends the text to a model: not for an entry whose
+    # ai_usage is 'none' (a model's reply is always spoken).
+    if not speech_allowed(node):
+        return jsonify({"error": SPEECH_REFUSED_MESSAGE}), 403
 
     # Check if OpenAI API key is configured
     api_key = get_openai_chat_key(current_app.config)

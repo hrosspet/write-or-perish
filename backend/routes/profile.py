@@ -13,6 +13,8 @@ from backend.utils.privacy import (
     PrivacyLevel,
     AI_ALLOWED,
     account_allows_ai,
+    speech_allowed,
+    SPEECH_REFUSED_MESSAGE,
 )
 from backend.utils.api_keys import get_openai_chat_key
 from backend.utils.spend import require_spend_headroom
@@ -154,6 +156,11 @@ def generate_tts(profile_id):
 
     if profile.audio_tts_url:
         return jsonify({"message": "TTS already available", "tts_url": profile.audio_tts_url}), 200
+
+    # A profile version saved while the account's AI usage was 'none' is
+    # not sent to the speech model.
+    if not speech_allowed(profile):
+        return jsonify({"error": SPEECH_REFUSED_MESSAGE}), 403
 
     if not get_openai_chat_key(current_app.config):
         return jsonify({"error": "TTS not configured (missing API key)"}), 500

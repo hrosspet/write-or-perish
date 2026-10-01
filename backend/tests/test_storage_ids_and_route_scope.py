@@ -230,6 +230,48 @@ def fake_tasks(monkeypatch):
     return types.SimpleNamespace(**mods)
 
 
+def _load_tts_tasks(app):
+    """A fresh copy of backend.tasks.tts whose tasks are plain functions
+    (self first) running against *app*. sys.modules and the
+    backend.tasks package attribute are restored afterwards, as in
+    test_tts_slow_calls.py."""
+    import backend.utils.audio_processing  # noqa: F401  (keeps real pydub)
+    import backend.tasks as tasks_pkg
+
+    celery_stub = MagicMock()
+    celery_stub.Task = object
+    celery_app = types.ModuleType("backend.celery_app")
+    celery_app.celery = MagicMock()
+    celery_app.celery.task = lambda *a, **k: (lambda f: f)
+    celery_app.flask_app = app
+    glue = {
+        "celery": celery_stub,
+        "celery.utils": MagicMock(),
+        "celery.utils.log": MagicMock(),
+        "pydub": MagicMock(),
+        "backend.celery_app": celery_app,
+    }
+    names = list(glue) + ["backend.tasks.tts"]
+    saved = {k: sys.modules.get(k) for k in names}
+    had_attr = hasattr(tasks_pkg, "tts")
+    saved_attr = getattr(tasks_pkg, "tts", None)
+    try:
+        sys.modules.update(glue)
+        sys.modules.pop("backend.tasks.tts", None)
+        import backend.tasks.tts as tts
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                sys.modules.pop(k, None)
+            else:
+                sys.modules[k] = v
+        if had_attr:
+            tasks_pkg.tts = saved_attr
+        elif hasattr(tasks_pkg, "tts"):
+            delattr(tasks_pkg, "tts")
+    return tts
+
+
 # ── Path construction ────────────────────────────────────────────────────
 
 class TestStoragePath:
@@ -423,3 +465,103 @@ class TestAttachStreamingAudio:
         assert Draft.query.get(draft.id) is not None
         assert not (app.audio_root
                     / f"nodes/{data.alice.id}/{data.bob_own.id}").exists()
+
+
+# ── Speech and ai_usage ──────────────────────────────────────────────────
+
+class TestSpeechFollowsAiUsage:
+
+    def test_entry_with_ai_usage_none_gets_no_speech(
+            self, app, data, fake_tasks):
+        entry = _node(data.alice, "ALICE NO-AI ENTRY", ai_usage="none")
+        resp = _call(app, data.alice, "POST", f"/api/nodes/{entry.id}/tts")
+        assert resp.status_code == 403
+        fake_tasks.tts.generate_tts_audio.delay.assert_not_called()
+        _db.session.refresh(entry)
+        assert entry.tts_task_status is None
+
+    def test_entry_that_allows_ai_gets_speech(self, app, data, fake_tasks):
+        entry = _node(data.alice, "ALICE CHAT ENTRY", ai_usage="chat")
+        resp = _call(app, data.alice, "POST", f"/api/nodes/{entry.id}/tts")
+        assert resp.status_code == 202
+        fake_tasks.tts.generate_tts_audio.delay.assert_called_once()
+
+    def test_model_reply_gets_speech_whatever_its_ai_usage(
+            self, app, data, fake_tasks):
+        """Voice mode speaks every reply, also in a thread that is 'none'."""
+        entry = _node(data.alice, "ALICE NO-AI ENTRY", ai_usage="none")
+        reply = _node(data.llm, "MODEL REPLY", parent=entry, node_type="llm",
+                      human_owner=data.alice, ai_usage="none",
+                      llm_model="gpt-5")
+        resp = _call(app, data.alice, "POST", f"/api/nodes/{reply.id}/tts")
+        assert resp.status_code == 202
+        fake_tasks.tts.generate_tts_audio.delay.assert_called_once()
+
+    def test_existing_speech_is_still_returned(self, app, data, fake_tasks):
+        entry = _node(data.alice, "ALICE NO-AI ENTRY", ai_usage="none")
+        entry.audio_tts_url = "/media/x.mp3"
+        _db.session.commit()
+        resp = _call(app, data.alice, "POST", f"/api/nodes/{entry.id}/tts")
+        assert resp.status_code == 200
+        assert resp.get_json()["tts_url"] == "/media/x.mp3"
+
+    def test_profile_with_ai_usage_none_gets_no_speech(
+            self, app, data, fake_tasks):
+        profile = UserProfile(user_id=data.alice.id, generated_by="user",
+                              tokens_used=0, ai_usage="none")
+        profile.set_content("ALICE PROFILE")
+        _db.session.add(profile)
+        _db.session.commit()
+        resp = _call(app, data.alice, "POST",
+                     f"/api/profile/{profile.id}/tts")
+        assert resp.status_code == 403
+        fake_tasks.tts.generate_tts_audio_for_profile.delay.assert_not_called()
+
+        profile.ai_usage = "chat"
+        _db.session.commit()
+        resp = _call(app, data.alice, "POST",
+                     f"/api/profile/{profile.id}/tts")
+        assert resp.status_code == 202
+
+    def test_speech_job_checks_ai_usage_when_it_runs(self, app, data):
+        """The job refuses a 'none' entry however it was queued, and still
+        speaks a model's reply."""
+        tts = _load_tts_tasks(app)
+        speak = MagicMock(return_value="/media/new.mp3")
+        tts._generate_tts_chunks = speak
+
+        entry = _node(data.alice, "ALICE NO-AI ENTRY", ai_usage="none")
+        result = tts.generate_tts_audio(None, entry.id, str(app.audio_root))
+        assert result["status"] == "refused"
+        speak.assert_not_called()
+        _db.session.refresh(entry)
+        assert entry.tts_task_status == "failed"
+        assert entry.audio_tts_url is None
+
+        reply = _node(data.llm, "MODEL REPLY", parent=entry, node_type="llm",
+                      human_owner=data.alice, ai_usage="none",
+                      llm_model="gpt-5")
+        result = tts.generate_tts_audio(None, reply.id, str(app.audio_root))
+        assert result["status"] == "completed"
+        speak.assert_called_once()
+
+        profile = UserProfile(user_id=data.alice.id, generated_by="user",
+                              tokens_used=0, ai_usage="none")
+        profile.set_content("ALICE PROFILE")
+        _db.session.add(profile)
+        _db.session.commit()
+        result = tts.generate_tts_audio_for_profile(
+            None, profile.id, str(app.audio_root))
+        assert result["status"] == "refused"
+        assert speak.call_count == 1
+
+    def test_speech_rule(self, app, data):
+        from backend.utils.privacy import speech_allowed
+        assert not speech_allowed(types.SimpleNamespace(
+            node_type="user", ai_usage="none"))
+        assert speech_allowed(types.SimpleNamespace(
+            node_type="user", ai_usage="chat"))
+        assert speech_allowed(types.SimpleNamespace(
+            node_type="llm", ai_usage="none"))
+        # A saved reference has no ai_usage setting.
+        assert speech_allowed(types.SimpleNamespace(source="clip"))
