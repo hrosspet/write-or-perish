@@ -46,6 +46,7 @@ Write or Perish evolves from journaling app to **distributed intelligence networ
 - ✅ **Personal Log** — Private chronological view of all your entries (`/log`, `GET /api/log`; #298 renamed it from Feed end to end, 2026-09-16). Deleting the last entry of a text/voice session asks whether to delete the system prompt too, so the Log never lists a session by its prompt text; sessions already in that state show their first alive entry or AI reply instead
 - ✅ **Issue-close notifications** (#236) — When a GitHub issue you submitted via Loore is fixed (or declined), you learn it in-app through the dev-update channel, targeted to you alone; v0 of the automated issue→fix→verify loop (#237)
 - ✅ **Apply settings to replies** — Changing an entry's privacy or AI usage when it has replies offers "this node only" or "this node and all my replies" (your own entries and AI responses you requested; other people's replies untouched)
+- ✅ **No AI reply where AI usage is None** (2026-10-01) — The server generates a reply only when the entry, everything above it that the model would read, and the reply are 'chat' or 'train'; Voice mode on an account or thread set to None explains (and links to the AI usage setting) instead of recording
 
 **In Progress:**
 - 🔧 **Text mode** — Non-voice agentic interaction for text-first users (last major feature before wider alpha)
