@@ -188,6 +188,32 @@ final class M2ScreensUITests: XCTestCase {
         snapshot("m2r-draft-discarded")
     }
 
+    /// Review M5: text typed less than the 1 s debounce before a tab switch is
+    /// saved (leaving the screen used to cancel the pending save). Writes only a
+    /// draft, discarded at the end. `TEST_RUNNER_LOORE_DRAFT_NODE` as above.
+    func testDraftTypedRightBeforeATabSwitchIsSaved() throws {
+        let node = try XCTUnwrap(env["LOORE_DRAFT_NODE"].flatMap { $0.isEmpty ? nil : $0 },
+                                 "set TEST_RUNNER_LOORE_DRAFT_NODE")
+        var app = try launch(route: "/node/\(node)", extra: ["-loore_auto_generate", "NO"])
+        XCTAssertTrue(app.descendants(matching: .any)["thread.focal"].firstMatch.waitForExistence(timeout: 20))
+        sleep(2)
+        let field = app.textViews["nodeForm.text.inline"].exists ? app.textViews["nodeForm.text.inline"]
+            : app.textFields["nodeForm.text.inline"]
+        field.tap()
+        field.typeText("Typed just before leaving.")
+        app.tabBars.buttons["Log"].tap()
+        sleep(3)
+        app.terminate()
+
+        app = try launch(route: "/node/\(node)")
+        XCTAssertTrue(app.descendants(matching: .any)["thread.focal"].firstMatch.waitForExistence(timeout: 20))
+        let discard = app.buttons["Discard draft"]
+        XCTAssertTrue(discard.waitForExistence(timeout: 10), "the draft was not saved")
+        snapshot("m5-draft-after-tab-switch")
+        discard.tap()
+        sleep(2)
+    }
+
     /// One billed inline reply with auto-generate on: lands on the new entry,
     /// hands off to its pending reply, watches it. `TEST_RUNNER_LOORE_REPLY_NODE`
     /// is the test-user reply to answer under.

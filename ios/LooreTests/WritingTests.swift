@@ -238,6 +238,65 @@ final class NodeFormModelTests: StubbedAppTestCase {
     }
 }
 
+/// Review M5: the draft survives the form leaving the screen.
+@MainActor
+final class DraftAutosaverTests: StubbedAppTestCase {
+    private var postedContents: [String] {
+        StubURLProtocol.requests.filter { $0.httpMethod == "POST" }.compactMap { request in
+            let object = (try? JSONSerialization.jsonObject(with: request.httpBody ?? Data())) as? [String: Any]
+            return object?["content"] as? String
+        }
+    }
+
+    private func eventually(_ condition: () -> Bool) async -> Bool {
+        for _ in 0..<60 {
+            if condition() { return true }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        return condition()
+    }
+
+    func testLeavingTheScreenSavesTheTextStillInTheDebounce() async {
+        StubURLProtocol.install { _ in .json(200, #"{"id":1,"content":"typed"}"#) }
+        let drafts = DraftAutosaver(api: app.api, nodeId: nil, parentId: 7, debounceDelay: 5, autoSaveInterval: 60)
+        drafts.save("typed")
+        await drafts.suspend()
+        XCTAssertEqual(postedContents, ["typed"])
+        XCTAssertFalse(drafts.hasPendingChanges)
+    }
+
+    func testAFailedSaveIsRetriedWhenTheFormIsBack() async {
+        final class Box: @unchecked Sendable { var fail = true }
+        let box = Box()
+        StubURLProtocol.install { _ in box.fail ? .json(500, #"{"error":"down"}"#) : .json(200, #"{"id":1,"content":"typed"}"#) }
+        let drafts = DraftAutosaver(api: app.api, nodeId: nil, parentId: 7, debounceDelay: 5, autoSaveInterval: 0.1)
+        drafts.save("typed")
+        await drafts.suspend()
+        XCTAssertTrue(drafts.hasPendingChanges, "kept for a retry")
+        box.fail = false
+        drafts.resume()
+        let saved = await eventually { !drafts.hasPendingChanges }
+        XCTAssertTrue(saved, "the retry interval runs again")
+        XCTAssertEqual(postedContents.last, "typed")
+    }
+
+    func testAFlushDuringASaveAlsoSavesTheNewerText() async {
+        StubURLProtocol.install { _ in
+            StubResponse(status: 200, headers: ["Content-Type": "application/json"],
+                         chunks: [Data(#"{"id":1,"content":"x"}"#.utf8)], chunkDelay: 0.2)
+        }
+        let drafts = DraftAutosaver(api: app.api, nodeId: nil, parentId: 7, debounceDelay: 5, autoSaveInterval: 60)
+        drafts.save("first")
+        let first = Task { await drafts.flush() }
+        await Task.yield()
+        drafts.save("first and more")
+        await drafts.suspend()
+        await first.value
+        XCTAssertEqual(postedContents, ["first", "first and more"])
+        XCTAssertFalse(drafts.hasPendingChanges)
+    }
+}
+
 /// Reply rules of the thread screen (map D §4.5 "After success", §5.5–5.8).
 @MainActor
 final class ThreadModelTests: StubbedAppTestCase {

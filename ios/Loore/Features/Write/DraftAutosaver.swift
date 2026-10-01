@@ -1,10 +1,13 @@
 import Foundation
 import Observation
+import UIKit
 
 /// Server drafts for the writing form (port of `hooks/useDraft.js`, map D §4.3):
 /// one draft per `(user, node_id)` for edits or `(user, parent_id)` for new
 /// entries. Typing saves after a 1 s pause; a 3 s interval also flushes;
 /// one save at a time; a failed save is retried on the next tick.
+/// When the form leaves the screen or the app goes to the background, the
+/// pending text is saved at once (`suspend()`, `flushInBackground()`).
 @MainActor
 @Observable
 final class DraftAutosaver {
@@ -19,6 +22,8 @@ final class DraftAutosaver {
     @ObservationIgnored private var pending: String?
     @ObservationIgnored private var debounceTask: Task<Void, Never>?
     @ObservationIgnored private var intervalTask: Task<Void, Never>?
+    /// The save in flight (one at a time).
+    @ObservationIgnored private var inFlight: Task<Void, Never>?
     @ObservationIgnored let debounceDelay: TimeInterval
     @ObservationIgnored let autoSaveInterval: TimeInterval
 
@@ -61,9 +66,20 @@ final class DraftAutosaver {
         }
     }
 
-    /// Saves the pending content now (also used before the form goes away).
+    /// Saves the pending content now. A save already in flight is awaited
+    /// first, then whatever is still pending is saved.
     func flush() async {
-        guard let content = pending, !isSaving else { return }
+        while let running = inFlight { await running.value }
+        guard let content = pending else { return }
+        let save = Task {
+            await self.post(content)
+            self.inFlight = nil
+        }
+        inFlight = save
+        await save.value
+    }
+
+    private func post(_ content: String) async {
         isSaving = true
         defer { isSaving = false }
         var body: [String: JSONValue] = ["content": .string(content)]
@@ -74,9 +90,46 @@ final class DraftAutosaver {
             lastSaved = saved.updatedAt ?? Date()
             if pending == content { pending = nil }
         } catch {
-            // Kept pending: the next interval tick retries.
+            // Kept pending: the next interval tick (or the next flush) retries.
         }
     }
+
+    /// The form left the screen (a tab switch, a screen pushed over it, a sheet
+    /// swiped down): save what is pending now and stop the timers until `resume()`.
+    func suspend() async {
+        debounceTask?.cancel()
+        intervalTask?.cancel()
+        intervalTask = nil
+        await flush()
+    }
+
+    /// The form is on screen again: restart the retry interval.
+    func resume() {
+        if intervalTask == nil { startInterval() }
+    }
+
+    /// The app is going to the background: save what is pending inside a
+    /// background task, so iOS does not suspend the app mid-save.
+    func flushInBackground() {
+        guard pending != nil else { return }
+        let application = UIApplication.shared
+        final class Token { var id = UIBackgroundTaskIdentifier.invalid }
+        let token = Token()
+        token.id = application.beginBackgroundTask(withName: "loore.draft-save") {
+            application.endBackgroundTask(token.id)
+            token.id = .invalid
+        }
+        Task {
+            await flush()
+            if token.id != .invalid {
+                application.endBackgroundTask(token.id)
+                token.id = .invalid
+            }
+        }
+    }
+
+    /// Whether text is waiting to be saved.
+    var hasPendingChanges: Bool { pending != nil }
 
     /// `DELETE /api/drafts/?…` after a send, a transcription or "Discard draft".
     func delete() async {
@@ -85,11 +138,6 @@ final class DraftAutosaver {
         _ = try? await api.delete(APIPath.drafts, query: query, as: EmptyResponse.self)
         draft = nil
         lastSaved = nil
-    }
-
-    func stop() {
-        debounceTask?.cancel()
-        intervalTask?.cancel()
     }
 
     private func startInterval() {

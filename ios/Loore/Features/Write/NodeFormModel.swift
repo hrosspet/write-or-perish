@@ -185,8 +185,14 @@ final class NodeFormModel {
         }
     }
 
-    func stop() {
-        drafts.stop()
+    /// The form left the screen: save the pending draft now (the debounce and the
+    /// retry interval stop until the form is back).
+    func formDisappeared() {
+        Task { await drafts.suspend() }
+    }
+
+    func formAppeared() {
+        drafts.resume()
     }
 
     /// Replying under a public node: the reply is public, whatever was remembered.

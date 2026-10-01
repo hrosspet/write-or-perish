@@ -8,6 +8,7 @@ struct NodeFormView: View {
     let config: NodeFormConfig
     let onSuccess: (NodeFormResult) -> Void
     @Environment(AppState.self) private var app
+    @Environment(\.scenePhase) private var scenePhase
     @State private var model: NodeFormModel?
 
     var body: some View {
@@ -27,9 +28,13 @@ struct NodeFormView: View {
                 Task { await m.start() }
             }
             model?.onSuccess = onSuccess
+            model?.formAppeared()
         }
         .onDisappear {
-            model?.stop()
+            model?.formDisappeared()
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .background { model?.drafts.flushInBackground() }
         }
     }
 }
