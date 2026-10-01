@@ -172,6 +172,8 @@ final class ToastCenter {
         nextId += 1
         let id = nextId
         toasts.append(Toast(id: id, message: message))
+        // VoiceOver users hear the toast; it only appears visually otherwise.
+        UIAccessibility.post(notification: .announcement, argument: message)
         Task { [weak self] in
             try? await Task.sleep(nanoseconds: UInt64(duration * 1_000_000_000))
             self?.dismiss(id)
@@ -191,6 +193,7 @@ final class ToastCenter {
 /// Renders the toast stack; place it in an overlay at the bottom of the root view.
 struct ToastStack: View {
     let center: ToastCenter
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         VStack(spacing: 8) {
@@ -205,9 +208,10 @@ struct ToastStack: View {
                     .overlay(RoundedRectangle(cornerRadius: LooreRadius.small).strokeBorder(LooreColor.border))
                     .shadow(color: LooreColor.shadow.opacity(0.3), radius: 10, y: 4)
                     .onTapGesture { center.dismiss(toast.id) }
-                    .transition(.opacity.combined(with: .offset(y: 8)))
+                    .transition(reduceMotion ? .opacity : .opacity.combined(with: .offset(y: 8)))
                     .accessibilityAddTraits(.isStaticText)
                     .accessibilityAction { center.dismiss(toast.id) }
+                    .accessibilityIdentifier("toast")
             }
         }
         .padding(.horizontal, LooreSpacing.md)

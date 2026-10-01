@@ -150,6 +150,15 @@ final class MagicLinkTests: XCTestCase {
         XCTAssertEqual(MagicLink.outcome(status: 200, location: nil), .failure(code: nil))
     }
 
+    func testLandingPathFollowsTheLinksNextURL() {
+        XCTAssertNil(MagicLink.landingPath(location: "https://loore.org/dashboard"))
+        XCTAssertNil(MagicLink.landingPath(location: "https://loore.org/"))
+        XCTAssertNil(MagicLink.landingPath(location: nil))
+        XCTAssertEqual(MagicLink.landingPath(location: "http://localhost:3001/welcome"), "/welcome")
+        XCTAssertEqual(MagicLink.landingPath(location: "https://loore.org/confirm-email?token=abc"), "/confirm-email?token=abc")
+        XCTAssertEqual(MagicLink.landingPath(location: "/account#email"), "/account#email")
+    }
+
     func testMessagesMatchTheWeb() {
         XCTAssertEqual(MagicLink.message(for: "link_already_used"),
                        "This sign-in link has already been used. Please request a new one.")

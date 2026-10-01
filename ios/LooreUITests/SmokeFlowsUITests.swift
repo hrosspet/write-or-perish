@@ -65,8 +65,8 @@ final class SmokeFlowsUITests: XCTestCase {
         sleep(2)
         snapshot("ui-03-reflect")
 
-        // Walk the tabs.
-        for tab in ["Artifacts", "Log", "Commons", "More"] {
+        // Walk the tabs. Not Commons: locally it lists other users' public posts.
+        for tab in ["Artifacts", "Log", "More"] {
             let button = app.tabBars.buttons[tab]
             guard button.exists else { continue }
             button.tap()

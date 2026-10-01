@@ -34,6 +34,10 @@ struct SignInView: View {
 
                 card
                     .looreFadeIn(delay: 0.25, offset: 16)
+
+                aboutLinks
+                    .padding(.top, 28)
+                    .looreFadeIn(delay: 0.4, offset: 16)
             }
             .padding(.horizontal, LooreSpacing.lg)
             .padding(.vertical, 40)
@@ -49,6 +53,21 @@ struct SignInView: View {
                 handleXLogin(result)
             }
         }
+    }
+
+    /// The web NavBar's "About" dropdown for signed-out visitors (Why Loore, Vision,
+    /// How To), opened as web pages.
+    private var aboutLinks: some View {
+        HStack(spacing: 20) {
+            Button("Why Loore") { app.open(.webPage(path: "/why-loore")) }
+            Button("Vision") { app.open(.webPage(path: "/vision")) }
+            Button("How To") { app.open(.webPage(path: "/how-to")) }
+        }
+        .buttonStyle(.plain)
+        .font(LooreFont.sans(13.6, .light))
+        .foregroundStyle(LooreColor.textMuted)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("signIn.about")
     }
 
     private var card: some View {
@@ -283,8 +302,8 @@ struct SignInView: View {
         focused = nil
         Task {
             do {
-                try await app.auth.verifyMagicLink(pasted: text)
-                await app.signInCompleted()
+                let landing = try await app.auth.verifyMagicLink(pasted: text)
+                await app.signInCompleted(landing: landing)
             } catch {
                 linkError = (error as? AuthFailure)?.message ?? MagicLink.genericFailure
             }

@@ -181,7 +181,8 @@ private struct ThreadContent: View {
                     .opacity(model.canPin ? 1 : 0.35)
                     .accessibilityLabel(model.pinTitle)
                     NodeAudioControls(nodeId: node.id, content: node.content, isPublic: node.privacyLevel == .public,
-                                      aiUsage: node.aiUsage, hasTTS: node.hasTTS)
+                                      aiUsage: node.aiUsage, hasTTS: node.hasTTS,
+                                      onTtsGenerated: { model.ttsGenerated() })
                 }
                 if showCraftBar && !(model.inReadThread && !model.readReplyAbove) {
                     llmResponseRow(node).padding(.top, 8)

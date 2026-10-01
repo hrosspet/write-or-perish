@@ -117,6 +117,10 @@ final class AudioCenter {
 
     // MARK: Listening outside voice mode
 
+    /// The mini-player's height with its padding, measured by `MiniPlayerView`, so
+    /// toasts and the spend-cap banner sit above it (web `--floating-player-offset`).
+    var miniPlayerHeight: CGFloat = 0
+
     /// Mini-player visibility: a queue is loaded and the Voice screen is not showing.
     var showsMiniPlayer: Bool {
         player.isLoaded && !voiceScreenVisible && player.source != .voice

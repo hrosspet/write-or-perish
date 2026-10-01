@@ -82,4 +82,18 @@ enum MagicLink {
         }
         return .success
     }
+
+    /// Where a successful verify sends the browser (the link's `next_url`, e.g.
+    /// `/welcome` from the Activate & Welcome email or `/confirm-email?token=…`),
+    /// as an in-app path; nil for the backend's default target (`/dashboard`) and `/`,
+    /// after which the app stays on Reflect.
+    static func landingPath(location: String?) -> String? {
+        guard let location, let components = URLComponents(string: location) else { return nil }
+        let path = components.path
+        guard !path.isEmpty, !["/", "/dashboard", "/login"].contains(path) else { return nil }
+        var result = path
+        if let query = components.percentEncodedQuery, !query.isEmpty { result += "?" + query }
+        if let fragment = components.fragment, !fragment.isEmpty { result += "#" + fragment }
+        return result
+    }
 }

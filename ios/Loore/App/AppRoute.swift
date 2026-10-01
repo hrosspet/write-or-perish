@@ -68,6 +68,13 @@ enum AppRoute: Hashable, Sendable {
         return .external(url)
     }
 
+    /// `(username, slug)` of a public permalink path `/@username/slug` (web `PermalinkRoute`).
+    static func permalink(in path: String) -> (username: String, slug: String)? {
+        let parts = path.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
+        guard parts.count == 2, parts[0].hasPrefix("@"), parts[0].count > 1, !parts[1].isEmpty else { return nil }
+        return (String(parts[0].dropFirst()), parts[1])
+    }
+
     /// The node id of a thread link, if `link` is one (`/node/<id>` on an own host).
     static func nodeId(inLink link: String, environment: AppEnvironment) -> Int? {
         if case .thread(let id, _) = parse(link, environment: environment) { return id }

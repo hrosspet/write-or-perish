@@ -7,13 +7,19 @@ import SwiftUI
 /// dot, a tap-to-seek bar, and ✕ Close (full teardown).
 struct MiniPlayerView: View {
     @Environment(AppState.self) private var app
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         if app.audio.showsMiniPlayer {
             card
                 .padding(.horizontal, 12)
                 .padding(.bottom, 8)
-                .transition(.move(edge: .bottom).combined(with: .opacity))
+                .background(GeometryReader { geometry in
+                    Color.clear
+                        .onAppear { app.audio.miniPlayerHeight = geometry.size.height }
+                        .onChange(of: geometry.size.height) { _, height in app.audio.miniPlayerHeight = height }
+                })
+                .transition(reduceMotion ? .opacity : .move(edge: .bottom).combined(with: .opacity))
         }
     }
 

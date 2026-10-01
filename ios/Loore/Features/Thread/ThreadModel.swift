@@ -565,6 +565,12 @@ final class ThreadModel {
         return node?.pinnedAt != nil ? "Unpin from your public page" : "Pin to the top of your public page"
     }
 
+    /// The speaker generated new audio for the focal node (web `onTtsGenerated`):
+    /// a later edit of its text then asks whether to regenerate the audio.
+    func ttsGenerated() {
+        node?.hasTTS = true
+    }
+
     func togglePin() {
         guard let app, let node, !pinLoading, canPin else { return }
         pinLoading = true

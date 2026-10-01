@@ -5,7 +5,8 @@
 # users hold real personal data: never point these commands at them.
 #
 #   ios/scripts/local_backend.sh session-cookie   # prints a signed Flask `session` cookie value
-#   ios/scripts/local_backend.sh magic-link       # prints a fresh 15-minute sign-in link
+#   ios/scripts/local_backend.sh magic-link [path] # prints a fresh 15-minute sign-in link
+#                                                  # (optional landing path, e.g. /welcome)
 #   ios/scripts/local_backend.sh state [modes…]   # switches test state, prints metadata
 #
 # State modes: terms_old (accepted terms out of date), unapproved, restore
@@ -36,6 +37,7 @@ with app.app_context():
 EOF
     ;;
   magic-link)
+    NEXT_PATH="${2:-}"
     run_py <<EOF
 from datetime import datetime, timedelta
 from backend import create_app
@@ -46,7 +48,7 @@ with app.app_context():
     from backend.utils.magic_link import generate_magic_link_token, hash_token
     u = db.session.get(User, $TEST_USER_ID)
     assert u.username == "$TEST_USERNAME"
-    token = generate_magic_link_token(u.email)
+    token = generate_magic_link_token(u.email, "$NEXT_PATH" or None)
     u.magic_link_token_hash = hash_token(token)
     u.magic_link_expires_at = datetime.utcnow() + timedelta(minutes=15)
     db.session.commit()

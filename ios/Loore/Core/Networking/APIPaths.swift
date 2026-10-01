@@ -132,6 +132,9 @@ enum APIPath {
     static func sharePublish(_ id: Int) -> String { "/api/share/\(id)/publish" }
     static func shareRevoke(_ id: Int) -> String { "/api/share/\(id)/revoke" }
     static let commonsFeed = "/api/commons/feed"
+    static func commonsPermalink(username: String, slug: String) -> String {
+        "/api/commons/permalink/\(escape(username))/\(escape(slug))"
+    }
     static let exportThreads = "/api/export/threads"
 
     // MARK: References and external sources (M4)

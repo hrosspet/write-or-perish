@@ -91,6 +91,8 @@ final class AppState {
 
     private var updatesFetched = false
     private var launchRouteHandled = false
+    /// Where the pasted sign-in link pointed (web `next_url`), opened once the user can see the app.
+    private var pendingLandingPath: String?
     private let secureStore: SecureStore
     private let defaults: UserDefaults
     private let log = Logger(subsystem: "org.loore.app", category: "app")
@@ -238,10 +240,14 @@ final class AppState {
     }
 
     private func openLaunchRouteIfReady() {
-        guard !launchRouteHandled, let path = launch.route, let user, user.approved, user.termsUpToDate else { return }
-        launchRouteHandled = true
-        if let route = AppRoute.parse(path, environment: environment) {
-            open(route)
+        guard let user, user.approved, user.termsUpToDate else { return }
+        if !launchRouteHandled, let path = launch.route {
+            launchRouteHandled = true
+            if let route = AppRoute.parse(path, environment: environment) { open(route) }
+        }
+        if let path = pendingLandingPath {
+            pendingLandingPath = nil
+            if let route = AppRoute.parse(path, environment: environment) { open(route) }
         }
     }
 
@@ -275,7 +281,23 @@ final class AppState {
     // MARK: Navigation
 
     func open(_ route: AppRoute) {
+        if case .webPage(let path) = route, phase == .signedIn, isApproved,
+           let permalink = AppRoute.permalink(in: path) {
+            openPermalink(username: permalink.username, slug: permalink.slug, path: path)
+            return
+        }
         router.open(route, environment: environment, commonsAvailable: capabilities.showsCommons)
+    }
+
+    /// `/@username/slug` (web `PermalinkRoute`): a signed-in member gets the thread
+    /// view of the resolved node, as on the web; anything that does not resolve
+    /// (not public, flag off, offline) opens the public page instead.
+    private func openPermalink(username: String, slug: String, path: String) {
+        Task {
+            let target: PermalinkTarget? = try? await api.get(APIPath.commonsPermalink(username: username, slug: slug))
+            let route: AppRoute = target?.nodeId.map { .thread(id: $0, awaitLLM: nil) } ?? .webPage(path: path)
+            router.open(route, environment: environment, commonsAvailable: capabilities.showsCommons)
+        }
     }
 
     /// Handles a tapped link (markdown bodies, notifications). Returns false for
@@ -289,8 +311,10 @@ final class AppState {
 
     // MARK: Sign-in and sign-out
 
-    /// After a successful magic-link verify or X web login.
-    func signInCompleted() async {
+    /// After a successful magic-link verify or X web login. `landing` is the
+    /// link's target page (`/welcome`, `/confirm-email?token=…`), as the web lands there.
+    func signInCompleted(landing: String? = nil) async {
+        pendingLandingPath = landing
         phase = .launching
         updatesFetched = false
         await loadUser()
@@ -316,6 +340,7 @@ final class AppState {
         spendCapBannerMessage = nil
         pendingUpdates = nil
         updatesFetched = false
+        pendingLandingPath = nil
         router.reset()
         toasts.clear()
         nodeTitles.reset()

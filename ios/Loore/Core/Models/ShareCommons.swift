@@ -102,6 +102,20 @@ struct CommonsItem: Decodable, Identifiable, Equatable, Sendable {
     }
 }
 
+/// `GET /api/commons/permalink/<username>/<slug>` → `{node_id, canonical?}` (404 when not public).
+struct PermalinkTarget: Decodable, Sendable {
+    var nodeId: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case nodeId = "node_id"
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        nodeId = c.flexibleInt(.nodeId)
+    }
+}
+
 struct CommonsPage: Decodable, Sendable {
     var items: [CommonsItem]
     var hasMore: Bool

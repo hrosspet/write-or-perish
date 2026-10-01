@@ -61,9 +61,15 @@ struct RootView: View {
     }
 }
 
-/// Toasts and the spend-cap banner, bottom centre above the tab bar.
+/// Toasts and the spend-cap banner, bottom centre above the tab bar and, while it
+/// shows, above the mini-player (web `--floating-player-offset`).
 private struct BottomNotices: View {
     @Environment(AppState.self) private var app
+
+    private var bottomOffset: CGFloat {
+        guard app.phase == .signedIn && app.isApproved else { return 24 }
+        return 64 + (app.audio.showsMiniPlayer ? app.audio.miniPlayerHeight : 0)
+    }
 
     var body: some View {
         VStack(spacing: 8) {
@@ -72,7 +78,7 @@ private struct BottomNotices: View {
                 SpendCapBanner(message: message) { app.spendCapBannerMessage = nil }
             }
         }
-        .padding(.bottom, app.phase == .signedIn && app.isApproved ? 64 : 24)
+        .padding(.bottom, bottomOffset)
         .animation(LooreMotion.quick, value: app.spendCapBannerMessage)
     }
 }

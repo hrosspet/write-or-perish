@@ -314,6 +314,15 @@ final class ThreadModelTests: StubbedAppTestCase {
         XCTAssertEqual(model.pinTitle, "Cannot pin a private node")
     }
 
+    func testAudioGeneratedFromTheSpeakerMakesAnEditAskAboutRegenerating() async {
+        let model = await loadedModel()
+        let before = try? XCTUnwrap(model.node)
+        XCTAssertEqual(before.map { model.target(focal: $0).hasTTS }, false)
+        model.ttsGenerated()
+        let after = try? XCTUnwrap(model.node)
+        XCTAssertEqual(after.map { model.target(focal: $0).hasTTS }, true)
+    }
+
     // MARK: Watching a pending reply (map D §5.5–5.6)
 
     private let pendingJSON = """

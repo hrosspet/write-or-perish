@@ -11,7 +11,7 @@ Build, install and the device / staging checklists are in [`README.md`](README.m
 | M2 Thread and writing | `ios-app` | **done** (2026-10-01) |
 | M3 Voice and audio | `ios-app-voice`, merged into `ios-app` (`d69bd0b`) | **done** in the simulator (2026-10-01); locked-phone behaviour needs the device checklist |
 | M4 Feature pages | `ios-app` (built after M3 was merged) | **done** (2026-10-01) |
-| M5 Integration and parity | `ios-app` | in progress |
+| M5 Integration and parity | `ios-app` | in progress (parity walk done) |
 
 Not yet done anywhere: a run on a real iPhone (README "Only a real iPhone can test") and a
 pass on staging (README "Check on staging").
@@ -431,9 +431,112 @@ reached by routes that never push (admin, waitlist, web pages).
   restored: shares, reference marks, settings unchanged; test todo/profile/artifact/notes removed with
   `local_backend.sh state m4_cleanup`.
 
-## M5 (integration and parity)
+## Done in M5 (integration and parity)
 
-In progress: parity walk, accessibility pass, release-safety checks, docs, PR.
+- Folded the voice hand-off (`PROGRESS-voice.md`) into this file.
+- **Parity walk** (table below) and the gaps it closed:
+  - `/@user/slug` permalinks open the native thread for a signed-in member (`GET /api/commons/permalink/…`,
+    web `PermalinkRoute`); anything that does not resolve opens the public web page as before.
+  - A pasted sign-in link opens its landing page (the link's `next_url`: `/welcome` from the Activate & Welcome
+    email, `/confirm-email?token=…`, …) once the user is in, as the web lands there.
+  - The sign-in screen has the web NavBar's signed-out About links (Why Loore, Vision, How To).
+  - Toasts and the spend-cap banner sit above the mini-player while it shows (web `--floating-player-offset`).
+  - Audio generated from a thread's speaker marks the node as having audio, so a later edit asks whether to
+    regenerate it (web `onTtsGenerated`).
+  - `SmokeFlowsUITests` no longer opens the Commons tab (locally it lists other users' public posts).
+- **Publish scan**: the web-app maps and the design doc no longer describe server-side gaps found while mapping;
+  personal names removed from the README and the signing example.
+
+**Verified in M5** (simulator "Loore M5 iPhone 17", local Docker backend, user 5)
+- Unit tests: 334 pass, one skipped (M4's 332 + the landing path, the speaker's audio flag; permalink parsing
+  joined the route tests).
+- `M5ParityUITests` (all pass): signed-out "Vision" opens the web page; a sign-in link minted with `/welcome`
+  lands on Welcome; `/@seowriter/<slug>` opens the native thread; a toast sits above the playing mini-player
+  (craft mode switched on for the toast and back off).
+- Web-view routes opened with `-LooreRoute`: `/admin` (authenticated web view, signed in; the server refuses the
+  data to a non-admin), `/vision`, `/@seowriter` (Safari views), a permalink whose node is gone (falls back to the
+  web page).
+
+### Parity walk
+
+Every route of map A §1, every global UI piece of A §4 and every NavBar / ⋮ item of A §2.1, against design
+doc §6. **parity** = same behaviour (a web view where §6 says so); **deviation** = intentional difference
+(listed under "Deviations"); **gap** = missing. "Unseen" items are built but need data the local test user lacks
+(see "Known gaps").
+
+**Routes (map A §1)**
+
+| # | Web route | App screen | Status | Note |
+|---|---|---|---|---|
+| 1 | `/` Home | Reflect tab, `HomeView` | parity | Voice, Text, Share (flag), Read (admin; unseen as admin); cards stack on a phone |
+| 2 | `/landing` | signed out: native sign-in; links: Safari view | deviation | no marketing page before sign-in (design §6: web view when linked) |
+| 3 | `/login` | `SignInView` | deviation | link pasted back (design §4); default landing is Reflect, not `/profile`; a link's `next_url` is followed (M5) |
+| 4–6 | `/vision`, `/why-loore`, `/how-to` | Safari view (More → About, sign-in screen, waitlist ⋯) | parity | checked M5 |
+| 7 | `/alpha-thank-you` | `WaitlistView` (gate for unapproved users) | parity | in-app links to it are ignored; email form not exercised |
+| 8 | `/confirm-email` | `ConfirmEmailView` | deviation | the link is pasted (Account, waitlist) or followed from a sign-in link |
+| 9 | `/welcome` | `WelcomeView` pushed on Reflect | parity | reached from the Activate & Welcome link since M5 |
+| 10 | `/voice` | `VoiceView` | deviation | thinking cue, mic permission first, `cancelled` ends the turn (Deviations, M3); device checklist |
+| 11 | `/textmode` | `TextModeView` | parity | |
+| 12 | `/profile` | Artifacts tab → Profile | parity | running-build indicator unseen (staging) |
+| 13 | `/todo` | Artifacts tab → Todo | deviation | re-fetch before every save (design §10) |
+| 14 | `/log` | Log tab | deviation | refreshes on change and pull-to-refresh, not per visit |
+| 15–17 | `/feed`, `/dashboard`, `/dashboard/:u` | Log, Profile, `/@u` web view | parity | legacy redirects |
+| 18–19 | `/prompts`, `/prompts/:key` | `PromptsView`, `PromptDetailView` (More, craft) | parity | default-updated banner unseen (staging) |
+| 20 | `/import` | `ImportView` | deviation | native file picker, 200 MB pre-check, 504 wording (Deviations, M4) |
+| 21–22 | `/references`, `/references/:id` | `ReferencesView` (More), `ReferenceDetailView` | deviation | listed in More (web has no entry); embeds in small web views; YouTube unseen |
+| 23–25 | `/ai-preferences`, `/artifacts`, `/artifacts/:kind`, `?create=1` | Artifacts tab documents | parity | documents switch in place (Deviations, M4) |
+| 26 | `/share` | `ShareView` | parity | "Not available." without the flag |
+| 27 | `/commons` | Commons tab (flag) | deviation | cards open the thread by id; never opened locally (staging) |
+| 28 | `/account` | `AccountView` | deviation | Connect X in a cookie web view; paste the confirmation link; real X OAuth unseen |
+| 29 | `/node/:id` (member) | `ThreadView` | deviation | iOS menus, narrower indents (Deviations, M2); visitors sign in first |
+| 29a | `/node/:id` admin extras | — | **gap** | `SemanticNeighbors` rail and read rerun controls not built (admin only) |
+| 30 | `/admin` | authenticated web view (More, admins) | parity | opened M5 as a non-admin (signed in, data refused); unseen as an admin |
+| 31 | `/@username` | Safari view (More → My public page) | parity | the page is public; Safari has no session |
+| 32 | `/@user/:slug` | member: `ThreadView` (M5); else Safari view | parity | checked M5 |
+| 33 | `*` | Reflect | parity | |
+| — | Connect X, X bookmarks connect | `CookieWebFlowSheet` | parity | design §6 web views; local landing checked M4, real OAuth on staging |
+
+**Global UI (map A §4)**
+
+| Piece | App | Status | Note |
+|---|---|---|---|
+| Terms modal | `TermsView` over everything | parity | text checked by `check_terms_text.py` |
+| Updates modal | `UpdatesSheet` | deviation | bottom sheet; poll "Draft with AI" not exercised (billed) |
+| Search modal | `SearchView` sheet | deviation | from the Log and References magnifiers (⌘K there); no app-wide ⌘K |
+| NodeFormModal (Write New Entry, Edit, Reply, Edit Reference) | sheets | deviation | swipe down closes; the draft keeps the text |
+| Craft mode dialog | `CraftModeDialog` | deviation | copy says "in More" |
+| New token dialog | `NewTokenDialog` | deviation | "Tap" for "Click" |
+| Delete, Rename, Regenerate audio, Apply to replies, Public reply, Split content, Unsaved changes dialogs | `.looreDialog` cards | parity | one presenter per dialog chain |
+| Version history drawer | `VersionHistorySheet` | deviation | sheet with list → detail |
+| Admin refusal, X lookup dialogs | admin web view | parity | |
+| Toasts | `ToastStack` | parity | above the mini-player (M5); announced to VoiceOver (M5) |
+| Spend-cap banner | `SpendCapBanner` | parity | unseen live (no capped user); unit-tested |
+| Offline banner | Voice screen, writing form | parity | |
+| Recovery banner | Voice screen | parity | Continue unit-tested only |
+| Global audio player | `MiniPlayerView` above the tab bar | deviation | the phone card, plus the chapter menu |
+| Profile generation watcher | `ProfileGenerationWatcher` on `AppState` | parity | unit-tested; a real build on staging |
+| ProtectedRoute | `RootView` gating | parity | |
+| User / Theme / Toast / Audio contexts | `AppState`, `ThemeManager`, `ToastCenter`, `AudioCenter` | parity | theme follows the system until chosen |
+| Cross-screen signals, CSS offsets, module caches | `AppSignals`, measured mini-player height, stores | parity | offset added M5 |
+| Per-device preferences | `DefaultsKey` (web names) | parity | |
+
+**NavBar and ⋮ menu (map A §2.1)**
+
+| Item | App | Status | Note |
+|---|---|---|---|
+| Brand, Reflect, Artifacts, Log, Commons | bottom tab bar | deviation | design §5; Commons only with the flag; no counts |
+| About ▾ (signed out) | links under the sign-in card | parity | M5 |
+| Login | sign-in screen | parity | |
+| ⋮ | More tab | deviation | design §5 |
+| Import data, Admin, Account, My public page | More rows | parity | |
+| References | More row | deviation | not in the web menu |
+| Light mode, Craft mode (+ dialog, toast, glow) | More rows | parity | |
+| Write new entry, Export data, Prompts (craft) | More rows | parity | export via the share sheet |
+| About: Why Loore, Vision, How To | More rows | parity | |
+| Logout | More row | deviation | asks for confirmation |
+
+Totals (a range of routes counts as one row): routes 15 parity · 11 deviation · 1 gap; global UI 12 parity ·
+7 deviation; NavBar/⋮ 6 parity · 4 deviation. Overall **33 parity, 22 deviation, 1 gap** (56 rows).
 
 ---
 
@@ -441,7 +544,9 @@ In progress: parity walk, accessibility pass, release-safety checks, docs, PR.
 
 **Sign-in, shell and global UI (M1)**
 - **Magic link is pasted into the app** (design §4): extra "I already have a sign-in link"
-  step and paste field, plus a note that sign-up links work once.
+  step and paste field, plus a note that sign-up links work once. After sign-in the app opens Reflect (the
+  web's default target is `/profile`); a link minted with another landing page (`/welcome`, `/confirm-email`)
+  opens that page (M5).
 - **More is a tab/screen**, not a dropdown; it also lists **References** (the web has no entry).
   Menu rows use `text-secondary` instead of the dropdown's `text-muted` for legibility on a full screen.
 - **Logout asks for confirmation** (the web logs out on click): re-signing in on a phone
@@ -574,8 +679,6 @@ In progress: parity walk, accessibility pass, release-safety checks, docs, PR.
   listen-aloud on profiles and references (billed TTS).
 
 **Behaviour gaps**
-- `NodeAudioControls.onTtsGenerated` is not connected to `ThreadModel` (the web sets `has_tts` on the node so a
-  later edit offers "Regenerate audio").
 - Listen-aloud has none of the Voice page's REST recovery (parity with the web).
 - A dictation form that goes away mid-recording stops capture but leaves the audio session active until the
   next audio action.

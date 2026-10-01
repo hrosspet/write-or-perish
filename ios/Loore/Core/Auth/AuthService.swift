@@ -86,8 +86,10 @@ final class AuthService {
 
     /// Verifies a pasted magic link or token: `GET /auth/magic-link/verify` with
     /// redirects disabled, then reads the 302's `Location` (map B §4.1 A).
-    /// On success the auth cookies are in the jar and the Keychain.
-    func verifyMagicLink(pasted: String) async throws {
+    /// On success the auth cookies are in the jar and the Keychain; returns the
+    /// link's landing path when it is not the default (`MagicLink.landingPath`).
+    @discardableResult
+    func verifyMagicLink(pasted: String) async throws -> String? {
         guard let token = MagicLink.extractToken(from: pasted) else {
             throw AuthFailure(message: "That doesn't look like a sign-in link. Copy the whole link from the email and paste it here.")
         }
@@ -116,6 +118,7 @@ final class AuthService {
                 log.error("magic-link verify succeeded but no auth cookie was stored")
                 throw AuthFailure(message: "Loore accepted the link but the sign-in cookie didn't arrive. Please try again.")
             }
+            return MagicLink.landingPath(location: location)
         case .failure(let code):
             var message = MagicLink.message(for: code)
             if let host = MagicLink.linkHost(in: pasted),
