@@ -1,9 +1,9 @@
 import SwiftUI
 
 /// The speaker icon on nodes, profiles and saved references (web `SpeakerIcon`).
-/// Shown when the user has voice mode or the node is public; for nodes whose
-/// `ai_usage` is `none` it shows at 35 % and does nothing. The audio plays in
-/// the global player (the mini-player above the tab bar).
+/// Shown when the user has voice mode or the node is public; where AI usage does
+/// not let AI read (`speechOff`) it shows at 35 % and does nothing. The audio
+/// plays in the global player (the mini-player above the tab bar).
 struct SpeakerButton: View {
     let target: ListenTarget
     var content: String?
@@ -14,9 +14,20 @@ struct SpeakerButton: View {
 
     @Environment(AppState.self) private var app
 
-    private var noAIAccess: Bool {
-        if case .node = target, aiUsage == .off { return true }
-        return false
+    private var noAIAccess: Bool { Self.speechOff(target: target, aiUsage: aiUsage) }
+
+    /// Speech sends the text to a speech model, so the server generates it only
+    /// where AI may read (`speech_allowed`): nodes, model replies included, and
+    /// profile versions whose `ai_usage` is chat or train. Saved references have
+    /// no AI usage. An unknown `aiUsage` (nil) does not turn the icon off.
+    static func speechOff(target: ListenTarget, aiUsage: AIUsage?) -> Bool {
+        switch target {
+        case .node, .profile:
+            guard let aiUsage else { return false }
+            return !aiUsage.allowsAI
+        case .item:
+            return false
+        }
     }
 
     var body: some View {

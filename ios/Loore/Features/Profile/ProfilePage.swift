@@ -70,7 +70,7 @@ struct ProfilePage: View {
     @ViewBuilder private var content: some View {
         DocTitleRow(title: "Profile") {
             if let profile {
-                SpeakerButton(target: .profile(profile.id), content: profile.content,
+                SpeakerButton(target: .profile(profile.id), content: profile.content, aiUsage: profile.aiUsage,
                               onTtsGenerated: { self.profile?.hasTTS = true })
                 HStack(spacing: 12) {
                     VersionChip(text: "v\(versionNumber.map(String.init) ?? "") · \(LooreDateFormat.date(profile.createdAt))") {

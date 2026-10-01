@@ -231,9 +231,13 @@ struct LatestProfile: Decodable, Identifiable, Sendable {
     var sourceDataCutoff: Date?
     var generationType: String?
     var hasTTS: Bool
+    /// The version's AI usage when the server sends it (nil otherwise): a
+    /// version that is not AI-readable gets no new speech.
+    var aiUsage: AIUsage?
 
     enum CodingKeys: String, CodingKey {
         case id, content
+        case aiUsage = "ai_usage"
         case generatedBy = "generated_by"
         case tokensUsed = "tokens_used"
         case createdAt = "created_at"
@@ -256,6 +260,7 @@ struct LatestProfile: Decodable, Identifiable, Sendable {
         sourceDataCutoff = c.tolerant(.sourceDataCutoff)
         generationType = c.tolerant(.generationType)
         hasTTS = c.tolerant(.hasTTS, default: false)
+        aiUsage = c.tolerant(.aiUsage)
     }
 }
 
