@@ -119,7 +119,9 @@ def _should_generate_recent_context(user):
         return False, None, None
 
     # After a refused (cut-off) output nothing was saved, so the gates below
-    # stay open and the same call would repeat every 10 minutes (#368).
+    # stay open and the same call would repeat every 10 minutes (#368):
+    # one more try after an hour, then stopped until a new recent context
+    # or profile version is saved.
     if refusal_backoff.recent_context_in_backoff(user_id):
         return False, None, None
 
@@ -384,15 +386,17 @@ def _generate_recent_context_impl(user_id, profile_id=None,
         # backoff in _should_generate_recent_context.
         cost_log.request_ref = refusal_backoff.REFUSED_REF
         db.session.commit()
-        n, until = refusal_backoff.backoff_until(
-            user_id, refusal_backoff.RECENT_CONTEXT_REQUEST_TYPES,
-            refusal_backoff.latest_recent_context_at(user_id))
-        log = (logger.error if n >= refusal_backoff.MAX_REFUSALS
-               else logger.warning)
-        log("Empty truncated recent-context output for user %s (model %s, "
-            "output_tokens=%s): nothing saved, the previous one stays; "
-            "refusal %d in a row, next try after %s", user_id, model_id,
-            response.get("output_tokens"), n, until)
+        n, until, stopped = refusal_backoff.recent_context_backoff_state(
+            user_id)
+        if stopped:
+            refusal_backoff.report_stop(
+                user_id, "recent context", n, model_id, "recent_context")
+        else:
+            logger.warning(
+                "Empty truncated recent-context output for user %s (model "
+                "%s, output_tokens=%s): nothing saved, the previous one "
+                "stays; next try after %s", user_id, model_id,
+                response.get("output_tokens"), until)
         raise EmptyTruncatedOutputError(
             f"recent context for user {user_id}", model_id,
             response.get("output_tokens"))

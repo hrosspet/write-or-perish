@@ -52,8 +52,9 @@ class EmptyTruncatedOutputError(RuntimeError):
     profile chunks and integration, where a partial profile would become
     the next base — anywhere (empty=False). The job saves nothing, so the
     previous version of what it maintains stays current, and fails; a
-    later run tries again after a backoff (utils/refusal_backoff.py,
-    #368). The cost row for the call is still written."""
+    later run tries again after a backoff (utils/refusal_backoff.py, #368:
+    one retry after an hour, then stopped). The cost row for the call is
+    still written."""
 
     def __init__(self, job, model_id=None, output_tokens=None, empty=True):
         self.job = job

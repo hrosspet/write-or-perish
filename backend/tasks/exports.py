@@ -268,6 +268,42 @@ def should_continue_chain(user, latest_profile):
     ).first() is not None
 
 
+def integration_due(user, latest_profile):
+    """Whether the run that saved ``latest_profile`` (the update base,
+    ``profile_update_base``) ended before its integration: the base is a
+    generated chunk ("iterative" or "update"), it is the newest
+    non-integration version of any ai_usage, no integration was saved on
+    top of it, its chain is finished (``should_continue_chain`` is false)
+    and it has at least two AI-readable versions to merge. Every run that
+    finishes its chunks integrates them (both pipelines), so this is a run
+    whose integration was refused (#368) or lost to a restart. The next
+    scheduled run then integrates alone (``update_user_profile`` with
+    ``integrate_only``, or the batch builder with ``allow_chunk=False``).
+
+    It cannot loop: a saved integration makes it false, and a refused one
+    counts toward the refusal backoff (one retry, then stopped)."""
+    if latest_profile is None or user.profile_needs_full_regen:
+        return False
+    if latest_profile.generated_by == "user" or \
+            latest_profile.generation_type not in ("iterative", "update"):
+        return False
+    newest = UserProfile.query.with_entities(UserProfile.id).filter(
+        UserProfile.user_id == user.id,
+        UserProfile.generation_type != 'integration',
+    ).order_by(UserProfile.created_at.desc()).first()
+    if newest is None or newest[0] != latest_profile.id:
+        return False
+    if UserProfile.query.with_entities(UserProfile.id).filter_by(
+            user_id=user.id, generation_type="integration",
+            parent_profile_id=latest_profile.id).first() is not None:
+        return False
+    if should_continue_chain(user, latest_profile):
+        return False
+    chain = [p for p in _collect_iterative_chain(latest_profile.id)
+             if p.ai_usage in AI_ALLOWED]
+    return len(chain) >= 2
+
+
 class ProfileGenerationTask(Task):
     """Custom task class with error handling."""
 
@@ -424,26 +460,27 @@ def refuse_truncated_profile(user, model_id, response, job, batch=False):
     refused for the backoff), save no version, and raise
     EmptyTruncatedOutputError so the job fails. The last good version
     stays the tip, and the next run resumes from it once the backoff
-    (utils/refusal_backoff.py) allows."""
+    (utils/refusal_backoff.py) allows: one more try after an hour, then
+    the job stops for this user."""
     if not response.get("truncated"):
         return
     _add_profile_cost_log(user, model_id, response, batch=batch,
                           refused=True)
     db.session.commit()
     empty = is_empty_truncated(response)
-    n, until = refusal_backoff.backoff_until(
-        user.id, refusal_backoff.PROFILE_REQUEST_TYPES,
-        refusal_backoff.latest_profile_at(user.id))
-    if n >= refusal_backoff.MAX_REFUSALS:
-        # Surfaces in the admin Profile column (seed_error); cleared by
-        # the next saved version.
+    n, until, stopped = refusal_backoff.profile_backoff_state(user.id)
+    if stopped:
+        # Second refusal in a row: no more automatic runs for this user.
+        # Shown in the admin Profile column (seed_error); the next saved
+        # version clears it.
         user.profile_seed_error = (
-            f"Output cut off {n} times in a row; next try after "
-            f"{until:%Y-%m-%d %H:%M} UTC")[:255]
+            f"Stopped: output cut off {n} times in a row "
+            f"({job}); runs again after an import, a saved version "
+            f"or Build profile")[:255]
         db.session.commit()
-        logger.error(
-            "User %s: profile output cut off %d times in a row (%s, model "
-            "%s); retrying only after %s", user.id, n, job, model_id, until)
+        refusal_backoff.report_stop(
+            user.id, f"profile {job}", n, model_id,
+            "profile_batch" if batch else "profile")
     else:
         logger.warning(
             "Truncated profile output for user %s (%s, model %s, empty=%s, "
@@ -545,7 +582,8 @@ def revert_profile_for_import(user_id, earliest_imported_created_at):
 
 @celery.task(base=ProfileGenerationTask, bind=True)
 def update_user_profile(self, user_id: int, model_id: str,
-                        previous_profile_id: int = None):
+                        previous_profile_id: int = None,
+                        integrate_only: bool = False):
     """
     Unified profile generation / update task.
 
@@ -553,6 +591,10 @@ def update_user_profile(self, user_id: int, model_id: str,
     using only new data written after the previous profile's cutoff.
     Otherwise, performs initial generation (possibly iterative if the
     source data exceeds the context window budget).
+
+    integrate_only: only the integration over the chain ending at
+    previous_profile_id — the retry of a run whose integration was
+    refused (``integration_due``, #368).
     """
     logger.info(
         f"Starting profile update for user {user_id}, model {model_id}, "
@@ -593,7 +635,13 @@ def update_user_profile(self, user_id: int, model_id: str,
                 DEFAULT_MAX_OUTPUT_TOKENS)
             api_keys = get_api_keys_for_usage(flask_app.config, 'chat')
 
-            if previous_profile_id:
+            if integrate_only and previous_profile_id:
+                result = _do_integration(
+                    self, user, model_id, previous_profile_id, api_keys
+                ) or {'user_id': user.id, 'profile_id': None,
+                      'status': 'completed',
+                      'message': 'Nothing to integrate'}
+            elif previous_profile_id:
                 result = _do_incremental_update(
                     self, user, model_id, previous_profile_id,
                     context_window, max_output_tokens, api_keys
@@ -1275,10 +1323,13 @@ def profile_update_base(user_id):
 
 
 def maybe_trigger_profile_update(user_id, model_id=None,
-                                  force_full_regen=False):
+                                  force_full_regen=False,
+                                  integrate_only=False):
     """
     Check concurrency guard and dispatch update_user_profile if safe.
-    Returns the task_id or None if skipped.
+    Returns the task_id or None if skipped. integrate_only: run only the
+    integration over the chain ending at the update base
+    (``integration_due``).
     """
     user = User.query.get(user_id)
     if not user:
@@ -1315,22 +1366,34 @@ def maybe_trigger_profile_update(user_id, model_id=None,
         latest_profile.id if latest_profile else None
     )
 
-    task = update_user_profile.delay(user_id, model_id, prev_id)
+    if integrate_only:
+        if prev_id is None:
+            return None
+        task = update_user_profile.delay(
+            user_id, model_id, prev_id, integrate_only=True)
+    else:
+        task = update_user_profile.delay(user_id, model_id, prev_id)
     user.profile_generation_task_id = task.id
     user.profile_generation_task_dispatched_at = datetime.utcnow()
     db.session.commit()
 
     logger.info(
         f"Dispatched profile update task {task.id} for user {user_id}"
-        f" (force_full_regen={force_full_regen})"
+        f" (force_full_regen={force_full_regen},"
+        f" integrate_only={integrate_only})"
     )
     return task.id
 
 
-def maybe_trigger_incremental_profile_update(user):
+def maybe_trigger_incremental_profile_update(user, ignore_backoff=False):
     """
     Check if enough new writing has accumulated to trigger an
     incremental profile update. Called periodically by Celery beat.
+
+    ignore_backoff: skip the refusal backoff (wait and stop). Only the
+    import hand-off passes it: new data is a new input, so a build the
+    import triggers runs at once (voice review, 2026-10-01). The hourly
+    check never does.
     """
     from datetime import datetime, timedelta
     from backend.models import Node
@@ -1365,7 +1428,7 @@ def maybe_trigger_incremental_profile_update(user):
 
     # After a refused (cut-off) output the gates below stay open — nothing
     # was saved — so without this the same billed call repeats hourly (#368).
-    if refusal_backoff.profile_in_backoff(user.id):
+    if not ignore_backoff and refusal_backoff.profile_in_backoff(user.id):
         return None
 
     latest_profile = profile_update_base(user.id)
@@ -1381,6 +1444,14 @@ def maybe_trigger_incremental_profile_update(user):
                 f"User {user.id}: continuing an unfinished profile chain")
             return maybe_trigger_profile_update(
                 user.id, force_full_regen=user.profile_needs_full_regen)
+        # A finished chain whose integration was refused (or lost): run the
+        # integration alone (#368).
+        if integration_due(user, latest_profile):
+            logger.info(
+                f"User {user.id}: chain {latest_profile.id} has no "
+                f"integration; integrating it")
+            return maybe_trigger_profile_update(
+                user.id, integrate_only=True)
         # Check minimum interval
         if (datetime.utcnow() - latest_profile.created_at) < MIN_INTERVAL:
             return None

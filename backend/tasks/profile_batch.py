@@ -29,7 +29,8 @@ from sqlalchemy import func, or_
 from backend.celery_app import celery, flask_app
 from backend.extensions import db
 from backend.models import User, UserProfile, Node, ProfileBatchJob
-from backend.llm_providers import DEFAULT_MAX_OUTPUT_TOKENS, model_input_cap
+from backend.llm_providers import (
+    DEFAULT_MAX_OUTPUT_TOKENS, model_input_cap, EmptyTruncatedOutputError)
 from backend.utils.chunk_plan import (
     UPDATE_THRESHOLD_UNITS, next_window_budget, max_units_for_cap)
 from backend.utils.api_keys import get_api_keys_for_usage
@@ -138,14 +139,21 @@ def _new_token_count(user, cutoff):
     return q.scalar()
 
 
-def _should_seed(user):
+def _should_seed(user, ignore_backoff=False):
     """Whether the user has crossed the trigger gates right now. Mirrors
     maybe_trigger_incremental_profile_update (inactivity, interval, tokens)
-    without dispatching."""
+    without dispatching.
+
+    ignore_backoff: skip the refusal backoff (wait and stop) — only for a
+    seed an import dispatches (the import is new input) or the admin
+    "Build profile" button sends after the admin confirmed the override
+    (voice review, 2026-10-01)."""
     # The refusal backoff outranks every gate, the regen flag included: a
     # refused chunk leaves them all open, and a pinned (force-batch)
-    # account is never stopped by MAX_BATCH_ATTEMPTS (#368).
-    if refusal_backoff.profile_in_backoff(user.id):
+    # account is never stopped by MAX_BATCH_ATTEMPTS (#368). This also
+    # holds the admin "Build profile" button, which seeds through here,
+    # unless the admin confirmed the override (force).
+    if not ignore_backoff and refusal_backoff.profile_in_backoff(user.id):
         return False
     # A pending full rebuild overrides the volume/interval gates: the
     # rebuild was explicitly requested (regen button, failure recovery,
@@ -167,6 +175,11 @@ def _should_seed(user):
     # continue rule of docs/design/chunk-planner.md: it replaces the
     # pinned-account special case and never leaves a tail unread.
     if latest is not None and _exports.should_continue_chain(user, latest):
+        return True
+    # A finished chain whose integration was refused (or lost): the seeder
+    # builds the integration alone (_seed_profile_batches passes
+    # allow_chunk=False, #368).
+    if _exports.integration_due(user, latest):
         return True
     if latest and (datetime.utcnow() - latest.created_at) < MIN_INTERVAL:
         return False
@@ -576,10 +589,11 @@ def seed_profile_batches():
                 _seed_profile_batches()
 
 
-def _seed_profile_batches(users=None):
+def _seed_profile_batches(users=None, ignore_backoff=False):
     """Impl — runs inside an active app context (testable directly).
     ``users`` restricts the cohort (immediate seed for one user); the
-    default is every profile-eligible user."""
+    default is every profile-eligible user. ``ignore_backoff`` is for an
+    import's seed and a confirmed admin override only (see _should_seed)."""
     config = current_app.config
     if config.get("PROFILE_UPDATES_PAUSED"):
         logger.info("PROFILE_UPDATES_PAUSED — skipping batch seeder")
@@ -604,10 +618,14 @@ def _seed_profile_batches(users=None):
             continue  # exhausted → synchronous last-resort handles it
         # (force-batch users keep retrying here every cycle instead:
         # they must never fall back to the full-price sync path)
-        if not _should_seed(user):
+        if not _should_seed(user, ignore_backoff=ignore_backoff):
             continue
         try:
-            req = _build_next_profile_request(user)
+            # An integration retry builds only the integration, never a
+            # chunk over organic growth since the chain's last render.
+            req = _build_next_profile_request(
+                user, allow_chunk=not _exports.integration_due(
+                    user, _exports.profile_update_base(user.id)))
         except Exception as e:
             # Recorded on the row (admin Profile column) and logged at
             # ERROR so Sentry sees it: a build failure never reaches the
@@ -627,7 +645,7 @@ def _seed_profile_batches(users=None):
 
 
 @celery.task(bind=True, max_retries=20, default_retry_delay=30)
-def seed_profile_batch_for_user(self, user_id):
+def seed_profile_batch_for_user(self, user_id, ignore_backoff=False):
     """Immediate seed for one user (admin pre-fill): same gates as the
     hourly seeder, without waiting for it. Returns the number actually
     put in flight (0 when the provider rejected the submit).
@@ -637,9 +655,13 @@ def seed_profile_batch_for_user(self, user_id):
     give up silently "for the hourly seeder", but that seeder skips
     unapproved accounts, so a pre-filled Inactive user whose immediate
     seed lost the lock never got a profile at all (2026-08-28, four
-    accounts)."""
+    accounts).
+
+    ignore_backoff: the seed an import dispatches, or the admin "Build
+    profile" button after the admin confirmed the override, skips the
+    refusal backoff (_should_seed). Everything else respects it."""
     with flask_app.app_context():
-        n = _seed_profile_batch_for_user_impl(user_id)
+        n = _seed_profile_batch_for_user_impl(user_id, ignore_backoff)
         if n is None:
             logger.info(f"User {user_id}: immediate seed deferred (pass in "
                         f"progress); retry {self.request.retries + 1}")
@@ -647,7 +669,7 @@ def seed_profile_batch_for_user(self, user_id):
         return n
 
 
-def _seed_profile_batch_for_user_impl(user_id):
+def _seed_profile_batch_for_user_impl(user_id, ignore_backoff=False):
     """Impl — runs inside an active app context. None = lock held (caller
     retries); otherwise the number of requests put in flight."""
     user = User.query.get(user_id)
@@ -656,7 +678,7 @@ def _seed_profile_batch_for_user_impl(user_id):
     with batch_pipeline_lock() as ok:
         if not ok:
             return None
-        n = _seed_profile_batches(users=[user])
+        n = _seed_profile_batches(users=[user], ignore_backoff=ignore_backoff)
     logger.info(f"User {user_id}: immediate batch seed → {n} request(s)")
     return n
 
@@ -710,6 +732,14 @@ def _poll_profile_batches():
                         intentions_mod.handle_failed_intentions_item(user, item, job, keys)
                     else:
                         intentions_mod.apply_intentions_item(user, item, result)
+                except EmptyTruncatedOutputError as e:
+                    # Refused (cut off before any text, #368): the cost row
+                    # is written and nothing saved. Shown as "failed" in the
+                    # admin column, not as the older version "complete".
+                    db.session.rollback()
+                    intentions_mod.mark_intentions_item_gave_up(item, job)
+                    logger.warning(f"Intentions result refused for user "
+                                   f"{user.id}: {e}")
                 except Exception as e:
                     logger.error(f"Apply intentions result failed for user "
                                  f"{user.id}: {e}", exc_info=True)
