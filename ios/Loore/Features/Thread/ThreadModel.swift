@@ -313,10 +313,14 @@ final class ThreadModel {
         }
     }
 
+    /// The screen went away (another node pushed over it, or popped). A pending
+    /// reply on this screen is picked up again by the reload on return.
     func stop() {
         pollTask?.cancel()
+        pollTask = nil
         streamTask?.cancel()
         streamTask = nil
+        llmTaskNodeId = nil
     }
 
     /// Completion, failure or cancellation of the tracked reply (map D §5.5–5.6).
