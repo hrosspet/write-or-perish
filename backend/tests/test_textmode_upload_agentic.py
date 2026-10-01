@@ -358,6 +358,10 @@ def tr(monkeypatch, tmp_path):
     app = Flask(__name__)
     app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///:memory:"
     app.config["TESTING"] = True
+    # create_llm_placeholder checks the model against SUPPORTED_MODELS
+    # since #356; without them it falls back to the default model.
+    app.config["DEFAULT_LLM_MODEL"] = "gpt-5"
+    app.config["SUPPORTED_MODELS"] = SUPPORTED
     _db.init_app(app)
     module.flask_app = app
     monkeypatch.setattr(module, "compress_audio_if_needed", lambda p, log: p)
