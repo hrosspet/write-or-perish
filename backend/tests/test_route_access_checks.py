@@ -301,9 +301,78 @@ class TestMediaFiles:
         assert resp.status_code == 404
 
 
+# ── /api/nodes/<id>/audio, /audio-chunks, /audio-download, /tts ──────────
+
+class TestNodeAudioRoutes:
+
+    def test_other_user_gets_404_for_private_node_audio_urls(self, app, data):
+        nid = data.private.id
+        for url in (f"/api/nodes/{nid}/audio",
+                    f"/api/nodes/{nid}/audio-chunks",
+                    f"/api/nodes/{nid}/audio-download"):
+            resp = _call(app, data.bob, "GET", url)
+            assert resp.status_code == 404, url
+            assert "ALICE" not in resp.get_data(as_text=True), url
+
+    def test_owner_gets_private_node_audio_urls(self, app, data):
+        resp = _call(app, data.alice, "GET",
+                     f"/api/nodes/{data.private.id}/audio")
+        assert resp.status_code == 200
+        assert resp.get_json()["tts_url"].startswith("/media/")
+        resp = _call(app, data.alice, "GET",
+                     f"/api/nodes/{data.private.id}/audio-chunks")
+        assert resp.status_code == 200
+        assert len(resp.get_json()["chunks"]) == 1
+
+    def test_other_user_gets_public_node_audio_urls(self, app, data):
+        resp = _call(app, data.bob, "GET",
+                     f"/api/nodes/{data.public.id}/audio")
+        assert resp.status_code == 200
+        assert resp.get_json()["tts_url"].startswith("/media/")
+
+    def test_other_user_cannot_request_speech_for_private_node(
+            self, app, data, monkeypatch):
+        fake_tts = types.ModuleType("backend.tasks.tts")
+        fake_tts.generate_tts_audio = MagicMock()
+        monkeypatch.setitem(sys.modules, "backend.tasks.tts", fake_tts)
+        target = _node(data.alice, "ALICE PRIVATE, NO AUDIO YET")
+
+        resp = _call(app, data.bob, "POST", f"/api/nodes/{target.id}/tts")
+        assert resp.status_code == 404
+        fake_tts.generate_tts_audio.delay.assert_not_called()
+
+    def test_voice_user_can_request_speech_for_public_node(
+            self, app, data, monkeypatch):
+        fake_tts = types.ModuleType("backend.tasks.tts")
+        fake_tts.generate_tts_audio = MagicMock()
+        fake_tts.generate_tts_audio.delay.return_value.id = "task-1"
+        monkeypatch.setitem(sys.modules, "backend.tasks.tts", fake_tts)
+        target = _node(data.alice, "ALICE PUBLIC, NO AUDIO YET",
+                       privacy_level="public")
+
+        resp = _call(app, data.bob, "POST", f"/api/nodes/{target.id}/tts")
+        assert resp.status_code == 202
+        kwargs = fake_tts.generate_tts_audio.delay.call_args.kwargs
+        assert kwargs["requesting_user_id"] == data.bob.id
+
+    def test_other_user_gets_404_for_suggested_model(self, app, data):
+        resp = _call(app, data.bob, "GET",
+                     f"/api/nodes/{data.private.id}/suggested-model")
+        assert resp.status_code == 404
+        resp = _call(app, data.alice, "GET",
+                     f"/api/nodes/{data.private.id}/suggested-model")
+        assert resp.status_code == 200
+
+
 # ── Removed routes ───────────────────────────────────────────────────────
 
 class TestRemovedRoutes:
+
+    def test_children_previews_route_is_gone(self, app, data):
+        resp = _call(app, data.bob, "GET",
+                     f"/api/nodes/{data.private.id}/children")
+        assert resp.status_code == 404
+        assert "ALICE" not in resp.get_data(as_text=True)
 
     def test_nodes_media_helper_is_gone(self, app, data):
         resp = _call(app, None, "GET",

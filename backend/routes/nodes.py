@@ -71,6 +71,20 @@ def voice_mode_required(f):
     return wrapper
 
 
+def _visible_node(node_id):
+    """The node when the current user may see it (the rule GET /<id>
+    applies), else None. Callers answer None with _node_not_found(), so a
+    node the user cannot see looks the same as one that does not exist."""
+    node = Node.query.get(node_id)
+    if node is None or not can_user_access_node(node, current_user.id):
+        return None
+    return node
+
+
+def _node_not_found():
+    return jsonify({"error": "Node not found"}), 404
+
+
 # Root folder (can be overridden via env var)
 AUDIO_STORAGE_ROOT = pathlib.Path(os.environ.get("AUDIO_STORAGE_PATH", "data/audio")).resolve()
 AUDIO_STORAGE_ROOT.mkdir(parents=True, exist_ok=True)
@@ -1452,22 +1466,6 @@ def resolve_node_quotes(node_id):
     }), 200
 
 
-# Retrieve children of a node (as previews).
-@nodes_bp.route("/<int:node_id>/children", methods=["GET"])
-@login_required
-def get_children(node_id):
-    node = Node.query.get_or_404(node_id)
-    def make_preview(text, length=200):
-        return text[:length] + ("..." if len(text) > length else "")
-    children = Node.query.filter_by(parent_id=node_id).all()
-    children_list = [{
-        "id": child.id,
-        "preview": make_preview(child.get_content()),
-        "child_count": len(child.children),
-        "node_type": child.node_type,
-    } for child in children]
-    return jsonify({"children": children_list}), 200
-
 # Titles for in-text links to other nodes (`https://loore.org/node/123`).
 # MarkdownBody swaps a bare node URL for the target's title; this is the
 # batch lookup behind it. One request per rendered body, ids deduplicated
@@ -1594,7 +1592,9 @@ def get_suggested_model(node_id):
     the reply routes apply when no model is sent. ``?purpose=read`` asks
     for the Read button's default instead. ``source`` is "predecessor"
     when an earlier reply in the thread decided it."""
-    node = Node.query.get_or_404(node_id)
+    node = _visible_node(node_id)
+    if node is None:
+        return _node_not_found()
     purpose = _model_purpose()
     if purpose is None:
         return jsonify({"error": "purpose must be 'chat' or 'read'"}), 400
@@ -1737,9 +1737,12 @@ def get_audio_urls(node_id):
 
     Response: 200 OK – `{ original_url: str|null, tts_url: str|null }`
               202 Accepted – when TTS generation is in progress
-              404     – when neither audio exists and no generation in progress.
+              404     – when neither audio exists and no generation in progress,
+                        or the node is not visible to the user.
     """
-    node = Node.query.get_or_404(node_id)
+    node = _visible_node(node_id)
+    if node is None:
+        return _node_not_found()
 
     # Public nodes: any authenticated user can listen.
     # Non-public nodes: require voice-mode (admin or paid plan).
@@ -1803,7 +1806,9 @@ def get_audio_chunks(node_id):
     Browsers incorrectly calculate duration from timestamps for WebM files
     with non-zero start times (common with MediaRecorder timeslice recordings).
     """
-    node = Node.query.get_or_404(node_id)
+    node = _visible_node(node_id)
+    if node is None:
+        return _node_not_found()
 
     # Public nodes: any authenticated user can listen.
     # Non-public nodes: require voice-mode (admin or paid plan).
@@ -1884,7 +1889,9 @@ def download_audio(node_id):
     if fmt not in ('original', 'mp3'):
         return jsonify({"error": "Unsupported format, use 'original' or 'mp3'"}), 400
 
-    node = Node.query.get_or_404(node_id)
+    node = _visible_node(node_id)
+    if node is None:
+        return _node_not_found()
 
     if node.privacy_level != "public":
         if not current_user.has_voice_mode:
@@ -1984,9 +1991,12 @@ def generate_tts(node_id):
     In a production setup this would queue a background task.  For the purpose
     of unit tests and the MVP we generate a dummy file synchronously and return
     `202 Accepted` (if generation was triggered) or `200 OK` (if it already
-    exists).
+    exists). The user must be able to see the node (404 otherwise); the
+    speech is billed to them.
     """
-    node = Node.query.get_or_404(node_id)
+    node = _visible_node(node_id)
+    if node is None:
+        return _node_not_found()
 
     # If original recording exists we stream that – generating TTS is not
     # allowed.
