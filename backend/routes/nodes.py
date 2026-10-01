@@ -79,7 +79,8 @@ def voice_mode_required(f):
 def _visible_node(node_id):
     """The node when the current user may see it (the rule GET /<id>
     applies), else None. Callers answer None with _node_not_found(), so a
-    node the user cannot see looks the same as one that does not exist."""
+    node the user cannot see looks the same as one that does not exist.
+    Admins get no exception: they see what any other user sees."""
     node = Node.query.get(node_id)
     if node is None or not can_user_access_node(node, current_user.id):
         return None
@@ -2061,12 +2062,9 @@ def generate_tts(node_id):
 @login_required
 def get_transcription_status(node_id):
     """Get the current transcription status for a node."""
-    node = Node.query.get_or_404(node_id)
-
-    # Check ownership (can_user_access_node handles LLM nodes by walking
-    # up the parent chain to find the human owner)
-    if not can_user_access_node(node) and not getattr(current_user, "is_admin", False):
-        return jsonify({"error": "Unauthorized"}), 403
+    node = _visible_node(node_id)
+    if node is None:
+        return _node_not_found()
 
     # Get task status from Celery if still processing
     task_info = None
@@ -2142,12 +2140,9 @@ def _reply_below_transcript(node, max_parts=50):
 @login_required
 def get_llm_status(node_id):
     """Get the current LLM completion status for a node."""
-    node = Node.query.get_or_404(node_id)
-
-    # Check ownership (can_user_access_node handles LLM nodes by walking
-    # up the parent chain to find the human owner)
-    if not can_user_access_node(node) and not getattr(current_user, "is_admin", False):
-        return jsonify({"error": "Unauthorized"}), 403
+    node = _visible_node(node_id)
+    if node is None:
+        return _node_not_found()
 
     # Get task status from Celery if still processing
     task_info = None
@@ -2244,12 +2239,9 @@ def get_llm_status(node_id):
 @login_required
 def get_tts_status(node_id):
     """Get the current TTS generation status for a node."""
-    node = Node.query.get_or_404(node_id)
-
-    # Check ownership (can_user_access_node handles LLM nodes by walking
-    # up the parent chain to find the human owner)
-    if not can_user_access_node(node) and not getattr(current_user, "is_admin", False):
-        return jsonify({"error": "Unauthorized"}), 403
+    node = _visible_node(node_id)
+    if node is None:
+        return _node_not_found()
 
     # Get task status from Celery if still processing
     task_info = None
@@ -2946,11 +2938,10 @@ def get_streaming_status(node_id):
 
     Returns status of all chunks and overall transcription progress.
     """
-    node = Node.query.get_or_404(node_id)
-
-    # Check ownership
-    if node.user_id != current_user.id and not getattr(current_user, "is_admin", False):
-        return jsonify({"error": "Unauthorized"}), 403
+    # Owner only, admins included; anyone else gets the missing-node 404.
+    node = Node.query.get(node_id)
+    if node is None or node.user_id != current_user.id:
+        return _node_not_found()
 
     if not node.streaming_transcription:
         return jsonify({"error": "Node is not in streaming transcription mode"}), 400
@@ -3231,10 +3222,9 @@ def get_tts_chapters(node_id):
     chunk durations) so the player can jump within the merged file and
     map chapters onto the chunked queue alike.
     """
-    node = Node.query.get_or_404(node_id)
-    if not can_user_access_node(node) and not getattr(
-            current_user, "is_admin", False):
-        return jsonify({"error": "Unauthorized"}), 403
+    node = _visible_node(node_id)
+    if node is None:
+        return _node_not_found()
 
     from backend.models import TTSChunk
     from backend.utils.audio_processing import tts_chapters

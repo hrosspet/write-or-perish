@@ -75,11 +75,13 @@ def _make_app():
     from backend.routes.drafts import drafts_bp
     from backend.routes.voice import voice_bp
     from backend.routes.profile import profile_bp
+    from backend.routes.sse import sse_bp
     app.register_blueprint(nodes_bp, url_prefix="/api/nodes")
     app.register_blueprint(dashboard_bp, url_prefix="/api/dashboard")
     app.register_blueprint(drafts_bp, url_prefix="/api/drafts")
     app.register_blueprint(voice_bp, url_prefix="/api/voice")
     app.register_blueprint(profile_bp, url_prefix="/api/profile")
+    app.register_blueprint(sse_bp, url_prefix="/api/sse")
     return app
 
 
@@ -671,3 +673,81 @@ class TestThreadViewCounts:
                 reply["child_count"]
             assert entries[tree.root.id]["child_count"] == \
                 root["child_count"]
+
+
+# ── No admin exception on status and stream routes ──────────────────────
+
+class TestAdminsOpenOnlyWhatAnyUserCan:
+    """An admin reads another user's node, profile or draft through the
+    status and stream routes exactly as any other user would: a private
+    one answers 404, the same as a missing one. Owners keep access."""
+
+    @pytest.fixture
+    def admin(self, data):
+        admin = User(username="site-admin", approved=True, plan="alpha",
+                     is_admin=True)
+        _db.session.add(admin)
+        _db.session.commit()
+        return admin
+
+    @pytest.fixture
+    def owned(self, data):
+        node = data.private
+        node.transcription_status = "completed"
+        node.llm_task_status = "completed"
+        profile = UserProfile(user_id=data.alice.id, generated_by="user",
+                              tokens_used=0)
+        profile.set_content("ALICE PROFILE")
+        draft = Draft(user_id=data.alice.id, session_id=str(uuid.uuid4()),
+                      streaming_status="completed")
+        draft.set_content("ALICE DRAFT")
+        _db.session.add_all([profile, draft])
+        _db.session.commit()
+        return types.SimpleNamespace(node=node, profile=profile, draft=draft)
+
+    @staticmethod
+    def _urls(node_id, profile_id, session_id):
+        return [
+            f"/api/nodes/{node_id}/transcription-status",
+            f"/api/nodes/{node_id}/llm-status",
+            f"/api/nodes/{node_id}/tts-status",
+            f"/api/nodes/{node_id}/streaming-status",
+            f"/api/nodes/{node_id}/tts-chapters",
+            f"/api/sse/nodes/{node_id}/transcription-stream",
+            f"/api/sse/nodes/{node_id}/tts-stream",
+            f"/api/sse/nodes/{node_id}/llm-stream",
+            f"/api/sse/profiles/{profile_id}/tts-stream",
+            f"/api/sse/drafts/{session_id}/transcription-stream",
+        ]
+
+    def test_admin_gets_404_like_any_other_user(self, app, data, admin, owned):
+        urls = self._urls(owned.node.id, owned.profile.id,
+                          owned.draft.session_id)
+        missing = self._urls(999999, 999999, str(uuid.uuid4()))
+        for url, missing_url in zip(urls, missing):
+            gone = _call(app, admin, "GET", missing_url)
+            assert gone.status_code == 404, missing_url
+            for viewer in (admin, data.bob):
+                resp = _call(app, viewer, "GET", url)
+                assert resp.status_code == 404, (viewer.username, url)
+                assert resp.get_json() == gone.get_json(), url
+                assert "ALICE" not in resp.get_data(as_text=True)
+
+    def test_owner_keeps_access(self, app, data, owned):
+        expected = [200, 200, 200,
+                    400,  # not a streaming-transcription node
+                    200,
+                    400,  # streaming transcription not enabled
+                    400,  # no TTS run for this node
+                    200,  # stream that ends at once: the reply is done
+                    400,  # no TTS run for this profile
+                    200]  # draft stream
+        urls = self._urls(owned.node.id, owned.profile.id,
+                          owned.draft.session_id)
+        for url, status in zip(urls, expected):
+            resp = _call(app, data.alice, "GET", url)
+            assert resp.status_code == status, url
+            resp.close()
+        resp = _call(app, data.alice, "GET",
+                     f"/api/nodes/{owned.node.id}/llm-status")
+        assert resp.get_json()["content"] == "ALICE PRIVATE ENTRY"
