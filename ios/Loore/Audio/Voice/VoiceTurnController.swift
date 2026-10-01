@@ -555,7 +555,9 @@ final class VoiceTurnController {
                 }
                 return true
             }
-            if !track.allComplete && !track.restDelivered {
+            // A reply spoken while written already streams its audio: no POST /tts
+            // (web useVoiceSession skips it for streamed nodes, M9).
+            if !track.allComplete && !track.restDelivered && !(track.attached && status.ttsStreaming) {
                 await triggerTTS(nodeId, gen)
             }
             return true
@@ -589,7 +591,13 @@ final class VoiceTurnController {
             guard gen == generation, currentNodeId == nodeId else { return }
             switch outcome {
             case .ready(let url):
-                if nodes[nodeId]?.restDelivered != true && nodes[nodeId]?.allComplete != true {
+                guard let track = nodes[nodeId], !track.restDelivered, !track.allComplete else { return }
+                if track.sseDelivered {
+                    // Part of the audio already came as chunks: the whole file would
+                    // repeat it. Reconnect; the stream replays the rest and all_complete (M9).
+                    nodes[nodeId]?.attached = false
+                    attachTTS(nodeId, gen)
+                } else {
                     deliverFull(nodeId, url: url, gen)
                 }
             case .started:
@@ -599,7 +607,13 @@ final class VoiceTurnController {
             // Lost without an answer: the reconcile watchdog re-fires it.
             nodes[nodeId]?.ttsAttemptAt = Date()
         } catch {
-            guard gen == generation else { return }
+            guard gen == generation, currentNodeId == nodeId else { return }
+            if nodes[nodeId]?.attached == true {
+                // The stream is delivering this reply (e.g. a 402 after the cap was
+                // crossed mid-turn): keep it; reconcile handles a dead stream (M9).
+                log.info("POST /tts failed while the stream is attached; keeping the stream")
+                return
+            }
             closeStream()
             endTurnWithError(nil, sound: false)
         }

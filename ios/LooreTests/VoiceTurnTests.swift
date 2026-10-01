@@ -13,6 +13,7 @@ final class FakeVoiceBackend: VoiceBackend {
     var statuses: [StreamingSessionStatus] = []
     var llmStatuses: [Int: [LLMStatus]] = [:]
     var ttsTrigger: [Int: TTSTriggerOutcome] = [:]
+    var ttsTriggerError: [Int: Error] = [:]
     var ttsStatuses: [Int: TTSStatus] = [:]
     var streams: [Int: AsyncThrowingStream<SSEMessage, Error>.Continuation] = [:]
     var streamRequests: [(Int, Int?)] = []
@@ -52,6 +53,7 @@ final class FakeVoiceBackend: VoiceBackend {
 
     func requestTTS(nodeId: Int) async throws -> TTSTriggerOutcome {
         log.append("tts \(nodeId)")
+        if let error = ttsTriggerError[nodeId] { throw error }
         return ttsTrigger[nodeId] ?? .started
     }
 
@@ -375,6 +377,57 @@ final class VoiceTurnTests: XCTestCase {
         await wait("delivered") { audio.fakeQueue.urls == ["/media/ready.mp3"] }
         XCTAssertTrue(backend.log.contains("tts 101"))
         XCTAssertFalse(backend.log.contains("attach 101"))
+    }
+
+    // M9: POST /tts at completion must not duplicate or cut a reply whose stream is attached.
+
+    func testStreamedReplySkipsPostTTS() async throws {
+        backend.statuses = [try status("completed", llm: 101)]
+        backend.llmStatuses[101] = [try llm(101, "processing", tts: "processing", streaming: true),
+                                    try llm(101, "completed", tts: "processing", streaming: true, content: "Done.")]
+        await recordAndStop()
+        await wait("attached") { backend.streams[101] != nil }
+        await wait("completed") { turn.lastReplyNodeId == 101 }
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertFalse(backend.log.contains("tts 101"), "the web skips POST /tts for a streamed node")
+    }
+
+    func testPostTTSAnsweringReadyAfterStreamedChunksDoesNotDuplicateTheReply() async throws {
+        backend.statuses = [try status("completed", llm: 101)]
+        backend.llmStatuses[101] = [try llm(101, "processing", tts: "pending")]
+        backend.ttsTrigger[101] = .ready(url: "/media/full.mp3")
+        await recordAndStop()
+        await wait("attached") { backend.streams[101] != nil }
+        backend.push(101, "chunk_ready", #"{"chunk_index":0,"audio_url":"/media/e0.mp3","duration":2}"#)
+        await wait("playing") { turn.state == .playing }
+        // The TTS finished before the stream's all_complete reached the app.
+        backend.llmStatuses[101] = [try llm(101, "completed", tts: "completed", content: "Done.")]
+        await wait("triggered") { backend.log.contains("tts 101") }
+        await wait("reattached") { backend.streamRequests.count == 2 }
+        XCTAssertEqual(backend.streamRequests.last?.1, 0, "resumes after the last chunk it has")
+        XCTAssertEqual(audio.fakeQueue.urls, ["/media/e0.mp3"], "the whole file is not appended after the chunks")
+        XCTAssertTrue(audio.fakeQueue.generatingTTS)
+        backend.push(101, "chunk_ready", #"{"chunk_index":1,"audio_url":"/media/e1.mp3","duration":2}"#)
+        backend.push(101, "all_complete", #"{"tts_url":"/media/full.mp3","continuation_node_id":null}"#)
+        await wait("done generating") { !audio.fakeQueue.generatingTTS }
+        XCTAssertEqual(audio.fakeQueue.urls, ["/media/e0.mp3", "/media/e1.mp3"])
+    }
+
+    func testPostTTSErrorWhileTheStreamIsAttachedKeepsTheReply() async throws {
+        backend.statuses = [try status("completed", llm: 101)]
+        backend.llmStatuses[101] = [try llm(101, "processing", tts: "pending")]
+        backend.ttsTriggerError[101] = APIError.spendCap(message: "capped")
+        await recordAndStop()
+        await wait("attached") { backend.streams[101] != nil }
+        backend.push(101, "chunk_ready", #"{"chunk_index":0,"audio_url":"/media/f0.mp3","duration":2}"#)
+        await wait("playing") { turn.state == .playing }
+        backend.llmStatuses[101] = [try llm(101, "completed", tts: "processing", content: "Done.")]
+        await wait("triggered") { backend.log.contains("tts 101") }
+        try await Task.sleep(nanoseconds: 30_000_000)
+        XCTAssertEqual(turn.state, .playing, "a 402 on POST /tts does not cut a reply that is streaming")
+        XCTAssertFalse(turn.hasError)
+        backend.push(101, "chunk_ready", #"{"chunk_index":1,"audio_url":"/media/f1.mp3","duration":2}"#)
+        await wait("second chunk") { audio.fakeQueue.urls.count == 2 }
     }
 
     // MARK: Endings
