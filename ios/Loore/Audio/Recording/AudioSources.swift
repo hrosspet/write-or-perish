@@ -20,8 +20,11 @@ protocol PCMSource: AnyObject {
 final class MicrophoneSource: PCMSource {
     var onBuffer: ((AVAudioPCMBuffer) -> Void)?
     var onEnd: (() -> Void)?
-    /// Called when the engine cannot be restarted after a configuration change.
+    /// Called when the engine cannot be restarted after a configuration change
+    /// (after one retry). Delivered on the main queue.
     var onFailure: ((Error) -> Void)?
+    /// Wait before the one retry: a new route is often not ready at once.
+    static let restartRetryDelay: TimeInterval = 0.5
 
     private let engine = AVAudioEngine()
     private var tapInstalled = false
@@ -52,15 +55,28 @@ final class MicrophoneSource: PCMSource {
     private func restartAfterConfigurationChange() {
         guard tapInstalled else { return }
         log.info("engine configuration changed; restarting input")
+        do {
+            try restartEngine()
+        } catch {
+            // One retry shortly after; then the recorder reports it (M15).
+            log.error("engine restart failed; retrying once")
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.restartRetryDelay) { [weak self] in
+                guard let self, self.tapInstalled, !self.engine.isRunning else { return }
+                do {
+                    try self.restartEngine()
+                } catch {
+                    self.log.error("engine restart failed")
+                    self.onFailure?(error)
+                }
+            }
+        }
+    }
+
+    private func restartEngine() throws {
         engine.stop()
         installTap()
-        do {
-            engine.prepare()
-            try engine.start()
-        } catch {
-            log.error("engine restart failed")
-            onFailure?(error)
-        }
+        engine.prepare()
+        try engine.start()
     }
 
     /// Stops capture (the OS mic indicator goes off). `resume()` starts it again.

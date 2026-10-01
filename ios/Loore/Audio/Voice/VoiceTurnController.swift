@@ -143,6 +143,7 @@ final class VoiceTurnController {
         timing = VoiceTiming(backend: backend)
         recorder.onSourceEnded = { [weak self] in self?.stop() }
         recorder.onFatal = { [weak self] message in self?.uploadFailedFatally(message) }
+        recorder.onSourceFailed = { [weak self] in self?.microphoneFailed() }
     }
 
     // MARK: Record
@@ -286,20 +287,29 @@ final class VoiceTurnController {
     func systemInterruptionBegan() {
         switch state {
         case .recording, .starting:
-            guard !isInterrupted else { return }
-            recorder.interrupt()
-            isPaused = true
-            isInterrupted = true
-            audio.playInterruptionAlert()
-            if let id = interruptionToast { notices.dismissToast(id) }
-            interruptionToast = notices.toast(
-                "Recording paused — another app took the microphone (phone call?). Everything up to the interruption is saved. Press Resume to continue.",
-                duration: 24 * 60 * 60)
-            notices.notify(.recordingPaused)
-            audio.refreshNowPlaying()
+            holdForInterruption("Recording paused — another app took the microphone (phone call?). Everything up to the interruption is saved. Press Resume to continue.")
         default:
             break
         }
+    }
+
+    /// The microphone could not restart after a route change (AirPods, CarPlay):
+    /// said like an interruption, so nobody keeps talking into a dead mic (M15).
+    private func microphoneFailed() {
+        guard state == .recording else { return }
+        holdForInterruption("Recording paused — the microphone stopped after an audio device change. Everything up to here is saved. Press Resume to continue.")
+    }
+
+    private func holdForInterruption(_ message: String) {
+        guard !isInterrupted else { return }
+        recorder.interrupt()
+        isPaused = true
+        isInterrupted = true
+        audio.playInterruptionAlert()
+        if let id = interruptionToast { notices.dismissToast(id) }
+        interruptionToast = notices.toast(message, duration: 24 * 60 * 60)
+        notices.notify(.recordingPaused)
+        audio.refreshNowPlaying()
     }
 
     /// The interruption is over. No automatic resume (web parity); the chime

@@ -87,6 +87,7 @@ final class FakeRecorder: VoiceRecording {
     var elapsed: Double = 0
     var onSourceEnded: (() -> Void)?
     var onFatal: ((String) -> Void)?
+    var onSourceFailed: (() -> Void)?
     var outcome = ChunkUploader.Outcome(produced: 2, stored: 2, failed: [], fatalMessage: nil)
     var startError: Error?
     weak var audio: FakeAudio?
@@ -670,6 +671,22 @@ final class VoiceTurnTests: XCTestCase {
         XCTAssertFalse(turn.isPaused)
         XCTAssertFalse(turn.isInterrupted)
         XCTAssertTrue(audio.events.contains("reactivate"))
+    }
+
+    // M15: a microphone that cannot restart after a route change is reported, not silent.
+    func testFailedMicrophoneRestartIsReportedAsAnInterruption() async throws {
+        turn.start()
+        await wait("recording") { turn.state == .recording }
+        recorder.onSourceFailed?()
+        XCTAssertTrue(turn.isInterrupted)
+        XCTAssertTrue(turn.isPaused, "the screen shows Resume, not Recording")
+        XCTAssertEqual(recorder.calls.last, "interrupt")
+        XCTAssertTrue(audio.events.contains("sound.interruption"))
+        XCTAssertEqual(notices.notified, [.recordingPaused])
+        XCTAssertTrue(notices.toasts.last?.hasPrefix("Recording paused — the microphone stopped") == true)
+        turn.resumeRecording()
+        XCTAssertFalse(turn.isInterrupted)
+        XCTAssertEqual(recorder.calls.last, "resume")
     }
 
     func testLongRecordingWarningAt59Minutes() async throws {

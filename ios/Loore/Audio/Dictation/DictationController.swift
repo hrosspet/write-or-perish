@@ -138,6 +138,9 @@ final class DictationController {
         let recorder = VoiceRecorder(debugFile: debugFile)
         recorder.onFatal = { [weak self] message in self?.fatalUpload(message) }
         recorder.onSourceEnded = { [weak self] in self?.stop() }
+        recorder.onSourceFailed = { [weak self] in
+            self?.holdForInterruption("Recording paused — the microphone stopped after an audio device change. Everything up to here is saved. Press Resume to continue.")
+        }
         recorder.chunkObserver = { [weak self] chunk in self?.keep(chunk) }
         return recorder
     }
@@ -291,13 +294,16 @@ final class DictationController {
     }
 
     func systemInterruptionBegan() {
+        holdForInterruption("Recording paused — another app took the microphone (phone call?). Everything up to the interruption is saved. Press Resume to continue.")
+    }
+
+    /// Also when the microphone could not restart after a route change (M15).
+    private func holdForInterruption(_ message: String) {
         guard state == .recording, !isInterrupted, let app else { return }
         recorder?.interrupt()
         isInterrupted = true
         app.audio.sounds.playInterruptionAlert()
-        interruptionToast = app.toasts.show(
-            "Recording paused — another app took the microphone (phone call?). Everything up to the interruption is saved. Press Resume to continue.",
-            duration: 24 * 60 * 60)
+        interruptionToast = app.toasts.show(message, duration: 24 * 60 * 60)
         LocalNotifier.post(.recordingPaused)
     }
 

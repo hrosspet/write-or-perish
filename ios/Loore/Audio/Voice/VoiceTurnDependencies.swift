@@ -42,6 +42,9 @@ protocol VoiceRecording: AnyObject {
     var onSourceEnded: (() -> Void)? { get set }
     /// An upload failed fatally (`init_parse_failed`): the session is dead.
     var onFatal: ((String) -> Void)? { get set }
+    /// The microphone stopped and could not be restarted (after a route change):
+    /// capture is held, as after an interruption.
+    var onSourceFailed: (() -> Void)? { get set }
     func start(sessionId: String, uploadURL: URL, firstChunkIndex: Int, elapsedOffset: Double) throws
     /// User pause: flushes the current segment; capture keeps the session alive.
     func pause()
@@ -115,7 +118,7 @@ enum LocalNotice: String {
     var body: String {
         switch self {
         case .recordingPaused:
-            return "Another app took the microphone. Everything up to the interruption is saved."
+            return "The microphone stopped (a call, or another app or device took it). Everything up to the interruption is saved."
         case .longRecording:
             return "Consider stopping soon and continuing in a new recording."
         }
