@@ -324,6 +324,8 @@ ios/scripts/                    check_terms_text.py, local_backend.sh
   the reply's Opus model; the 404 path is verified), Create issue and Send feedback (would file a
   real issue / message), continuation chains (only unit-tested; cannot be forced), spend-cap and
   offline states, `{quote_ext:N}` bubbles (user 5 has no saved references).
+- The Updates sheet's changelog bodies now go through `MarkdownView` (`flowText`); not re-seen on
+  screen in M2 (user 5 has no unread changelog entry).
 - A long thread's accessibility tree makes XCUITest queries slow; on 201121 a tap on "Apply changes
   to my Todo" did not register in the UI test (the same steps work on a shorter proposal).
 - Voice Mode in the thread posts `/voice/from-node` (billed when it starts a reply) and opens the
