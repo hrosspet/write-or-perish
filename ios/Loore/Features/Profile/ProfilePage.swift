@@ -13,7 +13,9 @@ struct ProfilePage: View {
     @State private var editing = false
     @State private var editContent = ""
     @State private var saving = false
-    @State private var showTtsDialog = false
+    /// The version the editor's text started from (nil: "Write Profile" with no profile).
+    @State private var editingBaseId: Int?
+    @State private var dialog: SaveDialog?
     @State private var showHistory = false
     @State private var generating = false
     @State private var failMessage = ""
@@ -33,11 +35,26 @@ struct ProfilePage: View {
             Task { await fetchProfile() }
         }
         .onChange(of: profile?.id) { _, _ in Task { await fetchVersionCount() } }
-        .looreDialog(isPresented: $showTtsDialog) {
-            RegenerateTtsDialog(onChoice: { regenerate in
-                showTtsDialog = false
-                save(regenerateTts: regenerate)
-            }, onCancel: { showTtsDialog = false })
+        // One presenter whose content switches (PROGRESS.md "Chained dialogs").
+        .looreDialog(isPresented: Binding(get: { dialog != nil }, set: { if !$0 { dialog = nil } })) {
+            switch dialog {
+            case .regenerateTts:
+                RegenerateTtsDialog(onChoice: { regenerate in
+                    dialog = nil
+                    save(regenerateTts: regenerate)
+                }, onCancel: { dialog = nil })
+            case .newerVersion:
+                NewerProfileVersionDialog(onSaveAsNew: {
+                    dialog = nil
+                    send(.create)
+                }, onDiscard: {
+                    dialog = nil
+                    editing = false
+                    editContent = profile?.content ?? ""
+                }, onKeepEditing: { dialog = nil })
+            case nil:
+                EmptyView()
+            }
         }
         .sheet(isPresented: $showHistory) {
             VersionHistorySheet(source: historySource) {
@@ -57,10 +74,7 @@ struct ProfilePage: View {
                               onTtsGenerated: { self.profile?.hasTTS = true })
                 HStack(spacing: 12) {
                     VersionChip(text: "v\(versionNumber.map(String.init) ?? "") · \(LooreDateFormat.date(profile.createdAt))") {
-                        if editing { save() } else {
-                            editContent = profile.content
-                            editing = true
-                        }
+                        if editing { save() } else { startEditing() }
                     }
                     HistoryLink { showHistory = true }
                 }
@@ -99,10 +113,7 @@ struct ProfilePage: View {
             Text("There's nothing to set up. Start writing, and this page will follow — or write the first version yourself.")
                 .foregroundStyle(LooreColor.textMuted)
                 .padding(.bottom, 4)
-            Button("Write Profile") {
-                editContent = ""
-                editing = true
-            }
+            Button("Write Profile") { startEditing() }
             .buttonStyle(.looreFilled)
             .accessibilityIdentifier("profile.write")
         }
@@ -187,22 +198,59 @@ struct ProfilePage: View {
 
     // MARK: Saving
 
+    private enum SaveDialog { case regenerateTts, newerVersion }
+
+    /// Where Save sends the editor's text.
+    enum SaveTarget: Equatable {
+        /// `PUT /profile/<id>`: the version the edit started from is still the latest.
+        case update(Int)
+        /// `POST /profile`: the first profile, or the user's text as a new version.
+        case create
+        /// A version was generated while the editor was open: saving over it would
+        /// replace it in place (and keep it out of history), so ask first.
+        case newerVersionArrived
+    }
+
+    static func saveTarget(editingBaseId: Int?, latestId: Int?) -> SaveTarget {
+        guard latestId == editingBaseId else { return .newerVersionArrived }
+        return latestId.map(SaveTarget.update) ?? .create
+    }
+
+    private func startEditing() {
+        editContent = profile?.content ?? ""
+        editingBaseId = profile?.id
+        editing = true
+    }
+
     private func save(regenerateTts: Bool? = nil) {
         guard !saving, !editContent.jsTrimmed.isEmpty else { return }
-        if let profile, profile.hasTTS, regenerateTts == nil, editContent != profile.content {
-            showTtsDialog = true
+        let target = Self.saveTarget(editingBaseId: editingBaseId, latestId: profile?.id)
+        if target == .newerVersionArrived {
+            dialog = .newerVersion
             return
         }
+        if case .update = target, let profile, profile.hasTTS, regenerateTts == nil, editContent != profile.content {
+            dialog = .regenerateTts
+            return
+        }
+        send(target, regenerateTts: regenerateTts)
+    }
+
+    private func send(_ target: SaveTarget, regenerateTts: Bool? = nil) {
+        guard !saving, !editContent.jsTrimmed.isEmpty else { return }
         saving = true
         Task {
             defer { saving = false }
             do {
-                if let profile {
+                switch target {
+                case .update(let id):
                     var body: [String: JSONValue] = ["content": .string(editContent)]
                     if regenerateTts == true { body["regenerate_tts"] = .bool(true) }
-                    let _: EmptyResponse = try await app.api.put(APIPath.profileItem(profile.id), json: .object(body))
-                } else {
+                    let _: EmptyResponse = try await app.api.put(APIPath.profileItem(id), json: .object(body))
+                case .create:
                     let _: EmptyResponse = try await app.api.post(APIPath.profile, json: ["content": .string(editContent)])
+                case .newerVersionArrived:
+                    return
                 }
                 editing = false
                 await fetchProfile()
@@ -225,6 +273,29 @@ struct ProfilePage: View {
                 guard let id = version.id.rowId else { return }
                 let _: EmptyResponse = try await api.post(APIPath.profileRevert(id))
             })
+    }
+}
+
+/// Save found a version generated while the editor was open.
+private struct NewerProfileVersionDialog: View {
+    let onSaveAsNew: () -> Void
+    let onDiscard: () -> Void
+    let onKeepEditing: () -> Void
+
+    var body: some View {
+        LooreDialogCard(title: "A new version arrived") {
+            DialogBodyText(text: "A new version of your profile was generated while you were editing. Saving now would replace it.")
+            VStack(spacing: 8) {
+                ChoiceButton(title: "Save mine as a new version",
+                             subtitle: "The generated version stays in history; yours becomes the latest.",
+                             tone: .accent, action: onSaveAsNew)
+                ChoiceButton(title: "Discard my edit", subtitle: "Shows the new version.",
+                             tone: .destructive, action: onDiscard)
+                ChoiceButton(title: "Keep editing", action: onKeepEditing)
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("profile.newerVersion")
     }
 }
 

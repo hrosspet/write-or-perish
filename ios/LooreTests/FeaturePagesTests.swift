@@ -627,6 +627,16 @@ final class FeaturePageModelTests: XCTestCase {
         XCTAssertTrue(line.hasPrefix("Built from ~120,000 tokens of writing (94% public tweets, 3% ChatGPT imports) · claude-opus-5.5 · Data through "))
     }
 
+    /// Review M4: a version generated while the editor is open must not be
+    /// overwritten in place by text based on the older version.
+    func testProfileSaveAsksWhenANewerVersionArrived() {
+        XCTAssertEqual(ProfilePage.saveTarget(editingBaseId: 7, latestId: 7), .update(7))
+        XCTAssertEqual(ProfilePage.saveTarget(editingBaseId: nil, latestId: nil), .create)
+        XCTAssertEqual(ProfilePage.saveTarget(editingBaseId: 7, latestId: 8), .newerVersionArrived)
+        XCTAssertEqual(ProfilePage.saveTarget(editingBaseId: nil, latestId: 8), .newerVersionArrived,
+                       "writing the first profile while one is generated")
+    }
+
     func testWorkspaceRoutesSwitchTheArtifactsTab() {
         let env = AppEnvironment.local
         XCTAssertEqual(AppRoute.parse("/artifacts?create=1", environment: env), .newArtifact)
