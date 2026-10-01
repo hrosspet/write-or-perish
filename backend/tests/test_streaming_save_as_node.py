@@ -339,8 +339,8 @@ class TestSaveAsNodeValidation:
 
         for body in ({"agentic": True}, {"auto_generate": True}):
             resp = client.post(_url(draft), json=body)
-            assert resp.status_code == 400
-            assert "ai_usage" in resp.get_json()["error"].lower()
+            assert resp.status_code == 403
+            assert resp.get_json()["code"] == "ai_usage_none"
         assert Node.query.count() == 0
 
     def test_unsupported_model_rejected(self, app):

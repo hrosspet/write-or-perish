@@ -13,9 +13,55 @@ from backend.utils.ca_feed import (
     FEED_AI_USAGE, READ_FURTHER_MARKER, READ_PROMPT_KEYS, ca_turn,
     read_reply_ids,
 )
+from backend.utils.privacy import AI_ALLOWED
 
 
 _MAX_ANCESTRY_HOPS = 1000
+
+
+# ── No reply where AI may not read (Peter, 2026-10-01) ───────────────────
+# A reply sends its thread to a model. It is generated only when every
+# node it would send, and the reply itself, has an ai_usage that lets AI
+# read it ('chat' / 'train'): the rule the web applies when it switches
+# auto-generate off (frontend/src/utils/aiUsage.js contextAllowsAi).
+AI_USAGE_NONE_CODE = "ai_usage_none"
+REPLY_REFUSED_MESSAGE = (
+    "AI usage is set to None here, so Loore keeps this thread away from AI "
+    "and doesn't reply.")
+VOICE_REFUSED_ACCOUNT_MESSAGE = (
+    "Voice mode needs AI to listen and reply. Your Default AI usage is set "
+    "to None, so Loore keeps your entries away from AI. You can change it "
+    "in Account settings.")
+VOICE_REFUSED_THREAD_MESSAGE = (
+    "Voice mode needs AI to listen and reply. AI usage in this thread is "
+    "set to None, so Loore keeps it away from AI. You can change it when "
+    "you edit the thread's entries, and the default for new entries in "
+    "Account settings.")
+
+
+class AIUsageRefused(Exception):
+    """A reply would send text to a model that its ai_usage keeps away
+    from AI. ``scope`` says whose setting decided it: "thread" (a node
+    the reply would read) or "account" (the account's Default AI usage,
+    which a new entry would take). HTTP callers answer 403 with
+    ``{"error", "code": "ai_usage_none", "scope"}``
+    (ai_usage_refused_response; backend/__init__.py registers the same
+    answer for any route that lets it escape)."""
+
+    code = AI_USAGE_NONE_CODE
+
+    def __init__(self, message=REPLY_REFUSED_MESSAGE, scope="thread"):
+        super().__init__(message)
+        self.message = message
+        self.scope = scope
+
+
+def ai_usage_refused_response(exc=None):
+    """The 403 answer for a refused reply or voice turn."""
+    from flask import jsonify
+    exc = exc or AIUsageRefused()
+    return jsonify({"error": exc.message, "code": exc.code,
+                    "scope": exc.scope}), 403
 
 
 def is_active_model(model_id):
@@ -81,7 +127,8 @@ class _Chain:
         self.nodes = [] if node is None else ancestor_chain(
             node.id, Node.id, Node.parent_id, Node.node_type, Node.llm_model,
             Node.deleted_at, Node.prompt_key, Node.tool_calls_meta,
-            Node.ai_usage, max_depth=_MAX_ANCESTRY_HOPS)
+            Node.ai_usage, Node.user_id, Node.human_owner_id,
+            Node.privacy_level, max_depth=_MAX_ANCESTRY_HOPS)
         self.keys = {n.id: n.prompt_key for n in self.nodes if n.prompt_key}
         linked = [n.id for n in self.nodes if not n.prompt_key]
         if linked:
@@ -102,6 +149,20 @@ class _Chain:
                     or (parent is not None and parent.deleted_at is None
                         and self.keys.get(parent.id) in READ_PROMPT_KEYS)):
                 self.reads.add(n.id)
+
+    def unreadable(self, user_id):
+        """The nearest node a reply for *user_id* would send to the model
+        whose ai_usage keeps AI out, else None. The walk is the completion
+        task's (_load_node_chain): up from the node while *user_id* can
+        see it or its tombstone. A deleted node is passed over: the task
+        sends a notice in its place, never its text."""
+        from backend.utils.privacy import can_user_see_node_or_tombstone
+        for n in self.nodes:
+            if not can_user_see_node_or_tombstone(n, user_id):
+                return None
+            if n.deleted_at is None and n.ai_usage not in AI_ALLOWED:
+                return n
+        return None
 
     def llm_replies(self):
         """Alive LLM replies, nearest first. Tombstones are skipped: a
@@ -235,6 +296,50 @@ def reply_ai_usage(parent_node, user, chain=None, parent_content=None):
     return default
 
 
+def reply_refusal(parent_node, user_id, ai_usage=None, chain=None):
+    """Why no reply may be generated under *parent_node* for *user_id*
+    (an AIUsageRefused), or None when it may: a node the reply would send
+    to the model is not AI-readable, or *ai_usage*, the setting the reply
+    (or the entry a turn adds above it) would carry, is not. Every path
+    that starts a reply asks here or goes through create_llm_placeholder,
+    which does."""
+    if ai_usage is not None and ai_usage not in AI_ALLOWED:
+        return AIUsageRefused()
+    if parent_node is None:
+        return None
+    chain = chain or _Chain(parent_node)
+    if chain.unreadable(user_id) is not None:
+        return AIUsageRefused()
+    return None
+
+
+def voice_turn_refusal(user, parent_node=None, ai_usage=None):
+    """Why a Voice turn may not start or get its reply (an AIUsageRefused
+    carrying the Voice screen's message), or None. Voice mode exists to
+    send what is said to a model, so a turn that could not get a reply is
+    not started (Peter, 2026-10-01).
+
+    - A fresh thread (no *parent_node*): the account's Default AI usage
+      and the *ai_usage* the recording carries must both let AI read it
+      ("account").
+    - Continuing a thread: the reply rule under *parent_node*, with the
+      ai_usage the turn's entry takes there (reply_ai_usage): "thread"
+      when a node above is not AI-readable, "account" when only the new
+      entry would not be (a thread whose only nodes are a read takes the
+      account's default)."""
+    if parent_node is None:
+        if (getattr(user, "default_ai_usage", None) not in AI_ALLOWED
+                or (ai_usage is not None and ai_usage not in AI_ALLOWED)):
+            return AIUsageRefused(VOICE_REFUSED_ACCOUNT_MESSAGE, "account")
+        return None
+    chain = _Chain(parent_node)
+    if chain.unreadable(user.id) is not None:
+        return AIUsageRefused(VOICE_REFUSED_THREAD_MESSAGE, "thread")
+    if reply_ai_usage(parent_node, user, chain=chain) not in AI_ALLOWED:
+        return AIUsageRefused(VOICE_REFUSED_ACCOUNT_MESSAGE, "account")
+    return None
+
+
 def create_llm_placeholder(parent_node_id, model_id, human_owner_id,
                            privacy_level="private", ai_usage="chat",
                            placeholder_text="[LLM response generation pending...]",
@@ -250,6 +355,10 @@ def create_llm_placeholder(parent_node_id, model_id, human_owner_id,
     contains a {user_export} placeholder with unrecognized param keys.
     Validation runs BEFORE any DB writes so a misconfigured placeholder
     never produces an orphan LLM node and never incurs LLM API spend.
+
+    Raises AIUsageRefused, also before any write, when a node the reply
+    would send to the model, or the reply's own *ai_usage*, is not
+    AI-readable (reply_refusal).
     """
     # Spend-cap guard: a blocked user must never get an LLM placeholder node
     # (and never incur generation spend). Raised before any DB write so no
@@ -270,6 +379,14 @@ def create_llm_placeholder(parent_node_id, model_id, human_owner_id,
         raise ParentDeletedError("Parent node not found")
     if parent.deleted_at is not None:
         raise ParentDeletedError("Parent node has been deleted")
+
+    # No reply where AI may not read: the thread the task would send (the
+    # parent and what is above it) and the reply itself. Before anything
+    # is decrypted or written.
+    chain = _Chain(parent)
+    refused = reply_refusal(parent, human_owner_id, ai_usage, chain=chain)
+    if refused is not None:
+        raise refused
 
     # Pre-flight: validate any {user_export} placeholders in the parent's
     # content. Misconfigured placeholders previously fell back silently
@@ -303,7 +420,6 @@ def create_llm_placeholder(parent_node_id, model_id, human_owner_id,
     # task's own rule (ca_feed.ca_turn). Any other reply never runs on a
     # deprecated model: one sent explicitly (a preference saved before the
     # deprecation, an old tab) is replaced by the chat default.
-    chain = _Chain(parent)
     turn = reply_read_turn(parent, meta, parent_content, chain=chain)
     if turn in ("read", "read_again"):
         if not is_read_model(model_id):
@@ -323,8 +439,8 @@ def create_llm_placeholder(parent_node_id, model_id, human_owner_id,
     # tweets verbatim: it is 'chat' by construction, like the read
     # routes stamp it. A chat turn after it takes the thread's setting
     # like any other reply (#362, 2026-09-29): the tweets it re-sends
-    # are kept off the training key per call (llm_completion). 'none' is
-    # left as the caller sent it.
+    # are kept off the training key per call (llm_completion). 'none'
+    # never gets here (reply_refusal above).
     if turn in ("read", "read_again") and ai_usage == "train":
         ai_usage = FEED_AI_USAGE
 

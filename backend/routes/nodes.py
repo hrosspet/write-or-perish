@@ -49,8 +49,8 @@ from backend.utils.audio_storage import (
     list_streaming_audio_files, storage_path,
 )
 from backend.utils.llm_nodes import (
-    create_llm_placeholder, pick_model_for_generation,
-    resolve_chat_model, resolve_read_model,
+    AIUsageRefused, ai_usage_refused_response, create_llm_placeholder,
+    pick_model_for_generation, resolve_chat_model, resolve_read_model,
 )
 from backend.utils.placeholders import UserExportValidationError
 
@@ -134,9 +134,7 @@ def _upload_reply_options(values, parent_id, ai_usage):
         }), 400)
     from backend.utils.privacy import AI_ALLOWED
     if ai_usage not in AI_ALLOWED:
-        return False, None, (jsonify({
-            "error": "agentic / auto_generate require ai_usage of 'chat' or 'train'",
-        }), 400)
+        return False, None, ai_usage_refused_response()
     model_id = None
     if auto_generate:
         model_id = values.get("model") or pick_model_for_generation(
@@ -1660,6 +1658,10 @@ def request_llm_response(node_id):
         # any LLM node so the user's Log isn't polluted with a stub
         # failed response. Frontend surfaces this message as a toast.
         return jsonify({"error": str(e)}), 400
+    except AIUsageRefused as e:
+        # The node, a node above it, or the reply's own setting keeps the
+        # thread away from AI: no reply, nothing created.
+        return ai_usage_refused_response(e)
 
     current_app.logger.info(f"Enqueued LLM completion task {task_id} for parent node {parent_node.id}, new node {llm_node.id}")
 

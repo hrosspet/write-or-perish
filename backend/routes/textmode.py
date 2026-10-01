@@ -8,7 +8,8 @@ from backend.utils.timefmt import iso_utc
 from backend.utils.prompts import get_user_prompt_record
 from backend.utils.placeholders import UserExportValidationError
 from backend.utils.llm_nodes import (
-    create_llm_placeholder, pick_model_for_generation, reply_ai_usage,
+    ai_usage_refused_response, create_llm_placeholder,
+    pick_model_for_generation, reply_ai_usage, reply_refusal,
 )
 from backend.utils.context_artifacts import attach_context_artifacts
 from backend.utils.session_helpers import attach_agentic_prompt_under
@@ -92,9 +93,7 @@ def start_conversation():
     # ai_usage of 'none' contradicts that intent — the frontend is
     # expected to pick a different endpoint (/nodes/) in that case.
     if ai_usage == 'none':
-        return jsonify({
-            "error": "Text mode requires ai_usage of 'chat' or 'train'",
-        }), 400
+        return ai_usage_refused_response()
 
     if not model_id:
         # /textmode/start has no parent — ancestry is empty, so the
@@ -249,6 +248,12 @@ def add_message(conversation_id):
     ai_usage = reply_ai_usage(last_node, current_user)
     privacy_level = last_node.privacy_level or "private"
 
+    # This route always replies: refused before the message is written
+    # when the thread (or the message's own setting) keeps AI out.
+    refused = reply_refusal(last_node, current_user.id, ai_usage)
+    if refused is not None:
+        return ai_usage_refused_response(refused)
+
     # Create user message node
     from backend.utils.tokens import approximate_token_count
     user_node = Node(
@@ -380,11 +385,15 @@ def continue_from_node(node_id):
     if not validate_ai_usage(ai_usage):
         return jsonify({"error": f"Invalid ai_usage: {ai_usage}"}), 400
     if ai_usage == 'none':
-        return jsonify({
-            "error": "Text mode requires ai_usage of 'chat' or 'train'",
-        }), 400
+        return ai_usage_refused_response()
     privacy_level = node.privacy_level or "private"
     auto_generate = bool(data.get("auto_generate", True))
+    if auto_generate:
+        # The reply would read the thread above *node*: refused before
+        # anything is written when a node there keeps AI out.
+        refused = reply_refusal(node, current_user.id, ai_usage)
+        if refused is not None:
+            return ai_usage_refused_response(refused)
 
     model_id = data.get("model")
     if not model_id:

@@ -313,6 +313,17 @@ def create_app():
             ),
         }), 402
 
+    # A reply (or a Voice turn) where AI may not read: create_llm_placeholder
+    # raises AIUsageRefused before any write. Routes answer it themselves
+    # where they keep the user's entry; any that lets it escape gets the
+    # same 403 {"error", "code": "ai_usage_none", "scope"}.
+    from backend.utils.llm_nodes import AIUsageRefused
+
+    @app.errorhandler(AIUsageRefused)
+    def _handle_ai_usage_refused(exc):
+        from backend.utils.llm_nodes import ai_usage_refused_response
+        return ai_usage_refused_response(exc)
+
     # --------------------------------------------------------------------
     # Health checks – liveness/readiness for monitoring (no auth).
     # --------------------------------------------------------------------

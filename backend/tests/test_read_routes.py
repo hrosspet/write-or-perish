@@ -370,8 +370,26 @@ class TestReadFromNode:
         _login(client, alice.id)
         resp = client.post(f"/api/read/from-node/{entry.id}",
                            json={"model": "gpt-5"})
-        assert resp.status_code == 400
+        assert resp.status_code == 403
+        assert resp.get_json()["code"] == "ai_usage_none"
         assert Node.query.count() == 1
+
+    def test_ai_usage_none_above_rejected(self, app):
+        # The read sends the whole thread above the node: a 'none' entry
+        # anywhere there refuses it, before the prompt is attached.
+        client = app.test_client()
+        alice = _make_user("alice", is_admin=True)
+        root = _make_node(alice, content="kept from AI", ai_usage="none")
+        entry = _make_node(alice, content="entry", ai_usage="chat",
+                           parent_id=root.id)
+        _db.session.commit()
+
+        _login(client, alice.id)
+        resp = client.post(f"/api/read/from-node/{entry.id}",
+                           json={"model": "gpt-5"})
+        assert resp.status_code == 403
+        assert resp.get_json()["code"] == "ai_usage_none"
+        assert Node.query.count() == 2
 
     def test_missing_node_404(self, app):
         client = app.test_client()
@@ -1034,9 +1052,11 @@ class TestReplyAiUsage:
             node, _ = create_llm_placeholder(parent.id, "gpt-6-sol", alice.id,
                                              ai_usage="train", enqueue=False)
             assert node.ai_usage == "chat", parent
-        node, _ = create_llm_placeholder(t["read"].id, "gpt-6-sol", alice.id,
-                                         ai_usage="none", enqueue=False)
-        assert node.ai_usage == "none"
+        # A reply marked 'none' is not generated at all (2026-10-01).
+        from backend.utils.llm_nodes import AIUsageRefused
+        with pytest.raises(AIUsageRefused):
+            create_llm_placeholder(t["read"].id, "gpt-6-sol", alice.id,
+                                   ai_usage="none", enqueue=False)
         # Outside a read thread the caller's value stands.
         node, _ = create_llm_placeholder(t["root"].id, "claude-opus-4.6",
                                          alice.id, ai_usage="train",

@@ -51,6 +51,11 @@ UPLOAD_REPLY_SKIPPED_SPEND_CAP = (
     "Your entry is saved. Loore didn't reply because you've reached your "
     "monthly usage limit, which resets at the start of next month."
 )
+# ...and whose reply AI usage refused (llm_nodes.reply_refusal).
+UPLOAD_REPLY_SKIPPED_AI_USAGE = (
+    "Your entry is saved. Loore didn't reply because AI usage is set to "
+    "None."
+)
 
 
 def _start_upload_reply(node, tip, model_id):
@@ -64,7 +69,7 @@ def _start_upload_reply(node, tip, model_id):
     if user_is_capped(node.user_id):
         record_task_warning(node, UPLOAD_REPLY_SKIPPED_SPEND_CAP)
         return None
-    from backend.utils.llm_nodes import create_llm_placeholder
+    from backend.utils.llm_nodes import AIUsageRefused, create_llm_placeholder
     try:
         llm_node, _ = create_llm_placeholder(
             tip.id, model_id, node.user_id,
@@ -76,7 +81,11 @@ def _start_upload_reply(node, tip, model_id):
         db.session.rollback()
         logger.warning(
             "Upload reply skipped for node %s: %s", node.id, e)
-        record_task_warning(node, str(e) or "Loore couldn't start a reply.")
+        if isinstance(e, AIUsageRefused):
+            message = UPLOAD_REPLY_SKIPPED_AI_USAGE
+        else:
+            message = str(e) or "Loore couldn't start a reply."
+        record_task_warning(node, message)
         return None
 
 
