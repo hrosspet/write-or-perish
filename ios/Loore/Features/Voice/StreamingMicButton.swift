@@ -10,6 +10,7 @@ struct StreamingMicButton: View {
     @Environment(AppState.self) private var app
     @State private var dictation: DictationController?
     @State private var sharing = false
+    @State private var sharedFile: URL?
 
     private var online: Bool { NetworkStatus.shared.isOnline }
 
@@ -51,8 +52,11 @@ struct StreamingMicButton: View {
                     .buttonStyle(.looreOutline)
                     .accessibilityHint("Stop and save what was recorded so far")
                 }
-                if controller?.recordingFile != nil {
-                    Button { sharing = true } label: {
+                if controller?.hasRecording == true {
+                    Button {
+                        sharedFile = controller?.writeRecordingFile()
+                        sharing = sharedFile != nil
+                    } label: {
                         HStack(spacing: 4) {
                             Image(systemName: "arrow.down.circle").font(.system(size: 12)).accessibilityHidden(true)
                             Text("Save audio")
@@ -63,9 +67,15 @@ struct StreamingMicButton: View {
                 }
             }
         }
-        .sheet(isPresented: $sharing) {
-            if let file = controller?.recordingFile { ShareSheet(items: [file]) }
+        .sheet(isPresented: $sharing, onDismiss: removeSharedFile) {
+            if let file = sharedFile { ShareSheet(items: [file]) }
         }
+    }
+
+    /// The saved copy is deleted once the share sheet closes (M2).
+    private func removeSharedFile() {
+        if let sharedFile { PrivateFiles.remove(sharedFile) }
+        sharedFile = nil
     }
 
     /// What VoiceOver says for the record button (its icons are hidden; the

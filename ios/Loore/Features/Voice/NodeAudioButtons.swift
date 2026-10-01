@@ -58,6 +58,8 @@ struct DownloadAudioButton: View {
     @Environment(AppState.self) private var app
     @State private var loading = false
     @State private var file: URL?
+    /// The downloaded file, deleted when the share sheet closes (M2).
+    @State private var shown: URL?
 
     var body: some View {
         if app.user?.voiceModeEnabled == true || isPublic {
@@ -68,6 +70,7 @@ struct DownloadAudioButton: View {
                 Task {
                     defer { loading = false }
                     file = try? await AudioDownloader.download(nodeId: nodeId, api: app.api)
+                    shown = file
                 }
             } label: {
                 Group {
@@ -87,7 +90,8 @@ struct DownloadAudioButton: View {
             .disabled(noAIAccess)
             .accessibilityLabel(noAIAccess ? "Download off — No AI access" : "Download audio")
             .accessibilityIdentifier("download.\(nodeId)")
-            .sheet(isPresented: Binding(get: { file != nil }, set: { if !$0 { file = nil } })) {
+            .sheet(isPresented: Binding(get: { file != nil }, set: { if !$0 { file = nil } }),
+                   onDismiss: { if let shown { PrivateFiles.remove(shown) }; shown = nil }) {
                 if let file { ShareSheet(items: [file]) { try? FileManager.default.removeItem(at: file) } }
             }
         }

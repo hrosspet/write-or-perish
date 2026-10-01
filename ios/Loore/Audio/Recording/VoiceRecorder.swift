@@ -15,6 +15,7 @@ import os
 final class VoiceRecorder: VoiceRecording {
     var onSourceEnded: (() -> Void)?
     var onFatal: ((String) -> Void)?
+    var onSourceFailed: (() -> Void)?
     /// Sees every chunk in order (dictation keeps a local copy for "Save audio").
     var chunkObserver: ((RecordedChunk) -> Void)?
 
@@ -92,7 +93,10 @@ final class VoiceRecorder: VoiceRecording {
         if let debugFile { return AudioFileSource(url: debugFile) }
         #endif
         let mic = MicrophoneSource()
-        mic.onFailure = { [weak self] _ in self?.interrupt() }
+        mic.onFailure = { [weak self] _ in
+            self?.interrupt()
+            self?.onSourceFailed?()
+        }
         return mic
     }
 

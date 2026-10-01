@@ -47,6 +47,13 @@ final class AudioCenter {
                 self.session.deactivate()
             }
         }
+        player.onTransport = { [weak self] playing in
+            guard let self, self.player.source == .voice else { return }
+            if playing { self.voiceController?.playbackResumed() } else { self.voiceController?.playbackPaused() }
+        }
+        player.onPlaybackError = { [weak self] message in
+            _ = self?.app?.toasts.show(message, duration: 6)
+        }
         player.onStartedPlaying = { [weak self] in
             guard let self, self.player.source == .voice else { return }
             self.voiceController?.queueStartedPlaying()
@@ -61,9 +68,11 @@ final class AudioCenter {
     /// Connects to the app (API client, cookies, toasts). Called once by `AppState`.
     func attach(_ app: AppState) {
         self.app = app
+        // What a killed app left in tmp/ (exports, downloads, imports, dictation).
+        PrivateFiles.sweepTemporary()
         player.cookiesProvider = { [weak app] in app?.api.backendCookies() ?? [] }
         player.urlResolver = { [weak app] raw in
-            if raw.hasPrefix("http://") || raw.hasPrefix("https://") { return URL(string: raw) }
+            if raw.hasPrefix("http://") || raw.hasPrefix("https://") || raw.hasPrefix("file://") { return URL(string: raw) }
             return app?.environment.url(path: raw)
         }
     }
@@ -102,10 +111,14 @@ final class AudioCenter {
         #endif
     }
 
-    /// Sign-out: stop everything and forget the conversation.
+    /// Sign-out: stop everything, forget the conversation, and delete this user's
+    /// audio and temporary files (upload queue, dictation, exports, downloads; M2).
     func signedOut() {
         voiceController?.tearDown()
         voiceController = nil
+        activeDictation?.cancel()
+        ChunkUploader.shared.reset()
+        PrivateFiles.sweepTemporary()
         listenTask?.cancel()
         listenCache = [:]
         loadingSource = nil
@@ -175,7 +188,13 @@ final class AudioCenter {
                                             next: { [weak voice] in voice?.stop() })
                 nowPlaying.update(.recording(elapsed: voice.elapsed, paused: voice.isPaused))
                 return
-            case .stopping, .transcribing, .awaitingAudio:
+            case .stopping:
+                // A second "next" while the last chunks upload does nothing (M11; web
+                // stays in recording until the transcript, so next just stops again).
+                nowPlaying.handlers = .init(next: { [weak voice] in voice?.stop() })
+                nowPlaying.update(.thinking(title: "Voice…"))
+                return
+            case .transcribing, .awaitingAudio:
                 nowPlaying.handlers = .init(next: { [weak voice] in voice?.cancelProcessing() })
                 nowPlaying.update(.thinking(title: "Voice…"))
                 return

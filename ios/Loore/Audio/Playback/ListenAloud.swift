@@ -95,9 +95,17 @@ extension AudioCenter {
             if case .node = target, urls?.hasAudioChunks == true || (urls?.originalURL == nil && urls?.ttsURL == nil),
                let chunks: AudioChunksResponse = try? await api.get("\(target.base)/audio-chunks"),
                !chunks.chunks.isEmpty {
+                if chunks.chunks.contains(where: { ListenFormats.isWebM($0.url) }) {
+                    await self.playConvertedRecording(target, title: title, cacheKey: cacheKey)
+                    return
+                }
                 let entry = ListenCacheEntry(urls: chunks.chunks.map(\.url), durations: chunks.chunks.map(\.duration), chapters: [])
                 self.listenCache[cacheKey] = entry
                 self.player.load(urls: entry.urls, durations: entry.durations, title: title, source: target.source)
+                return
+            }
+            if let original = urls?.originalURL, ListenFormats.isWebM(original) {
+                await self.playConvertedRecording(target, title: title, cacheKey: cacheKey)
                 return
             }
             if let path = urls?.originalURL ?? urls?.ttsURL {
@@ -173,6 +181,25 @@ extension AudioCenter {
         }
     }
 
+    /// A WebM/Opus recording (desktop Chrome), which AVFoundation cannot decode:
+    /// the server's merged MP3 (`audio-download?format=mp3`, design §9.3), fetched
+    /// once to a temporary file (the endpoint runs ffmpeg per request). M14.
+    private func playConvertedRecording(_ target: ListenTarget, title: String, cacheKey: ListenCacheKey) async {
+        guard case .node(let id) = target, let api = appState?.api else { return }
+        do {
+            let file = try await AudioDownloader.fetch("\(APIPath.nodeAudioDownload(id))?format=mp3",
+                                                       to: "node-\(id)-recording.mp3", api: api)
+            guard !Task.isCancelled else { return }
+            let entry = ListenCacheEntry(urls: [file.absoluteString], durations: [nil], chapters: [])
+            listenCache[cacheKey] = entry
+            player.load(urls: entry.urls, title: title, source: target.source)
+        } catch {
+            guard !Task.isCancelled else { return }
+            log.error("no playable copy of a WebM recording")
+            appState?.toasts.show(ListenFormats.webMMessage, duration: 6)
+        }
+    }
+
     /// `GET …/tts-chapters` (nodes and saved references; empty unless > 1 section).
     private func fetchChapters(_ target: ListenTarget, singleFile: Bool) async -> [QueueChapter] {
         guard target.hasChapters, let api = appState?.api,
@@ -189,6 +216,17 @@ extension AudioCenter {
 
     func isLoading(_ target: ListenTarget) -> Bool {
         loadingSource == target.source
+    }
+}
+
+/// Recordings made in desktop Chrome are WebM/Opus, which AVFoundation cannot
+/// decode (map C §10.7).
+enum ListenFormats {
+    static let webMMessage = "This recording is in WebM/Opus, which the app can't play."
+
+    static func isWebM(_ url: String) -> Bool {
+        let path = (url.split(separator: "?").first.map(String.init) ?? url).lowercased()
+        return path.hasSuffix(".webm") || path.hasSuffix(".webm.enc")
     }
 }
 
@@ -237,8 +275,9 @@ enum AudioDownloader {
         return ext.isEmpty ? fallback : ext
     }
 
+    /// Downloads to `tmp/<uuid>/<name>` (swept at launch and sign-out).
     @MainActor
-    private static func fetch(_ path: String, to name: String, api: APIClient) async throws -> URL {
+    static func fetch(_ path: String, to name: String, api: APIClient) async throws -> URL {
         var relative = path
         if path.hasPrefix("http"), let url = URL(string: path) {
             relative = url.path + (url.query.map { "?" + $0 } ?? "")

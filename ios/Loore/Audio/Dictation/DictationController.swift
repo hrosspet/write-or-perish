@@ -19,8 +19,9 @@ final class DictationController {
     private(set) var state: State = .idle
     private(set) var isInterrupted = false
     private(set) var elapsed: Double = 0
-    /// The recording so far as one `.m4a` (fragmented MP4) for "Save audio".
-    private(set) var recordingFile: URL?
+    /// A recording exists for "Save audio" (kept in memory; a file is written
+    /// only when the user saves it, M2).
+    private(set) var hasRecording = false
 
     struct Callbacks {
         /// Before recording starts (the form keeps its current text).
@@ -71,7 +72,7 @@ final class DictationController {
         let gen = generation
         callbacks.started()
         state = .initializing
-        recordingFile = nil
+        hasRecording = false
         recordedData = Data()
         warned = false
         elapsed = 0
@@ -138,15 +139,29 @@ final class DictationController {
         let recorder = VoiceRecorder(debugFile: debugFile)
         recorder.onFatal = { [weak self] message in self?.fatalUpload(message) }
         recorder.onSourceEnded = { [weak self] in self?.stop() }
+        recorder.onSourceFailed = { [weak self] in
+            self?.holdForInterruption("Recording paused — the microphone stopped after an audio device change. Everything up to here is saved. Press Resume to continue.")
+        }
         recorder.chunkObserver = { [weak self] chunk in self?.keep(chunk) }
         return recorder
     }
 
     private func keep(_ chunk: RecordedChunk) {
         recordedData.append(chunk.data)
+        hasRecording = true
+    }
+
+    /// "Save audio": the recording so far as one `.m4a` (fragmented MP4), for the
+    /// share sheet; the caller deletes it when the sheet closes.
+    func writeRecordingFile() -> URL? {
+        guard hasRecording else { return nil }
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("loore-dictation.m4a")
-        try? recordedData.write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
-        recordingFile = url
+        do {
+            try recordedData.write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+            return url
+        } catch {
+            return nil
+        }
     }
 
     /// The draft's transcription stream: live `content_update`, then `all_complete`.
@@ -225,6 +240,12 @@ final class DictationController {
                 self.callbacks.failed(nil, false)
                 return
             }
+            if !outcome.failed.isEmpty {
+                // Finalizing now would leave those chunks out of the transcript (B1).
+                app.audio.sounds.playError()
+                self.fail(VoiceTurnController.missingChunksMessage)
+                return
+            }
             do {
                 var request = APIRequest.json(.post, APIPath.streamingFinalize(sid),
                                               .object(["total_chunks": .int(outcome.totalForFinalize)]))
@@ -285,13 +306,16 @@ final class DictationController {
     }
 
     func systemInterruptionBegan() {
+        holdForInterruption("Recording paused — another app took the microphone (phone call?). Everything up to the interruption is saved. Press Resume to continue.")
+    }
+
+    /// Also when the microphone could not restart after a route change (M15).
+    private func holdForInterruption(_ message: String) {
         guard state == .recording, !isInterrupted, let app else { return }
         recorder?.interrupt()
         isInterrupted = true
         app.audio.sounds.playInterruptionAlert()
-        interruptionToast = app.toasts.show(
-            "Recording paused — another app took the microphone (phone call?). Everything up to the interruption is saved. Press Resume to continue.",
-            duration: 24 * 60 * 60)
+        interruptionToast = app.toasts.show(message, duration: 24 * 60 * 60)
         LocalNotifier.post(.recordingPaused)
     }
 

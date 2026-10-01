@@ -13,6 +13,9 @@ import os
 /// - Every media request carries the session cookies (`AVURLAssetHTTPCookiesKey`);
 ///   `.mp4` originals are served as octet-stream, so their MIME type is overridden.
 /// - Rate 1 / 1.25 / 1.5 / 2 with the time-domain pitch algorithm.
+/// - A chunk that fails (unplayable format, 403/404, network) is reported once
+///   per queue (`onPlaybackError`, the web's playback toast) and skipped like an
+///   ended one, so the queue still drains or finishes.
 @MainActor
 @Observable
 final class ChunkQueuePlayer {
@@ -20,6 +23,8 @@ final class ChunkQueuePlayer {
         var url: URL
         /// Seconds; 0 while unknown.
         var duration: Double
+        /// The item could not be played (skipped; counts as 0 s).
+        var failed = false
     }
 
     /// What the queue is playing, so a speaker icon can show its own state.
@@ -65,6 +70,10 @@ final class ChunkQueuePlayer {
     @ObservationIgnored var onStartedPlaying: (() -> Void)?
     /// State changed (Now Playing refresh).
     @ObservationIgnored var onStateChange: (() -> Void)?
+    /// After `play()` (true) or `pause()` (false): voice silences or resumes its cue.
+    @ObservationIgnored var onTransport: ((Bool) -> Void)?
+    /// A chunk could not be played: the user-facing message (once per queue).
+    @ObservationIgnored var onPlaybackError: ((String) -> Void)?
     /// Before `play()` starts audio: the owner activates the audio session.
     @ObservationIgnored var willPlay: (() -> Void)?
     @ObservationIgnored var cookiesProvider: () -> [HTTPCookie] = { [] }
@@ -76,6 +85,9 @@ final class ChunkQueuePlayer {
     @ObservationIgnored private var timeObserver: Any?
     @ObservationIgnored private var endObserver: NSObjectProtocol?
     @ObservationIgnored private var statusObservation: NSKeyValueObservation?
+    @ObservationIgnored private var failureObserver: NSObjectProtocol?
+    @ObservationIgnored private var itemObservations: [ObjectIdentifier: NSKeyValueObservation] = [:]
+    @ObservationIgnored private var failureReported = false
     @ObservationIgnored private var onFirstPlaying: (() -> Void)?
     @ObservationIgnored private let log = Logger(subsystem: "org.loore.app", category: "player")
 
@@ -95,6 +107,13 @@ final class ChunkQueuePlayer {
             guard let item = note.object as? AVPlayerItem else { return }
             let id = ObjectIdentifier(item)
             MainActor.assumeIsolated { self?.itemEnded(id, item: item) }
+        }
+        failureObserver = NotificationCenter.default.addObserver(forName: AVPlayerItem.failedToPlayToEndTimeNotification,
+                                                                 object: nil, queue: .main) { [weak self] note in
+            guard let item = note.object as? AVPlayerItem else { return }
+            let id = ObjectIdentifier(item)
+            let error = note.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? Error
+            MainActor.assumeIsolated { self?.itemFailed(id, item: item, error: error) }
         }
         statusObservation = player.observe(\.timeControlStatus, options: [.new, .old]) { [weak self] player, change in
             let playing = player.timeControlStatus == .playing
@@ -130,6 +149,7 @@ final class ChunkQueuePlayer {
         currentIndex = 0
         cumulativeTime = 0
         waitingForChunks = false
+        failureReported = false
         isLoaded = !entries.isEmpty
         onFirstPlaying = onPlaying
         entries.indices.forEach(probeDurationIfNeeded)
@@ -185,12 +205,14 @@ final class ChunkQueuePlayer {
         isPlaying = true
         if !waitingForChunks { startPlayer() }
         onStateChange?()
+        onTransport?(true)
     }
 
     func pause() {
         isPlaying = false
         player.pause()
         onStateChange?()
+        onTransport?(false)
     }
 
     func togglePlayPause() {
@@ -280,9 +302,38 @@ final class ChunkQueuePlayer {
         }
     }
 
+    /// An item failed to load or to play on: tell the user once, then go on as
+    /// if it had ended (web `audio.onerror` toast; M14).
+    private func itemFailed(_ id: ObjectIdentifier, item: AVPlayerItem, error: Error?) {
+        guard let index = itemIndex[id], index < entries.count else { return }
+        log.error("chunk \(index) could not be played")
+        entries[index].failed = true
+        entries[index].duration = 0
+        if !failureReported {
+            failureReported = true
+            onPlaybackError?(Self.playbackErrorMessage(url: entries[index].url, error: error))
+        }
+        player.remove(item)
+        itemEnded(id, item: item)
+    }
+
+    /// The web's `playbackErrorMessage`, for what AVFoundation reports.
+    nonisolated static func playbackErrorMessage(url: URL?, error: Error?) -> String {
+        if let url, ListenFormats.isWebM(url.absoluteString) {
+            return ListenFormats.webMMessage
+        }
+        let ns = error as NSError?
+        let underlying = ns?.userInfo[NSUnderlyingErrorKey] as? NSError
+        if ns?.domain == NSURLErrorDomain || underlying?.domain == NSURLErrorDomain {
+            return "Network error loading audio. Try again."
+        }
+        return "Audio playback failed."
+    }
+
     private func itemEnded(_ id: ObjectIdentifier, item: AVPlayerItem) {
         guard let index = itemIndex[id] else { return }
         itemIndex[id] = nil
+        itemObservations.removeValue(forKey: id)?.invalidate()
         let actual = CMTimeGetSeconds(item.currentTime())
         if actual.isFinite, actual > 0, index < entries.count, abs(entries[index].duration - actual) > 0.5 {
             entries[index].duration = actual
@@ -330,13 +381,23 @@ final class ChunkQueuePlayer {
     private func teardownItems() {
         player.removeAllItems()
         itemIndex = [:]
+        itemObservations.values.forEach { $0.invalidate() }
+        itemObservations = [:]
     }
 
     private func makeItem(_ index: Int) -> AVPlayerItem {
         let asset = asset(for: entries[index].url)
         let item = AVPlayerItem(asset: asset)
         item.audioTimePitchAlgorithm = .timeDomain
-        itemIndex[ObjectIdentifier(item)] = index
+        let id = ObjectIdentifier(item)
+        itemIndex[id] = index
+        itemObservations[id] = item.observe(\.status, options: [.new]) { [weak self] item, _ in
+            guard item.status == .failed else { return }
+            let error = item.error
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated { self?.itemFailed(id, item: item, error: error) }
+            }
+        }
         return item
     }
 
@@ -355,13 +416,14 @@ final class ChunkQueuePlayer {
     /// Unknown durations are read from the file (web `preloadChunkDurations`,
     /// 300 s fallback if it cannot be read).
     private func probeDurationIfNeeded(_ index: Int) {
-        guard index < entries.count, entries[index].duration <= 0 else { return }
+        guard index < entries.count, entries[index].duration <= 0, !entries[index].failed else { return }
         let url = entries[index].url
         let asset = asset(for: url)
         Task { [weak self] in
             let seconds = (try? await asset.load(.duration)).map(CMTimeGetSeconds) ?? 300
             guard let self else { return }
-            if let i = self.entries.firstIndex(where: { $0.url == url }), self.entries[i].duration <= 0 {
+            if let i = self.entries.firstIndex(where: { $0.url == url }), self.entries[i].duration <= 0,
+               !self.entries[i].failed {
                 self.entries[i].duration = seconds.isFinite && seconds > 0 ? seconds : 300
                 self.onStateChange?()
             }

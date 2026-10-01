@@ -147,26 +147,85 @@ final class ChunkUploaderTests: XCTestCase {
         uploader.open(sessionId: "s2", uploadURL: URL(string: "http://x/c")!)
         for i in 0..<3 { uploader.enqueue(sessionId: "s2", chunk: chunk(i)) }
         let outcome = await uploader.settle(sessionId: "s2")
-        XCTAssertEqual(attempts[1], 5, "4 retries = 5 attempts (web uploadChunkWithRetry)")
+        XCTAssertEqual(attempts[1], 6, "4 retries = 5 attempts (web uploadChunkWithRetry), plus one more at Stop")
         XCTAssertEqual(attempts[0], 1)
         XCTAssertEqual(outcome.failed, [1])
         XCTAssertEqual(outcome.stored, 2)
-        XCTAssertEqual(outcome.totalForFinalize, 2)
     }
 
     func testOfflineStopDoesNotRetryEveryChunkInFull() async throws {
         var attempts: [Int: Int] = [:]
         uploader.transport = { [unowned self] request, file in
-            attempts[self.index(of: request, file: file), default: 0] += 1
+            let i = self.index(of: request, file: file)
+            attempts[i, default: 0] += 1
+            if i == 0 {
+                return (Data(), HTTPURLResponse(url: request.url!, statusCode: 202, httpVersion: nil, headerFields: nil)!)
+            }
             throw URLError(.notConnectedToInternet)
         }
         uploader.open(sessionId: "s7", uploadURL: URL(string: "http://x/c")!)
         for i in 0..<4 { uploader.enqueue(sessionId: "s7", chunk: chunk(i)) }
         let outcome = await uploader.settle(sessionId: "s7")
-        XCTAssertEqual(attempts[0], 5)
-        XCTAssertEqual(attempts[1], 1)
-        XCTAssertEqual(attempts[3], 1)
-        XCTAssertEqual(outcome.failed, [0, 1, 2, 3])
+        XCTAssertEqual(attempts[1], 6, "5 attempts, then one more at Stop")
+        XCTAssertEqual(attempts[2], 2, "one attempt once the network is known down, one more at Stop")
+        XCTAssertEqual(attempts[3], 2)
+        XCTAssertEqual(outcome.failed, [1, 2, 3])
+    }
+
+    // B1: a later chunk must never reach the server before chunk 0 (the init segment).
+    func testChunkZeroIsNeverOvertakenOrGivenUpWhileRecording() async throws {
+        var sentOrder: [Int] = []
+        uploader.transport = { [unowned self] request, file in
+            let i = self.index(of: request, file: file)
+            sentOrder.append(i)
+            let failing = i == 0 && sentOrder.filter { $0 == 0 }.count <= 7
+            return (Data(), HTTPURLResponse(url: request.url!, statusCode: failing ? 503 : 202, httpVersion: nil, headerFields: nil)!)
+        }
+        uploader.open(sessionId: "s8", uploadURL: URL(string: "http://x/c")!)
+        uploader.enqueue(sessionId: "s8", chunk: chunk(0))
+        uploader.enqueue(sessionId: "s8", chunk: chunk(1))
+        let deadline = Date().addingTimeInterval(3)
+        while uploader.outcome("s8").stored < 2 && Date() < deadline {
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        let outcome = await uploader.settle(sessionId: "s8")
+        XCTAssertEqual(sentOrder, Array(repeating: 0, count: 8) + [1], "chunk 0 retried past the 5 attempts; chunk 1 waited")
+        XCTAssertEqual(outcome.stored, 2)
+        XCTAssertEqual(outcome.failed, [])
+    }
+
+    // B1: chunk 0 still failing at Stop: chunk 1 (which would succeed) is held
+    // back, both are reported missing and kept on disk, and the next launch sends them in order.
+    func testChunkZeroFailingAtStopHoldsBackLaterChunksAndKeepsThem() async throws {
+        var attempts: [Int: Int] = [:]
+        uploader.transport = { [unowned self] request, file in
+            let i = self.index(of: request, file: file)
+            attempts[i, default: 0] += 1
+            return (Data(), HTTPURLResponse(url: request.url!, statusCode: i == 0 ? 503 : 202, httpVersion: nil, headerFields: nil)!)
+        }
+        uploader.open(sessionId: "s9", uploadURL: URL(string: "http://x/c")!)
+        uploader.enqueue(sessionId: "s9", chunk: chunk(0))
+        uploader.enqueue(sessionId: "s9", chunk: chunk(1))
+        let outcome = await uploader.settle(sessionId: "s9")
+        XCTAssertEqual(attempts[0], 6, "5 attempts, then one more at Stop")
+        XCTAssertNil(attempts[1], "never sent before chunk 0")
+        XCTAssertEqual(outcome.stored, 0)
+        XCTAssertEqual(outcome.failed, [0, 1], "missing: the caller must not finalize")
+        let files = try FileManager.default.contentsOfDirectory(atPath: root.appendingPathComponent("s9").path).sorted()
+        XCTAssertEqual(files, ["chunk_0.body", "chunk_1.body", "manifest.json"])
+
+        let relaunched = ChunkUploader(root: root, useBackgroundSession: false)
+        relaunched.delay = { _ in 0.001 }
+        var sentIndexes: [Int] = []
+        relaunched.transport = { [unowned self] request, file in
+            sentIndexes.append(self.index(of: request, file: file))
+            return (Data(), HTTPURLResponse(url: request.url!, statusCode: 202, httpVersion: nil, headerFields: nil)!)
+        }
+        relaunched.resumePending()
+        let resumed = await relaunched.settle(sessionId: "s9")
+        XCTAssertEqual(sentIndexes, [0, 1])
+        XCTAssertEqual(resumed.stored, 2)
+        XCTAssertEqual(resumed.failed, [])
     }
 
     func testTransportErrorsAreRetried() async throws {
@@ -199,6 +258,58 @@ final class ChunkUploaderTests: XCTestCase {
         XCTAssertEqual(calls, 1, "no retry, and chunk 1 is not sent into a dead session")
         XCTAssertEqual(fatal, "Your audio recording could not be processed. Please try recording again. (No moof/mdat)")
         XCTAssertNotNil(outcome.fatalMessage)
+    }
+
+    // M2: a dead session keeps no audio on disk and is not "resumed" at every launch.
+    func testFatalSessionKeepsNoAudioAndIsNotResumed() async throws {
+        uploader.transport = { request, _ in
+            let body = #"{"error":"Could not parse init segment","detail":"x","code":"init_parse_failed"}"#
+            return (Data(body.utf8), HTTPURLResponse(url: request.url!, statusCode: 400, httpVersion: nil, headerFields: nil)!)
+        }
+        uploader.open(sessionId: "s10", uploadURL: URL(string: "http://x/c")!)
+        uploader.enqueue(sessionId: "s10", chunk: chunk(0))
+        uploader.enqueue(sessionId: "s10", chunk: chunk(1))
+        _ = await uploader.settle(sessionId: "s10")
+        uploader.enqueue(sessionId: "s10", chunk: chunk(2))
+        let dir = root.appendingPathComponent("s10")
+        let bodies = ((try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []).filter { $0.hasSuffix(".body") }
+        XCTAssertEqual(bodies, [], "no audio of a dead session stays on disk")
+
+        let relaunched = ChunkUploader(root: root, useBackgroundSession: false)
+        var sent = 0
+        relaunched.transport = { request, _ in
+            sent += 1
+            return (Data(), HTTPURLResponse(url: request.url!, statusCode: 202, httpVersion: nil, headerFields: nil)!)
+        }
+        relaunched.resumePending()
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(sent, 0)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: dir.path))
+    }
+
+    // M2: sign-out deletes the queue; the next user never sends (or keeps) these chunks.
+    func testResetDeletesTheQueueSoTheNextUserSendsNothing() async throws {
+        uploader.transport = { _, _ in
+            try await Task.sleep(nanoseconds: 30_000_000_000)
+            throw URLError(.timedOut)
+        }
+        uploader.open(sessionId: "s11", uploadURL: URL(string: "http://x/c")!)
+        uploader.enqueue(sessionId: "s11", chunk: chunk(0))
+        uploader.enqueue(sessionId: "s11", chunk: chunk(1))
+        try await Task.sleep(nanoseconds: 20_000_000)
+        uploader.reset()
+        try await Task.sleep(nanoseconds: 20_000_000)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: root.path), [])
+
+        let nextUser = ChunkUploader(root: root, useBackgroundSession: false)
+        var sent = 0
+        nextUser.transport = { request, _ in
+            sent += 1
+            return (Data(), HTTPURLResponse(url: request.url!, statusCode: 202, httpVersion: nil, headerFields: nil)!)
+        }
+        nextUser.resumePending()
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(sent, 0)
     }
 
     func testDuplicateAnswerCountsAsStored() async throws {
@@ -269,5 +380,73 @@ final class NowPlayingTests: XCTestCase {
         controller.update(.none)
         XCTAssertNil(MPNowPlayingInfoCenter.default().nowPlayingInfo)
         XCTAssertFalse(center.playCommand.isEnabled)
+    }
+}
+
+// M14: unplayable audio (WebM, 404, network) is reported and skipped, not silent.
+@MainActor
+final class PlaybackFailureTests: XCTestCase {
+    func testWebMIsRecognisedAndMessagesFollowTheWeb() {
+        XCTAssertTrue(ListenFormats.isWebM("/media/nodes/5/9/chunk_0001.webm"))
+        XCTAssertTrue(ListenFormats.isWebM("/media/nodes/5/9/original.WEBM.enc?v=2"))
+        XCTAssertFalse(ListenFormats.isWebM("/media/nodes/5/9/batch_0-19.mp4"))
+        XCTAssertEqual(ChunkQueuePlayer.playbackErrorMessage(url: URL(string: "http://x/media/a.webm"), error: nil),
+                       ListenFormats.webMMessage)
+        XCTAssertEqual(ChunkQueuePlayer.playbackErrorMessage(url: URL(string: "http://x/media/a.mp3"),
+                                                             error: URLError(.notConnectedToInternet)),
+                       "Network error loading audio. Try again.")
+        XCTAssertEqual(ChunkQueuePlayer.playbackErrorMessage(url: URL(string: "http://x/media/a.mp3"), error: nil),
+                       "Audio playback failed.")
+    }
+
+    func testAnUnplayableItemIsReportedOnceAndTheQueueFinishes() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("playback-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let a = dir.appendingPathComponent("chunk_0000.webm")
+        let b = dir.appendingPathComponent("chunk_0001.webm")
+        try Data(repeating: 0x42, count: 4096).write(to: a)
+        try Data(repeating: 0x42, count: 4096).write(to: b)
+
+        let player = ChunkQueuePlayer()
+        var errors: [String] = []
+        var finished = false
+        player.onPlaybackError = { errors.append($0) }
+        player.onFinished = { finished = true }
+        player.load(urls: [a.absoluteString, b.absoluteString], durations: [15, 15], title: "Rec", source: .node(1))
+        let deadline = Date().addingTimeInterval(5)
+        while !finished && Date() < deadline {
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        XCTAssertTrue(finished, "the queue skips unplayable chunks and ends (a voice turn reaches done)")
+        XCTAssertEqual(errors, [ListenFormats.webMMessage], "one toast per queue")
+        XCTAssertFalse(player.isPlaying)
+    }
+}
+
+// M2: what a killed app left in tmp/ is swept at launch and sign-out.
+final class PrivateFilesTests: XCTestCase {
+    func testSweepRemovesOnlyTheAppsTemporaryFiles() throws {
+        let fm = FileManager.default
+        let dir = fm.temporaryDirectory.appendingPathComponent("sweep-test-\(UUID().uuidString)")
+        try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: dir) }
+        let ours = ["loore-dictation.m4a", "loore-export-2026-10-01.txt", "import-\(UUID().uuidString)",
+                    UUID().uuidString, "CFNetworkDownload_abc.tmp", "org.loore.app-Inbox"]
+        for name in ours + ["keep.txt"] {
+            try Data("x".utf8).write(to: dir.appendingPathComponent(name))
+        }
+        PrivateFiles.sweepTemporary(in: dir)
+        XCTAssertEqual(try fm.contentsOfDirectory(atPath: dir.path), ["keep.txt"])
+    }
+
+    func testRemovingADownloadAlsoRemovesItsFolder() throws {
+        let fm = FileManager.default
+        let folder = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        let file = folder.appendingPathComponent("node-1-tts.mp3")
+        try Data("x".utf8).write(to: file)
+        PrivateFiles.remove(file)
+        XCTAssertFalse(fm.fileExists(atPath: folder.path))
     }
 }

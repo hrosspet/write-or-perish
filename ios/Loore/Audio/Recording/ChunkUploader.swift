@@ -8,15 +8,22 @@ import os
 ///   (`completeUntilFirstUserAuthentication`, so it works while the phone is
 ///   locked) and deleted once the server has it.
 /// - One worker per session uploads in index order, so chunk 0 (the init
-///   segment) always lands first.
+///   segment) always lands first. Nothing overtakes it: while recording it is
+///   retried every 16 s at most and never given up; once it is given up (after
+///   Stop), later chunks wait behind it (a batch cannot be remuxed without it).
 /// - Foreground `URLSession` with the web's retry schedule (4 retries, 2/4/8/16 s).
 ///   A chunk that still fails, and every pending chunk when the app goes to the
 ///   background, is also handed to a background `URLSession` (survives
 ///   suspension and termination; the server dedupes by index, the web's
 ///   `sendBeacon` copy).
-/// - `init_parse_failed` on chunk 0 is fatal (the session is dead); other 4xx
-///   answers are given up without retry.
-/// - A relaunch resumes whatever is left (`resumePending()`).
+/// - `settle` (Stop) makes one more foreground attempt for every chunk the
+///   server does not have. A chunk still missing stays queued on disk (the
+///   next launch retries it) and is reported, so the caller does not finalize
+///   without it.
+/// - `init_parse_failed` on chunk 0 is fatal (the session is dead, its audio is
+///   deleted at once); other 4xx answers are given up without retry.
+/// - A relaunch resumes whatever is left (`resumePending()`); sign-out deletes
+///   the whole queue (`reset()`).
 @MainActor
 final class ChunkUploader: NSObject {
     static let shared = ChunkUploader()
@@ -48,6 +55,8 @@ final class ChunkUploader: NSObject {
     struct Outcome: Equatable {
         var produced: Int
         var stored: Int
+        /// Chunks the server does not have (given up, or held back behind a
+        /// missing chunk 0). Non-empty = do not finalize.
         var failed: [Int]
         var fatalMessage: String?
         /// Chunks stored before this recording resumed the session (web `existingChunkCount`).
@@ -123,6 +132,8 @@ final class ChunkUploader: NSObject {
             log.error("enqueue for an unknown session")
             return
         }
+        // A dead session (fatal answer): its audio is not kept.
+        if manifest.chunks.values.contains(where: { $0.status == .fatal }) { return }
         var form = MultipartFormData()
         form.addFile("chunk", filename: "chunk_\(chunk.index).mp4", mimeType: "audio/mp4", data: chunk.data)
         form.addField("chunk_index", String(chunk.index))
@@ -148,14 +159,19 @@ final class ChunkUploader: NSObject {
         persist(sessionId)
     }
 
-    /// Waits until every chunk of a closed session is stored, given up, or fatal.
+    /// Waits until every chunk of a closed session is stored, given up, or fatal,
+    /// then gives every missing chunk one more foreground attempt (the thinking
+    /// cue keeps the app running here). Missing chunks stay queued on disk.
     func settle(sessionId: String) async -> Outcome {
         close(sessionId: sessionId)
         while let worker = workers[sessionId] {
             await worker.value
             if workers[sessionId] == worker { workers[sessionId] = nil }
         }
-        return outcome(sessionId)
+        await finalPass(sessionId)
+        let result = outcome(sessionId)
+        requeueMissing(sessionId)
+        return result
     }
 
     func outcome(_ sessionId: String) -> Outcome {
@@ -163,7 +179,7 @@ final class ChunkUploader: NSObject {
         let fatal = chunks.contains { $0.status == .fatal }
         return Outcome(produced: chunks.count,
                        stored: chunks.filter { $0.status == .stored }.count,
-                       failed: chunks.filter { $0.status == .failed || $0.status == .fatal }.map(\.index).sorted(),
+                       failed: chunks.filter { $0.status != .stored }.map(\.index).sorted(),
                        fatalMessage: fatal ? fatalMessages[sessionId] : nil,
                        prior: manifests[sessionId]?.firstIndex ?? 0)
     }
@@ -190,14 +206,45 @@ final class ChunkUploader: NSObject {
                 continue
             }
             if manifests[manifest.sessionId] != nil { continue }
-            let open = manifest.chunks.values.contains { $0.status == .pending }
+            // A dead session (fatal answer) is never resumed (M2).
+            if manifest.chunks.values.contains(where: { $0.status == .fatal }) {
+                try? fileManager.removeItem(at: dir)
+                continue
+            }
+            var resumed = manifest
+            // Given-up chunks whose body is still here get another chance (B1).
+            for (index, record) in manifest.chunks where record.status == .failed
+                && fileManager.fileExists(atPath: bodyFile(manifest.sessionId, index).path) {
+                resumed.chunks[index]?.status = .pending
+            }
+            let open = resumed.chunks.values.contains { $0.status == .pending }
             if !open {
                 try? fileManager.removeItem(at: dir)
                 continue
             }
-            manifests[manifest.sessionId] = manifest
+            // No recorder adds to a session left by an earlier launch.
+            resumed.closed = true
+            manifests[manifest.sessionId] = resumed
+            persist(manifest.sessionId)
             log.info("resuming uploads for a session left by a previous launch")
             startWorker(manifest.sessionId)
+        }
+    }
+
+    /// Sign-out: stop every upload (foreground and background, which carry this
+    /// user's cookie) and delete the queue, so nothing of this user's audio stays
+    /// on disk or is sent with the next user's cookies (M2).
+    func reset() {
+        workers.values.forEach { $0.cancel() }
+        workers = [:]
+        manifests = [:]
+        fatalMessages = [:]
+        degraded = []
+        if useBackgroundSession {
+            backgroundSession.getAllTasks { tasks in tasks.forEach { $0.cancel() } }
+        }
+        for dir in (try? fileManager.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)) ?? [] {
+            try? fileManager.removeItem(at: dir)
         }
     }
 
@@ -226,32 +273,43 @@ final class ChunkUploader: NSObject {
                   let next = manifest.chunks.values.filter({ $0.status == .pending }).min(by: { $0.index < $1.index })
             else { return }
             if manifest.chunks.values.contains(where: { $0.status == .fatal }) { return }
+            // Nothing overtakes a given-up init segment (B1).
+            if manifest.chunks[manifest.firstIndex]?.status == .failed { return }
             await upload(sessionId, index: next.index)
         }
+    }
+
+    /// The session's first chunk (the init segment) is not on the server yet.
+    private func initMissing(_ manifest: Manifest) -> Bool {
+        guard let record = manifest.chunks[manifest.firstIndex] else { return false }
+        return record.status != .stored
     }
 
     private enum AttemptResult { case stored, retry, giveUp, fatal(String) }
 
     private func upload(_ sessionId: String, index: Int) async {
         var attempt = 0
+        let isInit = manifests[sessionId]?.firstIndex == index
         while !Task.isCancelled {
+            // A background copy may have landed while this one waited.
+            if manifests[sessionId]?.chunks[index]?.status == .stored { return }
             let result = await attemptUpload(sessionId, index: index)
             switch result {
             case .stored:
-                degraded.remove(sessionId)
-                mark(sessionId, index, .stored)
-                try? fileManager.removeItem(at: bodyFile(sessionId, index))
+                stored(sessionId, index)
                 return
             case .fatal(let message):
-                mark(sessionId, index, .fatal)
-                fatalMessages[sessionId] = message
-                onFatal?(sessionId, message)
+                failFatally(sessionId, index, message)
                 return
             case .giveUp:
                 mark(sessionId, index, .failed)
                 return
             case .retry:
-                if attempt >= Self.retryDelays.count || degraded.contains(sessionId) {
+                if isInit && manifests[sessionId]?.closed == false {
+                    // Chunk 0 is never given up while recording: later chunks wait
+                    // behind it (B1). One background copy after the regular retries.
+                    if attempt == Self.retryDelays.count { startBackgroundUpload(sessionId, index: index) }
+                } else if attempt >= Self.retryDelays.count || degraded.contains(sessionId) {
                     log.error("chunk \(index) failed after \(attempt + 1) attempts; handing to the background session")
                     degraded.insert(sessionId)
                     mark(sessionId, index, .failed)
@@ -263,6 +321,61 @@ final class ChunkUploader: NSObject {
                 try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
             }
         }
+    }
+
+    private func stored(_ sessionId: String, _ index: Int) {
+        degraded.remove(sessionId)
+        mark(sessionId, index, .stored)
+        try? fileManager.removeItem(at: bodyFile(sessionId, index))
+    }
+
+    private func failFatally(_ sessionId: String, _ index: Int, _ message: String) {
+        mark(sessionId, index, .fatal)
+        fatalMessages[sessionId] = message
+        // Nothing of a dead session can be sent: delete its audio now (M2).
+        for chunk in manifests[sessionId]?.chunks.keys.map({ $0 }) ?? [] {
+            try? fileManager.removeItem(at: bodyFile(sessionId, chunk))
+        }
+        onFatal?(sessionId, message)
+    }
+
+    /// Stop: one more attempt for every chunk the server does not have, in
+    /// index order; if the init segment still fails, nothing after it is sent.
+    private func finalPass(_ sessionId: String) async {
+        guard let manifest = manifests[sessionId],
+              !manifest.chunks.values.contains(where: { $0.status == .fatal }) else { return }
+        let missing = manifest.chunks.values.filter { $0.status != .stored }.map(\.index).sorted()
+        for index in missing {
+            guard !Task.isCancelled, manifests[sessionId]?.chunks[index]?.status != .stored else { continue }
+            let isInit = index == manifest.firstIndex
+            guard fileManager.fileExists(atPath: bodyFile(sessionId, index).path) else {
+                if isInit { return }
+                continue
+            }
+            switch await attemptUpload(sessionId, index: index) {
+            case .stored:
+                stored(sessionId, index)
+            case .fatal(let message):
+                failFatally(sessionId, index, message)
+                return
+            case .giveUp, .retry:
+                mark(sessionId, index, .failed)
+                if isInit { return }
+            }
+        }
+    }
+
+    /// Chunks still missing after `settle` stay queued: the next launch
+    /// (`resumePending`), a background copy, or the next chunk of a resumed
+    /// recording uploads them.
+    private func requeueMissing(_ sessionId: String) {
+        guard let manifest = manifests[sessionId],
+              !manifest.chunks.values.contains(where: { $0.status == .fatal }) else { return }
+        for record in manifest.chunks.values where record.status == .failed
+            && fileManager.fileExists(atPath: bodyFile(sessionId, record.index).path) {
+            manifests[sessionId]?.chunks[record.index]?.status = .pending
+        }
+        persist(sessionId)
     }
 
     private func attemptUpload(_ sessionId: String, index: Int) async -> AttemptResult {
@@ -327,7 +440,10 @@ final class ChunkUploader: NSObject {
     /// background copy that finishes even if the app is suspended.
     func handOffPendingToBackground() {
         for (sessionId, manifest) in manifests {
+            let holdBack = initMissing(manifest)
             for record in manifest.chunks.values where record.status == .pending {
+                // Nothing overtakes the init segment (B1).
+                if holdBack && record.index != manifest.firstIndex { continue }
                 startBackgroundUpload(sessionId, index: record.index)
             }
         }
@@ -354,6 +470,10 @@ final class ChunkUploader: NSObject {
         guard manifests[sessionId]?.chunks[index] != nil else { return }
         mark(sessionId, index, .stored)
         try? fileManager.removeItem(at: bodyFile(sessionId, index))
+        // Chunks held back behind this one (the init segment) can go now.
+        if manifests[sessionId]?.chunks.values.contains(where: { $0.status == .pending }) == true {
+            startWorker(sessionId)
+        }
     }
 
     // MARK: Files
