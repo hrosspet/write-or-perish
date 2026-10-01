@@ -358,6 +358,89 @@ final class TodoModelTests: StubbedAppTestCase {
         XCTAssertEqual(m.todo?.content, shown)
         XCTAssertEqual(app.toasts.toasts.last?.message, "Couldn't save change — reverted (No todo exists to update)")
     }
+
+    // MARK: Quick edits in a row (review B2)
+
+    /// A stub backend that keeps the PATCHed content; a PATCH whose content
+    /// matches `failWhen` is answered with 500.
+    private final class TodoServer: @unchecked Sendable {
+        private let lock = NSLock()
+        private var _content: String
+        private let failWhen: (String) -> Bool
+
+        init(_ content: String, failWhen: @escaping (String) -> Bool = { _ in false }) {
+            _content = content
+            self.failWhen = failWhen
+        }
+
+        var content: String {
+            lock.lock()
+            defer { lock.unlock() }
+            return _content
+        }
+
+        func answer(_ request: URLRequest) -> StubResponse {
+            lock.lock()
+            defer { lock.unlock() }
+            if request.httpMethod == "PATCH" {
+                let sent = (try? JSONSerialization.jsonObject(with: request.httpBody ?? Data())) as? [String: Any]
+                let content = sent?["content"] as? String ?? _content
+                if failWhen(content) { return .json(500, #"{"error":"Server error"}"#) }
+                _content = content
+            }
+            return .json(200, json(["todo": ["id": 1, "content": _content, "version_number": 1]]))
+        }
+    }
+
+    private let two = "## Today\n\n- [ ] water the plants\n- [ ] feed the cat\n"
+
+    private func model(on server: TodoServer) async -> TodoModel {
+        let m = TodoModel(app: app)
+        StubURLProtocol.install { server.answer($0) }
+        await m.fetch()
+        return m
+    }
+
+    func testTwoQuickTicksAreBothSaved() async {
+        let server = TodoServer(two)
+        let m = await model(on: server)
+        let items = TodoSections.parse(m.todo?.content).first!.items
+        async let first: Void = m.toggle(items[0])
+        async let second: Void = m.toggle(items[1])
+        _ = await (first, second)
+        let both = "## Today\n\n- [x] water the plants\n- [x] feed the cat\n"
+        XCTAssertEqual(server.content, both, "the second tick's PATCH builds on the first one's")
+        XCTAssertEqual(m.todo?.content, both)
+        XCTAssertEqual(calls.suffix(4), ["GET /api/todo/", "PATCH /api/todo/", "GET /api/todo/", "PATCH /api/todo/"])
+    }
+
+    func testAQuickAddThenATickKeepsTheNewTask() async {
+        let server = TodoServer(two)
+        let m = await model(on: server)
+        let items = TodoSections.parse(m.todo?.content).first!.items
+        async let added = m.quickAdd("buy milk")
+        async let ticked: Void = m.toggle(items[1])
+        let ok = await added
+        _ = await ticked
+        XCTAssertTrue(ok)
+        let expected = "## Today\n\n- [ ] water the plants\n- [x] feed the cat\n- [ ] buy milk\n"
+        XCTAssertEqual(server.content, expected)
+        XCTAssertEqual(m.todo?.content, expected)
+    }
+
+    func testAFailedEditDoesNotUndoTheNextOne() async {
+        // Whichever tap runs first, the PATCH that ticks the plants fails.
+        let server = TodoServer(two, failWhen: { $0.contains("- [x] water the plants") })
+        let m = await model(on: server)
+        let items = TodoSections.parse(m.todo?.content).first!.items
+        async let first: Void = m.toggle(items[0])
+        async let second: Void = m.toggle(items[1])
+        _ = await (first, second)
+        let secondOnly = "## Today\n\n- [ ] water the plants\n- [x] feed the cat\n"
+        XCTAssertEqual(server.content, secondOnly)
+        XCTAssertEqual(m.todo?.content, secondOnly, "only the failed tick is reverted")
+        XCTAssertEqual(app.toasts.toasts.last?.message, "Couldn't save change — reverted (Server error)")
+    }
 }
 
 /// Import: archive reading, bodies, results (map E §7.1).
