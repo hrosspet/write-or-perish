@@ -213,10 +213,10 @@ def _save_digest(user, model_id, digest_text, response, corpus_at, batch):
                 "{name}", user.username or "the user")),
         generated_by=model_id,
         tokens_used=fields["input_tokens"] + fields["output_tokens"],
-        # Respect a manual opt-out on the previous version; otherwise
-        # mirror the user's global default (recent_context precedent).
-        ai_usage=(previous.ai_usage if previous
-                  else user.default_ai_usage),
+        # The account's AI-usage setting at the time this version is
+        # written, like every artifact writer (#326). A prompt that opens
+        # the digest counts it by this value (Peter, 2026-10-01).
+        ai_usage=user.default_ai_usage,
     )
     artifact.set_content(digest_text)
     db.session.add(artifact)
