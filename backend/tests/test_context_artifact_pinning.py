@@ -491,6 +491,6 @@ def test_load_node_chain_is_root_first_and_prefetches_every_dek(app, monkeypatch
     seen = []
     monkeypatch.setattr(encryption, "prefetch_deks", lambda texts: seen.append(list(texts)) or 0)
 
-    chain = _load_node_chain(leaf)
+    chain = _load_node_chain(leaf, u.id)
     assert [n.id for n in chain] == [root.id, mid.id, leaf.id]
     assert seen == [["root", "mid", "leaf"]]

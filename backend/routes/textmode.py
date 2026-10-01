@@ -12,7 +12,9 @@ from backend.utils.llm_nodes import (
 )
 from backend.utils.context_artifacts import attach_context_artifacts
 from backend.utils.session_helpers import attach_agentic_prompt_under
-from backend.utils.privacy import validate_ai_usage
+from backend.utils.privacy import (
+    can_user_see_node_or_tombstone, validate_ai_usage,
+)
 
 textmode_bp = Blueprint("textmode", __name__)
 
@@ -301,12 +303,16 @@ def get_conversation_from_node(node_id):
 
     # Collect ancestor chain (including target node, excluding root).
     # Cycle-safe: stop if we revisit a node or exceed a sane hop limit.
+    # The chain ends below the first ancestor the user cannot see, so the
+    # response never carries content that is not theirs to read.
     chain = []
     current = node
     visited = set()
     MAX_HOPS = 1000
     for _ in range(MAX_HOPS):
         if current is None or current.id in visited:
+            break
+        if not can_user_see_node_or_tombstone(current, current_user.id):
             break
         visited.add(current.id)
         chain.append(current)

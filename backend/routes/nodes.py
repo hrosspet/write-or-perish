@@ -11,6 +11,7 @@ from backend.utils.slugs import permalink_for
 from datetime import datetime
 from openai import OpenAI
 import os
+import re
 # Additional imports for Voice‑Mode functionality
 from functools import wraps
 from werkzeug.utils import secure_filename
@@ -23,6 +24,7 @@ from backend.utils.privacy import (
     validate_ai_usage,
     get_default_privacy_settings,
     can_user_access_node,
+    can_user_see_node_or_tombstone,
     can_user_view_tombstone,
     can_user_edit_node,
     PrivacyLevel,
@@ -69,6 +71,20 @@ def voice_mode_required(f):
         return f(*args, **kwargs)
 
     return wrapper
+
+
+def _visible_node(node_id):
+    """The node when the current user may see it (the rule GET /<id>
+    applies), else None. Callers answer None with _node_not_found(), so a
+    node the user cannot see looks the same as one that does not exist."""
+    node = Node.query.get(node_id)
+    if node is None or not can_user_access_node(node, current_user.id):
+        return None
+    return node
+
+
+def _node_not_found():
+    return jsonify({"error": "Node not found"}), 404
 
 
 # Root folder (can be overridden via env var)
@@ -1452,22 +1468,6 @@ def resolve_node_quotes(node_id):
     }), 200
 
 
-# Retrieve children of a node (as previews).
-@nodes_bp.route("/<int:node_id>/children", methods=["GET"])
-@login_required
-def get_children(node_id):
-    node = Node.query.get_or_404(node_id)
-    def make_preview(text, length=200):
-        return text[:length] + ("..." if len(text) > length else "")
-    children = Node.query.filter_by(parent_id=node_id).all()
-    children_list = [{
-        "id": child.id,
-        "preview": make_preview(child.get_content()),
-        "child_count": len(child.children),
-        "node_type": child.node_type,
-    } for child in children]
-    return jsonify({"children": children_list}), 200
-
 # Titles for in-text links to other nodes (`https://loore.org/node/123`).
 # MarkdownBody swaps a bare node URL for the target's title; this is the
 # batch lookup behind it. One request per rendered body, ids deduplicated
@@ -1594,7 +1594,9 @@ def get_suggested_model(node_id):
     the reply routes apply when no model is sent. ``?purpose=read`` asks
     for the Read button's default instead. ``source`` is "predecessor"
     when an earlier reply in the thread decided it."""
-    node = Node.query.get_or_404(node_id)
+    node = _visible_node(node_id)
+    if node is None:
+        return _node_not_found()
     purpose = _model_purpose()
     if purpose is None:
         return jsonify({"error": "purpose must be 'chat' or 'read'"}), 400
@@ -1683,15 +1685,16 @@ def add_linked_node(node_id):
     additional_text = data.get("content", "")  # Optional extra text.
     if not linked_node_id:
         return jsonify({"error": "linked_node_id is required"}), 400
-    # Validate that the node to be linked exists and is alive (privacy filter
-    # also excludes soft-deleted, but we want a distinct 410 if specifically
-    # the target is deleted vs 404 if it never existed).
+    # Validate that the node to be linked exists, is visible to the user
+    # and is alive. A node the user cannot see gets the same 404 as one
+    # that does not exist; a deleted one the user could see gets a 410.
     linked_node = Node.query.get(linked_node_id)
-    if not linked_node:
+    if linked_node is None or not can_user_see_node_or_tombstone(
+            linked_node, current_user.id):
         return jsonify({"error": "Linked node not found"}), 404
     if linked_node.deleted_at is not None:
         return jsonify({"error": "Linked node has been deleted"}), 410
-    # Race A guard: lock parent and reject if soft-deleted.
+    # Race A guard: lock parent and reject if soft-deleted or not visible.
     from backend.utils.node_deletion import assert_parent_alive
     err = assert_parent_alive(node_id)
     if err is not None:
@@ -1737,9 +1740,12 @@ def get_audio_urls(node_id):
 
     Response: 200 OK – `{ original_url: str|null, tts_url: str|null }`
               202 Accepted – when TTS generation is in progress
-              404     – when neither audio exists and no generation in progress.
+              404     – when neither audio exists and no generation in progress,
+                        or the node is not visible to the user.
     """
-    node = Node.query.get_or_404(node_id)
+    node = _visible_node(node_id)
+    if node is None:
+        return _node_not_found()
 
     # Public nodes: any authenticated user can listen.
     # Non-public nodes: require voice-mode (admin or paid plan).
@@ -1803,7 +1809,9 @@ def get_audio_chunks(node_id):
     Browsers incorrectly calculate duration from timestamps for WebM files
     with non-zero start times (common with MediaRecorder timeslice recordings).
     """
-    node = Node.query.get_or_404(node_id)
+    node = _visible_node(node_id)
+    if node is None:
+        return _node_not_found()
 
     # Public nodes: any authenticated user can listen.
     # Non-public nodes: require voice-mode (admin or paid plan).
@@ -1884,7 +1892,9 @@ def download_audio(node_id):
     if fmt not in ('original', 'mp3'):
         return jsonify({"error": "Unsupported format, use 'original' or 'mp3'"}), 400
 
-    node = Node.query.get_or_404(node_id)
+    node = _visible_node(node_id)
+    if node is None:
+        return _node_not_found()
 
     if node.privacy_level != "public":
         if not current_user.has_voice_mode:
@@ -1984,9 +1994,12 @@ def generate_tts(node_id):
     In a production setup this would queue a background task.  For the purpose
     of unit tests and the MVP we generate a dummy file synchronously and return
     `202 Accepted` (if generation was triggered) or `200 OK` (if it already
-    exists).
+    exists). The user must be able to see the node (404 otherwise); the
+    speech is billed to them.
     """
-    node = Node.query.get_or_404(node_id)
+    node = _visible_node(node_id)
+    if node is None:
+        return _node_not_found()
 
     # If original recording exists we stream that – generating TTS is not
     # allowed.
@@ -2290,6 +2303,29 @@ def get_tts_status(node_id):
 # Chunked upload endpoints
 # ---------------------------------------------------------------------------
 
+# The client names each chunked upload, and the name becomes a folder under
+# chunks/<user id>/. The web app sends "<ms>-<base36>" and the iOS app
+# "<ms>-<UUID prefix>"; only letters, digits, "-" and "_" are accepted.
+_UPLOAD_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
+
+
+def _upload_chunk_dir(upload_id):
+    """The folder that stages the current user's upload *upload_id*, or
+    None when *upload_id* is not a valid id or the folder, with symlinks
+    resolved, would not sit directly in the user's own chunks folder.
+    Every upload route builds the path here and nowhere else."""
+    if not isinstance(upload_id, str) or not _UPLOAD_ID_RE.fullmatch(upload_id):
+        return None
+    user_chunks = (AUDIO_STORAGE_ROOT / "chunks" / str(current_user.id)).resolve()
+    chunk_dir = (user_chunks / upload_id).resolve()
+    if chunk_dir.parent != user_chunks:
+        return None
+    return chunk_dir
+
+
+def _invalid_upload_id():
+    return jsonify({"error": "Invalid upload_id"}), 400
+
 
 @nodes_bp.route("/upload/init", methods=["POST"])
 @login_required
@@ -2329,6 +2365,9 @@ def init_chunked_upload():
     # Validate required fields
     if not all([filename, filesize, total_chunks, upload_id]):
         return jsonify({"error": "Missing required fields"}), 400
+    chunk_dir = _upload_chunk_dir(upload_id)
+    if chunk_dir is None:
+        return _invalid_upload_id()
 
     # Validate file type
     if not _allowed_file(filename):
@@ -2378,7 +2417,6 @@ def init_chunked_upload():
     db.session.commit()
 
     # Create directory for chunk storage
-    chunk_dir = AUDIO_STORAGE_ROOT / f"chunks/{current_user.id}/{upload_id}"
     chunk_dir.mkdir(parents=True, exist_ok=True)
 
     # Store upload metadata
@@ -2432,6 +2470,9 @@ def upload_chunk():
 
     if not all([chunk_index is not None, upload_id, node_id]):
         return jsonify({"error": "Missing required fields"}), 400
+    chunk_dir = _upload_chunk_dir(upload_id)
+    if chunk_dir is None:
+        return _invalid_upload_id()
 
     try:
         chunk_index = int(chunk_index)
@@ -2445,7 +2486,6 @@ def upload_chunk():
         return jsonify({"error": "Unauthorized"}), 403
 
     # Save chunk
-    chunk_dir = AUDIO_STORAGE_ROOT / f"chunks/{current_user.id}/{upload_id}"
     if not chunk_dir.exists():
         return jsonify({"error": "Upload session not found"}), 404
 
@@ -2497,6 +2537,9 @@ def finalize_chunked_upload():
 
     if not all([upload_id, node_id]):
         return jsonify({"error": "Missing required fields"}), 400
+    chunk_dir = _upload_chunk_dir(upload_id)
+    if chunk_dir is None:
+        return _invalid_upload_id()
 
     try:
         node_id = int(node_id)
@@ -2509,7 +2552,6 @@ def finalize_chunked_upload():
         return jsonify({"error": "Unauthorized"}), 403
 
     # Load metadata
-    chunk_dir = AUDIO_STORAGE_ROOT / f"chunks/{current_user.id}/{upload_id}"
     if not chunk_dir.exists():
         return jsonify({"error": "Upload session not found"}), 404
 
@@ -2612,8 +2654,9 @@ def cleanup_chunked_upload():
 
     if not upload_id:
         return jsonify({"error": "Missing upload_id"}), 400
-
-    chunk_dir = AUDIO_STORAGE_ROOT / f"chunks/{current_user.id}/{upload_id}"
+    chunk_dir = _upload_chunk_dir(upload_id)
+    if chunk_dir is None:
+        return _invalid_upload_id()
 
     if chunk_dir.exists():
         import shutil
@@ -2626,30 +2669,6 @@ def cleanup_chunked_upload():
             return jsonify({"error": "Cleanup failed"}), 500
 
     return jsonify({"message": "Nothing to clean up"}), 200
-
-
-# ---------------------------------------------------------------------------
-# Media serving endpoint (simple/dev only – not for production)
-# ---------------------------------------------------------------------------
-
-
-@nodes_bp.route("/media/<path:filename>", methods=["GET"])
-def serve_audio_file(filename):
-    """Serve files from the AUDIO_STORAGE_ROOT with support for range requests.
-
-    This is a **development‑only** helper to unblock tests.  In production the
-    app would be served by the web server (e.g. nginx) or a cloud storage
-    bucket.  Range requests are *not* implemented; whole file is returned.
-
-    Note: The production media blueprint (media_bp at /media) handles
-    encrypted .enc files. This endpoint is only used in tests.
-    """
-    file_path = AUDIO_STORAGE_ROOT / filename
-    if not file_path.is_file():
-        return jsonify({"error": "File not found"}), 404
-    from flask import send_file
-
-    return send_file(file_path)
 
 
 # ---------------------------------------------------------------------------
