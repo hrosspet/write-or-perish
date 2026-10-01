@@ -532,6 +532,40 @@ final class VoiceTurnTests: XCTestCase {
         XCTAssertFalse(backend.log.contains { $0.hasPrefix("finalize") })
     }
 
+    // M10: returning to the Voice screen must not apply its route parameters again.
+
+    func testRouteParentIsAppliedOncePerScreen() async throws {
+        var route = VoiceRouteParameters(parentId: 7, resumeLLMId: nil)
+        route.applyOnce(to: turn)
+        XCTAssertEqual(turn.threadParentId, 7)
+        try await runToDone()
+        XCTAssertEqual(turn.threadParentId, 101)
+        // Turn 2 is cancelled, then the screen appears again (tab switch).
+        turn.continueConversation()
+        await wait("recording") { turn.state == .recording }
+        turn.stop()
+        await wait("thinking") { turn.state == .awaitingAudio }
+        turn.cancelProcessing()
+        XCTAssertEqual(turn.state, .idle)
+        route.applyOnce(to: turn)
+        XCTAssertEqual(turn.threadParentId, 101, "turn 3 still replies under turn 1's reply")
+    }
+
+    func testRouteResumeIsNotReplayedOnReturn() async throws {
+        backend.llmStatuses[300] = [try llm(300, "processing", tts: "processing")]
+        var route = VoiceRouteParameters(parentId: 9, resumeLLMId: 300)
+        route.applyOnce(to: turn)
+        await wait("attached") { backend.streams[300] != nil }
+        XCTAssertEqual(turn.threadParentId, 9)
+        turn.cancelProcessing()
+        let requests = backend.streamRequests.count
+        route.applyOnce(to: turn)
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(turn.state, .idle, "no cue, no replay of reply 300")
+        XCTAssertEqual(backend.streamRequests.count, requests)
+        XCTAssertFalse(audio.cueOn)
+    }
+
     // MARK: Endings
 
     func testEmptyTranscriptReturnsToReady() async throws {

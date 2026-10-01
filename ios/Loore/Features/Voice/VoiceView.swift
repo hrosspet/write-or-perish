@@ -14,6 +14,13 @@ struct VoiceView: View {
     @State private var interrupted: InterruptedDraft?
     @State private var recoveryChecked = false
     @State private var resumeAfterRecovery = false
+    @State private var route: VoiceRouteParameters
+
+    init(parentId: Int?, resumeLLMId: Int?) {
+        self.parentId = parentId
+        self.resumeLLMId = resumeLLMId
+        _route = State(initialValue: VoiceRouteParameters(parentId: parentId, resumeLLMId: resumeLLMId))
+    }
 
     private var voice: VoiceTurnController { app.audio.voice }
     private var player: ChunkQueuePlayer { app.audio.player }
@@ -230,11 +237,7 @@ struct VoiceView: View {
 
     private func appear() {
         app.audio.voiceScreenVisible = true
-        if let resumeLLMId, voice.state == .idle {
-            voice.resumeReply(nodeId: resumeLLMId, parentId: parentId)
-        } else if voice.state == .idle, let parentId {
-            voice.setThreadParent(parentId)
-        }
+        route.applyOnce(to: voice)
     }
 
     private func disappear() {
@@ -317,6 +320,32 @@ struct VoiceView: View {
               UserDefaults.standard.bool(forKey: "LooreDebugVoiceAutoStart") else { return }
         startRecording()
         #endif
+    }
+}
+
+/// The route's `parent` / `resume`, applied once per Voice screen (the web reads
+/// them from the URL at mount, M10). `onAppear` runs again after a tab switch or
+/// after Text Mode is popped; re-applying would fork the conversation back to
+/// the route's parent, or replay the resumed reply.
+struct VoiceRouteParameters {
+    let parentId: Int?
+    let resumeLLMId: Int?
+    private(set) var applied = false
+
+    init(parentId: Int?, resumeLLMId: Int?) {
+        self.parentId = parentId
+        self.resumeLLMId = resumeLLMId
+    }
+
+    @MainActor
+    mutating func applyOnce(to voice: VoiceTurnController) {
+        guard !applied else { return }
+        applied = true
+        if let resumeLLMId, voice.state == .idle {
+            voice.resumeReply(nodeId: resumeLLMId, parentId: parentId)
+        } else if voice.state == .idle, let parentId {
+            voice.setThreadParent(parentId)
+        }
     }
 }
 
