@@ -775,9 +775,10 @@ class Draft(db.Model):
     streaming_warning = db.Column(db.Text, nullable=True)
 
     # Last sign of life from the tab recording this session: chunk
-    # uploads and the transcription SSE heartbeat stamp it, the tab's
-    # pagehide beacon clears it. A 'recording' session stamped recently
-    # is live, and no other view may complete or recover it (#320).
+    # uploads and the transcription SSE heartbeat stamp it; the tab's
+    # release (on pagehide, unmount or cancel) clears it. A 'recording'
+    # session stamped recently is live, and no other view may complete
+    # or recover it (#320).
     # See backend/utils/streaming_session.py.
     streaming_heartbeat_at = db.Column(db.DateTime, nullable=True)
 
