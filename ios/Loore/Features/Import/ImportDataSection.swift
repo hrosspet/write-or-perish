@@ -48,6 +48,18 @@ private struct ImportOptions: View {
                 .padding(.vertical, 14)
                 .accessibilityIdentifier("import.stage")
             } else {
+                #if DEBUG
+                // UI tests: `-LooreDebugImportFile <path> -LooreDebugImportKind markdown|claude|chatgpt|twitter`
+                // stands in for the system file picker.
+                if let path = UserDefaults.standard.string(forKey: "LooreDebugImportFile"),
+                   let kind = UserDefaults.standard.string(forKey: "LooreDebugImportKind").flatMap(ImportKind.init) {
+                    Button("Debug: import \((path as NSString).lastPathComponent)") {
+                        Task { await model.picked(URL(fileURLWithPath: path), kind: kind) }
+                    }
+                    .font(LooreFont.meta)
+                    .accessibilityIdentifier("import.debugFile")
+                }
+                #endif
                 ForEach(ImportKind.allCases) { kind in
                     Button { pickerKind = kind } label: {
                         Text(kind.buttonTitle)
@@ -209,7 +221,8 @@ private struct ConfirmImportDialog: View {
                      + Text(" (\(model.includeReplies ? analysis.totalTweets : analysis.originalCount) tweets)"))
             }
         }
-        .accessibilityIdentifier("import.summary")
+        .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("import.summary")
     }
 
     private func bold(_ n: Int) -> Text {
@@ -290,6 +303,7 @@ private struct ImportFinishedDialog: View {
                     }
                 }
             }
+            .accessibilityElement(children: .contain)
             .accessibilityIdentifier("import.finished")
             ForEach(result.notes, id: \.self) { note in
                 Text(note)

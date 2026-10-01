@@ -19,6 +19,7 @@ struct WelcomeView: View {
                     Text("You can type or record a voice note — whatever feels natural.")
                         .font(LooreFont.sans(12.5, .light))
                         .foregroundStyle(LooreColor.textMuted)
+                        .multilineTextAlignment(.center)
                         .padding(.top, 16)
                 }
                 .padding(.top, 16)
@@ -88,13 +89,14 @@ struct WelcomeView: View {
             Text("You're one of the first people here. This is an alpha — things are raw, evolving, alive. Your experience and your feedback shape what Loore becomes.")
                 .font(LooreFont.bodyLarge)
                 .foregroundStyle(LooreColor.textSecondary)
-                .lineSpacing(9)
+                .lineSpacing(6.3)
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
                 .looreFadeIn(delay: 0.18)
         }
+        .frame(minHeight: UIScreen.main.bounds.height * 0.55)
         .padding(.top, 64)
-        .padding(.bottom, 40)
+        .padding(.bottom, 32)
     }
 
     private func card<Content: View>(eyebrow: String, prompt: String, @ViewBuilder content: () -> Content) -> some View {
@@ -113,8 +115,8 @@ struct WelcomeView: View {
                 .padding(.bottom, 29)
             content()
         }
-        .padding(.vertical, 40)
-        .padding(.horizontal, 28)
+        .padding(.vertical, 35.2)
+        .padding(.horizontal, 32)
         .frame(maxWidth: .infinity)
         .background {
             ZStack {
@@ -124,7 +126,8 @@ struct WelcomeView: View {
                     .opacity(0.5)
             }
         }
-        .overlay(Rectangle().strokeBorder(LooreColor.border))
+        .clipShape(RoundedRectangle(cornerRadius: 14))
+        .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(LooreColor.border))
     }
 
     private var closing: some View {
@@ -137,7 +140,7 @@ struct WelcomeView: View {
             Text("Write about today. Talk about a dream. Process something that's been sitting in you. Loore will meet you wherever you are.")
                 .font(LooreFont.sans(15.2, .light))
                 .foregroundStyle(LooreColor.textMuted)
-                .lineSpacing(9)
+                .lineSpacing(6.3)
                 .padding(.bottom, 24)
             Text("If something's broken or feels wrong, tell us.\nThis is ours to shape together.")
                 .font(LooreFont.sans(13.6, .light))

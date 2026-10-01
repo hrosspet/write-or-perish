@@ -279,6 +279,7 @@ struct DiffRowsView: View {
                 }
             }
             .textSelection(.enabled)
+            .accessibilityElement(children: .contain)
             .accessibilityIdentifier("history.diff")
         }
     }

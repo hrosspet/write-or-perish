@@ -85,7 +85,8 @@ struct ProfilePage: View {
             DocEditButtons(saving: saving, onSave: { save() }, onCancel: { editing = false })
         } else if let profile {
             MarkdownView(markdown: profile.content, style: .profile)
-                .accessibilityIdentifier("profile.content")
+                .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("profile.content")
         }
     }
 
@@ -106,7 +107,7 @@ struct ProfilePage: View {
             .accessibilityIdentifier("profile.write")
         }
         .font(LooreFont.sans(14.4, .light))
-        .lineSpacing(9)
+        .lineSpacing(6.3)
         .multilineTextAlignment(.center)
         .fixedSize(horizontal: false, vertical: true)
         .frame(maxWidth: .infinity)

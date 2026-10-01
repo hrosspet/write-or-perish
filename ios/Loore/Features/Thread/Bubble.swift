@@ -144,7 +144,9 @@ struct BubbleView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.bottom, body.isEmpty ? 0 : 9.6)
                 if !body.isEmpty {
-                    Text(body)
+                    // The web's collapsed body is `white-space: normal`: runs of
+                    // whitespace, newlines included, show as one space.
+                    Text(JSRegex.replaceAll(body, #"\s+"#, " "))
                         .font(LooreFont.sans(14.7, .light))
                         .foregroundStyle(LooreColor.textSecondary)
                         .lineSpacing(6)

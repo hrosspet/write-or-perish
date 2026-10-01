@@ -67,6 +67,7 @@ struct LooreDialogCard<Content: View>: View {
                 }
                 content()
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             .padding(LooreSpacing.dialog)
         }
         .scrollBounceBehavior(.basedOnSize)

@@ -38,7 +38,7 @@ struct ShareView: View {
             VStack(alignment: .leading, spacing: 0) {
                 header
                 Text("Pieces of your writing worth giving outward — nothing is visible to anyone until you publish it, and you can take anything back.")
-                    .font(LooreFont.sans(13.6, .light))
+                    .font(LooreFont.sans(12, .light))
                     .foregroundStyle(LooreColor.textMuted.opacity(0.7))
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.bottom, 8)
@@ -189,7 +189,8 @@ struct ShareView: View {
             app.open(.thread(id: nodeId, awaitLLM: nil))
         }
         .padding(.bottom, 16)
-        .accessibilityIdentifier("share.card.\(share.id)")
+        .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("share.card.\(share.id)")
     }
 
     @ViewBuilder private func actions(_ share: ShareItem) -> some View {

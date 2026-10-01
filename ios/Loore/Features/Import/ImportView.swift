@@ -17,7 +17,7 @@ struct ImportView: View {
                         .padding(.bottom, 24)
                     ImportDataSection()
                     ExternalImportSection()
-                        .padding(.top, 40)
+                        .padding(.top, 28)
                 }
                 .padding(.horizontal, LooreSpacing.gutter)
                 .padding(.top, 24)

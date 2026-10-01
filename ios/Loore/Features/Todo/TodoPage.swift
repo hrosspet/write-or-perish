@@ -114,9 +114,9 @@ struct TodoPage: View {
             Text("Your todo list is the concrete counterpart to intentions — specific, finishable tasks; as you write and talk, the AI notices completions, new items, and priorities, and proposes updates that apply only when you confirm.")
                 .font(LooreFont.sans(14.4, .light))
                 .foregroundStyle(LooreColor.textSecondary)
-                .lineSpacing(9)
+                .lineSpacing(6.3)
             Text("No todo list yet. Create one to track your tasks.")
-                .font(LooreFont.sans(14.4, .light))
+                .font(LooreFont.sans(14.4, .regular))
                 .foregroundStyle(LooreColor.textMuted)
             Button("Create Todo") {
                 editContent = Self.createTemplate
@@ -300,8 +300,8 @@ private struct TodoItemRow: View {
                         }
                         .frame(width: 18, height: 18)
                         .padding(.top, 2)
-                        .frame(width: 30, height: 30, alignment: .top)
-                        .contentShape(Rectangle())
+                        .frame(width: 30, height: 22, alignment: .top)
+                        .contentShape(Rectangle().inset(by: -10))
                     }
                     .buttonStyle(.plain)
                     .padding(.horizontal, -6)

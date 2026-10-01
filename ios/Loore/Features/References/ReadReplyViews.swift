@@ -59,6 +59,7 @@ struct ReadReplyTail: View {
             .font(LooreFont.sans(12.8, .light))
             .foregroundStyle(LooreColor.textMuted)
             .padding(.top, 12)
+            .accessibilityElement(children: .contain)
             .accessibilityIdentifier("thread.readTail")
         }
     }

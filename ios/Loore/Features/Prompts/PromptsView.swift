@@ -155,7 +155,8 @@ struct PromptDetailView: View {
             })
         } else {
             MarkdownView(markdown: prompt.content, style: .prompt)
-                .accessibilityIdentifier("prompt.content")
+                .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("prompt.content")
         }
     }
 

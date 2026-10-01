@@ -49,7 +49,8 @@ struct ReferencesView: View {
                             app.open(.reference(id: item.id))
                         }
                         .onAppear { if item.id == items.last?.id { loadMoreIfNeeded() } }
-                        .accessibilityIdentifier("reference.card.\(item.id)")
+                        .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("reference.card.\(item.id)")
                     }
                     if loadingMore {
                         Text("Loading more...").frame(maxWidth: .infinity).padding(20)

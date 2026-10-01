@@ -14,6 +14,7 @@ import Foundation
 /// | `-LooreTheme light\|dark` | force the theme for this launch (screenshots) |
 /// | `-LooreResetState YES` | forget stored cookies and preferences at launch |
 /// | `-LooreSkipUpdates YES` | do not fetch `/api/updates` at launch (screenshots) |
+/// | `-LooreDebugImportFile <path>` + `-LooreDebugImportKind <kind>` | Import page: a button that imports that file instead of the picker (UserDefaults) |
 struct LaunchOptions: Equatable, Sendable {
     var environment: AppEnvironment?
     var sessionCookie: String?

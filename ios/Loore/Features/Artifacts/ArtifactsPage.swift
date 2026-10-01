@@ -122,7 +122,8 @@ struct ArtifactsPage: View {
                         MarkdownView(markdown: active.content, style: .profile)
                     }
                 }
-                .accessibilityIdentifier("artifact.content")
+                .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("artifact.content")
             } else {
                 emptyState(active)
             }
@@ -132,10 +133,13 @@ struct ArtifactsPage: View {
     private var editForm: some View {
         VStack(alignment: .leading, spacing: 12) {
             if creating {
-                field(text: Binding(get: { newKind }, set: { newKind = ArtifactKinds.sanitizeKindInput($0) }),
-                      placeholder: "artifact-name (lowercase, dashes)", identifier: "artifact.kind")
+                field(text: $newKind, placeholder: "artifact-name (lowercase, dashes)", identifier: "artifact.kind")
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
+                    .onChange(of: newKind) { _, typed in
+                        let clean = ArtifactKinds.sanitizeKindInput(typed)
+                        if clean != typed { newKind = clean }
+                    }
                 if !newKind.isEmpty && !ArtifactKinds.isValidKind(newKind) {
                     Text("Invalid kind: use a short lowercase slug (letters, digits, dashes).")
                         .font(LooreFont.meta)
@@ -179,7 +183,7 @@ struct ArtifactsPage: View {
                 Text(intro)
                     .font(LooreFont.sans(14.4, .light))
                     .foregroundStyle(LooreColor.textSecondary)
-                    .lineSpacing(9)
+                    .lineSpacing(6.3)
             }
             Text("Nothing here yet. The AI fills this in during Voice and Text sessions,\nor write your own.")
                 .font(LooreFont.sans(14.4, .light))

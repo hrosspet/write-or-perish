@@ -113,7 +113,8 @@ struct ReferenceDetailView: View {
                     .padding(.top, 10)
                 } else {
                     MarkdownView(markdown: item.bodyWithoutTitle, style: .referenceBody)
-                        .accessibilityIdentifier("reference.body")
+                        .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("reference.body")
                 }
 
                 ViewThatFits(in: .horizontal) {
@@ -134,7 +135,6 @@ struct ReferenceDetailView: View {
                         .foregroundStyle(LooreColor.textMuted)
                         .fixedSize(horizontal: false, vertical: true)
                     HStack(spacing: 0) {
-                        Spacer(minLength: 0)
                         ReferenceFeedbackControl(itemId: item.id, feedback: item.feedback, size: 18) { verdict, readAt in
                             self.item?.feedback = verdict
                             if let readAt { self.item?.readAt = readAt }
