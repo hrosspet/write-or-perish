@@ -13,8 +13,7 @@ struct TodoPage: View {
 
     @Environment(AppState.self) private var app
     @Environment(\.scenePhase) private var scenePhase
-    @State private var todo: TodoDoc?
-    @State private var loading = true
+    @State private var model = TodoModel()
     @State private var editing = false
     @State private var editContent = ""
     @State private var saving = false
@@ -29,9 +28,12 @@ struct TodoPage: View {
 
     var body: some View {
         WorkspaceScroll(active: .todo, onSelect: onSelect) {
-            if !loading { content }
+            if !model.loading { content }
         }
-        .task { await fetchTodo() }
+        .task {
+            model.app = app
+            await fetchTodo()
+        }
         .onChange(of: app.signals.todoChanged) { _, _ in Task { await fetchTodo() } }
         .onChange(of: scenePhase) { _, phase in
             if phase == .active, !editing { Task { await fetchTodo() } }
@@ -40,6 +42,8 @@ struct TodoPage: View {
             VersionHistorySheet(source: historySource)
         }
     }
+
+    private var todo: TodoDoc? { model.todo }
 
     @ViewBuilder private var content: some View {
         DocTitleRow(title: "Todo") {
@@ -165,14 +169,8 @@ struct TodoPage: View {
     // MARK: Loading and saving
 
     private func fetchTodo() async {
-        do {
-            let envelope: TodoEnvelope = try await app.api.get(APIPath.todo)
-            todo = envelope.todo
-            if let fresh = envelope.todo, !editing { editContent = fresh.content }
-        } catch {
-            // The web logs load errors only.
-        }
-        loading = false
+        let fresh = await model.fetch()
+        if let fresh, !editing { editContent = fresh.content }
     }
 
     /// `PUT /api/todo/` (Save in edit mode and the first create): a new version.
@@ -180,32 +178,17 @@ struct TodoPage: View {
         guard !saving, !editContent.jsTrimmed.isEmpty else { return }
         saving = true
         Task {
-            defer { saving = false }
-            do {
-                let envelope: TodoEnvelope = try await app.api.put(
-                    APIPath.todo, json: ["content": .string(editContent), "generated_by": "user"])
-                todo = envelope.todo
-                editing = false
-                app.signals.post(.todoChanged)
-            } catch {
-                // Logged only on the web.
-            }
+            if await model.save(editContent) { editing = false }
+            saving = false
         }
     }
 
     private func toggle(_ item: TodoSections.Item) {
-        let key = MarkdownEdits.stripInlineMarkdown(item.text).jsTrimmed
-        let checked = item.checked ?? false
-        patch(failure: "Couldn't save change — reverted") { content in
-            MarkdownEdits.toggleCheckbox(content, itemText: key, currentChecked: checked)
-        }
+        Task { await model.toggle(item) }
     }
 
     private func insertAfter(_ item: TodoSections.Item, _ text: String) {
-        let key = MarkdownEdits.stripInlineMarkdown(item.text).jsTrimmed
-        patch(failure: "Couldn't add task — reverted", skipUnchanged: true) { content in
-            MarkdownEdits.insertItemAfter(content, afterItemText: key, newText: text)
-        }
+        Task { await model.insertAfter(item, text: text) }
     }
 
     private func quickAdd() {
@@ -213,40 +196,10 @@ struct TodoPage: View {
         guard !task.isEmpty, !quickAddSaving, todo != nil else { return }
         quickAddSaving = true
         quickAddText = ""
-        patch(failure: nil, onFailure: { quickAddText = task }, onDone: {
+        Task {
+            if !(await model.quickAdd(task)) { quickAddText = task }
             quickAddSaving = false
             quickAddFocused = true
-        }) { content in
-            MarkdownEdits.appendItemToSection(content, sectionTitle: "Today", task: task, createAtStart: true)
-        }
-    }
-
-    /// Optimistic in-place edit: apply `edit` to what is shown, then re-fetch,
-    /// apply the same edit to the server's latest content and `PATCH` it. On
-    /// failure the shown content goes back and a toast names the reason.
-    private func patch(failure: String?, skipUnchanged: Bool = false, onFailure: @escaping () -> Void = {},
-                       onDone: @escaping () -> Void = {}, edit: @escaping (String) -> String) {
-        guard let current = todo else { onDone(); return }
-        let optimistic = edit(current.content)
-        if skipUnchanged && optimistic == current.content { onDone(); return }
-        todo?.content = optimistic
-        Task {
-            defer { onDone() }
-            do {
-                let fresh: TodoEnvelope = try await app.api.get(APIPath.todo, poll: true)
-                let base = fresh.todo?.content ?? current.content
-                let updated = edit(base)
-                let answer: TodoEnvelope = try await app.api.patch(APIPath.todo, json: ["content": .string(updated)])
-                if let saved = answer.todo { todo = saved } else { todo?.content = updated }
-            } catch {
-                todo?.content = current.content
-                onFailure()
-                if let failure {
-                    let reason = (error as? APIError)?.serverMessage ?? (error as? APIError)?.errorDescription
-                        ?? "Unknown error"
-                    app.toasts.show("\(failure) (\(reason))")
-                }
-            }
         }
     }
 
@@ -263,7 +216,7 @@ struct TodoPage: View {
                 guard let id = version.id.rowId else { return }
                 let envelope: TodoEnvelope = try await api.post(APIPath.todoRevert(id))
                 await MainActor.run {
-                    todo = envelope.todo
+                    model.adopt(envelope.todo)
                     if let reverted = envelope.todo { editContent = reverted.content }
                 }
             })

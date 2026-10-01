@@ -1,4 +1,5 @@
 import SwiftUI
+import Observation
 
 /// What a Community Archive read covered (web `ReadWindowLine`).
 struct ReadWindowLine: View {
@@ -92,6 +93,77 @@ private struct MarkAllReadButton: View {
     }
 }
 
+/// The picks of a legacy feed reply and their read/verdict state (web `FeedPicks`).
+@MainActor
+@Observable
+final class FeedPicksModel {
+    let nodeId: Int
+    private(set) var picks: [FeedPicksAnswer.Pick]?
+    private(set) var error: String?
+    weak var app: AppState?
+
+    init(nodeId: Int, app: AppState? = nil) {
+        self.nodeId = nodeId
+        self.app = app
+    }
+
+    var unread: Int { picks?.filter { $0.item.readAt == nil }.count ?? 0 }
+
+    func load() async {
+        guard picks == nil, let api = app?.api else { return }
+        do {
+            let answer: FeedPicksAnswer = try await api.get(APIPath.feedPicks(nodeId))
+            picks = answer.picks
+        } catch {
+            self.error = "Could not load the picks."
+        }
+    }
+
+    func patch(_ index: Int, _ change: (inout ExternalItem) -> Void) {
+        guard var list = picks, list.indices.contains(index) else { return }
+        change(&list[index].item)
+        picks = list
+    }
+
+    /// A verdict marks the pick read and is no longer "from another reply".
+    func feedbackChanged(_ index: Int, verdict: String?, readAt: Date?) {
+        patch(index) {
+            $0.feedback = verdict
+            $0.feedbackShared = false
+            if let readAt { $0.readAt = readAt }
+        }
+    }
+
+    func readChanged(_ index: Int, readAt: Date?) {
+        patch(index) { $0.readAt = readAt }
+    }
+
+    func markedAll(_ readAt: [Int: Date]) {
+        guard var list = picks else { return }
+        for i in list.indices { if let date = readAt[list[i].item.id] { list[i].item.readAt = date } }
+        picks = list
+    }
+
+    /// "Open on X" logs the open and marks the pick read (`{node_id, via:'open'}`),
+    /// also when it was read already.
+    func openedOnX(_ index: Int) async {
+        guard let app, let item = picks?[safe: index]?.item else { return }
+        do {
+            let answer: ReadMarkAnswer = try await app.api.post(
+                APIPath.externalItemRead(item.id), json: ["node_id": .int(nodeId), "via": "open"])
+            readChanged(index, readAt: answer.readAt)
+        } catch {
+            app.toasts.show("Could not update the read mark.", duration: 4)
+        }
+    }
+
+    func setForTesting(_ picks: [FeedPicksAnswer.Pick]) { self.picks = picks }
+}
+
+extension Array {
+    subscript(safe index: Int) -> Element? { indices.contains(index) ? self[index] : nil }
+}
+
 /// The tweets a legacy Community Archive feed reply named (web `FeedPicks`,
 /// map E §4.5): relevance margin, handle, tweet text, the model's reason,
 /// date, "Open on X" (marks it read), verdict and read toggle. Owner only.
@@ -99,39 +171,44 @@ struct FeedPicksView: View {
     let nodeId: Int
 
     @Environment(AppState.self) private var app
-    @State private var picks: [FeedPicksAnswer.Pick]?
-    @State private var error: String?
+    @State private var model: FeedPicksModel?
 
     var body: some View {
         Group {
-            if let error {
-                Text(error).font(LooreFont.sans(12.8, .light)).foregroundStyle(LooreColor.accent)
-            } else if let picks, !picks.isEmpty {
-                VStack(alignment: .leading, spacing: 0) {
-                    ForEach(Array(picks.enumerated()), id: \.element.id) { index, pick in
-                        row(pick, index: index)
-                        HairlineDivider()
-                    }
-                    Group {
-                        if picks.contains(where: { $0.item.readAt == nil }) {
-                            MarkAllReadButton(nodeId: nodeId) { readAt in markedAll(readAt) }
-                        } else {
-                            Text("All read.")
+            if let model {
+                if let error = model.error {
+                    Text(error).font(LooreFont.sans(12.8, .light)).foregroundStyle(LooreColor.accent)
+                } else if let picks = model.picks, !picks.isEmpty {
+                    VStack(alignment: .leading, spacing: 0) {
+                        ForEach(Array(picks.enumerated()), id: \.element.id) { index, pick in
+                            row(pick, index: index, model: model)
+                            HairlineDivider()
                         }
+                        Group {
+                            if model.unread > 0 {
+                                MarkAllReadButton(nodeId: nodeId) { model.markedAll($0) }
+                            } else {
+                                Text("All read.")
+                            }
+                        }
+                        .font(LooreFont.sans(12.8, .light))
+                        .foregroundStyle(LooreColor.textMuted)
+                        .padding(.top, 12)
                     }
-                    .font(LooreFont.sans(12.8, .light))
-                    .foregroundStyle(LooreColor.textMuted)
                     .padding(.top, 12)
+                    .accessibilityElement(children: .contain)
+                    .accessibilityLabel("Tweets picked from the Community Archive")
                 }
-                .padding(.top, 12)
-                .accessibilityElement(children: .contain)
-                .accessibilityLabel("Tweets picked from the Community Archive")
             }
         }
-        .task { await load() }
+        .task {
+            let created = model ?? FeedPicksModel(nodeId: nodeId, app: app)
+            model = created
+            await created.load()
+        }
     }
 
-    private func row(_ pick: FeedPicksAnswer.Pick, index: Int) -> some View {
+    private func row(_ pick: FeedPicksAnswer.Pick, index: Int, model: FeedPicksModel) -> some View {
         let item = pick.item
         let read = item.readAt != nil
         return HStack(alignment: .top, spacing: 12) {
@@ -170,7 +247,7 @@ struct FeedPicksView: View {
                     if let link = item.url, let url = URL(string: link) {
                         Button("Open on X") {
                             app.open(.external(url))
-                            markReadOnOpen(index: index, item: item)
+                            Task { await model.openedOnX(index) }
                         }
                         .buttonStyle(.plain)
                         .foregroundStyle(LooreColor.accentDim)
@@ -178,14 +255,10 @@ struct FeedPicksView: View {
                     Spacer(minLength: 0)
                     ReferenceFeedbackControl(itemId: item.id, feedback: item.feedback, nodeId: nodeId,
                                              shared: item.feedbackShared) { verdict, readAt in
-                        patch(index) {
-                            $0.feedback = verdict
-                            $0.feedbackShared = false
-                            if let readAt { $0.readAt = readAt }
-                        }
+                        model.feedbackChanged(index, verdict: verdict, readAt: readAt)
                     }
                     ReadToggleLink(itemId: item.id, nodeId: nodeId, readAt: item.readAt) { readAt in
-                        patch(index) { $0.readAt = readAt }
+                        model.readChanged(index, readAt: readAt)
                     }
                 }
                 .font(LooreFont.sans(12.5, .light))
@@ -194,41 +267,6 @@ struct FeedPicksView: View {
         }
         .padding(.vertical, 12)
         .opacity(read ? 0.55 : 1)
-    }
-
-    private func patch(_ index: Int, _ change: (inout ExternalItem) -> Void) {
-        guard var list = picks, list.indices.contains(index) else { return }
-        change(&list[index].item)
-        picks = list
-    }
-
-    private func markedAll(_ readAt: [Int: Date]) {
-        guard var list = picks else { return }
-        for i in list.indices { if let date = readAt[list[i].item.id] { list[i].item.readAt = date } }
-        picks = list
-    }
-
-    private func load() async {
-        guard picks == nil else { return }
-        do {
-            let answer: FeedPicksAnswer = try await app.api.get(APIPath.feedPicks(nodeId))
-            picks = answer.picks
-        } catch {
-            self.error = "Could not load the picks."
-        }
-    }
-
-    /// "Open on X" logs the open and marks the pick read (`{node_id, via:'open'}`).
-    private func markReadOnOpen(index: Int, item: ExternalItem) {
-        Task {
-            do {
-                let answer: ReadMarkAnswer = try await app.api.post(
-                    APIPath.externalItemRead(item.id), json: ["node_id": .int(nodeId), "via": "open"])
-                patch(index) { $0.readAt = answer.readAt }
-            } catch {
-                app.toasts.show("Could not update the read mark.", duration: 4)
-            }
-        }
     }
 }
 
