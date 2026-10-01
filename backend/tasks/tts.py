@@ -6,6 +6,10 @@ and can be played as soon as it's ready, without waiting for all chunks.
 """
 import json
 import re
+import time
+import httpx
+import openai
+import sentry_sdk
 from celery import Task
 from celery.utils.log import get_task_logger
 from openai import OpenAI
@@ -35,6 +39,20 @@ def _strip_quote_markers(text):
     return re.sub(r'[ \t]+\n', '\n', text).strip()
 
 
+_SHARE_BLOCK_RE = re.compile(
+    r'^:::share(?:[ \t]+\w+)?[ \t]*\r?\n.*?(?:^:::[ \t]*$\n?|\Z)',
+    flags=re.MULTILINE | re.DOTALL | re.IGNORECASE)
+
+
+def _strip_share_blocks(text):
+    """Drop fenced :::share blocks: the shareable piece is shown as a card,
+    never spoken; the surrounding prose already introduces it. Applies to
+    every reply, not only ones with a todo/issue/feedback proposal (#367:
+    a reply whose only proposal was a share used to be read out fence and
+    all)."""
+    return _SHARE_BLOCK_RE.sub('', text).strip()
+
+
 def _strip_heading_sections(text):
     """Extract spoken parts from a structured Voice response.
 
@@ -51,9 +69,7 @@ def _strip_heading_sections(text):
     """
     # Drop fenced :::share blocks first — the shareable piece is shown
     # visually, not spoken; the surrounding prose already introduces it.
-    text = re.sub(
-        r'^:::share(?:[ \t]+\w+)?[ \t]*\r?\n.*?(?:^:::[ \t]*$\n?|\Z)',
-        '', text, flags=re.MULTILINE | re.DOTALL | re.IGNORECASE).strip()
+    text = _strip_share_blocks(text)
 
     # Extract intro text before the first ### heading
     first_heading = re.search(r'^###\s+', text, flags=re.MULTILINE)
@@ -86,6 +102,144 @@ def _strip_heading_sections(text):
 # title. Belongs to the ENDING chapter so chapter start_times (computed
 # from per-chunk durations) stay exact.
 CHAPTER_END_SILENCE_MS = 900
+
+TTS_MODEL = "gpt-4o-mini-tts"
+TTS_VOICE = "alloy"
+
+# OpenAI's TTS MP3 is 128 kbps CBR: bytes received = seconds of audio
+# received (measured on prod and local chunk files).
+TTS_MP3_BYTES_PER_SEC = 16000
+
+# A call still streaming at this point has hit OpenAI's cutoff: since
+# 2026-09-27 slow calls end at 300 s with HTTP 200 and the audio cut
+# mid-word. Such audio is never stored as if complete.
+TTS_CUTOFF_SECS = 290
+
+# Temporary, #382: while OpenAI is slow, a call that is still running
+# after TTS_SLOW_CHECK_SECS and has delivered less audio than time
+# elapsed (normal calls deliver 3-7x realtime, slow ones 0.08-0.33x), or
+# that sends nothing for TTS_SLOW_CHECK_SECS, is cancelled and the same
+# text sent again, up to TTS_SLOW_RETRIES more times.
+TTS_SLOW_CHECK_SECS = 30
+TTS_SLOW_MIN_REALTIME = 1.0
+TTS_SLOW_RETRIES = 2
+
+# Temporary, #382: the SDK's own retries are off for the TTS call, so
+# each attempt is one request timed from its start; the loop in
+# synthesize_to_file resends what the SDK would have retried.
+_TTS_RETRIED_SDK_ERRORS = (openai.APIConnectionError,  # incl. timeouts
+                           openai.InternalServerError,
+                           openai.RateLimitError)
+
+_now = time.monotonic
+
+
+class TTSCutOff(Exception):
+    """The call ran to OpenAI's cutoff, so its audio is incomplete."""
+
+
+class TTSSlowCall(Exception):
+    """Temporary, #382: the call was cancelled for being too slow."""
+
+
+class TTSCallFailed(Exception):
+    """Temporary, #382: every attempt at a TTS call failed."""
+
+
+def _stream_speech(client, text, path, mark=None):
+    """One TTS call streamed to *path*. Raises TTSCutOff or TTSSlowCall
+    instead of leaving incomplete audio as the result."""
+    started = _now()
+    received = 0
+    with client.with_options(max_retries=0).audio.speech \
+            .with_streaming_response.create(
+        model=TTS_MODEL, input=text, voice=TTS_VOICE,
+        timeout=httpx.Timeout(TTS_SLOW_CHECK_SECS, connect=5.0),
+    ) as resp:
+        request_id = resp.headers.get("x-request-id")
+        try:
+            with open(path, "wb") as f:
+                for data in resp.iter_bytes():
+                    if mark is not None and received == 0:
+                        mark("tts_first_byte")
+                    f.write(data)
+                    received += len(data)
+                    elapsed = _now() - started
+                    if (elapsed >= TTS_SLOW_CHECK_SECS
+                            and received / TTS_MP3_BYTES_PER_SEC
+                            < elapsed * TTS_SLOW_MIN_REALTIME):
+                        raise TTSSlowCall(
+                            f"request {request_id}: "
+                            f"{received / TTS_MP3_BYTES_PER_SEC:.1f} s of "
+                            f"audio in {elapsed:.0f} s")
+        except httpx.TimeoutException:
+            raise TTSSlowCall(
+                f"request {request_id}: nothing received for "
+                f"{TTS_SLOW_CHECK_SECS} s")
+    elapsed = _now() - started
+    logger.info("TTS call %s: %s chars, %.1f s of audio in %.1f s",
+                request_id, len(text), received / TTS_MP3_BYTES_PER_SEC,
+                elapsed)
+    if elapsed >= TTS_CUTOFF_SECS:
+        raise TTSCutOff(
+            f"request {request_id} ran {elapsed:.0f} s; audio is cut")
+    if mark is not None:
+        mark("tts_last_byte")
+
+
+def synthesize_to_file(client, text, path, section_end=False, mark=None):
+    """One TTS call written to *path* as MP3. Returns the AudioSegment; a
+    chunk that closes a chapter gets the chapter-end silence, re-exported
+    so chunked playback (which streams the file directly) has it too.
+    *mark(stage)*, when given, is called at the first and the last byte
+    of the audio (#371 timing).
+
+    A call that is too slow, ran to OpenAI's cutoff, or failed with an
+    error the SDK would retry is sent again (#382); when every attempt
+    fails, the partial file is removed and TTSCallFailed raised, so the
+    chunk fails rather than playing cut audio. Only slow calls are
+    reported to Sentry: that count tells #382 when OpenAI is fast again."""
+    attempts = TTS_SLOW_RETRIES + 1
+    for attempt in range(1, attempts + 1):
+        try:
+            _stream_speech(client, text, path, mark=mark)
+            break
+        except (TTSSlowCall, TTSCutOff) + _TTS_RETRIED_SDK_ERRORS as e:
+            if attempt == attempts:
+                Path(path).unlink(missing_ok=True)
+                raise TTSCallFailed(
+                    f"TTS call failed after {attempts} attempts; "
+                    f"last: {e!r}") from e
+            slow = isinstance(
+                e, (TTSSlowCall, TTSCutOff, openai.APITimeoutError))
+            logger.warning("%s (attempt %s of %s, %s chars): %r",
+                           "Slow TTS call cancelled" if slow
+                           else "TTS call failed, resending",
+                           attempt, attempts, len(text), e)
+            if slow:
+                sentry_sdk.capture_message("Slow TTS call cancelled",
+                                           level="warning")
+    segment = AudioSegment.from_file(str(path), format="mp3")
+    if section_end:
+        segment = segment + AudioSegment.silent(
+            duration=CHAPTER_END_SILENCE_MS)
+        segment.export(str(path), format="mp3")
+    return segment
+
+
+def log_tts_cost(user_id, total_duration):
+    """Add (not commit) the APICostLog row for *total_duration* seconds of
+    generated audio."""
+    if total_duration <= 0:
+        return
+    db.session.add(APICostLog(
+        user_id=user_id,
+        model_id=TTS_MODEL,
+        request_type="tts",
+        audio_duration_seconds=total_duration,
+        cost_microdollars=calculate_audio_cost_microdollars(
+            TTS_MODEL, total_duration),
+    ))
 
 # Audio storage root path (matches the one in routes/nodes.py)
 import pathlib
@@ -265,8 +419,10 @@ def _generate_tts_chunks(task, entity, text, target_dir, audio_storage_root,
     }
 
     # Create TTSChunk records for streaming playback (with chapter
-    # metadata, #145)
+    # metadata, #145). Rows left by an earlier run that failed (a streamed
+    # voice reply's TTS, #367) would collide on the chunk index.
     chunk_fk = {chunk_fk_attr: entity.id}
+    TTSChunk.query.filter_by(**chunk_fk).delete(synchronize_session=False)
     created_chunks = []
     for i, (_chunk, section_title, section_index) in enumerate(chunk_specs):
         tts_chunk = TTSChunk(
@@ -296,12 +452,7 @@ def _generate_tts_chunks(task, entity, text, target_dir, audio_storage_root,
         entity.tts_task_progress = 40
         db.session.commit()
 
-        with client.audio.speech.with_streaming_response.create(
-            model="gpt-4o-mini-tts", input=chunks[0], voice="alloy"
-        ) as resp:
-            resp.stream_to_file(final_path)
-
-        segment = AudioSegment.from_file(str(final_path), format="mp3")
+        segment = synthesize_to_file(client, chunks[0], final_path)
         chunk_duration = len(segment) / 1000.0
         encrypt_file(str(final_path))
 
@@ -341,18 +492,9 @@ def _generate_tts_chunks(task, entity, text, target_dir, audio_storage_root,
 
             part_path = target_dir / f"tts_chunk_{i}.mp3"
 
-            with client.audio.speech.with_streaming_response.create(
-                model="gpt-4o-mini-tts", input=chunk, voice="alloy"
-            ) as resp:
-                resp.stream_to_file(part_path)
-
-            segment = AudioSegment.from_file(str(part_path), format="mp3")
-            if i in section_end_indices:
-                segment = segment + AudioSegment.silent(
-                    duration=CHAPTER_END_SILENCE_MS)
-                # Re-export so live chunked playback (which streams this
-                # file directly) carries the chapter pause as well.
-                segment.export(str(part_path), format="mp3")
+            segment = synthesize_to_file(
+                client, chunk, part_path,
+                section_end=i in section_end_indices)
             chunk_duration = len(segment) / 1000.0
             audio_parts.append((i, segment, part_path))
 
@@ -383,18 +525,7 @@ def _generate_tts_chunks(task, entity, text, target_dir, audio_storage_root,
     for tc in TTSChunk.query.filter_by(**chunk_fk).all():
         if tc.duration:
             total_duration += tc.duration
-    if total_duration > 0:
-        tts_cost = calculate_audio_cost_microdollars(
-            "gpt-4o-mini-tts", total_duration
-        )
-        cost_log = APICostLog(
-            user_id=requesting_user_id or entity.user_id,
-            model_id="gpt-4o-mini-tts",
-            request_type="tts",
-            audio_duration_seconds=total_duration,
-            cost_microdollars=tts_cost,
-        )
-        db.session.add(cost_log)
+    log_tts_cost(requesting_user_id or entity.user_id, total_duration)
 
     # Finalize
     task.update_state(
@@ -453,7 +584,8 @@ def generate_tts_audio(self, node_id: int, audio_storage_root: str,
                     'tts_url': node.audio_tts_url
                 }
 
-            text = _strip_quote_markers(node.get_content() or "")
+            text = _strip_share_blocks(
+                _strip_quote_markers(node.get_content() or ""))
             if not text:
                 logger.info(f"No text content for node {node_id}, skipping TTS")
                 node.tts_task_status = 'completed'

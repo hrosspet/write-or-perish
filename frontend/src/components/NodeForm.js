@@ -174,9 +174,12 @@ const NodeForm = forwardRef(
             const parent = response.data;
             setParentPrivacy(parent.privacy_level || "private");
             if (!initialPrivacyLevel && !initialAiUsage) {
-              // Set privacy settings to match parent's settings
+              // Set privacy settings to match parent's settings. AI usage
+              // is the backend's reply default (#362): the parent's, but
+              // under a Read the thread's, since a Read's nodes are 'chat'
+              // only for the tweets they quote.
               setPrivacyLevel(parent.privacy_level || "private");
-              setAiUsage(parent.ai_usage || "none");
+              setAiUsage(parent.reply_ai_usage || parent.ai_usage || "none");
             }
           })
           .catch((err) => {
@@ -454,9 +457,9 @@ const NodeForm = forwardRef(
           }
           if (res.data.llm_error) addToast(res.data.llm_error, 10000);
           if (res.data.llm_node_id) {
-            // Land on the USER node so the entry gets its own URL/history
-            // step; ?awaitLlm hands the pending LLM response to NodeDetail's
-            // polling, which navigates to it on completion.
+            // Through the USER node so the entry gets its own URL/history
+            // step; ?awaitLlm hands the pending LLM response to NodeDetail,
+            // which goes on to it.
             onSuccess({
               id: res.data.user_node_id,
               awaitLlm: res.data.llm_node_id,

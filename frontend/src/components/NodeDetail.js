@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useLayoutEffect, useRef, useCallback } from "react";
-import { useParams, useNavigate, useSearchParams, Link } from "react-router-dom";
+import { useParams, useNavigate, useSearchParams, useLocation, Link } from "react-router-dom";
 import { FaThumbtack, FaMicrophone, FaSpinner, FaBookOpen } from "react-icons/fa";
 import NodeFooter from "./NodeFooter";
 import SpeakerIcon from "./SpeakerIcon";
@@ -11,6 +11,7 @@ import SemanticNeighbors from "./SemanticNeighbors";
 import { useUser } from "../contexts/UserContext";
 import { useToast } from "../contexts/ToastContext";
 import { useAsyncTaskPolling } from "../hooks/useAsyncTaskPolling";
+import { useLlmTextStream } from "../hooks/useSSE";
 import api from "../api";
 import { useCheckboxToggle, useTaskInsert } from "../utils/markdown";
 import { contextAllowsAi } from "../utils/aiUsage";
@@ -62,6 +63,22 @@ function RenderChildTree({ nodes, onBubbleClick, buildActions }) {
   );
 }
 
+// A reply's text while it is written (#367), as it can be shown before
+// the final render: quote markers become cards only once the reply is
+// complete (their quotes are resolved from the stored content), and share
+// fences only turn into a card then — until then the piece shows as text.
+const SHARE_FENCE_LINE_RE = /^:::(?:share(?:[ \t]+[A-Za-z]+)?)?[ \t]*\r?$/i;
+const partialReplyText = (text) => (text || '')
+  .replace(/\{quote(?:_ext)?:\d+\}/g, '')
+  .split('\n')
+  .filter(line => !SHARE_FENCE_LINE_RE.test(line))
+  .join('\n');
+
+// History state for a move from a node to its own pending reply: the
+// entry before this one is the reply's parent. A reply that fails then
+// goes back to it instead of adding it to the history a second time.
+const FROM_PARENT = { fromParent: true };
+
 // The browser tab's title for a node: its first line, or a state word
 // while an AI reply is still being generated.
 const tabTitleFor = (node) => {
@@ -84,6 +101,7 @@ function NodeDetail({ nodeIdOverride }) {
   // comes from params. Everything downstream just uses `id`.
   const id = nodeIdOverride || paramId;
   const navigate = useNavigate();
+  const location = useLocation();
   const [searchParams, setSearchParams] = useSearchParams();
   const { user: currentUser } = useUser();
   const { addToast } = useToast();
@@ -182,6 +200,17 @@ function NodeDetail({ nodeIdOverride }) {
     }
   );
 
+  // #367: a pending reply's text while the model writes it. The node
+  // fetch carries the text so far; the stream brings the rest. (A batch
+  // read is never streamed.)
+  const replyStreaming = !!node && (node.node_type === 'llm' || !!node.llm_model)
+    && (node.llm_task_status === 'pending' || node.llm_task_status === 'processing')
+    && !isBatchWait;
+  const { text: streamText } = useLlmTextStream(
+    replyStreaming ? node.id : null,
+    { enabled: replyStreaming, initialText: node?.streaming_content || '' },
+  );
+
   useEffect(() => {
     setLoading(true);
     setError("");
@@ -270,16 +299,29 @@ function NodeDetail({ nodeIdOverride }) {
   }, [loading, focalId]);
 
   // If we arrived with ?awaitLlm=NID (e.g. from WritePage), pick up the
-  // pending LLM task and let the polling navigate to it on completion.
+  // pending LLM task and poll it here.
   // Re-runs when `id` changes so internal navigations to another node
   // with ?awaitLlm= also take effect (react-router reuses the component).
+  // An entry that arrives with its reply pending (?awaitLlm= another
+  // node) goes on to that reply at once (#367): it shows the model
+  // thinking, then the text as it is written. The entry keeps its own
+  // history step (the param is dropped first, so a back press lands on
+  // the entry and stays there). Handled once: StrictMode runs this twice
+  // in development, and a second hand-off would push the reply again.
+  const awaitLlmHandledRef = useRef(null);
   useEffect(() => {
     const awaitLlm = searchParams.get('awaitLlm');
-    if (awaitLlm) {
-      setLlmTaskNodeId(parseInt(awaitLlm, 10));
+    if (awaitLlm && awaitLlmHandledRef.current !== awaitLlm) {
+      awaitLlmHandledRef.current = awaitLlm;
       const next = new URLSearchParams(searchParams);
       next.delete('awaitLlm');
-      setSearchParams(next, { replace: true });
+      setSearchParams(next, { replace: true, state: location.state });
+      if (String(awaitLlm) === String(id)) {
+        setLlmTaskNodeId(parseInt(awaitLlm, 10));
+      } else {
+        navigate(`/node/${awaitLlm}?awaitLlm=${awaitLlm}`,
+                 { state: FROM_PARENT });
+      }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
@@ -332,7 +374,7 @@ function NodeDetail({ nodeIdOverride }) {
         // llmTaskNodeId state would be lost (this matches WritePage's
         // handoff). The awaitLlm effect picks it up after the remount.
         setLlmTaskNodeId(null);
-        navigate(`/node/${contId}?awaitLlm=${contId}`);
+        navigate(`/node/${contId}?awaitLlm=${contId}`, { state: FROM_PARENT });
         return;
       }
       if (completedId && String(completedId) === String(id)) {
@@ -376,12 +418,16 @@ function NodeDetail({ nodeIdOverride }) {
       addToast(llmError || 'LLM response generation failed', 8000);
       // awaitLlm flows can park the view on the pending LLM node itself;
       // on failure that's an empty dead node — hop to its parent (the
-      // user's entry), replacing the dead history entry so a back press
-      // walks real nodes.
+      // user's entry). Arrived from the parent: go back to it. Otherwise
+      // replace the dead history entry, so a back press walks real nodes.
       if (String(llmTaskNodeId) === String(id)) {
         const parent = node?.ancestors?.[node.ancestors.length - 1];
         if (parent && !parent.deleted) {
-          navigate(`/node/${parent.id}`, { replace: true });
+          if (location.state?.fromParent) {
+            navigate(-1);
+          } else {
+            navigate(`/node/${parent.id}`, { replace: true });
+          }
         }
       }
       setLlmTaskNodeId(null);
@@ -659,11 +705,14 @@ function NodeDetail({ nodeIdOverride }) {
     addToast(apiErr || err.message || "Error requesting LLM response.", 8000);
   };
 
+  // The reply is watched on its own node from the start (#367): the
+  // model thinking, then the text as it is written.
   const handleLLMResponse = () => {
     setError("");
     setLlmRequesting(true);
     requestLlmFor(id)
-      .then((newNodeId) => setLlmTaskNodeId(newNodeId))
+      .then((newNodeId) => navigate(`/node/${newNodeId}?awaitLlm=${newNodeId}`,
+                                    { state: FROM_PARENT }))
       .catch(handleLlmRequestError)
       .finally(() => setLlmRequesting(false));
   };
@@ -698,10 +747,9 @@ function NodeDetail({ nodeIdOverride }) {
       const chain = [node, ...(node.ancestors || [])];
       const llmNodeId = await tryAutoGenerateFor(newNodeId, chain);
       if (llmNodeId) {
-        // Land on the NEW USER node so it gets its own URL/history step
-        // (a back press then walks the actual entries); ?awaitLlm keeps
-        // the pending LLM response polling anchored here and navigates
-        // to the response on completion.
+        // Through the NEW USER node so it gets its own URL/history step
+        // (a back press then walks the actual entries); ?awaitLlm takes
+        // the view on from there to the pending response.
         navigate(`/node/${newNodeId}?awaitLlm=${llmNodeId}`);
       } else {
         navigate(`/node/${newNodeId}`);
@@ -724,7 +772,9 @@ function NodeDetail({ nodeIdOverride }) {
   // under that prompt (the task strips it on read turns). Auto-generate
   // is honoured like Text mode's own entry, and the reply fires
   // server-side, so there is no /nodes/<id>/llm follow-up here.
-  const submitReadReplyMessage = async ({ content, streaming_session_id }) => {
+  // The form's AI usage goes along (a recording carries it on its draft):
+  // it defaults to the thread's, not the read reply's 'chat' (#362).
+  const submitReadReplyMessage = async ({ content, privacy_level, ai_usage, streaming_session_id }) => {
     if (streaming_session_id) {
       const res = await api.post(
         `/drafts/streaming/${streaming_session_id}/save-as-node`,
@@ -732,8 +782,16 @@ function NodeDetail({ nodeIdOverride }) {
       );
       return res.data;
     }
+    if (ai_usage === 'none') {
+      // Kept away from AI: a plain note, no Text-mode prompt and no reply
+      // (Text mode requires 'chat' or 'train').
+      const res = await api.post('/nodes/', {
+        content, parent_id: parseInt(id, 10), privacy_level, ai_usage,
+      });
+      return res.data;
+    }
     const res = await api.post(`/textmode/from-node/${id}`, {
-      content, model: selectedModel, auto_generate: autoGenerateActive,
+      content, ai_usage, model: selectedModel, auto_generate: autoGenerateActive,
     });
     return res.data;
   };
@@ -796,10 +854,12 @@ function NodeDetail({ nodeIdOverride }) {
     try {
       const chain = [updated, ...(updated.ancestors || [])];
       const llmNodeId = await tryAutoGenerateFor(updated.id, chain);
-      // Focal is already the edited node — start polling in place (no
-      // navigation), so the edited node keeps its history entry and the
-      // completion effect pushes the response when it lands.
-      if (llmNodeId) setLlmTaskNodeId(llmNodeId);
+      // The edited node keeps its history entry; the response is watched
+      // on its own node from the start (#367).
+      if (llmNodeId) {
+        navigate(`/node/${llmNodeId}?awaitLlm=${llmNodeId}`,
+                 { state: FROM_PARENT });
+      }
     } catch (err) {
       handleLlmRequestError(err);
     }
@@ -1259,7 +1319,37 @@ function NodeDetail({ nodeIdOverride }) {
         {isReadReply && node.read_window && (
           <ReadWindowLine window={node.read_window} />
         )}
-        {isLlmPending ? (
+        {isLlmPending && partialReplyText(streamText).trim() ? (
+          // #367: the reply as far as it's written, then the same pulsing
+          // dots — the text is still coming.
+          <div>
+            <QuotedContent
+              content={partialReplyText(streamText)}
+              quotes={{}}
+              externalQuotes={{}}
+              nodeId={node.id}
+              contextArtifacts={node.context_artifacts || null}
+              onQuoteClick={handleBubbleClick}
+            />
+            <span aria-label="Still writing" style={{
+              display: 'inline-flex', gap: '3px', padding: '6px 0',
+            }}>
+              {[0, 1, 2].map(i => (
+                <span key={i} style={{
+                  width: '5px', height: '5px', borderRadius: '50%',
+                  background: 'var(--text-muted)',
+                  animation: `wopPulseDot 1.2s ease-in-out ${i * 0.15}s infinite`,
+                }} />
+              ))}
+            </span>
+            <style>{`
+              @keyframes wopPulseDot {
+                0%, 60%, 100% { opacity: 0.3; transform: translateY(0); }
+                30% { opacity: 1; transform: translateY(-2px); }
+              }
+            `}</style>
+          </div>
+        ) : isLlmPending ? (
           <div style={{
             display: 'flex', alignItems: 'center', gap: '10px',
             color: 'var(--text-muted)',

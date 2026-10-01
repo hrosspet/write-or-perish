@@ -1039,6 +1039,11 @@ def _focal_own_fields(node):
         # prompt (#66).
         "has_tts": bool(node.audio_tts_url),
     }
+    # The reply's text so far while it is generated (#367): a reload
+    # mid-generation shows it at once; the llm-stream SSE takes over.
+    if node.llm_task_status in ("pending", "processing") \
+            and node.streaming_content:
+        data["streaming_content"] = node.get_streaming_content()
     # Include tool call metadata for LLM nodes
     if node.tool_calls_meta:
         import json as _json
@@ -1305,6 +1310,15 @@ def get_node(node_id):
         from backend.utils.ca_feed import read_reply_ids
         alive = [n for n in ancestor_nodes if n.deleted_at is None] + [node]
         read_reply_above = bool(read_reply_ids(alive))
+    # What a new reply under this node starts with (#362): the reply form
+    # pre-selects it. The node's own ai_usage, except in the owner's read
+    # thread, where the walk looks through the read (reply_ai_usage; only
+    # there, so other threads pay no chain queries).
+    reply_usage = node.ai_usage or current_user.default_ai_usage
+    if in_read_thread and (node.human_owner_id or node.user_id) == current_user.id:
+        from backend.utils.llm_nodes import reply_ai_usage
+        reply_usage = reply_ai_usage(
+            node, current_user, parent_content=focal.get("content"))
     node_data = {
         **focal,
         "child_count": len(serialized_children),
@@ -1312,6 +1326,7 @@ def get_node(node_id):
         "children": serialized_children,
         "in_read_thread": in_read_thread,
         "read_reply_above": read_reply_above,
+        "reply_ai_usage": reply_usage,
     }
     return jsonify(node_data), 200
 
@@ -2067,6 +2082,10 @@ def get_llm_status(node_id):
         # finalized as an interim retrieval step and the answer lives on the
         # linked continuation node.
         "continuation_node_id": node.continuation_node_id,
+        # #367: voice TTS that started before the reply finished (spoken
+        # while written) — the browser attaches its TTS stream.
+        "tts_task_status": node.tts_task_status,
+        "tts_streaming": node.tts_task_id == "voice-stream",
     }
 
     # Include content when completed (needed by VoicePage polling) and

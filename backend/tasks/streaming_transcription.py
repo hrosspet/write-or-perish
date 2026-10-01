@@ -17,7 +17,8 @@ from openai import OpenAI
 import pathlib
 import os
 import shutil
-from datetime import datetime
+import time
+from datetime import datetime, timezone
 
 from backend.celery_app import celery, flask_app
 from backend.models import Node, NodeTranscriptChunk, Draft, APICostLog
@@ -28,6 +29,7 @@ from backend.utils.webm_utils import concat_fragmented_media
 from backend.utils.api_keys import get_openai_chat_key
 from backend.utils.encryption import decrypt_file_to_temp
 from backend.utils.cost import calculate_audio_cost_microdollars
+from backend.utils import voice_timing
 
 logger = get_task_logger(__name__)
 
@@ -36,6 +38,12 @@ logger = get_task_logger(__name__)
 # while recording), so the prefix is cold at generation — warm it. Tied to
 # the provider TTL; tune together.
 PREWARM_ONGOING_MIN_SECONDS = 300
+
+# How often finalize_draft_streaming checks whether the last chunks are
+# transcribed. The voice reply can't start before that wait ends.
+# INTRODUCED CONSTANT (#371): it was 2 s, which cost ~1 s per voice turn
+# on average (measured 0.5-1.7 s); one status query per poll is cheap.
+FINALIZE_POLL_SECS = 0.25
 
 # Toast text when a Voice recording finishes after the user hit the monthly
 # spend cap (#341): the entry is saved, the reply is skipped.
@@ -977,11 +985,16 @@ def finalize_draft_streaming(self, session_id: str, total_chunks: int,
         model: LLM model ID (for server-side LLM chain)
     """
     logger.info(f"Finalizing draft streaming for session {session_id}, {total_chunks} chunks")
+    # #371: where a voice turn's wait goes; marked under the reply node
+    # once it exists (_start_server_side_llm_chain).
+    timing = {"finalize_start": time.time()}
 
     with flask_app.app_context():
         draft = Draft.query.filter_by(session_id=session_id).first()
         if not draft:
             raise ValueError(f"Draft not found for session {session_id}")
+        # Read now: the draft may be discarded while the chunks transcribe.
+        recording_started = draft.created_at
 
         # #187: pre-warm the Anthropic prompt cache while the trailing
         # chunks transcribe. Fresh Voice threads only (for an ongoing
@@ -1065,10 +1078,10 @@ def finalize_draft_streaming(self, session_id: str, total_chunks: int,
             db.session.commit()
 
         # Wait for all chunks to complete (with timeout)
-        import time
         max_wait_seconds = 600  # 10 minutes max wait
-        poll_interval = 2  # seconds
+        waited_since = time.monotonic()
         elapsed = 0
+        last_counts = None
 
         while elapsed < max_wait_seconds:
             # Check chunk statuses
@@ -1077,30 +1090,52 @@ def finalize_draft_streaming(self, session_id: str, total_chunks: int,
             failed = [c for c in chunks if c.status == 'failed']
             pending = [c for c in chunks if c.status in ['pending', 'processing', 'stored']]
 
-            logger.info(
-                f"Session {session_id}: {len(completed)} completed, "
-                f"{len(failed)} failed, {len(pending)} pending of {total_chunks}"
-            )
+            counts = (len(completed), len(failed), len(pending))
+            if counts != last_counts:
+                last_counts = counts
+                logger.info(
+                    f"Session {session_id}: {len(completed)} completed, "
+                    f"{len(failed)} failed, {len(pending)} pending of {total_chunks}"
+                )
 
             # All chunks processed (either completed or failed)
             if len(completed) + len(failed) >= total_chunks:
                 break
+            if (not chunks and total_chunks and not Draft.query.filter_by(
+                    session_id=session_id).count()):
+                # The session was discarded (the draft and its chunk rows
+                # are gone): nothing will complete, and the re-fetch below
+                # skips it.
+                break
 
-            time.sleep(poll_interval)
-            elapsed += poll_interval
+            time.sleep(FINALIZE_POLL_SECS)
+            elapsed = time.monotonic() - waited_since
 
             # Refresh the session to get updated data
             db.session.expire_all()
 
+        timing["transcribed"] = time.time()
+        done_at = [c.completed_at for c in chunks if c.completed_at]
+        if done_at:
+            # When the last chunk was actually done (the loop polls).
+            timing["last_chunk_done"] = max(done_at).replace(
+                tzinfo=timezone.utc).timestamp()
+        if recording_started:
+            timing["recording_secs"] = round(
+                timing["finalize_start"]
+                - recording_started.replace(tzinfo=timezone.utc).timestamp(),
+                1)
+        timing["chunks"] = total_chunks
+
         # Log whether we exited by completion or timeout
         if elapsed >= max_wait_seconds:
             logger.warning(
-                f"Session {session_id}: TIMED OUT after {elapsed}s waiting for chunks. "
+                f"Session {session_id}: TIMED OUT after {elapsed:.0f}s waiting for chunks. "
                 f"Expected {total_chunks}, got {len(completed)} completed + {len(failed)} failed"
             )
         else:
             logger.info(
-                f"Session {session_id}: All chunks processed in {elapsed}s"
+                f"Session {session_id}: All chunks processed in {elapsed:.1f}s"
             )
 
         # The draft instance was expired by db.session.expire_all() in the
@@ -1179,6 +1214,7 @@ def finalize_draft_streaming(self, session_id: str, total_chunks: int,
                     draft, session_id, full_transcript,
                     user_id, parent_id, model, label,
                     cache_split_offset=cache_split_offset,
+                    timing=timing,
                 )
             except Exception as e:
                 logger.error(
@@ -1238,7 +1274,7 @@ def _create_system_node_early(user_id, prompt_key, draft):
 
 def _start_server_side_llm_chain(draft, session_id, transcript,
                                  user_id, parent_id, model, label,
-                                 cache_split_offset=None):
+                                 cache_split_offset=None, timing=None):
     """
     Create nodes and kick off LLM + TTS generation server-side.
 
@@ -1253,19 +1289,19 @@ def _start_server_side_llm_chain(draft, session_id, transcript,
        node's own finalization (interim steps included), so interim audio
        is playable while the continuation call is still generating
     """
-    from backend.models import Node, NodeTranscriptChunk
+    from backend.models import Node, NodeTranscriptChunk, User
     from backend.utils.prompts import get_user_prompt_record
-    from backend.utils.llm_nodes import create_llm_placeholder
+    from backend.utils.llm_nodes import create_llm_placeholder, reply_ai_usage
     from backend.utils.context_artifacts import attach_context_artifacts
     from backend.tasks.llm_completion import generate_llm_response
 
     prompt_key = label.lower()  # 'voice'
 
     if parent_id:
-        # Inherit ai_usage from parent node in the thread
+        # Inherit ai_usage from the thread, looking through a read (#362)
         parent_node = Node.query.get(parent_id)
-        ai_usage = (parent_node.ai_usage if parent_node
-                    else draft.ai_usage) or "none"
+        ai_usage = (reply_ai_usage(parent_node, User.query.get(user_id))
+                    if parent_node else draft.ai_usage) or "none"
         user_parent_id = parent_id
     else:
         # New thread — create system node with workflow prompt
@@ -1385,6 +1421,16 @@ def _start_server_side_llm_chain(draft, session_id, transcript,
     draft.llm_node_id = llm_node.id
     draft.streaming_status = 'completed'
     db.session.commit()
+
+    if timing:
+        # #371: the finalize task's marks, under the reply node.
+        facts = {k: timing[k] for k in ("recording_secs", "chunks")
+                 if k in timing}
+        for stage in ("finalize_start", "last_chunk_done", "transcribed"):
+            if stage in timing:
+                voice_timing.mark(llm_node.id, stage, t=timing[stage],
+                                  **(facts if stage == "transcribed" else {}))
+        voice_timing.mark(llm_node.id, "llm_enqueued")
 
     # LLM generation; TTS is dispatched inside the task at each node's own
     # finalization (source_mode='voice'), interim steps included.

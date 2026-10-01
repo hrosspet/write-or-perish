@@ -521,6 +521,44 @@ def test_a_chat_turn_in_a_train_read_thread_still_uses_chat_keys(app, monkeypatc
     assert keys == ["chat"]
 
 
+def test_a_chat_turn_in_a_read_thread_keeps_the_threads_train(app, monkeypatch, tmp_path):  # noqa: F811
+    """#362, voice review 2026-09-29: the AI answer to the user's reply
+    under a read takes the thread's setting like any other reply, so a
+    'train' placeholder stays 'train'. The call itself still goes out on
+    the chat key: the picks' quoted tweets are in its context."""
+    _, alice, llm_user, read, reply, _, _ = _first_read(monkeypatch, tmp_path)
+    question = _user_node(alice, reply.id, "why the second one?")
+    _train(question)
+    chat = _placeholder(llm_user, alice, question.id)
+    _train(chat)
+    keys = _watch_key_type(monkeypatch)
+    _live(monkeypatch, alice, question, chat, "Because it fit.")
+
+    assert _fresh(chat.id).llm_task_status == "completed"
+    assert keys == ["chat"]
+    assert _fresh(chat.id).ai_usage == "train"
+    assert _fresh(question.id).ai_usage == "train"
+
+
+def test_the_recommendation_reply_is_stored_as_chat(app, monkeypatch, tmp_path):  # noqa: F811
+    """#362: the read reply that presents the picks is 'chat' by
+    construction. A placeholder that reached the task as 'train' (made
+    some other way than the read routes) is stored as 'chat'."""
+    _capture_render(monkeypatch, tmp_path)
+    alice = _mk_user("alice", approved=True, plan="alpha", is_admin=True)
+    llm_user = _mk_user("gpt-5", twitter_id="llm-gpt-5")
+    note = _user_node(alice, None, "where am I stuck?")
+    read = _prompt_node(alice, "read_thread", parent_id=note.id)
+    _train(note, read)
+    reply = _placeholder(llm_user, alice, read.id)
+    _train(reply)
+    _live(monkeypatch, alice, read, reply, _feed_json([
+        {"n": 1, "qt": "This one.", "relevance": 30, "recommend": True}]))
+
+    assert _fresh(reply.id).llm_task_status == "completed"
+    assert _fresh(reply.id).ai_usage == "chat"
+
+
 def test_an_ordinary_train_thread_still_uses_train_keys(app, monkeypatch, tmp_path):  # noqa: F811
     """The guard is scoped to read threads: a thread the user wrote
     themselves and marked 'train' keeps its training key."""
@@ -530,10 +568,12 @@ def test_an_ordinary_train_thread_still_uses_train_keys(app, monkeypatch, tmp_pa
     _train(note)
     keys = _watch_key_type(monkeypatch)
     llm = _placeholder(llm_user, alice, note.id)
+    _train(llm)
     _live(monkeypatch, alice, note, llm, "Quite.")
 
     assert _fresh(llm.id).llm_task_status == "completed"
     assert keys == ["train"]
+    assert _fresh(llm.id).ai_usage == "train"   # only a read reply is lowered
 
 
 def test_is_feed_node_knows_the_poc_shape(app, monkeypatch, tmp_path):  # noqa: F811

@@ -418,3 +418,35 @@ class TestPrefillCheck:
         monkeypatch.setattr(ca, "coverage_summary", lambda h, snapshot_dir=None: None)
         assert client.get("/api/admin/prefill/check?handle=nobody").status_code == 404
         assert client.get("/api/admin/prefill/check").status_code == 400
+
+
+class TestVoiceTimingAdmin:
+    """#371: every user's voice-turn timings, for the admin only."""
+
+    def test_all_users_turns_and_medians(self, app, users, monkeypatch):
+        from backend.tests.test_voice_timing import FakeRedis
+        from backend.utils import voice_timing
+        fake = FakeRedis()
+        monkeypatch.setattr(voice_timing, "_redis", lambda: fake)
+        admin, other = users["renamed_admin"], users["impostor"]
+        for user, node_id, wait in ((admin, 11, 10.0), (other, 12, 20.0),
+                                    (other, 13, 30.0)):
+            voice_timing.mark(node_id, "rec_stop", t=100.0)
+            voice_timing.mark(node_id, "chunk_ready", t=100.0 + wait)
+            voice_timing.remember_turn(user.id, node_id)
+
+        client = app.test_client()
+        _login(client, admin.id)
+        data = client.get("/api/admin/voice-timing").get_json()
+        assert [t["node_id"] for t in data["turns"]] == [13, 12, 11]
+        assert data["median"]["ready"] == 20.0
+        assert [(u["username"], u["turns"], u["median"]["ready"])
+                for u in data["users"]] == [("hrosspet", 2, 25.0),
+                                            ("explore", 1, 10.0)]
+
+        from flask import g
+        g.pop("_login_user", None)   # the fixture's app context caches it
+        other_client = app.test_client()
+        _login(other_client, other.id)
+        assert other_client.get(
+            "/api/admin/voice-timing").status_code == 403
