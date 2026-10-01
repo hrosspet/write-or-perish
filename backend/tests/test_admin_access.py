@@ -10,6 +10,7 @@ Follows the real-app + sqlite pattern from test_audio_access.py.
 
 import os
 import sys
+from datetime import datetime, timedelta
 from unittest.mock import MagicMock
 
 # ── Environment ──────────────────────────────────────────────────────────
@@ -357,6 +358,35 @@ class TestProfileStatus:
         assert rows["donei"]["intentions"]["last_created_at"] is not None
         assert rows["neither"]["intentions"] is None
 
+    def test_refused_intentions_run_shows_failed_not_complete(self, app, users):
+        """#368: a run whose output was cut off before any text (sync or
+        batch) writes a refused cost row and no artifact; the column shows
+        "failed" until a newer version is saved."""
+        from backend.models import UserArtifact
+        from backend.utils.refusal_backoff import REFUSED_REF
+        admin = users["renamed_admin"]
+        now = datetime.utcnow()
+        u = User(username="refusedi", approved=True)
+        _db.session.add(u); _db.session.commit()
+        a = UserArtifact(user_id=u.id, kind="intentions", title="Intentions",
+                         generated_by="m", tokens_used=1,
+                         created_at=now - timedelta(days=1))
+        a.set_content("old"); _db.session.add(a)
+        _db.session.add(APICostLog(
+            user_id=u.id, model_id="m", request_type="intentions_infer",
+            request_ref=REFUSED_REF, input_tokens=1, output_tokens=1,
+            cost_microdollars=0, created_at=now - timedelta(minutes=5)))
+        _db.session.commit()
+        client = app.test_client()
+        _login(client, admin.id)
+        rows = {r["username"]: r for r in client.get("/api/admin/users").json["users"]}
+        assert rows["refusedi"]["intentions"]["state"] == "failed"
+        b = UserArtifact(user_id=u.id, kind="intentions", title="Intentions",
+                         generated_by="m", tokens_used=1)
+        b.set_content("new"); _db.session.add(b); _db.session.commit()
+        rows = {r["username"]: r for r in client.get("/api/admin/users").json["users"]}
+        assert rows["refusedi"]["intentions"]["state"] == "complete"
+
 
 class TestBuildProfile:
     def test_force_build_sets_flags_and_seeds(self, app, users, monkeypatch):
@@ -379,6 +409,67 @@ class TestBuildProfile:
         r = client.post(f"/api/admin/users/{small.id}/build_profile")
         assert r.status_code == 200 and r.json["queued"] is False
         assert delay.call_count == 1
+
+    def test_force_flag_skips_the_refusal_backoff(self, app, users, monkeypatch):
+        """#368: without the flag the seed respects the backoff (today's
+        behaviour); with {"force": true} — sent after the admin confirms
+        the dialog — the seed runs with ignore_backoff."""
+        from unittest.mock import MagicMock
+        from backend.tasks import profile_batch as pb
+        admin = users["renamed_admin"]
+        held = User(username="held", approved=True)
+        _db.session.add(held); _db.session.commit()
+        delay = MagicMock()
+        monkeypatch.setattr(pb.seed_profile_batch_for_user, "delay", delay)
+        client = app.test_client()
+        _login(client, admin.id)
+        r = client.post(f"/api/admin/users/{held.id}/build_profile")
+        assert r.status_code == 202 and r.json["force"] is False
+        delay.assert_called_once_with(held.id)
+        delay.reset_mock()
+        r = client.post(f"/api/admin/users/{held.id}/build_profile",
+                        json={"force": True})
+        assert r.status_code == 202 and r.json["force"] is True
+        delay.assert_called_once_with(held.id, ignore_backoff=True)
+
+    def test_users_payload_reports_the_profile_backoff(self, app, users):
+        """profile_backoff: null when not held, "waiting" (with until)
+        after one refusal in the last hour, "stopped" after two; a saved
+        version newer than the refusals ends it."""
+        from backend.models import UserProfile
+        from backend.utils.refusal_backoff import REFUSED_REF
+        admin = users["renamed_admin"]
+        now = datetime.utcnow()
+        waiting = User(username="waiting", approved=True)
+        stopped = User(username="stoppedu", approved=True)
+        cleared = User(username="cleared", approved=True)
+        old = User(username="oldone", approved=True)
+        _db.session.add_all([waiting, stopped, cleared, old]); _db.session.commit()
+
+        def refusal(u, ago):
+            _db.session.add(APICostLog(
+                user_id=u.id, model_id="m", request_type="profile_batch",
+                request_ref=REFUSED_REF, input_tokens=1, output_tokens=1,
+                cost_microdollars=0, created_at=now - ago))
+        refusal(waiting, timedelta(minutes=10))
+        refusal(stopped, timedelta(days=3))
+        refusal(stopped, timedelta(days=2))
+        refusal(cleared, timedelta(days=3))
+        refusal(cleared, timedelta(days=2))
+        refusal(old, timedelta(hours=2))   # one refusal, wait over
+        p = UserProfile(user_id=cleared.id, generated_by="m", tokens_used=0,
+                        generation_type="update", created_at=now - timedelta(days=1))
+        p.set_content("x")
+        _db.session.add(p); _db.session.commit()
+        client = app.test_client()
+        _login(client, admin.id)
+        rows = {u["username"]: u for u in client.get("/api/admin/users").json["users"]}
+        assert rows["waiting"]["profile_backoff"]["state"] == "waiting"
+        assert rows["waiting"]["profile_backoff"]["until"] is not None
+        assert rows["stoppedu"]["profile_backoff"] == {
+            "state": "stopped", "refusals": 2, "until": None}
+        assert rows["cleared"]["profile_backoff"] is None
+        assert rows["oldone"]["profile_backoff"] is None
 
 
 class TestPrefillCheck:

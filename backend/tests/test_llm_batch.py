@@ -141,7 +141,7 @@ def test_collect_anthropic_succeeded(monkeypatch):
     assert results["profile:1:0:1:chunk"] == {
         "content": "PROFILE TEXT", "input_tokens": 100, "output_tokens": 50,
         "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0,
-        "batch": True}
+        "truncated": False, "batch": True}
     assert durations["anthropic"] == 120.0
 
 
@@ -180,7 +180,8 @@ def test_collect_openai_completed(monkeypatch):
     assert pending == {}
     assert results["profile:2:0:1:chunk"] == {
         "content": "P", "input_tokens": 100, "output_tokens": 50,
-        "cached_tokens": 0, "cache_write_subset_tokens": 0, "batch": True}
+        "cached_tokens": 0, "cache_write_subset_tokens": 0,
+        "truncated": False, "batch": True}
     assert durations["openai:gpt-x"] == 120.0
 
 
@@ -233,7 +234,48 @@ def test_collect_openai_reads_chat_completions_cache_details(monkeypatch):
     assert results["c2"] == {
         "content": "P", "input_tokens": 6018, "output_tokens": 50,
         "cached_tokens": 2815, "cache_write_subset_tokens": 3000,
-        "batch": True}
+        "truncated": False, "batch": True}
+
+
+def test_collect_marks_cut_off_results_truncated(monkeypatch):
+    """#368: the collectors refuse an empty result cut off at the output
+    limit, so the multi-item collect must carry the flag both providers
+    report (Anthropic stop_reason, chat/completions finish_reason)."""
+    ant = MagicMock()
+    ant.messages.batches.retrieve.return_value = SimpleNamespace(
+        processing_status="ended", request_counts="c",
+        created_at=None, ended_at=None)
+    ant.messages.batches.results.return_value = [
+        SimpleNamespace(custom_id="cut", result=SimpleNamespace(
+            type="succeeded", message=SimpleNamespace(
+                content=[], stop_reason="max_tokens",
+                usage=SimpleNamespace(input_tokens=10, output_tokens=32000)))),
+        SimpleNamespace(custom_id="done", result=SimpleNamespace(
+            type="succeeded", message=SimpleNamespace(
+                content=[SimpleNamespace(text="T")], stop_reason="end_turn",
+                usage=SimpleNamespace(input_tokens=10, output_tokens=5)))),
+    ]
+    oai = MagicMock()
+    oai.batches.retrieve.return_value = SimpleNamespace(
+        status="completed", request_counts="c",
+        created_at=None, completed_at=None, output_file_id="of-1")
+    line = json.dumps({
+        "custom_id": "ocut",
+        "response": {"status_code": 200, "body": {
+            "choices": [{"message": {"content": ""},
+                         "finish_reason": "length"}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 32000},
+        }},
+    })
+    oai.files.content.return_value = SimpleNamespace(
+        content=(line + "\n").encode())
+    _install_fake_sdks(monkeypatch, anthropic_client=ant, openai_client=oai)
+
+    results, _, _ = batch_check_and_collect(
+        {"anthropic": "b", "openai:gpt-x": "b2"}, KEYS)
+    assert results["cut"]["truncated"] is True
+    assert results["done"]["truncated"] is False
+    assert results["ocut"]["truncated"] is True
 
 
 # ── one-item collect: the provider's verdict vs. a transient error ───────
