@@ -54,7 +54,7 @@ test('a read reference offers Mark as unread and clears the mark', async () => {
 
 test('the owner can rate the quote good or bad without opening the post', async () => {
   api.post.mockResolvedValue({ data: { id: 42, feedback: 'good', feedback_at: '2026-09-13T08:00:00Z' } });
-  render(<ExternalQuoteBubble quote={quote()} />);
+  render(<ExternalQuoteBubble quote={quote()} showRecommendationFeedback />);
 
   const more = screen.getByRole('button', { name: 'Good quote' });
   expect(more).toHaveAttribute('aria-pressed', 'false');
@@ -83,6 +83,47 @@ test('someone else viewing the node sees the quote without the toggle', () => {
   render(<ExternalQuoteBubble quote={quote()} />);
   expect(screen.queryByRole('button')).not.toBeInTheDocument();
   expect(screen.getByText('Singing was the original psychedelic.')).toBeInTheDocument();
+});
+
+test('someone else viewing an LLM reply sees neither the verdict nor the toggle', () => {
+  useUser.mockReturnValue({ user: { id: 99 } });
+  render(<ExternalQuoteBubble
+    quote={quote({ rated_before: { feedback: 'good', at: '2026-09-22T10:00:00Z' } })}
+    showRecommendationFeedback
+  />);
+  expect(screen.queryByRole('button')).not.toBeInTheDocument();
+  expect(screen.queryByText(/You rated this/)).not.toBeInTheDocument();
+});
+
+test('in an LLM reply the owner gets the verdict and the read toggle', () => {
+  render(<ExternalQuoteBubble quote={quote()} nodeId={5} showRecommendationFeedback />);
+  expect(screen.getByRole('button', { name: 'Good quote' })).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Bad quote' })).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Mark as read' })).toBeInTheDocument();
+});
+
+test('in the user\'s own node the owner gets only the read toggle (#363)', async () => {
+  // Nothing recommended a reference the user quoted themselves, so
+  // there is no recommendation to judge: no verdict, and no reminder
+  // of an earlier one. (feedback null: the reminder would show under
+  // an empty control, so only the flag hides it here.)
+  const { unmount } = render(<ExternalQuoteBubble
+    quote={quote({ feedback: null, rated_before: { feedback: 'bad', at: '2026-09-22T10:00:00Z' } })}
+    nodeId={5}
+  />);
+  expect(screen.queryByRole('button', { name: 'Good quote' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Bad quote' })).not.toBeInTheDocument();
+  expect(screen.queryByText(/You rated this/)).not.toBeInTheDocument();
+  unmount();
+
+  // A verdict stored on the reference is not shown there either.
+  render(<ExternalQuoteBubble quote={quote({ feedback: 'good' })} nodeId={5} />);
+  expect(screen.queryByRole('button', { name: 'Good quote' })).not.toBeInTheDocument();
+
+  api.post.mockResolvedValue({ data: { id: 42, read_at: '2026-09-25T08:00:00Z' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Mark as read' }));
+  expect(api.post).toHaveBeenCalledWith('/external/items/42/read', { node_id: 5 });
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Mark as unread' })).toBeInTheDocument());
 });
 
 test('clicking the quote body still opens the original post', () => {
@@ -124,7 +165,7 @@ test('opening an already-read post logs the open; someone else\'s logs nothing',
 test('a good / bad verdict marks the quote read too, and tells the page', async () => {
   api.post.mockResolvedValue({ data: { id: 42, feedback: 'bad', feedback_at: '2026-09-21T13:00:00Z', read_at: '2026-09-21T13:00:00Z' } });
   const onReadChange = jest.fn();
-  render(<ExternalQuoteBubble quote={quote()} onReadChange={onReadChange} />);
+  render(<ExternalQuoteBubble quote={quote()} onReadChange={onReadChange} showRecommendationFeedback />);
 
   fireEvent.click(screen.getByRole('button', { name: 'Bad quote' }));
   await waitFor(() => expect(screen.getByRole('button', { name: 'Mark as unread' })).toBeInTheDocument());
@@ -134,7 +175,7 @@ test('a good / bad verdict marks the quote read too, and tells the page', async 
 
 test('in a reply, marks and verdicts carry the reply id', async () => {
   api.post.mockResolvedValue({ data: { id: 42, feedback: 'good', read_at: '2026-09-24T08:00:00Z' } });
-  render(<ExternalQuoteBubble quote={quote()} nodeId={5} />);
+  render(<ExternalQuoteBubble quote={quote()} nodeId={5} showRecommendationFeedback />);
   fireEvent.click(screen.getByRole('button', { name: 'Good quote' }));
   expect(api.post).toHaveBeenCalledWith('/external/items/42/feedback', { feedback: 'good', node_id: 5 });
   await waitFor(() => expect(screen.getByRole('button', { name: 'Mark as unread' })).toBeInTheDocument());
@@ -144,7 +185,7 @@ test('in a reply, marks and verdicts carry the reply id', async () => {
 });
 
 test('a verdict from a parallel Read shows, and says where it came from', () => {
-  render(<ExternalQuoteBubble quote={quote({ feedback: 'good', feedback_shared: true })} nodeId={5} />);
+  render(<ExternalQuoteBubble quote={quote({ feedback: 'good', feedback_shared: true })} nodeId={5} showRecommendationFeedback />);
   const good = screen.getByRole('button', { name: 'Good quote' });
   expect(good).toHaveAttribute('aria-pressed', 'true');
   expect(good).toHaveAttribute('title', 'Good quote (your rating from another reply)');
@@ -154,6 +195,7 @@ test('quoted again after a verdict: the control is empty and the earlier verdict
   render(<ExternalQuoteBubble
     quote={quote({ feedback: null, rated_before: { feedback: 'good', at: '2026-09-22T10:00:00Z' } })}
     nodeId={5}
+    showRecommendationFeedback
   />);
   expect(screen.getByText(/You rated this good on/)).toBeInTheDocument();
   expect(screen.getByRole('button', { name: 'Good quote' })).toHaveAttribute('aria-pressed', 'false');
