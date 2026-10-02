@@ -23,8 +23,17 @@ import json
 import logging
 import os
 import tempfile
+from datetime import timedelta
 
 log = logging.getLogger(__name__)
+
+# Backstop for a batch we can no longer READ (lost batch id, revoked
+# key): once it is older than this, the collector abandons the job. A
+# slow batch never needs this — both providers end a batch themselves at
+# 24h (OpenAI `expired`, Anthropic `ended` with expired items) and the
+# collectors treat that as ended. So: the 24h window plus polling slack.
+# Shared by the external-digest and recent-context collectors.
+BATCH_JOB_MAX_AGE = timedelta(hours=25)
 
 
 class BatchItemFailed(RuntimeError):
