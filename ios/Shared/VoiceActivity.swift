@@ -36,12 +36,6 @@ struct VoiceActivityAttributes: ActivityAttributes {
     }
 }
 
-// EXPERIMENT (#397 device test): on a locked iPhone every card button asked
-// for the passcode, while Now Playing's play/pause did not. The intents are
-// also marked `AudioPlaybackIntent` (the kind media controls use) and say
-// `.alwaysAllowed` explicitly, to see whether iOS then runs them while locked.
-// Keep or remove after the device test.
-
 /// What a Live Activity button asks the voice conversation to do.
 enum VoiceActivityCommand: String, Sendable {
     case pause, resume, stop, record
@@ -50,10 +44,9 @@ enum VoiceActivityCommand: String, Sendable {
 /// Pause from the lock screen. The microphone keeps running (samples are
 /// dropped), so Resume needs no new microphone start.
 @available(iOS 18.0, *)
-struct PauseVoiceRecordingIntent: LiveActivityIntent, AudioPlaybackIntent {
+struct PauseVoiceRecordingIntent: LiveActivityIntent {
     static let title: LocalizedStringResource = "Pause Recording"
     static let isDiscoverable = false
-    static let authenticationPolicy = IntentAuthenticationPolicy.alwaysAllowed
 
     func perform() async throws -> some IntentResult {
         await VoiceActivityCommands.run(.pause)
@@ -65,10 +58,9 @@ struct PauseVoiceRecordingIntent: LiveActivityIntent, AudioPlaybackIntent {
 /// interruption the microphone has to start again, which iOS allows from the
 /// background only for this kind of intent (with a Live Activity showing).
 @available(iOS 18.0, *)
-struct ResumeVoiceRecordingIntent: AudioRecordingIntent, LiveActivityIntent, AudioPlaybackIntent {
+struct ResumeVoiceRecordingIntent: AudioRecordingIntent, LiveActivityIntent {
     static let title: LocalizedStringResource = "Resume Recording"
     static let isDiscoverable = false
-    static let authenticationPolicy = IntentAuthenticationPolicy.alwaysAllowed
 
     func perform() async throws -> some IntentResult {
         await VoiceActivityCommands.run(.resume)
@@ -78,10 +70,9 @@ struct ResumeVoiceRecordingIntent: AudioRecordingIntent, LiveActivityIntent, Aud
 
 /// Stop and send from the lock screen.
 @available(iOS 18.0, *)
-struct StopVoiceRecordingIntent: LiveActivityIntent, AudioPlaybackIntent {
+struct StopVoiceRecordingIntent: LiveActivityIntent {
     static let title: LocalizedStringResource = "Stop and Send"
     static let isDiscoverable = false
-    static let authenticationPolicy = IntentAuthenticationPolicy.alwaysAllowed
 
     func perform() async throws -> some IntentResult {
         await VoiceActivityCommands.run(.stop)
@@ -92,10 +83,9 @@ struct StopVoiceRecordingIntent: LiveActivityIntent, AudioPlaybackIntent {
 /// Record the next turn from the lock screen, also while the reply plays (it
 /// stops, like the Voice screen's Continue button).
 @available(iOS 18.0, *)
-struct RecordVoiceReplyIntent: AudioRecordingIntent, LiveActivityIntent, AudioPlaybackIntent {
+struct RecordVoiceReplyIntent: AudioRecordingIntent, LiveActivityIntent {
     static let title: LocalizedStringResource = "Record a Reply"
     static let isDiscoverable = false
-    static let authenticationPolicy = IntentAuthenticationPolicy.alwaysAllowed
 
     func perform() async throws -> some IntentResult {
         await VoiceActivityCommands.run(.record)
