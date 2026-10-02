@@ -409,10 +409,11 @@ function VoiceSession({ recovery, blocked, threadId, onAiUsageRefused, onFinishI
     model: selectedModel,
     aiUsage: user?.default_ai_usage || 'none',
     onAiUsageRefused,
-    onLLMComplete: (nodeId, content, isResume) => {
+    // The server saved the recording as an entry (#391). This does not wait
+    // for the reply: if it fails or is skipped the entry still exists.
+    onEntrySaved: markHasOwnEntries,
+    onLLMComplete: (nodeId, content) => {
       lastLlmNodeIdRef.current = nodeId;
-      // A reply to what the user just said: their entry is saved.
-      if (!isResume) markHasOwnEntries();
       setLlmContent(content);
       // ProposalInline handles its own parsing + apply-status derivation
       // from tool_calls_meta. We just feed it the raw content + meta.

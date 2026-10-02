@@ -280,14 +280,13 @@ test('continuing a thread keeps the everyday question', async () => {
   expect(screen.queryByText(WELCOME_QUESTION)).not.toBeInTheDocument();
 });
 
-test('the reply to a recorded entry marks the user as having written', async () => {
+test('the server saving the recording marks the user as having written, reply or not', async () => {
   renderAt('/voice', { default_ai_usage: 'chat', has_own_entries: false });
   await screen.findByText(WELCOME_QUESTION);
-
-  // Resuming playback of an earlier reply says nothing new.
-  act(() => { mockSessionOptions.onLLMComplete(30, 'earlier reply', true); });
   expect(mockMarkHasOwnEntries).not.toHaveBeenCalled();
 
-  act(() => { mockSessionOptions.onLLMComplete(31, 'a reply', false); });
+  // The session reports a saved entry before any reply exists; the reply
+  // can fail or be skipped afterwards without taking the entry back.
+  act(() => { mockSessionOptions.onEntrySaved(); });
   expect(mockMarkHasOwnEntries).toHaveBeenCalledTimes(1);
 });
