@@ -5,7 +5,9 @@ request per due user instead of calling the model, and a beat collector
 saves the results at batch price. Until a batch is collected the prompts
 keep reading the previous summary; an empty result is never saved; a
 failed item stays stale and counts in the #368 backoff (one more try after
-an hour, then stopped), so it is not resubmitted every 10 minutes.
+an hour, then stopped), so it is not resubmitted every 10 minutes. The
+check and the collector's claim-to-save step share one Redis lock (faked
+here), so no user is submitted twice.
 
 Same harness as test_empty_truncated_bg_output: in-memory SQLite,
 ENCRYPTION_DISABLED, celery mocked so the modules import. The provider is
@@ -88,6 +90,43 @@ def app():
 def rc():
     import backend.tasks.recent_context as rc
     return rc
+
+
+class _FakeLock:
+    """redis-py Lock semantics the batch lock relies on: a non-blocking
+    acquire, and a release that only removes the holder's own lock."""
+
+    def __init__(self, held, name):
+        self.held, self.name, self.token = held, name, object()
+
+    def acquire(self, blocking=True):
+        if self.name in self.held:
+            return False
+        self.held[self.name] = self.token
+        return True
+
+    def release(self):
+        if self.held.get(self.name) is not self.token:
+            raise RuntimeError("lock not owned")
+        del self.held[self.name]
+
+
+class _FakeLockRedis:
+    def __init__(self):
+        self.held = {}
+
+    def lock(self, name, timeout=None):
+        return _FakeLock(self.held, name)
+
+
+@pytest.fixture(autouse=True)
+def lock_redis(rc, monkeypatch):
+    """Every test gets an in-memory lock store: no test touches a real
+    Redis, and the check and collector run under the lock as in
+    production."""
+    fake = _FakeLockRedis()
+    monkeypatch.setattr(rc, "_lock_redis", lambda: fake)
+    return fake
 
 
 def _user(name, **kw):
@@ -546,6 +585,90 @@ def test_a_result_older_than_the_saved_summary_is_not_saved(
     assert _shown_summary(user) == "SAVED MEANWHILE"
     assert APICostLog.query.count() == 1
     assert _job_for(user)[0].items[0]["outcome"] == "skipped"
+
+
+# ── one lock for the check and the collector (#380 review) ───────────────
+
+def test_the_check_and_the_collector_skip_while_the_lock_is_held(
+        app, rc, world, monkeypatch, lock_redis):
+    user = _user("locked-out")
+    with rc.recent_context_batch_lock() as acquired:
+        assert acquired is True
+        assert _check(rc) == {"status": "locked", "submitted": 0}
+    assert world["submitted"] == []
+    assert _check(rc) == {"status": "ok", "submitted": 1}
+
+    # An ended batch is not claimed while a check holds the lock: nothing
+    # billed or saved, the user stays in flight, the next run collects.
+    with rc.recent_context_batch_lock():
+        assert _collect_with(rc, monkeypatch, _summary(user)) == {
+            "collected": 0, "abandoned": 0}
+    assert _job_for(user)[0].status == "pending"
+    assert APICostLog.query.count() == 0
+    assert user.id in rc._users_in_pending_batches()
+    assert _collect_with(rc, monkeypatch, _summary(user)) == {
+        "collected": 1, "abandoned": 0}
+    assert lock_redis.held == {}                  # released
+
+
+def test_overlapping_checks_submit_a_user_once(app, rc, world, monkeypatch):
+    """Two check runs can overlap (beat messages queued up behind busy
+    workers). Both used to read the users in flight before either
+    committed its job, and both submitted the same user. A run that starts
+    inside another run's user loop now finds the lock held and skips."""
+    user = _user("overlap")
+    inner = []
+    real = rc._should_generate_recent_context
+
+    def overtaken_by_a_second_run(u):
+        if not inner:
+            inner.append(_check(rc))
+        return real(u)
+    monkeypatch.setattr(rc, "_should_generate_recent_context",
+                        overtaken_by_a_second_run)
+
+    assert _check(rc) == {"status": "ok", "submitted": 1}
+    assert inner == [{"status": "locked", "submitted": 0}]
+    assert len(world["submitted"]) == 1
+    assert len(_job_for(user)) == 1
+
+
+def test_a_check_between_claim_and_save_does_not_resubmit_the_user(
+        app, rc, world, monkeypatch):
+    """The collector's claim takes the user out of flight before their
+    summary is saved. A check in that window found them due and submitted
+    them again (billed twice, the second result discarded). The collector
+    now holds the lock from the claim until the outcomes are saved."""
+    user = _user("claimed")
+    assert _check(rc)["submitted"] == 1
+    inner = []
+    real_apply = rc._apply_item
+
+    def a_check_runs_meanwhile(item, result, batch_id):
+        assert user.id not in rc._users_in_pending_batches()
+        inner.append(_check(rc))
+        return real_apply(item, result, batch_id)
+    monkeypatch.setattr(rc, "_apply_item", a_check_runs_meanwhile)
+
+    assert _collect_with(rc, monkeypatch, _summary(user))["collected"] == 1
+    assert inner == [{"status": "locked", "submitted": 0}]
+    assert len(world["submitted"]) == 1
+    assert _shown_summary(user).endswith("NEW SUMMARY")
+
+
+def test_without_redis_the_check_and_collector_run_unlocked(
+        app, rc, world, monkeypatch):
+    class RedisDown:
+        def lock(self, name, timeout=None):
+            lock = MagicMock()
+            lock.acquire.side_effect = ConnectionError(
+                "Error 61 connecting to localhost:6379")
+            return lock
+    monkeypatch.setattr(rc, "_lock_redis", lambda: RedisDown())
+    user = _user("no-redis")
+    assert _check(rc) == {"status": "ok", "submitted": 1}
+    assert _collect_with(rc, monkeypatch, _summary(user)) == {
+        "collected": 1, "abandoned": 0}
 
 
 # ── the direct path ──────────────────────────────────────────────────────

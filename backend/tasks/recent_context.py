@@ -16,6 +16,7 @@ would (default_model_for) — the same provider, never a fallback.
 The synchronous generate_recent_context task stays as the direct path; no
 scheduler dispatches it.
 """
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from celery.utils.log import get_task_logger
 from flask import current_app
@@ -340,6 +341,57 @@ def _batch_keys():
         current_app.config)
 
 
+# One lock for the submit check and the collector's claim-to-save step.
+# The check reads the users in flight (pending jobs) once, at its start,
+# and the collector's claim takes a user out of flight before their
+# summary is saved. Without the lock, two overlapping checks (beat
+# messages queued up behind busy workers), or a check that reads during a
+# collection, could submit the same user twice: billed twice, the second
+# result discarded by the "already covered" guard.
+RC_BATCH_LOCK_KEY = "loore:recent_context_batch:lock"
+RC_BATCH_LOCK_TTL = 30 * 60   # seconds; a pass ends well within this
+
+
+def _lock_redis():
+    import redis
+    return redis.Redis.from_url(
+        current_app.config.get("CELERY_BROKER_URL",
+                               "redis://localhost:6379/0"),
+        socket_connect_timeout=2)
+
+
+@contextmanager
+def recent_context_batch_lock():
+    """Held by the check for its whole pass and by the collector from the
+    claim of an ended job until its outcomes are saved. Same pattern as
+    profile_batch.batch_pipeline_lock: a non-blocking acquire with a TTL;
+    yields False when another pass holds it (the caller skips this run),
+    True when acquired or when Redis is unreachable (tests, local: run
+    unlocked, as before). The release only deletes this pass's own lock,
+    in case the TTL ran out and another pass took it."""
+    lock = None
+    try:
+        lock = _lock_redis().lock(RC_BATCH_LOCK_KEY,
+                                  timeout=RC_BATCH_LOCK_TTL)
+        acquired = bool(lock.acquire(blocking=False))
+    except Exception as e:  # no Redis → run unlocked
+        logger.warning("Recent-context batch lock unavailable (%s); "
+                       "running unlocked", e)
+        lock, acquired = None, True
+    if not acquired:
+        yield False
+        return
+    try:
+        yield True
+    finally:
+        if lock is not None:
+            try:
+                lock.release()
+            except Exception as e:
+                logger.warning("Recent-context batch lock release failed "
+                               "(%s); it expires after its TTL", e)
+
+
 def _users_in_pending_batches():
     pending = RecentContextBatchJob.query.filter_by(status="pending").all()
     return {item["user_id"] for job in pending for item in job.items}
@@ -453,6 +505,21 @@ def _check_pending_recent_context_updates():
         logger.info(
             "PROFILE_UPDATES_PAUSED — skipping recent-context check")
         return {"status": "paused", "submitted": 0}
+    # Under the lock the collector takes from claim to save, so the users
+    # in flight read below stay in flight until this pass has committed
+    # its own jobs (see RC_BATCH_LOCK_KEY).
+    with recent_context_batch_lock() as acquired:
+        if not acquired:
+            logger.info("Recent context check skipped: a check or a "
+                        "collection holds the lock; the next check runs "
+                        "in 10 minutes")
+            return {"status": "locked", "submitted": 0}
+        return _submit_due_users()
+
+
+def _submit_due_users():
+    """The check's pass, run under the lock: submit one request per due
+    user who has none in flight."""
     # Voice-Mode users minus the llm-<model> placeholder accounts.
     # Shared helper keeps NULL-twitter_id (email signup) users in —
     # a bare NOT LIKE drops them (NULL NOT LIKE = NULL). See
@@ -595,6 +662,7 @@ def _collect_recent_context_batches():
     keys = _batch_keys()
     now = datetime.utcnow()
     collected = abandoned = 0
+    ended = []
     for job in jobs:
         try:
             results, still_pending, _ = batch_check_and_collect(
@@ -614,6 +682,9 @@ def _collect_recent_context_batches():
                     "Recent-context batch %s not ended after %s; "
                     "abandoning (%d users keep their previous summary)",
                     job.batch_id, BATCH_JOB_MAX_AGE, len(job.items))
+                # Status and outcomes in one commit: a check sees these
+                # users either in flight or failed, so the abandon needs
+                # no lock.
                 job.items = [dict(item, outcome="failed")
                              for item in job.items]
                 job.status = "abandoned"
@@ -622,26 +693,45 @@ def _collect_recent_context_batches():
                 _report_unsaved(job.items)
                 abandoned += 1
             continue
+        ended.append((job, results))
 
-        # Batch ended: claim the job before saving anything, so a
-        # collector run overlapping this one (the beat fires every
-        # minute) cannot save the same summaries twice.
-        batch_id, items = job.batch_id, [dict(i) for i in job.items]
-        claimed = RecentContextBatchJob.query.filter_by(
-            id=job.id, status="pending").update(
-            {"status": "collected", "collected_at": now},
-            synchronize_session=False)
-        db.session.commit()
-        if not claimed:
-            continue
-        for item in items:
-            item["outcome"] = _apply_item(
-                item, results.get(item["custom_id"]), batch_id)
-        job.items = items
-        db.session.commit()
-        _report_unsaved(items)
-        collected += 1
+    if not ended:
+        return {"collected": 0, "abandoned": abandoned}
+    # From the claim until the outcomes are saved, a claimed job's users
+    # are neither in flight nor covered by a saved summary. The lock keeps
+    # the check from reading them in that window (RC_BATCH_LOCK_KEY).
+    with recent_context_batch_lock() as acquired:
+        if not acquired:
+            logger.info("Recent-context collection deferred: a check or "
+                        "another collection holds the lock; %d ended "
+                        "batch(es) are collected next run", len(ended))
+            return {"collected": 0, "abandoned": abandoned}
+        for job, results in ended:
+            collected += _claim_and_apply(job, results, now)
     return {"collected": collected, "abandoned": abandoned}
+
+
+def _claim_and_apply(job, results, now):
+    """Claim an ended job and save its items. Returns 1 if this run
+    claimed it, 0 if another collector run already had."""
+    # Claim the job before saving anything, so a collector run
+    # overlapping this one (the beat fires every minute) cannot save the
+    # same summaries twice.
+    batch_id, items = job.batch_id, [dict(i) for i in job.items]
+    claimed = RecentContextBatchJob.query.filter_by(
+        id=job.id, status="pending").update(
+        {"status": "collected", "collected_at": now},
+        synchronize_session=False)
+    db.session.commit()
+    if not claimed:
+        return 0
+    for item in items:
+        item["outcome"] = _apply_item(
+            item, results.get(item["custom_id"]), batch_id)
+    job.items = items
+    db.session.commit()
+    _report_unsaved(items)
+    return 1
 
 
 @celery.task
