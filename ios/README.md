@@ -153,6 +153,9 @@ without a paid account.
      underscores; it can't be changed later). The name is the App Store name, 2–30
      characters, and must not be used by another app. If "Loore" is taken, use another
      name; the home-screen name stays Loore *(unverified: whether "Loore" is free)*.
+   - If Xcode doesn't offer to create the record, create it first in App Store Connect:
+     **Apps → + → New App** → iOS, the name, primary language, bundle id
+     `org.loore.app`, SKU → Create. Then distribute again.
    - Export compliance: `Info.plist` sets `ITSAppUsesNonExemptEncryption` to NO (the app
      uses only HTTPS and the Keychain), so App Store Connect doesn't ask the encryption
      questions for each build.
@@ -176,7 +179,8 @@ without a paid account.
     → Add. A tester missing from that list hasn't got an eligible role, or may not have
     accepted the step 9 invitation yet *(unverified: whether pending users are listed)*.
     If the first build isn't in the group (it was uploaded before the group existed),
-    add it with **+** next to Builds. Testers can install each build for 90 days.
+    add it with **Add Builds** in the group, then fill in **What to Test**. Testers can
+    install each build for 90 days.
 
 ### What to send the testers
 
