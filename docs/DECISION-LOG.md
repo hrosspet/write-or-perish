@@ -132,7 +132,7 @@ Choices that agents flagged in PRs and that I decided because a rule above alrea
 | 2026-10-02 | #401 | A newcomer's first session and the updates window | `/welcome` skips the whole session | A newcomer reflects first |
 | 2026-10-02 | #401 | What counts as the user's own entry | Only writing done in Loore; not imports, session prompts, links or deleted entries | Imports don't count (Peter, 2026-10-01) |
 | 2026-10-02 | #403 | iPhone only or iPhone and iPad | iPhone only | The design document |
-| 2026-10-02 | #404 | A chat reply is sent with a read-only model | It runs on the chat default; no chat picker offers read-only models | A user's model is theirs |
+| 2026-10-02 | #404 | A chat reply is sent with a read-only model | Refused with a plain message. My first decision (run it on the chat default) was wrong: the review showed it can switch the provider | Never change providers, not even as a fallback |
 | 2026-10-02 | #405 | What counts as a dropped pick | Both kinds of picks Loore can't show | An empty Read is a good result |
 | 2026-10-02 | #408 | A failed auto-generate hides LLM Response outside Read | Follow-up issue #416 | Show the choices |
 | 2026-10-02 | #413 | Admin-only guard, dry run, missing-items count in the todo-merge comparison | Kept | Experiments run on Peter's data; cost is his call |
