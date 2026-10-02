@@ -68,6 +68,19 @@ def validate_default_model(config):
         f"Known keys: {', '.join(sorted(supported))}")
 
 
+# What Sentry may receive. send_default_pii=False only drops cookies, IPs
+# and user ids: the SDK still attaches each stack frame's local variables
+# and request bodies up to 10 KB, and both can hold decrypted user content
+# (an entry being saved, a todo list being merged). Nobody outside the
+# user's own session reads their content, so neither is sent.
+SENTRY_PRIVACY_OPTIONS = {
+    "send_default_pii": False,
+    "include_local_variables": False,
+    "max_request_body_size": "never",
+    "traces_sample_rate": 0.0,   # errors only, no perf tracing
+}
+
+
 def create_app():
     # Error monitoring (roadmap Phase 0). No-op unless SENTRY_DSN is set.
     sentry_dsn = os.environ.get("SENTRY_DSN")
@@ -100,9 +113,8 @@ def create_app():
         sentry_sdk.init(
             dsn=sentry_dsn,
             environment=os.environ.get("SENTRY_ENVIRONMENT", "production"),
-            send_default_pii=False,   # never attach user content/PII
-            traces_sample_rate=0.0,   # errors only, no perf tracing
             before_send=_before_send,
+            **SENTRY_PRIVACY_OPTIONS,
         )
 
     app = Flask(__name__)
