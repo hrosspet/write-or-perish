@@ -104,8 +104,11 @@ def revert_profile(version_id):
         tokens_used=0,
         privacy_level=old.privacy_level,
         ai_usage=old.ai_usage,
-        source_tokens_used=old.source_tokens_used,
-        source_data_cutoff=old.source_data_cutoff,
+        # The same coverage an edit of it would carry, render time
+        # included: copying only the cutoff left an integration's empty
+        # render time, so a pinned (pre-filled) account's continue rule
+        # measured from the revert and seeded an extra update.
+        **coverage_of(current_user, old),
         generation_type=USER_REVERT,
         parent_profile_id=old.id,
     )

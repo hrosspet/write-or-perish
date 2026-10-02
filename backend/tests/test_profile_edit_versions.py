@@ -200,6 +200,34 @@ def test_revert_from_the_history_is_marked_as_the_users(app, alice):  # noqa: F8
     assert revert.get_content() == generated.get_content()
 
 
+def test_revert_to_an_integration_carries_its_coverage(app, alice):  # noqa: F811
+    """A revert to an integration on a pre-filled (pinned) account carries
+    the coverage an edit of it would, render time included, so the update
+    gates decide as before the revert (same rule as finding 3)."""
+    from backend.utils.profile_versions import coverage_of
+    alice.profile_force_batch = True
+    tip = _generated(alice)
+    tip.generation_type = "iterative"
+    tip.source_rendered_at = datetime(2026, 5, 3)
+    integration = _generated(alice)
+    integration.parent_profile_id = tip.id
+    integration.source_rendered_at = None
+    _db.session.commit()
+    _edit(app, alice, integration, "### SURFACE MAP\nMY EDIT")
+    client = app.test_client()
+    _login(client, alice)
+
+    resp = client.post(f"/profile/revert/{integration.id}")
+
+    assert resp.status_code == 200
+    revert = UserProfile.query.get(resp.get_json()["profile"]["id"])
+    assert revert.source_rendered_at == datetime(2026, 5, 3)
+    assert revert.source_origin_stats == integration.source_origin_stats
+    assert revert.source_data_cutoff == integration.source_data_cutoff
+    for key, value in coverage_of(alice, integration).items():
+        assert getattr(revert, key) == value
+
+
 def test_new_profile_follows_the_newest_version(app, alice):  # noqa: F811
     """Finding 7: POST /profile (the iPhone app's "Save as new" when a new
     version arrived during an edit) makes a version that follows the
