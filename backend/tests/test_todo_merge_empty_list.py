@@ -5,7 +5,9 @@ A user with no todo list asked Text mode to add one task. The merge sent
 "Here is the current full todo list:" followed by nothing, and the model
 applied the prompt's rule for completed items "NOT on the todo list" to the
 new task. The merge now says the list is empty and which items become
-`- [ ]` and `- [x]`; with a list, the message is unchanged. The merge also
+`- [ ]` and `- [x]`. A list with headings but no tasks yet (the Todo page's
+Create template) is sent as before, followed by the same rule. With a
+task on the list, the message is unchanged. The merge also
 records which todo version it produced (`todo_id` in the proposal's
 tool_calls_meta), which it never did because the id was read before the
 row was flushed.
@@ -54,6 +56,10 @@ PROPOSAL = (
     "Starting fresh — this is the only item on the list."
 )
 MERGED = "## Today\n- [ ] Renew the passport (steps: [node 123](/node/123))"
+# The Todo page's Create template (TodoPage.js handleCreate), saved as is.
+TEMPLATE = "## Today\n\n- [ ] \n\n## Upcoming\n\n- [ ] \n\n## Completed recently\n"
+RULE = ("Add the items under New Tasks as `- [ ]` and the items under "
+        "Completed as `- [x]`; add nothing else.")
 
 
 @pytest.fixture
@@ -175,9 +181,50 @@ def test_empty_list_merge_says_the_list_is_empty(merge, existing):
     assert assistant["content"][0]["text"] == PROPOSAL
     assert user_msg["role"] == "user"
     assert user_msg["content"][0]["text"] == (
-        "The todo list is empty. Create it from the proposal: new tasks as "
-        "`- [ ]`, only items listed under Completed as `- [x]`."
+        "The todo list is empty. Add the items under New Tasks as `- [ ]` "
+        "and the items under Completed as `- [x]`; add nothing else."
         "\n\nNow apply the changes described above.")
+
+
+# ── headings but no tasks yet ────────────────────────────────────────────
+
+@pytest.mark.parametrize("existing", [
+    TEMPLATE,
+    "## Today\n\n## Upcoming\n",
+    "## Today\n- [ ]\n- [x] \n* [ ]\t\n\n## Notes\nnothing here yet\n",
+], ids=["create_template", "headings_only", "empty_checkboxes_and_prose"])
+def test_list_without_tasks_is_sent_with_the_rule(merge, existing):
+    """The Create template saved unchanged: its `## Completed recently`
+    heading is a place for the old misreading. The list is sent as it is,
+    so its sections stay, and the rule follows it."""
+    user = _user()
+    _todo(user.id, existing)
+    proposal = _proposal(user.id)
+
+    _run(merge, user, proposal)
+
+    _, assistant, user_msg = _FakeProvider.calls[0]["messages"]
+    assert assistant["content"][0]["text"] == PROPOSAL
+    assert user_msg["content"][0]["text"] == (
+        "Here is the current full todo list:\n\n" + existing
+        + "\n\n" + RULE + "\n\nNow apply the changes described above.")
+    assert _propose_todo_entry(proposal.id)["todo_id"] == (
+        _newest_todo(user.id).id)
+
+
+@pytest.mark.parametrize("text, expected", [
+    (None, False), ("", False), ("  \n", False), (TEMPLATE, False),
+    ("## Today\n- [ ]\n- [x]   \n1. \n- \n", False),
+    ("## Today\n- [ ] call mom", True),
+    ("## Done\n- [x] call mom", True),
+    ("## Done\n  * [X] call mom", True),
+    ("- call mom", True),
+    ("1. call mom", True),
+    ("## Today\n- [ ] \n- [ ] call mom\n", True),
+])
+def test_has_tasks(text, expected):
+    import backend.tasks.voice_todo_merge as vtm
+    assert vtm.has_tasks(text) is expected
 
 
 def test_empty_list_merge_saves_the_model_output_and_its_todo_id(merge):
@@ -216,11 +263,13 @@ def test_custom_merge_prompt_also_gets_the_empty_list_message(merge):
 
 # ── list with items: message unchanged ───────────────────────────────────
 
-def test_non_empty_list_message_is_unchanged(merge):
+@pytest.mark.parametrize("old_task", ["- [ ] an old task", "- [x] an old task",
+                                      "- an old task"])
+def test_non_empty_list_message_is_unchanged(merge, old_task):
     user = _user()
-    _todo(user.id, "## Today\n- [ ] an old task")
+    _todo(user.id, "## Today\n" + old_task)
     proposal = _proposal(user.id, "### New Tasks\n- buy milk")
-    _FakeProvider.answer = "## Today\n- [ ] an old task\n- [ ] buy milk"
+    _FakeProvider.answer = "## Today\n" + old_task + "\n- [ ] buy milk"
 
     _run(merge, user, proposal)
 
@@ -234,12 +283,12 @@ def test_non_empty_list_message_is_unchanged(merge):
             "role": "user",
             "content": [{"type": "text", "text": (
                 "Here is the current full todo list:\n\n"
-                "## Today\n- [ ] an old task"
-                "\n\nNow apply the changes described above.")}],
+                "## Today\n" + old_task
+                + "\n\nNow apply the changes described above.")}],
         },
     ]
     saved = _newest_todo(user.id)
-    assert saved.get_content() == "## Today\n- [ ] an old task\n- [ ] buy milk"
+    assert saved.get_content() == _FakeProvider.answer
     assert _propose_todo_entry(proposal.id)["todo_id"] == saved.id
 
 
@@ -266,3 +315,7 @@ def test_merge_prompt_keeps_its_rules_and_has_the_410_rules():
     assert "A new task is always `- [ ]`" in prompt
     assert "word for word" in prompt and "including links" in prompt
     assert '"under Today"' in prompt
+    # The section rule is for new items only: existing items stay where
+    # they are ("Preserve the original structure").
+    assert ("When your update names a section for a new item (e.g. "
+            '"under Today"), put the item in that `## section`') in prompt
