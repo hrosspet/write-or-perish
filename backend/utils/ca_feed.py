@@ -316,9 +316,12 @@ def record_feed_render(node, stats, refs, days=1, scope="all"):
 def mark_read_reply_opened(node, user_id):
     """Record that the reply's owner opened a finished Read reply:
     FeedRender.opened_at, the first time only. Called where the reply's
-    text is served: GET /nodes/<id> of the reply, and llm-status when it
-    returns the finished reply (a thread page left open while the batch
-    ran). Only the reply's human owner counts; another user or an admin
+    text is served to a page the owner is looking at: GET /nodes/<id> of
+    the reply, and llm-status when it returns the finished reply to a
+    thread page left open while the batch ran, but only for a poll the
+    page marked visible (?visible=1): the page keeps polling in a
+    background tab, which is not an open. Only the reply's human owner
+    counts; another user or an admin
     who can see the node does not, and neither does a reply still being
     generated. One UPDATE matched only while opened_at is null, no
     content read; a node with no FeedRender row matches nothing. Commits

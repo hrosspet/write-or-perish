@@ -1835,9 +1835,10 @@ class FeedRender(db.Model):
     dropped_picks = db.Column(db.Integer, nullable=False, default=0,
                               server_default="0")
     # When the reply's owner first fetched the finished reply: GET of the
-    # reply node, or the llm-status poll that returned it to a thread page
-    # left open while the batch ran (ca_feed.mark_read_reply_opened). Set
-    # once; another user or an admin opening the reply never sets it.
+    # reply node, or an llm-status poll that returned it to a thread page
+    # left open while the batch ran and said it was visible (?visible=1;
+    # a hidden tab's poll does not count) (ca_feed.mark_read_reply_opened).
+    # Set once; another user or an admin opening the reply never sets it.
     # Null on replies nobody has opened since the column was added
     # (2026-10-02), whatever happened before.
     opened_at = db.Column(db.DateTime, nullable=True)

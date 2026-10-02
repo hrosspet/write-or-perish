@@ -2,8 +2,10 @@
 opened, and Reads that showed nothing counted in the report.
 
 FeedRender.opened_at is set the first time the reply's owner fetches the
-finished reply (GET /nodes/<id>, or the llm-status poll that returns
-it), never for another user, an admin or a reply still being made. The
+finished reply (GET /nodes/<id>, or an llm-status poll that returns it
+and carries ?visible=1, the web page's flag while its tab is visible: a
+background tab keeps polling and does not count), never for another user,
+an admin or a reply still being made. The
 report's Reads table counts every completed Read, the pick-less ones
 split into "the model picked nothing" and "every pick was dropped"
 (FeedRender.dropped_picks). The batch side (dropped_picks set on
@@ -56,7 +58,8 @@ def test_owner_opening_a_finished_read_sets_opened_at_once(app, client):  # noqa
 
     # A later open keeps the first time.
     assert client.get(f"/api/nodes/{reply.id}").status_code == 200
-    assert client.get(f"/api/nodes/{reply.id}/llm-status").status_code == 200
+    assert client.get(
+        f"/api/nodes/{reply.id}/llm-status?visible=1").status_code == 200
     _db.session.expire_all()
     assert _render(reply).opened_at == first
 
@@ -68,23 +71,61 @@ def test_pending_read_is_not_opened(app, client):  # noqa: F811
 
     assert client.get(f"/api/nodes/{reply.id}").status_code == 200
     assert client.get(f"/api/nodes/{reply.id}/llm-status").status_code == 200
+    assert client.get(
+        f"/api/nodes/{reply.id}/llm-status?visible=1").status_code == 200
     assert _render(reply).opened_at is None
 
 
-def test_llm_status_returning_the_finished_read_sets_opened_at(app, client):  # noqa: F811
+def test_visible_llm_status_returning_the_finished_read_sets_opened_at(app, client):  # noqa: F811
     """A thread page left open while the batch ran: the poll that brings
-    the finished reply counts as the open."""
+    the finished reply counts as the open when its tab is visible."""
     reply = _read_reply(at=T0)
     reply.llm_task_status = "processing"
     _db.session.commit()
-    body = client.get(f"/api/nodes/{reply.id}/llm-status").get_json()
+    body = client.get(
+        f"/api/nodes/{reply.id}/llm-status?visible=1").get_json()
     assert "content" not in body
     assert _render(reply).opened_at is None
 
     reply.llm_task_status = "completed"
     _db.session.commit()
-    body = client.get(f"/api/nodes/{reply.id}/llm-status").get_json()
+    body = client.get(
+        f"/api/nodes/{reply.id}/llm-status?visible=1").get_json()
     assert body["status"] == "completed" and "content" in body
+    _db.session.expire_all()
+    assert _render(reply).opened_at is not None
+
+
+def test_llm_status_without_the_visible_flag_is_not_an_open(app, client):  # noqa: F811
+    """A background tab's poll, an older client, the iPhone app today:
+    the reply is returned, and nothing is recorded. Only visible=1
+    counts, so not visible=0 or any other value either."""
+    reply = _read_reply(at=T0)
+    reply.llm_task_status = "completed"
+    _db.session.commit()
+
+    for query in ("", "?visible=0", "?visible=", "?visible=true",
+                  "?visible=yes", "?other=1"):
+        body = client.get(
+            f"/api/nodes/{reply.id}/llm-status{query}").get_json()
+        assert body["status"] == "completed" and "content" in body
+        _db.session.expire_all()
+        assert _render(reply).opened_at is None, query
+
+    # The tab is shown again: the page's one extra poll counts.
+    client.get(f"/api/nodes/{reply.id}/llm-status?visible=1")
+    _db.session.expire_all()
+    assert _render(reply).opened_at is not None
+
+
+def test_a_hidden_polls_reply_is_opened_by_a_later_node_fetch(app, client):  # noqa: F811
+    """Loading the reply (GET of the node) is still an open, as before."""
+    reply = _read_reply(at=T0)
+    reply.llm_task_status = "completed"
+    _db.session.commit()
+    client.get(f"/api/nodes/{reply.id}/llm-status")
+    assert _render(reply).opened_at is None
+    client.get(f"/api/nodes/{reply.id}")
     _db.session.expire_all()
     assert _render(reply).opened_at is not None
 
@@ -100,7 +141,7 @@ def test_another_user_or_an_admin_opening_it_does_not_count(app, client):  # noq
         _login_as(client, viewer)
         assert client.get(f"/api/nodes/{reply.id}").status_code == 200
         assert client.get(
-            f"/api/nodes/{reply.id}/llm-status").status_code == 200
+            f"/api/nodes/{reply.id}/llm-status?visible=1").status_code == 200
         _db.session.expire_all()
         assert _render(reply).opened_at is None
 

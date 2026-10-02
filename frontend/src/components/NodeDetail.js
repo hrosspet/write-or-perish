@@ -197,6 +197,10 @@ function NodeDetail({ nodeIdOverride }) {
       enabled: !!llmTaskNodeId,  // Auto-start when llmTaskNodeId is set
       interval: isBatchWait ? 15000 : 2000,
       maxDuration: isBatchWait ? 25 * 60 * 60 * 1000 : 30 * 60 * 1000,
+      // A finished Read reply counts as opened (FeedRender.opened_at) only
+      // for a poll from a visible tab; this page polls in the background
+      // too (batch reads take up to 25 h).
+      reportVisible: true,
     }
   );
 

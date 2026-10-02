@@ -53,7 +53,13 @@ Read since 2026-09-19), per model, variant and turn as above:
                  October 2026, count as "nothing")
     opened     replies their owner has opened (FeedRender.opened_at,
                recorded only since that deploy: a Read opened only before
-               it counts as not opened), and their share of reads
+               it counts as not opened), and their share of reads. An
+               open is a load of the reply, or a poll from a visible web
+               tab that returns it (a tab in the background when the Read
+               finished does not count until the tab is shown again); the
+               iPhone app's polls carry no visibility flag, so a thread
+               screen it left open while the Read finished counts only
+               from its next load of the reply
 
     cd /path/to/write-or-perish
     python backend/scripts/recommendation_report.py
@@ -206,7 +212,8 @@ def print_reads(rows):
           "picked, but none of its picks could be shown (tweet gone from "
           "the snapshot, or a number outside the render).\nopened "
           "= the owner opened the reply (recorded since the October 2026 "
-          "deploy).")
+          "deploy; a web tab in the background when the Read finished "
+          "counts once it is shown).")
 
 
 def main(argv=None):
