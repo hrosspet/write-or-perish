@@ -14,6 +14,7 @@ from backend.utils.ca_feed import (
     read_reply_ids,
 )
 from backend.utils.privacy import AI_ALLOWED
+from backend.utils.client_platform import CLIENT_MARKER, request_client
 
 
 _MAX_ANCESTRY_HOPS = 1000
@@ -343,13 +344,20 @@ def voice_turn_refusal(user, parent_node=None, ai_usage=None):
 def create_llm_placeholder(parent_node_id, model_id, human_owner_id,
                            privacy_level="private", ai_usage="chat",
                            placeholder_text="[LLM response generation pending...]",
-                           enqueue=True, source_mode=None, meta=None):
+                           enqueue=True, source_mode=None, meta=None,
+                           client=None):
     """Create an LLM placeholder node, optionally enqueue generation task.
 
     Returns (llm_node, task_id) -- task_id is None if enqueue=False.
     *meta* seeds the node's tool_calls_meta (a list of entries) in the
     same commit that creates it, so a marker the task reads (the read
     thread's "_read", routes/read.py) is there before the task can start.
+
+    *client* ('ios' / 'web', utils/client_platform) is the app the user
+    is talking from. It defaults to the current request's; a caller with
+    no request (the Voice finalize task) passes the one its request
+    recorded. A known client is stamped on the node (CLIENT_MARKER): a
+    GitHub issue the turn files gets it as its platform label.
 
     Raises UserExportValidationError if the parent node's content
     contains a {user_export} placeholder with unrecognized param keys.
@@ -464,8 +472,12 @@ def create_llm_placeholder(parent_node_id, model_id, human_owner_id,
         token_count=approximate_token_count(placeholder_text),
     )
     llm_node.set_content(placeholder_text)
+    meta = list(meta or [])
+    client = client or request_client()
+    if client:
+        meta.append({"name": CLIENT_MARKER, "client": client})
     if meta:
-        llm_node.tool_calls_meta = json.dumps(list(meta))
+        llm_node.tool_calls_meta = json.dumps(meta)
     db.session.add(llm_node)
     db.session.commit()
 

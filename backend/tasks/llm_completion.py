@@ -62,7 +62,10 @@ from backend.utils.ca_feed import (
     ca_turn as _ca_turn,
     refresh_snapshot_for_read, refs_from_render, seen_tweet_ids,
 )
-from backend.utils.tool_meta import update_tool_meta, parse_github_issue
+from backend.utils.tool_meta import (
+    get_tool_meta_entry, update_tool_meta, parse_github_issue,
+)
+from backend.utils.client_platform import CLIENT_MARKER
 from backend.utils.privacy import AI_ALLOWED
 from backend.utils.placeholders import (
     CA_TWEETS_PATTERN,
@@ -1748,10 +1751,13 @@ def _redact_tool_input(inp):
 
 
 def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
-                        quote_labels=None):
+                        quote_labels=None, client=None):
     """Execute tool calls and return metadata list. *quote_labels* is the
     turn's label map ({label: ("node"|"external", id)}) so read_full can
-    resolve a search-result label; None outside the retrieval loop."""
+    resolve a search-result label; None outside the retrieval loop.
+    *client* is the app the turn was asked from ('ios' / 'web' / None,
+    utils/client_platform): an issue apply_github_issue files gets it as
+    its platform label."""
     tool_results = []
 
     for tc in tool_calls:
@@ -1834,6 +1840,7 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
                                 ),
                                 category=category,
                                 username=username,
+                                platform=client,
                             )
                             # Clean up draft
                             db.session.delete(draft)
@@ -2976,6 +2983,12 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
         batch_resp = None
         # #367: a voice turn's TTS worker, speaking replies as they stream.
         speech_turn = None
+        # The app the turn was asked from (create_llm_placeholder stamps
+        # it on the node), the platform label of an issue the turn files
+        # (apply_github_issue). Read before the tool loop rewrites the
+        # node's meta.
+        client = (get_tool_meta_entry(llm_node, CLIENT_MARKER)
+                  or {}).get("client")
 
         try:
             # The poll comes before anything else is loaded: one provider
@@ -4232,7 +4245,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         f"Executing {len(f_tool_calls)} tool calls")
                     tool_results = _execute_tool_calls(
                         f_tool_calls, target_node, node_chain, user_id,
-                        quote_labels=quote_labels,
+                        quote_labels=quote_labels, client=client,
                     )
                     if f_truncated:
                         for tr in tool_results:
@@ -4400,7 +4413,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     # Execute ALL tool calls on the interim node.
                     tool_results = _execute_tool_calls(
                         response_tool_calls, current_node, node_chain,
-                        user_id, quote_labels=quote_labels,
+                        user_id, quote_labels=quote_labels, client=client,
                     )
                     if interim_truncated:
                         for tr in tool_results:
