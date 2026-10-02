@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { useUser } from '../contexts/UserContext';
 import { useToast } from '../contexts/ToastContext';
 import api from '../api';
+import { entryQuestion } from '../utils/entryPrompt';
 
 function useOnScreen(ref, threshold = 0.1) {
   const [isVisible, setIsVisible] = useState(false);
@@ -288,12 +289,14 @@ export default function HomePage() {
           fontWeight: 300,
           color: "var(--text-primary)",
           margin: "0 0 48px 0",
+          maxWidth: "760px",
+          textAlign: "center",
           opacity: questionVisible ? 1 : 0,
           transform: questionVisible ? 'translateY(0)' : 'translateY(10px)',
           transition: "all 0.5s ease 200ms",
         }}
       >
-        What's on your mind?
+        {entryQuestion(user)}
       </h1>
 
       {cardRows(displayCards).map((row, r) => (

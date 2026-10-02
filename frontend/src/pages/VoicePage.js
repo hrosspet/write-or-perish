@@ -11,6 +11,7 @@ import { useToast } from '../contexts/ToastContext';
 import { isSpendBlocked, notifySpendBlocked, spendCapToastMessage } from '../utils/spendCap';
 import { isAiAllowed } from '../utils/aiUsage';
 import api from '../api';
+import { entryQuestion, EVERYDAY_QUESTION } from '../utils/entryPrompt';
 
 // Chain-chapter numerals — turns cap at a handful of nodes (tool-round
 // budget), so a static list covers it.
@@ -390,8 +391,11 @@ function VoiceSession({ recovery, blocked, threadId, onAiUsageRefused, onFinishI
   const setThreadParentIdRef = useRef(null);
   const lastLlmNodeIdRef = useRef(null);
 
-  const { user } = useUser();
+  const { user, markHasOwnEntries } = useUser();
   const selectedModel = user?.preferred_model || null;
+  // A fresh session asks the welcome question until the user's first entry
+  // (#391); a continued thread keeps the everyday one.
+  const question = threadId ? EVERYDAY_QUESTION : entryQuestion(user);
 
   const {
     phase, isStopping, hasError, isOnline, streaming, audio, handleStart, handleStop,
@@ -405,7 +409,10 @@ function VoiceSession({ recovery, blocked, threadId, onAiUsageRefused, onFinishI
     model: selectedModel,
     aiUsage: user?.default_ai_usage || 'none',
     onAiUsageRefused,
-    onLLMComplete: (nodeId, content, isResume) => {
+    // The server saved the recording as an entry (#391). This does not wait
+    // for the reply: if it fails or is skipped the entry still exists.
+    onEntrySaved: markHasOwnEntries,
+    onLLMComplete: (nodeId, content) => {
       lastLlmNodeIdRef.current = nodeId;
       setLlmContent(content);
       // ProposalInline handles its own parsing + apply-status derivation
@@ -574,8 +581,10 @@ function VoiceSession({ recovery, blocked, threadId, onAiUsageRefused, onFinishI
           fontWeight: 300,
           color: 'var(--text-muted)',
           marginBottom: '40px',
+          maxWidth: '640px',
+          textAlign: 'center',
         }}>
-          What's on your mind?
+          {question}
         </p>
 
         <EcgAnimation

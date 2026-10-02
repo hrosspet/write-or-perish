@@ -4,6 +4,7 @@ import Fade from "../utils/Fade";
 import ImportData from "../components/ImportData";
 import CtaButton from "../components/CtaButton";
 import PrefillConsentCard from "../components/PrefillConsentCard";
+import { WELCOME_QUESTION } from "../utils/entryPrompt";
 
 const importButtonStyle = {
   display: "inline-flex", alignItems: "center", gap: "0.4rem",
@@ -122,8 +123,7 @@ export default function WelcomePage() {
               color: "var(--text-primary)", maxWidth: 440, margin: "0 auto 1.8rem",
               position: "relative",
             }}>
-              What brought you to Loore — and what are you hoping to
-              find here?
+              {WELCOME_QUESTION}
             </p>
             {/* The homepage's voice / text modes are the first-entry
                 experience; the full entry editor is too much at this point. */}
