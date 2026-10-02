@@ -871,7 +871,7 @@ final class VoiceLiveActivityStateTests: XCTestCase {
     }
 
     func testRecordingPhases() {
-        XCTAssertEqual(phase(.starting), .recording)
+        XCTAssertEqual(phase(.starting), .starting, "no clock or buttons before the microphone is on")
         XCTAssertEqual(phase(.recording), .recording)
         XCTAssertEqual(phase(.recording, paused: true), .paused)
         XCTAssertEqual(phase(.recording, paused: true, interrupted: true), .interrupted)

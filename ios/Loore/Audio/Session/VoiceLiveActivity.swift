@@ -36,7 +36,11 @@ final class VoiceLiveActivity {
         switch turn {
         case .idle:
             return State(phase: .ready)
-        case .starting, .recording:
+        case .starting:
+            // No clock and no buttons until the microphone is on: the clock would
+            // run ahead, and Pause and Stop do nothing yet.
+            return State(phase: .starting)
+        case .recording:
             if isInterrupted { return State(phase: .interrupted, elapsed: Int(elapsed)) }
             if isPaused { return State(phase: .paused, elapsed: Int(elapsed)) }
             return State(phase: .recording, clockStart: now.addingTimeInterval(-elapsed))
@@ -98,6 +102,18 @@ final class VoiceLiveActivity {
         }
     }
 
+    /// A button on a card whose conversation is gone (iOS ended the app between
+    /// turns): remove the card and say why, instead of a tap that does nothing.
+    nonisolated static func staleTap() async {
+        for leftover in Activity<VoiceActivityAttributes>.activities {
+            await leftover.end(nil, dismissalPolicy: .immediate)
+        }
+        LocalNotifier.post(.recordFailed, body: staleMessage)
+    }
+
+    nonisolated static let staleMessage =
+        "Loore was closed in the meantime. Open Voice in Loore to continue the conversation."
+
     @available(iOS 18.0, *)
     private func request(_ state: State) {
         guard ActivityAuthorizationInfo().areActivitiesEnabled else {
@@ -131,12 +147,18 @@ final class VoiceLiveActivity {
 }
 
 /// Where the Live Activity's intents land (their `perform` runs in the app).
-/// `AudioCenter` sets the handler.
+/// `AudioCenter` sets the handler. When iOS launches the app in the background
+/// for a tap, `perform` runs before SwiftUI creates `AppState`: no handler, and
+/// no conversation either.
 @MainActor
 enum VoiceActivityCommands {
     static var handler: ((VoiceActivityCommand) async -> Void)?
 
     static func run(_ command: VoiceActivityCommand) async {
-        await handler?(command)
+        guard let handler else {
+            await VoiceLiveActivity.staleTap()
+            return
+        }
+        await handler(command)
     }
 }

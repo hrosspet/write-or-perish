@@ -873,6 +873,18 @@ From Peter's first run on his iPhone. 395 unit tests pass (one skipped), 5 of th
   next recording (the last audio app's platter; clearing the info and removing the command handlers did not
   remove it in the simulator). Dictation in the writing form has no lock-screen controls (unchanged).
 
+- **Review fixes** (review comment on #384, M1, M2, m1): a lock-screen Record that cannot run now
+  notifies instead of failing unseen: offline (checked before the reply is stopped), spending limit, AI
+  usage None, a start that fails (the notification repeats its toast), and a tap on an activity left
+  after iOS ended the app. For that last case, iOS launches the app in the background and runs the intent
+  before SwiftUI creates `AppState`, so `VoiceActivityCommands.run` handles it with no handler set (seen in
+  the simulator: app killed, Pause on the leftover card → the card goes and the notification request is
+  added; this simulator never granted notifications, so the banner itself was not seen). The card shows "Starting…" (no clock, no buttons) until the microphone is on,
+  so its clock no longer runs ahead. The wait for the microphone is `AudioCenter.lockScreenStartWait`
+  (15 s, a heuristic). Open from that review: m2 (the "could not resume" notification stays after Stop),
+  m3 (a `startSession` slower than the wait), m4 (device checks, in the README checklist), m5 (the trash
+  icon sits next to Send and discards without confirmation, as on the web).
+
 **#398 Writing form and model picker on a narrow phone**
 - Send keeps its words; Discard draft (trash), Record (mic), Save audio, Upload (paperclip), Resume and
   Stop & save are icons with spoken labels (`ButtonIcon`, `.looreIcon`); the recording clock and "Retry"

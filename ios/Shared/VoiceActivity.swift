@@ -13,6 +13,8 @@ struct VoiceActivityAttributes: ActivityAttributes {
         enum Phase: String, Codable, Hashable {
             /// Between turns (a cancelled or failed one): Record.
             case ready
+            /// Record was pressed; the session and the microphone are not ready yet.
+            case starting
             case recording
             /// Paused by the user.
             case paused

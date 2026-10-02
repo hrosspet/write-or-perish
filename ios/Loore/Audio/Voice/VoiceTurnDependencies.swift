@@ -110,12 +110,15 @@ enum LocalNotice: String {
     case recordingPaused = "org.loore.voice.recording-paused"
     case longRecording = "org.loore.voice.long-recording"
     case resumeFailed = "org.loore.voice.resume-failed"
+    /// A lock-screen Record that could not start (the reason goes in the body).
+    case recordFailed = "org.loore.voice.record-failed"
 
     var title: String {
         switch self {
         case .recordingPaused: return "Recording paused — tap to resume"
         case .longRecording: return "You’ve been recording for 59 minutes"
         case .resumeFailed: return "The recording could not resume"
+        case .recordFailed: return "Loore could not start recording"
         }
     }
 
@@ -127,6 +130,8 @@ enum LocalNotice: String {
             return "Consider stopping soon and continuing in a new recording."
         case .resumeFailed:
             return "The microphone did not restart. Open Loore and press Resume; everything up to the pause is saved."
+        case .recordFailed:
+            return "Open Loore and try again."
         }
     }
 }

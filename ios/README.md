@@ -235,8 +235,17 @@ Account → Voice → "Sound while Loore thinks" on Soft.
       parts; ■ → the reply plays by itself. Repeat the pause a minute long.
 - [ ] **Record a reply from the lock screen (#397).** While the reply plays (or after
       it ends, "Reply finished"), tap the mic on the Live Activity: the reply stops and a
-      new recording starts without unlocking; ■ sends it into the same thread. Then
-      unlock and leave Voice: the activity goes away.
+      new recording starts without unlocking ("Starting…", then the clock); ■ sends it
+      into the same thread. Then unlock and leave Voice: the activity goes away.
+- [ ] **Lock-screen Record edge cases (#397).** (a) After two lock-screen turns,
+      check the second transcript holds the whole recording (iOS requires a Live
+      Activity while an intent records; the app reuses the conversation's one).
+      (b) During a recording started from the lock screen, swipe the activity away:
+      does recording continue (Now Playing controls appear) or does iOS stop the
+      microphone? Note which. (c) Airplane mode, then Record on the activity: the
+      reply keeps playing and a notification says you're offline. (d) Force-quit
+      Loore while the activity shows "Reply finished", then tap its mic: the card
+      goes and a notification says Loore was closed.
 - [ ] **Thinking cue volumes.** Account → Voice → Very soft: quieter, same flow. Off
       (the warning appears): repeat the locked turn; silence while thinking, iOS may
       suspend the app and the reply may need a tap after unlocking (the app catches

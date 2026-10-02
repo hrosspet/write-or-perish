@@ -181,6 +181,8 @@ final class AudioCenter {
     }
 
     @ObservationIgnored private var resumeAfterInterruption = false
+    /// The voice conversation's last toast (a lock-screen Record that failed repeats it).
+    @ObservationIgnored private var lastVoiceToast: (text: String, at: Date)?
 
     // MARK: Lock screen
 
@@ -249,8 +251,9 @@ extension AudioCenter {
     /// be locked and the app was possibly suspended until now.
     func runLockScreenCommand(_ command: VoiceActivityCommand) async {
         guard let voice = voiceController, liveActivity.isShowing else {
-            // Left over from an earlier launch: no conversation to control.
-            liveActivity.endLeftovers()
+            // Left over from an earlier launch (iOS ended the app between turns):
+            // no conversation to control.
+            await VoiceLiveActivity.staleTap()
             return
         }
         log.info("lock screen: \(command.rawValue, privacy: .public)")
@@ -262,22 +265,47 @@ extension AudioCenter {
         }
     }
 
+    /// Most time a lock-screen Record waits for the session and the microphone
+    /// before its intent returns (heuristic: the intent keeps the app running
+    /// only until then, and the microphone may start only inside it).
+    static let lockScreenStartWait: Double = 15
+
     /// Record from the lock screen: the next turn, also while the reply plays
-    /// (the Voice screen's Continue), or a new one between turns.
+    /// (the Voice screen's Continue), or a new one between turns. On a locked
+    /// phone a toast is not seen, so a refusal or a failed start also notifies.
     private func recordFromLockScreen(_ voice: VoiceTurnController) async {
         if app?.spendCapped == true {
             app?.notifySpendBlocked()
             _ = app?.toasts.show(SpendCap.toastMessage(.record), duration: 8)
+            LocalNotifier.post(.recordFailed, body: SpendCap.toastMessage(.record))
+            return
+        }
+        // Checked before Continue stops the reply (the Voice screen disables it offline).
+        guard NetworkStatus.shared.isOnline else {
+            LocalNotifier.post(.recordFailed, body: "You're offline. Record again when you're back online.")
             return
         }
         switch voice.phase {
-        case .playback: voice.continueConversation()
-        case .ready where voice.aiBlock == nil: voice.start()
-        default: return
+        case .playback:
+            voice.continueConversation()
+        case .ready:
+            if let block = voice.aiBlock {
+                LocalNotifier.post(.recordFailed, body: block.body)
+                return
+            }
+            voice.start()
+        default:
+            return
         }
-        // The intent keeps the app running until it returns: wait for the microphone.
-        for _ in 0..<150 where voice.state == .starting {
+        let tapped = Date()
+        let deadline = tapped.addingTimeInterval(Self.lockScreenStartWait)
+        while voice.state == .starting && Date() < deadline {
             try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+        if voice.state == .idle {
+            // The start failed; its toast says why.
+            let reason = lastVoiceToast.flatMap { $0.at >= tapped ? $0.text : nil }
+            LocalNotifier.post(.recordFailed, body: reason ?? LocalNotice.recordFailed.body)
         }
     }
 }
@@ -327,7 +355,8 @@ extension AudioCenter: VoiceAudio {
 extension AudioCenter: VoiceNotices {
     @discardableResult
     func toast(_ text: String, duration: TimeInterval) -> Int {
-        app?.toasts.show(text, duration: duration) ?? 0
+        lastVoiceToast = (text, Date())
+        return app?.toasts.show(text, duration: duration) ?? 0
     }
 
     func dismissToast(_ id: Int) {
@@ -371,10 +400,10 @@ enum LocalNotifier {
         _ = try? await center.requestAuthorization(options: [.alert, .sound])
     }
 
-    static func post(_ notice: LocalNotice) {
+    static func post(_ notice: LocalNotice, body: String? = nil) {
         let content = UNMutableNotificationContent()
         content.title = notice.title
-        content.body = notice.body
+        content.body = body ?? notice.body
         content.sound = .default
         let request = UNNotificationRequest(identifier: notice.rawValue, content: content, trigger: nil)
         UNUserNotificationCenter.current().add(request)

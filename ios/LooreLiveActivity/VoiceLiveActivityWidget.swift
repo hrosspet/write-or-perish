@@ -88,6 +88,7 @@ private struct StatusText: View {
     private var title: String {
         switch state.phase {
         case .ready: return "Voice"
+        case .starting: return "Starting…"
         case .recording: return "Recording"
         case .paused: return "Paused"
         case .interrupted: return "Recording paused"
@@ -108,7 +109,7 @@ private struct StatusText: View {
             Text(clock(state.elapsed))
         case .interrupted:
             Text("\(clock(state.elapsed)) · a call or another app took the microphone")
-        case .ready, .sending, .thinking, .replying, .finished:
+        case .ready, .starting, .sending, .thinking, .replying, .finished:
             Text("Loore · Voice")
         }
     }
@@ -129,7 +130,7 @@ private struct CompactStatus: View {
             }
         case .paused, .interrupted:
             Image(systemName: "pause.fill").foregroundStyle(Palette.accent)
-        case .sending, .thinking:
+        case .starting, .sending, .thinking:
             Image(systemName: "ellipsis").foregroundStyle(Palette.accent)
         case .replying:
             Image(systemName: "waveform").foregroundStyle(Palette.accent)
@@ -160,7 +161,7 @@ private struct Controls: View {
             case .replying, .finished, .ready:
                 RoundButton(intent: RecordVoiceReplyIntent(), symbol: "mic.fill",
                             label: state.phase == .ready ? "Record" : "Record a reply", filled: true, size: size)
-            case .sending, .thinking:
+            case .starting, .sending, .thinking:
                 EmptyView()
             }
         }
