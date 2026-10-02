@@ -1542,13 +1542,19 @@ def get_node_titles():
 def get_models():
     """The active (non-deprecated) models for the pickers, newest first
     within each provider. ``featured`` models make the short list;
-    ``read`` models are the only ones the Read button offers (#355)."""
+    ``read`` models are the only ones the Read button offers (#355);
+    ``chat`` models are the only ones every other picker offers (LLM
+    Response, the Account default). A read-only model (read, not chat)
+    stays in the list so the Read picker can offer it; a client that
+    ignores ``chat`` still cannot chat with it (create_llm_placeholder
+    puts the chat default in its place)."""
     supported = current_app.config["SUPPORTED_MODELS"]
     models = [
         {"id": model_id, "name": cfg["display_name"],
          "provider": cfg["provider"],
          "featured": bool(cfg.get("featured")),
-         "read": bool(cfg.get("read"))}
+         "read": bool(cfg.get("read")),
+         "chat": bool(cfg.get("chat", True))}
         for model_id, cfg in supported.items()
         if "provider" in cfg and not cfg.get("deprecated")
     ]

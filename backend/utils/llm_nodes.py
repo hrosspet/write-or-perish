@@ -76,13 +76,24 @@ def is_read_model(model_id):
     return cfg is not None and not cfg.get("deprecated") and bool(cfg.get("read"))
 
 
+def is_chat_model(model_id):
+    """An active model that anything other than a read may run on: a
+    reply, a Voice / Text mode turn, the account preference and the
+    background work it drives. ``"chat": False`` makes a model read only
+    (Peter, 2026-10-02); absent means True."""
+    if not is_active_model(model_id):
+        return False
+    cfg = current_app.config["SUPPORTED_MODELS"][model_id]
+    return bool(cfg.get("chat", True))
+
+
 def effective_preferred_model(user):
-    """The user's saved model while it is still offered, else None. A
-    preference for a model deprecated since has no effect anywhere: the
-    reply routes, the background tasks and the Account page all fall back
-    to DEFAULT_LLM_MODEL (#355)."""
+    """The user's saved model while it is still offered for chat, else
+    None. A preference for a model deprecated since, or read only, has no
+    effect anywhere: the reply routes, the background tasks and the
+    Account page all fall back to DEFAULT_LLM_MODEL (#355)."""
     pref = getattr(user, "preferred_model", None) if user is not None else None
-    return pref if pref and is_active_model(pref) else None
+    return pref if pref and is_chat_model(pref) else None
 
 
 def default_model_for(user):
@@ -179,12 +190,13 @@ def resolve_chat_model(parent_node, user, chain=None):
       1. ("predecessor") the closest ancestor LLM reply's ``llm_model``,
          skipping reads: a read runs on a read model (Luna), and that
          must not become the default for the conversation around it.
-      2. ("user_preference") ``user.preferred_model`` (active).
+      2. ("user_preference") ``user.preferred_model`` (active, chat).
       3. ("default") ``DEFAULT_LLM_MODEL`` from the Flask config / env.
 
-    If the closest non-read LLM ancestor is recognized but no longer
-    usable (deprecated, or the historical ``gpt-4.5-preview`` legacy id),
-    the walk stops there and falls through to ``user.preferred_model``.
+    If the closest non-read LLM ancestor is recognized but not usable for
+    chat (deprecated, read only, or the historical ``gpt-4.5-preview``
+    legacy id), the walk stops there and falls through to
+    ``user.preferred_model``.
     Walking past it to find an even older active model would silently
     override the user's current account preference. Truly-unknown
     ancestors keep walking — they're typically placeholder rows from data
@@ -195,7 +207,7 @@ def resolve_chat_model(parent_node, user, chain=None):
     for node in chain.llm_replies():
         if node.id in chain.reads:
             continue
-        if is_active_model(node.llm_model):
+        if is_chat_model(node.llm_model):
             return node.llm_model, "predecessor"
         if node.llm_model in supported or node.llm_model == "gpt-4.5-preview":
             break
@@ -418,8 +430,11 @@ def create_llm_placeholder(parent_node_id, model_id, human_owner_id,
     # read prompt or read reply from a picker that offers every model, an
     # auto-generated reply under a note typed below the prompt) by the
     # task's own rule (ca_feed.ca_turn). Any other reply never runs on a
-    # deprecated model: one sent explicitly (a preference saved before the
-    # deprecation, an old tab) is replaced by the chat default.
+    # deprecated or read-only model: one sent explicitly (a preference
+    # saved before the deprecation, an old tab, a client whose picker does
+    # not filter on "chat") is replaced by the chat default. This is the
+    # one place that knows the turn, so the routes only check that the
+    # model exists: a read model is right for a read turn they also carry.
     turn = reply_read_turn(parent, meta, parent_content, chain=chain)
     if turn in ("read", "read_again"):
         if not is_read_model(model_id):
@@ -428,7 +443,7 @@ def create_llm_placeholder(parent_node_id, model_id, human_owner_id,
                 "Reply under node %s is a read: model %s -> %s",
                 parent.id, model_id, new_model_id)
             model_id = new_model_id
-    elif not is_active_model(model_id):
+    elif not is_chat_model(model_id):
         new_model_id = resolve_chat_model(parent, owner, chain=chain)[0]
         current_app.logger.info(
             "Reply under node %s: model %s is not offered -> %s",

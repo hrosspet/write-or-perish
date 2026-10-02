@@ -28,8 +28,8 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 
 def validate_default_model(config):
     """Refuse to boot on an ``LLM_NAME`` that is not an active (non-
-    deprecated) SUPPORTED_MODELS key, or on a READ_DEFAULT_MODEL that is
-    not an active read model.
+    deprecated) chat (not ``"chat": False``) SUPPORTED_MODELS key, or on
+    a READ_DEFAULT_MODEL that is not an active read model.
 
     The keys are the dotted display ids (``claude-opus-4.6``); the API ids
     use dashes (``claude-opus-4-6``). Setting the API id in the env file
@@ -44,11 +44,20 @@ def validate_default_model(config):
         # A deprecated default is in no picker and never inherited, so
         # every user without a preference would start on a model the UI
         # cannot show, and the periodic tasks would keep running on it
-        # (#355).
+        # (#355). A read-only model is in no chat picker either, and the
+        # default runs every reply and background job (2026-10-02).
+        chat_models = ', '.join(
+            k for k, v in supported.items()
+            if 'provider' in v and not v.get('deprecated')
+            and v.get('chat', True))
         if supported[model_id].get("deprecated"):
             raise RuntimeError(
-                f"LLM_NAME={model_id!r} is deprecated. Active models: "
-                f"{', '.join(k for k, v in supported.items() if 'provider' in v and not v.get('deprecated'))}")
+                f"LLM_NAME={model_id!r} is deprecated. Active chat "
+                f"models: {chat_models}")
+        if not supported[model_id].get("chat", True):
+            raise RuntimeError(
+                f"LLM_NAME={model_id!r} is read only (\"chat\": False). "
+                f"Active chat models: {chat_models}")
         read_default = config.get("READ_DEFAULT_MODEL")
         read_cfg = supported.get(read_default) or {}
         if read_default and (not read_cfg.get("read")

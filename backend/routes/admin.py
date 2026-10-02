@@ -956,6 +956,8 @@ def create_poll():
     supported = current_app.config.get("SUPPORTED_MODELS", {})
     if model_id not in supported:
         return jsonify({"error": f"Unsupported model: {model_id}"}), 400
+    if not supported[model_id].get("chat", True):
+        return jsonify({"error": f"{model_id} is for Read only"}), 400
     data_source = data.get("data_source") or "derived"
     if data_source not in Poll.DATA_SOURCES:
         return jsonify({"error": f"Invalid data_source. Allowed: "
