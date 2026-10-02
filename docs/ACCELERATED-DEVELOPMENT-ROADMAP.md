@@ -121,6 +121,14 @@ Feature 1 (Journaling) is production-ready and significantly expanded — see FO
 
 ### Remaining Items
 
+#### A.37 Native iPhone app (PR #384) — 🔧 in progress, awaiting device testing
+
+**What:** A SwiftUI iPhone app at parity with the desktop web app, against the unchanged backend (`ios/`; design `docs/IOS-APP-DESIGN.md`).
+
+**Why:** On a locked iPhone, Safari cannot start a reply's audio by itself, so voice mode needs a tap after every turn. The native app keeps its audio session alive from the record tap to the end of the reply (soft thinking cue, lock-screen controls, background uploads).
+
+**Status (2026-10-01):** M1–M5 built on `ios-app` and checked in the simulator against the local backend (334 unit tests, XCUITest flows, screenshots beside the web). Every member screen is native; Admin and public pages are web views; parity table in `ios/PROGRESS.md`. Left: Peter's iPhone (locked-phone turns, AirPods, calls, 60-minute recording, background upload) and a staging pass (streaming voice TTS, Commons, real X OAuth, read picks), both listed in `ios/README.md`; then review and merge.
+
 #### A.2 Basic Monitoring (Alpha Requirement)
 
 **What:** Minimal monitoring to catch issues before users report them.
@@ -557,6 +565,7 @@ Phase A (A.1–A.19) and B.1 are complete — see tables above for details.
 7. **NEXT:** A.9 (License & legal compliance for beta)
 8. ✅ **MOSTLY DONE:** RAG / semantic search — manual Cmd+K semantic search live (#197); agentic search + quote-as-response over own archive AND saved external references shipped per-user dark (#208: substrate, nightly X sync, digest, read_full, quote cards). Remaining: flip more users' toggles (announcement via #207 channel), #233 overnight pre-selection, #231 tripwire, #232 extension
 8b. **PoC (2026-09-13):** Community Archive personal feed — A.26; second feedback round addressed 2026-09-19 (snapshot refresh ✅, seen filter ✅, read/chat turn semantics ✅); judge the picks over a few more mornings, then decide on a feed surface or drop it
+8c. 🔧 **IN PROGRESS:** Native iPhone app (A.37, PR #384) — device checklist and staging pass, then review and merge
 9. **NEXT:** Alchemical Mode (spec'd 2026-07-01, authoritative spec in FOUR-FEATURE-ECOSYSTEM.md) — LLM readiness/safety checker over recent user data → opt-in with strong experimental disclaimers → gated Alchemy home card with hidden source prompt; sources pluggable (Meditationbook.page PoC first, Chapman corpus + Petr's book later). Note: Intention Market deferred until more users (maintainer decision 2026-07-01).
 10. **THEN:** Phase B remaining (B.2 backend tests + B.3 frontend tests) — can run parallel
 11. **THEN:** Phase C infrastructure, leading to Phase D parallelization
