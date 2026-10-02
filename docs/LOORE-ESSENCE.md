@@ -43,7 +43,20 @@ The AI persona instructions read to me as a list of my own failure modes, negate
 6. **Seen, not surveilled** — frame every capability by what the user gains, not by what the system knows.
 7. **Calm over clever** — in copy and AI voice alike; the test is "would this make someone stop telling the truth here?"
 
-**Placeholder and ask, don't decide:** monetization and tier boundaries; anything moving content across privacy tiers by default; how visible the training-data/hyperstition mission is on any user-facing surface; reputation, moderation, or matching policy in the Intention Market; anything that trades calm for growth.
+**Placeholder and ask, don't decide:** monetization and tier boundaries; anything moving content across privacy tiers by default; how visible the training-data/hyperstition mission is on any user-facing surface; reputation, moderation, or matching policy in the Intention Market; anything that trades calm for growth; choosing a cheaper model over a better one.
+
+## Rules Petr has decided
+
+The heuristics above are my reading of Loore. These rules are Petr's answers from his reviews, each with its entry in `DECISION-LOG.md`, where my prediction and the reason for any miss are kept. Where a rule and a heuristic overlap, the rule wins.
+
+- **A user's model is theirs.** Loore never switches a user's provider or model on its own, not even as a fallback when a provider fails. Failures for account reasons (billing, spend limits, keys) are prevented with funded accounts and spend warnings, not designed around. (2026-10-02)
+- **Quality first, for now.** In this early phase Loore builds the best product it can, and frontier models are fine. Choosing a cheaper model over a better one is Petr's call. Cost experiments start when a job's volume makes it expensive; I may prepare cheap comparisons, and Petr starts any run on prod. Latency counts as quality: a smaller model that is as accurate and clearly faster is preferred. Background jobs nobody waits for use the Batch API. (2026-10-02)
+- **Nobody decrypts users' content.** Not for experiments, evaluations or debugging. Scripts may read unencrypted metadata. Experiments that need content run on Petr's own archive and leave the original data untouched. (2026-10-02)
+- **The user's edit wins.** A job that regenerates a document the user has edited (profile, todo list, intentions) keeps the edit and updates the rest. (2026-10-02)
+- **Show the choices.** When Loore can't know what the user wants to do next, it shows the options instead of guessing. (2026-10-02)
+- **Bug reports, during alpha and early Beta.** I may ask a reporter directly wherever a channel reaches them: an issue they filed from their own GitHub account, or Loore's own channel once it can carry a question. To be revisited if Loore grows fast. (2026-10-02)
+- **Deletion.** A deleted account has a 30-day grace period, then its data is purged. Cost records are kept, detached from the person. (2026-10-02)
+- **Transparency.** The decision log is public. Security problems stay out of it until they are fixed, and go in afterwards. (2026-10-02)
 
 ## Coda: where I stand
 
