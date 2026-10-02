@@ -44,21 +44,25 @@ struct VoiceView: View {
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
-            ScrollView {
-                if typeSize.isAccessibilitySize {
-                    // Large text: the button scrolls with the page instead of covering its heading.
-                    textModeButton
-                        .frame(maxWidth: .infinity, alignment: .trailing)
-                        .padding(.top, 12)
-                        .padding(.trailing, 20)
+            GeometryReader { viewport in
+                ScrollView {
+                    if typeSize.isAccessibilitySize {
+                        // Large text: the button scrolls with the page instead of covering its heading.
+                        textModeButton
+                            .frame(maxWidth: .infinity, alignment: .trailing)
+                            .padding(.top, 12)
+                            .padding(.trailing, 20)
+                    }
+                    // Centred when it fits; taller content (a long proposal card under
+                    // the reply) scrolls instead of being cut to the screen's height.
+                    content
+                        .frame(maxWidth: .infinity)
+                        .padding(.horizontal, LooreSpacing.lg)
+                        .padding(.vertical, 40)
+                        .frame(minHeight: viewport.size.height, alignment: .center)
                 }
-                content
-                    .frame(maxWidth: .infinity)
-                    .padding(.horizontal, LooreSpacing.lg)
-                    .padding(.vertical, 40)
-                    .containerRelativeFrame(.vertical, alignment: .center) { length, _ in length }
+                .scrollBounceBehavior(.basedOnSize)
             }
-            .scrollBounceBehavior(.basedOnSize)
             if !typeSize.isAccessibilitySize {
                 textModeButton
                     .padding(.top, 12)
