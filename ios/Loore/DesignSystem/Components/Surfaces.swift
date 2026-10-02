@@ -174,6 +174,25 @@ struct LoadingLine: View {
     }
 }
 
+/// A thin accent ring with a gap, turning: the app's own loading indicator
+/// (the system spinner's spokes do not fit the design).
+struct SpinnerRing: View {
+    var size: CGFloat = 26
+    var lineWidth: CGFloat = 2.5
+
+    var body: some View {
+        TimelineView(.animation) { context in
+            let turn = context.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 0.9) / 0.9
+            Circle()
+                .trim(from: 0, to: 0.72)
+                .stroke(LooreColor.accent, style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
+                .rotationEffect(.degrees(turn * 360))
+        }
+        .frame(width: size, height: size)
+        .accessibilityLabel("Loading")
+    }
+}
+
 /// A line of accent text for errors (the web replaces the page with it).
 struct ErrorLine: View {
     let text: String

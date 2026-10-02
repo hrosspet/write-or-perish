@@ -99,8 +99,8 @@ private struct ThreadContent: View {
                     // A tapped node is loading: say so at once. Taps still work, so a
                     // misclick can be corrected (the newest tap opens).
                     if NodePrefetch.shared.isPending {
-                        ProgressView().controlSize(.large).tint(LooreColor.accent)
-                            .padding(18)
+                        SpinnerRing(size: 18, lineWidth: 2)
+                            .padding(11)
                             .background(LooreColor.bgCard, in: Circle())
                             .overlay(Circle().strokeBorder(LooreColor.border))
                             .allowsHitTesting(false)
