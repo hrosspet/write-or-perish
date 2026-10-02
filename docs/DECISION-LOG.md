@@ -137,10 +137,11 @@ Choices that agents flagged in PRs and that I decided because a rule above alrea
 | 2026-10-02 | #408 | A failed auto-generate hides LLM Response outside Read | Follow-up issue #416 | Show the choices |
 | 2026-10-02 | #413 | Admin-only guard, dry run, missing-items count in the todo-merge comparison | Kept | Experiments run on Peter's data; cost is his call |
 | 2026-10-02 | #414 | The profile note says "keep what they wrote" | Kept | The user's edit wins |
+| 2026-10-02 | #417 | The todo merge rewords items or moves them out of the section the user named | Keep wording; new items copied word for word; the named section is created if missing | The user's edit wins |
 | 2026-10-02 | #415 | Purging an AI or system account | Refused | None needed: purging one would delete every AI reply in Loore |
 | 2026-10-02 | #415 | Cost rows after a purge | Anonymised, with response ids cleared | Cost records are kept in anonymous form |
 
-Raised to Peter instead: whether the profile states what the entries show next to the user's own description of themselves (#414), revoking the X login at purge (it needs one decryption of the token), an undo window for "Delete all my writing" (#415), and a real-model check of #414.
+Raised to Peter instead: whether the profile states what the entries show next to the user's own description of themselves (#414), revoking the X login at purge (it needs one decryption of the token), an undo window for "Delete all my writing" (#415), and real-model checks of #414 and #417.
 
 ## Backfilled decisions
 
