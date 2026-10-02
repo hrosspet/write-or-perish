@@ -119,6 +119,29 @@ One more miss is not in the table: I excluded the question of when to post the s
 - **Peter:** "go ahead" · "yes"
 - **Applies to:** #217, #218, #275, #224, #216, #374, #287; #379 and #331 except Peter's prod steps.
 
+## Decided by Claude
+
+Choices that agents flagged in PRs and that I decided because a rule above already covers them (Peter, 2026-10-02: decide what the log supports, raise only real judgement calls). Each is also recorded on its PR. Peter can overrule any of them; an overruled one becomes a miss in the hit rate.
+
+| Date | PR | Choice | Decided | Rule |
+|---|---|---|---|---|
+| 2026-10-02 | #406 | How often to email about one failing provider account | At most every 6 h per cause, as a setting | Every added heuristic is named |
+| 2026-10-02 | #406 | A paid batch is refused for an account reason while polling | Keep polling until the cap | Prevent the failure where possible |
+| 2026-10-02 | #409 | Recent context keeps failing for a user | Stop after two failures in a row, report it | Stop after two failures, loudly (#368) |
+| 2026-10-02 | #409 | How often finished recent-context batches are collected | Every 60 s | Latency counts as quality |
+| 2026-10-02 | #401 | A newcomer's first session and the updates window | `/welcome` skips the whole session | A newcomer reflects first |
+| 2026-10-02 | #401 | What counts as the user's own entry | Only writing done in Loore; not imports, session prompts, links or deleted entries | Imports don't count (Peter, 2026-10-01) |
+| 2026-10-02 | #403 | iPhone only or iPhone and iPad | iPhone only | The design document |
+| 2026-10-02 | #404 | A chat reply is sent with a read-only model | It runs on the chat default; no chat picker offers read-only models | A user's model is theirs |
+| 2026-10-02 | #405 | What counts as a dropped pick | Both kinds of picks Loore can't show | An empty Read is a good result |
+| 2026-10-02 | #408 | A failed auto-generate hides LLM Response outside Read | Follow-up issue #416 | Show the choices |
+| 2026-10-02 | #413 | Admin-only guard, dry run, missing-items count in the todo-merge comparison | Kept | Experiments run on Peter's data; cost is his call |
+| 2026-10-02 | #414 | The profile note says "keep what they wrote" | Kept | The user's edit wins |
+| 2026-10-02 | #415 | Purging an AI or system account | Refused | None needed: purging one would delete every AI reply in Loore |
+| 2026-10-02 | #415 | Cost rows after a purge | Anonymised, with response ids cleared | Cost records are kept in anonymous form |
+
+Raised to Peter instead: whether the profile states what the entries show next to the user's own description of themselves (#414), revoking the X login at purge (it needs one decryption of the token), an undo window for "Delete all my writing" (#415), and a real-model check of #414.
+
 ## Backfilled decisions
 
 Decisions Peter made before this log existed, oldest first. None of them has a prediction, so none counts in the hit rate. Quotes are his own words, from earlier voice reviews in Loore, his comments on GitHub, and his messages in earlier Claude Code sessions. Fragments are joined with " · ".
