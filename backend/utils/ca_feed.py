@@ -306,9 +306,39 @@ def record_feed_render(node, stats, refs, days=1, scope="all"):
     row.account_count = int(stats.get("accounts") or 0)
     row.excluded_count = int(stats.get("excluded") or 0)
     row.set_tweet_ids(refs[n]["tweet_id"] for n in sorted(refs))
+    # A rerun's collect counts its own drops.
+    row.dropped_picks = 0
     row.created_at = datetime.utcnow()
     db.session.add(row)
     return row
+
+
+def mark_read_reply_opened(node, user_id):
+    """Record that the reply's owner opened a finished Read reply:
+    FeedRender.opened_at, the first time only. Called where the reply's
+    text is served: GET /nodes/<id> of the reply, and llm-status when it
+    returns the finished reply (a thread page left open while the batch
+    ran). Only the reply's human owner counts; another user or an admin
+    who can see the node does not, and neither does a reply still being
+    generated. One UPDATE matched only while opened_at is null, no
+    content read; a node with no FeedRender row matches nothing. Commits
+    when it set the time, so callers run it after their last read of
+    the session's objects. Returns whether it did."""
+    from backend.extensions import db
+    from backend.models import FeedRender
+    if (node is None or user_id is None
+            or not (node.node_type == "llm" or node.llm_model)
+            or node.llm_task_status != "completed"
+            or node.human_owner_id != user_id):
+        return False
+    updated = (FeedRender.query
+               .filter(FeedRender.node_id == node.id,
+                       FeedRender.opened_at.is_(None))
+               .update({FeedRender.opened_at: datetime.utcnow()},
+                       synchronize_session=False))
+    if updated:
+        db.session.commit()
+    return bool(updated)
 
 
 def read_window_fields(row):
@@ -355,10 +385,13 @@ def refs_from_render(row, reply_text, snapshot_dir):
     (FeedRender.tweet_id_for), and those few tweets are fetched by id
     from the snapshot — the current one; ids are stable across exports.
     A tweet the snapshot no longer holds drops its pick (parse_feed_reply
-    logs it as an unknown number)."""
+    logs it as an unknown number); how many picks that dropped is
+    recorded on the render (FeedRender.dropped_picks). A number cited
+    only in the verdict, or outside the render, is not counted."""
     from backend.utils.community_archive import (
         CA_CITATION_RE, fetch_tweets_by_id)
     numbers = pick_numbers(reply_text)
+    picked = set(numbers)
     # Numbers cited in the verdict prose too, so expand_ca_citations can
     # link them (they need no pick row, just the tweet behind them).
     try:
@@ -373,13 +406,17 @@ def refs_from_render(row, reply_text, snapshot_dir):
             wanted[n] = tweet_id
     found = fetch_tweets_by_id(snapshot_dir, wanted.values()) if wanted else {}
     refs = {}
+    dropped = 0
     for n, tweet_id in wanted.items():
         ref = found.get(tweet_id)
         if ref is None:
             log.warning("Feed pick #%s: tweet %s is not in the current "
                         "snapshot; dropping it", n, tweet_id)
+            if n in picked:
+                dropped += 1
             continue
         refs[n] = ref
+    row.dropped_picks = dropped
     return refs
 
 

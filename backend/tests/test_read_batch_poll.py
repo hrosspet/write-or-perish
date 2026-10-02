@@ -858,3 +858,218 @@ def test_pinned_collect_links_citations_in_the_verdict(app, monkeypatch, tmp_pat
     content = _reload(llm_node.id).get_content()
     assert "[#1](https://x.com/alice_w/status/111)" in content
     assert "[#2](https://x.com/bob_b/status/222)" in content
+
+
+# ── what the Read records for the reports (2026-10-02) ───────────────────
+# FeedRender.dropped_picks tells "every pick was dropped" from "the model
+# picked nothing"; a reply the collect cannot use still has its cost row.
+
+def _pinned_collect(monkeypatch, tmp_path, content, fetch=None):
+    """Submit a pinned read (render 111, 222) and script the collect of a
+    batch result carrying *content*; *fetch* replaces
+    fetch_tweets_by_id. The next _run collects."""
+    from backend.utils import community_archive as ca
+    state = {"resp": None}
+    _script(monkeypatch, tmp_path,
+            collect=lambda: (("completed", state["resp"]) if state["resp"]
+                             else ("in_progress", None)))
+    if fetch is not None:
+        monkeypatch.setattr(ca, "fetch_tweets_by_id", fetch)
+    alice, read, llm_node = _read_thread(submitted=False)
+    with pytest.raises(_llm_task_mod.Retry):
+        _run(_Task(), alice, read, llm_node)
+    state["resp"] = dict(_batch_resp(), batch_id="batch_9", content=content)
+    return alice, read, llm_node
+
+
+def test_pick_dropped_from_the_snapshot_is_counted_on_the_render(app, monkeypatch, tmp_path):  # noqa: F811
+    """Every pick dropped: no FeedPick row, but the render says the
+    model did pick (dropped_picks), which "picked nothing" would not."""
+    from backend.models import FeedRender
+    alice, read, llm_node = _pinned_collect(
+        monkeypatch, tmp_path, _batch_resp()["content"],
+        fetch=lambda d, ids: {})
+    assert _run(_Task(), alice, read, llm_node)["status"] == "completed"
+    assert FeedPick.query.filter_by(node_id=llm_node.id).count() == 0
+    assert FeedRender.query.filter_by(
+        node_id=llm_node.id).one().dropped_picks == 1
+
+
+def test_dropped_picks_counts_each_missing_pick_once(app, monkeypatch, tmp_path):  # noqa: F811
+    """Only picks whose tweet the snapshot lost count: a repeated number
+    once, a number cited only in the verdict not, a number outside the
+    render not (no tweet was behind it)."""
+    from backend.models import FeedRender
+
+    def only_111(snapshot_dir, ids):
+        return {r["tweet_id"]: dict(r) for r in REFS.values()
+                if r["tweet_id"] == "111" and r["tweet_id"] in set(ids)}
+    content = json.dumps({
+        "verdict": "#1 is the one; #2 was close.",
+        "picks": [
+            {"n": 2, "qt": "A", "relevance": 30, "recommend": False},
+            {"n": 2, "qt": "A again", "relevance": 30, "recommend": False},
+            {"n": 1, "qt": "B", "relevance": 60, "recommend": True},
+            {"n": 9, "qt": "C", "relevance": 10, "recommend": False},
+        ]})
+    alice, read, llm_node = _pinned_collect(
+        monkeypatch, tmp_path, content, fetch=only_111)
+    assert _run(_Task(), alice, read, llm_node)["status"] == "completed"
+    assert [p.item.external_id for p in
+            FeedPick.query.filter_by(node_id=llm_node.id)] == ["111"]
+    assert FeedRender.query.filter_by(
+        node_id=llm_node.id).one().dropped_picks == 1
+
+
+def test_verdict_citation_missing_from_the_snapshot_is_no_dropped_pick(app, monkeypatch, tmp_path):  # noqa: F811
+    from backend.models import FeedRender
+
+    def only_222(snapshot_dir, ids):
+        return {r["tweet_id"]: dict(r) for r in REFS.values()
+                if r["tweet_id"] == "222" and r["tweet_id"] in set(ids)}
+    alice, read, llm_node = _pinned_collect(
+        monkeypatch, tmp_path, json.dumps({
+            "verdict": "#1 is noise; #2 is the pick.",
+            "picks": [{"n": 2, "qt": "Q", "relevance": 40,
+                       "recommend": True}]}),
+        fetch=only_222)
+    assert _run(_Task(), alice, read, llm_node)["status"] == "completed"
+    assert FeedPick.query.filter_by(node_id=llm_node.id).count() == 1
+    assert FeedRender.query.filter_by(
+        node_id=llm_node.id).one().dropped_picks == 0
+
+
+def test_model_that_picked_nothing_drops_nothing(app, monkeypatch, tmp_path):  # noqa: F811
+    from backend.models import FeedRender
+    alice, read, llm_node = _pinned_collect(
+        monkeypatch, tmp_path,
+        json.dumps({"verdict": "Nothing today.", "picks": []}))
+    assert _run(_Task(), alice, read, llm_node)["status"] == "completed"
+    assert FeedPick.query.filter_by(node_id=llm_node.id).count() == 0
+    assert FeedRender.query.filter_by(
+        node_id=llm_node.id).one().dropped_picks == 0
+
+
+def test_rerun_render_resets_the_dropped_count(app, monkeypatch, tmp_path):  # noqa: F811
+    from backend.models import FeedRender
+    from backend.utils.ca_feed import record_feed_render
+    _, _, llm_node = _read_thread(submitted=False)
+    _db.session.add(FeedRender(node_id=llm_node.id, dropped_picks=3))
+    _db.session.commit()
+    record_feed_render(llm_node, {"tweets": 2}, dict(REFS))
+    _db.session.commit()
+    assert FeedRender.query.filter_by(
+        node_id=llm_node.id).one().dropped_picks == 0
+
+
+def _cost_rows(node_id):
+    return APICostLog.query.filter_by(request_ref=f"node:{node_id}").all()
+
+
+@pytest.mark.parametrize("bad", ["unparseable", "truncated"])
+def test_billed_reply_the_collect_cannot_use_still_logs_its_cost(app, monkeypatch, tmp_path, bad):  # noqa: F811
+    """The provider billed the batch; the reply is not the promised
+    object (or was cut off). The node fails as before, and the cost row
+    a collected reply gets is written with the failure."""
+    from backend.utils.ca_feed import FeedReplyError
+    resp = _batch_resp()
+    if bad == "truncated":
+        resp["content"] = resp["content"][:20]
+        resp["truncated"] = True
+    else:
+        resp["content"] = "not the promised object"
+    _script(monkeypatch, tmp_path, collect=lambda: ("completed", resp))
+    alice, read, llm_node = _read_thread()
+
+    with pytest.raises(FeedReplyError):
+        _run(_Task(), alice, read, llm_node)
+
+    node = _reload(llm_node.id)
+    assert node.llm_task_status == "failed"
+    assert APICostLog.query.count() == 1
+    row = _cost_rows(llm_node.id)[0]
+    assert (row.request_type, row.user_id, row.model_id) == (
+        "conversation", alice.id, "gpt-5")
+    assert (row.input_tokens, row.output_tokens) == (100, 50)
+    assert _entry(node)["failed_cost_logged_at"]
+
+
+def test_failed_collect_of_the_same_batch_logs_its_cost_once(app, monkeypatch, tmp_path):  # noqa: F811
+    """The entry stays submitted on the failed node, so a duplicate poll
+    or a re-dispatched run collects the same billed result again: it
+    fails the same way and writes no second cost row."""
+    from backend.utils.ca_feed import FeedReplyError
+    bad = dict(_batch_resp(), content="not the promised object")
+    calls = _script(monkeypatch, tmp_path, collect=lambda: ("completed", bad))
+    alice, read, llm_node = _read_thread()
+
+    with pytest.raises(FeedReplyError):
+        _run(_Task(), alice, read, llm_node)
+    assert _entry(_reload(llm_node.id))["status"] == "submitted"
+    with pytest.raises(FeedReplyError):
+        _run(_Task(), alice, read, llm_node)
+
+    assert len(calls["collect"]) == 2
+    assert len(_cost_rows(llm_node.id)) == 1
+    assert _reload(llm_node.id).llm_task_status == "failed"
+
+
+def test_rerun_batch_that_fails_again_logs_its_own_cost(app, monkeypatch, tmp_path):  # noqa: F811
+    """A rerun submits a new batch, billed again: its failed collect
+    logs a second row; the stamp on the first batch does not stop it."""
+    from backend.utils.ca_feed import FeedReplyError
+    bad = dict(_batch_resp(), content="not the promised object")
+    _script(monkeypatch, tmp_path, collect=lambda: ("completed", bad))
+    alice, read, llm_node = _read_thread()
+    with pytest.raises(FeedReplyError):
+        _run(_Task(), alice, read, llm_node)
+
+    # What routes/read.py rerun_read leaves on the node, plus the entry
+    # of the batch its run submits.
+    node = _reload(llm_node.id)
+    meta = json.loads(node.tool_calls_meta)
+    meta[0]["status"] = "cancelled"
+    meta.append({"name": "_batch", "batch_id": "batch_2",
+                 "custom_id": f"node-{node.id}", "model": "gpt-5",
+                 "provider": "openai", "key_type": "chat",
+                 "submitted_at": "2026-09-18T09:00:00", "status": "submitted"})
+    node.tool_calls_meta = json.dumps(meta)
+    node.llm_task_status = "processing"
+    _db.session.commit()
+    with pytest.raises(FeedReplyError):
+        _run(_Task(), alice, read, llm_node)
+
+    assert len(_cost_rows(llm_node.id)) == 2
+
+
+def test_collected_reply_still_logs_one_row(app, monkeypatch, tmp_path):  # noqa: F811
+    """A usable reply's path is unchanged: one row, written by the
+    finalize, no failure stamp on the entry."""
+    _script(monkeypatch, tmp_path,
+            collect=lambda: ("completed", _batch_resp()))
+    alice, read, llm_node = _read_thread()
+    assert _run(_Task(), alice, read, llm_node)["status"] == "completed"
+    assert len(_cost_rows(llm_node.id)) == 1
+    assert "failed_cost_logged_at" not in _entry(_reload(llm_node.id))
+
+
+def test_live_read_the_collect_cannot_use_logs_its_cost(app, monkeypatch, tmp_path):  # noqa: F811
+    """The admin's live rerun: one billed call, one cost row, though the
+    reply is unusable and the node fails."""
+    from backend.tests.test_read_context import _CapturingProvider
+    from backend.tests.test_retrieval_loop import _FakeSelf, _resp
+    from backend.utils.ca_feed import FeedReplyError
+    _stub_archive(monkeypatch, tmp_path)
+    _CapturingProvider.kwargs = []
+    _CapturingProvider.reset([_resp("not the promised object",
+                                    inp=70, out=30)])
+    monkeypatch.setattr(_llm_task_mod, "LLMProvider", _CapturingProvider)
+    alice, read, llm_node = _read_thread(submitted=False)
+
+    with pytest.raises(FeedReplyError):
+        generate_llm_response(_FakeSelf(), read.id, llm_node.id, "gpt-5",
+                              alice.id, source_mode=None, ca_live=True)
+
+    assert _reload(llm_node.id).llm_task_status == "failed"
+    assert [(r.request_type, r.input_tokens, r.output_tokens)
+            for r in _cost_rows(llm_node.id)] == [("conversation", 70, 30)]

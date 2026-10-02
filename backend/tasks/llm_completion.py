@@ -2578,6 +2578,31 @@ def _close_batch_entry(node, batch_id):
     node.tool_calls_meta = json.dumps(meta)
 
 
+def _claim_failed_feed_cost(node, resp):
+    """Whether this run logs the cost of a feed reply the collect could
+    not use (FeedReplyError). A live call is billed per call, so its run
+    always does. A batch result is billed once but can be collected more
+    than once: the entry stays submitted on the failed node, so a
+    duplicate poll or a re-dispatched run fetches the same result and
+    fails the same way. The first collect stamps the live entry
+    (failed_cost_logged_at), which lands in the same commit as its cost
+    row and the failure; a later collect of that batch finds the stamp
+    and logs nothing."""
+    if not resp.get("batch"):
+        return True
+    meta, entry = _batch_meta(node)
+    if entry is None:
+        return True
+    if entry.get("failed_cost_logged_at"):
+        logger.info("Node %s: cost of batch %s already logged; not "
+                    "logging it again", node.id, entry.get("batch_id"))
+        return False
+    entry["failed_cost_logged_at"] = datetime.utcnow().isoformat(
+        timespec="seconds")
+    node.tool_calls_meta = json.dumps(meta)
+    return True
+
+
 def _collect_feed_reply(llm_node, resp, ca_refs):
     """Turn the feed's JSON answer into the reply: each pick becomes a
     saved reference + FeedPick row (rank, relevance, recommend and the
@@ -3501,6 +3526,57 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                          and bool(model_config.get("cache_diagnostics"))),
                 user_id=user_id, node_chain=node_chain)
 
+            def _log_api_cost(resp, node):
+                """Log an APICostLog row for one model call. Every model call
+                costs money — the retrieval loop logs once per round.
+                *node* is the LLM node the call's text was written to; the
+                row points at it (request_ref) so the next turn can find its
+                cache-diagnostics baseline (#348).
+
+                Pricing and the unified column semantics (full-prompt
+                input_tokens, cache read/write columns across providers,
+                #187/#189/#286) live in llm_cost_log_fields; this only adds
+                the per-turn cache log lines."""
+                in_toks = resp.get("input_tokens", 0)
+                cache_read_toks = resp.get("cache_read_input_tokens", 0)
+                cache_write_toks = resp.get(
+                    "cache_creation_input_tokens", 0)
+                cached_input_toks = resp.get("cached_tokens", 0)
+                cache_write_subset_toks = resp.get(
+                    "cache_write_subset_tokens", 0)
+                if cache_read_toks or cache_write_toks:
+                    logger.info(
+                        "Prompt cache usage: read=%d write=%d uncached=%d",
+                        cache_read_toks, cache_write_toks, in_toks)
+                if cached_input_toks or cache_write_subset_toks:
+                    logger.info(
+                        "OpenAI prompt cache: %d/%d input tokens cached, "
+                        "%d written",
+                        cached_input_toks, in_toks, cache_write_subset_toks)
+                diag_fields = cache_diag.log_fields(resp, node.id)
+                db.session.add(APICostLog(
+                    user_id=user_id,
+                    model_id=model_id,
+                    request_type="conversation",
+                    **llm_cost_log_fields(model_id, resp),
+                    **diag_fields,
+                ))
+
+            def _collect_feed(resp):
+                """_collect_feed_reply for this turn. A reply the collect
+                cannot use (FeedReplyError: not the promised object, or cut
+                off at the output limit) was still billed, so its cost row
+                is written before the error fails the node: the row the
+                finalize writes for a collected reply (_log_api_cost). The
+                task's error handler commits it with the failure."""
+                try:
+                    return _collect_feed_reply(llm_node, resp, ca_refs)
+                except FeedReplyError:
+                    if (not resp.get("cut_off")
+                            and _claim_failed_feed_cost(llm_node, resp)):
+                        _log_api_cost(resp, llm_node)
+                    raise
+
             # Turn-scoped relative-quote labels: a short label ("A") maps to
             # ("node"|"external", id) — assigned when search results are
             # labeled, consumed by canonicalization wherever the model's
@@ -4062,8 +4138,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                             )),
                         stream=feed_schema is None)
                     if needs_ca:
-                        response = _collect_feed_reply(
-                            llm_node, response, ca_refs)
+                        response = _collect_feed(response)
                     break  # Success
                 except PromptTooLongError as e:
                     if attempt == MAX_RETRIES or not needs_export:
@@ -4078,42 +4153,6 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         f"(attempt {attempt + 2}/{MAX_RETRIES + 1})"
                     )
             # ── Helpers shared by the single-shot and retrieval paths ──────
-
-            def _log_api_cost(resp, node):
-                """Log an APICostLog row for one model call. Every model call
-                costs money — the retrieval loop logs once per round.
-                *node* is the LLM node the call's text was written to; the
-                row points at it (request_ref) so the next turn can find its
-                cache-diagnostics baseline (#348).
-
-                Pricing and the unified column semantics (full-prompt
-                input_tokens, cache read/write columns across providers,
-                #187/#189/#286) live in llm_cost_log_fields; this only adds
-                the per-turn cache log lines."""
-                in_toks = resp.get("input_tokens", 0)
-                cache_read_toks = resp.get("cache_read_input_tokens", 0)
-                cache_write_toks = resp.get(
-                    "cache_creation_input_tokens", 0)
-                cached_input_toks = resp.get("cached_tokens", 0)
-                cache_write_subset_toks = resp.get(
-                    "cache_write_subset_tokens", 0)
-                if cache_read_toks or cache_write_toks:
-                    logger.info(
-                        "Prompt cache usage: read=%d write=%d uncached=%d",
-                        cache_read_toks, cache_write_toks, in_toks)
-                if cached_input_toks or cache_write_subset_toks:
-                    logger.info(
-                        "OpenAI prompt cache: %d/%d input tokens cached, "
-                        "%d written",
-                        cached_input_toks, in_toks, cache_write_subset_toks)
-                diag_fields = cache_diag.log_fields(resp, node.id)
-                db.session.add(APICostLog(
-                    user_id=user_id,
-                    model_id=model_id,
-                    request_type="conversation",
-                    **llm_cost_log_fields(model_id, resp),
-                    **diag_fields,
-                ))
 
             # Turn-scoped quote state (quote_labels is set up before the
             # first call). bumped_ext_ids guards the eager surfacing-history
@@ -4320,8 +4359,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 # and holds its reply; the context was built for ca_refs.
                 response = batch_resp
                 if ca_refs is not None:
-                    response = _collect_feed_reply(
-                        llm_node, response, ca_refs)
+                    response = _collect_feed(response)
                 return _finalize(llm_node, response)
             if batch_mode:
                 # First run: submit and re-queue for the first poll.

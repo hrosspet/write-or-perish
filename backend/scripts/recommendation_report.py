@@ -33,9 +33,25 @@ reply was made: an earlier read reply deleted before it does not count.
 
 For a quote, variant is the agentic reply's mode, voice or text: Voice
 does not speak quotes (the TTS step strips the markers), so a quote in a
-Voice reply is only seen on screen. Quotes have no turn. Nothing records
-whether the reader looked at a reply at all, so "untouched" includes
-replies never opened.
+Voice reply is only seen on screen. Quotes have no turn. "untouched"
+includes picks in replies the reader never opened (see "opened" below).
+
+A second table counts Reads rather than picks, so a Read that showed
+nothing counts too ("no recommendation is a good recommendation"). One
+row per completed Read reply with a pinned render (FeedRender: every
+Read since 2026-09-19), per model, variant and turn as above:
+
+    reads      completed Read replies
+    picked     of them, replies that show at least one pick
+    empty      of them, replies that show no pick, split into
+    nothing      the model picked nothing
+    dropped      the model picked, but every pick's tweet had left the
+                 archive snapshot by the collect (FeedRender.dropped_picks;
+                 replies collected before the column was deployed,
+                 October 2026, count as "nothing")
+    opened     replies their owner has opened (FeedRender.opened_at,
+               recorded only since that deploy: a Read opened only before
+               it counts as not opened), and their share of reads
 
     cd /path/to/write-or-perish
     python backend/scripts/recommendation_report.py
@@ -51,7 +67,7 @@ from datetime import datetime, timedelta
 sys.path.insert(0, os.getcwd())
 
 from backend import create_app, db  # noqa: E402
-from backend.models import FeedPick, Node  # noqa: E402
+from backend.models import FeedPick, FeedRender, Node  # noqa: E402
 from backend.utils.ca_feed import READ_PROMPT_KEYS, read_reply_ids  # noqa: E402
 from backend.utils.reference_log import KIND_READ, outcomes  # noqa: E402
 from backend.utils.thread_tree import ancestor_chain  # noqa: E402
@@ -137,11 +153,65 @@ def report(user_id=None, since=None):
     return rows
 
 
+def read_report(user_id=None, since=None):
+    """The Reads table (see the module docstring), keyed by (model,
+    variant, turn). A Read is a completed reply with a pinned render;
+    *since* applies to the render's submit time. Metadata only: no
+    node content is read."""
+    q = (db.session.query(Node, FeedRender.dropped_picks,
+                          FeedRender.opened_at)
+         .join(FeedRender, FeedRender.node_id == Node.id)
+         .filter(Node.llm_task_status == "completed"))
+    if user_id:
+        q = q.filter(Node.human_owner_id == user_id)
+    if since:
+        q = q.filter(FeedRender.created_at >= since)
+    reads = q.order_by(Node.id).all()
+    rows = defaultdict(lambda: defaultdict(int))
+    variants = {}
+    for start in range(0, len(reads), CHUNK):
+        chunk = reads[start:start + CHUNK]
+        picked = {r[0] for r in (
+            db.session.query(FeedPick.node_id)
+            .filter(FeedPick.node_id.in_([n.id for n, _, _ in chunk]),
+                    FeedPick.kind == KIND_READ)
+            .distinct().all())}
+        for node, dropped, opened_at in chunk:
+            variant, turn = _read_variant(node, variants)
+            r = rows[(node.llm_model or "?", variant, turn)]
+            r["reads"] += 1
+            r["opened"] += opened_at is not None
+            if node.id in picked:
+                r["picked"] += 1
+            else:
+                r["empty"] += 1
+                r["dropped" if dropped else "nothing"] += 1
+    return rows
+
+
+def print_reads(rows):
+    head = (f"{'model':24} {'variant':7} {'turn':7} {'reads':>6} "
+            f"{'picked':>7} {'empty':>6} {'nothing':>8} {'dropped':>8} "
+            f"{'opened':>7} {'opened%':>8}")
+    print(head)
+    print("-" * len(head))
+    for (model, variant, turn), r in sorted(rows.items()):
+        share = f"{100 * r['opened'] / r['reads']:.0f}%" if r["reads"] else "-"
+        print(f"{model[:24]:24} {variant:7} {turn:7} {r['reads']:>6} "
+              f"{r['picked']:>7} {r['empty']:>6} {r['nothing']:>8} "
+              f"{r['dropped']:>8} {r['opened']:>7} {share:>8}")
+    print("\nempty = nothing + dropped: no pick shown. dropped = the model "
+          "picked, but every pick's tweet had left the snapshot.\nopened "
+          "= the owner opened the reply (recorded since the October 2026 "
+          "deploy).")
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--user-id", type=int, default=None)
     parser.add_argument("--days", type=int, default=None,
-                        help="only recommendations from the last N days")
+                        help="only recommendations (and Reads) from the "
+                             "last N days")
     args = parser.parse_args(argv)
     since = (datetime.utcnow() - timedelta(days=args.days)
              if args.days else None)
@@ -163,6 +233,9 @@ def main(argv=None):
                   f"{r['untouched']:>10} {r['after']:>6}")
         print("\ngood/bad (+n): n of them were given in another reply of "
               "the same group (a parallel Read), not in this one.")
+        print("\nReads: one row per completed Read reply, pick-less "
+              "ones included.\n")
+        print_reads(read_report(args.user_id, since))
 
 
 if __name__ == "__main__":

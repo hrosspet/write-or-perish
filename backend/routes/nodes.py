@@ -1397,6 +1397,11 @@ def get_node(node_id):
         "read_reply_above": read_reply_above,
         "reply_ai_usage": reply_usage,
     }
+    # The owner opened a finished Read reply (FeedRender.opened_at, once).
+    # Last, because it commits: the payload above is built.
+    if focal.get("read_reply"):
+        from backend.utils.ca_feed import mark_read_reply_opened
+        mark_read_reply_opened(node, current_user.id)
     return jsonify(node_data), 200
 
 # Resolve {quote:ID} placeholders in a node's content for frontend rendering.
@@ -2231,6 +2236,13 @@ def get_llm_status(node_id):
 
     if created_node:
         response_data["node"] = created_node
+
+    # A finished Read reply returned to its owner's open thread page
+    # counts as opened (FeedRender.opened_at, once; a no-op for any other
+    # node). Last, because it commits.
+    if "content" in response_data:
+        from backend.utils.ca_feed import mark_read_reply_opened
+        mark_read_reply_opened(node, current_user.id)
 
     response = jsonify(response_data)
     response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
