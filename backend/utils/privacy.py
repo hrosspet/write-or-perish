@@ -277,18 +277,16 @@ def can_ai_use_node_for_training(node) -> bool:
 def speech_allowed(entity) -> bool:
     """Whether text-to-speech may send *entity*'s text to the speech model.
 
-    - A model's reply (a node with node_type 'llm') may always be spoken:
-      its text came from a model, and voice mode speaks every reply, also
-      in a thread whose ai_usage is 'none'.
-    - Any other row that has an ai_usage (the user's own entries, profile
+    - A row that has an ai_usage (entries, a model's replies, profile
       versions) is spoken only when its ai_usage lets AI read it, the rule
-      the speaker icon applies to entries on the web and in the app.
+      the speaker icon applies on the web and in the app. A reply is never
+      generated where AI may not read (llm_nodes.reply_refusal), so a
+      reply marked 'none' was imported that way or set by its owner, and
+      is not spoken either.
     - Rows without an ai_usage (saved references) may be spoken.
 
     Speech that already exists is not affected: callers check this only
     before generating new speech."""
-    if getattr(entity, "node_type", None) == "llm":
-        return True
     if not hasattr(entity, "ai_usage"):
         return True
     return entity.ai_usage in AI_ALLOWED

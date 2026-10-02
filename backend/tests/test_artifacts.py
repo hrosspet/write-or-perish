@@ -527,6 +527,66 @@ def test_apply_feedback_tool_submits(app):
         assert Draft.query.filter_by(id=draft.id).first() is None
 
 
+# apply_todo_changes: the merge sends the todo list to a model, so it does
+# not start where AI may not read the list (#396 review). The proposal stays
+# pending and the model gets the message to pass on.
+
+def _pending_todo_proposal(uid):
+    proposal = Node(user_id=uid, node_type="llm", llm_model="test-model",
+                    ai_usage="chat")
+    proposal.set_content("### New Tasks\n- buy milk")
+    _db.session.add(proposal)
+    _db.session.flush()
+    draft = Draft(user_id=uid, parent_id=proposal.id, label="todo_pending")
+    draft.set_content("")
+    _db.session.add(draft)
+    _db.session.commit()
+    return proposal, draft
+
+
+def _stub_merge_start(monkeypatch):
+    import backend.routes.todo as todo_routes
+    started = []
+    monkeypatch.setattr(todo_routes, "_start_todo_merge",
+                        lambda *a, **k: started.append(a) or "task-1")
+    return todo_routes, started
+
+
+def test_apply_todo_changes_refused_for_a_none_todo_list(app, monkeypatch):
+    with app.app_context():
+        uid = User.query.first().id
+        _mk_todo(uid, "- SECRET TASK", ai_usage="none")
+        proposal, draft = _pending_todo_proposal(uid)
+        todo_routes, started = _stub_merge_start(monkeypatch)
+
+        r = _execute_tool_calls(
+            [{"name": "apply_todo_changes", "input": {}}], proposal,
+            [proposal], uid)[0]
+
+        assert r["status"] == "error"
+        assert r["error"] == todo_routes.TODO_MERGE_REFUSED_MESSAGE
+        assert "SECRET" not in r["error"]
+        assert started == []
+        assert Draft.query.get(draft.id) is not None
+
+
+def test_apply_todo_changes_starts_the_merge_for_a_chat_todo_list(
+        app, monkeypatch):
+    with app.app_context():
+        uid = User.query.first().id
+        _mk_todo(uid, "- a task", ai_usage="chat")
+        proposal, _ = _pending_todo_proposal(uid)
+        _, started = _stub_merge_start(monkeypatch)
+
+        r = _execute_tool_calls(
+            [{"name": "apply_todo_changes", "input": {}}], proposal,
+            [proposal], uid)[0]
+
+        assert r["status"] == "success"
+        assert r["apply_task_id"] == "task-1"
+        assert len(started) == 1
+
+
 def test_apply_feedback_without_pending_draft_errors(app):
     with app.app_context():
         uid = User.query.first().id

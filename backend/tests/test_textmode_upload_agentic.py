@@ -221,7 +221,8 @@ class TestMultipartUpload:
     def test_refused_with_ai_usage_none(self, client):
         resp = _upload(client, agentic="true", ai_usage="none")
 
-        assert resp.status_code == 400
+        assert resp.status_code == 403
+        assert resp.get_json()["code"] == "ai_usage_none"
         assert Node.query.count() == 0
 
     def test_unsupported_model_refused(self, client):

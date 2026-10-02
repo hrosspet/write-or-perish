@@ -252,8 +252,9 @@ class TestTextmodeStart:
             "/api/textmode/start",
             json={"content": "hi", "ai_usage": "none"},
         )
-        assert resp.status_code == 400
-        assert "chat" in resp.get_json()["error"].lower()
+        assert resp.status_code == 403
+        assert resp.get_json()["code"] == "ai_usage_none"
+        assert Node.query.count() == 0
 
     def test_honors_privacy_level_and_ai_usage(self, app):
         client = app.test_client()
@@ -1145,7 +1146,8 @@ class TestTextmodeContinueFromNode:
         assert resp.status_code == 400
         resp = client.post(f"/api/textmode/from-node/{read.id}", json={
             "content": "x", "ai_usage": "none", "auto_generate": False})
-        assert resp.status_code == 400
+        assert resp.status_code == 403
+        assert resp.get_json()["code"] == "ai_usage_none"
 
     def test_inside_an_agentic_thread_nothing_is_added(self, app):
         client = app.test_client()
@@ -1199,5 +1201,24 @@ class TestTextmodeContinueFromNode:
 
         resp = client.post(f"/api/textmode/from-node/{plain.id}",
                            json={"content": "hi"})
-        assert resp.status_code == 400
+        assert resp.status_code == 403
+        assert resp.get_json()["code"] == "ai_usage_none"
         assert Node.query.filter_by(parent_id=plain.id).count() == 0
+
+    def test_a_none_node_above_refuses_the_reply(self, app):
+        # The message's own setting is 'chat', but the reply would read
+        # a 'none' entry above: refused before anything is written.
+        client = app.test_client()
+        alice = _make_user("alice")
+        plain = _make_node(alice, content="no ai here", ai_usage="none")
+        below = _make_node(alice, parent_id=plain.id, content="later",
+                           ai_usage="chat")
+        _db.session.commit()
+        _login(client, alice.id)
+
+        resp = client.post(f"/api/textmode/from-node/{below.id}",
+                           json={"content": "hi", "ai_usage": "chat"})
+        assert resp.status_code == 403
+        assert resp.get_json()["code"] == "ai_usage_none"
+        assert Node.query.filter_by(parent_id=below.id).count() == 0
+        assert Node.query.filter_by(node_type="llm").count() == 0

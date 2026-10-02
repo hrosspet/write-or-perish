@@ -13,7 +13,10 @@ from backend.utils.audio_storage import (
     is_storage_id, move_session_audio_to_node, storage_path,
 )
 from backend.utils.encryption import encrypt_file_atomically
-from backend.utils.llm_nodes import pick_model_for_generation
+from backend.utils.llm_nodes import (
+    AIUsageRefused, ai_usage_refused_response, pick_model_for_generation,
+    voice_turn_refusal,
+)
 from backend.utils.spend import require_spend_headroom
 from backend.utils.webm_utils import (
     chunk_is_init_bearing, persist_init_segment,
@@ -554,11 +557,19 @@ def init_streaming():
     Resuming an interrupted session never calls init, and its chunks
     (audio-chunk, transcribe-remaining, finalize) are not cap-checked.
 
+    A Voice recording (label "Voice") where AI may not read gets 403
+    ``{"error", "code": "ai_usage_none", "scope"}`` and no draft, so the
+    mic never opens: a fresh thread when the account's Default AI usage
+    or the ai_usage sent is 'none', a continued one (parent_id) when the
+    thread is not AI-readable (voice_turn_refusal). Voice mode exists to
+    get a reply, and that reply would send the recording to a model.
+
     Request body:
     {
         "parent_id": 123,  // optional - parent node for the eventual node
         "privacy_level": "private",  // optional
         "ai_usage": "none",  // optional
+        "label": "Voice",  // optional
     }
 
     Returns: { "session_id": "uuid", "draft_id": 456 }
@@ -574,6 +585,12 @@ def init_streaming():
     privacy_level = data.get("privacy_level", "private")
     ai_usage = data.get("ai_usage", "none")
     label = data.get("label")  # 'Reflect', 'Orient', etc.
+    if label == "Voice":
+        parent = Node.query.get(int(parent_id)) if parent_id else None
+        refused = voice_turn_refusal(
+            current_user, parent, None if parent else ai_usage)
+        if refused is not None:
+            return ai_usage_refused_response(refused)
 
     # Generate session ID
     session_id = str(uuid.uuid4())
@@ -1189,9 +1206,7 @@ def save_streaming_as_node(session_id):
     if (agentic or auto_generate) and ai_usage == "none":
         # Same contract as /textmode/start: an AI reply / agentic prompt
         # contradicts ai_usage 'none'. The frontend gates on this too.
-        return jsonify({
-            "error": "agentic / auto_generate require ai_usage of 'chat' or 'train'",
-        }), 400
+        return ai_usage_refused_response()
     if auto_generate:
         if not model_id:
             # Walks ancestry from the parent (if any) → user.preferred_model
@@ -1310,11 +1325,16 @@ def save_streaming_as_node(session_id):
                 db.session.commit()
                 response["llm_node_id"] = llm_node.id
                 response["task_id"] = task_id
-            except (UserExportValidationError, ParentDeletedError) as e:
+            except (UserExportValidationError, ParentDeletedError,
+                    AIUsageRefused) as e:
+                # A thread above that keeps AI out (AIUsageRefused) skips
+                # the reply the same way: the entry is saved.
                 db.session.rollback()
                 current_app.logger.warning(
                     f"save-as-node: LLM reply skipped for node {node.id}: {e}"
                 )
                 response["llm_error"] = str(e)
+                if isinstance(e, AIUsageRefused):
+                    response["llm_error_code"] = e.code
 
     return jsonify(response), 201

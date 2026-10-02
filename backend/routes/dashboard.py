@@ -55,6 +55,9 @@ def get_latest_profile(user):
             # Whether this profile has generated TTS audio — drives the
             # "regenerate audio?" edit prompt (#66).
             "has_tts": bool(profile.audio_tts_url),
+            # The speaker icon is off where AI may not read the version
+            # (POST /profile/<id>/tts refuses it: speech_allowed).
+            "ai_usage": profile.ai_usage,
         }
     return None
 

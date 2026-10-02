@@ -634,7 +634,9 @@ export default function AccountPage() {
         </div>
       )}
 
-      <div style={rowStyle}>
+      {/* Anchor for deep links: /account#ai-usage (the Voice screen links
+          here when AI usage keeps Voice mode from recording). */}
+      <div id="ai-usage" style={{ ...rowStyle, scrollMarginTop: "72px" }}>
         <div style={labelStyle}>Default AI usage</div>
         <select
           value={user.default_ai_usage || "chat"}

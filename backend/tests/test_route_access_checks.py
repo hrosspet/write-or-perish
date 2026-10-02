@@ -683,6 +683,8 @@ class TestPublicDashboard:
         resp = _call(app, data.alice, "GET", "/api/dashboard/alice")
         assert resp.get_json()["latest_profile"]["content"] == \
             "ALICE PROFILE TEXT"
+        # The clients turn the speaker icon off for a 'none' version.
+        assert resp.get_json()["latest_profile"]["ai_usage"] == "chat"
 
     def test_session_card_does_not_preview_a_private_first_message(
             self, app, data):

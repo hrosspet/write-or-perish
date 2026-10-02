@@ -110,6 +110,20 @@ def _run_merge(llm_node, update_summary, user_id, model_id,
     """Execute the merge while holding the per-user lock."""
     llm_node_id = llm_node.id
 
+    # AI may not read the todo list or the proposal: no model call. Asked
+    # here, under the lock, because the list can change after the merge
+    # was started (an earlier merge saves one with the account default).
+    from backend.routes.todo import todo_merge_refusal
+    refusal = todo_merge_refusal(user_id, llm_node)
+    if refusal is not None:
+        logger.info(
+            f"Todo merge for node {llm_node_id} refused: AI usage keeps "
+            f"its inputs away from AI (user {user_id})")
+        _update_apply_status(llm_node, "failed", error=refusal,
+                             confirm_node_id=confirm_node_id)
+        db.session.commit()
+        return
+
     # Get current todo (fresh read — any prior merge has committed)
     todo = UserTodo.query.filter_by(user_id=user_id).order_by(
         UserTodo.created_at.desc()

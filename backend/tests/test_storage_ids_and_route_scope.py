@@ -400,13 +400,20 @@ class TestSpeechFollowsAiUsage:
         assert resp.status_code == 202
         fake_tasks.tts.generate_tts_audio.delay.assert_called_once()
 
-    def test_model_reply_gets_speech_whatever_its_ai_usage(
-            self, app, data, fake_tasks):
-        """Voice mode speaks every reply, also in a thread that is 'none'."""
-        entry = _node(data.alice, "ALICE NO-AI ENTRY", ai_usage="none")
+    def test_model_reply_follows_its_ai_usage(self, app, data, fake_tasks):
+        """A reply marked 'none' (imported, or set by its owner: none is
+        generated any more, 2026-10-01) gets no new speech; one marked
+        'chat' does."""
+        entry = _node(data.alice, "ALICE ENTRY", ai_usage="chat")
         reply = _node(data.llm, "MODEL REPLY", parent=entry, node_type="llm",
                       human_owner=data.alice, ai_usage="none",
                       llm_model="gpt-5")
+        resp = _call(app, data.alice, "POST", f"/api/nodes/{reply.id}/tts")
+        assert resp.status_code == 403
+        fake_tasks.tts.generate_tts_audio.delay.assert_not_called()
+
+        reply.ai_usage = "chat"
+        _db.session.commit()
         resp = _call(app, data.alice, "POST", f"/api/nodes/{reply.id}/tts")
         assert resp.status_code == 202
         fake_tasks.tts.generate_tts_audio.delay.assert_called_once()
@@ -438,8 +445,8 @@ class TestSpeechFollowsAiUsage:
         assert resp.status_code == 202
 
     def test_speech_job_checks_ai_usage_when_it_runs(self, app, data):
-        """The job refuses a 'none' entry however it was queued, and still
-        speaks a model's reply."""
+        """The job refuses a 'none' entry or reply however it was queued,
+        and speaks a reply AI may read."""
         tts = _load_tts_tasks(app)
         speak = MagicMock(return_value="/media/new.mp3")
         tts._generate_tts_chunks = speak
@@ -455,6 +462,12 @@ class TestSpeechFollowsAiUsage:
         reply = _node(data.llm, "MODEL REPLY", parent=entry, node_type="llm",
                       human_owner=data.alice, ai_usage="none",
                       llm_model="gpt-5")
+        result = tts.generate_tts_audio(None, reply.id, str(app.audio_root))
+        assert result["status"] == "refused"
+        speak.assert_not_called()
+
+        reply.ai_usage = "chat"
+        _db.session.commit()
         result = tts.generate_tts_audio(None, reply.id, str(app.audio_root))
         assert result["status"] == "completed"
         speak.assert_called_once()
@@ -475,8 +488,10 @@ class TestSpeechFollowsAiUsage:
             node_type="user", ai_usage="none"))
         assert speech_allowed(types.SimpleNamespace(
             node_type="user", ai_usage="chat"))
-        assert speech_allowed(types.SimpleNamespace(
+        assert not speech_allowed(types.SimpleNamespace(
             node_type="llm", ai_usage="none"))
+        assert speech_allowed(types.SimpleNamespace(
+            node_type="llm", ai_usage="chat"))
         # A saved reference has no ai_usage setting.
         assert speech_allowed(types.SimpleNamespace(source="clip"))
 

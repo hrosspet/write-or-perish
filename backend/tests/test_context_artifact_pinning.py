@@ -476,15 +476,17 @@ def test_load_node_chain_is_root_first_and_prefetches_every_dek(app, monkeypatch
     hands every node's ciphertext to one batched prefetch first."""
     from backend.utils import encryption
     u = _user()
-    root = Node(user_id=u.id, node_type="user")
+    root = Node(user_id=u.id, node_type="user", ai_usage="chat")
     root.set_content("root")
     db.session.add(root)
     db.session.flush()
-    mid = Node(user_id=u.id, node_type="llm", parent_id=root.id)
+    mid = Node(user_id=u.id, node_type="llm", parent_id=root.id,
+               ai_usage="train")
     mid.set_content("mid")
     db.session.add(mid)
     db.session.flush()
-    leaf = Node(user_id=u.id, node_type="user", parent_id=mid.id)
+    leaf = Node(user_id=u.id, node_type="user", parent_id=mid.id,
+                ai_usage="chat")
     leaf.set_content("leaf")
     db.session.add(leaf)
     db.session.commit()
@@ -494,3 +496,45 @@ def test_load_node_chain_is_root_first_and_prefetches_every_dek(app, monkeypatch
     chain = _load_node_chain(leaf, u.id)
     assert [n.id for n in chain] == [root.id, mid.id, leaf.id]
     assert seen == [["root", "mid", "leaf"]]
+
+
+def test_load_node_chain_leaves_out_nodes_ai_may_not_read(app, monkeypatch):
+    """The last line of the ai_usage rule (Peter, 2026-10-01): whatever
+    path reached the task, a node marked 'none' never joins the model's
+    input, a model's reply included, and its text is never decrypted
+    for it. A chain with nothing left is refused."""
+    from backend.utils import encryption
+    from backend.utils.llm_nodes import AIUsageRefused
+    u = _user()
+    root = Node(user_id=u.id, node_type="user", ai_usage="chat")
+    root.set_content("root")
+    db.session.add(root)
+    db.session.flush()
+    private = Node(user_id=u.id, node_type="user", parent_id=root.id,
+                   ai_usage="none")
+    private.set_content("kept from AI")
+    db.session.add(private)
+    db.session.flush()
+    reply = Node(user_id=u.id, node_type="llm", parent_id=private.id,
+                 ai_usage="none")
+    reply.set_content("an imported reply marked none")
+    db.session.add(reply)
+    db.session.flush()
+    leaf = Node(user_id=u.id, node_type="user", parent_id=reply.id,
+                ai_usage="chat")
+    leaf.set_content("leaf")
+    db.session.add(leaf)
+    db.session.commit()
+    seen = []
+    monkeypatch.setattr(encryption, "prefetch_deks", lambda texts: seen.append(list(texts)) or 0)
+
+    chain = _load_node_chain(leaf, u.id)
+    assert [n.id for n in chain] == [root.id, leaf.id]
+    assert seen == [["root", "leaf"]]
+
+    lone = Node(user_id=u.id, node_type="user", ai_usage="none")
+    lone.set_content("alone")
+    db.session.add(lone)
+    db.session.commit()
+    with pytest.raises(AIUsageRefused):
+        _load_node_chain(lone, u.id)

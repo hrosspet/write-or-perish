@@ -55,7 +55,8 @@ from backend.models import Node
 from backend.extensions import db
 from backend.utils.prompts import get_user_prompt_record
 from backend.utils.llm_nodes import (
-    create_llm_placeholder, is_read_model, resolve_read_model,
+    AIUsageRefused, ai_usage_refused_response, create_llm_placeholder,
+    is_read_model, reply_refusal, resolve_read_model,
 )
 from backend.utils.placeholders import (
     UserExportValidationError, ca_tweets_allowed, ca_tweets_denied_message,
@@ -127,6 +128,9 @@ def _start(prompt_key, parent, privacy_level, model_id, auto_generate=True):
     except UserExportValidationError as e:
         db.session.rollback()
         return jsonify({"error": str(e)}), 400
+    except AIUsageRefused as e:
+        db.session.rollback()
+        return ai_usage_refused_response(e)
     db.session.commit()
     return jsonify({
         "prompt_node_id": prompt_node.id,
@@ -145,9 +149,7 @@ def start_read():
     if err:
         return err
     if current_user.default_ai_usage == 'none':
-        return jsonify({
-            "error": "Reading the archive needs AI usage of 'chat' or 'train'.",
-        }), 400
+        return ai_usage_refused_response(AIUsageRefused(scope="account"))
     privacy_level = (
         getattr(current_user, "default_privacy_level", None) or "private"
     )
@@ -169,10 +171,11 @@ def start_read_from_node(node_id):
         return jsonify({"error": "Node not found"}), 404
     if node.human_owner_id != current_user.id:
         return jsonify({"error": "Unauthorized"}), 403
-    if (node.ai_usage or current_user.default_ai_usage) == 'none':
-        return jsonify({
-            "error": "AI usage is off for this thread.",
-        }), 400
+    # The read sends the whole thread above the node: refused before the
+    # prompt is attached when any of it keeps AI out.
+    refused = reply_refusal(node, current_user.id)
+    if refused is not None:
+        return ai_usage_refused_response(refused)
     model_id, err = _resolve_model(node)
     if err:
         return err
@@ -193,6 +196,9 @@ def start_read_from_node(node_id):
         except UserExportValidationError as e:
             db.session.rollback()
             return jsonify({"error": str(e)}), 400
+        except AIUsageRefused as e:
+            db.session.rollback()
+            return ai_usage_refused_response(e)
         db.session.commit()
         return jsonify({"llm_node_id": llm_node.id, "task_id": task_id}), 202
     data = request.get_json(silent=True) or {}
@@ -267,6 +273,11 @@ def rerun_read(node_id):
         }), 409
     if not node.llm_model:
         return jsonify({"error": "The reply has no model."}), 400
+    # A run sends the thread again: not once it keeps AI out.
+    refused = reply_refusal(parent, node.human_owner_id or node.user_id,
+                            node.ai_usage)
+    if refused is not None:
+        return ai_usage_refused_response(refused)
 
     data = request.get_json(silent=True) or {}
     live = bool(data.get("live", False))

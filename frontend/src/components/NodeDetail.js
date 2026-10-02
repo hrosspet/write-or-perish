@@ -14,7 +14,7 @@ import { useAsyncTaskPolling } from "../hooks/useAsyncTaskPolling";
 import { useLlmTextStream } from "../hooks/useSSE";
 import api from "../api";
 import { useCheckboxToggle, useTaskInsert } from "../utils/markdown";
-import { contextAllowsAi } from "../utils/aiUsage";
+import { contextAllowsAi, isAiUsageRefusedError } from "../utils/aiUsage";
 import NodeFormModal from "./NodeFormModal";
 import Bubble from "./Bubble";
 import BubbleKebabMenu from "./BubbleKebabMenu";
@@ -887,6 +887,12 @@ function NodeDetail({ nodeIdOverride }) {
         // 402 = spend cap, surfaced globally by SpendCapBanner; don't echo
         // the raw error code into the view.
         if (err?.response?.status === 402) return;
+        // AI usage keeps this thread away from AI: the Voice screen says
+        // so, and where to change it, in place of the record button.
+        if (sessionType === 'voice' && isAiUsageRefusedError(err)) {
+          navigate(`/voice?parent=${id}`);
+          return;
+        }
         setError(err.response?.data?.error || `Error starting ${sessionType} session.`);
       });
   };
@@ -1193,9 +1199,11 @@ function NodeDetail({ nodeIdOverride }) {
   // Top-right controls (Voice Mode + Auto-generate). Rendered in the
   // same flex row as the Thread heading so they align vertically and
   // scroll away with content (no absolute positioning / viewport
-  // anchoring).
-  const topRightControls = isOwner && node.ai_usage !== 'none'
-    && !isPublicThread && (
+  // anchoring). Voice Mode shows on a node AI may not read too: the
+  // Voice screen explains there instead of recording. Read and
+  // Auto-generate need AI and stay hidden on it.
+  const nodeAllowsAi = node.ai_usage !== 'none';
+  const topRightControls = isOwner && !isPublicThread && (
     <div style={{
       display: 'flex',
       flexDirection: 'column',
@@ -1219,7 +1227,7 @@ function NodeDetail({ nodeIdOverride }) {
           <FaMicrophone size={12} />
         </span>
       </button>
-      {currentUser?.is_admin && (
+      {currentUser?.is_admin && nodeAllowsAi && (
         <button
           onClick={handleReadFromNode}
           disabled={readLoading}
@@ -1238,7 +1246,7 @@ function NodeDetail({ nodeIdOverride }) {
           </span>
         </button>
       )}
-      {craftMode && (
+      {craftMode && nodeAllowsAi && (
         <button
           type="button"
           onClick={() => setAutoGenerate(v => !v)}
