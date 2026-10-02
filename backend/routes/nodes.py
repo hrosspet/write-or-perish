@@ -1110,8 +1110,14 @@ def _focal_own_fields(node):
     # Include tool call metadata for LLM nodes
     if node.tool_calls_meta:
         import json as _json
+        from backend.utils.client_platform import without_client_marker
         try:
-            data["tool_calls_meta"] = _json.loads(node.tool_calls_meta)
+            visible = without_client_marker(
+                _json.loads(node.tool_calls_meta))
+            # A reply whose only entry was the app marker reads as a node
+            # with no tool calls: no key, as before the marker existed.
+            if visible:
+                data["tool_calls_meta"] = visible
         except (ValueError, TypeError):
             pass
         # A Community Archive feed reply carries picks (see FeedPick), as
@@ -2202,10 +2208,12 @@ def get_llm_status(node_id):
     # Include tool call metadata if present
     if node.tool_calls_meta:
         import json
+        from backend.utils.client_platform import without_client_marker
         try:
-            response_data["tool_calls_meta"] = json.loads(
-                node.tool_calls_meta
-            )
+            visible = without_client_marker(
+                json.loads(node.tool_calls_meta))
+            if visible:
+                response_data["tool_calls_meta"] = visible
         except (json.JSONDecodeError, TypeError):
             pass
     # Batch stage ({ca_tweets}): the synchronous part is done and the

@@ -31,8 +31,9 @@ from backend.tests.test_no_replies_for_none import (  # noqa: F401 (fixtures)
 from backend.extensions import db as _db
 from backend.models import Draft, Node
 from backend.utils.client_platform import (
-    CLIENT_MARKER, client_from_headers, request_client,
+    CLIENT_MARKER, client_from_headers, request_client, without_client_marker,
 )
+from backend.utils.tool_meta import get_tool_meta_entry
 
 # What each app sends. The iPhone app's API requests go through URLSession
 # with no User-Agent of its own: the system default, "<app>/<build>
@@ -176,6 +177,86 @@ class TestPlaceholderStamp:
         reply = Node.query.filter_by(node_type="llm").one()
         assert _client_stamp(reply) == [
             {"name": CLIENT_MARKER, "client": "ios"}]
+
+
+# ── The app is not shown to other users ──────────────────────────────────
+#
+# The reply task reads the stamp on every run (a batch poll or a resumed
+# run starts from the node), so it stays on the node. The node payloads
+# leave it out: which app the author uses is not for the other users who
+# can see a public reply.
+
+def test_without_client_marker_drops_only_that_entry():
+    meta = [{"name": "_mode", "source_mode": "voice"},
+            {"name": CLIENT_MARKER, "client": "ios"},
+            {"name": "_batch", "batch_id": "b1"}]
+    assert without_client_marker(meta) == [meta[0], meta[2]]
+    assert without_client_marker([]) == []
+    assert without_client_marker(None) is None
+
+
+class TestClientMarkerHiddenFromOthers:
+    def _public_reply(self, app, ua, extra=None):  # noqa: F811
+        """alice's reply, created by the route with *ua* and made public."""
+        alice = _user()
+        leaf = _node(alice, _node(alice))
+        _db.session.commit()
+        resp = _client(app, alice).post(
+            f"/api/nodes/{leaf.id}/llm", json={}, headers={"User-Agent": ua})
+        assert resp.status_code == 202, resp.get_json()
+        reply = Node.query.filter_by(node_type="llm").one()
+        reply.privacy_level = "public"
+        if extra:
+            reply.tool_calls_meta = json.dumps(
+                _meta(reply) + extra)
+        _db.session.commit()
+        return alice, reply
+
+    def _names(self, payload):
+        return [m["name"] for m in payload.get("tool_calls_meta") or []]
+
+    def test_another_user_does_not_see_the_app(self, app, task_mod):  # noqa: F811
+        _alice, reply = self._public_reply(
+            app, IOS_UA, extra=[{"name": "_mode", "source_mode": "text"}])
+        bob = _user("bob")
+        _db.session.commit()
+        bobs = _client(app, bob)
+
+        node = bobs.get(f"/api/nodes/{reply.id}")
+        assert node.status_code == 200, node.get_json()
+        assert self._names(node.get_json()) == ["_mode"]
+        assert "ios" not in node.get_data(as_text=True)
+
+        status = bobs.get(f"/api/nodes/{reply.id}/llm-status")
+        assert status.status_code == 200, status.get_json()
+        assert self._names(status.get_json()) == ["_mode"]
+        assert "ios" not in status.get_data(as_text=True)
+
+    def test_a_reply_with_only_the_app_has_no_tool_meta(
+            self, app, task_mod):  # noqa: F811
+        _alice, reply = self._public_reply(app, IOS_UA)
+        assert _meta(reply) == [{"name": CLIENT_MARKER, "client": "ios"}]
+        bob = _user("bob")
+        _db.session.commit()
+        bobs = _client(app, bob)
+        assert "tool_calls_meta" not in bobs.get(
+            f"/api/nodes/{reply.id}").get_json()
+        assert "tool_calls_meta" not in bobs.get(
+            f"/api/nodes/{reply.id}/llm-status").get_json()
+
+    def test_the_label_still_works(self, app, task_mod):  # noqa: F811
+        # The stamp is still on the node after those fetches, and the
+        # task reads it from there (test_issue_platform_task.py files the
+        # issue with it).
+        _alice, reply = self._public_reply(app, IOS_UA)
+        bob = _user("bob")
+        _db.session.commit()
+        bobs = _client(app, bob)
+        bobs.get(f"/api/nodes/{reply.id}")
+        bobs.get(f"/api/nodes/{reply.id}/llm-status")
+        stored = Node.query.get(reply.id)
+        assert get_tool_meta_entry(stored, CLIENT_MARKER) == {
+            "name": CLIENT_MARKER, "client": "ios"}
 
 
 # ── Voice: the finalize request hands its app to the task ────────────────

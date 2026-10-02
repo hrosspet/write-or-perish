@@ -33,7 +33,9 @@ CLIENT_HEADER = "X-Loore-Client"
 
 # tool_calls_meta entry on a reply placeholder: {"name": "_client",
 # "client": "ios" | "web"}. Underscore names are hidden by both apps, like
-# "_mode".
+# "_mode". Only the reply task reads it (every run of it: a batch poll or a
+# resumed run starts from the node), so it stays on the node; the node
+# payloads that go to other users leave it out (without_client_marker).
 CLIENT_MARKER = "_client"
 
 
@@ -56,3 +58,13 @@ def request_client():
     if not has_request_context():
         return None
     return client_from_headers(request.headers)
+
+
+def without_client_marker(meta):
+    """*meta* (a tool_calls_meta list as the API returns it) without the
+    "_client" entry. Which app the author uses is not for the other users
+    who can see their node."""
+    if not isinstance(meta, list):
+        return meta
+    return [m for m in meta
+            if not (isinstance(m, dict) and m.get("name") == CLIENT_MARKER)]
