@@ -1782,3 +1782,67 @@ def test_183_batch_update_from_an_edited_version_matches_the_sync_base(
     assert req["meta"]["prev_profile_id"] == edit.id
     assert pb._exports.profile_text_for_prompt(edit) in text
     assert "+ MY EDIT" in text and "- WRONG GUESS" in text
+
+
+# ── #183 review, finding 3: an edit leaves the seed gates as they were ──
+
+def test_183_edit_of_an_integration_leaves_the_seed_gates_as_they_were(app):
+    """A pre-filled (pinned) account edits its newest version, an
+    integration. The user's version carries the integration's coverage,
+    including the render time of the chain tip the integration merged, so
+    the seeder decides as it did before the edit: writing newer than that
+    render waits for the gates, and an unfinished chain still continues.
+    With the integration's own empty render time, the continue rule
+    measured from the time of the edit and seeded an extra update after
+    every edit. A tip saved before render times existed falls back to its
+    save time on a pinned account, and the edit carries that too."""
+    from backend.utils.profile_versions import coverage_of
+    now = datetime.utcnow()
+
+    def account(unread_written_at, rendered=True):
+        u = _user(profile_force_batch=True)
+        tip = _prev_profile(
+            u, datetime(2026, 5, 1), source_tokens=100_000,
+            gen_type="iterative",
+            rendered_at=(now - timedelta(days=2, minutes=5)
+                         if rendered else None))
+        tip.created_at = now - timedelta(days=2)
+        integration = _prev_profile(u, datetime(2026, 5, 1),
+                                    source_tokens=100_000,
+                                    gen_type="integration")
+        integration.parent_profile_id = tip.id
+        integration.created_at = now - timedelta(days=2) + timedelta(minutes=1)
+        node = _seed_node(u, 3000)
+        node.created_at = unread_written_at
+        db.session.commit()
+        return u, tip, integration
+
+    def edit(u, integration):
+        e = UserProfile(user_id=u.id, generated_by="user", tokens_used=0,
+                        ai_usage="chat", parent_profile_id=integration.id,
+                        **coverage_of(u, integration))
+        e.set_content("edited")
+        db.session.add(e)
+        db.session.commit()
+        return e
+
+    # Writing after the tip's render: growth, which waits for the 80k gate.
+    u, tip, integration = account(now - timedelta(days=1))
+    assert pb._should_seed(u) is False
+    e = edit(u, integration)
+    assert e.source_rendered_at == tip.source_rendered_at
+    assert pb._exports.profile_update_base(u.id).id == e.id
+    assert pb._should_seed(u) is False
+
+    # Writing older than the tip's render: an unfinished chain continues.
+    u, tip, integration = account(now - timedelta(days=3))
+    assert pb._should_seed(u) is True
+    edit(u, integration)
+    assert pb._should_seed(u) is True
+
+    # A tip from before render times: its save time is the boundary.
+    u, tip, integration = account(now - timedelta(days=1), rendered=False)
+    assert pb._should_seed(u) is False
+    e = edit(u, integration)
+    assert e.source_rendered_at == tip.created_at
+    assert pb._should_seed(u) is False

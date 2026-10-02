@@ -18,7 +18,12 @@ from backend.utils.privacy import (
 )
 from backend.utils.api_keys import get_openai_chat_key
 from backend.utils.spend import require_spend_headroom
-from backend.utils.profile_versions import visible_profiles_query
+from backend.utils.profile_versions import (
+    visible_profiles_query,
+    USER_REVERT,
+    same_profile_text,
+    coverage_of,
+)
 
 profile_bp = Blueprint("profile", __name__)
 
@@ -74,9 +79,15 @@ def get_profile_version(version_id):
 @profile_bp.route("/revert/<int:version_id>", methods=["POST"])
 @login_required
 def revert_profile(version_id):
-    """Create a new profile version from a historical one. Mirrors the
-    in-pipeline revert (tasks/exports.py): a new row typed 'revert' that
-    carries the source version's attribution and ai_usage (#191)."""
+    """Create a new profile version from a historical one: a new row that
+    carries the source version's attribution and ai_usage (#191), like the
+    pipeline's re-tip (tasks/exports.retip_profile_chain).
+
+    It is typed USER_REVERT, not 'revert' like the re-tip, because it is
+    the user's choice: a profile the user wrote that this revert goes back
+    past stops being the user's own profile, so the profile jobs no longer
+    fold it in (tasks/exports.latest_user_written_profile). The user's
+    revert wins, as their edit does."""
     old = UserProfile.query.get_or_404(version_id)
     if old.user_id != current_user.id:
         return jsonify({"error": "Unauthorized"}), 403
@@ -95,7 +106,7 @@ def revert_profile(version_id):
         ai_usage=old.ai_usage,
         source_tokens_used=old.source_tokens_used,
         source_data_cutoff=old.source_data_cutoff,
-        generation_type="revert",
+        generation_type=USER_REVERT,
         parent_profile_id=old.id,
     )
     # Copy the encrypted content directly (no decrypt/re-encrypt round).
@@ -228,7 +239,18 @@ def get_tts_status(profile_id):
 @profile_bp.route("/", methods=["POST"])
 @login_required
 def create_profile():
-    """Create a new user-generated profile."""
+    """Create a new profile version the user wrote (generated_by "user").
+
+    When the user already has a profile, the new version follows the
+    newest one: that version is its parent, and it carries that version's
+    source coverage (``coverage_of``). The text is the user's, as sent. The
+    profile jobs then treat it like an edit of the newest version: they
+    see which lines the user changed, and the next update reads only
+    writing after the newest version's cutoff. Without a parent and a
+    cutoff, the next update read the whole corpus again, and the model was
+    told the whole text was the user's own. The iPhone app sends a POST
+    when a new version arrived while the user was editing (review of
+    #414, finding 7). With no profile yet, the version has neither."""
     from flask import request
 
     data = request.get_json()
@@ -248,12 +270,17 @@ def create_profile():
     if not validate_privacy_level(privacy_level):
         return jsonify({"error": f"Invalid privacy_level: {privacy_level}"}), 400
 
+    newest = UserProfile.query.filter_by(
+        user_id=current_user.id
+    ).order_by(UserProfile.created_at.desc()).first()
     profile = UserProfile(
         user_id=current_user.id,
         generated_by="user",
         tokens_used=0,
         privacy_level=privacy_level,
-        ai_usage=ai_usage
+        ai_usage=ai_usage,
+        parent_profile_id=newest.id if newest else None,
+        **(coverage_of(current_user, newest) if newest else {}),
     )
     profile.set_content(content)
 
@@ -293,6 +320,9 @@ def _save_edit_as_new_version(profile, new_content, data, keep_audio=False):
       user's own text, so incremental updates build on it and full
       rebuilds keep it (tasks/exports.place_user_written_profile).
 
+    The coverage comes from ``coverage_of``: for an integration, the
+    continue-rule boundary is that of the chain tip it merged.
+
     keep_audio: the user chose to keep the existing audio for the edited
     text (the frontend's "keep or regenerate" prompt, #66), so the new
     version reuses the edited version's audio files."""
@@ -302,11 +332,8 @@ def _save_edit_as_new_version(profile, new_content, data, keep_audio=False):
         tokens_used=0,
         privacy_level=data.get("privacy_level", profile.privacy_level),
         ai_usage=current_user.default_ai_usage,
-        source_tokens_used=profile.source_tokens_used,
-        source_data_cutoff=profile.source_data_cutoff,
-        source_origin_stats=profile.source_origin_stats,
-        source_rendered_at=profile.source_rendered_at,
         parent_profile_id=profile.id,
+        **coverage_of(current_user, profile),
     )
     new_profile.set_content(new_content)
     try:
@@ -398,9 +425,16 @@ def update_profile(profile_id):
 
     # An edit made while the account is set to 'none' (#346), or an edit of
     # a generated version (#183), is saved as a new version the user wrote;
-    # the edited version keeps its text, its ai_usage and its audio.
-    text_changed = new_content != profile.get_content()
-    if text_changed and _edit_needs_new_version(profile):
+    # the edited version keeps its text, its ai_usage and its audio. A change
+    # of whitespace only (blank lines, trailing spaces, a trailing newline)
+    # is not an edit of the words: it is saved in place and makes no new
+    # version, so a generated profile is never labelled as the user's
+    # without a line of theirs in it (review of #414, finding 2).
+    old_content = profile.get_content()
+    text_changed = new_content != old_content
+    words_changed = (text_changed
+                     and not same_profile_text(old_content, new_content))
+    if words_changed and _edit_needs_new_version(profile):
         # A 'none' version gets no speech, so it never takes audio.
         return _save_edit_as_new_version(
             profile, new_content, data,

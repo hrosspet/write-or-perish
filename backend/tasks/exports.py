@@ -19,6 +19,8 @@ from backend.utils.tokens import (
 from backend.utils.api_keys import get_api_keys_for_usage
 from backend.utils.cost import llm_cost_log_fields
 from backend.utils.privacy import AI_ALLOWED, account_allows_ai
+from backend.utils.profile_versions import (
+    USER_REVERT, continue_boundary, profile_lines)
 from backend.utils import refusal_backoff
 from backend.utils.refusal_backoff import REFUSED_REF
 
@@ -171,37 +173,62 @@ def _generated_source(profile):
 
 def _user_edits(before, after):
     """The lines the user removed ('- ') and wrote ('+ '), one group per
-    change, blank lines left out."""
+    change. Blank lines and trailing spaces are left out of the comparison
+    (``profile_lines``), so an empty result means the user changed no
+    words."""
     import difflib
-    old, new = before.splitlines(), after.splitlines()
+    old, new = profile_lines(before), profile_lines(after)
     groups = []
     matcher = difflib.SequenceMatcher(None, old, new, autojunk=False)
     for tag, i1, i2, j1, j2 in matcher.get_opcodes():
         if tag == "equal":
             continue
-        lines = ([f"- {line}" for line in old[i1:i2] if line.strip()]
-                 + [f"+ {line}" for line in new[j1:j2] if line.strip()])
-        if lines:
-            groups.append("\n".join(lines))
+        lines = ([f"- {line}" for line in old[i1:i2]]
+                 + [f"+ {line}" for line in new[j1:j2]])
+        groups.append("\n".join(lines))
     return "\n\n".join(groups)
+
+
+def _content_and_edits(profile):
+    """A user-written version's text and the user's edits of the generated
+    version it came from (``_user_edits``). The edits are None when there
+    is no such version: a profile written from scratch, or one edited from
+    a version that is not AI-readable (#346)."""
+    content = profile.get_content()
+    source = _generated_source(profile)
+    if source is None:
+        return content, None
+    return content, _user_edits(source.get_content(), content)
+
+
+def has_user_text(profile):
+    """Whether a user-written version holds words of the user's: it was
+    written from scratch, or it changes at least one line of the generated
+    version it came from. An edit that changed only whitespace, or that
+    restored the generated text, is that generated profile (review of
+    #414, finding 2)."""
+    _content, edits = _content_and_edits(profile)
+    return edits is None or bool(edits)
 
 
 def user_written_profile_text(profile):
     """A user-written profile as every profile prompt shows it: the dated
     note, then the user's text. An edit of a generated version also lists
-    the user's edits, so the model knows which part is theirs."""
+    the user's edits, so the model knows which part is theirs. An edit
+    with no changed line is shown as the generated profile it is, with no
+    note: the note would tell the model that generated text is the user's
+    own and must be kept (review of #414, finding 2)."""
     date = (profile.created_at.strftime("%Y-%m-%d")
             if profile.created_at else "an unknown date")
-    content = profile.get_content()
-    source = _generated_source(profile)
-    if source is not None:
-        edits = _user_edits(source.get_content(), content)
-        if edits:
-            note = USER_EDITED_PROFILE_NOTE.format(date=date)
-            return (f"{note}\n\n{content}\n\n"
-                    f"[The user's edits on {date}:]\n{edits}")
-    note = USER_WRITTEN_PROFILE_NOTE.format(date=date)
-    return f"{note}\n\n{content}"
+    content, edits = _content_and_edits(profile)
+    if edits is None:
+        note = USER_WRITTEN_PROFILE_NOTE.format(date=date)
+        return f"{note}\n\n{content}"
+    if not edits:
+        return content
+    note = USER_EDITED_PROFILE_NOTE.format(date=date)
+    return (f"{note}\n\n{content}\n\n"
+            f"[The user's edits on {date}:]\n{edits}")
 
 
 def profile_text_for_prompt(profile):
@@ -214,16 +241,95 @@ def profile_text_for_prompt(profile):
 
 
 def latest_user_written_profile(user_id):
-    """The newest profile the user wrote by hand (generated_by == "user")
-    that AI may read, or None. A version marked 'none' (written while the
-    account was set to 'none') is never sent to a model (#346); the newest
-    readable one before it is used instead."""
-    return UserProfile.query.filter(
+    """The user's own profile, which the profile jobs keep (#183), or None.
+    It is the newest version the user wrote (generated_by "user") that:
+
+    - AI may read. A version marked 'none' (written while the account was
+      set to 'none') is never sent to a model (#346); the newest readable
+      one before it is used instead.
+    - holds words of the user's (``has_user_text``).
+    - the user has not reverted past. After a revert the user made from the
+      history (USER_REVERT), a version older than the revert counts only
+      when the version the revert went back to still holds it
+      (``_revert_keeps``). Otherwise an edit the user undid by reverting
+      came back at the next update or rebuild (review of #414, finding 1).
+      The pipeline's re-tips after an import (``retip_profile_chain``) are
+      typed "revert" and do not count: they are not the user's choice."""
+    return _own_profile(user_id)
+
+
+def _own_profile(user_id, before=None, memo=None):
+    """``latest_user_written_profile`` as it stood at ``before``: only
+    versions and reverts created before that moment count (None: now).
+    ``memo`` holds the answers already computed for earlier moments within
+    one call, so a history with many reverts is walked once per revert."""
+    memo = {} if memo is None else memo
+    if before in memo:
+        return memo[before]
+    candidates = UserProfile.query.filter(
         UserProfile.user_id == user_id,
         UserProfile.generated_by == "user",
         UserProfile.ai_usage.in_(AI_ALLOWED),
         UserProfile.created_at.isnot(None),
-    ).order_by(UserProfile.created_at.desc()).first()
+    )
+    reverts = UserProfile.query.filter(
+        UserProfile.user_id == user_id,
+        UserProfile.generation_type == USER_REVERT,
+        UserProfile.created_at.isnot(None),
+    )
+    if before is not None:
+        candidates = candidates.filter(UserProfile.created_at < before)
+        reverts = reverts.filter(UserProfile.created_at < before)
+    revert = reverts.order_by(UserProfile.created_at.desc()).first()
+    found = None
+    for own in candidates.order_by(UserProfile.created_at.desc()):
+        if (revert is not None and own.id != revert.id
+                and own.created_at <= revert.created_at
+                and not _revert_keeps(user_id, revert, own, memo)):
+            continue
+        if has_user_text(own):
+            found = own
+            break
+    memo[before] = found
+    return found
+
+
+def _reverted_to(revert):
+    """The version a revert went back to. A revert row copies its parent;
+    when that parent is itself a copy (a user revert or a pipeline re-tip),
+    the version it copies is followed down to the original."""
+    target = (UserProfile.query.get(revert.parent_profile_id)
+              if revert.parent_profile_id else None)
+    seen = set()
+    while (target is not None and target.id not in seen
+           and target.generation_type in ("revert", USER_REVERT)
+           and target.parent_profile_id):
+        seen.add(target.id)
+        target = UserProfile.query.get(target.parent_profile_id)
+    return target
+
+
+def _revert_keeps(user_id, revert, own, memo):
+    """Whether the version a user revert went back to still holds the
+    user's version ``own``, which is older than the revert:
+
+    - the version descends from ``own`` (an update chain built on the
+      user's edit, an integration of it, or ``own`` itself); or
+    - the version was built after ``own``, while ``own`` was the user's own
+      profile, so the build folded it in at its date
+      (``place_user_written_profile``, ``build_integration_messages``).
+
+    A version from before ``own`` (going back to the generated text the
+    user had edited) does not hold it."""
+    target = _reverted_to(revert)
+    if target is None:
+        return False
+    if _descends_from(target, own.id):
+        return True
+    if target.created_at is None or target.created_at <= own.created_at:
+        return False
+    then = _own_profile(user_id, before=target.created_at, memo=memo)
+    return then is not None and then.id == own.id
 
 
 def _descends_from(profile, ancestor_id):
@@ -416,11 +522,9 @@ def should_continue_chain(user, latest_profile):
     cutoff = getattr(latest_profile, "source_data_cutoff", None)
     if cutoff is None:
         return False
-    boundary = getattr(latest_profile, "source_rendered_at", None)
-    if boundary is None:
-        if not getattr(user, "profile_force_batch", False):
-            return False
-        boundary = latest_profile.created_at
+    # The render time, or the legacy fallback above (shared with the
+    # coverage a user's edit copies: utils/profile_versions.coverage_of).
+    boundary = continue_boundary(user, latest_profile)
     if boundary is None:
         return False
     from sqlalchemy import or_
@@ -971,7 +1075,9 @@ def _collect_iterative_chain(last_profile_id):
 
     Includes profiles with generation_type in ("iterative", "update",
     "initial") — "initial" for backwards compat with users whose last
-    iterative profile was already re-typed by the old code.
+    iterative profile was already re-typed by the old code — and the
+    revert copies: the pipeline's re-tips ("revert") and the user's own
+    reverts (USER_REVERT).
 
     Returns list in chronological order (oldest first).
     """
@@ -985,7 +1091,7 @@ def _collect_iterative_chain(last_profile_id):
         if not profile:
             break
         if profile.generation_type not in (
-            "iterative", "update", "initial", "revert"
+            "iterative", "update", "initial", "revert", USER_REVERT
         ):
             break
         chain.append(profile)
@@ -1151,21 +1257,25 @@ def build_integration_messages(user_id, last_iterative_profile_id):
             ) if prev_cutoff else "unknown"
         entries.append((f"- {date_from} to {date_str}", content))
 
-    # #183: a chain that passed the date of the user's own profile without
-    # descending from it (a from-scratch rebuild, which folded the profile
-    # into one chunk) also shows the profile itself, at its date — as a
-    # chain rooted at the profile does — so the merged profile keeps the
-    # user's words.
+    # #183: a chain that does not descend from the user's own profile also
+    # shows the profile itself, so the merged profile keeps the user's
+    # words, as a chain rooted at the profile does:
+    # - at its date, when the chain passed that date (a from-scratch
+    #   rebuild, which folded the profile into one chunk);
+    # - last, when no version reaches that date: the user wrote it after
+    #   every window of the run was rendered, for example while the last
+    #   step was being generated. This matches the final-window rule of
+    #   place_user_written_profile; the next update folds it in as usual
+    #   (review of #414, finding 5).
     own = latest_user_written_profile(user_id)
-    if own is not None:
+    if own is not None and not _descends_from(chain[-1], own.id):
         at = next((n for n, p in enumerate(chain)
                    if p.source_data_cutoff is not None
-                   and p.source_data_cutoff >= own.created_at), None)
-        if at is not None and not _descends_from(chain[-1], own.id):
-            entries.insert(at, (
-                f"- written by the user on "
-                f"{own.created_at.strftime('%Y-%m-%d')}",
-                user_written_profile_text(own)))
+                   and p.source_data_cutoff >= own.created_at), len(chain))
+        entries.insert(at, (
+            f"- written by the user on "
+            f"{own.created_at.strftime('%Y-%m-%d')}",
+            user_written_profile_text(own)))
 
     messages = []
     for i, (span, content) in enumerate(entries, 1):

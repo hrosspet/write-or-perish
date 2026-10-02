@@ -121,3 +121,117 @@ def test_editing_the_user_version_again_stays_in_place(app, alice):  # noqa: F81
     assert second == first
     assert UserProfile.query.get(first).get_content() == "second edit"
     assert UserProfile.query.count() == 2
+
+
+# ── Review of #414 ──────────────────────────────────────────────────────
+
+def _chain_tip_and_integration(user):
+    """A finished chain as both pipelines save it: the last chunk carries
+    the render time; the integration on top of it has none of its own."""
+    tip = UserProfile(
+        user_id=user.id, generated_by="gpt-5.5", tokens_used=900,
+        ai_usage="chat", generation_type="iterative",
+        source_tokens_used=180_000, source_data_cutoff=datetime(2026, 5, 1),
+        source_origin_stats={"x": {"nodes": 900, "tokens": 180_000}},
+        source_rendered_at=datetime(2026, 5, 2),
+        created_at=datetime(2026, 5, 2))
+    tip.set_content("chunk text")
+    _db.session.add(tip)
+    _db.session.flush()
+    integration = UserProfile(
+        user_id=user.id, generated_by="gpt-5.5", tokens_used=1200,
+        ai_usage="chat", generation_type="integration",
+        source_tokens_used=180_000, source_data_cutoff=datetime(2026, 5, 1),
+        source_origin_stats={"x": {"nodes": 900, "tokens": 180_000}},
+        parent_profile_id=tip.id, created_at=datetime(2026, 5, 3))
+    integration.set_content("### SURFACE MAP\nLikes long walks.")
+    _db.session.add(integration)
+    _db.session.commit()
+    return tip, integration
+
+
+def test_whitespace_only_change_makes_no_new_version(app, alice):  # noqa: F811
+    """Finding 2: blank lines, trailing spaces and a trailing newline are
+    not an edit of the words. The generated version is saved in place and
+    no user version is made, so the jobs never label the generated text as
+    the user's own."""
+    generated = _generated(alice)
+
+    same_id = _edit(
+        app, alice, generated,
+        "### SURFACE MAP  \n\nLikes long walks.\n\n\nAvoids conflict.\n")
+
+    assert same_id == generated.id
+    assert UserProfile.query.count() == 1
+    assert UserProfile.query.get(generated.id).generated_by == "gpt-5.5"
+
+
+def test_edit_of_an_integration_carries_its_chain_tips_render_time(app, alice):  # noqa: F811
+    """Finding 3: an integration has no render time of its own; the edit
+    takes the one of the chain tip the integration merged, so the update
+    gates decide as they did before the edit (test_profile_batch has the
+    seeder side)."""
+    tip, integration = _chain_tip_and_integration(alice)
+
+    new = UserProfile.query.get(_edit(app, alice, integration, "my words"))
+
+    assert new.parent_profile_id == integration.id
+    assert new.source_rendered_at == tip.source_rendered_at
+    assert new.source_data_cutoff == datetime(2026, 5, 1)
+    assert new.source_tokens_used == 180_000
+
+
+def test_revert_from_the_history_is_marked_as_the_users(app, alice):  # noqa: F811
+    """Finding 1: a revert the user makes is typed USER_REVERT, so the
+    jobs can tell it from the pipeline's re-tips (typed "revert")."""
+    from backend.utils.profile_versions import USER_REVERT
+    generated = _generated(alice)
+    _edit(app, alice, generated, "### SURFACE MAP\nMY EDIT")
+    client = app.test_client()
+    _login(client, alice)
+
+    resp = client.post(f"/profile/revert/{generated.id}")
+
+    assert resp.status_code == 200
+    revert = UserProfile.query.get(resp.get_json()["profile"]["id"])
+    assert revert.generation_type == USER_REVERT
+    assert revert.parent_profile_id == generated.id
+    assert revert.generated_by == "gpt-5.5"
+    assert revert.get_content() == generated.get_content()
+
+
+def test_new_profile_follows_the_newest_version(app, alice):  # noqa: F811
+    """Finding 7: POST /profile (the iPhone app's "Save as new" when a new
+    version arrived during an edit) makes a version that follows the
+    newest one: that version is its parent and its coverage is copied, so
+    the next update does not read the whole corpus again, and the jobs see
+    which lines the user changed. The text is the user's, as sent."""
+    tip, integration = _chain_tip_and_integration(alice)
+    client = app.test_client()
+    _login(client, alice)
+
+    resp = client.post("/profile/",
+                       json={"content": "### SURFACE MAP\nMY WORDS"})
+
+    assert resp.status_code == 201
+    new = UserProfile.query.get(resp.get_json()["profile"]["id"])
+    assert new.generated_by == "user"
+    assert new.get_content() == "### SURFACE MAP\nMY WORDS"
+    assert new.parent_profile_id == integration.id
+    assert new.source_data_cutoff == datetime(2026, 5, 1)
+    assert new.source_tokens_used == 180_000
+    assert new.source_origin_stats == integration.source_origin_stats
+    assert new.source_rendered_at == tip.source_rendered_at
+
+
+def test_first_profile_written_from_scratch_has_no_parent(app, alice):  # noqa: F811
+    client = app.test_client()
+    _login(client, alice)
+
+    resp = client.post("/profile/", json={"content": "about me"})
+
+    new = UserProfile.query.get(resp.get_json()["profile"]["id"])
+    assert new.parent_profile_id is None
+    assert new.source_data_cutoff is None
+    assert new.source_rendered_at is None
+    assert not new.source_tokens_used

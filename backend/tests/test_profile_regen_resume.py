@@ -685,3 +685,194 @@ def test_183_an_edit_keeps_the_provisional_ladder_going(app):
     assert exports.profile_is_provisional(
         _edited(user, generated, source_tokens=180_000)) is False
     assert exports.profile_is_provisional(_user_written(user)) is False
+
+
+# ── #183 review: the user's revert wins; an edit with no changed line ───
+# Rule (Peter, 2026-10-02): when a job regenerates something the user has
+# edited, it keeps the user's edits and refreshes only its own part. The
+# user's edit wins, and so does the user's revert.
+
+JUL, AUG, SEP, OCT = (datetime(2025, 7, 1), datetime(2025, 8, 1),
+                      datetime(2025, 9, 1), datetime(2025, 10, 1))
+
+
+def _version(user, cutoff, created_at, parent=None, gen_type="iterative"):
+    """A generated version saved at ``created_at``."""
+    profile = _generated(user, cutoff, parent=parent, gen_type=gen_type)
+    profile.created_at = created_at
+    _db.session.commit()
+    return profile
+
+
+def _user_revert(user, target, created_at):
+    """A revert the user made from the history, written as
+    routes/profile.py revert_profile writes it."""
+    from backend.utils.profile_versions import USER_REVERT
+    revert = UserProfile(
+        user_id=user.id, generated_by=target.generated_by, tokens_used=0,
+        ai_usage=target.ai_usage,
+        source_tokens_used=target.source_tokens_used,
+        source_data_cutoff=target.source_data_cutoff,
+        generation_type=USER_REVERT, parent_profile_id=target.id,
+        created_at=created_at)
+    revert.content = target.content
+    _db.session.add(revert)
+    _db.session.commit()
+    return revert
+
+
+def _no_window_left(exports, monkeypatch):
+    monkeypatch.setattr(exports, "count_remaining_units",
+                        lambda uid, cutoff=None: 0)
+
+
+def test_183_a_revert_to_the_generated_version_ends_the_edit(app, monkeypatch):
+    """Finding 1: the user edits generated version G, then reverts to G
+    from the history. The edit is no longer the user's own profile: the
+    next update builds on the revert without folding the edit in, its
+    integration leaves the edit out, and a full rebuild does not bring it
+    back."""
+    import backend.tasks.exports as exports
+
+    user = _new_user("revert183")
+    generated = _generated_with(user, GENERATED_TEXT)
+    _edited(user, generated)
+    revert = _user_revert(user, generated, SEP)
+    _no_window_left(exports, monkeypatch)
+
+    assert exports.latest_user_written_profile(user.id) is None
+    # The next update builds on the revert: the generated text, no note.
+    assert exports.profile_update_base(user.id).id == revert.id
+    assert exports.profile_text_for_prompt(revert) == GENERATED_TEXT
+    assert "user_written_block" not in exports.place_user_written_profile(
+        user.id, revert, _window("NEW DATA", DEC))
+    # Its integration does not show the edit.
+    update = _version(user, DEC, OCT, parent=revert, gen_type="update")
+    messages, _chain = exports.build_integration_messages(user.id, update.id)
+    assert not any("MY EDIT" in m["content"][0]["text"] for m in messages)
+    # Nor does a full rebuild.
+    assert "user_written_block" not in exports.place_user_written_profile(
+        user.id, None, _window("ALL DATA", DEC))
+
+
+def test_183_an_edit_after_the_revert_is_the_users_again(app):
+    import backend.tasks.exports as exports
+
+    user = _new_user("reedit183")
+    generated = _generated_with(user, GENERATED_TEXT)
+    _edited(user, generated)
+    revert = _user_revert(user, generated, SEP)
+    again = _edited(user, revert, created_at=OCT)
+
+    assert exports.latest_user_written_profile(user.id).id == again.id
+    assert "+ MY EDIT" in exports.profile_text_for_prompt(again)
+
+
+def test_183_a_revert_to_a_version_that_holds_the_edit_keeps_it(app):
+    """Going back to a version that holds the edit keeps the edit as the
+    user's: a version built on it (an update and its integration), or one
+    built after it while it was the user's profile (a rebuild, which folded
+    it in at its date). A version built after the user had reverted away
+    from the edit does not hold it."""
+    import backend.tasks.exports as exports
+
+    # Built on the edit.
+    user = _new_user("keepchain183")
+    edit = _edited(user, _generated_with(user, GENERATED_TEXT))
+    update = _version(user, DEC, JUL, parent=edit, gen_type="update")
+    merged = _version(user, DEC, JUL, parent=update, gen_type="integration")
+    _version(user, DEC, AUG, parent=merged, gen_type="update")
+    _user_revert(user, merged, SEP)
+    assert exports.latest_user_written_profile(user.id).id == edit.id
+
+    # Built after the edit by a rebuild that folded it in.
+    user = _new_user("keeprebuild183")
+    edit = _edited(user, _generated_with(user, GENERATED_TEXT))
+    first = _version(user, JAN, JUL)
+    second = _version(user, DEC, JUL, parent=first)
+    rebuilt = _version(user, DEC, JUL, parent=second, gen_type="integration")
+    _version(user, DEC, AUG, parent=rebuilt, gen_type="update")
+    _user_revert(user, rebuilt, SEP)
+    assert exports.latest_user_written_profile(user.id).id == edit.id
+
+    # Built after the user had reverted away from the edit.
+    user = _new_user("awayrebuild183")
+    generated = _generated_with(user, GENERATED_TEXT)
+    _edited(user, generated)
+    _user_revert(user, generated, JUL)
+    rebuilt = _version(user, DEC, AUG, gen_type="initial")
+    _user_revert(user, rebuilt, SEP)
+    assert exports.latest_user_written_profile(user.id) is None
+
+
+def test_183_a_pipeline_retip_keeps_the_edit(app, monkeypatch):
+    """An import's re-tip is typed "revert", not USER_REVERT: it is not
+    the user's choice. A re-tip at an older version, or at the edit
+    itself, keeps the edit as the user's own profile, and a rebuild still
+    folds it in with the user's lines marked."""
+    import backend.tasks.exports as exports
+
+    user = _new_user("retip183")
+    generated = _generated_with(user, GENERATED_TEXT)
+    edit = _edited(user, generated)
+    exports.retip_profile_chain(user.id, generated)
+    _db.session.commit()
+    assert exports.latest_user_written_profile(user.id).id == edit.id
+
+    copy = exports.retip_profile_chain(user.id, edit)
+    _db.session.commit()
+    own = exports.latest_user_written_profile(user.id)
+    assert own.id == copy.id and own.get_content() == EDITED_TEXT
+    _no_window_left(exports, monkeypatch)
+    window = exports.place_user_written_profile(
+        user.id, None, _window("ALL DATA", DEC))
+    assert "+ MY EDIT" in window["user_written_block"]
+    assert "- WRONG GUESS" in window["user_written_block"]
+
+
+def test_183_an_edit_with_no_changed_line_is_the_generated_profile(
+        app, monkeypatch):
+    """Finding 2: an edit that changed only blank lines, trailing spaces
+    or the trailing newline, or one the user edited back to the generated
+    text, holds no words of the user's. Prompts show it as the generated
+    profile, with no note telling the model to keep it as the user's, and
+    a rebuild does not fold it in."""
+    import backend.tasks.exports as exports
+
+    user = _new_user("noedit183")
+    edit = _edited(user, _generated_with(user, GENERATED_TEXT))
+    _no_window_left(exports, monkeypatch)
+    whitespace_only = GENERATED_TEXT.replace("\n", "  \n\n") + "\n"
+
+    for text in (whitespace_only, GENERATED_TEXT):
+        edit.set_content(text)
+        _db.session.commit()
+        assert exports.profile_text_for_prompt(edit) == text
+        assert "NOTE" not in exports.profile_text_for_prompt(edit)
+        assert exports.latest_user_written_profile(user.id) is None
+        assert "user_written_block" not in exports.place_user_written_profile(
+            user.id, None, _window("ALL DATA", DEC))
+
+
+def test_183_edit_made_during_the_last_step_is_added_last_to_the_integration(
+        app):
+    """Finding 5: the user edits while the run's last chunk is generated,
+    after every window was rendered. No version's cutoff reaches the
+    edit's date, so the integration shows the edit last, as the final
+    window would have, instead of leaving it out until the next update."""
+    import backend.tasks.exports as exports
+
+    user = _new_user("lateedit183")
+    earlier = _generated_with(user, GENERATED_TEXT, cutoff=datetime(2024, 6, 1))
+    _edited(user, earlier, created_at=datetime(2026, 1, 1))
+    first = _version(user, JAN, datetime(2025, 12, 31))
+    second = _version(user, DEC, datetime(2026, 1, 2), parent=first)
+
+    messages, chain = exports.build_integration_messages(user.id, second.id)
+
+    texts = [m["content"][0]["text"] for m in messages[:-1]]
+    assert [p.id for p in chain] == [first.id, second.id]
+    assert len(texts) == 3
+    assert "MY EDIT" not in texts[0] and "MY EDIT" not in texts[1]
+    assert texts[2].startswith("Profile No. 3\n- written by the user on 2026-01-01")
+    assert "+ MY EDIT" in texts[2]
