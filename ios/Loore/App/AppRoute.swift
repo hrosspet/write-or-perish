@@ -131,9 +131,15 @@ enum AppRoute: Hashable, Sendable {
 
     /// The tab a route belongs to when opened from outside a stack.
     /// `nil` = keep the current tab (threads are pushed where they were opened).
+    /// Voice on a thread (`parent` / `resume`) and Text Mode are pushed where they
+    /// were opened, above the thread, as on the web where Back returns to it: in
+    /// Reflect they landed on top of that tab's older screens and conversation.
     var preferredTab: AppTab? {
         switch self {
-        case .home, .voice, .textMode, .welcome, .share: return .reflect
+        case .voice(let parentId, let resumeLLMId):
+            return parentId == nil && resumeLLMId == nil ? .reflect : nil
+        case .textMode: return nil
+        case .home, .welcome, .share: return .reflect
         case .profile, .todo, .artifacts, .newArtifact: return .artifacts
         case .log: return .log
         case .commons: return .commons

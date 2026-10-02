@@ -52,6 +52,10 @@ final class AppRouteTests: XCTestCase {
         XCTAssertEqual(AppRoute.todo.preferredTab, .artifacts)
         XCTAssertEqual(AppRoute.account(anchor: nil).preferredTab, .more)
         XCTAssertNil(AppRoute.thread(id: 1, awaitLLM: nil).preferredTab, "threads push on the current tab")
+        XCTAssertEqual(AppRoute.voice(parentId: nil, resumeLLMId: nil).preferredTab, .reflect, "Home's Voice")
+        XCTAssertNil(AppRoute.voice(parentId: 5, resumeLLMId: 6).preferredTab, "Voice Mode on a thread stays above it")
+        XCTAssertNil(AppRoute.voice(parentId: 5, resumeLLMId: nil).preferredTab)
+        XCTAssertNil(AppRoute.textMode.preferredTab, "Text Mode opens where Voice is")
         XCTAssertEqual(AppRoute.thread(id: 3, awaitLLM: nil).webPath, "/node/3")
     }
 
