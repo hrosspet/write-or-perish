@@ -988,7 +988,8 @@ class DraftFinalizationTask(Task):
 @celery.task(base=DraftFinalizationTask, bind=True)
 def finalize_draft_streaming(self, session_id: str, total_chunks: int,
                              label: str = None, user_id: int = None,
-                             parent_id: int = None, model: str = None):
+                             parent_id: int = None, model: str = None,
+                             client: str = None):
     """
     Finalize streaming transcription for a draft.
 
@@ -1008,6 +1009,8 @@ def finalize_draft_streaming(self, session_id: str, total_chunks: int,
         user_id: ID of the user (for server-side LLM chain)
         parent_id: Thread parent node ID (for server-side LLM chain)
         model: LLM model ID (for server-side LLM chain)
+        client: 'ios' / 'web' — the app the finalize request came from
+            (utils/client_platform), stamped on the reply placeholder.
     """
     logger.info(f"Finalizing draft streaming for session {session_id}, {total_chunks} chunks")
     # #371: where a voice turn's wait goes; marked under the reply node
@@ -1243,6 +1246,7 @@ def finalize_draft_streaming(self, session_id: str, total_chunks: int,
                     user_id, parent_id, model, label,
                     cache_split_offset=cache_split_offset,
                     timing=timing,
+                    client=client,
                 )
             except Exception as e:
                 logger.error(
@@ -1315,7 +1319,8 @@ def _skip_voice_reply(draft, user_node, message):
 
 def _start_server_side_llm_chain(draft, session_id, transcript,
                                  user_id, parent_id, model, label,
-                                 cache_split_offset=None, timing=None):
+                                 cache_split_offset=None, timing=None,
+                                 client=None):
     """
     Create nodes and kick off LLM + TTS generation server-side.
 
@@ -1323,7 +1328,8 @@ def _start_server_side_llm_chain(draft, session_id, transcript,
     1. If no parent_id → create system node (with workflow prompt)
     2. Create user node with transcript
     3. Move streaming audio to user node (without deleting draft)
-    4. Create LLM placeholder node (enqueue=False)
+    4. Create LLM placeholder node (enqueue=False), stamped with the
+       *client* the finalize request came from
     5. Set draft.llm_node_id AND draft.streaming_status='completed'
        in one commit so the SSE all_complete event includes llm_node_id
     6. Enqueue generate_llm_response — it dispatches TTS per node at each
@@ -1444,7 +1450,7 @@ def _start_server_side_llm_chain(draft, session_id, transcript,
     try:
         llm_node, _ = create_llm_placeholder(
             tip_node.id, model, user_id, enqueue=False,
-            ai_usage=ai_usage,
+            ai_usage=ai_usage, client=client,
         )
     except (UserExportValidationError, ParentDeletedError,
             SpendCapExceeded, AIUsageRefused) as e:
