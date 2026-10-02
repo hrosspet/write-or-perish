@@ -40,7 +40,6 @@ struct NodeFormView: View {
 }
 
 private struct NodeFormBody: View {
-    @Environment(\.dynamicTypeSize) private var typeSize
     @Bindable var model: NodeFormModel
     @Environment(AppState.self) private var app
     @FocusState private var focused: Bool
@@ -171,12 +170,11 @@ private struct NodeFormBody: View {
         .padding(.top, 4)
     }
 
+    /// Send keeps its words; the other actions are icons (#398), so the row fits
+    /// a phone. When it does not (large text, a recording's extra buttons), the
+    /// buttons wrap onto another row instead of squeezing their labels.
     private var buttons: some View {
-        // Large text: the buttons wrap onto more rows instead of running off the screen.
-        let layout = typeSize.isAccessibilitySize
-            ? AnyLayout(FlowLayout(spacing: 8, lineSpacing: 8))
-            : AnyLayout(HStackLayout(spacing: 8))
-        return layout {
+        FlowLayout(spacing: 8, lineSpacing: 8) {
             Button {
                 focused = false
                 Task { await model.submit() }
@@ -188,22 +186,27 @@ private struct NodeFormBody: View {
             .keyboardShortcut(.return, modifiers: .command)
             .accessibilityIdentifier("nodeForm.send.\(idSuffix)")
             if model.hasDraft {
-                Button("Discard draft") { model.discardDraft() }
-                    .buttonStyle(.looreOutline)
+                Button { model.discardDraft() } label: { ButtonIcon(systemName: "trash") }
+                    .buttonStyle(.looreIcon)
                     .disabled(model.loading)
+                    .accessibilityLabel("Discard draft")
+                    .accessibilityIdentifier("nodeForm.discardDraft")
             }
             if !config.isEdit {
                 DictationButton(model: model)
                 if !config.hideAudioUpload {
-                    Button("Upload") {
+                    Button {
                         if model.uploadPressed() { pickingFile = true }
+                    } label: {
+                        ButtonIcon(systemName: "paperclip")
                     }
-                    .buttonStyle(.looreOutline)
+                    .buttonStyle(.looreIcon)
                     .disabled(model.isRecording || model.aiUsage == .off || !model.isOnline)
+                    .accessibilityLabel("Upload audio or video")
                     .accessibilityHint(model.audioDisabledReason ?? "")
+                    .accessibilityIdentifier("nodeForm.upload")
                 }
             }
-            Spacer(minLength: 0)
         }
     }
 }

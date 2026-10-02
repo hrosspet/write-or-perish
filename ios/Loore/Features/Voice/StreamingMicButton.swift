@@ -2,8 +2,9 @@ import SwiftUI
 
 /// Record into the writing form (web `StreamingMicButton`): Record → `m:ss` (stop)
 /// → Finalizing… → the transcript lands in the form. After an interruption the
-/// button reads Resume and a "Stop & save" button appears. "Save audio" shares
-/// the recording so far.
+/// button becomes Resume and a "Stop & save" button appears. "Save audio" shares
+/// the recording so far. Apart from the running clock and "Retry" the buttons
+/// are icons with spoken labels (#398: the words broke over two lines on a phone).
 struct StreamingMicButton: View {
     let model: NodeFormModel
 
@@ -30,11 +31,11 @@ struct StreamingMicButton: View {
                 notice("Recording paused — another app took the microphone. Audio up to the interruption is saved.",
                        color: LooreColor.error)
             }
-            HStack(spacing: 6) {
+            HStack(spacing: 8) {
                 Button { press(state: state, interrupted: interrupted) } label: {
                     HStack(spacing: 6) { label(state: state, interrupted: interrupted, idleOffline: idleOffline) }
                 }
-                .buttonStyle(.looreOutline)
+                .buttonStyle(LooreButtonStyle(kind: .outline, iconOnly: !showsWords(state: state, interrupted: interrupted)))
                 .disabled(blocked)
                 .opacity(disabled || idleOffline ? 0.35 : 1)
                 .accessibilityLabel(spokenLabel(state: state, interrupted: interrupted, idleOffline: idleOffline))
@@ -43,26 +44,20 @@ struct StreamingMicButton: View {
                 .accessibilityIdentifier("nodeForm.record")
 
                 if interrupted && state == .recording {
-                    Button { controller?.stop() } label: {
-                        HStack(spacing: 4) {
-                            Image(systemName: "stop.fill").font(.system(size: 11)).accessibilityHidden(true)
-                            Text("Stop & save")
-                        }
-                    }
-                    .buttonStyle(.looreOutline)
-                    .accessibilityHint("Stop and save what was recorded so far")
+                    Button { controller?.stop() } label: { ButtonIcon(systemName: "stop.fill") }
+                        .buttonStyle(.looreIcon)
+                        .accessibilityLabel("Stop & save")
+                        .accessibilityHint("Stop and save what was recorded so far")
                 }
                 if controller?.hasRecording == true {
                     Button {
                         sharedFile = controller?.writeRecordingFile()
                         sharing = sharedFile != nil
                     } label: {
-                        HStack(spacing: 4) {
-                            Image(systemName: "arrow.down.circle").font(.system(size: 12)).accessibilityHidden(true)
-                            Text("Save audio")
-                        }
+                        ButtonIcon(systemName: "arrow.down.circle")
                     }
-                    .buttonStyle(.looreOutline)
+                    .buttonStyle(.looreIcon)
+                    .accessibilityLabel("Save audio")
                     .accessibilityIdentifier("nodeForm.saveAudio")
                 }
             }
@@ -89,26 +84,31 @@ struct StreamingMicButton: View {
         }
     }
 
+    /// The running clock and "Retry" are words; every other state is an icon.
+    private func showsWords(state: DictationController.State, interrupted: Bool) -> Bool {
+        (state == .recording && !interrupted) || state == .error
+    }
+
     @ViewBuilder
     private func label(state: DictationController.State, interrupted: Bool, idleOffline: Bool) -> some View {
         switch state {
         case .idle, .initializing:
-            Image(systemName: "mic.fill").font(.system(size: 13))
-            Text(idleOffline ? "Offline" : "Record")
+            ButtonIcon(systemName: idleOffline ? "mic.slash" : "mic")
         case .recording:
             if interrupted {
-                Image(systemName: "play.fill").font(.system(size: 12))
-                Text("Resume")
+                ButtonIcon(systemName: "play.fill")
             } else {
-                Image(systemName: "stop.fill").font(.system(size: 12))
+                Image(systemName: "stop.fill").font(.system(size: 12)).accessibilityHidden(true)
                 Text(AudioTimeFormat.clock(dictation?.elapsed ?? 0)).monospacedDigit()
             }
         case .finalizing:
-            ProgressView().controlSize(.mini)
-            Text("Finalizing...")
+            ZStack {
+                ButtonIcon(systemName: "mic").hidden()
+                ProgressView().controlSize(.mini)
+            }
         case .error:
-            Image(systemName: "exclamationmark.circle").font(.system(size: 13))
-            Text("Error - Retry")
+            Image(systemName: "exclamationmark.circle").font(.system(size: 13)).accessibilityHidden(true)
+            Text("Retry")
         }
     }
 

@@ -69,6 +69,7 @@ final class ModelCatalog {
 }
 
 /// The model picker joined to the right of an action button (web `ModelSelector`).
+/// As wide as the model's name, like the web's inline-flex button (#398).
 struct ModelPicker: View {
     let nodeId: Int?
     @Binding var selectedModel: String?
@@ -88,17 +89,16 @@ struct ModelPicker: View {
         Button {
             open = true
         } label: {
-            HStack(spacing: 8) {
+            HStack(spacing: 10) {
                 Text(suggestionLoaded && models != nil ? (selected?.name ?? "") : "…")
                     .lineLimit(1)
-                Spacer(minLength: 4)
                 Image(systemName: "chevron.down").font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(LooreColor.textMuted)
             }
             .font(LooreFont.button)
             .foregroundStyle(LooreColor.textSecondary)
             .padding(.vertical, 10)
             .padding(.horizontal, 14)
-            .frame(maxWidth: .infinity)
             .overlay(UnevenRoundedRectangle(bottomTrailingRadius: LooreRadius.control, topTrailingRadius: LooreRadius.control)
                 .strokeBorder(LooreColor.border))
             .contentShape(Rectangle())

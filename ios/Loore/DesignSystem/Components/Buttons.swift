@@ -18,6 +18,8 @@ struct LooreButtonStyle: ButtonStyle {
     var kind: Kind = .outline
     var fullWidth = false
     var font: Font = LooreFont.button
+    /// The label is a `ButtonIcon`: narrower side padding.
+    var iconOnly = false
 
     @Environment(\.isEnabled) private var isEnabled
 
@@ -29,7 +31,7 @@ struct LooreButtonStyle: ButtonStyle {
             .multilineTextAlignment(.center)
             .foregroundStyle(foreground(pressed: pressed))
             .padding(.vertical, kind == .link || kind == .quiet ? 4 : 10)
-            .padding(.horizontal, kind == .link || kind == .quiet ? 0 : 20)
+            .padding(.horizontal, kind == .link || kind == .quiet ? 0 : iconOnly ? 14 : 20)
             .frame(maxWidth: fullWidth ? .infinity : nil)
             .background(background(pressed: pressed), in: RoundedRectangle(cornerRadius: LooreRadius.control))
             .overlay {
@@ -70,6 +72,8 @@ struct LooreButtonStyle: ButtonStyle {
 
 extension ButtonStyle where Self == LooreButtonStyle {
     static var looreOutline: LooreButtonStyle { LooreButtonStyle(kind: .outline) }
+    /// An outline button whose label is a `ButtonIcon`.
+    static var looreIcon: LooreButtonStyle { LooreButtonStyle(kind: .outline, iconOnly: true) }
     static var loorePrimary: LooreButtonStyle { LooreButtonStyle(kind: .primary) }
     static var looreFilled: LooreButtonStyle { LooreButtonStyle(kind: .filled) }
     static var looreLink: LooreButtonStyle { LooreButtonStyle(kind: .link, font: LooreFont.sans(14, .light)) }
@@ -77,6 +81,22 @@ extension ButtonStyle where Self == LooreButtonStyle {
 
     static func loore(_ kind: LooreButtonStyle.Kind, fullWidth: Bool = false) -> LooreButtonStyle {
         LooreButtonStyle(kind: kind, fullWidth: fullWidth)
+    }
+}
+
+/// An SF Symbol as a whole button label, as tall as a text label in the same
+/// style, so icon and text buttons in one row line up. The caller gives the
+/// button an accessibility label.
+struct ButtonIcon: View {
+    let systemName: String
+
+    var body: some View {
+        ZStack {
+            // Sets the height: one line of the button's font.
+            Text(verbatim: " ").hidden()
+            Image(systemName: systemName)
+        }
+        .accessibilityHidden(true)
     }
 }
 

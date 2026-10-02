@@ -258,7 +258,6 @@ private struct ThreadContent: View {
             .disabled(busy)
             .accessibilityHint(model.readReplyAbove ? ThreadModel.readFurtherTitle : ThreadModel.readEntryTitle)
             ModelPicker(nodeId: node.id, selectedModel: $model.readModel, purpose: .read, disabled: busy)
-                .frame(maxWidth: 200)
                 .padding(.leading, -1)
             Spacer(minLength: 0)
         }
@@ -289,7 +288,6 @@ private struct ThreadContent: View {
             .opacity(busy || underReadReply ? 0.45 : 1)
             .accessibilityIdentifier("thread.llmResponse")
             ModelPicker(nodeId: node.id, selectedModel: $model.selectedModel, disabled: busy || underReadReply)
-                .frame(maxWidth: 200)
                 .padding(.leading, -1)
             Spacer(minLength: 0)
         }
