@@ -95,6 +95,20 @@ private struct ThreadContent: View {
                     .looreReadableWidth()
                 }
                 .scrollDismissesKeyboard(.interactively)
+                .overlay {
+                    // A tapped node is loading: say so at once. Taps still work, so a
+                    // misclick can be corrected (the newest tap opens).
+                    if NodePrefetch.shared.isPending {
+                        ProgressView().controlSize(.large).tint(LooreColor.accent)
+                            .padding(18)
+                            .background(LooreColor.bgCard, in: Circle())
+                            .overlay(Circle().strokeBorder(LooreColor.border))
+                            .allowsHitTesting(false)
+                            .accessibilityLabel("Loading node")
+                            .transition(.opacity)
+                    }
+                }
+                .animation(.easeOut(duration: 0.12), value: NodePrefetch.shared.isPending)
                 .task(id: node.id) {
                     // Once per focal node, after the first layout (web: scrollIntoView, block start).
                     guard !scrolledToFocal, !node.ancestors.isEmpty else { return }

@@ -151,10 +151,11 @@ final class ConfirmEmailModelTests: StubbedAppTestCase {
         StubURLProtocol.install { _ in StubResponse(status: 200, failWith: URLError(.notConnectedToInternet)) }
         let model = ConfirmEmailModel(app: app, token: "tok")
         model.startOnce()
-        try await Task.sleep(nanoseconds: 300_000_000)
+        // Polled, not a fixed 300 ms: a busy CI runner was slower than that.
+        for _ in 0..<50 where model.action != .retry { try await Task.sleep(nanoseconds: 100_000_000) }
         XCTAssertEqual(model.action, .retry)
         model.confirm()
-        try await Task.sleep(nanoseconds: 300_000_000)
+        for _ in 0..<50 where calls.count < 2 { try await Task.sleep(nanoseconds: 100_000_000) }
         XCTAssertEqual(calls.count, 2)
     }
 
