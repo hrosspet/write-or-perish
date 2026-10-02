@@ -18,8 +18,18 @@ uploaded recording. These do not count:
   uses);
 * soft-deleted nodes.
 
-One EXISTS query on indexed columns: no node is loaded and nothing is
-decrypted.
+One query: no node is loaded and nothing is decrypted. On PostgreSQL the
+planner treats ``user_id = X`` and ``origin IS NULL`` as independent. It
+expects many matches, so it can scan ``ix_node_origin`` or the whole
+table and filter on ``user_id`` last, which for a user whose rows are all
+imports means reading other users' rows. The query therefore selects the
+user's rows first, in a materialized CTE that PostgreSQL fills through
+``ix_node_user_id``, and applies the other conditions to those rows. Its
+cost is bounded by that user's own row count (a large import with no
+entry reads all of it). MATERIALIZED must stay: from PostgreSQL 12 a CTE
+used once is otherwise folded into the outer query, which brings the old
+plan back. A partial index on the predicate was tried and did not hold:
+the planner dropped it once the visibility map went stale.
 """
 from sqlalchemy import exists, select
 
@@ -27,19 +37,31 @@ from backend.extensions import db
 from backend.models import Node, NodeContextArtifact
 
 
-def has_own_entries(user_id):
-    """True once *user_id* has at least one entry written in Loore."""
+def own_entries_query(user_id):
+    """The statement behind :func:`has_own_entries` (a tests hook: it is
+    compiled for PostgreSQL to check the CTE keeps its MATERIALIZED prefix)."""
+    mine = (
+        select(Node.id, Node.node_type, Node.origin, Node.source_key,
+               Node.prompt_key, Node.deleted_at)
+        .where(Node.user_id == user_id)
+        .cte("mine")
+        .prefix_with("MATERIALIZED", dialect="postgresql")
+    )
     is_prompt_node = exists().where(
-        NodeContextArtifact.node_id == Node.id,
+        NodeContextArtifact.node_id == mine.c.id,
         NodeContextArtifact.artifact_type == "prompt",
     )
-    own_entry = select(Node.id).where(
-        Node.user_id == user_id,
-        Node.node_type == "user",
-        Node.origin.is_(None),
-        Node.source_key.is_(None),
-        Node.prompt_key.is_(None),
-        Node.deleted_at.is_(None),
+    own_entry = select(mine.c.id).where(
+        mine.c.node_type == "user",
+        mine.c.origin.is_(None),
+        mine.c.source_key.is_(None),
+        mine.c.prompt_key.is_(None),
+        mine.c.deleted_at.is_(None),
         ~is_prompt_node,
     )
-    return bool(db.session.execute(select(own_entry.exists())).scalar())
+    return select(own_entry.exists())
+
+
+def has_own_entries(user_id):
+    """True once *user_id* has at least one entry written in Loore."""
+    return bool(db.session.execute(own_entries_query(user_id)).scalar())

@@ -271,7 +271,24 @@ def test_one_query_no_decryption(app):
     finally:
         event.remove(engine, "before_cursor_execute", _record)
     assert len(statements) == 1
-    assert statements[0].lstrip().upper().startswith("SELECT EXISTS")
+    # The user's rows first (MATERIALIZED CTE on PostgreSQL), then EXISTS.
+    assert statements[0].lstrip().upper().startswith("WITH MINE AS")
+
+
+def test_postgres_statement_selects_the_users_rows_first(app):
+    # SQLite cannot show the plan, so pin the SQL PostgreSQL receives: the
+    # user's rows in a MATERIALIZED CTE (without the keyword PostgreSQL 12+
+    # folds it into the outer query and plans the old way, reading other
+    # users' rows for a user whose rows are all imports), and the other
+    # conditions applied to that CTE, not to node.
+    from sqlalchemy.dialects import postgresql
+    from backend.utils.own_entries import own_entries_query
+    sql = str(own_entries_query(7).compile(dialect=postgresql.dialect()))
+    assert "WITH mine AS MATERIALIZED" in sql
+    cte, outer = sql.split("SELECT EXISTS", 1)
+    assert "WHERE node.user_id = " in cte
+    assert "node.origin" not in outer and "node.node_type" not in outer
+    assert "mine.origin IS NULL" in outer
 
 
 # ── Exposed on the current user ──────────────────────────────────────────
@@ -300,3 +317,7 @@ def test_user_update_response_carries_the_flag(app):
     res = client.put("/api/dashboard/user", json={"prefill_consent": "no"})
     assert res.status_code == 200
     assert res.get_json()["user"]["has_own_entries"] is False
+    _node(_user())
+    res = client.put("/api/dashboard/user", json={"prefill_consent": "no"})
+    assert res.status_code == 200
+    assert res.get_json()["user"]["has_own_entries"] is True
