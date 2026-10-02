@@ -43,11 +43,14 @@ targets:
       - path: Loore
         excludes:
           - "**/.gitkeep"
+      # The voice Live Activity's state and intents, shared with LooreLiveActivity.
+      - path: Shared
     dependencies:
       - package: Markdown
         product: Markdown
       - package: ZIPFoundation
         product: ZIPFoundation
+      - target: LooreLiveActivity
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: $(LOORE_BUNDLE_ID)
@@ -71,6 +74,7 @@ targets:
           UIColorName: LaunchBackground
         UIBackgroundModes:
           - audio
+        NSSupportsLiveActivities: true
         NSMicrophoneUsageDescription: Loore records your voice so it can transcribe what you say and reply.
         NSLocalNetworkUsageDescription: Loore connects to a development server on your local network (debug builds only).
         NSAppTransportSecurity:
@@ -88,6 +92,34 @@ targets:
           - UIInterfaceOrientationPortrait
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
+
+  # The voice conversation's Live Activity (lock screen, Dynamic Island; #397).
+  # iOS 18: its Resume and Record buttons are AudioRecordingIntents. On iOS 17
+  # the app shows no Live Activity and keeps the Now Playing controls.
+  LooreLiveActivity:
+    type: app-extension
+    platform: iOS
+    deploymentTarget: "18.0"
+    configFiles:
+      Debug: Config/Signing.xcconfig
+      Release: Config/Signing.xcconfig
+    sources:
+      - path: LooreLiveActivity
+      - path: Shared
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(LOORE_BUNDLE_ID).LiveActivity
+        PRODUCT_NAME: LooreLiveActivity
+        IPHONEOS_DEPLOYMENT_TARGET: "18.0"
+        SKIP_INSTALL: YES
+    info:
+      path: LooreLiveActivity/Info.plist
+      properties:
+        CFBundleDisplayName: Loore
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
 
   LooreTests:
     type: bundle.unit-test

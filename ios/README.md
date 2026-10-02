@@ -76,7 +76,13 @@ needs neither.
    Settings → General → **VPN & Device Management** → your Apple ID → **Trust**, then
    open Loore from the home screen.
 8. **Allow the microphone** at the first recording and **notifications** when asked
-   (they say "Recording paused — tap to resume" after an interruption).
+   (they say "Recording paused — tap to resume" after an interruption). At the first
+   voice recording the lock screen asks **"Allow Live Activities from Loore?"**: tap
+   Allow, or the recording controls fall back to the Now Playing ones.
+
+The app has a widget extension (`LooreLiveActivity`, the voice Live Activity) signed
+with the same team; its bundle id is the app's plus `.LiveActivity`, and Xcode creates
+it on the first Run.
 
 After 7 days the app stops opening: connect the phone and press Run again (nothing is
 lost; your writing lives on the server). After the first cable install Xcode can also
@@ -152,7 +158,7 @@ Release build they are compiled out.
 ```sh
 cd ios && xcodegen
 xcodebuild -project Loore.xcodeproj -scheme Loore \
-  -destination 'platform=iOS Simulator,name=iPhone 17' test      # 334 unit tests
+  -destination 'platform=iOS Simulator,name=iPhone 17' test      # 395 unit tests
 python3 ios/scripts/check_terms_text.py                          # Terms text == TermsModal.js
 ```
 
@@ -219,13 +225,18 @@ Account → Voice → "Sound while Loore thinks" on Soft.
 
 **Voice and audio (the reason for the app)**
 - [ ] **Locked phone, reply by itself.** Reflect → Voice → record ~10 s → press
-      the side button to lock → stop from the lock screen (⏭ "next track") or wait
-      and stop before locking. Expected: a soft low swell while it thinks
-      (lock screen shows "Voice…"), then the reply plays without touching the phone;
-      the lock screen shows "Voice" with play/pause and ±10 s.
-- [ ] **Locked phone, stop from the lock screen.** Record, lock, then on the lock
-      screen: pause (title "Paused m:ss"), play (resumes, "Recording m:ss"),
-      ⏭ (stop and send). The reply must play by itself.
+      the side button to lock → stop with ■ on the Loore Live Activity. Expected: a
+      soft low swell while it thinks (the activity says "Thinking…", Now Playing
+      "Voice…"), then the reply plays without touching the phone; Now Playing shows
+      "Voice" with play/pause and ±10 s, the activity "Loore is replying" with a mic button.
+- [ ] **Locked phone, pause / resume / stop (#397).** Record, lock. The Live Activity
+      shows "Recording m:ss" with ‖ and ■, and no Now Playing controls. ‖ → "Paused
+      m:ss" with ▶ and ■; ▶ → the clock runs again and the transcript later holds both
+      parts; ■ → the reply plays by itself. Repeat the pause a minute long.
+- [ ] **Record a reply from the lock screen (#397).** While the reply plays (or after
+      it ends, "Reply finished"), tap the mic on the Live Activity: the reply stops and a
+      new recording starts without unlocking; ■ sends it into the same thread. Then
+      unlock and leave Voice: the activity goes away.
 - [ ] **Thinking cue volumes.** Account → Voice → Very soft: quieter, same flow. Off
       (the warning appears): repeat the locked turn; silence while thinking, iOS may
       suspend the app and the reply may need a tap after unlocking (the app catches
@@ -237,11 +248,14 @@ Account → Voice → "Sound while Loore thinks" on Soft.
 - [ ] **Phone call during a recording.** Record, call the phone from another one,
       decline or take the call. Expected: recording pauses, a chime (maybe only after
       the call), a notification "Recording paused — tap to resume", the red message on
-      the Voice screen; Resume continues the same recording; the transcript contains
-      both parts.
+      the Voice screen, and the Live Activity "Recording paused · a call or another app
+      took the microphone"; Resume (on screen, or ▶ on the activity with the phone still
+      locked) continues the same recording; the transcript contains both parts. If ▶ on
+      the activity cannot restart the microphone, a notification says so.
 - [ ] **Siri / another app takes the mic.** Same as the call: pause + notification.
-- [ ] **Lock-screen controls in each phase.** Recording (play/pause/⏭), thinking
-      (only ⏭ = cancel; the server still finishes the reply), playback (play/pause,
+- [ ] **Lock-screen controls in each phase.** Recording (Live Activity ‖ / ▶ and ■;
+      with Live Activities off in Settings → Loore: Now Playing play/pause/⏭), thinking
+      (Now Playing ⏭ = cancel; the server still finishes the reply), playback (play/pause,
       ±10 s, scrubbing, speed from the ⋯ menu where iOS offers it).
 - [ ] **60-minute recording.** Record for 59 minutes (phone locked is fine): at
       59:00 a rising two-note chime, a notification and a toast; stop at ~60:00 and

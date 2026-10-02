@@ -6,8 +6,8 @@ import os
 
 /// The app's audio, owned by `AppState` (design doc §3 "the shared audio player"):
 /// one audio session, one queue player (voice mode and the mini-player share it,
-/// C §8.4 option A), the thinking cue and chimes, the lock screen, and the
-/// voice conversation.
+/// C §8.4 option A), the thinking cue and chimes, the lock screen (Now Playing
+/// and the voice Live Activity), and the voice conversation.
 @MainActor
 @Observable
 final class AudioCenter {
@@ -15,6 +15,7 @@ final class AudioCenter {
     @ObservationIgnored let sounds = SoundPlayer()
     @ObservationIgnored let session = AudioSessionController()
     @ObservationIgnored let nowPlaying = NowPlayingController()
+    @ObservationIgnored let liveActivity = VoiceLiveActivity()
 
     /// The Voice screen is on screen (the mini-player hides there).
     var voiceScreenVisible = false
@@ -59,6 +60,8 @@ final class AudioCenter {
             self.voiceController?.queueStartedPlaying()
         }
         session.onEvent = { [weak self] event in self?.handleSessionEvent(event) }
+        liveActivity.onEnded = { [weak self] in self?.refreshNowPlaying() }
+        VoiceActivityCommands.handler = { [weak self] command in await self?.runLockScreenCommand(command) }
         observers.append(NotificationCenter.default.addObserver(forName: UIApplication.didBecomeActiveNotification,
                                                                 object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.voiceController?.appDidBecomeActive() }
@@ -70,6 +73,8 @@ final class AudioCenter {
         self.app = app
         // What a killed app left in tmp/ (exports, downloads, imports, dictation).
         PrivateFiles.sweepTemporary()
+        // …and on the lock screen: a conversation does not survive a relaunch.
+        liveActivity.endLeftovers()
         player.cookiesProvider = { [weak app] in app?.api.backendCookies() ?? [] }
         player.urlResolver = { [weak app] raw in
             if raw.hasPrefix("http://") || raw.hasPrefix("https://") || raw.hasPrefix("file://") { return URL(string: raw) }
@@ -180,9 +185,22 @@ final class AudioCenter {
     // MARK: Lock screen
 
     func refreshNowPlaying() {
+        if let voice = voiceController {
+            liveActivity.sync(VoiceLiveActivity.state(turn: voice.state, isPaused: voice.isPaused,
+                                                      isInterrupted: voice.isInterrupted,
+                                                      awaitingNextNode: voice.awaitingNextNode,
+                                                      elapsed: voice.elapsed),
+                              start: voice.state == .starting)
+        }
         if let voice = voiceController, voice.isActive || (player.source == .voice && player.isLoaded) {
             switch voice.state {
             case .starting, .recording:
+                if liveActivity.isShowing {
+                    // The Live Activity carries the recording controls (#397): Now
+                    // Playing's previous/next slots would only confuse them.
+                    nowPlaying.update(.none)
+                    return
+                }
                 nowPlaying.handlers = .init(play: { [weak voice] in voice?.resumeRecording() },
                                             pause: { [weak voice] in voice?.pauseRecording() },
                                             next: { [weak voice] in voice?.stop() })
@@ -224,6 +242,46 @@ final class AudioCenter {
     }
 }
 
+// MARK: Live Activity buttons
+
+extension AudioCenter {
+    /// A Live Activity button (its intent runs here, in the app). The phone may
+    /// be locked and the app was possibly suspended until now.
+    func runLockScreenCommand(_ command: VoiceActivityCommand) async {
+        guard let voice = voiceController, liveActivity.isShowing else {
+            // Left over from an earlier launch: no conversation to control.
+            liveActivity.endLeftovers()
+            return
+        }
+        log.info("lock screen: \(command.rawValue, privacy: .public)")
+        switch command {
+        case .pause: voice.pauseRecording()
+        case .resume: voice.resumeRecording()
+        case .stop: voice.stop()
+        case .record: await recordFromLockScreen(voice)
+        }
+    }
+
+    /// Record from the lock screen: the next turn, also while the reply plays
+    /// (the Voice screen's Continue), or a new one between turns.
+    private func recordFromLockScreen(_ voice: VoiceTurnController) async {
+        if app?.spendCapped == true {
+            app?.notifySpendBlocked()
+            _ = app?.toasts.show(SpendCap.toastMessage(.record), duration: 8)
+            return
+        }
+        switch voice.phase {
+        case .playback: voice.continueConversation()
+        case .ready where voice.aiBlock == nil: voice.start()
+        default: return
+        }
+        // The intent keeps the app running until it returns: wait for the microphone.
+        for _ in 0..<150 where voice.state == .starting {
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+    }
+}
+
 // MARK: VoiceAudio
 
 extension AudioCenter: VoiceAudio {
@@ -251,6 +309,10 @@ extension AudioCenter: VoiceAudio {
     func deactivate() {
         guard !player.isPlaying else { return }
         session.deactivate()
+    }
+
+    func voiceConversationEnded() {
+        liveActivity.end()
     }
 
     func startCue() { sounds.startCue() }

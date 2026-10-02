@@ -289,18 +289,21 @@ final class VoiceTurnController {
     }
 
     /// Resume after a pause or an interruption (web `handleResumeRecording`).
+    /// From the lock screen a toast is not seen, so a failure also notifies.
     func resumeRecording() {
         guard state == .recording, isPaused else { return }
         do {
             if isInterrupted { try audio.reactivate() }
             try recorder.resume()
         } catch {
-            log.error("resume failed")
-            notices.toast("The microphone could not restart. Unlock your phone and press play again.", duration: 8)
+            log.error("resume failed: \(String(describing: error), privacy: .public)")
+            notices.toast("The microphone could not restart. Open Loore and press Resume.", duration: 8)
+            notices.notify(.resumeFailed)
             return
         }
         isPaused = false
         endInterruption()
+        notices.withdraw(.resumeFailed)
         audio.refreshNowPlaying()
     }
 
@@ -1021,6 +1024,7 @@ final class VoiceTurnController {
         state = .idle
         aiBlock = nil
         audio.deactivate()
+        audio.voiceConversationEnded()
         audio.refreshNowPlaying()
     }
 

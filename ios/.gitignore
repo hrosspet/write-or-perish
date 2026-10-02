@@ -3,6 +3,7 @@ Loore.xcodeproj/
 Loore/Info.plist
 LooreTests/Info.plist
 LooreUITests/Info.plist
+LooreLiveActivity/Info.plist
 
 # Build products
 build/

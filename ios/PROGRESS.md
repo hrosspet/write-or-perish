@@ -668,8 +668,9 @@ Sign-out does not warn about unsent chunks (the review's optional logout warning
 - **Pause**: timestamps stay continuous and the writer is kept, so a native pause does not open a server
   subsession (the web's resume does). After a system interruption the same writer continues; only a
   media-services reset starts a new one (ftyp chunk → subsession).
-- **Lock-screen pause title** is "Paused m:ss" (the web adds "— play, then unlock"; natively the mic
-  restarts from the lock screen while the session is alive).
+- **Lock-screen recording controls** are a Live Activity (Pause/Resume, Stop), not the Media Session
+  mapping (play / pause / next = stop); see "Field test fixes" below. The Now Playing mapping remains the
+  fallback without a Live Activity.
 - **Thinking cue**: audible cue between Stop and the first chunk and whenever the queue drains while TTS
   is generating (design §9.4; no web counterpart), with Account → Voice → Soft / Very soft / Off.
 - **Mic permission** is asked before `init` (the web asks after init and discards the draft on denial):
@@ -837,3 +838,44 @@ The app follows it. 390 unit tests pass (one skipped), 17 of them new (`VoiceAIB
   included (the server dropped the reply exemption in `speech_allowed`), and for a profile version whose
   `ai_usage` the server sends. The dashboard's `latest_profile` does not send `ai_usage` today, so the profile
   icon stays on there (parity with the web, whose icon gates nodes only).
+
+## Field test fixes (#397, #398; 2026-10-02)
+
+From Peter's first run on his iPhone. 395 unit tests pass (one skipped), 5 of them new.
+
+**#397 Lock screen while recording and replying**
+- **Live Activity** (`ios/LooreLiveActivity/`, a widget extension; state and intents in `ios/Shared/`
+  compiled into both targets; app side `Audio/Session/VoiceLiveActivity.swift`). One activity per
+  conversation: requested at a record tap, updated on phase changes from `AudioCenter.refreshNowPlaying`,
+  ended by `VoiceTurnController.tearDown` (Voice screen closed, sign-out) and at launch (leftovers).
+  Recording: "Recording" + a clock that runs by itself, ‖ and ■. Paused / interrupted: ▶ and ■. Thinking:
+  no buttons. Replying and finished: a mic button = Record a reply (the Voice screen's Continue; stops the
+  reply). Between turns (a cancelled or failed one): Record.
+- **Why not Now Playing**: its slots are previous / play-pause / next, so Stop could only be "next track"
+  beside a greyed-out "previous", and its commands cannot start the microphone from the background. The
+  activity's Resume and Record buttons are `AudioRecordingIntent`s (iOS 18), which may start it; Pause and
+  Stop are `LiveActivityIntent`s. All run in the app's process (`VoiceActivityCommands`).
+- While the activity shows a recording, Now Playing is cleared; it returns for thinking and playback, where
+  play/pause and ±10 s stay. Without an activity (iOS 17, Live Activities off, swiped away) the old Now
+  Playing recording controls stand in. AirPods presses no longer pause a recording while the activity shows
+  (they were Now Playing commands).
+- **Resume**: `MicrophoneSource.resume()` does nothing when the engine still runs (a user pause only drops
+  samples). Before, it called `prepare()` and `start()` on the running engine; the likely reason the lock
+  screen's play did not resume (unconfirmed: the device log was not available). A failed resume now also
+  posts a notification ("The recording could not resume"), withdrawn when a resume works; the error is logged.
+- **Checked in the simulator** (iPhone 11 size, debug audio file, phone locked through XCUITest): record →
+  lock → ‖ → ▶ → ■ → the reply plays with the activity's mic → mic → a second recording → ■ → second reply →
+  leave Voice → the activity is gone. The simulator never suspends the app and cannot take the microphone
+  away, so the background-microphone rules, calls and the 59-minute mark need the device checklist (the
+  interruption and 59-minute paths are unit-tested: `testInterruptionPausesAlertsAndNotifies`,
+  `testLongRecordingWarningAt59Minutes`).
+- **Known**: after a reply played, iOS keeps an empty "Not Playing" platter above the activity during the
+  next recording (the last audio app's platter; clearing the info and removing the command handlers did not
+  remove it in the simulator). Dictation in the writing form has no lock-screen controls (unchanged).
+
+**#398 Writing form and model picker on a narrow phone**
+- Send keeps its words; Discard draft (trash), Record (mic), Save audio, Upload (paperclip), Resume and
+  Stop & save are icons with spoken labels (`ButtonIcon`, `.looreIcon`); the recording clock and "Retry"
+  stay words. The row is a `FlowLayout`, so it wraps instead of squeezing labels.
+- The model picker next to LLM Response / Read is as wide as the model's name (the web's inline button),
+  not 200 pt.

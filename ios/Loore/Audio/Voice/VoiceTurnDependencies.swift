@@ -92,6 +92,8 @@ protocol VoiceAudio: AnyObject {
     func playLongRecordingWarning()
     /// Something the lock screen shows changed.
     func refreshNowPlaying()
+    /// The conversation is over (the Voice screen closed): its Live Activity goes.
+    func voiceConversationEnded()
 }
 
 /// User-facing side effects: toasts and local notifications.
@@ -107,11 +109,13 @@ protocol VoiceNotices: AnyObject {
 enum LocalNotice: String {
     case recordingPaused = "org.loore.voice.recording-paused"
     case longRecording = "org.loore.voice.long-recording"
+    case resumeFailed = "org.loore.voice.resume-failed"
 
     var title: String {
         switch self {
         case .recordingPaused: return "Recording paused — tap to resume"
         case .longRecording: return "You’ve been recording for 59 minutes"
+        case .resumeFailed: return "The recording could not resume"
         }
     }
 
@@ -121,6 +125,8 @@ enum LocalNotice: String {
             return "The microphone stopped (a call, or another app or device took it). Everything up to the interruption is saved."
         case .longRecording:
             return "Consider stopping soon and continuing in a new recording."
+        case .resumeFailed:
+            return "The microphone did not restart. Open Loore and press Resume; everything up to the pause is saved."
         }
     }
 }

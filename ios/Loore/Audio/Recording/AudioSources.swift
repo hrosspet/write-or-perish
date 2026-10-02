@@ -84,7 +84,11 @@ final class MicrophoneSource: PCMSource {
         engine.pause()
     }
 
+    /// After a user pause the engine is still running (the recorder only drops
+    /// samples): nothing to do. Preparing or starting it again could only fail,
+    /// and from the background iOS refuses to start a microphone (#397).
     func resume() throws {
+        if engine.isRunning { return }
         if !tapInstalled { installTap() }
         engine.prepare()
         try engine.start()

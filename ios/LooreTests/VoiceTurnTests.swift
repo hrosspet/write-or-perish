@@ -100,8 +100,12 @@ final class FakeRecorder: VoiceRecording {
         if let startError { throw startError }
         elapsed = elapsedOffset + 3
     }
+    var resumeError: Error?
     func pause() { calls.append("pause") }
-    func resume() throws { calls.append("resume") }
+    func resume() throws {
+        calls.append("resume")
+        if let resumeError { throw resumeError }
+    }
     func interrupt() { calls.append("interrupt") }
     /// Seconds `stop()` takes (the last uploads).
     var stopDelay: Double = 0
@@ -163,6 +167,7 @@ final class FakeAudio: VoiceAudio {
     func playInterruptionAlert() { events.append("sound.interruption") }
     func playLongRecordingWarning() { events.append("sound.59") }
     func refreshNowPlaying() {}
+    func voiceConversationEnded() { events.append("conversation.ended") }
 }
 
 @MainActor
@@ -173,7 +178,8 @@ final class FakeNotices: VoiceNotices {
     func toast(_ text: String, duration: TimeInterval) -> Int { toasts.append(text); return toasts.count }
     func dismissToast(_ id: Int) {}
     func notify(_ notice: LocalNotice) { notified.append(notice) }
-    func withdraw(_ notice: LocalNotice) {}
+    func withdraw(_ notice: LocalNotice) { withdrawn.append(notice) }
+    var withdrawn: [LocalNotice] = []
     func spendCapped() { capped += 1 }
 }
 
@@ -544,7 +550,7 @@ final class VoiceTurnTests: XCTestCase {
         recorder.stopDelay = 0.1
         await recordAndStop()
         turn.tearDown()
-        XCTAssertEqual(audio.events.last, "deactivate")
+        XCTAssertEqual(Array(audio.events.suffix(2)), ["deactivate", "conversation.ended"])
         try await Task.sleep(nanoseconds: 200_000_000)
         XCTAssertFalse(audio.events.contains("category.playback"))
         XCTAssertFalse(backend.log.contains { $0.hasPrefix("finalize") })
@@ -783,6 +789,30 @@ final class VoiceTurnTests: XCTestCase {
         XCTAssertEqual(recorder.calls.last, "resume")
     }
 
+    // #397: a resume pressed on the lock screen that fails is not only a toast
+    // (nobody sees it there): a notification says so, and goes once it works.
+    func testFailedResumeNotifiesAndAWorkingOneWithdrawsIt() async throws {
+        turn.start()
+        await wait("recording") { turn.state == .recording }
+        turn.pauseRecording()
+        recorder.resumeError = NSError(domain: NSOSStatusErrorDomain, code: 561_145_187)
+        turn.resumeRecording()
+        XCTAssertTrue(turn.isPaused, "still paused: the microphone did not restart")
+        XCTAssertEqual(notices.notified, [.resumeFailed])
+        XCTAssertTrue(notices.toasts.last?.hasPrefix("The microphone could not restart") == true)
+        recorder.resumeError = nil
+        turn.resumeRecording()
+        XCTAssertFalse(turn.isPaused)
+        XCTAssertTrue(notices.withdrawn.contains(.resumeFailed))
+    }
+
+    func testLeavingVoiceEndsTheLockScreenActivity() async throws {
+        turn.start()
+        await wait("recording") { turn.state == .recording }
+        turn.tearDown()
+        XCTAssertTrue(audio.events.contains("conversation.ended"))
+    }
+
     func testLongRecordingWarningAt59Minutes() async throws {
         turn.timings.longRecording = 2
         turn.start()
@@ -827,5 +857,45 @@ final class ResumedSessionTotalsTests: XCTestCase {
         XCTAssertEqual(outcome.totalForFinalize, 3)
         let partial = ChunkUploader.Outcome(produced: 3, stored: 2, failed: [5], fatalMessage: nil, prior: 4)
         XCTAssertEqual(partial.totalForFinalize, 6)
+    }
+}
+
+/// The voice Live Activity's phase for each turn state (#397).
+final class VoiceLiveActivityStateTests: XCTestCase {
+    private typealias Phase = VoiceActivityAttributes.ContentState.Phase
+
+    private func phase(_ turn: VoiceTurnController.State, paused: Bool = false, interrupted: Bool = false,
+                       awaiting: Bool = false) -> Phase {
+        VoiceLiveActivity.state(turn: turn, isPaused: paused, isInterrupted: interrupted,
+                                awaitingNextNode: awaiting, elapsed: 0).phase
+    }
+
+    func testRecordingPhases() {
+        XCTAssertEqual(phase(.starting), .recording)
+        XCTAssertEqual(phase(.recording), .recording)
+        XCTAssertEqual(phase(.recording, paused: true), .paused)
+        XCTAssertEqual(phase(.recording, paused: true, interrupted: true), .interrupted)
+        XCTAssertEqual(phase(.stopping), .sending)
+    }
+
+    func testReplyPhasesOfferRecordOnlyOnceLooreSpeaks() {
+        XCTAssertEqual(phase(.transcribing), .thinking)
+        XCTAssertEqual(phase(.awaitingAudio), .thinking)
+        XCTAssertEqual(phase(.draining, awaiting: true), .thinking, "between a chain's nodes: still thinking")
+        XCTAssertEqual(phase(.draining), .replying)
+        XCTAssertEqual(phase(.playing), .replying)
+        XCTAssertEqual(phase(.done), .finished)
+        XCTAssertEqual(phase(.idle), .ready)
+    }
+
+    func testTheRecordingClockStartsWhereTheRecordingIs() {
+        let now = Date(timeIntervalSince1970: 1_000)
+        let state = VoiceLiveActivity.state(turn: .recording, isPaused: false, isInterrupted: false,
+                                            awaitingNextNode: false, elapsed: 42.6, now: now)
+        XCTAssertEqual(state.clockStart, now.addingTimeInterval(-42.6))
+        let paused = VoiceLiveActivity.state(turn: .recording, isPaused: true, isInterrupted: false,
+                                             awaitingNextNode: false, elapsed: 42.6, now: now)
+        XCTAssertNil(paused.clockStart)
+        XCTAssertEqual(paused.elapsed, 42)
     }
 }
