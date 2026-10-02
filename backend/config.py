@@ -176,9 +176,10 @@ class Config:
     #                the chat pickers (LLM Response, the Account default,
     #                admin polls) and refused as an account preference,
     #                as LLM_NAME and as a poll's model, and a reply that
-    #                is not a read turn sent with it runs on the chat
-    #                default instead (create_llm_placeholder). Absent
-    #                means True. "Read only" = read: True + chat: False.
+    #                is not a read turn sent with it is refused with a 400
+    #                (create_llm_placeholder, ReadOnlyModelRefused), never
+    #                moved to another model. Absent means True.
+    #                "Read only" = read: True + chat: False.
     # The picker's full list follows this dict's order: newest first
     # within each provider.
     SUPPORTED_MODELS = {

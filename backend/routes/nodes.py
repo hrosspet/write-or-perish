@@ -49,8 +49,10 @@ from backend.utils.audio_storage import (
     list_streaming_audio_files, storage_path,
 )
 from backend.utils.llm_nodes import (
-    AIUsageRefused, ai_usage_refused_response, create_llm_placeholder,
-    pick_model_for_generation, resolve_chat_model, resolve_read_model,
+    AIUsageRefused, ReadOnlyModelRefused, ai_usage_refused_response,
+    create_llm_placeholder, pick_model_for_generation,
+    read_only_model_refusal, read_only_model_response, resolve_chat_model,
+    resolve_read_model,
 )
 from backend.utils.placeholders import UserExportValidationError
 
@@ -143,6 +145,11 @@ def _upload_reply_options(values, parent_id, ai_usage):
             return False, None, (jsonify({
                 "error": f"Unsupported model: {model_id}",
             }), 400)
+        # A new thread is never a read: a read-only model is refused here,
+        # before the upload is stored, not after the transcript.
+        refused = read_only_model_refusal(model_id)
+        if refused is not None:
+            return False, None, read_only_model_response(refused)
     return agentic, model_id, None
 
 
@@ -1546,8 +1553,8 @@ def get_models():
     ``chat`` models are the only ones every other picker offers (LLM
     Response, the Account default). A read-only model (read, not chat)
     stays in the list so the Read picker can offer it; a client that
-    ignores ``chat`` still cannot chat with it (create_llm_placeholder
-    puts the chat default in its place)."""
+    ignores ``chat`` still cannot chat with it (a reply that is not a
+    read is refused with 400 ``code: model_read_only``)."""
     supported = current_app.config["SUPPORTED_MODELS"]
     models = [
         {"id": model_id, "name": cfg["display_name"],
@@ -1668,6 +1675,10 @@ def request_llm_response(node_id):
         # The node, a node above it, or the reply's own setting keeps the
         # thread away from AI: no reply, nothing created.
         return ai_usage_refused_response(e)
+    except ReadOnlyModelRefused as e:
+        # A chat reply asked for on a read-only model: refused, never
+        # moved to another model. Nothing created.
+        return read_only_model_response(e)
 
     current_app.logger.info(f"Enqueued LLM completion task {task_id} for parent node {parent_node.id}, new node {llm_node.id}")
 

@@ -1260,20 +1260,77 @@ class TestReadOnlyModels:
         node, _ = create_llm_placeholder(t["read"].id, "claude-sonnet-5.5", alice.id)
         assert node.llm_model == "claude-sonnet-5.5"
 
-    def test_a_chat_reply_sent_with_one_runs_on_the_chat_default(self, app_ro):
+    def test_a_chat_reply_sent_with_one_is_refused(self, app_ro, monkeypatch):
+        # Never moved to the chat default: that could be another provider
+        # (Peter, 2026-10-02). 400, nothing created, nothing enqueued, no
+        # provider called.
+        from backend.llm_providers import LLMProvider
+        provider = MagicMock()
+        monkeypatch.setattr(LLMProvider, "get_completion", provider)
+        delay = _mock_llm_task_module.generate_llm_response.delay
+        delay.reset_mock()
+        client = app_ro.test_client()
+        alice = _make_user("alice", is_admin=True)
+        root = _make_node(alice, content="a thought")
+        _db.session.commit()
+        _login(client, alice.id)
+        before = Node.query.count()
+        resp = client.post(f"/api/nodes/{root.id}/llm",
+                           json={"model": "gpt-6.1-sol"})
+        assert resp.status_code == 400, resp.get_json()
+        body = resp.get_json()
+        assert body["code"] == "model_read_only"
+        assert body["model"] == "gpt-6.1-sol"
+        assert body["error"] == ("GPT-6.1 Sol is only for Read. Choose "
+                                 "another model for replies.")
+        assert Node.query.count() == before
+        assert Node.query.filter_by(node_type="llm").count() == 0
+        delay.assert_not_called()
+        provider.assert_not_called()
+
+    def test_a_chat_turn_in_a_read_thread_is_refused(self, app_ro):
+        # Below the chat reply of a finished read the turn is chat: the
+        # read-only model is refused there too, before any write.
+        from backend.utils.llm_nodes import (
+            ReadOnlyModelRefused, create_llm_placeholder)
+        delay = _mock_llm_task_module.generate_llm_response.delay
+        delay.reset_mock()
+        alice = _make_user("alice", is_admin=True)
+        t = _read_thread(alice, read_model="claude-sonnet-5.5",
+                         chat_model="gpt-6-luna")
+        _render(t["read"])  # a finished read: what follows a note is chat
+        before = Node.query.count()
+        with pytest.raises(ReadOnlyModelRefused) as exc:
+            create_llm_placeholder(t["note2"].id, "claude-sonnet-5.5", alice.id)
+        assert exc.value.model_id == "claude-sonnet-5.5"
+        _db.session.rollback()
+        assert Node.query.count() == before
+        delay.assert_not_called()
+
+    def test_a_read_again_through_the_reply_route_keeps_one(self, app_ro):
+        # The generic reply route cannot tell a read from a chat turn and
+        # does not need to: directly under a rendered read reply the turn
+        # is a read again, which runs on the read-only model as asked.
+        client = app_ro.test_client()
+        alice = _make_user("alice", is_admin=True)
+        t = _read_thread(alice, read_model="gpt-6.1-sol")
+        _render(t["read"])
+        _login(client, alice.id)
+        resp = client.post(f"/api/nodes/{t['read'].id}/llm",
+                           json={"model": "claude-sonnet-5.5"})
+        assert resp.status_code == 202, resp.get_json()
+        assert (Node.query.get(resp.get_json()["node_id"]).llm_model
+                == "claude-sonnet-5.5")
+
+    def test_a_deprecated_model_still_runs_on_the_chat_default(self, app_ro):
+        # Unchanged here (#355): the same rule question applies to it and
+        # gets its own issue.
         from backend.utils.llm_nodes import create_llm_placeholder
         alice = _make_user("alice", is_admin=True)
         root = _make_node(alice, content="a thought")
         _db.session.commit()
-        node, _ = create_llm_placeholder(root.id, "gpt-6.1-sol", alice.id)
+        node, _ = create_llm_placeholder(root.id, "claude-opus-5", alice.id)
         assert node.llm_model == "claude-opus-4.6"
-        # A chat turn inside a read thread (below the chat reply) too:
-        # the thread's chat reply decides, not the read.
-        t = _read_thread(alice, read_model="claude-sonnet-5.5",
-                         chat_model="gpt-6-luna")
-        _render(t["read"])  # a finished read: what follows a note is chat
-        node, _ = create_llm_placeholder(t["note2"].id, "claude-sonnet-5.5", alice.id)
-        assert node.llm_model == "gpt-6-luna"
 
     def test_a_saved_read_only_preference_falls_back(self, app_ro):
         # Set directly, as if saved before the flag existed: the Account
@@ -1321,6 +1378,11 @@ class TestReadOnlyModels:
                            json={"question": "q?", "model_id": "claude-sonnet-5.5"})
         assert resp.status_code == 400
         assert "Read only" in resp.get_json()["error"]
+        # A deprecated model is no chat model either (is_chat_model).
+        resp = client.post("/api/admin/polls",
+                           json={"question": "q?", "model_id": "claude-opus-5"})
+        assert resp.status_code == 400
+        assert "deprecated" in resp.get_json()["error"]
         resp = client.post("/api/admin/polls",
                            json={"question": "q?", "model_id": "claude-opus-4.6"})
         assert resp.status_code == 201, resp.get_json()

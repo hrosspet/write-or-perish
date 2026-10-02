@@ -333,6 +333,20 @@ def create_app():
         from backend.utils.llm_nodes import ai_usage_refused_response
         return ai_usage_refused_response(exc)
 
+    # A reply that is not a read, asked for on a read-only model:
+    # create_llm_placeholder raises ReadOnlyModelRefused before any write
+    # (the reply is never moved to another model, 2026-10-02). Routes that
+    # let it escape get 400 {"error", "code": "model_read_only", "model"},
+    # and whatever they flushed before the call is not kept.
+    from backend.utils.llm_nodes import ReadOnlyModelRefused
+
+    @app.errorhandler(ReadOnlyModelRefused)
+    def _handle_read_only_model(exc):
+        from backend.extensions import db
+        from backend.utils.llm_nodes import read_only_model_response
+        db.session.rollback()
+        return read_only_model_response(exc)
+
     # --------------------------------------------------------------------
     # Health checks – liveness/readiness for monitoring (no auth).
     # --------------------------------------------------------------------

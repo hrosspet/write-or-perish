@@ -14,8 +14,8 @@ from backend.utils.audio_storage import (
 )
 from backend.utils.encryption import encrypt_file_atomically
 from backend.utils.llm_nodes import (
-    AIUsageRefused, ai_usage_refused_response, pick_model_for_generation,
-    voice_turn_refusal,
+    AIUsageRefused, ReadOnlyModelRefused, ai_usage_refused_response,
+    pick_model_for_generation, voice_turn_refusal,
 )
 from backend.utils.spend import require_spend_headroom
 from backend.utils.webm_utils import (
@@ -1326,15 +1326,16 @@ def save_streaming_as_node(session_id):
                 response["llm_node_id"] = llm_node.id
                 response["task_id"] = task_id
             except (UserExportValidationError, ParentDeletedError,
-                    AIUsageRefused) as e:
-                # A thread above that keeps AI out (AIUsageRefused) skips
-                # the reply the same way: the entry is saved.
+                    AIUsageRefused, ReadOnlyModelRefused) as e:
+                # A thread above that keeps AI out (AIUsageRefused), or a
+                # read-only model asked to reply (ReadOnlyModelRefused),
+                # skips the reply the same way: the entry is saved.
                 db.session.rollback()
                 current_app.logger.warning(
                     f"save-as-node: LLM reply skipped for node {node.id}: {e}"
                 )
                 response["llm_error"] = str(e)
-                if isinstance(e, AIUsageRefused):
+                if isinstance(e, (AIUsageRefused, ReadOnlyModelRefused)):
                     response["llm_error_code"] = e.code
 
     return jsonify(response), 201
