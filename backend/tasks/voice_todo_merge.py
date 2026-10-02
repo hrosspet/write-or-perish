@@ -30,6 +30,15 @@ _MERGE_LOCK_TIMEOUT = 600
 # How long to wait for the lock before giving up (seconds).
 _MERGE_LOCK_ACQUIRE_TIMEOUT = 600
 
+# Sent in place of the todo list when the user has none, or a blank one
+# (#410). Every new user starts with no list. Given an empty list, the model
+# applied the prompt's rule for completed items that are "NOT on the todo
+# list" to a new task and saved it as done.
+EMPTY_TODO_MESSAGE = (
+    "The todo list is empty. Create it from the proposal: new tasks as "
+    "`- [ ]`, only items listed under Completed as `- [x]`."
+)
+
 
 @celery.task(bind=True)
 def apply_voice_todo(self, llm_node_id: int, model_id: str, user_id: int,
@@ -134,6 +143,17 @@ def _run_merge(llm_node, update_summary, user_id, model_id,
     from backend.utils.prompts import get_user_prompt
     merge_prompt = get_user_prompt(user_id, 'orient_apply_todo')
 
+    if current_todo and current_todo.strip():
+        todo_message = (
+            f"Here is the current full todo list:\n\n{current_todo}"
+            "\n\nNow apply the changes described above."
+        )
+    else:
+        todo_message = (
+            EMPTY_TODO_MESSAGE
+            + "\n\nNow apply the changes described above."
+        )
+
     # Build messages: system=merge_prompt, user=update_summary + current todo
     messages = [
         {
@@ -146,10 +166,7 @@ def _run_merge(llm_node, update_summary, user_id, model_id,
         },
         {
             "role": "user",
-            "content": [{"type": "text", "text": (
-                f"Here is the current full todo list:\n\n{current_todo}"
-                "\n\nNow apply the changes described above."
-            )}],
+            "content": [{"type": "text", "text": todo_message}],
         },
     ]
 
@@ -202,6 +219,9 @@ def _run_merge(llm_node, update_summary, user_id, model_id,
     )
     new_todo.set_content(merged_todo)
     db.session.add(new_todo)
+    # Assigns new_todo.id, so the proposal's tool_calls_meta records which
+    # todo version this merge produced (#410).
+    db.session.flush()
 
     # Update apply status
     if truncated:
