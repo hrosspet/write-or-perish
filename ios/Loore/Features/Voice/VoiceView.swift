@@ -426,14 +426,20 @@ struct VoiceRouteParameters {
         self.resumeLLMId = resumeLLMId
     }
 
+    /// A new Voice screen is a new conversation, as a new page is on the web: the
+    /// controller outlives screens, so a finished or still-playing turn is set
+    /// aside first. Otherwise "Voice Mode" on an earlier node showed the old
+    /// session instead of branching there, and a Voice screen without `parent`
+    /// replied to the last thread (deleted since, in the device test). A
+    /// recording in progress is kept: it is the user's live audio.
     @MainActor
     mutating func applyOnce(to voice: VoiceTurnController) {
         guard !applied else { return }
         applied = true
-        if let resumeLLMId, voice.state == .idle {
+        guard voice.phase != .recording else { return }
+        voice.startNewConversation(parentId: parentId)
+        if let resumeLLMId {
             voice.resumeReply(nodeId: resumeLLMId, parentId: parentId)
-        } else if voice.state == .idle, let parentId {
-            voice.setThreadParent(parentId)
         }
     }
 }

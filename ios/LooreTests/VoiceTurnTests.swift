@@ -558,6 +558,61 @@ final class VoiceTurnTests: XCTestCase {
 
     // M10: returning to the Voice screen must not apply its route parameters again.
 
+    // Device test: a new Voice screen continued the last thread, which had been deleted.
+    func testANewVoiceScreenWithoutParentStartsANewConversation() async throws {
+        var first = VoiceRouteParameters(parentId: 7, resumeLLMId: nil)
+        first.applyOnce(to: turn)
+        try await runToDone()
+        XCTAssertEqual(turn.threadParentId, 101)
+        var fresh = VoiceRouteParameters(parentId: nil, resumeLLMId: nil)
+        fresh.applyOnce(to: turn)
+        XCTAssertNil(turn.threadParentId, "the next recording must not reply to the old thread")
+    }
+
+    // Device test: "Voice Mode" on an earlier node showed the old session instead of branching.
+    func testVoiceModeOnAnEarlierNodeBranchesFromIt() async throws {
+        try await runToDone()
+        XCTAssertEqual(turn.state, .done)
+        backend.llmStatuses[201] = [try llm(201, "completed", content: "Branch.")]
+        var branch = VoiceRouteParameters(parentId: 50, resumeLLMId: 201)
+        branch.applyOnce(to: turn)
+        XCTAssertEqual(turn.state, .awaitingAudio, "the new reply is awaited, not the old session shown")
+        XCTAssertEqual(turn.threadParentId, 50)
+        XCTAssertTrue(audio.fakeQueue.urls.isEmpty, "the old reply is not part of the new conversation")
+        await wait("the new reply's audio is requested") { backend.log.contains("tts 201") }
+    }
+
+    func testANewVoiceScreenKeepsARecordingInProgress() async throws {
+        var first = VoiceRouteParameters(parentId: 7, resumeLLMId: nil)
+        first.applyOnce(to: turn)
+        turn.start()
+        await wait("recording") { turn.state == .recording }
+        var other = VoiceRouteParameters(parentId: 9, resumeLLMId: nil)
+        other.applyOnce(to: turn)
+        XCTAssertEqual(turn.state, .recording)
+        XCTAssertEqual(turn.threadParentId, 7)
+    }
+
+    func testLeavingVoiceForgetsTheThread() async throws {
+        try await runToDone()
+        XCTAssertNotNil(turn.lastReplyNodeId)
+        turn.tearDown()
+        XCTAssertNil(turn.threadParentId)
+        XCTAssertNil(turn.lastReplyNodeId)
+    }
+
+    // Device test: after a cancel, the lock screen offered the previous reply and played it.
+    func testCancelUnloadsThePreviousReply() async throws {
+        try await runToDone()
+        XCTAssertFalse(audio.fakeQueue.urls.isEmpty)
+        turn.continueConversation()
+        await wait("recording") { turn.state == .recording }
+        turn.stop()
+        await wait("thinking") { turn.state == .awaitingAudio }
+        turn.cancelProcessing()
+        XCTAssertTrue(audio.fakeQueue.urls.isEmpty, "nothing left to replay")
+    }
+
     func testRouteParentIsAppliedOncePerScreen() async throws {
         var route = VoiceRouteParameters(parentId: 7, resumeLLMId: nil)
         route.applyOnce(to: turn)

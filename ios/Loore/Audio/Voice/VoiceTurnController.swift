@@ -160,6 +160,22 @@ final class VoiceTurnController {
         threadParentId = id
     }
 
+    /// A new Voice screen: whatever the last turn was doing (thinking, playing,
+    /// done) is set aside, as when the web's Voice page unmounts; the server
+    /// still finishes a reply it is writing. Not while recording.
+    func startNewConversation(parentId: Int?) {
+        guard phase != .recording else { return }
+        if state != .idle {
+            timing.endTurn()
+            resetTurn(keepQueue: false)
+            state = .idle
+            audio.deactivate()
+        }
+        threadParentId = parentId
+        lastReplyNodeId = nil
+        audio.refreshNowPlaying()
+    }
+
     /// A Voice screen checks AI usage afresh (a new screen, or a return after the
     /// setting may have changed): a refusal from an earlier start no longer applies.
     func clearAIBlock() {
@@ -1023,6 +1039,9 @@ final class VoiceTurnController {
         resetTurn(keepQueue: false)
         state = .idle
         aiBlock = nil
+        // The next Voice screen is a new conversation, not a reply to this one.
+        threadParentId = nil
+        lastReplyNodeId = nil
         audio.deactivate()
         audio.voiceConversationEnded()
         audio.refreshNowPlaying()
@@ -1035,7 +1054,10 @@ final class VoiceTurnController {
         if state == .recording || state == .starting { recorder.cancel() }
         cueOff()
         if !keepQueue {
+            // Unloaded, not only stopped: a cancelled turn must not leave the last
+            // reply on the lock screen, where play (or the next press) replays it.
             audio.queue.stop()
+            audio.queue.close()
             audio.queue.generatingTTS = false
         }
         endInterruption()
