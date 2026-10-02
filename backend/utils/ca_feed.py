@@ -384,10 +384,11 @@ def refs_from_render(row, reply_text, snapshot_dir):
     each cited number maps to the tweet id the model saw under it
     (FeedRender.tweet_id_for), and those few tweets are fetched by id
     from the snapshot — the current one; ids are stable across exports.
-    A tweet the snapshot no longer holds drops its pick (parse_feed_reply
-    logs it as an unknown number); how many picks that dropped is
-    recorded on the render (FeedRender.dropped_picks). A number cited
-    only in the verdict, or outside the render, is not counted."""
+    A tweet the snapshot no longer holds drops its pick, and so does a
+    number outside the render (parse_feed_reply logs both as unknown
+    numbers). How many of the model's picks were dropped either way is
+    recorded on the render (FeedRender.dropped_picks), each number once;
+    a number cited only in the verdict is not a pick and not counted."""
     from backend.utils.community_archive import (
         CA_CITATION_RE, fetch_tweets_by_id)
     numbers = pick_numbers(reply_text)
@@ -406,7 +407,8 @@ def refs_from_render(row, reply_text, snapshot_dir):
             wanted[n] = tweet_id
     found = fetch_tweets_by_id(snapshot_dir, wanted.values()) if wanted else {}
     refs = {}
-    dropped = 0
+    # Picks with no tweet behind their number in this render.
+    dropped = sum(1 for n in picked if n not in wanted)
     for n, tweet_id in wanted.items():
         ref = found.get(tweet_id)
         if ref is None:

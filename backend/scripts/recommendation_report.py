@@ -45,8 +45,10 @@ Read since 2026-09-19), per model, variant and turn as above:
     picked     of them, replies that show at least one pick
     empty      of them, replies that show no pick, split into
     nothing      the model picked nothing
-    dropped      the model picked, but every pick's tweet had left the
-                 archive snapshot by the collect (FeedRender.dropped_picks;
+    dropped      the model picked, but Loore could show none of the
+                 picks: the tweet had left the archive snapshot by the
+                 collect, or the number was outside the render
+                 (FeedRender.dropped_picks;
                  replies collected before the column was deployed,
                  October 2026, count as "nothing")
     opened     replies their owner has opened (FeedRender.opened_at,
@@ -201,7 +203,8 @@ def print_reads(rows):
               f"{r['picked']:>7} {r['empty']:>6} {r['nothing']:>8} "
               f"{r['dropped']:>8} {r['opened']:>7} {share:>8}")
     print("\nempty = nothing + dropped: no pick shown. dropped = the model "
-          "picked, but every pick's tweet had left the snapshot.\nopened "
+          "picked, but none of its picks could be shown (tweet gone from "
+          "the snapshot, or a number outside the render).\nopened "
           "= the owner opened the reply (recorded since the October 2026 "
           "deploy).")
 

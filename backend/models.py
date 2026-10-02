@@ -1825,12 +1825,13 @@ class FeedRender(db.Model):
     # Comma-joined tweet ids in render order: index i (0-based) is the
     # tweet the model saw as #i+1. ~100 KB for a day of the archive.
     tweet_ids = db.Column(db.Text, nullable=False, default="")
-    # How many of the model's picks the collect dropped because the tweet
-    # it saw under that number is no longer in the archive snapshot
-    # (ca_feed.refs_from_render; 2026-10-02). With no FeedPick row on the
-    # reply, a positive count means every pick was dropped, and 0 means
-    # the model picked nothing. Replies collected before the column
-    # existed read 0 either way.
+    # How many of the model's picks the collect could not show
+    # (ca_feed.refs_from_render; 2026-10-02): the tweet behind the number
+    # is no longer in the archive snapshot, or the number is outside the
+    # render. Each number once; a number cited only in the verdict is no
+    # pick. With no FeedPick row on the reply, a positive count means
+    # every pick was dropped, and 0 means the model picked nothing.
+    # Replies collected before the column existed read 0 either way.
     dropped_picks = db.Column(db.Integer, nullable=False, default=0,
                               server_default="0")
     # When the reply's owner first fetched the finished reply: GET of the

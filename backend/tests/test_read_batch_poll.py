@@ -895,10 +895,10 @@ def test_pick_dropped_from_the_snapshot_is_counted_on_the_render(app, monkeypatc
         node_id=llm_node.id).one().dropped_picks == 1
 
 
-def test_dropped_picks_counts_each_missing_pick_once(app, monkeypatch, tmp_path):  # noqa: F811
-    """Only picks whose tweet the snapshot lost count: a repeated number
-    once, a number cited only in the verdict not, a number outside the
-    render not (no tweet was behind it)."""
+def test_dropped_picks_counts_each_pick_loore_could_not_show_once(app, monkeypatch, tmp_path):  # noqa: F811
+    """A pick whose tweet the snapshot lost (#2, repeated: once) and a
+    pick citing a number outside the render (#9) both count; the shown
+    pick (#1) does not."""
     from backend.models import FeedRender
 
     def only_111(snapshot_dir, ids):
@@ -918,7 +918,41 @@ def test_dropped_picks_counts_each_missing_pick_once(app, monkeypatch, tmp_path)
     assert [p.item.external_id for p in
             FeedPick.query.filter_by(node_id=llm_node.id)] == ["111"]
     assert FeedRender.query.filter_by(
-        node_id=llm_node.id).one().dropped_picks == 1
+        node_id=llm_node.id).one().dropped_picks == 2
+
+
+def _report_script():
+    import importlib.util
+    import os
+    path = os.path.join(os.path.dirname(os.path.dirname(__file__)),
+                        "scripts", "recommendation_report.py")
+    spec = importlib.util.spec_from_file_location("_rec_report_poll", path)
+    script = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(script)
+    return script
+
+
+def test_empty_read_of_out_of_render_picks_reports_as_dropped(app, monkeypatch, tmp_path):  # noqa: F811
+    """The model picked, but only numbers no tweet was behind (#7, #9;
+    #1 is cited in the verdict only): no pick is shown, and the report
+    counts the Read as "dropped", not as "the model picked nothing"."""
+    from backend.models import FeedRender
+    _fetch_by_id(monkeypatch)
+    alice, read, llm_node = _pinned_collect(
+        monkeypatch, tmp_path, json.dumps({
+            "verdict": "Only #1 came close.",
+            "picks": [
+                {"n": 7, "qt": "A", "relevance": 30, "recommend": True},
+                {"n": 9, "qt": "B", "relevance": 20, "recommend": False},
+            ]}))
+    assert _run(_Task(), alice, read, llm_node)["status"] == "completed"
+    assert FeedPick.query.filter_by(node_id=llm_node.id).count() == 0
+    assert FeedRender.query.filter_by(
+        node_id=llm_node.id).one().dropped_picks == 2
+
+    row = _report_script().read_report()[("gpt-5", "uncond", "first")]
+    assert (row["reads"], row["empty"], row["dropped"], row["nothing"]) == (
+        1, 1, 1, 0)
 
 
 def test_verdict_citation_missing_from_the_snapshot_is_no_dropped_pick(app, monkeypatch, tmp_path):  # noqa: F811
