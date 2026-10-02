@@ -21,7 +21,7 @@ from backend.utils.thread_tree import visible_child_counts
 from backend.routes.terms import CURRENT_TERMS_VERSION
 from backend.utils.reserved_usernames import validate_username
 from backend.utils.spend import user_is_capped
-from backend.utils.llm_nodes import effective_preferred_model, is_active_model
+from backend.utils.llm_nodes import effective_preferred_model, is_chat_model
 
 logger = logging.getLogger(__name__)
 dashboard_bp = Blueprint("dashboard_bp", __name__)
@@ -527,7 +527,9 @@ def update_user():
 
     if "preferred_model" in data:
         model_id = data["preferred_model"]
-        if model_id and not is_active_model(model_id):
+        # The default model drives replies and background work: never a
+        # deprecated or read-only one.
+        if model_id and not is_chat_model(model_id):
             return jsonify({"error": f"Model not offered: {model_id}"}), 400
         current_user.preferred_model = model_id
 

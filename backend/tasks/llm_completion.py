@@ -4241,8 +4241,12 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
 
                 # Step 5c: Auto-detect proposals in LLM text (agentic). Not
                 # in a reply cut off mid-way: a half-written block would
-                # become a proposal and supersede the pending one.
-                if is_agentic and not resp.get("cut_off"):
+                # become a proposal and supersede the pending one. Nor in a
+                # read (a read prompt that is itself an agentic prompt keeps
+                # is_agentic): its verdict is no proposal, and the todo
+                # merge would run on the read's model, which may be read
+                # only (2026-10-02).
+                if is_agentic and not needs_ca and not resp.get("cut_off"):
                     auto_drafts = _auto_create_drafts(
                         f_llm_text, target_node, node_chain, user_id
                     )

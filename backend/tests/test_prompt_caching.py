@@ -150,9 +150,33 @@ def test_cost_opus_5_5_from_real_config():
                     batch=True) == 12_000_000
 
 
+def test_cost_sonnet_5_5_from_real_config():
+    # The real config entry against the Anthropic pricing page, verified
+    # 2026-10-02: $2 in / $10 out, cache hits $0.20 (the standard 0.1x),
+    # 5m writes $2.50 (1.25x), batch $1 / $5, no long-context surcharge.
+    from backend.config import Config
+    app = Flask(__name__)
+    app.config["SUPPORTED_MODELS"] = {
+        "claude-sonnet-5.5": Config.SUPPORTED_MODELS["claude-sonnet-5.5"]}
+    with app.app_context():
+        def cost(*a, **kw):
+            return calculate_llm_cost_microdollars("claude-sonnet-5.5", *a, **kw)
+        assert cost(1_000_000, 0) == 2_000_000
+        assert cost(0, 1_000_000) == 10_000_000
+        assert cost(0, 0, cache_read_tokens=1_000_000) == 200_000
+        assert cost(0, 0, cache_write_tokens=1_000_000) == 2_500_000
+        assert cost(1_000_000, 1_000_000, batch=True) == 6_000_000
+        assert cost(0, 0, cache_read_tokens=1_000_000, batch=True) == 100_000
+        # Flat across the 1M window: 900k input costs 900k x $2.
+        assert cost(900_000, 0) == 1_800_000
+
+
 @pytest.mark.parametrize("model_id, page", [
     # $/MTok (input, cached input, cache writes, output) from the OpenAI
-    # pricing page, verified 2026-09-23: short context, then >272k input.
+    # pricing page, verified 2026-09-23 (gpt-6.1-sol 2026-10-02): short
+    # context, then >272k input.
+    ("gpt-6.1-sol", {"short": (2.00, 0.10, 2.50, 10.00),
+                     "long": (4.00, 0.20, 5.00, 15.00)}),
     ("gpt-6-sol", {"short": (2.00, 0.20, 2.50, 10.00),
                    "long": (4.00, 0.40, 5.00, 15.00)}),
     ("gpt-6-luna", {"short": (0.10, 0.01, 0.125, 0.50),
@@ -174,6 +198,8 @@ def test_cost_gpt_6_from_real_config(model_id, page):
         assert cost(n, 0, cached_input_tokens=n) == round(cached * n)
         assert cost(n, 0, cache_write_subset_tokens=n) == round(write * n)
         assert cost(0, 1_000_000) == round(out * 1_000_000)
+        # Batch halves the cached rate too (gpt-6.1-sol: $0.05).
+        assert cost(n, 0, cached_input_tokens=n, batch=True) == round(cached * n / 2)
         n = 1_000_000  # over the 272k tier: the whole request reprices
         inp, cached, write, out = page["long"]
         assert cost(n, 0) == round(inp * n)
