@@ -155,7 +155,13 @@ final class ThreadModel {
         guard let app else { return }
         loading = node == nil
         do {
-            let fetched = try await app.api.nodeDetail(nodeId)
+            // Opened from another node of the thread: fetched before the page opened.
+            let fetched: NodeDetail
+            if node == nil, let prefetched = NodePrefetch.shared.take(nodeId) {
+                fetched = prefetched
+            } else {
+                fetched = try await app.api.nodeDetail(nodeId)
+            }
             node = fetched
             pageError = nil
             loading = false

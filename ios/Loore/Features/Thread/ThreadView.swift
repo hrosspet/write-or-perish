@@ -20,6 +20,8 @@ struct ThreadView: View {
                 LoadingLine(text: "Loading node...")
             }
         }
+        // The whole page, also while loading (the background was only behind the line).
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .loorePageBackground()
         .navigationBarTitleDisplayMode(.inline)
         .navigationTitle(model?.tabTitle ?? "Thread")
@@ -49,6 +51,13 @@ private struct ThreadContent: View {
 
     private var craftMode: Bool { app.capabilities.craftMode }
 
+    /// Another node of this thread: its page opens once its data is in (no loading page).
+    private func openNode(_ id: Int) {
+        NodePrefetch.shared.open(id, api: app.api) {
+            app.open(.thread(id: id, awaitLLM: nil))
+        }
+    }
+
     var body: some View {
         if model.loading {
             LoadingLine(text: "Loading node...")
@@ -62,7 +71,7 @@ private struct ThreadContent: View {
                         ForEach(node.ancestors) { ancestor in
                             BubbleView(data: BubbleData(ancestor), actions: actions(model.target(ancestor),
                                        userId: ancestor.userId, parentUserId: ancestor.parentUserId, nodeType: ancestor.nodeType)) {
-                                app.open(.thread(id: ancestor.id, awaitLLM: nil))
+                                openNode(ancestor.id)
                             }
                             .padding(.vertical, 8)
                         }
@@ -75,7 +84,7 @@ private struct ThreadContent: View {
                                 AnyView(BubbleView(data: BubbleData(child),
                                                    actions: actions(model.target(child), userId: child.userId,
                                                                     parentUserId: child.parentUserId, nodeType: child.nodeType)) {
-                                    app.open(.thread(id: child.id, awaitLLM: nil))
+                                    openNode(child.id)
                                 })
                             }
                         }
