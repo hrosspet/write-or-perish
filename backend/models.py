@@ -1826,9 +1826,9 @@ class FeedRender(db.Model):
     # tweet the model saw as #i+1. ~100 KB for a day of the archive.
     tweet_ids = db.Column(db.Text, nullable=False, default="")
     # How many of the model's picks the collect could not show
-    # (ca_feed.refs_from_render; 2026-10-02): the tweet behind the number
-    # is no longer in the archive snapshot, or the number is outside the
-    # render. Each number once; a number cited only in the verdict is no
+    # (ca_feed.count_dropped_picks, on the batch collect and the admin's
+    # live rerun alike; 2026-10-02): the tweet behind the number is no
+    # longer in the archive snapshot, or the number is outside the render. Each number once; a number cited only in the verdict is no
     # pick. With no FeedPick row on the reply, a positive count means
     # every pick was dropped, and 0 means the model picked nothing.
     # Replies collected before the column existed read 0 either way.

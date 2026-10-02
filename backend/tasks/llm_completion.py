@@ -58,7 +58,7 @@ from backend.utils.llm_batch import BatchItemFailed, BatchItemCancelled
 from backend.utils.ca_feed import (
     CA_CHAT_TURN_NOTE, CA_READ_AGAIN_TURN, CA_TWEETS_CHAT_STUB,
     FEED_AI_USAGE, READ_FURTHER_MARKER,
-    FeedReplyError, read_reply_ids, record_feed_render,
+    FeedReplyError, count_dropped_picks, read_reply_ids, record_feed_render,
     ca_turn as _ca_turn,
     refresh_snapshot_for_read, refs_from_render, seen_tweet_ids,
 )
@@ -2627,6 +2627,18 @@ def _collect_feed_reply(llm_node, resp, ca_refs):
         ca_refs = refs_from_render(
             llm_node.feed_render, resp["content"],
             snapshot_dir_for(flask_app.config))
+    else:
+        # The admin's live rerun: the render is this run's own, so ca_refs
+        # is the whole of it. Picks whose number is outside it are dropped
+        # by parse_feed_reply below; count them as the batch collect does
+        # (refs_from_render), so a Read of only such picks is not
+        # reported as one where the model picked nothing. (A batch from
+        # before renders were pinned has no row: nothing to count on.)
+        from backend.models import FeedRender
+        render = FeedRender.query.filter_by(node_id=llm_node.id).first()
+        if render is not None:
+            render.dropped_picks = count_dropped_picks(
+                resp["content"], ca_refs)
     verdict, picks = parse_feed_reply(resp["content"], ca_refs)
     rows = save_feed_picks(llm_node.human_owner_id, llm_node, picks)
     resp["content"] = expand_ca_citations(

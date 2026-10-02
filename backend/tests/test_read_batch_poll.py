@@ -996,6 +996,95 @@ def test_rerun_render_resets_the_dropped_count(app, monkeypatch, tmp_path):  # n
         node_id=llm_node.id).one().dropped_picks == 0
 
 
+def _live_read(monkeypatch, tmp_path, content):
+    """The admin's live rerun (ca_live): one provider call answering
+    *content* against the stubbed two-tweet render (#1, #2). Returns the
+    task result and the reply node."""
+    from backend.tests.test_read_context import _CapturingProvider
+    from backend.tests.test_retrieval_loop import _FakeSelf, _resp
+    _stub_archive(monkeypatch, tmp_path)
+    _CapturingProvider.kwargs = []
+    _CapturingProvider.reset([_resp(content)])
+    monkeypatch.setattr(_llm_task_mod, "LLMProvider", _CapturingProvider)
+    alice, read, llm_node = _read_thread(submitted=False)
+    result = generate_llm_response(
+        _FakeSelf(), read.id, llm_node.id, "gpt-5", alice.id,
+        source_mode=None, ca_live=True)
+    return result, llm_node
+
+
+def _dropped(llm_node):
+    from backend.models import FeedRender
+    _db.session.expire_all()
+    return FeedRender.query.filter_by(node_id=llm_node.id).one().dropped_picks
+
+
+def test_live_rerun_counts_picks_outside_the_render(app, monkeypatch, tmp_path):  # noqa: F811
+    """The live path drops a pick whose number is outside the render
+    (parse_feed_reply) and counts it like the batch collect does, so the
+    report does not file a Read of only such picks under "the model
+    picked nothing"."""
+    result, llm_node = _live_read(monkeypatch, tmp_path, json.dumps({
+        "verdict": "Only #1 came close.",
+        "picks": [{"n": 9, "qt": "A", "relevance": 30, "recommend": True}]}))
+    assert result["status"] == "completed"
+    assert FeedPick.query.filter_by(node_id=llm_node.id).count() == 0
+    assert _dropped(llm_node) == 1
+
+    row = _report_script().read_report()[("gpt-5", "uncond", "first")]
+    assert (row["reads"], row["empty"], row["dropped"], row["nothing"]) == (
+        1, 1, 1, 0)
+
+
+def test_live_rerun_counts_each_dropped_number_once(app, monkeypatch, tmp_path):  # noqa: F811
+    """#9 twice and #7 are dropped (2); #2 is shown; a number cited only
+    in the verdict (#5) is no pick."""
+    result, llm_node = _live_read(monkeypatch, tmp_path, json.dumps({
+        "verdict": "#2 is the one; #5 was noise.",
+        "picks": [
+            {"n": 2, "qt": "A", "relevance": 40, "recommend": True},
+            {"n": 9, "qt": "B", "relevance": 30, "recommend": False},
+            {"n": 9, "qt": "B again", "relevance": 30, "recommend": False},
+            {"n": 7, "qt": "C", "relevance": 10, "recommend": False},
+        ]}))
+    assert result["status"] == "completed"
+    assert [p.item.external_id for p in
+            FeedPick.query.filter_by(node_id=llm_node.id)] == ["222"]
+    assert _dropped(llm_node) == 2
+
+
+@pytest.mark.parametrize("picks", [
+    [],
+    [{"n": 2, "qt": "A", "relevance": 40, "recommend": True}],
+])
+def test_live_rerun_with_nothing_dropped_counts_zero(app, monkeypatch, tmp_path, picks):  # noqa: F811
+    """No picks, or every pick shown: nothing was dropped."""
+    result, llm_node = _live_read(monkeypatch, tmp_path, json.dumps({
+        "verdict": "Nothing today." if not picks else "One.",
+        "picks": picks}))
+    assert result["status"] == "completed"
+    assert FeedPick.query.filter_by(node_id=llm_node.id).count() == len(picks)
+    assert _dropped(llm_node) == 0
+
+
+def test_live_rerun_resets_the_count_of_the_run_it_replaces(app, monkeypatch, tmp_path):  # noqa: F811
+    """A rerun re-pins the render (count 0) and counts its own reply."""
+    from backend.models import FeedRender
+    from backend.tests.test_read_context import _CapturingProvider
+    from backend.tests.test_retrieval_loop import _FakeSelf, _resp
+    _stub_archive(monkeypatch, tmp_path)
+    _CapturingProvider.kwargs = []
+    _CapturingProvider.reset([_resp(json.dumps({
+        "verdict": "Nothing.", "picks": []}))])
+    monkeypatch.setattr(_llm_task_mod, "LLMProvider", _CapturingProvider)
+    alice, read, llm_node = _read_thread(submitted=False)
+    _db.session.add(FeedRender(node_id=llm_node.id, dropped_picks=3))
+    _db.session.commit()
+    generate_llm_response(_FakeSelf(), read.id, llm_node.id, "gpt-5",
+                          alice.id, source_mode=None, ca_live=True)
+    assert _dropped(llm_node) == 0
+
+
 def _cost_rows(node_id):
     return APICostLog.query.filter_by(request_ref=f"node:{node_id}").all()
 

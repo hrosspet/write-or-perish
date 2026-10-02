@@ -379,6 +379,17 @@ def pick_numbers(text):
     return numbers
 
 
+def count_dropped_picks(reply_text, refs):
+    """How many of the model's picks Loore could not show: each cited
+    number once, whose tweet is not in *refs* (the render's refs, the ones
+    that resolved). A number outside the render and a tweet the snapshot no
+    longer holds both count, as parse_feed_reply drops both. A number
+    cited only in the verdict is no pick. Shared by the batch collect
+    (refs_from_render) and the admin's live rerun (_collect_feed_reply), so
+    FeedRender.dropped_picks means the same on both."""
+    return len(set(pick_numbers(reply_text)) - set(refs))
+
+
 def refs_from_render(row, reply_text, snapshot_dir):
     """The refs a pinned reply's picks need, without re-rendering the day:
     each cited number maps to the tweet id the model saw under it
@@ -392,7 +403,6 @@ def refs_from_render(row, reply_text, snapshot_dir):
     from backend.utils.community_archive import (
         CA_CITATION_RE, fetch_tweets_by_id)
     numbers = pick_numbers(reply_text)
-    picked = set(numbers)
     # Numbers cited in the verdict prose too, so expand_ca_citations can
     # link them (they need no pick row, just the tweet behind them).
     try:
@@ -407,18 +417,14 @@ def refs_from_render(row, reply_text, snapshot_dir):
             wanted[n] = tweet_id
     found = fetch_tweets_by_id(snapshot_dir, wanted.values()) if wanted else {}
     refs = {}
-    # Picks with no tweet behind their number in this render.
-    dropped = sum(1 for n in picked if n not in wanted)
     for n, tweet_id in wanted.items():
         ref = found.get(tweet_id)
         if ref is None:
             log.warning("Feed pick #%s: tweet %s is not in the current "
                         "snapshot; dropping it", n, tweet_id)
-            if n in picked:
-                dropped += 1
             continue
         refs[n] = ref
-    row.dropped_picks = dropped
+    row.dropped_picks = count_dropped_picks(reply_text, refs)
     return refs
 
 
