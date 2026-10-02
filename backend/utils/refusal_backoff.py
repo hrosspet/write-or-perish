@@ -21,6 +21,14 @@ admin "Build profile" button after the admin confirms the override
 a new recent context or a new profile version, since that changes its
 input. The hourly schedulers, and the button without ``force``, respect
 the stop.
+
+Recent context runs through the Batch API (#380), where a request can
+also fail without a billed output (the item errored or expired, the
+batch ended without it or could not be read). Such a failure has no cost
+row; the collector marks the item ``outcome: "failed"`` on its
+RecentContextBatchJob, and it counts as one more strike in the same
+streak, so a request that keeps failing is not resubmitted every 10
+minutes either.
 """
 import logging
 from datetime import datetime, timedelta
@@ -51,11 +59,15 @@ def refusals_since(user_id, request_types, since):
     return [row[0] for row in q.order_by(APICostLog.created_at.desc()).all()]
 
 
-def backoff_state(user_id, request_types, since):
+def backoff_state(user_id, request_types, since, other_failures=()):
     """(n, until, stopped): the number of consecutive refusals since the
     last saved output; when the next attempt is allowed (None = now, or
-    never when stopped); and whether the job is stopped for this user."""
-    times = refusals_since(user_id, request_types, since)
+    never when stopped); and whether the job is stopped for this user.
+    ``other_failures``: times of failed runs that wrote no cost row (a
+    failed batch item), already limited to after ``since``; each counts
+    like a refusal."""
+    times = sorted(refusals_since(user_id, request_types, since)
+                   + list(other_failures), reverse=True)
     n = len(times)
     if n == 0:
         return 0, None, False
@@ -64,13 +76,15 @@ def backoff_state(user_id, request_types, since):
     return n, times[0] + RETRY_WAIT, False
 
 
-def in_backoff(user_id, request_types, since, job, now=None):
+def in_backoff(user_id, request_types, since, job, now=None,
+               other_failures=()):
     """True while the job must not run for this user: waiting after the
     first refusal, or stopped after the second."""
-    n, until, stopped = backoff_state(user_id, request_types, since)
+    n, until, stopped = backoff_state(user_id, request_types, since,
+                                      other_failures)
     if stopped:
-        logger.info("User %s: %s stopped after %d refused outputs in a row",
-                    user_id, job, n)
+        logger.info("User %s: %s stopped after %d refused outputs or "
+                    "failed runs in a row", user_id, job, n)
         return True
     if until is None or (now or datetime.utcnow()) >= until:
         return False
@@ -79,22 +93,29 @@ def in_backoff(user_id, request_types, since, job, now=None):
     return True
 
 
-def report_stop(user_id, job, n, model_id, request_type):
+CUT_OFF_CAUSE = "output cut off"
+
+
+def report_stop(user_id, job, n, model_id, request_type,
+                cause=CUT_OFF_CAUSE):
     """The job is stopped for this user: log it at ERROR and send a
-    tagged Sentry event, so someone looks at it. Nothing retries it."""
-    msg = (f"{job} stopped for user {user_id}: output cut off {n} times "
+    tagged Sentry event, so someone looks at it. Nothing retries it.
+    ``cause`` names what ended the runs (default: cut-off outputs)."""
+    msg = (f"{job} stopped for user {user_id}: {cause} {n} times "
            f"in a row (model {model_id}); no more automatic runs until a "
            f"new version is saved")
     logger.error(msg)
+    title = (f"Background job stopped after {n} cut-off outputs: {job}"
+             if cause == CUT_OFF_CAUSE else
+             f"Background job stopped after {n} runs in a row "
+             f"({cause}): {job}")
     try:
         import sentry_sdk
         with sentry_sdk.new_scope() as scope:
             scope.set_tag("user_id", str(user_id))
             scope.set_tag("job_type", request_type)
             scope.set_tag("model_id", model_id)
-            sentry_sdk.capture_message(
-                f"Background job stopped after {n} cut-off outputs: {job}",
-                level="error")
+            sentry_sdk.capture_message(title, level="error")
     except Exception:  # pragma: no cover — reporting must not mask the refusal
         logger.exception("Sentry report of the stop failed")
 
@@ -121,14 +142,33 @@ def latest_recent_context_at(user_id):
     return max(times) if times else None
 
 
+def recent_context_batch_failures_since(user_id, since):
+    """Collection times of the user's recent-context batch items marked
+    ``outcome: "failed"`` in jobs collected (or abandoned) after ``since``
+    (None = all). A refused item is not among them: its cost row already
+    counts."""
+    from backend.models import RecentContextBatchJob
+    q = RecentContextBatchJob.query.with_entities(
+        RecentContextBatchJob.collected_at, RecentContextBatchJob.items,
+    ).filter(RecentContextBatchJob.collected_at.isnot(None))
+    if since is not None:
+        q = q.filter(RecentContextBatchJob.collected_at > since)
+    return [collected_at for collected_at, items in q.all()
+            for item in (items or [])
+            if item.get("user_id") == user_id
+            and item.get("outcome") == "failed"]
+
+
 def profile_backoff_state(user_id):
     return backoff_state(user_id, PROFILE_REQUEST_TYPES,
                          latest_profile_at(user_id))
 
 
 def recent_context_backoff_state(user_id):
-    return backoff_state(user_id, RECENT_CONTEXT_REQUEST_TYPES,
-                         latest_recent_context_at(user_id))
+    since = latest_recent_context_at(user_id)
+    return backoff_state(
+        user_id, RECENT_CONTEXT_REQUEST_TYPES, since,
+        recent_context_batch_failures_since(user_id, since))
 
 
 def profile_in_backoff(user_id, now=None):
@@ -137,6 +177,8 @@ def profile_in_backoff(user_id, now=None):
 
 
 def recent_context_in_backoff(user_id, now=None):
-    return in_backoff(user_id, RECENT_CONTEXT_REQUEST_TYPES,
-                      latest_recent_context_at(user_id), "recent context",
-                      now=now)
+    since = latest_recent_context_at(user_id)
+    return in_backoff(
+        user_id, RECENT_CONTEXT_REQUEST_TYPES, since, "recent context",
+        now=now,
+        other_failures=recent_context_batch_failures_since(user_id, since))
