@@ -11,6 +11,7 @@ import { useToast } from '../contexts/ToastContext';
 import api from '../api';
 import * as voiceTiming from '../utils/voiceTiming';
 import { isAiUsageRefusedError, aiUsageRefusalScope } from '../utils/aiUsage';
+import { onPageReturn } from '../utils/pageReturn';
 
 // iOS devices can't autoplay audio regardless of warmup, and playing silent audio
 // while the mic stream is active crashes Bluetooth headphones on multi-device setups.
@@ -391,9 +392,15 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
   // Surface server-side warnings (e.g. typoed {user_export} keys) as toasts
   useLlmTaskWarnings(llmData, llmStatus);
 
-  // TTS SSE subscription
+  // TTS SSE subscription. A return to the page reconnects it (#374): a
+  // reply spoken while it is written (#367) opens this stream before the
+  // user locks the phone, and iOS can kill it without an error event, so
+  // the page sat on "Thinking..." until the whole reply was synthesized
+  // (the REST recovery below waits for that). The fresh stream sends the
+  // chunks made so far and goes on with the rest.
   const ttsSSE = useTTSStreamSSE(llmNodeId, {
     enabled: ttsGenerating,
+    reconnectOnReturn: true,
     onChunkReady: async (data) => {
       console.log('[VoiceSession] TTS chunk ready:', { audio_url: data.audio_url, chunk_index: data.chunk_index, firstChunk: firstChunkRef.current });
       // #242: this node's audio already landed whole via REST recovery —
@@ -761,7 +768,8 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
     let completedSeenAt = null;
     let catchUpTimer = null;
 
-    // foreground: called because the page became visible again.
+    // foreground: called because the user returned to the page (shown
+    // again, restored from the back/forward cache, back online).
     const reconcile = async ({ foreground = false } = {}) => {
       if (cancelled) return;
       if (
@@ -797,9 +805,12 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
               // Part of this node's audio already arrived via SSE — a
               // full-file load would duplicate it. Reconnect and let the
               // replayed stream fill the gap (and fire all_complete,
-              // which advances the chain).
-              console.warn('[VoiceSession] TTS SSE stalled mid-stream — reconnecting for node', llmNodeId);
-              ttsSSERef.current.reconnect();
+              // which advances the chain). On a return to the page the
+              // stream has just been reconnected (reconnectOnReturn).
+              if (!foreground) {
+                console.warn('[VoiceSession] TTS SSE stalled mid-stream — reconnecting for node', llmNodeId);
+                ttsSSERef.current.reconnect();
+              }
             } else if (restDeliveredForNodeRef.current !== llmNodeId) {
               console.warn('[VoiceSession] TTS SSE silent but generation complete — REST delivery for node', llmNodeId);
               setTtsGenerating(false);
@@ -817,15 +828,12 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
     };
 
     const intervalId = setInterval(reconcile, TTS_RECOVERY_POLL_MS);
-    const handleVisibilityChange = () => {
-      if (document.visibilityState === 'visible') reconcile({ foreground: true });
-    };
-    document.addEventListener('visibilitychange', handleVisibilityChange);
+    const stopListening = onPageReturn(() => reconcile({ foreground: true }));
     return () => {
       cancelled = true;
       clearInterval(intervalId);
       clearTimeout(catchUpTimer);
-      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      stopListening();
     };
   }, [phase, ttsGenerating, llmNodeId]);
 

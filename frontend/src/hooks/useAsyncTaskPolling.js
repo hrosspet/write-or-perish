@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import api from '../api';
+import { onPageReturn } from '../utils/pageReturn';
 
 /**
  * Custom hook for polling async task status
@@ -34,8 +35,17 @@ export function useAsyncTaskPolling(endpoint, options = {}) {
   // Track current endpoint to discard stale in-flight responses
   const currentEndpointRef = useRef(endpoint);
   currentEndpointRef.current = endpoint;
+  // Requests are numbered, and an answer older than the one already
+  // applied is dropped (#374): a request sent before the phone suspended
+  // the page can be answered after the one sent on return, and would put
+  // an earlier state back ("processing" over "completed").
+  const requestSeqRef = useRef(0);
+  const appliedSeqRef = useRef(0);
+  // maxDuration ran out before a final answer. The task may still finish,
+  // so a return to the page starts polling again (see below).
+  const timedOutRef = useRef(false);
 
-  const stopPolling = useCallback(() => {
+  const clearTimers = useCallback(() => {
     if (intervalRef.current) {
       clearInterval(intervalRef.current);
       intervalRef.current = null;
@@ -44,8 +54,12 @@ export function useAsyncTaskPolling(endpoint, options = {}) {
       clearTimeout(timeoutRef.current);
       timeoutRef.current = null;
     }
-    setIsPolling(false);
   }, []);
+
+  const stopPolling = useCallback(() => {
+    clearTimers();
+    setIsPolling(false);
+  }, [clearTimers]);
 
   const poll = useCallback(async () => {
     if (!endpoint) {
@@ -54,6 +68,8 @@ export function useAsyncTaskPolling(endpoint, options = {}) {
     }
     // Capture the endpoint at call time to detect stale responses
     const requestEndpoint = endpoint;
+    requestSeqRef.current += 1;
+    const seq = requestSeqRef.current;
     try {
       // Use shorter timeout for status polling (10 seconds instead of 60)
       // Add Cache-Control header to prevent Safari from caching polling responses
@@ -66,6 +82,11 @@ export function useAsyncTaskPolling(endpoint, options = {}) {
       if (currentEndpointRef.current !== requestEndpoint) {
         return;
       }
+      // ...or if a later request was answered first.
+      if (seq < appliedSeqRef.current) {
+        return;
+      }
+      appliedSeqRef.current = seq;
 
       const result = response.data;
       consecutiveErrorsRef.current = 0;
@@ -94,15 +115,13 @@ export function useAsyncTaskPolling(endpoint, options = {}) {
     }
   }, [endpoint, stopPolling, maxConsecutiveErrors]);
 
-  const startPolling = useCallback(() => {
-    if (isPolling) return;
-    if (!endpoint) {
-      console.error('Cannot start polling: endpoint is null or undefined');
-      return;
-    }
-
+  // Poll now, then every *interval* until a final answer or maxDuration.
+  const beginPolling = useCallback(() => {
+    clearTimers();
     setIsPolling(true);
     setError(null);
+    consecutiveErrorsRef.current = 0;
+    timedOutRef.current = false;
 
     // Poll immediately
     poll();
@@ -113,24 +132,29 @@ export function useAsyncTaskPolling(endpoint, options = {}) {
     // Set up timeout to stop polling after max duration
     if (maxDuration) {
       timeoutRef.current = setTimeout(() => {
-        stopPolling();
+        clearTimers();
+        setIsPolling(false);
+        timedOutRef.current = true;
         setError('Polling timeout - task took too long');
       }, maxDuration);
     }
-  }, [isPolling, endpoint, poll, interval, maxDuration, stopPolling]);
+  }, [clearTimers, poll, interval, maxDuration]);
+
+  const startPolling = useCallback(() => {
+    if (isPolling) return;
+    if (!endpoint) {
+      console.error('Cannot start polling: endpoint is null or undefined');
+      return;
+    }
+    beginPolling();
+  }, [isPolling, endpoint, beginPolling]);
 
   // Auto-start polling if enabled
   useEffect(() => {
     // Always stop any existing polling when effect runs
-    if (intervalRef.current) {
-      clearInterval(intervalRef.current);
-      intervalRef.current = null;
-    }
-    if (timeoutRef.current) {
-      clearTimeout(timeoutRef.current);
-      timeoutRef.current = null;
-    }
+    clearTimers();
     setIsPolling(false);
+    timedOutRef.current = false;
 
     // Reset stale state from previous endpoint before starting new polling
     setStatus(null);
@@ -139,60 +163,31 @@ export function useAsyncTaskPolling(endpoint, options = {}) {
 
     // Start new polling if enabled and endpoint is set
     if (enabled && endpoint) {
-      setIsPolling(true);
-      setError(null);
-      consecutiveErrorsRef.current = 0;
-
-      // Poll immediately
-      poll();
-
-      // Set up interval
-      intervalRef.current = setInterval(poll, interval);
-
-      // Set up timeout to stop polling after max duration
-      if (maxDuration) {
-        timeoutRef.current = setTimeout(() => {
-          if (intervalRef.current) {
-            clearInterval(intervalRef.current);
-            intervalRef.current = null;
-          }
-          if (timeoutRef.current) {
-            clearTimeout(timeoutRef.current);
-            timeoutRef.current = null;
-          }
-          setIsPolling(false);
-          setError('Polling timeout - task took too long');
-        }, maxDuration);
-      }
+      beginPolling();
     }
 
     // Cleanup on unmount or when dependencies change
     return () => {
-      if (intervalRef.current) {
-        clearInterval(intervalRef.current);
-        intervalRef.current = null;
-      }
-      if (timeoutRef.current) {
-        clearTimeout(timeoutRef.current);
-        timeoutRef.current = null;
-      }
+      clearTimers();
       setIsPolling(false);
     };
-  }, [enabled, endpoint, poll, interval, maxDuration]);
+  }, [enabled, endpoint, beginPolling, clearTimers]);
 
-  // iOS throttles setInterval when backgrounded. Poll immediately on foreground.
+  // The user is back on the page (#374). A phone suspends a backgrounded
+  // page's timers, so while polling, poll now rather than at the next
+  // tick. A poller that ran out of time while the page was away, and is
+  // still enabled (the page still waits), starts again. One stopped by
+  // maxConsecutiveErrors stays stopped: its caller handles that error.
   useEffect(() => {
-    if (!isPolling) return;
-
-    const handleVisibilityChange = () => {
-      if (document.visibilityState === 'visible') {
+    if (!endpoint) return undefined;
+    return onPageReturn(() => {
+      if (intervalRef.current) {
         poll();
+      } else if (enabled && timedOutRef.current) {
+        beginPolling();
       }
-    };
-
-    document.addEventListener('visibilitychange', handleVisibilityChange);
-    return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
-  }, [isPolling, poll]);
+    });
+  }, [endpoint, enabled, poll, beginPolling]);
 
   return {
     status,

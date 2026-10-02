@@ -5,6 +5,7 @@ import { useToast } from '../contexts/ToastContext';
 import api from '../api';
 import { isSpendCapError, spendCapToastMessage } from '../utils/spendCap';
 import { isAiUsageRefusedError, aiUsageRefusalScope } from '../utils/aiUsage';
+import { onPageReturn } from '../utils/pageReturn';
 
 /**
  * Play an error sound using the Web Audio API.
@@ -568,15 +569,14 @@ export function useStreamingTranscription(options = {}) {
       }
     };
 
-    // On foreground, poll immediately (iOS resumes JS but SSE is dead)
-    const handleVisibilityChange = () => {
-      if (document.visibilityState !== 'visible') return;
+    // On a return to the page (shown again, restored from the
+    // back/forward cache, back online), poll immediately (iOS resumes JS
+    // but SSE is dead)
+    const stopListening = onPageReturn(() => {
       // Clear any pending delayed poll and check immediately
       if (pollTimer) clearTimeout(pollTimer);
       checkStatus();
-    };
-
-    document.addEventListener('visibilitychange', handleVisibilityChange);
+    });
 
     // Start first poll after a short delay (give SSE a chance to deliver first)
     pollTimer = setTimeout(checkStatus, 5000);
@@ -584,7 +584,7 @@ export function useStreamingTranscription(options = {}) {
     return () => {
       cancelled = true;
       if (pollTimer) clearTimeout(pollTimer);
-      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      stopListening();
     };
   }, [sessionState, disconnectSSE]);
 
