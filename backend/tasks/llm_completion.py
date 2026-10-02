@@ -228,11 +228,33 @@ def _provider_failure(exc):
     import openai
     classes = [anthropic.APIError, openai.APIError, httpx.TransportError]
     providers = sys.modules.get("backend.llm_providers")
-    for name in ("ProviderUnavailableError", "OpenAIStreamError"):
+    for name in ("ProviderUnavailableError", "ProviderAccountError",
+                 "OpenAIStreamError"):
         cls = getattr(providers, name, None)
         if isinstance(cls, type) and issubclass(cls, BaseException):
             classes.append(cls)
     return isinstance(exc, tuple(classes))
+
+
+def _account_failure(exc):
+    """Whether *exc* is a call refused for an account reason (#369):
+    retrying won't help until someone fixes the account, and the error
+    already says so to the user. Looked up at call time, like
+    _provider_failure."""
+    cls = getattr(sys.modules.get("backend.llm_providers"),
+                  "ProviderAccountError", None)
+    return (isinstance(cls, type) and issubclass(cls, BaseException)
+            and isinstance(exc, cls))
+
+
+def _raise_for_account_failure(exc, provider, model=None, model_call=True):
+    """llm_providers.raise_for_account_failure for a provider key
+    ("anthropic" / "openai"); a no-op where the module is stubbed."""
+    providers = sys.modules.get("backend.llm_providers")
+    raise_for = getattr(providers, "raise_for_account_failure", None)
+    names = getattr(providers, "PROVIDER_NAMES", None)
+    if callable(raise_for) and isinstance(names, dict):
+        raise_for(exc, names.get(provider, provider), model, model_call)
 
 
 def _start_voice_tts_stream(llm_node, user_id, source_mode):
@@ -2484,6 +2506,13 @@ def _ca_batch_poll(task, llm_node, parent_node, meta, entry, user_id):
             raise
         _withdraw_batch_reply(llm_node, meta, entry)
         return "withdrawn", None
+    except Exception as e:
+        # A poll refused for an account reason (a revoked key, say) is
+        # reported (#369) and, like any other failed poll, asked again by
+        # the task's error handler: the batch is already submitted and
+        # billed, and the next poll after the fix collects it.
+        _raise_for_account_failure(e, provider, model_call=False)
+        raise
     # Heartbeat for resume_stuck_feed_batches: a poll that stops
     # arriving means the scheduled retry died with its worker.
     now = datetime.utcnow().isoformat(timespec="seconds")
@@ -2537,9 +2566,16 @@ def _ca_batch_submit(task, llm_node, model_id, api_model, messages,
         DEFAULT_MAX_OUTPUT_TOKENS)
     custom_id = f"node-{llm_node.id}"
     from backend.utils.ca_feed import FEED_SCHEMA
-    batch_id = submit_one(
-        api_key, custom_id, api_model, messages, max_tokens,
-        output_schema=FEED_SCHEMA if ca_refs is not None else None)
+    try:
+        batch_id = submit_one(
+            api_key, custom_id, api_model, messages, max_tokens,
+            output_schema=FEED_SCHEMA if ca_refs is not None else None)
+    except Exception as e:
+        # A spend limit, billing or the key refuses the submit like a
+        # live call: the user gets the readable error, the admin an
+        # alert (#369).
+        _raise_for_account_failure(e, provider, api_model)
+        raise
     meta, _ = _batch_meta(llm_node)
     meta.append({
         "name": "_batch", "batch_id": batch_id, "custom_id": custom_id,
@@ -3538,6 +3574,11 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         "Reply for node %s cut off by a provider failure "
                         "after %d chars", target_node.id, len(reply.text),
                         exc_info=True)
+                    if _account_failure(e):
+                        # Asking again won't get the rest (#369): the
+                        # note says why instead (also spoken).
+                        return reply.cut_off(
+                            f"\n\n*(The reply was cut off here. {e})*")
                     return reply.cut_off()
 
             MAX_RETRIES = 3
@@ -4629,14 +4670,16 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     # continuation node at 'processing' forever. Retry a
                     # couple of times; a terminal failure raises and the
                     # task-level handler fails THIS node (not the completed
-                    # interim).
+                    # interim). An account failure (#369) is not retried:
+                    # it lasts until someone fixes the account.
                     response = None
                     for retry_delay in (*CONTINUATION_RETRY_DELAYS, None):
                         try:
                             response = _call_continuation()
                             break
                         except Exception as cont_exc:
-                            if retry_delay is None:
+                            if (retry_delay is None
+                                    or _account_failure(cont_exc)):
                                 raise
                             logger.warning(
                                 "Continuation call failed (%s); retrying "
@@ -4686,7 +4729,10 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                                          max_retries=CA_BATCH_MAX_POLLS)
                     except MaxRetriesExceededError as cap:
                         error = cap
+                        # An account failure's text is already the
+                        # user's message (#369).
                         error_message = (
+                            str(e) if _account_failure(e) else
                             f"Gave up on batch {batch_id} after "
                             f"{CA_BATCH_MAX_POLLS} polls; last error: {e}")
             logger.error(f"LLM completion error for node {llm_node_id}: {error_message}", exc_info=True)

@@ -30,7 +30,7 @@ from backend.extensions import db
 from backend.models import (
     APICostLog, ExternalDigestBatchJob, ExternalItem, User, UserArtifact,
 )
-from backend.llm_providers import LLMProvider
+from backend.llm_providers import LLMProvider, ProviderAccountError
 from backend.utils.api_keys import get_api_keys_for_usage
 from backend.utils.cost import llm_cost_log_fields
 from backend.utils.refusal_backoff import REFUSED_REF
@@ -471,6 +471,10 @@ def rebuild_external_digest(self, user_id, force=False):
             logger.warning(
                 "External digest generation failed for user %s: %s",
                 user_id, exc)
+            # An account failure (#369) lasts until someone fixes the
+            # account: no retry; it is already reported.
+            if isinstance(exc, ProviderAccountError):
+                raise
             raise self.retry(exc=exc)
 
         digest_text = (response.get("content") or "").strip()

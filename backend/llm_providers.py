@@ -103,35 +103,212 @@ class ProviderUnavailableError(RuntimeError):
         self.provider = provider
 
 
-def _budget_exhausted(exc):
-    """A 429 that means a spent budget, not a rate limit. It lasts until
-    billing changes or the month resets, so neither a retry nor a few
-    minutes' wait helps. OpenAI: ``insufficient_quota``. Anthropic: the
-    usage tier's monthly spend cap, a ``rate_limit_error`` marked
-    ``details.error_code == "enforced_spend_limit_reached"`` (docs: Rate
-    limits → Reaching your spend cap). A spend limit set in the Console
-    is a 400 instead, which nothing here treats as temporary anyway."""
-    if "insufficient_quota" in (getattr(exc, "code", None),
-                                getattr(exc, "type", None)):
-        return True
+class ProviderAccountError(RuntimeError):
+    """A call the provider refused for a reason on Loore's side that
+    waiting won't fix (#369, #360): a spend limit or the provider's
+    monthly cap, billing or credits, an API key that is invalid, revoked
+    or without access, or a model id the provider doesn't serve.
+
+    The message is written for the user, as the node's error, and names
+    no provider; it is the same whatever the cause, so a copy rebuilt
+    from its args (Celery's stored task result) reads the same.
+    ``provider``, ``kind`` and ``model`` say what happened, for the admin
+    alert (backend/utils/provider_alerts.py); the provider's own error is
+    the ``__cause__``. Nothing retries it, and no other provider is tried
+    in its place (voice review, Peter, 2026-10-02)."""
+
+    USER_MESSAGE = (
+        "AI replies are temporarily unavailable. This is a problem on "
+        "Loore's side, not yours, and it has been reported.")
+
+    def __init__(self, provider=None, kind=None, model=None):
+        super().__init__(self.USER_MESSAGE)
+        self.provider = provider
+        self.kind = kind
+        self.model = model
+
+
+# Display names for the provider keys of SUPPORTED_MODELS, as the live
+# calls pass them to _retry_mid_stream.
+PROVIDER_NAMES = {"anthropic": "Anthropic", "openai": "OpenAI"}
+
+# The account-failure kinds, in the words the admin alert uses.
+ACCOUNT_FAILURE_KINDS = {
+    "spend_limit": "a spend limit set in the provider's console was reached",
+    "usage_cap": "the provider's own monthly usage cap was reached",
+    "billing": "billing, credits or quota",
+    "auth": "the API key is invalid, revoked or expired",
+    "permission": "the API key has no access to this resource",
+    "model_not_found": "the model id is unknown or no longer served",
+}
+
+# OpenAI error codes for an account that can't be billed for more calls.
+# Source: OpenAI API docs, Guides → Error codes (2026-10): 429
+# credit_balance_exhausted, organization_spend_limit_exceeded,
+# project_spend_limit_exceeded, organization_usage_limit_exceeded, and
+# "the broader error.type can still be insufficient_quota" (older
+# responses also carry it as the code). model_not_found: the 404 for a
+# model that "does not exist or you do not have access to it" (not in the
+# docs' table; as raised by the SDK in langgenius/dify#13036 and
+# Aider-AI/aider#2030).
+_OPENAI_ACCOUNT_CODES = {
+    "insufficient_quota": "billing",
+    "credit_balance_exhausted": "billing",
+    "organization_spend_limit_exceeded": "spend_limit",
+    "project_spend_limit_exceeded": "spend_limit",
+    "organization_usage_limit_exceeded": "usage_cap",
+    "model_not_found": "model_not_found",
+}
+
+
+def _anthropic_error_object(exc):
+    """The ``error`` object of an Anthropic error body ({type, message,
+    details?}), or {}. The SDK keeps the whole body on the exception."""
     body = getattr(exc, "body", None)
     error = body.get("error") if isinstance(body, dict) else None
-    details = error.get("details") if isinstance(error, dict) else None
-    return (isinstance(details, dict)
-            and details.get("error_code") == "enforced_spend_limit_reached")
+    return error if isinstance(error, dict) else {}
+
+
+def _anthropic_account_kind(status, error, model_call):
+    """Anthropic's account failures, from the HTTP status and the body's
+    error object. A mid-stream error event has status 200, so the error
+    type decides there. Sources: Claude API docs, API → Errors (HTTP
+    errors) and Rate limits → Spend limits."""
+    etype = error.get("type")
+    message = error.get("message") or ""
+    details = error.get("details")
+    if etype == "invalid_request_error":
+        # A spend limit set in the Console (organization or workspace):
+        # a 400 whose message "begins `You have reached your specified API
+        # usage limits`, or `You have reached your specified workspace API
+        # usage limits`" (Rate limits → Setting your own spend limit).
+        if message.startswith("You have reached your specified"):
+            return "spend_limit"
+        # Prepaid credits used up: a 400 with this message, not the 402
+        # billing_error (continuedev/continue#5499, anthropics/claude-code
+        # #54839).
+        if message.startswith("Your credit balance is too low"):
+            return "billing"
+    # The usage tier's monthly spend cap: a 429 rate_limit_error marked
+    # details.error_code == "enforced_spend_limit_reached", with no
+    # retry-after (Rate limits → Reaching your spend cap).
+    if (isinstance(details, dict)
+            and details.get("error_code") == "enforced_spend_limit_reached"):
+        return "usage_cap"
+    # Errors → HTTP errors: 402 billing_error, 401 authentication_error,
+    # 403 permission_error, 404 not_found_error.
+    if etype == "billing_error" or status == 402:
+        return "billing"
+    if etype == "authentication_error" or status == 401:
+        return "auth"
+    if etype == "permission_error" or status == 403:
+        return "permission"
+    # A Messages request has a fixed path and no resource id in its URL,
+    # so its 404 is the model id; a 404 elsewhere (a batch id) is not.
+    if model_call and (etype == "not_found_error" or status == 404):
+        return "model_not_found"
+    return None
+
+
+def _openai_account_kind(status, code, etype):
+    """OpenAI's account failures, from the HTTP status (None for an error
+    that arrived in the stream) and the error's code and type. Sources:
+    OpenAI API docs, Guides → Error codes (401 authentication, 403
+    permission, the 429 billing codes in _OPENAI_ACCOUNT_CODES)."""
+    if code in _OPENAI_ACCOUNT_CODES:
+        return _OPENAI_ACCOUNT_CODES[code]
+    if etype == "insufficient_quota":
+        return "billing"
+    if status == 401:
+        return "auth"
+    if status == 403:
+        return "permission"
+    return None
+
+
+def account_failure_kind(exc, model_call=True):
+    """The kind of account failure *exc* is (a key of
+    ACCOUNT_FAILURE_KINDS), or None for any other error. *model_call*:
+    the request named a model (a Messages / Responses call or a batch
+    submit), so an Anthropic 404 means the model id."""
+    if isinstance(exc, anthropic.APIStatusError):
+        return _anthropic_account_kind(
+            exc.status_code, _anthropic_error_object(exc), model_call)
+    if isinstance(exc, openai.APIStatusError):
+        return _openai_account_kind(
+            exc.status_code, getattr(exc, "code", None),
+            getattr(exc, "type", None))
+    if isinstance(exc, OpenAIStreamError) or _openai_mid_stream_error(exc):
+        return _openai_account_kind(
+            None, getattr(exc, "code", None), getattr(exc, "type", None))
+    return None
+
+
+def provider_error_detail(exc):
+    """What the provider said, for the admin alert: HTTP status, error
+    type and code, message, request id. Account errors carry no user
+    content."""
+    body = getattr(exc, "body", None)
+    body = body if isinstance(body, dict) else {}
+    detail = {"status": getattr(exc, "status_code", None),
+              "request_id": (getattr(exc, "request_id", None)
+                             or body.get("request_id"))}
+    if isinstance(exc, anthropic.APIError):
+        error = _anthropic_error_object(exc)
+        details = error.get("details")
+        detail.update(
+            type=error.get("type"),
+            code=(details.get("error_code")
+                  if isinstance(details, dict) else None),
+            message=error.get("message") or str(exc))
+    else:
+        # The OpenAI SDK keeps the body's ``error`` object as the body.
+        detail.update(type=getattr(exc, "type", None),
+                      code=getattr(exc, "code", None),
+                      message=body.get("message") or str(exc))
+    return detail
+
+
+def note_account_failure(exc, provider, model=None, model_call=True):
+    """If *exc* is an account failure, report it — one admin email and one
+    Sentry event per cause per throttle window
+    (backend/utils/provider_alerts.py) — and return the
+    ProviderAccountError to raise in its place; otherwise None. Reporting
+    never raises: a broken alert must not hide the failure itself."""
+    kind = account_failure_kind(exc, model_call=model_call)
+    if kind is None:
+        return None
+    err = ProviderAccountError(provider, kind, model)
+    try:
+        from backend.utils.provider_alerts import report_account_failure
+        report_account_failure(err, exc)
+    except Exception:  # pragma: no cover — reporting must not mask it
+        logger.exception("Reporting the %s account failure (%s) failed",
+                         provider, kind)
+    return err
+
+
+def raise_for_account_failure(exc, provider, model=None, model_call=True):
+    """Raise ProviderAccountError from *exc* (reported, see
+    note_account_failure) when *exc* is an account failure; otherwise
+    return, for the caller to handle *exc* as before."""
+    err = note_account_failure(exc, provider, model, model_call)
+    if err is not None:
+        raise err from exc
 
 
 def _transient_request_error(exc):
     """A request-level failure that is usually temporary, raised once the
     SDK's own retries have run out: no connection (or a timeout), a 429
     rate limit, or a 5xx (Anthropic's 529 overload among them). A 429 for
-    an exhausted budget is left out (_budget_exhausted)."""
+    a spent budget is an account failure instead (account_failure_kind):
+    it lasts until billing changes or the month resets."""
     if isinstance(exc, (anthropic.APIConnectionError,
                         openai.APIConnectionError)):
         return True
     if not isinstance(exc, (anthropic.APIStatusError, openai.APIStatusError)):
         return False
-    if _budget_exhausted(exc):
+    if account_failure_kind(exc) is not None:
         return False
     return exc.status_code == 429 or exc.status_code >= 500
 
@@ -158,11 +335,12 @@ def _retryable_stream_error(exc):
     """A failure that happened after the stream started, which the SDK does
     not retry: a raw transport error from reading the body, an Anthropic
     SSE error event (raised as APIStatusError with the stream's 200
-    status), or an OpenAI failure event with a transient code. An
-    exhausted budget is never retried, whichever way it arrives."""
+    status), or an OpenAI failure event with a transient code. An account
+    failure (a spent budget among them) is never retried, whichever way
+    it arrives."""
     if isinstance(exc, httpx.TransportError):
         return True
-    if _budget_exhausted(exc):
+    if account_failure_kind(exc) is not None:
         return False
     if (isinstance(exc, anthropic.APIStatusError)
             and exc.status_code == 200 and isinstance(exc.body, dict)):
@@ -197,18 +375,21 @@ class StreamListener:
         return True
 
 
-def _retry_mid_stream(call, provider, listener=None):
+def _retry_mid_stream(call, provider, listener=None, model=None):
     """Run ``call`` (one streamed request, collected to its final result),
     retrying mid-stream failures per STREAM_RETRY_DELAYS. Request-level
     errors are left to the SDK's own retries so the two don't stack. A
     temporary failure that outlasts either kind of retry raises
     ProviderUnavailableError instead of the provider's raw error, which
-    would otherwise reach the user as is. A retry restarts the reply, so
-    a *listener* is asked first (StreamListener.on_restart)."""
+    would otherwise reach the user as is; an account failure raises
+    ProviderAccountError at once, reported to the admin (*model*, the
+    API model id, goes in the report). A retry restarts the reply, so a
+    *listener* is asked first (StreamListener.on_restart)."""
     for retry_delay in (*STREAM_RETRY_DELAYS, None):
         try:
             return call()
         except Exception as e:
+            raise_for_account_failure(e, provider, model)
             if _transient_request_error(e):
                 # The SDK has already retried it; not again here.
                 raise ProviderUnavailableError(provider) from e
@@ -515,7 +696,7 @@ class LLMProvider:
                 client = OpenAI(api_key=api_key, http_client=http_client)
                 return _retry_mid_stream(
                     lambda: _openai_final_response(client, kwargs, listener),
-                    "OpenAI", listener)
+                    "OpenAI", listener, model=model)
 
         # A request error arrives as a 400 before the stream starts, or
         # after it as an error the SDK raises or a response.failed event
@@ -801,7 +982,8 @@ class LLMProvider:
                             _anthropic_event_to_listener(event, listener)
                     return stream.get_final_message()
 
-            response = _retry_mid_stream(_collect, "Anthropic", listener)
+            response = _retry_mid_stream(_collect, "Anthropic", listener,
+                                         model=model)
         except anthropic.BadRequestError as e:
             error_msg = str(e)
             match = re.search(

@@ -43,6 +43,19 @@ class BatchItemCancelled(BatchItemFailed):
     the poll that asked for the cancel."""
 
 
+def _note_account_failure(exc, provider, model=None):
+    """Report a submit refused for an account reason — a spend limit,
+    billing, the key (#369) — to the admin, as a live call's would be.
+    True when it was one. Background batches have no user to tell; the
+    alert is what makes someone fix the account."""
+    try:
+        from backend.llm_providers import note_account_failure
+        return note_account_failure(exc, provider, model) is not None
+    except Exception:  # pragma: no cover — never mask the submit error
+        log.exception("Classifying the batch submit error failed")
+        return False
+
+
 def apply_batch_key_override(api_keys, config):
     """Overlay the batch-specific OpenAI key (``OPENAI_API_KEY_BATCH``) if set.
 
@@ -119,7 +132,11 @@ def batch_submit(requests_by_provider, api_keys, phase=None):
             log.info(f"Anthropic batch submitted: {batch.id} "
                      f"({len(batch_requests)} requests)")
         except Exception as e:
-            log.error(f"Anthropic batch submission failed: {e}")
+            if _note_account_failure(e, "Anthropic"):
+                log.warning(f"Anthropic batch submission refused for an "
+                            f"account reason (reported): {e}")
+            else:
+                log.error(f"Anthropic batch submission failed: {e}")
 
     # --- OpenAI: one batch per model (all requests must share a model) ---
     openai_reqs = requests_by_provider.get("openai", [])
@@ -166,8 +183,13 @@ def batch_submit(requests_by_provider, api_keys, phase=None):
                 log.info(f"OpenAI batch submitted for {oai_model}: "
                          f"{batch.id} ({len(reqs)} requests)")
             except Exception as e:
-                log.error(f"OpenAI batch submission failed for "
-                          f"{oai_model}: {e}")
+                if _note_account_failure(e, "OpenAI", oai_model):
+                    log.warning(f"OpenAI batch submission for {oai_model} "
+                                f"refused for an account reason "
+                                f"(reported): {e}")
+                else:
+                    log.error(f"OpenAI batch submission failed for "
+                              f"{oai_model}: {e}")
                 if os.path.exists(tmp_path):
                     os.unlink(tmp_path)
 

@@ -112,6 +112,45 @@ def test_batch_submit_openai(monkeypatch, tmp_path):
     assert client.batches.create.call_args.kwargs["completion_window"] == "24h"
 
 
+def test_batch_submit_reports_an_account_refusal(monkeypatch):
+    """A background batch refused for an account reason (#369) has no user
+    to tell: the submit fails as before (no batch id) and the admin is
+    alerted through the same report a live call makes."""
+    import anthropic as real_anthropic
+    import httpx
+    import backend
+    # The real provider module, imported before the fake SDKs go in.
+    monkeypatch.setattr(backend, "llm_providers",
+                        getattr(backend, "llm_providers", None),
+                        raising=False)
+    monkeypatch.delitem(sys.modules, "backend.llm_providers", raising=False)
+    import backend.llm_providers  # noqa: F401
+    import backend.utils.provider_alerts as alerts
+    reported = []
+    monkeypatch.setattr(alerts, "report_account_failure",
+                        lambda err, exc: reported.append((err, exc)))
+    body = {"type": "error", "error": {
+        "type": "invalid_request_error",
+        "message": "You have reached your specified API usage limits. You "
+                   "will regain access on 2026-11-01 at 00:00 UTC."}}
+    raw = real_anthropic.Anthropic(api_key="k")._make_status_error(
+        str(body), body=body, response=httpx.Response(
+            400, request=httpx.Request(
+                "POST", "https://api.anthropic.com/v1/messages/batches")))
+    client = MagicMock()
+    client.messages.batches.create.side_effect = raw
+    _install_fake_sdks(monkeypatch, anthropic_client=client)
+
+    out = batch_submit({"anthropic": [{
+        "custom_id": "digest:1", "model_id": "claude", "api_model": "claude-x",
+        "messages": [{"role": "user", "content": "hi"}], "max_tokens": 500,
+    }]}, KEYS, "digest")
+
+    assert out == {}
+    assert [(e.provider, e.kind, x) for e, x in reported] == [
+        ("Anthropic", "spend_limit", raw)]
+
+
 # ── check + collect ───────────────────────────────────────────────────────
 
 def test_collect_anthropic_succeeded(monkeypatch):

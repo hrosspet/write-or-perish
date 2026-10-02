@@ -24,6 +24,11 @@ def providers(monkeypatch):
     monkeypatch.delitem(sys.modules, "backend.llm_providers", raising=False)
     import backend.llm_providers as mod
     monkeypatch.setattr(mod, "STREAM_RETRY_DELAYS", (0, 0))
+    # Account failures (#369) are reported to the admin; never for real
+    # here (test_provider_account_failures.py covers the reporting).
+    import backend.utils.provider_alerts as alerts
+    monkeypatch.setattr(alerts, "report_account_failure",
+                        lambda err, exc: None)
     return mod
 
 
@@ -169,19 +174,37 @@ def test_request_level_transient_error_is_readable_not_retried(
 
 
 @pytest.mark.parametrize("error", [
-    # A spend-limit pause lasts until the month resets: not "temporary".
+    # A spend-limit pause lasts until the month resets: not "temporary",
+    # and an account failure (#369): the user is told it's on Loore's
+    # side, without the provider's raw text.
     _sdk_status_error(anthropic.Anthropic, 400, SPEND_LIMIT),
     _sdk_status_error(anthropic.Anthropic, 429, SPEND_CAP),
     _status_error(200, SPEND_CAP),  # the same, if it came mid-stream
     _sdk_status_error(anthropic.Anthropic, 401, {"type": "error", "error": {
         "type": "authentication_error", "message": "invalid x-api-key"}}),
 ])
-def test_request_level_lasting_error_stays_raw(providers, monkeypatch,
-                                               error):
+def test_request_level_account_error_is_readable_not_retried(
+        providers, monkeypatch, error):
     calls = []
     monkeypatch.setattr(providers, "Anthropic", _client(
         [error, _message()], calls))
-    with pytest.raises(anthropic.APIStatusError) as exc_info:
+    with pytest.raises(providers.ProviderAccountError) as exc_info:
+        providers.LLMProvider._call_anthropic("m", MSGS, "k")
+    assert exc_info.value.__cause__ is error
+    assert str(exc_info.value) == providers.ProviderAccountError.USER_MESSAGE
+    assert len(calls) == 1
+
+
+def test_request_level_bad_request_stays_raw(providers, monkeypatch):
+    # Any other 4xx is a bug in a request we built: the raw text is what
+    # a bug report needs (#369, "leave every other 4xx raw").
+    error = _sdk_status_error(anthropic.Anthropic, 400, {
+        "type": "error", "error": {"type": "invalid_request_error",
+                                   "message": "messages: field required"}})
+    calls = []
+    monkeypatch.setattr(providers, "Anthropic", _client(
+        [error, _message()], calls))
+    with pytest.raises(anthropic.BadRequestError) as exc_info:
         providers.LLMProvider._call_anthropic("m", MSGS, "k")
     assert exc_info.value is error
     assert len(calls) == 1
@@ -316,22 +339,22 @@ def _oai_status_error(status, type_, code):
         "message": "boom", "type": type_, "param": None, "code": code}})
 
 
-@pytest.mark.parametrize("error,readable", [
-    (_oai_status_error(429, "requests", "rate_limit_exceeded"), True),
-    (_oai_status_error(503, "server_error", None), True),
-    # An exhausted quota needs billing, not a few minutes' wait.
+@pytest.mark.parametrize("error,expected", [
+    (_oai_status_error(429, "requests", "rate_limit_exceeded"),
+     "ProviderUnavailableError"),
+    (_oai_status_error(503, "server_error", None),
+     "ProviderUnavailableError"),
+    # An exhausted quota needs billing, not a few minutes' wait (#369).
     (_oai_status_error(429, "insufficient_quota", "insufficient_quota"),
-     False),
+     "ProviderAccountError"),
 ])
 def test_openai_request_level_error(providers, monkeypatch, error,
-                                    readable):
+                                    expected):
     calls = []
     monkeypatch.setattr(providers, "OpenAI", _oai_client(
         [[error], [_event("response.completed",
                           response=_oai_response())]], calls))
-    expected = (providers.ProviderUnavailableError if readable
-                else openai.RateLimitError)
-    with pytest.raises(expected):
+    with pytest.raises(getattr(providers, expected)):
         _oai_call(providers)
     assert len(calls) == 1
 

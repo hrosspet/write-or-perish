@@ -48,6 +48,15 @@ class Config:
     # Recipient for spend alerts (admin inbox also used for signup notices).
     SPEND_ALERT_EMAIL = os.environ.get("SPEND_ALERT_EMAIL", "signup@loore.org")
 
+    # Model calls that fail for an account reason (spend limit, billing,
+    # API key, unknown model; #369, #360) email SPEND_ALERT_EMAIL once per
+    # cause per this many seconds (backend/utils/provider_alerts.py).
+    # Default 6 h: a cause that stays broken is re-sent at most 4x a day.
+    PROVIDER_ACCOUNT_ALERT_THROTTLE_SECONDS = int(
+        os.environ.get("PROVIDER_ACCOUNT_ALERT_THROTTLE_SECONDS", "21600")
+        or "21600"
+    )
+
     # Per-user monthly spend hard cap in USD, summed across ALL providers
     # (issue #85 follow-up; free-alpha guardrail). 0 (default) disables the
     # cap. When a user's month-to-date spend reaches this, they are
