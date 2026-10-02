@@ -42,10 +42,12 @@ def _profile_status_map():
     """{user_id: {versions, last_generation_type, last_created_at, state}}
     in two grouped queries. state: "complete" when nothing is in flight and
     the chain is at rest — the latest version is an integration (the batch
-    rebuild's final step) or a root chunk (parent None: a single-chunk
-    build, or a from-scratch rebuild that superseded older versions) —
-    "generating" while a batch job is in flight / a rebuild is requested /
-    a multi-version chain hasn't integrated yet."""
+    rebuild's final step), a root chunk (parent None: a single-chunk
+    build, or a from-scratch rebuild that superseded older versions), a
+    version the user wrote (an Edit-button save makes one on top of the
+    generated version, #183) or a revert the user made — "generating"
+    while a batch job is in flight / a rebuild is requested / a
+    multi-version chain hasn't integrated yet."""
     from backend.models import UserProfile
     counts = dict(db.session.query(
         UserProfile.user_id, func.count(UserProfile.id)
@@ -55,6 +57,7 @@ def _profile_status_map():
     latest = {p.user_id: p for p in UserProfile.query.filter(
         UserProfile.id.in_(latest_ids)).all()}
     from backend.tasks.exports import should_continue_chain, profile_is_provisional
+    from backend.utils.profile_versions import USER_REVERT
     users_by_id = {u.id: u for u in User.query.all()}
     out = {}
     for user_id, n in counts.items():
@@ -62,7 +65,13 @@ def _profile_status_map():
         u = users_by_id.get(user_id)
         in_flight = bool(u and (u.profile_batch_pending or u.profile_needs_full_regen))
         at_rest = last is not None and (
-            last.generation_type == "integration" or last.parent_profile_id is None)
+            last.generation_type == "integration"
+            or last.parent_profile_id is None
+            # The user's own version, or a revert the user made, is not a
+            # pipeline step; an edit used to show "generating" until the
+            # next update (review of #414, finding 6).
+            or last.generated_by == "user"
+            or last.generation_type == USER_REVERT)
         # A chain whose latest version is a root chunk is at rest only
         # if nothing OLDER than that version remains beyond its cutoff:
         # such data is an unfinished chain (the continue rule the seeder
