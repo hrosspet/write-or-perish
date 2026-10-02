@@ -1,10 +1,11 @@
 """backend/scripts/compare_todo_merge_models.py (#234): the offline
 comparison of todo-merge models that Peter runs on prod on his own data.
 
-It must refuse without an explicit (admin) user, never write to the DB
-(no todo versions, nodes, drafts or api_cost_log rows), rebuild a past
-merge's inputs exactly as the merge task built them, and compare outputs
-item by item. The model is always a fake here: local dev has a real key.
+It must refuse without an explicit (admin) user whose username the
+operator types, never write to the DB (no todo versions, nodes, drafts or
+api_cost_log rows), never initialise Sentry, rebuild a past merge's inputs
+exactly as the merge task built them, and compare outputs item by item.
+The model is always a fake here: local dev has a real key.
 
 Same harness as test_todo_merge_ai_usage: in-memory SQLite,
 ENCRYPTION_DISABLED, celery mocked so the modules import.
@@ -84,6 +85,31 @@ def no_real_model(monkeypatch):
         raise AssertionError("a test reached the real LLM provider")
     monkeypatch.setattr(LLMProvider, "get_completion",
                         staticmethod(_refuse))
+
+
+@pytest.fixture(autouse=True)
+def no_real_keys(monkeypatch):
+    """No test can pick up a real API key: in a worktree, importing backend
+    loads the main checkout's .env, which has them."""
+    import backend.config as config
+    for name in list(vars(config.Config)):
+        if "_API_KEY" in name and not name.startswith("TWITTER"):
+            monkeypatch.setattr(config.Config, name, None)
+            monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def typed_username(monkeypatch):
+    """Answers the username confirmation the way Peter would for his
+    account; the tests of the confirmation replace it. Returns the prompts
+    shown."""
+    asked = []
+
+    def _input(prompt=""):
+        asked.append(prompt)
+        return "peter"
+    monkeypatch.setattr("builtins.input", _input)
+    return asked
 
 
 @pytest.fixture(autouse=True)
@@ -272,6 +298,74 @@ def test_refuses_an_account_set_to_ai_usage_none(app, decrypted, tmp_path):
     assert provider.calls == [] and decrypted == []
 
 
+def test_asks_for_the_username_before_decrypting(history, decrypted,
+                                                 typed_username, tmp_path,
+                                                 capsys):
+    provider = FakeProvider(_luna_answers())
+    cmp.run(str(history["peter"].id), provider=provider,
+            out_path=str(tmp_path / "out.jsonl"))
+    assert typed_username == ["Type the username to continue: "]
+    assert "'peter'" in capsys.readouterr().out
+    assert decrypted and len(provider.calls) == 3
+
+
+@pytest.mark.parametrize("answer", ["", "Peter", "eve", "no", EOFError])
+def test_a_wrong_or_missing_username_stops_before_decrypting(
+        history, decrypted, monkeypatch, tmp_path, answer):
+    """Another admin's account passes the admin check; typing its username
+    is what makes the operator see whose data it is."""
+    def _input(prompt=""):
+        if answer is EOFError:
+            raise EOFError
+        return answer
+    monkeypatch.setattr("builtins.input", _input)
+    provider = FakeProvider(_luna_answers())
+    out = tmp_path / "out.jsonl"
+    with pytest.raises(SystemExit, match="Not confirmed"):
+        cmp.run("peter", provider=provider, out_path=str(out))
+    assert provider.calls == [] and decrypted == []
+    assert not out.exists()
+
+
+def test_dry_run_does_not_ask_and_names_the_account(history, monkeypatch,
+                                                    capsys):
+    def _input(prompt=""):
+        raise AssertionError("a dry run asked for confirmation")
+    monkeypatch.setattr("builtins.input", _input)
+    cmp.run("peter", dry_run=True, provider=FakeProvider())
+    first_line = capsys.readouterr().out.splitlines()[0]
+    assert first_line.startswith("User 'peter' (id ")
+
+
+def test_main_turns_sentry_off_before_create_app(app, monkeypatch):
+    """create_app() initialises Sentry when SENTRY_DSN is set (prod's
+    .env.production sets it). Sentry reports an unhandled exception or
+    Ctrl-C with every stack frame's local variables, which hold the
+    decrypted texts. main() removes the variable before create_app().
+    (The real create_app() can't be built here after other test modules
+    have replaced flask_login with a mock, so a stand-in records what it
+    would have read.)"""
+    import sentry_sdk
+    import backend
+    monkeypatch.setenv("SENTRY_DSN", "https://key@sentry.invalid/1")
+    inits = []
+    monkeypatch.setattr(sentry_sdk, "init",
+                        lambda *a, **k: inits.append(k.get("dsn")))
+    seen = []
+
+    def create_app():
+        seen.append(os.environ.get("SENTRY_DSN"))
+        return app
+    monkeypatch.setattr(backend, "create_app", create_app)
+    runs = []
+    monkeypatch.setattr(cmp, "run", lambda *a, **k: runs.append(a))
+    cmp.main(["--user", "peter", "--dry-run"])
+    assert seen == [None]
+    assert inits == []
+    assert "SENTRY_DSN" not in os.environ
+    assert runs == [("peter",)]
+
+
 def test_reads_only_the_passed_users_rows(history, decrypted, tmp_path):
     provider = FakeProvider(_luna_answers())
     cmp.run("peter", provider=provider, out_path=str(tmp_path / "o.jsonl"))
@@ -379,8 +473,8 @@ def test_rebuilds_each_merges_inputs_as_the_task_built_them(history,
 
 
 def test_messages_match_the_merge_task(app, monkeypatch):
-    """build_merge_messages is a copy of voice_todo_merge._run_merge's
-    message construction; this fails if the two drift apart."""
+    """build_merge_messages calls the task's own builder; this fails if
+    _run_merge stops sending what that builder returns."""
     import backend.tasks.voice_todo_merge as vtm
     import backend.utils.prompts as prompts
     peter = _user("peter", admin=True)
@@ -403,6 +497,50 @@ def test_messages_match_the_merge_task(app, monkeypatch):
     vtm._run_merge(proposal, proposal.get_content(), peter.id,
                    "claude-opus-4.6", None)
     assert sent == [cmp.build_merge_messages("THE MERGE PROMPT", P1, V1)]
+
+
+# The Todo page's Create template (TodoPage.js handleCreate), saved as is.
+TEMPLATE = "## Today\n\n- [ ] \n\n## Upcoming\n\n- [ ] \n\n## Completed recently\n"
+
+
+@pytest.mark.parametrize("previous", [None, "   ", TEMPLATE],
+                         ids=["no_list", "blank_list", "create_template"])
+def test_messages_match_the_merge_task_for_lists_without_tasks(
+        app, monkeypatch, previous):
+    """The same check for the lists that #410 / PR #417 sends another
+    message for: the script must rebuild them with that message too."""
+    import backend.tasks.voice_todo_merge as vtm
+    import backend.utils.prompts as prompts
+    peter = _user("peter", admin=True)
+    if previous is not None:
+        _version(peter, previous, T0)
+    proposal = _proposal(peter, P1, T0 + timedelta(hours=1),
+                         status="started")
+    sent = []
+
+    class Recorder:
+        @staticmethod
+        def get_completion(model_id, messages, api_keys, **kwargs):
+            sent.append(messages)
+            return {"content": M1, "truncated": False, "input_tokens": 1,
+                    "output_tokens": 1, "total_tokens": 2}
+
+    monkeypatch.setattr(vtm, "LLMProvider", Recorder)
+    monkeypatch.setattr(vtm, "get_api_keys_for_usage", lambda *a, **k: {})
+    monkeypatch.setattr(prompts, "get_user_prompt",
+                        lambda uid, key: "THE MERGE PROMPT")
+    vtm._run_merge(proposal, proposal.get_content(), peter.id,
+                   "claude-opus-4.6", None)
+    assert sent == [cmp.build_merge_messages("THE MERGE PROMPT", P1,
+                                             previous or "")]
+
+
+def test_the_script_uses_the_tasks_builder(monkeypatch):
+    import backend.tasks.voice_todo_merge as vtm
+    monkeypatch.setattr(vtm, "build_merge_messages",
+                        lambda *args: ["FROM THE TASK", args])
+    assert cmp.build_merge_messages("p", "u", "t") == [
+        "FROM THE TASK", ("p", "u", "t")]
 
 
 def test_custom_merge_prompt_is_rebuilt_from_its_row(history, tmp_path):
@@ -462,9 +600,13 @@ def test_ai_usage_none_content_is_never_sent(app, tmp_path):
 
 
 def test_edited_or_deleted_proposals_are_skipped(app, tmp_path):
+    """Edited after the merge: the stored text is not what the merge read."""
     peter = _user("peter", admin=True)
     _version(peter, V1, T0)
     edited, _ = _merge(peter, P1, T0 + timedelta(hours=1), M1)
+    # Edited once before the merge (allowed) and once after it.
+    _add(NodeVersion(node_id=edited.id, content="first text",
+                     timestamp=T0 + timedelta(hours=1, seconds=30)))
     _add(NodeVersion(node_id=edited.id, content="older text",
                      timestamp=T0 + timedelta(days=1)))
     deleted, _ = _merge(peter, P2, T0 + timedelta(hours=2), M2)
@@ -476,6 +618,43 @@ def test_edited_or_deleted_proposals_are_skipped(app, tmp_path):
     assert provider.calls == []
     reasons = [r["reason"] for r in _jsonl(out) if r["type"] == "skipped"]
     assert reasons == ["proposal_deleted", "proposal_edited"]
+
+
+def test_a_proposal_edited_in_its_card_before_the_apply_is_rebuilt(
+        app, tmp_path):
+    """Ticking or adding an item in the proposal card before the apply
+    saves a NodeVersion; the card allows no edit after it. The stored
+    text is then what the merge read, so the merge is used."""
+    peter = _user("peter", admin=True)
+    _version(peter, V1, T0)
+    adjusted = "### New Tasks\n- buy milk\n- added in the card"
+    proposal, merged = _merge(peter, adjusted, T0 + timedelta(hours=1), M1)
+    _add(NodeVersion(node_id=proposal.id, content=P1,
+                     timestamp=T0 + timedelta(hours=1, seconds=30)))
+    assert merged.created_at > T0 + timedelta(hours=1, seconds=30)
+    provider = FakeProvider({("gpt-6-luna", adjusted): M1})
+    out = tmp_path / "out.jsonl"
+    cmp.run("peter", provider=provider, out_path=str(out))
+    assert [m[1]["content"][0]["text"] for _, m, _ in provider.calls] == [
+        adjusted]
+    records = _jsonl(out)
+    assert [r["type"] for r in records if r["type"] != "run"] == [
+        "merge", "summary"]
+    assert records[1]["proposal_node_id"] == proposal.id
+
+
+def test_proposal_edit_time_decides_the_skip():
+    versions = [V(1, _h(0), "user", 0, "chat"),
+                V(2, _h(1, 1), "voice_session", 5, "chat"),
+                V(3, _h(2, 1), "voice_session", 5, "chat")]
+    proposals = [_p(10, _h(1)), _p(20, _h(2))]
+    costs = [C(v.id, v.created_at, "claude-opus-4.6", 1, 5, 1)
+             for v in versions[1:]]
+    last_edit = {10: _h(1, 0) + timedelta(seconds=20),   # before its merge
+                 20: _h(2, 1)}                           # at its merge
+    linked = cmp.link_merges(versions, proposals, costs, last_edit, [])
+    assert {r["todo"].id: r["skip"] for r in linked} == {
+        3: "proposal_edited", 2: None}
 
 
 # ── linking (metadata only) ──────────────────────────────────────────────
@@ -495,7 +674,7 @@ def _link(versions, proposals, costs=None):
         costs = [C(v.id, v.created_at, "claude-opus-4.6", 1, v.tokens_used, 1)
                  for v in versions if v.generated_by == "voice_session"]
     return {r["todo"].id: r["skip"] for r in cmp.link_merges(
-        versions, proposals, costs, set(), [])}
+        versions, proposals, costs, {}, [])}
 
 
 def _h(hours, minutes=0):

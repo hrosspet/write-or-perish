@@ -23,6 +23,8 @@ Usage (on the prod VM, from the app dir, for your own account only):
         --models gpt-6-luna gpt-6-sol --since 2026-08-01 --limit 20 --rerun-original
 
 create_app loads .env.production (prod DB, KMS key, API keys) on its own.
+Before anything is decrypted, a run (not --dry-run) prints the account's
+username and asks you to type it to continue.
 Results go to ~/todo-merge-compare-u<id>-<UTC time>.jsonl (mode 0600, the
 todo texts are in it); the terminal shows counts and metrics only.
 
@@ -44,8 +46,14 @@ Safety
 ------
 * One account: --user is required, every query is scoped to that account,
   every row is checked to belong to it before it is decrypted, and the
-  account must be an admin's (the script is for Peter's own data). There
-  is no "all users" mode.
+  account must be an admin's (the script is for Peter's own data). Before
+  anything is decrypted, the script prints the account's username and runs
+  only if you type that username (--dry-run decrypts nothing and doesn't
+  ask). There is no "all users" mode.
+* No error reports: main() removes SENTRY_DSN from the environment before
+  create_app(), so Sentry is never initialised. An unhandled exception or
+  Ctrl-C would otherwise send the stack frames' local variables, which
+  hold the decrypted texts, to Sentry.
 * Never writes to the database: no todo versions, nodes, drafts or
   api_cost_log rows. On PostgreSQL every transaction runs READ ONLY, and
   the ORM session refuses any flush. Costs are computed with the app's
@@ -86,7 +94,9 @@ the merge is skipped and counted under its reason:
   tokens) and names the proposal's model; that row is the stored model;
 * no other todo version was saved between the proposal and the merge
   output (otherwise it is unknown which one the merge read);
-* the proposal was not edited (no NodeVersion rows) or deleted;
+* the proposal was not deleted, and not edited at or after the time of
+  the merge output (ticking or adding items in the proposal card before
+  the apply is allowed: the stored text is then what the merge read);
 * AI usage of the proposal and of the previous todo list allows AI;
 * the merge prompt did not change between the proposal and the merge.
 
@@ -125,7 +135,7 @@ from difflib import SequenceMatcher
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-from sqlalchemy import event, or_  # noqa: E402
+from sqlalchemy import event, func, or_  # noqa: E402
 
 from backend.extensions import db  # noqa: E402
 from backend.models import (  # noqa: E402
@@ -166,7 +176,7 @@ SKIP_REASONS = {
     "version_between": "another todo version was saved between the "
                        "proposal and the merge",
     "proposal_deleted": "proposal deleted",
-    "proposal_edited": "proposal edited after it was written",
+    "proposal_edited": "proposal edited after the merge",
     "proposal_ai_none": "proposal AI usage is none",
     "previous_ai_none": "previous todo list AI usage is none",
     "prompt_changed": "merge prompt changed between proposal and merge",
@@ -242,6 +252,22 @@ def resolve_user(ident):
     return user
 
 
+def confirm_account(user, out):
+    """Ask the operator to type the account's username before anything is
+    decrypted (the admin check alone allows any admin's account). Raises
+    SystemExit when the answer differs or there is no terminal."""
+    print(f"\nThis run decrypts the todo lists and proposals of "
+          f"{user.username!r} (user {user.id}) and sends them to the "
+          "models above.", file=out)
+    try:
+        answer = input("Type the username to continue: ")
+    except EOFError:
+        answer = None
+    if answer is None or answer.strip() != user.username:
+        raise SystemExit("Not confirmed: nothing was decrypted, no model "
+                         "was called, no file was written.")
+
+
 def _owned(row, user_id):
     """*row* if it belongs to *user_id*; raises before anything is
     decrypted otherwise (defence in depth: every query is scoped)."""
@@ -315,15 +341,19 @@ def load_cost_rows(user_id):
     ).order_by(APICostLog.created_at).all()
 
 
-def load_edited_node_ids(node_ids):
-    edited = set()
+def load_last_edit_times(node_ids):
+    """{node id: time of its newest NodeVersion} for the edited nodes
+    among *node_ids*. A NodeVersion keeps the text from before an edit and
+    is stamped when the edit is saved."""
+    last_edit = {}
     node_ids = list(node_ids)
     for start in range(0, len(node_ids), 500):
         chunk = node_ids[start:start + 500]
-        edited.update(node_id for (node_id,) in db.session.query(
-            NodeVersion.node_id).filter(
-                NodeVersion.node_id.in_(chunk)).distinct())
-    return edited
+        last_edit.update(db.session.query(
+            NodeVersion.node_id, func.max(NodeVersion.timestamp)).filter(
+                NodeVersion.node_id.in_(chunk)).group_by(
+                    NodeVersion.node_id).all())
+    return last_edit
 
 
 def load_prompt_rows(user_id):
@@ -382,14 +412,18 @@ def _link_problem(todo, proposal, previous_merge, cost):
     return None
 
 
-def _input_problem(todo, proposal, previous, edited_node_ids, prompt_rows):
+def _input_problem(todo, proposal, previous, last_edit, prompt_rows):
     """Why the merge's inputs can't be rebuilt exactly or may not be sent
     to a model, or None."""
     if previous is not None and previous.created_at > proposal["created_at"]:
         return "version_between"
     if proposal["deleted_at"] is not None:
         return "proposal_deleted"
-    if proposal["id"] in edited_node_ids:
+    # The proposal card allows edits (ticking, moving, adding items) only
+    # before the apply, so an edit saved before the merge output is in the
+    # text the merge read. Only a later edit changed it since.
+    edited_at = last_edit.get(proposal["id"])
+    if edited_at is not None and edited_at >= todo.created_at:
         return "proposal_edited"
     if proposal["ai_usage"] not in AI_ALLOWED:
         return "proposal_ai_none"
@@ -400,11 +434,12 @@ def _input_problem(todo, proposal, previous, edited_node_ids, prompt_rows):
     return None
 
 
-def link_merges(versions, proposals, cost_rows, edited_node_ids,
+def link_merges(versions, proposals, cost_rows, last_edit,
                 prompt_rows, floor=FLOOR):
     """Pair every merge output with its proposal and inputs (metadata
-    only). Returns one dict per merge output, newest first, with
-    ``skip`` set to a SKIP_REASONS key when it can't be rebuilt exactly.
+    only). *last_edit* maps a proposal id to the time of its newest edit.
+    Returns one dict per merge output, newest first, with ``skip`` set to
+    a SKIP_REASONS key when it can't be rebuilt exactly.
     """
     merges = [v for v in versions if v.generated_by == MERGE_GENERATED_BY]
     # Rank pairing from the newest end: the k-th newest merge output with
@@ -430,7 +465,7 @@ def link_merges(versions, proposals, cost_rows, edited_node_ids,
             _link_problem(todo, rec["proposal"],
                           merges[i - 1] if i > 0 else None, rec["cost"])
             or _input_problem(todo, rec["proposal"], rec["previous"],
-                              edited_node_ids, prompt_rows))
+                              last_edit, prompt_rows))
         if rec["skip"] is None:
             rec["prompt_id"] = prompt_source_at(prompt_rows, todo.created_at)
     linked.reverse()
@@ -440,25 +475,16 @@ def link_merges(versions, proposals, cost_rows, edited_node_ids,
 # ── the merge call, as the app builds it ─────────────────────────────────
 
 def build_merge_messages(merge_prompt, update_summary, current_todo):
-    """The messages voice_todo_merge._run_merge sends (kept identical;
-    test_todo_merge_comparison checks it against the task)."""
-    return [
-        {
-            "role": "system",
-            "content": [{"type": "text", "text": merge_prompt}],
-        },
-        {
-            "role": "assistant",
-            "content": [{"type": "text", "text": update_summary}],
-        },
-        {
-            "role": "user",
-            "content": [{"type": "text", "text": (
-                f"Here is the current full todo list:\n\n{current_todo}"
-                "\n\nNow apply the changes described above."
-            )}],
-        },
-    ]
+    """The messages voice_todo_merge._run_merge sends, from the task's own
+    builder, so the message and the prompt file come from the same deploy.
+
+    Imported here, not at the top: importing the task module imports
+    backend.celery_app, which runs create_app() once more. main() has
+    removed SENTRY_DSN before this runs."""
+    from backend.tasks.voice_todo_merge import (
+        build_merge_messages as task_build_merge_messages)
+    return task_build_merge_messages(merge_prompt, update_summary,
+                                     current_todo)
 
 
 def file_default_prompt():
@@ -746,7 +772,7 @@ def _skipped_line(todo, reason):
             "reason_text": SKIP_REASONS[reason]}
 
 
-def classify(uid, since, limit, out):
+def classify(uid, username, since, limit, out):
     """Link the account's merges (metadata only) and print the counts.
     Returns (window, chosen): every merge output in the window, newest
     first, and the rebuildable ones that will run."""
@@ -754,13 +780,14 @@ def classify(uid, since, limit, out):
     proposals = load_applied_proposals(uid)
     linked = link_merges(
         versions, proposals, load_cost_rows(uid),
-        load_edited_node_ids(p["id"] for p in proposals),
+        load_last_edit_times(p["id"] for p in proposals),
         load_prompt_rows(uid))
     window = [r for r in linked
               if since is None or r["todo"].created_at >= since]
     usable = [r for r in window if r["skip"] is None]
-    print(f"User {uid}: {len(versions)} todo versions, {len(linked)} "
-          f"merge outputs, {len(proposals)} applied proposals", file=out)
+    print(f"User {username!r} (id {uid}): {len(versions)} todo versions, "
+          f"{len(linked)} merge outputs, {len(proposals)} applied "
+          "proposals", file=out)
     if since is not None and since < FLOOR:
         print(f"--since is before {FLOOR.date()}: older merges can't be "
               "rebuilt and are counted as skipped", file=out)
@@ -958,7 +985,8 @@ def run(user_ident, models=None, limit=DEFAULT_LIMIT, since=None,
     with refuse_writes():
         user = resolve_user(user_ident)
         file_default_prompt()   # refuse early if the prompt file moved on
-        window, chosen = classify(user.id, since, limit, out)
+        window, chosen = classify(user.id, user.username, since, limit,
+                                  out)
         print(f"Running {len(chosen)} (limit {limit}), newest first, on "
               f"{', '.join(models)}"
               + (" + the stored model" if rerun_original else ""), file=out)
@@ -969,6 +997,7 @@ def run(user_ident, models=None, limit=DEFAULT_LIMIT, since=None,
             return {"dry_run": True, "chosen": len(chosen),
                     "rebuildable": sum(r["skip"] is None for r in window)}
 
+        confirm_account(user, out)
         out_path = out_path or default_out_path(user.id)
         print(f"Writing {out_path}", file=out)
         with open_private(out_path) as fh:
@@ -1035,6 +1064,12 @@ def parse_args(argv=None):
 
 
 def main(argv=None):
+    # Before create_app(): with SENTRY_DSN set it initialises Sentry, which
+    # reports an unhandled exception (or Ctrl-C) with the local variables
+    # of every stack frame, and those hold the decrypted texts.
+    # backend/__init__.py loaded .env.production when this module was
+    # imported, so removing the variable here is final.
+    os.environ.pop("SENTRY_DSN", None)
     args = parse_args(argv)
     from backend import create_app
     app = create_app()
