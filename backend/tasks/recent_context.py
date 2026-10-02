@@ -187,8 +187,10 @@ def _should_generate_recent_context(user):
     # saved, so the gates above stay open and the same request would
     # repeat every 10 minutes (#368, #380): one more try after an hour,
     # then stopped until a new recent context or profile version is
-    # saved. Checked last: it reads the batch jobs collected since the
-    # last summary, so only users who are otherwise due pay for it.
+    # saved; a stop with fewer than two billed failures (an outage)
+    # lifts after 24 h. Checked last: it reads the batch jobs collected
+    # since the last summary, so only users who are otherwise due pay
+    # for it.
     if refusal_backoff.recent_context_in_backoff(user_id):
         return False, None, None
 
@@ -553,8 +555,11 @@ def _submit_due_users():
 
 
 def _apply_item(item, result, batch_id):
-    """Save one collected item's summary. Returns the item's outcome:
-    saved, refused (cut off before any text), failed or skipped."""
+    """Save one collected item's summary. Returns (outcome, billed): the
+    outcome is saved, refused (cut off before any text), failed or
+    skipped; billed is whether its cost row was written. Only billed
+    failures can stop a user until a new version
+    (utils/refusal_backoff.py)."""
     user_id = item["user_id"]
     if result is None:
         # Errored, expired or missing at the provider: not billed.
@@ -562,13 +567,14 @@ def _apply_item(item, result, batch_id):
             "Recent-context item %s of batch %s has no result; nothing "
             "saved, the previous summary stays", item["custom_id"],
             batch_id)
-        return "failed"
+        return "failed", False
     user = User.query.get(user_id)
     if user is None:
         logger.info("Recent-context item %s: user %s no longer exists",
                     item["custom_id"], user_id)
-        return "skipped"
+        return "skipped", False
     model_id = item["model_id"]
+    billed = False
     try:
         # The cost row first and on its own: the call was billed whatever
         # happens to the summary. Batch price, on the human owner.
@@ -592,15 +598,16 @@ def _apply_item(item, result, batch_id):
                 "truncated=%s, output_tokens=%s): nothing saved, the "
                 "previous one stays", user_id, model_id, truncated,
                 result.get("output_tokens"))
-            return "refused" if truncated else "failed"
+            return ("refused" if truncated else "failed"), True
         db.session.add(cost_log)
         db.session.commit()
+        billed = True
 
         if not account_allows_ai(user):
             # Opted out while the batch ran (#346): don't store it.
             logger.info("User %s opted out of AI usage while their recent "
                         "context ran; not saved", user_id)
-            return "skipped"
+            return "skipped", billed
         profile_id = item.get("profile_id")
         latest_ts = _from_iso(item.get("source_data_cutoff"))
         # The direct path's guard, re-checked at save time: a summary that
@@ -611,7 +618,7 @@ def _apply_item(item, result, batch_id):
             logger.info("User %s: a recent context already covers up to %s; "
                         "batch result not saved", user_id,
                         latest_rc.source_data_cutoff)
-            return "skipped"
+            return "skipped", billed
         _save_recent_context(
             user, model_id, summary_text,
             tokens_used=(cost_log.input_tokens or 0)
@@ -625,12 +632,13 @@ def _apply_item(item, result, batch_id):
             "Recent context for user %s saved from batch %s: %d chars, "
             "covers %s source tokens", user_id, batch_id, len(summary_text),
             item.get("source_tokens"))
-        return "saved"
+        return "saved", billed
     except Exception:
         db.session.rollback()
         logger.exception("Saving recent-context item %s of batch %s failed",
                          item["custom_id"], batch_id)
-        return "failed"
+        # Billed if the cost row was committed before the failure.
+        return "failed", billed
 
 
 def _report_unsaved(items):
@@ -645,7 +653,8 @@ def _report_unsaved(items):
         if stopped:
             refusal_backoff.report_stop(
                 item["user_id"], "recent context", n, item["model_id"],
-                "recent_context", cause="batch item failed or cut off")
+                "recent_context", cause="batch item failed or cut off",
+                until=until)
         else:
             logger.warning(
                 "Recent context for user %s: batch item %s; next try after "
@@ -683,9 +692,9 @@ def _collect_recent_context_batches():
                     "abandoning (%d users keep their previous summary)",
                     job.batch_id, BATCH_JOB_MAX_AGE, len(job.items))
                 # Status and outcomes in one commit: a check sees these
-                # users either in flight or failed, so the abandon needs
-                # no lock.
-                job.items = [dict(item, outcome="failed")
+                # users either in flight or failed (not billed), so the
+                # abandon needs no lock.
+                job.items = [dict(item, outcome="failed", billed=False)
                              for item in job.items]
                 job.status = "abandoned"
                 job.collected_at = now
@@ -726,7 +735,7 @@ def _claim_and_apply(job, results, now):
     if not claimed:
         return 0
     for item in items:
-        item["outcome"] = _apply_item(
+        item["outcome"], item["billed"] = _apply_item(
             item, results.get(item["custom_id"]), batch_id)
     job.items = items
     db.session.commit()
@@ -840,7 +849,8 @@ def _generate_recent_context_impl(user_id, profile_id=None,
             user_id)
         if stopped:
             refusal_backoff.report_stop(
-                user_id, "recent context", n, model_id, "recent_context")
+                user_id, "recent context", n, model_id, "recent_context",
+                until=until)
         else:
             logger.warning(
                 "Empty truncated recent-context output for user %s (model "

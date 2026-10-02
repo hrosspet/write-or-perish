@@ -5,9 +5,11 @@ request per due user instead of calling the model, and a beat collector
 saves the results at batch price. Until a batch is collected the prompts
 keep reading the previous summary; an empty result is never saved; a
 failed item stays stale and counts in the #368 backoff (one more try after
-an hour, then stopped), so it is not resubmitted every 10 minutes. The
-check and the collector's claim-to-save step share one Redis lock (faked
-here), so no user is submitted twice.
+an hour, then stopped), so it is not resubmitted every 10 minutes. Two
+billed failures stop the user until a new version; a stop with fewer
+billed failures (an outage) lifts after 24 h. The check and the
+collector's claim-to-save step share one Redis lock (faked here), so no
+user is submitted twice.
 
 Same harness as test_empty_truncated_bg_output: in-memory SQLite,
 ENCRYPTION_DISABLED, celery mocked so the modules import. The provider is
@@ -238,6 +240,15 @@ def _age_jobs(delta):
     _db.session.commit()
 
 
+def _age_failures(delta):
+    """Move every failure back in time: the batch jobs' collection times
+    and the cost rows (where a refusal is recorded)."""
+    _age_jobs(delta)
+    for log in APICostLog.query.all():
+        log.created_at = log.created_at - delta
+    _db.session.commit()
+
+
 def _shown_summary(user):
     """The summary a voice / chat session starting now would embed: the
     version context_artifacts pins for {user_recent} (the same lookup as
@@ -405,7 +416,8 @@ def test_a_failed_item_stays_stale_and_is_retried_once_then_stops(
     """No result for the item (errored / expired at the provider): nothing
     saved, nothing billed, the previous summary stays. The user is
     retried by one later check (after the hour's wait), not every 10
-    minutes; a second failure in a row stops the job and reports it."""
+    minutes; a second failure in a row stops the job and reports it (for
+    24 h, as neither failure was billed: see the outage test below)."""
     from backend.utils import refusal_backoff
     stops = []
     monkeypatch.setattr(refusal_backoff, "report_stop",
@@ -419,6 +431,7 @@ def test_a_failed_item_stays_stale_and_is_retried_once_then_stops(
     [job] = _job_for(user)
     assert job.status == "collected"
     assert job.items[0]["outcome"] == "failed"
+    assert job.items[0]["billed"] is False
     assert _shown_summary(user) == "PREVIOUS CONTEXT"
     assert APICostLog.query.count() == 0
     assert stops == []
@@ -436,6 +449,7 @@ def test_a_failed_item_stays_stale_and_is_retried_once_then_stops(
     _collect_with(rc, monkeypatch, results={})
     assert len(stops) == 1
     assert stops[0][0][0] == user.id
+    assert stops[0][1]["until"] is not None       # lifts after 24 h
     _age_jobs(timedelta(hours=3))
     assert _check(rc)["submitted"] == 0
     assert _shown_summary(user) == "PREVIOUS CONTEXT"
@@ -489,6 +503,7 @@ def test_an_empty_result_that_was_not_cut_off_is_billed_and_not_saved(
     assert log.request_ref is None
     assert log.cost_microdollars == 3750
     assert _job_for(user)[0].items[0]["outcome"] == "failed"
+    assert _job_for(user)[0].items[0]["billed"] is True
     assert _check(rc)["submitted"] == 0           # waits like a failure
 
 
@@ -585,6 +600,134 @@ def test_a_result_older_than_the_saved_summary_is_not_saved(
     assert _shown_summary(user) == "SAVED MEANWHILE"
     assert APICostLog.query.count() == 1
     assert _job_for(user)[0].items[0]["outcome"] == "skipped"
+
+
+# ── billed and unbilled failures (#380 review) ───────────────────────────
+
+def _record_stops(monkeypatch):
+    from backend.utils import refusal_backoff
+    stops = []
+    monkeypatch.setattr(refusal_backoff, "report_stop",
+                        lambda *a, **k: stops.append(k))
+    return stops
+
+
+def _new_profile(user):
+    profile = UserProfile(user_id=user.id, generated_by=ANTHROPIC_MODEL,
+                          tokens_used=0, ai_usage="chat",
+                          generation_type="update",
+                          source_data_cutoff=OLD_CUTOFF)
+    profile.set_content("NEWER PROFILE")
+    _db.session.add(profile)
+    _db.session.commit()
+
+
+def test_an_outage_stops_a_user_for_24_hours_then_retries_once_a_day(
+        app, rc, world, monkeypatch):
+    """Failures nobody was billed for (an item that errored at the
+    provider, a batch unreadable until it is abandoned) say nothing about
+    the user's input. Two in a row stop the user for 24 h, not until
+    their next profile version: the first check after that retries once,
+    and another such failure stops it for another 24 h. The stop is still
+    reported."""
+    from backend.utils import refusal_backoff
+    stops = _record_stops(monkeypatch)
+    user = _user("outage")
+    _previous_summary(user)
+
+    # 1st failure: the item errored at the provider.
+    assert _check(rc)["submitted"] == 1
+    _collect_with(rc, monkeypatch, results={})
+    _age_jobs(timedelta(hours=1, minutes=1))
+    # 2nd failure: the retry's batch stays unreadable and is abandoned.
+    assert _check(rc)["submitted"] == 1
+    [job] = RecentContextBatchJob.query.filter_by(status="pending").all()
+    job.submitted_at = datetime.utcnow() - timedelta(hours=25, minutes=1)
+    _db.session.commit()
+    assert _collect_with(rc, monkeypatch, exc=_raise_not_found()) == {
+        "collected": 0, "abandoned": 1}
+    assert job.items[0]["billed"] is False
+    assert len(stops) == 1
+    assert stops[0]["until"] is not None
+
+    # Stopped for 24 h after the newer failure...
+    _age_jobs(timedelta(hours=23, minutes=58))
+    assert _check(rc)["submitted"] == 0
+    # ...then retried once.
+    _age_jobs(timedelta(minutes=3))
+    assert _check(rc)["submitted"] == 1
+    assert _check(rc)["submitted"] == 0           # in flight
+
+    # The outage goes on: stopped for another 24 h, reported again.
+    _collect_with(rc, monkeypatch, results={})
+    assert len(stops) == 2
+    _age_jobs(timedelta(hours=23))
+    assert _check(rc)["submitted"] == 0
+    _age_jobs(timedelta(hours=1, minutes=1))
+    assert _check(rc)["submitted"] == 1
+
+    # The provider is back: the summary is saved and the streak ends.
+    assert _collect_with(rc, monkeypatch, _summary(user))["collected"] == 1
+    assert _shown_summary(user).endswith("NEW SUMMARY")
+    assert refusal_backoff.recent_context_backoff_state(user.id) == (
+        0, None, False)
+
+
+@pytest.mark.parametrize("second", ["refused", "empty"])
+def test_two_billed_failures_stop_until_a_new_version(
+        app, rc, world, monkeypatch, second):
+    """Peter's #368 rule stays for failures we are billed for: two in a
+    row (a refused cut-off output, then a refused or an empty one) stop
+    the user until a new recent context or profile version, however long
+    it waits."""
+    stops = _record_stops(monkeypatch)
+    user = _user("refuser")
+    _previous_summary(user)
+
+    assert _check(rc)["submitted"] == 1
+    _collect_with(rc, monkeypatch, _summary(
+        user, "", truncated=True, output_tokens=32_000))
+    _age_failures(timedelta(hours=1, minutes=1))
+    assert _check(rc)["submitted"] == 1
+    _collect_with(rc, monkeypatch, _summary(
+        user, "", truncated=(second == "refused"), output_tokens=500))
+
+    assert APICostLog.query.count() == 2          # both billed
+    assert len(stops) == 1
+    assert stops[0]["until"] is None              # until a new version
+    _age_failures(timedelta(days=30))
+    assert _check(rc)["submitted"] == 0
+    assert _shown_summary(user) == "PREVIOUS CONTEXT"
+
+    _new_profile(user)
+    assert _check(rc)["submitted"] == 1
+
+
+def test_one_billed_and_one_unbilled_failure_stop_for_24_hours(
+        app, rc, world, monkeypatch):
+    """Only billed failures count toward the stop that lasts until a new
+    version. A refused output followed by an outage failure stops the
+    user for 24 h; a second billed failure after that stops it until a
+    new version."""
+    stops = _record_stops(monkeypatch)
+    user = _user("mixed")
+    _previous_summary(user)
+
+    assert _check(rc)["submitted"] == 1
+    _collect_with(rc, monkeypatch, _summary(
+        user, "", truncated=True, output_tokens=32_000))
+    _age_failures(timedelta(hours=1, minutes=1))
+    assert _check(rc)["submitted"] == 1
+    _collect_with(rc, monkeypatch, results={})    # outage, not billed
+    assert stops[-1]["until"] is not None
+    _age_failures(timedelta(hours=24, minutes=1))
+    assert _check(rc)["submitted"] == 1
+
+    _collect_with(rc, monkeypatch, _summary(
+        user, "", truncated=True, output_tokens=32_000))
+    assert stops[-1]["until"] is None
+    _age_failures(timedelta(days=30))
+    assert _check(rc)["submitted"] == 0
 
 
 # ── one lock for the check and the collector (#380 review) ───────────────
