@@ -366,8 +366,8 @@ final class NowPlayingTests: XCTestCase {
 
         controller.update(.thinking(title: "Voice…"))
         XCTAssertEqual(MPNowPlayingInfoCenter.default().nowPlayingInfo?[MPMediaItemPropertyTitle] as? String, "Voice…")
-        XCTAssertTrue(center.nextTrackCommand.isEnabled)
-        XCTAssertFalse(center.playCommand.isEnabled || center.pauseCommand.isEnabled)
+        XCTAssertFalse(center.nextTrackCommand.isEnabled, "no lock-screen cancel while thinking (#397)")
+        XCTAssertFalse(center.playCommand.isEnabled || center.pauseCommand.isEnabled || center.skipForwardCommand.isEnabled)
 
         controller.update(.playback(title: "Voice", elapsed: 3, duration: 20, rate: 1.5, playing: true))
         let info = MPNowPlayingInfoCenter.default().nowPlayingInfo

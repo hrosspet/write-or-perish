@@ -885,6 +885,16 @@ From Peter's first run on his iPhone. 395 unit tests pass (one skipped), 5 of th
   m3 (a `startSession` slower than the wait), m4 (device checks, in the README checklist), m5 (the trash
   icon sits next to Send and discards without confirmation, as on the web).
 
+- **Second device round (2026-10-02)**: the card's buttons ask for the passcode on a locked phone, then
+  run (Now Playing's do not). The intents already compile to "always allowed"; marking them
+  `AudioPlaybackIntent` as well changed nothing (reverted). Not reproducible in the simulator, which has
+  no passcode. With Face ID it is a glance. Thinking: no lock-screen command (the web's next = cancel
+  read as "next track"); "next track" has a handler only for the fallback recording row. Also fixed: a new
+  Voice screen is a new conversation (it had replied to the last, since deleted, thread and ignored
+  `resume` after a finished turn); a cancel unloads the last reply (the lock screen had replayed it);
+  Voice Mode on a thread and Text Mode open in the current tab above the thread (Voice always went to
+  Reflect's stack, so Back led into Reflect's history).
+
 **#398 Writing form and model picker on a narrow phone**
 - Send keeps its words; Discard draft (trash), Record (mic), Save audio, Upload (paperclip), Resume and
   Stop & save are icons with spoken labels (`ButtonIcon`, `.looreIcon`); the recording clock and "Retry"

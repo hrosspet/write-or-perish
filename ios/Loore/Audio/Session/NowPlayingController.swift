@@ -8,8 +8,12 @@ import SwiftUI
 /// | Phase | Title | Commands |
 /// |---|---|---|
 /// | recording | `Recording m:ss` / `Paused m:ss` | play = resume, pause = pause, next = stop and send |
-/// | thinking | `Voice…` (live) | next = cancel |
+/// | thinking | `Voice…` | none (#397: the web's next = cancel read as "next track" and only saved a TTS call) |
 /// | playback | `Voice` (+ chapter) or the listen-aloud title | play/pause, ±10 s, seek, rate |
+///
+/// The recording row is the fallback for when the voice Live Activity is not shown.
+/// "Next track" has a handler only while that row uses it, so iOS has no reason to
+/// lay out previous/next buttons in the other phases.
 @MainActor
 final class NowPlayingController {
     enum Phase: Equatable {
@@ -33,6 +37,7 @@ final class NowPlayingController {
 
     private let center = MPRemoteCommandCenter.shared()
     private var registered = false
+    private var nextTarget: Any?
 
     private lazy var artwork: MPMediaItemArtwork = {
         let renderer = ImageRenderer(content:
@@ -60,6 +65,7 @@ final class NowPlayingController {
         case .none:
             info.nowPlayingInfo = nil
             info.playbackState = .stopped
+            setNextTrackHandler(false)
             enable([])
         case .recording(let elapsed, let paused):
             info.nowPlayingInfo = [
@@ -70,17 +76,20 @@ final class NowPlayingController {
                 MPNowPlayingInfoPropertyPlaybackRate: paused ? 0.0 : 1.0,
             ]
             info.playbackState = paused ? .paused : .playing
+            setNextTrackHandler(true)
             enable([center.playCommand, center.pauseCommand, center.togglePlayPauseCommand, center.nextTrackCommand])
         case .thinking(let title):
+            // Nothing to control until the reply plays: every command is off.
+            // Not a live stream, which iOS shows without ±10 s.
             info.nowPlayingInfo = [
                 MPMediaItemPropertyTitle: title,
                 MPMediaItemPropertyArtist: "Loore",
                 MPMediaItemPropertyArtwork: artwork,
-                MPNowPlayingInfoPropertyIsLiveStream: true,
                 MPNowPlayingInfoPropertyPlaybackRate: 1.0,
             ]
             info.playbackState = .playing
-            enable([center.nextTrackCommand])
+            setNextTrackHandler(false)
+            enable([])
         case .playback(let title, let elapsed, let duration, let rate, let playing):
             info.nowPlayingInfo = [
                 MPMediaItemPropertyTitle: title,
@@ -92,6 +101,7 @@ final class NowPlayingController {
                 MPNowPlayingInfoPropertyDefaultPlaybackRate: Double(rate),
             ]
             info.playbackState = playing ? .playing : .paused
+            setNextTrackHandler(false)
             enable([center.playCommand, center.pauseCommand, center.togglePlayPauseCommand,
                     center.skipForwardCommand, center.skipBackwardCommand,
                     center.changePlaybackPositionCommand, center.changePlaybackRateCommand])
@@ -107,6 +117,18 @@ final class NowPlayingController {
         let on = Set(commands.map(ObjectIdentifier.init))
         for command in all {
             command.isEnabled = on.contains(ObjectIdentifier(command))
+        }
+    }
+
+    private func setNextTrackHandler(_ on: Bool) {
+        if on, nextTarget == nil {
+            nextTarget = center.nextTrackCommand.addTarget { [weak self] _ in
+                MainActor.assumeIsolated { self?.handlers.next() }
+                return .success
+            }
+        } else if !on, let target = nextTarget {
+            center.nextTrackCommand.removeTarget(target)
+            nextTarget = nil
         }
     }
 
@@ -134,10 +156,6 @@ final class NowPlayingController {
                 default: break
                 }
             }
-            return .success
-        }
-        center.nextTrackCommand.addTarget { [weak self] _ in
-            MainActor.assumeIsolated { self?.handlers.next() }
             return .success
         }
         center.skipForwardCommand.addTarget { [weak self] _ in

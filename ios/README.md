@@ -264,7 +264,8 @@ Account → Voice → "Sound while Loore thinks" on Soft.
 - [ ] **Siri / another app takes the mic.** Same as the call: pause + notification.
 - [ ] **Lock-screen controls in each phase.** Recording (Live Activity ‖ / ▶ and ■;
       with Live Activities off in Settings → Loore: Now Playing play/pause/⏭), thinking
-      (Now Playing ⏭ = cancel; the server still finishes the reply), playback (play/pause,
+      (Now Playing shows "Voice…" with every button greyed out; ideally the ±10 s
+      layout rather than previous/next: note which), playback (play/pause,
       ±10 s, scrubbing, speed from the ⋯ menu where iOS offers it).
 - [ ] **60-minute recording.** Record for 59 minutes (phone locked is fine): at
       59:00 a rising two-note chime, a notification and a toast; stop at ~60:00 and

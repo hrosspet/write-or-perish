@@ -208,18 +208,11 @@ final class AudioCenter {
                                             next: { [weak voice] in voice?.stop() })
                 nowPlaying.update(.recording(elapsed: voice.elapsed, paused: voice.isPaused))
                 return
-            case .stopping:
-                // A second "next" while the last chunks upload does nothing (M11; web
-                // stays in recording until the transcript, so next just stops again).
-                nowPlaying.handlers = .init(next: { [weak voice] in voice?.stop() })
-                nowPlaying.update(.thinking(title: "Voice…"))
-                return
-            case .transcribing, .awaitingAudio:
-                nowPlaying.handlers = .init(next: { [weak voice] in voice?.cancelProcessing() })
-                nowPlaying.update(.thinking(title: "Voice…"))
-                return
-            case .draining where voice.awaitingNextNode:
-                nowPlaying.handlers = .init(next: { [weak voice] in voice?.cancelProcessing() })
+            case .stopping, .transcribing, .awaitingAudio, .draining where voice.awaitingNextNode:
+                // Nothing to control until the reply plays. No lock-screen cancel
+                // (the web's next = cancel, #397): it looked like "next track", and the
+                // server finishes the reply anyway. The Voice screen's ✕ remains.
+                nowPlaying.handlers = .init()
                 nowPlaying.update(.thinking(title: "Voice…"))
                 return
             default:
