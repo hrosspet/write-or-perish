@@ -538,14 +538,26 @@ export function useStreamingTranscription(options = {}) {
 
     let pollTimer = null;
     let cancelled = false;
+    // One status check at a time, and onComplete at most once per finalize.
+    // One return to the page can fire two events (a back/forward-cache
+    // restore fires visibilitychange and then pageshow), and the 5 s timer
+    // can overlap a return. clearTimeout does not stop a request already in
+    // flight, so without these flags two answers that both say 'completed'
+    // would both call onComplete (in Voice mode: two POST /voice, two user
+    // nodes, two billed replies). The flags belong to this effect run, so the
+    // next recording's finalize starts with both cleared.
+    let inFlight = false;
+    let done = false;
 
     const checkStatus = async () => {
-      if (cancelled || !sessionIdRef.current) return;
+      if (cancelled || done || inFlight || !sessionIdRef.current) return;
+      inFlight = true;
       try {
         const res = await api.get(`/drafts/streaming/${sessionIdRef.current}/status`);
         if (cancelled) return;
         if (res.data.streaming_status === 'completed' && res.data.content) {
           console.log('[StreamingTranscription] Polling recovery: transcription already complete');
+          done = true;
           disconnectSSE();
           setSessionState('complete');
           setTranscript(res.data.content);
@@ -562,6 +574,8 @@ export function useStreamingTranscription(options = {}) {
         }
       } catch (err) {
         console.error('[StreamingTranscription] Polling status check failed:', err);
+      } finally {
+        inFlight = false;
       }
       // Not completed yet — schedule another check
       if (!cancelled) {
