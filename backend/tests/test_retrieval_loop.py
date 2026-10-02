@@ -661,6 +661,92 @@ def test_continuation_transient_failure_retries(app, monkeypatch):
     assert result["llm_node_id"] == final.id
 
 
+@pytest.fixture
+def real_providers(monkeypatch):
+    """The real backend.llm_providers in sys.modules for one test: the
+    task recognises ProviderAccountError (#369) by looking the class up
+    there at call time."""
+    import backend
+    monkeypatch.setattr(backend, "llm_providers",
+                        getattr(backend, "llm_providers", None),
+                        raising=False)
+    monkeypatch.delitem(sys.modules, "backend.llm_providers", raising=False)
+    import backend.llm_providers as mod
+    return mod
+
+
+def _account_error(providers):
+    """A ProviderAccountError as llm_providers raises it: from the SDK's
+    raw error, which must not reach the user."""
+    import httpx
+    import openai
+    raw = openai.OpenAI(api_key="k")._make_status_error(
+        "Error code: 429 - {'error': {'code': 'insufficient_quota'}}",
+        body={"error": {"message": "You exceeded your current quota",
+                        "type": "insufficient_quota",
+                        "code": "insufficient_quota"}},
+        response=httpx.Response(429, request=httpx.Request(
+            "POST", "https://api.openai.com/v1/responses")))
+    err = providers.ProviderAccountError("OpenAI", "billing", "gpt-5")
+    err.__cause__ = raw
+    return err
+
+
+def test_account_failure_fails_the_node_with_the_users_message(
+        app, real_providers):
+    """A call refused for an account reason (#369) fails the node with
+    the plain message — the thread page, the voice toast and the iPhone
+    app all show llm_task_error as is — never the SDK's raw text."""
+    alice, system, user_node, llm_node = _build_chain("textmode")
+    _ScriptedProvider.reset([_account_error(real_providers)])
+
+    with pytest.raises(real_providers.ProviderAccountError):
+        generate_llm_response(
+            _FakeSelf(), user_node.id, llm_node.id, "gpt-5", alice.id,
+            source_mode="textmode",
+        )
+
+    node = _fresh(llm_node.id)
+    assert node.llm_task_status == "failed"
+    assert node.llm_task_error == (
+        "AI replies are temporarily unavailable. This is a problem on "
+        "Loore's side, not yours, and it has been reported.")
+    assert "Error code" not in node.llm_task_error
+
+
+def test_continuation_account_failure_is_not_retried(
+        app, monkeypatch, real_providers):
+    """The continuation call's retries are for temporary failures; an
+    account failure lasts until someone fixes the account (#369), so it
+    fails the continuation node at once with the user's message."""
+    alice, system, user_node, llm_node = _build_chain("textmode")
+    _mk_artifact(alice.id, "reading-list", "books", title="Reading List")
+    monkeypatch.setattr(_llm_task_mod, "CONTINUATION_RETRY_DELAYS", (0, 0))
+
+    _ScriptedProvider.reset([
+        _resp("Let me pull that up.", tool_calls=[{
+            "id": "t1", "name": "read_artifact",
+            "input": {"kind": "reading-list"},
+        }]),
+        _account_error(real_providers),
+        _resp("never sent"),
+    ])
+
+    with pytest.raises(real_providers.ProviderAccountError):
+        generate_llm_response(
+            _FakeSelf(), user_node.id, llm_node.id, "gpt-5", alice.id,
+            source_mode="textmode",
+        )
+
+    assert len(_ScriptedProvider.calls) == 2
+    interim = _fresh(llm_node.id)
+    assert interim.llm_task_status == "completed"
+    cont = Node.query.get(interim.continuation_node_id)
+    assert cont.llm_task_status == "failed"
+    assert cont.llm_task_error == \
+        real_providers.ProviderAccountError.USER_MESSAGE
+
+
 def test_read_full_by_entry_id_resolves_and_continues(app):
     """read_full with a numeric entry id (query intent, explicit): the
     full node content is injected and the model answers with it in the
