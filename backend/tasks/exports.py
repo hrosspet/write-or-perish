@@ -137,13 +137,71 @@ USER_WRITTEN_PROFILE_NOTE = (
 )
 
 
+# For a user-written version that is an edit of a generated one (the
+# profile page saves such an edit as a new version, #183): the model is
+# shown which lines are the user's, so it keeps those and refreshes the
+# rest instead of treating the whole profile as the user's words.
+USER_EDITED_PROFILE_NOTE = (
+    "[NOTE: The profile below was generated, then edited by the user "
+    "themselves on {date}. Their edits are listed after it: lines starting "
+    "with '-' are text they removed, lines starting with '+' are text they "
+    "wrote. Keep their edits: what they removed stays out unless later data "
+    "clearly brings it back, and what they wrote stays in, in their words "
+    "where possible. Update the rest of the profile from the data as usual. "
+    "Data written before {date} should not be read through their edits.]"
+)
+
+
+def _generated_source(profile):
+    """The generated version a user-written one was edited from: the
+    nearest parent that is not user-written. None for a profile written
+    from scratch, or when that version is not AI-readable — its text is
+    then never shown to a model (#346)."""
+    seen = {profile.id}
+    current = profile
+    while current.parent_profile_id and current.parent_profile_id not in seen:
+        current = UserProfile.query.get(current.parent_profile_id)
+        if current is None:
+            return None
+        seen.add(current.id)
+        if current.generated_by != "user":
+            return current if current.ai_usage in AI_ALLOWED else None
+    return None
+
+
+def _user_edits(before, after):
+    """The lines the user removed ('- ') and wrote ('+ '), one group per
+    change, blank lines left out."""
+    import difflib
+    old, new = before.splitlines(), after.splitlines()
+    groups = []
+    matcher = difflib.SequenceMatcher(None, old, new, autojunk=False)
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            continue
+        lines = ([f"- {line}" for line in old[i1:i2] if line.strip()]
+                 + [f"+ {line}" for line in new[j1:j2] if line.strip()])
+        if lines:
+            groups.append("\n".join(lines))
+    return "\n\n".join(groups)
+
+
 def user_written_profile_text(profile):
     """A user-written profile as every profile prompt shows it: the dated
-    note, then the user's text."""
+    note, then the user's text. An edit of a generated version also lists
+    the user's edits, so the model knows which part is theirs."""
     date = (profile.created_at.strftime("%Y-%m-%d")
             if profile.created_at else "an unknown date")
+    content = profile.get_content()
+    source = _generated_source(profile)
+    if source is not None:
+        edits = _user_edits(source.get_content(), content)
+        if edits:
+            note = USER_EDITED_PROFILE_NOTE.format(date=date)
+            return (f"{note}\n\n{content}\n\n"
+                    f"[The user's edits on {date}:]\n{edits}")
     note = USER_WRITTEN_PROFILE_NOTE.format(date=date)
-    return f"{note}\n\n{profile.get_content()}"
+    return f"{note}\n\n{content}"
 
 
 def profile_text_for_prompt(profile):
@@ -294,9 +352,15 @@ def profile_is_provisional(profile):
     patching: it is replaced from scratch each time the account's total
     data crosses the next step of the provisional ladder
     (``provisional_build_due``), the earlier versions staying as history,
-    unchained. A user-written profile is never provisional: it is the
-    user's own words and stays the base."""
-    if profile is None or profile.generated_by == "user":
+    unchained. A profile the user wrote from scratch (no source coverage)
+    is never provisional: it is the user's own words and stays the base.
+    An edit of a generated version carries that version's coverage and is
+    provisional like it, so editing an early profile does not pause the
+    ladder; the next rebuild keeps the edit
+    (``place_user_written_profile``, #183)."""
+    if profile is None:
+        return False
+    if profile.generated_by == "user" and not profile.source_tokens_used:
         return False
     return (profile.source_tokens_used or 0) < CHUNK_TARGET_UNITS
 

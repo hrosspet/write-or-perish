@@ -278,12 +278,24 @@ def create_profile():
         return jsonify({"error": "Failed to create profile", "details": str(e)}), 500
 
 
-def _save_edit_as_none_version(profile, new_content, data):
-    """A profile edit made while the account is set to 'none', saved as a
-    new version with the account's ai_usage. It covers the same source
-    data as the edited version, so it carries that version's source
-    figures, and it links to it as its parent. The update pipeline skips
-    it as a base (tasks/exports.profile_update_base)."""
+def _save_edit_as_new_version(profile, new_content, data, keep_audio=False):
+    """A profile edit saved as a new version the user wrote
+    (generated_by "user"), with the account's ai_usage. The edited version
+    keeps its text, ai_usage and audio. The new version covers the same
+    source data as the edited one, so it carries that version's source
+    figures, and it links to it as its parent.
+
+    Two cases use it:
+    - an edit made while the account is set to 'none' (#346): the version
+      is marked 'none', and the update pipeline skips it as a base
+      (tasks/exports.profile_update_base);
+    - an edit of a generated version (#183): the pipeline treats it as the
+      user's own text, so incremental updates build on it and full
+      rebuilds keep it (tasks/exports.place_user_written_profile).
+
+    keep_audio: the user chose to keep the existing audio for the edited
+    text (the frontend's "keep or regenerate" prompt, #66), so the new
+    version reuses the edited version's audio files."""
     new_profile = UserProfile(
         user_id=current_user.id,
         generated_by="user",
@@ -292,11 +304,16 @@ def _save_edit_as_none_version(profile, new_content, data):
         ai_usage=current_user.default_ai_usage,
         source_tokens_used=profile.source_tokens_used,
         source_data_cutoff=profile.source_data_cutoff,
+        source_origin_stats=profile.source_origin_stats,
+        source_rendered_at=profile.source_rendered_at,
         parent_profile_id=profile.id,
     )
     new_profile.set_content(new_content)
     try:
         db.session.add(new_profile)
+        db.session.flush()
+        if keep_audio:
+            _copy_audio(profile, new_profile)
         db.session.commit()
     except Exception as e:
         db.session.rollback()
@@ -313,6 +330,47 @@ def _save_edit_as_none_version(profile, new_content, data):
             "ai_usage": new_profile.ai_usage
         }
     }), 200
+
+
+def _copy_audio(source, target):
+    """Point ``target`` at ``source``'s finished speech: the scalar URL and
+    the per-chunk rows the streaming player reads. The files are shared;
+    they belong to the same user, and clearing audio never deletes files
+    (utils/audio_storage.clear_tts_artifacts)."""
+    from backend.models import TTSChunk
+    if not source.audio_tts_url or source.tts_task_status != "completed":
+        return
+    target.audio_tts_url = source.audio_tts_url
+    target.tts_task_status = "completed"
+    target.tts_task_progress = 100
+    for chunk in TTSChunk.query.filter_by(profile_id=source.id).order_by(
+            TTSChunk.chunk_index).all():
+        db.session.add(TTSChunk(
+            profile_id=target.id, chunk_index=chunk.chunk_index,
+            section_index=chunk.section_index,
+            section_title=chunk.section_title, audio_url=chunk.audio_url,
+            duration=chunk.duration, status=chunk.status,
+            completed_at=chunk.completed_at))
+
+
+def _edit_needs_new_version(profile):
+    """Whether a text edit of this AI-readable version is saved as a new
+    version (``_save_edit_as_new_version``) rather than in place:
+
+    - while the account is set to 'none', so the text does not land in an
+      AI-readable row (#346);
+    - when the version is generated: the edit is the user's own text, so
+      the profile jobs keep it instead of overwriting it, and the generated
+      version stays in the history (#183; voice review, 2026-10-02: a job
+      that regenerates something the user edited keeps the edits and
+      refreshes only its own part).
+
+    A version the user wrote, or one already marked 'none', is edited in
+    place."""
+    if profile.ai_usage not in AI_ALLOWED:
+        return False
+    return (not account_allows_ai(current_user)
+            or profile.generated_by != "user")
 
 
 @profile_bp.route("/<int:profile_id>", methods=["PUT"])
@@ -338,19 +396,22 @@ def update_profile(profile_id):
     if "privacy_level" in data and not validate_privacy_level(data["privacy_level"]):
         return jsonify({"error": f"Invalid privacy_level: {data['privacy_level']}"}), 400
 
-    # Text written while the account is set to 'none' must not land in an
-    # AI-readable row (#346). Such an edit is saved as a new version marked
-    # 'none'; the edited version keeps its text, its ai_usage and its audio.
-    if (new_content != profile.get_content()
-            and profile.ai_usage in AI_ALLOWED
-            and not account_allows_ai(current_user)):
-        return _save_edit_as_none_version(profile, new_content, data)
+    # An edit made while the account is set to 'none' (#346), or an edit of
+    # a generated version (#183), is saved as a new version the user wrote;
+    # the edited version keeps its text, its ai_usage and its audio.
+    text_changed = new_content != profile.get_content()
+    if text_changed and _edit_needs_new_version(profile):
+        # A 'none' version gets no speech, so it never takes audio.
+        return _save_edit_as_new_version(
+            profile, new_content, data,
+            keep_audio=(account_allows_ai(current_user)
+                        and not data.get("regenerate_tts")))
 
     # Editing the text makes generated TTS audio stale. The frontend asks
     # the user whether to keep or regenerate and only sends
     # regenerate_tts=true when they choose to regenerate; we then clear the
     # audio so fresh TTS is generated on the next request (#66).
-    if data.get("regenerate_tts") and new_content != profile.get_content():
+    if data.get("regenerate_tts") and text_changed:
         from backend.utils.audio_storage import clear_tts_artifacts
         clear_tts_artifacts(profile)
 

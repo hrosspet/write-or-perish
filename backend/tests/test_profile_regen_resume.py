@@ -378,6 +378,14 @@ def _rebuild_two_windows(exports, monkeypatch, windows):
     import backend.llm_providers as lp
     monkeypatch.setattr(lp.LLMProvider, "count_tokens",
                         staticmethod(lambda m, msgs, k: None))
+
+    def no_provider(*a, **k):
+        raise AssertionError("a test reached the real LLM provider")
+    # Nothing may reach a provider; a test that needs a model patches in
+    # its stand-in over this.
+    monkeypatch.setattr(lp.LLMProvider, "get_completion",
+                        staticmethod(no_provider))
+    monkeypatch.setattr(exports, "get_api_keys_for_usage", lambda *a, **k: {})
     prompts = []
 
     def fake_call(self_, model_id, prompt, uid, keys, **kw):
@@ -527,3 +535,153 @@ def test_183_integration_shows_user_profile_once_for_a_rooted_chain(app):
     assert len(chain) == 3 and len(texts) == 3
     assert sum("MY OWN WORDS" in t for t in texts) == 1
     assert "MY OWN WORDS" in texts[0]
+
+
+# ── #183: an edit of a generated version (the profile page's Edit) ──────
+# The profile page saves such an edit as a new user-written version whose
+# parent is the generated one. The jobs see the user's edits as such: the
+# full text plus the lines the user removed and wrote.
+
+GENERATED_TEXT = "### SURFACE MAP\nLikes long walks.\nWRONG GUESS"
+EDITED_TEXT = "### SURFACE MAP\nLikes long walks.\nMY EDIT"
+
+
+def _edited(user, generated, created_at=JUN, source_tokens=90_000):
+    edit = UserProfile(
+        user_id=user.id, generated_by="user", tokens_used=0,
+        generation_type="initial", source_tokens_used=source_tokens,
+        source_data_cutoff=generated.source_data_cutoff, ai_usage="chat",
+        created_at=created_at, parent_profile_id=generated.id)
+    edit.set_content(EDITED_TEXT)
+    _db.session.add(edit)
+    _db.session.commit()
+    return edit
+
+
+def _generated_with(user, text, cutoff=JAN, ai_usage="chat"):
+    """A generated version saved right after its window (before the
+    edit)."""
+    profile = _generated(user, cutoff)
+    profile.set_content(text)
+    profile.ai_usage = ai_usage
+    profile.created_at = cutoff
+    _db.session.commit()
+    return profile
+
+
+def test_183_edited_version_is_shown_with_the_users_edits(app):
+    """The model sees which lines are the user's: what they removed and
+    what they wrote, under a note to keep those and refresh the rest."""
+    import backend.tasks.exports as exports
+
+    user = _new_user("edit183")
+    edit = _edited(user, _generated_with(user, GENERATED_TEXT))
+
+    text = exports.profile_text_for_prompt(edit)
+
+    assert "generated, then edited by the user themselves on 2025-06-01" in text
+    assert EDITED_TEXT in text
+    assert "- WRONG GUESS" in text and "+ MY EDIT" in text
+    assert "- Likes long walks." not in text     # unchanged lines are not edits
+
+
+def test_183_edit_of_a_none_version_never_shows_its_text(app):
+    """A generated version marked 'none' is never shown to a model, so its
+    removed lines are not either; the edit is shown as the user's text."""
+    import backend.tasks.exports as exports
+
+    user = _new_user("editnone183")
+    edit = _edited(user, _generated_with(user, GENERATED_TEXT,
+                                         ai_usage="none"))
+
+    text = exports.profile_text_for_prompt(edit)
+
+    assert "WRONG GUESS" not in text
+    assert "written by the user themselves on 2025-06-01" in text
+
+
+def test_183_edited_profile_survives_a_full_rebuild(app, monkeypatch):
+    """A profile edited on the profile page survives a from-scratch
+    rebuild: the edit joins the window that reaches its date, with the
+    user's lines marked, and the rebuilt profile holds the edit and the new
+    writing."""
+    import backend.tasks.exports as exports
+
+    user = _new_user("editrebuild183")
+    _edited(user, _generated_with(user, GENERATED_TEXT))
+    prompts = _rebuild_two_windows(exports, monkeypatch, {
+        None: _window("OLD DATA", JAN), JAN: _window("NEW DATA", DEC)})
+    monkeypatch.setattr(exports, "build_update_template",
+                        lambda uid: "UPDATE {existing_profile} || {new_data}")
+    monkeypatch.setattr(exports, "_load_prompt",
+                        lambda name, user_id=None: "INTEGRATE {N_MONTHS}")
+    markers = ("OLD DATA", "NEW DATA", "MY EDIT")
+
+    def keep_markers(text):
+        return " ".join(m for m in markers if m in text)
+
+    monkeypatch.setattr(exports, "_call_llm_with_retries",
+                        lambda self_, m, prompt, uid, keys, **kw: (
+                            prompts.append(prompt) or {
+                                "content": keep_markers(prompt),
+                                "input_tokens": 10, "output_tokens": 5,
+                                "total_tokens": 15}))
+    monkeypatch.setattr(exports.LLMProvider, "get_completion", staticmethod(
+        lambda model_id, messages, keys, **kw: {
+            "content": keep_markers(
+                "\n".join(m["content"][0]["text"] for m in messages)),
+            "input_tokens": 10, "output_tokens": 5, "total_tokens": 15}))
+
+    result = exports._iterative_generation(
+        MagicMock(), user, "gpt-5.5", "GEN {user_export}", 10_000, {})
+
+    assert "MY EDIT" not in prompts[0]
+    assert "+ MY EDIT" in prompts[1] and "- WRONG GUESS" in prompts[1]
+    final = UserProfile.query.get(result["profile_id"])
+    for marker in markers:
+        assert marker in final.get_content()
+
+
+def test_183_update_builds_on_the_edited_version_with_its_edits(app, monkeypatch):
+    """An incremental update after an edit builds on the edited version
+    (the newest one) and shows the user's edits, not the generated text
+    alone."""
+    import backend.tasks.exports as exports
+    from backend.models import Node
+
+    user = _new_user("editupdate183")
+    edit = _edited(user, _generated_with(user, GENERATED_TEXT))
+    node = Node(user_id=user.id, node_type="user", ai_usage="chat",
+                created_at=datetime(2025, 7, 1))
+    node.set_content("writing after the cutoff")
+    _db.session.add(node)
+    _db.session.commit()
+    assert exports.profile_update_base(user.id).id == edit.id
+
+    captured = {}
+    monkeypatch.setattr(exports, "_chunked_profile_loop", lambda *a, **kw: (
+        captured.update(kw) or (edit.id, 0, 0)))
+
+    exports._do_incremental_update(
+        MagicMock(), user, "gpt-5.5", edit.id,
+        context_window=200000, max_output_tokens=10000, api_keys={})
+
+    base = captured["initial_profile_content"]
+    assert "+ MY EDIT" in base and "- WRONG GUESS" in base
+    assert captured["initial_cutoff"] == JAN
+
+
+def test_183_an_edit_keeps_the_provisional_ladder_going(app):
+    """An edit carries the edited version's coverage: an edit of an early
+    (provisional) profile is provisional too, so the ladder's next rebuild
+    still comes — and keeps the edit. A profile written from scratch stays
+    the base."""
+    import backend.tasks.exports as exports
+
+    user = _new_user("ladder183")
+    generated = _generated_with(user, GENERATED_TEXT)
+    assert exports.profile_is_provisional(
+        _edited(user, generated, source_tokens=10_000)) is True
+    assert exports.profile_is_provisional(
+        _edited(user, generated, source_tokens=180_000)) is False
+    assert exports.profile_is_provisional(_user_written(user)) is False

@@ -1754,3 +1754,31 @@ def test_183_batch_update_from_user_written_base_carries_the_note(
     assert req["meta"]["prev_profile_id"] == base.id
     assert "written by the user themselves on 2025-06-01" in text
     assert text.count("MY OWN WORDS") == 1   # the base only, not folded in again
+
+
+def test_183_batch_update_from_an_edited_version_matches_the_sync_base(
+        app, monkeypatch):
+    """A version edited on the profile page is the next base; the batch
+    prompt carries it with the user's edits, byte for byte as the sync
+    loop does (both read it through profile_text_for_prompt)."""
+    _wide_window(app)
+    u = _user()
+    generated = _prev_profile(u, JAN183, gen_type="integration")
+    generated.set_content("Likes long walks.\nWRONG GUESS")
+    generated.created_at = JAN183
+    edit = UserProfile(user_id=u.id, generated_by="user", tokens_used=0,
+                       generation_type="initial", source_tokens_used=1000,
+                       source_data_cutoff=JAN183, created_at=JUN183,
+                       parent_profile_id=generated.id)
+    edit.set_content("Likes long walks.\nMY EDIT")
+    db.session.add(edit)
+    db.session.commit()
+    _windows_183(monkeypatch, {JAN183: 90_000},
+                 {JAN183: _chunk("NEW DATA", latest=DEC183)})
+
+    req = pb._build_next_profile_request(u)
+
+    text = _request_text(req)
+    assert req["meta"]["prev_profile_id"] == edit.id
+    assert pb._exports.profile_text_for_prompt(edit) in text
+    assert "+ MY EDIT" in text and "- WRONG GUESS" in text
