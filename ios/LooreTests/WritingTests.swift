@@ -551,6 +551,82 @@ final class ModelPickerTests: XCTestCase {
         XCTAssertEqual(ModelPickerOptions.appliedSuggestion(models: all, suggestion: try suggestion("claude-opus-4.6", "predecessor"),
                                                             selected: "gpt-6-astra", purpose: .chat), "claude-opus-4.6")
     }
+
+    // MARK: Read-only models (`chat: false`, PR #404)
+
+    /// `models()` plus the two read-only Read models, newest first within each provider.
+    private func modelsWithReadOnly() throws -> [ModelInfo] {
+        try decode([ModelInfo].self, """
+        [{"id":"gpt-6.1-sol","name":"GPT-6.1 Sol","provider":"openai","featured":false,"read":true,"chat":false},
+         {"id":"gpt-6-astra","name":"GPT-6 Astra","provider":"openai","featured":true,"read":false,"chat":true},
+         {"id":"gpt-6-luna","name":"GPT-6 Luna","provider":"openai","featured":false,"read":true,"chat":true},
+         {"id":"gpt-5.6-luna","name":"GPT-5.6 Luna","provider":"openai","featured":false,"read":true,"chat":true},
+         {"id":"claude-sonnet-5.5","name":"Sonnet 5.5","provider":"anthropic","featured":false,"read":true,"chat":false},
+         {"id":"claude-opus-5.5","name":"Opus 5.5","provider":"anthropic","featured":true,"read":false,"chat":true},
+         {"id":"claude-fable-5.1","name":"Fable 5.1","provider":"anthropic","featured":false,"read":false,"chat":true},
+         {"id":"claude-opus-4.6","name":"Opus 4.6","provider":"anthropic","featured":true,"read":false,"chat":true}]
+        """)
+    }
+
+    func testOfferedModelsPerPurpose() throws {
+        let all = try modelsWithReadOnly()
+        XCTAssertEqual(ModelPickerOptions.offered(all, purpose: .read).map(\.id),
+                       ["gpt-6.1-sol", "gpt-6-luna", "gpt-5.6-luna", "claude-sonnet-5.5"])
+        XCTAssertEqual(ModelPickerOptions.offered(all, purpose: .chat).map(\.id),
+                       ["gpt-6-astra", "gpt-6-luna", "gpt-5.6-luna", "claude-opus-5.5", "claude-fable-5.1", "claude-opus-4.6"])
+        // A server without the flag: every model is a chat model.
+        XCTAssertEqual(ModelPickerOptions.offered(try models(), purpose: .chat).count, try models().count)
+    }
+
+    func testChatPickerLeavesOutReadOnlyModelsEvenWhenSelected() throws {
+        let all = try modelsWithReadOnly()
+        let collapsed = ModelPickerOptions.make(models: all, selectedId: "claude-sonnet-5.5", purpose: .chat, expanded: false)
+        XCTAssertEqual(ids(collapsed), ["claude-opus-5.5", "claude-opus-4.6", "gpt-6-astra"])
+        guard case .grouped(let groups) = ModelPickerOptions.make(models: all, selectedId: "gpt-6.1-sol",
+                                                                   purpose: .chat, expanded: true) else { return XCTFail() }
+        XCTAssertEqual(groups.map(\.label), ["Anthropic", "OpenAI"])
+        XCTAssertEqual(groups[0].models.map(\.id), ["claude-opus-5.5", "claude-fable-5.1", "claude-opus-4.6"])
+        XCTAssertEqual(groups[1].models.map(\.id), ["gpt-6-astra", "gpt-6-luna", "gpt-5.6-luna"])
+    }
+
+    func testMoreModelsCountsOnlyChatModels() throws {
+        // Every chat model is featured; the read-only ones must not add "More models…".
+        let all = try decode([ModelInfo].self, """
+        [{"id":"gpt-6.1-sol","name":"GPT-6.1 Sol","provider":"openai","featured":false,"read":true,"chat":false},
+         {"id":"gpt-6-astra","name":"GPT-6 Astra","provider":"openai","featured":true,"read":false,"chat":true},
+         {"id":"claude-sonnet-5.5","name":"Sonnet 5.5","provider":"anthropic","featured":false,"read":true,"chat":false},
+         {"id":"claude-opus-5.5","name":"Opus 5.5","provider":"anthropic","featured":true,"read":false,"chat":true}]
+        """)
+        let o = ModelPickerOptions.make(models: all, selectedId: "claude-opus-5.5", purpose: .chat, expanded: false)
+        XCTAssertEqual(ids(o), ["claude-opus-5.5", "gpt-6-astra"])
+        guard case .flat(_, let more) = o else { return XCTFail() }
+        XCTAssertFalse(more)
+    }
+
+    func testReadPickerOffersReadOnlyModels() throws {
+        let o = ModelPickerOptions.make(models: try modelsWithReadOnly(), selectedId: "claude-sonnet-5.5",
+                                        purpose: .read, expanded: false)
+        XCTAssertEqual(ids(o), ["gpt-6.1-sol", "gpt-6-luna", "gpt-5.6-luna", "claude-sonnet-5.5"])
+    }
+
+    func testSuggestionRulesForReadOnlyModels() throws {
+        let all = try modelsWithReadOnly()
+        func suggestion(_ id: String, _ source: String) throws -> SuggestedModel {
+            try decode(SuggestedModel.self, #"{"suggested_model":"\#(id)","source":"\#(source)"}"#)
+        }
+        // A chat picker (LLM Response, or the Account default with no node) replaces a
+        // read-only selection with the server's suggestion, whatever its source.
+        XCTAssertEqual(ModelPickerOptions.appliedSuggestion(models: all, suggestion: try suggestion("claude-opus-5.5", "default"),
+                                                            selected: "claude-sonnet-5.5", purpose: .chat), "claude-opus-5.5")
+        XCTAssertEqual(ModelPickerOptions.appliedSuggestion(models: all, suggestion: try suggestion("gpt-6-astra", "user_preference"),
+                                                            selected: "gpt-6.1-sol", purpose: .chat), "gpt-6-astra")
+        // The Read picker keeps a read-only selection over a non-thread default.
+        XCTAssertNil(ModelPickerOptions.appliedSuggestion(models: all, suggestion: try suggestion("gpt-6-luna", "default"),
+                                                          selected: "gpt-6.1-sol", purpose: .read))
+        // A chat model is still replaced in the Read picker.
+        XCTAssertEqual(ModelPickerOptions.appliedSuggestion(models: all, suggestion: try suggestion("claude-sonnet-5.5", "default"),
+                                                            selected: "claude-opus-5.5", purpose: .read), "claude-sonnet-5.5")
+    }
 }
 
 final class SearchSnippetTests: XCTestCase {
