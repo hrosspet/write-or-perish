@@ -86,6 +86,24 @@ def no_real_model(monkeypatch):
                         staticmethod(_refuse))
 
 
+@pytest.fixture(autouse=True)
+def pin_live_prompt(monkeypatch):
+    """The pinned hash guards runs on prod (a changed default prompt can't
+    rebuild older merges). The tests rebuild with whatever the file says
+    today, so they don't fail when the prompt is edited (#410 / PR #417)."""
+    import hashlib
+    from backend.utils.prompts import load_default_prompt
+    live = load_default_prompt(cmp.PROMPT_KEY)
+    monkeypatch.setattr(cmp, "PROMPT_FILE_SHA256",
+                        hashlib.sha256(live.encode()).hexdigest())
+
+
+def test_a_changed_default_prompt_refuses_to_run(monkeypatch):
+    monkeypatch.setattr(cmp, "PROMPT_FILE_SHA256", "0" * 64)
+    with pytest.raises(SystemExit, match="orient_apply_todo.txt changed"):
+        cmp.file_default_prompt()
+
+
 class FakeProvider:
     """Answers each merge from a table keyed by the proposal text (the
     assistant message), per model; records every call."""
