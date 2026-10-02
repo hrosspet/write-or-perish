@@ -11,22 +11,26 @@ first failure is what matters: backend/llm_providers.py recognises it
   emails SPEND_ALERT_EMAIL (the spend monitor's recipient, #85) and sends
   one Sentry event.
 
-A cause is the provider and the kind (plus the model id for an unknown
-model). The window is claimed in Redis (SET NX EX), so one email goes out
-across the web and worker processes; without Redis (tests, a local run
-without it) each process keeps its own claims.
+A cause is the provider, the kind and the role of the key the call used
+(chat, train, batch, legacy), plus the model id for an unknown model, so
+two keys failing send two emails. The window is claimed in Redis (SET NX
+EX), so one email goes out across the web and worker processes; without
+Redis (tests, a local run without it) each process keeps its own claims.
 
-Every Sentry event whose exception is, or was raised from, a
-ProviderAccountError — or, for a log message without an exception, that
-was logged while one was being handled — gets the cause's fingerprint
-(``apply_fingerprint``, called from the before_send hook in
-backend/__init__.py), so the task failures and error logs of all those
-calls group into one issue per cause, next to the event sent here.
+Every Sentry event whose exception is a ProviderAccountError or was
+raised from one (``raise … from``: the __cause__ chain) gets the cause's
+fingerprint (``apply_fingerprint``, called from the before_send hook in
+backend/__init__.py), so the task failures and logged exceptions of all
+those calls group into one issue per cause, next to the event sent here.
+An exception that was merely raised while one was being handled (its
+__context__) keeps its own grouping: a DB error in an error handler is a
+DB error. A log line without an exception gets the fingerprint only when
+it asks for it, with ``extra=log_extra(exc)``.
 """
 import logging
-import sys
 import threading
 import time
+from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +41,9 @@ DEFAULT_THROTTLE_SECONDS = 6 * 3600
 
 KEY_PREFIX = "loore:provider-account-alert:"
 FINGERPRINT_PREFIX = "provider-account-failure"
+# The log-record attribute (set through ``extra=log_extra(exc)``) that
+# carries the fingerprint of a log line without an exception.
+LOG_RECORD_ATTR = "provider_account_fingerprint"
 
 _local_claims = {}
 _local_lock = threading.Lock()
@@ -45,8 +52,11 @@ _client = None
 
 def cause_key(err):
     """The cause of a ProviderAccountError as a tuple of strings: provider,
-    kind, and the model id when the model is the problem."""
-    parts = [(err.provider or "unknown").lower(), err.kind or "unknown"]
+    kind, the role of the key (chat, train, batch, legacy; "unknown" when
+    the call site didn't say), and the model id when the model is the
+    problem."""
+    parts = [(err.provider or "unknown").lower(), err.kind or "unknown",
+             getattr(err, "key_role", None) or "unknown"]
     if err.kind == "model_not_found" and err.model:
         parts.append(str(err.model))
     return tuple(parts)
@@ -59,32 +69,68 @@ def fingerprint(err):
 
 
 def account_failure_in(exc):
-    """The ProviderAccountError that *exc* is or was raised from (its
-    __cause__ / __context__ chain), or None."""
-    from backend.llm_providers import ProviderAccountError
+    """The ProviderAccountError that *exc* is or was raised from with
+    ``raise … from`` (its __cause__ chain), or None. __context__ is not
+    followed: Python sets it on any exception raised while another is
+    being handled, so an unrelated error in an account failure's handler
+    (a DB commit, say) would be grouped as the account failure."""
+    try:
+        from backend.llm_providers import ProviderAccountError
+    except ImportError:  # pragma: no cover
+        return None
+    if not isinstance(ProviderAccountError, type):  # a stubbed module
+        return None
     seen = set()
     while exc is not None and id(exc) not in seen:
         if isinstance(exc, ProviderAccountError):
             return exc
         seen.add(id(exc))
-        exc = exc.__cause__ or exc.__context__
+        exc = exc.__cause__
     return None
 
 
-def apply_fingerprint(event, exc=None):
+def log_extra(exc):
+    """``extra=`` for a log line about *exc* that is logged without
+    exc_info (Sentry makes it a message event, with no exception to
+    group by): the cause's fingerprint when *exc* is, or was raised from,
+    an account failure, else {}. E.g. ProfileGenerationTask.on_failure."""
+    err = account_failure_in(exc)
+    return {LOG_RECORD_ATTR: fingerprint(err)} if err is not None else {}
+
+
+def apply_fingerprint(event, exc=None, log_record=None):
     """Sentry before_send: group an event about an account failure under
     its cause's fingerprint. Returns the event.
 
-    *exc* is the event's exception. A log message without one (e.g. the
-    task's "LLM completion failed for node …" line) is about the
-    exception being handled when it was logged: before_send runs in the
-    logging thread, so that is sys.exc_info()."""
-    if exc is None:
-        exc = sys.exc_info()[1]
-    err = account_failure_in(exc) if exc is not None else None
+    *exc* is the event's exception: it gets the fingerprint when it is,
+    or was raised from, a ProviderAccountError (account_failure_in). A
+    log line without an exception (*log_record*, the hint's) gets it only
+    when it was logged with ``extra=log_extra(exc)``. Nothing is taken
+    from the exception being handled when the event was made: that would
+    group unrelated errors and messages too."""
+    err = account_failure_in(exc)
     if err is not None:
         event["fingerprint"] = fingerprint(err)
+    else:
+        tagged = getattr(log_record, LOG_RECORD_ATTR, None)
+        if tagged:
+            event["fingerprint"] = list(tagged)
     return event
+
+
+def environment_label(config):
+    """The deployment, for the alert's subject: "prod", "staging" or
+    "local", from FRONTEND_URL's host (prod and staging set it: login
+    redirects and canonical URLs use it); another host is named as is."""
+    host = (urlparse(config.get("FRONTEND_URL") or "").hostname
+            or "").lower()
+    if not host or host in ("localhost", "127.0.0.1", "0.0.0.0"):
+        return "local"
+    if host in ("loore.org", "www.loore.org"):
+        return "prod"
+    if host.startswith("staging."):
+        return "staging"
+    return host
 
 
 def throttle_seconds(config):
@@ -139,6 +185,8 @@ def _capture(err, detail):
             scope.fingerprint = fingerprint(err)
             scope.set_tag("provider", (err.provider or "").lower())
             scope.set_tag("account_failure", err.kind)
+            scope.set_tag("key_role", getattr(err, "key_role", None)
+                          or "unknown")
             if err.model:
                 scope.set_tag("model", str(err.model))
             scope.set_context("provider_error", detail)
@@ -180,7 +228,10 @@ def report_account_failure(err, exc, config=None, send_email=None):
         send_email(
             to_email=config.get("SPEND_ALERT_EMAIL") or "signup@loore.org",
             provider=err.provider, kind=err.kind, model=err.model,
-            detail=detail, window_seconds=window)
+            detail=detail, window_seconds=window,
+            key_role=getattr(err, "key_role", None) or "unknown",
+            environment=environment_label(config),
+            user_message=str(err))
     except Exception:
         # The window stays claimed: retrying the mail on every failed
         # call would slow each of them by the SMTP timeout. Sentry has

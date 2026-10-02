@@ -353,10 +353,22 @@ def _refuse(*args, **kwargs):
     raise AssertionError("the other provider must never be called")
 
 
-@pytest.mark.parametrize("make", [m for name, m, _ in ACCOUNT_ERRORS
-                                  if name.startswith("anthropic")])
+GENERIC_MESSAGE = ("AI replies are temporarily unavailable. This is a "
+                   "problem on Loore's side, not yours, and it has been "
+                   "reported.")
+MODEL_MESSAGE = "This model isn't available any more. Choose another model."
+
+
+def _users_message(kind):
+    # Only a missing model has its own message: the other models still
+    # work, so the user is told to choose one (#406 review).
+    return MODEL_MESSAGE if kind == "model_not_found" else GENERIC_MESSAGE
+
+
+@pytest.mark.parametrize("make,kind", [(m, k) for name, m, k in ACCOUNT_ERRORS
+                                       if name.startswith("anthropic")])
 def test_anthropic_account_error_reads_as_the_users_message(
-        providers, mails, sentry, monkeypatch, make):
+        providers, mails, sentry, monkeypatch, make, kind):
     error = make()
     calls = []
     monkeypatch.setattr(providers, "Anthropic", _anthropic_client(
@@ -365,9 +377,8 @@ def test_anthropic_account_error_reads_as_the_users_message(
     with pytest.raises(providers.ProviderAccountError) as exc_info:
         providers.LLMProvider._call_anthropic("claude-x", MSGS, "k")
     text = str(exc_info.value)
-    assert text == ("AI replies are temporarily unavailable. This is a "
-                    "problem on Loore's side, not yours, and it has been "
-                    "reported.")
+    assert text == _users_message(kind)
+    assert exc_info.value.kind == kind
     # None of the raw error reaches the user, nor the provider's name.
     for raw in ("Error code", "Anthropic", "request_id", "req_011",
                 "invalid_request_error"):
@@ -380,10 +391,10 @@ def test_anthropic_account_error_reads_as_the_users_message(
     assert exc_info.value.model == "claude-x"
 
 
-@pytest.mark.parametrize("make", [m for name, m, _ in ACCOUNT_ERRORS
-                                  if name.startswith("openai")])
+@pytest.mark.parametrize("make,kind", [(m, k) for name, m, k in ACCOUNT_ERRORS
+                                       if name.startswith("openai")])
 def test_openai_account_error_reads_as_the_users_message(
-        providers, mails, sentry, monkeypatch, make):
+        providers, mails, sentry, monkeypatch, make, kind):
     error = make()
     calls = []
     monkeypatch.setattr(providers, "OpenAI", _openai_client(
@@ -391,7 +402,8 @@ def test_openai_account_error_reads_as_the_users_message(
     monkeypatch.setattr(providers, "Anthropic", _refuse)
     with pytest.raises(providers.ProviderAccountError) as exc_info:
         providers.LLMProvider._call_openai("gpt-x", MSGS, "k")
-    assert str(exc_info.value) == providers.ProviderAccountError.USER_MESSAGE
+    assert str(exc_info.value) == _users_message(kind)
+    assert exc_info.value.kind == kind
     assert "Error code" not in str(exc_info.value)
     assert exc_info.value.__cause__ is error
     assert len(calls) == 1
@@ -402,7 +414,18 @@ def test_the_message_survives_celerys_round_trip(providers):
     # with cls(*args); the profile progress endpoint shows str(task.info).
     err = providers.ProviderAccountError("Anthropic", "spend_limit", "m")
     rebuilt = providers.ProviderAccountError(*err.args)
-    assert str(rebuilt) == str(err) == err.USER_MESSAGE
+    assert str(rebuilt) == str(err) == GENERIC_MESSAGE
+    # The missing model's own message is its class's, so it survives too.
+    err = providers.ModelUnavailableError("OpenAI", "model_not_found", "g")
+    rebuilt = type(err)(*err.args)
+    assert str(rebuilt) == str(err) == MODEL_MESSAGE
+    assert isinstance(rebuilt, providers.ProviderAccountError)
+
+
+def test_only_a_missing_model_has_its_own_message(providers):
+    for kind in providers.ACCOUNT_FAILURE_KINDS:
+        assert providers.account_error_class(kind).USER_MESSAGE == \
+            _users_message(kind), kind
 
 
 def test_no_fallback_to_the_other_provider(providers, mails, sentry,
@@ -486,14 +509,15 @@ def test_the_window_is_shared_across_processes_through_redis(
     monkeypatch.setattr(alerts, "_redis", lambda config: shared)
     config = {"PROVIDER_ACCOUNT_ALERT_THROTTLE_SECONDS": 600}
     error = _openai_error(429, "insufficient_quota", "insufficient_quota")
-    err = providers.ProviderAccountError("OpenAI", "billing", "gpt-x")
+    err = providers.ProviderAccountError("OpenAI", "billing", "gpt-x",
+                                         "batch")
     assert alerts.report_account_failure(err, error, config=config)
     # A second process: its own in-memory claims are empty, Redis isn't.
     monkeypatch.setattr(alerts, "_local_claims", {})
     assert not alerts.report_account_failure(err, error, config=config)
     assert len(mails) == 1
     assert list(shared.store) == [
-        "loore:provider-account-alert:openai:billing"]
+        "loore:provider-account-alert:openai:billing:batch"]
 
 
 def test_a_failed_email_does_not_fail_the_call(providers, alerts, sentry,
@@ -534,43 +558,52 @@ def test_a_live_call_reports_once(providers, mails, sentry, monkeypatch):
 
 def test_the_fingerprint_is_stable_per_cause(providers, alerts):
     Err = providers.ProviderAccountError
-    a = Err("Anthropic", "spend_limit", "claude-x")
-    b = Err("Anthropic", "spend_limit", "claude-y")
+    a = Err("Anthropic", "spend_limit", "claude-x", "chat")
+    b = Err("Anthropic", "spend_limit", "claude-y", "chat")
     assert alerts.fingerprint(a) == alerts.fingerprint(b) == [
-        "provider-account-failure", "anthropic", "spend_limit"]
-    assert alerts.fingerprint(Err("OpenAI", "spend_limit")) != \
+        "provider-account-failure", "anthropic", "spend_limit", "chat"]
+    assert alerts.fingerprint(Err("OpenAI", "spend_limit", None, "chat")) \
+        != alerts.fingerprint(a)
+    assert alerts.fingerprint(Err("Anthropic", "auth", None, "chat")) != \
         alerts.fingerprint(a)
-    assert alerts.fingerprint(Err("Anthropic", "auth")) != \
-        alerts.fingerprint(a)
+    # Another key is another cause: it is another thing to fix.
+    assert alerts.fingerprint(Err("Anthropic", "spend_limit", "claude-x",
+                                  "train")) != alerts.fingerprint(a)
+    # A call site that didn't name the key.
+    assert alerts.fingerprint(Err("Anthropic", "auth")) == [
+        "provider-account-failure", "anthropic", "auth", "unknown"]
     # An unknown model is its own cause per model id.
-    assert alerts.fingerprint(Err("OpenAI", "model_not_found", "gpt-old")) \
-        == ["provider-account-failure", "openai", "model_not_found",
-            "gpt-old"]
+    assert alerts.fingerprint(providers.ModelUnavailableError(
+        "OpenAI", "model_not_found", "gpt-old", "chat")) == [
+        "provider-account-failure", "openai", "model_not_found", "chat",
+        "gpt-old"]
 
 
 def test_the_sentry_event_carries_the_fingerprint(providers, alerts, mails,
                                                   sentry):
-    err = providers.ProviderAccountError("Anthropic", "billing", "claude-x")
+    err = providers.ProviderAccountError("Anthropic", "billing", "claude-x",
+                                         "train")
     alerts.report_account_failure(
         err, _anthropic_error(402, "billing_error", "Payment required"),
         config={})
     assert sentry == [{
         "message": "Model provider account failure: Anthropic (billing)",
         "level": "error",
-        "fingerprint": ["provider-account-failure", "anthropic", "billing"],
+        "fingerprint": ["provider-account-failure", "anthropic", "billing",
+                        "train"],
         "tags": {"provider": "anthropic", "account_failure": "billing",
-                 "model": "claude-x"},
+                 "key_role": "train", "model": "claude-x"},
     }]
 
 
 def test_before_send_groups_every_event_about_the_failure(providers,
                                                           alerts):
-    err = providers.ProviderAccountError("OpenAI", "billing", "gpt-x")
+    err = providers.ProviderAccountError("OpenAI", "billing", "gpt-x", "chat")
+    expected = ["provider-account-failure", "openai", "billing", "chat"]
     # The task failure itself.
     event = alerts.apply_fingerprint({}, err)
-    assert event["fingerprint"] == [
-        "provider-account-failure", "openai", "billing"]
-    # An error raised from it (e.g. a batch poll that gave up).
+    assert event["fingerprint"] == expected
+    # An error raised from it.
     try:
         try:
             raise err
@@ -578,20 +611,60 @@ def test_before_send_groups_every_event_about_the_failure(providers,
             raise RuntimeError("gave up") from inner
     except RuntimeError as outer:
         event = alerts.apply_fingerprint({}, outer)
-    assert event["fingerprint"] == [
-        "provider-account-failure", "openai", "billing"]
-    # A log message without an exception, logged while the failure is
-    # handled (the task's "LLM completion failed for node …" line).
-    try:
-        raise err
-    except providers.ProviderAccountError:
-        event = alerts.apply_fingerprint({"message": "failed"}, None)
-    assert event["fingerprint"] == [
-        "provider-account-failure", "openai", "billing"]
+    assert event["fingerprint"] == expected
+    # A log line without an exception that asks for it (log_extra), such
+    # as ProfileGenerationTask.on_failure's.
+    import logging
+    record = logging.LogRecord("t", logging.ERROR, __file__, 1, "failed",
+                               None, None)
+    for key, value in alerts.log_extra(err).items():
+        setattr(record, key, value)
+    event = alerts.apply_fingerprint({"message": "failed"}, None, record)
+    assert event["fingerprint"] == expected
     # Anything else keeps Sentry's own grouping.
     assert "fingerprint" not in alerts.apply_fingerprint(
         {}, ValueError("x"))
     assert "fingerprint" not in alerts.apply_fingerprint({}, None)
+    assert alerts.log_extra(ValueError("x")) == {}
+
+
+def test_an_unrelated_error_in_the_handler_keeps_its_own_grouping(
+        providers, alerts):
+    """An exception raised while an account failure is being handled (a
+    DB commit in the task's error handler) only has it as __context__.
+    It is not about the account, so it is not grouped under it; neither
+    is a log line written while it is handled without log_extra (#406
+    review, minor 1)."""
+    err = providers.ProviderAccountError("Anthropic", "spend_limit",
+                                         "claude-x", "chat")
+    try:
+        try:
+            raise err
+        except providers.ProviderAccountError:
+            raise ConnectionError("database connection lost")
+    except ConnectionError as db_error:
+        assert db_error.__context__ is err  # what Python links
+        assert "fingerprint" not in alerts.apply_fingerprint({}, db_error)
+        # Nor a message-only event logged while it is handled.
+        assert "fingerprint" not in alerts.apply_fingerprint(
+            {"message": "commit failed"}, None)
+    try:
+        raise err
+    except providers.ProviderAccountError:
+        assert "fingerprint" not in alerts.apply_fingerprint(
+            {"message": "something else failed"}, None)
+
+
+def test_the_poll_cap_failure_is_grouped_under_the_account_failure(
+        providers, alerts):
+    # The task raises MaxRetriesExceededError at the poll cap with the
+    # account failure set as its __cause__ (llm_completion), so that task
+    # failure still groups with it.
+    err = providers.ProviderAccountError("OpenAI", "auth", None, "chat")
+    cap = RuntimeError("max retries exceeded")
+    cap.__cause__ = err
+    assert alerts.apply_fingerprint({}, cap)["fingerprint"] == [
+        "provider-account-failure", "openai", "auth", "chat"]
 
 
 # ── The email ────────────────────────────────────────────────────────────
@@ -607,11 +680,121 @@ def test_the_alert_email(providers, monkeypatch):
         detail={"status": 400, "type": "invalid_request_error",
                 "code": None, "message": SPEND_LIMIT_WORKSPACE,
                 "request_id": "req_011"},
-        window_seconds=21600)
+        window_seconds=21600, key_role="train", environment="staging",
+        user_message=GENERIC_MESSAGE)
     (to, subject, text, html), = delivered
     assert to == "admin@example.com"
-    assert subject == "Loore: Anthropic calls are failing (spend_limit)"
+    # Staging mails the same inbox as prod: the subject says which.
+    assert subject == \
+        "[staging] Loore: Anthropic calls are failing (spend_limit)"
+    assert "Deployment: staging" in text
+    # Which key to fix: its role and setting name.
+    assert "API key: train (ANTHROPIC_API_KEY_TRAIN)" in text
+    assert "ANTHROPIC_API_KEY_TRAIN" in html
     assert "a spend limit set in the provider's console" in text
     assert SPEND_LIMIT_WORKSPACE in text and "req_011" in text
+    assert f'Users see "{GENERIC_MESSAGE}"' in text
     assert "not emailed for 6 hours" in text
     assert "Error code: None" not in text  # empty fields are left out
+
+
+def test_the_alert_email_for_a_missing_model(providers, monkeypatch):
+    import backend.utils.email as email
+    delivered = []
+    monkeypatch.setattr(email, "_deliver",
+                        lambda *args: delivered.append(args))
+    email.send_provider_account_alert_email(
+        to_email="admin@example.com", provider="OpenAI",
+        kind="model_not_found", model="gpt-old",
+        detail={"status": 404, "code": "model_not_found"},
+        window_seconds=3600, key_role="chat/legacy", environment="prod")
+    (_, subject, text, _), = delivered
+    assert subject == \
+        "[prod] Loore: OpenAI calls are failing (model_not_found)"
+    assert f'Users see "{MODEL_MESSAGE}"' in text
+    assert "API key: chat/legacy (OPENAI_API_KEY_CHAT, OPENAI_API_KEY)" \
+        in text
+
+
+@pytest.mark.parametrize("url,label", [
+    ("https://loore.org", "prod"),
+    ("https://www.loore.org/", "prod"),
+    ("https://staging.loore.org", "staging"),
+    ("http://localhost:3000", "local"),
+    ("http://127.0.0.1:3001", "local"),
+    ("", "local"),
+    (None, "local"),
+    ("https://loore.example.com", "loore.example.com"),
+])
+def test_the_deployment_label(alerts, url, label):
+    assert alerts.environment_label({"FRONTEND_URL": url}) == label
+
+
+def test_the_key_role(providers):
+    from backend.utils.api_keys import api_key_role
+    config = {"ANTHROPIC_API_KEY_CHAT": "sk-ant-chat",
+              "ANTHROPIC_API_KEY_TRAIN": "sk-ant-train",
+              "ANTHROPIC_API_KEY": "sk-ant-legacy",
+              "OPENAI_API_KEY_CHAT": "",          # unset: an empty string
+              "OPENAI_API_KEY_BATCH": "sk-oai-batch",
+              "OPENAI_API_KEY": "sk-oai-legacy"}
+    assert api_key_role(config, "Anthropic", "sk-ant-chat") == "chat"
+    assert api_key_role(config, "anthropic", "sk-ant-train") == "train"
+    assert api_key_role(config, "Anthropic", "sk-ant-legacy") == "legacy"
+    assert api_key_role(config, "OpenAI", "sk-oai-batch") == "batch"
+    assert api_key_role(config, "OpenAI", "sk-oai-legacy") == "legacy"
+    # One key set in two settings: both roles.
+    assert api_key_role({**config, "OPENAI_API_KEY_CHAT": "sk-oai-legacy"},
+                        "OpenAI", "sk-oai-legacy") == "chat/legacy"
+    # Not a configured key, no key: unknown. An empty setting never matches.
+    assert api_key_role(config, "Anthropic", "sk-other") == "unknown"
+    assert api_key_role(config, "OpenAI", None) == "unknown"
+    assert api_key_role(config, "OpenAI", "") == "unknown"
+    # Another provider's key is not this provider's.
+    assert api_key_role(config, "OpenAI", "sk-ant-chat") == "unknown"
+
+
+def test_two_keys_failing_send_two_emails(providers, alerts, mails, sentry):
+    paused = _anthropic_error(400, "invalid_request_error", SPEND_LIMIT_ORG)
+    for role in ("train", "chat", "train", "chat"):
+        alerts.report_account_failure(
+            providers.ProviderAccountError("Anthropic", "spend_limit",
+                                           "claude-x", role),
+            paused, config={})
+    assert [m["key_role"] for m in mails] == ["train", "chat"]
+
+
+def test_a_live_call_names_its_key_and_deployment_never_the_key(
+        providers, alerts, sentry, monkeypatch):
+    """End to end through the provider call and the real email (only the
+    SMTP delivery is replaced): the alert names the deployment and the
+    key's role and setting; no part of the key is anywhere in it."""
+    from flask import Flask
+    import backend.utils.email as email
+    delivered = []
+    monkeypatch.setattr(email, "_deliver",
+                        lambda *args: delivered.append(args))
+    app = Flask(__name__)
+    secret = "sk-ant-api03-TRAINKEY0123456789abcdef"
+    app.config.update(
+        ANTHROPIC_API_KEY_CHAT="sk-ant-api03-CHATKEY0123456789abcdef",
+        ANTHROPIC_API_KEY_TRAIN=secret,
+        ANTHROPIC_API_KEY="",
+        FRONTEND_URL="https://staging.loore.org",
+        SPEND_ALERT_EMAIL="admin@example.com")
+    revoked = _anthropic_error(401, "authentication_error",
+                               "invalid x-api-key")
+    monkeypatch.setattr(providers, "Anthropic",
+                        _anthropic_client([revoked], []))
+    with app.app_context():
+        with pytest.raises(providers.ProviderAccountError) as exc_info:
+            providers.LLMProvider._call_anthropic("claude-x", MSGS, secret)
+    assert exc_info.value.key_role == "train"
+    (to, subject, text, html), = delivered
+    assert to == "admin@example.com"
+    assert subject == "[staging] Loore: Anthropic calls are failing (auth)"
+    assert "API key: train (ANTHROPIC_API_KEY_TRAIN)" in text
+    for part in (subject, text, html):
+        assert "TRAINKEY" not in part and "sk-ant" not in part
+        assert secret[-4:] not in part
+    assert sentry[0]["tags"]["key_role"] == "train"

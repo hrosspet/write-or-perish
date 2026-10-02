@@ -110,22 +110,42 @@ class ProviderAccountError(RuntimeError):
     or without access, or a model id the provider doesn't serve.
 
     The message is written for the user, as the node's error, and names
-    no provider; it is the same whatever the cause, so a copy rebuilt
-    from its args (Celery's stored task result) reads the same.
-    ``provider``, ``kind`` and ``model`` say what happened, for the admin
-    alert (backend/utils/provider_alerts.py); the provider's own error is
-    the ``__cause__``. Nothing retries it, and no other provider is tried
-    in its place (voice review, Peter, 2026-10-02)."""
+    no provider; it is fixed per class (ModelUnavailableError has its
+    own), so a copy Celery rebuilds from its args reads the same.
+    ``provider``, ``kind``, ``model`` and ``key_role`` (which configured
+    key: chat, train, batch or legacy; never the key itself) say what
+    happened, for the admin alert (backend/utils/provider_alerts.py); the
+    provider's own error is the ``__cause__``. Nothing retries it, and no
+    other provider is tried in its place (voice review, Peter,
+    2026-10-02)."""
 
     USER_MESSAGE = (
         "AI replies are temporarily unavailable. This is a problem on "
         "Loore's side, not yours, and it has been reported.")
 
-    def __init__(self, provider=None, kind=None, model=None):
+    def __init__(self, provider=None, kind=None, model=None, key_role=None):
         super().__init__(self.USER_MESSAGE)
         self.provider = provider
         self.kind = kind
         self.model = model
+        self.key_role = key_role
+
+
+class ModelUnavailableError(ProviderAccountError):
+    """The account failure ``model_not_found``: the provider doesn't serve
+    the model id (retired, or the key has no access to it). Only calls
+    that name this model fail, so the user is told to pick another one
+    instead of that AI replies are unavailable (#406 review)."""
+
+    USER_MESSAGE = ("This model isn't available any more. Choose another "
+                    "model.")
+
+
+def account_error_class(kind):
+    """The ProviderAccountError class raised for an account failure of
+    *kind*; its USER_MESSAGE is what the user reads."""
+    return (ModelUnavailableError if kind == "model_not_found"
+            else ProviderAccountError)
 
 
 # Display names for the provider keys of SUPPORTED_MODELS, as the live
@@ -269,16 +289,37 @@ def provider_error_detail(exc):
     return detail
 
 
-def note_account_failure(exc, provider, model=None, model_call=True):
+def _key_role(provider, api_key):
+    """The role of *api_key* among the configured keys (chat, train,
+    batch, legacy; backend/utils/api_keys.api_key_role), or "unknown"
+    outside an app context. Only the role leaves this function."""
+    try:
+        config = current_app.config
+    except RuntimeError:  # outside an app context (a script)
+        return "unknown"
+    try:
+        from backend.utils.api_keys import api_key_role
+        return api_key_role(config, provider, api_key)
+    except Exception:  # pragma: no cover — naming the key must not mask it
+        logger.exception("Naming the %s key of an account failure failed",
+                         provider)
+        return "unknown"
+
+
+def note_account_failure(exc, provider, model=None, model_call=True,
+                         api_key=None):
     """If *exc* is an account failure, report it — one admin email and one
     Sentry event per cause per throttle window
     (backend/utils/provider_alerts.py) — and return the
-    ProviderAccountError to raise in its place; otherwise None. Reporting
-    never raises: a broken alert must not hide the failure itself."""
+    ProviderAccountError to raise in its place; otherwise None. *api_key*
+    is the key the call used: the report names its role (chat, train,
+    batch, legacy), never the key. Reporting never raises: a broken alert
+    must not hide the failure itself."""
     kind = account_failure_kind(exc, model_call=model_call)
     if kind is None:
         return None
-    err = ProviderAccountError(provider, kind, model)
+    err = account_error_class(kind)(
+        provider, kind, model, _key_role(provider, api_key))
     try:
         from backend.utils.provider_alerts import report_account_failure
         report_account_failure(err, exc)
@@ -288,11 +329,12 @@ def note_account_failure(exc, provider, model=None, model_call=True):
     return err
 
 
-def raise_for_account_failure(exc, provider, model=None, model_call=True):
+def raise_for_account_failure(exc, provider, model=None, model_call=True,
+                              api_key=None):
     """Raise ProviderAccountError from *exc* (reported, see
     note_account_failure) when *exc* is an account failure; otherwise
     return, for the caller to handle *exc* as before."""
-    err = note_account_failure(exc, provider, model, model_call)
+    err = note_account_failure(exc, provider, model, model_call, api_key)
     if err is not None:
         raise err from exc
 
@@ -375,7 +417,8 @@ class StreamListener:
         return True
 
 
-def _retry_mid_stream(call, provider, listener=None, model=None):
+def _retry_mid_stream(call, provider, listener=None, model=None,
+                      api_key=None):
     """Run ``call`` (one streamed request, collected to its final result),
     retrying mid-stream failures per STREAM_RETRY_DELAYS. Request-level
     errors are left to the SDK's own retries so the two don't stack. A
@@ -383,13 +426,14 @@ def _retry_mid_stream(call, provider, listener=None, model=None):
     ProviderUnavailableError instead of the provider's raw error, which
     would otherwise reach the user as is; an account failure raises
     ProviderAccountError at once, reported to the admin (*model*, the
-    API model id, goes in the report). A retry restarts the reply, so a
-    *listener* is asked first (StreamListener.on_restart)."""
+    API model id, and the role of *api_key* go in the report). A retry
+    restarts the reply, so a *listener* is asked first
+    (StreamListener.on_restart)."""
     for retry_delay in (*STREAM_RETRY_DELAYS, None):
         try:
             return call()
         except Exception as e:
-            raise_for_account_failure(e, provider, model)
+            raise_for_account_failure(e, provider, model, api_key=api_key)
             if _transient_request_error(e):
                 # The SDK has already retried it; not again here.
                 raise ProviderUnavailableError(provider) from e
@@ -696,7 +740,7 @@ class LLMProvider:
                 client = OpenAI(api_key=api_key, http_client=http_client)
                 return _retry_mid_stream(
                     lambda: _openai_final_response(client, kwargs, listener),
-                    "OpenAI", listener, model=model)
+                    "OpenAI", listener, model=model, api_key=api_key)
 
         # A request error arrives as a 400 before the stream starts, or
         # after it as an error the SDK raises or a response.failed event
@@ -983,7 +1027,7 @@ class LLMProvider:
                     return stream.get_final_message()
 
             response = _retry_mid_stream(_collect, "Anthropic", listener,
-                                         model=model)
+                                         model=model, api_key=api_key)
         except anthropic.BadRequestError as e:
             error_msg = str(e)
             match = re.search(

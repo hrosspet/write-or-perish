@@ -364,12 +364,18 @@ def test_poll_refused_for_an_account_reason_polls_again(
     assert node.llm_task_status == "processing"
     assert [(e.provider, e.kind) for e, _ in reported] == [("OpenAI", "auth")]
 
-    with pytest.raises(_llm_task_mod.MaxRetriesExceededError):
+    with pytest.raises(_llm_task_mod.MaxRetriesExceededError) as capped:
         _run(_Task(cap=True), alice, read, llm_node)
     node = _reload(llm_node.id)
     assert node.llm_task_status == "failed"
     assert node.llm_task_error == \
         real_providers.ProviderAccountError.USER_MESSAGE
+    # The task's failure is raised from the account failure (its
+    # __cause__, not only __context__), so Sentry groups it with that
+    # cause (#406 review, minor 1).
+    assert isinstance(capped.value.__cause__,
+                      real_providers.ProviderAccountError)
+    assert capped.value.__cause__.kind == "auth"
 
 
 def test_error_without_a_batch_still_fails_the_node(app, monkeypatch, tmp_path):  # noqa: F811

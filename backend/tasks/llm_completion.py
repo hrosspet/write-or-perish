@@ -247,14 +247,17 @@ def _account_failure(exc):
             and isinstance(exc, cls))
 
 
-def _raise_for_account_failure(exc, provider, model=None, model_call=True):
+def _raise_for_account_failure(exc, provider, model=None, model_call=True,
+                               api_key=None):
     """llm_providers.raise_for_account_failure for a provider key
-    ("anthropic" / "openai"); a no-op where the module is stubbed."""
+    ("anthropic" / "openai"); a no-op where the module is stubbed.
+    *api_key* is the key the call used; only its role is reported."""
     providers = sys.modules.get("backend.llm_providers")
     raise_for = getattr(providers, "raise_for_account_failure", None)
     names = getattr(providers, "PROVIDER_NAMES", None)
     if callable(raise_for) and isinstance(names, dict):
-        raise_for(exc, names.get(provider, provider), model, model_call)
+        raise_for(exc, names.get(provider, provider), model, model_call,
+                  api_key=api_key)
 
 
 def _start_voice_tts_stream(llm_node, user_id, source_mode):
@@ -2511,7 +2514,8 @@ def _ca_batch_poll(task, llm_node, parent_node, meta, entry, user_id):
         # reported (#369) and, like any other failed poll, asked again by
         # the task's error handler: the batch is already submitted and
         # billed, and the next poll after the fix collects it.
-        _raise_for_account_failure(e, provider, model_call=False)
+        _raise_for_account_failure(e, provider, model_call=False,
+                                   api_key=api_keys[provider])
         raise
     # Heartbeat for resume_stuck_feed_batches: a poll that stops
     # arriving means the scheduled retry died with its worker.
@@ -2574,7 +2578,7 @@ def _ca_batch_submit(task, llm_node, model_id, api_model, messages,
         # A spend limit, billing or the key refuses the submit like a
         # live call: the user gets the readable error, the admin an
         # alert (#369).
-        _raise_for_account_failure(e, provider, api_model)
+        _raise_for_account_failure(e, provider, api_model, api_key=api_key)
         raise
     meta, _ = _batch_meta(llm_node)
     meta.append({
@@ -4729,12 +4733,19 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                                          max_retries=CA_BATCH_MAX_POLLS)
                     except MaxRetriesExceededError as cap:
                         error = cap
-                        # An account failure's text is already the
-                        # user's message (#369).
-                        error_message = (
-                            str(e) if _account_failure(e) else
-                            f"Gave up on batch {batch_id} after "
-                            f"{CA_BATCH_MAX_POLLS} polls; last error: {e}")
+                        if _account_failure(e):
+                            # An account failure's text is already the
+                            # user's message (#369). The task fails
+                            # because of it: chained as the cause (not
+                            # only __context__), Sentry groups this
+                            # failure under the account failure's issue.
+                            cap.__cause__ = e
+                            error_message = str(e)
+                        else:
+                            error_message = (
+                                f"Gave up on batch {batch_id} after "
+                                f"{CA_BATCH_MAX_POLLS} polls; last error: "
+                                f"{e}")
             logger.error(f"LLM completion error for node {llm_node_id}: {error_message}", exc_info=True)
             # Fail the node in flight: mid-loop that's the continuation
             # placeholder. Failing llm_node here instead used to clobber the
