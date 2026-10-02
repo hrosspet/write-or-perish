@@ -1397,6 +1397,11 @@ def get_node(node_id):
         "read_reply_above": read_reply_above,
         "reply_ai_usage": reply_usage,
     }
+    # The owner opened a finished Read reply (FeedRender.opened_at, once).
+    # Last, because it commits: the payload above is built.
+    if focal.get("read_reply"):
+        from backend.utils.ca_feed import mark_read_reply_opened
+        mark_read_reply_opened(node, current_user.id)
     return jsonify(node_data), 200
 
 # Resolve {quote:ID} placeholders in a node's content for frontend rendering.
@@ -2231,6 +2236,17 @@ def get_llm_status(node_id):
 
     if created_node:
         response_data["node"] = created_node
+
+    # A finished Read reply returned to its owner's thread page counts as
+    # opened (FeedRender.opened_at, once; a no-op for any other node) only
+    # when the page says it is visible (?visible=1, sent by the web
+    # client's poll while document.visibilityState is 'visible'). The page
+    # keeps polling in a background tab, and a request without the flag (an
+    # older client, the iPhone app today, a hidden tab) never counts. Last,
+    # because it commits.
+    if "content" in response_data and request.args.get("visible") == "1":
+        from backend.utils.ca_feed import mark_read_reply_opened
+        mark_read_reply_opened(node, current_user.id)
 
     response = jsonify(response_data)
     response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'

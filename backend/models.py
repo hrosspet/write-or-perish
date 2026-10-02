@@ -1803,7 +1803,10 @@ class FeedRender(db.Model):
     render order here, and the collect looks the picked numbers up in it
     and fetches those few tweets by id. The window and counts are the
     reply page's record of what was read (the "which day was this?"
-    question). One row per reply node; a rerun replaces it."""
+    question). One row per reply node, pick-less replies included; a
+    rerun replaces it. It also records what the picks alone cannot: how
+    many picks the collect dropped and when the owner opened the reply
+    (backend/scripts/recommendation_report.py)."""
     __tablename__ = "feed_render"
     id = db.Column(db.Integer, primary_key=True)
     node_id = db.Column(db.Integer, db.ForeignKey("node.id"),
@@ -1822,6 +1825,23 @@ class FeedRender(db.Model):
     # Comma-joined tweet ids in render order: index i (0-based) is the
     # tweet the model saw as #i+1. ~100 KB for a day of the archive.
     tweet_ids = db.Column(db.Text, nullable=False, default="")
+    # How many of the model's picks the collect could not show
+    # (ca_feed.count_dropped_picks, on the batch collect and the admin's
+    # live rerun alike; 2026-10-02): the tweet behind the number is no
+    # longer in the archive snapshot, or the number is outside the render. Each number once; a number cited only in the verdict is no
+    # pick. With no FeedPick row on the reply, a positive count means
+    # every pick was dropped, and 0 means the model picked nothing.
+    # Replies collected before the column existed read 0 either way.
+    dropped_picks = db.Column(db.Integer, nullable=False, default=0,
+                              server_default="0")
+    # When the reply's owner first fetched the finished reply: GET of the
+    # reply node, or an llm-status poll that returned it to a thread page
+    # left open while the batch ran and said it was visible (?visible=1;
+    # a hidden tab's poll does not count) (ca_feed.mark_read_reply_opened).
+    # Set once; another user or an admin opening the reply never sets it.
+    # Null on replies nobody has opened since the column was added
+    # (2026-10-02), whatever happened before.
+    opened_at = db.Column(db.DateTime, nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
     node = db.relationship("Node", backref=db.backref(

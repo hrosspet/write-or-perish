@@ -12,6 +12,13 @@ import api from '../api';
  * @param {boolean} options.enabled - Whether polling is enabled
  * @param {number} options.maxConsecutiveErrors - Stop polling (with `error` set)
  *   after this many failed requests in a row; 0 (default) keeps retrying
+ * @param {boolean} options.reportVisible - Send `?visible=1` with each poll made
+ *   while the tab is visible (document.visibilityState === 'visible'). The
+ *   server counts a finished reply as opened (a Read reply's opened_at) only
+ *   for such a poll: this hook keeps polling in a background tab, and that is
+ *   not an open. If the poll that returns the finished task was made in a
+ *   hidden tab, one more is sent when the tab is next shown, so the reply is
+ *   counted when the user can see it. Default false: no parameter is added.
  * @returns {Object} - { status, progress, data, error, startPolling, stopPolling }
  */
 export function useAsyncTaskPolling(endpoint, options = {}) {
@@ -19,7 +26,8 @@ export function useAsyncTaskPolling(endpoint, options = {}) {
     interval = 2000,
     maxDuration = 30 * 60 * 1000, // 30 minutes
     enabled = false,
-    maxConsecutiveErrors = 0
+    maxConsecutiveErrors = 0,
+    reportVisible = false
   } = options;
 
   const [status, setStatus] = useState(null); // 'pending', 'processing', 'completed', 'failed', 'cancelled'
@@ -34,6 +42,42 @@ export function useAsyncTaskPolling(endpoint, options = {}) {
   // Track current endpoint to discard stale in-flight responses
   const currentEndpointRef = useRef(endpoint);
   currentEndpointRef.current = endpoint;
+
+  // The one extra visible poll owed after a task finished in a hidden tab
+  // (reportVisible): the listener waiting for the tab to be shown.
+  const shownListenerRef = useRef(null);
+
+  const reportWhenShown = useCallback((url) => {
+    const send = () => {
+      api.get(url, {
+        timeout: 10000,
+        headers: { 'Cache-Control': 'no-cache' },
+        params: { visible: 1 }
+      }).catch(() => {});
+    };
+    if (document.visibilityState === 'visible') {
+      send();
+      return;
+    }
+    if (shownListenerRef.current) return;
+    const onChange = () => {
+      if (document.visibilityState !== 'visible') return;
+      document.removeEventListener('visibilitychange', onChange);
+      shownListenerRef.current = null;
+      send();
+    };
+    shownListenerRef.current = onChange;
+    document.addEventListener('visibilitychange', onChange);
+  }, []);
+
+  // The wait ends with the page, not with the polling: the poll is stopped
+  // (its endpoint cleared) by the time the tab is shown.
+  useEffect(() => () => {
+    if (shownListenerRef.current) {
+      document.removeEventListener('visibilitychange', shownListenerRef.current);
+      shownListenerRef.current = null;
+    }
+  }, []);
 
   const stopPolling = useCallback(() => {
     if (intervalRef.current) {
@@ -54,12 +98,15 @@ export function useAsyncTaskPolling(endpoint, options = {}) {
     }
     // Capture the endpoint at call time to detect stale responses
     const requestEndpoint = endpoint;
+    // Whether the tab was visible when this poll was sent (reportVisible)
+    const sentVisible = reportVisible && document.visibilityState === 'visible';
     try {
       // Use shorter timeout for status polling (10 seconds instead of 60)
       // Add Cache-Control header to prevent Safari from caching polling responses
       const response = await api.get(endpoint, {
         timeout: 10000,
-        headers: { 'Cache-Control': 'no-cache' }
+        headers: { 'Cache-Control': 'no-cache' },
+        ...(sentVisible ? { params: { visible: 1 } } : {})
       });
 
       // Discard response if endpoint changed while request was in flight
@@ -81,6 +128,9 @@ export function useAsyncTaskPolling(endpoint, options = {}) {
         if (result.status === 'failed') {
           setError(result.error || 'Task failed');
         }
+        if (result.status === 'completed' && reportVisible && !sentVisible) {
+          reportWhenShown(requestEndpoint);
+        }
       }
     } catch (err) {
       console.error('Polling error:', err);
@@ -92,7 +142,7 @@ export function useAsyncTaskPolling(endpoint, options = {}) {
         setError(`Polling stopped after ${consecutiveErrorsRef.current} consecutive errors`);
       }
     }
-  }, [endpoint, stopPolling, maxConsecutiveErrors]);
+  }, [endpoint, stopPolling, maxConsecutiveErrors, reportVisible, reportWhenShown]);
 
   const startPolling = useCallback(() => {
     if (isPolling) return;
