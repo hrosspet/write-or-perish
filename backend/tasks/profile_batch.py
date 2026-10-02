@@ -261,13 +261,18 @@ def _build_next_profile_request(user, allow_chunk=True, chunk_num=1):
         is_first_initial = prev is None
 
         def _prompt_for(chunk):
+            # #183: the user's own profile joins the window that reaches
+            # its date — the same decision the sync loop makes.
+            _exports.place_user_written_profile(user.id, prev, chunk)
             if is_first_initial:
                 gen_template = _exports._load_prompt(
                     "profile_generation.txt", user_id=user.id)
                 return gen_template.replace(
                     "{user_export}", _exports.chunk_content_for_prompt(chunk))
+            # A user-written base carries its note, as in the sync loop.
             return _exports.build_chunk_prompt(
-                _exports.build_update_template(user.id), prev.get_content(),
+                _exports.build_update_template(user.id),
+                _exports.profile_text_for_prompt(prev),
                 cumulative, chunk, prev.source_origin_stats)
 
         # Pre-submit sizing (shared build_fitted_chunk): count the prompt
@@ -287,7 +292,10 @@ def _build_next_profile_request(user, allow_chunk=True, chunk_num=1):
                 generation_type = "initial"   # the whole corpus in one chunk
             else:
                 generation_type = "iterative"
-            latest_ts = chunk["latest_node_created_at"]
+            # The window's last node, or the user's profile date when the
+            # profile went into a final window older than it (#183).
+            latest_ts = (chunk.get("version_cutoff")
+                         or chunk["latest_node_created_at"])
             # NB: Anthropic requires custom_id to match ^[a-zA-Z0-9_-]{1,64}$ —
             # no colons. Underscore-delimited, parsed nowhere (routing is by
             # exact match against the stored items), so the format is free to

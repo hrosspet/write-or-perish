@@ -119,15 +119,118 @@ def record_token_ratio(user, model_id, chunk_units, actual_input_tokens):
     return user.profile_token_ratio
 
 
-# Prepended to a user-written profile (generated_by == "user") whenever it's
-# fed to the LLM — as the base for an incremental update or as the root of an
-# integration chain — so the model treats it as the user's own words rather
-# than a prior generated profile.
+# Prepended to a user-written profile (generated_by == "user") wherever it's
+# fed to the LLM — the base of an incremental update, a version in an
+# integration, or the dated block a from-scratch build folds in at the
+# profile's own date (#183) — so the model treats it as the user's own words
+# rather than a prior generated profile. A job that regenerates the profile
+# keeps the user's text and refreshes its own observations (voice review,
+# 2026-10-02).
 USER_WRITTEN_PROFILE_NOTE = (
-    "[NOTE: The profile below was written by the user themselves, not "
-    "AI-generated. Treat it as their own self-description - important, but "
-    "also just another data point. Don't overindex on it.]"
+    "[NOTE: The profile below was written by the user themselves on {date}, "
+    "not AI-generated. Keep what they wrote: their own statements about "
+    "themselves stay in the profile, in their words where possible. Update "
+    "the rest of the profile from the data as usual; their self-description "
+    "does not replace what the data shows, and data written before {date} "
+    "should not be read through it. Where later data shows a change, "
+    "describe the change rather than dropping their words.]"
 )
+
+
+def user_written_profile_text(profile):
+    """A user-written profile as every profile prompt shows it: the dated
+    note, then the user's text."""
+    date = (profile.created_at.strftime("%Y-%m-%d")
+            if profile.created_at else "an unknown date")
+    note = USER_WRITTEN_PROFILE_NOTE.format(date=date)
+    return f"{note}\n\n{profile.get_content()}"
+
+
+def profile_text_for_prompt(profile):
+    """A profile version's text for a profile prompt: a user-written one
+    with its note, a generated one as is. The sync loop and the batch
+    builder both read the update base through this (#183)."""
+    if profile.generated_by == "user":
+        return user_written_profile_text(profile)
+    return profile.get_content()
+
+
+def latest_user_written_profile(user_id):
+    """The newest profile the user wrote by hand (generated_by == "user")
+    that AI may read, or None. A version marked 'none' (written while the
+    account was set to 'none') is never sent to a model (#346); the newest
+    readable one before it is used instead."""
+    return UserProfile.query.filter(
+        UserProfile.user_id == user_id,
+        UserProfile.generated_by == "user",
+        UserProfile.ai_usage.in_(AI_ALLOWED),
+        UserProfile.created_at.isnot(None),
+    ).order_by(UserProfile.created_at.desc()).first()
+
+
+def _descends_from(profile, ancestor_id):
+    """Whether ``ancestor_id`` is ``profile`` or one of its parents."""
+    seen = set()
+    current = profile
+    while current is not None and current.id not in seen:
+        if current.id == ancestor_id:
+            return True
+        seen.add(current.id)
+        if current.parent_profile_id is None:
+            return False
+        current = UserProfile.query.get(current.parent_profile_id)
+    return False
+
+
+def place_user_written_profile(user_id, base, chunk):
+    """Decide whether the user's hand-written profile goes into this
+    chunk's prompt (#183). The sync loop and the batch builder call it on
+    every rendered window, before the prompt is built and counted.
+
+    A full rebuild reads the writing oldest first. The user's own profile
+    enters it at its own date: in the first window whose data reaches the
+    date the profile was written, or in the final window when all the data
+    is older than the profile. Earlier windows are read without it, so old
+    writing is not read through a later self-description.
+
+    The decision depends only on the base and the window, so a run resumed
+    from a saved chunk, and every batch step, make the same choice. It is
+    skipped when the base already covers the profile's date (the chain has
+    passed it) or descends from the profile (the profile is the chain's
+    root and was the base of its first update).
+
+    Sets on ``chunk``:
+      ``user_written_block``: the dated profile text to append to the
+        window's data, or absent;
+      ``version_cutoff``: the cutoff to save on the version built from this
+        window. It is the window's last node, except when the profile goes
+        into the final window and is newer than every node: then it is the
+        profile's date, so the chain records that it has passed that date
+        and later steps do not fold the profile in again.
+    Returns ``chunk``."""
+    window_end = chunk.get("latest_node_created_at")
+    chunk["version_cutoff"] = window_end
+    chunk.pop("user_written_block", None)
+    if window_end is None:
+        return chunk
+    own = latest_user_written_profile(user_id)
+    if own is None:
+        return chunk
+    written_at = own.created_at
+    if base is not None and (base.source_data_cutoff is None
+                             or base.source_data_cutoff >= written_at):
+        return chunk
+    version_cutoff = window_end
+    if window_end < written_at:
+        # Not this window, unless nothing is left after it.
+        if count_remaining_units(user_id, window_end) > 0:
+            return chunk
+        version_cutoff = written_at
+    if base is not None and _descends_from(base, own.id):
+        return chunk
+    chunk["user_written_block"] = user_written_profile_text(own)
+    chunk["version_cutoff"] = version_cutoff
+    return chunk
 
 
 def _is_task_stale(user):
@@ -731,10 +834,9 @@ def _do_iterative_incremental_update(self, user, model_id, prev_profile,
 
     # When the base is the user's own hand-written profile, tell the LLM so
     # (it's chunk 1's {existing_profile}; later chunks build on generated
-    # output and need no note).
-    base_content = prev_profile.get_content()
-    if prev_profile.generated_by == "user":
-        base_content = f"{USER_WRITTEN_PROFILE_NOTE}\n\n{base_content}"
+    # output and need no note). The batch builder reads its base the same
+    # way.
+    base_content = profile_text_for_prompt(prev_profile)
 
     current_profile_id, chunk_num, cumulative_source_tokens = \
         _chunked_profile_loop(
@@ -915,8 +1017,14 @@ def source_mix_preamble(chunk, prev_stats=None):
 
 def chunk_content_for_prompt(chunk, prev_stats=None):
     """The chunk's export text as fed to the profile prompts: source-mix
-    preamble (when any content, base or new, is imported) + content."""
-    return source_mix_preamble(chunk, prev_stats) + chunk["content"]
+    preamble (when any content, base or new, is imported) + content, then
+    the user's own profile when this window is where a rebuild folds it in
+    (``place_user_written_profile``, #183)."""
+    text = source_mix_preamble(chunk, prev_stats) + chunk["content"]
+    block = chunk.get("user_written_block")
+    if block:
+        text = f"{text}\n\n{block}"
+    return text
 
 
 def build_chunk_prompt(update_template, current_profile_content,
@@ -963,29 +1071,47 @@ def build_integration_messages(user_id, last_iterative_profile_id):
         "{profile_generation_prompt}", gen_template
     )
 
-    messages = []
-    for i, profile in enumerate(chain, 1):
-        content = profile.get_content()
+    entries = []
+    for i, profile in enumerate(chain):
         # The chain root can be the user's hand-written profile — flag it so
         # the integration treats it as the user's own words.
-        if profile.generated_by == "user":
-            content = f"{USER_WRITTEN_PROFILE_NOTE}\n\n{content}"
+        content = profile_text_for_prompt(profile)
         cutoff = profile.source_data_cutoff
         date_str = cutoff.strftime("%Y-%m-%d") if cutoff else "unknown"
-        if i == 1:
+        if i == 0:
             date_from = "start"
         else:
-            prev_cutoff = chain[i - 2].source_data_cutoff
+            prev_cutoff = chain[i - 1].source_data_cutoff
             date_from = prev_cutoff.strftime(
                 "%Y-%m-%d"
             ) if prev_cutoff else "unknown"
+        entries.append((f"- {date_from} to {date_str}", content))
+
+    # #183: a chain that passed the date of the user's own profile without
+    # descending from it (a from-scratch rebuild, which folded the profile
+    # into one chunk) also shows the profile itself, at its date — as a
+    # chain rooted at the profile does — so the merged profile keeps the
+    # user's words.
+    own = latest_user_written_profile(user_id)
+    if own is not None:
+        at = next((n for n, p in enumerate(chain)
+                   if p.source_data_cutoff is not None
+                   and p.source_data_cutoff >= own.created_at), None)
+        if at is not None and not _descends_from(chain[-1], own.id):
+            entries.insert(at, (
+                f"- written by the user on "
+                f"{own.created_at.strftime('%Y-%m-%d')}",
+                user_written_profile_text(own)))
+
+    messages = []
+    for i, (span, content) in enumerate(entries, 1):
         messages.append({
             "role": "user",
             "content": [{
                 "type": "text",
                 "text": (
                     f"Profile No. {i}\n"
-                    f"- {date_from} to {date_str}\n\n"
+                    f"{span}\n\n"
                     f"{content}"
                 )
             }]
@@ -1160,8 +1286,13 @@ def _chunked_profile_loop(self, user, model_id, update_template,
 
         is_first_with_gen = bool(
             first_chunk_prompt_fn and current_profile_content is None)
+        base = (UserProfile.query.get(current_profile_id)
+                if current_profile_id else None)
 
         def _prompt_for(chunk):
+            # #183: the user's own profile joins the window that reaches
+            # its date (shared with the batch builder).
+            place_user_written_profile(user.id, base, chunk)
             if is_first_with_gen:
                 return first_chunk_prompt_fn(chunk)
             return build_chunk_prompt(
@@ -1177,7 +1308,9 @@ def _chunked_profile_loop(self, user, model_id, update_template,
         chunk, prompt = fitted
         chunk_num += 1
         chunk_units = chunk["unit_count"]
-        latest_ts = chunk["latest_node_created_at"]
+        # The window's last node, or the user's profile date when the
+        # profile went into a final window older than it (#183).
+        latest_ts = chunk.get("version_cutoff") or chunk["latest_node_created_at"]
 
         response = _call_llm_with_retries(
             self, model_id, prompt, user.id, api_keys,

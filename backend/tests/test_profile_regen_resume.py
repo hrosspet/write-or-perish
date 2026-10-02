@@ -309,3 +309,221 @@ def test_null_cutoff_high_data_still_triggers(app, monkeypatch):
     exports.maybe_trigger_incremental_profile_update(user)
     assert "yes" in called              # crossed threshold -> triggered
     assert called["yes"][0][0] == user.id
+
+
+# ── #183: a full rebuild keeps the user's own profile ───────────────────
+# Decision (voice review, 2026-10-02): a job that regenerates the profile
+# keeps the user's hand-written text and refreshes the rest. The rebuild
+# reads the writing oldest first and folds the user's profile in at its own
+# date, so older writing is not read through it.
+
+JAN, JUN, DEC = datetime(2025, 1, 1), datetime(2025, 6, 1), datetime(2025, 12, 1)
+MARKERS = ("OLD DATA", "NEW DATA", "MY OWN WORDS")
+
+
+def _user_written(user, content="MY OWN WORDS", created_at=JUN,
+                  ai_usage="chat", parent=None):
+    profile = UserProfile(
+        user_id=user.id, generated_by="user", tokens_used=0,
+        generation_type="initial", source_tokens_used=0,
+        source_data_cutoff=None, ai_usage=ai_usage, created_at=created_at,
+        parent_profile_id=parent.id if parent else None)
+    profile.set_content(content)
+    _db.session.add(profile)
+    _db.session.commit()
+    return profile
+
+
+def _generated(user, cutoff, parent=None, gen_type="iterative"):
+    profile = UserProfile(
+        user_id=user.id, generated_by="gpt-5.5", tokens_used=0,
+        generation_type=gen_type, source_tokens_used=90_000,
+        source_data_cutoff=cutoff,
+        parent_profile_id=parent.id if parent else None)
+    profile.set_content("GENERATED")
+    _db.session.add(profile)
+    _db.session.commit()
+    return profile
+
+
+def _new_user(name):
+    user = User(username=name, plan="alpha", twitter_id=None, approved=True)
+    _db.session.add(user)
+    _db.session.commit()
+    return user
+
+
+def _window(content, latest):
+    return {"content": content, "token_count": 90_000, "unit_count": 90_000,
+            "latest_node_created_at": latest}
+
+
+def _echo(prompt_text):
+    """A stand-in model that keeps every marker it was shown — the way a
+    real update keeps what still holds — so a test can see what reached
+    the final profile."""
+    return " ".join(m for m in MARKERS if m in prompt_text)
+
+
+def _rebuild_two_windows(exports, monkeypatch, windows):
+    """Wire the sync loop to two windows: OLD DATA up to January, NEW DATA
+    up to December. ``windows`` maps the window's cutoff to its chunk."""
+    remaining = {None: 180_000, JAN: 90_000, DEC: 0}
+    monkeypatch.setattr(exports, "count_remaining_units",
+                        lambda uid, cutoff=None: remaining.get(cutoff, 0))
+    monkeypatch.setattr(
+        exports, "build_user_export_content",
+        lambda user, max_tokens=None, **kw: windows.get(kw.get("created_after")))
+    monkeypatch.setattr(exports, "should_continue_chain", lambda u, p: True)
+    import backend.llm_providers as lp
+    monkeypatch.setattr(lp.LLMProvider, "count_tokens",
+                        staticmethod(lambda m, msgs, k: None))
+    prompts = []
+
+    def fake_call(self_, model_id, prompt, uid, keys, **kw):
+        prompts.append(prompt)
+        return {"content": _echo(prompt), "input_tokens": 10,
+                "output_tokens": 5, "total_tokens": 15}
+    monkeypatch.setattr(exports, "_call_llm_with_retries", fake_call)
+    return prompts
+
+
+def test_183_full_rebuild_keeps_user_profile_and_integrates_new_writing(
+        app, monkeypatch):
+    """A hand-written profile survives a full rebuild: it joins the window
+    that reaches its date (not the older one), the integration sees it, and
+    the rebuilt profile holds the user's words and the new writing."""
+    import backend.tasks.exports as exports
+
+    user = _new_user("rebuild183")
+    _user_written(user)
+    prompts = _rebuild_two_windows(exports, monkeypatch, {
+        None: _window("OLD DATA", JAN), JAN: _window("NEW DATA", DEC)})
+    monkeypatch.setattr(exports, "build_update_template",
+                        lambda uid: "UPDATE {existing_profile} || {new_data}")
+    monkeypatch.setattr(exports, "_load_prompt",
+                        lambda name, user_id=None: "INTEGRATE {N_MONTHS}")
+    integration = []
+
+    def fake_completion(model_id, messages, keys, **kw):
+        text = "\n".join(m["content"][0]["text"] for m in messages)
+        integration.append(messages)
+        return {"content": _echo(text), "input_tokens": 10,
+                "output_tokens": 5, "total_tokens": 15}
+    monkeypatch.setattr(exports.LLMProvider, "get_completion",
+                        staticmethod(fake_completion))
+
+    result = exports._iterative_generation(
+        MagicMock(), user, "gpt-5.5", "GEN {user_export}", 10_000, {})
+
+    assert len(prompts) == 2
+    # January's window predates the profile: read without it.
+    assert "MY OWN WORDS" not in prompts[0]
+    # December's window reaches June: the profile joins it, dated.
+    assert "MY OWN WORDS" in prompts[1]
+    assert "written by the user themselves on 2025-06-01" in prompts[1]
+    # The integration shows the profile itself, between the two versions.
+    texts = [m["content"][0]["text"] for m in integration[0]]
+    assert "MY OWN WORDS" in texts[1] and "2025-06-01" in texts[1]
+    assert texts[0].startswith("Profile No. 1") and "MY OWN WORDS" not in texts[0]
+    final = UserProfile.query.get(result["profile_id"])
+    assert final.generation_type == "integration"
+    for marker in MARKERS:
+        assert marker in final.get_content()
+
+
+def test_183_profile_newer_than_all_writing_goes_into_the_final_window(
+        app, monkeypatch):
+    """Every window predates the profile: it joins the final one, and that
+    version's cutoff is the profile's date, so the next update does not
+    fold it in again."""
+    import backend.tasks.exports as exports
+
+    user = _new_user("late183")
+    written = _user_written(user, created_at=datetime(2026, 1, 1))
+    prompts = _rebuild_two_windows(exports, monkeypatch, {
+        None: _window("OLD DATA", JAN), JAN: _window("NEW DATA", DEC)})
+
+    profile_id, chunk_num, _ = exports._chunked_profile_loop(
+        MagicMock(), user, "gpt-5.5", "UPDATE {existing_profile} || {new_data}",
+        {}, first_chunk_prompt_fn=lambda c: "GEN " + c["content"])
+
+    assert chunk_num == 2
+    assert "MY OWN WORDS" not in prompts[0]
+    assert "MY OWN WORDS" in prompts[1]
+    tip = UserProfile.query.get(profile_id)
+    assert tip.source_data_cutoff == written.created_at
+    # The next window, after newer writing, is read without it.
+    later = _window("NEWER", datetime(2026, 3, 1))
+    exports.place_user_written_profile(user.id, tip, later)
+    assert "user_written_block" not in later
+
+
+def test_183_placement_rules(app, monkeypatch):
+    """The placement depends only on the base and the window, so a resumed
+    run and every batch step decide the same way."""
+    import backend.tasks.exports as exports
+
+    user = _new_user("rules183")
+    monkeypatch.setattr(exports, "count_remaining_units",
+                        lambda uid, cutoff=None: 50_000)
+
+    def place(base, latest):
+        return exports.place_user_written_profile(
+            user.id, base, _window("DATA", latest))
+
+    # No hand-written profile: nothing changes.
+    chunk = place(None, DEC)
+    assert "user_written_block" not in chunk
+    assert chunk["version_cutoff"] == DEC
+
+    own = _user_written(user)
+    # From scratch: the window that reaches the profile's date takes it ...
+    assert "MY OWN WORDS" in place(None, DEC)["user_written_block"]
+    # ... an earlier one does not while writing remains after it.
+    assert "user_written_block" not in place(None, JAN)
+    # A base that already covers the date has passed it.
+    assert "user_written_block" not in place(_generated(user, JUN), DEC)
+    # A base from before the date (a resumed rebuild) still takes it.
+    assert "user_written_block" in place(_generated(user, JAN), DEC)
+    # A chain rooted at the profile had it as its base: not again.
+    rooted = _generated(user, JAN, parent=own, gen_type="update")
+    assert "user_written_block" not in place(rooted, DEC)
+    # The profile as the base itself (no cutoff): the note path covers it.
+    assert "user_written_block" not in place(own, DEC)
+
+
+def test_183_profile_marked_none_is_never_folded_in(app, monkeypatch):
+    """A hand-written version marked 'none' is never sent; the newest
+    readable one before it is used instead (#346)."""
+    import backend.tasks.exports as exports
+
+    user = _new_user("none183")
+    monkeypatch.setattr(exports, "count_remaining_units",
+                        lambda uid, cutoff=None: 50_000)
+    _user_written(user, content="READABLE WORDS", created_at=JAN)
+    _user_written(user, content="PRIVATE WORDS", created_at=JUN,
+                  ai_usage="none")
+
+    chunk = exports.place_user_written_profile(
+        user.id, None, _window("DATA", DEC))
+    assert "READABLE WORDS" in chunk["user_written_block"]
+    assert "PRIVATE WORDS" not in exports.chunk_content_for_prompt(chunk)
+
+
+def test_183_integration_shows_user_profile_once_for_a_rooted_chain(app):
+    """A chain rooted at the user's profile already shows it as Profile
+    No. 1; it is not added a second time."""
+    import backend.tasks.exports as exports
+
+    user = _new_user("root183")
+    own = _user_written(user)
+    first = _generated(user, DEC, parent=own, gen_type="update")
+    second = _generated(user, datetime(2026, 2, 1), parent=first,
+                        gen_type="update")
+
+    messages, chain = exports.build_integration_messages(user.id, second.id)
+    texts = [m["content"][0]["text"] for m in messages[:-1]]
+    assert len(chain) == 3 and len(texts) == 3
+    assert sum("MY OWN WORDS" in t for t in texts) == 1
+    assert "MY OWN WORDS" in texts[0]
