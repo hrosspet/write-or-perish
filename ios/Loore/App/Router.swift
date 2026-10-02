@@ -121,10 +121,14 @@ final class Router {
             break
         }
 
+        let from = selectedTab
         var tab = route.preferredTab ?? selectedTab
         if tab == .commons && !commonsAvailable { tab = .reflect }
         selectedTab = tab
-        if let document = route.workspaceDocument, tab == .artifacts {
+        if route.carriesItsThreadToReflect && tab != from {
+            // The other tab keeps its stack; Reflect's older screens are replaced.
+            paths[tab] = (paths[from] ?? []) + [route]
+        } else if let document = route.workspaceDocument, tab == .artifacts {
             paths[tab] = []
             workspace = document
         } else if route.isTabRoot && route.preferredTab == tab {

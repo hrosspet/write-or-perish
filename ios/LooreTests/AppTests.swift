@@ -52,11 +52,31 @@ final class AppRouteTests: XCTestCase {
         XCTAssertEqual(AppRoute.todo.preferredTab, .artifacts)
         XCTAssertEqual(AppRoute.account(anchor: nil).preferredTab, .more)
         XCTAssertNil(AppRoute.thread(id: 1, awaitLLM: nil).preferredTab, "threads push on the current tab")
-        XCTAssertEqual(AppRoute.voice(parentId: nil, resumeLLMId: nil).preferredTab, .reflect, "Home's Voice")
-        XCTAssertNil(AppRoute.voice(parentId: 5, resumeLLMId: 6).preferredTab, "Voice Mode on a thread stays above it")
-        XCTAssertNil(AppRoute.voice(parentId: 5, resumeLLMId: nil).preferredTab)
-        XCTAssertNil(AppRoute.textMode.preferredTab, "Text Mode opens where Voice is")
+        XCTAssertEqual(AppRoute.voice(parentId: 5, resumeLLMId: 6).preferredTab, .reflect)
         XCTAssertEqual(AppRoute.thread(id: 3, awaitLLM: nil).webPath, "/node/3")
+    }
+
+    // Voice Mode on a thread in another tab: Reflect, with Back returning to the thread.
+    @MainActor
+    func testVoiceFromAnotherTabBringsItsThreadToReflect() {
+        let router = Router()
+        router.paths[.reflect] = [.voice(parentId: nil, resumeLLMId: nil), .textMode]
+        router.selectedTab = .log
+        router.paths[.log] = [.thread(id: 5, awaitLLM: nil), .thread(id: 3, awaitLLM: nil)]
+        router.open(.voice(parentId: 3, resumeLLMId: 9), environment: env, commonsAvailable: false)
+        XCTAssertEqual(router.selectedTab, .reflect)
+        XCTAssertEqual(router.path(for: .reflect),
+                       [.thread(id: 5, awaitLLM: nil), .thread(id: 3, awaitLLM: nil), .voice(parentId: 3, resumeLLMId: 9)])
+        XCTAssertEqual(router.path(for: .log).count, 2, "the Log tab keeps its screens")
+
+        // Within Reflect it is pushed as before; Home's Voice too.
+        router.open(.thread(id: 9, awaitLLM: nil), environment: env, commonsAvailable: false)
+        router.open(.voice(parentId: 9, resumeLLMId: 10), environment: env, commonsAvailable: false)
+        XCTAssertEqual(router.path(for: .reflect).count, 5)
+        router.selectedTab = .log
+        router.open(.voice(parentId: nil, resumeLLMId: nil), environment: env, commonsAvailable: false)
+        XCTAssertEqual(router.path(for: .reflect).last, .voice(parentId: nil, resumeLLMId: nil))
+        XCTAssertEqual(router.path(for: .reflect).count, 6, "Home's Voice is pushed on Reflect's stack")
     }
 
     @MainActor

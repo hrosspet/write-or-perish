@@ -131,15 +131,9 @@ enum AppRoute: Hashable, Sendable {
 
     /// The tab a route belongs to when opened from outside a stack.
     /// `nil` = keep the current tab (threads are pushed where they were opened).
-    /// Voice on a thread (`parent` / `resume`) and Text Mode are pushed where they
-    /// were opened, above the thread, as on the web where Back returns to it: in
-    /// Reflect they landed on top of that tab's older screens and conversation.
     var preferredTab: AppTab? {
         switch self {
-        case .voice(let parentId, let resumeLLMId):
-            return parentId == nil && resumeLLMId == nil ? .reflect : nil
-        case .textMode: return nil
-        case .home, .welcome, .share: return .reflect
+        case .home, .voice, .textMode, .welcome, .share: return .reflect
         case .profile, .todo, .artifacts, .newArtifact: return .artifacts
         case .log: return .log
         case .commons: return .commons
@@ -148,6 +142,15 @@ enum AppRoute: Hashable, Sendable {
         case .thread: return nil
         case .waitlist, .webPage, .external: return nil
         }
+    }
+
+    /// Voice on a thread (`parent` / `resume`) opened from another tab: Reflect
+    /// takes over the screens it was opened from, so Back returns to the thread,
+    /// as on the web. Pushed onto Reflect's own stack it landed on that tab's older
+    /// screens, and Back led into them.
+    var carriesItsThreadToReflect: Bool {
+        if case .voice(let parentId, let resumeLLMId) = self { return parentId != nil || resumeLLMId != nil }
+        return false
     }
 
     /// Routes that are a tab's root screen (opening them pops that tab to root).
