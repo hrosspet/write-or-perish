@@ -1,0 +1,176 @@
+# XcodeGen spec for the Loore iPhone app.
+# Generate the project with `cd ios && xcodegen`; Loore.xcodeproj is git-ignored.
+# Sources are included by directory: adding a Swift file never edits this file.
+name: Loore
+
+options:
+  bundleIdPrefix: org.loore
+  deploymentTarget:
+    iOS: "17.0"
+  xcodeVersion: "26.0"
+  createIntermediateGroups: true
+  groupSortPosition: top
+
+settings:
+  base:
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    SWIFT_VERSION: "5.0"
+    SWIFT_STRICT_CONCURRENCY: minimal
+    TARGETED_DEVICE_FAMILY: "1"
+    IPHONEOS_DEPLOYMENT_TARGET: "17.0"
+    CODE_SIGN_STYLE: Automatic
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+    DEAD_CODE_STRIPPING: YES
+
+packages:
+  Markdown:
+    url: https://github.com/swiftlang/swift-markdown
+    exactVersion: 0.7.3
+  ZIPFoundation:
+    url: https://github.com/weichsel/ZIPFoundation
+    exactVersion: 0.9.20
+
+targets:
+  Loore:
+    type: application
+    platform: iOS
+    # Team id and bundle id overrides: Config/Signing.local.xcconfig (git-ignored).
+    configFiles:
+      Debug: Config/Signing.xcconfig
+      Release: Config/Signing.xcconfig
+    sources:
+      - path: Loore
+        excludes:
+          - "**/.gitkeep"
+      # The voice Live Activity's state and intents, shared with LooreLiveActivity.
+      - path: Shared
+    dependencies:
+      - package: Markdown
+        product: Markdown
+      - package: ZIPFoundation
+        product: ZIPFoundation
+      - target: LooreLiveActivity
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(LOORE_BUNDLE_ID)
+        PRODUCT_NAME: Loore
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        SUPPORTS_MACCATALYST: NO
+        SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD: NO
+        SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD: NO
+    info:
+      path: Loore/Info.plist
+      properties:
+        CFBundleDisplayName: Loore
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        LSRequiresIPhoneOS: true
+        ITSAppUsesNonExemptEncryption: false
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        UILaunchScreen:
+          UIColorName: LaunchBackground
+        UIBackgroundModes:
+          - audio
+        NSSupportsLiveActivities: true
+        NSMicrophoneUsageDescription: Loore records your voice so it can transcribe what you say and reply.
+        NSLocalNetworkUsageDescription: Loore connects to a development server on your local network (debug builds only).
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+        UIAppFonts:
+          - CormorantGaramond-VF.ttf
+          - CormorantGaramond-Italic-VF.ttf
+          - Outfit-ExtraLight.ttf
+          - Outfit-Light.ttf
+          - Outfit-Regular.ttf
+          - Outfit-Medium.ttf
+          - Outfit-SemiBold.ttf
+          - Outfit-Bold.ttf
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+
+  # The voice conversation's Live Activity (lock screen, Dynamic Island; #397).
+  # iOS 18: its Resume and Record buttons are AudioRecordingIntents. On iOS 17
+  # the app shows no Live Activity and keeps the Now Playing controls.
+  LooreLiveActivity:
+    type: app-extension
+    platform: iOS
+    deploymentTarget: "18.0"
+    configFiles:
+      Debug: Config/Signing.xcconfig
+      Release: Config/Signing.xcconfig
+    sources:
+      - path: LooreLiveActivity
+      - path: Shared
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(LOORE_BUNDLE_ID).LiveActivity
+        PRODUCT_NAME: LooreLiveActivity
+        IPHONEOS_DEPLOYMENT_TARGET: "18.0"
+        SKIP_INSTALL: YES
+    info:
+      path: LooreLiveActivity/Info.plist
+      properties:
+        CFBundleDisplayName: Loore
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+
+  LooreTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: LooreTests
+    dependencies:
+      - target: Loore
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: org.loore.app.tests
+        GENERATE_INFOPLIST_FILE: YES
+
+  LooreUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: LooreUITests
+    dependencies:
+      - target: Loore
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: org.loore.app.uitests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_TARGET_NAME: Loore
+
+schemes:
+  Loore:
+    build:
+      targets:
+        Loore: all
+        LooreTests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      gatherCoverageData: false
+      targets:
+        - name: LooreTests
+          parallelizable: false
+    archive:
+      config: Release
+
+  # UI smoke flows. They need the local Docker backend and a magic link or
+  # session cookie for the test user, so CI does not run them (see README).
+  LooreUITests:
+    build:
+      targets:
+        Loore: all
+        LooreUITests: [test]
+    test:
+      config: Debug
+      targets:
+        - name: LooreUITests
