@@ -179,9 +179,11 @@ final class AudioCenter {
         case .routeChanged(let reason, let from, let to):
             if reason == .oldDeviceUnavailable && player.isPlaying { player.pause() }
             if AudioRoute.headsetMicLost(from: from, to: to) {
-                RecordingLog.shared.note("headset mic lost")
-                if voiceActive { voiceController?.headsetMicLost() }
-                activeDictation?.headsetMicLost()
+                // Also at every Stop (the switch to playback drops the input): only
+                // a recording that was paused gets a line.
+                let voiceHeld = voiceActive && voiceController?.headsetMicLost() == true
+                let dictationHeld = activeDictation?.headsetMicLost() == true
+                if voiceHeld || dictationHeld { RecordingLog.shared.note("headset mic lost: recording paused") }
             }
         case .mediaServicesReset:
             sounds.stopCue()

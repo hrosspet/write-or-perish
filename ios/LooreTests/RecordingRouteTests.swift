@@ -80,6 +80,7 @@ final class RecordingLogTests: XCTestCase {
         XCTAssertTrue(text.contains("route change (oldDeviceUnavailable)"))
         XCTAssertTrue(text.contains("session deactivated"))
         log.note("after the end")
+        _ = log.files()  // waits for the log's queue
         XCTAssertFalse(try String(contentsOf: file, encoding: .utf8).contains("after the end"))
     }
 

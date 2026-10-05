@@ -73,7 +73,12 @@ final class RecordingLog: @unchecked Sendable {
         queue.async { [self] in
             guard let handle else { return }
             let line = "\(Self.clock.string(from: now)) +\(String(format: "%.1f", now.timeIntervalSince(beganAt)))s  \(text)\n"
-            handle.write(Data(line.utf8))
+            do {
+                try handle.write(contentsOf: Data(line.utf8))
+            } catch {
+                // A full phone: stop logging rather than fail the recording.
+                closeLocked()
+            }
         }
     }
 

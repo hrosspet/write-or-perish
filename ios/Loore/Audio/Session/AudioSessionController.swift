@@ -101,7 +101,7 @@ final class AudioSessionController {
             try? session.setPrefersNoInterruptionsFromSystemAlerts(true)
             try session.setActive(true)
         } catch {
-            recordingLog.note("activation failed: \(Self.describe(error))")
+            recordingLog.end("activation failed: \(Self.describe(error))")
             throw error
         }
         mode = .recording

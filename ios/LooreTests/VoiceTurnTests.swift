@@ -922,6 +922,22 @@ final class VoiceTurnTests: XCTestCase {
         XCTAssertEqual(recorder.calls.last, "resume")
     }
 
+    // A call during a lost-headset hold stops capture, without a second alert.
+    func testCallDuringALostHeadsetHoldStopsCapture() async throws {
+        turn.start()
+        await wait("recording") { turn.state == .recording }
+        XCTAssertTrue(turn.headsetMicLost())
+        XCTAssertFalse(turn.headsetMicLost(), "already held")
+        turn.systemInterruptionBegan()
+        XCTAssertEqual(recorder.calls.suffix(2), ["pause", "interrupt"])
+        XCTAssertEqual(audio.events.filter { $0 == "sound.interruption" }.count, 1)
+        turn.systemInterruptionBegan()
+        XCTAssertEqual(recorder.calls.filter { $0 == "interrupt" }.count, 1)
+        turn.resumeRecording()
+        XCTAssertFalse(turn.isInterrupted)
+        XCTAssertEqual(recorder.calls.last, "resume")
+    }
+
     func testLostHeadsetMicOutsideRecordingDoesNothing() async throws {
         turn.headsetMicLost()
         XCTAssertFalse(turn.isInterrupted)
