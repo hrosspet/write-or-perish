@@ -309,10 +309,18 @@ final class DictationController {
         holdForInterruption("Recording paused — another app took the microphone (phone call?). Everything up to the interruption is saved. Press Resume to continue.")
     }
 
+    /// The headphones' mic went away (#423): hold rather than record from the
+    /// phone's mic; the microphone keeps running, so Resume needs no restart.
+    func headsetMicLost() {
+        holdForInterruption("Recording paused — the headphones’ microphone disconnected. Everything up to here is saved. Press Resume to continue.",
+                            keepCapture: true)
+    }
+
     /// Also when the microphone could not restart after a route change (M15).
-    private func holdForInterruption(_ message: String) {
+    /// - Parameter keepCapture: drop samples but keep the microphone running.
+    private func holdForInterruption(_ message: String, keepCapture: Bool = false) {
         guard state == .recording, !isInterrupted, let app else { return }
-        recorder?.interrupt()
+        if keepCapture { recorder?.pause() } else { recorder?.interrupt() }
         isInterrupted = true
         app.audio.sounds.playInterruptionAlert()
         interruptionToast = app.toasts.show(message, duration: 24 * 60 * 60)

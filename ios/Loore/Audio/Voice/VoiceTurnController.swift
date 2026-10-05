@@ -350,9 +350,23 @@ final class VoiceTurnController {
         holdForInterruption("Recording paused — the microphone stopped after an audio device change. Everything up to here is saved. Press Resume to continue.")
     }
 
-    private func holdForInterruption(_ message: String) {
+    /// The headphones' mic went away mid-recording (#423). iOS would carry on with
+    /// the phone's own mic, which in a pocket records almost nothing of the voice:
+    /// hold instead, and wait for Resume (web parity: no automatic resume, also
+    /// when the headphones come back). The microphone keeps running and only its
+    /// samples are dropped, as in a user pause, so the app stays alive and Resume
+    /// works from the lock screen.
+    func headsetMicLost() {
+        guard state == .recording else { return }
+        holdForInterruption("Recording paused — the headphones’ microphone disconnected. Everything up to here is saved. Press Resume to continue.",
+                            keepCapture: true)
+    }
+
+    /// - Parameter keepCapture: drop samples but keep the microphone running (the
+    ///   session is still ours), rather than stopping capture as for a call.
+    private func holdForInterruption(_ message: String, keepCapture: Bool = false) {
         guard !isInterrupted else { return }
-        recorder.interrupt()
+        if keepCapture { recorder.pause() } else { recorder.interrupt() }
         isPaused = true
         isInterrupted = true
         audio.playInterruptionAlert()

@@ -902,6 +902,38 @@ final class VoiceTurnTests: XCTestCase {
         XCTAssertEqual(recorder.calls.last, "resume")
     }
 
+    // #423: the headphones' mic went away; the phone's mic must not take over unnoticed.
+    func testLostHeadsetMicPausesWithTheMicrophoneOnAndWaitsForResume() async throws {
+        turn.start()
+        await wait("recording") { turn.state == .recording }
+        turn.headsetMicLost()
+        XCTAssertTrue(turn.isInterrupted)
+        XCTAssertTrue(turn.isPaused)
+        XCTAssertEqual(recorder.calls.last, "pause", "samples dropped, microphone kept for a lock-screen Resume")
+        XCTAssertFalse(recorder.calls.contains("interrupt"))
+        XCTAssertTrue(audio.events.contains("sound.interruption"))
+        XCTAssertEqual(notices.notified, [.recordingPaused])
+        XCTAssertTrue(notices.toasts.last?.hasPrefix("Recording paused — the headphones’ microphone disconnected") == true)
+        turn.headsetMicLost()
+        XCTAssertEqual(audio.events.filter { $0 == "sound.interruption" }.count, 1, "one alert per episode")
+        turn.resumeRecording()
+        XCTAssertFalse(turn.isInterrupted)
+        XCTAssertFalse(turn.isPaused)
+        XCTAssertEqual(recorder.calls.last, "resume")
+    }
+
+    func testLostHeadsetMicOutsideRecordingDoesNothing() async throws {
+        turn.headsetMicLost()
+        XCTAssertFalse(turn.isInterrupted)
+        backend.statuses = [try status("finalizing")]
+        await recordAndStop()
+        turn.headsetMicLost()
+        XCTAssertFalse(turn.isInterrupted, "Stop switches the session to playback: not a lost mic")
+        XCTAssertFalse(audio.events.contains("sound.interruption"))
+        await wait("transcribing") { turn.state == .transcribing }
+        turn.cancelProcessing()
+    }
+
     // #397: a resume pressed on the lock screen that fails is not only a toast
     // (nobody sees it there): a notification says so, and goes once it works.
     func testFailedResumeNotifiesAndAWorkingOneWithdrawsIt() async throws {

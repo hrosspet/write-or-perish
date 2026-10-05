@@ -64,7 +64,12 @@ final class AudioCenter {
         VoiceActivityCommands.handler = { [weak self] command in await self?.runLockScreenCommand(command) }
         observers.append(NotificationCenter.default.addObserver(forName: UIApplication.didBecomeActiveNotification,
                                                                 object: nil, queue: .main) { [weak self] _ in
+            RecordingLog.shared.note("app active")
             MainActor.assumeIsolated { self?.voiceController?.appDidBecomeActive() }
+        })
+        observers.append(NotificationCenter.default.addObserver(forName: UIApplication.didEnterBackgroundNotification,
+                                                                object: nil, queue: .main) { _ in
+            RecordingLog.shared.note("app in background")
         })
     }
 
@@ -124,6 +129,7 @@ final class AudioCenter {
         activeDictation?.cancel()
         ChunkUploader.shared.reset()
         PrivateFiles.sweepTemporary()
+        RecordingLog.shared.deleteAll()
         listenTask?.cancel()
         listenCache = [:]
         loadingSource = nil
@@ -170,8 +176,13 @@ final class AudioCenter {
                 player.play()
             }
             resumeAfterInterruption = false
-        case .oldDeviceUnavailable:
-            if player.isPlaying { player.pause() }
+        case .routeChanged(let reason, let from, let to):
+            if reason == .oldDeviceUnavailable && player.isPlaying { player.pause() }
+            if AudioRoute.headsetMicLost(from: from, to: to) {
+                RecordingLog.shared.note("headset mic lost")
+                if voiceActive { voiceController?.headsetMicLost() }
+                activeDictation?.headsetMicLost()
+            }
         case .mediaServicesReset:
             sounds.stopCue()
             if voiceActive { voiceController?.systemInterruptionBegan() }
