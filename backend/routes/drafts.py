@@ -72,49 +72,6 @@ def _exclude_proposal_drafts(query):
     )
 
 
-def _input_drafts(node_id, parent_id):
-    """The current user's input drafts for one writing context (an edit of
-    *node_id*, or a new entry under *parent_id*, top level when None),
-    newest first. GET, POST and DELETE all start here, so autosave writes
-    the row GET restores and a send deletes that same row.
-
-    Never a proposal-pending draft (#158), nor a recording the server
-    chain already saved as a node (llm_node_id / streaming_warning). Such
-    a row waits for its SSE all_complete, or, when the client polls
-    /status instead (the iPhone app always does), for the next
-    streaming/init's _cleanup_stale_drafts. Picked as "the" draft with no
-    ordering, it took the typed text out of GET's sight, and a send
-    deleted it in place of the typed draft, which then came back with the
-    entry just sent.
-    """
-    query = Draft.query.filter_by(user_id=current_user.id)
-    query = _exclude_proposal_drafts(query)
-    query = query.filter(Draft.llm_node_id.is_(None),
-                         Draft.streaming_warning.is_(None))
-    if node_id:
-        query = query.filter_by(node_id=node_id)
-    else:
-        query = query.filter_by(node_id=None)
-        if parent_id:
-            query = query.filter_by(parent_id=parent_id)
-        else:
-            query = query.filter_by(parent_id=None)
-    return query.order_by(Draft.updated_at.desc(), Draft.id.desc())
-
-
-def _no_session_in_progress_clause():
-    """Every Draft except a session still in 'recording', live or left
-    behind (#320), or in 'finalizing' (its finalize task is turning it
-    into a node). Those end only through the task, save-as-node or
-    /streaming/<id>/discard: typed text never goes into their row (it
-    would overwrite the transcript), and deleting the input draft never
-    takes them (it would lose the turn and orphan its audio)."""
-    return db.or_(
-        Draft.streaming_status.is_(None),
-        Draft.streaming_status.notin_(('recording', 'finalizing')),
-    )
-
-
 def _parent_error(parent_id):
     """An error response when *parent_id* names a node the current user
     may not build on (missing, or not visible to them: 404), else None.
@@ -197,21 +154,43 @@ def get_draft():
         if parent is not None and parent.deleted_at is not None:
             parent_deleted = True
 
-    # The most recent input draft (stale empty drafts must not hide newer
-    # ones with actual content or stored audio chunks). Even under a
-    # soft-deleted parent, the lookup uses the original parent_id so the
-    # user's saved content comes back (with a warning); the response
-    # below null-rebinds the parent_id field per plan §17. A draft saved
-    # as a node with a streaming_warning (spend cap, #341, or a refused
-    # placeholder) is not restored: it would save the transcript twice.
-    query = _input_drafts(node_id, parent_id)
+    # Build query for the user's draft matching the context
+    query = Draft.query.filter_by(user_id=current_user.id)
+    # Never surface proposal-pending drafts as the composing/input draft.
+    query = _exclude_proposal_drafts(query)
+
+    # Exclude drafts already processed by server-side LLM chain
+    # (Reflect/Orient workflows create nodes automatically but leave
+    # the draft alive for the SSE all_complete event). A draft with a
+    # streaming_warning was saved as a node too, only without a reply
+    # (spend cap, #341, or a refused placeholder): restoring it would
+    # save the same transcript a second time.
+    query = query.filter(Draft.llm_node_id.is_(None),
+                         Draft.streaming_warning.is_(None))
 
     # A session another tab is recording right now is not a draft to
     # load here: this view would auto-recover it, which completes it
     # under the recording tab (#320).
     query = query.filter(not_live_clause())
 
-    draft = query.first()
+    if node_id:
+        # Editing an existing node
+        query = query.filter_by(node_id=node_id)
+    else:
+        # Creating a new node (possibly under a parent)
+        query = query.filter_by(node_id=None)
+        if parent_id:
+            # Even if the parent is soft-deleted, look up the draft by
+            # the original parent_id so we can return the user's saved
+            # content (with a warning); the response below null-rebinds
+            # the parent_id field per plan §17.
+            query = query.filter_by(parent_id=parent_id)
+        else:
+            query = query.filter_by(parent_id=None)
+
+    # Prefer the most recent draft (avoids stale empty drafts hiding
+    # newer ones with actual content or stored audio chunks)
+    draft = query.order_by(Draft.updated_at.desc()).first()
 
     if not draft:
         return jsonify({"error": "No draft found"}), 404
@@ -382,12 +361,25 @@ def save_draft():
         if parent.deleted_at is not None:
             return jsonify({"error": "Parent node has been deleted"}), 410
 
-    # The newest input draft, as GET restores it, but never a session in
-    # progress (#320): a second tab's autosave would overwrite its
-    # transcript. Typing next to one goes to a plain draft of its own,
-    # which is then the newest.
-    draft = _input_drafts(node_id, parent_id).filter(
-        _no_session_in_progress_clause()).first()
+    # Find existing draft for this context (never an agentic proposal draft —
+    # those share parent_id with the composing draft under a proposal node).
+    query = Draft.query.filter_by(user_id=current_user.id)
+    query = _exclude_proposal_drafts(query)
+    # Nor a session some tab is recording (#320): a second tab's autosave
+    # would overwrite its transcript. Typing next to a live recording goes
+    # to a plain draft of its own.
+    query = query.filter(not_live_clause())
+
+    if node_id:
+        query = query.filter_by(node_id=node_id)
+    else:
+        query = query.filter_by(node_id=None)
+        if parent_id:
+            query = query.filter_by(parent_id=parent_id)
+        else:
+            query = query.filter_by(parent_id=None)
+
+    draft = query.first()
 
     if draft:
         # Update existing draft
@@ -439,18 +431,35 @@ def delete_draft():
         if err is not None:
             return err
 
-    # Every input draft of the context, not just the newest: after a send
-    # or a discard none may come back. Never a proposal draft (deleting the
-    # composing draft under a proposal node must not take the pending
-    # proposal with it) nor a session in progress (#320).
-    drafts = _input_drafts(node_id, parent_id).filter(
-        _no_session_in_progress_clause()).all()
+    # Build query for the user's draft matching the context. Exclude proposal
+    # drafts so deleting the composing draft under a proposal node can't take
+    # the pending proposal with it.
+    query = Draft.query.filter_by(user_id=current_user.id)
+    query = _exclude_proposal_drafts(query)
+    # Never a session still in 'recording', live or left behind (#320):
+    # sending or discarding a text entry in another tab would delete the
+    # recording's row and orphan its audio. Those rows end through
+    # save-as-node or /streaming/<id>/discard.
+    query = query.filter(db.or_(
+        Draft.streaming_status.is_(None),
+        Draft.streaming_status != 'recording',
+    ))
 
-    if not drafts:
+    if node_id:
+        query = query.filter_by(node_id=node_id)
+    else:
+        query = query.filter_by(node_id=None)
+        if parent_id:
+            query = query.filter_by(parent_id=parent_id)
+        else:
+            query = query.filter_by(parent_id=None)
+
+    draft = query.first()
+
+    if not draft:
         return jsonify({"error": "No draft found"}), 404
 
-    for draft in drafts:
-        db.session.delete(draft)
+    db.session.delete(draft)
     db.session.commit()
 
     return jsonify({"message": "Draft deleted"}), 200
