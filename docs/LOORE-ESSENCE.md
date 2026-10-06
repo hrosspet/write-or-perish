@@ -57,6 +57,13 @@ The heuristics above are my reading of Loore. These rules are Petr's answers fro
 - **Bug reports, during alpha and early Beta.** I may ask a reporter directly wherever a channel reaches them: an issue they filed from their own GitHub account, or Loore's own channel once it can carry a question. To be revisited if Loore grows fast. (2026-10-02)
 - **Deletion.** A deleted account has a 30-day grace period, then its data is purged. Cost records are kept, detached from the person. (2026-10-02)
 - **Transparency.** The decision log is public. Security problems stay out of it until they are fixed, and go in afterwards. (2026-10-02)
+- **Training licence.** A call goes to the training key only if everything in its prompt allows it. External content quoted word for word never reaches training. (2026-10-06)
+- **Recommend fewer, better.** An empty Read is a good result, an untouched pick is neutral, and Read uses no patterns from extractive feeds. (2026-10-06)
+- **Reflection comes first.** A Read answers a reflection, also in a newcomer's first session, and reading more means reflecting again. A Read does not start by itself after each reflection: the user opens it from its card (Reflect, then Read), and reflecting alone is fine. (2026-10-06)
+- **Problems show.** Loore fails loudly, stops after repeated failures, and fixes the cause rather than what is displayed. (2026-10-06)
+- **Ask when the choice matters.** The question is a dialog the user can dismiss. No answer means "we don't know", not "no". (2026-10-06)
+- **Autonomy.** Reversible work goes ahead without asking and is flagged afterwards. Every added heuristic is named. Merging stays Petr's. (2026-10-06)
+- **No AI means no AI.** Nothing marked None reaches a model by any route, and no job runs for an account set to None. The user's own data export is the exception. (2026-10-06)
 
 ## Coda: where I stand
 
