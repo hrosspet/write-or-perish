@@ -42,9 +42,11 @@ NO_TASKS_RULE = (
 EMPTY_TODO_MESSAGE = "The todo list is empty. " + NO_TASKS_RULE
 
 # Shown on the card when the model's output hit the output cap (#432).
+# The card has no retry button after a failed merge (its pending draft
+# is gone), so the message says how to get a new proposal.
 TRUNCATED_MESSAGE = (
     "The todo update was cut off, so nothing was changed. "
-    "Please try again.")
+    "Ask for the todo update again to retry.")
 
 # A list item (`- `, `* `, `+ `, `1. `), with the text after its checkbox,
 # if it has one, in group 1.
