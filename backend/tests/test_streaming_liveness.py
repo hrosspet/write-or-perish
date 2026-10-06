@@ -588,7 +588,10 @@ class TestDeadSession:
     """Peter, 2026-10-06: a Voice recording left on the iPhone before its
     first chunk stayed in 'recording' with no chunks. Text mode loaded it,
     autosave wrote into it, and neither Send nor Discard could delete it,
-    so the text came back on every device. Prod had 15 such rows."""
+    so the text came back on every device. Prod had 15 such rows.
+
+    Hidden from the form, never deleted: a phone offline before chunk 0
+    was stored uploads it later (PR #427 review)."""
 
     def test_form_does_not_load_a_dead_session(self, app):
         client, alice = _setup(app)
@@ -596,17 +599,15 @@ class TestDeadSession:
 
         assert client.get("/api/drafts/").status_code == 404
 
-    def test_discard_removes_a_dead_session_holding_typed_text(self, app):
+    def test_text_left_in_a_dead_session_no_longer_comes_back(self, app):
         # The state on prod: an earlier autosave wrote into the row.
         client, alice = _setup(app)
         dead = _make_session(alice, heartbeat_age=STALE, chunk_statuses=())
-        _chunk_dir(alice, dead)
 
-        assert client.delete("/api/drafts/").status_code == 200
+        assert client.get("/api/drafts/").status_code == 404
+        assert client.delete("/api/drafts/").status_code == 404
         _db.session.expire_all()
-        assert Draft.query.get(dead.id) is None
-        from backend.routes import drafts as drafts_module
-        assert not drafts_module._session_dir(alice.id, dead.session_id).exists()
+        assert Draft.query.get(dead.id) is not None
 
     def test_typed_then_sent_next_to_a_dead_session(self, app):
         client, alice = _setup(app)
@@ -618,7 +619,26 @@ class TestDeadSession:
         assert client.delete("/api/drafts/").status_code == 200
         assert client.get("/api/drafts/").status_code == 404
         _db.session.expire_all()
-        assert Draft.query.get(dead.id) is None
+        assert Draft.query.get(dead.id).get_content() == "words so far"
+
+    def test_a_late_first_chunk_still_lands(self, app, monkeypatch):
+        # The phone lost its connection before chunk 0 was stored; meanwhile
+        # the same context sends and discards, and a recording starts.
+        client, alice = _setup(app)
+        offline = _make_session(alice, heartbeat_age=STALE, chunk_statuses=())
+        _chunk_dir(alice, offline)
+        client.post("/api/drafts/", json={"content": "typed on the Mac"})
+        client.delete("/api/drafts/")
+        from backend.routes import drafts as drafts_module
+        drafts_module._cleanup_stale_drafts(alice.id)
+        # The test bytes are not a real init segment.
+        monkeypatch.setattr(drafts_module, "persist_init_segment", lambda *a, **k: None)
+
+        assert _post_chunk(client, offline, 0).status_code == 202
+        _db.session.expire_all()
+        assert Draft.query.get(offline.id) is not None
+        assert NodeTranscriptChunk.query.filter_by(
+            session_id=offline.session_id, chunk_index=0).count() == 1
 
     def test_a_recording_just_started_elsewhere_is_not_dead(self, app):
         # Live (stamped at init), no chunk yet: another device recording.
@@ -634,35 +654,11 @@ class TestDeadSession:
         client, alice = _setup(app)
         stale = _make_session(alice, heartbeat_age=STALE,
                               chunk_statuses=("stored",))
-        client.post("/api/drafts/", json={"content": "typed"})
 
-        assert client.delete("/api/drafts/").status_code == 200
-        _db.session.expire_all()
-        assert Draft.query.get(stale.id) is not None
+        assert client.get("/api/drafts/").get_json()["session_id"] == stale.session_id
         ids = [e["session_id"] for e in
                client.get("/api/drafts/interrupted").get_json()]
         assert ids == [stale.session_id]
-
-    def test_next_recording_cleans_up_dead_sessions_anywhere(self, app):
-        client, alice = _setup(app)
-        top = _make_session(alice, heartbeat_age=STALE, chunk_statuses=())
-        in_thread = _make_session(alice, heartbeat_age=None, parent_id=42,
-                                  chunk_statuses=())
-        with_audio = _make_session(alice, heartbeat_age=STALE)
-        live = _make_session(alice, heartbeat_age=LIVE, chunk_statuses=())
-        bob = _make_user("bob")
-        _db.session.commit()
-        bobs = _make_session(bob, heartbeat_age=STALE, chunk_statuses=())
-
-        from backend.routes import drafts as drafts_module
-        drafts_module._cleanup_stale_drafts(alice.id)
-
-        _db.session.expire_all()
-        assert Draft.query.get(top.id) is None
-        assert Draft.query.get(in_thread.id) is None
-        assert Draft.query.get(with_audio.id) is not None
-        assert Draft.query.get(live.id) is not None
-        assert Draft.query.get(bobs.id) is not None
 
 
 class TestChunkAfterRelease:
