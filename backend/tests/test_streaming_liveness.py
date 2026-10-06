@@ -570,6 +570,19 @@ class TestFinishedVoiceTurnIsNotTheInputDraft:
         _db.session.expire_all()
         assert Draft.query.get(elsewhere.id) is not None
 
+    def test_a_voice_turn_being_finalized_is_left_alone(self, app):
+        # PR #425 review: no reply node yet, so not a finished turn either.
+        client, alice = _setup(app)
+        turn = _make_session(alice, heartbeat_age=None, status="finalizing")
+
+        saved = client.post("/api/drafts/", json={"content": "typed"})
+        assert saved.get_json()["id"] != turn.id
+        assert client.delete("/api/drafts/").status_code == 200
+        _db.session.expire_all()
+        kept = Draft.query.get(turn.id)
+        assert kept is not None
+        assert kept.get_content() == "words so far"
+
 
 class TestChunkAfterRelease:
     def test_chunk_in_flight_at_release_does_not_revive_the_session(self, app):

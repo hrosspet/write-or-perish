@@ -102,15 +102,16 @@ def _input_drafts(node_id, parent_id):
     return query.order_by(Draft.updated_at.desc(), Draft.id.desc())
 
 
-def _not_recording_clause():
+def _no_session_in_progress_clause():
     """Every Draft except a session still in 'recording', live or left
-    behind (#320). Those end only through save-as-node or
+    behind (#320), or in 'finalizing' (its finalize task is turning it
+    into a node). Those end only through the task, save-as-node or
     /streaming/<id>/discard: typed text never goes into their row (it
     would overwrite the transcript), and deleting the input draft never
-    takes them (it would orphan their audio)."""
+    takes them (it would lose the turn and orphan its audio)."""
     return db.or_(
         Draft.streaming_status.is_(None),
-        Draft.streaming_status != 'recording',
+        Draft.streaming_status.notin_(('recording', 'finalizing')),
     )
 
 
@@ -381,11 +382,12 @@ def save_draft():
         if parent.deleted_at is not None:
             return jsonify({"error": "Parent node has been deleted"}), 410
 
-    # The input draft GET restores. Nor a recording session (#320): a
-    # second tab's autosave would overwrite its transcript. Typing next to
-    # a recording goes to a plain draft of its own.
+    # The newest input draft, as GET restores it, but never a session in
+    # progress (#320): a second tab's autosave would overwrite its
+    # transcript. Typing next to one goes to a plain draft of its own,
+    # which is then the newest.
     draft = _input_drafts(node_id, parent_id).filter(
-        _not_recording_clause()).first()
+        _no_session_in_progress_clause()).first()
 
     if draft:
         # Update existing draft
@@ -440,9 +442,9 @@ def delete_draft():
     # Every input draft of the context, not just the newest: after a send
     # or a discard none may come back. Never a proposal draft (deleting the
     # composing draft under a proposal node must not take the pending
-    # proposal with it) nor a recording session (#320).
+    # proposal with it) nor a session in progress (#320).
     drafts = _input_drafts(node_id, parent_id).filter(
-        _not_recording_clause()).all()
+        _no_session_in_progress_clause()).all()
 
     if not drafts:
         return jsonify({"error": "No draft found"}), 404
