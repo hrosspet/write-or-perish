@@ -132,6 +132,43 @@ def apply_voice_todo(self, llm_node_id: int, model_id: str, user_id: int,
                     f"Merge lock expired before release for user {user_id}")
 
 
+def build_merge_messages(merge_prompt, update_summary, current_todo):
+    """The merge call's messages: system=merge_prompt, assistant=the
+    proposal, user=the current todo list. Also used by
+    backend/scripts/compare_todo_merge_models.py to rebuild past merges."""
+    if has_tasks(current_todo):
+        todo_message = (
+            f"Here is the current full todo list:\n\n{current_todo}"
+            "\n\nNow apply the changes described above."
+        )
+    elif current_todo and current_todo.strip():
+        # Headings but no tasks yet, e.g. the Todo page's Create template.
+        todo_message = (
+            f"Here is the current full todo list:\n\n{current_todo}"
+            f"\n\n{NO_TASKS_RULE}"
+            "\n\nNow apply the changes described above."
+        )
+    else:
+        todo_message = (
+            EMPTY_TODO_MESSAGE
+            + "\n\nNow apply the changes described above."
+        )
+    return [
+        {
+            "role": "system",
+            "content": [{"type": "text", "text": merge_prompt}],
+        },
+        {
+            "role": "assistant",
+            "content": [{"type": "text", "text": update_summary}],
+        },
+        {
+            "role": "user",
+            "content": [{"type": "text", "text": todo_message}],
+        },
+    ]
+
+
 def _run_merge(llm_node, update_summary, user_id, model_id,
                confirm_node_id):
     """Execute the merge while holding the per-user lock."""
@@ -161,39 +198,8 @@ def _run_merge(llm_node, update_summary, user_id, model_id,
     from backend.utils.prompts import get_user_prompt
     merge_prompt = get_user_prompt(user_id, 'orient_apply_todo')
 
-    if has_tasks(current_todo):
-        todo_message = (
-            f"Here is the current full todo list:\n\n{current_todo}"
-            "\n\nNow apply the changes described above."
-        )
-    elif current_todo and current_todo.strip():
-        # Headings but no tasks yet, e.g. the Todo page's Create template.
-        todo_message = (
-            f"Here is the current full todo list:\n\n{current_todo}"
-            f"\n\n{NO_TASKS_RULE}"
-            "\n\nNow apply the changes described above."
-        )
-    else:
-        todo_message = (
-            EMPTY_TODO_MESSAGE
-            + "\n\nNow apply the changes described above."
-        )
-
     # Build messages: system=merge_prompt, user=update_summary + current todo
-    messages = [
-        {
-            "role": "system",
-            "content": [{"type": "text", "text": merge_prompt}],
-        },
-        {
-            "role": "assistant",
-            "content": [{"type": "text", "text": update_summary}],
-        },
-        {
-            "role": "user",
-            "content": [{"type": "text", "text": todo_message}],
-        },
-    ]
+    messages = build_merge_messages(merge_prompt, update_summary, current_todo)
 
     # Call LLM
     api_keys = get_api_keys_for_usage(flask_app.config, "chat")
