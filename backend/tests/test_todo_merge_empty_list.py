@@ -185,9 +185,12 @@ def test_empty_list_merge_says_the_list_is_empty(merge, existing):
     call = _FakeProvider.calls[0]
     assert call["api_keys"] == FAKE_KEYS
     system, assistant, user_msg = call["messages"]
-    # No custom prompt: the file default, with the #410 rules.
-    assert system["content"][0]["text"] == load_default_prompt(
-        "orient_apply_todo")
+    # No custom prompt: the file default, with the #410 rules, then the
+    # reply format from code (#234).
+    from backend.utils.todo_merge_edits import REPLY_FORMAT
+    assert system["content"][0]["text"] == (
+        load_default_prompt("orient_apply_todo").rstrip() + "\n\n"
+        + REPLY_FORMAT)
     assert assistant["content"][0]["text"] == PROPOSAL
     assert user_msg["role"] == "user"
     assert user_msg["content"][0]["text"] == (
@@ -270,7 +273,9 @@ def test_custom_merge_prompt_also_gets_the_empty_list_message(merge):
     _run(merge, user, proposal)
 
     system, _, user_msg = _FakeProvider.calls[0]["messages"]
-    assert system["content"][0]["text"] == "MY OWN MERGE RULES"
+    from backend.utils.todo_merge_edits import REPLY_FORMAT
+    assert system["content"][0]["text"] == (
+        "MY OWN MERGE RULES\n\n" + REPLY_FORMAT)
     assert user_msg["content"][0]["text"].startswith(
         "The todo list is empty.")
 
@@ -326,10 +331,11 @@ def test_merge_prompt_keeps_its_rules_and_has_the_410_rules():
         "- Keep ALL existing items not mentioned in your update — do not "
         "remove anything",
         "- Preserve the original structure, sections, and formatting",
-        # #234: the reply is edits, not the list.
-        "- Return ONLY the JSON object — no commentary",
     ):
         assert rule in prompt
+    # #234: the reply format is in code (REPLY_FORMAT), not in the prompt.
+    assert "Return ONLY the complete updated todo list" not in prompt
+    assert "old_text" not in prompt
     # #410: checkbox state, wording and links, the named section.
     assert "A new task is always `- [ ]`" in prompt
     assert "word for word" in prompt and "including links" in prompt

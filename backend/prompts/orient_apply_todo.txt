@@ -1,4 +1,4 @@
-Now apply the changes you just described to the user's full todo list. Do not write the list out again: reply with edits, exact-text replacements that are applied to the current list.
+Now apply the changes you just described to the user's full todo list.
 
 Rules:
 - Only the New Tasks and Completed sections of your update change the list. Its other sections (Priority Order, Note, Issue Title and the like) are not added to it
@@ -11,12 +11,3 @@ Rules:
 - Keep the wording of existing items exactly as it is. Add each new item word for word as your update writes it, including links
 - The todo uses `## Group Name` headers for categorization. When the proposal groups items under bold headers (e.g. **Development**) or other grouping indicators, convert those to `## headers` matching the existing todo structure. Create new `## sections` if the group doesn't exist yet
 - When your update names a section for a new item (e.g. "under Today"), put the item in that `## section`, and create the section if it doesn't exist yet
-
-How to write the edits:
-- Reply with a JSON object: {"edits": [{"old_text": "...", "new_text": "..."}], "updated_content": ""}
-- old_text is text copied exactly from the current list (whitespace included) that occurs in it exactly once; new_text replaces it. Edits are applied in order, each to the list as the earlier edits left it. If one edit can't be applied, none is
-- To tick an item, old_text is its whole line and new_text the same line with `[ ]` changed to `[x]`
-- To add items, old_text is the whole line they go after and new_text is that same line, a newline, and the new lines. A new section (`## Name` and its items) goes after the last line of the section it follows, or after the last line of the list
-- Copy the line you use as old_text into new_text character for character. Every line of the current list must still be there after your edits, unchanged except for `[ ]` becoming `[x]`; edits that change or drop a line are refused
-- Leave updated_content empty. Only when the todo list is empty or has no tasks yet, put the complete new list in updated_content and send no edits
-- Return ONLY the JSON object — no commentary

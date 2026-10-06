@@ -38,7 +38,8 @@ for _mod in ["flask_login", "backend.models", "backend.extensions"]:
         del sys.modules[_mod]
 
 from backend.extensions import db as _db  # noqa: E402
-from backend.models import APICostLog, Node, User, UserTodo  # noqa: E402
+from backend.models import (  # noqa: E402
+    APICostLog, Node, User, UserPrompt, UserTodo)
 from backend.utils import todo_merge_edits as tme  # noqa: E402
 from backend.utils.text_edits import apply_text_edits  # noqa: E402
 
@@ -468,12 +469,18 @@ def task(app, monkeypatch):
     monkeypatch.setattr(vtm, "get_api_keys_for_usage",
                         lambda *a, **k: dict(FAKE_KEYS))
 
-    def run(*answers, todo=LIST, confirm=False):
+    def run(*answers, todo=LIST, confirm=False, saved_prompt=None):
         holder["provider"] = Scripted(*answers)
         user = User(username="alice", plan="alpha", twitter_id=None,
                     approved=True, default_ai_usage="chat")
         _db.session.add(user)
         _db.session.commit()
+        if saved_prompt is not None:
+            # A merge prompt the user saved on the Prompts page.
+            row = UserPrompt(user_id=user.id, prompt_key="orient_apply_todo",
+                             title="Apply to Todo", generated_by="user")
+            row.set_content(saved_prompt)
+            _db.session.add(row)
         if todo is not None:
             row = UserTodo(user_id=user.id, generated_by="user",
                            ai_usage="chat")
@@ -541,11 +548,45 @@ def test_task_applies_the_edits_to_the_newest_list(task):
     call = provider.calls[0]
     assert call["model_id"] == "claude-opus-5.5"
     assert call["kwargs"]["output_schema"] == tme.TODO_EDITS_SCHEMA
+    from backend.utils.prompts import load_default_prompt
     assert call["messages"] == task.build_merge_messages(
-        call["messages"][0]["content"][0]["text"], PROPOSAL, LIST)
+        load_default_prompt("orient_apply_todo"), PROPOSAL, LIST)
+    assert call["messages"][0]["content"][0]["text"].endswith(
+        tme.REPLY_FORMAT)
     rows = _cost_rows(user)
     assert len(rows) == 1 and rows[0].request_ref is None
     assert rows[0].model_id == "claude-opus-5.5"
+
+
+# The merge prompt as it was before #234, saved by the user: it asks for
+# the whole list.
+SAVED_FULL_REWRITE_PROMPT = (
+    "Now apply the changes you just described to the user's full todo "
+    "list.\n\nRules:\n"
+    "- Keep ALL existing items not mentioned in your update — do not "
+    "remove anything\n"
+    "- My own rule: put errands under ## Errands\n"
+    "- Return ONLY the complete updated todo list — no commentary\n")
+
+
+def test_saved_full_rewrite_prompt_gets_the_reply_format_and_merges(task):
+    """A merge prompt the user saved before #234 is sent unchanged, and
+    the reply format follows it, so the model is told to send edits."""
+    user, node, _, provider = task.run(GOOD,
+                                       saved_prompt=SAVED_FULL_REWRITE_PROMPT)
+
+    assert len(provider.calls) == 1
+    system = provider.calls[0]["messages"][0]["content"][0]["text"]
+    assert system == (SAVED_FULL_REWRITE_PROMPT.rstrip() + "\n\n"
+                      + tme.REPLY_FORMAT)
+    assert system.startswith(SAVED_FULL_REWRITE_PROMPT.rstrip())
+    assert ("replaces any instruction above to return the whole list"
+            in system)
+    assert '{"edits": [{"old_text": "...", "new_text": "..."}]' in system
+    assert _versions(user)[-1].get_content() == MERGED
+    entry = _entry(node)
+    assert entry["apply_status"] == "completed"
+    assert len(_cost_rows(user)) == 1
 
 
 def test_task_retries_once_and_logs_both_calls(task):
@@ -643,7 +684,15 @@ def test_merge_prompt_asks_for_edits_and_keeps_the_417_rules():
         "Only the New Tasks and Completed sections of your update change "
         "the list",
         "Priority Order",
-        # The edits.
+    ):
+        assert rule in prompt, rule
+    assert "Return ONLY the complete updated todo list" not in prompt
+    # The reply format is the parser's contract: in code, not in the
+    # user-editable prompt.
+    assert "old_text" not in prompt and "JSON" not in prompt
+    for rule in (
+        "replaces any instruction above to return the whole list",
+        "Do not write the list out again",
         '{"edits": [{"old_text": "...", "new_text": "..."}], '
         '"updated_content": ""}',
         "occurs in it exactly once",
@@ -651,8 +700,7 @@ def test_merge_prompt_asks_for_edits_and_keeps_the_417_rules():
         "has no tasks yet",
         "Return ONLY the JSON object",
     ):
-        assert rule in prompt, rule
-    assert "Return ONLY the complete updated todo list" not in prompt
+        assert rule in tme.REPLY_FORMAT, rule
 
 
 # ── the provider passes the schema name to OpenAI ────────────────────────

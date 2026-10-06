@@ -22,7 +22,8 @@ from backend.utils.cost import llm_cost_log_fields
 from backend.models import APICostLog
 from backend.utils.refusal_backoff import REFUSED_REF
 from backend.utils.todo_merge_edits import (
-    FAILURE_EMPTY, FAILURE_TRUNCATED, MergeRun, has_tasks, run_todo_merge)
+    FAILURE_EMPTY, FAILURE_TRUNCATED, REPLY_FORMAT, MergeRun, has_tasks,
+    run_todo_merge)
 
 logger = get_task_logger(__name__)
 
@@ -134,9 +135,17 @@ def apply_voice_todo(self, llm_node_id: int, model_id: str, user_id: int,
 
 
 def build_merge_messages(merge_prompt, update_summary, current_todo):
-    """The merge call's messages: system=merge_prompt, assistant=the
-    proposal, user=the current todo list. Also used by
-    backend/scripts/compare_todo_merge_models.py to rebuild past merges."""
+    """The merge call's messages: system=merge_prompt followed by the
+    reply format, assistant=the proposal, user=the current todo list.
+    Also used by backend/scripts/compare_todo_merge_models.py to rebuild
+    past merges.
+
+    REPLY_FORMAT (#234) is the parser's contract, so it is added in code
+    after whatever merge prompt the account has: the file default or one
+    the user saved, whose text is sent unchanged (the user's edit wins).
+    One text block: the Anthropic conversion reads a system message's
+    first block only."""
+    system_text = f"{(merge_prompt or '').rstrip()}\n\n{REPLY_FORMAT}"
     if has_tasks(current_todo):
         todo_message = (
             f"Here is the current full todo list:\n\n{current_todo}"
@@ -157,7 +166,7 @@ def build_merge_messages(merge_prompt, update_summary, current_todo):
     return [
         {
             "role": "system",
-            "content": [{"type": "text", "text": merge_prompt}],
+            "content": [{"type": "text", "text": system_text}],
         },
         {
             "role": "assistant",

@@ -576,8 +576,9 @@ def test_custom_merge_prompt_is_rebuilt_from_its_row(history, tmp_path):
     provider = FakeProvider(_luna_answers())
     out = tmp_path / "out.jsonl"
     cmp.run("peter", provider=provider, out_path=str(out))
+    from backend.utils.todo_merge_edits import REPLY_FORMAT
     assert {m[0]["content"][0]["text"] for _, m, _ in provider.calls} == {
-        "MY OWN MERGE RULES"}
+        "MY OWN MERGE RULES\n\n" + REPLY_FORMAT}
     merges = [r for r in _jsonl(out) if r["type"] == "merge"]
     assert {m["prompt"] for m in merges} == {f"user_prompt:{row.id}"}
 
@@ -1014,8 +1015,9 @@ def test_current_prompt_replaces_a_custom_prompt_and_does_not_read_it(
     out = tmp_path / "out.jsonl"
     cmp.run("peter", provider=provider, current_prompt=True,
             out_path=str(out))
+    from backend.utils.todo_merge_edits import REPLY_FORMAT
     assert {m[0]["content"][0]["text"] for _, m, _ in provider.calls} == {
-        NEW_PROMPT}
+        NEW_PROMPT + "\n\n" + REPLY_FORMAT}
     assert not [s for s in decrypted if s[0] == "UserPrompt"]
     merges = [r for r in _jsonl(out) if r["type"] == "merge"]
     assert {m["prompt"] for m in merges} == {"current_file"}

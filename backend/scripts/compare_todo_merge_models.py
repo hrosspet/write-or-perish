@@ -34,7 +34,8 @@ The evaluation of the merge by edits (#234) on Opus 5.5:
 
 --current-prompt runs every merge (candidates and --rerun-original) the way
 the task runs it today: the CURRENT backend/prompts/orient_apply_todo.txt
-through the task's message builder, the model replying with edits
+through the task's message builder (which appends the reply format,
+REPLY_FORMAT, after any merge prompt), the model replying with edits
 ({old_text, new_text}), and the task's own function
 (backend/utils/todo_merge_edits.run_todo_merge) applying them to the
 previous todo list, with its one retry after a refused reply and its

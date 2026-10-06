@@ -103,6 +103,38 @@ TODO_EDITS_SCHEMA = {
     "additionalProperties": False,
 }
 
+# How to write the reply. It is the parser's contract, so it lives here,
+# not in the user-editable orient_apply_todo prompt (which keeps the rules
+# of what a merge changes): tasks/voice_todo_merge.build_merge_messages
+# appends it after the merge prompt, the file default and a prompt the
+# user saved alike. A prompt saved before #234 ends with "Return ONLY the
+# complete updated todo list", hence the first line.
+REPLY_FORMAT = (
+    "How to write your reply (this sets the form of the reply and "
+    "replaces any instruction above to return the whole list):\n"
+    "- Do not write the list out again: reply with edits, exact-text "
+    "replacements that are applied to the current list\n"
+    '- Reply with a JSON object: {"edits": [{"old_text": "...", '
+    '"new_text": "..."}], "updated_content": ""}\n'
+    "- old_text is text copied exactly from the current list (whitespace "
+    "included) that occurs in it exactly once; new_text replaces it. "
+    "Edits are applied in order, each to the list as the earlier edits "
+    "left it. If one edit can't be applied, none is\n"
+    "- To tick an item, old_text is its whole line and new_text the same "
+    "line with `[ ]` changed to `[x]`\n"
+    "- To add items, old_text is the whole line they go after and "
+    "new_text is that same line, a newline, and the new lines. A new "
+    "section (`## Name` and its items) goes after the last line of the "
+    "section it follows, or after the last line of the list\n"
+    "- Copy the line you use as old_text into new_text character for "
+    "character. Every line of the current list must still be there after "
+    "your edits, unchanged except for `[ ]` becoming `[x]`; edits that "
+    "change or drop a line are refused\n"
+    "- Leave updated_content empty. Only when the todo list is empty or "
+    "has no tasks yet, put the complete new list in updated_content and "
+    "send no edits\n"
+    "- Return ONLY the JSON object — no commentary")
+
 FORMAT_ERROR = ("The reply was not a JSON object with `edits` (a list of "
                 "{old_text, new_text}) and `updated_content` (a string).")
 REWRITE_REFUSED_ERROR = (
