@@ -79,6 +79,23 @@ def _upsert_items(user_id, source, items):
     return created, skipped
 
 
+def _saved_by(user_id, external_ids, cutoff):
+    """How many of the user's X bookmark rows among *external_ids* were
+    saved at or before *cutoff*. Rows from before ExternalItem.saved_at
+    existed fall back to fetched_at: their insert time, or later if a
+    re-clip or a saved Read pick moved it, which can only make a row
+    look newer and the resume read further, never stop early."""
+    if not external_ids:
+        return 0
+    return ExternalItem.query.filter(
+        ExternalItem.user_id == user_id,
+        ExternalItem.source == "twitter_bookmark",
+        ExternalItem.external_id.in_(list(external_ids)),
+        func.coalesce(ExternalItem.saved_at, ExternalItem.fetched_at)
+        <= cutoff,
+    ).count()
+
+
 @celery.task(name='backend.tasks.external_sync.fetch_community_archive',
              bind=True)
 def fetch_community_archive(self, user_id, username, max_items=2000):
@@ -242,6 +259,36 @@ def sync_twitter_bookmarks(self, user_id, max_items=800):
         # the page that ends a night is a cheap one.
         # X bills pay-per-use per RETURNED POST (#271), not per request:
         # a page of N bookmarks costs N post reads, an empty page nothing.
+        #
+        # Except after a sync that did not finish (#310). The early stop
+        # assumes everything below a known page was imported by a sync
+        # that ran to its end. A sync cut off by a 429, a 5xx or a deploy
+        # killing the worker, while it was still storing new bookmarks,
+        # leaves its head imported and the rest missing; stopping at that
+        # head would skip the rest for good. The sync_incomplete marker
+        # records such a sync. Two cases:
+        #
+        # - No sync has finished yet (last_synced_at is None): a first
+        #   import. It reads to the end or to max_items (X's own cap),
+        #   re-reading the imported head once: at most max_items posts.
+        # - A sync has finished before: a RESUME. Bookmarks saved at or
+        #   before last_synced_at (set only when a sync reaches its end)
+        #   came in through a finished sync, so everything below them is
+        #   imported too. The resume reads past pages of bookmarks saved
+        #   since then, and stops at the first page whose bookmarks were
+        #   all saved at or before last_synced_at. Its cost is the
+        #   nightly ceiling with N = the bookmarks since the last
+        #   finished sync (see X_BOOKMARKS_FIRST_PAGE_SIZE): pages grow
+        #   while they hold no such old bookmark and freeze once one
+        #   appears, so the closing page stays small. A sync that fails
+        #   at the same point every night pays that again each night,
+        #   not a read to the end.
+        #
+        # In all modes, a page on which X returned nothing ends the sync.
+        read_to_end = account.last_synced_at is None
+        resume_cutoff = (account.last_synced_at
+                         if account.sync_incomplete and not read_to_end
+                         else None)
         created = skipped = requests_made = posts_read = 0
 
         def _log_cost():
@@ -275,13 +322,30 @@ def sync_twitter_bookmarks(self, user_id, max_items=800):
                     break
                 requests_made += 1
                 posts_read += returned
+                if page:
+                    # Rides _upsert_items' commit, so it is stored with
+                    # the page's rows: an exception or a killed worker
+                    # after this point leaves it set for the next sync.
+                    # Cleared below only when the sync reaches its end.
+                    account.sync_incomplete = True
                 page_created, page_skipped = _upsert_items(
                     user_id, "twitter_bookmark", page)
                 created += page_created
                 skipped += page_skipped
-                if page_created == 0:
+                if returned == 0:
                     break
-                grow = page_skipped == 0
+                if read_to_end:
+                    grow = True
+                elif resume_cutoff is not None:
+                    ids = {item["external_id"] for item in page}
+                    old = _saved_by(user_id, ids, resume_cutoff)
+                    if ids and old == len(ids):
+                        break
+                    grow = old == 0
+                else:
+                    if page_created == 0:
+                        break
+                    grow = page_skipped == 0
         except Exception as exc:
             # Pages already upserted are committed (_upsert_items commits
             # per page); this only discards a half-applied page from a DB
@@ -308,7 +372,12 @@ def sync_twitter_bookmarks(self, user_id, max_items=800):
             if code == 401:
                 return _mark_revoked(account, "bookmarks fetch HTTP 401")
             raise
+        # Only a sync that ran to its end gets here, so this is what
+        # ends the first-import and resume modes above. Every row this
+        # sync stored is committed by now, so a later resume counts all
+        # of them as saved at or before this time.
         account.last_synced_at = datetime.utcnow()
+        account.sync_incomplete = None
         account.last_sync_created = created
         _log_cost()
         db.session.commit()

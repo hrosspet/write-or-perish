@@ -19,6 +19,7 @@ from backend.llm_providers import LLMProvider
 from backend.utils.api_keys import get_api_keys_for_usage
 from backend.utils.cost import llm_cost_log_fields
 from backend.models import APICostLog
+from backend.utils.refusal_backoff import REFUSED_REF
 
 logger = get_task_logger(__name__)
 
@@ -104,23 +105,11 @@ def apply_voice_todo(self, llm_node_id: int, model_id: str, user_id: int,
                     f"Merge lock expired before release for user {user_id}")
 
 
-def _run_merge(llm_node, update_summary, user_id, model_id,
-               confirm_node_id):
-    """Execute the merge while holding the per-user lock."""
-    llm_node_id = llm_node.id
-
-    # Get current todo (fresh read — any prior merge has committed)
-    todo = UserTodo.query.filter_by(user_id=user_id).order_by(
-        UserTodo.created_at.desc()
-    ).first()
-    current_todo = todo.get_content() if todo else ""
-
-    # Get merge prompt
-    from backend.utils.prompts import get_user_prompt
-    merge_prompt = get_user_prompt(user_id, 'orient_apply_todo')
-
-    # Build messages: system=merge_prompt, user=update_summary + current todo
-    messages = [
+def build_merge_messages(merge_prompt, update_summary, current_todo):
+    """The merge call's messages: system=merge_prompt, assistant=the
+    proposal, user=the current todo list. Also used by
+    backend/scripts/compare_todo_merge_models.py to rebuild past merges."""
+    return [
         {
             "role": "system",
             "content": [{"type": "text", "text": merge_prompt}],
@@ -138,6 +127,39 @@ def _run_merge(llm_node, update_summary, user_id, model_id,
         },
     ]
 
+
+def _run_merge(llm_node, update_summary, user_id, model_id,
+               confirm_node_id):
+    """Execute the merge while holding the per-user lock."""
+    llm_node_id = llm_node.id
+
+    # AI may not read the todo list or the proposal: no model call. Asked
+    # here, under the lock, because the list can change after the merge
+    # was started (an earlier merge saves one with the account default).
+    from backend.routes.todo import todo_merge_refusal
+    refusal = todo_merge_refusal(user_id, llm_node)
+    if refusal is not None:
+        logger.info(
+            f"Todo merge for node {llm_node_id} refused: AI usage keeps "
+            f"its inputs away from AI (user {user_id})")
+        _update_apply_status(llm_node, "failed", error=refusal,
+                             confirm_node_id=confirm_node_id)
+        db.session.commit()
+        return
+
+    # Get current todo (fresh read — any prior merge has committed)
+    todo = UserTodo.query.filter_by(user_id=user_id).order_by(
+        UserTodo.created_at.desc()
+    ).first()
+    current_todo = todo.get_content() if todo else ""
+
+    # Get merge prompt
+    from backend.utils.prompts import get_user_prompt
+    merge_prompt = get_user_prompt(user_id, 'orient_apply_todo')
+
+    # Build messages: system=merge_prompt, user=update_summary + current todo
+    messages = build_merge_messages(merge_prompt, update_summary, current_todo)
+
     # Call LLM
     api_keys = get_api_keys_for_usage(flask_app.config, "chat")
     try:
@@ -152,21 +174,29 @@ def _run_merge(llm_node, update_summary, user_id, model_id,
         return
 
     merged_todo = response["content"]
-    if not merged_todo or not merged_todo.strip():
-        logger.warning(f"LLM returned empty merged todo for node {llm_node_id}")
-        _update_apply_status(llm_node, "failed", error="Empty merge result",
-                            confirm_node_id=confirm_node_id)
-        db.session.commit()
-        return
+    truncated = response.get("truncated", False)
+    empty = not merged_todo or not merged_todo.strip()
 
-    # Log cost
+    # Log cost, also for an empty result: the call was billed (#368). A
+    # result cut off before any text is marked like the other background
+    # jobs' refusals.
     output_tokens = response.get("output_tokens", 0)
     db.session.add(APICostLog(
         user_id=user_id,
         model_id=model_id,
         request_type="todo_merge",
+        request_ref=(REFUSED_REF if empty and truncated else None),
         **llm_cost_log_fields(model_id, response),
     ))
+
+    if empty:
+        logger.warning(
+            f"LLM returned empty merged todo for node {llm_node_id} "
+            f"(truncated={truncated}, output_tokens={output_tokens})")
+        _update_apply_status(llm_node, "failed", error="Empty merge result",
+                            confirm_node_id=confirm_node_id)
+        db.session.commit()
+        return
 
     # Save new UserTodo
     merge_user = User.query.get(user_id)
@@ -181,7 +211,6 @@ def _run_merge(llm_node, update_summary, user_id, model_id,
     db.session.add(new_todo)
 
     # Update apply status
-    truncated = response.get("truncated", False)
     if truncated:
         logger.warning(f"Todo merge response truncated for node {llm_node_id}")
     _update_apply_status(

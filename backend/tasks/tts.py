@@ -313,6 +313,15 @@ def _run_entity_tts(task, entity_cls, entity_id, text_of, subdir,
             db.session.commit()
             return
 
+        # Checked when the job runs, as for nodes (a saved reference has
+        # no ai_usage and always passes).
+        from backend.utils.privacy import speech_allowed
+        if not entity.audio_tts_url and not speech_allowed(entity):
+            logger.info("%s %s: ai_usage is none; no speech", label, entity_id)
+            entity.tts_task_status = 'failed'
+            db.session.commit()
+            return {'status': 'refused'}
+
         entity.tts_task_status = 'processing'
         entity.tts_task_progress = 10
         db.session.commit()
@@ -564,6 +573,15 @@ def generate_tts_audio(self, node_id: int, audio_storage_root: str,
             node.tts_task_status = 'failed'
             db.session.commit()
             return
+
+        # Checked when the job runs: the node's ai_usage may have changed
+        # since it was queued, and not every caller goes through the route.
+        from backend.utils.privacy import speech_allowed
+        if not node.audio_tts_url and not speech_allowed(node):
+            logger.info("Node %s: ai_usage is none; no speech", node_id)
+            node.tts_task_status = 'failed'
+            db.session.commit()
+            return {'node_id': node_id, 'status': 'refused'}
 
         node.tts_task_status = 'processing'
         node.tts_task_progress = 10

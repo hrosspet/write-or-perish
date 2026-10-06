@@ -41,9 +41,13 @@ X_API_BASE = "https://api.twitter.com/2"
 # closing page of the same size, each ≤ N + 10 because the all-new
 # pages before it sum to that size minus 10. E.g. 1 new = 20 posts,
 # 11 new = 50, 31 new = 110, 71 new = 230; a full 800 first import
-# stays 800 (max_items caps the last request). Heuristic: the 10 is a
-# floor on what a nightly check can cost (10 posts = $0.05), nothing
-# more precise.
+# stays 800 (max_items caps the last request), and so does a first
+# import resumed after an interrupted one, which reads to the end.
+# A sync resumed after an interrupted one on an account that has
+# finished a sync before has the same ceiling, with N = the bookmarks
+# saved since that finished sync; "known" then means saved at or
+# before it (#310). Heuristic: the 10 is a floor on what a nightly
+# check can cost (10 posts = $0.05), nothing more precise.
 X_BOOKMARKS_FIRST_PAGE_SIZE = 10
 X_BOOKMARKS_PAGE_SIZE = 100  # X's max_results cap for the endpoint
 

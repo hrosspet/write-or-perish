@@ -12,11 +12,14 @@ from backend.celery_app import celery, flask_app
 from backend.models import User, UserProfile, UserRecentContext, Node, APICostLog
 from backend.utils.privacy import AI_ALLOWED, account_allows_ai
 from backend.extensions import db
-from backend.llm_providers import LLMProvider, PromptTooLongError
+from backend.llm_providers import (
+    LLMProvider, PromptTooLongError, is_empty_truncated,
+    EmptyTruncatedOutputError)
 from backend.utils.tokens import reduce_export_tokens, format_date_metadata
 from backend.utils.api_keys import get_api_keys_for_usage
 from backend.utils.cost import llm_cost_log_fields
 from backend.utils.chunk_plan import UPDATE_THRESHOLD_UNITS
+from backend.utils import refusal_backoff
 
 logger = get_task_logger(__name__)
 
@@ -115,6 +118,13 @@ def _should_generate_recent_context(user):
     if last_node and (datetime.utcnow() - last_node.created_at) < MIN_INACTIVITY:
         return False, None, None
 
+    # After a refused (cut-off) output nothing was saved, so the gates below
+    # stay open and the same call would repeat every 10 minutes (#368):
+    # one more try after an hour, then stopped until a new recent context
+    # or profile version is saved.
+    if refusal_backoff.recent_context_in_backoff(user_id):
+        return False, None, None
+
     # Find current profile (if any)
     profile = _get_latest_chat_profile(user_id)
     profile_id = profile.id if profile else None
@@ -204,187 +214,216 @@ def generate_recent_context(user_id, profile_id=None, data_cutoff_iso=None):
     progressively more comprehensive.
     """
     with flask_app.app_context():
-        user = User.query.get(user_id)
-        if not user:
-            logger.warning(f"User {user_id} not found")
-            return
+        _generate_recent_context_impl(user_id, profile_id, data_cutoff_iso)
 
-        from backend.utils.spend import user_is_capped
-        if user_is_capped(user):
-            logger.info(
-                "User %s is spend-capped; skipping recent context", user_id)
-            return
-        if not account_allows_ai(user):
-            # Re-checked here: the setting may change after dispatch (#346).
-            logger.info(
-                "User %s has opted out of AI usage; skipping recent context",
-                user_id)
-            return
 
-        data_cutoff = (
-            datetime.fromisoformat(data_cutoff_iso)
-            if data_cutoff_iso else None
-        )
+def _generate_recent_context_impl(user_id, profile_id=None,
+                                  data_cutoff_iso=None):
+    """Body of generate_recent_context; runs inside an app context (plain
+    function so tests can call it without the Celery machinery)."""
+    user = User.query.get(user_id)
+    if not user:
+        logger.warning(f"User {user_id} not found")
+        return
 
-        # Re-check concurrency: no recent context created in last 5 min
-        profile = UserProfile.query.get(profile_id) if profile_id else None
-        pid = profile.id if profile else None
-        latest_rc = _get_latest_recent_context(user_id, pid)
-        if latest_rc and (datetime.utcnow() - latest_rc.created_at) < MIN_GENERATION_INTERVAL:
-            logger.info(
-                f"User {user_id}: recent context was just generated, skipping"
-            )
-            return
-
-        # Determine the model to use (same as profile generation). The
-        # fallback must be a valid SUPPORTED_MODELS key — the old hardcoded
-        # "claude-opus-4-6" (hyphen) is the *api_model*, not the internal id
-        # ("claude-opus-4.6"), so it failed get_completion's lookup.
-        from backend.utils.llm_nodes import default_model_for
-        model_id = default_model_for(user)
-
-        # Build data: ALL nodes since profile cutoff
-        from backend.routes.export_data import (
-            build_user_export_content as _build_export
-        )
-        export_result = _build_export(
-            user,
-            max_tokens=None,
-            filter_ai_usage=True,
-            created_after=data_cutoff,
-            chronological_order=True,
-            return_metadata=True,
-            collapse_artifacts=True,
-        )
-        if not export_result:
-            logger.debug(f"User {user_id}: no data for recent context")
-            return
-
-        recent_data = export_result["content"]
-        source_tokens = export_result["token_count"]
-        latest_ts = export_result["latest_node_created_at"]
-
-        # Belt-and-suspenders guard: if the export's newest node has not
-        # advanced past the previous RC's cutoff, the LLM call would
-        # regenerate on identical data. `_count_new_tokens` can still
-        # return ≥ threshold when the user has replied in pre-profile-
-        # cutoff top-level threads — those replies are counted but the
-        # export filters their top-level ancestor out, so they never
-        # land in `recent_data`. Skip before paying for the LLM call.
-        if (latest_rc and latest_rc.source_data_cutoff
-                and latest_ts
-                and latest_ts <= latest_rc.source_data_cutoff):
-            logger.info(
-                f"User {user_id}: export latest_ts ({latest_ts}) has not "
-                f"advanced past previous RC cutoff "
-                f"({latest_rc.source_data_cutoff}); skipping regen"
-            )
-            return
-
-        # Load prompt template
-        prompt_template = _load_prompt("recent_context.txt", user_id=user_id)
-
-        # Inject profile content (if available)
-        profile_content = ""
-        if profile and profile.ai_usage in AI_ALLOWED:
-            profile_content = profile.get_content()
-        prompt_text = prompt_template.replace("{user_profile}", profile_content)
-        prompt_text = prompt_text.replace("{recent_data}", recent_data)
-
-        # Build messages
-        messages = [
-            {
-                "role": "user",
-                "content": [{"type": "text", "text": prompt_text}]
-            }
-        ]
-
-        api_keys = get_api_keys_for_usage(flask_app.config, 'chat')
-
-        MAX_RETRIES = 2
-        max_data_tokens = None
-        for attempt in range(MAX_RETRIES + 1):
-            if max_data_tokens is not None:
-                # Retry with truncated data
-                export_result = _build_export(
-                    user,
-                    max_tokens=max_data_tokens,
-                    filter_ai_usage=True,
-                    created_after=data_cutoff,
-                    chronological_order=True,
-                    return_metadata=True,
-                    collapse_artifacts=True,
-                )
-                if not export_result:
-                    logger.warning(f"User {user_id}: no data after truncation")
-                    return
-                recent_data = export_result["content"]
-                source_tokens = export_result["token_count"]
-                latest_ts = export_result["latest_node_created_at"]
-                prompt_text = prompt_template.replace(
-                    "{user_profile}", profile_content
-                )
-                prompt_text = prompt_text.replace("{recent_data}", recent_data)
-                messages = [
-                    {
-                        "role": "user",
-                        "content": [{"type": "text", "text": prompt_text}]
-                    }
-                ]
-
-            try:
-                response = LLMProvider.get_completion(
-                    model_id, messages, api_keys
-                )
-                break
-            except PromptTooLongError as e:
-                if attempt == MAX_RETRIES:
-                    raise
-                max_data_tokens = reduce_export_tokens(
-                    max_data_tokens, e.actual_tokens, e.max_tokens,
-                    export_content=recent_data,
-                )
-                logger.warning(
-                    f"Prompt too long for recent context "
-                    f"({e.actual_tokens} > {e.max_tokens}), "
-                    f"retrying with max_data_tokens={max_data_tokens}"
-                )
-
-        summary_text = response["content"]
-        total_tokens = response["total_tokens"]
-
-        # Log API cost (cache-aware, #286)
-        cost_log = APICostLog(
-            user_id=user_id,
-            model_id=model_id,
-            request_type="recent_context",
-            **llm_cost_log_fields(model_id, response),
-        )
-        db.session.add(cost_log)
-
-        # Save the recent context
-        rc = UserRecentContext(
-            user_id=user_id,
-            generated_by=model_id,
-            tokens_used=total_tokens,
-            source_data_cutoff=latest_ts,
-            source_tokens_covered=source_tokens,
-            profile_id=pid,
-            # ai_usage mirrors the user's global default; generation is gated
-            # to 'chat'/'train' users in profile_eligible_query (#191).
-            ai_usage=user.default_ai_usage,
-        )
-        rc.set_content(
-            format_date_metadata(
-                covers_start=data_cutoff, covers_end=latest_ts,
-                tokens=source_tokens,
-            ) + summary_text
-        )
-        db.session.add(rc)
-        db.session.commit()
-
+    from backend.utils.spend import user_is_capped
+    if user_is_capped(user):
         logger.info(
-            f"Generated recent context for user {user_id}: "
-            f"{len(summary_text)} chars, {total_tokens} tokens used, "
-            f"covers {source_tokens} source tokens"
+            "User %s is spend-capped; skipping recent context", user_id)
+        return
+    if not account_allows_ai(user):
+        # Re-checked here: the setting may change after dispatch (#346).
+        logger.info(
+            "User %s has opted out of AI usage; skipping recent context",
+            user_id)
+        return
+
+    data_cutoff = (
+        datetime.fromisoformat(data_cutoff_iso)
+        if data_cutoff_iso else None
+    )
+
+    # Re-check concurrency: no recent context created in last 5 min
+    profile = UserProfile.query.get(profile_id) if profile_id else None
+    pid = profile.id if profile else None
+    latest_rc = _get_latest_recent_context(user_id, pid)
+    if latest_rc and (datetime.utcnow() - latest_rc.created_at) < MIN_GENERATION_INTERVAL:
+        logger.info(
+            f"User {user_id}: recent context was just generated, skipping"
         )
+        return
+
+    # Determine the model to use (same as profile generation). The
+    # fallback must be a valid SUPPORTED_MODELS key — the old hardcoded
+    # "claude-opus-4-6" (hyphen) is the *api_model*, not the internal id
+    # ("claude-opus-4.6"), so it failed get_completion's lookup.
+    from backend.utils.llm_nodes import default_model_for
+    model_id = default_model_for(user)
+
+    # Build data: ALL nodes since profile cutoff
+    from backend.routes.export_data import (
+        build_user_export_content as _build_export
+    )
+    export_result = _build_export(
+        user,
+        max_tokens=None,
+        filter_ai_usage=True,
+        created_after=data_cutoff,
+        chronological_order=True,
+        return_metadata=True,
+        collapse_artifacts=True,
+    )
+    if not export_result:
+        logger.debug(f"User {user_id}: no data for recent context")
+        return
+
+    recent_data = export_result["content"]
+    source_tokens = export_result["token_count"]
+    latest_ts = export_result["latest_node_created_at"]
+
+    # Belt-and-suspenders guard: if the export's newest node has not
+    # advanced past the previous RC's cutoff, the LLM call would
+    # regenerate on identical data. `_count_new_tokens` can still
+    # return ≥ threshold when the user has replied in pre-profile-
+    # cutoff top-level threads — those replies are counted but the
+    # export filters their top-level ancestor out, so they never
+    # land in `recent_data`. Skip before paying for the LLM call.
+    if (latest_rc and latest_rc.source_data_cutoff
+            and latest_ts
+            and latest_ts <= latest_rc.source_data_cutoff):
+        logger.info(
+            f"User {user_id}: export latest_ts ({latest_ts}) has not "
+            f"advanced past previous RC cutoff "
+            f"({latest_rc.source_data_cutoff}); skipping regen"
+        )
+        return
+
+    # Load prompt template
+    prompt_template = _load_prompt("recent_context.txt", user_id=user_id)
+
+    # Inject profile content (if available)
+    profile_content = ""
+    if profile and profile.ai_usage in AI_ALLOWED:
+        profile_content = profile.get_content()
+    prompt_text = prompt_template.replace("{user_profile}", profile_content)
+    prompt_text = prompt_text.replace("{recent_data}", recent_data)
+
+    # Build messages
+    messages = [
+        {
+            "role": "user",
+            "content": [{"type": "text", "text": prompt_text}]
+        }
+    ]
+
+    api_keys = get_api_keys_for_usage(flask_app.config, 'chat')
+
+    MAX_RETRIES = 2
+    max_data_tokens = None
+    for attempt in range(MAX_RETRIES + 1):
+        if max_data_tokens is not None:
+            # Retry with truncated data
+            export_result = _build_export(
+                user,
+                max_tokens=max_data_tokens,
+                filter_ai_usage=True,
+                created_after=data_cutoff,
+                chronological_order=True,
+                return_metadata=True,
+                collapse_artifacts=True,
+            )
+            if not export_result:
+                logger.warning(f"User {user_id}: no data after truncation")
+                return
+            recent_data = export_result["content"]
+            source_tokens = export_result["token_count"]
+            latest_ts = export_result["latest_node_created_at"]
+            prompt_text = prompt_template.replace(
+                "{user_profile}", profile_content
+            )
+            prompt_text = prompt_text.replace("{recent_data}", recent_data)
+            messages = [
+                {
+                    "role": "user",
+                    "content": [{"type": "text", "text": prompt_text}]
+                }
+            ]
+
+        try:
+            response = LLMProvider.get_completion(
+                model_id, messages, api_keys
+            )
+            break
+        except PromptTooLongError as e:
+            if attempt == MAX_RETRIES:
+                raise
+            max_data_tokens = reduce_export_tokens(
+                max_data_tokens, e.actual_tokens, e.max_tokens,
+                export_content=recent_data,
+            )
+            logger.warning(
+                f"Prompt too long for recent context "
+                f"({e.actual_tokens} > {e.max_tokens}), "
+                f"retrying with max_data_tokens={max_data_tokens}"
+            )
+
+    summary_text = response["content"]
+    total_tokens = response["total_tokens"]
+
+    # Log API cost (cache-aware, #286)
+    cost_log = APICostLog(
+        user_id=user_id,
+        model_id=model_id,
+        request_type="recent_context",
+        **llm_cost_log_fields(model_id, response),
+    )
+    db.session.add(cost_log)
+
+    # Cut off before any text (#368): keep the previous recent context
+    # rather than replace it with an empty one, and fail the task.
+    if is_empty_truncated(response):
+        # The cost row (the call was billed), marked as a refusal for the
+        # backoff in _should_generate_recent_context.
+        cost_log.request_ref = refusal_backoff.REFUSED_REF
+        db.session.commit()
+        n, until, stopped = refusal_backoff.recent_context_backoff_state(
+            user_id)
+        if stopped:
+            refusal_backoff.report_stop(
+                user_id, "recent context", n, model_id, "recent_context")
+        else:
+            logger.warning(
+                "Empty truncated recent-context output for user %s (model "
+                "%s, output_tokens=%s): nothing saved, the previous one "
+                "stays; next try after %s", user_id, model_id,
+                response.get("output_tokens"), until)
+        raise EmptyTruncatedOutputError(
+            f"recent context for user {user_id}", model_id,
+            response.get("output_tokens"))
+
+    # Save the recent context
+    rc = UserRecentContext(
+        user_id=user_id,
+        generated_by=model_id,
+        tokens_used=total_tokens,
+        source_data_cutoff=latest_ts,
+        source_tokens_covered=source_tokens,
+        profile_id=pid,
+        # ai_usage mirrors the user's global default; generation is gated
+        # to 'chat'/'train' users in profile_eligible_query (#191).
+        ai_usage=user.default_ai_usage,
+    )
+    rc.set_content(
+        format_date_metadata(
+            covers_start=data_cutoff, covers_end=latest_ts,
+            tokens=source_tokens,
+        ) + summary_text
+    )
+    db.session.add(rc)
+    db.session.commit()
+
+    logger.info(
+        f"Generated recent context for user {user_id}: "
+        f"{len(summary_text)} chars, {total_tokens} tokens used, "
+        f"covers {source_tokens} source tokens"
+    )

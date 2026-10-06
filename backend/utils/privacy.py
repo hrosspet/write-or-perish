@@ -166,6 +166,23 @@ def can_user_view_tombstone(node, user_id: Optional[int] = None) -> bool:
     return _can_user_access_ignoring_deleted(node, user_id)
 
 
+def can_user_see_node_or_tombstone(node, user_id: Optional[int] = None) -> bool:
+    """True when the viewer can see *node* now, or could see it before it
+    was soft-deleted (the case where they see its tombstone).
+
+    Use it when a client-supplied id names a node to build on, such as a
+    reply's parent or a thread's ancestors. The caller then handles
+    deletion on its own, e.g. a 410 for a deleted parent or a scrubbed
+    message for a deleted ancestor.
+
+    Args:
+        node: The Node object to check
+        user_id: The user ID to check (defaults to current_user.id)
+    """
+    return (can_user_access_node(node, user_id)
+            or can_user_view_tombstone(node, user_id))
+
+
 def accessible_nodes_filter(node_model, user_id: int):
     """Return a SQLAlchemy filter clause for nodes accessible by the given user.
 
@@ -255,6 +272,28 @@ def can_ai_use_node_for_training(node) -> bool:
     """
     ai_usage = getattr(node, 'ai_usage', AIUsage.NONE)
     return ai_usage == AIUsage.TRAIN
+
+
+def speech_allowed(entity) -> bool:
+    """Whether text-to-speech may send *entity*'s text to the speech model.
+
+    - A row that has an ai_usage (entries, a model's replies, profile
+      versions) is spoken only when its ai_usage lets AI read it, the rule
+      the speaker icon applies on the web and in the app. A reply is never
+      generated where AI may not read (llm_nodes.reply_refusal), so a
+      reply marked 'none' was imported that way or set by its owner, and
+      is not spoken either.
+    - Rows without an ai_usage (saved references) may be spoken.
+
+    Speech that already exists is not affected: callers check this only
+    before generating new speech."""
+    if not hasattr(entity, "ai_usage"):
+        return True
+    return entity.ai_usage in AI_ALLOWED
+
+
+SPEECH_REFUSED_MESSAGE = (
+    "AI usage is set to none here, so no speech can be generated.")
 
 
 def account_allows_ai(user) -> bool:

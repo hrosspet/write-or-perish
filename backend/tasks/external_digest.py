@@ -33,6 +33,7 @@ from backend.models import (
 from backend.llm_providers import LLMProvider
 from backend.utils.api_keys import get_api_keys_for_usage
 from backend.utils.cost import llm_cost_log_fields
+from backend.utils.refusal_backoff import REFUSED_REF
 from backend.utils.privacy import account_allows_ai
 from backend.utils.llm_batch import (
     apply_batch_key_override, batch_check_and_collect, batch_submit,
@@ -184,6 +185,25 @@ def _render_digest_prompt(user_id):
     return DIGEST_PROMPT.replace("{corpus}", corpus), total
 
 
+def _log_empty_digest_cost(user_id, model_id, response, batch):
+    """Cost row for a billed call that returned no digest text (#368): no
+    version is saved, the digest stays stale and the next sweep retries,
+    but the call was billed. A result cut off before any text is marked
+    like the other background jobs' refusals."""
+    db.session.add(APICostLog(
+        user_id=user_id,
+        model_id=model_id,
+        request_type="external_digest",
+        request_ref=(REFUSED_REF if response.get("truncated") else None),
+        **llm_cost_log_fields(model_id, response, batch=batch),
+    ))
+    logger.warning(
+        "External digest for user %s came back empty (model %s, "
+        "truncated=%s, output_tokens=%s); nothing saved", user_id,
+        model_id, bool(response.get("truncated")),
+        response.get("output_tokens"))
+
+
 def _save_digest(user, model_id, digest_text, response, corpus_at, batch):
     """Log the cost and write the new digest version. ``response`` is the
     provider result dict (live call or batch collector) so the cost row
@@ -213,10 +233,10 @@ def _save_digest(user, model_id, digest_text, response, corpus_at, batch):
                 "{name}", user.username or "the user")),
         generated_by=model_id,
         tokens_used=fields["input_tokens"] + fields["output_tokens"],
-        # Respect a manual opt-out on the previous version; otherwise
-        # mirror the user's global default (recent_context precedent).
-        ai_usage=(previous.ai_usage if previous
-                  else user.default_ai_usage),
+        # The account's AI-usage setting at the time this version is
+        # written, like every artifact writer (#326). A prompt that opens
+        # the digest counts it by this value (Peter, 2026-10-01).
+        ai_usage=user.default_ai_usage,
     )
     artifact.set_content(digest_text)
     db.session.add(artifact)
@@ -381,6 +401,10 @@ def _collect_digest_batches():
         for item in job.items:
             result = results.get(item["custom_id"])
             digest_text = ((result or {}).get("content") or "").strip()
+            if result and not digest_text:
+                # Billed, but empty: record the cost, save nothing.
+                _log_empty_digest_cost(
+                    item["user_id"], item["model_id"], result, batch=True)
             user = User.query.get(item["user_id"]) if digest_text else None
             if user is None:
                 logger.warning(
@@ -451,6 +475,8 @@ def rebuild_external_digest(self, user_id, force=False):
 
         digest_text = (response.get("content") or "").strip()
         if not digest_text:
+            _log_empty_digest_cost(user_id, model_id, response, batch=False)
+            db.session.commit()
             return {"status": "empty_response"}
 
         artifact = _save_digest(

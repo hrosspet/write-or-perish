@@ -223,6 +223,57 @@ def test_version_ownership_enforced(app, client):
         f"/api/artifacts/versions/{foreign_id}").status_code == 403
 
 
+def test_patch_edits_own_unpinned_version_in_place(app, client):
+    client.put("/api/artifacts/dev-map", json={"content": "- [ ] a"})
+    r = client.patch("/api/artifacts/dev-map", json={"content": "- [x] a"})
+    assert r.status_code == 200
+    assert r.get_json()["artifact"]["version_number"] == 1
+    got = client.get("/api/artifacts/dev-map").get_json()["artifact"]
+    assert got["content"] == "- [x] a"
+
+
+def test_patch_over_ai_version_creates_user_version(app, client):
+    with app.app_context():
+        uid = User.query.first().id
+        _mk_artifact(uid, "dev-map", "- [ ] a", title="Dev Map",
+                     description="Ideas")
+    r = client.patch("/api/artifacts/dev-map", json={"content": "- [x] a"})
+    art = r.get_json()["artifact"]
+    assert art["version_number"] == 2
+    assert art["generated_by"] == "user"
+    assert art["title"] == "Dev Map"
+    assert art["description"] == "Ideas"
+    # The next click edits the new user version in place.
+    r = client.patch("/api/artifacts/dev-map", json={"content": "- [ ] a"})
+    assert r.get_json()["artifact"]["version_number"] == 2
+
+
+def test_patch_over_pinned_version_creates_new_version(app, client):
+    client.put("/api/artifacts/dev-map", json={"content": "- [ ] a"})
+    with app.app_context():
+        uid = User.query.first().id
+        pinned = UserArtifact.latest_for(uid, "dev-map")
+        node = Node(user_id=uid, node_type="user")
+        node.set_content("session")
+        _db.session.add(node)
+        _db.session.flush()
+        _db.session.add(NodeContextArtifact(
+            node_id=node.id, artifact_type="user_artifact",
+            artifact_id=pinned.id))
+        _db.session.commit()
+        pinned_id = pinned.id
+    r = client.patch("/api/artifacts/dev-map", json={"content": "- [x] a"})
+    assert r.get_json()["artifact"]["version_number"] == 2
+    # The pinned version keeps the content the session saw.
+    old = client.get(f"/api/artifacts/versions/{pinned_id}").get_json()
+    assert old["artifact"]["content"] == "- [ ] a"
+
+
+def test_patch_missing_artifact_404(app, client):
+    assert client.patch(
+        "/api/artifacts/nope", json={"content": "x"}).status_code == 404
+
+
 # ── Tool executor ────────────────────────────────────────────────────────
 
 def _run_tool(app, name, inp, uid):
@@ -525,6 +576,66 @@ def test_apply_feedback_tool_submits(app):
         assert row.status == "new"
         # Draft consumed; origin meta marked completed.
         assert Draft.query.filter_by(id=draft.id).first() is None
+
+
+# apply_todo_changes: the merge sends the todo list to a model, so it does
+# not start where AI may not read the list (#396 review). The proposal stays
+# pending and the model gets the message to pass on.
+
+def _pending_todo_proposal(uid):
+    proposal = Node(user_id=uid, node_type="llm", llm_model="test-model",
+                    ai_usage="chat")
+    proposal.set_content("### New Tasks\n- buy milk")
+    _db.session.add(proposal)
+    _db.session.flush()
+    draft = Draft(user_id=uid, parent_id=proposal.id, label="todo_pending")
+    draft.set_content("")
+    _db.session.add(draft)
+    _db.session.commit()
+    return proposal, draft
+
+
+def _stub_merge_start(monkeypatch):
+    import backend.routes.todo as todo_routes
+    started = []
+    monkeypatch.setattr(todo_routes, "_start_todo_merge",
+                        lambda *a, **k: started.append(a) or "task-1")
+    return todo_routes, started
+
+
+def test_apply_todo_changes_refused_for_a_none_todo_list(app, monkeypatch):
+    with app.app_context():
+        uid = User.query.first().id
+        _mk_todo(uid, "- SECRET TASK", ai_usage="none")
+        proposal, draft = _pending_todo_proposal(uid)
+        todo_routes, started = _stub_merge_start(monkeypatch)
+
+        r = _execute_tool_calls(
+            [{"name": "apply_todo_changes", "input": {}}], proposal,
+            [proposal], uid)[0]
+
+        assert r["status"] == "error"
+        assert r["error"] == todo_routes.TODO_MERGE_REFUSED_MESSAGE
+        assert "SECRET" not in r["error"]
+        assert started == []
+        assert Draft.query.get(draft.id) is not None
+
+
+def test_apply_todo_changes_starts_the_merge_for_a_chat_todo_list(
+        app, monkeypatch):
+    with app.app_context():
+        uid = User.query.first().id
+        _mk_todo(uid, "- a task", ai_usage="chat")
+        proposal, _ = _pending_todo_proposal(uid)
+        _, started = _stub_merge_start(monkeypatch)
+
+        r = _execute_tool_calls(
+            [{"name": "apply_todo_changes", "input": {}}], proposal,
+            [proposal], uid)[0]
+
+        assert r["status"] == "success"
+        assert r["apply_task_id"] == "task-1"
+        assert len(started) == 1
 
 
 def test_apply_feedback_without_pending_draft_errors(app):
@@ -982,3 +1093,83 @@ def test_revert_enforces_ownership_and_kind(app, client):
     # Right row, wrong kind in the URL.
     assert client.post(
         f"/api/artifacts/memory/revert/{mine_id}").status_code == 400
+
+
+# ── ai_usage follows the owner's default (#326) ─────────────────────────
+
+@pytest.mark.parametrize("default", ["train", "chat", "none"])
+def test_put_stamps_the_owners_default(app, client, default):
+    """Every artifact writer stamps the owner's default_ai_usage, like
+    the todo list and the profile — no longer a hardcoded 'chat'."""
+    user = User.query.first()
+    user.default_ai_usage = default
+    _db.session.commit()
+    r = client.put("/api/artifacts/memory", json={"content": "a fact"})
+    assert r.status_code == 200
+    assert r.get_json()["artifact"]["ai_usage"] == default
+    assert UserArtifact.latest_for(user.id, "memory").ai_usage == default
+    # A kind with no row yet shows what a first write would be stamped.
+    listed = {a["kind"]: a for a in
+              client.get("/api/artifacts/").get_json()["artifacts"]}
+    assert listed["scratchpad"]["ai_usage"] == default
+
+
+@pytest.mark.parametrize("default, thread, expected", [
+    ("train", "train", "train"),
+    ("train", "chat", "chat"),    # a Chat thread's content stays chat
+    ("chat", "train", "chat"),
+    ("chat", "chat", "chat"),
+    # A 'none' default in a thread set to Chat: the memory must stay
+    # readable next turn, so not 'none'.
+    ("none", "chat", "chat"),
+])
+def test_update_artifact_tool_stamps_train_only_in_a_train_thread_of_a_train_owner(
+        app, default, thread, expected):
+    """The model writes the artifact from this conversation: 'train' only
+    when the owner's default and the thread's own setting both are (#326
+    review)."""
+    with app.app_context():
+        user = User.query.first()
+        user.default_ai_usage = default
+        node = Node(user_id=user.id, node_type="user", ai_usage=thread)
+        node.set_content("tell me something")
+        _db.session.add(node)
+        _db.session.commit()
+        llm_node = MagicMock()
+        llm_node.llm_model = "test-model"
+        r = _execute_tool_calls(
+            [{"name": "update_artifact",
+              "input": {"kind": "memory", "updated_content": "fact"}}],
+            llm_node, [node], user.id)[0]
+        assert r["status"] == "success"
+        assert UserArtifact.latest_for(user.id, "memory").ai_usage == expected
+
+
+def test_switching_the_account_to_train_changes_no_existing_artifact(
+        app, client):
+    """Decision 3 (Peter, 2026-10-01): a switch to Train restamps nothing
+    (the Account handler only sets default_ai_usage). A version written
+    afterwards takes the new setting; a revert copies the version it
+    reproduces."""
+    user = User.query.first()
+    user.default_ai_usage = "chat"
+    _db.session.commit()
+    assert client.put("/api/artifacts/memory",
+                      json={"content": "old"}).status_code == 200
+    old = UserArtifact.latest_for(user.id, "memory")
+    old_id = old.id
+    assert old.ai_usage == "chat"
+
+    user.default_ai_usage = "train"             # PUT /api/dashboard/user
+    _db.session.commit()
+    assert UserArtifact.query.get(old_id).ai_usage == "chat"
+
+    assert client.put("/api/artifacts/memory",
+                      json={"content": "new"}).status_code == 200
+    new = UserArtifact.latest_for(user.id, "memory")
+    assert new.id != old_id and new.ai_usage == "train"
+    assert UserArtifact.query.get(old_id).ai_usage == "chat"
+
+    assert client.post(
+        f"/api/artifacts/memory/revert/{old_id}").status_code in (200, 201)
+    assert UserArtifact.latest_for(user.id, "memory").ai_usage == "chat"

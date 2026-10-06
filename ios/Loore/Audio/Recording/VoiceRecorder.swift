@@ -42,6 +42,9 @@ final class VoiceRecorder: VoiceRecording {
 
     var isRecording: Bool { source != nil }
 
+    /// A fresh session starts at chunk 0, a resumed one after its stored chunks.
+    var hasProducedChunks: Bool { nextIndex > 0 }
+
     func start(sessionId: String, uploadURL: URL, firstChunkIndex: Int, elapsedOffset: Double) throws {
         cancel()
         self.sessionId = sessionId

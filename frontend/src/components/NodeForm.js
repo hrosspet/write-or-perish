@@ -20,7 +20,7 @@ import useSubmitShortcut from "../hooks/useSubmitShortcut";
 
 const NodeForm = forwardRef(
   (
-    { parentId, onSuccess, hideSubmit, initialContent, editMode = false, nodeId, initialPrivacyLevel, initialAiUsage, detachPrompt, hidePowerFeatures = false, placeholder, onSubmitOverride, compact = false, hideAudioUpload = false, allowAgenticPrompt = false, hasGeneratedTts = false, aiUsageFromGlobalDefault = false, hasChildren = false },
+    { parentId, onSuccess, hideSubmit, initialContent, editMode = false, nodeId, initialPrivacyLevel, initialAiUsage, detachPrompt, hidePowerFeatures = false, placeholder, onSubmitOverride, uploadReplyOptions, compact = false, hideAudioUpload = false, allowAgenticPrompt = false, hasGeneratedTts = false, aiUsageFromGlobalDefault = false, hasChildren = false },
     ref
   ) => {
     const { user } = useUser();
@@ -210,6 +210,14 @@ const NodeForm = forwardRef(
 
     // Recovery: when a draft has stored (untranscribed) audio chunks,
     // trigger server-side transcription and poll for completion.
+    //
+    // This still fires on its own, but only for a session nobody is
+    // recording: GET /drafts/ no longer returns a live session (#320), so
+    // what arrives here was left behind (reload, crash, navigating away
+    // mid-recording) and the transcript should come back into this box
+    // without a click. If the session turns out to be live after all (its
+    // tab resumed it), the server refuses (409) or reports `live`, and
+    // this view lets go of it instead of completing it.
     useEffect(() => {
       if (!isDraftLoaded || !draft) return;
       if (!draft.session_id || !draft.has_stored_chunks) return;
@@ -217,15 +225,35 @@ const NodeForm = forwardRef(
       setIsRecoveringAudio(true);
       setStreamingSessionId(draft.session_id);
 
+      const letGo = () => {
+        setIsRecoveringAudio(false);
+        setStreamingSessionId(null);
+      };
+
       const triggerRecovery = async () => {
         try {
-          await api.post(`/drafts/streaming/${draft.session_id}/transcribe-remaining`);
+          try {
+            await api.post(`/drafts/streaming/${draft.session_id}/transcribe-remaining`);
+          } catch (err) {
+            if (err.response?.status === 409) {
+              console.warn('[NodeForm] Recording is live in another tab; not recovering it here');
+              letGo();
+              return;
+            }
+            throw err;
+          }
 
           // Poll for completion
           const pollInterval = setInterval(async () => {
             try {
               const res = await api.get(`/drafts/streaming/${draft.session_id}/status`);
-              const { streaming_status, content } = res.data;
+              const { streaming_status, content, live } = res.data;
+
+              if (live) {
+                clearInterval(pollInterval);
+                letGo();
+                return;
+              }
 
               if (content) {
                 setContent(content);
@@ -282,7 +310,16 @@ const NodeForm = forwardRef(
         // Delete draft after successful transcription
         deleteDraft();
         setHasDraft(false);
-        const normalizedData = { ...transcriptionData, id: transcriptionData.node_id };
+        // A Text-mode upload's reply (#342): land on the entry with
+        // ?awaitLlm like a typed or recorded one, or say why it was skipped.
+        (transcriptionData.warnings || []).forEach((w) => addToast(w, 10000));
+        const normalizedData = {
+          ...transcriptionData,
+          id: transcriptionData.node_id,
+          user_node_id: transcriptionData.node_id,
+          ...(transcriptionData.llm_node_id
+            && { awaitLlm: transcriptionData.llm_node_id }),
+        };
         onSuccess(normalizedData);
         setUploadedNodeId(null);
       } else if (transcriptionStatus === 'failed') {
@@ -290,7 +327,7 @@ const NodeForm = forwardRef(
         setError(transcriptionError || 'Transcription failed');
         setUploadedNodeId(null);
       }
-    }, [transcriptionStatus, transcriptionData, transcriptionError, onSuccess, deleteDraft]);
+    }, [transcriptionStatus, transcriptionData, transcriptionError, onSuccess, deleteDraft, addToast]);
 
     const handleFileSelect = (event) => {
       const file = event.target.files[0];
@@ -525,6 +562,21 @@ const NodeForm = forwardRef(
           // Upload audio file
           const fileToUpload = uploadedFile;
 
+          // The same two decisions a typed or recorded entry makes (#342):
+          // Agentic Reply → textmode system node, Auto-generate → an LLM
+          // reply once the transcript exists (the transcription task
+          // creates it). A page with its own submit policy (Text mode)
+          // supplies them; otherwise the form's toggles do, for top-level
+          // entries only, as in the recorded branch above.
+          const topLevelWithAi = !parentId && aiUsage !== 'none';
+          const replyOptions = uploadReplyOptions
+            ? (uploadReplyOptions({ ai_usage: aiUsage }) || {})
+            : {
+              ...(topLevelWithAi && useAgenticPrompt && { agentic: true }),
+              ...(topLevelWithAi && useAutoGenerate && allowAgenticPrompt
+                && { auto_generate: true }),
+            };
+
           // Check file size - use chunked upload for files larger than 10MB
           const useChunkedUpload = fileToUpload.size > 10 * 1024 * 1024;
 
@@ -540,7 +592,8 @@ const NodeForm = forwardRef(
                   parent_id: parentId,
                   node_type: 'user',
                   privacy_level: privacyLevel,
-                  ai_usage: aiUsage
+                  ai_usage: aiUsage,
+                  ...replyOptions,
                 },
                 (progress) => {
                   setUploadProgress(progress);
@@ -568,6 +621,8 @@ const NodeForm = forwardRef(
             if (parentId) formData.append('parent_id', parentId);
             formData.append('privacy_level', privacyLevel);
             formData.append('ai_usage', aiUsage);
+            if (replyOptions.agentic) formData.append('agentic', 'true');
+            if (replyOptions.auto_generate) formData.append('auto_generate', 'true');
 
             response = await api.post("/nodes/", formData, {
               headers: { 'Content-Type': 'multipart/form-data' }

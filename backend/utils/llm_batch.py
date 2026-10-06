@@ -190,6 +190,7 @@ def batch_check_and_collect(batch_ids, api_keys):
     """
     from anthropic import Anthropic
     from openai import OpenAI
+    from backend.llm_providers import TRUNCATED_STOP_REASONS
 
     results = {}
     still_pending = {}
@@ -230,6 +231,10 @@ def batch_check_and_collect(batch_ids, api_keys):
                             usage, "cache_read_input_tokens", 0) or 0,
                         "cache_creation_input_tokens": getattr(
                             usage, "cache_creation_input_tokens", 0) or 0,
+                        # Cut off at the output limit — the collectors
+                        # refuse an empty cut-off result (#368).
+                        "truncated": getattr(msg, "stop_reason", None)
+                        in TRUNCATED_STOP_REASONS,
                         "batch": True,
                     }
                 else:
@@ -275,8 +280,9 @@ def batch_check_and_collect(batch_ids, api_keys):
                     # input_tokens / input_tokens_details). Both subsets
                     # of the prompt, same semantics as the live call.
                     details = usage.get("prompt_tokens_details") or {}
+                    choice = body["choices"][0]
                     results[cid] = {
-                        "content": body["choices"][0]["message"]["content"],
+                        "content": choice["message"]["content"],
                         "input_tokens": usage.get("prompt_tokens", 0) or 0,
                         "output_tokens": usage.get(
                             "completion_tokens", 0) or 0,
@@ -284,6 +290,8 @@ def batch_check_and_collect(batch_ids, api_keys):
                             "cached_tokens", 0) or 0,
                         "cache_write_subset_tokens": details.get(
                             "cache_write_tokens", 0) or 0,
+                        # chat/completions: "length" = the output limit.
+                        "truncated": choice.get("finish_reason") == "length",
                         "batch": True,
                     }
                 else:

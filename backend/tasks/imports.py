@@ -374,13 +374,15 @@ def _import_prefill_rows(user_id, handle, rows, options, state, seed_now,
         seed_profile_batch_for_user)
     from backend.utils.chunk_plan import next_build_threshold
     user = User.query.get(user_id)
-    queued = bool(user.profile_batch_pending or _should_seed(user))
+    # An import skips the refusal backoff (#368, voice review 2026-10-01).
+    queued = bool(user.profile_batch_pending
+                  or _should_seed(user, ignore_backoff=True))
     if queued and seed_now and not user.profile_batch_pending:
         # Don't wait for the hourly seeder (which skips unapproved
         # accounts): submit this user's first chunk now. The handoff in
         # create_twitter_nodes seeds too, but only for Voice-Mode plans;
         # a second seed is harmless (pipeline lock + pending guard).
-        seed_profile_batch_for_user.delay(user_id)
+        seed_profile_batch_for_user.delay(user_id, ignore_backoff=True)
     latest = _latest_non_integration_profile(user_id)
     covered = (latest.source_tokens_used or 0) if latest else 0
     result.update({

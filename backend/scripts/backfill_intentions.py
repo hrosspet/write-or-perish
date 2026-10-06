@@ -79,8 +79,10 @@ from backend.utils.llm_batch import (  # noqa: E402
     batch_submit, batch_check_and_collect, apply_batch_key_override,
 )
 from backend.llm_providers import (  # noqa: E402
-    LLMProvider, PromptTooLongError, fit_by_count,
+    LLMProvider, PromptTooLongError, fit_by_count, is_empty_truncated,
+    EmptyTruncatedOutputError,
 )
+from backend.utils.refusal_backoff import REFUSED_REF  # noqa: E402
 # Cheap DB token estimate (sum of the user's AI-readable node token_counts —
 # no decryption, no export build), the same one the heartbeat/trigger checks
 # use to gate work.
@@ -179,6 +181,28 @@ def _save_intentions(user, model_id, content, input_tokens, output_tokens,
     return version, cost, total_tokens
 
 
+def _refuse_empty_truncated(user, model_id, response, batch):
+    """The intentions task's guard (#368): a result cut off at the output
+    limit before any text writes its cost row (the call was billed, marked
+    refused), saves no artifact version and raises
+    EmptyTruncatedOutputError, which the callers report as a failed user."""
+    if not is_empty_truncated(response):
+        return
+    in_t = response.get("input_tokens", 0)
+    out_t = response.get("output_tokens", 0)
+    db.session.add(APICostLog(
+        user_id=user.id, model_id=model_id, request_type="intentions_backfill",
+        request_ref=REFUSED_REF, input_tokens=in_t, output_tokens=out_t,
+        cost_microdollars=calculate_llm_cost_microdollars(
+            model_id, in_t, out_t, batch=batch),
+    ))
+    db.session.commit()
+    print(f"  ✗ user {user.id}: output cut off before any text "
+          f"(output_tokens={out_t}); nothing saved")
+    raise EmptyTruncatedOutputError(
+        f"intentions backfill for user {user.id}", model_id, out_t)
+
+
 # ── Synchronous path (default) ─────────────────────────────────────────────
 
 def backfill_user(app, user, template, model_id, dry_run=False):
@@ -226,6 +250,7 @@ def backfill_user(app, user, template, model_id, dry_run=False):
             print(f"    prompt too long ({e.actual_tokens} > {e.max_tokens}); "
                   f"retry with budget={max_export_tokens}")
 
+    _refuse_empty_truncated(user, model_id, response, batch=False)
     version, cost, total = _save_intentions(
         user, model_id, response["content"],
         response.get("input_tokens", 0), response.get("output_tokens", 0),
@@ -380,6 +405,8 @@ def run_batch(app, users, template, model_override, dry_run,
             if r:
                 try:
                     in_t, out_t = r["input_tokens"], r["output_tokens"]
+                    _refuse_empty_truncated(
+                        info["user"], info["model_id"], r, batch=True)
                     version, cost, total = _save_intentions(
                         info["user"], info["model_id"], r["content"],
                         in_t, out_t, in_t + out_t, batch=True)
@@ -466,6 +493,7 @@ def collect_batches(app, batch_ids, model_override):
             model_id = _resolve_model(app, user, model_override)
             try:
                 in_t, out_t = r["input_tokens"], r["output_tokens"]
+                _refuse_empty_truncated(user, model_id, r, batch=True)
                 version, cost, total = _save_intentions(
                     user, model_id, r["content"], in_t, out_t,
                     in_t + out_t, batch=True)

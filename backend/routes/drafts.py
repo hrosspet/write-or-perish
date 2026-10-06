@@ -8,15 +8,44 @@ import uuid
 import pathlib
 import os
 import shutil
-from backend.utils.audio_storage import move_draft_audio_to_node_dir
+from datetime import datetime
+from backend.utils.audio_storage import (
+    is_storage_id, move_session_audio_to_node, storage_path,
+)
 from backend.utils.encryption import encrypt_file_atomically
-from backend.utils.llm_nodes import pick_model_for_generation
+from backend.utils.llm_nodes import (
+    AIUsageRefused, ai_usage_refused_response, pick_model_for_generation,
+    voice_turn_refusal,
+)
 from backend.utils.spend import require_spend_headroom
 from backend.utils.webm_utils import (
     chunk_is_init_bearing, persist_init_segment,
 )
+from backend.utils.streaming_session import (
+    not_live_clause, release_session, session_is_live, stamp_session_alive,
+)
 
 drafts_bp = Blueprint("drafts_bp", __name__)
+
+
+@drafts_bp.before_request
+def _refuse_malformed_session_id():
+    """A <session_id> in the URL names a folder on disk: one that is not a
+    plain folder name (audio_storage.is_storage_id) gets the same 404 as
+    a session that does not exist."""
+    session_id = (request.view_args or {}).get("session_id")
+    if session_id is not None and not is_storage_id(session_id):
+        return jsonify({
+            "error": "Streaming session not found",
+            "code": "session_not_found",
+        }), 404
+    return None
+
+
+def _session_dir(user_id, session_id):
+    """drafts/<user_id>/<session_id> under AUDIO_STORAGE_ROOT."""
+    return storage_path(AUDIO_STORAGE_ROOT, "drafts", user_id, session_id)
+
 
 # Proposal-pending drafts (created by the agentic loop's _auto_create_drafts,
 # consumed by apply_* / the proposal REST routes) live in the same Draft table
@@ -41,6 +70,98 @@ def _exclude_proposal_drafts(query):
             Draft.label.notin_(_PROPOSAL_DRAFT_LABELS),
         )
     )
+
+
+def _input_drafts(node_id, parent_id):
+    """The current user's input drafts for one writing context (an edit of
+    *node_id*, or a new entry under *parent_id*, top level when None),
+    newest first. GET, POST and DELETE all start here, so autosave writes
+    the row GET restores and a send deletes that same row.
+
+    Never a proposal-pending draft (#158), nor a recording the server
+    chain already saved as a node (llm_node_id / streaming_warning). Such
+    a row waits for its SSE all_complete, or, when the client polls
+    /status instead (the iPhone app always does), for the next
+    streaming/init's _cleanup_stale_drafts. Picked as "the" draft with no
+    ordering, it took the typed text out of GET's sight, and a send
+    deleted it in place of the typed draft, which then came back with the
+    entry just sent.
+    """
+    query = Draft.query.filter_by(user_id=current_user.id)
+    query = _exclude_proposal_drafts(query)
+    query = query.filter(Draft.llm_node_id.is_(None),
+                         Draft.streaming_warning.is_(None))
+    if node_id:
+        query = query.filter_by(node_id=node_id)
+    else:
+        query = query.filter_by(node_id=None)
+        if parent_id:
+            query = query.filter_by(parent_id=parent_id)
+        else:
+            query = query.filter_by(parent_id=None)
+    return query.order_by(Draft.updated_at.desc(), Draft.id.desc())
+
+
+def _no_session_in_progress_clause():
+    """Every Draft except a session still in 'recording', live or left
+    behind (#320), or in 'finalizing' (its finalize task is turning it
+    into a node). Those end only through the task, save-as-node or
+    /streaming/<id>/discard: typed text never goes into their row (it
+    would overwrite the transcript), and deleting the input draft never
+    takes them (it would lose the turn and orphan its audio)."""
+    return db.or_(
+        Draft.streaming_status.is_(None),
+        Draft.streaming_status.notin_(('recording', 'finalizing')),
+    )
+
+
+def _dead_session_clause():
+    """A recording session with no sign of life within the liveness window
+    (#320) and not one chunk stored. Most were left before their first
+    chunk (the iPhone app told the server nothing on leaving the Voice
+    screen; the web releases the session but keeps it). The voice banner
+    skips it (/interrupted lists sessions with chunks only); shown in the
+    writing form, where DELETE never takes a recording, it came back after
+    every send and discard, holding whatever autosave had put in it.
+
+    Hidden, not deleted: a phone that lost its connection before chunk 0
+    was stored still holds that chunk and uploads it later, which brings
+    the session back as a recording to recover (PR #427 review)."""
+    has_chunks = db.exists().where(
+        NodeTranscriptChunk.session_id == Draft.session_id)
+    return db.and_(
+        Draft.session_id.isnot(None),
+        Draft.streaming_status.isnot(None),
+        Draft.streaming_status == 'recording',
+        not_live_clause(),
+        ~has_chunks,
+    )
+
+
+def _parent_error(parent_id):
+    """An error response when *parent_id* names a node the current user
+    may not build on (missing, or not visible to them: 404), else None.
+    No parent is fine. A parent the user could see before it was deleted
+    passes: callers keep their own handling of deleted parents."""
+    if not parent_id:
+        return None
+    try:
+        pid = int(parent_id)
+    except (TypeError, ValueError):
+        return jsonify({"error": "Invalid parent_id"}), 400
+    from backend.utils.node_deletion import parent_visibility_error
+    return parent_visibility_error(Node.query.get(pid), current_user.id)
+
+
+def _editable_node(node_id):
+    """(node, None) when the current user may edit the node *node_id*
+    (can_user_edit_node), else (None, a 404 response): a node the user
+    cannot edit gets the same 404 as one that does not exist. A deleted
+    node the user could edit is returned; callers handle deletion."""
+    node = Node.query.get(node_id)
+    if node is None or not can_user_edit_node(node):
+        return None, (jsonify({"error": "Node not found"}), 404)
+    return node, None
 
 
 # Audio storage root - same as in nodes.py
@@ -75,21 +196,18 @@ def get_draft():
     node_id = request.args.get("node_id", type=int)
     parent_id = request.args.get("parent_id", type=int)
 
-    # Validate node_id if provided - user must own the node OR be LLM requester (parent node owner)
+    # Validate node_id if provided - user must own the node OR be LLM
+    # requester (parent node owner); any other node answers 404.
     if node_id:
-        node = Node.query.get(node_id)
-        if not node:
-            return jsonify({"error": "Node not found"}), 404
+        node, err = _editable_node(node_id)
+        if err is not None:
+            return err
         # Soft-deleted target — treat as gone (per plan §17). The
         # underlying Draft row is left alone so a future "rescue
         # interrupted drafts" UI could surface it; at the GET-by-target
         # entry point, behave as if no draft exists.
         if node.deleted_at is not None:
             return jsonify({"error": "Node not found"}), 404
-
-        # Check authorization using shared utility function
-        if not can_user_edit_node(node):
-            return jsonify({"error": "Not authorized to access drafts for this node"}), 403
 
     # Plan §17 parent_id branch: if the parent has been soft-deleted,
     # we still want to surface the user's in-progress writing — but
@@ -102,38 +220,22 @@ def get_draft():
         if parent is not None and parent.deleted_at is not None:
             parent_deleted = True
 
-    # Build query for the user's draft matching the context
-    query = Draft.query.filter_by(user_id=current_user.id)
-    # Never surface proposal-pending drafts as the composing/input draft.
-    query = _exclude_proposal_drafts(query)
+    # The most recent input draft (stale empty drafts must not hide newer
+    # ones with actual content or stored audio chunks). Even under a
+    # soft-deleted parent, the lookup uses the original parent_id so the
+    # user's saved content comes back (with a warning); the response
+    # below null-rebinds the parent_id field per plan §17. A draft saved
+    # as a node with a streaming_warning (spend cap, #341, or a refused
+    # placeholder) is not restored: it would save the transcript twice.
+    query = _input_drafts(node_id, parent_id)
 
-    # Exclude drafts already processed by server-side LLM chain
-    # (Reflect/Orient workflows create nodes automatically but leave
-    # the draft alive for the SSE all_complete event). A draft with a
-    # streaming_warning was saved as a node too, only without a reply
-    # (spend cap, #341, or a refused placeholder): restoring it would
-    # save the same transcript a second time.
-    query = query.filter(Draft.llm_node_id.is_(None),
-                         Draft.streaming_warning.is_(None))
+    # A session another tab is recording right now is not a draft to
+    # load here: this view would auto-recover it, which completes it
+    # under the recording tab (#320). Nor a dead one: it holds no audio,
+    # and nothing the form does would end it.
+    query = query.filter(not_live_clause(), db.not_(_dead_session_clause()))
 
-    if node_id:
-        # Editing an existing node
-        query = query.filter_by(node_id=node_id)
-    else:
-        # Creating a new node (possibly under a parent)
-        query = query.filter_by(node_id=None)
-        if parent_id:
-            # Even if the parent is soft-deleted, look up the draft by
-            # the original parent_id so we can return the user's saved
-            # content (with a warning); the response below null-rebinds
-            # the parent_id field per plan §17.
-            query = query.filter_by(parent_id=parent_id)
-        else:
-            query = query.filter_by(parent_id=None)
-
-    # Prefer the most recent draft (avoids stale empty drafts hiding
-    # newer ones with actual content or stored audio chunks)
-    draft = query.order_by(Draft.updated_at.desc()).first()
+    draft = query.first()
 
     if not draft:
         return jsonify({"error": "No draft found"}), 404
@@ -175,6 +277,9 @@ def get_interrupted_drafts():
     - session_id is set
     - llm_node_id is NULL (not already processed)
     - Has at least one stored or completed chunk
+    - is not live: no tab has shown a sign of life within the liveness
+      window (#320) — a recording still running elsewhere is not
+      interrupted, and recovering or resuming it here would end it there
 
     Returns the most recent interrupted draft regardless of parent context,
     so recovery works from any entry point (Reflect, Orient, Log resume).
@@ -184,6 +289,7 @@ def get_interrupted_drafts():
         Draft.session_id.isnot(None),
         Draft.streaming_status == 'recording',
         Draft.llm_node_id.is_(None),
+        not_live_clause(),
     )
 
     drafts = query.order_by(Draft.updated_at.desc()).all()
@@ -278,44 +384,34 @@ def save_draft():
     node_id = data.get("node_id")
     parent_id = data.get("parent_id")
 
-    # Validate node_id if provided - user must own the node OR be LLM requester (parent node owner)
+    # Validate node_id if provided - user must own the node OR be LLM
+    # requester (parent node owner); any other node answers 404.
     if node_id:
-        node = Node.query.get(node_id)
-        if not node:
-            return jsonify({"error": "Node not found"}), 404
+        node, err = _editable_node(node_id)
+        if err is not None:
+            return err
         # Soft-deleted edit target — match the create endpoint's 410
         # so the frontend can treat parent/edit-target deletions
         # uniformly (clear local state, surface a warning).
         if node.deleted_at is not None:
             return jsonify({"error": "Node has been deleted"}), 410
 
-        # Check authorization using shared utility function
-        if not can_user_edit_node(node):
-            return jsonify({"error": "Not authorized to edit this node"}), 403
-
-    # Validate parent_id if provided - parent must exist
+    # Validate parent_id if provided - the user must be able to see the
+    # parent (404 like a missing one otherwise), as when creating a node.
     if parent_id:
-        parent = Node.query.get(parent_id)
-        if not parent:
-            return jsonify({"error": "Parent node not found"}), 404
+        err = _parent_error(parent_id)
+        if err is not None:
+            return err
+        parent = Node.query.get(int(parent_id))
         if parent.deleted_at is not None:
             return jsonify({"error": "Parent node has been deleted"}), 410
 
-    # Find existing draft for this context (never an agentic proposal draft —
-    # those share parent_id with the composing draft under a proposal node).
-    query = Draft.query.filter_by(user_id=current_user.id)
-    query = _exclude_proposal_drafts(query)
-
-    if node_id:
-        query = query.filter_by(node_id=node_id)
-    else:
-        query = query.filter_by(node_id=None)
-        if parent_id:
-            query = query.filter_by(parent_id=parent_id)
-        else:
-            query = query.filter_by(parent_id=None)
-
-    draft = query.first()
+    # The newest input draft, as GET restores it, but never a session in
+    # progress (#320): a second tab's autosave would overwrite its
+    # transcript. Typing next to one goes to a plain draft of its own,
+    # which is then the newest.
+    draft = _input_drafts(node_id, parent_id).filter(
+        _no_session_in_progress_clause()).first()
 
     if draft:
         # Update existing draft
@@ -360,37 +456,26 @@ def delete_draft():
     node_id = request.args.get("node_id", type=int)
     parent_id = request.args.get("parent_id", type=int)
 
-    # Validate node_id if provided - user must own the node OR be LLM requester (parent node owner)
+    # Validate node_id if provided - user must own the node OR be LLM
+    # requester (parent node owner); any other node answers 404.
     if node_id:
-        node = Node.query.get(node_id)
-        if not node:
-            return jsonify({"error": "Node not found"}), 404
+        _node, err = _editable_node(node_id)
+        if err is not None:
+            return err
 
-        # Check authorization using shared utility function
-        if not can_user_edit_node(node):
-            return jsonify({"error": "Not authorized to delete drafts for this node"}), 403
+    # Every input draft of the context, not just the newest: after a send
+    # or a discard none may come back. Never a proposal draft (deleting the
+    # composing draft under a proposal node must not take the pending
+    # proposal with it) nor a session in progress (#320), a dead one
+    # included (see _dead_session_clause).
+    drafts = _input_drafts(node_id, parent_id).filter(
+        _no_session_in_progress_clause()).all()
 
-    # Build query for the user's draft matching the context. Exclude proposal
-    # drafts so deleting the composing draft under a proposal node can't take
-    # the pending proposal with it.
-    query = Draft.query.filter_by(user_id=current_user.id)
-    query = _exclude_proposal_drafts(query)
-
-    if node_id:
-        query = query.filter_by(node_id=node_id)
-    else:
-        query = query.filter_by(node_id=None)
-        if parent_id:
-            query = query.filter_by(parent_id=parent_id)
-        else:
-            query = query.filter_by(parent_id=None)
-
-    draft = query.first()
-
-    if not draft:
+    if not drafts:
         return jsonify({"error": "No draft found"}), 404
 
-    db.session.delete(draft)
+    for draft in drafts:
+        db.session.delete(draft)
     db.session.commit()
 
     return jsonify({"message": "Draft deleted"}), 200
@@ -418,7 +503,7 @@ def discard_streaming_draft(session_id):
     NodeTranscriptChunk.query.filter_by(session_id=session_id).delete()
 
     # Delete audio files
-    audio_dir = AUDIO_STORAGE_ROOT / f"drafts/{draft.user_id}/{session_id}"
+    audio_dir = _session_dir(draft.user_id, draft.session_id)
     if audio_dir.exists():
         shutil.rmtree(audio_dir)
 
@@ -453,7 +538,10 @@ def _cleanup_stale_drafts(user_id):
 
     deleted = 0
     for draft in stale_drafts:
-        audio_dir = AUDIO_STORAGE_ROOT / f"drafts/{user_id}/{draft.session_id}"
+        try:
+            audio_dir = _session_dir(user_id, draft.session_id)
+        except ValueError:
+            continue
         if audio_dir.exists():
             current_app.logger.warning(
                 f"Draft {draft.id} (session {draft.session_id}) was "
@@ -485,11 +573,19 @@ def init_streaming():
     Resuming an interrupted session never calls init, and its chunks
     (audio-chunk, transcribe-remaining, finalize) are not cap-checked.
 
+    A Voice recording (label "Voice") where AI may not read gets 403
+    ``{"error", "code": "ai_usage_none", "scope"}`` and no draft, so the
+    mic never opens: a fresh thread when the account's Default AI usage
+    or the ai_usage sent is 'none', a continued one (parent_id) when the
+    thread is not AI-readable (voice_turn_refusal). Voice mode exists to
+    get a reply, and that reply would send the recording to a model.
+
     Request body:
     {
         "parent_id": 123,  // optional - parent node for the eventual node
         "privacy_level": "private",  // optional
         "ai_usage": "none",  // optional
+        "label": "Voice",  // optional
     }
 
     Returns: { "session_id": "uuid", "draft_id": 456 }
@@ -499,9 +595,18 @@ def init_streaming():
     data = request.get_json() or {}
 
     parent_id = data.get("parent_id")
+    err = _parent_error(parent_id)
+    if err is not None:
+        return err
     privacy_level = data.get("privacy_level", "private")
     ai_usage = data.get("ai_usage", "none")
     label = data.get("label")  # 'Reflect', 'Orient', etc.
+    if label == "Voice":
+        parent = Node.query.get(int(parent_id)) if parent_id else None
+        refused = voice_turn_refusal(
+            current_user, parent, None if parent else ai_usage)
+        if refused is not None:
+            return ai_usage_refused_response(refused)
 
     # Generate session ID
     session_id = str(uuid.uuid4())
@@ -518,14 +623,15 @@ def init_streaming():
         streaming_completed_chunks=0,
         label=label,
         privacy_level=privacy_level,
-        ai_usage=ai_usage
+        ai_usage=ai_usage,
+        streaming_heartbeat_at=datetime.utcnow(),
     )
     draft.set_content("")  # Will be populated as chunks are transcribed
     db.session.add(draft)
     db.session.commit()
 
     # Create directory for chunk storage
-    chunk_dir = AUDIO_STORAGE_ROOT / f"drafts/{current_user.id}/{session_id}"
+    chunk_dir = _session_dir(current_user.id, session_id)
     chunk_dir.mkdir(parents=True, exist_ok=True)
 
     current_app.logger.info(
@@ -573,10 +679,25 @@ def upload_streaming_chunk(session_id):
     ).first()
 
     if not draft:
-        return jsonify({"error": "Streaming session not found"}), 404
+        # The codes tell the recorder the session is gone for good (e.g.
+        # ended or discarded from another tab), so it stops recording
+        # instead of retrying into it (#320).
+        return jsonify({
+            "error": "Streaming session not found",
+            "code": "session_not_found",
+        }), 404
 
     if draft.streaming_status not in ["recording", "finalizing"]:
-        return jsonify({"error": "Streaming session is not active"}), 400
+        return jsonify({
+            "error": "Streaming session is not active",
+            "code": "session_not_active",
+        }), 400
+
+    # A chunk is the recording tab's sign of life (#320) — unless the tab
+    # already released the session: an upload still in flight when the
+    # tab left must not make it live again.
+    stamp_session_alive(session_id, only_if_unreleased=True)
+    db.session.commit()
 
     # Get form data
     if "chunk" not in request.files:
@@ -621,7 +742,7 @@ def upload_streaming_chunk(session_id):
     ext = ".mp4" if form_mime_family == "audio/mp4" else ".webm"
 
     # Save chunk to disk
-    chunk_dir = AUDIO_STORAGE_ROOT / f"drafts/{current_user.id}/{session_id}"
+    chunk_dir = _session_dir(current_user.id, draft.session_id)
     if not chunk_dir.exists():
         return jsonify({"error": "Streaming session directory not found"}), 404
 
@@ -840,6 +961,9 @@ def finalize_streaming(session_id):
     total_chunks = data.get("total_chunks")
     label = data.get("label")  # e.g. "Reflect", "Orient"
     parent_id = data.get("parent_id")  # thread parent for LLM chain
+    err = _parent_error(parent_id)
+    if err is not None:
+        return err
     model = data.get("model")  # LLM model for server-side generation
     if not model and label in ("Reflect", "Orient", "Voice"):
         # Resolve a model when the client didn't send one (e.g. user has no
@@ -906,6 +1030,14 @@ def transcribe_remaining(session_id):
 
     if not draft:
         return jsonify({"error": "Streaming session not found"}), 404
+
+    # A live session belongs to the tab recording it: its own batching
+    # and finalize transcribe these chunks (#320).
+    if session_is_live(draft):
+        return jsonify({
+            "error": "This recording is still in progress in another tab",
+            "code": "session_live",
+        }), 409
 
     # Find all stored (untranscribed) chunks
     stored_chunks = NodeTranscriptChunk.query.filter_by(
@@ -981,8 +1113,13 @@ def get_streaming_status(session_id):
     # Auto-complete interrupted recordings: if all chunks are done
     # (no pending/stored/processing) and the draft is still in 'recording'
     # state, the user refreshed mid-recording. Mark as completed so the
-    # frontend recovery polling can finish.
+    # frontend recovery polling can finish. Never a live session: "no
+    # chunk pending" is also true for a moment after every batch of a
+    # recording that is still going, and completing it there ends the
+    # recording in the tab that owns it (#320).
+    live = session_is_live(draft)
     if (draft.streaming_status == 'recording'
+            and not live
             and chunks and pending_count == 0):
         draft.streaming_status = 'completed'
         draft.streaming_completed_chunks = completed_count
@@ -998,6 +1135,7 @@ def get_streaming_status(session_id):
         "failed_chunks": failed_count,
         "chunks": chunk_statuses,
         "content": draft.get_content(),
+        "live": live,
     }
     if draft.llm_node_id:
         status_data["llm_node_id"] = draft.llm_node_id
@@ -1007,6 +1145,20 @@ def get_streaming_status(session_id):
     if draft.streaming_warning:
         status_data["warning"] = draft.streaming_warning
     return jsonify(status_data)
+
+
+@drafts_bp.route("/streaming/<session_id>/release", methods=["POST"])
+@login_required
+def release_streaming(session_id):
+    """
+    The recording tab is leaving (pagehide beacon, or its recorder
+    unmounted mid-recording): the session stops being live now, so a
+    reload offers recovery at once instead of after the liveness window
+    (#320). A no-op unless the session is still 'recording'.
+    """
+    released = release_session(session_id, current_user.id)
+    db.session.commit()
+    return jsonify({"released": bool(released)}), 200
 
 
 @drafts_bp.route("/streaming/<session_id>/save-as-node", methods=["POST"])
@@ -1054,6 +1206,10 @@ def save_streaming_as_node(session_id):
     if draft.streaming_status not in ["completed", "finalizing"]:
         return jsonify({"error": "Streaming session is not complete"}), 400
 
+    err = _parent_error(draft.parent_id)
+    if err is not None:
+        return err
+
     data = request.get_json() or {}
     content = data.get("content", draft.get_content())
     agentic = bool(data.get("agentic", False))
@@ -1066,9 +1222,7 @@ def save_streaming_as_node(session_id):
     if (agentic or auto_generate) and ai_usage == "none":
         # Same contract as /textmode/start: an AI reply / agentic prompt
         # contradicts ai_usage 'none'. The frontend gates on this too.
-        return jsonify({
-            "error": "agentic / auto_generate require ai_usage of 'chat' or 'train'",
-        }), 400
+        return ai_usage_refused_response()
     if auto_generate:
         if not model_id:
             # Walks ancestry from the parent (if any) → user.preferred_model
@@ -1141,18 +1295,9 @@ def save_streaming_as_node(session_id):
     tip_node = _split_parts[-1] if _split_parts else node
     db.session.commit()
 
-    # Move audio files from drafts folder to nodes folder
-    draft_audio_dir = AUDIO_STORAGE_ROOT / f"drafts/{current_user.id}/{session_id}"
-    node_audio_dir = AUDIO_STORAGE_ROOT / f"nodes/{current_user.id}/{node.id}"
-
-    move_draft_audio_to_node_dir(
-        draft_audio_dir, node_audio_dir, current_app.logger,
-    )
-
-    # Update transcript chunks to reference the node
-    NodeTranscriptChunk.query.filter_by(session_id=session_id).update({
-        "node_id": node.id
-    })
+    # Move the session's audio files and transcript chunk rows to the node
+    move_session_audio_to_node(
+        draft, node, current_app.logger, root=AUDIO_STORAGE_ROOT)
 
     # Delete the draft
     db.session.delete(draft)
@@ -1196,11 +1341,16 @@ def save_streaming_as_node(session_id):
                 db.session.commit()
                 response["llm_node_id"] = llm_node.id
                 response["task_id"] = task_id
-            except (UserExportValidationError, ParentDeletedError) as e:
+            except (UserExportValidationError, ParentDeletedError,
+                    AIUsageRefused) as e:
+                # A thread above that keeps AI out (AIUsageRefused) skips
+                # the reply the same way: the entry is saved.
                 db.session.rollback()
                 current_app.logger.warning(
                     f"save-as-node: LLM reply skipped for node {node.id}: {e}"
                 )
                 response["llm_error"] = str(e)
+                if isinstance(e, AIUsageRefused):
+                    response["llm_error_code"] = e.code
 
     return jsonify(response), 201

@@ -752,6 +752,25 @@ class TestDraftBatchPipeline:
         assert job.status == "collected"
         assert resp.status == "draft_failed"
 
+    def test_collect_empty_cut_off_draft_fails_response(self, pipeline,
+                                                        monkeypatch):
+        """#368: a draft cut off at the output limit before any text is
+        not saved as an empty draft; the response fails (the user can
+        retry or write their own) and the billed call is still logged."""
+        poll, resp = _make_drafting_response()
+        job = self._pending_job(poll, resp)
+        monkeypatch.setattr(
+            pipeline, "batch_check_and_collect",
+            lambda ids, keys: ({f"poll-draft-{resp.id}": {
+                "content": "", "truncated": True,
+                "input_tokens": 100, "output_tokens": 32000,
+            }}, {}, {}))
+        pipeline._collect_poll_draft_batches()
+        assert resp.status == "draft_failed"
+        assert resp.generated_by is None
+        assert job.status == "collected"
+        assert APICostLog.query.one().request_type == "poll_draft"
+
     def test_system_account_is_idempotent(self, app):
         first = get_poll_system_user()
         second = get_poll_system_user()

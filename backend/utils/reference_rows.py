@@ -43,8 +43,10 @@ def save_pick_row(item, source):
     """Make the Read pick's row *item* a saved reference of *source*.
     fetched_at moves, because the saved corpus changed: the nightly
     digest sees a newer item and rebuilds, and the embedding sweep, which
-    skips picks, embeds it."""
+    skips picks, embeds it. saved_at moves too: the row is a saved
+    reference from now on, which the X bookmark sync's resume reads
+    (#310)."""
     item.source = source
-    item.fetched_at = datetime.utcnow()
+    item.fetched_at = item.saved_at = datetime.utcnow()
     db.session.add(item)
     return item

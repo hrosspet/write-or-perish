@@ -100,6 +100,30 @@ def attach_agentic_prompt_under(node, user_id, prompt_key, privacy_level,
     return prompt_node
 
 
+def create_agentic_root(user_id, prompt_key, privacy_level, ai_usage):
+    """The system node that starts a new agentic thread: empty, top-level,
+    linked to the user's *prompt_key* prompt record (and the artifact
+    snapshots its placeholders name) through attach_context_artifacts.
+    Same shape /textmode/start and save-as-node build. The caller hangs
+    the first message under it and commits."""
+    from backend.extensions import db
+    from backend.utils.prompts import get_user_prompt_record
+    from backend.utils.context_artifacts import attach_context_artifacts
+    prompt_record = get_user_prompt_record(user_id, prompt_key)
+    root = Node(
+        user_id=user_id,
+        human_owner_id=user_id,
+        parent_id=None,
+        node_type="user",
+        privacy_level=privacy_level,
+        ai_usage=ai_usage,
+    )
+    db.session.add(root)
+    db.session.flush()
+    attach_context_artifacts(root.id, user_id, prompt_record=prompt_record)
+    return root
+
+
 def create_llm_placeholder_node(parent_node_id, model_id, requesting_user_id,
                                 ai_usage=None, source_mode=None):
     """Create an LLM placeholder node and enqueue the generation task."""

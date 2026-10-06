@@ -3,6 +3,7 @@ from flask import Blueprint, jsonify, request, current_app
 from flask_login import login_required, current_user
 from backend.models import Node, Draft, UserTodo
 from backend.extensions import db
+from backend.utils.privacy import AI_ALLOWED
 from backend.utils.timefmt import iso_utc
 from backend.utils.tool_meta import update_tool_meta
 
@@ -196,6 +197,37 @@ def revert_todo(version_id):
     }), 200
 
 
+# A todo merge sends the newest todo list and the proposal it applies to a
+# model (orient_apply_todo), so it runs only when AI may read both (Peter,
+# 2026-10-01: content marked 'none' is never sent to a model). Checked
+# before a merge starts (the apply-draft route, the apply_todo_changes
+# tool) and again when it runs (voice_todo_merge._run_merge), since the
+# list can change in between. The web and the iPhone app show the message
+# where the apply failed (the route's "error", the task's apply_error).
+TODO_MERGE_REFUSED_MESSAGE = (
+    "Your todo list is set to AI usage None, so Loore keeps it away from "
+    "AI and didn't change it.")
+TODO_PROPOSAL_REFUSED_MESSAGE = (
+    "This reply is set to AI usage None, so Loore keeps it away from AI "
+    "and didn't apply its todo changes.")
+
+
+def todo_merge_refusal(user_id, proposal_node):
+    """Why a todo merge may not send its inputs to a model (a message for
+    the user), or None: the proposal node whose text the merge applies, or
+    the newest todo list, has an ai_usage AI may not read. No todo list
+    yet does not refuse: the merge then starts one from the proposal."""
+    if (proposal_node is not None
+            and proposal_node.ai_usage not in AI_ALLOWED):
+        return TODO_PROPOSAL_REFUSED_MESSAGE
+    todo = UserTodo.query.filter_by(user_id=user_id).order_by(
+        UserTodo.created_at.desc()
+    ).first()
+    if todo is not None and todo.ai_usage not in AI_ALLOWED:
+        return TODO_MERGE_REFUSED_MESSAGE
+    return None
+
+
 def _find_pending_todo_draft(llm_node_id, user_id):
     """Find the todo_pending draft by walking ancestor chain from llm_node_id."""
     llm_node = Node.query.get(llm_node_id)
@@ -286,6 +318,9 @@ def apply_todo_draft():
     Apply a pending todo draft created by the Voice update_todo tool.
     Kicks off an async orient_apply_todo LLM merge to apply the
     proposed changes to the full todo list.
+
+    403 ``{"error", "code": "ai_usage_none"}`` when AI may not read the
+    todo list or the proposal (todo_merge_refusal); nothing is started.
     """
     data = request.get_json() or {}
     llm_node_id = data.get("llm_node_id")
@@ -300,6 +335,13 @@ def apply_todo_draft():
 
     if draft.user_id != current_user.id:
         return jsonify({"error": "Unauthorized"}), 403
+
+    # Nothing starts, and the proposal stays pending, where AI may not read
+    # the todo list or the proposal.
+    refusal = todo_merge_refusal(current_user.id, llm_node)
+    if refusal is not None:
+        from backend.utils.llm_nodes import AI_USAGE_NONE_CODE
+        return jsonify({"error": refusal, "code": AI_USAGE_NONE_CODE}), 403
 
     task_id = _start_todo_merge(draft, llm_node, current_user.id)
 

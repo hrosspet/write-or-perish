@@ -134,9 +134,9 @@ def _script(monkeypatch, tmp_path, collect, render=None, cancel=None):
 
     real_chain = _llm_task_mod._load_node_chain
 
-    def _chain(parent):
+    def _chain(parent, *args, **kwargs):
         calls["chain"] += 1
-        return real_chain(parent)
+        return real_chain(parent, *args, **kwargs)
     monkeypatch.setattr(_llm_task_mod, "_load_node_chain", _chain)
 
     from backend.utils import community_archive as ca

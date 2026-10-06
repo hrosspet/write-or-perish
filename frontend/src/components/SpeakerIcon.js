@@ -227,7 +227,9 @@ const SpeakerIcon = ({ nodeId, profileId, itemId, content, isPublic, aiUsage, on
     return null;
   }
 
-  const noAiAccess = nodeId != null && aiUsage === 'none';
+  // New speech sends the text to a model: off for an entry, a reply or a
+  // profile version whose AI usage is 'none' (the server refuses it too).
+  const noAiAccess = (nodeId != null || profileId != null) && aiUsage === 'none';
 
   const handleClick = async () => {
     if (noAiAccess || loading || ttsTaskActive || sseActive) return;
