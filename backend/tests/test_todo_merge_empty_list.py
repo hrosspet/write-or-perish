@@ -319,3 +319,83 @@ def test_merge_prompt_keeps_its_rules_and_has_the_410_rules():
     # they are ("Preserve the original structure").
     assert ("When your update names a section for a new item (e.g. "
             '"under Today"), put the item in that `## section`') in prompt
+
+
+
+# ── cut-off output (#432) ────────────────────────────────────────────────
+
+def _merge_with(merge, monkeypatch, user, proposal, truncated,
+                content=MERGED, confirm=None):
+    def get_completion(*a, **k):
+        return {"content": content, "truncated": truncated,
+                "input_tokens": 100, "output_tokens": 10,
+                "total_tokens": 110}
+    import backend.llm_providers as lp
+    for provider in {lp.LLMProvider, merge.LLMProvider}:
+        monkeypatch.setattr(provider, "get_completion", get_completion)
+    merge._run_merge(proposal, proposal.get_content(), user.id,
+                     "claude-opus-4.6", confirm.id if confirm else None)
+    _db.session.rollback()
+
+
+def _confirm_node(user_id):
+    node = Node(user_id=user_id, node_type="llm", llm_model="claude-opus-4.6",
+                ai_usage="chat",
+                tool_calls_meta=json.dumps([{"name": "apply_todo_changes"}]))
+    node.set_content("ok")
+    _db.session.add(node)
+    _db.session.commit()
+    return node
+
+
+def _todo_cost_rows(user_id):
+    from backend.models import APICostLog
+    return APICostLog.query.filter_by(
+        user_id=user_id, request_type="todo_merge").all()
+
+
+def test_truncated_merge_fails_and_saves_nothing(merge, monkeypatch):
+    user = _user()
+    old = _todo(user.id, "- [ ] old task")
+    proposal = _proposal(user.id)
+    confirm = _confirm_node(user.id)
+
+    _merge_with(merge, monkeypatch, user, proposal, True,
+                content="- [ ] a\n- [ ] a\n- [ ] a", confirm=confirm)
+
+    assert _newest_todo(user.id).id == old.id
+    assert UserTodo.query.filter_by(user_id=user.id).count() == 1
+    entry = _propose_todo_entry(proposal.id)
+    assert entry["apply_status"] == "failed"
+    assert entry["apply_error"] == merge.TRUNCATED_MESSAGE
+    assert "todo_id" not in entry and "apply_truncated" not in entry
+    cmeta = json.loads(Node.query.get(confirm.id).tool_calls_meta)[0]
+    assert cmeta["apply_status"] == "failed"
+    assert cmeta["apply_error"] == merge.TRUNCATED_MESSAGE
+    rows = _todo_cost_rows(user.id)
+    assert len(rows) == 1
+    assert rows[0].request_ref == "refused:truncated"
+
+
+def test_untruncated_merge_still_saves_and_logs_plain_cost(merge, monkeypatch):
+    user = _user()
+    proposal = _proposal(user.id)
+
+    _merge_with(merge, monkeypatch, user, proposal, False)
+
+    assert _newest_todo(user.id).get_content() == MERGED
+    assert _propose_todo_entry(proposal.id)["apply_status"] == "completed"
+    rows = _todo_cost_rows(user.id)
+    assert len(rows) == 1 and rows[0].request_ref is None
+
+
+def test_empty_merge_still_fails_as_before(merge, monkeypatch):
+    user = _user()
+    proposal = _proposal(user.id)
+
+    _merge_with(merge, monkeypatch, user, proposal, False, content="  ")
+
+    assert _newest_todo(user.id) is None
+    entry = _propose_todo_entry(proposal.id)
+    assert entry["apply_error"] == "Empty merge result"
+    assert _todo_cost_rows(user.id)[0].request_ref is None
