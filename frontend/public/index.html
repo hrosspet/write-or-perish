@@ -2,6 +2,16 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
+    <!--
+      Images load only from Loore itself (#441): an image in markdown that an
+      outside page or another user wrote must not reach its host when a node
+      is shown. data: is for the CSS noise textures. Only img-src is set:
+      scripts, styles, fonts and frames are not restricted by this policy.
+      This tag also reaches the server-rendered public pages, which Flask
+      builds from this file (backend/utils/public_html.py). It must stay
+      above every image in the page.
+    -->
+    <meta http-equiv="Content-Security-Policy" content="img-src 'self' data:" />
     <!-- Google Fonts: Cormorant Garamond + Outfit -->
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
