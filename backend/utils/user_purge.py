@@ -49,7 +49,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta
 from typing import NamedTuple
 
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, case, func, or_, select
 
 from backend.extensions import db
 from backend.models import (
@@ -77,8 +77,12 @@ PURGE_MAX_ROUNDS = 3
 # A running job whose runner has not sent a heartbeat for this long is
 # claimed again (a chunk takes seconds; a deploy kills the worker).
 PURGE_STALE_AFTER = timedelta(minutes=10)
-# Claims before a job is marked failed and logged as an error.
+# Runs that started and did not finish before a job is marked failed and
+# logged as an error. A claim whose runner never started does not count.
 PURGE_MAX_ATTEMPTS = 3
+# A due job with no runner started for this long is logged as an error
+# (still dispatched again each time it goes stale).
+PURGE_START_OVERDUE = timedelta(hours=1)
 # While the user's tasks are still running, look again after this long...
 PURGE_WAIT_RETRY_SECONDS = 120
 # ...for at most this long: Celery's hard time limit (task_time_limit,
@@ -1001,7 +1005,12 @@ def _claimable(now):
 
 def claim_job(job_id, token, now=None):
     """Take the job for the runner *token*, if it is due or its last
-    runner went quiet. Atomic: of two claims, one wins."""
+    runner went quiet. Atomic: of two claims, one wins.
+
+    A claim is not an attempt: the runner may wait in the Celery queue
+    behind long jobs, and a claim whose runner never started is simply
+    claimed again by a later beat. The attempt is counted when the
+    runner starts (start_runner)."""
     now = now or _now()
     n = UserDataPurge.query.filter(
         UserDataPurge.id == job_id, _claimable(now),
@@ -1009,8 +1018,27 @@ def claim_job(job_id, token, now=None):
         UserDataPurge.status: "running",
         UserDataPurge.task_id: token,
         UserDataPurge.heartbeat_at: now,
-        UserDataPurge.attempts: UserDataPurge.attempts + 1,
+        UserDataPurge.runner_started_at: None,
+    }, synchronize_session=False)
+    db.session.commit()
+    return n == 1
+
+
+def start_runner(job_id, token, now=None):
+    """The runner *token* starts (or resumes after a wait): True when
+    it still holds the job. The first start under a claim counts one
+    attempt; a resume after waiting for the user's tasks does not."""
+    now = now or _now()
+    n = UserDataPurge.query.filter(
+        UserDataPurge.id == job_id, UserDataPurge.task_id == token,
+        UserDataPurge.status == "running",
+    ).update({
+        UserDataPurge.attempts: UserDataPurge.attempts + case(
+            (UserDataPurge.runner_started_at.is_(None), 1), else_=0),
+        UserDataPurge.runner_started_at: func.coalesce(
+            UserDataPurge.runner_started_at, now),
         UserDataPurge.started_at: func.coalesce(UserDataPurge.started_at, now),
+        UserDataPurge.heartbeat_at: now,
     }, synchronize_session=False)
     db.session.commit()
     return n == 1
@@ -1037,6 +1065,14 @@ def dispatch_due_jobs(dispatch, now=None):
         if job.status == "running" and (job.attempts or 0) >= PURGE_MAX_ATTEMPTS:
             _fail_job(job, job.error or "runner stopped without finishing")
             continue
+        if job.status == "running" and job.runner_started_at is None:
+            # Claimed, but no runner has started: the queue is backed up
+            # or the message was lost. Claim again; not an attempt.
+            overdue = now - job.scheduled_for
+            log = logger.error if overdue > PURGE_START_OVERDUE else logger.warning
+            log("user purge job %s (user %s): no runner started since the "
+                "last claim; due %s ago; dispatching again", job.id,
+                job.user_id, overdue)
         token = str(uuid.uuid4())
         if not claim_job(job.id, token, now):
             continue
@@ -1076,9 +1112,9 @@ def run_purge_job(job_id, token):
     """Run the claimed job. Returns "done", "wait" (call again after
     PURGE_WAIT_RETRY_SECONDS: the user's tasks are still running),
     "superseded", "refused" or "error"."""
-    job = db.session.get(UserDataPurge, job_id)
-    if job is None or job.status != "running" or job.task_id != token:
+    if not start_runner(job_id, token):
         return "superseded"
+    job = db.session.get(UserDataPurge, job_id)
     user = db.session.get(User, job.user_id)
     if user is None:
         job.status = "done"

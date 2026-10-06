@@ -696,7 +696,8 @@ def test_interrupted_purge_resumes(world, stubs, monkeypatch):
     assert up.leftovers(up.count_user_data(world.alice.id)) == {}
 
 
-def test_a_job_that_keeps_failing_is_marked_failed(world, stubs, monkeypatch):
+def test_a_job_that_keeps_failing_is_marked_failed(world, stubs, monkeypatch,
+                                                   caplog):
     monkeypatch.setattr(up, "purge_user_content",
                         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("bug")))
     alice = world.alice
@@ -706,9 +707,47 @@ def test_a_job_that_keeps_failing_is_marked_failed(world, stubs, monkeypatch):
         tokens = []
         up.dispatch_due_jobs(lambda j, t: tokens.append(t))
         assert up.run_purge_job(job.id, tokens[0]) == "error"
+    caplog.clear()
     up.dispatch_due_jobs(lambda j, t: pytest.fail("dispatched a dead job"))
     job = _db.session.get(UserDataPurge, job.id)
     assert job.status == "failed" and "RuntimeError" in job.error
+    assert job.attempts == up.PURGE_MAX_ATTEMPTS
+    # Loud: an error-level log line, which Sentry reports.
+    assert any(r.levelname == "ERROR" and f"job {job.id}" in r.getMessage()
+               for r in caplog.records)
+
+
+def test_a_backed_up_queue_does_not_use_up_attempts(world, stubs, caplog):
+    """The beat claims a due job every time its claim goes stale, but a
+    claim whose runner is still waiting in the Celery queue is not an
+    attempt: hours of backlog must not fail a purge with nothing done."""
+    alice = world.alice
+    job, _ = up.schedule_purge(alice, requested_by_id=alice.id, source="self",
+                               at=datetime.utcnow())
+    t0 = datetime.utcnow()
+    tokens = []
+    for minutes in (0, 11, 22, 33, 44, 55):
+        up.dispatch_due_jobs(lambda j, t: tokens.append(t),
+                             now=t0 + timedelta(minutes=minutes))
+    job = _db.session.get(UserDataPurge, job.id)
+    assert len(tokens) == 6
+    assert job.status == "running" and job.attempts == 0
+    assert job.runner_started_at is None
+    assert Node.query.filter_by(user_id=alice.id).count() == 7
+    # Overdue by more than an hour with no runner started: an error line.
+    caplog.clear()
+    up.dispatch_due_jobs(lambda j, t: tokens.append(t),
+                         now=t0 + timedelta(minutes=66, seconds=1))
+    assert any(r.levelname == "ERROR" and "no runner started" in r.getMessage()
+               for r in caplog.records)
+    # The queue drains: the old runners stand down, the latest one purges.
+    for old in tokens[:-1]:
+        assert up.run_purge_job(job.id, old) == "superseded"
+    assert up.run_purge_job(job.id, tokens[-1]) == "done"
+    job = _db.session.get(UserDataPurge, job.id)
+    assert job.status == "done" and job.attempts == 1
+    assert job.started_at is not None
+    assert Node.query.filter_by(user_id=alice.id).count() == 3   # tombstones
 
 
 def test_a_superseded_runner_stops(world, stubs):
@@ -749,6 +788,8 @@ def test_the_purge_waits_for_running_tasks(world, stubs):
     _db.session.commit()
     assert up.run_purge_job(job_id, job.task_id) == "done"
     assert _db.session.get(Node, world.ids["A2"]) is None
+    # Waiting under one claim is one attempt, however many looks it took.
+    assert _db.session.get(UserDataPurge, job_id).attempts == 1
 
 
 def test_a_running_profile_task_is_still_seen_on_the_next_look(world, stubs):

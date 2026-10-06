@@ -1907,17 +1907,21 @@ class UserDataPurge(db.Model):
     scheduled_for = db.Column(db.DateTime, nullable=False, index=True)
     cancelled_at = db.Column(db.DateTime, nullable=True)
     cancelled_by_id = db.Column(db.Integer, nullable=True)
-    # First claim by a runner.
+    # When the first runner started.
     started_at = db.Column(db.DateTime, nullable=True)
-    # Touched by the runner after every chunk; a running job whose
-    # heartbeat is older than PURGE_STALE_AFTER is claimed again.
+    # When the runner of the current claim started; null while the claim
+    # waits in the Celery queue (such a claim is not an attempt).
+    runner_started_at = db.Column(db.DateTime, nullable=True)
+    # Set at the claim, touched by the runner after every chunk; a running
+    # job whose heartbeat is older than PURGE_STALE_AFTER is claimed again.
     heartbeat_at = db.Column(db.DateTime, nullable=True)
     # Since when the runner has been waiting for the user's in-flight
     # tasks to end before it deletes anything (null when not waiting).
     waiting_since = db.Column(db.DateTime, nullable=True)
     finished_at = db.Column(db.DateTime, nullable=True)
-    # Claims so far; the claim that would exceed PURGE_MAX_ATTEMPTS marks
-    # the job failed instead.
+    # Runs that started (one per claim, counted when its runner starts);
+    # once PURGE_MAX_ATTEMPTS have started without finishing, the next
+    # beat marks the job failed instead of claiming it again.
     attempts = db.Column(db.Integer, nullable=False, default=0,
                          server_default="0")
     # The claim token: the Celery task id of the runner that holds the
