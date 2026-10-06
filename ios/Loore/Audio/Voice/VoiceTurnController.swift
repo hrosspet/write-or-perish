@@ -245,8 +245,13 @@ final class VoiceTurnController {
                 sid = draft.sessionId
             } else {
                 do {
-                    sid = try await self.backend.startSession(parentId: self.threadParentId,
-                                                              aiUsage: self.aiUsage()).sessionId
+                    // Its own task: leaving the screen cancels this flow, and a
+                    // cancelled request could leave a session on the server whose
+                    // id never arrives here, so it would never be discarded.
+                    let parentId = self.threadParentId, aiUsage = self.aiUsage()
+                    sid = try await Task { [backend = self.backend] in
+                        try await backend.startSession(parentId: parentId, aiUsage: aiUsage)
+                    }.value.sessionId
                 } catch {
                     guard gen == self.generation else { return }
                     if SpendCap.isSpendCapError(error) {
@@ -1042,9 +1047,11 @@ final class VoiceTurnController {
         timing.endTurn()
         // Left before the first chunk: no audio will ever reach the session.
         // Kept, it stayed in 'recording' on the server, where Text mode found
-        // it as a draft that no Send or Discard removed.
-        let emptySession = (state == .recording || state == .starting) && !recorder.hasProducedChunks
-            ? sessionId : nil
+        // it as a draft that no Send or Discard removed. Only while recording:
+        // in `.starting`, `sessionId` may still name the last turn's session
+        // (kept on the phone or the server after an error); a new session
+        // created meanwhile is discarded by the start flow.
+        let emptySession = state == .recording && !recorder.hasProducedChunks ? sessionId : nil
         if state == .recording || state == .starting { recorder.cancel() }
         resetTurn(keepQueue: false)
         if let emptySession {
