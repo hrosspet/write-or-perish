@@ -4,6 +4,7 @@ import api from '../api';
 import { formatDate } from '../utils/date';
 import { useUser } from '../contexts/UserContext';
 import { authorLabel, sourceLabel } from '../utils/references';
+import { highlightRuns } from '../utils/searchHighlight';
 
 // Two surfaces share this modal: the Log (scope 'archive', the default —
 // the user's own entries, with saved references merged into semantic
@@ -413,8 +414,11 @@ function SearchModal({ onClose, scope = 'archive' }) {
                   WebkitLineClamp: 2,
                   WebkitBoxOrient: 'vertical',
                 }}
-                dangerouslySetInnerHTML={{ __html: r.snippet || r.preview }}
-              />
+              >
+                {highlightRuns(r.snippet || r.preview).map((run, i) => (run.marked
+                  ? <mark key={i}>{run.text}</mark>
+                  : <React.Fragment key={i}>{run.text}</React.Fragment>))}
+              </div>
             </div>
           ))}
 
