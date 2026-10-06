@@ -270,7 +270,12 @@ final class VoiceTurnController {
                     return
                 }
             }
-            guard gen == self.generation else { return }
+            guard gen == self.generation else {
+                // Torn down while the session was being created: nothing records
+                // into it. Its own task: this one was cancelled with the turn.
+                if draft == nil { Task { [backend = self.backend] in await backend.discard(sessionId: sid) } }
+                return
+            }
             self.sessionId = sid
             do {
                 try self.recorder.start(sessionId: sid, uploadURL: self.backend.uploadURL(sessionId: sid),
@@ -1035,8 +1040,17 @@ final class VoiceTurnController {
     /// Leaving the Voice screen (the web's unmount cleanup).
     func tearDown() {
         timing.endTurn()
+        // Left before the first chunk: no audio will ever reach the session.
+        // Kept, it stayed in 'recording' on the server, where Text mode found
+        // it as a draft that no Send or Discard removed.
+        let emptySession = (state == .recording || state == .starting) && !recorder.hasProducedChunks
+            ? sessionId : nil
         if state == .recording || state == .starting { recorder.cancel() }
         resetTurn(keepQueue: false)
+        if let emptySession {
+            recorder.forget(sessionId: emptySession)
+            Task { [backend] in await backend.discard(sessionId: emptySession) }
+        }
         state = .idle
         aiBlock = nil
         // The next Voice screen is a new conversation, not a reply to this one.

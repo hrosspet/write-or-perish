@@ -9,7 +9,9 @@
 #                                                  # (optional landing path, e.g. /welcome)
 #   ios/scripts/local_backend.sh state [modes…]   # switches test state, prints metadata
 #
-# State modes: terms_old (accepted terms out of date), unapproved, restore
+# State modes: clear_top_drafts (the test user's top-level drafts), dead_voice_session
+# (a top-level Voice session left in 'recording' before its first chunk),
+# terms_old (accepted terms out of date), unapproved, restore
 # (approved + terms current), tz_utc, add_notification (an unread "fix_ready"
 # notification linking to /log), del_notifications, craft_off, m4_cleanup (removes
 # what M4ScreensUITests leave: the test user's todo and profile rows, the
@@ -93,6 +95,20 @@ with app.app_context():
             for row in rows:
                 db.session.delete(row)
             print("m4_cleanup removed %d rows" % len(rows))
+        elif mode == "clear_top_drafts":
+            from backend.models import Draft
+            for d in Draft.query.filter_by(user_id=$TEST_USER_ID, node_id=None, parent_id=None).all():
+                db.session.delete(d)
+        elif mode == "dead_voice_session":
+            # A Voice recording left before its first chunk (TextModeDraftUITests).
+            import uuid
+            from datetime import datetime, timedelta
+            from backend.models import Draft
+            d = Draft(user_id=$TEST_USER_ID, session_id=str(uuid.uuid4()), streaming_status="recording", label="Voice",
+                      ai_usage="chat", privacy_level="private",
+                      streaming_heartbeat_at=datetime.utcnow() - timedelta(minutes=5))
+            d.set_content("")
+            db.session.add(d)
         else:
             raise SystemExit("unknown mode: " + mode)
     db.session.commit()

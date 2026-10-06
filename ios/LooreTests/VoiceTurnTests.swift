@@ -20,9 +20,12 @@ final class FakeVoiceBackend: VoiceBackend {
     var timingPosts: [(Int, [String: Double])] = []
     var legacyResult: VoiceSessionResponse?
     var legacyError: Error?
+    /// Seconds `startSession` takes (the answer arrives even if the turn is gone).
+    var startDelay: Double = 0
 
     func startSession(parentId: Int?, aiUsage: String) async throws -> StreamingInitResponse {
         log.append("init parent=\(parentId.map(String.init) ?? "nil") ai=\(aiUsage)")
+        if startDelay > 0 { try? await Task.sleep(nanoseconds: UInt64(startDelay * 1_000_000_000)) }
         return try startResult.get()
     }
 
@@ -117,6 +120,7 @@ final class FakeRecorder: VoiceRecording {
     }
     func cancel() { calls.append("cancel") }
     func forget(sessionId: String) { calls.append("forget") }
+    var hasProducedChunks = true
 }
 
 @MainActor
@@ -746,6 +750,35 @@ final class VoiceTurnTests: XCTestCase {
         XCTAssertEqual(notices.toasts, [warning])
         XCTAssertFalse(backend.log.contains("legacy"))
         XCTAssertNil(turn.aiBlock)
+    }
+
+    // MARK: Leaving the screen (Peter, 2026-10-06: a session left before its
+    // first chunk stayed in 'recording' and came back in Text mode)
+
+    func testLeavingBeforeTheFirstChunkDiscardsTheSession() async throws {
+        recorder.hasProducedChunks = false
+        turn.start()
+        await wait("recording") { turn.state == .recording }
+        turn.tearDown()
+        await wait("discard") { backend.log.contains("discard") }
+        XCTAssertTrue(recorder.calls.contains("forget"))
+    }
+
+    func testLeavingWithAudioKeepsTheSessionForTheBanner() async throws {
+        turn.start()
+        await wait("recording") { turn.state == .recording }
+        turn.tearDown()
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertFalse(backend.log.contains("discard"))
+    }
+
+    func testLeavingWhileTheSessionIsCreatedDiscardsIt() async throws {
+        backend.startDelay = 0.2
+        turn.start()
+        await wait("starting") { turn.state == .starting }
+        turn.tearDown()
+        await wait("discard") { backend.log.contains("discard") }
+        XCTAssertFalse(recorder.calls.contains { $0.hasPrefix("start ") })
     }
 
     func testMicrophoneFailureDiscardsTheDraft() async throws {

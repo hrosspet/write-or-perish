@@ -55,6 +55,9 @@ protocol VoiceRecording: AnyObject {
     func stop() async -> ChunkUploader.Outcome
     /// Abandons the recording (uploads already stored stay on the server).
     func cancel()
+    /// The session has a chunk: stored, queued, or from before a resume.
+    /// Read before `cancel()`, which drops the unfinished segment.
+    var hasProducedChunks: Bool { get }
     /// The session is finished: forget its local upload state.
     func forget(sessionId: String)
 }
