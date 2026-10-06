@@ -1,0 +1,1141 @@
+"""Delete all of one user's data (#268).
+
+One operation, used by the user's "Delete all my writing" (after a grace
+period) and by the admin dashboard's "Purge data" (at once):
+
+* ``stop_in_flight`` stops what would write the user's data again behind
+  the purge: queued Celery tasks are revoked, provider batches that carry
+  only this user's requests are cancelled, the user's items are taken out
+  of shared batch jobs and the profile pipeline flags are reset.
+* ``purge_user_content`` deletes the rows and files. It reads ids and
+  metadata only, never content, so nothing is ever decrypted, and every
+  statement is scoped to the one user: other users' rows are changed only
+  where a foreign key to a deleted row requires it (a reply's
+  ``linked_node_id``, a draft's ``parent_id``), and then only that column.
+* ``count_user_data`` is the dry run: the same counts, nothing changed.
+
+The account itself stays (login, username, settings, plan). Cost rows
+stay too, moved to the ``loore-erased`` system account with every field
+that could lead back to the person cleared.
+
+Which nodes are the user's (S): ``user_id`` or ``human_owner_id`` is the
+user (their own writing, imports, and the AI replies they asked for,
+which are stored under the model's account), plus legacy AI replies with
+no ``human_owner_id`` whose owner by ``privacy.find_human_owner`` is the
+user. A node of S that has another user's node anywhere below it is kept
+as an empty tombstone (K), as soft-delete does, so the other user's
+reply keeps its parent; the rest (D) is deleted, deepest first, in chunks
+of PURGE_CHUNK_SIZE with a commit per chunk.
+
+Files: every node of S has its folders deleted (``user/<author>/node/<id>``
+and ``nodes/<author>/<id>`` for the author and the human owner, which is
+how AI-reply audio stored under the model account's folder is found),
+then the user's own folders (``user/``, ``nodes/``, ``drafts/``,
+``chunks/``, ``streaming/`` under AUDIO_STORAGE_PATH and the import stash
+``imports/<id>/``) and the X API dumps of the handle the account was
+pre-filled from. Every stored audio URL points inside these folders.
+
+Re-running is safe: each step selects what is still there. A purge that
+crashed half way continues where it stopped.
+"""
+import json
+import logging
+import os
+import pathlib
+import re
+import uuid
+from collections import Counter
+from contextlib import contextmanager
+from datetime import datetime, timedelta
+from typing import NamedTuple
+
+from sqlalchemy import and_, func, or_, select
+
+from backend.extensions import db
+from backend.models import (
+    APICostLog, ArtifactView, Draft, ExternalAccount, ExternalDigestBatchJob,
+    ExternalItem, ExternalItemEmbedding, FeedPick, FeedRender, Node,
+    NodeContextArtifact, NodeEmbedding, NodeTranscriptChunk, NodeVersion,
+    PollDraftBatchJob, PollResponse, ProfileBatchJob, ReferenceAction,
+    ShareDraft, TTSChunk, Thread, User, UserArtifact, UserDataPurge,
+    UserFeedback, UserNotification, UserProfile, UserPrompt,
+    UserRecentContext, UserTodo,
+)
+
+logger = logging.getLogger(__name__)
+
+# ── Heuristics (see the PR for why each value) ──────────────────────────
+# The grace period of a user's own request: Petr's deletion rule
+# (LOORE-ESSENCE "Deletion", 2026-10-02), the same 30 days as account
+# deletion (#269).
+PURGE_GRACE_DAYS = 30
+# Ids per statement and per commit. The 2026-08-28 manual purge ran
+# 91,850 nodes in 27 s with IN lists of 500.
+PURGE_CHUNK_SIZE = 500
+# Passes over everything, to pick up rows written while the purge ran.
+PURGE_MAX_ROUNDS = 3
+# A running job whose runner has not sent a heartbeat for this long is
+# claimed again (a chunk takes seconds; a deploy kills the worker).
+PURGE_STALE_AFTER = timedelta(minutes=10)
+# Claims before a job is marked failed and logged as an error.
+PURGE_MAX_ATTEMPTS = 3
+# While the user's tasks are still running, look again after this long...
+PURGE_WAIT_RETRY_SECONDS = 120
+# ...for at most this long: Celery's hard time limit (task_time_limit,
+# 1 h) has killed any task by then.
+PURGE_MAX_WAIT = timedelta(minutes=65)
+
+IN_FLIGHT_STATUSES = ("pending", "processing")
+# The user's own folders under AUDIO_STORAGE_PATH.
+USER_AUDIO_FOLDERS = ("user", "nodes", "drafts", "chunks", "streaming")
+# The live states of a Read's provider batch (llm_completion).
+_LIVE_BATCH_STATUSES = ("submitted", "cancelling")
+# x_api_dump_path: <handle>-<UTC stamp>.jsonl
+_X_DUMP_STAMP = r"-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}Z\.jsonl"
+_HANDLE_RE = re.compile(r"[A-Za-z0-9_]{1,64}")
+
+# Keys that describe what the purge keeps, not what it deletes.
+INFO_KEYS = ("node_tombstoned", "others_replies_kept")
+
+
+class PurgeRefused(Exception):
+    """The account must never be purged (an AI or system account)."""
+
+    def __init__(self, reason):
+        super().__init__(reason)
+        self.reason = reason
+
+
+class PurgeSuperseded(Exception):
+    """Another runner claimed the job; this one stops."""
+
+
+def _now():
+    return datetime.utcnow()
+
+
+def _chunks(seq, size=None):
+    size = size or PURGE_CHUNK_SIZE
+    seq = list(seq)
+    for i in range(0, len(seq), size):
+        yield seq[i:i + size]
+
+
+# ── Who may be purged ───────────────────────────────────────────────────
+
+def purge_refusal(user):
+    """Why *user* must never be purged, or None.
+
+    AI replies are stored with ``user_id`` = the ``llm-<model>`` account,
+    so a purge of that account would delete every AI reply in Loore. The
+    rule is the one ``User.profile_eligible_query`` uses (the account
+    authors ``node_type='llm'`` nodes), plus the old ``llm`` id prefix and
+    the system accounts by name."""
+    from backend.utils.system_accounts import SYSTEM_USERNAMES
+    if user is None:
+        return "no such account"
+    if user.username in SYSTEM_USERNAMES:
+        return "system account"
+    if (user.twitter_id or "").startswith("llm"):
+        return "AI account"
+    authors_ai = db.session.query(Node.id).filter(
+        Node.user_id == user.id, Node.node_type == "llm").first()
+    if authors_ai is not None:
+        return "AI account"
+    return None
+
+
+# ── The user's nodes ────────────────────────────────────────────────────
+
+def _legacy_ai_reply_ids(user_id):
+    """AI replies with no ``human_owner_id`` that ``find_human_owner``
+    gives to *user_id*: the nearest ancestor that is not an AI reply is
+    the user's. Reads ids, types and authors only."""
+    cands = db.session.query(Node.id, Node.parent_id).filter(
+        Node.node_type == "llm", Node.human_owner_id.is_(None)).all()
+    if not cands:
+        return set()
+    known = {nid: ("llm", None, pid) for nid, pid in cands}
+    need = {pid for _, pid in cands if pid is not None and pid not in known}
+    while need:
+        for chunk in _chunks(need):
+            for r in db.session.query(
+                    Node.id, Node.node_type, Node.user_id, Node.parent_id
+            ).filter(Node.id.in_(chunk)):
+                known[r.id] = (r.node_type, r.user_id, r.parent_id)
+        nxt = set()
+        for nid in need:
+            row = known.get(nid)
+            if (row and row[0] == "llm" and row[2] is not None
+                    and row[2] not in known):
+                nxt.add(row[2])
+        need = nxt
+
+    def owner(nid):
+        seen = set()
+        cur = known[nid][2]
+        while cur is not None and cur not in seen:
+            seen.add(cur)
+            row = known.get(cur)
+            if row is None:
+                return None
+            if row[0] != "llm":
+                return row[1]
+            cur = row[2]
+        return None
+
+    return {nid for nid, _ in cands if owner(nid) == user_id}
+
+
+def _owned(user_id, extras):
+    """Filter for the user's nodes (S)."""
+    conds = [Node.user_id == user_id, Node.human_owner_id == user_id]
+    if extras:
+        conds.append(Node.id.in_(sorted(extras)))
+    return or_(*conds)
+
+
+def _not_owned(user_id, extras):
+    """The exact complement of _owned. Spelled out so a NULL
+    human_owner_id (legacy rows) counts as not the user's: NOT (a OR
+    NULL) is NULL in SQL and would drop the row."""
+    conds = [Node.user_id != user_id,
+             or_(Node.human_owner_id.is_(None),
+                 Node.human_owner_id != user_id)]
+    if extras:
+        conds.append(~Node.id.in_(sorted(extras)))
+    return and_(*conds)
+
+
+class NodePlan(NamedTuple):
+    extras: set        # legacy AI replies that are the user's
+    parents: dict      # S: node id -> parent id
+    authors: dict      # S: node id -> {user_id, human_owner_id}
+    keep: set          # K: tombstones (another user's node is below)
+    deleted: list      # D: deepest first
+    others_under: int  # other users' nodes directly under a node of S
+
+    def owned_select(self, user_id):
+        return select(Node.id).where(_owned(user_id, self.extras))
+
+    def deleted_select(self, user_id):
+        cond = _owned(user_id, self.extras)
+        if self.keep:
+            cond = and_(cond, ~Node.id.in_(sorted(self.keep)))
+        return select(Node.id).where(cond)
+
+
+def plan_nodes(user_id):
+    """Which of the user's nodes are deleted (D) and which stay as
+    tombstones (K). Ids and authors only."""
+    extras = _legacy_ai_reply_ids(user_id)
+    parents, authors = {}, {}
+    for r in db.session.query(
+            Node.id, Node.parent_id, Node.user_id, Node.human_owner_id
+    ).filter(_owned(user_id, extras)):
+        parents[r.id] = r.parent_id
+        authors[r.id] = {r.user_id, r.human_owner_id} - {None}
+
+    keep, others_under = set(), 0
+    for chunk in _chunks(parents):
+        for cid, pid in db.session.query(Node.id, Node.parent_id).filter(
+                Node.parent_id.in_(chunk)):
+            if cid in parents:
+                continue
+            others_under += 1
+            p = pid
+            while p is not None and p in parents and p not in keep:
+                keep.add(p)
+                p = parents[p]
+
+    depth = {}
+    for n in parents:
+        path, on_path, cur = [], set(), n
+        while cur in parents and cur not in depth and cur not in on_path:
+            path.append(cur)
+            on_path.add(cur)
+            cur = parents[cur]
+        base = depth.get(cur, -1) if cur in parents else -1
+        for x in reversed(path):
+            base += 1
+            depth[x] = base
+    deleted = sorted((n for n in parents if n not in keep),
+                     key=lambda n: (-depth.get(n, 0), n))
+    return NodePlan(extras, parents, authors, keep, deleted, others_under)
+
+
+def _session_ids(user_id, plan):
+    """Streaming sessions of the user: their drafts' sessions, their
+    nodes' sessions and the session folders under ``drafts/<id>/`` (left
+    by abandoned recordings whose draft is gone). Draft session ids are
+    server uuids, so none can be another user's."""
+    from backend.utils.audio_storage import is_storage_id
+    sessions = {s for (s,) in db.session.query(Draft.session_id).filter(
+        Draft.user_id == user_id, Draft.session_id.isnot(None))}
+    for chunk in _chunks(plan.parents):
+        sessions.update(s for (s,) in db.session.query(
+            Node.streaming_session_id).filter(
+            Node.id.in_(chunk), Node.streaming_session_id.isnot(None)))
+    folder = _audio_root() / "drafts" / str(user_id)
+    if folder.is_dir() and not folder.is_symlink():
+        sessions.update(p.name for p in folder.iterdir() if p.is_dir())
+    return sorted(s for s in sessions if is_storage_id(s))
+
+
+def _session_chunk_filter(sessions, owned_ids):
+    """Transcript chunks of the user's sessions that are not attached to
+    another user's node (a session moves only onto its owner's node, so
+    this is a guard, not a case)."""
+    return and_(NodeTranscriptChunk.session_id.in_(sessions),
+                or_(NodeTranscriptChunk.node_id.is_(None),
+                    NodeTranscriptChunk.node_id.in_(owned_ids)))
+
+
+# ── Files ───────────────────────────────────────────────────────────────
+
+def _audio_root():
+    from backend.utils import audio_storage
+    return pathlib.Path(audio_storage.AUDIO_STORAGE_ROOT)
+
+
+def _stash_root():
+    from backend.utils import twitter_archive
+    return pathlib.Path(twitter_archive.STASH_ROOT)
+
+
+def _node_dirs(plan, node_ids):
+    from backend.utils.audio_storage import storage_path
+    root = _audio_root()
+    dirs = []
+    for nid in node_ids:
+        for author in sorted(plan.authors.get(nid, ())):
+            dirs.append(storage_path(root, "user", author, "node", nid))
+            dirs.append(storage_path(root, "nodes", author, nid))
+    return dirs
+
+
+def _user_dirs(user_id):
+    from backend.utils.audio_storage import storage_path
+    root = _audio_root()
+    dirs = [storage_path(root, name, user_id) for name in USER_AUDIO_FOLDERS]
+    dirs.append(storage_path(_stash_root(), user_id))
+    return dirs
+
+
+def _x_dump_files(handle):
+    """X API dumps (backend.tasks.imports.x_api_dump_path) of the handle
+    the account was pre-filled from: that account's public posts."""
+    if not handle or not _HANDLE_RE.fullmatch(handle):
+        return []
+    folder = _stash_root().parent / "x-api"
+    if not folder.is_dir() or folder.is_symlink():
+        return []
+    pattern = re.compile(re.escape(handle) + _X_DUMP_STAMP, re.IGNORECASE)
+    return [p for p in folder.iterdir()
+            if p.is_file() and pattern.fullmatch(p.name)]
+
+
+def _files_in(dirs):
+    """Every file (and symlink, never followed) under *dirs*."""
+    out = set()
+    for d in dirs:
+        d = pathlib.Path(d)
+        if d.is_symlink() or not d.is_dir():
+            continue
+        for dirpath, dirnames, filenames in os.walk(d, followlinks=False):
+            for name in filenames:
+                out.add(pathlib.Path(dirpath) / name)
+            for name in dirnames:
+                p = pathlib.Path(dirpath) / name
+                if p.is_symlink():
+                    out.add(p)
+    return out
+
+
+def _delete_files(dirs, files=()):
+    """Delete the files under *dirs* and the *files*, then the emptied
+    folders. Returns how many files were deleted. A file that cannot be
+    deleted is logged by path (paths hold ids, never content) and the
+    purge goes on; the next run tries again."""
+    deleted = 0
+    for f in sorted(_files_in(dirs) | set(files)):
+        try:
+            os.unlink(f)
+            deleted += 1
+        except FileNotFoundError:
+            pass
+        except OSError as e:
+            logger.warning("user purge: could not delete %s (%s)", f,
+                           type(e).__name__)
+    for d in dirs:
+        d = pathlib.Path(d)
+        if d.is_symlink() or not d.is_dir():
+            continue
+        for dirpath, _, _ in os.walk(d, topdown=False, followlinks=False):
+            try:
+                os.rmdir(dirpath)
+            except OSError:
+                pass
+    return deleted
+
+
+# ── Stop what is in flight ──────────────────────────────────────────────
+
+class InFlight(NamedTuple):
+    counts: dict
+    running: list       # task ids still executing
+    lock_busy: bool     # the profile batch pipeline holds its lock
+
+    @property
+    def must_wait(self):
+        return bool(self.running) or self.lock_busy
+
+
+def _task_ids(user_id, plan):
+    ids = set()
+    node_cols = (
+        (Node.llm_task_id, Node.llm_task_status),
+        (Node.transcription_task_id, Node.transcription_status),
+        (Node.tts_task_id, Node.tts_task_status),
+    )
+    for chunk in _chunks(plan.parents):
+        for id_col, status_col in node_cols:
+            ids.update(t for (t,) in db.session.query(id_col).filter(
+                Node.id.in_(chunk), status_col.in_(IN_FLIGHT_STATUSES),
+                id_col.isnot(None)))
+        ids.update(t for (t,) in db.session.query(
+            NodeTranscriptChunk.task_id).filter(
+            NodeTranscriptChunk.node_id.in_(chunk),
+            NodeTranscriptChunk.status.in_(IN_FLIGHT_STATUSES),
+            NodeTranscriptChunk.task_id.isnot(None)))
+    sessions = _session_ids(user_id, plan)
+    for chunk in _chunks(sessions):
+        ids.update(t for (t,) in db.session.query(
+            NodeTranscriptChunk.task_id).filter(
+            NodeTranscriptChunk.session_id.in_(chunk),
+            NodeTranscriptChunk.status.in_(IN_FLIGHT_STATUSES),
+            NodeTranscriptChunk.task_id.isnot(None)))
+    for model in (UserProfile, ExternalItem):
+        ids.update(t for (t,) in db.session.query(model.tts_task_id).filter(
+            model.user_id == user_id,
+            model.tts_task_status.in_(IN_FLIGHT_STATUSES),
+            model.tts_task_id.isnot(None)))
+    ids.update(t for (t,) in db.session.query(PollResponse.draft_task_id)
+               .filter(PollResponse.user_id == user_id,
+                       PollResponse.status == "drafting",
+                       PollResponse.draft_task_id.isnot(None)))
+    user = db.session.get(User, user_id)
+    if user is not None and user.profile_generation_task_id:
+        ids.add(user.profile_generation_task_id)
+    return sorted(ids)
+
+
+def _revoke_tasks(task_ids):
+    """Revoke queued tasks so they never start. Without terminate: Celery
+    documents that terminate may kill the process after it has moved on
+    to another task, which here would be another user's."""
+    if not task_ids:
+        return
+    from backend.celery_app import celery
+    celery.control.revoke(list(task_ids))
+
+
+def _running_tasks(task_ids):
+    """The task ids a worker is executing now (state STARTED; the app
+    sets task_track_started)."""
+    if not task_ids:
+        return []
+    from backend.celery_app import celery
+    return [t for t in task_ids if celery.AsyncResult(t).state == "STARTED"]
+
+
+def _batch_keys(key_type="chat"):
+    from flask import current_app
+    from backend.utils.api_keys import get_api_keys_for_usage
+    from backend.utils.llm_batch import apply_batch_key_override
+    return apply_batch_key_override(
+        get_api_keys_for_usage(current_app.config, key_type),
+        current_app.config)
+
+
+def _cancel_provider_batch(provider_key, batch_id, key_type="chat"):
+    """Best-effort provider cancel of a batch that carries only this
+    user's requests. Returns None, or the error class name."""
+    from backend.utils import llm_batch
+    try:
+        keys = _batch_keys(key_type)
+        if provider_key == "anthropic":
+            llm_batch.anthropic_batch_cancel_one(keys.get("anthropic"), batch_id)
+        elif provider_key.startswith("openai"):
+            llm_batch.openai_batch_cancel_one(keys.get("openai"), batch_id)
+        else:
+            return "UnknownProvider"
+        return None
+    except Exception as e:  # noqa: BLE001 - a cancel never blocks the purge
+        logger.warning("user purge: provider cancel of batch %s failed (%s)",
+                       batch_id, type(e).__name__)
+        return type(e).__name__
+
+
+@contextmanager
+def _profile_batch_lock():
+    """The profile batch pipeline's lock, so the poller cannot apply this
+    user's result from a job it read before the purge stripped it."""
+    from backend.tasks.profile_batch import batch_pipeline_lock
+    with batch_pipeline_lock() as ok:
+        yield ok
+
+
+def _node_batch_entries(plan):
+    """Live provider batches of the user's Reads ("_batch" entries in
+    tool_calls_meta, one request each)."""
+    out = []
+    for chunk in _chunks(plan.parents):
+        for nid, meta in db.session.query(Node.id, Node.tool_calls_meta).filter(
+                Node.id.in_(chunk), Node.llm_task_status.in_(IN_FLIGHT_STATUSES),
+                Node.tool_calls_meta.like('%"_batch"%')):
+            try:
+                entries = json.loads(meta) or []
+            except (TypeError, ValueError):
+                continue
+            for m in entries:
+                if (isinstance(m, dict) and m.get("name") == "_batch"
+                        and m.get("status") in _LIVE_BATCH_STATUSES
+                        and m.get("batch_id")):
+                    out.append(m)
+    return out
+
+
+def _strip_batch_jobs(model, belongs, dry_run, now, counts, key):
+    """Take the user's items out of a batch job table. A pending job that
+    carried only theirs is cancelled at the provider and marked
+    cancelled; a finished job that carried only theirs is deleted; any
+    other job keeps the other users' items."""
+    for job in model.query.order_by(model.id).all():
+        items = list(job.items or [])
+        mine = [i for i in items if isinstance(i, dict) and belongs(i)]
+        if not mine:
+            continue
+        counts[key] += 1
+        others = [i for i in items if not (isinstance(i, dict) and belongs(i))]
+        if job.status == "pending" and not others:
+            counts["provider_batches_cancelled"] += 1
+            if not dry_run:
+                _cancel_provider_batch(job.provider_key, job.batch_id)
+                job.status = "cancelled"
+                job.collected_at = now
+                job.items = []
+        elif dry_run:
+            continue
+        elif job.status != "pending" and not others:
+            db.session.delete(job)
+        else:
+            job.items = others
+
+
+PIPELINE_FLAG_RESETS = {
+    "profile_batch_pending": False,
+    "profile_needs_full_regen": False,
+    "profile_batch_attempts": 0,
+    "profile_force_batch": False,
+    "profile_generation_task_id": None,
+    "profile_generation_task_dispatched_at": None,
+    "profile_seed_error": None,
+    "profile_token_ratio": None,
+    "profile_token_ratio_family": None,
+}
+
+
+def stop_in_flight(user_id, *, dry_run=False, plan=None):
+    """Stop everything that could write the user's data again. Returns
+    InFlight: counts, the task ids still executing (the runner waits for
+    them) and whether the profile batch lock was busy."""
+    plan = plan or plan_nodes(user_id)
+    counts = Counter()
+    now = _now()
+    task_ids = _task_ids(user_id, plan)
+    counts["celery_tasks_revoked"] = len(task_ids)
+    node_batches = _node_batch_entries(plan)
+    counts["provider_batches_cancelled"] += len(node_batches)
+    response_ids = {r for (r,) in db.session.query(PollResponse.id).filter(
+        PollResponse.user_id == user_id)}
+
+    if dry_run:
+        for model, belongs, key in _batch_tables(user_id, response_ids):
+            _strip_batch_jobs(model, belongs, True, now, counts, key)
+        return InFlight(dict(counts), [], False)
+
+    user = db.session.get(User, user_id)
+    for attr, value in PIPELINE_FLAG_RESETS.items():
+        setattr(user, attr, value)
+    db.session.commit()
+
+    try:
+        _revoke_tasks(task_ids)
+    except Exception as e:  # noqa: BLE001 - the broker being down must not stop it
+        logger.warning("user purge: revoke failed (%s)", type(e).__name__)
+    for entry in node_batches:
+        _cancel_provider_batch(entry.get("provider") or "anthropic",
+                               entry["batch_id"],
+                               entry.get("key_type") or "chat")
+
+    lock_busy = False
+    for model, belongs, key in _batch_tables(user_id, response_ids):
+        if model is ProfileBatchJob:
+            with _profile_batch_lock() as ok:
+                if not ok:
+                    lock_busy = True
+                    continue
+                _strip_batch_jobs(model, belongs, False, now, counts, key)
+                db.session.commit()
+        else:
+            _strip_batch_jobs(model, belongs, False, now, counts, key)
+            db.session.commit()
+
+    try:
+        running = _running_tasks(task_ids)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("user purge: task state check failed (%s)",
+                       type(e).__name__)
+        running = []
+    return InFlight(dict(counts), running, lock_busy)
+
+
+def _batch_tables(user_id, response_ids):
+    return (
+        (ProfileBatchJob, lambda i: i.get("user_id") == user_id,
+         "profile_batch_job"),
+        (PollDraftBatchJob, lambda i: i.get("response_id") in response_ids,
+         "poll_draft_batch_job"),
+        (ExternalDigestBatchJob, lambda i: i.get("user_id") == user_id,
+         "external_digest_batch_job"),
+    )
+
+
+# ── Counting (the dry run) ──────────────────────────────────────────────
+
+# Tables deleted by user_id alone.
+_USER_TABLES = (
+    (ExternalAccount, "external_account"),
+    (UserRecentContext, "user_recent_context"),
+    (UserProfile, "user_profile"),
+    (UserTodo, "user_todo"),
+    (UserArtifact, "user_artifact"),
+    (ArtifactView, "artifact_view"),
+    (UserPrompt, "user_prompt"),
+    (UserFeedback, "user_feedback"),
+    (UserNotification, "user_notification"),
+    (PollResponse, "poll_response"),
+)
+
+# Columns of other users' rows that point at a deleted node and are set
+# to null (the foreign key requires it).
+_REF_COLUMNS = (
+    (Draft, Draft.node_id, "draft.node_id"),
+    (Draft, Draft.parent_id, "draft.parent_id"),
+    (Draft, Draft.llm_node_id, "draft.llm_node_id"),
+    (ShareDraft, ShareDraft.source_node_id, "share_draft.source_node_id"),
+    (ShareDraft, ShareDraft.public_node_id, "share_draft.public_node_id"),
+)
+
+
+def _count(model, *conds):
+    return db.session.query(func.count()).select_from(model).filter(
+        *conds).scalar() or 0
+
+
+def count_user_data(user_id, plan=None):
+    """What a purge of *user_id* would delete, change or keep, per table.
+    Changes nothing."""
+    plan = plan or plan_nodes(user_id)
+    U = user_id
+    owned_ids = plan.owned_select(U)
+    deleted_ids = plan.deleted_select(U)
+    item_ids = select(ExternalItem.id).where(ExternalItem.user_id == U)
+    profile_ids = select(UserProfile.id).where(UserProfile.user_id == U)
+    sessions = _session_ids(U, plan)
+
+    c = {
+        "node": len(plan.deleted),
+        "node_tombstoned": len(plan.keep),
+        "others_replies_kept": plan.others_under,
+        "node_version": _count(NodeVersion, NodeVersion.node_id.in_(owned_ids)),
+        "node_transcript_chunk": _count(NodeTranscriptChunk, or_(
+            NodeTranscriptChunk.node_id.in_(owned_ids),
+            _session_chunk_filter(sessions, owned_ids))),
+        "tts_chunk": _count(TTSChunk, or_(
+            TTSChunk.node_id.in_(owned_ids),
+            TTSChunk.profile_id.in_(profile_ids),
+            TTSChunk.item_id.in_(item_ids))),
+        "node_context_artifact": _count(
+            NodeContextArtifact, NodeContextArtifact.node_id.in_(owned_ids)),
+        "node_embedding": _count(NodeEmbedding, or_(
+            NodeEmbedding.node_id.in_(owned_ids), NodeEmbedding.user_id == U)),
+        "thread": _count(Thread, Thread.root_node_id.in_(owned_ids)),
+        "feed_pick": _count(FeedPick, or_(
+            FeedPick.node_id.in_(owned_ids), FeedPick.user_id == U,
+            FeedPick.external_item_id.in_(item_ids))),
+        "feed_render": _count(FeedRender, FeedRender.node_id.in_(owned_ids)),
+        "reference_action": _count(ReferenceAction, or_(
+            ReferenceAction.node_id.in_(owned_ids), ReferenceAction.user_id == U,
+            ReferenceAction.item_id.in_(item_ids))),
+        "draft": _count(Draft, Draft.user_id == U),
+        "share_draft": _count(ShareDraft, ShareDraft.user_id == U),
+        "external_item": _count(ExternalItem, ExternalItem.user_id == U),
+        "external_item_embedding": _count(ExternalItemEmbedding, or_(
+            ExternalItemEmbedding.item_id.in_(item_ids),
+            ExternalItemEmbedding.user_id == U)),
+        "api_cost_log": _count(APICostLog, APICostLog.user_id == U),
+    }
+    for model, col, key in _REF_COLUMNS:
+        c[key] = _count(model, col.in_(deleted_ids), model.user_id != U)
+    for col, key in ((Node.linked_node_id, "node.linked_node_id"),
+                     (Node.continuation_node_id, "node.continuation_node_id")):
+        c[key] = _count(Node, col.in_(deleted_ids), _not_owned(U, plan.extras))
+    for model, key in _USER_TABLES:
+        c[key] = _count(model, model.user_id == U)
+
+    user = db.session.get(User, U)
+    files = _files_in(_node_dirs(plan, plan.parents) + _user_dirs(U))
+    files |= set(_x_dump_files(user.prefilled_handle if user else None))
+    c["files"] = len(files)
+    return c
+
+
+def leftovers(counts):
+    """The part of *counts* the purge should have brought to zero."""
+    return {k: v for k, v in counts.items() if v and k not in INFO_KEYS}
+
+
+# ── The purge ───────────────────────────────────────────────────────────
+
+def _delete(model, *conds):
+    return model.query.filter(*conds).delete(synchronize_session=False)
+
+
+def _delete_node_rows_dependents(ids, counts):
+    """Rows that hang off the nodes *ids* (all of them the user's)."""
+    for model, col, key in (
+            (NodeVersion, NodeVersion.node_id, "node_version"),
+            (NodeTranscriptChunk, NodeTranscriptChunk.node_id,
+             "node_transcript_chunk"),
+            (TTSChunk, TTSChunk.node_id, "tts_chunk"),
+            (NodeContextArtifact, NodeContextArtifact.node_id,
+             "node_context_artifact"),
+            (NodeEmbedding, NodeEmbedding.node_id, "node_embedding"),
+            (Thread, Thread.root_node_id, "thread"),
+            (FeedPick, FeedPick.node_id, "feed_pick"),
+            (FeedRender, FeedRender.node_id, "feed_render"),
+            (ReferenceAction, ReferenceAction.node_id, "reference_action"),
+    ):
+        counts[key] += _delete(model, col.in_(ids))
+
+
+def _clear_references_to(ids, user_id, extras, counts):
+    """Before the nodes *ids* are deleted: set to null every column that
+    points at them. Only that column changes on another user's row, and
+    its updated_at is kept (a bumped timestamp would look like an edit,
+    and would send a reply back through the embedding sweep)."""
+    for model, col, key in _REF_COLUMNS:
+        counts[key] += model.query.filter(
+            col.in_(ids), model.user_id != user_id,
+        ).update({col: None, model.updated_at: model.updated_at},
+                 synchronize_session=False)
+        # The user's own rows written since the first step of the round.
+        table_key = "draft" if model is Draft else "share_draft"
+        counts[table_key] += _delete(model, col.in_(ids),
+                                     model.user_id == user_id)
+    for col, key in ((Node.linked_node_id, "node.linked_node_id"),
+                     (Node.continuation_node_id, "node.continuation_node_id")):
+        counts[key] += Node.query.filter(
+            col.in_(ids), _not_owned(user_id, extras),
+        ).update({col: None, Node.updated_at: Node.updated_at},
+                 synchronize_session=False)
+        Node.query.filter(col.in_(ids), _owned(user_id, extras)).update(
+            {col: None, Node.updated_at: Node.updated_at},
+            synchronize_session=False)
+
+
+def _tombstone(ids, now):
+    """Keep the rows (another user's reply hangs below) but nothing of
+    what the user wrote or recorded."""
+    return Node.query.filter(Node.id.in_(ids)).update({
+        Node.content: None,
+        Node.streaming_content: None,
+        Node.tool_calls_meta: None,
+        Node.public_slug: None,
+        Node.source_key: None,
+        Node.audio_original_url: None,
+        Node.audio_tts_url: None,
+        Node.audio_duration_sec: None,
+        Node.audio_mime_type: None,
+        Node.transcription_error: None,
+        Node.llm_task_error: None,
+        Node.llm_task_warnings: None,
+        Node.streaming_session_id: None,
+        Node.pinned_at: None,
+        Node.pinned_by: None,
+        Node.token_count: 0,
+        Node.deleted_at: func.coalesce(Node.deleted_at, now),
+    }, synchronize_session=False)
+
+
+def _beat(heartbeat):
+    if heartbeat is not None:
+        heartbeat()
+
+
+def _purge_round(user, plan, counts, heartbeat):
+    U = user.id
+    owned_ids = plan.owned_select(U)
+
+    # 1. Rows of the user's that point at nodes, so the nodes can go.
+    # Sessions are read before the drafts that name them are deleted.
+    sessions = _session_ids(U, plan)
+    for chunk in _chunks(sessions):
+        counts["node_transcript_chunk"] += _delete(
+            NodeTranscriptChunk, _session_chunk_filter(chunk, owned_ids))
+    counts["external_account"] += _delete(ExternalAccount,
+                                          ExternalAccount.user_id == U)
+    counts["draft"] += _delete(Draft, Draft.user_id == U)
+    counts["share_draft"] += _delete(ShareDraft, ShareDraft.user_id == U)
+    counts["feed_pick"] += _delete(FeedPick, FeedPick.user_id == U)
+    counts["reference_action"] += _delete(ReferenceAction,
+                                          ReferenceAction.user_id == U)
+    counts["node_embedding"] += _delete(NodeEmbedding, NodeEmbedding.user_id == U)
+    counts["external_item_embedding"] += _delete(
+        ExternalItemEmbedding, ExternalItemEmbedding.user_id == U)
+    db.session.commit()
+    _beat(heartbeat)
+
+    # 2. Nodes, deepest first. Files first: a crash between the two
+    # leaves rows whose folders the next run finds again.
+    for chunk in _chunks(plan.deleted):
+        counts["files"] += _delete_files(_node_dirs(plan, chunk))
+        _delete_node_rows_dependents(chunk, counts)
+        _clear_references_to(chunk, U, plan.extras, counts)
+        counts["node"] += _delete(Node, Node.id.in_(chunk))
+        db.session.commit()
+        _beat(heartbeat)
+
+    # 3. Tombstones.
+    now = _now()
+    tombstoned = 0
+    for chunk in _chunks(sorted(plan.keep)):
+        counts["files"] += _delete_files(_node_dirs(plan, chunk))
+        _delete_node_rows_dependents(chunk, counts)
+        tombstoned += _tombstone(chunk, now)
+        db.session.commit()
+        _beat(heartbeat)
+    counts["node_tombstoned"] = tombstoned
+    counts["others_replies_kept"] = plan.others_under
+
+    # 4. Saved references.
+    item_ids = [i for (i,) in db.session.query(ExternalItem.id).filter(
+        ExternalItem.user_id == U).order_by(ExternalItem.id)]
+    for chunk in _chunks(item_ids):
+        counts["tts_chunk"] += _delete(TTSChunk, TTSChunk.item_id.in_(chunk))
+        counts["feed_pick"] += _delete(FeedPick,
+                                       FeedPick.external_item_id.in_(chunk))
+        counts["reference_action"] += _delete(
+            ReferenceAction, ReferenceAction.item_id.in_(chunk))
+        counts["external_item_embedding"] += _delete(
+            ExternalItemEmbedding, ExternalItemEmbedding.item_id.in_(chunk))
+        counts["external_item"] += _delete(ExternalItem,
+                                           ExternalItem.id.in_(chunk))
+        db.session.commit()
+        _beat(heartbeat)
+
+    # 5. Profiles and the rest of the user's own tables.
+    profile_ids = [p for (p,) in db.session.query(UserProfile.id).filter(
+        UserProfile.user_id == U)]
+    for chunk in _chunks(profile_ids):
+        counts["tts_chunk"] += _delete(TTSChunk, TTSChunk.profile_id.in_(chunk))
+        UserProfile.query.filter(UserProfile.id.in_(chunk)).update(
+            {UserProfile.parent_profile_id: None}, synchronize_session=False)
+    for model, key in _USER_TABLES:
+        if model is ExternalAccount:
+            continue
+        counts[key] += _delete(model, model.user_id == U)
+    db.session.commit()
+    _beat(heartbeat)
+
+    # 6. Cost rows stay, detached from the person.
+    from backend.utils.system_accounts import get_erased_system_user
+    counts["api_cost_log"] += 0   # reported even when there is none
+    if db.session.query(APICostLog.id).filter(
+            APICostLog.user_id == U).first() is not None:
+        erased = get_erased_system_user()
+        counts["api_cost_log"] += APICostLog.query.filter(
+            APICostLog.user_id == U,
+        ).update({
+            APICostLog.user_id: erased.id,
+            APICostLog.provider_response_id: None,
+            APICostLog.request_ref: None,
+            APICostLog.system_prefix_hash: None,
+        }, synchronize_session=False)
+        db.session.commit()
+
+    # 7. The user's folders and pre-fill dumps.
+    counts["files"] += _delete_files(
+        _user_dirs(U), _x_dump_files(user.prefilled_handle))
+    _beat(heartbeat)
+
+
+def purge_user_content(user_id, *, dry_run=False, heartbeat=None):
+    """Delete all of *user_id*'s data (see the module docstring), or with
+    *dry_run* count it. Returns counts per table. Raises PurgeRefused for
+    an AI or system account. *heartbeat* is called after every commit and
+    may raise PurgeSuperseded to stop."""
+    user = db.session.get(User, user_id)
+    reason = purge_refusal(user)
+    if reason:
+        raise PurgeRefused(reason)
+    if dry_run:
+        plan = plan_nodes(user_id)
+        counts = count_user_data(user_id, plan)
+        counts.update(stop_in_flight(user_id, dry_run=True, plan=plan).counts)
+        return counts
+
+    counts = Counter()
+    for _ in range(PURGE_MAX_ROUNDS):
+        plan = plan_nodes(user_id)
+        _purge_round(user, plan, counts, heartbeat)
+        left = leftovers(count_user_data(user_id))
+        if not left:
+            break
+        logger.warning("user purge of user %s: rows written meanwhile (%s); "
+                       "another round", user_id, sorted(left))
+    else:
+        logger.error("user purge of user %s: rows still left after %d rounds",
+                     user_id, PURGE_MAX_ROUNDS)
+
+    # The account stays; what described the writing does not.
+    user = db.session.get(User, user_id)
+    for attr, value in PIPELINE_FLAG_RESETS.items():
+        setattr(user, attr, value)
+    user.prefilled_handle = None
+    user.description = ""
+    db.session.commit()
+    return dict(counts)
+
+
+# ── Jobs: schedule, cancel, claim, run ──────────────────────────────────
+
+def active_job(user_id):
+    return UserDataPurge.query.filter(
+        UserDataPurge.user_id == user_id,
+        UserDataPurge.status.in_(UserDataPurge.ACTIVE_STATUSES),
+    ).order_by(UserDataPurge.id.desc()).first()
+
+
+def schedule_purge(user, *, requested_by_id, source, at=None):
+    """Create the user's purge job, due at *at* (default: after the grace
+    period). Returns (job, created); an active job is returned as it is.
+    Raises PurgeRefused for an AI or system account."""
+    reason = purge_refusal(user)
+    if reason:
+        raise PurgeRefused(reason)
+    # One active job per user: the user row lock serialises two requests.
+    db.session.query(User).filter(User.id == user.id).with_for_update().one()
+    job = active_job(user.id)
+    if job is not None:
+        db.session.commit()
+        return job, False
+    now = _now()
+    job = UserDataPurge(
+        user_id=user.id, source=source, requested_by_id=requested_by_id,
+        status="scheduled", requested_at=now,
+        scheduled_for=at or now + timedelta(days=PURGE_GRACE_DAYS))
+    db.session.add(job)
+    db.session.commit()
+    return job, True
+
+
+def cancel_purge(user_id, cancelled_by_id):
+    """Cancel the user's purge while it waits. Returns True when a job
+    was cancelled (False: none waiting, or it has started)."""
+    n = UserDataPurge.query.filter(
+        UserDataPurge.user_id == user_id,
+        UserDataPurge.status == "scheduled",
+    ).update({UserDataPurge.status: "cancelled",
+              UserDataPurge.cancelled_at: _now(),
+              UserDataPurge.cancelled_by_id: cancelled_by_id},
+             synchronize_session=False)
+    db.session.commit()
+    return n > 0
+
+
+def _claimable(now):
+    stale = now - PURGE_STALE_AFTER
+    return or_(
+        and_(UserDataPurge.status == "scheduled",
+             UserDataPurge.scheduled_for <= now),
+        and_(UserDataPurge.status == "running",
+             or_(UserDataPurge.heartbeat_at.is_(None),
+                 UserDataPurge.heartbeat_at < stale)),
+    )
+
+
+def claim_job(job_id, token, now=None):
+    """Take the job for the runner *token*, if it is due or its last
+    runner went quiet. Atomic: of two claims, one wins."""
+    now = now or _now()
+    n = UserDataPurge.query.filter(
+        UserDataPurge.id == job_id, _claimable(now),
+    ).update({
+        UserDataPurge.status: "running",
+        UserDataPurge.task_id: token,
+        UserDataPurge.heartbeat_at: now,
+        UserDataPurge.attempts: UserDataPurge.attempts + 1,
+        UserDataPurge.started_at: func.coalesce(UserDataPurge.started_at, now),
+    }, synchronize_session=False)
+    db.session.commit()
+    return n == 1
+
+
+def _fail_job(job, error):
+    job.status = "failed"
+    job.finished_at = _now()
+    job.error = (error or "")[:255]
+    db.session.commit()
+    logger.error("user data purge job %s (user %s) failed: %s",
+                 job.id, job.user_id, job.error)
+
+
+def dispatch_due_jobs(dispatch, now=None):
+    """Beat: claim every due job (end of grace, admin purge, a runner that
+    went quiet) and hand it to *dispatch(job_id, token)*. A job that has
+    used up PURGE_MAX_ATTEMPTS is marked failed instead. Returns the ids
+    dispatched."""
+    now = now or _now()
+    dispatched = []
+    for job in UserDataPurge.query.filter(_claimable(now)).order_by(
+            UserDataPurge.id).all():
+        if job.status == "running" and (job.attempts or 0) >= PURGE_MAX_ATTEMPTS:
+            _fail_job(job, job.error or "runner stopped without finishing")
+            continue
+        token = str(uuid.uuid4())
+        if not claim_job(job.id, token, now):
+            continue
+        try:
+            dispatch(job.id, token)
+            dispatched.append(job.id)
+        except Exception as e:  # noqa: BLE001 - the next beat claims it again
+            logger.warning("user purge job %s: dispatch failed (%s)",
+                           job.id, type(e).__name__)
+    return dispatched
+
+
+def start_job_now(job, dispatch):
+    """Claim and dispatch *job* at once (admin purge). False when another
+    runner holds it."""
+    token = str(uuid.uuid4())
+    if not claim_job(job.id, token):
+        return False
+    dispatch(job.id, token)
+    return True
+
+
+def _heartbeat_for(job_id, token):
+    def beat():
+        n = UserDataPurge.query.filter(
+            UserDataPurge.id == job_id, UserDataPurge.task_id == token,
+            UserDataPurge.status == "running",
+        ).update({UserDataPurge.heartbeat_at: _now()},
+                 synchronize_session=False)
+        db.session.commit()
+        if not n:
+            raise PurgeSuperseded()
+    return beat
+
+
+def run_purge_job(job_id, token):
+    """Run the claimed job. Returns "done", "wait" (call again after
+    PURGE_WAIT_RETRY_SECONDS: the user's tasks are still running),
+    "superseded", "refused" or "error"."""
+    job = db.session.get(UserDataPurge, job_id)
+    if job is None or job.status != "running" or job.task_id != token:
+        return "superseded"
+    user = db.session.get(User, job.user_id)
+    if user is None:
+        job.status = "done"
+        job.finished_at = _now()
+        job.counts = {}
+        job.error = "account no longer exists; nothing to purge"
+        db.session.commit()
+        return "done"
+    reason = purge_refusal(user)
+    if reason:
+        _fail_job(job, f"refused: {reason}")
+        return "refused"
+
+    heartbeat = _heartbeat_for(job_id, token)
+    try:
+        inflight = stop_in_flight(user.id)
+        job = db.session.get(UserDataPurge, job_id)
+        now = _now()
+        if inflight.must_wait:
+            job.waiting_since = job.waiting_since or now
+            if now - job.waiting_since < PURGE_MAX_WAIT:
+                # Ahead of now, so the beat does not take it for stale.
+                job.heartbeat_at = now + timedelta(
+                    seconds=PURGE_WAIT_RETRY_SECONDS)
+                db.session.commit()
+                logger.info("user purge job %s: waiting for %d running "
+                            "task(s)%s", job_id, len(inflight.running),
+                            ", profile batch lock" if inflight.lock_busy else "")
+                return "wait"
+            logger.warning("user purge job %s: tasks still running after "
+                           "%s; purging anyway", job_id, PURGE_MAX_WAIT)
+        heartbeat()
+        counts = purge_user_content(user.id, heartbeat=heartbeat)
+        for key, value in inflight.counts.items():
+            counts[key] = counts.get(key, 0) + value
+        job = db.session.get(UserDataPurge, job_id)
+        job.status = "done"
+        job.finished_at = _now()
+        job.counts = counts
+        job.error = None
+        job.waiting_since = None
+        db.session.commit()
+        logger.info("user data purge job %s (user %s) done", job_id, user.id)
+        return "done"
+    except PurgeSuperseded:
+        db.session.rollback()
+        logger.warning("user purge job %s: claimed by another runner; "
+                       "stopping", job_id)
+        return "superseded"
+    except Exception as e:  # noqa: BLE001 - recorded; the beat retries
+        db.session.rollback()
+        logger.exception("user purge job %s failed", job_id)
+        job = db.session.get(UserDataPurge, job_id)
+        if job is not None and job.task_id == token and job.status == "running":
+            job.error = f"{type(e).__name__}: {e}"[:255]
+            # Stale at once: the next beat claims it (bounded by attempts).
+            job.heartbeat_at = None
+            db.session.commit()
+        return "error"
+
+
+def deletion_status(user_id):
+    """The user's latest purge, for the Account page and the banner."""
+    job = UserDataPurge.query.filter(
+        UserDataPurge.user_id == user_id,
+        UserDataPurge.status != "cancelled",
+    ).order_by(UserDataPurge.id.desc()).first()
+    out = {"status": None, "grace_days": PURGE_GRACE_DAYS,
+           "purge_at": None, "requested_at": None, "finished_at": None,
+           "x_connection_removed": False}
+    if job is None:
+        return out
+    from backend.utils.timefmt import iso_utc
+    out.update({
+        "status": job.status,
+        "source": job.source,
+        "purge_at": iso_utc(job.scheduled_for),
+        "requested_at": iso_utc(job.requested_at),
+        "finished_at": iso_utc(job.finished_at),
+        "x_connection_removed": bool((job.counts or {}).get("external_account")),
+    })
+    return out

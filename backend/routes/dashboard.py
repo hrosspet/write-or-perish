@@ -22,6 +22,7 @@ from backend.routes.terms import CURRENT_TERMS_VERSION
 from backend.utils.reserved_usernames import validate_username
 from backend.utils.spend import user_is_capped
 from backend.utils.llm_nodes import effective_preferred_model, is_active_model
+from backend.utils.user_purge import deletion_status
 
 logger = logging.getLogger(__name__)
 dashboard_bp = Blueprint("dashboard_bp", __name__)
@@ -178,6 +179,9 @@ def get_dashboard():
                 current_app.config.get("SEMANTIC_SEARCH_AGENTIC", True)),
             "external_content_enabled": bool(
                 current_user.external_content_enabled),
+            # "Delete all my writing" (#268): a scheduled deletion shows
+            # its date and a way to cancel on every page.
+            "data_deletion": deletion_status(current_user.id),
         },
         "pinned_nodes": pinned_list,
         "nodes": nodes_list,

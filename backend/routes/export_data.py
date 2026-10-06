@@ -2,7 +2,7 @@ from flask import Blueprint, jsonify, Response, request, current_app
 from flask_login import login_required, current_user
 from backend.models import (
     Node, NodeVersion, UserProfile, UserPrompt, UserTodo,
-    UserArtifact, Thread,
+    UserArtifact,
 )
 from backend.extensions import db
 from backend.utils.tokens import approximate_token_count
@@ -1946,24 +1946,7 @@ def get_profile_progress():
     }), 200
 
 
-# Delete all of the current user's data from our app.
-@export_bp.route("/delete_my_data", methods=["DELETE"])
-@login_required
-def delete_my_data():
-    try:
-        # Delete all node versions and thread names first, then nodes.
-        # (The thread FK cascades on Postgres; explicit so it also holds
-        # where FK enforcement is off, e.g. sqlite tests.)
-        own_node_ids = db.session.query(Node.id).filter_by(user_id=current_user.id)
-        NodeVersion.query.filter(
-            NodeVersion.node_id.in_(own_node_ids)
-        ).delete(synchronize_session=False)
-        Thread.query.filter(
-            Thread.root_node_id.in_(own_node_ids)
-        ).delete(synchronize_session=False)
-        Node.query.filter_by(user_id=current_user.id).delete(synchronize_session=False)
-        db.session.commit()
-    except Exception as e:
-        db.session.rollback()
-        return jsonify({"error": "Error deleting data", "details": str(e)}), 500
-    return jsonify({"message": "All your app data has been deleted."}), 200
+# DELETE /api/delete_my_data was removed (#268): it deleted only the
+# user's own node rows, missed imports, AI replies and every dependent
+# table, and failed on Postgres's foreign keys. "Delete all my writing"
+# is DELETE /api/account/data (backend/routes/account_data.py).
