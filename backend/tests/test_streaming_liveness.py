@@ -584,6 +584,87 @@ class TestFinishedVoiceTurnIsNotTheInputDraft:
         assert kept.get_content() == "words so far"
 
 
+class TestDeadSession:
+    """Peter, 2026-10-06: a Voice recording left on the iPhone before its
+    first chunk stayed in 'recording' with no chunks. Text mode loaded it,
+    autosave wrote into it, and neither Send nor Discard could delete it,
+    so the text came back on every device. Prod had 15 such rows."""
+
+    def test_form_does_not_load_a_dead_session(self, app):
+        client, alice = _setup(app)
+        _make_session(alice, heartbeat_age=STALE, chunk_statuses=())
+
+        assert client.get("/api/drafts/").status_code == 404
+
+    def test_discard_removes_a_dead_session_holding_typed_text(self, app):
+        # The state on prod: an earlier autosave wrote into the row.
+        client, alice = _setup(app)
+        dead = _make_session(alice, heartbeat_age=STALE, chunk_statuses=())
+        _chunk_dir(alice, dead)
+
+        assert client.delete("/api/drafts/").status_code == 200
+        _db.session.expire_all()
+        assert Draft.query.get(dead.id) is None
+        from backend.routes import drafts as drafts_module
+        assert not drafts_module._session_dir(alice.id, dead.session_id).exists()
+
+    def test_typed_then_sent_next_to_a_dead_session(self, app):
+        client, alice = _setup(app)
+        dead = _make_session(alice, heartbeat_age=STALE, chunk_statuses=())
+
+        saved = client.post("/api/drafts/", json={"content": "the entry"})
+        assert saved.get_json()["id"] != dead.id
+        assert client.get("/api/drafts/").get_json()["id"] == saved.get_json()["id"]
+        assert client.delete("/api/drafts/").status_code == 200
+        assert client.get("/api/drafts/").status_code == 404
+        _db.session.expire_all()
+        assert Draft.query.get(dead.id) is None
+
+    def test_a_recording_just_started_elsewhere_is_not_dead(self, app):
+        # Live (stamped at init), no chunk yet: another device recording.
+        client, alice = _setup(app)
+        live = _make_session(alice, heartbeat_age=LIVE, chunk_statuses=())
+        client.post("/api/drafts/", json={"content": "typed"})
+
+        assert client.delete("/api/drafts/").status_code == 200
+        _db.session.expire_all()
+        assert Draft.query.get(live.id) is not None
+
+    def test_a_left_behind_recording_with_audio_is_not_dead(self, app):
+        client, alice = _setup(app)
+        stale = _make_session(alice, heartbeat_age=STALE,
+                              chunk_statuses=("stored",))
+        client.post("/api/drafts/", json={"content": "typed"})
+
+        assert client.delete("/api/drafts/").status_code == 200
+        _db.session.expire_all()
+        assert Draft.query.get(stale.id) is not None
+        ids = [e["session_id"] for e in
+               client.get("/api/drafts/interrupted").get_json()]
+        assert ids == [stale.session_id]
+
+    def test_next_recording_cleans_up_dead_sessions_anywhere(self, app):
+        client, alice = _setup(app)
+        top = _make_session(alice, heartbeat_age=STALE, chunk_statuses=())
+        in_thread = _make_session(alice, heartbeat_age=None, parent_id=42,
+                                  chunk_statuses=())
+        with_audio = _make_session(alice, heartbeat_age=STALE)
+        live = _make_session(alice, heartbeat_age=LIVE, chunk_statuses=())
+        bob = _make_user("bob")
+        _db.session.commit()
+        bobs = _make_session(bob, heartbeat_age=STALE, chunk_statuses=())
+
+        from backend.routes import drafts as drafts_module
+        drafts_module._cleanup_stale_drafts(alice.id)
+
+        _db.session.expire_all()
+        assert Draft.query.get(top.id) is None
+        assert Draft.query.get(in_thread.id) is None
+        assert Draft.query.get(with_audio.id) is not None
+        assert Draft.query.get(live.id) is not None
+        assert Draft.query.get(bobs.id) is not None
+
+
 class TestChunkAfterRelease:
     def test_chunk_in_flight_at_release_does_not_revive_the_session(self, app):
         client, alice = _setup(app)

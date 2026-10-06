@@ -115,6 +115,37 @@ def _no_session_in_progress_clause():
     )
 
 
+def _dead_session_clause():
+    """A recording session nothing can continue or recover: still in
+    'recording', no sign of life within the liveness window (#320), and
+    not one chunk stored. A recording left before its first chunk was
+    uploaded ends this way (the iPhone app, leaving the Voice screen,
+    told the server nothing; the web releases it on leaving). The voice
+    banner skips it (/interrupted lists sessions with chunks only), so
+    shown in the writing form and spared by DELETE it came back after
+    every send and discard, holding whatever autosave had put in it."""
+    has_chunks = db.exists().where(
+        NodeTranscriptChunk.session_id == Draft.session_id)
+    return db.and_(
+        Draft.session_id.isnot(None),
+        Draft.streaming_status.isnot(None),
+        Draft.streaming_status == 'recording',
+        not_live_clause(),
+        ~has_chunks,
+    )
+
+
+def _delete_dead_session(draft):
+    """Delete a dead session's row and its (chunkless) folder on disk."""
+    try:
+        audio_dir = _session_dir(draft.user_id, draft.session_id)
+    except ValueError:
+        audio_dir = None
+    if audio_dir is not None and audio_dir.exists():
+        shutil.rmtree(audio_dir, ignore_errors=True)
+    db.session.delete(draft)
+
+
 def _parent_error(parent_id):
     """An error response when *parent_id* names a node the current user
     may not build on (missing, or not visible to them: 404), else None.
@@ -208,8 +239,9 @@ def get_draft():
 
     # A session another tab is recording right now is not a draft to
     # load here: this view would auto-recover it, which completes it
-    # under the recording tab (#320).
-    query = query.filter(not_live_clause())
+    # under the recording tab (#320). Nor a dead one: it holds no audio,
+    # and nothing the form could do would end it.
+    query = query.filter(not_live_clause(), db.not_(_dead_session_clause()))
 
     draft = query.first()
 
@@ -442,15 +474,19 @@ def delete_draft():
     # Every input draft of the context, not just the newest: after a send
     # or a discard none may come back. Never a proposal draft (deleting the
     # composing draft under a proposal node must not take the pending
-    # proposal with it) nor a session in progress (#320).
-    drafts = _input_drafts(node_id, parent_id).filter(
-        _no_session_in_progress_clause()).all()
+    # proposal with it) nor a session in progress (#320), unless it is
+    # dead: then nothing else would ever end it.
+    drafts = _input_drafts(node_id, parent_id).filter(db.or_(
+        _no_session_in_progress_clause(), _dead_session_clause())).all()
 
     if not drafts:
         return jsonify({"error": "No draft found"}), 404
 
     for draft in drafts:
-        db.session.delete(draft)
+        if draft.streaming_status == 'recording':
+            _delete_dead_session(draft)
+        else:
+            db.session.delete(draft)
     db.session.commit()
 
     return jsonify({"message": "Draft deleted"}), 200
@@ -525,6 +561,12 @@ def _cleanup_stale_drafts(user_id):
             )
             continue
         db.session.delete(draft)
+        deleted += 1
+
+    # Dead sessions too (any context): no audio, nothing to recover.
+    for draft in Draft.query.filter(
+            Draft.user_id == user_id, _dead_session_clause()).all():
+        _delete_dead_session(draft)
         deleted += 1
 
     if deleted:
