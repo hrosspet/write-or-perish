@@ -4,6 +4,13 @@ on:
   push:
     branches:
       - main
+    # The iOS app ships through Xcode/TestFlight and nothing on the VM reads
+    # ios/, so a push that only touches it would just restart Celery (draining
+    # running tasks, #312) for no change. A push mixing iOS and server files
+    # still deploys; the VM picks up skipped iOS commits on the next deploy.
+    paths-ignore:
+      - "ios/**"
+      - ".github/workflows/ios.yml"
   workflow_dispatch:  # Allows manual triggering from GitHub UI
 
 concurrency:

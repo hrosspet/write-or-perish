@@ -18,7 +18,7 @@ The project uses GitHub Actions for CI/CD with direct deployment to production:
    - Frontend: npm lint, jest tests, production build
    - Security: bandit scan, dependency vulnerability check (safety)
 
-2. **Deploy to Production (`deploy.yml`)** - Runs ONLY on pushes to `main`:
+2. **Deploy to Production (`deploy.yml`)** - Runs ONLY on pushes to `main`, except pushes that only change `ios/**` (`paths-ignore`; the iOS app ships via Xcode/TestFlight):
    - Runs backend + frontend tests first, then deploys
    - Builds frontend with production URLs (`https://loore.org`)
    - Deploys to production VM via SSH
