@@ -87,6 +87,7 @@ Users have a `plan` column (string, max 16 chars) on the User model. The plan co
 - **Dedicated login page** - Standalone login page with redirect flow (#53)
 - **User plan tiers** - Standardized plan system (free/alpha/pro) with admin dashboard management, migration scripts, and feature gating via `User.has_voice_mode`
 - **Terms of service acceptance** - Terms acceptance tracking with admin ability to reset on account deactivation
+- **Delete all my writing / admin data purge** (#268, 2026-10-06) - `backend/utils/user_purge.py` deletes all of one user's data in one set-based, chunked, resumable operation (ids and metadata only, nothing decrypted): stops in-flight work first, deletes the user's nodes deepest first (tombstones where another user replied below), every dependent table, profiles, artifacts, drafts, shares, saved references, the X connection and files; keeps cost rows on the `loore-erased` system account without anything that names the person; refuses AI and system accounts. Users ask from the Account page and get a 30-day grace period they can cancel (`/api/account/data`); admins purge at once after a dry run (`/api/admin/users/<id>/purge_data`). The `user_data_purge` table and the `process-user-data-purges` beat entry drive the grace period and resume a purge after a crash
 
 ### UI/UX
 - **Warm literary design system** - Complete UI redesign across all app pages with cohesive dark theme (#56)
@@ -163,7 +164,7 @@ Users have a `plan` column (string, max 16 chars) on the User model. The plan co
 
 **GDPR rights section in terms** - Add explicit mention of data subject rights: access, rectification, erasure, portability, right to object, right to lodge complaint with ÚOOÚ
 
-**Account deletion feature** - Build account deletion, then update terms to describe what's purged, retained, sent to AI providers, and in backups
+**Account deletion feature** - Build account deletion, then update terms to describe what's purged, retained, sent to AI providers, and in backups. 🔧 The data purge underneath is built (#268, "Delete all my writing"); the account layer is #269
 
 **Data export / portability** - Implement GDPR-required data export feature and document it in terms
 
@@ -797,6 +798,7 @@ This roadmap prioritizes **privacy & encryption first** (Phase -1), then **found
 17. ✅ **COMPLETED:** Hierarchical context freshness (#80, #84, #86)
 19. ✅ **COMPLETED:** Proposal tracking with explicit IDs and lifecycle statuses, confirmation nodes
 19b. ✅ **COMPLETED:** Feature 2 Download as quote-as-response (#208) — substrate, nightly X sync, digest, labeled search + read_full, per-user easter-egg activation
+19c. ✅ **COMPLETED:** Delete all my writing / admin data purge (#268) — 30-day grace for the user's request, cost rows kept anonymised; account deletion (#269) is next on top of it
 20. **NOW:** Implement text mode — last major feature before expanding alpha to ~10 users
 21. **NOW:** Stabilize Voice/Todo workflow — open bugs: todo merge hangs (#87), checkbox UX (#93, #94), interactive proposal editing (#89), completed item deletion (#97)
 22. **NOW:** Protected usernames (#91) + Anthropic API spend monitoring (#85)
