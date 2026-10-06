@@ -565,9 +565,14 @@ def stop_in_flight(user_id, *, dry_run=False, plan=None):
             _strip_batch_jobs(model, belongs, True, now, counts, key)
         return InFlight(dict(counts), [], False)
 
+    # The profile task's own guard stays until the purge has run: it is
+    # how the next look finds the task still running (the task clears
+    # it when it ends; the purge clears it at the end).
     user = db.session.get(User, user_id)
     for attr, value in PIPELINE_FLAG_RESETS.items():
-        setattr(user, attr, value)
+        if attr not in ("profile_generation_task_id",
+                        "profile_generation_task_dispatched_at"):
+            setattr(user, attr, value)
     db.session.commit()
 
     try:
@@ -882,6 +887,21 @@ def _purge_round(user, plan, counts, heartbeat):
     _beat(heartbeat)
 
 
+def _drop_public_pages(user):
+    """Drop the cached public pages the user's writing appears on (their
+    profile, feed, permalinks and the threads they replied in). Before
+    the purge, while the slugs still name the pages; after it, for a page
+    rendered meanwhile. A cache failure never stops the purge (the TTL
+    bounds it)."""
+    try:
+        from backend.utils.public_cache import invalidate_for_user
+        invalidate_for_user(user)
+    except Exception as e:  # noqa: BLE001
+        db.session.rollback()
+        logger.warning("user purge of user %s: public page cache not "
+                       "dropped (%s)", user.id, type(e).__name__)
+
+
 def purge_user_content(user_id, *, dry_run=False, heartbeat=None):
     """Delete all of *user_id*'s data (see the module docstring), or with
     *dry_run* count it. Returns counts per table. Raises PurgeRefused for
@@ -897,6 +917,7 @@ def purge_user_content(user_id, *, dry_run=False, heartbeat=None):
         counts.update(stop_in_flight(user_id, dry_run=True, plan=plan).counts)
         return counts
 
+    _drop_public_pages(user)
     counts = Counter()
     for _ in range(PURGE_MAX_ROUNDS):
         plan = plan_nodes(user_id)
@@ -917,6 +938,7 @@ def purge_user_content(user_id, *, dry_run=False, heartbeat=None):
     user.prefilled_handle = None
     user.description = ""
     db.session.commit()
+    _drop_public_pages(user)
     return dict(counts)
 
 
@@ -1126,6 +1148,10 @@ def deletion_status(user_id):
     ).order_by(UserDataPurge.id.desc()).first()
     out = {"status": None, "grace_days": PURGE_GRACE_DAYS,
            "purge_at": None, "requested_at": None, "finished_at": None,
+           # X is connected for bookmarks: the purge removes the stored
+           # connection, and the user can remove Loore's access on X.
+           "x_connected": db.session.query(ExternalAccount.id).filter(
+               ExternalAccount.user_id == user_id).first() is not None,
            "x_connection_removed": False}
     if job is None:
         return out

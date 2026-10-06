@@ -370,8 +370,8 @@ def _bob_snapshot(w):
 
     _db.session.expire_all()
     return {
-        "nodes": rows(Node, Node.id.in_([w.ids[k] for k in
-                                          ("B1", "LB", "B2", "B3", "L3", "B4")])),
+        "nodes": rows(Node, Node.id.in_(
+            [w.ids[k] for k in ("B1", "LB", "B2", "B3", "L3", "B4")])),
         "versions": rows(NodeVersion, NodeVersion.node_id == w.ids["B1"]),
         "thread": rows(Thread, Thread.root_node_id == w.ids["B3"]),
         "embeddings": rows(NodeEmbedding, NodeEmbedding.user_id == b),
@@ -751,6 +751,35 @@ def test_the_purge_waits_for_running_tasks(world, stubs):
     assert _db.session.get(Node, world.ids["A2"]) is None
 
 
+def test_a_running_profile_task_is_still_seen_on_the_next_look(world, stubs):
+    """The profile task's guard is the only record of its id: the first
+    look must not clear it, or the second look would stop waiting."""
+    stubs.running = ["t-profile"]
+    job_id, outcome = _run_job()
+    assert outcome == "wait"
+    assert _db.session.get(User, world.alice.id).profile_generation_task_id == "t-profile"
+    job = _db.session.get(UserDataPurge, job_id)
+    assert up.run_purge_job(job_id, job.task_id) == "wait"
+    stubs.running = []
+    assert up.run_purge_job(job_id, job.task_id) == "done"
+    assert _db.session.get(User, world.alice.id).profile_generation_task_id is None
+
+
+def test_cached_public_pages_are_dropped(world, stubs, monkeypatch):
+    import backend.utils.public_cache as public_cache
+    seen = []
+
+    def record(user, former_handle=None):
+        slug = _db.session.query(Node.public_slug).filter(
+            Node.id == world.ids["A1"]).scalar()
+        seen.append((user.id, slug))
+    monkeypatch.setattr(public_cache, "invalidate_for_user", record)
+    _run_job()
+    # Before the purge, while the permalink's slug still names its page,
+    # and after it.
+    assert seen == [(world.alice.id, "birds"), (world.alice.id, None)]
+
+
 def test_the_purge_waits_for_the_profile_batch_lock(world, stubs):
     stubs.lock_ok = False
     job_id, outcome = _run_job()
@@ -910,8 +939,8 @@ def test_admin_purge_brings_a_scheduled_request_forward(app, world, stubs,
     assert r.status_code == 409
 
 
-def test_admin_cannot_purge_an_ai_or_system_account(app, world, stubs,
-                                                     monkeypatch):
+def test_admin_cannot_purge_an_ai_or_system_account(
+        app, world, stubs, monkeypatch):
     _stub_dispatch(monkeypatch, stubs)
     from backend.utils.system_accounts import get_poll_system_user
     polls = get_poll_system_user()
