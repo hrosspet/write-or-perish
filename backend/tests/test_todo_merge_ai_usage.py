@@ -77,7 +77,12 @@ class _Provider:
     @classmethod
     def get_completion(cls, model_id, messages, api_keys, **kwargs):
         cls.calls.append(messages)
-        return {"content": "- an old task\n- buy milk", "truncated": False,
+        # The merge's edits reply (#234): add the task after the old one.
+        content = json.dumps({"edits": [{
+            "old_text": "- an old task",
+            "new_text": "- an old task\n- buy milk"}],
+            "updated_content": ""})
+        return {"content": content, "truncated": False,
                 "input_tokens": 100, "output_tokens": 10,
                 "total_tokens": 110}
 

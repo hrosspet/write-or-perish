@@ -63,6 +63,7 @@ from backend.utils.ca_feed import (
     refresh_snapshot_for_read, refs_from_render, seen_tweet_ids,
 )
 from backend.utils.tool_meta import update_tool_meta, parse_github_issue
+from backend.utils.text_edits import apply_text_edits
 from backend.utils.privacy import AI_ALLOWED
 from backend.utils.placeholders import (
     CA_TWEETS_PATTERN,
@@ -1710,30 +1711,11 @@ def _resolve_artifact_write(inp, previous):
     if previous is None:
         return None, ("No existing artifact to edit — pass "
                       "updated_content with the full text to create it.")
-    text = previous.get_content() or ""
-    for i, edit in enumerate(edits):
-        if not isinstance(edit, dict):
-            return None, f"edits[{i}] is not an object."
-        old = edit.get("old_text") or ""
-        new = edit.get("new_text")
-        if not old:
-            return None, (f"edits[{i}].old_text is empty — every edit "
-                          "needs the exact text to replace.")
-        if new is None:
-            return None, f"edits[{i}].new_text is missing."
-        count = text.count(old)
-        if count == 0:
-            return None, (
-                f"edits[{i}].old_text was not found in the current "
-                f"version. Match the current text exactly (whitespace "
-                f"included), or send updated_content with the full new "
-                f"text instead.")
-        if count > 1:
-            return None, (
-                f"edits[{i}].old_text matches {count} places — include "
-                f"more surrounding context so it's unique.")
-        text = text.replace(old, new, 1)
-    return text, None
+    # Shared with the todo merge (utils/todo_merge_edits.py).
+    return apply_text_edits(
+        previous.get_content() or "", edits,
+        not_found_hint=(", or send updated_content with the full new "
+                        "text instead"))
 
 
 def _redact_tool_input(inp):

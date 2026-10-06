@@ -56,6 +56,16 @@ PROPOSAL = (
     "Starting fresh — this is the only item on the list."
 )
 MERGED = "## Today\n- [ ] Renew the passport (steps: [node 123](/node/123))"
+
+
+def full_write(text):
+    """The merge reply that writes the whole list (#234: allowed only on a
+    list without tasks)."""
+    return json.dumps({"edits": [], "updated_content": text})
+
+
+# The model's reply for an empty list: the whole new list.
+MERGED_REPLY = full_write(MERGED)
 # The Todo page's Create template (TodoPage.js handleCreate), saved as is.
 TEMPLATE = "## Today\n\n- [ ] \n\n## Upcoming\n\n- [ ] \n\n## Completed recently\n"
 RULE = ("Add the items under New Tasks as `- [ ]` and the items under "
@@ -86,7 +96,7 @@ class _FakeProvider:
     """Stands in for LLMProvider.get_completion: records each call and
     answers with `answer`."""
     calls = []
-    answer = MERGED
+    answer = MERGED_REPLY
 
     @classmethod
     def get_completion(cls, model_id, messages, api_keys, **kwargs):
@@ -106,7 +116,7 @@ def merge(app, monkeypatch):
                 "OPENAI_API_KEY", "OPENAI_API_KEY_CHAT"):
         monkeypatch.delenv(key, raising=False)
     _FakeProvider.calls = []
-    _FakeProvider.answer = MERGED
+    _FakeProvider.answer = MERGED_REPLY
     # On the class itself, so every reference to LLMProvider gets the fake
     # (both names, in case another test re-imported backend.llm_providers).
     for provider in {lp.LLMProvider, vtm.LLMProvider}:
@@ -200,9 +210,13 @@ def test_list_without_tasks_is_sent_with_the_rule(merge, existing):
     user = _user()
     _todo(user.id, existing)
     proposal = _proposal(user.id)
+    # A full write that keeps the list's headings and prose.
+    _FakeProvider.answer = full_write(existing.replace(
+        "## Today", MERGED, 1))
 
     _run(merge, user, proposal)
 
+    assert len(_FakeProvider.calls) == 1
     _, assistant, user_msg = _FakeProvider.calls[0]["messages"]
     assert assistant["content"][0]["text"] == PROPOSAL
     assert user_msg["content"][0]["text"] == (
@@ -269,7 +283,10 @@ def test_non_empty_list_message_is_unchanged(merge, old_task):
     user = _user()
     _todo(user.id, "## Today\n" + old_task)
     proposal = _proposal(user.id, "### New Tasks\n- buy milk")
-    _FakeProvider.answer = "## Today\n" + old_task + "\n- [ ] buy milk"
+    # A list with tasks gets edits (#234).
+    _FakeProvider.answer = json.dumps({"edits": [
+        {"old_text": old_task, "new_text": old_task + "\n- [ ] buy milk"}],
+        "updated_content": ""})
 
     _run(merge, user, proposal)
 
@@ -288,7 +305,8 @@ def test_non_empty_list_message_is_unchanged(merge, old_task):
         },
     ]
     saved = _newest_todo(user.id)
-    assert saved.get_content() == _FakeProvider.answer
+    assert saved.get_content() == (
+        "## Today\n" + old_task + "\n- [ ] buy milk")
     assert _propose_todo_entry(proposal.id)["todo_id"] == saved.id
 
 
@@ -308,7 +326,8 @@ def test_merge_prompt_keeps_its_rules_and_has_the_410_rules():
         "- Keep ALL existing items not mentioned in your update — do not "
         "remove anything",
         "- Preserve the original structure, sections, and formatting",
-        "- Return ONLY the complete updated todo list — no commentary",
+        # #234: the reply is edits, not the list.
+        "- Return ONLY the JSON object — no commentary",
     ):
         assert rule in prompt
     # #410: checkbox state, wording and links, the named section.
@@ -325,7 +344,7 @@ def test_merge_prompt_keeps_its_rules_and_has_the_410_rules():
 # ── cut-off output (#432) ────────────────────────────────────────────────
 
 def _merge_with(merge, monkeypatch, user, proposal, truncated,
-                content=MERGED, confirm=None):
+                content=MERGED_REPLY, confirm=None):
     def get_completion(*a, **k):
         return {"content": content, "truncated": truncated,
                 "input_tokens": 100, "output_tokens": 10,
