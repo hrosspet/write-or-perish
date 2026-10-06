@@ -867,3 +867,138 @@ def test_never_overwrites_an_existing_file(history, tmp_path):
         cmp.run("peter", provider=FakeProvider(_luna_answers()),
                 out_path=str(out))
     assert out.read_text() == "keep me"
+
+
+# ── --current-prompt ─────────────────────────────────────────────────────
+
+NEW_PROMPT = "TODAY'S MERGE RULES"
+
+
+@pytest.fixture
+def new_prompt_file(monkeypatch):
+    """The prompt file has changed since the past merges: the pinned hash
+    no longer matches, as after #417 deploys."""
+    import backend.utils.prompts as prompts
+    monkeypatch.setattr(prompts, "load_default_prompt",
+                        lambda key: NEW_PROMPT)
+    monkeypatch.setattr(cmp, "PROMPT_FILE_SHA256", "0" * 64)
+
+
+def test_current_prompt_flag_parses():
+    assert cmp.parse_args(["--user", "x"]).current_prompt is False
+    assert cmp.parse_args(
+        ["--user", "x", "--current-prompt"]).current_prompt is True
+
+
+def test_hash_check_is_skipped_only_with_current_prompt(
+        history, new_prompt_file, tmp_path):
+    provider = FakeProvider(_luna_answers())
+    with pytest.raises(SystemExit, match="orient_apply_todo.txt changed"):
+        cmp.run("peter", provider=provider,
+                out_path=str(tmp_path / "a.jsonl"))
+    with pytest.raises(SystemExit, match="orient_apply_todo.txt changed"):
+        cmp.run("peter", provider=provider, dry_run=True)
+    assert provider.calls == []
+    cmp.run("peter", provider=provider, current_prompt=True,
+            out_path=str(tmp_path / "b.jsonl"))
+    assert len(provider.calls) == 3
+
+
+def test_current_prompt_dry_run_works_on_a_changed_file(
+        history, new_prompt_file, capsys):
+    result = cmp.run("peter", provider=FakeProvider(), dry_run=True,
+                     current_prompt=True)
+    assert result["dry_run"] is True
+    assert "current file" in capsys.readouterr().out
+
+
+def test_every_call_uses_the_current_prompt_and_builder(
+        history, new_prompt_file, tmp_path):
+    provider = FakeProvider(_luna_answers())
+    out = tmp_path / "out.jsonl"
+    cmp.run("peter", models=["gpt-6-luna"], rerun_original=True,
+            provider=provider, current_prompt=True, out_path=str(out))
+    # Same inputs as a normal run, only the prompt is today's; candidate
+    # and original re-run alike.
+    expected = [cmp.build_merge_messages(NEW_PROMPT, P3, V4),
+                cmp.build_merge_messages(NEW_PROMPT, P2, M1),
+                cmp.build_merge_messages(NEW_PROMPT, P1, V1)]
+    assert [m for model, m, _ in provider.calls
+            if model == "gpt-6-luna"] == expected
+    assert [m for model, m, _ in provider.calls
+            if model == "claude-opus-4.6"] == expected
+    assert len(provider.calls) == 6
+    merges = [r for r in _jsonl(out) if r["type"] == "merge"]
+    # The reference and the inputs are the past merge's own.
+    assert merges[0]["stored"]["text"] == M3
+    assert merges[0]["inputs"] == {"proposal_text": P3,
+                                   "previous_todo_text": V4}
+    assert [r["role"] for r in merges[0]["runs"]] == [
+        "candidate", "original_rerun"]
+
+
+def test_current_prompt_is_recorded_in_the_run_and_each_merge(
+        history, new_prompt_file, tmp_path, capsys):
+    import hashlib
+    sha = hashlib.sha256(NEW_PROMPT.encode()).hexdigest()
+    out = tmp_path / "out.jsonl"
+    cmp.run("peter", provider=FakeProvider(_luna_answers()),
+            current_prompt=True, out_path=str(out))
+    records = _jsonl(out)
+    run_rec = records[0]
+    assert run_rec["type"] == "run"
+    assert run_rec["current_prompt"] is True
+    assert run_rec["prompt_file_sha256"] == sha
+    merges = [r for r in records if r["type"] == "merge"]
+    assert merges and all(m["current_prompt"] is True
+                          and m["prompt"] == "current_file"
+                          and m["prompt_sha256"] == sha
+                          and m["stored_prompt"] == "file_default"
+                          for m in merges)
+    shown = capsys.readouterr().out
+    assert (f"prompt: current file {sha[:8]}, not the one these merges "
+            "used") in shown
+
+
+def test_a_normal_run_records_that_it_did_not_use_the_current_prompt(
+        history, tmp_path):
+    out = tmp_path / "out.jsonl"
+    cmp.run("peter", provider=FakeProvider(_luna_answers()),
+            out_path=str(out))
+    records = _jsonl(out)
+    assert records[0]["current_prompt"] is False
+    assert records[0]["prompt_file_sha256"] == cmp.PROMPT_FILE_SHA256
+    assert all(m["current_prompt"] is False and m["prompt"] == "file_default"
+               for m in records if m["type"] == "merge")
+
+
+def test_current_prompt_replaces_a_custom_prompt_and_does_not_read_it(
+        history, new_prompt_file, decrypted, tmp_path):
+    row = UserPrompt(user_id=history["peter"].id,
+                     prompt_key="orient_apply_todo", title="Apply to Todo",
+                     generated_by="user", created_at=T0 - timedelta(days=1))
+    row.set_content("MY OWN MERGE RULES")
+    _add(row)
+    provider = FakeProvider(_luna_answers())
+    out = tmp_path / "out.jsonl"
+    cmp.run("peter", provider=provider, current_prompt=True,
+            out_path=str(out))
+    assert {m[0]["content"][0]["text"] for _, m, _ in provider.calls} == {
+        NEW_PROMPT}
+    assert not [s for s in decrypted if s[0] == "UserPrompt"]
+    merges = [r for r in _jsonl(out) if r["type"] == "merge"]
+    assert {m["prompt"] for m in merges} == {"current_file"}
+    assert {m["stored_prompt"] for m in merges} == {f"user_prompt:{row.id}"}
+
+
+def test_current_prompt_keeps_the_safety_properties(
+        history, new_prompt_file, tmp_path):
+    before = _counts()
+    out = tmp_path / "out.jsonl"
+    cmp.run("peter", provider=FakeProvider(_luna_answers()),
+            current_prompt=True, out_path=str(out))
+    assert _counts() == before
+    assert stat.S_IMODE(os.stat(out).st_mode) == 0o600
+    with pytest.raises(SystemExit):
+        cmp.run("eve", provider=FakeProvider(), current_prompt=True,
+                out_path=str(tmp_path / "eve.jsonl"))
