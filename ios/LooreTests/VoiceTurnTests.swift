@@ -20,9 +20,13 @@ final class FakeVoiceBackend: VoiceBackend {
     var timingPosts: [(Int, [String: Double])] = []
     var legacyResult: VoiceSessionResponse?
     var legacyError: Error?
+    /// Seconds `startSession` takes (the answer arrives even if the turn is gone).
+    var startDelay: Double = 0
 
     func startSession(parentId: Int?, aiUsage: String) async throws -> StreamingInitResponse {
         log.append("init parent=\(parentId.map(String.init) ?? "nil") ai=\(aiUsage)")
+        // Throws when cancelled, as URLSession does.
+        if startDelay > 0 { try await Task.sleep(nanoseconds: UInt64(startDelay * 1_000_000_000)) }
         return try startResult.get()
     }
 
@@ -72,7 +76,11 @@ final class FakeVoiceBackend: VoiceBackend {
         }
     }
 
-    func discard(sessionId: String) async { log.append("discard") }
+    var discarded: [String] = []
+    func discard(sessionId: String) async {
+        log.append("discard")
+        discarded.append(sessionId)
+    }
     func timingClock() async throws -> Double { Date().timeIntervalSince1970 }
     func postTiming(nodeId: Int, marks: [String: Double], offsetMs: Double, rttMs: Double) async {
         timingPosts.append((nodeId, marks))
@@ -115,8 +123,12 @@ final class FakeRecorder: VoiceRecording {
         if stopDelay > 0 { try? await Task.sleep(nanoseconds: UInt64(stopDelay * 1_000_000_000)) }
         return outcome
     }
-    func cancel() { calls.append("cancel") }
+    func cancel() {
+        calls.append("cancel")
+        hasProducedChunks = false  // the real recorder drops its writer
+    }
     func forget(sessionId: String) { calls.append("forget") }
+    var hasProducedChunks = true
 }
 
 @MainActor
@@ -746,6 +758,52 @@ final class VoiceTurnTests: XCTestCase {
         XCTAssertEqual(notices.toasts, [warning])
         XCTAssertFalse(backend.log.contains("legacy"))
         XCTAssertNil(turn.aiBlock)
+    }
+
+    // MARK: Leaving the screen (Peter, 2026-10-06: a session left before its
+    // first chunk stayed in 'recording' and came back in Text mode)
+
+    func testLeavingBeforeTheFirstChunkDiscardsTheSession() async throws {
+        recorder.hasProducedChunks = false
+        turn.start()
+        await wait("recording") { turn.state == .recording }
+        turn.tearDown()
+        await wait("discard") { backend.log.contains("discard") }
+        XCTAssertTrue(recorder.calls.contains("forget"))
+    }
+
+    func testLeavingWithAudioKeepsTheSessionForTheBanner() async throws {
+        turn.start()
+        await wait("recording") { turn.state == .recording }
+        turn.tearDown()
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertFalse(backend.log.contains("discard"))
+    }
+
+    func testLeavingWhileTheSessionIsCreatedDiscardsIt() async throws {
+        backend.startDelay = 0.2
+        turn.start()
+        await wait("starting") { turn.state == .starting }
+        turn.tearDown()
+        await wait("discard") { backend.log.contains("discard") }
+        XCTAssertFalse(recorder.calls.contains { $0.hasPrefix("start ") })
+    }
+
+    // Review of #428: in `.starting`, the last turn's session id is still set.
+    func testLeavingWhileTheNextRecordingStartsKeepsTheLastTurnsSession() async throws {
+        recorder.outcome = .init(produced: 4, stored: 3, failed: [2], fatalMessage: nil)
+        await recordAndStop()
+        await wait("turn 1 ended") { turn.state == .idle || turn.state == .done }
+        recorder.hasProducedChunks = false  // the real recorder after stop
+        backend.startResult = .success(StreamingInitResponse(sessionId: "sid-2", draftId: 8, sseURL: nil))
+        backend.startDelay = 0.2
+        turn.start()
+        await wait("starting") { turn.state == .starting }
+        turn.tearDown()
+        await wait("sid-2 discarded") { backend.discarded == ["sid-2"] }
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(backend.discarded, ["sid-2"], "the kept session sid-1 must survive")
+        XCTAssertFalse(recorder.calls.contains("forget"))
     }
 
     func testMicrophoneFailureDiscardsTheDraft() async throws {
