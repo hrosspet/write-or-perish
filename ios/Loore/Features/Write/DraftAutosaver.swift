@@ -135,6 +135,9 @@ final class DraftAutosaver {
     func delete() async {
         pending = nil
         debounceTask?.cancel()
+        // A save already on its way (the debounce fired while Send waited for
+        // the server) could land after the DELETE and bring the draft back.
+        while let running = inFlight { await running.value }
         _ = try? await api.delete(APIPath.drafts, query: query, as: EmptyResponse.self)
         draft = nil
         lastSaved = nil

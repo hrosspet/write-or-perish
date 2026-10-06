@@ -1,5 +1,6 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import { useStreamingTranscription } from './useStreamingTranscription';
+import { useLongRecordingWarning } from './useLongRecordingWarning';
 import { useAsyncTaskPolling } from './useAsyncTaskPolling';
 import { useLlmTaskWarnings } from './useLlmTaskWarnings';
 import { useTTSStreamSSE } from './useSSE';
@@ -9,6 +10,7 @@ import { useOnlineStatus } from './useOnlineStatus';
 import { useToast } from '../contexts/ToastContext';
 import api from '../api';
 import * as voiceTiming from '../utils/voiceTiming';
+import { isAiUsageRefusedError, aiUsageRefusalScope } from '../utils/aiUsage';
 
 // iOS devices can't autoplay audio regardless of warmup, and playing silent audio
 // while the mic stream is active crashes Bluetooth headphones on multi-device setups.
@@ -64,7 +66,7 @@ function chapterTitleFromContent(content) {
  * @param {number|null} options.initialLlmNodeId - Resume in processing phase, polling this LLM node
  * @param {number|null} options.initialParentId - Resume in ready phase with thread parent pre-set
  */
-export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete, initialLlmNodeId = null, initialParentId = null, model = null, aiUsage = 'none' }) {
+export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete, initialLlmNodeId = null, initialParentId = null, model = null, aiUsage = 'none', onAiUsageRefused = null }) {
   const audio = useAudio();
   const isOnline = useOnlineStatus();
   const [phase, setPhase] = useState(initialLlmNodeId ? 'processing' : 'ready');
@@ -216,6 +218,13 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
   useEffect(() => {
     onLLMCompleteRef.current = onLLMComplete;
   }, [onLLMComplete]);
+  // The server refused the turn because AI usage keeps the account or the
+  // thread away from AI ('account' | 'thread'): the page explains instead
+  // of offering the record button again.
+  const onAiUsageRefusedRef = useRef(onAiUsageRefused);
+  useEffect(() => {
+    onAiUsageRefusedRef.current = onAiUsageRefused;
+  }, [onAiUsageRefused]);
 
   // Streaming transcription
   // Derive label from apiEndpoint: '/voice' → 'Voice'
@@ -241,6 +250,17 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
         stopSilentAudio();
         setIsStopping(false);
         setPhase('ready');
+        return;
+      }
+      // Refused because AI usage is 'none' on the account or the thread:
+      // no recording started. The page shows why.
+      if (err?.aiUsageRefused) {
+        stopSilentAudio();
+        setIsStopping(false);
+        setPhase('ready');
+        if (onAiUsageRefusedRef.current) {
+          onAiUsageRefusedRef.current(err.aiUsageScope || 'account');
+        }
         return;
       }
 
@@ -323,6 +343,12 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
         lastUserNodeIdRef.current = res.data.user_node_id;
       } catch (err) {
         console.error(`${apiEndpoint} API error:`, err);
+        // AI usage keeps the thread away from AI: the page explains.
+        if (isAiUsageRefusedError(err) && onAiUsageRefusedRef.current) {
+          setPhase('ready');
+          onAiUsageRefusedRef.current(aiUsageRefusalScope(err));
+          return;
+        }
         // Server returned a structured validation error (400) — surface
         // the message as a toast so the user knows what to fix.
         const apiErr = err?.response?.data?.error;
@@ -336,6 +362,19 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
       }
     },
   });
+
+  // #320 / #243: the same 59-minute chime + toast text mode has. Voice
+  // mode had no warning at all, so a long voice turn walked into the
+  // ~60-minute cliff silently. Armed in each record-press gesture below.
+  const { armAlertContext } = useLongRecordingWarning(
+    streaming.duration || 0, phase === 'recording');
+  // Called in the record-press gesture, after startSilentAudio(): on iOS
+  // the chime reuses the silent-audio context that gesture just started
+  // instead of opening a second one next to the live mic; elsewhere the
+  // hook creates its own.
+  const armLongRecordingAlert = useCallback(() => {
+    armAlertContext(silentAudioRef.current?.ctx || null);
+  }, [armAlertContext]);
 
   // Poll LLM completion (don't gate on phase — the 15s safety-net timeout
   // changes phase to 'playback' which would kill polling before slow LLM
@@ -802,8 +841,9 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
     setPhase('recording');
     setHasError(false);
     startSilentAudio(); // User gesture context — activates iOS lock screen controls
+    armLongRecordingAlert();
     streaming.startStreaming(threadParentIdRef.current);
-  }, [streaming, startSilentAudio]);
+  }, [streaming, startSilentAudio, armLongRecordingAlert]);
 
   const handleStop = useCallback(() => {
     voiceTiming.startTurn();
@@ -855,8 +895,9 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
     // Go straight to recording — skip the ready phase
     setPhase('recording');
     startSilentAudio(); // User gesture context
+    armLongRecordingAlert();
     streaming.startStreaming(threadParentIdRef.current);
-  }, [audio, ttsSSE, streaming, startSilentAudio]);
+  }, [audio, ttsSSE, streaming, startSilentAudio, armLongRecordingAlert]);
 
   const setThreadParentId = useCallback((id) => {
     threadParentIdRef.current = id;
@@ -915,8 +956,9 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
     setPhase('recording');
     setHasError(false);
     startSilentAudio();
+    armLongRecordingAlert();
     streaming.resumeStreaming(sessionId, draftId, chunkCount, mimeType);
-  }, [streaming, startSilentAudio]);
+  }, [streaming, startSilentAudio, armLongRecordingAlert]);
 
   const handlePauseRecording = useCallback(() => {
     streaming.pauseRecording();

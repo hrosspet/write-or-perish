@@ -151,6 +151,73 @@ def test_apply_intentions_item_saves_at_batch_price(app, wired):  # noqa: F811
     assert UserArtifact.query.filter_by(user_id=u.id, kind="intentions").count() == 1
 
 
+def test_empty_truncated_output_saves_no_version(app, wired, monkeypatch):  # noqa: F811
+    """#368: output cut off before any text — batch or sync — saves no
+    artifact version (the previous one stays current), raises, and keeps
+    the cost row."""
+    from backend.llm_providers import EmptyTruncatedOutputError
+    import backend.llm_providers as lp
+    u = _make_user("ivan")
+    _db.session.commit()
+    item = {"custom_id": f"int-u{u.id}", "user_id": u.id, "kind": "intentions",
+            "budget": 1_000_000, "resubmitted": False}
+    with pytest.raises(EmptyTruncatedOutputError):
+        it.apply_intentions_item(u, item, {
+            "content": "", "truncated": True,
+            "input_tokens": 100_000, "output_tokens": 32_000})
+    monkeypatch.setattr(lp.LLMProvider, "get_completion", staticmethod(
+        lambda model_id, messages, keys, **kw: {
+            "content": " ", "truncated": True, "total_tokens": 132_000,
+            "input_tokens": 100_000, "output_tokens": 32_000}))
+    with pytest.raises(EmptyTruncatedOutputError):
+        it.run_infer_intentions_sync_impl(u.id)
+    assert UserArtifact.query.filter_by(user_id=u.id, kind="intentions").count() == 0
+    assert APICostLog.query.filter_by(
+        user_id=u.id, request_type="intentions_infer").count() == 2
+    # Both rows are marked refused: the admin column reads them as "failed"
+    # (batch and sync alike), not as the older version "complete".
+    from backend.utils.refusal_backoff import REFUSED_REF
+    assert APICostLog.query.filter_by(
+        user_id=u.id, request_type="intentions_infer",
+        request_ref=REFUSED_REF).count() == 2
+
+
+def test_partial_cut_off_output_still_saves(app, wired):  # noqa: F811
+    """A cut-off run that has some text counts as success (#368)."""
+    u = _make_user("partial_int")
+    _db.session.commit()
+    item = {"custom_id": f"int-u{u.id}", "user_id": u.id, "kind": "intentions",
+            "budget": 1_000_000, "resubmitted": False}
+    saved = it.apply_intentions_item(u, item, {
+        "content": "# Endorsed\n- half", "truncated": True,
+        "input_tokens": 100_000, "output_tokens": 32_000})
+    assert saved["version"] == 1
+    assert APICostLog.query.filter_by(user_id=u.id).one().request_ref is None
+
+
+def test_poller_marks_a_refused_item_gave_up(app, wired, monkeypatch):  # noqa: F811
+    """Review finding 4: a batch result refused as empty-and-cut-off marks
+    the item gave_up (admin column "failed"), like a twice-failed item."""
+    import backend.tasks.profile_batch as pb
+    u = _make_user("refused_item")
+    _db.session.commit()
+    item = {"custom_id": f"int-u{u.id}", "user_id": u.id, "kind": "intentions",
+            "budget": 1_000_000, "resubmitted": False}
+    job = _job_for(item)
+    monkeypatch.setattr(pb, "batch_check_and_collect", lambda ids, keys: (
+        {item["custom_id"]: {"content": "", "truncated": True,
+                             "input_tokens": 100_000, "output_tokens": 32_000}},
+        {}, {}))
+    monkeypatch.setattr(pb, "get_api_keys_for_usage", lambda cfg, usage: {})
+    monkeypatch.setattr(pb, "apply_batch_key_override", lambda keys, cfg: keys)
+    pb._poll_profile_batches()
+    _db.session.expire_all()
+    row = ProfileBatchJob.query.get(job.id)
+    assert row.status == "collected"
+    assert row.items[0]["gave_up"] is True
+    assert UserArtifact.query.filter_by(user_id=u.id, kind="intentions").count() == 0
+
+
 def _job_for(item):
     from datetime import datetime
     j = ProfileBatchJob(provider_key="anthropic", batch_id="b-old",

@@ -261,10 +261,14 @@ final class NodeLinksTests: XCTestCase {
             let one = try JSONDecoder().decode(NodeTitlesResponse.Title.self, from: Data(#"{"id":1,"title":"One"}"#.utf8))
             return [1: one, 2: nil]
         })
-        async let a = store.lookup(1)
-        async let b = store.lookup(2)
-        async let c = store.lookup(1)
-        let (ra, rb, rc) = await (a, b, c)
+        // Three main-actor tasks, queued before the flush the first one
+        // schedules (as views asking in one render pass). `async let`
+        // children hop to the main actor at their own pace, and on a slow
+        // CI runner the flush ran between them.
+        let a = Task { await store.lookup(1) }
+        let b = Task { await store.lookup(2) }
+        let c = Task { await store.lookup(1) }
+        let (ra, rb, rc) = await (a.value, b.value, c.value)
         XCTAssertEqual(ra, .title("One"))
         XCTAssertEqual(rb, .inaccessible)
         XCTAssertEqual(rc, .title("One"))

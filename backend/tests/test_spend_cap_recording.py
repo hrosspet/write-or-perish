@@ -438,6 +438,7 @@ class TestCappedRecordingIsTranscribed:
             user.spend_blocked_month = None
         draft = _recording(user, "sess-4", [], st._test_root)
         draft.set_content("x" * 600)
+        draft.ai_usage = "chat"
         _db.session.commit()
         st.flask_app.config["SUPPORTED_MODELS"] = {
             "claude-test": {"provider": "anthropic"}}

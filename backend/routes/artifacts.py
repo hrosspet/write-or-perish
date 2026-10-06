@@ -2,7 +2,8 @@
 
 Artifacts are generic named, versioned documents (memory, scratchpad,
 custom kinds). Same append-only versioning contract as AI preferences:
-PUT inserts a new row; the latest row per (user, kind) is current.
+PUT inserts a new row; the latest row per (user, kind) is current. PATCH
+(checklist clicks) may edit the latest row in place — see patch_artifact.
 """
 import re
 
@@ -10,7 +11,7 @@ from flask import Blueprint, jsonify, request
 from flask_login import login_required, current_user
 
 from backend.extensions import db
-from backend.models import UserArtifact
+from backend.models import NodeContextArtifact, UserArtifact
 from backend.utils.timefmt import iso_utc
 
 artifacts_bp = Blueprint("artifacts", __name__)
@@ -65,7 +66,8 @@ def list_artifacts():
             "description": _render_desc(
                 UserArtifact.DEFAULT_DESCRIPTIONS.get(kind)),
             "generated_by": None, "created_at": None,
-            "privacy_level": "private", "ai_usage": "chat",
+            "privacy_level": "private",
+            "ai_usage": current_user.default_ai_usage,
         })
     for kind in sorted(latest):
         items.append(_serialize(latest[kind]))
@@ -84,7 +86,8 @@ def get_artifact(kind):
                 "description": _render_desc(
                     UserArtifact.DEFAULT_DESCRIPTIONS.get(kind)),
                 "content": "", "generated_by": None, "created_at": None,
-                "privacy_level": "private", "ai_usage": "chat",
+                "privacy_level": "private",
+                "ai_usage": current_user.default_ai_usage,
             }}), 200
         return jsonify({"error": "Artifact not found"}), 404
 
@@ -151,9 +154,60 @@ def update_artifact(kind):
         description=(description[:255] if description else None),
         generated_by=data.get("generated_by", "user"),
         tokens_used=0,
+        # The user's global default, like the todo list and the profile
+        # (#326): the row's ai_usage is what the training key reads.
+        ai_usage=current_user.default_ai_usage,
     )
     artifact.set_content(content)
     db.session.add(artifact)
+    db.session.commit()
+
+    version_count = UserArtifact.query.filter_by(
+        user_id=current_user.id, kind=kind).count()
+    return jsonify(
+        {"artifact": _serialize(artifact, version_number=version_count)}
+    ), 200
+
+
+@artifacts_bp.route("/<kind>", methods=["PATCH"])
+@login_required
+def patch_artifact(kind):
+    """Save a checklist toggle or a "+" insert from the artifacts page.
+
+    Like the todo list's PATCH, it edits the latest version in place, so
+    ticking boxes doesn't add a version per click. The append-only
+    contract still holds where it matters: when the latest version came
+    from the AI (or a revert), or a session has pinned it (#191: a pin
+    means "this exact version was in that session's context"), the
+    change becomes a new user version instead, and later clicks edit
+    that one.
+    """
+    data = request.get_json() or {}
+    content = data.get("content")
+    if content is None:
+        return jsonify({"error": "Content is required"}), 400
+
+    latest = UserArtifact.latest_for(current_user.id, kind)
+    if latest is None:
+        return jsonify({"error": "Artifact not found"}), 404
+
+    pinned = NodeContextArtifact.query.filter_by(
+        artifact_type="user_artifact", artifact_id=latest.id,
+    ).first() is not None
+    if latest.generated_by in ("user", "manual") and not pinned:
+        artifact = latest
+    else:
+        artifact = UserArtifact(
+            user_id=current_user.id,
+            kind=kind,
+            title=latest.title,
+            description=latest.description,
+            generated_by="user",
+            tokens_used=0,
+            ai_usage=current_user.default_ai_usage,
+        )
+        db.session.add(artifact)
+    artifact.set_content(content)
     db.session.commit()
 
     version_count = UserArtifact.query.filter_by(

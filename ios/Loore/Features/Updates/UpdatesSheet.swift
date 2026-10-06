@@ -196,7 +196,7 @@ private struct NotificationItemView: View {
         app.api.fireAndForget(APIRequest(.post, APIPath.notification(notification.id, action: "skip")))
         if link.lowercased().hasPrefix("http://") || link.lowercased().hasPrefix("https://"),
            case .external(let url) = AppRoute.parse(link, environment: app.environment) {
-            UIApplication.shared.open(url)
+            Router.openOutsideApp(url)
         } else {
             onCloseAndOpen(link)
         }
@@ -234,9 +234,10 @@ private struct ChangelogItemView: View {
     }
 
     /// Following a body link is not acknowledging: record a skip, close, navigate.
+    /// Outside links open in Safari or Mail; other schemes are ignored (#442).
     private func followLink(_ link: String) {
         if case .external(let url) = AppRoute.parse(link, environment: app.environment) {
-            UIApplication.shared.open(url)
+            Router.openOutsideApp(url)
             return
         }
         app.api.fireAndForget(APIRequest(.post, APIPath.changelog(section.id, action: "skip")))

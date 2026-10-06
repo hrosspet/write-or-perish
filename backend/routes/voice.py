@@ -6,9 +6,11 @@ from backend.models import Node
 from backend.extensions import db
 from backend.utils.prompts import get_user_prompt_record
 from backend.utils.llm_nodes import (
-    create_llm_placeholder, pick_model_for_generation, reply_ai_usage,
+    ai_usage_refused_response, create_llm_placeholder,
+    pick_model_for_generation, reply_ai_usage, voice_turn_refusal,
 )
 from backend.utils.placeholders import UserExportValidationError
+from backend.utils.audio_storage import is_storage_id
 from backend.utils.context_artifacts import attach_context_artifacts
 from backend.utils import voice_timing
 from backend.utils.session_helpers import (
@@ -28,12 +30,18 @@ PROMPT_KEY = 'voice'
 @voice_bp.route("/from-node/<int:node_id>", methods=["POST"])
 @login_required
 def create_voice_from_node(node_id):
-    """Start or resume a voice session from an existing node's thread."""
+    """Start or resume a voice session from an existing node's thread.
+    A thread that keeps AI out gets 403 ``code: ai_usage_none`` and
+    nothing is created: the clients then open the Voice screen on it,
+    which explains instead of recording."""
     node = Node.query.get(node_id)
     if not node:
         return jsonify({"error": "Node not found"}), 404
     if node.human_owner_id != current_user.id:
         return jsonify({"error": "Unauthorized"}), 403
+    refused = voice_turn_refusal(current_user, node)
+    if refused is not None:
+        return ai_usage_refused_response(refused)
 
     data = request.get_json() or {}
     model_id = data.get("model")
@@ -138,6 +146,8 @@ def create_voice_session():
     session_id = data.get("session_id")
     if not content or not content.strip():
         return jsonify({"error": "Content is required"}), 400
+    if session_id and not is_storage_id(session_id):
+        return jsonify({"error": "Invalid session_id"}), 400
 
     parent_node = None
     if parent_id:
@@ -160,6 +170,15 @@ def create_voice_session():
 
     if not parent_id:
         ai_usage = data.get("ai_usage") or current_user.default_ai_usage
+
+    # Every turn here gets a reply: refused before anything is written
+    # (or any audio moved) where AI may not read.
+    refused = voice_turn_refusal(
+        current_user, parent_node, None if parent_node else ai_usage)
+    if refused is not None:
+        return ai_usage_refused_response(refused)
+
+    if not parent_id:
         prompt_record = get_user_prompt_record(current_user.id, PROMPT_KEY)
         system_node = Node(
             user_id=current_user.id,
@@ -191,6 +210,7 @@ def create_voice_session():
     db.session.flush()
 
     if session_id:
+        # Moves the user's own draft session only (see the helper).
         from backend.utils.audio_storage import (
             attach_streaming_audio_to_node,
         )
@@ -218,6 +238,34 @@ def create_voice_session():
         "llm_node_id": llm_node.id,
         "task_id": task_id,
     }), 202
+
+
+@voice_bp.route("/availability", methods=["GET"])
+@login_required
+def voice_availability():
+    """Whether the Voice screen may record: ``{"allowed": true}``, or
+    ``{"allowed": false, "code": "ai_usage_none", "scope", "error"}``,
+    which the screen shows in place of the record button. The rule is
+    the one streaming init and finalize apply (voice_turn_refusal).
+    ``?parent=<node id>`` names the thread Voice continues; without it,
+    the account's Default AI usage decides. A node the user cannot see
+    answers 404, like one that does not exist."""
+    from backend.utils.privacy import can_user_see_node_or_tombstone
+    parent = None
+    raw = request.args.get("parent")
+    if raw not in (None, ""):
+        try:
+            parent = Node.query.get(int(raw))
+        except (TypeError, ValueError):
+            return jsonify({"error": "Invalid parent"}), 400
+        if parent is None or not can_user_see_node_or_tombstone(
+                parent, current_user.id):
+            return jsonify({"error": "Node not found"}), 404
+    refused = voice_turn_refusal(current_user, parent)
+    if refused is None:
+        return jsonify({"allowed": True})
+    return jsonify({"allowed": False, "code": refused.code,
+                    "scope": refused.scope, "error": refused.message})
 
 
 # ── Where a voice turn's wait goes (#371 step 0) ─────────────────────────

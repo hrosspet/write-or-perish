@@ -26,8 +26,11 @@ const COMBINED_PATTERN = /(\{quote_ext:\d+\}|\{quote:\d+\}|\{user_(?:profile|tod
  *   onQuoteClick: Callback when a quote is clicked (receives quote ID)
  *   nodeId: the node the content belongs to; external-reference bubbles
  *     log what the reader does with them against it (#352)
+ *   showRecommendationFeedback: the node is LLM-authored, so its
+ *     external-reference quotes are recommendations and get the good /
+ *     bad verdict; a user's own quotes get only the read toggle (#363)
  */
-const QuotedContent = ({ content, quotes, externalQuotes, contextArtifacts, onQuoteClick, onCheckboxToggle, onAddTask, onExternalReadChange, onExternalFeedbackChange, nodeId }) => {
+const QuotedContent = ({ content, quotes, externalQuotes, contextArtifacts, onQuoteClick, onCheckboxToggle, onAddTask, onExternalReadChange, onExternalFeedbackChange, nodeId, showRecommendationFeedback = false }) => {
   if (!content) {
     return null;
   }
@@ -130,6 +133,7 @@ const QuotedContent = ({ content, quotes, externalQuotes, contextArtifacts, onQu
                 nodeId={nodeId}
                 onReadChange={onExternalReadChange}
                 onFeedbackChange={onExternalFeedbackChange}
+                showRecommendationFeedback={showRecommendationFeedback}
               />
             </div>
           );

@@ -411,6 +411,36 @@ def test_clip_session_creates_then_dedupes(app, client):
     assert listed["items"][0]["title"] == "A post"
 
 
+def test_clip_overlapping_presses_answer_as_a_reclip(app, client, monkeypatch):
+    # Two presses of the clip key: the other press saves the page after
+    # this request's lookup found nothing, so this request's insert hits
+    # the unique key. It must answer as a re-clip, not a 500.
+    url = "https://example.com/paper.pdf"
+    real_set_content = ExternalItem.set_content
+    other = {}
+
+    def set_content_after_the_other_press(self, text):
+        if self.id is None and not other:
+            winner = ExternalItem(
+                user_id=self.user_id, source=self.source,
+                external_id=self.external_id, url=url)
+            real_set_content(winner, text)
+            _db.session.add(winner)
+            _db.session.commit()
+            other["id"] = winner.id
+        real_set_content(self, text)
+
+    monkeypatch.setattr(ExternalItem, "set_content",
+                        set_content_after_the_other_press)
+    res = client.post("/api/external/clip", json={
+        "url": url, "title": "A paper", "content": "PDF: [A paper](x)"})
+    assert res.status_code == 200
+    body = res.get_json()
+    assert body["created"] is False and body["id"] == other["id"]
+    with app.app_context():
+        assert ExternalItem.query.filter_by(source="web_clip").count() == 1
+
+
 def test_clip_upgrades_stored_text_when_longer(app, client):
     short = "What happens if Claude thinks you are Amanda?\n\n(See https://t.co/x"
     long = short + "\n\nI couldn't jailbreak with it, but: would this get me " \

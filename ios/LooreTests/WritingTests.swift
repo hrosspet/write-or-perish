@@ -314,6 +314,33 @@ final class DraftAutosaverTests: StubbedAppTestCase {
         XCTAssertEqual(postedContents, ["first", "first and more"])
         XCTAssertFalse(drafts.hasPendingChanges)
     }
+
+    /// A send deletes the draft while an autosave may still be on its way: the
+    /// DELETE goes out only after that save is answered, or the save would
+    /// bring the sent text back as a draft.
+    func testDeletingWaitsForASaveAlreadyOnItsWay() async throws {
+        final class Clock: @unchecked Sendable { var postStarted: Date?; var deleteStarted: Date? }
+        let clock = Clock()
+        StubURLProtocol.install { request in
+            if request.httpMethod == "DELETE" {
+                clock.deleteStarted = Date()
+                return .json(200, #"{"message":"Draft deleted"}"#)
+            }
+            clock.postStarted = Date()
+            return StubResponse(status: 200, headers: ["Content-Type": "application/json"],
+                                chunks: [Data(#"{"id":1,"content":"sent"}"#.utf8)], chunkDelay: 0.3)
+        }
+        let drafts = DraftAutosaver(api: app.api, nodeId: nil, parentId: nil, debounceDelay: 5, autoSaveInterval: 60)
+        drafts.save("sent")
+        let save = Task { await drafts.flush() }
+        await Task.yield()
+        await drafts.delete()
+        await save.value
+        let posted = try XCTUnwrap(clock.postStarted)
+        let deleted = try XCTUnwrap(clock.deleteStarted)
+        XCTAssertGreaterThanOrEqual(deleted.timeIntervalSince(posted), 0.25)
+        XCTAssertFalse(drafts.hasPendingChanges)
+    }
 }
 
 /// Reply rules of the thread screen (map D §4.5 "After success", §5.5–5.8).

@@ -16,7 +16,9 @@ from sqlalchemy.sql import ClauseElement
 
 from backend.extensions import db
 from backend.models import Node
-from backend.utils.privacy import accessible_nodes_filter_ignoring_deleted
+from backend.utils.privacy import (
+    accessible_nodes_filter, accessible_nodes_filter_ignoring_deleted,
+)
 
 # An *upward* chain longer than this is treated as a cycle and the walk
 # stops (a root is then never found for that start id). The FK tree has
@@ -141,6 +143,23 @@ def alive_child_counts(parent_ids):
     return dict(
         db.session.query(Node.parent_id, func.count(Node.id))
         .filter(Node.parent_id.in_(ids), Node.deleted_at.is_(None))
+        .group_by(Node.parent_id).all()
+    )
+
+
+def visible_child_counts(parent_ids, viewer_id):
+    """{parent_id: number of direct children *viewer_id* can access} for
+    the given ids, in one grouped COUNT (no row loads, no decryption).
+    A child counts when it is alive and passes `accessible_nodes_filter`
+    (the query form of `can_user_access_node`), so another user's private
+    reply is not counted. Ids with no such child are absent."""
+    ids = list({int(i) for i in parent_ids})
+    if not ids:
+        return {}
+    return dict(
+        db.session.query(Node.parent_id, func.count(Node.id))
+        .filter(Node.parent_id.in_(ids),
+                accessible_nodes_filter(Node, viewer_id))
         .group_by(Node.parent_id).all()
     )
 

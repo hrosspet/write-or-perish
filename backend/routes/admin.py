@@ -99,14 +99,53 @@ def _profile_status_map():
     return out
 
 
+def _profile_backoff_map():
+    """{user_id: {state, refusals, until}} for users whose profile job is
+    held by the refusal backoff (#368, utils/refusal_backoff.py): "waiting"
+    after one cut-off output in a row (until = when the next try is
+    allowed), "stopped" after two. Users not held are left out. Two
+    queries: the refused profile cost rows (rare) and each of their
+    users' newest saved version."""
+    from backend.models import UserProfile
+    from backend.utils import refusal_backoff as rb
+    refused = db.session.query(APICostLog.user_id, APICostLog.created_at).filter(
+        APICostLog.request_type.in_(rb.PROFILE_REQUEST_TYPES),
+        APICostLog.request_ref == rb.REFUSED_REF).all()
+    if not refused:
+        return {}
+    uids = {uid for uid, _ in refused}
+    last_saved = dict(db.session.query(
+        UserProfile.user_id, func.max(UserProfile.created_at)).filter(
+        UserProfile.user_id.in_(uids)).group_by(UserProfile.user_id).all())
+    streaks = {}
+    for uid, at in refused:
+        since = last_saved.get(uid)
+        if since is None or at > since:
+            streaks.setdefault(uid, []).append(at)
+    now = datetime.utcnow()
+    out = {}
+    for uid, times in streaks.items():
+        n = len(times)
+        if n >= rb.STOP_AFTER:
+            out[uid] = {"state": "stopped", "refusals": n, "until": None}
+            continue
+        until = max(times) + rb.RETRY_WAIT
+        if now < until:
+            out[uid] = {"state": "waiting", "refusals": n,
+                        "until": iso_utc(until)}
+    return out
+
+
 def _intentions_status_map():
     """{user_id: {state, versions, last_created_at}} for the Users-tab
     Profile column: "generating" while a kind="intentions" batch item is
     pending (persisted ProfileBatchJob — survives restarts); "failed" when
-    the latest run gave up (overflow twice / batch error) and no artifact
-    version postdates it; else "complete" when at least one intentions
-    artifact version exists."""
+    the latest run gave up (overflow twice / batch error) or its output was
+    refused (cut off before any text, batch or sync — its cost row is
+    marked refused, #368) and no artifact version postdates it; else
+    "complete" when at least one intentions artifact version exists."""
     from backend.models import ProfileBatchJob, UserArtifact
+    from backend.utils.refusal_backoff import REFUSED_REF
     pending, gave_up_at = {}, {}
     for job in ProfileBatchJob.query.order_by(ProfileBatchJob.submitted_at).all():
         for item in job.items:
@@ -119,6 +158,13 @@ def _intentions_status_map():
                     "resubmitted": bool(item.get("resubmitted"))}
             elif item.get("gave_up"):
                 gave_up_at[item["user_id"]] = job.submitted_at
+    for uid, when in db.session.query(
+            APICostLog.user_id, func.max(APICostLog.created_at)).filter(
+            APICostLog.request_type == "intentions_infer",
+            APICostLog.request_ref == REFUSED_REF).group_by(
+            APICostLog.user_id).all():
+        if uid not in gave_up_at or gave_up_at[uid] < when:
+            gave_up_at[uid] = when
     rows = db.session.query(
         UserArtifact.user_id, func.count(UserArtifact.id),
         func.max(UserArtifact.created_at),
@@ -153,6 +199,7 @@ def list_users():
     users = User.query.order_by(User.created_at.desc()).all()
     profile_status = _profile_status_map()
     intentions_status = _intentions_status_map()
+    profile_backoff = _profile_backoff_map()
 
     # Aggregate total (all-time) spending per user in a single query
     spending_rows = db.session.query(
@@ -232,6 +279,10 @@ def list_users():
             "prefill_consent_at": iso_utc(user.prefill_consent_at),
             "spam": bool(user.spam),
             "intentions": intentions_status.get(user.id),
+            # Held by the refusal backoff after cut-off outputs (#368):
+            # {state: "waiting"|"stopped", refusals, until} or null. The
+            # Build profile button asks before overriding it.
+            "profile_backoff": profile_backoff.get(user.id),
             "profile": profile_status.get(user.id) or {
                 "versions": 0,
                 "last_generation_type": None,
@@ -304,7 +355,13 @@ def build_profile(user_id):
     Sets the full-regen flag (which _should_seed honours unconditionally
     and which makes the first chunk build at any size), pins the user to
     the batch path, and seeds immediately. Idempotent while a job is in
-    flight."""
+    flight.
+
+    The refusal backoff (#368) still holds the seed — after a cut-off
+    output the build waits, after two it is stopped — unless the JSON body
+    has ``"force": true``, which the admin sends after confirming the
+    dialog the Users tab shows for a held user. A saved version then ends
+    the stop."""
     user = User.query.get_or_404(user_id)
     # Same refusal as pre-fill: this button usually follows one (#346).
     # Checked here only: the seeder it dispatches also serves the user's
@@ -314,12 +371,17 @@ def build_profile(user_id):
         return refusal
     if user.profile_batch_pending:
         return jsonify({"message": "A batch step is already in flight.", "queued": False}), 200
+    force = bool((request.get_json(silent=True) or {}).get("force"))
     user.profile_needs_full_regen = True
     user.profile_force_batch = True
     db.session.commit()
     from backend.tasks.profile_batch import seed_profile_batch_for_user
-    seed_profile_batch_for_user.delay(user.id)
-    return jsonify({"message": "Batch profile build queued.", "queued": True}), 202
+    if force:
+        seed_profile_batch_for_user.delay(user.id, ignore_backoff=True)
+    else:
+        seed_profile_batch_for_user.delay(user.id)
+    return jsonify({"message": "Batch profile build queued.", "queued": True,
+                    "force": force}), 202
 
 
 @admin_bp.route("/users/<int:user_id>/infer_intentions", methods=["POST"])

@@ -1066,7 +1066,7 @@ def test_immediate_seed_defers_when_lock_held(app, monkeypatch):
 
     monkeypatch.setattr(pb, "batch_pipeline_lock", lambda: Held())
     seeded = []
-    monkeypatch.setattr(pb, "_seed_profile_batches", lambda users=None: seeded.append([x.id for x in users]) or 1)
+    monkeypatch.setattr(pb, "_seed_profile_batches", lambda users=None, ignore_backoff=False: seeded.append([x.id for x in users]) or 1)
     assert pb._seed_profile_batch_for_user_impl(u.id) is None
     assert seeded == []
     monkeypatch.setattr(pb, "batch_pipeline_lock", lambda: Free())
@@ -1444,3 +1444,203 @@ def test_integration_leaves_out_none_versions(app, monkeypatch):
     tip.ai_usage = "none"
     db.session.commit()
     assert pb._exports.build_integration_messages(u.id, tip.id) == (None, None)
+
+
+# ── #368: an empty result cut off at the output limit ────────────────────
+
+def test_poll_empty_truncated_chunk_saves_nothing_and_counts_attempt(
+        app, monkeypatch):
+    """A chunk cut off before any text must not become the chain tip (the
+    base the next chunk builds on). Nothing is saved, no next step is
+    submitted, the attempt counts as failed, the cost row is kept."""
+    u = _user()
+    prev = _prev_profile(u, datetime(2026, 5, 1))
+    job, item = _chunk_job(u, prev)
+    monkeypatch.setattr(pb, "batch_check_and_collect", lambda bids, keys: (
+        {item["custom_id"]: {"content": "", "truncated": True,
+                             "input_tokens": 2000, "output_tokens": 32000}},
+        {}, {}))
+    submit = MagicMock(return_value={})
+    monkeypatch.setattr(pb, "batch_submit", submit)
+
+    pb._poll_profile_batches()
+
+    assert UserProfile.query.filter_by(user_id=u.id).all() == [prev]
+    assert pb._exports.profile_update_base(u.id).id == prev.id
+    u2 = User.query.get(u.id)
+    assert u2.profile_batch_attempts == 1
+    assert u2.profile_batch_pending is False
+    submit.assert_not_called()
+    assert ProfileBatchJob.query.get(job.id).status == "collected"
+    log = APICostLog.query.filter_by(user_id=u.id).one()
+    assert log.request_type == "profile_batch"
+    assert log.output_tokens == 32000
+
+
+def test_poll_empty_truncated_integration_saves_nothing(app, monkeypatch):
+    u = _user()
+    tip = _prev_profile(u, datetime(2026, 6, 1))
+    job, item = _integration_job(u, tip)
+    monkeypatch.setattr(pb, "batch_check_and_collect", lambda bids, keys: (
+        {item["custom_id"]: {"content": "  \n", "truncated": True,
+                             "input_tokens": 100, "output_tokens": 32000}},
+        {}, {}))
+    monkeypatch.setattr(pb, "batch_submit", MagicMock(return_value={}))
+    import backend.utils.notifications as notif
+    notify = MagicMock()
+    monkeypatch.setattr(notif, "notify_profile_ready", notify)
+
+    pb._poll_profile_batches()
+
+    assert UserProfile.query.filter_by(
+        user_id=u.id, generation_type="integration").count() == 0
+    assert User.query.get(u.id).profile_batch_attempts == 1
+    notify.assert_not_called()
+    assert APICostLog.query.filter_by(user_id=u.id).count() == 1
+
+
+def test_apply_result_refuses_partial_truncated_chunk(app, monkeypatch):
+    """A cut-off chunk WITH text is refused too: a profile stopped at the
+    output limit is incomplete, and it would become the next base."""
+    from backend.llm_providers import EmptyTruncatedOutputError
+    from backend.utils.refusal_backoff import REFUSED_REF
+    u = _user()
+    db.session.commit()
+    item = {"custom_id": "x", "user_id": u.id, "kind": "chunk",
+            "prev_profile_id": None, "generation_type": "iterative",
+            "prev_cumulative": 0, "origin_stats": None,
+            "source_data_cutoff": "2026-06-01T00:00:00",
+            "model_id": "test-model", "chunk_units": 1000}
+    result = {"content": "PARTIAL PROFILE", "truncated": True,
+              "input_tokens": 3000, "output_tokens": 32000}
+    with pytest.raises(EmptyTruncatedOutputError):
+        pb._apply_result(u, item, result,
+                         datetime.utcnow() - timedelta(minutes=1))
+    db.session.rollback()   # only what was committed counts
+    assert UserProfile.query.filter_by(user_id=u.id).count() == 0
+    log = APICostLog.query.filter_by(user_id=u.id).one()
+    assert log.request_ref == REFUSED_REF
+
+
+def _refusal(user, ago, request_type="profile_batch"):
+    from backend.utils.refusal_backoff import REFUSED_REF
+    db.session.add(APICostLog(
+        user_id=user.id, model_id="test-model", request_type=request_type,
+        request_ref=REFUSED_REF, input_tokens=1, output_tokens=1,
+        cost_microdollars=0, created_at=datetime.utcnow() - ago))
+    db.session.commit()
+
+
+def test_should_seed_backs_off_after_a_refusal_even_with_regen_flag(app):
+    """#368: a refused chunk leaves every gate open (here the regen flag
+    of a from-scratch build). The backoff holds the seeder for 1 h after
+    the first refusal, then lets it through."""
+    u = _user(profile_needs_full_regen=True)
+    db.session.commit()
+    assert pb._should_seed(u) is True
+    _refusal(u, timedelta(minutes=30))
+    assert pb._should_seed(u) is False
+    # The same refusal, older than the 1 h wait: seeding resumes.
+    APICostLog.query.filter_by(user_id=u.id).update(
+        {"created_at": datetime.utcnow() - timedelta(hours=1, minutes=1)})
+    db.session.commit()
+    assert pb._should_seed(u) is True
+
+
+def test_pinned_account_stops_after_two_refusals(app, monkeypatch):
+    """A force-batch account is never stopped by MAX_BATCH_ATTEMPTS; the
+    refusal backoff stops it: after the second refusal in a row the
+    seeder never seeds it again, however long ago that was. An import's
+    seed (ignore_backoff) still runs it."""
+    u = _user(profile_force_batch=True, profile_needs_full_regen=True,
+              profile_batch_attempts=pb.MAX_BATCH_ATTEMPTS + 5)
+    app.config["PROFILE_USE_BATCH"] = True
+    db.session.commit()
+    _remaining(monkeypatch, 90000)
+    monkeypatch.setattr(pb._exports, "build_user_export_content",
+                        MagicMock(return_value=_chunk("DATA")))
+    monkeypatch.setattr(pb._exports, "_load_prompt",
+                        lambda *a, **k: "G {user_export}")
+    submitted = []
+    monkeypatch.setattr(pb, "batch_submit", lambda reqs, keys, kind: (
+        submitted.append(reqs) or {k: f"b-{k}" for k in reqs}))
+    for days in (30, 29):
+        _refusal(u, timedelta(days=days))
+    assert pb._seed_profile_batches(users=[u]) == 0
+    assert submitted == []
+    # The import hand-off skips the stop.
+    assert pb._seed_profile_batches(users=[u], ignore_backoff=True) == 1
+
+
+def test_saved_version_ends_the_refusal_streak(app):
+    """Only refusals newer than the newest saved version count."""
+    u = _user(profile_needs_full_regen=True)
+    db.session.commit()
+    for minutes in (50, 40, 30):
+        _refusal(u, timedelta(minutes=minutes))
+    assert pb._should_seed(u) is False
+    _prev_profile(u, datetime(2026, 6, 1))   # created now, after them
+    db.session.commit()
+    assert pb._should_seed(u) is True
+
+
+def test_should_seed_ignore_backoff_only_skips_the_backoff(app):
+    """ignore_backoff (import hand-off, admin force) skips the wait and the
+    stop, not the other gates: an account with nothing to build stays
+    unseeded."""
+    u = _user()
+    db.session.commit()
+    _refusal(u, timedelta(minutes=30))
+    _refusal(u, timedelta(minutes=20))
+    assert pb._should_seed(u) is False
+    assert pb._should_seed(u, ignore_backoff=True) is False   # no data
+    u.profile_needs_full_regen = True
+    db.session.commit()
+    assert pb._should_seed(u) is False
+    assert pb._should_seed(u, ignore_backoff=True) is True
+
+
+def test_seeder_builds_the_integration_alone_after_a_refused_one(
+        app, monkeypatch):
+    """#368: the run's integration was refused, so the chain tip is a chunk
+    with no integration on top. After the 1 h wait the seeder submits the
+    integration alone — not a chunk over the organic growth since the
+    render — and after a second refusal it stops."""
+    u = _user()
+    app.config["PROFILE_USE_BATCH"] = True
+    db.session.commit()
+    root = UserProfile(user_id=u.id, generated_by="test-model", tokens_used=0,
+                       generation_type="iterative", source_tokens_used=200000,
+                       source_data_cutoff=datetime(2026, 1, 1),
+                       created_at=datetime.utcnow() - timedelta(days=1))
+    root.set_content("ROOT")
+    db.session.add(root)
+    db.session.commit()
+    tip = UserProfile(user_id=u.id, generated_by="test-model", tokens_used=0,
+                      generation_type="iterative", source_tokens_used=400000,
+                      source_data_cutoff=datetime(2026, 6, 1),
+                      parent_profile_id=root.id,
+                      created_at=datetime.utcnow() - timedelta(hours=3))
+    tip.set_content("TIP")
+    db.session.add(tip)
+    db.session.commit()
+    # Organic growth after the tip's cutoff exists; it must not be chunked.
+    _remaining(monkeypatch, 5000)
+    submitted = []
+    monkeypatch.setattr(pb, "batch_submit", lambda reqs, keys, kind: (
+        submitted.append(reqs) or {k: f"b-{k}" for k in reqs}))
+
+    _refusal(u, timedelta(minutes=30))
+    assert pb._seed_profile_batches(users=[u]) == 0
+
+    APICostLog.query.filter_by(user_id=u.id).update(
+        {"created_at": datetime.utcnow() - timedelta(hours=2)})
+    db.session.commit()
+    assert pb._seed_profile_batches(users=[u]) == 1
+    (reqs,) = submitted
+    (req,) = next(iter(reqs.values()))
+    assert req["custom_id"] == f"profile_{u.id}_{tip.id}_integration"
+
+    u.profile_batch_pending = False
+    _refusal(u, timedelta(minutes=1))
+    assert pb._should_seed(u) is False

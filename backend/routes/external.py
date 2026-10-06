@@ -21,6 +21,7 @@ from flask import (
     Blueprint, current_app, g, jsonify, redirect, request, session,
 )
 from flask_login import current_user, login_required
+from sqlalchemy.exc import IntegrityError
 
 from backend.extensions import db
 from backend.models import (
@@ -702,9 +703,9 @@ def clip():
 
     Body: {url, content, title?, author?, posted_at?, author_protected?}.
     The URL decides the source (see backend.utils.web_clip). Re-clipping a known URL is
-    a 200 so the extension can be pressed twice safely: a no-op when the
-    stored text is at least as long, otherwise the stored text is
-    replaced. The X bookmark sync stores the API's truncated `text` for
+    a 200 so the extension can be pressed twice safely, also when the
+    two presses overlap: a no-op when the stored text is at least as
+    long, otherwise the stored text is replaced. The X bookmark sync stores the API's truncated `text` for
     long posts; the extension reads the full rendered post, and the
     reference should hold the fuller of the two.
     """
@@ -731,9 +732,8 @@ def clip():
 
     user = g.api_user
     source, external_id, canon = classify_clip(url)
-    existing = ExternalItem.query.filter_by(
-        user_id=user.id, source=source, external_id=external_id).first()
-    if existing is not None:
+
+    def reclip(existing):
         updated = _upgrade_clip(existing, content, title, author, posted_at)
         locked = author_protected and existing.public_source is not False
         if locked:
@@ -747,6 +747,14 @@ def clip():
             "source": source, "title": existing.title,
             "truncated": truncated if updated else False,
         }), 200
+
+    def lookup():
+        return ExternalItem.query.filter_by(
+            user_id=user.id, source=source, external_id=external_id).first()
+
+    existing = lookup()
+    if existing is not None:
+        return reclip(existing)
 
     if source in TWEET_SOURCES:
         # A tweet a Read picked becomes the saved reference in place, so
@@ -777,7 +785,17 @@ def clip():
     )
     item.set_content(content)
     db.session.add(item)
-    db.session.commit()
+    try:
+        db.session.commit()
+    except IntegrityError:
+        # A second press of the clip key raced this request past the
+        # lookup above and saved the page first: answer as a re-clip
+        # instead of a 500 for a page that is in fact saved.
+        db.session.rollback()
+        existing = lookup()
+        if existing is None:
+            raise
+        return reclip(existing)
     return jsonify({
         "created": True, "id": item.id, "source": source,
         "title": title, "truncated": truncated,

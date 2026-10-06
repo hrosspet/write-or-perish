@@ -1,3 +1,4 @@
+import html
 import unicodedata
 from datetime import datetime
 
@@ -19,17 +20,40 @@ def _strip_diacritics(text):
     return ''.join(c for c in nfkd if unicodedata.category(c) != 'Mn')
 
 
+# Search results carry `snippet` and `preview` as HTML fragments: every
+# character of the stored text is escaped, and the only markup is the
+# <mark>…</mark> that _snippet adds around matches AFTER escaping. Both
+# clients (web SearchModal, iOS SearchView) parse these two fields as
+# escaped text with <mark> runs, and a web bundle from before #445 still
+# open in a tab renders them as HTML. Stored text includes what other
+# people wrote — bookmarked tweets, Community Archive tweets, clipped
+# pages — so unescaped text here is script on loore.org. Other
+# endpoints' `preview` (e.g. /search/neighbors) stays plain text.
+PREVIEW_CHARS = 200
+
+
+def _preview(content):
+    """The opening of `content` as an escaped HTML fragment."""
+    return (html.escape(content[:PREVIEW_CHARS])
+            + ("..." if len(content) > PREVIEW_CHARS else ""))
+
+
 def _snippet(text, keyword, context_chars=80):
-    """Return a snippet around the first keyword match with <mark> highlighting.
+    """Return an escaped snippet around the first keyword match, with <mark>
+    around each match.
 
     Matches are found diacritics-insensitively but the original text is
-    preserved in the output, with matching spans wrapped in <mark> tags.
+    preserved in the output. Each slice of it is escaped first and the
+    <mark> tags go around the escaped matches, so the result is safe to
+    render as HTML whatever the stored text contains.
     """
     stripped = _strip_diacritics(text).lower()
     kw_stripped = _strip_diacritics(keyword).lower()
-    idx = stripped.find(kw_stripped)
+    # A keyword of nothing but combining marks folds to "": it matches
+    # everywhere and would never advance the highlight loop below.
+    idx = stripped.find(kw_stripped) if kw_stripped else -1
     if idx == -1:
-        return text[:200] + ("..." if len(text) > 200 else "")
+        return _preview(text)
 
     # idx/len refer to positions in the stripped string, which is
     # char-for-char the same length as the original (NFKD + remove Mn
@@ -50,11 +74,12 @@ def _snippet(text, keyword, context_chars=80):
     while i < len(fragment):
         match_start = fragment_stripped.find(kw_stripped, i)
         if match_start == -1:
-            highlighted.append(fragment[i:])
+            highlighted.append(html.escape(fragment[i:]))
             break
-        highlighted.append(fragment[i:match_start])
+        highlighted.append(html.escape(fragment[i:match_start]))
         match_end = match_start + len(kw_stripped)
-        highlighted.append(f"<mark>{fragment[match_start:match_end]}</mark>")
+        highlighted.append(
+            f"<mark>{html.escape(fragment[match_start:match_end])}</mark>")
         i = match_end
 
     return prefix + ''.join(highlighted) + suffix
@@ -94,7 +119,7 @@ def _external_result(item, content, score, snippet=None):
         "author_handle": item.author_handle,
         "title": item.title,
         "external_url": item.url,
-        "preview": content[:200] + ("..." if len(content) > 200 else ""),
+        "preview": _preview(content),
         "snippet": snippet,
         "created_at": iso_utc(item.posted_at or item.fetched_at),
         "score": score,
@@ -214,7 +239,7 @@ def search():
             content = node.get_content()
             results.append({
                 "id": node.id,
-                "preview": content[:200] + ("..." if len(content) > 200 else ""),
+                "preview": _preview(content),
                 "snippet": None,
                 "node_type": node.node_type,
                 "created_at": iso_utc(node.created_at),
@@ -250,7 +275,7 @@ def search():
     for node, content in page_matches:
         results.append({
             "id": node.id,
-            "preview": content[:200] + ("..." if len(content) > 200 else ""),
+            "preview": _preview(content),
             "snippet": _snippet(content, q),
             "node_type": node.node_type,
             "created_at": iso_utc(node.created_at),
@@ -391,7 +416,7 @@ def semantic_search():
         content = node.get_content() or ""
         results.append({
             "id": node.id,
-            "preview": content[:200] + ("..." if len(content) > 200 else ""),
+            "preview": _preview(content),
             "snippet": None,
             "node_type": node.node_type,
             "created_at": iso_utc(node.created_at),

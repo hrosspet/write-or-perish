@@ -446,3 +446,67 @@ def test_collector_keeps_a_young_unreadable_batch_pending(app, monkeypatch):
     assert _digest._collect_digest_batches() == {"collected": 0,
                                                  "abandoned": 0}
     assert ExternalDigestBatchJob.query.get(job.id).status == "pending"
+
+
+def test_a_rebuild_stamps_the_owners_default_not_the_last_version(
+        app, monkeypatch):
+    """Every artifact writer stamps the owner's default (#326). The
+    digest used to copy the previous version's ai_usage, so a digest
+    first written under a 'chat' default kept 'chat' after the owner
+    moved to 'train'."""
+    user = User.query.first()
+    _mk_item(user.id, "a", fetched_at=datetime.utcnow() - timedelta(hours=2))
+    old = _mk_digest(user.id,
+                     created_at=datetime.utcnow() - timedelta(hours=3))
+    assert old.ai_usage == "chat"
+    user.default_ai_usage = "train"
+    _db.session.commit()
+    _stub_llm(monkeypatch)
+
+    assert _digest.rebuild_external_digest(
+        _FakeSelf(), user.id)["status"] == "ok"
+    assert UserArtifact.latest_for(
+        user.id, _digest.DIGEST_KIND).ai_usage == "train"
+
+
+# ── #368: an empty output saves nothing but its billed call is logged ───
+
+def test_direct_rebuild_logs_the_cost_of_an_empty_output(app, monkeypatch):
+    from backend.utils.refusal_backoff import REFUSED_REF
+    uid = User.query.first().id
+    _mk_item(uid, "a")
+    monkeypatch.setattr(
+        _digest.LLMProvider, "get_completion",
+        staticmethod(lambda *a, **k: {
+            "content": "", "truncated": True, "input_tokens": 1000,
+            "output_tokens": 100}))
+
+    assert _digest.rebuild_external_digest(
+        _FakeSelf(), uid) == {"status": "empty_response"}
+    _db.session.rollback()   # the cost row must have been committed
+    assert UserArtifact.latest_for(uid, _digest.DIGEST_KIND) is None
+    log = APICostLog.query.one()
+    assert log.request_type == "external_digest"
+    assert log.request_ref == REFUSED_REF   # cut off before any text
+    assert log.cost_microdollars == 7500    # full price, direct call
+    assert _digest.digest_is_stale(uid) is True
+
+
+def test_collector_logs_the_cost_of_an_empty_batch_result(app, monkeypatch):
+    user = User.query.first()
+    _mk_item(user.id, "a")
+    _pending_job(user, datetime.utcnow())
+    monkeypatch.setattr(
+        _digest, "batch_check_and_collect",
+        lambda ids, keys: ({f"external-digest-{user.id}": {
+            "content": "  ", "input_tokens": 1000,
+            "output_tokens": 100}}, {}, {}))
+
+    assert _digest._collect_digest_batches() == {"collected": 1,
+                                                 "abandoned": 0}
+    _db.session.rollback()
+    assert UserArtifact.latest_for(user.id, _digest.DIGEST_KIND) is None
+    log = APICostLog.query.one()
+    assert log.request_type == "external_digest"
+    assert log.request_ref is None          # empty, but not cut off
+    assert log.cost_microdollars == 3750    # batch price

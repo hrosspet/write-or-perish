@@ -89,6 +89,20 @@ final class Router {
         }
     }
 
+    /// Opens an outside link in Safari or Mail under the same allowlist, for a
+    /// sheet the in-app Safari view cannot cover (the Updates sheet). Other
+    /// schemes are ignored (#442).
+    static func openOutsideApp(_ url: URL) {
+        openOutsideApp(url) { UIApplication.shared.open($0) }
+    }
+
+    static func openOutsideApp(_ url: URL, opener: (URL) -> Void) {
+        switch externalHandling(url) {
+        case .safari, .system: opener(url)
+        case .ignore: break
+        }
+    }
+
     func reset() {
         selectedTab = .reflect
         paths = [:]

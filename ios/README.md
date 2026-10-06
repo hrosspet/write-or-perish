@@ -186,6 +186,7 @@ xcodebuild -project Loore.xcodeproj -scheme LooreUITests \
 | `M4ScreensUITests` (M4) | Todo, Profile, artifacts, references, prompts, Account, Confirm email, import, Share, Welcome | `LOORE_IMPORT_DIR`, `LOORE_KEEP_SHARE_IDS`, `LOORE_PICKER_FILE` (a markdown zip in the simulator's Files → On My iPhone, for the real file picker); a test user with no todo or profile; afterwards `state m4_cleanup` |
 | `M5ParityUITests` (M5) | signed-out About link, a sign-in link landing on Welcome, a permalink opening the native thread, a toast above the mini-player | `LOORE_WELCOME_LINK` (`magic-link /welcome`), `LOORE_PERMALINK` (a live `/@user/slug` of the test user), `LOORE_LISTEN_NODE` (a node whose audio already exists) |
 | `VoiceUITests`, `VoiceWiringUITests` (M3) | a voice turn, Continue; speaker, download, dictation, Voice Mode from a thread | billed, see below |
+| `TextModeDraftUITests` (#425, #427) | Reflect home → Text → Send (auto-generate off) or Discard → back → Text again: the text must not come back as the draft | Send right after typing: `LOORE_BACKEND_URL=http://localhost:5099` with `python3 scripts/delay_proxy.py` running (production-like latency; without it the race cannot fail locally). Send or Discard next to a dead Voice session: `state clear_top_drafts dead_voice_session` before each test. The test user's sent entries stay in the Log |
 
 Notes: the M2 tests cancel every dialog and delete what they create; craft mode is
 switched on through More and back off (if a run stops halfway, switch it off again).
