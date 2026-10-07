@@ -185,6 +185,8 @@ Users have a `plan` column (string, max 16 chars) on the User model. The plan co
 
 ### Mobile & Offline Support
 
+**Native iPhone app** (🔧 in progress, PR #384, 2026-10-01; awaiting device testing) - SwiftUI app in `ios/` (XcodeGen project, iOS 17+, two dependencies: swift-markdown and ZIPFoundation) against the unchanged backend: cookie session kept in the Keychain (magic link pasted into the app, X login in a web view), the web's endpoints, SSE streams and polling, a native recorder producing the same fMP4 chunks as Safari's MediaRecorder (chunk 0 = init + first segment) with a persisted, resumable upload queue and background `URLSession`, an `AVQueuePlayer` reply queue with chapters, Now Playing and an audible thinking cue that keeps the audio session alive while the phone is locked. CI: `.github/workflows/ios.yml` (build + 334 unit tests on PRs touching `ios/**`). Design `docs/IOS-APP-DESIGN.md`; parity table and known gaps in `ios/PROGRESS.md`; device and staging checklists in `ios/README.md`. Backend follow-ups proposed in the design doc §14 (universal links, sliding 30-day sign-in, `.mp4` content type, push)
+
 **Mobile-optimized API design** - RESTful API with pagination, partial responses, and efficient payloads for mobile bandwidth constraints
 
 **Offline-first data sync** - Conflict resolution for offline writes using operational transforms or CRDTs when user reconnects
@@ -802,6 +804,7 @@ This roadmap prioritizes **privacy & encryption first** (Phase -1), then **found
 24. **NEXT:** Onboarding flow + About page updates for alpha expansion
 25. **NEXT:** Expand agentic tool use — intentions, feedback, memory/artifacts, long-running thread UX
 26. **NEXT:** RAG / semantic search — embeddings, chat with archive, community archive (Phase 1)
+26b. 🔧 **IN PROGRESS:** Native iPhone app (PR #384) — built and simulator-tested (M1–M5); next: Peter's device checklist and a staging pass, then review and merge
 27. **NEXT:** Alchemical Mode (spec'd 2026-07-01, see FOUR-FEATURE-ECOSYSTEM.md) — LLM readiness/safety checker over recent user data → opt-in with strong disclaimers → gated Alchemy home card with hidden source prompt (Meditationbook.page PoC first; Chapman corpus + Petr's book as pluggable sources later)
 28. **THEN:** Testing infrastructure (Phase 0) + legal compliance
 29. Iterate based on learnings at each phase

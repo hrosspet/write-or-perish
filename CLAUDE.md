@@ -18,7 +18,7 @@ The project uses GitHub Actions for CI/CD with direct deployment to production:
    - Frontend: npm lint, jest tests, production build
    - Security: bandit scan, dependency vulnerability check (safety)
 
-2. **Deploy to Production (`deploy.yml`)** - Runs ONLY on pushes to `main`:
+2. **Deploy to Production (`deploy.yml`)** - Runs ONLY on pushes to `main`, except pushes that only change `ios/**` (`paths-ignore`; the iOS app ships via Xcode/TestFlight):
    - Runs backend + frontend tests first, then deploys
    - Builds frontend with production URLs (`https://loore.org`)
    - Deploys to production VM via SSH
@@ -104,6 +104,7 @@ The dev stack runs:
 - Backend on `http://localhost:5010` (Flask dev server with hot reload)
 - Frontend on `http://localhost:3001` (React dev server with HMR)
 - PostgreSQL, Redis, and Celery are internal to the Docker network
+- **No Celery beat by default**: `celery-beat` sits behind the Compose profile `beat` in `docker-compose.override.yml`, so no periodic job (profile updates, recent-context summaries, embedding sweeps, digests, ...) runs locally. The worker still runs, so jobs you trigger (replies, transcription, TTS) work. To run beat, set `COMPOSE_PROFILES=beat` in `.env` (or `docker compose --profile beat up`); to fire one job, `.delay()` it from a flask shell.
 
 Source code is volume-mounted, so edits are reflected immediately without rebuilding.
 
