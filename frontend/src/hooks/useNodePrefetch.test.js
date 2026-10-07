@@ -13,7 +13,7 @@ import useNodePrefetch, {
 const deferredGet = () => {
   const calls = [];
   api.get.mockImplementation((url, { signal }) => new Promise((resolve, reject) => {
-    calls.push({ url, resolve, signal });
+    calls.push({ url, resolve, reject, signal });
     signal.addEventListener('abort', () => reject(new Error('canceled')));
   }));
   return calls;
@@ -42,11 +42,11 @@ test('pending until the node arrives, then opens with the data handed out once',
   expect(open).toHaveBeenCalledTimes(1);
   expect(result.current.pending).toBe(false);
   expect(peekPrefetchedNode('7')).toEqual({ id: 7, content: 'seven' });
-  expect(takePrefetchedNode(7)).toEqual({ id: 7, content: 'seven' });
+  await expect(takePrefetchedNode(7)).resolves.toEqual({ data: { id: 7, content: 'seven' } });
   expect(takePrefetchedNode(7)).toBeNull();
 });
 
-test('a newer click replaces the first; only the newest opens', async () => {
+test('a click on another node replaces the first; only the newest opens', async () => {
   const calls = deferredGet();
   const openFirst = jest.fn();
   const openSecond = jest.fn();
@@ -60,10 +60,26 @@ test('a newer click replaces the first; only the newest opens', async () => {
   expect(openFirst).not.toHaveBeenCalled();
   expect(openSecond).toHaveBeenCalledTimes(1);
   expect(takePrefetchedNode(1)).toBeNull();
-  expect(takePrefetchedNode(2)).toEqual({ id: 2 });
+  await expect(takePrefetchedNode(2)).resolves.toEqual({ data: { id: 2 } });
 });
 
-test('a slow answer opens the page anyway, without data', async () => {
+test('the same node clicked again (a double click) keeps the first request', async () => {
+  const calls = deferredGet();
+  const open = jest.fn();
+  const { result } = renderHook(() => useNodePrefetch());
+
+  act(() => { result.current.openNode(8, open); });
+  act(() => { jest.advanceTimersByTime(MAX_WAIT_MS - 500); });
+  act(() => { result.current.openNode(8, open); });
+  expect(calls).toHaveLength(1);
+  expect(calls[0].signal.aborted).toBe(false);
+
+  // The wait still ends MAX_WAIT_MS after the first click.
+  await act(async () => { jest.advanceTimersByTime(500); });
+  expect(open).toHaveBeenCalledTimes(1);
+});
+
+test('a slow answer opens the page anyway, which waits for the same request', async () => {
   const calls = deferredGet();
   const open = jest.fn();
   const { result } = renderHook(() => useNodePrefetch());
@@ -72,18 +88,25 @@ test('a slow answer opens the page anyway, without data', async () => {
   await act(async () => { jest.advanceTimersByTime(MAX_WAIT_MS); });
   expect(open).toHaveBeenCalledTimes(1);
   expect(result.current.pending).toBe(false);
-  expect(calls[0].signal.aborted).toBe(true);
-  expect(takePrefetchedNode(3)).toBeNull();
+  expect(calls[0].signal.aborted).toBe(false);
+  expect(peekPrefetchedNode(3)).toBeNull();
+
+  const handed = takePrefetchedNode(3);
+  calls[0].resolve({ data: { id: 3 } });
+  await expect(handed).resolves.toEqual({ data: { id: 3 } });
+  expect(api.get).toHaveBeenCalledTimes(1);
 });
 
-test('a failed fetch opens the page, which then shows its own error', async () => {
-  api.get.mockRejectedValue({ response: { status: 404 } });
+test('a failed fetch opens the page with the error to show', async () => {
+  const notFound = { response: { status: 404 } };
+  api.get.mockRejectedValue(notFound);
   const open = jest.fn();
   const { result } = renderHook(() => useNodePrefetch());
 
   await act(async () => { result.current.openNode(4, open); });
   expect(open).toHaveBeenCalledTimes(1);
-  expect(takePrefetchedNode(4)).toBeNull();
+  expect(peekPrefetchedNode(4)).toBeNull();
+  await expect(takePrefetchedNode(4)).rejects.toBe(notFound);
 });
 
 test('leaving the page drops a click in flight', async () => {
@@ -96,6 +119,7 @@ test('leaving the page drops a click in flight', async () => {
   expect(calls[0].signal.aborted).toBe(true);
   await act(async () => { jest.advanceTimersByTime(MAX_WAIT_MS); });
   expect(open).not.toHaveBeenCalled();
+  expect(takePrefetchedNode(5)).toBeNull();
 });
 
 test('a fetched node goes stale after FRESH_FOR_MS', async () => {

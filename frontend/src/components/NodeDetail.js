@@ -258,8 +258,9 @@ function NodeDetail({ nodeIdOverride }) {
     setError("");
     setQuotes({}); // Reset quotes when node changes
     setExternalQuotes({});
-    const prefetched = takePrefetchedNode(id);
-    (prefetched ? Promise.resolve({ data: prefetched }) : api.get(`/nodes/${id}`))
+    // Opened from another node of the thread: that click's request (settled,
+    // or still in flight after a slow answer) instead of a second one.
+    (takePrefetchedNode(id) || api.get(`/nodes/${id}`))
       .then((response) => {
         setNode(response.data);
         setLoading(false);
