@@ -90,6 +90,21 @@ final class NodePrefetchTests: StubbedAppTestCase {
         XCTAssertEqual(nodeGets(3), 1)
     }
 
+    func testTheSameNodeFromAnotherScreenOpens() async {
+        stubNodes(delay: 0.3)
+        let tab = app.router.selectedTab
+        app.router.setPath([.thread(id: 10, awaitLLM: nil)], for: tab)
+        let prefetch = NodePrefetch()
+        var openedFromA = 0
+        var openedFromP = 0
+        prefetch.open(5, app: app) { openedFromA += 1 }
+        app.router.pop()
+        prefetch.open(5, app: app) { openedFromP += 1 }
+        let done = await eventually { openedFromP == 1 }
+        XCTAssertTrue(done)
+        XCTAssertEqual(openedFromA, 0)
+    }
+
     func testATextModeSendOpensTheEntryOnceItsNodeIsIn() async {
         stubNodes(delay: 0.2)
         let tab = app.router.selectedTab

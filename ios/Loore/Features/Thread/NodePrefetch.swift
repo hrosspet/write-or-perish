@@ -55,7 +55,9 @@ final class NodePrefetch {
     /// Fetches `id` (waiting at most `maxWait`), then calls `open` if the screen
     /// that asked is still on top. A move to another node cancels this one.
     func open(_ id: Int, app: AppState, then open: @escaping () -> Void) {
-        if let move, move.id == id { return }
+        // The same node again from the same screen (a double tap): the first request goes on.
+        if let move, move.id == id, move.tab == app.router.selectedTab,
+           move.path == app.router.path(for: move.tab) { return }
         cancel()
         generation += 1
         let current = generation

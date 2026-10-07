@@ -424,6 +424,21 @@ final class ThreadModelTests: StubbedAppTestCase {
         model.stop()
     }
 
+    func testLLMResponseWaitsWhileAnotherNodeLoads() async {
+        let model = await loadedModel()
+        StubURLProtocol.install { request in
+            var stub = StubResponse.json(200, "{}")
+            if request.url?.path(percentEncoded: true) == "/api/nodes/9" { stub.chunkDelay = 0.5 }
+            return stub
+        }
+        NodePrefetch.shared.open(9, app: app) {}
+        XCTAssertTrue(NodePrefetch.shared.isPending)
+        model.llmResponsePressed()
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertFalse(calls.contains("POST /api/nodes/10/llm"), "a second reply started while another node loaded")
+        XCTAssertFalse(model.llmRequesting)
+    }
+
     func testPinRulesAndTitles() async {
         let model = await loadedModel()
         XCTAssertFalse(model.canPin)

@@ -141,7 +141,7 @@ private struct ThreadContent: View {
                                        : (model.inReadThread ? model.readLabel : "Relevant tweets")) {
                             Image(systemName: "book").font(.system(size: 11)).accessibilityHidden(true)
                         } action: { model.readFromNode(autoGenerate: autoGenerate) }
-                        .disabled(model.readLoading)
+                        .disabled(model.readLoading || NodePrefetch.shared.isPending)
                         .accessibilityHint(model.inReadThread && model.readReplyAbove ? ThreadModel.readFurtherTitle
                                            : ThreadModel.readEntryTitle)
                     }
@@ -251,7 +251,8 @@ private struct ThreadContent: View {
 
     /// "Read" / "Read further" with its own read-model picker (admin read threads).
     private func readRow(_ node: NodeDetail) -> some View {
-        let busy = model.readLoading || model.llmRequesting || model.llmTaskNodeId != nil
+        // Another node is loading (NodePrefetch): a second press would start a second read.
+        let busy = model.readLoading || model.llmRequesting || model.llmTaskNodeId != nil || NodePrefetch.shared.isPending
         return AdaptiveStack(spacing: 0, verticalSpacing: 6) {
             Button { model.readFromNode(autoGenerate: autoGenerate) } label: {
                 Text(model.readLoading ? "Starting…" : model.readLabel)
@@ -275,7 +276,8 @@ private struct ThreadContent: View {
     }
 
     private func llmResponseRow(_ node: NodeDetail) -> some View {
-        let busy = model.llmRequesting || model.llmTaskNodeId != nil
+        // Another node is loading (NodePrefetch): a second press would start a second reply.
+        let busy = model.llmRequesting || model.llmTaskNodeId != nil || NodePrefetch.shared.isPending
         let underReadReply = model.isReadReply && node.llmTaskStatus == .completed
         return AdaptiveStack(spacing: 0, verticalSpacing: 6) {
             Button(action: model.llmResponsePressed) {

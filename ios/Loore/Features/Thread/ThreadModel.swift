@@ -441,7 +441,7 @@ final class ThreadModel {
 
     /// The craft bar's LLM Response: the reply is watched on its own page (#367).
     func llmResponsePressed() {
-        guard app != nil, !llmRequesting else { return }
+        guard app != nil, !llmRequesting, !NodePrefetch.shared.isPending else { return }
         llmRequesting = true
         Task {
             defer { llmRequesting = false }
@@ -531,7 +531,7 @@ final class ThreadModel {
 
     /// `POST /api/read/from-node/<id>` (billed): a read turn under this node.
     func readFromNode(autoGenerate: Bool) {
-        guard let app, !readLoading else { return }
+        guard let app, !readLoading, !NodePrefetch.shared.isPending else { return }
         readLoading = true
         pageError = nil
         Task {
