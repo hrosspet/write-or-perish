@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Routes, Route, Navigate, useNavigate, useParams } from 'react-router-dom';
+import { Routes, Route, Navigate, useNavigate, useParams, useLocation } from 'react-router-dom';
 import LandingPage from "./components/LandingPage";
 import Log from "./components/Log";
 import NavBar from "./components/NavBar";
@@ -8,6 +8,8 @@ import SpendCapBanner from "./components/SpendCapBanner";
 import TermsModal from "./components/TermsModal";
 import AdminPanel from "./components/AdminPanel";
 import NodeDetailWrapper from "./components/NodeDetailWrapper";
+import NodeOpeningSpinner from "./components/NodeOpeningSpinner";
+import useNodePrefetch from "./hooks/useNodePrefetch";
 import LoginPage from "./components/LoginPage";
 import ProtectedRoute from "./components/ProtectedRoute";
 import VisionPage from "./pages/VisionPage";
@@ -120,6 +122,11 @@ function App() {
   const updatesFetched = useRef(false);
   const { user, setUser } = useUser();
   const navigate = useNavigate();
+  // A new entry's page opens once its node is in, with a spinner over the
+  // current page meanwhile; moving elsewhere first drops it.
+  const { pending: openingEntry, openNode: openEntry, cancel: cancelOpenEntry } = useNodePrefetch();
+  const { pathname } = useLocation();
+  useEffect(() => { cancelOpenEntry(); }, [pathname, cancelOpenEntry]);
 
   // When the user info is loaded, check if they have accepted the terms.
   useEffect(() => {
@@ -187,11 +194,12 @@ function App() {
                 // carries `awaitLlm` so NodeDetail picks up the pending
                 // LLM response on the highlighted node.
                 const suffix = data.awaitLlm ? `?awaitLlm=${data.awaitLlm}` : '';
-                navigate(`/node/${data.id}${suffix}`);
+                openEntry(data.id, () => navigate(`/node/${data.id}${suffix}`));
               },
             }}
           />
       )}
+      {openingEntry && <NodeOpeningSpinner />}
 
       {showSearch && <SearchModal scope={searchScope} onClose={() => setShowSearch(false)} />}
 

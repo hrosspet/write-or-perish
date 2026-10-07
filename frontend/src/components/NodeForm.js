@@ -296,6 +296,18 @@ const NodeForm = forwardRef(
       setContent(initialContent || "");
     }, [deleteDraft, initialContent]);
 
+    // A new entry is sent: the form is cleared before the caller moves on.
+    // The page can stay on screen until the entry's node loads
+    // (NodeDetailWrapper, useNodePrefetch), and the sent text must not be
+    // sendable twice. An edit keeps its text.
+    const succeed = useCallback((data) => {
+      if (!editMode) {
+        setContent("");
+        setUploadedFile(null);
+      }
+      onSuccess(data);
+    }, [editMode, onSuccess]);
+
     // Auto-start polling when uploadedNodeId is set
     useEffect(() => {
       if (uploadedNodeId) {
@@ -320,14 +332,14 @@ const NodeForm = forwardRef(
           ...(transcriptionData.llm_node_id
             && { awaitLlm: transcriptionData.llm_node_id }),
         };
-        onSuccess(normalizedData);
+        succeed(normalizedData);
         setUploadedNodeId(null);
       } else if (transcriptionStatus === 'failed') {
         setLoading(false);
         setError(transcriptionError || 'Transcription failed');
         setUploadedNodeId(null);
       }
-    }, [transcriptionStatus, transcriptionData, transcriptionError, onSuccess, deleteDraft, addToast]);
+    }, [transcriptionStatus, transcriptionData, transcriptionError, succeed, deleteDraft, addToast]);
 
     const handleFileSelect = (event) => {
       const file = event.target.files[0];
@@ -461,7 +473,7 @@ const NodeForm = forwardRef(
           // The entry was saved but the reply was refused (e.g. an
           // uncapped {user_export} on a non-Pro plan): say why.
           if (data && data.llm_error) addToast(data.llm_error, 10000);
-          onSuccess(data);
+          succeed(data);
           setLoading(false);
           return;
         }
@@ -497,13 +509,13 @@ const NodeForm = forwardRef(
             // Through the USER node so the entry gets its own URL/history
             // step; ?awaitLlm hands the pending LLM response to NodeDetail,
             // which goes on to it.
-            onSuccess({
+            succeed({
               id: res.data.user_node_id,
               awaitLlm: res.data.llm_node_id,
               ...res.data,
             });
           } else {
-            onSuccess({
+            succeed({
               id: res.data.user_node_id,
               ...res.data,
             });
@@ -536,7 +548,7 @@ const NodeForm = forwardRef(
             } catch (e) { /* no-op */ }
           }
           // Land on the entry; ?awaitLlm hands a pending reply to NodeDetail.
-          onSuccess({
+          succeed({
             ...response.data,
             ...(response.data.llm_node_id && { awaitLlm: response.data.llm_node_id }),
           });
@@ -667,7 +679,7 @@ const NodeForm = forwardRef(
               `/nodes/${response.data.id}/llm`,
               { source_mode: 'textmode' },
             );
-            onSuccess({
+            succeed({
               ...response.data,
               id: llmRes.data.node_id,
               awaitLlm: llmRes.data.node_id,
@@ -681,7 +693,7 @@ const NodeForm = forwardRef(
           }
         }
 
-        onSuccess(response.data);
+        succeed(response.data);
         setLoading(false);
       } catch (err) {
         console.error("Error in NodeForm:", err);
