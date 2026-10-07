@@ -3,6 +3,8 @@ import { useNavigate } from 'react-router-dom';
 import { useUser } from '../contexts/UserContext';
 import { useToast } from '../contexts/ToastContext';
 import api from '../api';
+import NodeOpeningSpinner from '../components/NodeOpeningSpinner';
+import useNodePrefetch from '../hooks/useNodePrefetch';
 
 function useOnScreen(ref, threshold = 0.1) {
   const [isVisible, setIsVisible] = useState(false);
@@ -225,6 +227,9 @@ export default function HomePage() {
   const { addToast } = useToast();
   const navigate = useNavigate();
   const [readStarting, setReadStarting] = useState(false);
+  // The read's thread opens once its node is in, with a spinner here
+  // meanwhile; the button stays on "Starting…" until then.
+  const { pending: openingNode, openNode } = useNodePrefetch();
 
   const startRead = async () => {
     setReadStarting(true);
@@ -235,7 +240,8 @@ export default function HomePage() {
       const stored = localStorage.getItem('loore_auto_generate');
       const autoGenerate = stored === null ? true : stored === 'true';
       const res = await api.post('/read/start', { auto_generate: autoGenerate });
-      navigate(`/node/${res.data.llm_node_id || res.data.prompt_node_id}`);
+      const id = res.data.llm_node_id || res.data.prompt_node_id;
+      openNode(id, () => navigate(`/node/${id}`));
     } catch (err) {
       setReadStarting(false);
       if (err?.response?.status === 402) return;
@@ -264,6 +270,7 @@ export default function HomePage() {
       padding: "40px 24px",
       background: "radial-gradient(ellipse at 50% 40%, rgba(196,149,106,0.06) 0%, transparent 70%)",
     }}>
+      {openingNode && <NodeOpeningSpinner />}
       <p
         ref={greetingRef}
         style={{
