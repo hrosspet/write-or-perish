@@ -9,6 +9,7 @@ Merges are serialized per user via a Redis lock so concurrent
 confirmations don't clobber each other's results.
 """
 import json
+import re
 import redis
 from celery.utils.log import get_task_logger
 
@@ -29,6 +30,32 @@ logger = get_task_logger(__name__)
 _MERGE_LOCK_TIMEOUT = 600
 # How long to wait for the lock before giving up (seconds).
 _MERGE_LOCK_ACQUIRE_TIMEOUT = 600
+
+# For a list with no tasks yet (#410). Every new user starts with no list.
+# Given an empty list, the model applied the prompt's rule for completed
+# items that are "NOT on the todo list" to a new task and saved it as done.
+NO_TASKS_RULE = (
+    "Add the items under New Tasks as `- [ ]` and the items under "
+    "Completed as `- [x]`; add nothing else."
+)
+# Sent in place of the todo list when the user has none, or a blank one.
+EMPTY_TODO_MESSAGE = "The todo list is empty. " + NO_TASKS_RULE
+
+# A list item (`- `, `* `, `+ `, `1. `), with the text after its checkbox,
+# if it has one, in group 1.
+_LIST_ITEM_RE = re.compile(
+    r"^[ \t]*(?:[-*+]|\d+[.)])[ \t]+(?:\[[ xX]\](?=[ \t]|$))?(.*)$")
+
+
+def has_tasks(todo_text):
+    """Whether the list has an item with text: `- [ ] call mom`,
+    `- [x] call mom` or `- call mom`. The Todo page's Create template
+    (headings and empty `- [ ] ` lines) has none."""
+    for line in (todo_text or "").splitlines():
+        item = _LIST_ITEM_RE.match(line)
+        if item and item.group(1).strip():
+            return True
+    return False
 
 
 @celery.task(bind=True)
@@ -109,6 +136,23 @@ def build_merge_messages(merge_prompt, update_summary, current_todo):
     """The merge call's messages: system=merge_prompt, assistant=the
     proposal, user=the current todo list. Also used by
     backend/scripts/compare_todo_merge_models.py to rebuild past merges."""
+    if has_tasks(current_todo):
+        todo_message = (
+            f"Here is the current full todo list:\n\n{current_todo}"
+            "\n\nNow apply the changes described above."
+        )
+    elif current_todo and current_todo.strip():
+        # Headings but no tasks yet, e.g. the Todo page's Create template.
+        todo_message = (
+            f"Here is the current full todo list:\n\n{current_todo}"
+            f"\n\n{NO_TASKS_RULE}"
+            "\n\nNow apply the changes described above."
+        )
+    else:
+        todo_message = (
+            EMPTY_TODO_MESSAGE
+            + "\n\nNow apply the changes described above."
+        )
     return [
         {
             "role": "system",
@@ -120,10 +164,7 @@ def build_merge_messages(merge_prompt, update_summary, current_todo):
         },
         {
             "role": "user",
-            "content": [{"type": "text", "text": (
-                f"Here is the current full todo list:\n\n{current_todo}"
-                "\n\nNow apply the changes described above."
-            )}],
+            "content": [{"type": "text", "text": todo_message}],
         },
     ]
 
@@ -209,6 +250,9 @@ def _run_merge(llm_node, update_summary, user_id, model_id,
     )
     new_todo.set_content(merged_todo)
     db.session.add(new_todo)
+    # Assigns new_todo.id, so the proposal's tool_calls_meta records which
+    # todo version this merge produced (#410).
+    db.session.flush()
 
     # Update apply status
     if truncated:
