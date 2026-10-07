@@ -8,9 +8,10 @@ jest.mock('../contexts/UserContext', () => ({
 jest.mock('../contexts/ToastContext', () => ({
   useToast: () => ({ addToast: jest.fn(), removeToast: jest.fn() }),
 }));
+const mockGet = jest.fn();
 jest.mock('../api', () => ({
   __esModule: true,
-  default: { get: jest.fn(), post: jest.fn() },
+  default: { get: (...args) => mockGet(...args), post: jest.fn() },
 }));
 let mockNodeFormProps;
 jest.mock('../components/NodeForm', () => ({
@@ -27,7 +28,7 @@ jest.mock('react-router-dom', () => ({
 }));
 
 import React from 'react';
-import { render, screen } from '@testing-library/react';
+import { render, screen, act, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import HomePage from './HomePage';
 import WritePage from './WritePage';
@@ -74,9 +75,14 @@ describe.each([
   });
 });
 
-test('an entry saved on the Text screen ends the welcome question', () => {
+test('an entry saved on the Text screen ends the welcome question', async () => {
+  // The Text screen fetches the saved entry before it opens its page
+  // (useNodePrefetch, #447).
+  mockGet.mockResolvedValue({ data: { id: 11 } });
   renderPage(WritePage, { has_own_entries: false });
-  mockNodeFormProps.onSuccess({ user_node_id: 11, llm_node_id: 12 });
+  act(() => {
+    mockNodeFormProps.onSuccess({ user_node_id: 11, llm_node_id: 12 });
+  });
   expect(markHasOwnEntries).toHaveBeenCalledTimes(1);
-  expect(mockNavigate).toHaveBeenCalledWith('/node/11?awaitLlm=12');
+  await waitFor(() => expect(mockNavigate).toHaveBeenCalledWith('/node/11?awaitLlm=12'));
 });
