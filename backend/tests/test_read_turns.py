@@ -395,6 +395,29 @@ def test_chat_turn_under_a_voice_thread_is_agentic(app, monkeypatch, tmp_path): 
     assert _fresh(chat.id).get_content() == "Because."
 
 
+def test_a_read_under_its_own_agentic_prompt_proposes_no_todo(app, monkeypatch, tmp_path):  # noqa: F811
+    """A Voice prompt whose text carries {ca_tweets} is the read prompt
+    itself, so the read keeps it (strip_agentic_prompts keep=) and runs
+    agentic. Its verdict still makes no todo proposal: approving one
+    would run the merge on the read's model, which may be read only
+    (2026-10-02 review of #404)."""
+    from backend.models import Draft
+    from backend.tests.test_read_context import _prompt_node as _pn
+    _capture_render(monkeypatch, tmp_path)
+    alice = _mk_user("alice", approved=True, plan="alpha", is_admin=True)
+    llm_user = _mk_user("gpt-5", twitter_id="llm-gpt-5")
+    voice = _pn(alice, "voice", body="AGENTIC PERSONA AND TOOLS {ca_tweets}")
+    reply = _placeholder(llm_user, alice, voice.id)
+    _live(monkeypatch, alice, voice, reply, json.dumps({
+        "verdict": "One thing today.\n\n### New tasks\n- call mom",
+        "picks": [{"n": 2, "qt": "Meets your pacing question.",
+                   "relevance": 40, "recommend": True}]}))
+    node = _fresh(reply.id)
+    assert node.llm_task_status == "completed"
+    assert "propose_todo" not in (node.tool_calls_meta or "")
+    assert Draft.query.filter_by(label="todo_pending").count() == 0
+
+
 def test_chat_turn_under_a_read_root_is_agentic_once_text_mode_is_attached(app, monkeypatch, tmp_path):  # noqa: F811
     """read prompt -> read reply -> textmode prompt (what POST
     /textmode/from-node attaches under the reply) -> question: the chat

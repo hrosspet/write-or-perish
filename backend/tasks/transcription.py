@@ -69,7 +69,9 @@ def _start_upload_reply(node, tip, model_id):
     if user_is_capped(node.user_id):
         record_task_warning(node, UPLOAD_REPLY_SKIPPED_SPEND_CAP)
         return None
-    from backend.utils.llm_nodes import AIUsageRefused, create_llm_placeholder
+    from backend.utils.llm_nodes import (
+        AIUsageRefused, ReadOnlyModelRefused, create_llm_placeholder,
+    )
     try:
         llm_node, _ = create_llm_placeholder(
             tip.id, model_id, node.user_id,
@@ -83,6 +85,8 @@ def _start_upload_reply(node, tip, model_id):
             "Upload reply skipped for node %s: %s", node.id, e)
         if isinstance(e, AIUsageRefused):
             message = UPLOAD_REPLY_SKIPPED_AI_USAGE
+        elif isinstance(e, ReadOnlyModelRefused):
+            message = f"Your entry is saved. {e.message}"
         else:
             message = str(e) or "Loore couldn't start a reply."
         record_task_warning(node, message)

@@ -1,19 +1,33 @@
 import React from 'react';
 import { render, screen, waitFor, fireEvent } from '@testing-library/react';
-import ModelSelector, { pickerOptions } from './ModelSelector';
+import ModelSelector, { offeredModels, pickerOptions } from './ModelSelector';
 import api from '../api';
 
 jest.mock('../api', () => ({ get: jest.fn() }));
 
+// The rows without `chat` stand for a backend that predates the flag
+// (missing = chat); the two read-only models carry `chat: false`.
 const MODELS = [
+  { id: 'gpt-6.1-sol', name: 'GPT-6.1 Sol', provider: 'openai', featured: false, read: true, chat: false },
   { id: 'gpt-6-astra', name: 'GPT-6 Astra', provider: 'openai', featured: true, read: false },
-  { id: 'gpt-6-luna', name: 'GPT-6 Luna', provider: 'openai', featured: false, read: true },
+  { id: 'gpt-6-luna', name: 'GPT-6 Luna', provider: 'openai', featured: false, read: true, chat: true },
   { id: 'gpt-5.6-luna', name: 'GPT-5.6 Luna', provider: 'openai', featured: false, read: true },
+  { id: 'claude-sonnet-5.5', name: 'Sonnet 5.5', provider: 'anthropic', featured: false, read: true, chat: false },
   { id: 'claude-opus-5.5', name: 'Opus 5.5', provider: 'anthropic', featured: true, read: false },
   { id: 'claude-fable-5.1', name: 'Fable 5.1', provider: 'anthropic', featured: false, read: false },
   { id: 'claude-opus-4.6', name: 'Opus 4.6', provider: 'anthropic', featured: true, read: false },
 ];
 const ids = (list) => list.map((m) => m.id);
+
+describe('offeredModels', () => {
+  it('keeps read-only models out of chat and in Read', () => {
+    expect(ids(offeredModels(MODELS, 'chat'))).toEqual([
+      'gpt-6-astra', 'gpt-6-luna', 'gpt-5.6-luna',
+      'claude-opus-5.5', 'claude-fable-5.1', 'claude-opus-4.6']);
+    expect(ids(offeredModels(MODELS, 'read'))).toEqual([
+      'gpt-6.1-sol', 'gpt-6-luna', 'gpt-5.6-luna', 'claude-sonnet-5.5']);
+  });
+});
 
 describe('pickerOptions', () => {
   it('shows the featured models, Anthropic first, then More', () => {
@@ -28,15 +42,24 @@ describe('pickerOptions', () => {
       ['claude-fable-5.1', 'claude-opus-5.5', 'claude-opus-4.6', 'gpt-6-astra']);
   });
 
-  it('expands to every model grouped by provider', () => {
+  it('expands to every chat model grouped by provider', () => {
     const o = pickerOptions(MODELS, 'claude-opus-4.6', 'chat', true);
     expect(o.groups.map((g) => g.label)).toEqual(['Anthropic', 'OpenAI']);
+    expect(ids(o.groups[0].models)).toEqual(
+      ['claude-opus-5.5', 'claude-fable-5.1', 'claude-opus-4.6']);
     expect(ids(o.groups[1].models)).toEqual(['gpt-6-astra', 'gpt-6-luna', 'gpt-5.6-luna']);
   });
 
-  it('offers only read models for Read, with no More', () => {
+  it('never shows a read-only model in a chat picker, even when selected', () => {
+    const o = pickerOptions(MODELS, 'claude-sonnet-5.5', 'chat', false);
+    expect(ids(o.models)).toEqual(['claude-opus-5.5', 'claude-opus-4.6', 'gpt-6-astra']);
+    expect(o.more).toBe(true);
+  });
+
+  it('offers only read models for Read, read-only ones included, with no More', () => {
     const o = pickerOptions(MODELS, 'gpt-6-luna', 'read', false);
-    expect(ids(o.models)).toEqual(['gpt-6-luna', 'gpt-5.6-luna']);
+    expect(ids(o.models)).toEqual(
+      ['gpt-6.1-sol', 'gpt-6-luna', 'gpt-5.6-luna', 'claude-sonnet-5.5']);
     expect(o.more).toBeUndefined();
   });
 });
@@ -68,6 +91,24 @@ describe('ModelSelector', () => {
     await waitFor(() => expect(onChange).toHaveBeenCalledWith('claude-opus-4.6'));
   });
 
+  it('replaces a read-only model in a chat picker', async () => {
+    mockApi({ suggested_model: 'claude-opus-4.6', source: 'user_preference' });
+    const onChange = jest.fn();
+    render(<ModelSelector nodeId={3} selectedModel="claude-sonnet-5.5" onModelChange={onChange} />);
+    await waitFor(() => expect(onChange).toHaveBeenCalledWith('claude-opus-4.6'));
+  });
+
+  it('keeps a read-only model in the Read picker', async () => {
+    mockApi({ suggested_model: 'gpt-6-luna', source: 'default' });
+    const onChange = jest.fn();
+    render(<ModelSelector nodeId={3} purpose="read" selectedModel="claude-sonnet-5.5"
+      onModelChange={onChange} />);
+    await waitFor(() => expect(trigger(/Sonnet 5.5/)).not.toBeDisabled());
+    fireEvent.click(trigger(/Sonnet 5.5/));
+    expect(optionNames()).toEqual(['GPT-6.1 Sol', 'GPT-6 Luna', 'GPT-5.6 Luna', 'Sonnet 5.5']);
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
   it('keeps an offered selection over a non-thread default', async () => {
     mockApi({ suggested_model: 'claude-opus-4.6', source: 'user_preference' });
     const onChange = jest.fn();
@@ -90,6 +131,9 @@ describe('ModelSelector', () => {
     expect(screen.getAllByRole('group')).toHaveLength(2);
     expect(optionNames()).toContain('Fable 5.1');
     expect(optionNames()).not.toContain('More models…');
+    // The read-only models are not in the full chat list either.
+    expect(optionNames()).not.toContain('Sonnet 5.5');
+    expect(optionNames()).not.toContain('GPT-6.1 Sol');
     expect(onChange).not.toHaveBeenCalled();
 
     fireEvent.click(screen.getByRole('option', { name: 'Fable 5.1' }));
