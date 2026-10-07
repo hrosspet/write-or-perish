@@ -88,7 +88,7 @@ struct MarkdownView: View {
         let link = url.absoluteString
         if let onLink, onLink(link) { return .handled }
         switch MarkdownLinkTarget.resolve(link, environment: app.environment) {
-        case .thread(let id): app.open(.thread(id: id, awaitLLM: nil))
+        case .thread(let id): NodePrefetch.shared.openThread(id, app: app)  // opens once the node is in
         case .route(let route): app.open(route)
         case .ignore: break
         }

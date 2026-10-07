@@ -32,7 +32,8 @@ struct LogView: View {
                 } else {
                     ForEach(cards) { card in
                         BubbleView(data: BubbleData(card), actions: actions(card)) {
-                            app.open(.thread(id: card.newestNodeId ?? card.id, awaitLLM: nil))
+                            // The thread opens once its node is in (NodePrefetch), not on a loading page.
+                            NodePrefetch.shared.openThread(card.newestNodeId ?? card.id, app: app)
                         }
                         .onAppear {
                             if card.id == cards.last?.id { loadMoreIfNeeded() }

@@ -187,13 +187,13 @@ struct ShareView: View {
         .contentShape(Rectangle())
         .onTapGesture {
             guard linksToThread, let nodeId = share.publicNodeId else { return }
-            app.open(.thread(id: nodeId, awaitLLM: nil))
+            NodePrefetch.shared.openThread(nodeId, app: app)  // opens once the node is in
         }
         .padding(.bottom, 16)
         .accessibilityElement(children: .contain)
         .accessibilityAction(named: "Open public thread") {
             guard linksToThread, let nodeId = share.publicNodeId else { return }
-            app.open(.thread(id: nodeId, awaitLLM: nil))
+            NodePrefetch.shared.openThread(nodeId, app: app)  // opens once the node is in
         }
             .accessibilityIdentifier("share.card.\(share.id)")
     }

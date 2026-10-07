@@ -193,6 +193,27 @@ struct SpinnerRing: View {
     }
 }
 
+/// A node is loading while the current screen stays (NodePrefetch): the ring on
+/// a small dark disc, readable over any card, in the middle of the screen. Taps
+/// go through, so another node can still be picked (the newest one opens).
+/// Shown over every tab by `MainTabView`.
+struct NodeOpeningSpinner: View {
+    var body: some View {
+        ZStack {
+            if NodePrefetch.shared.isPending {
+                SpinnerRing(size: 18, lineWidth: 2)
+                    .padding(11)
+                    .background(LooreColor.bgCard, in: Circle())
+                    .overlay(Circle().strokeBorder(LooreColor.border))
+                    .accessibilityLabel("Loading node")
+                    .transition(.opacity)
+            }
+        }
+        .allowsHitTesting(false)
+        .animation(.easeOut(duration: 0.12), value: NodePrefetch.shared.isPending)
+    }
+}
+
 /// A line of accent text for errors (the web replaces the page with it).
 struct ErrorLine: View {
     let text: String
