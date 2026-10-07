@@ -20,7 +20,7 @@ beat collector saves the results — see sweep_external_digests /
 collect_external_digest_batches. The synchronous rebuild_external_digest
 task stays as the direct path (a future "rebuild now" button).
 """
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from celery.utils.log import get_task_logger
 from sqlalchemy import func
@@ -36,7 +36,8 @@ from backend.utils.cost import llm_cost_log_fields
 from backend.utils.refusal_backoff import REFUSED_REF
 from backend.utils.privacy import account_allows_ai
 from backend.utils.llm_batch import (
-    apply_batch_key_override, batch_check_and_collect, batch_submit,
+    BATCH_JOB_MAX_AGE, apply_batch_key_override, batch_check_and_collect,
+    batch_submit,
 )
 from backend.utils.timefmt import user_local_hour
 
@@ -57,13 +58,9 @@ NIGHTLY_DIGEST_LOCAL_HOUR = 4
 # Output cap for a digest request. Real digests run ~2k tokens; this is
 # headroom, matching the direct path's provider default.
 DIGEST_MAX_TOKENS = 10000
-# Backstop for a batch we can no longer READ (lost batch id, revoked
-# key): once it is older than this, the job is marked abandoned so its
-# users, still stale, are resubmitted by the next sweep. A slow batch
-# never needs this — both providers end a batch themselves at 24h
-# (OpenAI `expired`, Anthropic `ended` with expired items) and the
-# collector treats that as ended. So: the 24h window plus polling slack.
-BATCH_JOB_MAX_AGE = timedelta(hours=25)
+# BATCH_JOB_MAX_AGE (utils/llm_batch, 25h = the providers' 24h window plus
+# polling slack): a batch we can no longer read is abandoned after it, so
+# its users, still stale, are resubmitted by the next sweep.
 
 # Corpus caps for the digest prompt. Most recent items first; each item
 # rendered compactly. ~1500 items x ~300 chars ≈ 450k chars worst case,
