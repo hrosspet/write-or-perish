@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useLayoutEffect, useRef, useCallback } from "react";
-import { useParams, useNavigate, useSearchParams, useLocation, Link } from "react-router-dom";
+import { useNavigate, useSearchParams, useLocation, Link } from "react-router-dom";
 import { FaThumbtack, FaMicrophone, FaSpinner, FaBookOpen } from "react-icons/fa";
 import NodeFooter from "./NodeFooter";
 import SpeakerIcon from "./SpeakerIcon";
@@ -12,7 +12,7 @@ import { useUser } from "../contexts/UserContext";
 import { useToast } from "../contexts/ToastContext";
 import { useAsyncTaskPolling } from "../hooks/useAsyncTaskPolling";
 import { useLlmTextStream } from "../hooks/useSSE";
-import useNodePrefetch, { peekPrefetchedNode, takePrefetchedNode } from "../hooks/useNodePrefetch";
+import { peekPrefetchedNode, takePrefetchedNode } from "../hooks/useNodePrefetch";
 import api from "../api";
 import { useCheckboxToggle, useTaskInsert } from "../utils/markdown";
 import { contextAllowsAi, isAiUsageRefusedError } from "../utils/aiUsage";
@@ -32,43 +32,6 @@ import DeleteConfirmDialog from "./DeleteConfirmDialog";
 const READ_FURTHER_TITLE = "Another pass over the day's tweets, against everything in this thread so far "
   + "— your marks on these picks included.";
 const READ_ENTRY_TITLE = "Loore reads the last day of Community Archive tweets and shows you the ones relevant to this thread";
-
-// A clicked node of the thread is loading (useNodePrefetch): a thin accent
-// ring, turning, on a small disc in the middle of the screen. Clicks pass
-// through, so another node can still be picked (the newest click opens).
-const SPINNER_RING_R = 8;
-const SPINNER_RING_C = 2 * Math.PI * SPINNER_RING_R;
-function NodeOpeningSpinner() {
-  return (
-    <div
-      role="status"
-      aria-label="Loading node"
-      style={{
-        position: "fixed",
-        top: "50%",
-        left: "50%",
-        transform: "translate(-50%, -50%)",
-        zIndex: 50,
-        padding: "11px",
-        lineHeight: 0,
-        borderRadius: "50%",
-        background: "var(--bg-card)",
-        border: "1px solid var(--border)",
-        pointerEvents: "none",
-        animation: "nodeOpeningFadeIn 0.12s ease-out",
-      }}
-    >
-      <style>{`@keyframes nodeOpeningFadeIn { from { opacity: 0; } }`}</style>
-      <svg width="18" height="18" viewBox="0 0 18 18" style={{ animation: "spin 0.9s linear infinite" }}>
-        <circle
-          cx="9" cy="9" r={SPINNER_RING_R}
-          fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round"
-          strokeDasharray={`${0.72 * SPINNER_RING_C} ${SPINNER_RING_C}`}
-        />
-      </svg>
-    </div>
-  );
-}
 
 // Recursive component to render children nodes.
 function RenderChildTree({ nodes, onBubbleClick, buildActions }) {
@@ -134,18 +97,18 @@ const tabTitleFor = (node) => {
   return firstLine ? `${firstLine} — Loore` : 'Loore';
 };
 
-function NodeDetail({ nodeIdOverride }) {
-  const { id: paramId } = useParams();
-  // Under /u/:username/:slug the id arrives resolved; under /node/:id it
-  // comes from params. Everything downstream just uses `id`.
-  const id = nodeIdOverride || paramId;
+// `nodeId` and `openNode` come from NodeDetailWrapper: the id is the node
+// this page shows, which stays put while the address has moved on to a node
+// that is still loading; `openNode(id, go)` fetches a node before `go`
+// changes the address (useNodePrefetch).
+function NodeDetail({ nodeId: id, openNode }) {
   const navigate = useNavigate();
   const location = useLocation();
   const [searchParams, setSearchParams] = useSearchParams();
   const { user: currentUser } = useUser();
   const { addToast } = useToast();
   const craftMode = !!currentUser?.craft_mode;
-  // Opened from another node of the thread: the data came with the click
+  // Opened from another node: its data was fetched before this page opened
   // (useNodePrefetch), so the page renders at once instead of loading.
   const [node, setNode] = useState(() => peekPrefetchedNode(id));
   const [loading, setLoading] = useState(node == null);
@@ -258,8 +221,8 @@ function NodeDetail({ nodeIdOverride }) {
     setError("");
     setQuotes({}); // Reset quotes when node changes
     setExternalQuotes({});
-    // Opened from another node of the thread: that click's request (settled,
-    // or still in flight after a slow answer) instead of a second one.
+    // Opened from another node: the request made before this page opened
+    // (settled, or still in flight after a slow answer), not a second one.
     (takePrefetchedNode(id) || api.get(`/nodes/${id}`))
       .then((response) => {
         setNode(response.data);
@@ -525,8 +488,6 @@ function NodeDetail({ nodeIdOverride }) {
   }, [checkActionsStacked]);
   // After every render: a new model label can change the widths.
   useLayoutEffect(() => { checkActionsStacked(); });
-
-  const { pending: openingNode, openNode } = useNodePrefetch();
 
   if (loading) return <div style={{ color: "var(--text-muted)", padding: "20px" }}>Loading node...</div>;
   if (error) return <div style={{ color: "var(--accent)", padding: "20px" }}>{error}</div>;
@@ -1742,8 +1703,7 @@ function NodeDetail({ nodeIdOverride }) {
         }}>Thread</h2>
         {topRightControls}
       </div>
-      <SemanticNeighbors nodeId={node.id} />
-      {openingNode && <NodeOpeningSpinner />}
+      <SemanticNeighbors nodeId={node.id} openNode={openNode} />
       {ancestorsSection}
       {highlightedNodeSection}
       {childrenSection}
