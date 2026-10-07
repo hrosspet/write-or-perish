@@ -363,9 +363,11 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
   // is cleared, this effect re-runs once (llmTaskNodeId is a dep) while
   // llmStatus/llmData are still stale — the polling hook resets them a
   // render later — and without the guard that stale pass acts twice
-  // (duplicate toast / duplicate navigation).
+  // (duplicate toast / duplicate navigation). While another node loads
+  // (`moving`), this page may be on its way out (a back press, a click):
+  // it acts on the result only if it stays (the move is undone).
   useEffect(() => {
-    if (!llmTaskNodeId) return;
+    if (!llmTaskNodeId || moving) return;
     if (llmStatus === 'completed' && llmData) {
       // Prefer the id of the node returned in payload; fall back to the
       // polled node id (llmTaskNodeId).
@@ -377,6 +379,16 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
       // final answer arrives in the next. Repeats for each retrieval round.
       if (llmData.continuation_node_id) {
         const contId = llmData.continuation_node_id;
+        // This turn's own text is done: shown as finished, should the
+        // page stay (a back press while the continuation loads).
+        if (String(completedId) === String(id)) {
+          setNode(prev => prev ? {
+            ...prev,
+            content: llmData.content ?? prev.content,
+            tool_calls_meta: llmData.tool_calls_meta ?? prev.tool_calls_meta,
+            llm_task_status: 'completed',
+          } : prev);
+        }
         // Navigate WITH ?awaitLlm so polling re-establishes on the
         // continuation node — NodeDetail remounts on :id change, so bare
         // llmTaskNodeId state would be lost (this matches WritePage's
@@ -441,7 +453,7 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
       setLlmTaskNodeId(null);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [llmStatus, llmData, llmError, navigate, id, llmTaskNodeId]);
+  }, [llmStatus, llmData, llmError, navigate, id, llmTaskNodeId, moving]);
 
   const getNodeContent = useCallback(() => node?.content, [node]);
   const setNodeContent = useCallback((newContent) => setNode(prev => ({ ...prev, content: newContent })), []);
