@@ -16,6 +16,7 @@ class StubbedAppTestCase: XCTestCase {
 
     override func setUp() async throws {
         StubURLProtocol.reset()
+        NodePrefetch.shared.resetForTesting()
         defaults = UserDefaults(suiteName: "loore-tests-\(UUID().uuidString)")
         app = AppState(launch: LaunchOptions(), secureStore: InMemorySecureStore(), defaults: defaults)
         let user = try decode(CurrentUser.self, Self.userJSON)
@@ -379,7 +380,10 @@ final class ThreadModelTests: StubbedAppTestCase {
         let binding = Binding(get: { auto }, set: { auto = $0 })
         await model.inlineReplySent(NodeFormResult(id: 11), autoGenerate: binding)
         XCTAssertEqual(body(of: "POST /api/nodes/11/llm")?["model"] as? String, "gpt-6-luna")
-        XCTAssertEqual(app.router.path(for: app.router.selectedTab).last, .thread(id: 11, awaitLLM: 77))
+        // The entry's page opens once its node is fetched (NodePrefetch).
+        let opened = await eventually { self.app.router.path(for: self.app.router.selectedTab).last == .thread(id: 11, awaitLLM: 77) }
+        XCTAssertTrue(opened)
+        XCTAssertTrue(calls.contains("GET /api/nodes/11"))
         XCTAssertTrue(auto)
     }
 
@@ -393,7 +397,8 @@ final class ThreadModelTests: StubbedAppTestCase {
         XCTAssertFalse(auto)
         XCTAssertFalse(calls.contains { $0.hasSuffix("/llm") })
         XCTAssertEqual(app.toasts.toasts.last?.message, "Turning off auto-generate. AI usage on some nodes is turned off.")
-        XCTAssertEqual(app.router.path(for: app.router.selectedTab).last, .thread(id: 11, awaitLLM: nil))
+        let opened = await eventually { self.app.router.path(for: self.app.router.selectedTab).last == .thread(id: 11, awaitLLM: nil) }
+        XCTAssertTrue(opened)
     }
 
     func testPublicThreadsForceAutoGenerateOff() async {
@@ -408,8 +413,14 @@ final class ThreadModelTests: StubbedAppTestCase {
         app.router.setPath([.thread(id: 10, awaitLLM: 55)], for: app.router.selectedTab)
         let model = await loadedModel(awaitLLM: 55)
         await model.start()
-        let path = app.router.path(for: app.router.selectedTab)
-        XCTAssertEqual(path, [.thread(id: 10, awaitLLM: nil), .thread(id: 55, awaitLLM: 55)])
+        // The entry stays (with the spinner) until the reply's node is fetched.
+        XCTAssertEqual(app.router.path(for: app.router.selectedTab), [.thread(id: 10, awaitLLM: nil)])
+        XCTAssertTrue(NodePrefetch.shared.isPending)
+        let opened = await eventually {
+            self.app.router.path(for: self.app.router.selectedTab) == [.thread(id: 10, awaitLLM: nil), .thread(id: 55, awaitLLM: 55)]
+        }
+        XCTAssertTrue(opened)
+        XCTAssertFalse(NodePrefetch.shared.isPending)
         model.stop()
     }
 
@@ -476,6 +487,34 @@ final class ThreadModelTests: StubbedAppTestCase {
         XCTAssertEqual(model.node?.content, "Final text")
         XCTAssertEqual(app.router.path(for: app.router.selectedTab).count, 2)
         model.stop()
+    }
+
+    func testAReplyThatContinuesOpensTheNextNodeWithItsDataInHand() async {
+        let next = pendingJSON.replacingOccurrences(of: #""id":77,"#, with: #""id":78,"#)
+        let pending = pendingJSON
+        StubURLProtocol.install { request in
+            switch request.url?.path(percentEncoded: true) ?? "" {
+            case "/api/nodes/77": return .json(200, pending)
+            case "/api/nodes/78": return .json(200, next)
+            case "/api/nodes/77/llm-status":
+                return .json(200, #"{"node_id":77,"status":"completed","content":"Let me look.","continuation_node_id":78}"#)
+            default: return .json(200, "{}")
+            }
+        }
+        let tab = app.router.selectedTab
+        app.router.setPath([.thread(id: 10, awaitLLM: nil), .thread(id: 77, awaitLLM: 77)], for: tab)
+        let model = ThreadModel(nodeId: 77, awaitLLM: 77, app: app)
+        await model.start()
+        let opened = await eventually { self.app.router.path(for: tab).last == .thread(id: 78, awaitLLM: 78) }
+        XCTAssertTrue(opened)
+        model.stop()
+
+        // The continuation's page takes the fetched node: no second request.
+        let nextModel = ThreadModel(nodeId: 78, awaitLLM: 78, app: app)
+        await nextModel.load()
+        XCTAssertEqual(nextModel.node?.id, 78)
+        XCTAssertEqual(calls.filter { $0 == "GET /api/nodes/78" }.count, 1)
+        nextModel.stop()
     }
 
     func testAContinuationIsFollowed() async {

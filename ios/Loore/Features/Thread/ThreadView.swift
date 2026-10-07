@@ -53,9 +53,7 @@ private struct ThreadContent: View {
 
     /// Another node of this thread: its page opens once its data is in (no loading page).
     private func openNode(_ id: Int) {
-        NodePrefetch.shared.open(id, api: app.api) {
-            app.open(.thread(id: id, awaitLLM: nil))
-        }
+        model.openThread(id, awaitLLM: nil)
     }
 
     var body: some View {
@@ -579,7 +577,7 @@ private struct ToolCallsDisclosure: View {
                 HStack(spacing: 0) {
                     Text("Read in full — ")
                     linkButton("entry #\(ref.map(String.init) ?? "")") {
-                        if let ref { app.open(.thread(id: ref, awaitLLM: nil)) }
+                        if let ref { NodePrefetch.shared.open(ref, app: app) { app.open(.thread(id: ref, awaitLLM: nil)) } }
                     }
                 }
             }
