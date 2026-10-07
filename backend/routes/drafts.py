@@ -13,6 +13,7 @@ from backend.utils.audio_storage import (
     is_storage_id, move_session_audio_to_node, storage_path,
 )
 from backend.utils.encryption import encrypt_file_atomically
+from backend.utils.client_platform import request_client
 from backend.utils.llm_nodes import (
     AIUsageRefused, ai_usage_refused_response, pick_model_for_generation,
     voice_turn_refusal,
@@ -992,6 +993,9 @@ def finalize_streaming(session_id):
         user_id=current_user.id,
         parent_id=parent_id,
         model=model,
+        # The reply placeholder is made in the task, outside this
+        # request: hand it the app the user is talking from.
+        client=request_client(),
     )
 
     # Log chunk status at time of finalize request
