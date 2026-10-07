@@ -41,6 +41,13 @@ NO_TASKS_RULE = (
 # Sent in place of the todo list when the user has none, or a blank one.
 EMPTY_TODO_MESSAGE = "The todo list is empty. " + NO_TASKS_RULE
 
+# Shown on the card when the model's output hit the output cap (#432).
+# The card has no retry button after a failed merge (its pending draft
+# is gone), so the message says how to get a new proposal.
+TRUNCATED_MESSAGE = (
+    "The todo update was cut off, so nothing was changed. "
+    "Ask for the todo update again to retry.")
+
 # A list item (`- `, `* `, `+ `, `1. `), with the text after its checkbox,
 # if it has one, in group 1.
 _LIST_ITEM_RE = re.compile(
@@ -218,15 +225,15 @@ def _run_merge(llm_node, update_summary, user_id, model_id,
     truncated = response.get("truncated", False)
     empty = not merged_todo or not merged_todo.strip()
 
-    # Log cost, also for an empty result: the call was billed (#368). A
-    # result cut off before any text is marked like the other background
-    # jobs' refusals.
+    # Log cost, also for a result that is thrown away: the call was billed
+    # (#368). Any cut-off result is marked like the other background jobs'
+    # refusals: it hit the output cap and produced nothing usable.
     output_tokens = response.get("output_tokens", 0)
     db.session.add(APICostLog(
         user_id=user_id,
         model_id=model_id,
         request_type="todo_merge",
-        request_ref=(REFUSED_REF if empty and truncated else None),
+        request_ref=(REFUSED_REF if truncated else None),
         **llm_cost_log_fields(model_id, response),
     ))
 
@@ -236,6 +243,17 @@ def _run_merge(llm_node, update_summary, user_id, model_id,
             f"(truncated={truncated}, output_tokens={output_tokens})")
         _update_apply_status(llm_node, "failed", error="Empty merge result",
                             confirm_node_id=confirm_node_id)
+        db.session.commit()
+        return
+
+    # A cut-off list (output cap, a repetition loop) is missing items:
+    # saving it would replace the user's list with a partial one (#432).
+    if truncated:
+        logger.warning(
+            f"Todo merge for node {llm_node_id} was cut off; nothing "
+            f"saved (output_tokens={output_tokens})")
+        _update_apply_status(llm_node, "failed", error=TRUNCATED_MESSAGE,
+                             confirm_node_id=confirm_node_id)
         db.session.commit()
         return
 
@@ -255,18 +273,16 @@ def _run_merge(llm_node, update_summary, user_id, model_id,
     db.session.flush()
 
     # Update apply status
-    if truncated:
-        logger.warning(f"Todo merge response truncated for node {llm_node_id}")
     _update_apply_status(
         llm_node, "completed", todo_id=new_todo.id,
-        truncated=truncated, confirm_node_id=confirm_node_id)
+        confirm_node_id=confirm_node_id)
 
     db.session.commit()
-    logger.info(f"Voice todo merge completed: todo_id={new_todo.id} for user {user_id}, truncated={truncated}")
+    logger.info(f"Voice todo merge completed: todo_id={new_todo.id} for user {user_id}")
 
 
 def _update_apply_status(llm_node, status, error=None, todo_id=None,
-                         truncated=False, confirm_node_id=None):
+                         confirm_node_id=None):
     """Update the apply_status in the LLM node's tool_calls_meta.
 
     Also updates the confirmation node (where apply_todo_changes lives)
@@ -285,8 +301,6 @@ def _update_apply_status(llm_node, status, error=None, todo_id=None,
                 entry["apply_error"] = error
             if todo_id:
                 entry["todo_id"] = todo_id
-            if truncated:
-                entry["apply_truncated"] = True
             break
     llm_node.tool_calls_meta = json.dumps(meta)
 
