@@ -11,33 +11,43 @@ const PROVIDERS = [
 ];
 
 /**
+ * The models a picker of this purpose may offer: the read models for
+ * 'read', the chat models otherwise. A read-only model (`chat: false`)
+ * is in the Read picker only. A missing `chat` counts as true.
+ */
+export const offeredModels = (models, purpose) => models.filter(
+  (m) => (purpose === 'read' ? m.read : m.chat !== false),
+);
+
+/**
  * The options a picker shows (#355).
  *
  * purpose 'read': only the models a read runs on.
  * purpose 'chat', collapsed: the featured models plus the selected one
  *   (first, when it is not featured), then "More models…".
- * purpose 'chat', expanded: every active model, grouped by provider.
+ * purpose 'chat', expanded: every active chat model, grouped by provider.
  *
  * `models` comes from /nodes/models: active only, newest first within
  * each provider.
  */
 export const pickerOptions = (models, selectedId, purpose, expanded) => {
+  const offered = offeredModels(models, purpose);
   if (purpose === 'read') {
-    return { kind: 'flat', models: models.filter((m) => m.read) };
+    return { kind: 'flat', models: offered };
   }
   if (expanded) {
     return {
       kind: 'grouped',
       groups: PROVIDERS
-        .map((p) => ({ ...p, models: models.filter((m) => m.provider === p.id) }))
+        .map((p) => ({ ...p, models: offered.filter((m) => m.provider === p.id) }))
         .filter((g) => g.models.length > 0),
     };
   }
-  const byProvider = PROVIDERS.flatMap((p) => models.filter((m) => m.provider === p.id));
+  const byProvider = PROVIDERS.flatMap((p) => offered.filter((m) => m.provider === p.id));
   const featured = byProvider.filter((m) => m.featured);
-  const selected = models.find((m) => m.id === selectedId);
+  const selected = offered.find((m) => m.id === selectedId);
   const short = selected && !selected.featured ? [selected, ...featured] : featured;
-  return { kind: 'flat', models: short, more: short.length < models.length };
+  return { kind: 'flat', models: short, more: short.length < offered.length };
 };
 
 const optionModels = (options) => (
@@ -62,7 +72,8 @@ const MENU_MAX_HEIGHT = 320;
  * chat reply otherwise), else the account preference / server default.
  * A thread predecessor overrides whatever was selected; otherwise the
  * default only fills an empty selection or replaces one this picker
- * cannot offer (a deprecated preference, a chat model in the Read picker).
+ * cannot offer (a deprecated preference, a chat model in the Read picker,
+ * a read-only model in a chat picker).
  */
 const ModelSelector = ({
   nodeId, selectedModel, onModelChange, purpose = 'chat', disabled = false,
@@ -106,8 +117,7 @@ const ModelSelector = ({
     const key = `${nodeId}:${purpose}`;
     if (appliedFor.current === key) return;
     appliedFor.current = key;
-    const offered = models.filter((m) => purpose !== 'read' || m.read);
-    const selectable = offered.some((m) => m.id === selectedModel);
+    const selectable = offeredModels(models, purpose).some((m) => m.id === selectedModel);
     if (suggestion.source === 'predecessor' || !selectable) {
       if (suggestion.suggested_model !== selectedModel) {
         onModelChange(suggestion.suggested_model);

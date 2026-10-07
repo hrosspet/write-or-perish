@@ -145,16 +145,16 @@ class Config:
     # Sources:
     #   Anthropic: https://platform.claude.com/docs/en/about-claude/pricing
     #   OpenAI:    https://developers.openai.com/api/docs/pricing
-    PRICING_VERSION = "7"
-    PRICING_UPDATED_AT = "2026-09-23"
+    PRICING_VERSION = "8"
+    PRICING_UPDATED_AT = "2026-10-02"
 
     # Supported models configuration (single source of truth for all model metadata)
     #
     # Profile-chunk sizing keys (docs/design/chunk-planner.md):
     #   tokenizer_family  — which BPE the model bills with: "claude_old"
     #                       (Opus ≤ 4.6, Sonnet 4.6, Haiku 4.5), "claude_new"
-    #                       (introduced with Opus 4.7: Opus 4.7/4.8/5/5.5, Sonnet 5,
-    #                       Fable 5/5.1; 1.0–1.35× the old family), "o200k"
+    #                       (introduced with Opus 4.7: Opus 4.7/4.8/5/5.5, Sonnet
+    #                       5/5.5, Fable 5/5.1; 1.0–1.35× the old family), "o200k"
     #                       (GPT-5.x; tiktoken o200k_base matches billing).
     #                       Chunk balance is in stored content units and does
     #                       not depend on the family; the family only selects
@@ -181,9 +181,42 @@ class Config:
     #                the rest sit behind "More models…". Set by hand.
     #   read       — a read (Community Archive picks) may run on it; the
     #                Read button's picker lists only these.
+    #   chat       — False keeps the model to reads: it is left out of
+    #                the chat pickers (LLM Response, the Account default,
+    #                admin polls) and refused as an account preference,
+    #                as LLM_NAME and as a poll's model, and a reply that
+    #                is not a read turn sent with it is refused with a 400
+    #                (create_llm_placeholder, ReadOnlyModelRefused), never
+    #                moved to another model. Absent means True.
+    #                "Read only" = read: True + chat: False.
     # The picker's full list follows this dict's order: newest first
     # within each provider.
     SUPPORTED_MODELS = {
+        "gpt-6.1-sol": {
+            # ASSUMED o200k, as for gpt-6-sol.
+            "tokenizer_family": "o200k",
+            "provider": "openai",
+            "api_model": "gpt-6.1-sol",
+            "cache_diagnostics": True,
+            "max_input_tokens": 922000,
+            "display_name": "GPT-6.1 Sol",
+            # Read only (Peter, 2026-10-02): "for Read (not for normal
+            # chatting, though)".
+            "read": True,
+            "chat": False,
+            "context_window": 1050000,
+            # Verified 2026-10-02 on the OpenAI pricing + model pages:
+            # $2.00 / $10.00, cached input $0.10 (0.05x, where gpt-6-sol
+            # is 0.1x), cache writes $2.50 (the default 1.25x); >272k
+            # input: 2x input and cache rates, 1.5x output for the whole
+            # request; batch half.
+            "input_price_per_mtok": 2.00,
+            "output_price_per_mtok": 10.00,
+            "cached_input_multiplier": 0.05,
+            "long_context_threshold": 272000,
+            "long_context_input_multiplier": 2.0,
+            "long_context_output_multiplier": 1.5,
+        },
         "gpt-6-astra": {
             "provider": "openai",
             "api_model": "gpt-6-astra",
@@ -347,6 +380,23 @@ class Config:
             "input_price_per_mtok": 1.75,
             "output_price_per_mtok": 14.00,
             "deprecated": True,
+        },
+        "claude-sonnet-5.5": {
+            "tokenizer_family": "claude_new",
+            "provider": "anthropic",
+            "api_model": "claude-sonnet-5-5",
+            "display_name": "Sonnet 5.5",
+            # Read only (Peter, 2026-10-02): "for Read (not for normal
+            # chatting, though)".
+            "read": True,
+            "chat": False,
+            "context_window": 1000000,
+            # Verified 2026-10-02 on the Anthropic pricing page: $2 / $10,
+            # 5m cache writes $2.50 (the standard 1.25x), cache hits $0.20
+            # (the standard 0.1x), batch 50%, flat pricing across the 1M
+            # window.
+            "input_price_per_mtok": 2.00,
+            "output_price_per_mtok": 10.00,
         },
         "claude-sonnet-4.5": {
             "tokenizer_family": "claude_old",
