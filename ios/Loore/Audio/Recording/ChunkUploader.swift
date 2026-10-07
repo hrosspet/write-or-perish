@@ -29,6 +29,10 @@ final class ChunkUploader: NSObject {
     static let shared = ChunkUploader()
     static let backgroundIdentifier = "org.loore.app.voice-uploads"
     static let retryDelays: [Double] = [2, 4, 8, 16]
+    /// The server's hide window for a recording session (`LIVE_SESSION_WINDOW_SEC`
+    /// in backend/utils/streaming_session.py): for this long after its last
+    /// chunk no other client is offered the session.
+    static let serverLiveWindow: TimeInterval = 45
 
     enum ChunkStatus: String, Codable { case pending, stored, failed, fatal }
 
@@ -49,6 +53,11 @@ final class ChunkUploader: NSObject {
         var closed = false
         /// Chunks the session already had on the server (a resumed recording).
         var firstIndex = 0
+        /// When this phone began its last upload the server stored (nil in
+        /// manifests from earlier builds). No later than the server's own stamp
+        /// for that chunk, so an age measured from it is never less than the
+        /// server's (`mayRelease`).
+        var lastUploadAt: Date?
     }
 
     /// What `settle` reports before finalize.
@@ -79,6 +88,8 @@ final class ChunkUploader: NSObject {
     var cookieHeader: (URL) -> [String: String] = { url in
         HTTPCookie.requestHeaderFields(with: HTTPCookieStorage.shared.cookies(for: url) ?? [])
     }
+    /// The clock (tests move it).
+    var now: () -> Date = Date.init
     /// Called once when a session hits a fatal error.
     var onFatal: ((String, String) -> Void)?
     /// Called when a background relaunch finished its events.
@@ -208,14 +219,16 @@ final class ChunkUploader: NSObject {
     }
 
     /// After a relaunch: upload whatever a killed app left behind.
-    /// - Returns: sessions a recorder was still writing when the app ended, with
-    ///   nothing left to upload. Nothing records into them any more; the caller
-    ///   releases them on the server, which otherwise hides a recording session
-    ///   from recovery for 45 s after its last chunk (#423 walk test). A session
-    ///   with chunks still to upload is not returned: recovered before they land,
-    ///   its continuation would reuse their indexes.
+    /// - Parameter releaseMargin: the release request's own time in flight
+    ///   (see `mayRelease`).
+    /// - Returns: sessions to release on the server: a recorder was still writing
+    ///   them when the app ended, nothing is left to upload, and the server still
+    ///   hides them from every other client (`mayRelease`). Released, they are
+    ///   offered for recovery at once instead of after `serverLiveWindow` (#423
+    ///   walk test). A session with chunks still to upload is not returned:
+    ///   recovered before they land, its continuation would reuse their indexes.
     @discardableResult
-    func resumePending() -> [String] {
+    func resumePending(releaseMargin: TimeInterval = 0) -> [String] {
         guard let dirs = try? fileManager.contentsOfDirectory(at: root, includingPropertiesForKeys: nil) else { return [] }
         var abandoned: [String] = []
         for dir in dirs {
@@ -240,7 +253,10 @@ final class ChunkUploader: NSObject {
             }
             let open = resumed.chunks.values.contains { $0.status == .pending }
             if !open {
-                if !manifest.closed { abandoned.append(manifest.sessionId) }
+                if !manifest.closed && Self.mayRelease(lastUploadAt: manifest.lastUploadAt, now: now(),
+                                                       margin: releaseMargin) {
+                    abandoned.append(manifest.sessionId)
+                }
                 try? fileManager.removeItem(at: dir)
                 continue
             }
@@ -252,6 +268,22 @@ final class ChunkUploader: NSObject {
             startWorker(manifest.sessionId)
         }
         return abandoned
+    }
+
+    /// Whether a relaunch may release a session it was recording: only while the
+    /// server still hides it from every other client, so no other device can
+    /// have continued it. Released later, a session the web has continued since
+    /// would lose its liveness: the phone would offer Discard (which deletes the
+    /// web's audio) and Continue (whose chunk numbers clash with the web's), and
+    /// a status poll could complete it under the web (review of #424). After the
+    /// window the server offers the session anyway, so there is nothing to
+    /// release. No record (an older build, or no chunk stored): no release.
+    /// - Parameter margin: subtracted from the window for the release request's
+    ///   time in flight.
+    static func mayRelease(lastUploadAt: Date?, now: Date, margin: TimeInterval) -> Bool {
+        guard let lastUploadAt else { return false }
+        let age = now.timeIntervalSince(lastUploadAt)
+        return age >= 0 && age < serverLiveWindow - margin
     }
 
     /// Sign-out: stop every upload (foreground and background, which carry this
@@ -407,9 +439,13 @@ final class ChunkUploader: NSObject {
         guard fileManager.fileExists(atPath: file.path) else { return .giveUp }
         manifests[sessionId]?.chunks[index]?.attempts += 1
         let request = makeRequest(manifest.uploadURL, contentType: record.contentType)
+        let began = now()
         do {
             let (data, http) = try await transport(request, file)
-            return Self.classify(status: http.statusCode, body: data, index: index)
+            let result = Self.classify(status: http.statusCode, body: data, index: index)
+            // Persisted by the caller's `stored`.
+            if case .stored = result { manifests[sessionId]?.lastUploadAt = began }
+            return result
         } catch {
             log.info("chunk \(index) transport error")
             return .retry

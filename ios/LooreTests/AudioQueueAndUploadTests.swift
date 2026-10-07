@@ -323,25 +323,71 @@ final class ChunkUploaderTests: XCTestCase {
         XCTAssertEqual(outcome.stored, 1)
     }
 
-    // #423 walk test: the app crashed mid-recording. A relaunch reports its
-    // session for release (nothing records into it any more), once.
-    func testRelaunchReportsARecordingTheKilledAppLeft() async throws {
+    /// A session whose recorder was running when "the app was killed": chunk 0
+    /// stored, the manifest left open on disk.
+    private func leaveRecordingSession(_ sid: String) async throws {
         uploader.transport = { request, _ in
             (Data(), HTTPURLResponse(url: request.url!, statusCode: 202, httpVersion: nil, headerFields: nil)!)
         }
-        uploader.open(sessionId: "s10", uploadURL: URL(string: "http://x/c")!)
-        uploader.enqueue(sessionId: "s10", chunk: chunk(0))
-        // A recording that was stopped is not reported.
+        uploader.open(sessionId: sid, uploadURL: URL(string: "http://x/c")!)
+        uploader.enqueue(sessionId: sid, chunk: chunk(0))
+        for _ in 0..<200 where uploader.outcome(sid).stored < 1 {
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        XCTAssertEqual(uploader.outcome(sid).stored, 1)
+    }
+
+    private func relaunch(at offset: TimeInterval = 0) -> ChunkUploader {
+        let relaunched = ChunkUploader(root: root, useBackgroundSession: false)
+        relaunched.now = { Date().addingTimeInterval(offset) }
+        return relaunched
+    }
+
+    // #423 walk test: the app crashed mid-recording and relaunched inside the
+    // server's window. Its session is released (nothing records into it any
+    // more), once; a recording that was stopped is not.
+    func testRelaunchInsideTheWindowReleasesTheRecordingTheKilledAppLeft() async throws {
+        try await leaveRecordingSession("s10")
         uploader.open(sessionId: "s11", uploadURL: URL(string: "http://x/c")!)
         uploader.enqueue(sessionId: "s11", chunk: chunk(0))
         _ = await uploader.settle(sessionId: "s11")
-        for _ in 0..<200 where uploader.outcome("s10").stored < 1 {
-            try await Task.sleep(nanoseconds: 5_000_000)
+        XCTAssertEqual(relaunch().resumePending(releaseMargin: AudioCenter.releaseTimeout), ["s10"])
+        XCTAssertEqual(relaunch().resumePending(releaseMargin: AudioCenter.releaseTimeout), [], "released once")
+    }
+
+    // Review of #424: after the window another device may have continued the
+    // session; releasing it then would let the phone discard or clash with it.
+    func testRelaunchAfterTheWindowDoesNotRelease() async throws {
+        try await leaveRecordingSession("s13")
+        let later = relaunch(at: ChunkUploader.serverLiveWindow - AudioCenter.releaseTimeout)
+        XCTAssertEqual(later.resumePending(releaseMargin: AudioCenter.releaseTimeout), [])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("s13").path),
+                       "nothing left to upload: the session's files go either way")
+    }
+
+    // A manifest from an earlier build has no upload record: no release.
+    func testRelaunchWithNoUploadRecordDoesNotRelease() async throws {
+        try await leaveRecordingSession("s14")
+        let file = root.appendingPathComponent("s14").appendingPathComponent("manifest.json")
+        var json = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: file)) as? [String: Any])
+        XCTAssertNotNil(json.removeValue(forKey: "lastUploadAt"))
+        try JSONSerialization.data(withJSONObject: json).write(to: file)
+        XCTAssertEqual(relaunch().resumePending(releaseMargin: AudioCenter.releaseTimeout), [])
+    }
+
+    func testMayReleaseOnlyInsideTheWindowLessTheMargin() {
+        let stored = Date()
+        let window = ChunkUploader.serverLiveWindow
+        func may(after age: TimeInterval, margin: TimeInterval = 5) -> Bool {
+            ChunkUploader.mayRelease(lastUploadAt: stored, now: stored.addingTimeInterval(age), margin: margin)
         }
-        XCTAssertEqual(uploader.outcome("s10").stored, 1)
-        let relaunched = ChunkUploader(root: root, useBackgroundSession: false)
-        XCTAssertEqual(relaunched.resumePending(), ["s10"])
-        XCTAssertEqual(ChunkUploader(root: root, useBackgroundSession: false).resumePending(), [], "reported once")
+        XCTAssertTrue(may(after: 0))
+        XCTAssertTrue(may(after: window - 5 - 0.5))
+        XCTAssertFalse(may(after: window - 5))
+        XCTAssertFalse(may(after: window + 60))
+        XCTAssertTrue(may(after: window - 0.5, margin: 0))
+        XCTAssertFalse(may(after: -1), "a clock that went back")
+        XCTAssertFalse(ChunkUploader.mayRelease(lastUploadAt: nil, now: stored, margin: 0), "no record")
     }
 
     // Its chunks still uploading: not reported. Recovered before they land, the

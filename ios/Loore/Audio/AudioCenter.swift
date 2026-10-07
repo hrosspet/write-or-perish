@@ -427,7 +427,7 @@ enum LocalNotifier {
 extension AudioCenter {
     /// Signed in with cookies restored: finish uploads a killed app left behind.
     func didSignIn() {
-        releaseAbandonedRecordings(ChunkUploader.shared.resumePending())
+        releaseAbandonedRecordings(ChunkUploader.shared.resumePending(releaseMargin: AudioCenter.releaseTimeout))
         #if DEBUG
         // `-LooreDebugListenNode <id>`: play a node's audio in the global player
         // at launch (the speaker icon's path) until the thread view lands (M2).
@@ -439,11 +439,13 @@ extension AudioCenter {
 
 extension AudioCenter {
     /// Recordings this app was making when it was killed or crashed. The server
-    /// counts a recording session as live for 45 s after its last chunk and
-    /// keeps it out of the Voice screen's recovery banner until then; after the
-    /// crash on the 2026-10-07 walk (#423) the Voice screen opened inside that
-    /// window and offered nothing. Nothing records into these any more, so they
-    /// are released now (the web's pagehide beacon does the same).
+    /// counts a recording session as live for `ChunkUploader.serverLiveWindow`
+    /// after its last chunk and keeps it out of the Voice screen's recovery
+    /// banner until then; after the crash on the 2026-10-07 walk (#423) the
+    /// Voice screen opened inside that window and offered nothing. Nothing
+    /// records into these any more, so they are released now (the web's
+    /// pagehide beacon does the same), but only while still inside the window
+    /// (`ChunkUploader.mayRelease`).
     func releaseAbandonedRecordings(_ sessionIds: [String]) {
         guard !sessionIds.isEmpty, let api = app?.api else { return }
         releasingAbandoned = Task {
@@ -461,7 +463,9 @@ extension AudioCenter {
 
     /// INTRODUCED HEURISTIC: the longest a release may take. The Voice screen
     /// waits for the releases before it asks for unfinished recordings, so
-    /// offline it stays blank for at most this long.
+    /// offline it stays blank for at most this long. Also taken off the window
+    /// in which a relaunch releases (`ChunkUploader.mayRelease`), so a release
+    /// still in flight lands while the server hides the session.
     static let releaseTimeout: TimeInterval = 5
 }
 
