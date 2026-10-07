@@ -1881,3 +1881,35 @@ class ExternalDigestBatchJob(db.Model):
     submitted_at = db.Column(
         db.DateTime, nullable=False, default=datetime.utcnow)
     collected_at = db.Column(db.DateTime, nullable=True)
+
+
+class RecentContextBatchJob(db.Model):
+    """A submitted provider batch carrying recent-context summaries (#380):
+    one request per user whose writing crossed the regeneration threshold.
+    Nobody waits on a recent context, so it rides the Batch API (~50%
+    cheaper); until a batch is collected, prompts keep reading the user's
+    previous summary. Mirrors ExternalDigestBatchJob: per-item routing
+    metadata lives in `items` (keyed by custom_id); the beat collector
+    retrieves results and saves each UserRecentContext.
+    """
+    __tablename__ = "recent_context_batch_job"
+
+    id = db.Column(db.Integer, primary_key=True)
+    # "anthropic" | "openai:<api_model>"
+    provider_key = db.Column(db.String(64), nullable=False)
+    batch_id = db.Column(db.String(255), nullable=False, index=True)
+    # "pending" | "collected" | "abandoned" (never ended within the
+    # collector's patience; its items count as failed)
+    status = db.Column(db.String(16), nullable=False, default="pending")
+    # List of per-item dicts: {custom_id, user_id, profile_id, model_id,
+    # data_cutoff and source_data_cutoff (ISO or None: the window the
+    # prompt rendered), source_tokens}, plus `outcome` once the job is
+    # collected: "saved" | "refused" (cut off before any text; billed) |
+    # "failed" (no usable result) | "skipped" (not saved: account opted
+    # out or deleted, or a newer summary already covers the window).
+    items = db.Column(db.JSON, nullable=False, default=list)
+    submitted_at = db.Column(
+        db.DateTime, nullable=False, default=datetime.utcnow)
+    # Indexed: the refusal backoff counts failed items in jobs collected
+    # after the user's last saved summary (utils/refusal_backoff.py).
+    collected_at = db.Column(db.DateTime, nullable=True, index=True)
