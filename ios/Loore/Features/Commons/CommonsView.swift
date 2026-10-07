@@ -44,7 +44,8 @@ struct CommonsView: View {
                         .padding(.top, 48)
                 } else {
                     ForEach(model.items) { item in
-                        CommonsCard(item: item) { app.open(.thread(id: item.id, awaitLLM: nil)) }
+                        // The thread opens once its node is in (NodePrefetch), not on a loading page.
+                        CommonsCard(item: item) { NodePrefetch.shared.openThread(item.id, app: app) }
                     }
                 }
                 if model.loadingMore {
