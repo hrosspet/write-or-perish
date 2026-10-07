@@ -276,13 +276,15 @@ private struct ThreadContent: View {
     }
 
     private func llmResponseRow(_ node: NodeDetail) -> some View {
-        // Another node is loading (NodePrefetch): a second press would start a second reply.
-        let busy = model.llmRequesting || model.llmTaskNodeId != nil || NodePrefetch.shared.isPending
+        let working = model.llmRequesting || model.llmTaskNodeId != nil
+        // Another node is loading (NodePrefetch): disabled too, as a second press would
+        // start a second reply, but without the button's own spinner.
+        let busy = working || NodePrefetch.shared.isPending
         let underReadReply = model.isReadReply && node.llmTaskStatus == .completed
         return AdaptiveStack(spacing: 0, verticalSpacing: 6) {
             Button(action: model.llmResponsePressed) {
                 HStack(spacing: 8) {
-                    if busy { ProgressView().controlSize(.mini).tint(LooreColor.textSecondary) }
+                    if working { ProgressView().controlSize(.mini).tint(LooreColor.textSecondary) }
                     Text(model.llmRequesting ? "Requesting…"
                          : model.llmTaskNodeId != nil ? (model.llmPollStatus == .pending ? "Waiting for AI…" : "Generating…")
                          : "LLM Response")
