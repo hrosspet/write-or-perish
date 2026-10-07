@@ -64,10 +64,11 @@ function chapterTitleFromContent(content) {
  * @param {string} options.apiEndpoint - API path to post transcripts to ('/voice')
  * @param {string} options.ttsTitle - Label for the audio player
  * @param {Function} options.onLLMComplete - Called with (nodeId, content) when LLM response is ready
+ * @param {Function} [options.onEntrySaved] - Called once the server has confirmed it saved the user's recording as an entry, whether or not a reply follows (the reply can fail or be skipped)
  * @param {number|null} options.initialLlmNodeId - Resume in processing phase, polling this LLM node
  * @param {number|null} options.initialParentId - Resume in ready phase with thread parent pre-set
  */
-export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete, initialLlmNodeId = null, initialParentId = null, model = null, aiUsage = 'none', onAiUsageRefused = null }) {
+export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete, initialLlmNodeId = null, initialParentId = null, model = null, aiUsage = 'none', onAiUsageRefused = null, onEntrySaved = null }) {
   const audio = useAudio();
   const isOnline = useOnlineStatus();
   const [phase, setPhase] = useState(initialLlmNodeId ? 'processing' : 'ready');
@@ -226,6 +227,13 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
   useEffect(() => {
     onAiUsageRefusedRef.current = onAiUsageRefused;
   }, [onAiUsageRefused]);
+  // The server confirmed the recording is saved as an entry (#391): the
+  // page learns that without waiting for a reply, which can fail or be
+  // skipped after the entry exists.
+  const onEntrySavedRef = useRef(onEntrySaved);
+  useEffect(() => {
+    onEntrySavedRef.current = onEntrySaved;
+  }, [onEntrySaved]);
 
   // Streaming transcription
   // Derive label from apiEndpoint: '/voice' → 'Voice'
@@ -306,8 +314,10 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
       // Server-side validation rejected the request (e.g. misconfigured
       // {user_export}). No LLM node was created — surface the toast and
       // return to ready so the user can re-record without seeing a stub
-      // failed response.
+      // failed response. Only the reply was skipped: the server saved the
+      // recording as an entry before it decided that (_skip_voice_reply).
       if (data.warning) {
+        if (onEntrySavedRef.current) onEntrySavedRef.current();
         addToast(data.warning, 8000);
         setPhase('ready');
         return;
@@ -317,6 +327,8 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
       // node, skip the frontend POST and use the server-provided node ID.
       if (data.llmNodeId) {
         console.log('[VoiceSession] Server-side LLM chain: llmNodeId=', data.llmNodeId);
+        // The user's node was created before the reply's placeholder.
+        if (onEntrySavedRef.current) onEntrySavedRef.current();
         voiceTiming.setTurnNode(data.llmNodeId);
         voiceTiming.mark('llm_node_known');
         setLlmNodeId(data.llmNodeId);
@@ -342,6 +354,7 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
         console.log('[VoiceSession] API response:', { llm_node_id: res.data.llm_node_id, user_node_id: res.data.user_node_id, parent_id: payload.parent_id });
         setLlmNodeId(res.data.llm_node_id);
         lastUserNodeIdRef.current = res.data.user_node_id;
+        if (onEntrySavedRef.current) onEntrySavedRef.current();
       } catch (err) {
         console.error(`${apiEndpoint} API error:`, err);
         // AI usage keeps the thread away from AI: the page explains.
