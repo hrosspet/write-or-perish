@@ -81,6 +81,30 @@ SENTRY_PRIVACY_OPTIONS = {
 }
 
 
+def _without_query(url):
+    return url.split("?", 1)[0].split("#", 1)[0]
+
+
+def _drop_query_strings(event):
+    """Query strings can carry user input (the search box sends its words
+    as ?q=), and send_default_pii=False does not remove them: the SDK
+    sends the request's query string, and the Referer header carries the
+    query of the page that made the call. Both are removed; the paths
+    stay, so the route is still identifiable."""
+    request_info = event.get("request")
+    if not isinstance(request_info, dict):
+        return event
+    request_info.pop("query_string", None)
+    if isinstance(request_info.get("url"), str):
+        request_info["url"] = _without_query(request_info["url"])
+    headers = request_info.get("headers")
+    if isinstance(headers, dict):
+        for name, value in list(headers.items()):
+            if name.lower() == "referer" and isinstance(value, str):
+                headers[name] = _without_query(value)
+    return event
+
+
 def create_app():
     # Error monitoring (roadmap Phase 0). No-op unless SENTRY_DSN is set.
     sentry_dsn = os.environ.get("SENTRY_DSN")
@@ -88,6 +112,7 @@ def create_app():
         import sentry_sdk
 
         def _before_send(event, hint):
+            _drop_query_strings(event)
             # Drop known, expected noise. Match against BOTH the exception text
             # and the log-record message so it's caught regardless of which
             # Sentry path captured it (OpenAI integration, logging, or the
