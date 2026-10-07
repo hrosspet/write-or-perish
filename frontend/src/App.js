@@ -122,11 +122,13 @@ function App() {
   const updatesFetched = useRef(false);
   const { user, setUser } = useUser();
   const navigate = useNavigate();
-  // A new entry's page opens once its node is in, with a spinner over the
-  // current page meanwhile; moving elsewhere first drops it.
-  const { pending: openingEntry, openNode: openEntry, cancel: cancelOpenEntry } = useNodePrefetch();
+  // A thread opened from a modal (a new entry, a search result): the modal
+  // closes, and the thread opens once its node is in, with a spinner over
+  // the current page meanwhile; moving elsewhere first drops it.
+  const { pending: openingNode, openNode, cancel: cancelOpenNode } = useNodePrefetch();
   const { pathname } = useLocation();
-  useEffect(() => { cancelOpenEntry(); }, [pathname, cancelOpenEntry]);
+  useEffect(() => { cancelOpenNode(); }, [pathname, cancelOpenNode]);
+  const openThread = (id, url = `/node/${id}`) => openNode(id, () => navigate(url));
 
   // When the user info is loaded, check if they have accepted the terms.
   useEffect(() => {
@@ -194,14 +196,16 @@ function App() {
                 // carries `awaitLlm` so NodeDetail picks up the pending
                 // LLM response on the highlighted node.
                 const suffix = data.awaitLlm ? `?awaitLlm=${data.awaitLlm}` : '';
-                openEntry(data.id, () => navigate(`/node/${data.id}${suffix}`));
+                openThread(data.id, `/node/${data.id}${suffix}`);
               },
             }}
           />
       )}
-      {openingEntry && <NodeOpeningSpinner />}
+      {openingNode && <NodeOpeningSpinner />}
 
-      {showSearch && <SearchModal scope={searchScope} onClose={() => setShowSearch(false)} />}
+      {showSearch && (
+        <SearchModal scope={searchScope} onClose={() => setShowSearch(false)} onOpenNode={openThread} />
+      )}
 
       {/* Render the Terms Modal if the user hasn't accepted the terms yet */}
       {showTerms && (

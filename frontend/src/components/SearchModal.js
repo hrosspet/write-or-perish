@@ -10,7 +10,9 @@ import { highlightRuns } from '../utils/searchHighlight';
 // the user's own entries, with saved references merged into semantic
 // results) and the References page (scope 'external' — saved references
 // only, in both modes).
-function SearchModal({ onClose, scope = 'archive' }) {
+// `onOpenNode(id)` opens a result's thread once its node is in (App's
+// useNodePrefetch: the modal closes, the page under it shows the spinner).
+function SearchModal({ onClose, onOpenNode, scope = 'archive' }) {
   const { user } = useUser();
   const externalOnly = scope === 'external';
   const isAdmin = !!(user && user.is_admin);
@@ -135,7 +137,8 @@ function SearchModal({ onClose, scope = 'archive' }) {
       window.open(`/node/${id}`, '_blank');
     } else {
       onClose();
-      navigate(`/node/${id}`);
+      if (onOpenNode) onOpenNode(id);
+      else navigate(`/node/${id}`);
     }
   };
 
