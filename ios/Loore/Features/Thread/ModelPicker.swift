@@ -13,19 +13,28 @@ enum ModelPickerOptions: Equatable {
 
     static let providers = [("anthropic", "Anthropic"), ("openai", "OpenAI")]
 
+    /// The models a picker of this purpose may offer (web `offeredModels`): the read
+    /// models for a Read, the chat models otherwise. A read-only model is in the
+    /// Read picker only.
+    static func offered(_ models: [ModelInfo], purpose: ModelPurpose) -> [ModelInfo] {
+        models.filter { purpose == .read ? $0.read : $0.chat }
+    }
+
     /// read: only read models. chat collapsed: featured (Anthropic first) with a
-    /// non-featured selection first, then "More models…". chat expanded: all, grouped.
+    /// non-featured selection first, then "More models…". chat expanded: all chat
+    /// models, grouped.
     static func make(models: [ModelInfo], selectedId: String?, purpose: ModelPurpose, expanded: Bool) -> ModelPickerOptions {
-        if purpose == .read { return .flat(models: models.filter(\.read), more: false) }
+        let candidates = offered(models, purpose: purpose)
+        if purpose == .read { return .flat(models: candidates, more: false) }
         if expanded {
-            return .grouped(providers.map { id, label in Group(label: label, models: models.filter { $0.provider == id }) }
+            return .grouped(providers.map { id, label in Group(label: label, models: candidates.filter { $0.provider == id }) }
                 .filter { !$0.models.isEmpty })
         }
-        let byProvider = providers.flatMap { id, _ in models.filter { $0.provider == id } }
+        let byProvider = providers.flatMap { id, _ in candidates.filter { $0.provider == id } }
         let featured = byProvider.filter(\.featured)
-        let selected = models.first { $0.id == selectedId }
+        let selected = candidates.first { $0.id == selectedId }
         let short = selected.map { !$0.featured ? [$0] + featured : featured } ?? featured
-        return .flat(models: short, more: short.count < models.count)
+        return .flat(models: short, more: short.count < candidates.count)
     }
 
     var allModels: [ModelInfo] {
@@ -36,12 +45,12 @@ enum ModelPickerOptions: Equatable {
     }
 
     /// The default the backend suggests replaces the selection when it is a
-    /// thread predecessor, or when the picker cannot offer the selection.
-    /// Returns the new selection, or nil to keep the current one.
+    /// thread predecessor, or when the picker cannot offer the selection (a
+    /// deprecated model, a chat model in the Read picker, a read-only model in a
+    /// chat picker). Returns the new selection, or nil to keep the current one.
     static func appliedSuggestion(models: [ModelInfo], suggestion: SuggestedModel, selected: String?,
                                   purpose: ModelPurpose) -> String? {
-        let offered = models.filter { purpose != .read || $0.read }
-        let selectable = offered.contains { $0.id == selected }
+        let selectable = offered(models, purpose: purpose).contains { $0.id == selected }
         guard suggestion.source == "predecessor" || !selectable else { return nil }
         guard let suggested = suggestion.suggestedModel, suggested != selected else { return nil }
         return suggested
