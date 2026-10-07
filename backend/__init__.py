@@ -97,20 +97,31 @@ def _without_query(url):
 def _drop_query_strings(event):
     """Query strings can carry user input (the search box sends its words
     as ?q=), and send_default_pii=False does not remove them: the SDK
-    sends the request's query string, and the Referer header carries the
-    query of the page that made the call. Both are removed; the paths
-    stay, so the route is still identifiable."""
+    sends the request's query string, the Referer header carries the
+    query of the page that made the call, and outgoing-HTTP breadcrumbs
+    keep each call's query in `http.query`. All are removed; the paths
+    stay, so the route is still identifiable. (Access-log lines, which
+    hold whole request lines, are kept out by ignore_logger in
+    create_app.)"""
     request_info = event.get("request")
-    if not isinstance(request_info, dict):
-        return event
-    request_info.pop("query_string", None)
-    if isinstance(request_info.get("url"), str):
-        request_info["url"] = _without_query(request_info["url"])
-    headers = request_info.get("headers")
-    if isinstance(headers, dict):
-        for name, value in list(headers.items()):
-            if name.lower() == "referer" and isinstance(value, str):
-                headers[name] = _without_query(value)
+    if isinstance(request_info, dict):
+        request_info.pop("query_string", None)
+        if isinstance(request_info.get("url"), str):
+            request_info["url"] = _without_query(request_info["url"])
+        headers = request_info.get("headers")
+        if isinstance(headers, dict):
+            for name, value in list(headers.items()):
+                if name.lower() == "referer" and isinstance(value, str):
+                    headers[name] = _without_query(value)
+    breadcrumbs = event.get("breadcrumbs")
+    if isinstance(breadcrumbs, dict):
+        for crumb in breadcrumbs.get("values") or ():
+            data = crumb.get("data") if isinstance(crumb, dict) else None
+            if isinstance(data, dict):
+                data.pop("http.query", None)
+                data.pop("http.fragment", None)
+                if isinstance(data.get("url"), str):
+                    data["url"] = _without_query(data["url"])
     return event
 
 
@@ -119,6 +130,15 @@ def create_app():
     sentry_dsn = os.environ.get("SENTRY_DSN")
     if sentry_dsn:
         import sentry_sdk
+        from sentry_sdk.integrations.logging import ignore_logger
+
+        # Access-log lines hold each request's full request line and
+        # Referer, query strings included. Logged at INFO they become
+        # breadcrumbs, and an event captured outside the request scope
+        # (gunicorn's own "Error handling request" when a streamed
+        # response fails) carries them. Sentry ignores these loggers.
+        ignore_logger("gunicorn.access")
+        ignore_logger("werkzeug")
 
         def _before_send(event, hint):
             _drop_query_strings(event)
