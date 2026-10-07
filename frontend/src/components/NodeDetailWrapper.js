@@ -32,16 +32,20 @@ const NodeDetailWrapper = ({ nodeIdOverride }) => {
   }, [target, shown]);
 
   // A click on the node already shown (a quote of itself) just navigates:
-  // its data would otherwise wait unused and be shown on a later visit.
+  // its data would otherwise wait unused and be shown on a later visit. A
+  // click on the node the address is already moving to waits for that move.
   const open = useCallback((nodeId, go) => {
-    if (String(nodeId) === shown) go();
+    const clicked = String(nodeId);
+    if (clicked === target && target !== shown) return;
+    if (clicked === shown) go();
     else openNode(nodeId, go);
-  }, [shown, openNode]);
+  }, [shown, target, openNode]);
 
+  const moving = clickPending || target !== shown;
   return (
     <>
-      <NodeDetail key={shown} nodeId={shown} openNode={open} />
-      {(clickPending || target !== shown) && <NodeOpeningSpinner />}
+      <NodeDetail key={shown} nodeId={shown} openNode={open} moving={moving} />
+      {moving && <NodeOpeningSpinner />}
     </>
   );
 };

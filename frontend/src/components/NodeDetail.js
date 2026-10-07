@@ -97,11 +97,13 @@ const tabTitleFor = (node) => {
   return firstLine ? `${firstLine} — Loore` : 'Loore';
 };
 
-// `nodeId` and `openNode` come from NodeDetailWrapper: the id is the node
-// this page shows, which stays put while the address has moved on to a node
-// that is still loading; `openNode(id, go)` fetches a node before `go`
-// changes the address (useNodePrefetch).
-function NodeDetail({ nodeId: id, openNode }) {
+// `nodeId`, `openNode` and `moving` come from NodeDetailWrapper: the id is
+// the node this page shows, which stays put while the address has moved on
+// to a node that is still loading; `openNode(id, go)` fetches a node before
+// `go` changes the address (useNodePrefetch); `moving` is true while another
+// node loads, and the billed buttons wait (a second press would start a
+// second reply or read).
+function NodeDetail({ nodeId: id, openNode, moving }) {
   const navigate = useNavigate();
   const location = useLocation();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -1128,7 +1130,7 @@ function NodeDetail({ nodeId: id, openNode }) {
     borderTopLeftRadius: 0, borderBottomLeftRadius: 0,
     flex: 1, justifyContent: 'space-between',
   };
-  const readBusy = readLoading || llmRequesting || !!llmTaskNodeId;
+  const readBusy = readLoading || llmRequesting || !!llmTaskNodeId || moving;
   const readButton = (
     <span data-action-group style={actionGroupStyle}>
       <button
@@ -1236,7 +1238,7 @@ function NodeDetail({ nodeId: id, openNode }) {
       {currentUser?.is_admin && nodeAllowsAi && (
         <button
           onClick={handleReadFromNode}
-          disabled={readLoading}
+          disabled={readLoading || moving}
           style={{ ...topRightButtonStyle, justifyContent: 'space-between' }}
           title={inReadThread ? readTitle : READ_ENTRY_TITLE}
         >
@@ -1602,7 +1604,7 @@ function NodeDetail({ nodeId: id, openNode }) {
               <span data-action-group title={llmResponseTitle} style={actionGroupStyle}>
                 <button
                   onClick={handleLLMResponse}
-                  disabled={llmRequesting || !!llmTaskNodeId || underReadReply}
+                  disabled={llmRequesting || !!llmTaskNodeId || underReadReply || moving}
                   aria-disabled={underReadReply || undefined}
                   style={{ display: 'inline-flex', alignItems: 'center', gap: '8px', ...joinedButtonStyle }}
                 >
@@ -1618,7 +1620,7 @@ function NodeDetail({ nodeId: id, openNode }) {
                   nodeId={node.id}
                   selectedModel={selectedModel}
                   onModelChange={setSelectedModel}
-                  disabled={llmRequesting || !!llmTaskNodeId || underReadReply}
+                  disabled={llmRequesting || !!llmTaskNodeId || underReadReply || moving}
                   style={joinedPickerStyle}
                 />
               </span>

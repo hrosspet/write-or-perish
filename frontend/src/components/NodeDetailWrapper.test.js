@@ -7,7 +7,7 @@ jest.mock('./NodeDetail', () => {
   const React = require('react');
   const { useNavigate, useLocation } = require('react-router-dom');
   const { takePrefetchedNode } = require('../hooks/useNodePrefetch');
-  return function MockNodeDetail({ nodeId, openNode }) {
+  return function MockNodeDetail({ nodeId, openNode, moving }) {
     const navigate = useNavigate();
     const { pathname } = useLocation();
     // As NodeDetail does on mount: the page takes its prefetched request.
@@ -16,8 +16,10 @@ jest.mock('./NodeDetail', () => {
     return React.createElement('div', null,
       React.createElement('div', { 'data-testid': 'shown' }, nodeId),
       React.createElement('div', { 'data-testid': 'address' }, pathname),
+      React.createElement('div', { 'data-testid': 'moving' }, String(moving)),
       button('click 2', () => openNode(2, () => navigate('/node/2'))),
       button('click 1', () => openNode(1, () => navigate('/node/1'))),
+      button('click 3', () => openNode(3, () => navigate('/node/3'))),
       button('auto 3', () => navigate('/node/3?awaitLlm=3')),
       button('back', () => navigate(-1)));
   };
@@ -68,6 +70,29 @@ test('a move that changes the address first keeps the page until the node is in'
   expect(shown()).toBe('3');
   expect(spinner()).toBeNull();
   expect(api.get).toHaveBeenCalledTimes(1);
+});
+
+test('the page is told it is moving, so its billed buttons wait', async () => {
+  renderAt('/node/1');
+  expect(screen.getByTestId('moving').textContent).toBe('false');
+  fireEvent.click(screen.getByText('auto 3'));
+  expect(screen.getByTestId('moving').textContent).toBe('true');
+  await act(async () => { calls[0].resolve({ data: { id: 3 } }); });
+  expect(screen.getByTestId('moving').textContent).toBe('false');
+});
+
+test('a click on the node the address is moving to waits for that move', async () => {
+  renderAt('/node/1');
+  fireEvent.click(screen.getByText('auto 3'));
+  fireEvent.click(screen.getByText('click 3'));
+  expect(api.get).toHaveBeenCalledTimes(1);
+  expect(calls[0].signal.aborted).toBe(false);
+
+  await act(async () => { calls[0].resolve({ data: { id: 3 } }); });
+  expect(shown()).toBe('3');
+  // No data was left waiting for a later visit.
+  const { hasPrefetchedNode } = require('../hooks/useNodePrefetch');
+  expect(hasPrefetchedNode(3)).toBe(false);
 });
 
 test('a slow node opens after MAX_WAIT_MS', async () => {
