@@ -307,6 +307,12 @@ const NodeForm = forwardRef(
       }
       onSuccess(data);
     }, [editMode, onSuccess]);
+    // For the transcription effect below, which must not re-run when only
+    // the caller's `onSuccess` changes: a page that re-renders while the
+    // entry's node loads (WritePage's spinner) would otherwise handle the
+    // same completed upload twice (its toasts shown twice).
+    const succeedRef = useRef(succeed);
+    useEffect(() => { succeedRef.current = succeed; });
 
     // Auto-start polling when uploadedNodeId is set
     useEffect(() => {
@@ -332,14 +338,14 @@ const NodeForm = forwardRef(
           ...(transcriptionData.llm_node_id
             && { awaitLlm: transcriptionData.llm_node_id }),
         };
-        succeed(normalizedData);
+        succeedRef.current(normalizedData);
         setUploadedNodeId(null);
       } else if (transcriptionStatus === 'failed') {
         setLoading(false);
         setError(transcriptionError || 'Transcription failed');
         setUploadedNodeId(null);
       }
-    }, [transcriptionStatus, transcriptionData, transcriptionError, succeed, deleteDraft, addToast]);
+    }, [transcriptionStatus, transcriptionData, transcriptionError, deleteDraft, addToast]);
 
     const handleFileSelect = (event) => {
       const file = event.target.files[0];

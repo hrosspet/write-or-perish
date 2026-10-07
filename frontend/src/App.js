@@ -128,7 +128,10 @@ function App() {
   const { pending: openingNode, openNode, cancel: cancelOpenNode } = useNodePrefetch();
   const { pathname } = useLocation();
   useEffect(() => { cancelOpenNode(); }, [pathname, cancelOpenNode]);
-  const openThread = (id, url = `/node/${id}`) => openNode(id, () => navigate(url));
+  // The node already on screen just navigates: its fetched data would wait
+  // unused and be shown, out of date, on a later visit.
+  const openThread = (id, url = `/node/${id}`) => (
+    pathname === `/node/${id}` ? navigate(url) : openNode(id, () => navigate(url)));
 
   // When the user info is loaded, check if they have accepted the terms.
   useEffect(() => {
