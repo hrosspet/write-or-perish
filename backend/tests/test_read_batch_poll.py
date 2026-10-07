@@ -16,7 +16,7 @@ from types import SimpleNamespace
 import pytest  # noqa: F401
 
 from backend.tests.test_retrieval_loop import (  # noqa: F401 (fixture)
-    app, _llm_task_mod, generate_llm_response, _mk_user,
+    app, _llm_task_mod, generate_llm_response, _mk_user, real_providers,
 )
 from backend.tests.test_read_context import (
     _prompt_node, _stub_archive, _feed_json, CORPUS, REFS,
@@ -292,6 +292,90 @@ def test_poll_error_at_the_cap_fails_the_node_with_the_last_error(app, monkeypat
     assert node.llm_task_status == "failed"
     assert "provider unreachable" in node.llm_task_error
     assert f"{MAX_POLLS} polls" in node.llm_task_error
+
+
+def _openai_status_error(status, code):
+    import httpx
+    import openai
+    body = {"error": {"message": "refused", "type": "invalid_request_error",
+                      "param": None, "code": code}}
+    return openai.OpenAI(api_key="k")._make_status_error(
+        f"Error code: {status} - {body}", body=body,
+        response=httpx.Response(status, request=httpx.Request(
+            "POST", "https://api.openai.com/v1/batches")))
+
+
+@pytest.fixture
+def reported(monkeypatch, real_providers):  # noqa: F811
+    """Account failures reported to the admin (#369), recorded instead of
+    emailed."""
+    import backend.utils.provider_alerts as alerts
+    seen = []
+    monkeypatch.setattr(alerts, "report_account_failure",
+                        lambda err, exc: seen.append((err, exc)))
+    return seen
+
+
+def test_submit_refused_for_an_account_reason_fails_the_node(
+        app, monkeypatch, tmp_path, real_providers, reported):  # noqa: F811
+    """A spend limit (or the key, billing) refuses the batch submit like a
+    live call: the node fails with the user's message, nothing polls, and
+    the admin is alerted (#369)."""
+    calls = _script(monkeypatch, tmp_path,
+                    collect=lambda: ("in_progress", None))
+    raw = _openai_status_error(429, "project_spend_limit_exceeded")
+
+    def refused(*args, **kwargs):
+        raise raw
+    monkeypatch.setattr(llm_batch, "openai_batch_submit_one", refused)
+    alice, read, llm_node = _read_thread(submitted=False)
+    task = _Task()
+
+    with pytest.raises(real_providers.ProviderAccountError):
+        _run(task, alice, read, llm_node)
+
+    assert task.retries == []
+    assert calls["collect"] == []
+    node = _reload(llm_node.id)
+    assert node.llm_task_status == "failed"
+    assert node.llm_task_error == \
+        real_providers.ProviderAccountError.USER_MESSAGE
+    (err, exc), = reported
+    assert (err.provider, err.kind, exc) == ("OpenAI", "spend_limit", raw)
+
+
+def test_poll_refused_for_an_account_reason_polls_again(
+        app, monkeypatch, tmp_path, real_providers, reported):  # noqa: F811
+    """A poll refused for an account reason (a revoked key) is reported,
+    and the batch — already submitted and billed — is polled again: the
+    next poll after the fix collects it. At the cap the node fails with
+    the user's message, not the raw error."""
+    def revoked():
+        raise _openai_status_error(401, "invalid_api_key")
+    _script(monkeypatch, tmp_path, collect=revoked)
+    alice, read, llm_node = _read_thread()
+    task = _Task()
+
+    with pytest.raises(_llm_task_mod.Retry):
+        _run(task, alice, read, llm_node)
+
+    assert task.retries == [{"countdown": POLL, "max_retries": MAX_POLLS}]
+    node = _reload(llm_node.id)
+    assert node.llm_task_status == "processing"
+    assert [(e.provider, e.kind) for e, _ in reported] == [("OpenAI", "auth")]
+
+    with pytest.raises(_llm_task_mod.MaxRetriesExceededError) as capped:
+        _run(_Task(cap=True), alice, read, llm_node)
+    node = _reload(llm_node.id)
+    assert node.llm_task_status == "failed"
+    assert node.llm_task_error == \
+        real_providers.ProviderAccountError.USER_MESSAGE
+    # The task's failure is raised from the account failure (its
+    # __cause__, not only __context__), so Sentry groups it with that
+    # cause (#406 review, minor 1).
+    assert isinstance(capped.value.__cause__,
+                      real_providers.ProviderAccountError)
+    assert capped.value.__cause__.kind == "auth"
 
 
 def test_error_without_a_batch_still_fails_the_node(app, monkeypatch, tmp_path):  # noqa: F811

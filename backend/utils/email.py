@@ -270,6 +270,68 @@ def send_spend_alert_email(to_email, provider, spend_usd, limit_usd, threshold):
           f"Failed to send spend alert email to {to_email}")
 
 
+def send_provider_account_alert_email(to_email, provider, kind, model,
+                                      detail, window_seconds,
+                                      key_role="unknown", environment=None,
+                                      user_message=None):
+    """Alert the admin that calls to a model provider fail for an account
+    reason — a spend limit, billing, the API key, a model id — which
+    waiting won't fix (#369, #360). Sent once per cause per
+    ``window_seconds`` (backend/utils/provider_alerts.py).
+
+    *environment* ("prod", "staging", "local") goes in the subject, since
+    staging sends to the same inbox. *key_role* says which configured key
+    failed (chat, train, batch, legacy) by its role and setting names;
+    no part of the key itself is in the email. *user_message* is what
+    users read instead of the provider's error."""
+    from backend.llm_providers import ACCOUNT_FAILURE_KINDS, account_error_class
+    from backend.utils.api_keys import api_key_role_settings
+    what = ACCOUNT_FAILURE_KINDS.get(kind, kind)
+    window = _duration_words(window_seconds)
+    user_message = user_message or account_error_class(kind).USER_MESSAGE
+    settings = api_key_role_settings(provider, key_role)
+    key_text = (f"{key_role} ({', '.join(settings)})" if settings
+                else key_role)
+    fields = [
+        ("Deployment", environment),
+        ("Provider", provider),
+        ("Cause", f"{what} ({kind})"),
+        ("API key", key_text),
+        ("Model", model),
+        ("HTTP status", detail.get("status")),
+        ("Error type", detail.get("type")),
+        ("Error code", detail.get("code")),
+        ("Provider's message", detail.get("message")),
+        ("Request id", detail.get("request_id")),
+    ]
+    fields = [(label, value) for label, value in fields if value]
+    text_body = (
+        f"Model provider account failure\n\n"
+        f"Calls to {provider} are failing: {what}. Retrying won't help; "
+        f"these calls keep failing until it is fixed. Users see "
+        f"\"{user_message}\"\n\n"
+        + "".join(f"{label}: {value}\n" for label, value in fields)
+        + f"\nFurther failures with the same cause are not emailed for "
+        f"{window}. Sentry groups them in one issue.\n"
+    )
+    html_body = _card(
+        f"{escape(str(provider))} calls are failing",
+        [f"Cause: <strong style=\"color: #ede8dd;\">{escape(what)}</strong>. "
+         f"Retrying won't help; these calls keep failing until it is fixed. "
+         f"Users see &ldquo;{escape(user_message)}&rdquo;",
+         "<br>".join(f"{escape(label)}: {escape(str(value))}"
+                     for label, value in fields)],
+        footnotes=(f"Further failures with the same cause are not emailed "
+                   f"for {window}. Sentry groups them in one issue.",))
+    prefix = f"[{environment}] " if environment else ""
+    _send(to_email,
+          f"{prefix}Loore: {provider} calls are failing ({kind})",
+          text_body, html_body,
+          f"Provider account alert sent to {to_email} ({provider} {kind} "
+          f"{key_role})",
+          f"Failed to send provider account alert to {to_email}")
+
+
 def send_user_spend_block_email(to_email, username, spend_usd, limit_usd):
     """Alert the admin that a single user hit their monthly spend cap and has
     been hard-blocked until month rollover (issue #85 follow-up)."""

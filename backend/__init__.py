@@ -95,6 +95,15 @@ def create_app():
             # running tasks finish; a pool process gets SIGTERM only when a
             # task outlives the 90 s drain (scripts/celery-graceful-stop.sh),
             # and that task is lost, so it reports.
+            # 2) A call refused for an account reason (#369): every event
+            #    about it — task failures, logged exceptions, log lines
+            #    tagged with provider_alerts.log_extra — groups into one
+            #    issue per cause, whatever the call site.
+            try:
+                from backend.utils.provider_alerts import apply_fingerprint
+                apply_fingerprint(event, exc, rec)
+            except Exception:  # never lose an event over grouping
+                pass
             return event
 
         sentry_sdk.init(

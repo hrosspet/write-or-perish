@@ -112,6 +112,109 @@ def test_batch_submit_openai(monkeypatch, tmp_path):
     assert client.batches.create.call_args.kwargs["completion_window"] == "24h"
 
 
+def test_batch_submit_reports_an_account_refusal(monkeypatch):
+    """A background batch refused for an account reason (#369) has no user
+    to tell: the submit fails as before (no batch id) and the admin is
+    alerted through the same report a live call makes."""
+    import anthropic as real_anthropic
+    import httpx
+    import backend
+    # The real provider module, imported before the fake SDKs go in.
+    monkeypatch.setattr(backend, "llm_providers",
+                        getattr(backend, "llm_providers", None),
+                        raising=False)
+    monkeypatch.delitem(sys.modules, "backend.llm_providers", raising=False)
+    import backend.llm_providers  # noqa: F401
+    import backend.utils.provider_alerts as alerts
+    reported = []
+    monkeypatch.setattr(alerts, "report_account_failure",
+                        lambda err, exc: reported.append((err, exc)))
+    body = {"type": "error", "error": {
+        "type": "invalid_request_error",
+        "message": "You have reached your specified API usage limits. You "
+                   "will regain access on 2026-11-01 at 00:00 UTC."}}
+    raw = real_anthropic.Anthropic(api_key="k")._make_status_error(
+        str(body), body=body, response=httpx.Response(
+            400, request=httpx.Request(
+                "POST", "https://api.anthropic.com/v1/messages/batches")))
+    client = MagicMock()
+    client.messages.batches.create.side_effect = raw
+    _install_fake_sdks(monkeypatch, anthropic_client=client)
+
+    out = batch_submit({"anthropic": [{
+        "custom_id": "digest:1", "model_id": "claude", "api_model": "claude-x",
+        "messages": [{"role": "user", "content": "hi"}], "max_tokens": 500,
+    }]}, KEYS, "digest")
+
+    assert out == {}
+    assert [(e.provider, e.kind, x) for e, x in reported] == [
+        ("Anthropic", "spend_limit", raw)]
+    # The caller learns it was the account, not the requests (#406
+    # review: profile_batch doesn't count it as a failed attempt).
+    assert out.account_refused == {"anthropic"}
+
+
+def test_batch_submit_names_an_openai_refusal_and_its_key(monkeypatch):
+    """OpenAI, one batch per model: the refused model's provider key is in
+    account_refused, and the report names the key by its role — the batch
+    key here (apply_batch_key_override) — never the key itself."""
+    import httpx
+    import openai as real_openai
+    import backend
+    from flask import Flask
+    monkeypatch.setattr(backend, "llm_providers",
+                        getattr(backend, "llm_providers", None),
+                        raising=False)
+    monkeypatch.delitem(sys.modules, "backend.llm_providers", raising=False)
+    import backend.llm_providers  # noqa: F401
+    import backend.utils.provider_alerts as alerts
+    reported = []
+    monkeypatch.setattr(alerts, "report_account_failure",
+                        lambda err, exc: reported.append((err, exc)))
+    body = {"error": {"message": "spend limit", "type": "insufficient_quota",
+                      "param": None, "code": "project_spend_limit_exceeded"}}
+    raw = real_openai.OpenAI(api_key="k")._make_status_error(
+        f"Error code: 429 - {body}", body=body, response=httpx.Response(
+            429, request=httpx.Request(
+                "POST", "https://api.openai.com/v1/batches")))
+    client = MagicMock()
+    client.files.create.return_value = SimpleNamespace(id="file-1")
+    client.batches.create.side_effect = raw
+    _install_fake_sdks(monkeypatch, openai_client=client)
+    app = Flask(__name__)
+    app.config.update(OPENAI_API_KEY_CHAT="k-chat",
+                      OPENAI_API_KEY_BATCH="k-oai")
+
+    with app.app_context():
+        out = batch_submit({"openai": [{
+            "custom_id": "profile_2_0_chunk", "model_id": "gpt",
+            "api_model": "gpt-x",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 500,
+        }]}, KEYS, "profile")
+
+    assert out == {}
+    assert out.account_refused == {"openai:gpt-x"}
+    (err, exc), = reported
+    assert (err.provider, err.kind, err.model, err.key_role, exc) == (
+        "OpenAI", "spend_limit", "gpt-x", "batch", raw)
+
+
+def test_batch_submit_other_failures_are_not_account_refusals(monkeypatch):
+    client = MagicMock()
+    client.messages.batches.create.side_effect = RuntimeError("boom")
+    _install_fake_sdks(monkeypatch, anthropic_client=client)
+
+    out = batch_submit({"anthropic": [{
+        "custom_id": "profile_1_0_chunk", "model_id": "claude",
+        "api_model": "claude-x",
+        "messages": [{"role": "user", "content": "hi"}], "max_tokens": 500,
+    }]}, KEYS, "profile")
+
+    assert out == {}
+    assert out.account_refused == set()
+
+
 # ── check + collect ───────────────────────────────────────────────────────
 
 def test_collect_anthropic_succeeded(monkeypatch):
