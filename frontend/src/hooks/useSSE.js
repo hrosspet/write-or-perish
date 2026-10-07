@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import { onPageReturn } from '../utils/pageReturn';
 
 /**
  * useSSE hook for subscribing to Server-Sent Events.
@@ -12,6 +13,10 @@ import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
  * @param {Function} options.onMessage - Callback for generic messages
  * @param {Object} options.eventHandlers - Map of event names to handlers
  * @param {number} options.reconnectDelay - Delay between reconnection attempts (default: 3000ms)
+ * @param {boolean} options.reconnectOnReturn - Open a fresh connection each
+ *   time the user returns to the page (default: false). Only for a stream
+ *   that sends what the page already has again on connect, and whose
+ *   handlers skip what they have seen.
  */
 export function useSSE(url, options = {}) {
   const {
@@ -19,6 +24,7 @@ export function useSSE(url, options = {}) {
     onMessage = null,
     eventHandlers = {},
     reconnectDelay = 3000,
+    reconnectOnReturn = false,
   } = options;
 
   const [isConnected, setIsConnected] = useState(false);
@@ -132,6 +138,18 @@ export function useSSE(url, options = {}) {
       disconnect();
     };
   }, [enabled, url, connect, disconnect]);
+
+  // The user is back on the page (#374): replace the connection. iOS can
+  // leave a suspended page's EventSource dead without an error event, so
+  // neither the browser's own retry nor the onerror reconnect above runs,
+  // and the page would wait on a stream that never speaks again. A live
+  // connection replaced this way costs one reconnect.
+  useEffect(() => {
+    if (!reconnectOnReturn || !enabled || !url) return undefined;
+    return onPageReturn(() => {
+      if (connectRef.current) connectRef.current();
+    });
+  }, [reconnectOnReturn, enabled, url]);
 
   return {
     isConnected,
@@ -425,6 +443,9 @@ export function useDraftTranscriptionSSE(sessionId, options = {}) {
  * @param {string} options.entityType - 'node' (default), 'profile' or 'item' (saved reference)
  * @param {Function} options.onChunkReady - Called when an audio chunk is ready
  * @param {Function} options.onAllComplete - Called when all chunks are done
+ * @param {boolean} options.reconnectOnReturn - Reconnect when the user
+ *   returns to the page (see useSSE). The stream sends every chunk again
+ *   on connect; onChunkReady still gets each chunk index once.
  */
 export function useTTSStreamSSE(entityId, options = {}) {
   const {
@@ -432,6 +453,7 @@ export function useTTSStreamSSE(entityId, options = {}) {
     entityType = 'node',
     onChunkReady = null,
     onAllComplete = null,
+    reconnectOnReturn = false,
   } = options;
 
   const [audioChunks, setAudioChunks] = useState([]); // Array of { index, url, duration }
@@ -510,6 +532,7 @@ export function useTTSStreamSSE(entityId, options = {}) {
   const { isConnected, error, connect, disconnect } = useSSE(url, {
     enabled,
     eventHandlers,
+    reconnectOnReturn,
   });
 
   // Get ordered list of audio URLs for queue playback
@@ -581,7 +604,10 @@ export function useLlmTextStream(nodeId, { enabled = false, initialText = '' } =
 
   // Stop listening once the node is done: the server closes the stream,
   // and EventSource would otherwise reconnect just to hear "done" again.
-  useSSE(url, { enabled: enabled && !done, eventHandlers });
+  // A return to the page reconnects (#374): the stream opens with a
+  // snapshot of the whole text, so a connection that died while the page
+  // was away loses nothing.
+  useSSE(url, { enabled: enabled && !done, eventHandlers, reconnectOnReturn: true });
 
   return { text, done };
 }
