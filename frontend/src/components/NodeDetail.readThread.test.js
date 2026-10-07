@@ -44,7 +44,9 @@ jest.mock('./QuotedContent', () => ({ content }) => <div>{content}</div>);
 import React from 'react';
 import { render, screen, act, waitFor } from '@testing-library/react';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
-import NodeDetail from './NodeDetail';
+// The node route renders NodeDetail through its wrapper, which hands it
+// the node id (#447).
+import NodeDetailWrapper from './NodeDetailWrapper';
 
 const ME = { id: 1, username: 'peter', craft_mode: true, is_admin: true };
 
@@ -131,7 +133,7 @@ afterEach(() => {
 const renderAt = (path) => render(
   <MemoryRouter initialEntries={[path]}>
     <Routes>
-      <Route path="/node/:id" element={<NodeDetail />} />
+      <Route path="/node/:id" element={<NodeDetailWrapper />} />
     </Routes>
   </MemoryRouter>,
 );
