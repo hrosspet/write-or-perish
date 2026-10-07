@@ -17,7 +17,10 @@ struct ThreadView: View {
             if let model {
                 ThreadContent(model: model, autoGenerate: $autoGenerate)
             } else {
-                LoadingLine(text: "Loading node...")
+                // The frame or two before `.task` makes the model (the page is sliding in):
+                // nothing yet. A node fetched before the page opened (NodePrefetch) then
+                // shows at once; any other shows "Loading node..." while it loads.
+                Color.clear
             }
         }
         // The whole page, also while loading (the background was only behind the line).
@@ -93,20 +96,6 @@ private struct ThreadContent: View {
                     .looreReadableWidth()
                 }
                 .scrollDismissesKeyboard(.interactively)
-                .overlay {
-                    // A tapped node is loading: say so at once. Taps still work, so a
-                    // misclick can be corrected (the newest tap opens).
-                    if NodePrefetch.shared.isPending {
-                        SpinnerRing(size: 18, lineWidth: 2)
-                            .padding(11)
-                            .background(LooreColor.bgCard, in: Circle())
-                            .overlay(Circle().strokeBorder(LooreColor.border))
-                            .allowsHitTesting(false)
-                            .accessibilityLabel("Loading node")
-                            .transition(.opacity)
-                    }
-                }
-                .animation(.easeOut(duration: 0.12), value: NodePrefetch.shared.isPending)
                 .task(id: node.id) {
                     // Once per focal node, after the first layout (web: scrollIntoView, block start).
                     guard !scrolledToFocal, !node.ancestors.isEmpty else { return }
@@ -577,7 +566,7 @@ private struct ToolCallsDisclosure: View {
                 HStack(spacing: 0) {
                     Text("Read in full — ")
                     linkButton("entry #\(ref.map(String.init) ?? "")") {
-                        if let ref { NodePrefetch.shared.open(ref, app: app) { app.open(.thread(id: ref, awaitLLM: nil)) } }
+                        if let ref { NodePrefetch.shared.openThread(ref, app: app) }
                     }
                 }
             }

@@ -82,16 +82,19 @@ struct TextModeView: View {
                               spendCapped: answer.spendCapped, llmError: answer.llmError)
     }
 
-    /// Where a Text-mode send lands (web `WritePage.handleSuccess`).
+    /// Where a Text-mode send lands (web `WritePage.handleSuccess`). The entry's
+    /// page opens once its node is in, with the spinner over this screen meanwhile
+    /// (NodePrefetch), not on a loading page.
     static func open(_ result: NodeFormResult, app: AppState) {
+        let prefetch = NodePrefetch.shared
         if let llm = result.llmNodeId, let user = result.userNodeId {
-            app.open(.thread(id: user, awaitLLM: llm))
+            prefetch.openThread(user, awaitLLM: llm, app: app)
         } else if let llm = result.llmNodeId {
-            app.open(.thread(id: llm, awaitLLM: llm))
+            prefetch.openThread(llm, awaitLLM: llm, app: app)
         } else if let user = result.userNodeId {
-            app.open(.thread(id: user, awaitLLM: nil))
+            prefetch.openThread(user, app: app)
         } else if let id = result.id {
-            app.open(.thread(id: id, awaitLLM: nil))
+            prefetch.openThread(id, app: app)
         }
     }
 }
@@ -107,7 +110,9 @@ struct WriteNewEntrySheet: View {
             dismiss()
             guard let id = result.id else { return }
             app.signals.post(.nodeCreated(id))
-            app.open(.thread(id: id, awaitLLM: result.awaitLLM))
+            // The entry opens once its node is in, with the spinner over the screen
+            // under the sheet meanwhile (NodePrefetch), not on a loading page.
+            NodePrefetch.shared.openThread(id, awaitLLM: result.awaitLLM, app: app)
         } onClose: {
             dismiss()
         }

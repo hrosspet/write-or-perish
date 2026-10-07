@@ -78,6 +78,11 @@ final class NodePrefetch {
         }
     }
 
+    /// `open` for a node's thread page.
+    func openThread(_ id: Int, awaitLLM: Int? = nil, app: AppState) {
+        open(id, app: app) { app.open(.thread(id: id, awaitLLM: awaitLLM)) }
+    }
+
     private func finish(_ generation: Int, _ handoff: Handoff) {
         guard let move, move.generation == generation else { return }
         self.move = nil

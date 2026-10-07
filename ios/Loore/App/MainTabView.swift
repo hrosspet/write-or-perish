@@ -31,6 +31,9 @@ struct MainTabView: View {
                 .tabItem { Label(AppTab.more.title, systemImage: "ellipsis").environment(\.symbolVariants, .none) }
                 .tag(AppTab.more)
         }
+        // A node is loading from any screen (a thread, Text mode, the Log, Write
+        // New Entry): the screen stays, with the spinner, until the node's page opens.
+        .overlay { NodeOpeningSpinner() }
         .onChange(of: app.capabilities.showsCommons) { _, shows in
             if !shows && app.router.selectedTab == .commons { app.router.selectedTab = .reflect }
         }

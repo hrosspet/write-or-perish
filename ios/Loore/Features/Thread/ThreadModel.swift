@@ -261,7 +261,7 @@ final class ThreadModel {
     /// spinner meanwhile, instead of a "Loading node..." page (NodePrefetch).
     func openThread(_ id: Int, awaitLLM: Int?) {
         guard let app else { return }
-        NodePrefetch.shared.open(id, app: app) { app.open(.thread(id: id, awaitLLM: awaitLLM)) }
+        NodePrefetch.shared.openThread(id, awaitLLM: awaitLLM, app: app)
     }
 
     /// The same, in place of this page (a failed reply, a deleted node).

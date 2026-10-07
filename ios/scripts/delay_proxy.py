@@ -4,12 +4,15 @@ request with timestamps (received / forwarded / answered). Used by
 TextModeDraftUITests (#425): with no latency, an autosave can never be in
 flight when Send deletes the draft, so the race cannot show locally.
 
-  python3 ios/scripts/delay_proxy.py [port]     # default 5099
+  python3 ios/scripts/delay_proxy.py [port] [node_delay]   # default 5099, 0
 
   POST /api/textmode/start  held 1.0 s before forwarding
   POST /api/drafts/         held 0.5 s before forwarding
+  GET  /api/nodes/<id>      held `node_delay` s (NodeOpeningUITests: the
+                            spinner shows while a node loads)
 """
 import http.client
+import re
 import sys
 import threading
 import time
@@ -17,6 +20,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 UPSTREAM = ("localhost", 5010)
 DELAYS = {("POST", "/api/textmode/start"): 1.0, ("POST", "/api/drafts/"): 0.5}
+NODE_GET = re.compile(r"^/api/nodes/\d+$")
+NODE_DELAY = float(sys.argv[2]) if len(sys.argv) > 2 else 0.0
 T0 = time.monotonic()
 LOCK = threading.Lock()
 
@@ -38,6 +43,8 @@ class Proxy(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length") or 0)
         body = self.rfile.read(length) if length else None
         delay = DELAYS.get((self.command, path_only), 0)
+        if self.command == "GET" and NODE_GET.match(path_only):
+            delay = NODE_DELAY
         if watched:
             log(f"recv      {self.command} {self.path}")
         if delay:

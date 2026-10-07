@@ -90,6 +90,18 @@ final class NodePrefetchTests: StubbedAppTestCase {
         XCTAssertEqual(nodeGets(3), 1)
     }
 
+    func testATextModeSendOpensTheEntryOnceItsNodeIsIn() async {
+        stubNodes(delay: 0.2)
+        let tab = app.router.selectedTab
+        TextModeView.open(NodeFormResult(id: 21, userNodeId: 21, llmNodeId: 22), app: app)
+        XCTAssertTrue(NodePrefetch.shared.isPending)
+        XCTAssertEqual(app.router.path(for: tab), [])
+        let opened = await eventually { self.app.router.path(for: tab).last == .thread(id: 21, awaitLLM: 22) }
+        XCTAssertTrue(opened)
+        XCTAssertFalse(NodePrefetch.shared.isPending)
+        XCTAssertEqual(nodeGets(21), 1)
+    }
+
     func testNothingOpensWhenTheScreenThatAskedIsGone() async {
         stubNodes(delay: 0.2)
         let tab = app.router.selectedTab
