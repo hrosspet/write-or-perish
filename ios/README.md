@@ -8,7 +8,8 @@ the milestone log, the parity table, deviations from the web and known gaps are 
 [`PROGRESS.md`](PROGRESS.md).
 
 Contents: [Requirements](#requirements) · [Simulator](#build-and-run-in-the-simulator) ·
-[Install on your iPhone](#install-on-your-iphone-free-apple-id) · [Signing in](#signing-in) ·
+[Install on your iPhone](#install-on-your-iphone-free-apple-id) ·
+[TestFlight](#shipping-a-testflight-build) · [Signing in](#signing-in) ·
 [Backends](#backends) · [Debug launch arguments](#debug-launch-arguments) · [Tests](#tests) ·
 [Device checklist](#only-a-real-iphone-can-test) · [Staging checklist](#check-on-staging) · [Fonts](#fonts)
 
@@ -46,8 +47,8 @@ In the simulator a Debug build talks to the local Docker backend (`make dev`:
 
 A free Apple ID is enough. It gives a "Personal Team" whose builds run for 7 days
 (then press Run again) and allows three such apps on a phone at a time. A paid
-membership lifts the 7-day limit and adds TestFlight and push notifications; the app
-needs neither.
+membership lifts the 7-day limit and adds TestFlight (see
+[Shipping a TestFlight build](#shipping-a-testflight-build)) and push notifications.
 
 1. **Add your Apple ID to Xcode.** Xcode → Settings → Accounts → **+** → Apple ID →
    sign in. A team named "<your name> (Personal Team)" appears.
@@ -87,6 +88,157 @@ it on the first Run.
 After 7 days the app stops opening: connect the phone and press Run again (nothing is
 lost; your writing lives on the server). After the first cable install Xcode can also
 reach the phone over the same Wi-Fi.
+
+## Shipping a TestFlight build
+
+For the alpha: the app reaches the testers' iPhones through **internal** TestFlight
+testing, which needs no Beta App Review. Every internal tester is a user of your App
+Store Connect account. Apple's pages for the steps below:
+[enrolment](https://developer.apple.com/programs/enroll/),
+[distributing from Xcode](https://developer.apple.com/documentation/xcode/distributing-your-app-for-beta-testing-and-releases),
+[adding users](https://developer.apple.com/help/app-store-connect/manage-your-team/add-and-edit-users),
+[internal testers](https://developer.apple.com/help/app-store-connect/test-a-beta-version/add-internal-testers).
+Steps marked *(unverified)* could not be checked against Apple's documentation or
+without a paid account.
+
+### Once: membership and signing
+
+1. **Enrol** in the Apple Developer Program as an **individual**. Apple asks for an
+   Apple Account with two-factor authentication, your **legal name** in the first and
+   last name fields (an alias, nickname or company name delays approval; the legal name
+   is shown as the seller on the App Store), an email, a phone number and an address.
+   **The enrolment address can't be a P.O. box.** A P.O. box is allowed only as the
+   EU Digital Services Act trader address, which Apple displays for apps on the App
+   Store in the EU; Apple says distributing only through TestFlight doesn't make you a
+   trader, so that step can wait for the App Store release.
+2. **Xcode → Settings → Accounts**: select your Apple Account. When the membership is
+   active, the paid team is listed next to your Personal Team *(unverified: the exact
+   label)*. Its team id: [developer.apple.com/account](https://developer.apple.com/account)
+   → Membership details → Team ID (10 characters).
+3. **Edit `ios/Config/Signing.local.xcconfig`**: set the paid team and delete the
+   `LOORE_BUNDLE_ID = …` line, so the committed default from `Signing.xcconfig` applies
+   (`org.loore.app`, and `org.loore.app.LiveActivity` for the Live Activity extension):
+   ```
+   DEVELOPMENT_TEAM = <paid team id>
+   ```
+   The bundle id is permanent: App Store Connect can't change it after the first build
+   is uploaded. If Xcode says `org.loore.app` is not available to the paid team, stop
+   before uploading anything, choose the permanent id and commit it as
+   `LOORE_BUNDLE_ID` in `Signing.xcconfig` rather than in the local file.
+4. **Regenerate the project**: `cd ios && xcodegen generate && open Loore.xcodeproj`.
+   Signing & Capabilities of both **Loore** and **LooreLiveActivity** should show the paid
+   team with "Automatically manage signing".
+5. **Accept the agreement**: sign in to [App Store Connect](https://appstoreconnect.apple.com)
+   → **Business**, and accept any agreement waiting there. Apple: "You can't add an app to
+   your account until the Account Holder signs the latest agreement in the Business
+   section." A free app needs no Paid Applications Agreement.
+
+### Each build
+
+6. **Archive**: in Xcode's toolbar choose the **Loore** scheme and **Any iOS Device** as
+   the destination, then Product → **Archive**. The scheme archives the **Release**
+   configuration: production backend, no debug tools, launch arguments ignored. The
+   Organizer opens with the archive when it finishes.
+7. **Distribute**: optionally first select the archive → **Validate App**, which runs
+   Apple's initial checks without uploading. Then select the archive → **Distribute App** →
+   **TestFlight & App Store** → Distribute. Apple describes this option as updating the
+   build number, signing automatically and uploading symbols. The same through **Custom**:
+   App Store Connect → Upload, with **Manage Version and Build Number** checked. Keep the
+   build number management on: `project.yml` fixes `CURRENT_PROJECT_VERSION` at 1, and
+   every upload needs a new build number. (**TestFlight Internal Only** would also work
+   for the alpha, but a build uploaded that way can never be submitted to the App
+   Store.)
+   - On the first upload Xcode asks for the details of the App Store Connect app record
+     and creates it: name, primary language, SKU (letters, numbers, hyphens, periods and
+     underscores; it can't be changed later). The name is the App Store name, 2–30
+     characters, and must not be used by another app. If "Loore" is taken, use another
+     name; the home-screen name stays Loore *(unverified: whether "Loore" is free)*.
+   - If Xcode doesn't offer to create the record, create it first in App Store Connect:
+     **Apps → + → New App** → iOS, the name, primary language, bundle id
+     `org.loore.app`, SKU → Create. Then distribute again.
+   - Export compliance: `Info.plist` sets `ITSAppUsesNonExemptEncryption` to NO (the app
+     uses only HTTPS and the Keychain), so App Store Connect doesn't ask the encryption
+     questions for each build.
+8. **Wait for processing**: the build appears in the app's **TestFlight** tab after Apple
+   processes it, and Apple emails you when that is done. You can do step 9 meanwhile,
+   once the app record exists.
+
+### Once: testers
+
+9. **Users and Access → People → +** for each tester: first name, last name, email (any
+   address; it needn't belong to an Apple Account yet). Role: **Marketing** only. Leave
+   **Access to Reports** off: users with reports access see every app and can't be limited
+   to one. Next → choose the **Loore** app → **Invite**.
+   - Sales and Customer Support can't be internal testers. Only Account Holder, Admin,
+     App Manager, Developer and Marketing can; of these, Marketing can't upload builds
+     (that needs Account Holder, Admin, App Manager or Developer).
+   - Invitations expire 3 days after they are sent and can be resent after that.
+   - An individual membership can add up to 50 users.
+10. **TestFlight → Internal Testing → +**: name the group **Alpha**, tick **Enable
+    automatic distribution**, Create. In the group, **Invite Testers** → tick each tester
+    → Add. A tester missing from that list hasn't got an eligible role, or may not have
+    accepted the step 9 invitation yet *(unverified: whether pending users are listed)*.
+    If the first build isn't in the group (it was uploaded before the group existed),
+    add it with **Add Builds** in the group, then fill in **What to Test**. Testers can
+    install each build for 90 days.
+
+### What to send the testers
+
+1. Accept the invitation email from App Store Connect: sign in with your Apple Account,
+   or create one there.
+2. Install **TestFlight** from the App Store on the iPhone.
+3. Open the TestFlight invitation for Loore (a second email, which arrives once a build
+   is in the Alpha group) on the iPhone, accept it in TestFlight and tap **Install**.
+4. Loore needs **iOS 17** or later. The lock-screen recording controls (the Live
+   Activity's pause, resume, stop and record buttons) need **iOS 18**; on iOS 17 the lock
+   screen shows the standard Now Playing controls instead.
+5. **Sign in with an email link**: Sign in with Email → your address → Send Sign-in Link.
+   In Mail, touch and hold the sign-in button → **Copy Link**. Back in Loore, paste it
+   (the paste button or the field) → Sign in. The link lasts 15 minutes.
+6. **Signed up with X and no email on Loore?** Either add an email first: on loore.org,
+   signed in, open **Account** → Email → enter the address → **Send confirmation link**,
+   and open that link in the same browser (it confirms only inside your signed-in
+   session); then sign in in the app with that email. Or use **Sign in with X** in the
+   app: it signs in to the account your X is connected to. Sign in with X has not been
+   tested end to end on a phone yet: Peter tries it before telling testers about it.
+
+### The privacy manifest
+
+App Store Connect rejects an upload whose code uses one of Apple's
+[required reason APIs](https://developer.apple.com/documentation/bundleresources/describing-use-of-required-reason-api)
+without a declared reason (ITMS-91053). `Loore/Resources/PrivacyInfo.xcprivacy` declares:
+
+| Category | Reason | Used by |
+|---|---|---|
+| `NSPrivacyAccessedAPICategoryUserDefaults` | `CA92.1`: data only the app reads and writes | preferences (theme, auto-generate, last privacy level, thinking cue; the backend choice in Debug builds) |
+| `NSPrivacyAccessedAPICategoryFileTimestamp` | `C617.1`: files inside the app container | ZIPFoundation, linked into the app binary: extracting a Claude or ChatGPT export sets each extracted file's modification date (`lstat`, `FileAttributeKey.modificationDate`) in the app's temporary directory |
+
+No tracking, so `NSPrivacyTracking` is false and no tracking domains are listed.
+`NSPrivacyCollectedDataTypes` is left out. The upload rejection (ITMS-91053) concerns the
+required reason APIs; the collected-data list feeds Xcode's privacy report, which helps
+answer App Store Connect's "App Privacy" questions, and those are required only for App
+Store distribution. An empty list would say the app collects nothing, which is wrong
+(the email address, writing and voice recordings go to loore.org), so the list waits
+for those answers. The Live Activity extension has no manifest because its binary uses
+none of these APIs. ZIPFoundation ships its own manifest; swift-markdown and swift-cmark
+use none of these APIs.
+
+After adding code that uses user defaults, file timestamps (`stat`, `creationDate`,
+`modificationDate`, `.contentModificationDateKey`, …), `systemUptime` /
+`mach_absolute_time`, disk space (`volumeAvailableCapacity…`, `statfs`, …) or
+`activeInputModes`, update the manifest. To see what a Release build or an archive
+references (the app binary is `Loore.app/Loore`; the extension's is
+`Loore.app/PlugIns/LooreLiveActivity.appex/LooreLiveActivity`):
+
+```sh
+BIN=path/to/Loore.app/Loore
+xcrun nm -u "$BIN" | grep -E \
+  '^_(f?stat|lstat|fstatat|f?getattrlist(bulk|at)?|f?statv?fs|mach_absolute_time|NSFile(Creation|Modification)Date|NSFileSystem(Free)?Size|NSURL(ContentModification|Creation)DateKey|NSURLVolume(AvailableCapacity[A-Za-z]*|TotalCapacityKey)|OBJC_CLASS_\$_(NSUserDefaults|UITextInputMode))$'
+strings -a "$BIN" | grep -xE 'systemUptime|activeInputModes|fileModificationDate'
+```
+
+On 2026-10-02 the app binary listed `_NSFileModificationDate`, `_lstat` (both from
+ZIPFoundation) and `_OBJC_CLASS_$_NSUserDefaults`; the extension listed nothing.
 
 ## Signing in
 

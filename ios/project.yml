@@ -55,6 +55,8 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: $(LOORE_BUNDLE_ID)
         PRODUCT_NAME: Loore
+        # iPhone only. XcodeGen's per-target iOS preset is "1,2" and overrides the project-level value.
+        TARGETED_DEVICE_FAMILY: "1"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
         SUPPORTS_MACCATALYST: NO
@@ -112,6 +114,7 @@ targets:
         PRODUCT_NAME: LooreLiveActivity
         IPHONEOS_DEPLOYMENT_TARGET: "18.0"
         SKIP_INSTALL: YES
+        TARGETED_DEVICE_FAMILY: "1"
     info:
       path: LooreLiveActivity/Info.plist
       properties:
