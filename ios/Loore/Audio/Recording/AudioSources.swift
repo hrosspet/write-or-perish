@@ -14,11 +14,103 @@ protocol PCMSource: AnyObject {
     func stop()
 }
 
+/// The parts of `AVAudioEngine` the microphone uses. A seam, so tests can drive
+/// the restart paths that crashed on the 2026-10-07 walk (#423).
+protocol CaptureEngine: AnyObject {
+    /// The object `AVAudioEngineConfigurationChange` is posted for.
+    var notificationObject: AnyObject { get }
+    var isRunning: Bool { get }
+    /// The input hardware's format, and the input node's output format (what a
+    /// tap receives). After a route change the second can lag the first.
+    func inputFormats() throws -> (hardware: AVAudioFormat, output: AVAudioFormat)
+    func installTap(format: AVAudioFormat, bufferSize: AVAudioFrameCount,
+                    block: @escaping (AVAudioPCMBuffer) -> Void) throws
+    func removeTap()
+    /// Prepares and starts the engine.
+    func start() throws
+    func pause()
+    func stop()
+}
+
+/// `AVAudioEngine`'s input. AVFAudio answers a format it cannot use with an
+/// Objective-C exception, which Swift cannot catch: those calls throw here instead.
+final class AVCaptureEngine: CaptureEngine {
+    private let engine = AVAudioEngine()
+
+    var notificationObject: AnyObject { engine }
+    var isRunning: Bool { engine.isRunning }
+
+    func inputFormats() throws -> (hardware: AVAudioFormat, output: AVAudioFormat) {
+        var formats: (hardware: AVAudioFormat, output: AVAudioFormat)?
+        try ObjCException.catching {
+            let input = engine.inputNode
+            formats = (input.inputFormat(forBus: 0), input.outputFormat(forBus: 0))
+        }
+        guard let formats else { throw MicrophoneSource.SourceError.noInput }
+        return formats
+    }
+
+    func installTap(format: AVAudioFormat, bufferSize: AVAudioFrameCount,
+                    block: @escaping (AVAudioPCMBuffer) -> Void) throws {
+        try ObjCException.catching {
+            engine.inputNode.installTap(onBus: 0, bufferSize: bufferSize, format: format) { buffer, _ in
+                block(buffer)
+            }
+        }
+    }
+
+    func removeTap() {
+        try? ObjCException.catching { engine.inputNode.removeTap(onBus: 0) }
+    }
+
+    func start() throws {
+        var startError: Error?
+        try ObjCException.catching {
+            engine.prepare()
+            do { try engine.start() } catch { startError = error }
+        }
+        if let startError { throw startError }
+    }
+
+    func pause() {
+        try? ObjCException.catching { engine.pause() }
+    }
+
+    func stop() {
+        try? ObjCException.catching { engine.stop() }
+    }
+}
+
+/// An Objective-C exception caught on its way into Swift.
+struct ObjCExceptionError: Error, CustomStringConvertible {
+    let name: String
+    let reason: String
+    var description: String { "\(name): \(reason)" }
+}
+
+enum ObjCException {
+    /// Runs `body`. An Objective-C exception it raises comes back as an
+    /// `ObjCExceptionError` instead of ending the app.
+    static func catching(_ body: () -> Void) throws {
+        if let exception = LooreCatchException(body) {
+            throw ObjCExceptionError(name: exception.name.rawValue, reason: exception.reason ?? "")
+        }
+    }
+}
+
 /// The microphone through `AVAudioEngine` (map C §8.1). The engine is restarted
 /// after a configuration change (route change, category switch); the converter
 /// after it keeps the output format fixed. A microphone that stops delivering
 /// audio while it should be running is restarted too (#423); when the restarts
 /// fail, `onFailure` reports it.
+///
+/// Every restart builds a new engine and taps it only with a format the input
+/// hardware has now. On the 2026-10-07 walk (#423) the headphones went off
+/// mid-recording; the reused engine's input node still reported the headset
+/// mic's 16 kHz while the phone's mic runs at 48 kHz. It started but delivered
+/// nothing, and the watchdog's restart then installed a tap on it that AVFAudio
+/// refused with an exception (most likely the sample-rate mismatch; the crash
+/// report does not keep the reason): the app aborted.
 final class MicrophoneSource: PCMSource {
     var onBuffer: ((AVAudioPCMBuffer) -> Void)?
     var onEnd: (() -> Void)?
@@ -36,11 +128,36 @@ final class MicrophoneSource: PCMSource {
     /// Restarts of a stalled microphone that still bring no audio before it is
     /// reported as failed (INTRODUCED HEURISTIC).
     static let stallRestartLimit = 2
+    static let tapBufferSize: AVAudioFrameCount = 4_096
 
-    enum SourceError: Error { case stalled }
+    enum SourceError: Error, CustomStringConvertible {
+        case stalled
+        /// The hardware reports no input (0 Hz or no channels).
+        case noInput
+        /// The input node's format lags the hardware's (a route change); a tap
+        /// with it would raise.
+        case formatMismatch(hardware: Double, output: Double)
 
-    private let engine = AVAudioEngine()
+        var description: String {
+            switch self {
+            case .stalled: return "no audio"
+            case .noInput: return "no input"
+            case .formatMismatch(let hardware, let output):
+                return "input node at \(Int(output)) Hz, hardware at \(Int(hardware)) Hz"
+            }
+        }
+    }
+
+    /// The waits above (tests shorten them).
+    var retryDelays = MicrophoneSource.restartRetryDelays
+    var stallTimeout = MicrophoneSource.stallTimeout
+
+    private let makeEngine: () -> CaptureEngine
+    private var engine: CaptureEngine
+    /// A tap is on the current engine.
     private var tapInstalled = false
+    /// Between a successful `start()` and `stop()`.
+    private var active = false
     /// Capture should be running: not stopped, not paused for an interruption.
     private var capturing = false
     private var restartGeneration = 0
@@ -52,42 +169,59 @@ final class MicrophoneSource: PCMSource {
     private let recordingLog: RecordingLog
     private let log = Logger(subsystem: "org.loore.app", category: "recorder")
 
-    init(recordingLog: RecordingLog = .shared) {
+    init(recordingLog: RecordingLog = .shared, makeEngine: @escaping () -> CaptureEngine = { AVCaptureEngine() }) {
         self.recordingLog = recordingLog
+        self.makeEngine = makeEngine
+        engine = makeEngine()
     }
 
     func start() throws {
-        installTap()
-        engine.prepare()
         do {
+            try installTap()
             try engine.start()
         } catch {
             recordingLog.note("microphone did not start: \(AudioSessionController.describe(error))")
+            discardEngine()
             throw error
         }
+        active = true
         capturing = true
         clock.reset()
         recordingLog.note("microphone started: \(formatSummary)")
-        configObserver = NotificationCenter.default.addObserver(
-            forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main
-        ) { [weak self] _ in
-            self?.restartAfterConfigurationChange()
-        }
+        observeConfigurationChanges()
         startWatchdog()
     }
 
     private var formatSummary: String {
-        let format = engine.inputNode.outputFormat(forBus: 0)
-        return "\(Int(format.sampleRate)) Hz, \(format.channelCount) ch"
+        guard let formats = try? engine.inputFormats() else { return "format unknown" }
+        let output = formats.output, hardware = formats.hardware
+        var summary = "\(Int(output.sampleRate)) Hz, \(output.channelCount) ch"
+        if hardware.sampleRate != output.sampleRate { summary += " (hardware \(Int(hardware.sampleRate)) Hz)" }
+        return summary
     }
 
-    private func installTap() {
-        let input = engine.inputNode
-        if tapInstalled { input.removeTap(onBus: 0) }
-        let format = input.outputFormat(forBus: 0)
+    /// The format to tap with: the input node's output format, when the hardware
+    /// has an input and the node agrees with it. AVFAudio raises an exception
+    /// for a tap with no channels or whose sample rate differs from the
+    /// hardware's.
+    static func tapFormat(hardware: AVAudioFormat, output: AVAudioFormat) throws -> AVAudioFormat {
+        guard hardware.sampleRate > 0, hardware.channelCount > 0 else { throw SourceError.noInput }
+        guard output.sampleRate == hardware.sampleRate, output.channelCount > 0 else {
+            throw SourceError.formatMismatch(hardware: hardware.sampleRate, output: output.sampleRate)
+        }
+        return output
+    }
+
+    private func installTap() throws {
+        let formats = try engine.inputFormats()
+        let format = try Self.tapFormat(hardware: formats.hardware, output: formats.output)
+        if tapInstalled {
+            engine.removeTap()
+            tapInstalled = false
+        }
         let clock = clock
         let recordingLog = recordingLog
-        input.installTap(onBus: 0, bufferSize: 4_096, format: format) { [weak self] buffer, _ in
+        try engine.installTap(format: format, bufferSize: Self.tapBufferSize) { [weak self] buffer in
             clock.tick()
             recordingLog.measure(buffer)
             self?.onBuffer?(buffer)
@@ -95,23 +229,32 @@ final class MicrophoneSource: PCMSource {
         tapInstalled = true
     }
 
+    private func observeConfigurationChanges() {
+        if let configObserver { NotificationCenter.default.removeObserver(configObserver) }
+        configObserver = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange, object: engine.notificationObject, queue: .main
+        ) { [weak self] _ in
+            self?.restartAfterConfigurationChange()
+        }
+    }
+
     private func restartAfterConfigurationChange() {
-        guard tapInstalled else { return }
+        guard active else { return }
         log.info("engine configuration changed; restarting input")
         recordingLog.note("engine configuration changed (running: \(engine.isRunning))")
         restart()
     }
 
-    /// Restarts now, then retries on `restartRetryDelays`; a newer restart
-    /// (another configuration change) replaces a pending one.
+    /// Restarts now, then retries on `retryDelays`; a newer restart (another
+    /// configuration change) replaces a pending one.
     private func restart() {
         restartGeneration += 1
         attemptRestart(attempt: 0, generation: restartGeneration)
     }
 
     private func attemptRestart(attempt: Int, generation: Int) {
-        guard tapInstalled, generation == restartGeneration else { return }
-        if attempt > 0 && engine.isRunning && !clock.stalled(after: Self.stallTimeout) {
+        guard active, generation == restartGeneration else { return }
+        if attempt > 0 && engine.isRunning && !clock.stalled(after: stallTimeout) {
             restarting = false
             return
         }
@@ -124,50 +267,64 @@ final class MicrophoneSource: PCMSource {
             recordingLog.note("microphone restarted (attempt \(attempt + 1)): \(formatSummary)")
         } catch {
             recordingLog.note("microphone restart failed (attempt \(attempt + 1)): \(AudioSessionController.describe(error))")
-            guard attempt < Self.restartRetryDelays.count else {
+            guard attempt < retryDelays.count else {
                 restarting = false
                 log.error("engine restart failed")
                 onFailure?(error)
                 return
             }
             log.error("engine restart failed; retrying")
-            DispatchQueue.main.asyncAfter(deadline: .now() + Self.restartRetryDelays[attempt]) { [weak self] in
+            DispatchQueue.main.asyncAfter(deadline: .now() + retryDelays[attempt]) { [weak self] in
                 self?.attemptRestart(attempt: attempt + 1, generation: generation)
             }
         }
     }
 
+    /// A new engine, tapped with the format the hardware has now (see the type's
+    /// comment for why the old one is not reused).
     private func restartEngine() throws {
-        engine.stop()
-        installTap()
-        engine.prepare()
+        discardEngine()
+        engine = makeEngine()
+        observeConfigurationChanges()
+        try installTap()
         try engine.start()
+    }
+
+    private func discardEngine() {
+        if tapInstalled {
+            engine.removeTap()
+            tapInstalled = false
+        }
+        engine.stop()
     }
 
     /// A running engine whose tap stopped delivering is restarted (the web found
     /// iOS capture that dies silently, #209).
     private func startWatchdog() {
         watchdog?.invalidate()
-        let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
-            guard let self, self.capturing, !self.restarting, self.tapInstalled else { return }
-            // Only real audio clears the count (a restart also restarts the wait).
-            if self.clock.takeDelivered() > 0 { self.stallRestarts = 0 }
-            guard self.clock.stalled(after: Self.stallTimeout) else { return }
-            guard self.stallRestarts < Self.stallRestartLimit else {
-                // Restarting brings no audio: say so rather than record nothing.
-                self.recordingLog.note("no audio after \(self.stallRestarts) restarts: reporting a failure")
-                self.capturing = false
-                self.stallRestarts = 0
-                self.onFailure?(SourceError.stalled)
-                return
-            }
-            self.stallRestarts += 1
-            self.recordingLog.note("no audio from the microphone for \(Int(Self.stallTimeout)) s (running: \(self.engine.isRunning)): restarting")
-            self.log.error("microphone stalled; restarting")
-            self.restart()
-        }
+        let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in self?.checkForStall() }
         RunLoop.main.add(timer, forMode: .common)
         watchdog = timer
+    }
+
+    /// The watchdog's check, once a second.
+    func checkForStall() {
+        guard active, capturing, !restarting else { return }
+        // Only real audio clears the count (a restart also restarts the wait).
+        if clock.takeDelivered() > 0 { stallRestarts = 0 }
+        guard clock.stalled(after: stallTimeout) else { return }
+        guard stallRestarts < Self.stallRestartLimit else {
+            // Restarting brings no audio: say so rather than record nothing.
+            recordingLog.note("no audio after \(stallRestarts) restarts: reporting a failure")
+            capturing = false
+            stallRestarts = 0
+            onFailure?(SourceError.stalled)
+            return
+        }
+        stallRestarts += 1
+        recordingLog.note("no audio from the microphone for \(Int(stallTimeout)) s (running: \(engine.isRunning)): restarting")
+        log.error("microphone stalled; restarting")
+        restart()
     }
 
     /// Stops capture (the OS mic indicator goes off). `resume()` starts it again.
@@ -180,31 +337,37 @@ final class MicrophoneSource: PCMSource {
     /// After a user pause the engine is still running (the recorder only drops
     /// samples): nothing to do. Preparing or starting it again could only fail,
     /// and from the background iOS refuses to start a microphone (#397).
+    /// After an interruption, a media-services reset or a failed restart the
+    /// route may have changed meanwhile: a new engine, as for a restart.
     func resume() throws {
         if engine.isRunning {
             capturing = true
             return
         }
-        if !tapInstalled { installTap() }
-        engine.prepare()
-        try engine.start()
+        // A retry still pending would replace the engine this starts.
+        restartGeneration += 1
+        restarting = false
+        do {
+            try restartEngine()
+        } catch {
+            recordingLog.note("microphone did not resume: \(AudioSessionController.describe(error))")
+            throw error
+        }
         capturing = true
+        stallRestarts = 0
         clock.reset()
         recordingLog.note("microphone resumed: \(formatSummary)")
     }
 
     func stop() {
         capturing = false
+        active = false
         restartGeneration += 1
         watchdog?.invalidate()
         watchdog = nil
         if let configObserver { NotificationCenter.default.removeObserver(configObserver) }
         configObserver = nil
-        if tapInstalled {
-            engine.inputNode.removeTap(onBus: 0)
-            tapInstalled = false
-        }
-        engine.stop()
+        discardEngine()
     }
 }
 

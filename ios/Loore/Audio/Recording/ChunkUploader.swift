@@ -208,8 +208,16 @@ final class ChunkUploader: NSObject {
     }
 
     /// After a relaunch: upload whatever a killed app left behind.
-    func resumePending() {
-        guard let dirs = try? fileManager.contentsOfDirectory(at: root, includingPropertiesForKeys: nil) else { return }
+    /// - Returns: sessions a recorder was still writing when the app ended, with
+    ///   nothing left to upload. Nothing records into them any more; the caller
+    ///   releases them on the server, which otherwise hides a recording session
+    ///   from recovery for 45 s after its last chunk (#423 walk test). A session
+    ///   with chunks still to upload is not returned: recovered before they land,
+    ///   its continuation would reuse their indexes.
+    @discardableResult
+    func resumePending() -> [String] {
+        guard let dirs = try? fileManager.contentsOfDirectory(at: root, includingPropertiesForKeys: nil) else { return [] }
+        var abandoned: [String] = []
         for dir in dirs {
             let file = dir.appendingPathComponent("manifest.json")
             guard let data = try? Data(contentsOf: file),
@@ -232,6 +240,7 @@ final class ChunkUploader: NSObject {
             }
             let open = resumed.chunks.values.contains { $0.status == .pending }
             if !open {
+                if !manifest.closed { abandoned.append(manifest.sessionId) }
                 try? fileManager.removeItem(at: dir)
                 continue
             }
@@ -242,6 +251,7 @@ final class ChunkUploader: NSObject {
             log.info("resuming uploads for a session left by a previous launch")
             startWorker(manifest.sessionId)
         }
+        return abandoned
     }
 
     /// Sign-out: stop every upload (foreground and background, which carry this

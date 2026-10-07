@@ -384,6 +384,9 @@ struct VoiceView: View {
             autoStartIfRequested()
         }
         guard voice.state == .idle, resumeLLMId == nil else { return }
+        // Right after a relaunch: a recording the killed app left is listed only
+        // once it is released.
+        await app.audio.releasingAbandoned?.value
         if let drafts: [InterruptedDraft] = try? await app.api.get(APIPath.interruptedDrafts),
            let first = drafts.first {
             interrupted = first

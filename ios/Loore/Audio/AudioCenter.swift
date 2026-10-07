@@ -194,6 +194,9 @@ final class AudioCenter {
     }
 
     @ObservationIgnored private var resumeAfterInterruption = false
+    /// The releases of recordings a killed app left (`releaseAbandonedRecordings`);
+    /// the Voice screen waits for them before it asks for unfinished recordings.
+    @ObservationIgnored var releasingAbandoned: Task<Void, Never>?
     /// The voice conversation's last toast (a lock-screen Record that failed repeats it).
     @ObservationIgnored private var lastVoiceToast: (text: String, at: Date)?
 
@@ -424,7 +427,7 @@ enum LocalNotifier {
 extension AudioCenter {
     /// Signed in with cookies restored: finish uploads a killed app left behind.
     func didSignIn() {
-        ChunkUploader.shared.resumePending()
+        releaseAbandonedRecordings(ChunkUploader.shared.resumePending())
         #if DEBUG
         // `-LooreDebugListenNode <id>`: play a node's audio in the global player
         // at launch (the speaker icon's path) until the thread view lands (M2).
@@ -432,6 +435,34 @@ extension AudioCenter {
         if id > 0 { listen(to: .node(id), content: nil) }
         #endif
     }
+}
+
+extension AudioCenter {
+    /// Recordings this app was making when it was killed or crashed. The server
+    /// counts a recording session as live for 45 s after its last chunk and
+    /// keeps it out of the Voice screen's recovery banner until then; after the
+    /// crash on the 2026-10-07 walk (#423) the Voice screen opened inside that
+    /// window and offered nothing. Nothing records into these any more, so they
+    /// are released now (the web's pagehide beacon does the same).
+    func releaseAbandonedRecordings(_ sessionIds: [String]) {
+        guard !sessionIds.isEmpty, let api = app?.api else { return }
+        releasingAbandoned = Task {
+            await withTaskGroup(of: Void.self) { group in
+                for sessionId in sessionIds {
+                    group.addTask {
+                        var request = APIRequest(.post, APIPath.streamingRelease(sessionId))
+                        request.timeout = AudioCenter.releaseTimeout
+                        _ = try? await api.data(for: request)
+                    }
+                }
+            }
+        }
+    }
+
+    /// INTRODUCED HEURISTIC: the longest a release may take. The Voice screen
+    /// waits for the releases before it asks for unfinished recordings, so
+    /// offline it stays blank for at most this long.
+    static let releaseTimeout: TimeInterval = 5
 }
 
 /// App delegate for the background upload session (design doc §9.2): a relaunch

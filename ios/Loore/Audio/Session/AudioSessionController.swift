@@ -133,7 +133,11 @@ final class AudioSessionController {
         try? session.setPreferredInput(nil)
     }
 
+    /// For the recording log: the error's domain and code, or the reason of a
+    /// caught AVFAudio exception (a format condition, no user content).
     nonisolated static func describe(_ error: Error) -> String {
+        if let exception = error as? ObjCExceptionError { return "exception \(exception)" }
+        if let sourceError = error as? MicrophoneSource.SourceError { return sourceError.description }
         let ns = error as NSError
         return "\(ns.domain) \(ns.code)"
     }

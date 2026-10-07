@@ -938,6 +938,25 @@ final class VoiceTurnTests: XCTestCase {
         XCTAssertEqual(recorder.calls.last, "resume")
     }
 
+    // The 2026-10-07 walk with the crash fixed: the headphones go off (hold, mic
+    // on), the phone's mic then cannot be restarted (reported after the retries),
+    // and Resume pressed on the lock screen starts it again. One alert.
+    func testMicrophoneFailureDuringAHeadsetHoldWaitsForResume() async throws {
+        turn.start()
+        await wait("recording") { turn.state == .recording }
+        XCTAssertTrue(turn.headsetMicLost())
+        recorder.onSourceFailed?()
+        XCTAssertEqual(recorder.calls.suffix(2), ["pause", "interrupt"])
+        XCTAssertEqual(audio.events.filter { $0 == "sound.interruption" }.count, 1)
+        XCTAssertEqual(notices.notified, [.recordingPaused])
+        XCTAssertTrue(turn.isInterrupted)
+        turn.resumeRecording()
+        XCTAssertFalse(turn.isInterrupted)
+        XCTAssertFalse(turn.isPaused)
+        XCTAssertTrue(audio.events.contains("reactivate"))
+        XCTAssertEqual(recorder.calls.last, "resume")
+    }
+
     func testLostHeadsetMicOutsideRecordingDoesNothing() async throws {
         turn.headsetMicLost()
         XCTAssertFalse(turn.isInterrupted)

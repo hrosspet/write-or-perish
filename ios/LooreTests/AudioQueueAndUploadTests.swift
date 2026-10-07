@@ -323,6 +323,48 @@ final class ChunkUploaderTests: XCTestCase {
         XCTAssertEqual(outcome.stored, 1)
     }
 
+    // #423 walk test: the app crashed mid-recording. A relaunch reports its
+    // session for release (nothing records into it any more), once.
+    func testRelaunchReportsARecordingTheKilledAppLeft() async throws {
+        uploader.transport = { request, _ in
+            (Data(), HTTPURLResponse(url: request.url!, statusCode: 202, httpVersion: nil, headerFields: nil)!)
+        }
+        uploader.open(sessionId: "s10", uploadURL: URL(string: "http://x/c")!)
+        uploader.enqueue(sessionId: "s10", chunk: chunk(0))
+        // A recording that was stopped is not reported.
+        uploader.open(sessionId: "s11", uploadURL: URL(string: "http://x/c")!)
+        uploader.enqueue(sessionId: "s11", chunk: chunk(0))
+        _ = await uploader.settle(sessionId: "s11")
+        for _ in 0..<200 where uploader.outcome("s10").stored < 1 {
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        XCTAssertEqual(uploader.outcome("s10").stored, 1)
+        let relaunched = ChunkUploader(root: root, useBackgroundSession: false)
+        XCTAssertEqual(relaunched.resumePending(), ["s10"])
+        XCTAssertEqual(ChunkUploader(root: root, useBackgroundSession: false).resumePending(), [], "reported once")
+    }
+
+    // Its chunks still uploading: not reported. Recovered before they land, the
+    // continuation would reuse their indexes.
+    func testRelaunchDoesNotReportARecordingWithChunksStillToUpload() async throws {
+        uploader.transport = { _, _ in
+            try await Task.sleep(nanoseconds: 30_000_000_000)
+            throw URLError(.timedOut)
+        }
+        uploader.open(sessionId: "s12", uploadURL: URL(string: "http://x/c")!)
+        uploader.enqueue(sessionId: "s12", chunk: chunk(0))
+        try await Task.sleep(nanoseconds: 20_000_000)
+        let relaunched = ChunkUploader(root: root, useBackgroundSession: false)
+        relaunched.delay = { _ in 0.001 }
+        relaunched.transport = { request, _ in
+            (Data(), HTTPURLResponse(url: request.url!, statusCode: 202, httpVersion: nil, headerFields: nil)!)
+        }
+        XCTAssertEqual(relaunched.resumePending(), [])
+        let outcome = await relaunched.settle(sessionId: "s12")
+        XCTAssertEqual(outcome.stored, 1)
+        uploader.forget(sessionId: "s12")
+    }
+
     func testRelaunchResumesPendingChunks() async throws {
         // The first upload never answers (the app is killed mid-request).
         uploader.transport = { _, _ in
