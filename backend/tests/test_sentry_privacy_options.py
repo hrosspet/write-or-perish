@@ -2,6 +2,10 @@
 content). send_default_pii=False alone still lets the SDK attach stack-frame
 local variables and request bodies, which can hold decrypted text."""
 import json
+import logging
+import threading
+import urllib.request
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
 import sentry_sdk
@@ -125,3 +129,57 @@ def test_a_query_in_the_event_url_is_dropped_too():
     assert _drop_query_strings(event)["request"]["url"] == (
         "https://loore.org/api/search")
     assert _drop_query_strings({}) == {}
+
+
+class _Quiet(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"ok")
+
+    def log_message(self, *args):
+        pass
+
+
+def test_log_and_http_breadcrumbs_carry_no_query_strings(monkeypatch):
+    """An access-log line (gunicorn logs it at INFO, so it would become a
+    breadcrumb) and an outgoing HTTP call, both with a query, before an
+    error: the event that reaches Sentry has neither query."""
+    before_send = _app_before_send(monkeypatch)
+    marker = "-".join(["typed", "search", "words"])
+    access_log = logging.getLogger("gunicorn.access")
+    saved_level = access_log.level
+    access_log.setLevel(logging.INFO)
+    server = HTTPServer(("127.0.0.1", 0), _Quiet)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    events = []
+    app = Flask(__name__)
+
+    @app.route("/api/stream")
+    def stream():
+        access_log.info('"GET /api/search?q=%s HTTP/1.1" 200', marker)
+        urllib.request.urlopen(
+            f"http://127.0.0.1:{server.server_port}/x?q={marker}",
+            timeout=5).read()
+        raise RuntimeError("boom")
+
+    try:
+        sentry_sdk.init(dsn="https://key@example.invalid/1",
+                        transport=lambda envelope: None,
+                        before_send=lambda e, h: events.append(
+                            before_send(e, h)),
+                        **SENTRY_PRIVACY_OPTIONS)
+        app.test_client().get("/api/stream")
+    finally:
+        sentry_sdk.init(dsn=None)
+        server.shutdown()
+        server.server_close()
+        access_log.setLevel(saved_level)
+
+    assert events
+    for event in events:
+        crumbs = event["breadcrumbs"]["values"]
+        http = [c for c in crumbs if c.get("category") == "httplib"]
+        assert http and http[0]["data"]["url"].endswith("/x")
+        assert not [c for c in crumbs if c.get("category") == "gunicorn.access"]
+        assert marker not in json.dumps(event, default=str)
