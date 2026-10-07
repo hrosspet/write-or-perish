@@ -46,6 +46,7 @@ import React from 'react';
 import { render, screen, act, fireEvent, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import VoicePage, { VOICE_NEEDS_AI_TEXT, FINISH_WITHOUT_REPLY_TEXT } from './VoicePage';
+import { WELCOME_QUESTION } from '../utils/entryPrompt';
 
 // GET answers by URL: the interrupted-recording check (useInterruptedRecovery)
 // and /voice/availability (keyed by its parent param, '' for none).
@@ -63,8 +64,12 @@ const answerGets = ({ interrupted = [], availability = {} } = {}) => {
   });
 };
 
+const mockMarkHasOwnEntries = jest.fn();
 const renderAt = (path, user) => {
-  mockUserCtx = { user: { username: 'alice', ...user } };
+  mockUserCtx = {
+    user: { username: 'alice', ...user },
+    markHasOwnEntries: mockMarkHasOwnEntries,
+  };
   return render(
     <MemoryRouter initialEntries={[path]}>
       <VoicePage />
@@ -77,6 +82,7 @@ beforeEach(() => {
   mockDelete.mockReset();
   mockDelete.mockResolvedValue({ data: {} });
   mockUseVoiceSession.mockReset();
+  mockMarkHasOwnEntries.mockReset();
   mockHandleStart.mockReset();
   mockHandleResumeSession.mockReset();
   mockSessionOptions = null;
@@ -248,4 +254,39 @@ test('where the recording continues a thread that lets AI reply, no note is adde
   await waitFor(() => expect(mockGet).toHaveBeenCalledWith(
     '/voice/availability', { params: { parent: 9 } }));
   expect(screen.queryByText(FINISH_WITHOUT_REPLY_TEXT)).not.toBeInTheDocument();
+});
+
+// #391: a fresh Voice session asks the welcome page's question until the
+// user has written an entry in Loore; the first reply ends that.
+test("a newcomer's fresh session asks the welcome question", async () => {
+  renderAt('/voice', { default_ai_usage: 'chat', has_own_entries: false });
+
+  expect(await screen.findByText(WELCOME_QUESTION)).toBeInTheDocument();
+  expect(screen.queryByText("What's on your mind?")).not.toBeInTheDocument();
+});
+
+test('once they have written, a fresh session asks the everyday question', async () => {
+  renderAt('/voice', { default_ai_usage: 'chat', has_own_entries: true });
+
+  expect(await screen.findByText("What's on your mind?")).toBeInTheDocument();
+  expect(screen.queryByText(WELCOME_QUESTION)).not.toBeInTheDocument();
+});
+
+test('continuing a thread keeps the everyday question', async () => {
+  answerGets({ availability: { 7: { allowed: true } } });
+  renderAt('/voice?parent=7', { default_ai_usage: 'chat', has_own_entries: false });
+
+  expect(await screen.findByText("What's on your mind?")).toBeInTheDocument();
+  expect(screen.queryByText(WELCOME_QUESTION)).not.toBeInTheDocument();
+});
+
+test('the server saving the recording marks the user as having written, reply or not', async () => {
+  renderAt('/voice', { default_ai_usage: 'chat', has_own_entries: false });
+  await screen.findByText(WELCOME_QUESTION);
+  expect(mockMarkHasOwnEntries).not.toHaveBeenCalled();
+
+  // The session reports a saved entry before any reply exists; the reply
+  // can fail or be skipped afterwards without taking the entry back.
+  act(() => { mockSessionOptions.onEntrySaved(); });
+  expect(mockMarkHasOwnEntries).toHaveBeenCalledTimes(1);
 });
