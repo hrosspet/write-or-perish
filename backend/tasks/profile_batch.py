@@ -477,7 +477,12 @@ def _submit_requests(built, keys):
     persist a ProfileBatchJob per returned batch id, and set guards.
 
     `built` items are not in flight until their batch id comes back; a failed
-    submission clears the guard so the user is re-seeded next cycle."""
+    submission clears the guard so the user is re-seeded next cycle. It also
+    counts a batch attempt (MAX_BATCH_ATTEMPTS, then the synchronous
+    full-price path), except when the provider refused the submit for an
+    account reason (#369): a spend limit or a revoked key says nothing about
+    the requests, and an outage spanning three hourly seeds would otherwise
+    move every unpinned batch user to the full-price path for good."""
     # Invariant: ONE in-flight step per user. Drop duplicate custom_ids
     # (OpenAI rejects the whole batch) and extra steps for the same user
     # (they'd race each other on the chain); keep the first built.
@@ -502,19 +507,27 @@ def _submit_requests(built, keys):
         key = _provider_key(b["provider"], b["request"]["api_model"])
         items_by_key.setdefault(key, []).append(b["meta"])
 
+    # Provider keys refused for an account reason (llm_batch.SubmittedBatches;
+    # a plain dict from a stand-in has none).
+    account_refused = getattr(batch_ids, "account_refused", None) or set()
     now = datetime.utcnow()
     submitted = 0
     for provider_key, items in items_by_key.items():
         batch_id = batch_ids.get(provider_key)
         if not batch_id:
+            refused = provider_key in account_refused
             logger.warning(
                 f"Batch submit failed for {provider_key}; "
-                f"{len(items)} item(s) not in flight")
+                f"{len(items)} item(s) not in flight"
+                + ("; refused for an account reason (reported), "
+                   "not counted as a batch attempt" if refused else ""))
             for item in items:
                 u = User.query.get(item["user_id"])
                 if u:
                     u.profile_batch_pending = False
-                    u.profile_batch_attempts = (u.profile_batch_attempts or 0) + 1
+                    if not refused:
+                        u.profile_batch_attempts = (
+                            (u.profile_batch_attempts or 0) + 1)
             db.session.commit()
             continue
         db.session.add(ProfileBatchJob(
