@@ -12,6 +12,7 @@ import { useUser } from "../contexts/UserContext";
 import { useToast } from "../contexts/ToastContext";
 import { useAsyncTaskPolling } from "../hooks/useAsyncTaskPolling";
 import { useLlmTextStream } from "../hooks/useSSE";
+import useNodePrefetch, { peekPrefetchedNode, takePrefetchedNode } from "../hooks/useNodePrefetch";
 import api from "../api";
 import { useCheckboxToggle, useTaskInsert } from "../utils/markdown";
 import { contextAllowsAi, isAiUsageRefusedError } from "../utils/aiUsage";
@@ -31,6 +32,44 @@ import DeleteConfirmDialog from "./DeleteConfirmDialog";
 const READ_FURTHER_TITLE = "Another pass over the day's tweets, against everything in this thread so far "
   + "— your marks on these picks included.";
 const READ_ENTRY_TITLE = "Loore reads the last day of Community Archive tweets and shows you the ones relevant to this thread";
+
+// A clicked node of the thread is loading (useNodePrefetch): a thin accent
+// ring, turning, on a small disc in the middle of the screen. Clicks pass
+// through, so another node can still be picked (the newest click opens).
+const SPINNER_RING_R = 8;
+const SPINNER_RING_C = 2 * Math.PI * SPINNER_RING_R;
+function NodeOpeningSpinner() {
+  return (
+    <div
+      role="status"
+      aria-label="Loading node"
+      style={{
+        position: "fixed",
+        top: "50%",
+        left: "50%",
+        transform: "translate(-50%, -50%)",
+        zIndex: 50,
+        padding: "11px",
+        lineHeight: 0,
+        borderRadius: "50%",
+        background: "var(--bg-card)",
+        border: "1px solid var(--border)",
+        pointerEvents: "none",
+        animation: "nodeOpeningFadeIn 0.12s ease-out",
+      }}
+    >
+      <style>{`@keyframes nodeOpeningFadeIn { from { opacity: 0; } }`}</style>
+      <svg width="18" height="18" viewBox="0 0 18 18" style={{ animation: "spin 0.9s linear infinite" }}>
+        <circle
+          cx="9" cy="9" r={SPINNER_RING_R}
+          fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round"
+          strokeDasharray={`${0.72 * SPINNER_RING_C} ${SPINNER_RING_C}`}
+        />
+      </svg>
+    </div>
+  );
+}
+
 // Recursive component to render children nodes.
 function RenderChildTree({ nodes, onBubbleClick, buildActions }) {
   return (
@@ -106,8 +145,10 @@ function NodeDetail({ nodeIdOverride }) {
   const { user: currentUser } = useUser();
   const { addToast } = useToast();
   const craftMode = !!currentUser?.craft_mode;
-  const [node, setNode] = useState(null);
-  const [loading, setLoading] = useState(true);
+  // Opened from another node of the thread: the data came with the click
+  // (useNodePrefetch), so the page renders at once instead of loading.
+  const [node, setNode] = useState(() => peekPrefetchedNode(id));
+  const [loading, setLoading] = useState(node == null);
   const [error, setError] = useState("");
   const [showEditOverlay, setShowEditOverlay] = useState(false);
   const [selectedModel, setSelectedModel] = useState(currentUser?.preferred_model || null);
@@ -211,13 +252,14 @@ function NodeDetail({ nodeIdOverride }) {
     { enabled: replyStreaming, initialText: node?.streaming_content || '' },
   );
 
+  // Loads once per node: NodeDetailWrapper keys this component by id, so
+  // `loading` starts true unless the node came with the click.
   useEffect(() => {
-    setLoading(true);
     setError("");
     setQuotes({}); // Reset quotes when node changes
     setExternalQuotes({});
-    api
-      .get(`/nodes/${id}`)
+    const prefetched = takePrefetchedNode(id);
+    (prefetched ? Promise.resolve({ data: prefetched }) : api.get(`/nodes/${id}`))
       .then((response) => {
         setNode(response.data);
         setLoading(false);
@@ -483,6 +525,8 @@ function NodeDetail({ nodeIdOverride }) {
   // After every render: a new model label can change the widths.
   useLayoutEffect(() => { checkActionsStacked(); });
 
+  const { pending: openingNode, openNode } = useNodePrefetch();
+
   if (loading) return <div style={{ color: "var(--text-muted)", padding: "20px" }}>Loading node...</div>;
   if (error) return <div style={{ color: "var(--accent)", padding: "20px" }}>{error}</div>;
   if (!node) return <div style={{ color: "var(--text-muted)", padding: "20px" }}>No node found.</div>;
@@ -491,7 +535,7 @@ function NodeDetail({ nodeIdOverride }) {
     if (e && (e.metaKey || e.ctrlKey)) {
       window.open(`/node/${nodeId}`, '_blank');
     } else {
-      navigate(`/node/${nodeId}`);
+      openNode(nodeId, () => navigate(`/node/${nodeId}`));
     }
   };
 
@@ -1698,6 +1742,7 @@ function NodeDetail({ nodeIdOverride }) {
         {topRightControls}
       </div>
       <SemanticNeighbors nodeId={node.id} />
+      {openingNode && <NodeOpeningSpinner />}
       {ancestorsSection}
       {highlightedNodeSection}
       {childrenSection}
