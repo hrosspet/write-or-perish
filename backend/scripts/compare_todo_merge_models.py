@@ -22,6 +22,21 @@ Usage (on the prod VM, from the app dir, for your own account only):
     python backend/scripts/compare_todo_merge_models.py --user hrosspet \
         --models gpt-6-luna gpt-6-sol --since 2026-08-01 --limit 20 --rerun-original
 
+After the prompt file changed (#417), the past merges can't be rebuilt with
+the prompt they used, and the run above refuses. To test the new prompt on
+the same past inputs, run (Luna is the default model):
+
+    python backend/scripts/compare_todo_merge_models.py --user hrosspet --current-prompt
+
+--current-prompt sends every call (candidates and --rerun-original) the
+CURRENT backend/prompts/orient_apply_todo.txt through the task's current
+message builder. The inputs (proposal, previous todo list) and the stored
+output the results are compared with stay those of the past merge. The
+PROMPT_FILE_SHA256 check does not apply in this mode; the run record, each
+merge record and the terminal summary say that the current prompt was used,
+with its sha256. A merge whose stored prompt was a custom UserPrompt row is
+run on the file prompt too, like the others (the custom row is not read).
+
 create_app loads .env.production (prod DB, KMS key, API keys) on its own.
 Before anything is decrypted, a run (not --dry-run) prints the account's
 username and asks you to type it to continue.
@@ -487,11 +502,13 @@ def build_merge_messages(merge_prompt, update_summary, current_todo):
                                      current_todo)
 
 
-def file_default_prompt():
+def file_default_prompt(check_hash=True):
+    """The prompt file's text. By default it must still be the file past
+    merges used (PROMPT_FILE_SHA256); --current-prompt skips that check."""
     from backend.utils.prompts import load_default_prompt
     text = load_default_prompt(PROMPT_KEY)
     digest = hashlib.sha256(text.encode()).hexdigest()
-    if digest != PROMPT_FILE_SHA256:
+    if check_hash and digest != PROMPT_FILE_SHA256:
         raise SystemExit(
             "Refusing to run: backend/prompts/orient_apply_todo.txt changed "
             "since this script was written, so past merges' default prompt "
@@ -799,7 +816,8 @@ def classify(uid, username, since, limit, out):
     return window, usable[:limit]
 
 
-def rebuild_inputs(rec, uid, default_prompt, prompt_cache):
+def rebuild_inputs(rec, uid, default_prompt, prompt_cache,
+                   current_prompt=False):
     """Decrypt what one merge needs (one KMS call per row): the proposal,
     the previous todo version, the stored output, a custom prompt."""
     proposal_text = _decrypt(db.session.get(Node, rec["proposal"]["id"]),
@@ -809,7 +827,9 @@ def rebuild_inputs(rec, uid, default_prompt, prompt_cache):
                      if previous is not None else "")
     stored_text = _decrypt(db.session.get(UserTodo, rec["todo"].id), uid)
     prompt_id = rec["prompt_id"]
-    if prompt_id is None:
+    if prompt_id is None or current_prompt:
+        # --current-prompt: the file prompt for every merge, so a custom
+        # prompt row is not decrypted at all.
         merge_prompt = default_prompt
     else:
         if prompt_id not in prompt_cache:
@@ -856,7 +876,7 @@ def score_runs(runs, stored_text, previous_text):
                 original["text"], result["text"])
 
 
-def _merge_line(rec, inputs, stored_missing, runs):
+def _merge_line(rec, inputs, stored_missing, runs, current_prompt=False):
     todo, proposal, cost = rec["todo"], rec["proposal"], rec["cost"]
     return {
         "type": "merge",
@@ -865,8 +885,13 @@ def _merge_line(rec, inputs, stored_missing, runs):
         "proposal_node_id": proposal["id"],
         "proposal_created_at": _iso(proposal["created_at"]),
         "previous_todo_id": rec["previous"].id if rec["previous"] else None,
-        "prompt": ("file_default" if rec["prompt_id"] is None
+        "prompt": ("current_file" if current_prompt
+                   else "file_default" if rec["prompt_id"] is None
                    else f"user_prompt:{rec['prompt_id']}"),
+        "current_prompt": current_prompt,
+        # What the stored output was made with (the reference).
+        "stored_prompt": ("file_default" if rec["prompt_id"] is None
+                          else f"user_prompt:{rec['prompt_id']}"),
         "prompt_sha256": hashlib.sha256(
             inputs["merge_prompt"].encode()).hexdigest(),
         "stored": {
@@ -889,14 +914,14 @@ def _merge_line(rec, inputs, stored_missing, runs):
 
 
 def compare_chosen(chosen, window, uid, models, rerun_original, provider,
-                   fh, out):
+                   fh, out, current_prompt=False):
     """Run and score each chosen merge, one at a time, writing a JSONL
     line per merge as it finishes. Returns (runs_by_label, stored)."""
     from flask import current_app
     from backend.utils.api_keys import get_api_keys_for_usage
     supported = current_app.config.get("SUPPORTED_MODELS", {})
     api_keys = get_api_keys_for_usage(current_app.config, "chat")
-    default_prompt = file_default_prompt()
+    default_prompt = file_default_prompt(check_hash=not current_prompt)
     for rec in window:
         if rec["skip"]:
             fh.write(json.dumps(_skipped_line(rec["todo"], rec["skip"]))
@@ -907,7 +932,8 @@ def compare_chosen(chosen, window, uid, models, rerun_original, provider,
               "costs_usd": []}
     for n, rec in enumerate(chosen, 1):
         todo = rec["todo"]
-        inputs = rebuild_inputs(rec, uid, default_prompt, prompt_cache)
+        inputs = rebuild_inputs(rec, uid, default_prompt, prompt_cache,
+                                current_prompt)
         db.session.rollback()   # no open transaction during model calls
         if not inputs["proposal_text"].strip():
             fh.write(json.dumps(_skipped_line(todo, "proposal_empty"))
@@ -938,8 +964,9 @@ def compare_chosen(chosen, window, uid, models, rerun_original, provider,
                      else f"{result['model']} (original re-run)")
             runs_by_label.setdefault(label, []).append(result)
             print("    " + _fmt_run(result), file=out)
-        fh.write(json.dumps(_merge_line(rec, inputs, stored_missing, runs))
-                 + "\n")
+        line = _merge_line(rec, inputs, stored_missing, runs,
+                           current_prompt)
+        fh.write(json.dumps(line) + "\n")
         fh.flush()
     costs = stored.pop("costs_usd")
     stored["cost_usd_mean"] = statistics.mean(costs) if costs else 0.0
@@ -967,7 +994,7 @@ def _estimate(models, chosen, rerun_original, out):
 
 def run(user_ident, models=None, limit=DEFAULT_LIMIT, since=None,
         rerun_original=False, out_path=None, dry_run=False,
-        provider=None, out=None):
+        provider=None, out=None, current_prompt=False):
     """The comparison, inside an app context. Returns the summary dict
     (per model label), or the counts on a dry run."""
     from flask import current_app
@@ -984,7 +1011,13 @@ def run(user_ident, models=None, limit=DEFAULT_LIMIT, since=None,
 
     with refuse_writes():
         user = resolve_user(user_ident)
-        file_default_prompt()   # refuse early if the prompt file moved on
+        # Refuse early if the prompt file moved on (not with
+        # --current-prompt: then the current file is what runs).
+        prompt_text = file_default_prompt(check_hash=not current_prompt)
+        prompt_sha = hashlib.sha256(prompt_text.encode()).hexdigest()
+        if current_prompt:
+            print(f"prompt: current file {prompt_sha[:8]}, not the one "
+                  "these merges used", file=out)
         window, chosen = classify(user.id, user.username, since, limit,
                                   out)
         print(f"Running {len(chosen)} (limit {limit}), newest first, on "
@@ -1006,15 +1039,20 @@ def run(user_ident, models=None, limit=DEFAULT_LIMIT, since=None,
                 "rerun_original": rerun_original, "limit": limit,
                 "since": _iso(since), "floor": _iso(FLOOR),
                 "started_at": _iso(datetime.utcnow()),
-                "prompt_file_sha256": PROMPT_FILE_SHA256,
+                "prompt_file_sha256": (prompt_sha if current_prompt
+                                       else PROMPT_FILE_SHA256),
+                "current_prompt": current_prompt,
             }) + "\n")
             runs_by_label, stored = compare_chosen(
                 chosen, window, user.id, models, rerun_original, provider,
-                fh, out)
+                fh, out, current_prompt)
             summary = summarize(runs_by_label)
             fh.write(json.dumps({"type": "summary", "stored": stored,
                                  "models": summary}) + "\n")
         print_summary(summary, stored, out)
+        if current_prompt:
+            print(f"\nprompt: current file {prompt_sha[:8]}, not the one "
+                  "these merges used", file=out)
         print(f"\nPer-merge results (with the todo texts): {out_path}",
               file=out)
         return summary
@@ -1054,6 +1092,12 @@ def parse_args(argv=None):
         help="also re-run each merge's stored model on the same inputs "
              "(adds one frontier-model call per merge)")
     parser.add_argument(
+        "--current-prompt", action="store_true",
+        help="run every call (candidates and --rerun-original) on the "
+             "CURRENT orient_apply_todo.txt instead of the prompt the past "
+             "merge used; inputs and the stored reference stay as they "
+             "were. Use after the prompt file changed")
+    parser.add_argument(
         "--out", help="JSONL path (default: ~/todo-merge-compare-u<id>-"
                       "<UTC time>.jsonl; never overwritten)")
     parser.add_argument(
@@ -1078,7 +1122,8 @@ def main(argv=None):
         db.session.rollback()   # the next transaction starts read-only
         run(args.user, models=args.models, limit=args.limit,
             since=args.since, rerun_original=args.rerun_original,
-            out_path=args.out, dry_run=args.dry_run)
+            out_path=args.out, dry_run=args.dry_run,
+            current_prompt=args.current_prompt)
 
 
 if __name__ == "__main__":
