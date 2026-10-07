@@ -708,6 +708,9 @@ struct ModelInfo: Decodable, Identifiable, Hashable, Sendable {
     var featured: Bool
     /// May be used for a Read.
     var read: Bool
+    /// May be used for anything other than a Read (a reply, the account default).
+    /// False for a read-only model; a server without the field means true.
+    var chat: Bool
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -716,9 +719,10 @@ struct ModelInfo: Decodable, Identifiable, Hashable, Sendable {
         provider = c.tolerant(.provider, default: "")
         featured = c.tolerant(.featured, default: false)
         read = c.tolerant(.read, default: false)
+        chat = c.tolerant(.chat, default: true)
     }
 
-    enum CodingKeys: String, CodingKey { case id, name, provider, featured, read }
+    enum CodingKeys: String, CodingKey { case id, name, provider, featured, read, chat }
 }
 
 /// `GET /api/nodes/default-model` and `/api/nodes/<id>/suggested-model`.
