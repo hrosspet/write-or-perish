@@ -4,6 +4,8 @@
 
 When implementing a feature that is underspecified, ambiguous, or specified in a possibly outdated doc, read `docs/LOORE-ESSENCE.md` first. It characterizes what Loore is and aspires to be, the vibes it should give, and the decision heuristics for resolving ambiguity (plus when to placeholder and ask instead of deciding).
 
+Decision log: docs/DECISION-LOG.md · intent doc: docs/LOORE-ESSENCE.md (read by the `decision-log` skill)
+
 ## CI/CD Pipeline - IMPORTANT
 
 **Pushing to `main` branch triggers automatic deployment to production.**
