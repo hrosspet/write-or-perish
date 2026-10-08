@@ -37,7 +37,9 @@ logger = logging.getLogger(__name__)
 CACHE_TTL_SECONDS = 24 * 3600
 # v2: entries carry the training-key verdict next to the text (#326).
 # Entries from before are never read as verdict-less hits; they expire.
-_KEY_PREFIX = "wop:sysprompt:v2:"
+# v3: renders end without trailing whitespace (system_block_text); a v2
+# render ending in a newline would keep the ongoing-thread warm missing.
+_KEY_PREFIX = "wop:sysprompt:v3:"
 
 # *unlicensed* is why the render's own rows keep a payload off the
 # training key (``ContextUsage.reason``), or None when they are all
