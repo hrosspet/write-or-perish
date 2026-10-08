@@ -132,10 +132,9 @@ describe('withoutQuery', () => {
   });
 });
 
-// The options wired into the real browser SDK: what reaches the transport
-// when an error follows a search, a console line and a click, on a page
-// opened from a link with a token.
-async function sendErrorAfterActivity(options) {
+// The options wired into the real browser SDK: the events that reach the
+// transport while `activity` runs.
+async function sentEvents(options, activity) {
   const sent = [];
   // Breadcrumbs live on the global scope, not the client: start clean.
   Sentry.getIsolationScope().clearBreadcrumbs();
@@ -152,6 +151,21 @@ async function sendErrorAfterActivity(options) {
     }),
   });
   try {
+    await activity();
+    await Sentry.flush(1000);
+  } finally {
+    await Sentry.close();
+  }
+  return sent
+    .flatMap(([, items]) => items)
+    .filter(([header]) => header.type === 'event')
+    .map(([, payload]) => payload);
+}
+
+// An error after a search, a console line and a click, on a page opened
+// from a link with a token.
+async function sendErrorAfterActivity(options) {
+  const events = await sentEvents(options, async () => {
     // The search box's call, made the way axios makes it (an XHR). Nothing
     // listens on the port, so it fails, which still leaves its breadcrumb.
     await new Promise((resolve) => {
@@ -164,16 +178,34 @@ async function sendErrorAfterActivity(options) {
     document.body.innerHTML = '<button id="chapter-1" title="The opening of a reply">1</button>';
     document.getElementById('chapter-1').click();
     Sentry.captureException(new Error('boom'));
-    await Sentry.flush(1000);
-  } finally {
-    await Sentry.close();
-  }
-  const events = sent
-    .flatMap(([, items]) => items)
-    .filter(([header]) => header.type === 'event')
-    .map(([, payload]) => payload);
+  });
   expect(events).toHaveLength(1);
   return events[0];
+}
+
+// A document keydown listener (like useEscapeKey's) that throws while the
+// Account page's email field has focus. The SDK wraps native listeners and
+// reports the error with the DOM event attached.
+async function sendErrorFromKeydownListener(options) {
+  const listener = () => {
+    throw new Error('listener failed');
+  };
+  // jsdom reports an uncaught listener error as a test failure otherwise.
+  const swallow = (e) => e.preventDefault();
+  window.addEventListener('error', swallow);
+  try {
+    return await sentEvents(options, () => {
+      document.addEventListener('keydown', listener);
+      document.body.innerHTML =
+        '<input id="email" aria-label="New email address (current: a@b.c)" title="a@b.c">';
+      const input = document.getElementById('email');
+      input.focus();
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    });
+  } finally {
+    document.removeEventListener('keydown', listener);
+    window.removeEventListener('error', swallow);
+  }
 }
 
 describe('Sentry in the browser', () => {
@@ -215,5 +247,21 @@ describe('Sentry in the browser', () => {
     expect(crumbs.find((b) => b.category === 'ui.click').message).toBe('body > button#chapter-1');
     expect(crumbs.some((b) => b.category === 'console')).toBe(false);
     expect(JSON.stringify(event)).not.toMatch(/private|abc123|opening of a reply/);
+  });
+
+  it('control: an error in a native listener sends the focused field\'s labels', async () => {
+    const events = await sendErrorFromKeydownListener({ sendDefaultPii: false });
+    const withArguments = events.find((e) => e.extra && e.extra.arguments);
+    expect(JSON.stringify(withArguments.extra.arguments)).toContain('New email address (current: a@b.c)');
+  });
+
+  it('with the privacy options an error in a native listener sends no extra or labels', async () => {
+    const events = await sendErrorFromKeydownListener(sentryPrivacyOptions());
+    expect(events.length).toBeGreaterThan(0);
+    expect(events.map((e) => e.exception.values[0].value)).toContain('listener failed');
+    for (const event of events) {
+      expect(event.extra).toBeUndefined();
+      expect(JSON.stringify(event)).not.toMatch(/a@b\.c|New email address/);
+    }
   });
 });

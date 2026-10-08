@@ -14,10 +14,12 @@ import { breadcrumbsIntegration } from "@sentry/react";
 //   aria-label and alt values, which can be a chapter title taken from a
 //   reply, a link from a note, or the account's email address;
 // - stack frames of the inlined webpack runtime are filed under the page
-//   address, query included.
+//   address, query included;
+// - an error thrown in a native event listener carries the DOM event in
+//   extra, its element described with the same attribute values.
 // Queries and fragments are removed and paths kept, so the route of an
 // error stays readable. Console breadcrumbs are not recorded. An element is
-// described by its tag, id and classes only.
+// described by its tag, id and classes only. Extra is dropped.
 
 export function withoutQuery(url) {
   return url.split("?", 1)[0].split("#", 1)[0];
@@ -71,6 +73,10 @@ export function scrubBreadcrumb(breadcrumb, hint) {
 }
 
 export function scrubEvent(event) {
+  // The SDK puts here the DOM event of a native listener that threw (its
+  // target described with title, aria-label and alt), or the whole value
+  // of a thrown or rejected non-Error. The app sets no extra of its own.
+  delete event.extra;
   const request = event.request;
   if (request && typeof request === "object") {
     delete request.query_string;
