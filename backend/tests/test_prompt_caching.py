@@ -152,8 +152,9 @@ def test_cost_opus_5_5_from_real_config():
 
 def test_cost_sonnet_5_5_from_real_config():
     # The real config entry against the Anthropic pricing page, verified
-    # 2026-10-02: $2 in / $10 out, cache hits $0.20 (the standard 0.1x),
-    # 5m writes $2.50 (1.25x), batch $1 / $5, no long-context surcharge.
+    # 2026-10-02 (cache hits 2026-10-08): $2 in / $10 out, cache hits
+    # $0.10 (0.05x), 5m writes $2.50 (1.25x), batch $1 / $5, no
+    # long-context surcharge.
     from backend.config import Config
     app = Flask(__name__)
     app.config["SUPPORTED_MODELS"] = {
@@ -163,10 +164,10 @@ def test_cost_sonnet_5_5_from_real_config():
             return calculate_llm_cost_microdollars("claude-sonnet-5.5", *a, **kw)
         assert cost(1_000_000, 0) == 2_000_000
         assert cost(0, 1_000_000) == 10_000_000
-        assert cost(0, 0, cache_read_tokens=1_000_000) == 200_000
+        assert cost(0, 0, cache_read_tokens=1_000_000) == 100_000
         assert cost(0, 0, cache_write_tokens=1_000_000) == 2_500_000
         assert cost(1_000_000, 1_000_000, batch=True) == 6_000_000
-        assert cost(0, 0, cache_read_tokens=1_000_000, batch=True) == 100_000
+        assert cost(0, 0, cache_read_tokens=1_000_000, batch=True) == 50_000
         # Flat across the 1M window: 900k input costs 900k x $2.
         assert cost(900_000, 0) == 1_800_000
 

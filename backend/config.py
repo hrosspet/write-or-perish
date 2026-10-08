@@ -396,11 +396,13 @@ class Config:
             "chat": False,
             "context_window": 1000000,
             # Verified 2026-10-02 on the Anthropic pricing page: $2 / $10,
-            # 5m cache writes $2.50 (the standard 1.25x), cache hits $0.20
-            # (the standard 0.1x), batch 50%, flat pricing across the 1M
-            # window.
+            # 5m cache writes $2.50 (the standard 1.25x), batch 50%, flat
+            # pricing across the 1M window.
             "input_price_per_mtok": 2.00,
             "output_price_per_mtok": 10.00,
+            # Cache hits bill at 0.05x base input ($0.10/MTok), as on Opus
+            # 5.5 (pricing page, 2026-10-08; was recorded as 0.1x).
+            "cache_read_multiplier": 0.05,
         },
         "claude-haiku-5.5": {
             # The Anthropic pricing page: Claude 4.7 and later models use
