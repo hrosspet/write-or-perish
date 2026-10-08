@@ -2856,7 +2856,17 @@ def render_system_message(system_node, user_id, usage=None):
         text = text.replace(
             EXTERNAL_GUIDANCE_PLACEHOLDER,
             _external_guidance_for_user(user_id))
-    return text
+    return system_block_text(text)
+
+
+def system_block_text(text):
+    """The system block without trailing whitespace. The ongoing-thread
+    pre-warm sends the system block as the last content of its request,
+    and Anthropic drops trailing whitespace there; generation sends the
+    same block followed by the first message, where it stays. With a
+    trailing newline the warm's cache entry ends one token short of the
+    position generation looks up, and every ongoing-thread warm missed."""
+    return text.rstrip()
 
 
 @celery.task(name='backend.tasks.llm_completion.prewarm_anthropic_cache')
@@ -4030,6 +4040,8 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         latest_user_msg_index = len(messages)
                     if node is system_node:
                         system_msg_index = len(messages)
+                        # Same bytes render_system_message gives the warm.
+                        message_text = system_block_text(message_text)
                         if (system_render_cacheable
                                 and cached_system_render is None
                                 and attempt == 0):
