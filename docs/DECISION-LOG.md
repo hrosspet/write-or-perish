@@ -349,6 +349,18 @@ Kinds (one per entry and per table row):
 - **Applies to:** #422, #459.
 - **Rule:** candidate: how urgent a privacy cleanup is depends on the phase; before the Beta, letting data expire is acceptable.
 
+### 2026-10-09 · Cache writes on new threads: move the thread's timestamp out of the prompt start
+
+- **Kind:** cost
+- **Situation:** every new voice thread pays a full prompt-cache write of its ~100k-token system prompt (about $0.50 on Opus 5.5), the largest part of the conversation spend in early October. The rendered system prompt starts with the thread's own timestamp.
+- **Decision:** recommended moving the timestamp out of the first bytes of the system prompt, so that threads started close together could share a cached prefix.
+- **Peter:** "this is not a bug, it's a feature - we're feeding last 10k of raw conversation into the sys prompt, so it's expected each thread will have a cold cache"
+- **Score:** miss.
+- **Why it missed:** looked only at the first bytes. The render pins each thread's own window of recent raw entries (`created_before` the system node), so the prompt differs between threads anyway; the code that showed this was already open.
+- **Source:** Claude Code session 2026-10-09 (Opus 5.5)
+- **Applies to:** #462.
+- **Rule:** candidate: a cold prompt cache on every new thread is expected, because the system prompt carries that thread's own recent raw entries.
+
 ## Decided by the builder
 
 Choices that agents flagged in PRs and that the builder decided because a rule above already covers them (Peter, 2026-10-02: decide what the log supports, raise only real judgement calls). Each is also recorded on its PR, or in the session where Peter asked. The Decided column holds only the builder's part; a rule or decision of Peter's goes in the Rule column. Questions raised to Peter instead are not listed; his answers become entries. Model is the model that wrote the PR (its Co-Authored-By line). Result is "accepted by merge (PR #N, date)" once the PR has merged and Peter didn't correct the choice, "pending" until it merges, and "corrected → entry <title>" when he overrules it; the entry is then scored as a miss.
@@ -380,6 +392,8 @@ Choices that agents flagged in PRs and that the builder decided because a rule a
 | 2026-10-08 | #459 | privacy | How click and key-press breadcrumbs describe an element | Tag, id and classes only, no attribute values | No user content reaches Sentry (#422) | Opus 5.5 | pending |
 | 2026-10-08 | #459 | privacy | `extra` on browser events | Dropped from every event | No user content reaches Sentry (#422) | Opus 5.5 | pending |
 | 2026-10-08 | #459 | privacy | A request body or query string on a browser event | Dropped, although the SDK attaches neither today, so a later integration can't add them | No user content reaches Sentry (#422) | Opus 5.5 | pending |
+| 2026-10-09 | #462 | cost | Where to strip trailing whitespace from the system block | In both the pre-warm's render and the reply's inline render | The pre-warm and the reply send byte-identical prefixes (#187, #192) | Opus 5.5 | pending |
+| 2026-10-09 | #462 | cost | System-prompt renders cached before the fix, which may end in a newline | Render cache key v2 to v3: one extra system-prompt write for each thread active across the deploy, once | Fix the root cause | Opus 5.5 | pending |
 
 ## Backfilled decisions
 
