@@ -6,15 +6,14 @@ macOS, fed a 440 Hz tone with 2 s segments. chunk_0000 is the init segment
 + the first segment, chunk_0001 the next segment. As on the phone, every
 `moof` holds one `trun` per second of audio (three here).
 
-ffmpeg 4.2 (Ubuntu 20.04, production in October 2026) started every `trun`
-at its fragment's `tfdt`, so a batch's last chunk collapsed into its first
-second: a one-chunk batch of 15 s came out saying ~1 s, and the player
-never reached the recording's next file. On ffmpeg 4.2 the plain remux of
-these fixtures says 0.98 s for chunk_0000 alone and 3.05 s for both chunks
-(audio: 2.07 s and 4.07 s). The ffmpeg in CI and in Docker places the runs
-correctly either way; the duration tests pin the result on whatever ffmpeg
-runs them, and the tfdt and fallback tests pin the two mechanisms that make
-it right on 4.2.
+ffmpeg before 4.3 started every `trun` at its fragment's `tfdt`, so a
+batch's last chunk collapsed into its first second: a one-chunk batch of
+15 s came out saying ~1 s, and the player never reached the recording's
+next file. On ffmpeg 4.2 the plain remux of these fixtures says 0.98 s for
+chunk_0000 alone and 3.05 s for both chunks (audio: 2.07 s and 4.07 s).
+The ffmpeg in CI and in Docker places the runs correctly either way; the
+duration tests pin the result on whatever ffmpeg runs them, and the tfdt
+and fallback tests pin the mechanisms that make it right on 4.2.
 """
 import pathlib
 import shutil
@@ -136,7 +135,8 @@ def test_wrong_container_duration_is_rebuilt_from_decoded_audio(monkeypatch):
     out = concat_fragmented_media([str(CHUNK_0), str(CHUNK_1)],
                                   output_suffix='.mp4')
     try:
-        assert len(calls) == 1
+        # The stream copy, then the rebuild (kept: it holds all the audio).
+        assert len(calls) == 2
         container, audio = real(out)
         assert audio == pytest.approx(4.07, abs=0.15)
         assert container == pytest.approx(audio, abs=0.1)
@@ -159,3 +159,152 @@ def test_right_file_is_not_rebuilt(monkeypatch):
                                   output_suffix='.mp4')
     pathlib.Path(out).unlink()
     assert not any('pcm_s16le' in cmd for cmd in ran)
+
+
+# ── A stream cut mid-box (separate review of #458) ──────────────────────
+
+def _fragment(data):
+    """The moof+mdat of a fixture chunk (everything after its init)."""
+    boxes = [b for b in _boxes(data) if not b[0]]
+    start = next(off for _, box, off in boxes if box == 'moof')
+    return data[start:]
+
+
+def _set_tfdt(fragment, base_time):
+    buf = bytearray(fragment)
+    for path, box, off in _boxes(fragment):
+        if box == 'tfdt':
+            if buf[off + 8] == 1:
+                buf[off + 12:off + 20] = struct.pack('>Q', base_time)
+            else:
+                buf[off + 12:off + 16] = struct.pack('>I', base_time)
+    return bytes(buf)
+
+
+def _packets(fragment):
+    """Samples in a fragment: the sum of its truns' sample counts."""
+    return sum(struct.unpack('>I', fragment[off + 12:off + 16])[0]
+               for _, box, off in _boxes(fragment) if box == 'trun')
+
+
+def _cut_mid_box_chunks(tmp_path):
+    """A 14.1 s stream (chunk_0000's fragment, then chunk_0001's fragment
+    six times, re-timed to follow each other), cut 3000 bytes into every
+    later fragment's mdat, as chunk files."""
+    first = CHUNK_0.read_bytes()
+    init = extract_mp4_init_segment(first)
+    frag0, frag1 = _fragment(first), _fragment(CHUNK_1.read_bytes())
+    fragments, t = [frag0], _packets(frag0) * 1024
+    for _ in range(6):
+        fragments.append(_set_tfdt(frag1, t))
+        t += _packets(frag1) * 1024
+    stream = init + b''.join(fragments)
+    cuts, pos = [0], len(init) + len(frag0)
+    for frag in fragments[1:]:
+        mdat = next(off for _, box, off in _boxes(frag) if box == 'mdat')
+        cuts.append(pos + mdat + 3000)
+        pos += len(frag)
+    cuts.append(len(stream))
+    paths = []
+    for i, (a, b) in enumerate(zip(cuts, cuts[1:])):
+        p = tmp_path / f"chunk_{i:04d}.mp4"
+        p.write_bytes(stream[a:b])
+        paths.append(str(p))
+    return paths, t / 48000
+
+
+@requires_ffmpeg
+def test_stream_cut_mid_box_says_as_long_as_its_audio(tmp_path):
+    """Chunks that do not start on a box boundary: the tfdt boxes are
+    dropped over the joined bytes, so none survives (on ffmpeg before 4.3
+    a surviving one made the rebuild lose 5 s of this stream)."""
+    paths, seconds = _cut_mid_box_chunks(tmp_path)
+    assert seconds == pytest.approx(14.1, abs=0.05)
+    report = {}
+    out = concat_fragmented_media(paths, output_suffix='.mp4', report=report)
+    try:
+        container, audio = webm_utils._mp4_durations(out)
+    finally:
+        pathlib.Path(out).unlink()
+    assert audio == pytest.approx(seconds, abs=0.05)
+    assert container == pytest.approx(audio, abs=0.1)
+    assert report['holds_all_audio'] is True
+    assert report['input_seconds'] == pytest.approx(seconds, abs=0.05)
+
+
+@requires_ffmpeg
+def test_shorter_rebuild_is_not_kept(tmp_path, monkeypatch):
+    """A rebuild with less audio than the stream copy (decoding dropped
+    some) is thrown away: the stream copy, with every packet, stays."""
+    paths, seconds = _cut_mid_box_chunks(tmp_path)
+    real = webm_utils._mp4_durations
+    real_rebuild = webm_utils._rebuild_from_decoded_audio
+    calls = []
+
+    def first_check_fails(path):
+        calls.append(path)
+        container, audio = real(path)
+        return (9.0, audio) if len(calls) == 1 else (container, audio)
+
+    def rebuild_from_first_chunk_only(raw_path, work_dir):
+        short = pathlib.Path(work_dir) / "short_raw.mp4"
+        short.write_bytes(pathlib.Path(paths[0]).read_bytes())
+        return real_rebuild(str(short), work_dir)
+
+    monkeypatch.setattr(webm_utils, '_mp4_durations', first_check_fails)
+    monkeypatch.setattr(webm_utils, '_rebuild_from_decoded_audio',
+                        rebuild_from_first_chunk_only)
+    out = concat_fragmented_media(paths, output_suffix='.mp4')
+    try:
+        container, audio = real(out)
+    finally:
+        pathlib.Path(out).unlink()
+    assert audio == pytest.approx(seconds, abs=0.05)
+
+
+@requires_ffmpeg
+@pytest.mark.parametrize('failure', ['exit', 'timeout'])
+def test_failed_rebuild_keeps_stream_copy_and_leaves_no_temp_file(
+        tmp_path, monkeypatch, failure):
+    temp = tmp_path / "tmp"
+    temp.mkdir()
+    monkeypatch.setattr(webm_utils.tempfile, 'tempdir', str(temp))
+    real = webm_utils._mp4_durations
+    monkeypatch.setattr(
+        webm_utils, '_mp4_durations',
+        lambda path: (0.98, real(path)[1]) if path.startswith(str(temp))
+        and 'merged_' in path else real(path))
+    real_run = subprocess.run
+
+    def run(cmd, *args, **kwargs):
+        if 'pcm_s16le' in cmd:
+            if failure == 'timeout':
+                raise subprocess.TimeoutExpired(cmd, kwargs.get('timeout'))
+            return subprocess.CompletedProcess(cmd, 1, '', 'forced failure')
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(webm_utils.subprocess, 'run', run)
+    out = concat_fragmented_media([str(CHUNK_0), str(CHUNK_1)],
+                                  output_suffix='.mp4')
+    assert sorted(p.name for p in temp.iterdir()) == [pathlib.Path(out).name]
+    assert real(out)[1] == pytest.approx(4.07, abs=0.1)
+    pathlib.Path(out).unlink()
+    assert not list(temp.iterdir())
+
+
+@requires_ffmpeg
+def test_failed_remux_leaves_no_temp_file(tmp_path, monkeypatch):
+    temp = tmp_path / "tmp"
+    temp.mkdir()
+    monkeypatch.setattr(webm_utils.tempfile, 'tempdir', str(temp))
+    real_run = subprocess.run
+
+    def run(cmd, *args, **kwargs):
+        if 'copy' in cmd:
+            return subprocess.CompletedProcess(cmd, 1, '', 'forced failure')
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(webm_utils.subprocess, 'run', run)
+    with pytest.raises(RuntimeError, match="remux failed"):
+        concat_fragmented_media([str(CHUNK_0)], output_suffix='.mp4')
+    assert not list(temp.iterdir())

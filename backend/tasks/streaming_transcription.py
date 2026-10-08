@@ -763,13 +763,20 @@ def transcribe_chunk_batch(self, session_id: str, chunk_indices: list):
 
             transcripts = []
             batch_duration_sec = 0.0
+            # Sub-batches whose merged file holds less audio than their
+            # chunks: those chunks are kept (renamed, see below).
+            short_subbatches = set()
             for sub_indices in sub_batches:
+                merge_report = {}
                 merged_path = concat_fragmented_media(
                     [paths_by_idx[i] for i in sub_indices],
                     init_segment_path=_resolve_init(sub_indices),
                     output_suffix=ext,
+                    report=merge_report,
                 )
                 merged_by_subbatch.append((sub_indices, merged_path))
+                if merge_report.get('holds_all_audio') is False:
+                    short_subbatches.add(sub_indices[0])
 
                 # Compress if needed (no-op for compressed WebM/MP4)
                 merge_input_path = pathlib.Path(merged_path)
@@ -860,7 +867,18 @@ def transcribe_chunk_batch(self, session_id: str, chunk_indices: list):
                 shutil.move(sub_merged, str(batch_dest))
                 encrypt_file(str(batch_dest))
 
-                # Delete individual encrypted chunk files in the sub-batch
+                # Delete individual encrypted chunk files in the sub-batch,
+                # unless the merged file holds less audio than they do:
+                # then they are kept as unmerged_chunk_*, which playback
+                # does not list (list_streaming_audio_files), so the batch
+                # file still plays and the audio can be recovered.
+                keep = sub_indices[0] in short_subbatches
+                if keep:
+                    logger.error(
+                        f"Session {session_id}: merged chunks "
+                        f"{sub_indices} hold less audio than the chunks; "
+                        "keeping the chunks as unmerged_chunk_*"
+                    )
                 for idx in sub_indices:
                     for chunk_name in [
                         f"chunk_{idx:04d}{ext}.enc",
@@ -869,10 +887,13 @@ def transcribe_chunk_batch(self, session_id: str, chunk_indices: list):
                         p = chunk_dir / chunk_name
                         if p.exists():
                             try:
-                                p.unlink()
+                                if keep:
+                                    p.rename(chunk_dir / f"unmerged_{chunk_name}")
+                                else:
+                                    p.unlink()
                             except Exception as e:
                                 logger.warning(
-                                    f"Failed to delete {p}: {e}"
+                                    f"Failed to remove {p}: {e}"
                                 )
 
             db.session.commit()

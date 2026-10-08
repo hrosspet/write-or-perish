@@ -357,7 +357,8 @@ def extract_mp4_init_segment(data: bytes) -> bytes:
 
 def concat_fragmented_media(paths: list,
                             init_segment_path: Optional[str] = None,
-                            output_suffix: str = '.webm') -> str:
+                            output_suffix: str = '.webm',
+                            report: Optional[dict] = None) -> str:
     """Concatenate MediaRecorder timeslice fragments into one valid file.
 
     Handles both Matroska/WebM and fragmented MP4 (fMP4) — they share the
@@ -382,12 +383,17 @@ def concat_fragmented_media(paths: list,
     don't care about container — but the suffix tells ffmpeg which muxer
     to use for the output.
 
-    For fMP4 the fragments' `tfdt` boxes are dropped before the remux (see
-    `drop_fragment_decode_times`), and the output's container duration is
-    checked against its audio (see `_mp4_durations`).
+    For fMP4 the `tfdt` boxes of the joined bytes are dropped before the
+    remux (see `drop_fragment_decode_times`), and the output's container
+    duration is checked against its audio (see
+    `_ensure_mp4_duration_matches_audio`). When `report` is a dict, it gets
+    `input_seconds` and `output_seconds` (audio, from packet counts) and
+    `holds_all_audio`: False only when the output measurably holds less
+    audio than the input, so the caller keeps the input files.
 
     Returns the path to the merged output file. Caller is responsible for
-    cleaning it up (parity with `concat_audio_files`).
+    cleaning it up (parity with `concat_audio_files`). On any error no
+    temp file is left behind (the inputs may be decrypted audio).
     """
     if not paths:
         raise ValueError("No fragments to concatenate")
@@ -396,16 +402,25 @@ def concat_fragmented_media(paths: list,
     # Step 1: binary-append init segment (if any) + fragments in order
     fd, raw_path = tempfile.mkstemp(suffix=output_suffix, prefix='frag_raw_')
     os.close(fd)
+    out_path = None
     try:
         with open(raw_path, 'wb') as out:
-            if init_segment_path:
-                with open(init_segment_path, 'rb') as src:
-                    shutil.copyfileobj(src, out)
-            for p in paths:
-                with open(p, 'rb') as src:
-                    if is_mp4:
-                        out.write(drop_fragment_decode_times(src.read()))
-                    else:
+            if is_mp4:
+                # Once over the joined bytes, not per chunk: a chunk need
+                # not start on a box boundary, and a walk that starts
+                # mid-box would leave the rest of that chunk's `tfdt`s.
+                # A 5-minute batch is ~2.4 MB.
+                parts = []
+                for p in ([init_segment_path] if init_segment_path else []) + list(paths):
+                    with open(p, 'rb') as src:
+                        parts.append(src.read())
+                out.write(drop_fragment_decode_times(b''.join(parts)))
+            else:
+                if init_segment_path:
+                    with open(init_segment_path, 'rb') as src:
+                        shutil.copyfileobj(src, out)
+                for p in paths:
+                    with open(p, 'rb') as src:
                         shutil.copyfileobj(src, out)
 
         # Step 2: remux so Duration/Cues reflect all clusters, not just the
@@ -419,16 +434,21 @@ def concat_fragmented_media(paths: list,
             capture_output=True, text=True, timeout=120,
         )
         if result.returncode != 0:
-            try:
-                os.unlink(out_path)
-            except OSError:
-                pass
             raise RuntimeError(
                 f"ffmpeg remux failed: {result.stderr[:500]}"
             )
         if is_mp4:
             _ensure_mp4_duration_matches_audio(raw_path, out_path)
+            if report is not None:
+                _report_mp4_audio(raw_path, out_path, report)
         return out_path
+    except BaseException:
+        if out_path:
+            try:
+                os.unlink(out_path)
+            except OSError:
+                pass
+        raise
     finally:
         try:
             os.unlink(raw_path)
@@ -443,20 +463,22 @@ _FMP4_TFDT_PARENTS = (b'moof', b'traf')
 def drop_fragment_decode_times(data: bytes) -> bytes:
     """Return fMP4 bytes with every `moof/traf/tfdt` box renamed `free`.
 
-    `tfdt` gives a fragment's start time. ffmpeg before 4.3 (Ubuntu
-    20.04 ships 4.2.7) starts every `trun` of a fragment at that time
-    instead of after the previous run. The iPhone app's AVAssetWriter
-    writes one `trun` per second of audio, ~15 per chunk, so on such an
-    ffmpeg the remux stacked a whole chunk's packets into its first
-    second: the files it wrote said ~1 s while holding 15 s of audio,
-    and players stopped there and never reached the next file.
+    `tfdt` gives a fragment's start time. ffmpeg before 4.3 starts every
+    `trun` of a fragment at that time instead of after the previous run.
+    The iPhone app's AVAssetWriter writes one `trun` per second of audio,
+    ~15 per chunk, so on such an ffmpeg the remux stacked a whole chunk's
+    packets into its first second: the files it wrote said ~1 s while
+    holding 15 s of audio, and players stopped there and never reached
+    the next file.
 
     Without `tfdt` every ffmpeg version places each run right after the
     previous one. The fragments of one call are one continuous stream
     (a resumed recording's new stream is merged on its own, #124), so
     nothing depends on the absolute times; a batch that starts later in
     the recording now starts at 0, like a file of its own. The box keeps
-    its size, so no offset in the file changes.
+    its size, so no offset in the file changes. The walk stops at the
+    first box that does not fit, so pass whole files, not pieces cut
+    mid-box.
     """
     buf = bytearray(data)
 
@@ -488,11 +510,15 @@ _AAC_SAMPLES_PER_PACKET = 1024
 # the audio it holds (encoder priming and rounding are a few ms). A
 # heuristic: the failure it catches was off by ~14 s per 15 s chunk.
 _MP4_DURATION_TOLERANCE_SEC = 0.5
+# How much less audio than its source a file may hold and still count as
+# holding all of it (an AAC re-encode can differ by a frame or two). A
+# heuristic.
+_AUDIO_LOSS_TOLERANCE_SEC = 0.1
 
 
 def _mp4_durations(path: str):
-    """(container seconds, audio seconds) of an AAC .mp4, or None when
-    ffprobe cannot tell (not AAC, no stream, ffprobe failed). Audio
+    """(container seconds or None, audio seconds) of an AAC .mp4, or None
+    when ffprobe cannot tell (not AAC, no stream, ffprobe failed). Audio
     seconds come from the packet count, which wrong timestamps cannot
     change."""
     try:
@@ -512,27 +538,50 @@ def _mp4_durations(path: str):
     try:
         if fields.get('codec_name') != 'aac':
             return None
-        container = float(fields['duration'])
         audio = (int(fields['nb_read_packets']) * _AAC_SAMPLES_PER_PACKET
                  / int(fields['sample_rate']))
     except (KeyError, ValueError, ZeroDivisionError):
         return None
+    try:
+        container = float(fields.get('duration', ''))
+    except ValueError:
+        container = None
     return container, audio
+
+
+def _rebuild_from_decoded_audio(raw_path: str, work_dir: str) -> str:
+    """Decode `raw_path` to WAV in `work_dir` and encode it to AAC there.
+    Returns the new file's path; raises RuntimeError when ffmpeg fails."""
+    wav_path = os.path.join(work_dir, 'audio.wav')
+    rebuilt = os.path.join(work_dir, 'rebuilt.mp4')
+    for cmd in (
+        ['ffmpeg', '-y', '-i', raw_path, '-vn', '-c:a', 'pcm_s16le',
+         wav_path],
+        ['ffmpeg', '-y', '-i', wav_path, '-c:a', 'aac', '-b:a', '64k',
+         rebuilt],
+    ):
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        if r.returncode != 0:
+            raise RuntimeError(f"ffmpeg rebuild failed: {r.stderr[:500]}")
+    return rebuilt
 
 
 def _ensure_mp4_duration_matches_audio(raw_path: str, out_path: str):
     """Check a remuxed .mp4 against the audio it holds; when the container
-    is wrong, rebuild `out_path` in place from the decoded audio.
+    is wrong, try to rebuild `out_path` from the decoded audio.
 
     A stream copy keeps whatever timestamps ffmpeg's fMP4 reader made up,
     and those depend on the ffmpeg version (`drop_fragment_decode_times`).
-    The rebuild decodes the raw input (its `tfdt` boxes already dropped)
-    to WAV, which has no timestamps, and encodes that again, so the file
-    says exactly as long as the audio. It costs an AAC re-encode, so it
-    only runs when the check fails, and it is logged as an error so the
-    cause gets found."""
+    The rebuild decodes the raw input to WAV, which has no timestamps,
+    and encodes that again. It replaces the stream copy only when it holds
+    at least as much audio: decoding can itself drop audio whose
+    timestamps overlap (ffmpeg before 4.3 does), and the stream copy
+    always holds every packet. If the rebuild fails or comes out shorter,
+    the stream copy stays: all the audio, with the wrong duration. Either
+    way the mismatch is logged, so the cause gets found. Every file the
+    rebuild writes is removed."""
     durations = _mp4_durations(out_path)
-    if durations is None:
+    if durations is None or durations[0] is None:
         return
     container, audio = durations
     if abs(container - audio) <= _MP4_DURATION_TOLERANCE_SEC:
@@ -540,24 +589,39 @@ def _ensure_mp4_duration_matches_audio(raw_path: str, out_path: str):
     logger.error(
         "Remuxed MP4 says %.2f s but holds %.2f s of audio; rebuilding it "
         "from decoded audio", container, audio)
-    wav_dir = tempfile.mkdtemp(prefix='mp4_rebuild_')
+    work_dir = tempfile.mkdtemp(prefix='mp4_rebuild_')
     try:
-        wav_path = os.path.join(wav_dir, 'audio.wav')
-        rebuilt = os.path.join(wav_dir, 'rebuilt.mp4')
-        for cmd in (
-            ['ffmpeg', '-y', '-i', raw_path, '-vn', '-c:a', 'pcm_s16le',
-             wav_path],
-            ['ffmpeg', '-y', '-i', wav_path, '-c:a', 'aac', '-b:a', '64k',
-             rebuilt],
-        ):
-            r = subprocess.run(cmd, capture_output=True, text=True,
-                               timeout=600)
-            if r.returncode != 0:
-                raise RuntimeError(
-                    f"ffmpeg rebuild of {out_path} failed: {r.stderr[:500]}")
+        try:
+            rebuilt = _rebuild_from_decoded_audio(raw_path, work_dir)
+        except Exception as exc:  # any failure: keep the stream copy
+            logger.warning(
+                "MP4 rebuild failed (%s); keeping the stream copy", exc)
+            return
+        rebuilt_durations = _mp4_durations(rebuilt)
+        rebuilt_audio = rebuilt_durations[1] if rebuilt_durations else 0.0
+        if rebuilt_audio < audio - _AUDIO_LOSS_TOLERANCE_SEC:
+            logger.warning(
+                "MP4 rebuild holds %.2f s of audio, the stream copy %.2f s; "
+                "keeping the stream copy", rebuilt_audio, audio)
+            return
         shutil.move(rebuilt, out_path)
     finally:
-        shutil.rmtree(wav_dir, ignore_errors=True)
+        shutil.rmtree(work_dir, ignore_errors=True)
+
+
+def _report_mp4_audio(raw_path: str, out_path: str, report: dict):
+    """Fill `report` (see concat_fragmented_media) for an fMP4 merge."""
+    source = _mp4_durations(raw_path)
+    merged = _mp4_durations(out_path)
+    report['input_seconds'] = source[1] if source else None
+    report['output_seconds'] = merged[1] if merged else None
+    report['holds_all_audio'] = not (
+        source and merged
+        and merged[1] < source[1] - _AUDIO_LOSS_TOLERANCE_SEC)
+    if not report['holds_all_audio']:
+        logger.error(
+            "Merged MP4 holds %.2f s of audio, its input %.2f s",
+            merged[1], source[1])
 
 
 def concat_audio_files(paths: list, output_suffix: str = '.webm',
