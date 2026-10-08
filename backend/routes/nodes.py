@@ -49,8 +49,10 @@ from backend.utils.audio_storage import (
     list_streaming_audio_files, storage_path,
 )
 from backend.utils.llm_nodes import (
-    AIUsageRefused, ai_usage_refused_response, create_llm_placeholder,
-    pick_model_for_generation, resolve_chat_model, resolve_read_model,
+    AIUsageRefused, ReadOnlyModelRefused, ai_usage_refused_response,
+    create_llm_placeholder, pick_model_for_generation,
+    read_only_model_refusal, read_only_model_response, resolve_chat_model,
+    resolve_read_model,
 )
 from backend.utils.placeholders import UserExportValidationError
 
@@ -143,6 +145,11 @@ def _upload_reply_options(values, parent_id, ai_usage):
             return False, None, (jsonify({
                 "error": f"Unsupported model: {model_id}",
             }), 400)
+        # A new thread is never a read: a read-only model is refused here,
+        # before the upload is stored, not after the transcript.
+        refused = read_only_model_refusal(model_id)
+        if refused is not None:
+            return False, None, read_only_model_response(refused)
     return agentic, model_id, None
 
 
@@ -1110,8 +1117,14 @@ def _focal_own_fields(node):
     # Include tool call metadata for LLM nodes
     if node.tool_calls_meta:
         import json as _json
+        from backend.utils.client_platform import without_client_marker
         try:
-            data["tool_calls_meta"] = _json.loads(node.tool_calls_meta)
+            visible = without_client_marker(
+                _json.loads(node.tool_calls_meta))
+            # A reply whose only entry was the app marker reads as a node
+            # with no tool calls: no key, as before the marker existed.
+            if visible:
+                data["tool_calls_meta"] = visible
         except (ValueError, TypeError):
             pass
         # A Community Archive feed reply carries picks (see FeedPick), as
@@ -1397,6 +1410,11 @@ def get_node(node_id):
         "read_reply_above": read_reply_above,
         "reply_ai_usage": reply_usage,
     }
+    # The owner opened a finished Read reply (FeedRender.opened_at, once).
+    # Last, because it commits: the payload above is built.
+    if focal.get("read_reply"):
+        from backend.utils.ca_feed import mark_read_reply_opened
+        mark_read_reply_opened(node, current_user.id)
     return jsonify(node_data), 200
 
 # Resolve {quote:ID} placeholders in a node's content for frontend rendering.
@@ -1542,13 +1560,19 @@ def get_node_titles():
 def get_models():
     """The active (non-deprecated) models for the pickers, newest first
     within each provider. ``featured`` models make the short list;
-    ``read`` models are the only ones the Read button offers (#355)."""
+    ``read`` models are the only ones the Read button offers (#355);
+    ``chat`` models are the only ones every other picker offers (LLM
+    Response, the Account default). A read-only model (read, not chat)
+    stays in the list so the Read picker can offer it; a client that
+    ignores ``chat`` still cannot chat with it (a reply that is not a
+    read is refused with 400 ``code: model_read_only``)."""
     supported = current_app.config["SUPPORTED_MODELS"]
     models = [
         {"id": model_id, "name": cfg["display_name"],
          "provider": cfg["provider"],
          "featured": bool(cfg.get("featured")),
-         "read": bool(cfg.get("read"))}
+         "read": bool(cfg.get("read")),
+         "chat": bool(cfg.get("chat", True))}
         for model_id, cfg in supported.items()
         if "provider" in cfg and not cfg.get("deprecated")
     ]
@@ -1662,6 +1686,10 @@ def request_llm_response(node_id):
         # The node, a node above it, or the reply's own setting keeps the
         # thread away from AI: no reply, nothing created.
         return ai_usage_refused_response(e)
+    except ReadOnlyModelRefused as e:
+        # A chat reply asked for on a read-only model: refused, never
+        # moved to another model. Nothing created.
+        return read_only_model_response(e)
 
     current_app.logger.info(f"Enqueued LLM completion task {task_id} for parent node {parent_node.id}, new node {llm_node.id}")
 
@@ -2202,10 +2230,12 @@ def get_llm_status(node_id):
     # Include tool call metadata if present
     if node.tool_calls_meta:
         import json
+        from backend.utils.client_platform import without_client_marker
         try:
-            response_data["tool_calls_meta"] = json.loads(
-                node.tool_calls_meta
-            )
+            visible = without_client_marker(
+                json.loads(node.tool_calls_meta))
+            if visible:
+                response_data["tool_calls_meta"] = visible
         except (json.JSONDecodeError, TypeError):
             pass
     # Batch stage ({ca_tweets}): the synchronous part is done and the
@@ -2231,6 +2261,17 @@ def get_llm_status(node_id):
 
     if created_node:
         response_data["node"] = created_node
+
+    # A finished Read reply returned to its owner's thread page counts as
+    # opened (FeedRender.opened_at, once; a no-op for any other node) only
+    # when the page says it is visible (?visible=1, sent by the web
+    # client's poll while document.visibilityState is 'visible'). The page
+    # keeps polling in a background tab, and a request without the flag (an
+    # older client, the iPhone app today, a hidden tab) never counts. Last,
+    # because it commits.
+    if "content" in response_data and request.args.get("visible") == "1":
+        from backend.utils.ca_feed import mark_read_reply_opened
+        mark_read_reply_opened(node, current_user.id)
 
     response = jsonify(response_data)
     response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'

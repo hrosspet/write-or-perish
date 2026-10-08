@@ -20,7 +20,7 @@ from backend.extensions import db as _db  # noqa: E402
 from backend.models import (  # noqa: E402
     User, UserNotification, Poll, PollResponse, ChangelogReadState,
     PollDraftBatchJob, APICostLog, UserProfile, UserRecentContext,
-    UserArtifact,
+    UserArtifact, Node,
 )
 import backend.utils.changelog as changelog_mod  # noqa: E402
 from backend.utils.changelog import (  # noqa: E402
@@ -356,7 +356,27 @@ def _stub_poll_draft_task(monkeypatch):
     return stub
 
 
+def _write_entry(user, **kwargs):
+    """An entry the user wrote in Loore; kwargs make it an import, an LLM
+    node, etc."""
+    fields = dict(user_id=user.id, human_owner_id=user.id,
+                  node_type="user", privacy_level="private",
+                  ai_usage="chat")
+    fields.update(kwargs)
+    node = Node(**fields)
+    node.set_content("an entry")
+    _db.session.add(node)
+    _db.session.commit()
+    return node
+
+
 class TestPolls:
+    @pytest.fixture(autouse=True)
+    def _tester_has_written(self, app):
+        # Polls wait for the user's first entry (#392); these tests are
+        # about the poll flow itself.
+        _write_entry(User.query.filter_by(username="tester").first())
+
     def _poll(self):
         poll = Poll(question="What's missing in Loore?")
         _db.session.add(poll)
@@ -463,6 +483,57 @@ class TestPolls:
         _db.session.refresh(resp)
         assert resp.status == "sent"
         assert resp.generated_by == "claude-opus-4.6"
+
+
+class TestPollsWaitForFirstEntry:
+    """#392: no polls until the user has written an entry in Loore. A
+    freshly activated user lands on /welcome; developer polls on top of it
+    came before they had written anything."""
+
+    def _poll(self):
+        poll = Poll(question="What's one thing you wish Loore did?")
+        _db.session.add(poll)
+        _db.session.commit()
+        return poll
+
+    def _tester(self):
+        return User.query.filter_by(username="tester").first()
+
+    def test_newcomer_gets_no_polls(self, app, client):
+        from backend.routes.updates import _pending_polls_for
+        self._poll()
+        assert _pending_polls_for(self._tester()) == []
+        assert client.get("/api/updates").get_json()["polls"] == []
+
+    def test_imports_llm_and_prompt_nodes_dont_count(self, app, client):
+        self._poll()
+        tester = self._tester()
+        llm = User(username="llm-test-model", twitter_id="llm-test-model")
+        _db.session.add(llm)
+        _db.session.commit()
+        _write_entry(tester, origin="twitter", source_key="twitter:1")
+        _write_entry(tester, origin="markdown", source_key="a" * 64)
+        _write_entry(llm, human_owner_id=tester.id, node_type="llm",
+                     llm_model="test-model")
+        _write_entry(tester, prompt_key="voice")
+        assert client.get("/api/updates").get_json()["polls"] == []
+
+    def test_first_entry_brings_the_polls(self, app, client):
+        poll = self._poll()
+        assert client.get("/api/updates").get_json()["polls"] == []
+        _write_entry(self._tester())
+        polls = client.get("/api/updates").get_json()["polls"]
+        assert [p["id"] for p in polls] == [poll.id]
+
+    def test_changelog_and_notifications_still_shown(self, app, client):
+        # Only polls wait; the modal itself is kept off /welcome by the
+        # frontend.
+        self._poll()
+        notify_user(self._tester().id, "fix_ready", "A fix is live")
+        data = client.get("/api/updates").get_json()
+        assert data["polls"] == []
+        assert len(data["notifications"]) == 1
+        assert data["changelog"]
 
 
 class TestAdminPolls:

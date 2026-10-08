@@ -230,6 +230,20 @@ final class ModelDecodingTests: XCTestCase {
         XCTAssertFalse(models.models.isEmpty)
         XCTAssertTrue(models.models.contains { $0.featured })
         XCTAssertTrue(models.models.allSatisfy { !$0.id.isEmpty && !$0.provider.isEmpty })
+        // The fixture predates the `chat` flag: a server without it means every model chats.
+        XCTAssertTrue(models.models.allSatisfy(\.chat))
+    }
+
+    func testModelChatFlag() throws {
+        let models = try decode([ModelInfo].self, """
+        [{"id":"gpt-6.1-sol","name":"GPT-6.1 Sol","provider":"openai","featured":false,"read":true,"chat":false},
+         {"id":"claude-opus-5.5","name":"Opus 5.5","provider":"anthropic","featured":true,"read":false,"chat":true},
+         {"id":"gpt-6-luna","name":"GPT-6 Luna","provider":"openai","featured":false,"read":true},
+         {"id":"gpt-6-astra","name":"GPT-6 Astra","provider":"openai","featured":true,"read":false,"chat":null},
+         {"id":"gpt-5.6-luna","name":"GPT-5.6 Luna","provider":"openai","featured":false,"read":true,"chat":"no"}]
+        """)
+        XCTAssertEqual(models.map(\.chat), [false, true, true, true, true])
+        XCTAssertTrue(models[0].read)
     }
 
     func testUpdates() throws {

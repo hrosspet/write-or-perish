@@ -498,15 +498,15 @@ final class PlaybackFailureTests: XCTestCase {
 
         let player = ChunkQueuePlayer()
         var errors: [String] = []
-        var finished = false
+        let finished = expectation(description: "the queue skips unplayable chunks and ends (a voice turn reaches done)")
         player.onPlaybackError = { errors.append($0) }
-        player.onFinished = { finished = true }
+        player.onFinished = { finished.fulfill() }
         player.load(urls: [a.absoluteString, b.absoluteString], durations: [15, 15], title: "Rec", source: .node(1))
-        let deadline = Date().addingTimeInterval(5)
-        while !finished && Date() < deadline {
-            try await Task.sleep(nanoseconds: 20_000_000)
-        }
-        XCTAssertTrue(finished, "the queue skips unplayable chunks and ends (a voice turn reaches done)")
+        // Waits for the end itself. Under Xcode, CoreMedia's "FigFilePlayer
+        // signalled err" log line goes to stderr from the player's queue before
+        // the item fails; on CI that stderr stalled and the end came over 5 s
+        // late. The timeout only stops a queue that never ends.
+        await fulfillment(of: [finished], timeout: 60)
         XCTAssertEqual(errors, [ListenFormats.webMMessage], "one toast per queue")
         XCTAssertFalse(player.isPlaying)
     }

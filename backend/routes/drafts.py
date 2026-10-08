@@ -13,9 +13,10 @@ from backend.utils.audio_storage import (
     is_storage_id, move_session_audio_to_node, storage_path,
 )
 from backend.utils.encryption import encrypt_file_atomically
+from backend.utils.client_platform import request_client
 from backend.utils.llm_nodes import (
-    AIUsageRefused, ai_usage_refused_response, pick_model_for_generation,
-    voice_turn_refusal,
+    AIUsageRefused, ReadOnlyModelRefused, ai_usage_refused_response,
+    pick_model_for_generation, voice_turn_refusal,
 )
 from backend.utils.spend import require_spend_headroom
 from backend.utils.webm_utils import (
@@ -992,6 +993,9 @@ def finalize_streaming(session_id):
         user_id=current_user.id,
         parent_id=parent_id,
         model=model,
+        # The reply placeholder is made in the task, outside this
+        # request: hand it the app the user is talking from.
+        client=request_client(),
     )
 
     # Log chunk status at time of finalize request
@@ -1342,15 +1346,16 @@ def save_streaming_as_node(session_id):
                 response["llm_node_id"] = llm_node.id
                 response["task_id"] = task_id
             except (UserExportValidationError, ParentDeletedError,
-                    AIUsageRefused) as e:
-                # A thread above that keeps AI out (AIUsageRefused) skips
-                # the reply the same way: the entry is saved.
+                    AIUsageRefused, ReadOnlyModelRefused) as e:
+                # A thread above that keeps AI out (AIUsageRefused), or a
+                # read-only model asked to reply (ReadOnlyModelRefused),
+                # skips the reply the same way: the entry is saved.
                 db.session.rollback()
                 current_app.logger.warning(
                     f"save-as-node: LLM reply skipped for node {node.id}: {e}"
                 )
                 response["llm_error"] = str(e)
-                if isinstance(e, AIUsageRefused):
+                if isinstance(e, (AIUsageRefused, ReadOnlyModelRefused)):
                     response["llm_error_code"] = e.code
 
     return jsonify(response), 201

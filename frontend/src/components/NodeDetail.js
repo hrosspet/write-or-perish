@@ -203,6 +203,10 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
       enabled: !!llmTaskNodeId,  // Auto-start when llmTaskNodeId is set
       interval: isBatchWait ? 15000 : 2000,
       maxDuration: isBatchWait ? 25 * 60 * 60 * 1000 : 30 * 60 * 1000,
+      // A finished Read reply counts as opened (FeedRender.opened_at) only
+      // for a poll from a visible tab; this page polls in the background
+      // too (batch reads take up to 25 h).
+      reportVisible: true,
     }
   );
 
@@ -454,6 +458,26 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [llmStatus, llmData, llmError, navigate, id, llmTaskNodeId, moving]);
+
+  // While the reply this page shows is pending, its tool_calls_meta
+  // follows the poll (#386). A read is fetched as soon as it starts,
+  // before the worker has submitted its batch, and only the poll then
+  // reports the "_batch" entry. With it on the node the page says
+  // "Processing…", polls at the batch cadence (15 s, for up to 25 h)
+  // and closes the text stream (a batch is never streamed). Without it
+  // the page said "Thinking…" until a refresh, and its 30-minute poll
+  // could end long before the batch did.
+  const polledMeta = llmData?.tool_calls_meta;
+  useEffect(() => {
+    if (!llmTaskNodeId || String(llmTaskNodeId) !== String(id)) return;
+    if (llmStatus !== 'pending' && llmStatus !== 'processing') return;
+    if (!Array.isArray(polledMeta)) return;
+    setNode(prev => (
+      prev && JSON.stringify(prev.tool_calls_meta) !== JSON.stringify(polledMeta)
+        ? { ...prev, tool_calls_meta: polledMeta }
+        : prev
+    ));
+  }, [llmTaskNodeId, id, llmStatus, polledMeta]);
 
   const getNodeContent = useCallback(() => node?.content, [node]);
   const setNodeContent = useCallback((newContent) => setNode(prev => ({ ...prev, content: newContent })), []);
@@ -1106,8 +1130,19 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
   // via /voice/from-node), Craft-bar LLM Response + ModelSelector, and
   // the kebab Edit/Delete menu.
   const showInlineInput = !!currentUser;
+  // Auto-generate hides LLM Response because it already asked for the
+  // reply when the node was sent. In a read thread it doesn't always: an
+  // audio upload under the picks is saved without a reply, because
+  // auto-generate can't know whether the user wants to talk about it
+  // (LLM Response) or get more picks (Read further). When Loore can't
+  // know what the user wants next, it shows the choices (#387): a node
+  // of the user's in a read thread with no reply under it yet offers
+  // both, auto-generate on or off.
+  const awaitsChoiceInRead = inReadThread && !isLlmNode
+    && !(node.children || []).some(c => !c.deleted);
   const showCraftBar = isOwner && (craftMode || isPublicThread)
-    && !autoGenerateActive && node.ai_usage !== 'none' && !isLlmPending;
+    && (!autoGenerateActive || awaitsChoiceInRead)
+    && node.ai_usage !== 'none' && !isLlmPending;
   // In a read thread the action row under every node also carries
   // "Read further" — the conversation under the picks can get long and
   // nothing is pinned to the viewport (small screens), so the action
@@ -1644,7 +1679,7 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
             {readActions && readButton}
           </div>
         )}
-        {llmTaskNodeId && !showCraftBar && !isLlmPending && (
+        {llmTaskNodeId && !showLlmResponse && !isLlmPending && (
           <div style={{
             marginTop: '8px',
             display: 'flex', alignItems: 'center', gap: '8px',

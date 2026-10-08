@@ -19,7 +19,7 @@ This document says what the native iPhone app is, how it is built, and in what o
 **Non-goals for this PR.**
 - No backend changes. Backend changes the app would benefit from are listed in §14 as proposals.
 - iPad layout, widgets, Live Activities, push notifications, a Share Extension (the iOS counterpart of the Chrome clipper), offline mode. The code should not block any of them.
-- App Store submission. The build targets Peter's own iPhone through Xcode (free Apple ID; a paid membership only adds TestFlight and push).
+- App Store submission. The build goes to Peter's iPhone through Xcode, and to the alpha testers through internal TestFlight testing (paid membership; see `ios/README.md`).
 
 ---
 

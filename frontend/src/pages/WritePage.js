@@ -7,10 +7,11 @@ import { useUser } from '../contexts/UserContext';
 import { useToast } from '../contexts/ToastContext';
 import { isAiAllowed } from '../utils/aiUsage';
 import api from '../api';
+import { entryQuestion } from '../utils/entryPrompt';
 
 export default function WritePage() {
   const navigate = useNavigate();
-  const { user } = useUser();
+  const { user, markHasOwnEntries } = useUser();
   const { addToast } = useToast();
   const craftMode = !!user?.craft_mode;
   // The entry's page opens once its node is in, with a spinner here
@@ -83,6 +84,8 @@ export default function WritePage() {
   };
 
   const handleSuccess = (data) => {
+    // Every path here (typed, recorded, uploaded) saved an entry.
+    markHasOwnEntries();
     const llmNodeId = data?.llm_node_id;
     if (llmNodeId && data?.user_node_id) {
       // Through the user's entry so it gets its own URL/history step;
@@ -117,9 +120,10 @@ export default function WritePage() {
         fontWeight: 300,
         color: 'var(--text-primary)',
         margin: '0 0 32px 0',
+        maxWidth: '760px',
         textAlign: 'center',
       }}>
-        What's on your mind?
+        {entryQuestion(user)}
       </h1>
 
       <div style={{ width: '1170px', maxWidth: '90vw' }}>

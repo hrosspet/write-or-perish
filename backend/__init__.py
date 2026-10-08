@@ -28,8 +28,8 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 
 def validate_default_model(config):
     """Refuse to boot on an ``LLM_NAME`` that is not an active (non-
-    deprecated) SUPPORTED_MODELS key, or on a READ_DEFAULT_MODEL that is
-    not an active read model.
+    deprecated) chat (not ``"chat": False``) SUPPORTED_MODELS key, or on
+    a READ_DEFAULT_MODEL that is not an active read model.
 
     The keys are the dotted display ids (``claude-opus-4.6``); the API ids
     use dashes (``claude-opus-4-6``). Setting the API id in the env file
@@ -44,11 +44,20 @@ def validate_default_model(config):
         # A deprecated default is in no picker and never inherited, so
         # every user without a preference would start on a model the UI
         # cannot show, and the periodic tasks would keep running on it
-        # (#355).
+        # (#355). A read-only model is in no chat picker either, and the
+        # default runs every reply and background job (2026-10-02).
+        chat_models = ', '.join(
+            k for k, v in supported.items()
+            if 'provider' in v and not v.get('deprecated')
+            and v.get('chat', True))
         if supported[model_id].get("deprecated"):
             raise RuntimeError(
-                f"LLM_NAME={model_id!r} is deprecated. Active models: "
-                f"{', '.join(k for k, v in supported.items() if 'provider' in v and not v.get('deprecated'))}")
+                f"LLM_NAME={model_id!r} is deprecated. Active chat "
+                f"models: {chat_models}")
+        if not supported[model_id].get("chat", True):
+            raise RuntimeError(
+                f"LLM_NAME={model_id!r} is read only (\"chat\": False). "
+                f"Active chat models: {chat_models}")
         read_default = config.get("READ_DEFAULT_MODEL")
         read_cfg = supported.get(read_default) or {}
         if read_default and (not read_cfg.get("read")
@@ -68,13 +77,71 @@ def validate_default_model(config):
         f"Known keys: {', '.join(sorted(supported))}")
 
 
+# What Sentry may receive. send_default_pii=False only drops cookies, IPs
+# and user ids: the SDK still attaches each stack frame's local variables
+# and request bodies up to 10 KB, and both can hold decrypted user content
+# (an entry being saved, a todo list being merged). Nobody outside the
+# user's own session reads their content, so neither is sent.
+SENTRY_PRIVACY_OPTIONS = {
+    "send_default_pii": False,
+    "include_local_variables": False,
+    "max_request_body_size": "never",
+    "traces_sample_rate": 0.0,   # errors only, no perf tracing
+}
+
+
+def _without_query(url):
+    return url.split("?", 1)[0].split("#", 1)[0]
+
+
+def _drop_query_strings(event):
+    """Query strings can carry user input (the search box sends its words
+    as ?q=), and send_default_pii=False does not remove them: the SDK
+    sends the request's query string, the Referer header carries the
+    query of the page that made the call, and outgoing-HTTP breadcrumbs
+    keep each call's query in `http.query`. All are removed; the paths
+    stay, so the route is still identifiable. (Access-log lines, which
+    hold whole request lines, are kept out by ignore_logger in
+    create_app.)"""
+    request_info = event.get("request")
+    if isinstance(request_info, dict):
+        request_info.pop("query_string", None)
+        if isinstance(request_info.get("url"), str):
+            request_info["url"] = _without_query(request_info["url"])
+        headers = request_info.get("headers")
+        if isinstance(headers, dict):
+            for name, value in list(headers.items()):
+                if name.lower() == "referer" and isinstance(value, str):
+                    headers[name] = _without_query(value)
+    breadcrumbs = event.get("breadcrumbs")
+    if isinstance(breadcrumbs, dict):
+        for crumb in breadcrumbs.get("values") or ():
+            data = crumb.get("data") if isinstance(crumb, dict) else None
+            if isinstance(data, dict):
+                data.pop("http.query", None)
+                data.pop("http.fragment", None)
+                if isinstance(data.get("url"), str):
+                    data["url"] = _without_query(data["url"])
+    return event
+
+
 def create_app():
     # Error monitoring (roadmap Phase 0). No-op unless SENTRY_DSN is set.
     sentry_dsn = os.environ.get("SENTRY_DSN")
     if sentry_dsn:
         import sentry_sdk
+        from sentry_sdk.integrations.logging import ignore_logger
+
+        # Access-log lines hold each request's full request line and
+        # Referer, query strings included. Logged at INFO they become
+        # breadcrumbs, and an event captured outside the request scope
+        # (gunicorn's own "Error handling request" when a streamed
+        # response fails) carries them. Sentry ignores these loggers.
+        ignore_logger("gunicorn.access")
+        ignore_logger("werkzeug")
 
         def _before_send(event, hint):
+            _drop_query_strings(event)
             # Drop known, expected noise. Match against BOTH the exception text
             # and the log-record message so it's caught regardless of which
             # Sentry path captured it (OpenAI integration, logging, or the
@@ -95,14 +162,22 @@ def create_app():
             # running tasks finish; a pool process gets SIGTERM only when a
             # task outlives the 90 s drain (scripts/celery-graceful-stop.sh),
             # and that task is lost, so it reports.
+            # 2) A call refused for an account reason (#369): every event
+            #    about it — task failures, logged exceptions, log lines
+            #    tagged with provider_alerts.log_extra — groups into one
+            #    issue per cause, whatever the call site.
+            try:
+                from backend.utils.provider_alerts import apply_fingerprint
+                apply_fingerprint(event, exc, rec)
+            except Exception:  # never lose an event over grouping
+                pass
             return event
 
         sentry_sdk.init(
             dsn=sentry_dsn,
             environment=os.environ.get("SENTRY_ENVIRONMENT", "production"),
-            send_default_pii=False,   # never attach user content/PII
-            traces_sample_rate=0.0,   # errors only, no perf tracing
             before_send=_before_send,
+            **SENTRY_PRIVACY_OPTIONS,
         )
 
     app = Flask(__name__)
@@ -323,6 +398,20 @@ def create_app():
     def _handle_ai_usage_refused(exc):
         from backend.utils.llm_nodes import ai_usage_refused_response
         return ai_usage_refused_response(exc)
+
+    # A reply that is not a read, asked for on a read-only model:
+    # create_llm_placeholder raises ReadOnlyModelRefused before any write
+    # (the reply is never moved to another model, 2026-10-02). Routes that
+    # let it escape get 400 {"error", "code": "model_read_only", "model"},
+    # and whatever they flushed before the call is not kept.
+    from backend.utils.llm_nodes import ReadOnlyModelRefused
+
+    @app.errorhandler(ReadOnlyModelRefused)
+    def _handle_read_only_model(exc):
+        from backend.extensions import db
+        from backend.utils.llm_nodes import read_only_model_response
+        db.session.rollback()
+        return read_only_model_response(exc)
 
     # --------------------------------------------------------------------
     # Health checks – liveness/readiness for monitoring (no auth).

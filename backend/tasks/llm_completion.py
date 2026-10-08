@@ -58,11 +58,14 @@ from backend.utils.llm_batch import BatchItemFailed, BatchItemCancelled
 from backend.utils.ca_feed import (
     CA_CHAT_TURN_NOTE, CA_READ_AGAIN_TURN, CA_TWEETS_CHAT_STUB,
     FEED_AI_USAGE, READ_FURTHER_MARKER,
-    FeedReplyError, read_reply_ids, record_feed_render,
+    FeedReplyError, count_dropped_picks, read_reply_ids, record_feed_render,
     ca_turn as _ca_turn,
     refresh_snapshot_for_read, refs_from_render, seen_tweet_ids,
 )
-from backend.utils.tool_meta import update_tool_meta, parse_github_issue
+from backend.utils.tool_meta import (
+    get_tool_meta_entry, update_tool_meta, parse_github_issue,
+)
+from backend.utils.client_platform import CLIENT_MARKER
 from backend.utils.privacy import AI_ALLOWED
 from backend.utils.placeholders import (
     CA_TWEETS_PATTERN,
@@ -228,11 +231,36 @@ def _provider_failure(exc):
     import openai
     classes = [anthropic.APIError, openai.APIError, httpx.TransportError]
     providers = sys.modules.get("backend.llm_providers")
-    for name in ("ProviderUnavailableError", "OpenAIStreamError"):
+    for name in ("ProviderUnavailableError", "ProviderAccountError",
+                 "OpenAIStreamError"):
         cls = getattr(providers, name, None)
         if isinstance(cls, type) and issubclass(cls, BaseException):
             classes.append(cls)
     return isinstance(exc, tuple(classes))
+
+
+def _account_failure(exc):
+    """Whether *exc* is a call refused for an account reason (#369):
+    retrying won't help until someone fixes the account, and the error
+    already says so to the user. Looked up at call time, like
+    _provider_failure."""
+    cls = getattr(sys.modules.get("backend.llm_providers"),
+                  "ProviderAccountError", None)
+    return (isinstance(cls, type) and issubclass(cls, BaseException)
+            and isinstance(exc, cls))
+
+
+def _raise_for_account_failure(exc, provider, model=None, model_call=True,
+                               api_key=None):
+    """llm_providers.raise_for_account_failure for a provider key
+    ("anthropic" / "openai"); a no-op where the module is stubbed.
+    *api_key* is the key the call used; only its role is reported."""
+    providers = sys.modules.get("backend.llm_providers")
+    raise_for = getattr(providers, "raise_for_account_failure", None)
+    names = getattr(providers, "PROVIDER_NAMES", None)
+    if callable(raise_for) and isinstance(names, dict):
+        raise_for(exc, names.get(provider, provider), model, model_call,
+                  api_key=api_key)
 
 
 def _start_voice_tts_stream(llm_node, user_id, source_mode):
@@ -1748,10 +1776,13 @@ def _redact_tool_input(inp):
 
 
 def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
-                        quote_labels=None):
+                        quote_labels=None, client=None):
     """Execute tool calls and return metadata list. *quote_labels* is the
     turn's label map ({label: ("node"|"external", id)}) so read_full can
-    resolve a search-result label; None outside the retrieval loop."""
+    resolve a search-result label; None outside the retrieval loop.
+    *client* is the app the turn was asked from ('ios' / 'web' / None,
+    utils/client_platform): an issue apply_github_issue files gets it as
+    its platform label."""
     tool_results = []
 
     for tc in tool_calls:
@@ -1834,6 +1865,7 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
                                 ),
                                 category=category,
                                 username=username,
+                                platform=client,
                             )
                             # Clean up draft
                             db.session.delete(draft)
@@ -2484,6 +2516,14 @@ def _ca_batch_poll(task, llm_node, parent_node, meta, entry, user_id):
             raise
         _withdraw_batch_reply(llm_node, meta, entry)
         return "withdrawn", None
+    except Exception as e:
+        # A poll refused for an account reason (a revoked key, say) is
+        # reported (#369) and, like any other failed poll, asked again by
+        # the task's error handler: the batch is already submitted and
+        # billed, and the next poll after the fix collects it.
+        _raise_for_account_failure(e, provider, model_call=False,
+                                   api_key=api_keys[provider])
+        raise
     # Heartbeat for resume_stuck_feed_batches: a poll that stops
     # arriving means the scheduled retry died with its worker.
     now = datetime.utcnow().isoformat(timespec="seconds")
@@ -2537,9 +2577,16 @@ def _ca_batch_submit(task, llm_node, model_id, api_model, messages,
         DEFAULT_MAX_OUTPUT_TOKENS)
     custom_id = f"node-{llm_node.id}"
     from backend.utils.ca_feed import FEED_SCHEMA
-    batch_id = submit_one(
-        api_key, custom_id, api_model, messages, max_tokens,
-        output_schema=FEED_SCHEMA if ca_refs is not None else None)
+    try:
+        batch_id = submit_one(
+            api_key, custom_id, api_model, messages, max_tokens,
+            output_schema=FEED_SCHEMA if ca_refs is not None else None)
+    except Exception as e:
+        # A spend limit, billing or the key refuses the submit like a
+        # live call: the user gets the readable error, the admin an
+        # alert (#369).
+        _raise_for_account_failure(e, provider, api_model, api_key=api_key)
+        raise
     meta, _ = _batch_meta(llm_node)
     meta.append({
         "name": "_batch", "batch_id": batch_id, "custom_id": custom_id,
@@ -2578,6 +2625,31 @@ def _close_batch_entry(node, batch_id):
     node.tool_calls_meta = json.dumps(meta)
 
 
+def _claim_failed_feed_cost(node, resp):
+    """Whether this run logs the cost of a feed reply the collect could
+    not use (FeedReplyError). A live call is billed per call, so its run
+    always does. A batch result is billed once but can be collected more
+    than once: the entry stays submitted on the failed node, so a
+    duplicate poll or a re-dispatched run fetches the same result and
+    fails the same way. The first collect stamps the live entry
+    (failed_cost_logged_at), which lands in the same commit as its cost
+    row and the failure; a later collect of that batch finds the stamp
+    and logs nothing."""
+    if not resp.get("batch"):
+        return True
+    meta, entry = _batch_meta(node)
+    if entry is None:
+        return True
+    if entry.get("failed_cost_logged_at"):
+        logger.info("Node %s: cost of batch %s already logged; not "
+                    "logging it again", node.id, entry.get("batch_id"))
+        return False
+    entry["failed_cost_logged_at"] = datetime.utcnow().isoformat(
+        timespec="seconds")
+    node.tool_calls_meta = json.dumps(meta)
+    return True
+
+
 def _collect_feed_reply(llm_node, resp, ca_refs):
     """Turn the feed's JSON answer into the reply: each pick becomes a
     saved reference + FeedPick row (rank, relevance, recommend and the
@@ -2602,6 +2674,18 @@ def _collect_feed_reply(llm_node, resp, ca_refs):
         ca_refs = refs_from_render(
             llm_node.feed_render, resp["content"],
             snapshot_dir_for(flask_app.config))
+    else:
+        # The admin's live rerun: the render is this run's own, so ca_refs
+        # is the whole of it. Picks whose number is outside it are dropped
+        # by parse_feed_reply below; count them as the batch collect does
+        # (refs_from_render), so a Read of only such picks is not
+        # reported as one where the model picked nothing. (A batch from
+        # before renders were pinned has no row: nothing to count on.)
+        from backend.models import FeedRender
+        render = FeedRender.query.filter_by(node_id=llm_node.id).first()
+        if render is not None:
+            render.dropped_picks = count_dropped_picks(
+                resp["content"], ca_refs)
     verdict, picks = parse_feed_reply(resp["content"], ca_refs)
     rows = save_feed_picks(llm_node.human_owner_id, llm_node, picks)
     resp["content"] = expand_ca_citations(
@@ -2976,6 +3060,12 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
         batch_resp = None
         # #367: a voice turn's TTS worker, speaking replies as they stream.
         speech_turn = None
+        # The app the turn was asked from (create_llm_placeholder stamps
+        # it on the node), the platform label of an issue the turn files
+        # (apply_github_issue). Read before the tool loop rewrites the
+        # node's meta.
+        client = (get_tool_meta_entry(llm_node, CLIENT_MARKER)
+                  or {}).get("client")
 
         try:
             # The poll comes before anything else is loaded: one provider
@@ -3501,6 +3591,57 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                          and bool(model_config.get("cache_diagnostics"))),
                 user_id=user_id, node_chain=node_chain)
 
+            def _log_api_cost(resp, node):
+                """Log an APICostLog row for one model call. Every model call
+                costs money — the retrieval loop logs once per round.
+                *node* is the LLM node the call's text was written to; the
+                row points at it (request_ref) so the next turn can find its
+                cache-diagnostics baseline (#348).
+
+                Pricing and the unified column semantics (full-prompt
+                input_tokens, cache read/write columns across providers,
+                #187/#189/#286) live in llm_cost_log_fields; this only adds
+                the per-turn cache log lines."""
+                in_toks = resp.get("input_tokens", 0)
+                cache_read_toks = resp.get("cache_read_input_tokens", 0)
+                cache_write_toks = resp.get(
+                    "cache_creation_input_tokens", 0)
+                cached_input_toks = resp.get("cached_tokens", 0)
+                cache_write_subset_toks = resp.get(
+                    "cache_write_subset_tokens", 0)
+                if cache_read_toks or cache_write_toks:
+                    logger.info(
+                        "Prompt cache usage: read=%d write=%d uncached=%d",
+                        cache_read_toks, cache_write_toks, in_toks)
+                if cached_input_toks or cache_write_subset_toks:
+                    logger.info(
+                        "OpenAI prompt cache: %d/%d input tokens cached, "
+                        "%d written",
+                        cached_input_toks, in_toks, cache_write_subset_toks)
+                diag_fields = cache_diag.log_fields(resp, node.id)
+                db.session.add(APICostLog(
+                    user_id=user_id,
+                    model_id=model_id,
+                    request_type="conversation",
+                    **llm_cost_log_fields(model_id, resp),
+                    **diag_fields,
+                ))
+
+            def _collect_feed(resp):
+                """_collect_feed_reply for this turn. A reply the collect
+                cannot use (FeedReplyError: not the promised object, or cut
+                off at the output limit) was still billed, so its cost row
+                is written before the error fails the node: the row the
+                finalize writes for a collected reply (_log_api_cost). The
+                task's error handler commits it with the failure."""
+                try:
+                    return _collect_feed_reply(llm_node, resp, ca_refs)
+                except FeedReplyError:
+                    if (not resp.get("cut_off")
+                            and _claim_failed_feed_cost(llm_node, resp)):
+                        _log_api_cost(resp, llm_node)
+                    raise
+
             # Turn-scoped relative-quote labels: a short label ("A") maps to
             # ("node"|"external", id) — assigned when search results are
             # labeled, consumed by canonicalization wherever the model's
@@ -3538,6 +3679,11 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         "Reply for node %s cut off by a provider failure "
                         "after %d chars", target_node.id, len(reply.text),
                         exc_info=True)
+                    if _account_failure(e):
+                        # Asking again won't get the rest (#369): the
+                        # note says why instead (also spoken).
+                        return reply.cut_off(
+                            f"\n\n*(The reply was cut off here. {e})*")
                     return reply.cut_off()
 
             MAX_RETRIES = 3
@@ -4062,8 +4208,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                             )),
                         stream=feed_schema is None)
                     if needs_ca:
-                        response = _collect_feed_reply(
-                            llm_node, response, ca_refs)
+                        response = _collect_feed(response)
                     break  # Success
                 except PromptTooLongError as e:
                     if attempt == MAX_RETRIES or not needs_export:
@@ -4078,42 +4223,6 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         f"(attempt {attempt + 2}/{MAX_RETRIES + 1})"
                     )
             # ── Helpers shared by the single-shot and retrieval paths ──────
-
-            def _log_api_cost(resp, node):
-                """Log an APICostLog row for one model call. Every model call
-                costs money — the retrieval loop logs once per round.
-                *node* is the LLM node the call's text was written to; the
-                row points at it (request_ref) so the next turn can find its
-                cache-diagnostics baseline (#348).
-
-                Pricing and the unified column semantics (full-prompt
-                input_tokens, cache read/write columns across providers,
-                #187/#189/#286) live in llm_cost_log_fields; this only adds
-                the per-turn cache log lines."""
-                in_toks = resp.get("input_tokens", 0)
-                cache_read_toks = resp.get("cache_read_input_tokens", 0)
-                cache_write_toks = resp.get(
-                    "cache_creation_input_tokens", 0)
-                cached_input_toks = resp.get("cached_tokens", 0)
-                cache_write_subset_toks = resp.get(
-                    "cache_write_subset_tokens", 0)
-                if cache_read_toks or cache_write_toks:
-                    logger.info(
-                        "Prompt cache usage: read=%d write=%d uncached=%d",
-                        cache_read_toks, cache_write_toks, in_toks)
-                if cached_input_toks or cache_write_subset_toks:
-                    logger.info(
-                        "OpenAI prompt cache: %d/%d input tokens cached, "
-                        "%d written",
-                        cached_input_toks, in_toks, cache_write_subset_toks)
-                diag_fields = cache_diag.log_fields(resp, node.id)
-                db.session.add(APICostLog(
-                    user_id=user_id,
-                    model_id=model_id,
-                    request_type="conversation",
-                    **llm_cost_log_fields(model_id, resp),
-                    **diag_fields,
-                ))
 
             # Turn-scoped quote state (quote_labels is set up before the
             # first call). bumped_ext_ids guards the eager surfacing-history
@@ -4232,7 +4341,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         f"Executing {len(f_tool_calls)} tool calls")
                     tool_results = _execute_tool_calls(
                         f_tool_calls, target_node, node_chain, user_id,
-                        quote_labels=quote_labels,
+                        quote_labels=quote_labels, client=client,
                     )
                     if f_truncated:
                         for tr in tool_results:
@@ -4241,8 +4350,12 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
 
                 # Step 5c: Auto-detect proposals in LLM text (agentic). Not
                 # in a reply cut off mid-way: a half-written block would
-                # become a proposal and supersede the pending one.
-                if is_agentic and not resp.get("cut_off"):
+                # become a proposal and supersede the pending one. Nor in a
+                # read (a read prompt that is itself an agentic prompt keeps
+                # is_agentic): its verdict is no proposal, and the todo
+                # merge would run on the read's model, which may be read
+                # only (2026-10-02).
+                if is_agentic and not needs_ca and not resp.get("cut_off"):
                     auto_drafts = _auto_create_drafts(
                         f_llm_text, target_node, node_chain, user_id
                     )
@@ -4320,8 +4433,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 # and holds its reply; the context was built for ca_refs.
                 response = batch_resp
                 if ca_refs is not None:
-                    response = _collect_feed_reply(
-                        llm_node, response, ca_refs)
+                    response = _collect_feed(response)
                 return _finalize(llm_node, response)
             if batch_mode:
                 # First run: submit and re-queue for the first poll.
@@ -4400,7 +4512,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     # Execute ALL tool calls on the interim node.
                     tool_results = _execute_tool_calls(
                         response_tool_calls, current_node, node_chain,
-                        user_id, quote_labels=quote_labels,
+                        user_id, quote_labels=quote_labels, client=client,
                     )
                     if interim_truncated:
                         for tr in tool_results:
@@ -4629,14 +4741,16 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     # continuation node at 'processing' forever. Retry a
                     # couple of times; a terminal failure raises and the
                     # task-level handler fails THIS node (not the completed
-                    # interim).
+                    # interim). An account failure (#369) is not retried:
+                    # it lasts until someone fixes the account.
                     response = None
                     for retry_delay in (*CONTINUATION_RETRY_DELAYS, None):
                         try:
                             response = _call_continuation()
                             break
                         except Exception as cont_exc:
-                            if retry_delay is None:
+                            if (retry_delay is None
+                                    or _account_failure(cont_exc)):
                                 raise
                             logger.warning(
                                 "Continuation call failed (%s); retrying "
@@ -4686,9 +4800,19 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                                          max_retries=CA_BATCH_MAX_POLLS)
                     except MaxRetriesExceededError as cap:
                         error = cap
-                        error_message = (
-                            f"Gave up on batch {batch_id} after "
-                            f"{CA_BATCH_MAX_POLLS} polls; last error: {e}")
+                        if _account_failure(e):
+                            # An account failure's text is already the
+                            # user's message (#369). The task fails
+                            # because of it: chained as the cause (not
+                            # only __context__), Sentry groups this
+                            # failure under the account failure's issue.
+                            cap.__cause__ = e
+                            error_message = str(e)
+                        else:
+                            error_message = (
+                                f"Gave up on batch {batch_id} after "
+                                f"{CA_BATCH_MAX_POLLS} polls; last error: "
+                                f"{e}")
             logger.error(f"LLM completion error for node {llm_node_id}: {error_message}", exc_info=True)
             # Fail the node in flight: mid-loop that's the continuation
             # placeholder. Failing llm_node here instead used to clobber the
