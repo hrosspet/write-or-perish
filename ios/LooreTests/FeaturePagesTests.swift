@@ -122,8 +122,10 @@ final class ConfirmEmailModelTests: StubbedAppTestCase {
         StubURLProtocol.install { _ in .json(200, #"{"message":"Email confirmed.","email":"new@example.com","pending_email":null,"pending_email_expired":false}"#) }
         let model = ConfirmEmailModel(app: app, token: "tok123")
         model.startOnce()
+        let first = model.confirmTask
         model.startOnce()
-        try await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertEqual(model.confirmTask, first, "the second call starts nothing")
+        await model.confirmTask?.value
         XCTAssertEqual(calls, ["POST /api/dashboard/email/confirm"])
         XCTAssertEqual(body(of: "POST /api/dashboard/email/confirm")?["token"] as? String, "tok123")
         XCTAssertEqual(model.state, .confirmed(email: "new@example.com"))
@@ -141,7 +143,7 @@ final class ConfirmEmailModelTests: StubbedAppTestCase {
         StubURLProtocol.install { _ in .json(403, #"{"error":"This confirmation link was requested from a different Loore account. Sign in to that account to use it.","reason":"other_account"}"#) }
         let model = ConfirmEmailModel(app: app, token: "tok")
         model.startOnce()
-        try await Task.sleep(nanoseconds: 300_000_000)
+        await model.confirmTask?.value
         XCTAssertEqual(model.heading, "Not confirmed")
         XCTAssertTrue(model.body.hasSuffix(" You are signed in as @seowriter."))
         XCTAssertEqual(model.action, .signOut)
@@ -151,12 +153,16 @@ final class ConfirmEmailModelTests: StubbedAppTestCase {
         StubURLProtocol.install { _ in StubResponse(status: 200, failWith: URLError(.notConnectedToInternet)) }
         let model = ConfirmEmailModel(app: app, token: "tok")
         model.startOnce()
-        // Polled, not a fixed 300 ms: a busy CI runner was slower than that.
-        for _ in 0..<50 where model.action != .retry { try await Task.sleep(nanoseconds: 100_000_000) }
+        // Awaited, not timed. Under Xcode, CFNetwork's "Task finished with
+        // error" log line goes to stderr from the session's queue before the
+        // completion is delivered; on CI that stderr stalled and the answer
+        // came 13 s late.
+        await model.confirmTask?.value
         XCTAssertEqual(model.action, .retry)
         model.confirm()
-        for _ in 0..<50 where calls.count < 2 { try await Task.sleep(nanoseconds: 100_000_000) }
+        await model.confirmTask?.value
         XCTAssertEqual(calls.count, 2)
+        XCTAssertEqual(model.action, .retry)
     }
 
     func testWithoutATokenNothingIsPosted() async throws {

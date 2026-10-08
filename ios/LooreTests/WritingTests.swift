@@ -97,7 +97,7 @@ final class NodeFormModelTests: StubbedAppTestCase {
         await model.submit()
         XCTAssertTrue(model.showScopeDialog)
         model.answerScope(true)
-        try? await Task.sleep(nanoseconds: 300_000_000)
+        await model.dialogSubmit?.value
         XCTAssertEqual(result()?.descendantsUpdated, 3)
         XCTAssertEqual(body(of: "PUT /api/nodes/9")?["apply_to_descendants"] as? Bool, true)
         XCTAssertEqual(body(of: "PUT /api/nodes/9")?["ai_usage"] as? String, "none")
@@ -118,7 +118,7 @@ final class NodeFormModelTests: StubbedAppTestCase {
         await model.submit()
         XCTAssertTrue(model.showSplitDialog)
         model.confirmSplit()
-        try? await Task.sleep(nanoseconds: 300_000_000)
+        await model.dialogSubmit?.value
         XCTAssertEqual(result()?.id, 1)
         XCTAssertEqual(result()?.tipId, 3)
         XCTAssertEqual(SplitContentDialog.parts(250_001), 3)
@@ -153,7 +153,7 @@ final class NodeFormModelTests: StubbedAppTestCase {
         await model.submit()
         XCTAssertTrue(model.showPublicReplyDialog)
         model.answerPublicReply()
-        try? await Task.sleep(nanoseconds: 300_000_000)
+        await model.dialogSubmit?.value
         XCTAssertEqual(result()?.id, 8)
         XCTAssertEqual(body(of: "POST /api/nodes/")?["privacy_level"] as? String, "public")
     }

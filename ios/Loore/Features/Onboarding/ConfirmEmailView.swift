@@ -121,6 +121,8 @@ final class ConfirmEmailModel {
     let token: String?
     private(set) var state: State = .confirming
     private var started = false
+    /// The latest `confirm()` POST and its outcome; tests await it.
+    @ObservationIgnored private(set) var confirmTask: Task<Void, Never>?
 
     init(app: AppState, token: String?) {
         self.app = app
@@ -140,7 +142,7 @@ final class ConfirmEmailModel {
     func confirm() {
         guard let token else { return }
         state = .confirming
-        Task {
+        confirmTask = Task {
             do {
                 let answer: EmailState = try await app.api.post(APIPath.emailConfirm, json: ["token": .string(token)])
                 app.applyEmailState(answer)
