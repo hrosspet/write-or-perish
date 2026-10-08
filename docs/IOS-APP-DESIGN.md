@@ -160,7 +160,9 @@ Everything here is specified in map D; the decisions:
 Map C is the specification; §8 of it is the native design. The decisions:
 
 ### 9.1 Audio session
-- Voice turn: `.playAndRecord`, mode `.default` (not `.voiceChat`), options `[.allowBluetooth, .allowBluetoothA2DP, .defaultToSpeaker]`, activated at the record tap (foreground). **Do not deactivate until the turn's audio is finished** — a non-mixable session cannot be re-activated from the background.
+- Voice turn: `.playAndRecord`, mode `.videoChat`, options `[.allowBluetoothHFP, .allowBluetoothA2DP, .defaultToSpeaker]`, activated at the record tap (foreground) — what Safari sets when the web app opens the mic. The headset's mic is set as the preferred input. (Mode `.default` was the first choice; it let iOS move the input to the phone's own mic mid-recording while Bluetooth headphones kept playing, #423. The reply's volume is unaffected: it plays after the switch to `.playback`.) **Do not deactivate until the turn's audio is finished** — a non-mixable session cannot be re-activated from the background.
+- If a headset's mic goes away mid-recording anyway, the recording pauses (alert, toast, notification) and waits for Resume; the microphone keeps running with its samples dropped, so Resume works from the lock screen (#423).
+- Each recording writes a log on the phone (`RecordingLog`: route changes, interruptions, microphone restarts, chunks, input level once a second; no audio, no words), read over the cable (`ios/README.md`).
 - At Stop, switch the still-active session to `.playback` / `.spokenAudio` so replies play over Bluetooth A2DP rather than narrowband HFP (C §8.2); back to `.playAndRecord` at the next record tap. Device-test this while locked (§13.3); if it breaks background playback, stay in `.playAndRecord` and note it.
 - Listen-aloud outside voice mode: `.playback`, `.spokenAudio`. Deactivate with `.notifyOthersOnDeactivation` when playback ends.
 - `setPrefersNoInterruptionsFromSystemAlerts(true)` while recording.

@@ -95,6 +95,7 @@ enum APIPath {
     }
     static func streamingSaveAsNode(_ sid: String) -> String { "/api/drafts/streaming/\(escape(sid))/save-as-node" }
     static func streamingDiscard(_ sid: String) -> String { "/api/drafts/streaming/\(escape(sid))/discard" }
+    static func streamingRelease(_ sid: String) -> String { "/api/drafts/streaming/\(escape(sid))/release" }
     static let voice = "/api/voice/"
     static func voiceFromNode(_ id: Int) -> String { "/api/voice/from-node/\(id)" }
     /// Whether Voice mode may run (`?parent=<id>` for a thread); AI usage `none` closes it.
