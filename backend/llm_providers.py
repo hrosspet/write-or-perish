@@ -579,7 +579,8 @@ class LLMProvider:
                        prompt_cache_key: str = None,
                        output_schema: dict = None,
                        cache_comparison_response_id: str = None,
-                       listener: StreamListener = None) -> dict:
+                       listener: StreamListener = None,
+                       output_schema_name: str = None) -> dict:
         """
         Generate a completion using the specified model.
 
@@ -591,6 +592,8 @@ class LLMProvider:
             tools: Optional list of tool definitions (Anthropic format)
             output_schema: Optional JSON schema the reply must match
                 (structured output; the same shape the batch path takes)
+            output_schema_name: Optional name for that schema; OpenAI
+                requires one (default "feed_reply"), Anthropic takes none
             cache_comparison_response_id: Optional id of an earlier OpenAI
                 response to compare the prompt cache against (#348). Sent
                 only to models with "cache_diagnostics" in their config;
@@ -633,7 +636,7 @@ class LLMProvider:
                 context_window=config.get("context_window"),
                 output_schema=output_schema,
                 cache_comparison_response_id=cache_comparison_response_id,
-                listener=listener)
+                listener=listener, output_schema_name=output_schema_name)
         elif provider == "anthropic":
             return LLMProvider._call_anthropic(
                 api_model, messages, api_keys["anthropic"], max_tokens,
@@ -649,7 +652,8 @@ class LLMProvider:
                      context_window: int = None,
                      output_schema: dict = None,
                      cache_comparison_response_id: str = None,
-                     listener: StreamListener = None) -> dict:
+                     listener: StreamListener = None,
+                     output_schema_name: str = None) -> dict:
         """
         Call OpenAI via the Responses API (/v1/responses).
 
@@ -719,7 +723,8 @@ class LLMProvider:
             ]
         if output_schema:
             kwargs["text"] = {"format": {
-                "type": "json_schema", "name": "feed_reply",
+                "type": "json_schema",
+                "name": output_schema_name or "feed_reply",
                 "schema": output_schema, "strict": True}}
 
         # #348: Prompt Cache Diagnostics. The SDK pin (<3) has no typed
