@@ -39,7 +39,7 @@ function playErrorSound() {
 }
 
 /**
- * Play an urgent mic-interruption alert: the descending error motif twice,
+ * Play an urgent mic-interruption alert: the descending error motif once,
  * louder — the recording just auto-paused because the OS took the mic
  * (phone call, lock screen), so the user needs to notice within seconds,
  * not 20 minutes later (#245). Best-effort: during an actual call the OS
@@ -64,12 +64,10 @@ function playInterruptionAlert() {
       osc.stop(startTime + duration);
     };
     const now = ctx.currentTime;
-    [0, 0.9].forEach((offset) => {
-      playTone(660, now + offset, 0.15);
-      playTone(440, now + offset + 0.18, 0.15);
-      playTone(330, now + offset + 0.36, 0.25);
-    });
-    setTimeout(() => ctx.close(), 2200);
+    playTone(660, now, 0.15);
+    playTone(440, now + 0.18, 0.15);
+    playTone(330, now + 0.36, 0.25);
+    setTimeout(() => ctx.close(), 1000);
   } catch (e) {
     console.warn('[StreamingTranscription] Could not play interruption alert:', e);
   }
