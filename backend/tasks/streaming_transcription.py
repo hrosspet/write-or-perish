@@ -1068,7 +1068,12 @@ def finalize_draft_streaming(self, session_id: str, total_chunks: int,
         # uses the warm (it goes through the Batch API).
         from backend.utils.spend import user_is_capped
         from backend.utils.llm_nodes import is_chat_model
+        from backend.utils.prompt_cache import new_prewarm_token
         cache_split_offset = None
+        # The reply waits for the warm sent here to finish before its
+        # first model call (prompt_cache.wait_for_prewarm); None = no warm
+        # was sent, and the reply starts without waiting.
+        prewarm_token = None
         if (user_id and model and label == 'Voice'
                 and is_chat_model(model)
                 and not user_is_capped(user_id)
@@ -1089,10 +1094,12 @@ def finalize_draft_streaming(self, session_id: str, total_chunks: int,
                         parent_id = _create_system_node_early(
                             user_id, label.lower(), draft)
                         cache_split_offset = len(transcript_so_far)
+                        prewarm_token = new_prewarm_token()
                         prewarm_anthropic_cache.delay(
                             parent_id, user_id, model, transcript_so_far,
                             (draft.created_at
                              or datetime.utcnow()).isoformat(),
+                            done_token=prewarm_token,
                         )
                 elif is_anthropic and parent_id is not None:
                     # Ongoing thread + long recording: the prior turn's cache
@@ -1109,13 +1116,16 @@ def finalize_draft_streaming(self, session_id: str, total_chunks: int,
                     if recording_secs > PREWARM_ONGOING_MIN_SECONDS:
                         sys_node = _find_thread_system_node(parent_id)
                         if sys_node is not None:
+                            prewarm_token = new_prewarm_token()
                             prewarm_anthropic_cache.delay(
-                                sys_node.id, user_id, model)
+                                sys_node.id, user_id, model,
+                                done_token=prewarm_token)
             except Exception:
                 logger.warning(
                     "Cache pre-warm setup failed; continuing without it",
                     exc_info=True)
                 cache_split_offset = None
+                prewarm_token = None
 
         # Trigger transcription of any remaining stored chunks (< 20, so
         # they didn't hit the batch threshold during recording). This is a
@@ -1279,6 +1289,7 @@ def finalize_draft_streaming(self, session_id: str, total_chunks: int,
                     draft, session_id, full_transcript,
                     user_id, parent_id, model, label,
                     cache_split_offset=cache_split_offset,
+                    prewarm_token=prewarm_token,
                     timing=timing,
                     client=client,
                 )
@@ -1354,7 +1365,7 @@ def _skip_voice_reply(draft, user_node, message):
 def _start_server_side_llm_chain(draft, session_id, transcript,
                                  user_id, parent_id, model, label,
                                  cache_split_offset=None, timing=None,
-                                 client=None):
+                                 client=None, prewarm_token=None):
     """
     Create nodes and kick off LLM + TTS generation server-side.
 
@@ -1368,7 +1379,9 @@ def _start_server_side_llm_chain(draft, session_id, transcript,
        in one commit so the SSE all_complete event includes llm_node_id
     6. Enqueue generate_llm_response — it dispatches TTS per node at each
        node's own finalization (interim steps included), so interim audio
-       is playable while the continuation call is still generating
+       is playable while the continuation call is still generating.
+       *prewarm_token* names the cache pre-warm finalize sent; the reply
+       waits for it before its first model call (#187).
 
     A recording that gets no reply because AI usage keeps it, or the
     thread it continues, away from AI (_voice_reply_refusal) is saved as
@@ -1533,11 +1546,16 @@ def _start_server_side_llm_chain(draft, session_id, transcript,
     # LLM generation; TTS is dispatched inside the task at each node's own
     # finalization (source_mode='voice'), interim steps included.
     # The placeholder may have switched the model (a read runs on a read
-    # model, a deprecated one is replaced): run what the node says.
+    # model, a deprecated one is replaced): run what the node says. A
+    # reply on another model than the warmed one can't read the warm, so
+    # it doesn't wait for it.
+    if llm_node.llm_model != model:
+        prewarm_token = None
     generate_llm_response.si(
         tip_node.id, llm_node.id, llm_node.llm_model, user_id,
         source_mode='voice',
         cache_split_offset=cache_split_offset,
+        prewarm_token=prewarm_token,
     ).apply_async()
 
     logger.info(

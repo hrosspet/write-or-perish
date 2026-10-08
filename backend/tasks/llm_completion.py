@@ -2871,7 +2871,30 @@ def system_block_text(text):
 
 @celery.task(name='backend.tasks.llm_completion.prewarm_anthropic_cache')
 def prewarm_anthropic_cache(system_node_id, user_id, model_id,
-                            transcript_so_far=None, recording_stamp_iso=None):
+                            transcript_so_far=None, recording_stamp_iso=None,
+                            done_token=None):
+    """Pre-warm the Anthropic prompt cache during voice finalize (#187);
+    see _prewarm_anthropic_cache.
+
+    *done_token*: the reply started after this warm waits for it
+    (prompt_cache.wait_for_prewarm). The warm signals under it on every
+    exit (wrote the cache, failed, skipped), so the reply never waits
+    the full cap for a warm that gave up.
+    """
+    result = {"status": "failed"}
+    try:
+        result = _prewarm_anthropic_cache(
+            system_node_id, user_id, model_id,
+            transcript_so_far=transcript_so_far,
+            recording_stamp_iso=recording_stamp_iso)
+        return result
+    finally:
+        from backend.utils.prompt_cache import mark_prewarm_done
+        mark_prewarm_done(flask_app.config, done_token, result)
+
+
+def _prewarm_anthropic_cache(system_node_id, user_id, model_id,
+                             transcript_so_far=None, recording_stamp_iso=None):
     """Pre-warm the Anthropic prompt cache during voice finalize (#187).
 
     Fired at the START of finalize, overlapping the trailing-batch
@@ -3000,7 +3023,9 @@ def prewarm_anthropic_cache(system_node_id, user_id, model_id,
 
 
 @celery.task(base=LLMCompletionTask, bind=True)
-def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id: str, user_id: int, source_mode: str = None, cache_split_offset: int = None, ca_live: bool = False):
+def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id: str, user_id: int,
+                          source_mode: str = None, cache_split_offset: int = None, ca_live: bool = False,
+                          prewarm_token: str = None):
     """
     Asynchronously generate an LLM response and update a placeholder node.
 
@@ -3013,6 +3038,9 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
         cache_split_offset: char offset splitting the latest voice
             transcript into [already-warmed prefix][final batch] blocks
             for provider prompt caching (#187). None = no split.
+        prewarm_token: the cache pre-warm finalize sent for this reply
+            (#187). The turn's first model call waits until that warm
+            has finished (prompt_cache.wait_for_prewarm). None = no wait.
     """
     logger.info(f"Starting LLM completion task for parent {parent_node_id}, updating node {llm_node_id}, model={model_id}")
 
@@ -4185,6 +4213,15 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 if needs_ca:
                     from backend.utils.ca_feed import FEED_SCHEMA
                     feed_schema = FEED_SCHEMA
+                if prewarm_token:
+                    # #187: the cache entry the finalize pre-warm writes
+                    # exists only once its request has been processed. Wait
+                    # for it here, after the prompt is built, so building
+                    # overlaps with the warm. Only the turn's first call.
+                    from backend.utils.prompt_cache import wait_for_prewarm
+                    wait_for_prewarm(flask_app.config, prewarm_token,
+                                     llm_node_id)
+                    prewarm_token = None
                 cache_diag.system_hash = system_prefix_hash(
                     messages, system_msg_index)
                 try:

@@ -361,6 +361,17 @@ Kinds (one per entry and per table row):
 - **Applies to:** #462.
 - **Rule:** candidate: a cold prompt cache on every new thread is expected, because the system prompt carries that thread's own recent raw entries.
 
+### 2026-10-09 · New threads: make the reply wait for the cache pre-warm
+
+- **Kind:** cost
+- **Situation:** when a voice recording ends, Loore pre-warms the prompt cache with the ~100k-token system prompt and starts the reply at about the same time. On 2 of 6 new threads in early October the reply's request reached the API before the pre-warm had finished, so the reply wrote the whole prompt again and the pre-warm was paid for nothing. Fix: the reply waits for the pre-warm's "finished" signal, at most 10 s; replies without a pre-warm never wait.
+- **Prediction:** yes, build it (70 %).
+- **Peter:** "what do you mean wait a few seconds? Is this just an estimate, or do you intend to put there a constant number of second wait?" · "yes, go ahead with this PR"
+- **Score:** hit.
+- **Source:** Claude Code session 2026-10-09 (Opus 5.5)
+- **Applies to:** #463.
+- **Rule:** none new; "a few seconds" needed the mechanism stated (a signal with a capped wait, not a fixed sleep) before he decided.
+
 ## Decided by the builder
 
 Choices that agents flagged in PRs and that the builder decided because a rule above already covers them (Peter, 2026-10-02: decide what the log supports, raise only real judgement calls). Each is also recorded on its PR, or in the session where Peter asked. The Decided column holds only the builder's part; a rule or decision of Peter's goes in the Rule column. Questions raised to Peter instead are not listed; his answers become entries. Model is the model that wrote the PR (its Co-Authored-By line). Result is "accepted by merge (PR #N, date)" once the PR has merged and Peter didn't correct the choice, "pending" until it merges, and "corrected → entry <title>" when he overrules it; the entry is then scored as a miss.
@@ -392,8 +403,12 @@ Choices that agents flagged in PRs and that the builder decided because a rule a
 | 2026-10-08 | #459 | privacy | How click and key-press breadcrumbs describe an element | Tag, id and classes only, no attribute values | No user content reaches Sentry (#422) | Opus 5.5 | pending |
 | 2026-10-08 | #459 | privacy | `extra` on browser events | Dropped from every event | No user content reaches Sentry (#422) | Opus 5.5 | pending |
 | 2026-10-08 | #459 | privacy | A request body or query string on a browser event | Dropped, although the SDK attaches neither today, so a later integration can't add them | No user content reaches Sentry (#422) | Opus 5.5 | pending |
-| 2026-10-09 | #462 | cost | Where to strip trailing whitespace from the system block | In both the pre-warm's render and the reply's inline render | The pre-warm and the reply send byte-identical prefixes (#187, #192) | Opus 5.5 | pending |
-| 2026-10-09 | #462 | cost | System-prompt renders cached before the fix, which may end in a newline | Render cache key v2 to v3: one extra system-prompt write for each thread active across the deploy, once | Fix the root cause | Opus 5.5 | pending |
+| 2026-10-09 | #462 | cost | Where to strip trailing whitespace from the system block | In both the pre-warm's render and the reply's inline render | The pre-warm and the reply send byte-identical prefixes (#187, #192) | Opus 5.5 | accepted by merge (PR #462, 2026-10-09) |
+| 2026-10-09 | #462 | cost | System-prompt renders cached before the fix, which may end in a newline | Render cache key v2 to v3: one extra system-prompt write for each thread active across the deploy, once | Fix the root cause | Opus 5.5 | accepted by merge (PR #462, 2026-10-09) |
+| 2026-10-09 | #463 | reliability | What the pre-warm's "finished" signal carries | Its outcome (done, failed, or skipped with the reason), written to the worker log with each wait | Problems show | Opus 5.5 | pending |
+| 2026-10-09 | #463 | reliability | Redis can't be read when the reply checks for the signal | No wait, a warning in the log, the reply goes ahead | Latency counts as quality; problems show | Opus 5.5 | pending |
+| 2026-10-09 | #463 | UX | A reply on a different model from the one pre-warmed | Gets no wait (cannot happen today) | Latency counts as quality | Opus 5.5 | pending |
+| 2026-10-09 | #463 | reliability | How often the reply checks, and how long the signal is kept | Every 0.2 s; signal kept 1 h, longer than finalize's wait for the last chunks (up to 10 min); the 10 s maximum is a setting and 0 turns the wait off | Every added heuristic is named | Opus 5.5 | pending |
 
 ## Backfilled decisions
 

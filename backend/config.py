@@ -121,6 +121,16 @@ class Config:
     STREAMING_VOICE_TTS = os.environ.get(
         "STREAMING_VOICE_TTS", "false").lower() in ("1", "true", "yes")
 
+    # --- Voice reply waits for its cache pre-warm (#187) ---
+    # A voice reply that had an Anthropic cache pre-warm sent for it waits
+    # until the pre-warm reports that it finished, at most this many
+    # seconds, before its first model call; past that it writes the cache
+    # itself. Peter, 2026-10-09: 10 s, a bit over twice the longest
+    # pre-warm call seen (4.4 s). 0 turns the wait off (read by the worker;
+    # see utils/prompt_cache.wait_for_prewarm).
+    PREWARM_WAIT_MAX_SECONDS = float(
+        os.environ.get("PREWARM_WAIT_MAX_SECONDS") or "10")
+
     # --- Dev-update channel: changelog + notifications + polls (#207) ---
     # Intrinsically quiet (nothing shows unless something is unread), so it
     # deploys on. This env var is the emergency KILL SWITCH only: set
