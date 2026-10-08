@@ -158,8 +158,8 @@ Kinds (one per entry and per table row):
 - **Decision:** recorded in `.playAndRecord` with mode `.default`, not `.voiceChat` (which lowers playback volume), with Bluetooth A2DP allowed.
 - **Peter:** issue #423: "In the native iPhone app, voice-mode recording over connected Bluetooth headphones fails partway through. After a while, the app plays its warning sound for a headphone/audio problem. Either most of the audio is lost, or the recording silently switches to the iPhone's built-in mic."
 - **Score:** miss.
-- **Why it missed:** the design copied the web app, whose recording runs through Safari in `.videoChat`, a mode that keeps a connected headset's mic as the input, and checking that was possible before choosing `.default`.
-- **Source:** issue #423 (2026-10-05) and PR #384 (Opus 5.5). PR #424 names this session mode as the likely cause; the recording log has not confirmed it yet.
+- **Why it missed:** the design chose `.default` without checking how the web app records: Safari records in `.videoChat`, a mode that keeps a connected headset's mic as the input, and that could have been checked before choosing.
+- **Source:** issue #423 (2026-10-05) and PR #384 (Opus 5.5). The cause is confirmed: in the walk test of 2026-10-07 (PR #424), with `.videoChat` and the headset preferred as input, the input stayed on the headset mic through four turns with the phone locked, about 18 minutes, while in the bad turns of 10-04 and 10-05 it had moved to the phone's mic.
 - **Applies to:** PR #384, #423, PR #424.
 
 ### 2026-10-06 · Todo merge model: Luna first
@@ -493,10 +493,10 @@ Decisions made before this log existed, oldest first. None of them has a predict
 - **Kind:** product scope
 - **Situation:** PR #322 made the Read leave out tweets the user has already seen. Peter's note, quoted in the PR, asked to "Pre-filter seen recommendations (and bookmarks!)".
 - **Decision:** counted as seen every tweet saved from X (bookmarks and clipped tweets), read or not, besides the picks marked read.
-- **Peter:** issue #352: "The intent was to drop only references marked read."
+- **Peter:** "really? I only wanted to filter out external references already marked as read. Bookmarked or clipped tweets are not marked as read"
 - **Score:** miss.
 - **Why it missed:** a bookmark shows that the user saved a tweet, not that they read it, so the builder could have asked whether "(and bookmarks!)" meant every bookmark or only those marked read.
-- **Source:** issue #352 (2026-09-24) and PR #322 (Fable 5.1).
+- **Source:** Claude Code session 2026-09-24, which rewrote issue #352; PR #322 (Fable 5.1).
 - **Applies to:** PR #322, #352, PR #358.
 
 ### 2026-09-25 · An account set to None runs no AI jobs
@@ -663,14 +663,25 @@ Decisions made before this log existed, oldest first. None of them has a predict
 - **Applies to:** PR #375.
 - **Rule:** candidate (awaits Peter's confirmation, asked 2026-10-06 in node 201350; the first wording, "a retry pays only for the missing work", was unclear to him because a retried single call costs the full price; it came from the X bookmark sync, PR #334): every billed call records its cost on the account it serves. A job that stops partway resumes where it stopped, so the next run doesn't pay again for work already done.
 
+### 2026-10-01 · A cut-off todo merge is saved as the user's list
+
+- **Kind:** reliability
+- **Situation:** PR #375 (merged through #393) makes background jobs refuse a model output cut off at the output limit. Only the profile refuses any cut-off output; every other job refuses only an output cut off before any text. The voice todo merge is one of those jobs, so a merge cut off partway through replaces the user's whole todo list, and the next merge builds on it.
+- **Decision:** kept the rule that jobs other than the profile refuse only an empty cut-off output, the todo merge included (PR #375, "Earlier decisions that still hold").
+- **Score:** miss.
+- **Why it missed:** the rule was written for outputs cut off before any text (#366, #368), and the todo merge was not checked against it, although a partial list harms the user the same way a partial profile does, which the same PR refuses.
+- **Source:** issue #432 (2026-10-06), which the builder filed during the voice review after Peter's comparison run showed one merge looping until the 32,000-token cap and losing 105 items; issue #432 expects "A truncated result fails the merge." Peter's own words on it are not on record. PR #375 (Opus 5.5).
+- **Applies to:** PR #375, #432, PR #433.
+
 ### 2026-10-01 · The line under Reflect goes
 
 - **Kind:** user-facing text
-- **Situation:** PR #337 puts "Reflect" on the homepage. The card asks its own question, while the homepage and the Voice and Text modes ask "What's on your mind?".
+- **Situation:** PR #337 changes `/welcome`: the button on the first-entry card becomes "Reflect" and leads to the homepage. The card asks its own question, while the homepage and the Voice and Text modes ask "What's on your mind?".
 - **Decision:** added a helper line under the Reflect button: "Take the question with you, or start with whatever is on your mind. Type or record a voice note, whichever feels natural."
-- **Peter:** "Line under Reflect: 'Take the question with you…' is removed. The rest of the wording is approved." (as recorded in the PR, from the voice review of 2026-10-01).
+- **Peter:** "I'd drop the "Take the question with you, or start with whatever is on your mind. Type or record a voice note, whichever feels natural." - there is a better text below"
 - **Score:** miss.
-- **Source:** PR #337 and the voice review of 2026-10-01 (Opus 5.5); found on 2026-10-08 while backfilling approvals by merge.
+- **Why it missed:** the line was written to carry the card's question over to screens that ask "What's on your mind?", but the page already had better text below it.
+- **Source:** Claude Code session 2026-10-01, during the voice review, looking at `/welcome` on the PR's build; PR #337 (Opus 5.5). Found on 2026-10-08 while backfilling approvals by merge.
 - **Applies to:** PR #337, #391.
 
 ### 2026-10-01 · What the Read is for
@@ -838,7 +849,7 @@ Decisions made before this log existed, oldest first. None of them has a predict
 
 ## Accepted by merge
 
-Builder decisions listed in PRs that merged without Peter correcting them, backfilled on 2026-10-08. Each row is a decision scored as a hit. Sources: the sections of the PR body that list the builder's own choices ("Decisions to review", "Decided under Peter's rules", "Heuristics introduced", "Choices to check", "Things I decided that you may want to change", introduced constants). A decision counts as corrected if this log, the PR's comments, its later commits or a later issue show Peter changing it; the corrections found that way are entries above ("The deploy drain: 90 s, not 240 s", "The line under Reflect goes", "A bookmark isn't seen until it's marked read", "Recording keeps the headset's mic"). Left out: decisions already in this log as entries, Peter's own decisions written into a PR body, implementation details he couldn't have decided differently, known limitations, reviewer findings, and decisions he turned into a follow-up issue. The cutoff, PRs merged since 2026-09-01, is a heuristic: older PRs are not backfilled. Date is the merge date; Model is the PR's Co-Authored-By line. Choices explicitly accepted in a voice review before the merge are counted here too.
+Builder decisions listed in PRs that merged without Peter correcting them, backfilled on 2026-10-08. Each row is a decision scored as a hit. Sources: the sections of the PR body that list the builder's own choices ("Decisions to review", "Decided under Peter's rules", "Heuristics introduced", "Choices to check", "Things I decided that you may want to change", introduced constants). A decision counts as corrected if this log, the PR's comments, its later commits or a later issue show Peter changing it; the corrections found that way are entries above ("The deploy drain: 90 s, not 240 s", "The line under Reflect goes", "A bookmark isn't seen until it's marked read", "Recording keeps the headset's mic", "A cut-off todo merge is saved as the user's list"). Left out: decisions already in this log as entries, Peter's own decisions written into a PR body, implementation details he couldn't have decided differently, known limitations, reviewer findings, and decisions he turned into a follow-up issue. The cutoff, PRs merged since 2026-09-01, is a heuristic: older PRs are not backfilled. Date is the merge date; Model is the PR's Co-Authored-By line. Choices explicitly accepted in a voice review before the merge are counted here too.
 
 | Date | PR | Kind | Decision | Model | Result |
 |---|---|---|---|---|---|
@@ -928,7 +939,7 @@ Builder decisions listed in PRs that merged without Peter correcting them, backf
 | 2026-10-01 | #364 (via #393) | UX | The ⊕/⊖ verdict is off unless a surface turns it on | Opus 5.5 | accepted by merge |
 | 2026-10-01 | #364 (via #393) | UX | The "You rated this" line is hidden with the verdict on the user's own nodes | Opus 5.5 | accepted by merge |
 | 2026-10-01 | #364 (via #393) | data safety | No server-side check on which node a verdict is given in | Opus 5.5 | accepted by merge |
-| 2026-10-01 | #375 (via #393) | reliability | Profiles refuse any truncated output; other jobs refuse only empty truncated output | Opus 5.5 | accepted by merge |
+| 2026-10-01 | #375 (via #393) | reliability | Jobs other than the profile refuse only an empty cut-off output, the todo merge included | Opus 5.5 | corrected → entry A cut-off todo merge is saved as the user's list |
 | 2026-10-01 | #375 (via #393) | reliability | A new profile version restarts a stopped recent-context summary | Opus 5.5 | accepted by merge |
 | 2026-10-01 | #395 | privacy | Profile versions marked None get no new speech; their speaker icon isn't greyed out yet | Opus 5.5 | accepted by merge |
 | 2026-10-02 | #396 | privacy | Link nodes keep the column default None, since no client creates them | Opus 5.5 | accepted by merge |
