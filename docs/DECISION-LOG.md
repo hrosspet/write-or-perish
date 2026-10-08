@@ -6,12 +6,12 @@ How it works:
 - **Before a review**, the builder writes down what it expects him to answer and how sure it is. The prediction is recorded before his answer, in Loore or in the builder's notes, and copied here afterwards.
 - **After the review**, each entry gets his answer verbatim, a score (hit, partial or miss), and for a miss, what led to the wrong guess.
 - **Decision lines** record what the builder did without asking (wrote text, built something, chose a default) before Peter reviewed it; a decision is scored like a prediction that he would approve, and backfilled entries (made before this log existed) have only these.
-- **Escalation lines** appear only when the choice to ask or to act was wrong: "asked; should have decided" or "decided; should have asked". The escalation is scored apart from the content.
+- **Escalation entries** (`**Kind:** escalation`) score whether to ask was the right call, as a decision of its own. One sits right after the entry it belongs to, with the same Situation, a Decision of "decided without asking Peter" or "asked Peter instead of deciding", Peter's words about the asking, and a hit or miss.
 - **Entries arrive** in these ways:
   - a prediction, written before a brief or reply goes out, and scored when Peter answers;
   - Peter corrects a decision the builder made in a PR (Decision, miss);
-  - Peter agrees with a decision but wanted to be asked (Escalation: decided; should have asked);
-  - Peter says a question should have been decided without him (Escalation: asked; should have decided);
+  - Peter agrees with a decision but wanted to be asked first: two entries, the decision scored as a hit and an escalation entry ("decided without asking Peter") scored as a miss;
+  - Peter says a question should have been decided without him: an escalation entry ("asked Peter instead of deciding") scored as a miss, and any recommendation in the brief scored as a normal prediction entry;
   - an issue filed days or weeks after a PR traces back to a decision the builder made in that PR: a Decision entry with the issue as its source, scored as a miss, with what the builder could have seen at the time;
   - not logged: the many small implementation choices nobody reacted to.
 - **Rules** that come out of his answers are proposed for `LOORE-ESSENCE.md`. Nothing changes that document without his approval.
@@ -29,7 +29,7 @@ Backfilled decisions (27 entries, 2026-04-06 to 2026-10-06): 7 hits / 4 partial 
 
 Live decisions (from 2026-10-08): 0 hits / 0 partial / 1 miss. They arrive the same way, mostly through corrections, so they are not comparable with the predictions either.
 
-Escalation misses: asked; should have decided: 1 (backfilled, 2026-06-17). Decided; should have asked: 0.
+Escalation entries, counted apart from the content scores above: 1, all backfilled: 0 hits / 1 miss. Asked instead of deciding: 1 miss (2026-06-17). Decided without asking: none yet.
 
 Partial hits count as half. Calibration on 2026-10-02: at 75–80 % confidence the builder scored 2.5 of 4; at 55–65 %, 2.5 of 5; at 40 %, 0 of 1. Overconfident by about 15 points.
 
@@ -258,14 +258,23 @@ Decisions made before this log existed, oldest first. None of them has a predict
 - **Applies to:** #131 (PR #201).
 - **Rule:** candidate: work a user started finishes without them, and Loore tells them when they come back.
 
-### 2026-06-17 · Reversibility is the bar for working without asking
+### 2026-06-17 · Four choices for the last slice of PR #196
 
 - **Situation:** an overnight run on PR #196, a refactor on staging, reached a slice that needed four choices. Peter was away.
-- **Decision:** recommended four choices for the slice (the version-history mapping, keeping the old table for now, its place in the navigation, the backfill as a standalone script), and stopped to ask Peter to confirm them before building.
+- **Decision:** recommended four choices for the slice: the version-history mapping, keeping the old table for now, its place in the navigation, and the backfill as a standalone script.
+- **Peter:** "1 - yes" · "2 - yes, make an issue to drop the table once confident the new table is correct and working" · "3 - yes, curated" · "4 - standalone"
+- **Score:** hit.
+- **Source:** Claude Code session 2026-06-17 (Opus 4.8).
+- **Applies to:** PR #196.
+
+### 2026-06-17 · Decide reversible work without asking
+
+- **Kind:** escalation
+- **Situation:** an overnight run on PR #196, a refactor on staging, reached a slice that needed four choices. Peter was away.
+- **Decision:** asked Peter instead of deciding.
 - **Peter:** "Were any of the changes destructive / irreversible? We're on staging -> no. Better to ship code that is tested and working, but potentially needs to be updated based on my different intent (or worst case dropped completely) for work that is running overnight." · "if I come back in the morning and no implementation and no UI tests were done, that's the same from my point of view as the worst case scenario of having to walk back some work that has been done." · "It's good to flag them explicitly, so I can review (I explicitly gave you this instruction before going afk), but that's for after the fact." · "what is risky is destructive / irreparable changes, not big changes in terms of volume"
-- **Score:** hit. He accepted all four.
-- **Escalation:** asked; should have decided.
-- **Why the escalation missed:** the size of the change was taken for risk; the measure is whether it can be undone.
+- **Score:** miss.
+- **Why it missed:** the size of the change was taken for risk; the measure is whether it can be undone.
 - **Source:** Claude Code session 2026-06-17 (Opus 4.8).
 - **Applies to:** all agent work; PR #196; the reversible items moved to ready on 2026-10-02.
 - **Rule:** adopted 2026-10-06: reversible work goes ahead without asking and is flagged afterwards; every added heuristic is named; merging to main stays Peter's.
