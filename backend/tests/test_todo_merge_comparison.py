@@ -1084,7 +1084,8 @@ def test_current_prompt_records_what_each_merge_by_edits_did(
     assert newest["edits"] == {
         "calls": 2, "retries": 1, "edits_applied": 1, "full_write": False,
         "format_errors": 0, "anchor_errors": 1, "rewrite_refusals": 0,
-        "kept_lines_failures": 0, "failure": None}
+        "kept_lines_failures": 0, "sub_items_moved_failures": 0,
+        "failure": None}
     # Tokens and cost of both calls.
     one_call = llm_cost_log_fields(luna, dict(provider.usage, content=E3))
     assert newest["input_tokens"] == 2 * 5000
@@ -1109,9 +1110,11 @@ def test_current_prompt_records_what_each_merge_by_edits_did(
         "with_retry": 2, "calls": 5, "edits_applied": 2, "full_writes": 0,
         "anchor_errors": 1, "with_anchor_error": 1,
         "kept_lines_refusals": 2, "with_kept_lines_refusal": 1,
+        "sub_items_moved_refusals": 0, "with_sub_items_moved_refusal": 0,
         "rewrite_refusals": 0, "format_errors": 0}
     printed = capsys.readouterr().out
     assert "kept-lines check refused 2 replies in 1 merges" in printed
+    assert "nesting check refused 0 replies in 0 merges" in printed
     assert "anchor errors 1 in 1 merges" in printed
     assert "edits: failed 1/3 (33%) (kept_lines 1)" in printed
     assert "ERROR MergeFailed:kept_lines" in printed

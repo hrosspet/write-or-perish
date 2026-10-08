@@ -42,7 +42,8 @@ previous todo list, with its one retry after a refused reply and its
 checks. The resulting list is compared with the stored output as in a
 normal run. Each run also records, over all calls of the merge: the edits
 applied, retries, anchor errors (old_text not found or not unique), how
-often the kept-lines check (an existing line changed or missing) refused a
+often the kept-lines check (an existing line changed or missing) and the
+nesting check (an existing sub-item now under a new line) refused a
 reply, refused full rewrites, unparseable replies, the final failure if
 the merge saved nothing, tokens, latency and cost; the JSONL also has each
 reply. The inputs (proposal, previous todo list) and the stored output the
@@ -782,6 +783,7 @@ def _fmt_edits(run):
             + (" full-write" if e["full_write"] else "")
             + f" retries={e['retries']} anchor-err={e['anchor_errors']}"
             f" kept-lines-refused={e['kept_lines_failures']}"
+            f" sub-items-moved={e['sub_items_moved_failures']}"
             f" rewrite-refused={e['rewrite_refusals']}"
             f" format-err={e['format_errors']}")
 
@@ -873,6 +875,9 @@ def _summarize_edits(stats):
         "with_anchor_error": merges_with("anchor_errors"),
         "kept_lines_refusals": times("kept_lines_failures"),
         "with_kept_lines_refusal": merges_with("kept_lines_failures"),
+        "sub_items_moved_refusals": times("sub_items_moved_failures"),
+        "with_sub_items_moved_refusal": merges_with(
+            "sub_items_moved_failures"),
         "rewrite_refusals": times("rewrite_refusals"),
         "format_errors": times("format_errors"),
     }
@@ -923,6 +928,9 @@ def print_summary(summary, stored_stats, out):
                   f"applied, {e['full_writes']} full writes", file=out)
             print(f"    kept-lines check refused {e['kept_lines_refusals']}"
                   f" replies in {e['with_kept_lines_refusal']} merges"
+                  f" | nesting check refused "
+                  f"{e['sub_items_moved_refusals']} replies in "
+                  f"{e['with_sub_items_moved_refusal']} merges"
                   f" | anchor errors {e['anchor_errors']} in "
                   f"{e['with_anchor_error']} merges | rewrites refused "
                   f"{e['rewrite_refusals']} | unparseable replies "

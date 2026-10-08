@@ -326,6 +326,120 @@ def test_kept_lines_error_names_at_most_ten_lines():
     assert "task 10" not in error and "(and 5 more)" in error
 
 
+# ── the nesting check ────────────────────────────────────────────────────
+
+NESTED = (
+    "## Dev\n"
+    "- [ ] review flow\n"
+    "  - [ ] automated UI testing\n"
+    "  - [ ] manual UI testing\n"
+    "  - [ ] push notification\n"
+    "- [ ] other task\n"
+)
+
+
+def test_nesting_catches_a_new_task_between_sub_items():
+    """GPT-6 Luna's error in the comparison of past merges: a new
+    top-level task after a task's first sub-item takes the other
+    sub-items as its own. Every line is still there."""
+    edit = ("  - [ ] automated UI testing",
+            "  - [ ] automated UI testing\n- [ ] new task")
+    merged, _ = apply_text_edits(NESTED, [
+        {"old_text": edit[0], "new_text": edit[1]}])
+    assert tme.lines_not_kept(NESTED, merged) == []
+    assert tme.lines_moved_under_new(NESTED, merged) == [
+        ("  - [ ] manual UI testing", "- [ ] new task"),
+        ("  - [ ] push notification", "- [ ] new task")]
+
+    merged, failure, error, run = resolve(reply(edit), NESTED)
+    assert merged is None and failure == tme.FAILURE_SUB_ITEMS_MOVED
+    assert run.sub_items_moved_failures == 1 and run.kept_lines_failures == 0
+    assert error.startswith("2 existing line(s) now sit under a line your "
+                            "edits added")
+    assert "never between the sub-items of an existing task" in error
+    assert ("`  - [ ] manual UI testing` is now under `- [ ] new task`"
+            in error)
+
+
+def test_nesting_catches_a_new_task_before_the_first_sub_item():
+    merged = NESTED.replace("- [ ] review flow\n",
+                            "- [x] review flow\n- [ ] new task\n")
+    assert [line for line, _ in tme.lines_moved_under_new(NESTED, merged)] \
+        == ["  - [ ] automated UI testing", "  - [ ] manual UI testing",
+            "  - [ ] push notification"]
+
+
+def test_nesting_catches_a_note_line_and_tab_indents():
+    previous = "- [ ] call the bank\n  ask about the fee\n- [ ] gym\n"
+    merged = previous.replace("bank\n", "bank\n- [ ] new task\n")
+    assert tme.lines_moved_under_new(previous, merged) == [
+        ("  ask about the fee", "- [ ] new task")]
+    previous = "- [ ] trip\n\t- [ ] flights\n\t- [ ] hotel\n"
+    merged = previous.replace("flights\n", "flights\n- [ ] new task\n")
+    assert tme.lines_moved_under_new(previous, merged) == [
+        ("\t- [ ] hotel", "- [ ] new task")]
+
+
+def test_nesting_passes_new_items_in_the_right_places():
+    merged = (
+        "## Dev\n"
+        "- [ ] new task before the parent\n"
+        "- [x] review flow\n"
+        "  - [x] automated UI testing\n"
+        "    - [ ] a new sub-sub-item\n"
+        "  - [ ] a new sub-item between existing ones\n"
+        "  - [ ] manual UI testing\n"
+        "  - [x] push notification\n"
+        "  - [ ] a new last sub-item\n"
+        "- [ ] new task after the last sub-item\n"
+        "  - [ ] with its own new sub-item\n"
+        "- [ ] other task\n"
+        "\n"
+        "## New section\n"
+        "- [ ] new\n"
+    )
+    assert tme.lines_not_kept(NESTED, merged) == []
+    assert tme.lines_moved_under_new(NESTED, merged) == []
+    merged, failure, _, run = resolve(reply(
+        ("- [ ] review flow", "- [x] review flow"),
+        ("  - [ ] push notification",
+         "  - [ ] push notification\n- [ ] new task")), NESTED)
+    assert failure is None and run.sub_items_moved_failures == 0
+
+
+def test_nesting_refuses_only_when_certain():
+    # The new task's sub-item has the text of an existing one: which copy
+    # is new is unknown, so neither counts as moved.
+    merged = NESTED.replace(
+        "  - [ ] automated UI testing\n",
+        "  - [ ] automated UI testing\n- [ ] new task\n"
+        "  - [ ] manual UI testing\n")
+    assert tme.lines_moved_under_new(NESTED, merged) == [
+        ("  - [ ] push notification", "- [ ] new task")]
+    # The line above has the text of an existing line: not certainly new.
+    merged = NESTED.replace("UI testing\n  - [ ] manual",
+                            "UI testing\n- [ ] other task\n  - [ ] manual")
+    assert tme.lines_moved_under_new(NESTED, merged) == []
+    # A sub-item that sat under no line (right below a heading) is not
+    # checked; nor is a heading or a blank line.
+    previous = "## Today\n  - [ ] indented\n\n## Later\n- [ ] gym\n"
+    merged = "## Today\n- [ ] new task\n  - [ ] indented\n\n## Later\n" \
+        "- [ ] gym\n"
+    assert tme.lines_moved_under_new(previous, merged) == []
+    # An empty item (the Create template's placeholder) is not compared.
+    previous = "- [ ] trip\n  - [ ] \n"
+    assert tme.lines_moved_under_new(
+        previous, "- [ ] trip\n- [ ] new\n  - [ ] \n") == []
+
+
+def test_nesting_error_names_at_most_ten_lines():
+    moved = [(f"  - [ ] sub {i}", "- [ ] new") for i in range(12)]
+    error = tme.sub_items_moved_error(moved)
+    assert error.startswith("12 existing line(s)")
+    assert "sub 9" in error and "sub 10" not in error
+    assert "(and 2 more)" in error
+
+
 # ── the calls: retry, truncation ─────────────────────────────────────────
 
 MESSAGES = [{"role": "system", "content": [{"type": "text", "text": "P"}]},
@@ -349,7 +463,8 @@ def test_one_call_asks_for_structured_output():
     assert run.stats() == {
         "calls": 1, "retries": 0, "edits_applied": 1, "full_write": False,
         "format_errors": 0, "anchor_errors": 0, "rewrite_refusals": 0,
-        "kept_lines_failures": 0, "failure": None}
+        "kept_lines_failures": 0, "sub_items_moved_failures": 0,
+        "failure": None}
 
 
 def test_retry_then_success():
@@ -372,6 +487,23 @@ def test_retry_then_success():
     assert run.replies == [bad, good]
     assert run.error is None
     assert [r["kind"] for r in run.refusals] == [tme.FAILURE_ANCHOR]
+
+
+def test_nesting_refusal_gets_the_retry():
+    bad = reply(("  - [ ] automated UI testing",
+                 "  - [ ] automated UI testing\n- [ ] new task"))
+    good = reply(("  - [ ] push notification",
+                  "  - [ ] push notification\n- [ ] new task"))
+    provider = Scripted(bad, good)
+    run = tme.run_todo_merge(provider, "gpt-6-luna", MESSAGES, FAKE_KEYS,
+                             NESTED)
+    assert run.failure is None
+    assert run.merged.endswith(
+        "  - [ ] push notification\n- [ ] new task\n- [ ] other task\n")
+    assert run.stats()["sub_items_moved_failures"] == 1
+    assert [r["kind"] for r in run.refusals] == [tme.FAILURE_SUB_ITEMS_MOVED]
+    sent = provider.calls[1]["messages"][4]["content"][0]["text"]
+    assert "2 existing line(s) now sit under a line your edits added" in sent
 
 
 @pytest.mark.parametrize("first, second, failure", [
@@ -684,6 +816,11 @@ def test_merge_prompt_asks_for_edits_and_keeps_the_417_rules():
         "Only the New Tasks and Completed sections of your update change "
         "the list",
         "Priority Order",
+        # A parent ticked with its sub-items still open (Opus 5.5 in the
+        # comparison of past merges).
+        "Tick a parent task only when your update says the parent itself "
+        "is done. Ticking some of its sub-items doesn't tick the parent; a "
+        "task whose sub-items are still open stays `- [ ]`",
     ):
         assert rule in prompt, rule
     assert "Return ONLY the complete updated todo list" not in prompt
@@ -699,6 +836,9 @@ def test_merge_prompt_asks_for_edits_and_keeps_the_417_rules():
         "Leave updated_content empty. Only when the todo list is empty or "
         "has no tasks yet",
         "Return ONLY the JSON object",
+        # What the nesting check refuses (lines_moved_under_new).
+        "A new top-level task goes after the last sub-item of the task "
+        "above it, never between the sub-items of an existing task",
     ):
         assert rule in tme.REPLY_FORMAT, rule
 

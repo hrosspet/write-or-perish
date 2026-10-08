@@ -52,8 +52,9 @@ TRUNCATED_MESSAGE = (
     "Ask for the todo update again to retry.")
 EMPTY_RESULT_MESSAGE = "Empty merge result"
 # Shown on the card when the model's edits were refused twice (#234): an
-# anchor not found or not unique, a full rewrite of a list with tasks, or
-# an existing line changed. Nothing was saved.
+# anchor not found or not unique, a full rewrite of a list with tasks, an
+# existing line changed, or an existing sub-item moved under a new line.
+# Nothing was saved.
 EDITS_FAILED_MESSAGE = (
     "The todo update couldn't be applied to your list, so nothing was "
     "changed. Ask for the todo update again to retry.")

@@ -22,7 +22,10 @@ A reply is refused, and the model gets one retry with the reason, when:
   only an empty list, or one with headings and no tasks yet (the Todo
   page's Create template), has nothing to anchor edits on;
 * after the edits, a line of the previous list is gone or changed, other
-  than a checkbox going from `[ ]` to `[x]` (lines_not_kept).
+  than a checkbox going from `[ ]` to `[x]` (lines_not_kept);
+* after the edits, an existing sub-item sits under a line the edits added:
+  new lines went between the sub-items of an existing task
+  (lines_moved_under_new).
 If the retry is refused too, the merge fails and nothing is saved. A reply
 cut off at the output cap fails at once (#432).
 
@@ -42,6 +45,10 @@ _LIST_ITEM_RE = re.compile(
     r"^[ \t]*(?:[-*+]|\d+[.)])[ \t]+(?:\[[ xX]\](?=[ \t]|$))?(.*)$")
 # An unticked checkbox item: the part before `[ ]` in group 1, after in 2.
 _UNTICKED_RE = re.compile(r"^([ \t]*(?:[-*+]|\d+[.)])[ \t]+)\[ \](.*)$")
+# A ticked checkbox item: the part before `[x]` in group 1, after in 2.
+_TICKED_RE = re.compile(r"^([ \t]*(?:[-*+]|\d+[.)])[ \t]+)\[[xX]\](.*)$")
+# A markdown heading; no line below it sits under a line above it.
+_HEADING_RE = re.compile(r"^ {0,3}#{1,6}(?:[ \t]|$)")
 
 # Heuristic: one retry after a refused reply, as the artifact tool gets one
 # round to fix an anchor. A second refusal fails the merge (nothing saved).
@@ -57,6 +64,7 @@ FAILURE_FORMAT = "format"
 FAILURE_ANCHOR = "anchor"
 FAILURE_REWRITE = "rewrite_refused"
 FAILURE_KEPT_LINES = "kept_lines"
+FAILURE_SUB_ITEMS_MOVED = "sub_items_moved"
 
 SCHEMA_NAME = "todo_edits"
 # The reply format. Same edit shape as update_artifact's `edits`; strict
@@ -124,6 +132,8 @@ REPLY_FORMAT = (
     "line with `[ ]` changed to `[x]`\n"
     "- To add items, old_text is the whole line they go after and "
     "new_text is that same line, a newline, and the new lines. A new "
+    "top-level task goes after the last sub-item of the task above it, "
+    "never between the sub-items of an existing task. A new "
     "section (`## Name` and its items) goes after the last line of the "
     "section it follows, or after the last line of the list\n"
     "- Copy the line you use as old_text into new_text character for "
@@ -172,6 +182,7 @@ class MergeRun:
         self.anchor_errors = 0
         self.rewrite_refusals = 0
         self.kept_lines_failures = 0
+        self.sub_items_moved_failures = 0
         self.merged = None
         self.failure = None
         # Each refused reply's kind and reason, as sent to the model; the
@@ -191,6 +202,7 @@ class MergeRun:
             "anchor_errors": self.anchor_errors,
             "rewrite_refusals": self.rewrite_refusals,
             "kept_lines_failures": self.kept_lines_failures,
+            "sub_items_moved_failures": self.sub_items_moved_failures,
             "failure": self.failure,
         }
 
@@ -290,6 +302,97 @@ def kept_lines_error(missing):
         + named + (f"\n(and {more} more)" if more > 0 else ""))
 
 
+def _unticked(line):
+    """*line* as the nesting check matches it: trailing whitespace off
+    and a ticked checkbox as `[ ]`, so a line the merge ticked is still
+    the line it was."""
+    line = line.rstrip()
+    ticked = _TICKED_RE.match(line)
+    return f"{ticked.group(1)}[ ]{ticked.group(2)}" if ticked else line
+
+
+def _indent(line):
+    """The width of the line's leading whitespace (a tab is 4)."""
+    line = line.expandtabs(4)
+    return len(line) - len(line.lstrip(" "))
+
+
+def _parent_indexes(lines):
+    """For each line, the index of the line it sits under: the nearest
+    non-blank line above it that is less indented, not looking past a
+    heading. None for a blank line, a heading, or a line with no such
+    line above it."""
+    parents, open_lines = [], []   # (indent, index), indents increasing
+    for index, line in enumerate(lines):
+        if not line.strip():
+            parents.append(None)
+            continue
+        if _HEADING_RE.match(line):
+            open_lines = []
+            parents.append(None)
+            continue
+        indent = _indent(line)
+        while open_lines and open_lines[-1][0] >= indent:
+            open_lines.pop()
+        parents.append(open_lines[-1][1] if open_lines else None)
+        open_lines.append((indent, index))
+    return parents
+
+
+def lines_moved_under_new(previous, merged):
+    """The nesting check: the lines of *previous* that sit under a line
+    the edits added in *merged*, as [(line, the new line it sits under)].
+
+    New lines between the sub-items of an existing task take the
+    sub-items below them: a new top-level task inserted after a task's
+    first sub-item gets the task's other sub-items as its own (GPT-6 Luna
+    did this in the comparison of past merges, #234). Every line is
+    still there, so lines_not_kept passes it.
+
+    Refused only when it is certain, so a good merge is never refused:
+    the line is an existing one (its text, ticked or not, is in the
+    merged list as often as in the previous list, and sat under another
+    line each time), and the line it now sits under is new (its text,
+    ticked or not, is nowhere in the previous list). A new sub-item among
+    existing ones is at their indent or deeper, so it is no line's
+    parent. Kept on its own, like lines_not_kept, so it is easy to
+    remove."""
+    before = (previous or "").splitlines()
+    after = (merged or "").splitlines()
+    count_before = Counter(_unticked(line) for line in before
+                           if line.strip())
+    count_after = Counter(_unticked(line) for line in after if line.strip())
+    had_parent = Counter(
+        _unticked(before[index])
+        for index, parent in enumerate(_parent_indexes(before))
+        if parent is not None)
+    moved = []
+    for index, parent in enumerate(_parent_indexes(after)):
+        if parent is None or not _compared(after[index]):
+            continue
+        line = _unticked(after[index])
+        if (_unticked(after[parent]) not in count_before
+                and count_before[line]
+                and count_after[line] == count_before[line]
+                and had_parent[line] == count_before[line]):
+            moved.append((after[index].rstrip(), after[parent].rstrip()))
+    return moved
+
+
+def sub_items_moved_error(moved):
+    """The refusal for the model, quoting each moved line and the new
+    line it sits under (its own input and reply: never logged)."""
+    named = "\n".join(f"`{line}` is now under `{parent}`"
+                      for line, parent in moved[:MAX_LINES_NAMED])
+    more = len(moved) - MAX_LINES_NAMED
+    return (
+        f"{len(moved)} existing line(s) now sit under a line your edits "
+        "added, so they moved to another task. A new top-level task goes "
+        "after the last sub-item of the task above it, never between the "
+        "sub-items of an existing task. The lines:\n"
+        + named + (f"\n(and {more} more)" if more > 0 else ""))
+
+
 def resolve_merge_reply(content, current_todo, run):
     """The merged list for one reply: (merged, None, None), or
     (None, failure kind, reason for the model) with that kind counted on
@@ -314,6 +417,10 @@ def resolve_merge_reply(content, current_todo, run):
     if missing:
         run.kept_lines_failures += 1
         return None, FAILURE_KEPT_LINES, kept_lines_error(missing)
+    moved = lines_moved_under_new(current_todo, merged)
+    if moved:
+        run.sub_items_moved_failures += 1
+        return None, FAILURE_SUB_ITEMS_MOVED, sub_items_moved_error(moved)
     run.full_write = full_write
     run.edits_applied = 0 if full_write else len(edits)
     return merged, None, None
