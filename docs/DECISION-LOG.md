@@ -284,32 +284,90 @@ Kinds (one per entry and per table row):
 - **Source:** Claude Code session 2026-10-08 (Opus 5.5).
 - **Applies to:** this log (rates now come from `stats.py`), `DECISION-PATTERNS.md`.
 
+### 2026-10-08 · Continue audio: repair other users' recordings?
+
+- **Kind:** privacy
+- **Situation:** the server's batch files for iPhone recordings reported a wrong length, so the phone stopped playing a continued recording early (fixed for new recordings in #458). Repairing the recordings already stored would mean decrypting other users' audio; the alternative was to fix new recordings only and repair just Peter's test node.
+- **Prediction:** fix forward and repair only his node, with no scan of other users' recordings (85 %).
+- **Peter:** "fix it for new recordings only, you can leave mine unfixed as it was just a test. Also, count that as a hit - fixing mine would have been ok, it's just unnecessary"
+- **Score:** hit. Peter asked for it to count as one: repairing his node would have been fine, only unnecessary.
+- **Source:** Loore voice review 2026-10-08 (Opus 5.5).
+- **Applies to:** #458.
+- **Rule:** "Nobody decrypts users' content" in `LOORE-ESSENCE.md`.
+
+### 2026-10-08 · Todo merge: a separate call or inside the thread
+
+- **Kind:** cost
+- **Situation:** when the user confirms a todo proposal, the merge runs as a separate call with the merge prompt, the proposal and the newest list. The alternative was to let the thread's own agent make the edits: cheaper by at most about 3 cents, and only while the prompt cache is warm; several times dearer when the cache is cold on a long thread.
+- **Prediction:** keep the separate call (80 %).
+- **Peter:** "thx for the real numbers, that helped. Keep the separate call with edits"
+- **Score:** hit.
+- **Source:** Loore voice review 2026-10-08 (Opus 5.5).
+- **Applies to:** #443, #234.
+
+### 2026-10-08 · Todo merge by edits: no switch
+
+- **Kind:** release/ops
+- **Situation:** the builder had told Peter that #443 would ship switched off. It was built without a switch, so merging it moves every user to merges by edits at once. Asked: run the evaluation on his past merges first and then merge without a switch, or add the promised switch?
+- **Prediction:** the evaluation first, then a merge without a switch (60 %).
+- **Peter:** "there should be no switch, just ship it to everyone. It was a good decision" · "I'm gonna run the test for #443 and if it's 100% which it should be, I want it shipped"
+- **Score:** hit.
+- **Source:** Loore voice review 2026-10-08 (Opus 5.5).
+- **Applies to:** #443.
+
+### 2026-10-08 · Todo merge by edits shipped without the promised switch
+
+- **Kind:** release/ops
+- **Situation:** #443 changes how every user's todo merge works. A switch would let it reach some users first; without one, reverting the PR is the rollback.
+- **Decision:** built #443 with no feature switch, although the builder had said in a voice review that it would ship switched off.
+- **Peter:** "It was a good decision"
+- **Score:** hit. This entry replaces the "Decided by the builder" row of 2026-10-06 for #443 (feature flag), so the decision is counted once.
+- **Source:** Loore voice review 2026-10-08 (Opus 5.5).
+- **Applies to:** #443.
+- **Rule:** "Autonomy" in `LOORE-ESSENCE.md` (reversible work goes ahead without asking).
+
+### 2026-10-08 · Mic alert played twice
+
+- **Kind:** UX
+- **Situation:** when a recording loses the microphone (a phone call takes it, or the headphones go), Loore plays an alert of three falling notes, on the web and in the iPhone app.
+- **Decision:** #209 (commit 0c46f40b) played the alert's three notes twice, at 0 and 0.9 s, as an "urgent doubled" chime on the web. The iPhone app (#384) copied the sound note for note.
+- **Peter:** "the sound played when I turn off the headphones while recording is too long. It's three notes with decreasing pitch played twice in a row. Change it to just once in a row. Do that for both iOS app and the web app."
+- **Score:** miss.
+- **Why it missed:** #245 asked for an audible alert, not a repeated one. The alert was the existing error sound's three notes, louder (gain 0.25 against 0.15) and played twice. The louder single pass already set it apart from the error sound, and the page plays it again when it returns to the foreground, so the second pass added length without telling the user anything more.
+- **Source:** Peter's request of 2026-10-08, quoted in PR #456; the decision is PR #209's (Fable 5).
+- **Applies to:** #209, #384, #456.
+
 ## Decided by the builder
 
 Choices that agents flagged in PRs and that the builder decided because a rule above already covers them (Peter, 2026-10-02: decide what the log supports, raise only real judgement calls). Each is also recorded on its PR, or in the session where Peter asked. The Decided column holds only the builder's part; a rule or decision of Peter's goes in the Rule column. Questions raised to Peter instead are not listed; his answers become entries. Model is the model that wrote the PR (its Co-Authored-By line). Result is "accepted by merge (PR #N, date)" once the PR has merged and Peter didn't correct the choice, "pending" until it merges, and "corrected → entry <title>" when he overrules it; the entry is then scored as a miss.
 
 | Date | PR | Kind | Choice | Decided | Rule | Model | Result |
 |---|---|---|---|---|---|---|---|
-| 2026-10-02 | #406 | reliability | How often to email about one failing provider account | At most every 6 h per cause, as a setting | Every added heuristic is named | Opus 5.5 | pending |
-| 2026-10-02 | #406 | reliability | A paid batch is refused for an account reason while polling | Keep polling until the cap | Prevent the failure where possible | Opus 5.5 | pending |
-| 2026-10-02 | #409 | UX | How often finished recent-context batches are collected | Every 60 s | Latency counts as quality | Opus 5.5 | pending |
-| 2026-10-02 | #401 | UX | A newcomer's first session and the updates window | `/welcome` skips the whole session | A newcomer reflects first | Opus 5.5 | pending |
-| 2026-10-02 | #401 | product scope | What counts as the user's own entry | Session prompts, link nodes and deleted entries don't count either | Only entries written in Loore count; imports don't (Peter, 2026-10-01) | Opus 5.5 | pending |
-| 2026-10-02 | #403 | product scope | iPhone only or iPhone and iPad | iPhone only | The design document | Opus 5.5 | pending |
-| 2026-10-02 | #404 | provider | A chat reply is sent with a read-only model | Refused with a plain message. The first decision (run it on the chat default) was wrong: the review showed it can switch the provider | Never change providers, not even as a fallback | Opus 5.5 | pending |
-| 2026-10-02 | #405 | testing | What counts as a dropped pick | Both kinds of picks Loore can't show | An empty Read is a good result | Opus 5.5 | pending |
-| 2026-10-02 | #408 | UX | A failed auto-generate hides LLM Response outside Read | Follow-up issue #416 | Show the choices | Opus 5.5 | pending |
+| 2026-10-02 | #406 | reliability | How often to email about one failing provider account | At most every 6 h per cause, as a setting | Every added heuristic is named | Opus 5.5 | accepted by merge (PR #451, 2026-10-08) |
+| 2026-10-02 | #406 | reliability | A paid batch is refused for an account reason while polling | Keep polling until the cap | Prevent the failure where possible | Opus 5.5 | accepted by merge (PR #451, 2026-10-08) |
+| 2026-10-02 | #409 | UX | How often finished recent-context batches are collected | Every 60 s | Latency counts as quality | Opus 5.5 | accepted by merge (PR #451, 2026-10-08) |
+| 2026-10-02 | #401 | UX | A newcomer's first session and the updates window | `/welcome` skips the whole session | A newcomer reflects first | Opus 5.5 | accepted by merge (PR #451, 2026-10-08) |
+| 2026-10-02 | #401 | product scope | What counts as the user's own entry | Session prompts, link nodes and deleted entries don't count either | Only entries written in Loore count; imports don't (Peter, 2026-10-01) | Opus 5.5 | accepted by merge (PR #451, 2026-10-08) |
+| 2026-10-02 | #403 | product scope | iPhone only or iPhone and iPad | iPhone only | The design document | Opus 5.5 | accepted by merge (PR #451, 2026-10-08) |
+| 2026-10-02 | #404 | provider | A chat reply is sent with a read-only model | Refused with a plain message. The first decision (run it on the chat default) was wrong: the review showed it can switch the provider | Never change providers, not even as a fallback | Opus 5.5 | accepted by merge (PR #451, 2026-10-08) |
+| 2026-10-02 | #405 | testing | What counts as a dropped pick | Both kinds of picks Loore can't show | An empty Read is a good result | Opus 5.5 | accepted by merge (PR #451, 2026-10-08) |
+| 2026-10-02 | #408 | UX | A failed auto-generate hides LLM Response outside Read | Follow-up issue #416 | Show the choices | Opus 5.5 | accepted by merge (PR #451, 2026-10-08) |
 | 2026-10-02 | #413 | privacy | Admin-only guard, dry run, missing-items count in the todo-merge comparison | Kept | Experiments run on Peter's data; cost is his call | Opus 5.5 | accepted by merge (PR #413, 2026-10-06) |
 | 2026-10-02 | #414 | data safety | The profile note says "keep what they wrote" | Kept | The user's edit wins | Opus 5.5 | pending |
-| 2026-10-02 | #417 | data safety | The todo merge rewords items or moves them out of the section the user named | Keep wording; new items copied word for word; the named section is created if missing | The user's edit wins | Opus 5.5 | pending |
+| 2026-10-02 | #417 | data safety | The todo merge rewords items or moves them out of the section the user named | Keep wording; new items copied word for word; the named section is created if missing | The user's edit wins | Opus 5.5 | accepted by merge (PR #451, 2026-10-08) |
 | 2026-10-02 | #415 | data safety | Purging an AI or system account | Refused | None needed: purging one would delete every AI reply in Loore | Opus 5.5 | pending |
 | 2026-10-02 | #415 | privacy | Cost rows after a purge | Response ids, request refs and prompt-prefix hashes are cleared as well | Cost records are kept in anonymous form (Peter, 2026-10-02) | Opus 5.5 | pending |
 | 2026-10-06 | #443 | data safety | Todo merge as edits: which sections change the list | Only New Tasks and Completed; Note, Issue and Priority Order don't | Extends Peter's "yes" on Priority Order | Opus 5.5 | pending |
 | 2026-10-06 | #443 | data safety | Todo merge as edits: when a full rewrite is allowed | Only when the list has no tasks (nothing to anchor on); otherwise edits only | The user's edit wins | Opus 5.5 | pending |
 | 2026-10-06 | #443 | data safety | Todo merge as edits: a check after the edits are applied | Every previous line is kept with its text, only [ ] to [x] may change; one retry, then fail. This differs from the proposal-wording check Peter leaned against. It sits in one removable function and the evaluation measures how often it fires | Every added heuristic is named | Opus 5.5 | pending |
-| 2026-10-06 | #443 | release/ops | Todo merge as edits: feature flag | None, because Peter evaluates from the branch before merging | Reversible work goes ahead | Opus 5.5 | pending |
-| 2026-10-06 | #433 | reliability | A cut-off merge output | Fails with nothing saved; the message says to ask for the update again, since the card has no retry (#434) | Problems show | Opus 5.5 | pending |
-| 2026-10-06 | #431 | release/ops | Running the comparison script on prod | From a separate worktree with `.env.production` symlinked, never by checking out a branch in the live app folder (the merge prompt file is read on every call) | Experiments run on Peter's data; he starts any run on prod | Sonnet 5.5 | pending |
+| 2026-10-06 | #433 | reliability | A cut-off merge output | Fails with nothing saved; the message says to ask for the update again, since the card has no retry (#434) | Problems show | Opus 5.5 | accepted by merge (PR #451, 2026-10-08) |
+| 2026-10-06 | #431 | release/ops | Running the comparison script on prod | From a separate worktree with `.env.production` symlinked, never by checking out a branch in the live app folder (the merge prompt file is read on every call) | Experiments run on Peter's data; he starts any run on prod | Sonnet 5.5 | accepted by merge (PR #451, 2026-10-08) |
+| 2026-10-08 | #458 | reliability | A remuxed iPhone batch file still reports a wrong length | Rebuild it from the decoded audio (0.5 s tolerance, AAC 64 kbps), only for files that are already wrong | Fix the root cause, keep a fallback where the cause is outside our control | Opus 5.5 | pending |
+| 2026-10-08 | #459 | privacy | Addresses in the browser's error reports (page, Referer, API calls, navigation, stack-frame files) | Query and fragment removed everywhere the SDK puts an address; paths kept | No user content reaches Sentry (#422) | Opus 5.5 | pending |
+| 2026-10-08 | #459 | privacy | Console breadcrumbs from the browser | Dropped at every level, `console.error` included | No user content reaches Sentry (#422) | Opus 5.5 | pending |
+| 2026-10-08 | #459 | privacy | How click and key-press breadcrumbs describe an element | Tag, id and classes only, no attribute values | No user content reaches Sentry (#422) | Opus 5.5 | pending |
+| 2026-10-08 | #459 | privacy | `extra` on browser events | Dropped from every event | No user content reaches Sentry (#422) | Opus 5.5 | pending |
+| 2026-10-08 | #459 | privacy | A request body or query string on a browser event | Dropped, although the SDK attaches neither today, so a later integration can't add them | No user content reaches Sentry (#422) | Opus 5.5 | pending |
 
 ## Backfilled decisions
 
@@ -849,7 +907,7 @@ Decisions made before this log existed, oldest first. None of them has a predict
 
 ## Accepted by merge
 
-Builder decisions listed in PRs that merged without Peter correcting them, backfilled on 2026-10-08. Each row is a decision scored as a hit. Sources: the sections of the PR body that list the builder's own choices ("Decisions to review", "Decided under Peter's rules", "Heuristics introduced", "Choices to check", "Things I decided that you may want to change", introduced constants). A decision counts as corrected if this log, the PR's comments, its later commits or a later issue show Peter changing it; the corrections found that way are entries above ("The deploy drain: 90 s, not 240 s", "The line under Reflect goes", "A bookmark isn't seen until it's marked read", "Recording keeps the headset's mic", "A cut-off todo merge is saved as the user's list"). Left out: decisions already in this log as entries, Peter's own decisions written into a PR body, implementation details he couldn't have decided differently, known limitations, reviewer findings, and decisions he turned into a follow-up issue. The cutoff, PRs merged since 2026-09-01, is a heuristic: older PRs are not backfilled. Date is the merge date; Model is the PR's Co-Authored-By line. Choices explicitly accepted in a voice review before the merge are counted here too.
+Builder decisions listed in PRs that merged without Peter correcting them, backfilled on 2026-10-08. Each row is a decision scored as a hit. Sources: the sections of the PR body that list the builder's own choices ("Decisions to review", "Decided under Peter's rules", "Heuristics introduced", "Choices to check", "Things I decided that you may want to change", introduced constants). A decision counts as corrected if this log, the PR's comments, its later commits or a later issue show Peter changing it; the corrections found that way are entries above ("The deploy drain: 90 s, not 240 s", "The line under Reflect goes", "A bookmark isn't seen until it's marked read", "Recording keeps the headset's mic", "A cut-off todo merge is saved as the user's list"). Left out: decisions already in this log as entries, Peter's own decisions written into a PR body, implementation details he couldn't have decided differently, known limitations, reviewer findings, and decisions he turned into a follow-up issue. The cutoff, PRs merged since 2026-09-01, is a heuristic: older PRs are not backfilled. Date is the merge date; Model is the PR's Co-Authored-By line. Choices explicitly accepted in a voice review before the merge are counted here too. Rows dated 2026-10-08 and later are added when their PR merges, not backfilled; a PR shipped in a merge train names the train in Result.
 
 | Date | PR | Kind | Decision | Model | Result |
 |---|---|---|---|---|---|
@@ -963,3 +1021,34 @@ Builder decisions listed in PRs that merged without Peter correcting them, backf
 | 2026-10-06 | #446 | privacy | Search snippets are escaped HTML whose only tag is `<mark>`; titles stay plain text | Opus 5.5 | accepted by merge |
 | 2026-10-07 | #447 | UX | Moving to another node waits at most 2 s for it | Opus 5.5 | accepted by merge |
 | 2026-10-07 | #447 | UX | Prefetched node data is used for at most 10 s | Opus 5.5 | accepted by merge |
+| 2026-10-08 | #408 | product scope | LLM Response on an upload in a Read thread still runs without the Text-mode prompt; left to the upload work (#342, PR #347) | Opus 5.5 | accepted by merge (PR #451, 2026-10-08) |
+| 2026-10-08 | #401 | product scope | An import is recognised by `origin` or by `source_key`, so imports from before the `origin` column don't count as the user's own entries | Opus 5.5 | accepted by merge (PR #451, 2026-10-08) |
+| 2026-10-08 | #401 | UX | A continued Voice thread keeps "What's on your mind?"; only a fresh Voice session asks the welcome question | Opus 5.5 | accepted by merge (PR #451, 2026-10-08) |
+| 2026-10-08 | #401 | UX | The client marks the first entry itself after a save, without refetching; an entry written elsewhere changes the question at the next page load | Opus 5.5 | accepted by merge (PR #451, 2026-10-08) |
+| 2026-10-08 | #401 | product scope | Only polls wait for the first entry; changelog and notifications don't | Opus 5.5 | accepted by merge (PR #451, 2026-10-08) |
+| 2026-10-08 | #401 | UX | Only an explicit `has_own_entries: false` marks a newcomer; a user object without the flag gets "What's on your mind?" | Opus 5.5 | accepted by merge (PR #451, 2026-10-08) |
+| 2026-10-08 | #405 | testing | A Read counts as opened from a page load or from a poll sent by a visible tab, so the web page sends a visibility flag, a client change beyond the server-only plan | Opus 5.5 | accepted by merge (PR #451, 2026-10-08) |
+| 2026-10-08 | #405 | testing | A finished Read that reached a hidden tab gets one more poll when the tab is shown, so it counts as opened | Opus 5.5 | accepted by merge (PR #451, 2026-10-08) |
+| 2026-10-08 | #409 | reliability | A stop made only of failures Loore wasn't billed for lifts after 24 h (`UNBILLED_STOP_EXPIRY`); two billed failures stop recent context until a new summary or profile version | Opus 5.5 | accepted by merge (PR #451, 2026-10-08) |
+| 2026-10-08 | #409 | provider | OpenAI recent-context batches go through chat/completions like the other batch jobs, on the same model | Opus 5.5 | accepted by merge (PR #451, 2026-10-08) |
+| 2026-10-08 | #409 | reliability | A failed batch submit is not a strike; the next check, 10 minutes later, tries again | Opus 5.5 | accepted by merge (PR #451, 2026-10-08) |
+| 2026-10-08 | #409 | reliability | The recent-context batch lock expires after 30 min if its holder dies (`RC_BATCH_LOCK_TTL`) | Opus 5.5 | accepted by merge (PR #451, 2026-10-08) |
+| 2026-10-08 | #406 | user-facing text | The account-failure message, without the provider's name: "AI replies are temporarily unavailable. This is a problem on Loore's side, not yours, and it has been reported." | Opus 5.5 | accepted by merge (PR #451, 2026-10-08) |
+| 2026-10-08 | #406 | user-facing text | An unknown model gets "This model isn't available any more. Choose another model." | Opus 5.5 | accepted by merge (PR #451, 2026-10-08) |
+| 2026-10-08 | #406 | cost | With the OpenAI batch key revoked, profile users wait for the fix instead of moving to the full-price path on the chat key | Opus 5.5 | accepted by merge (PR #451, 2026-10-08) |
+| 2026-10-08 | #404 | product scope | GPT-6.1 Sol and Sonnet 5.5 are not featured, and the Read default stays GPT-6 Luna | Opus 5.5 | accepted by merge (PR #451, 2026-10-08) |
+| 2026-10-08 | #404 | provider | Admin polls refuse read-only and deprecated models | Opus 5.5 | accepted by merge (PR #451, 2026-10-08) |
+| 2026-10-08 | #404 | product scope | A Read makes no todo proposal, even under an agentic read prompt | Opus 5.5 | accepted by merge (PR #451, 2026-10-08) |
+| 2026-10-08 | #404 | user-facing text | A chat reply on a read-only model is refused with a message naming the model, e.g. "GPT-6.1 Sol is only for Read. Choose another model for replies." | Opus 5.5 | accepted by merge (PR #451, 2026-10-08) |
+| 2026-10-08 | #403 | privacy | The iPhone app's privacy manifest leaves out the collected-data list until the App Store release, because an empty list would say the app collects nothing | Opus 5.5 | accepted by merge (PR #451, 2026-10-08) |
+| 2026-10-08 | #417 | data safety | A blank list counts as empty, and a list item with text counts as a task with or without a checkbox, so the merge ticks an existing plain item instead of adding a duplicate | Opus 5.5 | accepted by merge (PR #451, 2026-10-08) |
+| 2026-10-08 | #417 | product scope | No model-free path for an empty list: the model still writes it, since parsing proposals by hand would be brittle | Opus 5.5 | accepted by merge (PR #451, 2026-10-08) |
+| 2026-10-08 | #431 | privacy | A past merge made with a custom prompt is run on the file prompt in `--current-prompt` mode; the custom prompt is not read or decrypted | Sonnet 5.5 | accepted by merge (PR #451, 2026-10-08) |
+| 2026-10-08 | #431 | testing | `--current-prompt` selects the same merges as a normal run, so the results stay comparable | Sonnet 5.5 | accepted by merge (PR #451, 2026-10-08) |
+| 2026-10-08 | #433 | reliability | A cut-off todo merge gets no fallback model and no automatic retry; the user asks again | Sonnet 5.5 | accepted by merge (PR #451, 2026-10-08) |
+| 2026-10-08 | #433 | cost | Every cut-off merge result marks its cost row as refused, not only an empty one | Sonnet 5.5 | accepted by merge (PR #451, 2026-10-08) |
+| 2026-10-08 | #452 | product scope | Haiku 5.5 is read-only, not featured and not the Read default | Opus 5.5 | accepted by merge (PR #451, 2026-10-08) |
+| 2026-10-08 | #452 | provider | No fallbacks and no move to another model when Haiku 5.5 refuses a Read | Opus 5.5 | accepted by merge (PR #451, 2026-10-08) |
+| 2026-10-08 | #452 | cost | A Haiku 5.5 Read runs through the Batch API like other Reads | Opus 5.5 | accepted by merge (PR #451, 2026-10-08) |
+| 2026-10-08 | #452 | cost | A Haiku 5.5 Read sends no effort or thinking setting, so it runs at Haiku's default | Opus 5.5 | accepted by merge (PR #451, 2026-10-08) |
+| 2026-10-08 | #452 | cost | Sonnet 5.5's recorded cache-hit price corrected to 0.05× in the same PR | Opus 5.5 | accepted by merge (PR #451, 2026-10-08) |
