@@ -9,6 +9,7 @@ Merges are serialized per user via a Redis lock so concurrent
 confirmations don't clobber each other's results.
 """
 import json
+import re
 import redis
 from celery.utils.log import get_task_logger
 
@@ -29,6 +30,39 @@ logger = get_task_logger(__name__)
 _MERGE_LOCK_TIMEOUT = 600
 # How long to wait for the lock before giving up (seconds).
 _MERGE_LOCK_ACQUIRE_TIMEOUT = 600
+
+# For a list with no tasks yet (#410). Every new user starts with no list.
+# Given an empty list, the model applied the prompt's rule for completed
+# items that are "NOT on the todo list" to a new task and saved it as done.
+NO_TASKS_RULE = (
+    "Add the items under New Tasks as `- [ ]` and the items under "
+    "Completed as `- [x]`; add nothing else."
+)
+# Sent in place of the todo list when the user has none, or a blank one.
+EMPTY_TODO_MESSAGE = "The todo list is empty. " + NO_TASKS_RULE
+
+# Shown on the card when the model's output hit the output cap (#432).
+# The card has no retry button after a failed merge (its pending draft
+# is gone), so the message says how to get a new proposal.
+TRUNCATED_MESSAGE = (
+    "The todo update was cut off, so nothing was changed. "
+    "Ask for the todo update again to retry.")
+
+# A list item (`- `, `* `, `+ `, `1. `), with the text after its checkbox,
+# if it has one, in group 1.
+_LIST_ITEM_RE = re.compile(
+    r"^[ \t]*(?:[-*+]|\d+[.)])[ \t]+(?:\[[ xX]\](?=[ \t]|$))?(.*)$")
+
+
+def has_tasks(todo_text):
+    """Whether the list has an item with text: `- [ ] call mom`,
+    `- [x] call mom` or `- call mom`. The Todo page's Create template
+    (headings and empty `- [ ] ` lines) has none."""
+    for line in (todo_text or "").splitlines():
+        item = _LIST_ITEM_RE.match(line)
+        if item and item.group(1).strip():
+            return True
+    return False
 
 
 @celery.task(bind=True)
@@ -109,6 +143,23 @@ def build_merge_messages(merge_prompt, update_summary, current_todo):
     """The merge call's messages: system=merge_prompt, assistant=the
     proposal, user=the current todo list. Also used by
     backend/scripts/compare_todo_merge_models.py to rebuild past merges."""
+    if has_tasks(current_todo):
+        todo_message = (
+            f"Here is the current full todo list:\n\n{current_todo}"
+            "\n\nNow apply the changes described above."
+        )
+    elif current_todo and current_todo.strip():
+        # Headings but no tasks yet, e.g. the Todo page's Create template.
+        todo_message = (
+            f"Here is the current full todo list:\n\n{current_todo}"
+            f"\n\n{NO_TASKS_RULE}"
+            "\n\nNow apply the changes described above."
+        )
+    else:
+        todo_message = (
+            EMPTY_TODO_MESSAGE
+            + "\n\nNow apply the changes described above."
+        )
     return [
         {
             "role": "system",
@@ -120,10 +171,7 @@ def build_merge_messages(merge_prompt, update_summary, current_todo):
         },
         {
             "role": "user",
-            "content": [{"type": "text", "text": (
-                f"Here is the current full todo list:\n\n{current_todo}"
-                "\n\nNow apply the changes described above."
-            )}],
+            "content": [{"type": "text", "text": todo_message}],
         },
     ]
 
@@ -177,15 +225,15 @@ def _run_merge(llm_node, update_summary, user_id, model_id,
     truncated = response.get("truncated", False)
     empty = not merged_todo or not merged_todo.strip()
 
-    # Log cost, also for an empty result: the call was billed (#368). A
-    # result cut off before any text is marked like the other background
-    # jobs' refusals.
+    # Log cost, also for a result that is thrown away: the call was billed
+    # (#368). Any cut-off result is marked like the other background jobs'
+    # refusals: it hit the output cap and produced nothing usable.
     output_tokens = response.get("output_tokens", 0)
     db.session.add(APICostLog(
         user_id=user_id,
         model_id=model_id,
         request_type="todo_merge",
-        request_ref=(REFUSED_REF if empty and truncated else None),
+        request_ref=(REFUSED_REF if truncated else None),
         **llm_cost_log_fields(model_id, response),
     ))
 
@@ -195,6 +243,17 @@ def _run_merge(llm_node, update_summary, user_id, model_id,
             f"(truncated={truncated}, output_tokens={output_tokens})")
         _update_apply_status(llm_node, "failed", error="Empty merge result",
                             confirm_node_id=confirm_node_id)
+        db.session.commit()
+        return
+
+    # A cut-off list (output cap, a repetition loop) is missing items:
+    # saving it would replace the user's list with a partial one (#432).
+    if truncated:
+        logger.warning(
+            f"Todo merge for node {llm_node_id} was cut off; nothing "
+            f"saved (output_tokens={output_tokens})")
+        _update_apply_status(llm_node, "failed", error=TRUNCATED_MESSAGE,
+                             confirm_node_id=confirm_node_id)
         db.session.commit()
         return
 
@@ -209,20 +268,21 @@ def _run_merge(llm_node, update_summary, user_id, model_id,
     )
     new_todo.set_content(merged_todo)
     db.session.add(new_todo)
+    # Assigns new_todo.id, so the proposal's tool_calls_meta records which
+    # todo version this merge produced (#410).
+    db.session.flush()
 
     # Update apply status
-    if truncated:
-        logger.warning(f"Todo merge response truncated for node {llm_node_id}")
     _update_apply_status(
         llm_node, "completed", todo_id=new_todo.id,
-        truncated=truncated, confirm_node_id=confirm_node_id)
+        confirm_node_id=confirm_node_id)
 
     db.session.commit()
-    logger.info(f"Voice todo merge completed: todo_id={new_todo.id} for user {user_id}, truncated={truncated}")
+    logger.info(f"Voice todo merge completed: todo_id={new_todo.id} for user {user_id}")
 
 
 def _update_apply_status(llm_node, status, error=None, todo_id=None,
-                         truncated=False, confirm_node_id=None):
+                         confirm_node_id=None):
     """Update the apply_status in the LLM node's tool_calls_meta.
 
     Also updates the confirmation node (where apply_todo_changes lives)
@@ -241,8 +301,6 @@ def _update_apply_status(llm_node, status, error=None, todo_id=None,
                 entry["apply_error"] = error
             if todo_id:
                 entry["todo_id"] = todo_id
-            if truncated:
-                entry["apply_truncated"] = True
             break
     llm_node.tool_calls_meta = json.dumps(meta)
 

@@ -48,6 +48,15 @@ class Config:
     # Recipient for spend alerts (admin inbox also used for signup notices).
     SPEND_ALERT_EMAIL = os.environ.get("SPEND_ALERT_EMAIL", "signup@loore.org")
 
+    # Model calls that fail for an account reason (spend limit, billing,
+    # API key, unknown model; #369, #360) email SPEND_ALERT_EMAIL once per
+    # cause per this many seconds (backend/utils/provider_alerts.py).
+    # Default 6 h: a cause that stays broken is re-sent at most 4x a day.
+    PROVIDER_ACCOUNT_ALERT_THROTTLE_SECONDS = int(
+        os.environ.get("PROVIDER_ACCOUNT_ALERT_THROTTLE_SECONDS", "21600")
+        or "21600"
+    )
+
     # Per-user monthly spend hard cap in USD, summed across ALL providers
     # (issue #85 follow-up; free-alpha guardrail). 0 (default) disables the
     # cap. When a user's month-to-date spend reaches this, they are
@@ -136,16 +145,17 @@ class Config:
     # Sources:
     #   Anthropic: https://platform.claude.com/docs/en/about-claude/pricing
     #   OpenAI:    https://developers.openai.com/api/docs/pricing
-    PRICING_VERSION = "7"
-    PRICING_UPDATED_AT = "2026-09-23"
+    PRICING_VERSION = "9"
+    PRICING_UPDATED_AT = "2026-10-08"
 
     # Supported models configuration (single source of truth for all model metadata)
     #
     # Profile-chunk sizing keys (docs/design/chunk-planner.md):
     #   tokenizer_family  — which BPE the model bills with: "claude_old"
     #                       (Opus ≤ 4.6, Sonnet 4.6, Haiku 4.5), "claude_new"
-    #                       (introduced with Opus 4.7: Opus 4.7/4.8/5/5.5, Sonnet 5,
-    #                       Fable 5/5.1; 1.0–1.35× the old family), "o200k"
+    #                       (introduced with Opus 4.7: Opus 4.7/4.8/5/5.5, Sonnet
+    #                       5/5.5, Haiku 5.5, Fable 5/5.1; 1.0–1.35× the old
+    #                       family), "o200k"
     #                       (GPT-5.x; tiktoken o200k_base matches billing).
     #                       Chunk balance is in stored content units and does
     #                       not depend on the family; the family only selects
@@ -155,8 +165,11 @@ class Config:
     #                       below the context window: OpenAI reserves its full
     #                       128k max output out of the window whatever is
     #                       requested, so a 1.05M window takes 922k of input.
-    #   long_context_threshold — the pricing tier; the profile pipeline never
-    #                       plans a prompt across it (#259).
+    #   long_context_threshold — the pricing tier: a prompt (uncached input
+    #                       + cache reads + cache writes) above it bills the
+    #                       whole request at the long_context_input_ /
+    #                       _output_multiplier (utils/cost.py). The profile
+    #                       pipeline never plans a prompt across it (#259).
     #
     #   cache_diagnostics — OpenAI Prompt Cache Diagnostics (GPT-5.6 and later,
     #                       #348): conversation calls pass the previous call's
@@ -172,9 +185,42 @@ class Config:
     #                the rest sit behind "More models…". Set by hand.
     #   read       — a read (Community Archive picks) may run on it; the
     #                Read button's picker lists only these.
+    #   chat       — False keeps the model to reads: it is left out of
+    #                the chat pickers (LLM Response, the Account default,
+    #                admin polls) and refused as an account preference,
+    #                as LLM_NAME and as a poll's model, and a reply that
+    #                is not a read turn sent with it is refused with a 400
+    #                (create_llm_placeholder, ReadOnlyModelRefused), never
+    #                moved to another model. Absent means True.
+    #                "Read only" = read: True + chat: False.
     # The picker's full list follows this dict's order: newest first
     # within each provider.
     SUPPORTED_MODELS = {
+        "gpt-6.1-sol": {
+            # ASSUMED o200k, as for gpt-6-sol.
+            "tokenizer_family": "o200k",
+            "provider": "openai",
+            "api_model": "gpt-6.1-sol",
+            "cache_diagnostics": True,
+            "max_input_tokens": 922000,
+            "display_name": "GPT-6.1 Sol",
+            # Read only (Peter, 2026-10-02): "for Read (not for normal
+            # chatting, though)".
+            "read": True,
+            "chat": False,
+            "context_window": 1050000,
+            # Verified 2026-10-02 on the OpenAI pricing + model pages:
+            # $2.00 / $10.00, cached input $0.10 (0.05x, where gpt-6-sol
+            # is 0.1x), cache writes $2.50 (the default 1.25x); >272k
+            # input: 2x input and cache rates, 1.5x output for the whole
+            # request; batch half.
+            "input_price_per_mtok": 2.00,
+            "output_price_per_mtok": 10.00,
+            "cached_input_multiplier": 0.05,
+            "long_context_threshold": 272000,
+            "long_context_input_multiplier": 2.0,
+            "long_context_output_multiplier": 1.5,
+        },
         "gpt-6-astra": {
             "provider": "openai",
             "api_model": "gpt-6-astra",
@@ -338,6 +384,54 @@ class Config:
             "input_price_per_mtok": 1.75,
             "output_price_per_mtok": 14.00,
             "deprecated": True,
+        },
+        "claude-sonnet-5.5": {
+            "tokenizer_family": "claude_new",
+            "provider": "anthropic",
+            "api_model": "claude-sonnet-5-5",
+            "display_name": "Sonnet 5.5",
+            # Read only (Peter, 2026-10-02): "for Read (not for normal
+            # chatting, though)".
+            "read": True,
+            "chat": False,
+            "context_window": 1000000,
+            # Verified 2026-10-02 on the Anthropic pricing page: $2 / $10,
+            # 5m cache writes $2.50 (the standard 1.25x), batch 50%, flat
+            # pricing across the 1M window.
+            "input_price_per_mtok": 2.00,
+            "output_price_per_mtok": 10.00,
+            # Cache hits bill at 0.05x base input ($0.10/MTok), as on Opus
+            # 5.5 (pricing page, 2026-10-08; was recorded as 0.1x).
+            "cache_read_multiplier": 0.05,
+        },
+        "claude-haiku-5.5": {
+            # The Anthropic pricing page: Claude 4.7 and later models use
+            # the newer tokenizer (~30% more tokens than Haiku 4.5).
+            "tokenizer_family": "claude_new",
+            "provider": "anthropic",
+            "api_model": "claude-haiku-5-5",
+            "display_name": "Haiku 5.5",
+            # Read only (Peter, 2026-10-08): "yes pls, add it to the list
+            # of models for Read. We will see how good it is - if it's
+            # actually better than Luna, we can figure out how to get the
+            # input below 100k toks."
+            "read": True,
+            "chat": False,
+            # 1M context, 128K max output (above DEFAULT_MAX_OUTPUT_TOKENS,
+            # so no max_output_tokens entry).
+            "context_window": 1000000,
+            # Verified 2026-10-08 on the Anthropic pricing page: prompts up
+            # to 100,000 tokens $0.10 / $0.50, cache hits $0.01 (the
+            # standard 0.1x), 5m writes $0.125 (1.25x); prompts over
+            # 100,000 tokens $0.50 / $2.50, hits $0.05, writes $0.625 (5x
+            # input, cache and output for the whole request); batch half
+            # of each. A day of Community Archive tweets is ~270k tokens,
+            # so every Read bills at the higher tier.
+            "input_price_per_mtok": 0.10,
+            "output_price_per_mtok": 0.50,
+            "long_context_threshold": 100000,
+            "long_context_input_multiplier": 5.0,
+            "long_context_output_multiplier": 5.0,
         },
         "claude-sonnet-4.5": {
             "tokenizer_family": "claude_old",

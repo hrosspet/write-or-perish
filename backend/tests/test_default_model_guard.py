@@ -63,6 +63,20 @@ def test_read_default_must_be_a_read_model():
                                 "SUPPORTED_MODELS": models})
 
 
+def test_a_read_only_model_is_no_chat_default_but_may_be_the_read_default():
+    models = {"claude-opus-4.6": {"provider": "anthropic"},
+              "gpt-6.1-sol": {"provider": "openai", "read": True,
+                              "chat": False}}
+    with pytest.raises(RuntimeError) as e:
+        validate_default_model({"DEFAULT_LLM_MODEL": "gpt-6.1-sol",
+                                "SUPPORTED_MODELS": models})
+    assert "read only" in str(e.value)
+    assert "Active chat models: claude-opus-4.6" in str(e.value)
+    validate_default_model({"DEFAULT_LLM_MODEL": "claude-opus-4.6",
+                            "READ_DEFAULT_MODEL": "gpt-6.1-sol",
+                            "SUPPORTED_MODELS": models})
+
+
 def test_the_shipped_config_passes():
     from backend.config import Config
     validate_default_model({

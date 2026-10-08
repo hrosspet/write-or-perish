@@ -306,9 +306,42 @@ def record_feed_render(node, stats, refs, days=1, scope="all"):
     row.account_count = int(stats.get("accounts") or 0)
     row.excluded_count = int(stats.get("excluded") or 0)
     row.set_tweet_ids(refs[n]["tweet_id"] for n in sorted(refs))
+    # A rerun's collect counts its own drops.
+    row.dropped_picks = 0
     row.created_at = datetime.utcnow()
     db.session.add(row)
     return row
+
+
+def mark_read_reply_opened(node, user_id):
+    """Record that the reply's owner opened a finished Read reply:
+    FeedRender.opened_at, the first time only. Called where the reply's
+    text is served to a page the owner is looking at: GET /nodes/<id> of
+    the reply, and llm-status when it returns the finished reply to a
+    thread page left open while the batch ran, but only for a poll the
+    page marked visible (?visible=1): the page keeps polling in a
+    background tab, which is not an open. Only the reply's human owner
+    counts; another user or an admin
+    who can see the node does not, and neither does a reply still being
+    generated. One UPDATE matched only while opened_at is null, no
+    content read; a node with no FeedRender row matches nothing. Commits
+    when it set the time, so callers run it after their last read of
+    the session's objects. Returns whether it did."""
+    from backend.extensions import db
+    from backend.models import FeedRender
+    if (node is None or user_id is None
+            or not (node.node_type == "llm" or node.llm_model)
+            or node.llm_task_status != "completed"
+            or node.human_owner_id != user_id):
+        return False
+    updated = (FeedRender.query
+               .filter(FeedRender.node_id == node.id,
+                       FeedRender.opened_at.is_(None))
+               .update({FeedRender.opened_at: datetime.utcnow()},
+                       synchronize_session=False))
+    if updated:
+        db.session.commit()
+    return bool(updated)
 
 
 def read_window_fields(row):
@@ -349,13 +382,27 @@ def pick_numbers(text):
     return numbers
 
 
+def count_dropped_picks(reply_text, refs):
+    """How many of the model's picks Loore could not show: each cited
+    number once, whose tweet is not in *refs* (the render's refs, the ones
+    that resolved). A number outside the render and a tweet the snapshot no
+    longer holds both count, as parse_feed_reply drops both. A number
+    cited only in the verdict is no pick. Shared by the batch collect
+    (refs_from_render) and the admin's live rerun (_collect_feed_reply), so
+    FeedRender.dropped_picks means the same on both."""
+    return len(set(pick_numbers(reply_text)) - set(refs))
+
+
 def refs_from_render(row, reply_text, snapshot_dir):
     """The refs a pinned reply's picks need, without re-rendering the day:
     each cited number maps to the tweet id the model saw under it
     (FeedRender.tweet_id_for), and those few tweets are fetched by id
     from the snapshot — the current one; ids are stable across exports.
-    A tweet the snapshot no longer holds drops its pick (parse_feed_reply
-    logs it as an unknown number)."""
+    A tweet the snapshot no longer holds drops its pick, and so does a
+    number outside the render (parse_feed_reply logs both as unknown
+    numbers). How many of the model's picks were dropped either way is
+    recorded on the render (FeedRender.dropped_picks), each number once;
+    a number cited only in the verdict is not a pick and not counted."""
     from backend.utils.community_archive import (
         CA_CITATION_RE, fetch_tweets_by_id)
     numbers = pick_numbers(reply_text)
@@ -380,6 +427,7 @@ def refs_from_render(row, reply_text, snapshot_dir):
                         "snapshot; dropping it", n, tweet_id)
             continue
         refs[n] = ref
+    row.dropped_picks = count_dropped_picks(reply_text, refs)
     return refs
 
 

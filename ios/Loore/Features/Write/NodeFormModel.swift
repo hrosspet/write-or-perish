@@ -124,6 +124,8 @@ final class NodeFormModel {
     private(set) var pendingPaste: String?
     @ObservationIgnored private var splitAcknowledged = false
     @ObservationIgnored private var pendingRegenerateTts: Bool?
+    /// The submit a dialog answer started; tests await it.
+    @ObservationIgnored private(set) var dialogSubmit: Task<Void, Never>?
 
     let drafts: DraftAutosaver
     @ObservationIgnored private var started = false
@@ -307,15 +309,15 @@ final class NodeFormModel {
     }
 
     func answerTts(_ regenerate: Bool) {
-        Task { await submit(regenerateTts: regenerate) }
+        dialogSubmit = Task { await submit(regenerateTts: regenerate) }
     }
 
     func answerScope(_ applyToReplies: Bool) {
-        Task { await submit(regenerateTts: pendingRegenerateTts, applyToReplies: applyToReplies) }
+        dialogSubmit = Task { await submit(regenerateTts: pendingRegenerateTts, applyToReplies: applyToReplies) }
     }
 
     func answerPublicReply() {
-        Task { await submit(publicConfirmed: true) }
+        dialogSubmit = Task { await submit(publicConfirmed: true) }
     }
 
     func confirmSplit() {
@@ -327,7 +329,7 @@ final class NodeFormModel {
             hasDraft = true
             pendingPaste = nil
         } else {
-            Task { await submit(splitConfirmed: true) }
+            dialogSubmit = Task { await submit(splitConfirmed: true) }
         }
     }
 
