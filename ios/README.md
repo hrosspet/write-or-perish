@@ -310,7 +310,7 @@ Release build they are compiled out.
 ```sh
 cd ios && xcodegen
 xcodebuild -project Loore.xcodeproj -scheme Loore \
-  -destination 'platform=iOS Simulator,name=iPhone 17' test      # 395 unit tests
+  -destination 'platform=iOS Simulator,name=iPhone 17' test      # 451 unit tests
 python3 ios/scripts/check_terms_text.py                          # Terms text == TermsModal.js
 ```
 
@@ -432,6 +432,24 @@ Account → Voice → "Sound while Loore thinks" on Soft.
       Voice: "Unfinished Voice recording" → Continue → record a few seconds → stop.
       The reply's transcript contains all three parts.
 - [ ] **Headphones unplugged / AirPods removed during playback** pause the reply.
+- [ ] **Bluetooth headphones on a walk (#423).** Record several voice turns of a few
+      minutes with the phone locked in a pocket: the transcripts are complete, and
+      the recording logs (below) show the input staying on `BluetoothHFP`. Then
+      switch the headphones off mid-recording: the alert plays from the phone, the
+      lock screen shows Paused, the notification says so, and Resume continues on
+      the phone's mic; the transcript has both parts.
+
+**Recording logs.** Each recording writes a plain-text log on the phone (route
+changes, interruptions, microphone restarts, chunks, input level once a second; no
+audio or words). Copy them from a build installed from Xcode, with the iPhone
+connected (`xcrun devicectl list devices` gives the device id; the bundle id is
+yours from `Signing.local.xcconfig`):
+
+```sh
+xcrun devicectl device copy from --device <device id> \
+  --domain-type appDataContainer --domain-identifier <bundle id> \
+  --source "Library/Application Support/RecordingLogs" --destination ./recording-logs
+```
 - [ ] **Dictation.** In a thread's reply box: Record, lock the phone for 30 s,
       unlock, stop: the transcript lands in the box; "Save audio" shares an `.m4a`.
 - [ ] **Listen aloud.** A node's speaker icon plays in the mini-player above the tab

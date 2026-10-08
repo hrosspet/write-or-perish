@@ -64,7 +64,12 @@ final class AudioCenter {
         VoiceActivityCommands.handler = { [weak self] command in await self?.runLockScreenCommand(command) }
         observers.append(NotificationCenter.default.addObserver(forName: UIApplication.didBecomeActiveNotification,
                                                                 object: nil, queue: .main) { [weak self] _ in
+            RecordingLog.shared.note("app active")
             MainActor.assumeIsolated { self?.voiceController?.appDidBecomeActive() }
+        })
+        observers.append(NotificationCenter.default.addObserver(forName: UIApplication.didEnterBackgroundNotification,
+                                                                object: nil, queue: .main) { _ in
+            RecordingLog.shared.note("app in background")
         })
     }
 
@@ -124,6 +129,7 @@ final class AudioCenter {
         activeDictation?.cancel()
         ChunkUploader.shared.reset()
         PrivateFiles.sweepTemporary()
+        RecordingLog.shared.deleteAll()
         listenTask?.cancel()
         listenCache = [:]
         loadingSource = nil
@@ -170,8 +176,15 @@ final class AudioCenter {
                 player.play()
             }
             resumeAfterInterruption = false
-        case .oldDeviceUnavailable:
-            if player.isPlaying { player.pause() }
+        case .routeChanged(let reason, let from, let to):
+            if reason == .oldDeviceUnavailable && player.isPlaying { player.pause() }
+            if AudioRoute.headsetMicLost(from: from, to: to) {
+                // Also at every Stop (the switch to playback drops the input): only
+                // a recording that was paused gets a line.
+                let voiceHeld = voiceActive && voiceController?.headsetMicLost() == true
+                let dictationHeld = activeDictation?.headsetMicLost() == true
+                if voiceHeld || dictationHeld { RecordingLog.shared.note("headset mic lost: recording paused") }
+            }
         case .mediaServicesReset:
             sounds.stopCue()
             if voiceActive { voiceController?.systemInterruptionBegan() }
@@ -181,6 +194,9 @@ final class AudioCenter {
     }
 
     @ObservationIgnored private var resumeAfterInterruption = false
+    /// The releases of recordings a killed app left (`releaseAbandonedRecordings`);
+    /// the Voice screen waits for them before it asks for unfinished recordings.
+    @ObservationIgnored var releasingAbandoned: Task<Void, Never>?
     /// The voice conversation's last toast (a lock-screen Record that failed repeats it).
     @ObservationIgnored private var lastVoiceToast: (text: String, at: Date)?
 
@@ -411,7 +427,7 @@ enum LocalNotifier {
 extension AudioCenter {
     /// Signed in with cookies restored: finish uploads a killed app left behind.
     func didSignIn() {
-        ChunkUploader.shared.resumePending()
+        releaseAbandonedRecordings(ChunkUploader.shared.resumePending(releaseMargin: AudioCenter.releaseTimeout))
         #if DEBUG
         // `-LooreDebugListenNode <id>`: play a node's audio in the global player
         // at launch (the speaker icon's path) until the thread view lands (M2).
@@ -419,6 +435,38 @@ extension AudioCenter {
         if id > 0 { listen(to: .node(id), content: nil) }
         #endif
     }
+}
+
+extension AudioCenter {
+    /// Recordings this app was making when it was killed or crashed. The server
+    /// counts a recording session as live for `ChunkUploader.serverLiveWindow`
+    /// after its last chunk and keeps it out of the Voice screen's recovery
+    /// banner until then; after the crash on the 2026-10-07 walk (#423) the
+    /// Voice screen opened inside that window and offered nothing. Nothing
+    /// records into these any more, so they are released now (the web's
+    /// pagehide beacon does the same), but only while still inside the window
+    /// (`ChunkUploader.mayRelease`).
+    func releaseAbandonedRecordings(_ sessionIds: [String]) {
+        guard !sessionIds.isEmpty, let api = app?.api else { return }
+        releasingAbandoned = Task {
+            await withTaskGroup(of: Void.self) { group in
+                for sessionId in sessionIds {
+                    group.addTask {
+                        var request = APIRequest(.post, APIPath.streamingRelease(sessionId))
+                        request.timeout = AudioCenter.releaseTimeout
+                        _ = try? await api.data(for: request)
+                    }
+                }
+            }
+        }
+    }
+
+    /// INTRODUCED HEURISTIC: the longest a release may take. The Voice screen
+    /// waits for the releases before it asks for unfinished recordings, so
+    /// offline it stays blank for at most this long. Also taken off the window
+    /// in which a relaunch releases (`ChunkUploader.mayRelease`), so a release
+    /// still in flight lands while the server hides the session.
+    static let releaseTimeout: TimeInterval = 5
 }
 
 /// App delegate for the background upload session (design doc §9.2): a relaunch

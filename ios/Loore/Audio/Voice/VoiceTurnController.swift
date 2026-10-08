@@ -126,6 +126,8 @@ final class VoiceTurnController {
     @ObservationIgnored private var toastedWarnings: Set<String> = []
     @ObservationIgnored private var failureToasted: Set<Int> = []
     @ObservationIgnored private var interruptionToast: Int?
+    /// The current hold left the microphone running (a lost headset mic, #423).
+    @ObservationIgnored private var holdKeepsCapture = false
     @ObservationIgnored private var longRecordingWarned = false
     @ObservationIgnored private var flowTask: Task<Void, Never>?
     @ObservationIgnored private var tickTask: Task<Void, Never>?
@@ -350,9 +352,36 @@ final class VoiceTurnController {
         holdForInterruption("Recording paused — the microphone stopped after an audio device change. Everything up to here is saved. Press Resume to continue.")
     }
 
-    private func holdForInterruption(_ message: String) {
-        guard !isInterrupted else { return }
-        recorder.interrupt()
+    /// The headphones' mic went away mid-recording (#423). iOS would carry on with
+    /// the phone's own mic, which in a pocket records almost nothing of the voice:
+    /// hold instead, and wait for Resume (web parity: no automatic resume, also
+    /// when the headphones come back). The microphone keeps running and only its
+    /// samples are dropped, as in a user pause, so the app stays alive and Resume
+    /// works from the lock screen.
+    /// - Returns: whether the recording was paused now.
+    @discardableResult
+    func headsetMicLost() -> Bool {
+        guard state == .recording else { return false }
+        return holdForInterruption("Recording paused — the headphones’ microphone disconnected. Everything up to here is saved. Press Resume to continue.",
+                                   keepCapture: true)
+    }
+
+    /// - Parameter keepCapture: drop samples but keep the microphone running (the
+    ///   session is still ours), rather than stopping capture as for a call.
+    /// - Returns: whether this began a hold (false when already held).
+    @discardableResult
+    private func holdForInterruption(_ message: String, keepCapture: Bool = false) -> Bool {
+        guard !isInterrupted else {
+            // A call or a dead microphone during a lost-headset hold: capture
+            // stops now (no second alert), or the watchdog would fight the call.
+            if holdKeepsCapture && !keepCapture {
+                recorder.interrupt()
+                holdKeepsCapture = false
+            }
+            return false
+        }
+        holdKeepsCapture = keepCapture
+        if keepCapture { recorder.pause() } else { recorder.interrupt() }
         isPaused = true
         isInterrupted = true
         audio.playInterruptionAlert()
@@ -360,6 +389,7 @@ final class VoiceTurnController {
         interruptionToast = notices.toast(message, duration: 24 * 60 * 60)
         notices.notify(.recordingPaused)
         audio.refreshNowPlaying()
+        return true
     }
 
     /// The interruption is over. No automatic resume (web parity); the chime
@@ -377,6 +407,7 @@ final class VoiceTurnController {
 
     private func endInterruption() {
         isInterrupted = false
+        holdKeepsCapture = false
         if let id = interruptionToast { notices.dismissToast(id) }
         interruptionToast = nil
         notices.withdraw(.recordingPaused)
