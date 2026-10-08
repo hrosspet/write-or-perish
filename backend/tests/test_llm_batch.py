@@ -28,6 +28,7 @@ from backend.utils.llm_batch import (  # noqa: E402
     batch_check_and_collect,
     BatchItemFailed,
     BatchItemCancelled,
+    anthropic_batch_submit_one,
     anthropic_batch_collect_one,
     openai_batch_collect_one,
 )
@@ -567,3 +568,54 @@ def test_collect_one_anthropic_canceled_item_is_cancelled(monkeypatch):
 
     with pytest.raises(BatchItemCancelled, match="before it ran"):
         anthropic_batch_collect_one("k", "b-ant", "node-7")
+
+
+# ── a Read on Haiku 5.5 (Peter, 2026-10-08) ──────────────────────────────
+# Haiku 5.5 refuses non-default sampling parameters and a `fallbacks`
+# list with a 400, and thinks (adaptive, effort medium) unless told
+# otherwise; its reply can start with a thinking block whose text is
+# empty. The Read's one-item batch sends none of those settings and keeps
+# only the text.
+
+def test_read_batch_on_haiku_5_5_sends_only_supported_params(monkeypatch):
+    client = MagicMock()
+    client.messages.batches.create.return_value = SimpleNamespace(id="b-ant")
+    _install_fake_sdks(monkeypatch, anthropic_client=client)
+    schema = {"type": "object", "properties": {"verdict": {"type": "string"}},
+              "required": ["verdict"], "additionalProperties": False}
+
+    assert anthropic_batch_submit_one(
+        "k", "node-7", "claude-haiku-5-5",
+        [{"role": "system", "content": "read prompt"},
+         {"role": "user", "content": "tweets"}],
+        32000, output_schema=schema) == "b-ant"
+
+    params = client.messages.batches.create.call_args.kwargs[
+        "requests"][0]["params"]
+    assert params["model"] == "claude-haiku-5-5"
+    assert params["output_config"] == {
+        "format": {"type": "json_schema", "schema": schema}}
+    assert set(params) == {"model", "max_tokens", "messages", "system",
+                           "output_config"}
+
+
+def test_read_batch_collect_skips_a_thinking_block(monkeypatch):
+    client = MagicMock()
+    client.messages.batches.retrieve.return_value = SimpleNamespace(
+        processing_status="ended", request_counts="counts")
+    client.messages.batches.results.return_value = [SimpleNamespace(
+        custom_id="node-7",
+        result=SimpleNamespace(type="succeeded", message=SimpleNamespace(
+            content=[SimpleNamespace(type="thinking", thinking="",
+                                     signature="sig"),
+                     SimpleNamespace(type="text", text='{"verdict": "ok"}')],
+            stop_reason="end_turn",
+            usage=SimpleNamespace(input_tokens=270_000,
+                                  output_tokens=3_000))))]
+    _install_fake_sdks(monkeypatch, anthropic_client=client)
+
+    status, resp = anthropic_batch_collect_one("k", "b-ant", "node-7")
+    assert status == "ended"
+    assert resp["content"] == '{"verdict": "ok"}'
+    assert (resp["input_tokens"], resp["output_tokens"]) == (270_000, 3_000)
+    assert resp["truncated"] is False and resp["batch"] is True

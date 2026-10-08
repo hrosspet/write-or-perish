@@ -1391,7 +1391,9 @@ class TestReadOnlyModels:
         from backend.config import Config
         for key, api_model, provider in (
                 ("gpt-6.1-sol", "gpt-6.1-sol", "openai"),
-                ("claude-sonnet-5.5", "claude-sonnet-5-5", "anthropic")):
+                ("claude-sonnet-5.5", "claude-sonnet-5-5", "anthropic"),
+                # Peter, 2026-10-08.
+                ("claude-haiku-5.5", "claude-haiku-5-5", "anthropic")):
             cfg = Config.SUPPORTED_MODELS[key]
             assert (cfg["read"], cfg["chat"]) == (True, False), key
             assert (cfg["api_model"], cfg["provider"]) == (api_model, provider)

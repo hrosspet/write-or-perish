@@ -145,8 +145,8 @@ class Config:
     # Sources:
     #   Anthropic: https://platform.claude.com/docs/en/about-claude/pricing
     #   OpenAI:    https://developers.openai.com/api/docs/pricing
-    PRICING_VERSION = "8"
-    PRICING_UPDATED_AT = "2026-10-02"
+    PRICING_VERSION = "9"
+    PRICING_UPDATED_AT = "2026-10-08"
 
     # Supported models configuration (single source of truth for all model metadata)
     #
@@ -154,7 +154,8 @@ class Config:
     #   tokenizer_family  — which BPE the model bills with: "claude_old"
     #                       (Opus ≤ 4.6, Sonnet 4.6, Haiku 4.5), "claude_new"
     #                       (introduced with Opus 4.7: Opus 4.7/4.8/5/5.5, Sonnet
-    #                       5/5.5, Fable 5/5.1; 1.0–1.35× the old family), "o200k"
+    #                       5/5.5, Haiku 5.5, Fable 5/5.1; 1.0–1.35× the old
+    #                       family), "o200k"
     #                       (GPT-5.x; tiktoken o200k_base matches billing).
     #                       Chunk balance is in stored content units and does
     #                       not depend on the family; the family only selects
@@ -164,8 +165,11 @@ class Config:
     #                       below the context window: OpenAI reserves its full
     #                       128k max output out of the window whatever is
     #                       requested, so a 1.05M window takes 922k of input.
-    #   long_context_threshold — the pricing tier; the profile pipeline never
-    #                       plans a prompt across it (#259).
+    #   long_context_threshold — the pricing tier: a prompt (uncached input
+    #                       + cache reads + cache writes) above it bills the
+    #                       whole request at the long_context_input_ /
+    #                       _output_multiplier (utils/cost.py). The profile
+    #                       pipeline never plans a prompt across it (#259).
     #
     #   cache_diagnostics — OpenAI Prompt Cache Diagnostics (GPT-5.6 and later,
     #                       #348): conversation calls pass the previous call's
@@ -397,6 +401,35 @@ class Config:
             # window.
             "input_price_per_mtok": 2.00,
             "output_price_per_mtok": 10.00,
+        },
+        "claude-haiku-5.5": {
+            # The Anthropic pricing page: Claude 4.7 and later models use
+            # the newer tokenizer (~30% more tokens than Haiku 4.5).
+            "tokenizer_family": "claude_new",
+            "provider": "anthropic",
+            "api_model": "claude-haiku-5-5",
+            "display_name": "Haiku 5.5",
+            # Read only (Peter, 2026-10-08): "yes pls, add it to the list
+            # of models for Read. We will see how good it is - if it's
+            # actually better than Luna, we can figure out how to get the
+            # input below 100k toks."
+            "read": True,
+            "chat": False,
+            # 1M context, 128K max output (above DEFAULT_MAX_OUTPUT_TOKENS,
+            # so no max_output_tokens entry).
+            "context_window": 1000000,
+            # Verified 2026-10-08 on the Anthropic pricing page: prompts up
+            # to 100,000 tokens $0.10 / $0.50, cache hits $0.01 (the
+            # standard 0.1x), 5m writes $0.125 (1.25x); prompts over
+            # 100,000 tokens $0.50 / $2.50, hits $0.05, writes $0.625 (5x
+            # input, cache and output for the whole request); batch half
+            # of each. A day of Community Archive tweets is ~270k tokens,
+            # so every Read bills at the higher tier.
+            "input_price_per_mtok": 0.10,
+            "output_price_per_mtok": 0.50,
+            "long_context_threshold": 100000,
+            "long_context_input_multiplier": 5.0,
+            "long_context_output_multiplier": 5.0,
         },
         "claude-sonnet-4.5": {
             "tokenizer_family": "claude_old",
