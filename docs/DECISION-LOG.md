@@ -149,6 +149,17 @@ Kinds (one per entry and per table row):
 - **Source:** voice review 2026-10-02 (Paid Beta planning; Opus 5.5).
 - **Applies to:** #217, #218, #275, #224, #216, #374, #287; #379 and #331 except Peter's prod steps.
 
+### 2026-10-05 · Recording keeps the headset's mic
+
+- **Kind:** data safety
+- **Situation:** the native iPhone app (PR #384) records voice turns; its design document set the audio session for recording.
+- **Decision:** recorded in `.playAndRecord` with mode `.default`, not `.voiceChat` (which lowers playback volume), with Bluetooth A2DP allowed.
+- **Peter:** issue #423: "In the native iPhone app, voice-mode recording over connected Bluetooth headphones fails partway through. After a while, the app plays its warning sound for a headphone/audio problem. Either most of the audio is lost, or the recording silently switches to the iPhone's built-in mic."
+- **Score:** miss.
+- **Why it missed:** the design copied the web app, whose recording runs through Safari in `.videoChat`, a mode that keeps a connected headset's mic as the input, and checking that was possible before choosing `.default`.
+- **Source:** issue #423 (2026-10-05) and PR #384 (Opus 5.5). PR #424 names this session mode as the likely cause; the recording log has not confirmed it yet.
+- **Applies to:** PR #384, #423, PR #424.
+
 ### 2026-10-06 · Todo merge model: Luna first
 
 - **Kind:** cost
@@ -475,6 +486,17 @@ Decisions made before this log existed, oldest first. None of them has a predict
 - **Applies to:** #325, #326, PR #327, PR #339.
 - **Rule:** adopted 2026-10-06: a call goes to the training key only if everything in its prompt allows it. External content quoted word for word never reaches training.
 
+### 2026-09-24 · A bookmark isn't seen until it's marked read
+
+- **Kind:** product scope
+- **Situation:** PR #322 made the Read leave out tweets the user has already seen. Peter's note, quoted in the PR, asked to "Pre-filter seen recommendations (and bookmarks!)".
+- **Decision:** counted as seen every tweet saved from X (bookmarks and clipped tweets), read or not, besides the picks marked read.
+- **Peter:** issue #352: "The intent was to drop only references marked read."
+- **Score:** miss.
+- **Why it missed:** a bookmark shows that the user saved a tweet, not that they read it, so the builder could have asked whether "(and bookmarks!)" meant every bookmark or only those marked read.
+- **Source:** issue #352 (2026-09-24) and PR #322 (Fable 5.1).
+- **Applies to:** PR #322, #352, PR #358.
+
 ### 2026-09-25 · An account set to None runs no AI jobs
 
 - **Kind:** privacy
@@ -511,7 +533,7 @@ Decisions made before this log existed, oldest first. None of them has a predict
 - **Kind:** release/ops
 - **Situation:** PR #333 lets running Celery tasks finish before a deploy restarts the worker. While the worker drains, new tasks wait.
 - **Decision:** a 240 s drain before running tasks are stopped, flagged in the PR as a guess.
-- **Peter:** not kept verbatim. The PR records "Decided 2026-09-29 (voice review): 90 s drain, no re-queue in this PR" (commit 37026b2, "drain grace 90 s instead of 240 s (maintainer decision)").
+- **Peter:** "Decided 2026-09-29 (voice review): 90 s drain, no re-queue in this PR" (as recorded in the PR; commit 37026b2: "drain grace 90 s instead of 240 s (maintainer decision)").
 - **Score:** miss.
 - **Why it missed:** the drain was judged by the tasks it saves, not by the replies that wait behind it during every deploy.
 - **Source:** PR #333 and the voice review of 2026-09-29 (Opus 5.5); found on 2026-10-08 while backfilling approvals by merge.
@@ -644,7 +666,7 @@ Decisions made before this log existed, oldest first. None of them has a predict
 - **Kind:** user-facing text
 - **Situation:** PR #337 puts "Reflect" on the homepage. The card asks its own question, while the homepage and the Voice and Text modes ask "What's on your mind?".
 - **Decision:** added a helper line under the Reflect button: "Take the question with you, or start with whatever is on your mind. Type or record a voice note, whichever feels natural."
-- **Peter:** not kept verbatim. The PR records "Line under Reflect: 'Take the question with you…' is removed. The rest of the wording is approved." (voice review, 2026-10-01).
+- **Peter:** "Line under Reflect: 'Take the question with you…' is removed. The rest of the wording is approved." (as recorded in the PR, from the voice review of 2026-10-01).
 - **Score:** miss.
 - **Source:** PR #337 and the voice review of 2026-10-01 (Opus 5.5); found on 2026-10-08 while backfilling approvals by merge.
 - **Applies to:** PR #337, #391.
@@ -814,7 +836,7 @@ Decisions made before this log existed, oldest first. None of them has a predict
 
 ## Accepted by merge
 
-Builder decisions listed in PRs that merged without Peter correcting them, backfilled on 2026-10-08. Each row is a hit. Sources: the sections of the PR body that list the builder's own choices ("Decisions to review", "Decided under Peter's rules", "Heuristics introduced", "Choices to check", "Things I decided that you may want to change", introduced constants). A decision counts as corrected if this log, the PR's comments, its later commits or a later issue show Peter changing it; the two found that way are entries above ("The deploy drain: 90 s, not 240 s" and "The line under Reflect goes"). Left out: decisions already in this log as entries, Peter's own decisions written into a PR body, implementation details he couldn't have decided differently, known limitations, reviewer findings, and decisions he turned into a follow-up issue or that a later issue may trace back to. The cutoff, PRs merged since 2026-09-01, is a heuristic: older PRs are not backfilled. Date is the merge date; Model is the PR's Co-Authored-By line. Choices explicitly accepted in a voice review before the merge are counted here too.
+Builder decisions listed in PRs that merged without Peter correcting them, backfilled on 2026-10-08. Each row is a hit. Sources: the sections of the PR body that list the builder's own choices ("Decisions to review", "Decided under Peter's rules", "Heuristics introduced", "Choices to check", "Things I decided that you may want to change", introduced constants). A decision counts as corrected if this log, the PR's comments, its later commits or a later issue show Peter changing it; the corrections found that way are entries above ("The deploy drain: 90 s, not 240 s", "The line under Reflect goes", "A bookmark isn't seen until it's marked read", "Recording keeps the headset's mic"). Left out: decisions already in this log as entries, Peter's own decisions written into a PR body, implementation details he couldn't have decided differently, known limitations, reviewer findings, and decisions he turned into a follow-up issue. The cutoff, PRs merged since 2026-09-01, is a heuristic: older PRs are not backfilled. Date is the merge date; Model is the PR's Co-Authored-By line. Choices explicitly accepted in a voice review before the merge are counted here too.
 
 | Date | PR | Kind | Decision | Model | Result |
 |---|---|---|---|---|---|
