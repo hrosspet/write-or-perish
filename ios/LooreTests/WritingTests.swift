@@ -16,6 +16,7 @@ class StubbedAppTestCase: XCTestCase {
 
     override func setUp() async throws {
         StubURLProtocol.reset()
+        NodePrefetch.shared.resetForTesting()
         defaults = UserDefaults(suiteName: "loore-tests-\(UUID().uuidString)")
         app = AppState(launch: LaunchOptions(), secureStore: InMemorySecureStore(), defaults: defaults)
         let user = try decode(CurrentUser.self, Self.userJSON)
@@ -96,7 +97,7 @@ final class NodeFormModelTests: StubbedAppTestCase {
         await model.submit()
         XCTAssertTrue(model.showScopeDialog)
         model.answerScope(true)
-        try? await Task.sleep(nanoseconds: 300_000_000)
+        await model.dialogSubmit?.value
         XCTAssertEqual(result()?.descendantsUpdated, 3)
         XCTAssertEqual(body(of: "PUT /api/nodes/9")?["apply_to_descendants"] as? Bool, true)
         XCTAssertEqual(body(of: "PUT /api/nodes/9")?["ai_usage"] as? String, "none")
@@ -117,7 +118,7 @@ final class NodeFormModelTests: StubbedAppTestCase {
         await model.submit()
         XCTAssertTrue(model.showSplitDialog)
         model.confirmSplit()
-        try? await Task.sleep(nanoseconds: 300_000_000)
+        await model.dialogSubmit?.value
         XCTAssertEqual(result()?.id, 1)
         XCTAssertEqual(result()?.tipId, 3)
         XCTAssertEqual(SplitContentDialog.parts(250_001), 3)
@@ -152,7 +153,7 @@ final class NodeFormModelTests: StubbedAppTestCase {
         await model.submit()
         XCTAssertTrue(model.showPublicReplyDialog)
         model.answerPublicReply()
-        try? await Task.sleep(nanoseconds: 300_000_000)
+        await model.dialogSubmit?.value
         XCTAssertEqual(result()?.id, 8)
         XCTAssertEqual(body(of: "POST /api/nodes/")?["privacy_level"] as? String, "public")
     }
@@ -379,7 +380,10 @@ final class ThreadModelTests: StubbedAppTestCase {
         let binding = Binding(get: { auto }, set: { auto = $0 })
         await model.inlineReplySent(NodeFormResult(id: 11), autoGenerate: binding)
         XCTAssertEqual(body(of: "POST /api/nodes/11/llm")?["model"] as? String, "gpt-6-luna")
-        XCTAssertEqual(app.router.path(for: app.router.selectedTab).last, .thread(id: 11, awaitLLM: 77))
+        // The entry's page opens once its node is fetched (NodePrefetch).
+        let opened = await eventually { self.app.router.path(for: self.app.router.selectedTab).last == .thread(id: 11, awaitLLM: 77) }
+        XCTAssertTrue(opened)
+        XCTAssertTrue(calls.contains("GET /api/nodes/11"))
         XCTAssertTrue(auto)
     }
 
@@ -393,7 +397,8 @@ final class ThreadModelTests: StubbedAppTestCase {
         XCTAssertFalse(auto)
         XCTAssertFalse(calls.contains { $0.hasSuffix("/llm") })
         XCTAssertEqual(app.toasts.toasts.last?.message, "Turning off auto-generate. AI usage on some nodes is turned off.")
-        XCTAssertEqual(app.router.path(for: app.router.selectedTab).last, .thread(id: 11, awaitLLM: nil))
+        let opened = await eventually { self.app.router.path(for: self.app.router.selectedTab).last == .thread(id: 11, awaitLLM: nil) }
+        XCTAssertTrue(opened)
     }
 
     func testPublicThreadsForceAutoGenerateOff() async {
@@ -408,9 +413,30 @@ final class ThreadModelTests: StubbedAppTestCase {
         app.router.setPath([.thread(id: 10, awaitLLM: 55)], for: app.router.selectedTab)
         let model = await loadedModel(awaitLLM: 55)
         await model.start()
-        let path = app.router.path(for: app.router.selectedTab)
-        XCTAssertEqual(path, [.thread(id: 10, awaitLLM: nil), .thread(id: 55, awaitLLM: 55)])
+        // The entry stays (with the spinner) until the reply's node is fetched.
+        XCTAssertEqual(app.router.path(for: app.router.selectedTab), [.thread(id: 10, awaitLLM: nil)])
+        XCTAssertTrue(NodePrefetch.shared.isPending)
+        let opened = await eventually {
+            self.app.router.path(for: self.app.router.selectedTab) == [.thread(id: 10, awaitLLM: nil), .thread(id: 55, awaitLLM: 55)]
+        }
+        XCTAssertTrue(opened)
+        XCTAssertFalse(NodePrefetch.shared.isPending)
         model.stop()
+    }
+
+    func testLLMResponseWaitsWhileAnotherNodeLoads() async {
+        let model = await loadedModel()
+        StubURLProtocol.install { request in
+            var stub = StubResponse.json(200, "{}")
+            if request.url?.path(percentEncoded: true) == "/api/nodes/9" { stub.chunkDelay = 0.5 }
+            return stub
+        }
+        NodePrefetch.shared.open(9, app: app) {}
+        XCTAssertTrue(NodePrefetch.shared.isPending)
+        model.llmResponsePressed()
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertFalse(calls.contains("POST /api/nodes/10/llm"), "a second reply started while another node loaded")
+        XCTAssertFalse(model.llmRequesting)
     }
 
     func testPinRulesAndTitles() async {
@@ -476,6 +502,34 @@ final class ThreadModelTests: StubbedAppTestCase {
         XCTAssertEqual(model.node?.content, "Final text")
         XCTAssertEqual(app.router.path(for: app.router.selectedTab).count, 2)
         model.stop()
+    }
+
+    func testAReplyThatContinuesOpensTheNextNodeWithItsDataInHand() async {
+        let next = pendingJSON.replacingOccurrences(of: #""id":77,"#, with: #""id":78,"#)
+        let pending = pendingJSON
+        StubURLProtocol.install { request in
+            switch request.url?.path(percentEncoded: true) ?? "" {
+            case "/api/nodes/77": return .json(200, pending)
+            case "/api/nodes/78": return .json(200, next)
+            case "/api/nodes/77/llm-status":
+                return .json(200, #"{"node_id":77,"status":"completed","content":"Let me look.","continuation_node_id":78}"#)
+            default: return .json(200, "{}")
+            }
+        }
+        let tab = app.router.selectedTab
+        app.router.setPath([.thread(id: 10, awaitLLM: nil), .thread(id: 77, awaitLLM: 77)], for: tab)
+        let model = ThreadModel(nodeId: 77, awaitLLM: 77, app: app)
+        await model.start()
+        let opened = await eventually { self.app.router.path(for: tab).last == .thread(id: 78, awaitLLM: 78) }
+        XCTAssertTrue(opened)
+        model.stop()
+
+        // The continuation's page takes the fetched node: no second request.
+        let nextModel = ThreadModel(nodeId: 78, awaitLLM: 78, app: app)
+        await nextModel.load()
+        XCTAssertEqual(nextModel.node?.id, 78)
+        XCTAssertEqual(calls.filter { $0 == "GET /api/nodes/78" }.count, 1)
+        nextModel.stop()
     }
 
     func testAContinuationIsFollowed() async {
@@ -577,6 +631,82 @@ final class ModelPickerTests: XCTestCase {
         // A thread predecessor always wins.
         XCTAssertEqual(ModelPickerOptions.appliedSuggestion(models: all, suggestion: try suggestion("claude-opus-4.6", "predecessor"),
                                                             selected: "gpt-6-astra", purpose: .chat), "claude-opus-4.6")
+    }
+
+    // MARK: Read-only models (`chat: false`, PR #404)
+
+    /// `models()` plus the two read-only Read models, newest first within each provider.
+    private func modelsWithReadOnly() throws -> [ModelInfo] {
+        try decode([ModelInfo].self, """
+        [{"id":"gpt-6.1-sol","name":"GPT-6.1 Sol","provider":"openai","featured":false,"read":true,"chat":false},
+         {"id":"gpt-6-astra","name":"GPT-6 Astra","provider":"openai","featured":true,"read":false,"chat":true},
+         {"id":"gpt-6-luna","name":"GPT-6 Luna","provider":"openai","featured":false,"read":true,"chat":true},
+         {"id":"gpt-5.6-luna","name":"GPT-5.6 Luna","provider":"openai","featured":false,"read":true,"chat":true},
+         {"id":"claude-sonnet-5.5","name":"Sonnet 5.5","provider":"anthropic","featured":false,"read":true,"chat":false},
+         {"id":"claude-opus-5.5","name":"Opus 5.5","provider":"anthropic","featured":true,"read":false,"chat":true},
+         {"id":"claude-fable-5.1","name":"Fable 5.1","provider":"anthropic","featured":false,"read":false,"chat":true},
+         {"id":"claude-opus-4.6","name":"Opus 4.6","provider":"anthropic","featured":true,"read":false,"chat":true}]
+        """)
+    }
+
+    func testOfferedModelsPerPurpose() throws {
+        let all = try modelsWithReadOnly()
+        XCTAssertEqual(ModelPickerOptions.offered(all, purpose: .read).map(\.id),
+                       ["gpt-6.1-sol", "gpt-6-luna", "gpt-5.6-luna", "claude-sonnet-5.5"])
+        XCTAssertEqual(ModelPickerOptions.offered(all, purpose: .chat).map(\.id),
+                       ["gpt-6-astra", "gpt-6-luna", "gpt-5.6-luna", "claude-opus-5.5", "claude-fable-5.1", "claude-opus-4.6"])
+        // A server without the flag: every model is a chat model.
+        XCTAssertEqual(ModelPickerOptions.offered(try models(), purpose: .chat).count, try models().count)
+    }
+
+    func testChatPickerLeavesOutReadOnlyModelsEvenWhenSelected() throws {
+        let all = try modelsWithReadOnly()
+        let collapsed = ModelPickerOptions.make(models: all, selectedId: "claude-sonnet-5.5", purpose: .chat, expanded: false)
+        XCTAssertEqual(ids(collapsed), ["claude-opus-5.5", "claude-opus-4.6", "gpt-6-astra"])
+        guard case .grouped(let groups) = ModelPickerOptions.make(models: all, selectedId: "gpt-6.1-sol",
+                                                                   purpose: .chat, expanded: true) else { return XCTFail() }
+        XCTAssertEqual(groups.map(\.label), ["Anthropic", "OpenAI"])
+        XCTAssertEqual(groups[0].models.map(\.id), ["claude-opus-5.5", "claude-fable-5.1", "claude-opus-4.6"])
+        XCTAssertEqual(groups[1].models.map(\.id), ["gpt-6-astra", "gpt-6-luna", "gpt-5.6-luna"])
+    }
+
+    func testMoreModelsCountsOnlyChatModels() throws {
+        // Every chat model is featured; the read-only ones must not add "More models…".
+        let all = try decode([ModelInfo].self, """
+        [{"id":"gpt-6.1-sol","name":"GPT-6.1 Sol","provider":"openai","featured":false,"read":true,"chat":false},
+         {"id":"gpt-6-astra","name":"GPT-6 Astra","provider":"openai","featured":true,"read":false,"chat":true},
+         {"id":"claude-sonnet-5.5","name":"Sonnet 5.5","provider":"anthropic","featured":false,"read":true,"chat":false},
+         {"id":"claude-opus-5.5","name":"Opus 5.5","provider":"anthropic","featured":true,"read":false,"chat":true}]
+        """)
+        let o = ModelPickerOptions.make(models: all, selectedId: "claude-opus-5.5", purpose: .chat, expanded: false)
+        XCTAssertEqual(ids(o), ["claude-opus-5.5", "gpt-6-astra"])
+        guard case .flat(_, let more) = o else { return XCTFail() }
+        XCTAssertFalse(more)
+    }
+
+    func testReadPickerOffersReadOnlyModels() throws {
+        let o = ModelPickerOptions.make(models: try modelsWithReadOnly(), selectedId: "claude-sonnet-5.5",
+                                        purpose: .read, expanded: false)
+        XCTAssertEqual(ids(o), ["gpt-6.1-sol", "gpt-6-luna", "gpt-5.6-luna", "claude-sonnet-5.5"])
+    }
+
+    func testSuggestionRulesForReadOnlyModels() throws {
+        let all = try modelsWithReadOnly()
+        func suggestion(_ id: String, _ source: String) throws -> SuggestedModel {
+            try decode(SuggestedModel.self, #"{"suggested_model":"\#(id)","source":"\#(source)"}"#)
+        }
+        // A chat picker (LLM Response, or the Account default with no node) replaces a
+        // read-only selection with the server's suggestion, whatever its source.
+        XCTAssertEqual(ModelPickerOptions.appliedSuggestion(models: all, suggestion: try suggestion("claude-opus-5.5", "default"),
+                                                            selected: "claude-sonnet-5.5", purpose: .chat), "claude-opus-5.5")
+        XCTAssertEqual(ModelPickerOptions.appliedSuggestion(models: all, suggestion: try suggestion("gpt-6-astra", "user_preference"),
+                                                            selected: "gpt-6.1-sol", purpose: .chat), "gpt-6-astra")
+        // The Read picker keeps a read-only selection over a non-thread default.
+        XCTAssertNil(ModelPickerOptions.appliedSuggestion(models: all, suggestion: try suggestion("gpt-6-luna", "default"),
+                                                          selected: "gpt-6.1-sol", purpose: .read))
+        // A chat model is still replaced in the Read picker.
+        XCTAssertEqual(ModelPickerOptions.appliedSuggestion(models: all, suggestion: try suggestion("claude-sonnet-5.5", "default"),
+                                                            selected: "claude-opus-5.5", purpose: .read), "claude-sonnet-5.5")
     }
 }
 

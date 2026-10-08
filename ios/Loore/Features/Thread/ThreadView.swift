@@ -17,7 +17,10 @@ struct ThreadView: View {
             if let model {
                 ThreadContent(model: model, autoGenerate: $autoGenerate)
             } else {
-                LoadingLine(text: "Loading node...")
+                // The frame or two before `.task` makes the model (the page is sliding in):
+                // nothing yet. A node fetched before the page opened (NodePrefetch) then
+                // shows at once; any other shows "Loading node..." while it loads.
+                Color.clear
             }
         }
         // The whole page, also while loading (the background was only behind the line).
@@ -53,9 +56,7 @@ private struct ThreadContent: View {
 
     /// Another node of this thread: its page opens once its data is in (no loading page).
     private func openNode(_ id: Int) {
-        NodePrefetch.shared.open(id, api: app.api) {
-            app.open(.thread(id: id, awaitLLM: nil))
-        }
+        model.openThread(id, awaitLLM: nil)
     }
 
     var body: some View {
@@ -95,20 +96,6 @@ private struct ThreadContent: View {
                     .looreReadableWidth()
                 }
                 .scrollDismissesKeyboard(.interactively)
-                .overlay {
-                    // A tapped node is loading: say so at once. Taps still work, so a
-                    // misclick can be corrected (the newest tap opens).
-                    if NodePrefetch.shared.isPending {
-                        SpinnerRing(size: 18, lineWidth: 2)
-                            .padding(11)
-                            .background(LooreColor.bgCard, in: Circle())
-                            .overlay(Circle().strokeBorder(LooreColor.border))
-                            .allowsHitTesting(false)
-                            .accessibilityLabel("Loading node")
-                            .transition(.opacity)
-                    }
-                }
-                .animation(.easeOut(duration: 0.12), value: NodePrefetch.shared.isPending)
                 .task(id: node.id) {
                     // Once per focal node, after the first layout (web: scrollIntoView, block start).
                     guard !scrolledToFocal, !node.ancestors.isEmpty else { return }
@@ -154,7 +141,7 @@ private struct ThreadContent: View {
                                        : (model.inReadThread ? model.readLabel : "Relevant tweets")) {
                             Image(systemName: "book").font(.system(size: 11)).accessibilityHidden(true)
                         } action: { model.readFromNode(autoGenerate: autoGenerate) }
-                        .disabled(model.readLoading)
+                        .disabled(model.readLoading || NodePrefetch.shared.isPending)
                         .accessibilityHint(model.inReadThread && model.readReplyAbove ? ThreadModel.readFurtherTitle
                                            : ThreadModel.readEntryTitle)
                     }
@@ -264,7 +251,8 @@ private struct ThreadContent: View {
 
     /// "Read" / "Read further" with its own read-model picker (admin read threads).
     private func readRow(_ node: NodeDetail) -> some View {
-        let busy = model.readLoading || model.llmRequesting || model.llmTaskNodeId != nil
+        // Another node is loading (NodePrefetch): a second press would start a second read.
+        let busy = model.readLoading || model.llmRequesting || model.llmTaskNodeId != nil || NodePrefetch.shared.isPending
         return AdaptiveStack(spacing: 0, verticalSpacing: 6) {
             Button { model.readFromNode(autoGenerate: autoGenerate) } label: {
                 Text(model.readLoading ? "Starting…" : model.readLabel)
@@ -288,12 +276,15 @@ private struct ThreadContent: View {
     }
 
     private func llmResponseRow(_ node: NodeDetail) -> some View {
-        let busy = model.llmRequesting || model.llmTaskNodeId != nil
+        let working = model.llmRequesting || model.llmTaskNodeId != nil
+        // Another node is loading (NodePrefetch): disabled too, as a second press would
+        // start a second reply, but without the button's own spinner.
+        let busy = working || NodePrefetch.shared.isPending
         let underReadReply = model.isReadReply && node.llmTaskStatus == .completed
         return AdaptiveStack(spacing: 0, verticalSpacing: 6) {
             Button(action: model.llmResponsePressed) {
                 HStack(spacing: 8) {
-                    if busy { ProgressView().controlSize(.mini).tint(LooreColor.textSecondary) }
+                    if working { ProgressView().controlSize(.mini).tint(LooreColor.textSecondary) }
                     Text(model.llmRequesting ? "Requesting…"
                          : model.llmTaskNodeId != nil ? (model.llmPollStatus == .pending ? "Waiting for AI…" : "Generating…")
                          : "LLM Response")
@@ -579,7 +570,7 @@ private struct ToolCallsDisclosure: View {
                 HStack(spacing: 0) {
                     Text("Read in full — ")
                     linkButton("entry #\(ref.map(String.init) ?? "")") {
-                        if let ref { app.open(.thread(id: ref, awaitLLM: nil)) }
+                        if let ref { NodePrefetch.shared.openThread(ref, app: app) }
                     }
                 }
             }

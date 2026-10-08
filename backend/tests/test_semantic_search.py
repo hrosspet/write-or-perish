@@ -492,3 +492,25 @@ def test_retrieve_relevant_snippets_streams_more_rows_than_a_chunk(
             uid, "q", [], "fake-key", k=2, min_score=0.0,
             query_vector=[1.0, 0.0])
         assert [nid for nid, _, _, _ in results] == [best.id, nodes[4].id]
+
+
+def test_semantic_results_escape_stored_markup(app, client, monkeypatch):
+    """Semantic results have no snippet, so clients show `preview` — as
+    markup on both. Stored text, including a clipped page someone else
+    wrote, comes back escaped (#445). The marker is inert."""
+    probe = '<i data-loore-probe="1">probe</i>'
+    escaped = '&lt;i data-loore-probe=&quot;1&quot;&gt;probe&lt;/i&gt;'
+    with app.app_context():
+        uid = User.query.first().id
+        node = _mk_node(uid, f"my note {probe} & more")
+        _mk_embedding(node, [1.0, 0.0])
+        _mk_reference(uid, f"clipped {probe}", [0.9, 0.1], title="<b>T</b>")
+
+    _patch_query_embedding(monkeypatch, [1.0, 0.0])
+    body = client.get("/api/search/semantic?q=note").get_json()
+    node_r, ref_r = body["results"]
+    assert node_r["preview"] == f"my note {escaped} &amp; more"
+    assert ref_r["preview"] == f"clipped {escaped}"
+    assert node_r["snippet"] is None and ref_r["snippet"] is None
+    # The title is a plain-text field (rendered as text by both clients).
+    assert ref_r["title"] == "<b>T</b>"

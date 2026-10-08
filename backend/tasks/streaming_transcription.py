@@ -60,6 +60,12 @@ VOICE_REPLY_SKIPPED_AI_USAGE = (
     "Your recording is saved. Loore didn't reply because AI usage is set "
     "to None."
 )
+# The same when the turn asked for a read-only model: the reply is not
+# moved to another model (Peter, 2026-10-02), so there is none.
+VOICE_REPLY_SKIPPED_READ_ONLY = (
+    "Your recording is saved. Loore didn't reply because {model} is only "
+    "for Read. Choose another model for replies."
+)
 
 
 def _voice_reply_refusal(user_id, parent_id, draft):
@@ -988,7 +994,8 @@ class DraftFinalizationTask(Task):
 @celery.task(base=DraftFinalizationTask, bind=True)
 def finalize_draft_streaming(self, session_id: str, total_chunks: int,
                              label: str = None, user_id: int = None,
-                             parent_id: int = None, model: str = None):
+                             parent_id: int = None, model: str = None,
+                             client: str = None):
     """
     Finalize streaming transcription for a draft.
 
@@ -1008,6 +1015,8 @@ def finalize_draft_streaming(self, session_id: str, total_chunks: int,
         user_id: ID of the user (for server-side LLM chain)
         parent_id: Thread parent node ID (for server-side LLM chain)
         model: LLM model ID (for server-side LLM chain)
+        client: 'ios' / 'web' — the app the finalize request came from
+            (utils/client_platform), stamped on the reply placeholder.
     """
     logger.info(f"Finalizing draft streaming for session {session_id}, {total_chunks} chunks")
     # #371: where a voice turn's wait goes; marked under the reply node
@@ -1031,9 +1040,16 @@ def finalize_draft_streaming(self, session_id: str, total_chunks: int,
         # it), so warming the cache for it would be a paid write for nothing.
         # Nor for a recording that gets no reply because AI usage keeps it
         # (or its thread) away from AI: the warm would send it to a model.
+        # Nor on a model that is not a chat model (read only, deprecated):
+        # a chat turn never runs on it (a read-only one is refused, a
+        # deprecated one replaced), so the transcript would go to a model
+        # that writes no reply, possibly at another provider. A read never
+        # uses the warm (it goes through the Batch API).
         from backend.utils.spend import user_is_capped
+        from backend.utils.llm_nodes import is_chat_model
         cache_split_offset = None
         if (user_id and model and label == 'Voice'
+                and is_chat_model(model)
                 and not user_is_capped(user_id)
                 and _voice_reply_refusal(user_id, parent_id, draft) is None):
             try:
@@ -1243,6 +1259,7 @@ def finalize_draft_streaming(self, session_id: str, total_chunks: int,
                     user_id, parent_id, model, label,
                     cache_split_offset=cache_split_offset,
                     timing=timing,
+                    client=client,
                 )
             except Exception as e:
                 logger.error(
@@ -1315,7 +1332,8 @@ def _skip_voice_reply(draft, user_node, message):
 
 def _start_server_side_llm_chain(draft, session_id, transcript,
                                  user_id, parent_id, model, label,
-                                 cache_split_offset=None, timing=None):
+                                 cache_split_offset=None, timing=None,
+                                 client=None):
     """
     Create nodes and kick off LLM + TTS generation server-side.
 
@@ -1323,7 +1341,8 @@ def _start_server_side_llm_chain(draft, session_id, transcript,
     1. If no parent_id → create system node (with workflow prompt)
     2. Create user node with transcript
     3. Move streaming audio to user node (without deleting draft)
-    4. Create LLM placeholder node (enqueue=False)
+    4. Create LLM placeholder node (enqueue=False), stamped with the
+       *client* the finalize request came from
     5. Set draft.llm_node_id AND draft.streaming_status='completed'
        in one commit so the SSE all_complete event includes llm_node_id
     6. Enqueue generate_llm_response — it dispatches TTS per node at each
@@ -1339,7 +1358,8 @@ def _start_server_side_llm_chain(draft, session_id, transcript,
     from backend.models import Node, User
     from backend.utils.prompts import get_user_prompt_record
     from backend.utils.llm_nodes import (
-        AIUsageRefused, create_llm_placeholder, reply_ai_usage,
+        AIUsageRefused, ReadOnlyModelRefused, create_llm_placeholder,
+        reply_ai_usage,
     )
     from backend.utils.context_artifacts import attach_context_artifacts
     from backend.tasks.llm_completion import generate_llm_response
@@ -1438,20 +1458,25 @@ def _start_server_side_llm_chain(draft, session_id, transcript,
     # the nodes with no warning, and the voice frontend's fallback POST
     # then tried to save the same transcript again.
     # AIUsageRefused the same way: AI usage changed after the check above.
+    # ReadOnlyModelRefused the same way: the client sent a read-only model
+    # (an app whose picker does not filter on "chat"); the recording is
+    # kept and the reply is not moved to another model.
     from backend.utils.placeholders import UserExportValidationError
     from backend.utils.node_deletion import ParentDeletedError
     from backend.utils.spend import SpendCapExceeded
     try:
         llm_node, _ = create_llm_placeholder(
             tip_node.id, model, user_id, enqueue=False,
-            ai_usage=ai_usage,
+            ai_usage=ai_usage, client=client,
         )
     except (UserExportValidationError, ParentDeletedError,
-            SpendCapExceeded, AIUsageRefused) as e:
+            SpendCapExceeded, AIUsageRefused, ReadOnlyModelRefused) as e:
         if isinstance(e, SpendCapExceeded):
             message = VOICE_REPLY_SKIPPED_SPEND_CAP
         elif isinstance(e, AIUsageRefused):
             message = VOICE_REPLY_SKIPPED_AI_USAGE
+        elif isinstance(e, ReadOnlyModelRefused):
+            message = VOICE_REPLY_SKIPPED_READ_ONLY.format(model=e.model_name)
         else:
             message = str(e)
         logger.warning(

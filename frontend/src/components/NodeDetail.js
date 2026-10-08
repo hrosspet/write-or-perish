@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useLayoutEffect, useRef, useCallback } from "react";
-import { useParams, useNavigate, useSearchParams, useLocation, Link } from "react-router-dom";
+import { useNavigate, useSearchParams, useLocation, Link } from "react-router-dom";
 import { FaThumbtack, FaMicrophone, FaSpinner, FaBookOpen } from "react-icons/fa";
 import NodeFooter from "./NodeFooter";
 import SpeakerIcon from "./SpeakerIcon";
@@ -12,6 +12,7 @@ import { useUser } from "../contexts/UserContext";
 import { useToast } from "../contexts/ToastContext";
 import { useAsyncTaskPolling } from "../hooks/useAsyncTaskPolling";
 import { useLlmTextStream } from "../hooks/useSSE";
+import { peekPrefetchedNode, takePrefetchedNode } from "../hooks/useNodePrefetch";
 import api from "../api";
 import { useCheckboxToggle, useTaskInsert } from "../utils/markdown";
 import { contextAllowsAi, isAiUsageRefusedError } from "../utils/aiUsage";
@@ -31,6 +32,7 @@ import DeleteConfirmDialog from "./DeleteConfirmDialog";
 const READ_FURTHER_TITLE = "Another pass over the day's tweets, against everything in this thread so far "
   + "— your marks on these picks included.";
 const READ_ENTRY_TITLE = "Loore reads the last day of Community Archive tweets and shows you the ones relevant to this thread";
+
 // Recursive component to render children nodes.
 function RenderChildTree({ nodes, onBubbleClick, buildActions }) {
   return (
@@ -95,19 +97,23 @@ const tabTitleFor = (node) => {
   return firstLine ? `${firstLine} — Loore` : 'Loore';
 };
 
-function NodeDetail({ nodeIdOverride }) {
-  const { id: paramId } = useParams();
-  // Under /u/:username/:slug the id arrives resolved; under /node/:id it
-  // comes from params. Everything downstream just uses `id`.
-  const id = nodeIdOverride || paramId;
+// `nodeId`, `openNode` and `moving` come from NodeDetailWrapper: the id is
+// the node this page shows, which stays put while the address has moved on
+// to a node that is still loading; `openNode(id, go)` fetches a node before
+// `go` changes the address (useNodePrefetch); `moving` is true while another
+// node loads, and the billed buttons wait (a second press would start a
+// second reply or read).
+function NodeDetail({ nodeId: id, openNode, moving }) {
   const navigate = useNavigate();
   const location = useLocation();
   const [searchParams, setSearchParams] = useSearchParams();
   const { user: currentUser } = useUser();
   const { addToast } = useToast();
   const craftMode = !!currentUser?.craft_mode;
-  const [node, setNode] = useState(null);
-  const [loading, setLoading] = useState(true);
+  // Opened from another node: its data was fetched before this page opened
+  // (useNodePrefetch), so the page renders at once instead of loading.
+  const [node, setNode] = useState(() => peekPrefetchedNode(id));
+  const [loading, setLoading] = useState(node == null);
   const [error, setError] = useState("");
   const [showEditOverlay, setShowEditOverlay] = useState(false);
   const [selectedModel, setSelectedModel] = useState(currentUser?.preferred_model || null);
@@ -197,6 +203,10 @@ function NodeDetail({ nodeIdOverride }) {
       enabled: !!llmTaskNodeId,  // Auto-start when llmTaskNodeId is set
       interval: isBatchWait ? 15000 : 2000,
       maxDuration: isBatchWait ? 25 * 60 * 60 * 1000 : 30 * 60 * 1000,
+      // A finished Read reply counts as opened (FeedRender.opened_at) only
+      // for a poll from a visible tab; this page polls in the background
+      // too (batch reads take up to 25 h).
+      reportVisible: true,
     }
   );
 
@@ -211,13 +221,15 @@ function NodeDetail({ nodeIdOverride }) {
     { enabled: replyStreaming, initialText: node?.streaming_content || '' },
   );
 
+  // Loads once per node: NodeDetailWrapper keys this component by id, so
+  // `loading` starts true unless the node came with the click.
   useEffect(() => {
-    setLoading(true);
     setError("");
     setQuotes({}); // Reset quotes when node changes
     setExternalQuotes({});
-    api
-      .get(`/nodes/${id}`)
+    // Opened from another node: the request made before this page opened
+    // (settled, or still in flight after a slow answer), not a second one.
+    (takePrefetchedNode(id) || api.get(`/nodes/${id}`))
       .then((response) => {
         setNode(response.data);
         setLoading(false);
@@ -355,9 +367,11 @@ function NodeDetail({ nodeIdOverride }) {
   // is cleared, this effect re-runs once (llmTaskNodeId is a dep) while
   // llmStatus/llmData are still stale — the polling hook resets them a
   // render later — and without the guard that stale pass acts twice
-  // (duplicate toast / duplicate navigation).
+  // (duplicate toast / duplicate navigation). While another node loads
+  // (`moving`), this page may be on its way out (a back press, a click):
+  // it acts on the result only if it stays (the move is undone).
   useEffect(() => {
-    if (!llmTaskNodeId) return;
+    if (!llmTaskNodeId || moving) return;
     if (llmStatus === 'completed' && llmData) {
       // Prefer the id of the node returned in payload; fall back to the
       // polled node id (llmTaskNodeId).
@@ -369,6 +383,16 @@ function NodeDetail({ nodeIdOverride }) {
       // final answer arrives in the next. Repeats for each retrieval round.
       if (llmData.continuation_node_id) {
         const contId = llmData.continuation_node_id;
+        // This turn's own text is done: shown as finished, should the
+        // page stay (a back press while the continuation loads).
+        if (String(completedId) === String(id)) {
+          setNode(prev => prev ? {
+            ...prev,
+            content: llmData.content ?? prev.content,
+            tool_calls_meta: llmData.tool_calls_meta ?? prev.tool_calls_meta,
+            llm_task_status: 'completed',
+          } : prev);
+        }
         // Navigate WITH ?awaitLlm so polling re-establishes on the
         // continuation node — NodeDetail remounts on :id change, so bare
         // llmTaskNodeId state would be lost (this matches WritePage's
@@ -433,7 +457,27 @@ function NodeDetail({ nodeIdOverride }) {
       setLlmTaskNodeId(null);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [llmStatus, llmData, llmError, navigate, id, llmTaskNodeId]);
+  }, [llmStatus, llmData, llmError, navigate, id, llmTaskNodeId, moving]);
+
+  // While the reply this page shows is pending, its tool_calls_meta
+  // follows the poll (#386). A read is fetched as soon as it starts,
+  // before the worker has submitted its batch, and only the poll then
+  // reports the "_batch" entry. With it on the node the page says
+  // "Processing…", polls at the batch cadence (15 s, for up to 25 h)
+  // and closes the text stream (a batch is never streamed). Without it
+  // the page said "Thinking…" until a refresh, and its 30-minute poll
+  // could end long before the batch did.
+  const polledMeta = llmData?.tool_calls_meta;
+  useEffect(() => {
+    if (!llmTaskNodeId || String(llmTaskNodeId) !== String(id)) return;
+    if (llmStatus !== 'pending' && llmStatus !== 'processing') return;
+    if (!Array.isArray(polledMeta)) return;
+    setNode(prev => (
+      prev && JSON.stringify(prev.tool_calls_meta) !== JSON.stringify(polledMeta)
+        ? { ...prev, tool_calls_meta: polledMeta }
+        : prev
+    ));
+  }, [llmTaskNodeId, id, llmStatus, polledMeta]);
 
   const getNodeContent = useCallback(() => node?.content, [node]);
   const setNodeContent = useCallback((newContent) => setNode(prev => ({ ...prev, content: newContent })), []);
@@ -491,7 +535,7 @@ function NodeDetail({ nodeIdOverride }) {
     if (e && (e.metaKey || e.ctrlKey)) {
       window.open(`/node/${nodeId}`, '_blank');
     } else {
-      navigate(`/node/${nodeId}`);
+      openNode(nodeId, () => navigate(`/node/${nodeId}`));
     }
   };
 
@@ -1086,8 +1130,19 @@ function NodeDetail({ nodeIdOverride }) {
   // via /voice/from-node), Craft-bar LLM Response + ModelSelector, and
   // the kebab Edit/Delete menu.
   const showInlineInput = !!currentUser;
+  // Auto-generate hides LLM Response because it already asked for the
+  // reply when the node was sent. In a read thread it doesn't always: an
+  // audio upload under the picks is saved without a reply, because
+  // auto-generate can't know whether the user wants to talk about it
+  // (LLM Response) or get more picks (Read further). When Loore can't
+  // know what the user wants next, it shows the choices (#387): a node
+  // of the user's in a read thread with no reply under it yet offers
+  // both, auto-generate on or off.
+  const awaitsChoiceInRead = inReadThread && !isLlmNode
+    && !(node.children || []).some(c => !c.deleted);
   const showCraftBar = isOwner && (craftMode || isPublicThread)
-    && !autoGenerateActive && node.ai_usage !== 'none' && !isLlmPending;
+    && (!autoGenerateActive || awaitsChoiceInRead)
+    && node.ai_usage !== 'none' && !isLlmPending;
   // In a read thread the action row under every node also carries
   // "Read further" — the conversation under the picks can get long and
   // nothing is pinned to the viewport (small screens), so the action
@@ -1122,7 +1177,7 @@ function NodeDetail({ nodeIdOverride }) {
     borderTopLeftRadius: 0, borderBottomLeftRadius: 0,
     flex: 1, justifyContent: 'space-between',
   };
-  const readBusy = readLoading || llmRequesting || !!llmTaskNodeId;
+  const readBusy = readLoading || llmRequesting || !!llmTaskNodeId || moving;
   const readButton = (
     <span data-action-group style={actionGroupStyle}>
       <button
@@ -1230,7 +1285,7 @@ function NodeDetail({ nodeIdOverride }) {
       {currentUser?.is_admin && nodeAllowsAi && (
         <button
           onClick={handleReadFromNode}
-          disabled={readLoading}
+          disabled={readLoading || moving}
           style={{ ...topRightButtonStyle, justifyContent: 'space-between' }}
           title={inReadThread ? readTitle : READ_ENTRY_TITLE}
         >
@@ -1596,7 +1651,7 @@ function NodeDetail({ nodeIdOverride }) {
               <span data-action-group title={llmResponseTitle} style={actionGroupStyle}>
                 <button
                   onClick={handleLLMResponse}
-                  disabled={llmRequesting || !!llmTaskNodeId || underReadReply}
+                  disabled={llmRequesting || !!llmTaskNodeId || underReadReply || moving}
                   aria-disabled={underReadReply || undefined}
                   style={{ display: 'inline-flex', alignItems: 'center', gap: '8px', ...joinedButtonStyle }}
                 >
@@ -1612,7 +1667,7 @@ function NodeDetail({ nodeIdOverride }) {
                   nodeId={node.id}
                   selectedModel={selectedModel}
                   onModelChange={setSelectedModel}
-                  disabled={llmRequesting || !!llmTaskNodeId || underReadReply}
+                  disabled={llmRequesting || !!llmTaskNodeId || underReadReply || moving}
                   style={joinedPickerStyle}
                 />
               </span>
@@ -1624,7 +1679,7 @@ function NodeDetail({ nodeIdOverride }) {
             {readActions && readButton}
           </div>
         )}
-        {llmTaskNodeId && !showCraftBar && !isLlmPending && (
+        {llmTaskNodeId && !showLlmResponse && !isLlmPending && (
           <div style={{
             marginTop: '8px',
             display: 'flex', alignItems: 'center', gap: '8px',
@@ -1697,7 +1752,7 @@ function NodeDetail({ nodeIdOverride }) {
         }}>Thread</h2>
         {topRightControls}
       </div>
-      <SemanticNeighbors nodeId={node.id} />
+      <SemanticNeighbors nodeId={node.id} openNode={openNode} />
       {ancestorsSection}
       {highlightedNodeSection}
       {childrenSection}

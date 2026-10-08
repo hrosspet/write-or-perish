@@ -2,6 +2,7 @@ import React, { useState, useEffect } from "react";
 import XLookupConfirmDialog from "./XLookupConfirmDialog";
 import ProfileBuildConfirmDialog from "./ProfileBuildConfirmDialog";
 import AdminRefusalDialog, { REFUSAL_TITLES } from "./AdminRefusalDialog";
+import { offeredModels } from "./ModelSelector";
 import { FaTimesCircle, FaFilter, FaCaretDown, FaCaretUp, FaEye, FaEyeSlash } from "react-icons/fa";
 import api from "../api";
 import { formatDate, formatDateTime } from "../utils/date";
@@ -137,8 +138,9 @@ function AdminPolls() {
     // "default" option that resolves invisibly at creation time.
     Promise.all([
       fetchPolls(),
+      // A poll drafts answers like a reply does: chat models only.
       api.get("/nodes/models")
-        .then((res) => res.data.models || [])
+        .then((res) => offeredModels(res.data.models || [], "chat"))
         .catch(() => []),
     ]).then(([defaultModelId, fetchedModels]) => {
       setModels(fetchedModels);

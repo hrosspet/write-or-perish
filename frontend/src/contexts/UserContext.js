@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect } from "react";
+import React, { createContext, useContext, useState, useEffect, useCallback } from "react";
 import api from "../api";
 import { markSpendBlocked } from "../utils/spendCap";
 
@@ -51,8 +51,18 @@ export const UserProvider = ({ children }) => {
       });
   }, []);
 
+  // The user just wrote an entry (Voice or Text): from now on the screens
+  // ask "What's on your mind?" instead of the welcome question (#391).
+  // Set here rather than refetched — /dashboard decrypts the profile and
+  // the node previews on every call.
+  const markHasOwnEntries = useCallback(() => {
+    setUser((prev) => (prev && prev.has_own_entries === false
+      ? { ...prev, has_own_entries: true }
+      : prev));
+  }, []);
+
   return (
-    <UserContext.Provider value={{ user, loading, error, setUser }}>
+    <UserContext.Provider value={{ user, loading, error, setUser, markHasOwnEntries }}>
       {children}
     </UserContext.Provider>
   );

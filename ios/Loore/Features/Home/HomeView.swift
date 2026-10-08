@@ -68,7 +68,7 @@ struct HomeView: View {
             } action: {
                 startRead()
             }
-            .disabled(readStarting)
+            .disabled(readStarting || NodePrefetch.shared.isPending)
             .accessibilityIdentifier("home.read")
         }
     }
@@ -76,7 +76,7 @@ struct HomeView: View {
     /// Admin-only Community Archive read (`POST /api/read/start`, billed):
     /// the click creates the thread and lands on the reply (or the prompt).
     private func startRead() {
-        guard !readStarting else { return }
+        guard !readStarting, !NodePrefetch.shared.isPending else { return }
         readStarting = true
         let stored = UserDefaults.standard.object(forKey: DefaultsKey.autoGenerate)
         let autoGenerate = stored == nil ? true : UserDefaults.standard.bool(forKey: DefaultsKey.autoGenerate)
@@ -85,7 +85,8 @@ struct HomeView: View {
                 struct Answer: Decodable { var llm_node_id: Int?; var prompt_node_id: Int? }
                 let answer: Answer = try await app.api.post(APIPath.readStart, json: .object(["auto_generate": .bool(autoGenerate)]))
                 readStarting = false
-                if let id = answer.llm_node_id ?? answer.prompt_node_id { app.open(.thread(id: id, awaitLLM: nil)) }
+                // The read's thread opens once its node is in (NodePrefetch), not on a loading page.
+                if let id = answer.llm_node_id ?? answer.prompt_node_id { NodePrefetch.shared.openThread(id, app: app) }
             } catch {
                 readStarting = false
                 if SpendCap.isSpendCapError(error) { return }

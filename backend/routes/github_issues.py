@@ -2,6 +2,7 @@ from flask import Blueprint, jsonify, request
 from flask_login import login_required, current_user
 from backend.models import Node, Draft
 from backend.extensions import db
+from backend.utils.client_platform import request_client
 from backend.utils.github import create_github_issue
 from backend.utils.tool_meta import parse_github_issue, update_tool_meta
 
@@ -62,6 +63,8 @@ def create_issue():
             description=issue_data.get("description", ""),
             category=category,
             username=current_user.username,
+            # The app the user tapped "Create issue" in.
+            platform=request_client(),
         )
     except (ValueError, RuntimeError) as e:
         return jsonify({"error": str(e)}), 500

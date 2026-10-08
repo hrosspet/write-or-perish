@@ -1187,3 +1187,214 @@ class TestNoLockBelowARead:
         assert {n.id for n in changed} == {t["note"].id, t["chat"].id}
         for name in ("prompt", "read"):
             assert Node.query.get(t[name].id).ai_usage == "chat", name
+
+
+# ── Read-only models: "chat": False (Peter, 2026-10-02) ────────────────
+
+MODELS_RO = dict(MODELS_355, **{
+    "gpt-6.1-sol": {"provider": "openai", "display_name": "GPT-6.1 Sol",
+                    "read": True, "chat": False},
+    "claude-sonnet-5.5": {"provider": "anthropic",
+                          "display_name": "Sonnet 5.5",
+                          "read": True, "chat": False},
+})
+
+
+@pytest.fixture
+def app_ro(app):
+    app.config["SUPPORTED_MODELS"] = MODELS_RO
+    app.config["DEFAULT_LLM_MODEL"] = "claude-opus-4.6"
+    app.config["READ_DEFAULT_MODEL"] = "gpt-6-luna"
+    from backend.routes.admin import admin_bp
+    from backend.routes.dashboard import dashboard_bp
+    app.register_blueprint(admin_bp, url_prefix="/api/admin")
+    app.register_blueprint(dashboard_bp, url_prefix="/api/dashboard")
+    return app
+
+
+class TestReadOnlyModels:
+    def test_the_list_flags_them_read_and_not_chat(self, app_ro):
+        client = app_ro.test_client()
+        alice = _make_user("alice")
+        _db.session.commit()
+        _login(client, alice.id)
+        models = {m["id"]: m for m in
+                  client.get("/api/nodes/models").get_json()["models"]}
+        for ro in ("gpt-6.1-sol", "claude-sonnet-5.5"):
+            assert (models[ro]["read"], models[ro]["chat"]) == (True, False)
+        # Absent means chat.
+        assert models["claude-opus-4.6"]["chat"] is True
+        assert (models["gpt-6-luna"]["read"], models["gpt-6-luna"]["chat"]) == (True, True)
+        assert "claude-opus-5" not in models
+
+    def test_chat_and_read_predicates(self, app_ro):
+        from backend.utils.llm_nodes import is_chat_model, is_read_model
+        assert is_read_model("gpt-6.1-sol") and not is_chat_model("gpt-6.1-sol")
+        assert is_read_model("claude-sonnet-5.5")
+        assert not is_chat_model("claude-sonnet-5.5")
+        assert is_chat_model("claude-opus-4.6") and is_chat_model("gpt-6-luna")
+        assert not is_chat_model("claude-opus-5")      # deprecated
+        assert not is_chat_model("nope")
+
+    def test_a_read_runs_on_them(self, app_ro):
+        client = app_ro.test_client()
+        alice = _make_user("alice", is_admin=True)
+        _db.session.commit()
+        _login(client, alice.id)
+        resp = client.post("/api/read/start", json={"model": "claude-sonnet-5.5"})
+        assert resp.status_code == 202, resp.get_json()
+        assert Node.query.get(resp.get_json()["llm_node_id"]).llm_model == "claude-sonnet-5.5"
+
+        t = _read_thread(alice, read_model="gpt-6.1-sol")
+        resp = client.post(f"/api/read/from-node/{t['note2'].id}", json={})
+        assert resp.status_code == 202, resp.get_json()
+        # The thread's last read was on GPT-6.1 Sol: the next one is too.
+        assert Node.query.get(resp.get_json()["llm_node_id"]).llm_model == "gpt-6.1-sol"
+
+    def test_a_read_turn_keeps_the_read_only_model(self, app_ro):
+        from backend.utils.llm_nodes import create_llm_placeholder
+        alice = _make_user("alice", is_admin=True)
+        t = _read_thread(alice, read_model="gpt-6.1-sol")
+        _render(t["read"])
+        # Directly under a rendered read reply: a read again.
+        node, _ = create_llm_placeholder(t["read"].id, "claude-sonnet-5.5", alice.id)
+        assert node.llm_model == "claude-sonnet-5.5"
+
+    def test_a_chat_reply_sent_with_one_is_refused(self, app_ro, monkeypatch):
+        # Never moved to the chat default: that could be another provider
+        # (Peter, 2026-10-02). 400, nothing created, nothing enqueued, no
+        # provider called.
+        from backend.llm_providers import LLMProvider
+        provider = MagicMock()
+        monkeypatch.setattr(LLMProvider, "get_completion", provider)
+        delay = _mock_llm_task_module.generate_llm_response.delay
+        delay.reset_mock()
+        client = app_ro.test_client()
+        alice = _make_user("alice", is_admin=True)
+        root = _make_node(alice, content="a thought")
+        _db.session.commit()
+        _login(client, alice.id)
+        before = Node.query.count()
+        resp = client.post(f"/api/nodes/{root.id}/llm",
+                           json={"model": "gpt-6.1-sol"})
+        assert resp.status_code == 400, resp.get_json()
+        body = resp.get_json()
+        assert body["code"] == "model_read_only"
+        assert body["model"] == "gpt-6.1-sol"
+        assert body["error"] == ("GPT-6.1 Sol is only for Read. Choose "
+                                 "another model for replies.")
+        assert Node.query.count() == before
+        assert Node.query.filter_by(node_type="llm").count() == 0
+        delay.assert_not_called()
+        provider.assert_not_called()
+
+    def test_a_chat_turn_in_a_read_thread_is_refused(self, app_ro):
+        # Below the chat reply of a finished read the turn is chat: the
+        # read-only model is refused there too, before any write.
+        from backend.utils.llm_nodes import (
+            ReadOnlyModelRefused, create_llm_placeholder)
+        delay = _mock_llm_task_module.generate_llm_response.delay
+        delay.reset_mock()
+        alice = _make_user("alice", is_admin=True)
+        t = _read_thread(alice, read_model="claude-sonnet-5.5",
+                         chat_model="gpt-6-luna")
+        _render(t["read"])  # a finished read: what follows a note is chat
+        before = Node.query.count()
+        with pytest.raises(ReadOnlyModelRefused) as exc:
+            create_llm_placeholder(t["note2"].id, "claude-sonnet-5.5", alice.id)
+        assert exc.value.model_id == "claude-sonnet-5.5"
+        _db.session.rollback()
+        assert Node.query.count() == before
+        delay.assert_not_called()
+
+    def test_a_read_again_through_the_reply_route_keeps_one(self, app_ro):
+        # The generic reply route cannot tell a read from a chat turn and
+        # does not need to: directly under a rendered read reply the turn
+        # is a read again, which runs on the read-only model as asked.
+        client = app_ro.test_client()
+        alice = _make_user("alice", is_admin=True)
+        t = _read_thread(alice, read_model="gpt-6.1-sol")
+        _render(t["read"])
+        _login(client, alice.id)
+        resp = client.post(f"/api/nodes/{t['read'].id}/llm",
+                           json={"model": "claude-sonnet-5.5"})
+        assert resp.status_code == 202, resp.get_json()
+        assert (Node.query.get(resp.get_json()["node_id"]).llm_model
+                == "claude-sonnet-5.5")
+
+    def test_a_deprecated_model_still_runs_on_the_chat_default(self, app_ro):
+        # Unchanged here (#355): the same rule question applies to it and
+        # gets its own issue.
+        from backend.utils.llm_nodes import create_llm_placeholder
+        alice = _make_user("alice", is_admin=True)
+        root = _make_node(alice, content="a thought")
+        _db.session.commit()
+        node, _ = create_llm_placeholder(root.id, "claude-opus-5", alice.id)
+        assert node.llm_model == "claude-opus-4.6"
+
+    def test_a_saved_read_only_preference_falls_back(self, app_ro):
+        # Set directly, as if saved before the flag existed: the Account
+        # page never offers it and PUT /dashboard/user refuses it.
+        from backend.utils.llm_nodes import (
+            default_model_for, effective_preferred_model, resolve_chat_model)
+        client = app_ro.test_client()
+        alice = _make_user("alice", is_admin=True, preferred_model="gpt-6.1-sol")
+        _db.session.commit()
+        assert effective_preferred_model(alice) is None
+        assert default_model_for(alice) == "claude-opus-4.6"
+        assert resolve_chat_model(None, alice) == ("claude-opus-4.6", "default")
+        _login(client, alice.id)
+        assert client.get("/api/nodes/default-model").get_json() == {
+            "suggested_model": "claude-opus-4.6", "source": "default"}
+
+    def test_a_chat_reply_on_one_is_not_inherited(self, app_ro):
+        from backend.utils.llm_nodes import resolve_chat_model
+        alice = _make_user("alice", preferred_model="gpt-6-luna")
+        root = _make_node(alice, content="a thought")
+        reply = _make_node(alice, parent_id=root.id, node_type="llm",
+                           llm_model="gpt-6.1-sol", content="hi")
+        note = _make_node(alice, parent_id=reply.id, content="and?")
+        _db.session.commit()
+        assert resolve_chat_model(note, alice) == ("gpt-6-luna", "user_preference")
+
+    def test_the_account_default_refuses_one(self, app_ro):
+        client = app_ro.test_client()
+        alice = _make_user("alice")
+        _db.session.commit()
+        _login(client, alice.id)
+        resp = client.put("/api/dashboard/user", json={"preferred_model": "gpt-6.1-sol"})
+        assert resp.status_code == 400
+        assert User.query.get(alice.id).preferred_model is None
+        resp = client.put("/api/dashboard/user", json={"preferred_model": "claude-opus-4.6"})
+        assert resp.status_code == 200, resp.get_json()
+        assert User.query.get(alice.id).preferred_model == "claude-opus-4.6"
+
+    def test_a_poll_refuses_one(self, app_ro):
+        client = app_ro.test_client()
+        boss = _make_user("boss", is_admin=True)
+        _db.session.commit()
+        _login(client, boss.id)
+        resp = client.post("/api/admin/polls",
+                           json={"question": "q?", "model_id": "claude-sonnet-5.5"})
+        assert resp.status_code == 400
+        assert "Read only" in resp.get_json()["error"]
+        # A deprecated model is no chat model either (is_chat_model).
+        resp = client.post("/api/admin/polls",
+                           json={"question": "q?", "model_id": "claude-opus-5"})
+        assert resp.status_code == 400
+        assert "deprecated" in resp.get_json()["error"]
+        resp = client.post("/api/admin/polls",
+                           json={"question": "q?", "model_id": "claude-opus-4.6"})
+        assert resp.status_code == 201, resp.get_json()
+
+    def test_the_shipped_entries_are_read_only(self):
+        from backend.config import Config
+        for key, api_model, provider in (
+                ("gpt-6.1-sol", "gpt-6.1-sol", "openai"),
+                ("claude-sonnet-5.5", "claude-sonnet-5-5", "anthropic"),
+                # Peter, 2026-10-08.
+                ("claude-haiku-5.5", "claude-haiku-5-5", "anthropic")):
+            cfg = Config.SUPPORTED_MODELS[key]
+            assert (cfg["read"], cfg["chat"]) == (True, False), key
+            assert (cfg["api_model"], cfg["provider"]) == (api_model, provider)
+            assert not cfg.get("deprecated") and not cfg.get("featured")

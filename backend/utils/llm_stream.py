@@ -177,11 +177,11 @@ class ReplyStream:
         self._writer_call("reset")
         return True
 
-    def cut_off(self):
-        """The reply as it stood when the provider failed, with the note
+    def cut_off(self, note=CUT_OFF_NOTE):
+        """The reply as it stood when the provider failed, with the *note*
         that says so (also spoken), as a response dict for _finalize. No
         tool calls: the round never completed."""
-        self.on_text(CUT_OFF_NOTE)
+        self.on_text(note)
         return {
             "content": self.text,
             "tool_calls": [],
