@@ -20,22 +20,23 @@ How it works:
 
 ## Hit rate
 
+A hit counts as one and a partial hit as half. The first table counts predictions, per review session. The second counts Decision lines and escalation entries, apart from the predictions: they reach the log mostly through Peter's corrections, while approvals pass without comment and are not recorded, so their rates are **not** comparable with the predictions'.
+
 | Date | Session | Model | Parts scored | Hits | Partial | Misses | Score | Expected from the stated confidence |
 |---|---|---|---|---|---|---|---|---|
 | 2026-10-02 | Paid Beta voice review | Opus 5.5 | 10 | 4 | 2 | 4 | 5.0 | 6.45 |
 | 2026-10-08 | Role name; Haiku 5.5 for the Read | Opus 5.5 | 2 | 2 | 0 | 0 | 2.0 | not recorded |
 
-Backfilled decisions (27 entries, 2026-04-06 to 2026-10-06): 7 hits / 4 partial / 16 misses. These are **not** comparable with the live predictions above: the backfill mostly picked up Peter's corrections, while approvals passed without comment and were not recorded.
-
-Live decisions (from 2026-10-08): 0 hits / 0 partial / 1 miss. They arrive the same way, mostly through corrections, so they are not comparable with the predictions either.
-
-Escalation entries, counted apart from the content scores above: 1, all backfilled: 0 hits / 1 miss. Asked instead of deciding: 1 miss (2026-06-17). Decided without asking: none yet.
-
-Partial hits count as half. Calibration on 2026-10-02: at 75–80 % confidence the builder scored 2.5 of 4; at 55–65 %, 2.5 of 5; at 40 %, 0 of 1. Overconfident by about 15 points.
-
-One more miss is not in the table: the builder excluded the question of when to post the situations, claiming his reply already showed "now". He answered "after the Beta scope is settled", as the builder had proposed.
+| Kind | Dates | Entries | Hits | Partial | Misses |
+|---|---|---|---|---|---|
+| Decisions, backfilled | 2026-04-06 to 2026-10-06 | 28 | 7 | 4 | 17 |
+| Decisions, live | from 2026-10-08 | 1 | 0 | 0 | 1 |
+| Escalations: asked instead of deciding | 2026-06-17 (backfilled) | 1 | 0 | 0 | 1 |
+| Escalations: decided without asking | none yet | 0 | 0 | 0 | 0 |
 
 ## Patterns in the builder's misses
+
+- **Overconfidence.** In the 2026-10-02 predictions, at 75–80 % confidence the builder scored 2.5 of 4; at 55–65 %, 2.5 of 5; at 40 %, 0 of 1: about 15 points overconfident.
 
 - **Hard lines read as conditions.** Where Peter holds a rule without exceptions ("never change providers", "never decrypt users' content"), the prediction was a yes with conditions.
 - **A cost emergency generalised into a cost mandate.** The 2026-09-12 digest incident was a fix for runaway spend, not a standing wish to cut cost. In this phase he puts product quality first.
@@ -57,7 +58,7 @@ One more miss is not in the table: the builder excluded the question of when to 
 ### 2026-10-02 · Cheaper models and the Batch API for background jobs
 
 - **Situation:** for background jobs such as the todo merge, recent context or intentions, may the cheapest model or the Batch API be chosen without asking whenever a blind comparison shows no loss and the result can be some hours old?
-- **Prediction:** yes, I decide myself as long as I record the comparison and the choice; Peter judges user-facing text, I judge mechanical jobs (65 %).
+- **Prediction:** yes: the builder decides as long as it records the comparison and the choice; Peter judges user-facing text, the builder judges mechanical jobs (65 %).
 - **Peter:** "batch api for background jobs is a natural choice, use it wherever it makes sense" · "on the other hand, cost vs. quality is something I'd like have a say in" · "what could remove some decision burden from me would be making comparisons between different models without my say, if it's cheap - so I can imagine you making an experiment where you run a comparison with the cheapest available model (like GPT-6 Luna) against my prod data and compare against the frontier models that I triggered in the past manually. Like todo merges" · "this is still on prod, so I'd like to start the experiment manually myself, but you can expect me to want to run such experiments" · "we're still in a really early phase, so we're not optimizing for cost. We want to build the best product we can, and if paying for frontier models is what it takes, then ok. Later, when we have too many todo merge requests and it costs us a ton, only then it will make sense to run such experiments, whose aim is cost optimization" · "smaller models also may have better latency, and that is something that influences UX a lot. So when todo merges have 100% accuracy on both frontier, and small models, and small models have significantly better latency, then that would be desired."
 - **Score:** partial. The Batch API part was right; deciding the model without Peter was wrong.
 - **Why it missed:** the digest cost incident was generalised into a cost rule, and latency was missed as a criterion.
@@ -122,10 +123,12 @@ One more miss is not in the table: the builder excluded the question of when to 
 
 ### 2026-10-02 · When to post the decision situations
 
-- **Situation:** post the situations for the Beta-relevant issues now, or after the Beta scope is settled?
-- **Prediction:** not made; his reply was wrongly taken as already showing "now".
-- **Peter:** "yes" (to "after we settle the Beta scope").
-- **Score:** miss, not counted in the table.
+- **Situation:** writing the predictions for the Paid Beta voice review. The brief on the open issues had asked when to post the situations for this log as separate nodes, and proposed doing it after the Beta scope is settled.
+- **Decision:** dropped the question from the predictions as already answered, reading Peter's reply to the brief as "now".
+- **Peter:** "yes" (to "I'd do it after we settle the Beta scope, so they cover only Beta-relevant issues").
+- **Score:** miss.
+- **Why it missed:** his "we can start right away with the example questions you asked above" covered the few examples in the brief, and was read as an answer about posting all the situations.
+- **Source:** voice review in local Loore, 2026-10-02 (Opus 5.5): the brief is node 201225, his reply to it node 201261, the predictions node 201262, his answer node 201264.
 
 ### 2026-10-02 · Moving reversible engineering items to ready
 
@@ -205,16 +208,15 @@ One more miss is not in the table: the builder excluded the question of when to 
 
 ## Decided by the builder
 
-Choices that agents flagged in PRs and that the builder decided because a rule above already covers them (Peter, 2026-10-02: decide what the log supports, raise only real judgement calls). Each is also recorded on its PR. Peter can overrule any of them; an overruled one becomes a miss in the hit rate.
+Choices that agents flagged in PRs and that the builder decided because a rule above already covers them (Peter, 2026-10-02: decide what the log supports, raise only real judgement calls). Each is also recorded on its PR, or in the session where Peter asked. The Decided column holds only the builder's part; a rule or decision of Peter's goes in the Rule column. Questions raised to Peter instead are not listed; his answers become entries. Peter can overrule any row; an overruled one becomes a miss in the hit rate.
 
 | Date | PR | Choice | Decided | Rule |
 |---|---|---|---|---|
 | 2026-10-02 | #406 | How often to email about one failing provider account | At most every 6 h per cause, as a setting | Every added heuristic is named |
 | 2026-10-02 | #406 | A paid batch is refused for an account reason while polling | Keep polling until the cap | Prevent the failure where possible |
-| 2026-10-02 | #409 | Recent context keeps failing for a user | Stop after two failures in a row, report it | Stop after two failures, loudly (#368) |
 | 2026-10-02 | #409 | How often finished recent-context batches are collected | Every 60 s | Latency counts as quality |
 | 2026-10-02 | #401 | A newcomer's first session and the updates window | `/welcome` skips the whole session | A newcomer reflects first |
-| 2026-10-02 | #401 | What counts as the user's own entry | Only writing done in Loore; not imports, session prompts, links or deleted entries | Imports don't count (Peter, 2026-10-01) |
+| 2026-10-02 | #401 | What counts as the user's own entry | Session prompts, link nodes and deleted entries don't count either | Only entries written in Loore count; imports don't (Peter, 2026-10-01) |
 | 2026-10-02 | #403 | iPhone only or iPhone and iPad | iPhone only | The design document |
 | 2026-10-02 | #404 | A chat reply is sent with a read-only model | Refused with a plain message. The first decision (run it on the chat default) was wrong: the review showed it can switch the provider | Never change providers, not even as a fallback |
 | 2026-10-02 | #405 | What counts as a dropped pick | Both kinds of picks Loore can't show | An empty Read is a good result |
@@ -223,15 +225,13 @@ Choices that agents flagged in PRs and that the builder decided because a rule a
 | 2026-10-02 | #414 | The profile note says "keep what they wrote" | Kept | The user's edit wins |
 | 2026-10-02 | #417 | The todo merge rewords items or moves them out of the section the user named | Keep wording; new items copied word for word; the named section is created if missing | The user's edit wins |
 | 2026-10-02 | #415 | Purging an AI or system account | Refused | None needed: purging one would delete every AI reply in Loore |
-| 2026-10-02 | #415 | Cost rows after a purge | Anonymised, with response ids cleared | Cost records are kept in anonymous form |
-| 2026-10-06 | #234 | Todo merge as edits: which sections change the list | Only New Tasks and Completed; Note, Issue and Priority Order don't | Extends Peter's "yes" on Priority Order |
-| 2026-10-06 | #234 | Todo merge as edits: when a full rewrite is allowed | Only when the list has no tasks (nothing to anchor on); otherwise edits only | The user's edit wins |
-| 2026-10-06 | #234 | Todo merge as edits: a check after the edits are applied | Every previous line is kept with its text, only [ ] to [x] may change; one retry, then fail. This differs from the proposal-wording check Peter leaned against. It sits in one removable function and the evaluation measures how often it fires | Every added heuristic is named |
-| 2026-10-06 | #234 | Todo merge as edits: feature flag | None, because Peter evaluates from the branch before merging | Reversible work goes ahead |
+| 2026-10-02 | #415 | Cost rows after a purge | Response ids, request refs and prompt-prefix hashes are cleared as well | Cost records are kept in anonymous form (Peter, 2026-10-02) |
+| 2026-10-06 | #443 | Todo merge as edits: which sections change the list | Only New Tasks and Completed; Note, Issue and Priority Order don't | Extends Peter's "yes" on Priority Order |
+| 2026-10-06 | #443 | Todo merge as edits: when a full rewrite is allowed | Only when the list has no tasks (nothing to anchor on); otherwise edits only | The user's edit wins |
+| 2026-10-06 | #443 | Todo merge as edits: a check after the edits are applied | Every previous line is kept with its text, only [ ] to [x] may change; one retry, then fail. This differs from the proposal-wording check Peter leaned against. It sits in one removable function and the evaluation measures how often it fires | Every added heuristic is named |
+| 2026-10-06 | #443 | Todo merge as edits: feature flag | None, because Peter evaluates from the branch before merging | Reversible work goes ahead |
 | 2026-10-06 | #433 | A cut-off merge output | Fails with nothing saved; the message says to ask for the update again, since the card has no retry (#434) | Problems show |
-| 2026-10-06 | #413 | Running the comparison script on prod | From a separate worktree with `.env.production` symlinked, never by checking out a branch in the live app folder (the merge prompt file is read on every call) | Experiments run on Peter's data; he starts any run on prod |
-
-Raised to Peter instead: whether the profile states what the entries show next to the user's own description of themselves (#414), revoking the X login at purge (it needs one decryption of the token), an undo window for "Delete all my writing" (#415), and real-model checks of #414 and #417.
+| 2026-10-06 | #431 | Running the comparison script on prod | From a separate worktree with `.env.production` symlinked, never by checking out a branch in the live app folder (the merge prompt file is read on every call) | Experiments run on Peter's data; he starts any run on prod |
 
 ## Backfilled decisions
 
@@ -505,13 +505,13 @@ Decisions made before this log existed, oldest first. None of them has a predict
 
 ### 2026-10-01 · Stop after two failures, loudly
 
-- **Situation:** background jobs whose output is cut off now save nothing (PR #375). Without a limit, a refused job would repeat the same billed call on every scheduler run.
-- **Decision:** a retry backoff: one hour, then four hours, then weekly, with an error to Sentry from the third failure; recommended as built.
+- **Situation:** background jobs whose output is cut off now save nothing (PR #375, #368). Without a limit, a refused job would repeat the same billed call on every scheduler run: recent context every ten minutes, the profile every hour.
+- **Decision:** a retry backoff with a growing wait: one hour, then four hours, then one attempt a week, with an error to Sentry from the third failure and no final stop; recommended as built.
 - **Peter:** "the error is logged after a week? That's too long. If a profile generation got cutoff with 32k tokens output limit, that's way too much! Two errors should be enough to stop completely and log a very loud error on Sentry" · on an import that triggers a rebuild: "Then I'd skip the wait and go right ahead" · on the Build profile button for a stopped user: "it should pop up a dialog informing me the profile generation failed twice, and whether I really want to start another build." · "Cut-off intentions count as success, empty artifact no. But admin dashboard shows it as success. This should be fixed."
 - **Score:** miss.
 - **Why it missed:** the schedule avoided stopping for good, because nothing would restart a stopped job.
-- **Source:** voice review 2026-10-01 (Opus 5.5).
-- **Applies to:** PR #375, #368.
+- **Source:** voice review in local Loore, 2026-10-01 (Opus 5.5): the brief is node 201165, his replies nodes 201213 and 201215.
+- **Applies to:** PR #375, #368, and PR #409, which applies the same stop to recent context through the Batch API.
 - **Rule:** adopted 2026-10-06: problems show, they are not hidden. Fail loudly, stop after repeated failures, and fix the cause rather than what is displayed.
 
 ### 2026-10-01 · Every billed call records its cost
