@@ -1307,8 +1307,9 @@ def parse_args(argv=None):
              "task runs it today: the CURRENT orient_apply_todo.txt, the "
              "model replying with edits, applied and checked by the task's "
              "own function (#234); inputs and the stored reference stay as "
-             "they were. Also records edits, retries, anchor errors and "
-             "kept-lines check refusals per merge")
+             "they were. Also records edits, retries, anchor errors, "
+             "kept-lines check refusals and nesting check refusals per "
+             "merge")
     parser.add_argument(
         "--out", help="JSONL path (default: ~/todo-merge-compare-u<id>-"
                       "<UTC time>.jsonl; never overwritten)")

@@ -329,12 +329,12 @@ def test_kept_lines_error_names_at_most_ten_lines():
 # ── the nesting check ────────────────────────────────────────────────────
 
 NESTED = (
-    "## Dev\n"
-    "- [ ] review flow\n"
-    "  - [ ] automated UI testing\n"
-    "  - [ ] manual UI testing\n"
-    "  - [ ] push notification\n"
-    "- [ ] other task\n"
+    "## Chores\n"
+    "- [ ] spring cleaning\n"
+    "  - [ ] wash the windows\n"
+    "  - [ ] sort the garage\n"
+    "  - [ ] oil the hinges\n"
+    "- [ ] bake bread\n"
 )
 
 
@@ -342,14 +342,14 @@ def test_nesting_catches_a_new_task_between_sub_items():
     """GPT-6 Luna's error in the comparison of past merges: a new
     top-level task after a task's first sub-item takes the other
     sub-items as its own. Every line is still there."""
-    edit = ("  - [ ] automated UI testing",
-            "  - [ ] automated UI testing\n- [ ] new task")
+    edit = ("  - [ ] wash the windows",
+            "  - [ ] wash the windows\n- [ ] buy stamps")
     merged, _ = apply_text_edits(NESTED, [
         {"old_text": edit[0], "new_text": edit[1]}])
     assert tme.lines_not_kept(NESTED, merged) == []
     assert tme.lines_moved_under_new(NESTED, merged) == [
-        ("  - [ ] manual UI testing", "- [ ] new task"),
-        ("  - [ ] push notification", "- [ ] new task")]
+        ("  - [ ] sort the garage", "- [ ] buy stamps"),
+        ("  - [ ] oil the hinges", "- [ ] buy stamps")]
 
     merged, failure, error, run = resolve(reply(edit), NESTED)
     assert merged is None and failure == tme.FAILURE_SUB_ITEMS_MOVED
@@ -357,53 +357,81 @@ def test_nesting_catches_a_new_task_between_sub_items():
     assert error.startswith("2 existing line(s) now sit under a line your "
                             "edits added")
     assert "never between the sub-items of an existing task" in error
-    assert ("`  - [ ] manual UI testing` is now under `- [ ] new task`"
+    assert ("`  - [ ] sort the garage` is now under `- [ ] buy stamps`"
             in error)
 
 
 def test_nesting_catches_a_new_task_before_the_first_sub_item():
-    merged = NESTED.replace("- [ ] review flow\n",
-                            "- [x] review flow\n- [ ] new task\n")
+    merged = NESTED.replace("- [ ] spring cleaning\n",
+                            "- [x] spring cleaning\n- [ ] buy stamps\n")
     assert [line for line, _ in tme.lines_moved_under_new(NESTED, merged)] \
-        == ["  - [ ] automated UI testing", "  - [ ] manual UI testing",
-            "  - [ ] push notification"]
+        == ["  - [ ] wash the windows", "  - [ ] sort the garage",
+            "  - [ ] oil the hinges"]
 
 
 def test_nesting_catches_a_note_line_and_tab_indents():
     previous = "- [ ] call the bank\n  ask about the fee\n- [ ] gym\n"
-    merged = previous.replace("bank\n", "bank\n- [ ] new task\n")
+    merged = previous.replace("bank\n", "bank\n- [ ] buy stamps\n")
     assert tme.lines_moved_under_new(previous, merged) == [
-        ("  ask about the fee", "- [ ] new task")]
+        ("  ask about the fee", "- [ ] buy stamps")]
     previous = "- [ ] trip\n\t- [ ] flights\n\t- [ ] hotel\n"
-    merged = previous.replace("flights\n", "flights\n- [ ] new task\n")
+    merged = previous.replace("flights\n", "flights\n- [ ] buy stamps\n")
     assert tme.lines_moved_under_new(previous, merged) == [
-        ("\t- [ ] hotel", "- [ ] new task")]
+        ("\t- [ ] hotel", "- [ ] buy stamps")]
+
+
+def test_nesting_reads_depth_as_the_apps_do():
+    """Depth is indent // 2, as on the Todo page and in the iOS app."""
+    # Sub-items at 3 and 2 spaces are siblings: a new 2-space sub-item
+    # right after the parent moves nothing (the review's case).
+    previous = ("- [ ] pack the bags\n   - [ ] socks\n  - [ ] towels\n"
+                "- [ ] book a taxi\n")
+    merged, failure, _, _ = resolve(reply(
+        ("- [ ] pack the bags", "- [ ] pack the bags\n  - [ ] sunscreen")),
+        previous)
+    assert failure is None
+    assert tme.lines_moved_under_new(
+        "- [ ] pack the bags\n  - [ ] socks\n   - [ ] towels\n",
+        "- [ ] pack the bags\n  - [ ] socks\n  - [ ] sunscreen\n"
+        "   - [ ] towels\n") == []
+    # 1-space items are top-level tasks: a new task between them moves
+    # nothing.
+    previous = "- [ ] pack the bags\n - [ ] socks\n - [ ] towels\n"
+    merged, failure, _, _ = resolve(reply(
+        ("- [ ] pack the bags", "- [ ] pack the bags\n- [ ] sunscreen")),
+        previous)
+    assert failure is None
+    # A 2-space item above 4-space sub-items takes them: refused.
+    previous = "- [ ] trip\n    - [ ] flights\n    - [ ] hotel\n"
+    merged = previous.replace("trip\n", "trip\n  - [ ] visa\n")
+    assert [line for line, _ in tme.lines_moved_under_new(
+        previous, merged)] == ["    - [ ] flights", "    - [ ] hotel"]
 
 
 def test_nesting_passes_new_items_in_the_right_places():
     merged = (
-        "## Dev\n"
-        "- [ ] new task before the parent\n"
-        "- [x] review flow\n"
-        "  - [x] automated UI testing\n"
-        "    - [ ] a new sub-sub-item\n"
-        "  - [ ] a new sub-item between existing ones\n"
-        "  - [ ] manual UI testing\n"
-        "  - [x] push notification\n"
-        "  - [ ] a new last sub-item\n"
-        "- [ ] new task after the last sub-item\n"
-        "  - [ ] with its own new sub-item\n"
-        "- [ ] other task\n"
+        "## Chores\n"
+        "- [ ] fix the bike\n"
+        "- [x] spring cleaning\n"
+        "  - [x] wash the windows\n"
+        "    - [ ] rinse the cloths\n"
+        "  - [ ] dust the shelves\n"
+        "  - [ ] sort the garage\n"
+        "  - [x] oil the hinges\n"
+        "  - [ ] empty the bins\n"
+        "- [ ] plan the garden\n"
+        "  - [ ] buy seeds\n"
+        "- [ ] bake bread\n"
         "\n"
-        "## New section\n"
-        "- [ ] new\n"
+        "## Errands\n"
+        "- [ ] post the letter\n"
     )
     assert tme.lines_not_kept(NESTED, merged) == []
     assert tme.lines_moved_under_new(NESTED, merged) == []
     merged, failure, _, run = resolve(reply(
-        ("- [ ] review flow", "- [x] review flow"),
-        ("  - [ ] push notification",
-         "  - [ ] push notification\n- [ ] new task")), NESTED)
+        ("- [ ] spring cleaning", "- [x] spring cleaning"),
+        ("  - [ ] oil the hinges",
+         "  - [ ] oil the hinges\n- [ ] buy stamps")), NESTED)
     assert failure is None and run.sub_items_moved_failures == 0
 
 
@@ -411,29 +439,29 @@ def test_nesting_refuses_only_when_certain():
     # The new task's sub-item has the text of an existing one: which copy
     # is new is unknown, so neither counts as moved.
     merged = NESTED.replace(
-        "  - [ ] automated UI testing\n",
-        "  - [ ] automated UI testing\n- [ ] new task\n"
-        "  - [ ] manual UI testing\n")
+        "  - [ ] wash the windows\n",
+        "  - [ ] wash the windows\n- [ ] buy stamps\n"
+        "  - [ ] sort the garage\n")
     assert tme.lines_moved_under_new(NESTED, merged) == [
-        ("  - [ ] push notification", "- [ ] new task")]
+        ("  - [ ] oil the hinges", "- [ ] buy stamps")]
     # The line above has the text of an existing line: not certainly new.
-    merged = NESTED.replace("UI testing\n  - [ ] manual",
-                            "UI testing\n- [ ] other task\n  - [ ] manual")
+    merged = NESTED.replace("windows\n  - [ ] sort",
+                            "windows\n- [ ] bake bread\n  - [ ] sort")
     assert tme.lines_moved_under_new(NESTED, merged) == []
     # A sub-item that sat under no line (right below a heading) is not
     # checked; nor is a heading or a blank line.
-    previous = "## Today\n  - [ ] indented\n\n## Later\n- [ ] gym\n"
-    merged = "## Today\n- [ ] new task\n  - [ ] indented\n\n## Later\n" \
-        "- [ ] gym\n"
+    previous = "## Monday\n  - [ ] indented\n\n## Errands\n- [ ] gym\n"
+    merged = "## Monday\n- [ ] buy stamps\n  - [ ] indented\n\n" \
+        "## Errands\n- [ ] gym\n"
     assert tme.lines_moved_under_new(previous, merged) == []
     # An empty item (the Create template's placeholder) is not compared.
     previous = "- [ ] trip\n  - [ ] \n"
     assert tme.lines_moved_under_new(
-        previous, "- [ ] trip\n- [ ] new\n  - [ ] \n") == []
+        previous, "- [ ] trip\n- [ ] post the letter\n  - [ ] \n") == []
 
 
 def test_nesting_error_names_at_most_ten_lines():
-    moved = [(f"  - [ ] sub {i}", "- [ ] new") for i in range(12)]
+    moved = [(f"  - [ ] sub {i}", "- [ ] buy stamps") for i in range(12)]
     error = tme.sub_items_moved_error(moved)
     assert error.startswith("12 existing line(s)")
     assert "sub 9" in error and "sub 10" not in error
@@ -490,16 +518,16 @@ def test_retry_then_success():
 
 
 def test_nesting_refusal_gets_the_retry():
-    bad = reply(("  - [ ] automated UI testing",
-                 "  - [ ] automated UI testing\n- [ ] new task"))
-    good = reply(("  - [ ] push notification",
-                  "  - [ ] push notification\n- [ ] new task"))
+    bad = reply(("  - [ ] wash the windows",
+                 "  - [ ] wash the windows\n- [ ] buy stamps"))
+    good = reply(("  - [ ] oil the hinges",
+                  "  - [ ] oil the hinges\n- [ ] buy stamps"))
     provider = Scripted(bad, good)
     run = tme.run_todo_merge(provider, "gpt-6-luna", MESSAGES, FAKE_KEYS,
                              NESTED)
     assert run.failure is None
     assert run.merged.endswith(
-        "  - [ ] push notification\n- [ ] new task\n- [ ] other task\n")
+        "  - [ ] oil the hinges\n- [ ] buy stamps\n- [ ] bake bread\n")
     assert run.stats()["sub_items_moved_failures"] == 1
     assert [r["kind"] for r in run.refusals] == [tme.FAILURE_SUB_ITEMS_MOVED]
     sent = provider.calls[1]["messages"][4]["content"][0]["text"]

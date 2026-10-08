@@ -319,10 +319,15 @@ def _indent(line):
 
 def _parent_indexes(lines):
     """For each line, the index of the line it sits under: the nearest
-    non-blank line above it that is less indented, not looking past a
+    non-blank line above it at a smaller depth, not looking past a
     heading. None for a blank line, a heading, or a line with no such
-    line above it."""
-    parents, open_lines = [], []   # (indent, index), indents increasing
+    line above it.
+
+    Depth is the indent // 2, as the Todo page (parseTodoSections) and the
+    iOS app (TodoSections) read nesting: sub-items at 2 and 3 spaces are
+    siblings, and a 1-space item is a top-level task. A tab counts as 4
+    columns, as in CommonMark."""
+    parents, open_lines = [], []   # (depth, index), depths increasing
     for index, line in enumerate(lines):
         if not line.strip():
             parents.append(None)
@@ -331,11 +336,11 @@ def _parent_indexes(lines):
             open_lines = []
             parents.append(None)
             continue
-        indent = _indent(line)
-        while open_lines and open_lines[-1][0] >= indent:
+        depth = _indent(line) // 2
+        while open_lines and open_lines[-1][0] >= depth:
             open_lines.pop()
         parents.append(open_lines[-1][1] if open_lines else None)
-        open_lines.append((indent, index))
+        open_lines.append((depth, index))
     return parents
 
 
@@ -354,7 +359,7 @@ def lines_moved_under_new(previous, merged):
     merged list as often as in the previous list, and sat under another
     line each time), and the line it now sits under is new (its text,
     ticked or not, is nowhere in the previous list). A new sub-item among
-    existing ones is at their indent or deeper, so it is no line's
+    existing ones is at their depth or deeper, so it is no line's
     parent. Kept on its own, like lines_not_kept, so it is easy to
     remove."""
     before = (previous or "").splitlines()
