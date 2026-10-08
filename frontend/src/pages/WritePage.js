@@ -1,6 +1,8 @@
 import React from 'react';
 import { useNavigate } from 'react-router-dom';
 import NodeForm from '../components/NodeForm';
+import NodeOpeningSpinner from '../components/NodeOpeningSpinner';
+import useNodePrefetch from '../hooks/useNodePrefetch';
 import { useUser } from '../contexts/UserContext';
 import { useToast } from '../contexts/ToastContext';
 import { isAiAllowed } from '../utils/aiUsage';
@@ -11,6 +13,10 @@ export default function WritePage() {
   const { user } = useUser();
   const { addToast } = useToast();
   const craftMode = !!user?.craft_mode;
+  // The entry's page opens once its node is in, with a spinner here
+  // meanwhile, instead of a "Loading node..." page.
+  const { pending: openingNode, openNode } = useNodePrefetch();
+  const openAt = (id, url) => openNode(id, () => navigate(url));
 
   // Text mode is agentic: every entry that starts here gets the textmode
   // system prompt and honours the auto-generate preference — typed
@@ -81,17 +87,17 @@ export default function WritePage() {
     if (llmNodeId && data?.user_node_id) {
       // Through the user's entry so it gets its own URL/history step;
       // NodeDetail takes ?awaitLlm on to the pending LLM response.
-      navigate(`/node/${data.user_node_id}?awaitLlm=${llmNodeId}`);
+      openAt(data.user_node_id, `/node/${data.user_node_id}?awaitLlm=${llmNodeId}`);
     } else if (llmNodeId) {
-      navigate(`/node/${llmNodeId}?awaitLlm=${llmNodeId}`);
+      openAt(llmNodeId, `/node/${llmNodeId}?awaitLlm=${llmNodeId}`);
     } else if (data?.user_node_id) {
       // Auto-generate off (#134): no LLM reply was created — land on the
       // user's own entry. /textmode/start returns user_node_id (not id).
-      navigate(`/node/${data.user_node_id}`);
+      openAt(data.user_node_id, `/node/${data.user_node_id}`);
     } else if (data?.id) {
       // Fallback path (ai_usage not chat/train) — navigate to the plain
       // entry without the awaitLlm query param.
-      navigate(`/node/${data.id}`);
+      openAt(data.id, `/node/${data.id}`);
     }
   };
 
@@ -128,6 +134,7 @@ export default function WritePage() {
           onSuccess={handleSuccess}
         />
       </div>
+      {openingNode && <NodeOpeningSpinner />}
     </div>
   );
 }

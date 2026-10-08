@@ -223,6 +223,57 @@ def test_version_ownership_enforced(app, client):
         f"/api/artifacts/versions/{foreign_id}").status_code == 403
 
 
+def test_patch_edits_own_unpinned_version_in_place(app, client):
+    client.put("/api/artifacts/dev-map", json={"content": "- [ ] a"})
+    r = client.patch("/api/artifacts/dev-map", json={"content": "- [x] a"})
+    assert r.status_code == 200
+    assert r.get_json()["artifact"]["version_number"] == 1
+    got = client.get("/api/artifacts/dev-map").get_json()["artifact"]
+    assert got["content"] == "- [x] a"
+
+
+def test_patch_over_ai_version_creates_user_version(app, client):
+    with app.app_context():
+        uid = User.query.first().id
+        _mk_artifact(uid, "dev-map", "- [ ] a", title="Dev Map",
+                     description="Ideas")
+    r = client.patch("/api/artifacts/dev-map", json={"content": "- [x] a"})
+    art = r.get_json()["artifact"]
+    assert art["version_number"] == 2
+    assert art["generated_by"] == "user"
+    assert art["title"] == "Dev Map"
+    assert art["description"] == "Ideas"
+    # The next click edits the new user version in place.
+    r = client.patch("/api/artifacts/dev-map", json={"content": "- [ ] a"})
+    assert r.get_json()["artifact"]["version_number"] == 2
+
+
+def test_patch_over_pinned_version_creates_new_version(app, client):
+    client.put("/api/artifacts/dev-map", json={"content": "- [ ] a"})
+    with app.app_context():
+        uid = User.query.first().id
+        pinned = UserArtifact.latest_for(uid, "dev-map")
+        node = Node(user_id=uid, node_type="user")
+        node.set_content("session")
+        _db.session.add(node)
+        _db.session.flush()
+        _db.session.add(NodeContextArtifact(
+            node_id=node.id, artifact_type="user_artifact",
+            artifact_id=pinned.id))
+        _db.session.commit()
+        pinned_id = pinned.id
+    r = client.patch("/api/artifacts/dev-map", json={"content": "- [x] a"})
+    assert r.get_json()["artifact"]["version_number"] == 2
+    # The pinned version keeps the content the session saw.
+    old = client.get(f"/api/artifacts/versions/{pinned_id}").get_json()
+    assert old["artifact"]["content"] == "- [ ] a"
+
+
+def test_patch_missing_artifact_404(app, client):
+    assert client.patch(
+        "/api/artifacts/nope", json={"content": "x"}).status_code == 404
+
+
 # ── Tool executor ────────────────────────────────────────────────────────
 
 def _run_tool(app, name, inp, uid):
