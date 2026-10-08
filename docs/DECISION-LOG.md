@@ -337,6 +337,18 @@ Kinds (one per entry and per table row):
 - **Source:** Peter's request of 2026-10-08, quoted in PR #456; the decision is PR #209's (Fable 5).
 - **Applies to:** #209, #384, #456.
 
+### 2026-10-08 · Old Sentry reports: delete them or let them expire
+
+- **Kind:** privacy
+- **Situation:** error reports sent to Sentry before #422 (server) and #459 (browser) could carry search words and other text from requests. Settings that scrub data in Sentry apply only to new reports, so the old ones could be deleted by hand or left to expire after the plan's 30 days.
+- **Prediction:** delete the server project's old issues now and the browser project's after #459 deploys (80 %).
+- **Peter:** "let it expire in 30 days" · "yeah, would delete them if we were in Beta"
+- **Score:** miss.
+- **Why it missed:** weighed as if Beta users' text were at stake. Before the Beta the reports hold mostly Peter's own and test data, so expiry within 30 days is enough.
+- **Source:** Loore voice review and Claude Code session 2026-10-08 (Opus 5.5)
+- **Applies to:** #422, #459.
+- **Rule:** candidate: how urgent a privacy cleanup is depends on the phase; before the Beta, letting data expire is acceptable.
+
 ## Decided by the builder
 
 Choices that agents flagged in PRs and that the builder decided because a rule above already covers them (Peter, 2026-10-02: decide what the log supports, raise only real judgement calls). Each is also recorded on its PR, or in the session where Peter asked. The Decided column holds only the builder's part; a rule or decision of Peter's goes in the Rule column. Questions raised to Peter instead are not listed; his answers become entries. Model is the model that wrote the PR (its Co-Authored-By line). Result is "accepted by merge (PR #N, date)" once the PR has merged and Peter didn't correct the choice, "pending" until it merges, and "corrected → entry <title>" when he overrules it; the entry is then scored as a miss.
