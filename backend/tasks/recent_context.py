@@ -30,7 +30,7 @@ from backend.models import (
 from backend.utils.privacy import AI_ALLOWED, account_allows_ai
 from backend.extensions import db
 from backend.llm_providers import (
-    LLMProvider, PromptTooLongError, is_empty_truncated,
+    LLMProvider, PromptTooLongError, is_empty_truncated, is_refused,
     EmptyTruncatedOutputError, DEFAULT_MAX_OUTPUT_TOKENS, model_input_cap,
     fit_by_count)
 from backend.utils.tokens import reduce_export_tokens, format_date_metadata
@@ -586,19 +586,24 @@ def _apply_item(item, result, batch_id):
         )
         summary_text = result.get("content") or ""
         truncated = bool(result.get("truncated"))
-        if not summary_text.strip():
-            # Billed but empty: save nothing, keep the previous summary.
-            # Cut off before any text = a refusal for the backoff (#368).
-            if truncated:
+        refused = is_refused(result)
+        if refused or not summary_text.strip():
+            # Billed but empty, or the model refused (#470; its text, if
+            # any, is no summary): save nothing, keep the previous summary.
+            # Cut off before any text, or refused = a refusal for the
+            # backoff (#368).
+            if refused:
+                item["model_refused"] = True   # for the stop report
+            if truncated or refused:
                 cost_log.request_ref = refusal_backoff.REFUSED_REF
             db.session.add(cost_log)
             db.session.commit()
             logger.warning(
-                "Empty recent-context output for user %s (model %s, "
-                "truncated=%s, output_tokens=%s): nothing saved, the "
-                "previous one stays", user_id, model_id, truncated,
-                result.get("output_tokens"))
-            return ("refused" if truncated else "failed"), True
+                "Recent-context output not saved for user %s (model %s, "
+                "refused=%s, truncated=%s, output_tokens=%s): nothing "
+                "saved, the previous one stays", user_id, model_id,
+                refused, truncated, result.get("output_tokens"))
+            return ("refused" if (truncated or refused) else "failed"), True
         db.session.add(cost_log)
         db.session.commit()
         billed = True
@@ -653,7 +658,9 @@ def _report_unsaved(items):
         if stopped:
             refusal_backoff.report_stop(
                 item["user_id"], "recent context", n, item["model_id"],
-                "recent_context", cause="batch item failed or cut off",
+                "recent_context",
+                cause=("refused by the model" if item.get("model_refused")
+                       else "batch item failed or cut off"),
                 until=until)
         else:
             logger.warning(
@@ -840,7 +847,8 @@ def _generate_recent_context_impl(user_id, profile_id=None,
 
     # Cut off before any text (#368): keep the previous recent context
     # rather than replace it with an empty one, and fail the task.
-    if is_empty_truncated(response):
+    refused = is_refused(response)
+    if refused or is_empty_truncated(response):
         # The cost row (the call was billed), marked as a refusal for the
         # backoff in _should_generate_recent_context.
         cost_log.request_ref = refusal_backoff.REFUSED_REF
@@ -850,16 +858,18 @@ def _generate_recent_context_impl(user_id, profile_id=None,
         if stopped:
             refusal_backoff.report_stop(
                 user_id, "recent context", n, model_id, "recent_context",
+                cause=(refusal_backoff.REFUSED_CAUSE if refused
+                       else refusal_backoff.CUT_OFF_CAUSE),
                 until=until)
         else:
             logger.warning(
-                "Empty truncated recent-context output for user %s (model "
-                "%s, output_tokens=%s): nothing saved, the previous one "
-                "stays; next try after %s", user_id, model_id,
-                response.get("output_tokens"), until)
+                "Recent-context output refused for user %s (model "
+                "%s, refused=%s, output_tokens=%s): nothing saved, the "
+                "previous one stays; next try after %s", user_id, model_id,
+                refused, response.get("output_tokens"), until)
         raise EmptyTruncatedOutputError(
             f"recent context for user {user_id}", model_id,
-            response.get("output_tokens"))
+            response.get("output_tokens"), refused=refused)
 
     # Save the recent context
     _save_recent_context(

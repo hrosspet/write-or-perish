@@ -46,6 +46,15 @@ def is_empty_truncated(response):
             and not response.get("tool_calls"))
 
 
+def is_refused(response):
+    """True when the model declined the request (#470): Anthropic
+    stop_reason "refusal", an OpenAI refusal block or message.refusal. The
+    text, if any, is an apology or a fragment, never the job's output, so a
+    background job saves nothing from it whether it is empty or partial.
+    Set on live and batch-collected results alike (#454)."""
+    return bool(response.get("refused"))
+
+
 class EmptyTruncatedOutputError(RuntimeError):
     """A background job refused its model output because it was cut off at
     the output limit: before any text (is_empty_truncated), or — for
@@ -56,9 +65,18 @@ class EmptyTruncatedOutputError(RuntimeError):
     one retry after an hour, then stopped). The cost row for the call is
     still written."""
 
-    def __init__(self, job, model_id=None, output_tokens=None, empty=True):
+    def __init__(self, job, model_id=None, output_tokens=None, empty=True,
+                 refused=False):
         self.job = job
+        self.refused = refused
         where = "before any text" if empty else "mid-output"
+        if refused:
+            # The model declined (#470); counted like a cut-off output.
+            super().__init__(
+                f"{job}: the model refused the request "
+                f"(model={model_id}, output_tokens={output_tokens}); "
+                f"nothing was saved")
+            return
         super().__init__(
             f"{job}: model output was cut off at the output limit {where} "
             f"(model={model_id}, output_tokens={output_tokens}); "
@@ -778,11 +796,17 @@ class LLMProvider:
             raise mapped from e
 
         content = ""
+        refused = False
         tool_calls = []
         import json
         for item in response.output:
             if item.type == "message":
                 for block in item.content:
+                    # A Responses API refusal is a content block of type
+                    # "refusal" (its text in .refusal), not output_text.
+                    if getattr(block, "type", None) == "refusal":
+                        refused = True
+                        continue
                     text = getattr(block, "text", None)
                     if text:
                         content += text
@@ -827,6 +851,7 @@ class LLMProvider:
             "cache_write_subset_tokens": cache_write_tokens,
             "tool_calls": tool_calls,
             "truncated": truncated,
+            "refused": refused,
             "response_id": getattr(response, "id", None),
         }
         # Whether the comparison actually went out (it is dropped on the
@@ -1083,6 +1108,8 @@ class LLMProvider:
             "cache_creation_input_tokens": cache_write,
             "tool_calls": tool_calls,
             "truncated": truncated,
+            # The model declined (#454): the text is a refusal, not an answer.
+            "refused": stop_reason == "refusal",
         }
 
 

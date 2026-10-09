@@ -442,7 +442,7 @@ def test_scan_statuses_delivers_todo_content(app):
         node = _node_with_meta(uid, [
             {"name": "read_todo", "status": "success", "todo_id": todo.id},
         ])
-        notes, to_mark = _scan_proposal_statuses([node])
+        notes, to_mark = _scan_proposal_statuses([node], uid)
         joined = "\n".join(notes)
         assert "the actual tasks" in joined
         assert "current todo list" in joined
@@ -450,7 +450,7 @@ def test_scan_statuses_delivers_todo_content(app):
 
         _mark_status_reported(to_mark)
         _db.session.commit()
-        notes2, to_mark2 = _scan_proposal_statuses([node])
+        notes2, to_mark2 = _scan_proposal_statuses([node], uid)
         assert notes2 == []
 
 
@@ -495,7 +495,7 @@ def test_semantic_search_tool_returns_refs_and_reresolves(app, monkeypatch):
         # The raw snippet text must NOT be persisted in tool meta.
         assert "RAW_SNIPPET" not in json.dumps(r)
         # Injection re-resolves the actual node content fresh.
-        text = _retrieval_injection_text(r)
+        text = _retrieval_injection_text(r, uid)
         assert "leaving my job" in text
         assert "career change" in text
 
@@ -518,7 +518,7 @@ def test_semantic_search_injection_skips_opted_out_node(app, monkeypatch):
         _db.session.commit()
         r = {"name": "semantic_search", "status": "success", "query": "x",
              "matches": [{"node_id": node.id, "score": 0.9}]}
-        assert _retrieval_injection_text(r) is None
+        assert _retrieval_injection_text(r, uid) is None
 
 
 # ── Feedback propose → confirm flow ──────────────────────────────────────
@@ -528,8 +528,13 @@ FEEDBACK_TEXT = (
 )
 
 
-def _mk_llm_node(uid, content):
+def _mk_llm_node(uid, content, proposes=None):
+    """An AI reply of *uid*'s; *proposes* names the propose_* entry the
+    completion task writes on a proposal."""
     node = Node(user_id=uid, node_type="llm", llm_model="test-model")
+    if proposes:
+        node.tool_calls_meta = json.dumps(
+            [{"name": proposes, "status": "success"}])
     node.set_content(content)
     _db.session.add(node)
     _db.session.commit()
@@ -559,7 +564,8 @@ def test_auto_create_drafts_creates_feedback_draft(app):
 def test_apply_feedback_tool_submits(app):
     with app.app_context():
         uid = User.query.first().id
-        origin = _mk_llm_node(uid, FEEDBACK_TEXT)
+        origin = _mk_llm_node(uid, FEEDBACK_TEXT,
+                              proposes="propose_feedback")
         draft = Draft(user_id=uid, parent_id=origin.id,
                       label="feedback_pending")
         draft.set_content("")
@@ -584,7 +590,8 @@ def test_apply_feedback_tool_submits(app):
 
 def _pending_todo_proposal(uid):
     proposal = Node(user_id=uid, node_type="llm", llm_model="test-model",
-                    ai_usage="chat")
+                    ai_usage="chat", tool_calls_meta=json.dumps(
+                        [{"name": "propose_todo", "status": "success"}]))
     proposal.set_content("### New Tasks\n- buy milk")
     _db.session.add(proposal)
     _db.session.flush()
@@ -638,6 +645,27 @@ def test_apply_todo_changes_starts_the_merge_for_a_chat_todo_list(
         assert len(started) == 1
 
 
+def test_apply_todo_changes_when_another_request_started_the_merge(
+        app, monkeypatch):
+    """Two confirmations of one proposal start one merge (#434): the
+    second start finds its draft already claimed."""
+    with app.app_context():
+        uid = User.query.first().id
+        _mk_todo(uid, "- a task", ai_usage="chat")
+        proposal, _ = _pending_todo_proposal(uid)
+        import backend.routes.todo as todo_routes
+        monkeypatch.setattr(todo_routes, "_start_todo_merge",
+                            lambda *a, **k: None)
+
+        r = _execute_tool_calls(
+            [{"name": "apply_todo_changes", "input": {}}], proposal,
+            [proposal], uid)[0]
+
+        assert r["status"] == "error"
+        assert r["error"] == todo_routes.TODO_MERGE_RUNNING_MESSAGE
+        assert "apply_task_id" not in r
+
+
 def test_apply_feedback_without_pending_draft_errors(app):
     with app.app_context():
         uid = User.query.first().id
@@ -651,7 +679,8 @@ def test_apply_feedback_without_pending_draft_errors(app):
 def test_feedback_submit_route(app, client):
     with app.app_context():
         uid = User.query.first().id
-        origin = _mk_llm_node(uid, FEEDBACK_TEXT)
+        origin = _mk_llm_node(uid, FEEDBACK_TEXT,
+                              proposes="propose_feedback")
         draft = Draft(user_id=uid, parent_id=origin.id,
                       label="feedback_pending")
         draft.set_content("")
@@ -686,7 +715,8 @@ def test_composing_reply_under_proposal_does_not_clobber_draft(app, client):
     only because it never composes a reply)."""
     with app.app_context():
         uid = User.query.first().id
-        proposal = _mk_llm_node(uid, FEEDBACK_TEXT)
+        proposal = _mk_llm_node(uid, FEEDBACK_TEXT,
+                                proposes="propose_feedback")
         fb = Draft(user_id=uid, parent_id=proposal.id,
                    label="feedback_pending")
         fb.set_content("")
@@ -771,7 +801,7 @@ def test_scan_statuses_reports_artifact_tools_once(app):
             {"name": "propose_feedback", "status": "success",
              "apply_status": "completed"},
         ])
-        notes, to_mark = _scan_proposal_statuses([node])
+        notes, to_mark = _scan_proposal_statuses([node], uid)
         joined = "\n".join(notes)
         assert "Artifact 'memory' was updated." in joined
         assert "the actual books" in joined  # read_artifact content delivery
@@ -780,7 +810,7 @@ def test_scan_statuses_reports_artifact_tools_once(app):
 
         _mark_status_reported(to_mark)
         _db.session.commit()
-        notes2, to_mark2 = _scan_proposal_statuses([node])
+        notes2, to_mark2 = _scan_proposal_statuses([node], uid)
         assert notes2 == []
         assert to_mark2 == []
 
@@ -795,14 +825,93 @@ def test_scan_statuses_reports_artifact_failure(app):
             {"name": "update_artifact", "status": "error",
              "kind": "memory", "error": "Anchor text not found"},
         ])
-        notes, to_mark = _scan_proposal_statuses([node])
+        notes, to_mark = _scan_proposal_statuses([node], uid)
         assert notes == ["[update_artifact failed — Anchor text not found]"]
         assert len(to_mark) == 1
 
         _mark_status_reported(to_mark)
         _db.session.commit()
-        notes2, _ = _scan_proposal_statuses([node])
+        notes2, _ = _scan_proposal_statuses([node], uid)
         assert notes2 == []
+
+
+# ── A thread two people reply in ─────────────────────────────────────────
+
+def _reply_for(owner, meta):
+    """An LLM reply made for *owner*, as the task writes one: authored by
+    the model's account, the human owner on human_owner_id."""
+    llm = User.query.filter_by(username="model-account").first()
+    if llm is None:
+        llm = User(username="model-account")
+        _db.session.add(llm)
+        _db.session.commit()
+    node = Node(user_id=llm.id, human_owner_id=owner.id, node_type="llm",
+                llm_model="test-model")
+    node.set_content("resp")
+    node.tool_calls_meta = json.dumps(meta)
+    _db.session.add(node)
+    _db.session.commit()
+    return node
+
+
+def _second_user():
+    bob = User(username="bob")
+    _db.session.add(bob)
+    _db.session.commit()
+    return bob
+
+
+def _apply_status(node):
+    return json.loads(Node.query.get(node.id).tool_calls_meta)[0][
+        "apply_status"]
+
+
+def test_new_proposal_supersedes_only_the_replying_users_own(app):
+    """A new todo proposal for bob replaces bob's pending one; alice's
+    pending proposal in the same thread keeps its status."""
+    with app.app_context():
+        alice, bob = User.query.first(), _second_user()
+        pending = [{"name": "propose_todo", "status": "success",
+                    "apply_status": "pending_approval"}]
+        alices = _reply_for(alice, pending)
+        bobs_earlier = _reply_for(bob, pending)
+        bobs_new = _reply_for(bob, [])
+
+        results = _auto_create_drafts(
+            "### New Tasks\n- call the bank", bobs_new,
+            [alices, bobs_earlier, bobs_new], bob.id)
+        _db.session.commit()
+        _db.session.expire_all()
+
+        assert [r["name"] for r in results] == ["propose_todo"]
+        assert _apply_status(bobs_earlier) == "superseded"
+        assert _apply_status(alices) == "pending_approval"
+
+
+def test_scan_statuses_reads_only_the_replying_users_replies(app):
+    """Bob's reply under alice's carries forward only bob's own pending
+    results. Alice's retrieval waiting for her next turn stays hers and
+    is not marked reported, so her next turn still gets it."""
+    with app.app_context():
+        alice, bob = User.query.first(), _second_user()
+        todo = _mk_todo(alice.id, "alice's own tasks")
+        alices = _reply_for(alice, [
+            {"name": "read_todo", "status": "success", "todo_id": todo.id},
+        ])
+        bobs = _reply_for(bob, [
+            {"name": "update_artifact", "status": "success",
+             "kind": "memory", "created": False},
+        ])
+
+        notes, to_mark = _scan_proposal_statuses([alices, bobs], bob.id)
+        assert notes == ["[Artifact 'memory' was updated.]"]
+        assert [(n.id, name) for n, name in to_mark] == [
+            (bobs.id, "update_artifact")]
+
+        _mark_status_reported(to_mark)
+        _db.session.commit()
+        notes, _ = _scan_proposal_statuses([alices, bobs], alice.id)
+        assert any("alice's own tasks" in n for n in notes)
 
 
 # ── Pinning ──────────────────────────────────────────────────────────────
@@ -872,7 +981,7 @@ def test_inline_kinds_surface_in_node_display(app):
         attach_context_artifacts(node.id, uid)
         _db.session.commit()
 
-        fields = _context_artifact_fields(node)
+        fields = _context_artifact_fields(node, uid)
         for kind in UserArtifact.INLINE_KINDS:
             assert kind in fields, f"{kind} missing from display fields"
             assert fields[kind]["content"] == f"{kind}-body"
@@ -903,16 +1012,16 @@ def test_share_guidance_display_mirrors_llm_substitution(app):
 
         app.config["SHARE_V1"] = True
         user.public_sharing_enabled = False
-        fields = _context_artifact_fields(node)
+        fields = _context_artifact_fields(node, user.id)
         assert fields["share_guidance"]["content"] == ""
 
         user.public_sharing_enabled = True
-        fields = _context_artifact_fields(node)
+        fields = _context_artifact_fields(node, user.id)
         assert fields["share_guidance"]["content"] == SHARE_GUIDANCE_TEXT
 
         # Killswitch off → same as user-disabled
         app.config["SHARE_V1"] = False
-        fields = _context_artifact_fields(node)
+        fields = _context_artifact_fields(node, user.id)
         assert fields["share_guidance"]["content"] == ""
 
 

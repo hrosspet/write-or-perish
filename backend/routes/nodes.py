@@ -397,8 +397,9 @@ def _prompt_version_number(prompt):
     ).count()
 
 
-def _system_prompt_fields(n):
-    """Return system prompt serialization fields for a node."""
+def _system_prompt_fields(n, viewer_id):
+    """Return system prompt serialization fields for a node, as
+    *viewer_id* may see them (see _context_artifact_fields)."""
     prompt = n.get_artifact("prompt")
     if prompt is not None:
         # The read prompts are shown under Glean's name (#435), also on
@@ -414,13 +415,13 @@ def _system_prompt_fields(n):
             "prompt_key": prompt.prompt_key,
             "user_prompt_id": prompt.id,
             "prompt_version_number": _prompt_version_number(prompt),
-            "context_artifacts": _context_artifact_fields(n),
+            "context_artifacts": _context_artifact_fields(n, viewer_id),
         }
     # No linked prompt version. A root whose per-thread edit detached the
     # link keeps its prompt_key stamp: still the session's system prompt
     # (mode badge, Log preview), just with no title/version to show. Its
     # other context artifacts (pinned profile etc.) may still exist too.
-    artifacts = _context_artifact_fields(n)
+    artifacts = _context_artifact_fields(n, viewer_id)
     return {
         "is_system_prompt": n.is_system_prompt,
         "prompt_title": None,
@@ -431,10 +432,21 @@ def _system_prompt_fields(n):
     }
 
 
-def _context_artifact_fields(n):
-    """Build a dict of context artifacts attached to a node."""
+def _context_artifact_fields(n, viewer_id):
+    """Build a dict of context artifacts attached to a node.
+
+    The pinned personal versions (profile, todo, recent context, memory
+    and the other inline artifacts) and the recent-writing range are the
+    node owner's, shown to the owner only: a public thread's system
+    prompt shows other viewers the prompt, and its placeholders read as
+    not available. Each version is also checked to be the viewer's own.
+    """
+    is_owner = (viewer_id is not None
+                and (n.human_owner_id or n.user_id) == viewer_id)
     artifacts = {}
     for row in n.context_artifacts:
+        if row.artifact_type != "prompt" and not is_owner:
+            continue
         if row.artifact_type == "prompt":
             prompt = UserPrompt.query.get(row.artifact_id)
             if prompt:
@@ -446,7 +458,7 @@ def _context_artifact_fields(n):
                 }
         elif row.artifact_type == "profile":
             profile = UserProfile.query.get(row.artifact_id)
-            if profile:
+            if profile and profile.user_id == viewer_id:
                 artifacts["profile"] = {
                     "id": profile.id,
                     "version_number": UserProfile.query.filter(
@@ -457,7 +469,7 @@ def _context_artifact_fields(n):
                 }
         elif row.artifact_type == "todo":
             todo = UserTodo.query.get(row.artifact_id)
-            if todo:
+            if todo and todo.user_id == viewer_id:
                 artifacts["todo"] = {
                     "id": todo.id,
                     "version_number": UserTodo.query.filter(
@@ -468,7 +480,7 @@ def _context_artifact_fields(n):
                 }
         elif row.artifact_type == "recent_context":
             rc = UserRecentContext.query.get(row.artifact_id)
-            if rc:
+            if rc and rc.user_id == viewer_id:
                 artifacts["recent"] = {
                     "id": rc.id,
                     "content": rc.get_content(),
@@ -481,7 +493,8 @@ def _context_artifact_fields(n):
             # Non-inline kinds reach the model via the artifacts index / tools
             # and have no inline placeholder, so they're skipped here.
             art = UserArtifact.query.get(row.artifact_id)
-            if art and art.kind in UserArtifact.INLINE_KINDS:
+            if (art and art.kind in UserArtifact.INLINE_KINDS
+                    and art.user_id == viewer_id):
                 artifacts[art.kind] = {
                     "id": art.id,
                     "version_number": UserArtifact.query.filter(
@@ -512,7 +525,7 @@ def _context_artifact_fields(n):
                 "content": render_external_guidance(
                     current_app.config, n.human_owner_id or n.user_id),
             }
-        if "{user_recent_raw}" in content:
+        if "{user_recent_raw}" in content and is_owner:
             from backend.routes.export_data import get_raw_data_date_range
             earliest, latest, total_tokens = get_raw_data_date_range(
                 n.user_id, created_before=n.created_at,
@@ -626,7 +639,7 @@ def serialize_node_recursive(n, user_id=None, parent_user_id=None):
         "privacy_level": n.privacy_level,
         "ai_usage": n.ai_usage,
     }
-    data.update(_system_prompt_fields(n))
+    data.update(_system_prompt_fields(n, user_id))
     return data
 
 
@@ -1048,7 +1061,7 @@ def update_node(node_id):
     # subtree walk and a KMS unwrap per descendant on every save.
     return jsonify({
         "message": "Node updated",
-        "node": _focal_own_fields(node),
+        "node": _focal_own_fields(node, current_user.id),
         "descendants_updated": len(cascaded),
     }), 200
 
@@ -1095,12 +1108,13 @@ def _render_set_ciphertexts(nodes):
     return texts
 
 
-def _focal_own_fields(node):
+def _focal_own_fields(node, viewer_id):
     """The focal node's own serialized fields — everything GET /nodes/<id>
     returns except the tree (ancestors, children, child_count). Shared
     with PUT, whose response used to re-run the whole GET (subtree walk,
     every descendant decrypted) only for the UI to keep the node's own
-    fields and refetch the rest."""
+    fields and refetch the rest. *viewer_id* is the user the response is
+    for: fields that belong to the node's owner alone go to them only."""
     data = {
         "id": node.id,
         "content": node.get_content(),
@@ -1133,19 +1147,15 @@ def _focal_own_fields(node):
     if node.llm_task_status in ("pending", "processing") \
             and node.streaming_content:
         data["streaming_content"] = node.get_streaming_content()
-    # Include tool call metadata for LLM nodes
+    # Include tool call metadata for LLM nodes: in full for the reply's
+    # owner, each action's name and outcome for anyone else.
     if node.tool_calls_meta:
-        import json as _json
-        from backend.utils.client_platform import without_client_marker
-        try:
-            visible = without_client_marker(
-                _json.loads(node.tool_calls_meta))
-            # A reply whose only entry was the app marker reads as a node
-            # with no tool calls: no key, as before the marker existed.
-            if visible:
-                data["tool_calls_meta"] = visible
-        except (ValueError, TypeError):
-            pass
+        from backend.utils.tool_meta import tool_calls_meta_for
+        visible = tool_calls_meta_for(node, viewer_id)
+        # A reply whose only entry was the app marker reads as a node
+        # with no tool calls: no key, as before the marker existed.
+        if visible:
+            data["tool_calls_meta"] = visible
         # A Community Archive feed reply carries picks (see FeedPick), as
         # does a control sample rendered through the same list; the
         # count is looked up only for nodes marked as either.
@@ -1154,15 +1164,20 @@ def _focal_own_fields(node):
             from backend.models import FeedPick
             data["feed_picks_count"] = FeedPick.query.filter_by(
                 node_id=node.id, kind="read").count()
-    data.update(_system_prompt_fields(node))
+    data.update(_system_prompt_fields(node, current_user.id))
     # A Community Archive read reply: the thread page shows what the read
     # covered (the window, from the pinned render) and offers to read
-    # the day again. Focal node only — two small lookups.
+    # the day again. Focal node only — two small lookups. The window goes
+    # to the reply's owner only: its counts are taken after the owner's
+    # read tweets were left out (`excluded` is how many; the tweet and
+    # account counts are what remained), so they are the owner's read
+    # state. Another viewer of the reply gets it without the window.
     if node.node_type == "llm" or node.llm_model:
         from backend.utils.ca_feed import is_read_reply, read_window_fields
         if is_read_reply(node):
             data["read_reply"] = True
-            data["read_window"] = read_window_fields(node.feed_render)
+            if (node.human_owner_id or node.user_id) == viewer_id:
+                data["read_window"] = read_window_fields(node.feed_render)
     return data
 
 
@@ -1349,7 +1364,8 @@ def get_node(node_id):
                 # persist it on save.
                 "privacy_level": current.privacy_level,
             }
-            ancestor_data.update(_system_prompt_fields(current))
+            ancestor_data.update(
+                _system_prompt_fields(current, current_user.id))
             ancestors.insert(0, ancestor_data)
         elif status.get("deleted"):
             ancestor_data = {
@@ -1358,7 +1374,8 @@ def get_node(node_id):
                 "ai_usage": current.ai_usage,
                 "privacy_level": current.privacy_level,
             }
-            ancestor_data.update(_system_prompt_fields(current))
+            ancestor_data.update(
+                _system_prompt_fields(current, current_user.id))
             ancestors.insert(0, ancestor_data)
         # else: status.get('inaccessible') — skip entirely (no leak of
         # structural fact "something is here" to a viewer who never had
@@ -1395,7 +1412,7 @@ def get_node(node_id):
         ) if serialized is not None
     ]
     _order_and_count_children(serialized_children)
-    focal = _focal_own_fields(node)
+    focal = _focal_own_fields(node, current_user.id)
     in_read_thread = bool(
         read_prompt_above
         or focal.get("read_reply")
@@ -1482,7 +1499,16 @@ def resolve_node_quotes(node_id):
     ext_owner_id = node.human_owner_id or node.user_id
     ext_quote_data = get_ext_quote_data(ext_quote_ids, ext_owner_id) \
         if ext_quote_ids else {}
-    if ext_quote_ids and ext_owner_id == current_user.id:
+    if ext_quote_ids and ext_owner_id != current_user.id:
+        # The quoted text is published with the node; the owner's read
+        # mark and verdict on each reference are not. Another viewer gets
+        # the quotes without them (the bubbles show them to the owner
+        # only anyway).
+        for quote in ext_quote_data.values():
+            if quote is not None:
+                quote.pop("read_at", None)
+                quote.pop("feedback", None)
+    elif ext_quote_ids:
         # The owner's controls show the verdict that counts for the
         # recommendation this reply made (#352), where it has one.
         from backend.models import FeedPick
@@ -2261,17 +2287,13 @@ def get_llm_status(node_id):
     if node.llm_task_status in ('completed', 'cancelled'):
         response_data["content"] = node.get_content()
 
-    # Include tool call metadata if present
+    # Include tool call metadata if present: in full for the reply's
+    # owner, each action's name and outcome for anyone else.
     if node.tool_calls_meta:
-        import json
-        from backend.utils.client_platform import without_client_marker
-        try:
-            visible = without_client_marker(
-                json.loads(node.tool_calls_meta))
-            if visible:
-                response_data["tool_calls_meta"] = visible
-        except (json.JSONDecodeError, TypeError):
-            pass
+        from backend.utils.tool_meta import tool_calls_meta_for
+        visible = tool_calls_meta_for(node, current_user.id)
+        if visible:
+            response_data["tool_calls_meta"] = visible
     # Batch stage ({ca_tweets}): the synchronous part is done and the
     # turn is queued at the provider. The thread page uses this to stop
     # the generate spinner and hand the wait to the pending node.
@@ -3066,7 +3088,7 @@ def get_streaming_status(node_id):
 @nodes_bp.route("/<int:node_id>/pin", methods=["POST"])
 @login_required
 def pin_node(node_id):
-    """Pin a node to the current user's profile (Dashboard + Log)."""
+    """Pin a node to the current user's Log."""
     node = Node.query.get_or_404(node_id)
 
     owner_id = node.human_owner_id or node.user_id

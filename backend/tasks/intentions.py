@@ -105,17 +105,23 @@ def _refuse_empty_truncated(user, response, batch):
     raise EmptyTruncatedOutputError."""
     from backend.extensions import db
     from backend.llm_providers import (
-        is_empty_truncated, EmptyTruncatedOutputError)
-    if not is_empty_truncated(response):
+        is_empty_truncated, is_refused, EmptyTruncatedOutputError)
+    # A model refusal (#470), empty or partial, is refused like an empty
+    # cut-off output: nothing saved, the previous version stays.
+    refused = is_refused(response)
+    if not (refused or is_empty_truncated(response)):
         return
     out_t = response.get("output_tokens", 0)
     _add_cost_log(user, response.get("input_tokens", 0), out_t, batch,
                   refused=True)
     db.session.commit()
-    logger.warning("intentions user %s: output cut off before any text "
-                   "(output_tokens=%s); nothing saved", user.id, out_t)
+    logger.warning("intentions user %s: %s (model %s, output_tokens=%s); "
+                   "nothing saved", user.id,
+                   "refused by the model" if refused
+                   else "output cut off before any text",
+                   MODEL_ID, out_t)
     raise EmptyTruncatedOutputError(
-        f"intentions for user {user.id}", MODEL_ID, out_t)
+        f"intentions for user {user.id}", MODEL_ID, out_t, refused=refused)
 
 
 def _save(user, content, input_tokens, output_tokens, total_tokens, batch):

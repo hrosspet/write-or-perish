@@ -545,3 +545,82 @@ def test_collector_logs_the_cost_of_an_empty_batch_result(app, monkeypatch):
     assert log.request_type == "external_digest"
     assert log.request_ref is None          # empty, but not cut off
     assert log.cost_microdollars == 3750    # batch price
+
+
+@pytest.mark.parametrize("text", ["", "I can't write this digest"])
+def test_collector_does_not_save_a_refused_batch_result(
+        app, monkeypatch, text):
+    """#470: a refusal (no text or partial text) is billed and marked
+    refused, and no digest version is saved."""
+    from backend.utils.refusal_backoff import REFUSED_REF
+    user = User.query.first()
+    _mk_item(user.id, "a")
+    _pending_job(user, datetime.utcnow())
+    monkeypatch.setattr(
+        _digest, "batch_check_and_collect",
+        lambda ids, keys: ({f"external-digest-{user.id}": {
+            "content": text, "refused": True, "input_tokens": 1000,
+            "output_tokens": 20}}, {}, {}))
+
+    _digest._collect_digest_batches()
+    _db.session.rollback()
+    assert UserArtifact.latest_for(user.id, _digest.DIGEST_KIND) is None
+    assert APICostLog.query.one().request_ref == REFUSED_REF
+
+
+def test_direct_rebuild_does_not_save_a_refused_digest(app, monkeypatch):
+    uid = User.query.first().id
+    _mk_item(uid, "a")
+    monkeypatch.setattr(
+        _digest.LLMProvider, "get_completion",
+        staticmethod(lambda *a, **k: {
+            "content": "I can't", "refused": True, "input_tokens": 1000,
+            "output_tokens": 5}))
+    assert _digest.rebuild_external_digest(
+        _FakeSelf(), uid) == {"status": "empty_response"}
+    assert UserArtifact.latest_for(uid, _digest.DIGEST_KIND) is None
+
+
+def test_refused_digest_backs_off_and_is_not_billed_every_night(
+        app, monkeypatch):
+    """#470: repeated sweeps after a refusal do not resubmit or bill
+    again until the backoff allows it: one try after an hour, then a stop
+    (reported) until a digest is saved."""
+    from backend.utils import refusal_backoff
+    user = User.query.first()
+    user.timezone = _tz_at_hour(_digest.NIGHTLY_DIGEST_LOCAL_HOUR)
+    _db.session.commit()
+    _mk_item(user.id, "a")
+    submitted = _stub_batch_submit(monkeypatch)
+    stops = []
+    monkeypatch.setattr(refusal_backoff, "report_stop",
+                        lambda *a, **k: stops.append((a, k)))
+
+    def refuse_round():
+        res = _digest.sweep_external_digests()
+        monkeypatch.setattr(
+            _digest, "batch_check_and_collect",
+            lambda ids, keys: ({f"external-digest-{user.id}": {
+                "content": "I can't", "refused": True,
+                "input_tokens": 1000, "output_tokens": 5}}, {}, {}))
+        _digest._collect_digest_batches()
+        return res["submitted"]
+
+    assert refuse_round() == 1                   # first try, refused
+    assert _digest.sweep_external_digests()["submitted"] == 0   # waiting
+    assert len(submitted) == 1 and APICostLog.query.count() == 1
+    assert stops == []
+
+    APICostLog.query.update({"created_at": datetime.utcnow()
+                             - timedelta(hours=1, minutes=1)})
+    _db.session.commit()
+    assert refuse_round() == 1                   # the one more try
+    assert len(stops) == 1                       # second refusal: stopped
+    assert stops[0][1]["cause"] == refusal_backoff.REFUSED_CAUSE
+
+    APICostLog.query.update({"created_at": datetime.utcnow()
+                             - timedelta(days=2)})
+    _db.session.commit()
+    for _ in range(3):
+        assert _digest.sweep_external_digests()["submitted"] == 0
+    assert len(submitted) == 2 and APICostLog.query.count() == 2

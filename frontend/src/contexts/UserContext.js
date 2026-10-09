@@ -11,11 +11,12 @@ export const UserProvider = ({ children }) => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
-  // Fetch current user info when the provider mounts.
+  // Fetch current user info when the provider mounts. profile=0: only `user`
+  // is read here, so the server leaves out the profile and decrypts nothing
+  // on an app load (#481); the Profile page asks for the profile itself.
   useEffect(() => {
-    api.get("/dashboard")  // Or another endpoint you use to get current user info.
+    api.get("/dashboard", { params: { profile: 0 } })
       .then((response) => {
-        // Assume the endpoint returns a { user: { id: ..., username: ... } } object.
         const fetchedUser = response.data.user;
         setUser(fetchedUser);
         setLoading(false);
@@ -53,8 +54,7 @@ export const UserProvider = ({ children }) => {
 
   // The user just wrote an entry (Voice or Text): from now on the screens
   // ask "What's on your mind?" instead of the welcome question (#391).
-  // Set here rather than refetched — /dashboard decrypts the profile and
-  // the node previews on every call.
+  // Set here rather than refetched from /dashboard.
   const markHasOwnEntries = useCallback(() => {
     setUser((prev) => (prev && prev.has_own_entries === false
       ? { ...prev, has_own_entries: true }

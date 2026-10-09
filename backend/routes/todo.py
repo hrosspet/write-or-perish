@@ -1,13 +1,78 @@
+import hashlib
 import json
 from flask import Blueprint, jsonify, request, current_app
 from flask_login import login_required, current_user
 from backend.models import Node, Draft, UserTodo
 from backend.extensions import db
-from backend.utils.privacy import AI_ALLOWED
+from backend.utils.privacy import AI_ALLOWED, can_user_access_node
+from backend.utils.proposals import find_own_pending_proposal
 from backend.utils.timefmt import iso_utc
-from backend.utils.tool_meta import update_tool_meta
+from backend.utils.todo_lock import (
+    TODO_BUSY_CODE, TODO_BUSY_MESSAGE, TodoBusy, lock_user_todo)
+from backend.utils.tool_meta import get_tool_meta_entry
 
 todo_bp = Blueprint("todo", __name__)
+
+# A PATCH or PUT refused because the list changed since the client loaded
+# it (#430, #476): the answer's "code".
+TODO_CHANGED_CODE = "todo_changed"
+TODO_CHANGED_MESSAGE = (
+    "Your todo list changed since this page loaded, so this change wasn't "
+    "saved.")
+
+
+def todo_revision(todo):
+    """Names the stored text of a todo version. It changes with every
+    write, an in-place PATCH included: the column holds ciphertext with a
+    fresh key and nonce per write (or, unencrypted, the text itself). Only
+    the stored column is hashed, so nothing is decrypted. A client sends it
+    back as base_revision on PATCH (#430)."""
+    stored = f"{todo.id}:{todo.content or ''}"
+    return hashlib.sha256(stored.encode("utf-8")).hexdigest()
+
+
+def _todo_json(todo, version_number):
+    return {
+        "id": todo.id,
+        "content": todo.get_content(),
+        "generated_by": todo.generated_by,
+        "tokens_used": todo.tokens_used,
+        "created_at": iso_utc(todo.created_at),
+        "privacy_level": todo.privacy_level,
+        "ai_usage": todo.ai_usage,
+        "version_number": version_number,
+        "revision": todo_revision(todo),
+    }
+
+
+def _version_count(user_id):
+    return UserTodo.query.filter_by(user_id=user_id).count()
+
+
+def newest_todo(user_id):
+    """The user's newest todo version as the database has it now. Read it
+    under lock_user_todo when you check it or build on it (#477). A copy
+    the session already holds (the merge task read the list before its
+    model call) is refreshed, so an in-place edit made since is seen."""
+    return UserTodo.query.filter_by(user_id=user_id).order_by(
+        UserTodo.created_at.desc()).populate_existing().first()
+
+
+def _todo_busy_response():
+    return jsonify({"error": TODO_BUSY_MESSAGE, "code": TODO_BUSY_CODE}), 503
+
+
+def _todo_changed_response(todo, user_id):
+    """409: the newest version is no longer the one the client edited.
+    Nothing was written; the answer carries the newest version, so the
+    client can show it (and apply a tick to it)."""
+    latest = _todo_json(todo, _version_count(user_id)) if todo else None
+    db.session.rollback()
+    return jsonify({
+        "error": TODO_CHANGED_MESSAGE,
+        "code": TODO_CHANGED_CODE,
+        "todo": latest,
+    }), 409
 
 
 @todo_bp.route("/", methods=["GET"])
@@ -21,75 +86,95 @@ def get_todo():
     if not todo:
         return jsonify({"todo": None}), 200
 
-    # Count total versions for version number
-    version_count = UserTodo.query.filter_by(
-        user_id=current_user.id
-    ).count()
-
     return jsonify({
-        "todo": {
-            "id": todo.id,
-            "content": todo.get_content(),
-            "generated_by": todo.generated_by,
-            "tokens_used": todo.tokens_used,
-            "created_at": iso_utc(todo.created_at),
-            "privacy_level": todo.privacy_level,
-            "ai_usage": todo.ai_usage,
-            "version_number": version_count,
-        }
+        "todo": _todo_json(todo, _version_count(current_user.id))
     }), 200
 
 
 @todo_bp.route("/", methods=["PATCH"])
 @login_required
 def patch_todo():
-    """Update the latest todo version in-place (e.g. checkbox toggles)."""
-    data = request.get_json()
+    """Update the latest todo version in place (checkbox toggles, the row
+    "+", quick-add).
+
+    ``base_revision`` (optional): the revision of the version the client
+    applied its change to. When the latest version is no longer that text
+    (a todo merge, or an edit on another device or tab, landed in between),
+    nothing is written and the answer is 409 ``{"error", "code":
+    "todo_changed", "todo": <the latest version>}``, so the client can
+    apply its own change to the latest list and save again (#430).
+    Without it the request overwrites the latest version as before (iPhone
+    builds from before #477 re-fetch the list right before they save).
+
+    503 ``{"error", "code": "todo_busy"}`` when another write of the
+    user's todo held the lock too long (lock_user_todo); nothing written.
+    """
+    data = request.get_json() or {}
     content = data.get("content")
+    base_revision = data.get("base_revision")
 
     if content is None:
         return jsonify({"error": "Content is required"}), 400
     if not content.strip():
         return jsonify({"error": "Content cannot be empty"}), 400
 
-    todo = UserTodo.query.filter_by(
-        user_id=current_user.id
-    ).order_by(UserTodo.created_at.desc()).first()
+    # Every todo writer takes the user's lock before it reads the newest
+    # version (#477), so no Save, revert or merge adds a version between
+    # this check and the write. The commit releases it.
+    try:
+        lock_user_todo(current_user.id)
+    except TodoBusy:
+        return _todo_busy_response()
+    todo = newest_todo(current_user.id)
 
     if not todo:
         return jsonify({"error": "No todo exists to update"}), 404
 
+    if base_revision is not None and base_revision != todo_revision(todo):
+        return _todo_changed_response(todo, current_user.id)
+
     todo.set_content(content)
     db.session.commit()
 
-    version_count = UserTodo.query.filter_by(
-        user_id=current_user.id
-    ).count()
-
     return jsonify({
-        "todo": {
-            "id": todo.id,
-            "content": todo.get_content(),
-            "generated_by": todo.generated_by,
-            "tokens_used": todo.tokens_used,
-            "created_at": iso_utc(todo.created_at),
-            "version_number": version_count,
-        }
+        "todo": _todo_json(todo, _version_count(current_user.id))
     }), 200
 
 
 @todo_bp.route("/", methods=["PUT"])
 @login_required
 def update_todo():
-    """Create a new todo version."""
-    data = request.get_json()
+    """Create a new todo version (the editor's Save, and Create).
+
+    ``base_revision`` (optional): the revision of the version the editor
+    was opened on. When the newest version is no longer that one (a todo
+    merge, a tick or another Save landed while the editor was open),
+    nothing is written and the answer is 409 ``{"error", "code":
+    "todo_changed", "todo": <the newest version>}`` (#476). The editor then
+    shows the choice: save the user's text anyway (sent again with the
+    newest revision) or show the newest list. Without it the text is saved
+    as before (Create, and clients from before #476).
+
+    503 ``{"error", "code": "todo_busy"}``: see patch_todo.
+    """
+    data = request.get_json() or {}
     content = data.get("content")
     generated_by = data.get("generated_by", "user")
+    base_revision = data.get("base_revision")
 
     if content is None:
         return jsonify({"error": "Content is required"}), 400
     if not content.strip():
         return jsonify({"error": "Content cannot be empty"}), 400
+
+    try:
+        lock_user_todo(current_user.id)
+    except TodoBusy:
+        return _todo_busy_response()
+    if base_revision is not None:
+        latest = newest_todo(current_user.id)
+        if latest is None or base_revision != todo_revision(latest):
+            return _todo_changed_response(latest, current_user.id)
 
     todo = UserTodo(
         user_id=current_user.id,
@@ -103,19 +188,8 @@ def update_todo():
     db.session.add(todo)
     db.session.commit()
 
-    version_count = UserTodo.query.filter_by(
-        user_id=current_user.id
-    ).count()
-
     return jsonify({
-        "todo": {
-            "id": todo.id,
-            "content": todo.get_content(),
-            "generated_by": todo.generated_by,
-            "tokens_used": todo.tokens_used,
-            "created_at": iso_utc(todo.created_at),
-            "version_number": version_count,
-        }
+        "todo": _todo_json(todo, _version_count(current_user.id))
     }), 200
 
 
@@ -164,7 +238,16 @@ def get_todo_version(version_id):
 @todo_bp.route("/revert/<int:version_id>", methods=["POST"])
 @login_required
 def revert_todo(version_id):
-    """Create a new todo version from a historical one."""
+    """Create a new todo version from a historical one.
+
+    A revert is the user's explicit choice of a version, so it isn't
+    checked against the newest one. It still takes the user's todo lock
+    first (#477): a tick in progress finishes before the revert replaces
+    its version, and the copy is of the version as it is now."""
+    try:
+        lock_user_todo(current_user.id)
+    except TodoBusy:
+        return _todo_busy_response()
     old_todo = UserTodo.query.get_or_404(version_id)
 
     if old_todo.user_id != current_user.id:
@@ -182,18 +265,8 @@ def revert_todo(version_id):
     db.session.add(new_todo)
     db.session.commit()
 
-    version_count = UserTodo.query.filter_by(
-        user_id=current_user.id
-    ).count()
-
     return jsonify({
-        "todo": {
-            "id": new_todo.id,
-            "content": new_todo.get_content(),
-            "generated_by": new_todo.generated_by,
-            "created_at": iso_utc(new_todo.created_at),
-            "version_number": version_count,
-        }
+        "todo": _todo_json(new_todo, _version_count(current_user.id))
     }), 200
 
 
@@ -229,24 +302,81 @@ def todo_merge_refusal(user_id, proposal_node):
 
 
 def _find_pending_todo_draft(llm_node_id, user_id):
-    """Find the todo_pending draft by walking ancestor chain from llm_node_id."""
+    """The user's pending todo proposal at or above *llm_node_id*: (its
+    todo_pending draft, the proposal node), or (None, None). A todo merge
+    runs only on the user's own live proposal (utils/proposals), so a node
+    they can't see, or a draft on any other node, finds nothing."""
     llm_node = Node.query.get(llm_node_id)
-    if not llm_node:
+    if not llm_node or not can_user_access_node(llm_node, user_id):
         return None, None
+    return find_own_pending_proposal(llm_node, user_id, 'todo_pending')
 
-    current_node = llm_node
-    visited = set()
-    while current_node and current_node.id not in visited:
-        visited.add(current_node.id)
-        draft = Draft.query.filter_by(
-            user_id=user_id,
-            parent_id=current_node.id,
-            label='todo_pending',
-        ).first()
-        if draft:
-            return draft, current_node
-        current_node = current_node.parent
-    return None, None
+
+# A second apply of a proposal whose merge is running (a double click, a
+# second tab): the answer's "code". The web and iPhone cards then show the
+# merge as started and follow it (#434).
+TODO_MERGE_RUNNING_CODE = "todo_merge_started"
+TODO_MERGE_RUNNING_MESSAGE = "These todo changes are already being applied."
+
+
+def _todo_merge_running_response():
+    return jsonify({
+        "error": TODO_MERGE_RUNNING_MESSAGE,
+        "code": TODO_MERGE_RUNNING_CODE,
+    }), 409
+
+
+def _todo_merge_running(node_id, user_id):
+    """Whether the user's proposal node has a merge running. A proposal is
+    an AI reply: its user_id is the model's account, its human_owner_id
+    the user's."""
+    node = Node.query.get(node_id)
+    if node is None or (node.human_owner_id or node.user_id) != user_id:
+        return False
+    entry = get_tool_meta_entry(node, "propose_todo")
+    return bool(entry) and entry.get("apply_status") == "started"
+
+
+# A newer proposal's merge in these states has changed, or is changing,
+# the list (#477).
+_APPLIED_STATUSES = ("started", "completed")
+
+
+def _newer_proposal_applied(proposal_node, user_id):
+    """Whether a todo proposal made after *proposal_node* was applied, or
+    is being applied, for the user. The model may repeat the older
+    proposal's tasks in a newer one while the older merge runs; applying
+    the older one again after the newer one would add them twice."""
+    newer = Node.query.filter(
+        db.or_(Node.human_owner_id == user_id, Node.user_id == user_id),
+        Node.id > proposal_node.id,
+        Node.tool_calls_meta.like('%propose_todo%'),
+    ).all()
+    for node in newer:
+        entry = get_tool_meta_entry(node, "propose_todo")
+        if entry and entry.get("apply_status") in _APPLIED_STATUSES:
+            return True
+    return False
+
+
+def restore_todo_draft(proposal_node, user_id):
+    """After a failed merge, make its proposal applicable again (#434): put
+    back the pending draft its start removed, so the card's "Apply again",
+    the apply-draft route and the voice apply_todo_changes tool all find
+    it. Not when the user has another todo proposal pending: a merge's
+    start removes every pending one, so that one is newer, and only one
+    proposal is pending at a time. Not when a newer proposal was applied,
+    or is being applied, meanwhile either (#477). Returns whether the
+    proposal is pending again. The caller commits."""
+    if Draft.query.filter_by(user_id=user_id, label='todo_pending').first():
+        return False
+    if _newer_proposal_applied(proposal_node, user_id):
+        return False
+    draft = Draft(user_id=user_id, parent_id=proposal_node.id,
+                  label='todo_pending')
+    draft.set_content("")
+    db.session.add(draft)
+    return True
 
 
 def _start_todo_merge(draft, llm_node, user_id, confirm_node_id=None):
@@ -263,43 +393,65 @@ def _start_todo_merge(draft, llm_node, user_id, confirm_node_id=None):
         confirm_node_id: Optional ID of the node where the user confirmed
             (apply_todo_changes). If provided, its meta is also updated
             with the final outcome.
+
+    Returns the task id, or None when another request already started a
+    merge of this proposal (a double click, a second tab): nothing is
+    started then.
     """
     merge_model = llm_node.llm_model or current_app.config.get(
         "DEFAULT_LLM_MODEL", "claude-opus-4.6"
     )
 
-    # Delete ALL pending todo drafts for this user (not just the one found)
-    all_pending = Draft.query.filter_by(
-        user_id=draft.user_id,
-        label='todo_pending',
-    ).all()
-    for d in all_pending:
-        db.session.delete(d)
+    # The draft says "this proposal can be applied now". Deleting it claims
+    # the merge: of two requests that found it, only the one whose delete
+    # removed the row goes on (the other's waits for that commit and then
+    # matches nothing). A failed merge puts the draft back (#434).
+    draft_id, owner_id = draft.id, draft.user_id
+    claimed = Draft.query.filter_by(id=draft_id).delete()
+    if not claimed:
+        return None
 
-    # Update tool_calls_meta on the LLM node to record apply started
-    update_tool_meta(llm_node, "propose_todo", {
-        "apply_status": "started",
-    })
+    # Delete ALL other pending todo drafts for this user too
+    Draft.query.filter_by(
+        user_id=owner_id,
+        label='todo_pending',
+    ).delete()
+
+    meta = []
+    if llm_node.tool_calls_meta:
+        try:
+            meta = json.loads(llm_node.tool_calls_meta)
+        except (json.JSONDecodeError, TypeError):
+            meta = []
+    # Record apply started on the proposal; a merge applied again after a
+    # failure drops the old error.
+    for entry in meta:
+        if entry.get("name") == "propose_todo":
+            entry["apply_status"] = "started"
+            entry.pop("apply_error", None)
+            entry.pop("retryable", None)
+            # The agent was told about the failure; it must hear how this
+            # merge ends too.
+            entry.pop("status_reported", None)
+            break
 
     # When confirmed via UI button (no separate confirmation node),
-    # add an apply_todo_changes entry on the proposal node itself
-    # so NodeDetail shows the confirmation action.
+    # the apply_todo_changes entry on the proposal node itself shows
+    # the confirmation action in NodeDetail.
     if not confirm_node_id:
         confirm_node_id = llm_node.id
-        meta = []
-        if llm_node.tool_calls_meta:
-            try:
-                meta = json.loads(llm_node.tool_calls_meta)
-            except (json.JSONDecodeError, TypeError):
-                meta = []
-        # Only add if not already present
-        if not any(e.get("name") == "apply_todo_changes" for e in meta):
+        confirm = next((e for e in meta
+                        if e.get("name") == "apply_todo_changes"), None)
+        if confirm is None:
             meta.append({
                 "name": "apply_todo_changes",
                 "status": "success",
                 "apply_status": "started",
             })
-            llm_node.tool_calls_meta = json.dumps(meta)
+        else:
+            confirm["apply_status"] = "started"
+            confirm.pop("apply_error", None)
+    llm_node.tool_calls_meta = json.dumps(meta)
 
     db.session.commit()
 
@@ -319,6 +471,8 @@ def apply_todo_draft():
     Kicks off an async orient_apply_todo LLM merge to apply the
     proposed changes to the full todo list.
 
+    404 unless the node, or the nearest node above it with a pending todo
+    draft, is the user's own live todo proposal (_find_pending_todo_draft).
     403 ``{"error", "code": "ai_usage_none"}`` when AI may not read the
     todo list or the proposal (todo_merge_refusal); nothing is started.
     """
@@ -331,6 +485,8 @@ def apply_todo_draft():
     draft, llm_node = _find_pending_todo_draft(llm_node_id, current_user.id)
 
     if not draft:
+        if _todo_merge_running(llm_node_id, current_user.id):
+            return _todo_merge_running_response()
         return jsonify({"error": "No pending todo changes found"}), 404
 
     if draft.user_id != current_user.id:
@@ -344,6 +500,8 @@ def apply_todo_draft():
         return jsonify({"error": refusal, "code": AI_USAGE_NONE_CODE}), 403
 
     task_id = _start_todo_merge(draft, llm_node, current_user.id)
+    if task_id is None:
+        return _todo_merge_running_response()
 
     return jsonify({
         "status": "started",

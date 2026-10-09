@@ -63,12 +63,21 @@ def create_voice_from_node(node_id):
     """Start or resume a voice session from an existing node's thread.
     A thread that keeps AI out gets 403 ``code: ai_usage_none`` and
     nothing is created: the clients then open the Voice screen on it,
-    which explains instead of recording."""
+    which explains instead of recording.
+    A deleted node (a page opened before the delete) gets the 410 that
+    POST /nodes/ gives for a deleted parent, before any prompt node or
+    reply is created (#480). The check locks the row as POST /nodes/
+    does, so a delete that arrives meanwhile waits until this request's
+    nodes are written."""
     node = Node.query.get(node_id)
     if not node:
         return jsonify({"error": "Node not found"}), 404
     if node.human_owner_id != current_user.id:
         return jsonify({"error": "Unauthorized"}), 403
+    from backend.utils.node_deletion import assert_parent_alive
+    err = assert_parent_alive(node.id)
+    if err is not None:
+        return err
     refused = voice_turn_refusal(current_user, node)
     if refused is not None:
         return ai_usage_refused_response(refused)
