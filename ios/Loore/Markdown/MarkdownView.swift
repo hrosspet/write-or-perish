@@ -55,7 +55,10 @@ struct ChecklistActions {
 ///
 /// Links: `/node/<id>` links (relative or on a Loore host) open the thread in
 /// the app; a bare node URL shows the node's title; other Loore paths open
-/// their native screen; other web links open in an in-app Safari view.
+/// their native screen; other web links open in an in-app Safari view and
+/// `mailto:` in Mail. Every other scheme renders as plain text (#442).
+/// Images: only Loore's own media loads by itself; any other image waits for a
+/// tap (#441).
 struct MarkdownView: View {
     let markdown: String
     var style: MarkdownStyle = .focal
@@ -76,21 +79,20 @@ struct MarkdownView: View {
 
     private var context: MarkdownRenderContext {
         MarkdownRenderContext(style: style, checklist: checklist, edit: edit,
-                              titles: app.nodeTitles, origin: app.environment.frontendOrigin)
+                              titles: app.nodeTitles, environment: app.environment)
     }
 
+    /// Never `.systemAction`: the system opens any app's URL scheme, so every
+    /// link goes through the router's allowlist instead (#442).
     private func handle(_ url: URL) -> OpenURLAction.Result {
         let link = url.absoluteString
         if let onLink, onLink(link) { return .handled }
-        if let id = NodeLinks.nodeId(link, currentOrigin: app.environment.frontendOrigin) {
-            app.open(.thread(id: id, awaitLLM: nil))
-            return .handled
+        switch MarkdownLinkTarget.resolve(link, environment: app.environment) {
+        case .thread(let id): NodePrefetch.shared.openThread(id, app: app)  // opens once the node is in
+        case .route(let route): app.open(route)
+        case .ignore: break
         }
-        let scheme = url.scheme?.lowercased()
-        if scheme == nil || scheme == "http" || scheme == "https" {
-            return app.openLink(link) ? .handled : .systemAction
-        }
-        return .systemAction // mailto:, tel:, …
+        return .handled
     }
 }
 
@@ -108,7 +110,8 @@ struct MarkdownRenderContext {
     var checklist: ChecklistActions?
     var edit: ChecklistEditState
     var titles: NodeTitleStore
-    var origin: URL?
+    var environment: AppEnvironment
+    var origin: URL? { environment.frontendOrigin }
     /// Blockquotes render italic.
     var italic = false
 
@@ -246,7 +249,10 @@ private struct ParagraphView: View {
                     case .text(let run):
                         InlineText(inlines: run, context: context, softBreakAsSpace: softBreakAsSpace)
                     case .image(let source, let alt):
-                        MarkdownImage(source: source, alt: alt)
+                        // Keyed on the source: a tap allows that image only, also
+                        // when a streaming reply shifts the images' positions.
+                        MarkdownImage(source: source, alt: alt, environment: context.environment)
+                            .id(source)
                     }
                 }
             }
@@ -273,24 +279,64 @@ private struct ParagraphView: View {
     }
 }
 
+/// A markdown image (#441). Loore's own media loads as the view appears. Any
+/// other image is a quiet placeholder with its host and alt text; a tap loads
+/// that one image (the tap is the user's consent for it).
 private struct MarkdownImage: View {
     let source: String
     let alt: String
+    let environment: AppEnvironment
+    @State private var allowed = false
 
     var body: some View {
-        if let url = URL(string: source), let scheme = url.scheme, ["http", "https"].contains(scheme.lowercased()) {
-            AsyncImage(url: url) { phase in
-                switch phase {
-                case .success(let image):
-                    image.resizable().scaledToFit().frame(maxWidth: .infinity, alignment: .leading)
-                default:
-                    Text(alt).font(LooreFont.meta).foregroundStyle(LooreColor.textMuted)
-                }
+        switch MarkdownImageSource.classify(source, environment: environment) {
+        case .own(let url):
+            loaded(url)
+        case .remote(let url, let host):
+            if allowed {
+                loaded(url)
+            } else {
+                Button { allowed = true } label: { placeholder(host) }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(placeholderText(host))
+                    .accessibilityHint("Loads the image")
             }
-            .accessibilityLabel(alt)
-        } else {
-            Text(alt).font(LooreFont.meta).foregroundStyle(LooreColor.textMuted)
+        case .none:
+            altText
         }
+    }
+
+    private func loaded(_ url: URL) -> some View {
+        AsyncImage(url: url) { phase in
+            switch phase {
+            case .success(let image):
+                image.resizable().scaledToFit().frame(maxWidth: .infinity, alignment: .leading)
+            default:
+                altText
+            }
+        }
+        .accessibilityLabel(alt)
+    }
+
+    private var altText: some View {
+        Text(verbatim: alt).font(LooreFont.meta).foregroundStyle(LooreColor.textMuted)
+    }
+
+    private func placeholderText(_ host: String) -> String {
+        alt.isEmpty ? "Image from \(host)" : "Image from \(host): \(alt)"
+    }
+
+    private func placeholder(_ host: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Image(systemName: "photo").imageScale(.small)
+            Text(verbatim: placeholderText(host)).multilineTextAlignment(.leading)
+        }
+        .font(LooreFont.meta)
+        .foregroundStyle(LooreColor.textMuted)
+        .padding(.vertical, 5)
+        .padding(.horizontal, 10)
+        .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(LooreColor.border))
+        .contentShape(Rectangle())
     }
 }
 
@@ -393,7 +439,12 @@ struct InlineAttributedBuilder {
     }
 
     private func linkPiece(destination: String, children: [MDInline], traits: Traits) -> AttributedString {
-        let url = URL(string: destination) ?? URL(string: destination.addingPercentEncoding(withAllowedCharacters: .urlFragmentAllowed) ?? "")
+        var url = URL(string: destination) ?? URL(string: destination.addingPercentEncoding(withAllowedCharacters: .urlFragmentAllowed) ?? "")
+        // A link the router would ignore (other apps' schemes, `tel:`, no
+        // scheme) is plain text, not a link that does nothing (#442).
+        if let target = url, MarkdownLinkTarget.resolve(target.absoluteString, environment: context.environment) == .ignore {
+            url = nil
+        }
         if let nodeId = NodeLinks.nodeId(destination, currentOrigin: context.origin), Self.isBare(children, href: destination) {
             switch context.titles.record(for: nodeId) {
             case .title(let title)?:

@@ -2,8 +2,9 @@
 Celery task for applying Voice todo updates to the user's todo list.
 
 Runs entirely in the background without creating visible nodes.
-Uses the orient_apply_todo prompt to merge the proposed changes
-into the full todo via a single LLM call.
+Uses the orient_apply_todo prompt: the conversation's model replies with
+edits to the full todo (the artifact tool's {old_text, new_text} format),
+which code applies to the newest list (utils/todo_merge_edits.py, #234).
 
 Merges are serialized per user via a Redis lock so concurrent
 confirmations don't clobber each other's results.
@@ -20,6 +21,9 @@ from backend.utils.api_keys import get_api_keys_for_usage
 from backend.utils.cost import llm_cost_log_fields
 from backend.models import APICostLog
 from backend.utils.refusal_backoff import REFUSED_REF
+from backend.utils.todo_merge_edits import (
+    FAILURE_EMPTY, FAILURE_TRUNCATED, REPLY_FORMAT, MergeRun, has_tasks,
+    run_todo_merge)
 
 logger = get_task_logger(__name__)
 
@@ -30,6 +34,31 @@ _MERGE_LOCK_TIMEOUT = 600
 # How long to wait for the lock before giving up (seconds).
 _MERGE_LOCK_ACQUIRE_TIMEOUT = 600
 
+# For a list with no tasks yet (#410). Every new user starts with no list.
+# Given an empty list, the model applied the prompt's rule for completed
+# items that are "NOT on the todo list" to a new task and saved it as done.
+NO_TASKS_RULE = (
+    "Add the items under New Tasks as `- [ ]` and the items under "
+    "Completed as `- [x]`; add nothing else."
+)
+# Sent in place of the todo list when the user has none, or a blank one.
+EMPTY_TODO_MESSAGE = "The todo list is empty. " + NO_TASKS_RULE
+
+# Shown on the card when the model's output hit the output cap (#432).
+# The card has no retry button after a failed merge (its pending draft
+# is gone), so the message says how to get a new proposal.
+TRUNCATED_MESSAGE = (
+    "The todo update was cut off, so nothing was changed. "
+    "Ask for the todo update again to retry.")
+EMPTY_RESULT_MESSAGE = "Empty merge result"
+# Shown on the card when the model's edits were refused twice (#234): an
+# anchor not found or not unique, a full rewrite of a list with tasks, an
+# existing line changed, or an existing sub-item moved under a new line.
+# Nothing was saved.
+EDITS_FAILED_MESSAGE = (
+    "The todo update couldn't be applied to your list, so nothing was "
+    "changed. Ask for the todo update again to retry.")
+
 
 @celery.task(bind=True)
 def apply_voice_todo(self, llm_node_id: int, model_id: str, user_id: int,
@@ -39,7 +68,8 @@ def apply_voice_todo(self, llm_node_id: int, model_id: str, user_id: int,
 
     1. Read update summary from the LLM node's text content
     2. Get the current user todo
-    3. Call LLM with orient_apply_todo prompt to produce merged todo
+    3. Call LLM with orient_apply_todo prompt for edits, apply them to
+       the todo and check the result (utils/todo_merge_edits.py)
     4. Save as new UserTodo
     5. Update tool_calls_meta on the originating LLM node
     """
@@ -106,13 +136,38 @@ def apply_voice_todo(self, llm_node_id: int, model_id: str, user_id: int,
 
 
 def build_merge_messages(merge_prompt, update_summary, current_todo):
-    """The merge call's messages: system=merge_prompt, assistant=the
-    proposal, user=the current todo list. Also used by
-    backend/scripts/compare_todo_merge_models.py to rebuild past merges."""
+    """The merge call's messages: system=merge_prompt followed by the
+    reply format, assistant=the proposal, user=the current todo list.
+    Also used by backend/scripts/compare_todo_merge_models.py to rebuild
+    past merges.
+
+    REPLY_FORMAT (#234) is the parser's contract, so it is added in code
+    after whatever merge prompt the account has: the file default or one
+    the user saved, whose text is sent unchanged (the user's edit wins).
+    One text block: the Anthropic conversion reads a system message's
+    first block only."""
+    system_text = f"{(merge_prompt or '').rstrip()}\n\n{REPLY_FORMAT}"
+    if has_tasks(current_todo):
+        todo_message = (
+            f"Here is the current full todo list:\n\n{current_todo}"
+            "\n\nNow apply the changes described above."
+        )
+    elif current_todo and current_todo.strip():
+        # Headings but no tasks yet, e.g. the Todo page's Create template.
+        todo_message = (
+            f"Here is the current full todo list:\n\n{current_todo}"
+            f"\n\n{NO_TASKS_RULE}"
+            "\n\nNow apply the changes described above."
+        )
+    else:
+        todo_message = (
+            EMPTY_TODO_MESSAGE
+            + "\n\nNow apply the changes described above."
+        )
     return [
         {
             "role": "system",
-            "content": [{"type": "text", "text": merge_prompt}],
+            "content": [{"type": "text", "text": system_text}],
         },
         {
             "role": "assistant",
@@ -120,10 +175,7 @@ def build_merge_messages(merge_prompt, update_summary, current_todo):
         },
         {
             "role": "user",
-            "content": [{"type": "text", "text": (
-                f"Here is the current full todo list:\n\n{current_todo}"
-                "\n\nNow apply the changes described above."
-            )}],
+            "content": [{"type": "text", "text": todo_message}],
         },
     ]
 
@@ -160,41 +212,57 @@ def _run_merge(llm_node, update_summary, user_id, model_id,
     # Build messages: system=merge_prompt, user=update_summary + current todo
     messages = build_merge_messages(merge_prompt, update_summary, current_todo)
 
-    # Call LLM
+    # Call the model for edits and apply them (one retry after a refused
+    # reply). On the conversation's model: a user's provider is never
+    # switched, not even when a merge fails.
     api_keys = get_api_keys_for_usage(flask_app.config, "chat")
+    run = MergeRun()
     try:
-        response = LLMProvider.get_completion(
-            model_id, messages, api_keys
-        )
+        run_todo_merge(LLMProvider, model_id, messages, api_keys,
+                       current_todo, run)
     except Exception as e:
         logger.error(f"LLM call failed for todo merge: {e}", exc_info=True)
+        # Calls made before the failing one were billed.
+        _log_merge_costs(user_id, model_id, run)
         _update_apply_status(llm_node, "failed", error=str(e),
-                            confirm_node_id=confirm_node_id)
+                             confirm_node_id=confirm_node_id)
         db.session.commit()
         return
 
-    merged_todo = response["content"]
-    truncated = response.get("truncated", False)
-    empty = not merged_todo or not merged_todo.strip()
-
-    # Log cost, also for an empty result: the call was billed (#368). A
-    # result cut off before any text is marked like the other background
-    # jobs' refusals.
-    output_tokens = response.get("output_tokens", 0)
-    db.session.add(APICostLog(
-        user_id=user_id,
-        model_id=model_id,
-        request_type="todo_merge",
-        request_ref=(REFUSED_REF if empty and truncated else None),
-        **llm_cost_log_fields(model_id, response),
-    ))
-
-    if empty:
+    # Log cost of every call, also of a result that is thrown away: each
+    # was billed (#368).
+    _log_merge_costs(user_id, model_id, run)
+    # Counts only: the replies and refusal reasons hold list text.
+    logger.info(f"Todo merge for node {llm_node_id}: {run.stats()}")
+    if run.kept_lines_failures:
         logger.warning(
-            f"LLM returned empty merged todo for node {llm_node_id} "
-            f"(truncated={truncated}, output_tokens={output_tokens})")
-        _update_apply_status(llm_node, "failed", error="Empty merge result",
-                            confirm_node_id=confirm_node_id)
+            f"Todo merge for node {llm_node_id}: the kept-lines check "
+            f"refused {run.kept_lines_failures} of {len(run.responses)} "
+            "replies")
+
+    if run.failure is not None:
+        output_tokens = sum(r.get("output_tokens", 0) or 0
+                            for r in run.responses)
+        if run.failure == FAILURE_EMPTY:
+            logger.warning(
+                f"LLM returned an empty todo merge for node {llm_node_id} "
+                f"(output_tokens={output_tokens})")
+            error = EMPTY_RESULT_MESSAGE
+        elif run.failure == FAILURE_TRUNCATED:
+            # A cut-off reply (output cap, a repetition loop) may be
+            # missing edits: nothing is saved (#432).
+            logger.warning(
+                f"Todo merge for node {llm_node_id} was cut off; nothing "
+                f"saved (output_tokens={output_tokens})")
+            error = TRUNCATED_MESSAGE
+        else:
+            logger.warning(
+                f"Todo merge for node {llm_node_id} failed after "
+                f"{len(run.responses)} replies ({run.failure}); nothing "
+                "saved")
+            error = EDITS_FAILED_MESSAGE
+        _update_apply_status(llm_node, "failed", error=error,
+                             confirm_node_id=confirm_node_id)
         db.session.commit()
         return
 
@@ -203,26 +271,45 @@ def _run_merge(llm_node, update_summary, user_id, model_id,
     new_todo = UserTodo(
         user_id=user_id,
         generated_by="voice_session",
-        tokens_used=output_tokens,
+        # The applied reply's output tokens, so the version still pairs
+        # with one api_cost_log row (scripts/compare_todo_merge_models.py);
+        # a refused first reply has its own row.
+        tokens_used=run.responses[-1].get("output_tokens", 0) or 0,
         # ai_usage follows the user's global default (#191).
         ai_usage=merge_user.default_ai_usage if merge_user else "chat",
     )
-    new_todo.set_content(merged_todo)
+    new_todo.set_content(run.merged)
     db.session.add(new_todo)
+    # Assigns new_todo.id, so the proposal's tool_calls_meta records which
+    # todo version this merge produced (#410).
+    db.session.flush()
 
     # Update apply status
-    if truncated:
-        logger.warning(f"Todo merge response truncated for node {llm_node_id}")
     _update_apply_status(
         llm_node, "completed", todo_id=new_todo.id,
-        truncated=truncated, confirm_node_id=confirm_node_id)
+        confirm_node_id=confirm_node_id)
 
     db.session.commit()
-    logger.info(f"Voice todo merge completed: todo_id={new_todo.id} for user {user_id}, truncated={truncated}")
+    logger.info(f"Voice todo merge completed: todo_id={new_todo.id} for user {user_id}")
+
+
+def _log_merge_costs(user_id, model_id, run):
+    """One api_cost_log row per model call of the merge. A cut-off reply
+    is marked like the other background jobs' refusals: it hit the output
+    cap and produced nothing usable."""
+    for response in run.responses:
+        db.session.add(APICostLog(
+            user_id=user_id,
+            model_id=model_id,
+            request_type="todo_merge",
+            request_ref=(REFUSED_REF if response.get("truncated")
+                         else None),
+            **llm_cost_log_fields(model_id, response),
+        ))
 
 
 def _update_apply_status(llm_node, status, error=None, todo_id=None,
-                         truncated=False, confirm_node_id=None):
+                         confirm_node_id=None):
     """Update the apply_status in the LLM node's tool_calls_meta.
 
     Also updates the confirmation node (where apply_todo_changes lives)
@@ -241,8 +328,6 @@ def _update_apply_status(llm_node, status, error=None, todo_id=None,
                 entry["apply_error"] = error
             if todo_id:
                 entry["todo_id"] = todo_id
-            if truncated:
-                entry["apply_truncated"] = True
             break
     llm_node.tool_calls_meta = json.dumps(meta)
 

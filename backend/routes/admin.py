@@ -1055,6 +1055,13 @@ def create_poll():
     supported = current_app.config.get("SUPPORTED_MODELS", {})
     if model_id not in supported:
         return jsonify({"error": f"Unsupported model: {model_id}"}), 400
+    # A poll drafts answers the way a reply does: only a chat model, the
+    # rule every chat picker and reply route applies (is_chat_model).
+    from backend.utils.llm_nodes import is_chat_model
+    if not is_chat_model(model_id):
+        why = ("deprecated" if supported[model_id].get("deprecated")
+               else "for Read only")
+        return jsonify({"error": f"{model_id} is {why}"}), 400
     data_source = data.get("data_source") or "derived"
     if data_source not in Poll.DATA_SOURCES:
         return jsonify({"error": f"Invalid data_source. Allowed: "

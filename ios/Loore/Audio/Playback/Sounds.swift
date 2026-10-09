@@ -72,13 +72,13 @@ enum ToneSynth {
         ], length: 0.7)
     }
 
-    /// Web `playInterruptionAlert`: the error motif twice, gain 0.25.
+    /// Web `playInterruptionAlert`: the error motif once, gain 0.25.
     static func interruptionAlert() -> Data {
-        render([0.0, 0.9].flatMap { o in [
-            Tone(frequency: 660, start: o, duration: 0.15, gain: 0.25, wave: .square),
-            Tone(frequency: 440, start: o + 0.18, duration: 0.15, gain: 0.25, wave: .square),
-            Tone(frequency: 330, start: o + 0.36, duration: 0.25, gain: 0.25, wave: .square),
-        ] }, length: 1.6)
+        render([
+            Tone(frequency: 660, start: 0, duration: 0.15, gain: 0.25, wave: .square),
+            Tone(frequency: 440, start: 0.18, duration: 0.15, gain: 0.25, wave: .square),
+            Tone(frequency: 330, start: 0.36, duration: 0.25, gain: 0.25, wave: .square),
+        ], length: 0.7)
     }
 
     /// Web `playWarningSound` (59 minutes): G5 → C6 triangle, twice, gain 0.2.

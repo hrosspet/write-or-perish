@@ -44,6 +44,8 @@ final class DictationController {
     @ObservationIgnored private var recordedData = Data()
     @ObservationIgnored private var warned = false
     @ObservationIgnored private var interruptionToast: Int?
+    /// The current hold left the microphone running (a lost headset mic, #423).
+    @ObservationIgnored private var holdKeepsCapture = false
     @ObservationIgnored private var generation = 0
     @ObservationIgnored private let log = Logger(subsystem: "org.loore.app", category: "dictation")
 
@@ -309,14 +311,36 @@ final class DictationController {
         holdForInterruption("Recording paused — another app took the microphone (phone call?). Everything up to the interruption is saved. Press Resume to continue.")
     }
 
+    /// The headphones' mic went away (#423): hold rather than record from the
+    /// phone's mic; the microphone keeps running, so Resume needs no restart.
+    /// - Returns: whether the recording was paused now.
+    @discardableResult
+    func headsetMicLost() -> Bool {
+        holdForInterruption("Recording paused — the headphones’ microphone disconnected. Everything up to here is saved. Press Resume to continue.",
+                            keepCapture: true)
+    }
+
     /// Also when the microphone could not restart after a route change (M15).
-    private func holdForInterruption(_ message: String) {
-        guard state == .recording, !isInterrupted, let app else { return }
-        recorder?.interrupt()
+    /// - Parameter keepCapture: drop samples but keep the microphone running.
+    /// - Returns: whether this began a hold.
+    @discardableResult
+    private func holdForInterruption(_ message: String, keepCapture: Bool = false) -> Bool {
+        guard state == .recording, let app else { return false }
+        guard !isInterrupted else {
+            // A call during a lost-headset hold: capture stops now (no second alert).
+            if holdKeepsCapture && !keepCapture {
+                recorder?.interrupt()
+                holdKeepsCapture = false
+            }
+            return false
+        }
+        holdKeepsCapture = keepCapture
+        if keepCapture { recorder?.pause() } else { recorder?.interrupt() }
         isInterrupted = true
         app.audio.sounds.playInterruptionAlert()
         interruptionToast = app.toasts.show(message, duration: 24 * 60 * 60)
         LocalNotifier.post(.recordingPaused)
+        return true
     }
 
     func systemInterruptionEnded() {
@@ -325,6 +349,7 @@ final class DictationController {
 
     private func endInterruption() {
         isInterrupted = false
+        holdKeepsCapture = false
         if let id = interruptionToast { app?.toasts.dismiss(id) }
         interruptionToast = nil
         LocalNotifier.withdraw(.recordingPaused)

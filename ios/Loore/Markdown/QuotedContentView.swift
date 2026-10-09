@@ -37,7 +37,7 @@ struct QuotedContentView: View {
                     MarkdownView(markdown: piece, style: style, checklist: checklist)
                 case .quote(let id):
                     InlineQuoteBubble(quote: quotes.quotes[id] ?? nil, loaded: quotes.loaded) { quoteId in
-                        app.open(.thread(id: quoteId, awaitLLM: nil))
+                        NodePrefetch.shared.openThread(quoteId, app: app)  // opens once the node is in
                     }
                 case .externalQuote(let id):
                     ExternalQuoteBubble(quote: quotes.external[id] ?? nil, loaded: quotes.loaded, nodeId: nodeId,

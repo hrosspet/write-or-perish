@@ -21,7 +21,8 @@ from backend.utils.thread_tree import visible_child_counts
 from backend.routes.terms import CURRENT_TERMS_VERSION
 from backend.utils.reserved_usernames import validate_username
 from backend.utils.spend import user_is_capped
-from backend.utils.llm_nodes import effective_preferred_model, is_active_model
+from backend.utils.llm_nodes import effective_preferred_model, is_chat_model
+from backend.utils.own_entries import has_own_entries
 from backend.utils.user_purge import deletion_status
 
 logger = logging.getLogger(__name__)
@@ -157,6 +158,10 @@ def get_dashboard():
             "pending_email_expired": _pending_email_expired(current_user),
             "prefill_consent": current_user.prefill_consent,
             "prefilled_handle": current_user.prefilled_handle,
+            # False until the user has written an entry in Loore (imports
+            # and LLM replies don't count): the homepage, Voice and Text
+            # screens ask the welcome question until then (#391).
+            "has_own_entries": has_own_entries(current_user.id),
             "timezone": current_user.timezone or "UTC",
             # Lets the client block cost actions (e.g. starting a long voice
             # recording) up front instead of after the fact (issue #85).
@@ -531,7 +536,9 @@ def update_user():
 
     if "preferred_model" in data:
         model_id = data["preferred_model"]
-        if model_id and not is_active_model(model_id):
+        # The default model drives replies and background work: never a
+        # deprecated or read-only one.
+        if model_id and not is_chat_model(model_id):
             return jsonify({"error": f"Model not offered: {model_id}"}), 400
         current_user.preferred_model = model_id
 
@@ -600,6 +607,9 @@ def update_user():
                 "pending_email_expired": _pending_email_expired(current_user),
                 "prefill_consent": current_user.prefill_consent,
                 "prefilled_handle": current_user.prefilled_handle,
+                # The client replaces its user with this object (e.g. the
+                # tweets opt-in on /welcome), so it carries the flag too.
+                "has_own_entries": has_own_entries(current_user.id),
                 "spend_blocked": user_is_capped(current_user),
                 "share_v1_enabled": bool(
                     current_app.config.get("SHARE_V1", False)

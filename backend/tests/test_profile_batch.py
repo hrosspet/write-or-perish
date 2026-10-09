@@ -907,6 +907,76 @@ def test_seed_reports_submitted_not_built(app, monkeypatch):
     assert User.query.get(u.id).profile_batch_attempts == 1
 
 
+def test_profile_failure_log_line_is_grouped_with_an_account_failure(app, monkeypatch):
+    """ProfileGenerationTask.on_failure logs without exc_info. For an
+    account failure the line carries the cause's fingerprint (log_extra),
+    which the Sentry hook applies; any other failure's line doesn't."""
+    import logging
+    import backend.llm_providers as lp
+    from backend.utils import provider_alerts
+    records = []
+
+    class _Keep(logging.Handler):
+        def emit(self, record):
+            records.append(record)
+    log = logging.getLogger("test.profile_failure")
+    log.addHandler(_Keep())
+    monkeypatch.setattr(pb._exports, "logger", log)
+
+    err = lp.ProviderAccountError("Anthropic", "spend_limit", "claude-x", "chat")
+    pb._exports._log_profile_failure(7, err)
+    pb._exports._log_profile_failure(8, ValueError("bad export"))
+
+    tagged, plain = records
+    assert "user 7" in tagged.getMessage()
+    assert provider_alerts.apply_fingerprint({}, None, tagged)["fingerprint"] == [
+        "provider-account-failure", "anthropic", "spend_limit", "chat"]
+    assert "fingerprint" not in provider_alerts.apply_fingerprint({}, None, plain)
+
+
+def test_submit_refused_for_an_account_reason_is_not_a_batch_attempt(app, monkeypatch):
+    """A spend limit or a revoked key refuses the submit (#369), whatever
+    the requests. Counting it would move an unpinned batch user to the
+    full-price synchronous path after three hourly seeds of an outage, and
+    keep them there after the account is fixed (#406 review, minor 2).
+    So it is not counted: the user is re-seeded each cycle and stays on
+    the Batch path."""
+    from backend.utils.llm_batch import SubmittedBatches
+    u = _user(profile_needs_full_regen=True,
+              profile_batch_attempts=pb.MAX_BATCH_ATTEMPTS - 1)
+    app.config["PROFILE_USE_BATCH"] = True
+    db.session.commit()
+    _remaining(monkeypatch, 90000)
+    monkeypatch.setattr(pb._exports, "build_user_export_content",
+                        MagicMock(return_value=_chunk("DATA")))
+    monkeypatch.setattr(pb._exports, "_load_prompt", lambda *a, **k: "G {user_export}")
+    submits = []
+
+    def refused(reqs, keys, kind):
+        submits.append(reqs)
+        out = SubmittedBatches()
+        out.account_refused.update(reqs)  # "anthropic"
+        return out
+    monkeypatch.setattr(pb, "batch_submit", refused)
+
+    for _ in range(pb.MAX_BATCH_ATTEMPTS + 1):
+        assert pb._seed_profile_batches(users=[u]) == 0
+    assert len(submits) == pb.MAX_BATCH_ATTEMPTS + 1  # re-seeded every time
+    user = User.query.get(u.id)
+    assert user.profile_batch_pending is False
+    assert user.profile_batch_attempts == pb.MAX_BATCH_ATTEMPTS - 1
+    # Still below the cap: exports' sync last resort leaves this user to
+    # the batch pipeline.
+    assert pb.use_batch_for_user(user, app.config)
+    assert user.profile_batch_attempts < pb.MAX_BATCH_ATTEMPTS
+
+    # Once the account is fixed the next seed goes through.
+    monkeypatch.setattr(pb, "batch_submit", lambda reqs, keys, kind: (
+        {k: f"b-{k}" for k in reqs}))
+    assert pb._seed_profile_batches(users=[u]) == 1
+    assert User.query.get(u.id).profile_batch_pending is True
+
+
 def test_force_batch_user_never_exhausts_to_sync(app, monkeypatch):
     """Pinned accounts keep being seeded past MAX_BATCH_ATTEMPTS; the
     sync last-resort in exports skips them too."""

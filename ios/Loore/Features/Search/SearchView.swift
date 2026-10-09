@@ -257,7 +257,13 @@ struct SearchView: View {
     private func row(_ r: SearchResult) -> some View {
         Button {
             dismiss()
-            app.open(r.isReference ? .reference(id: r.rawId) : .thread(id: r.rawId, awaitLLM: nil))
+            // A thread opens once its node is in, with the spinner over the screen under
+            // the sheet meanwhile (NodePrefetch), not on a loading page.
+            if r.isReference {
+                app.open(.reference(id: r.rawId))
+            } else {
+                NodePrefetch.shared.openThread(r.rawId, app: app)
+            }
         } label: {
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 8) {

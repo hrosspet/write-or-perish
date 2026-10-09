@@ -272,7 +272,10 @@ struct VoiceView: View {
                 if VoiceAIBlock.backPops(previous: app.router.previousRoute) {
                     app.router.pop()
                 } else {
-                    app.router.replaceTop(with: .thread(id: threadId, awaitLLM: nil))
+                    // Opens once the node is in (NodePrefetch), not on a loading page.
+                    NodePrefetch.shared.open(threadId, app: app) {
+                        app.router.replaceTop(with: .thread(id: threadId, awaitLLM: nil))
+                    }
                 }
             }
             .buttonStyle(RecoveryButtonStyle(accent: false))
@@ -283,7 +286,7 @@ struct VoiceView: View {
     private var textModeButton: some View {
         Button {
             if let id = voice.lastReplyNodeId {
-                app.open(.thread(id: id, awaitLLM: nil))
+                NodePrefetch.shared.openThread(id, app: app)  // opens once the node is in
             } else {
                 app.open(.textMode)
             }
@@ -381,6 +384,9 @@ struct VoiceView: View {
             autoStartIfRequested()
         }
         guard voice.state == .idle, resumeLLMId == nil else { return }
+        // Right after a relaunch: a recording the killed app left is listed only
+        // once it is released.
+        await app.audio.releasingAbandoned?.value
         if let drafts: [InterruptedDraft] = try? await app.api.get(APIPath.interruptedDrafts),
            let first = drafts.first {
             interrupted = first

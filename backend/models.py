@@ -1811,7 +1811,10 @@ class FeedRender(db.Model):
     render order here, and the collect looks the picked numbers up in it
     and fetches those few tweets by id. The window and counts are the
     reply page's record of what was read (the "which day was this?"
-    question). One row per reply node; a rerun replaces it."""
+    question). One row per reply node, pick-less replies included; a
+    rerun replaces it. It also records what the picks alone cannot: how
+    many picks the collect dropped and when the owner opened the reply
+    (backend/scripts/recommendation_report.py)."""
     __tablename__ = "feed_render"
     id = db.Column(db.Integer, primary_key=True)
     node_id = db.Column(db.Integer, db.ForeignKey("node.id"),
@@ -1830,6 +1833,23 @@ class FeedRender(db.Model):
     # Comma-joined tweet ids in render order: index i (0-based) is the
     # tweet the model saw as #i+1. ~100 KB for a day of the archive.
     tweet_ids = db.Column(db.Text, nullable=False, default="")
+    # How many of the model's picks the collect could not show
+    # (ca_feed.count_dropped_picks, on the batch collect and the admin's
+    # live rerun alike; 2026-10-02): the tweet behind the number is no
+    # longer in the archive snapshot, or the number is outside the render. Each number once; a number cited only in the verdict is no
+    # pick. With no FeedPick row on the reply, a positive count means
+    # every pick was dropped, and 0 means the model picked nothing.
+    # Replies collected before the column existed read 0 either way.
+    dropped_picks = db.Column(db.Integer, nullable=False, default=0,
+                              server_default="0")
+    # When the reply's owner first fetched the finished reply: GET of the
+    # reply node, or an llm-status poll that returned it to a thread page
+    # left open while the batch ran and said it was visible (?visible=1;
+    # a hidden tab's poll does not count) (ca_feed.mark_read_reply_opened).
+    # Set once; another user or an admin opening the reply never sets it.
+    # Null on replies nobody has opened since the column was added
+    # (2026-10-02), whatever happened before.
+    opened_at = db.Column(db.DateTime, nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
     node = db.relationship("Node", backref=db.backref(
@@ -1869,6 +1889,38 @@ class ExternalDigestBatchJob(db.Model):
     submitted_at = db.Column(
         db.DateTime, nullable=False, default=datetime.utcnow)
     collected_at = db.Column(db.DateTime, nullable=True)
+
+
+class RecentContextBatchJob(db.Model):
+    """A submitted provider batch carrying recent-context summaries (#380):
+    one request per user whose writing crossed the regeneration threshold.
+    Nobody waits on a recent context, so it rides the Batch API (~50%
+    cheaper); until a batch is collected, prompts keep reading the user's
+    previous summary. Mirrors ExternalDigestBatchJob: per-item routing
+    metadata lives in `items` (keyed by custom_id); the beat collector
+    retrieves results and saves each UserRecentContext.
+    """
+    __tablename__ = "recent_context_batch_job"
+
+    id = db.Column(db.Integer, primary_key=True)
+    # "anthropic" | "openai:<api_model>"
+    provider_key = db.Column(db.String(64), nullable=False)
+    batch_id = db.Column(db.String(255), nullable=False, index=True)
+    # "pending" | "collected" | "abandoned" (never ended within the
+    # collector's patience; its items count as failed)
+    status = db.Column(db.String(16), nullable=False, default="pending")
+    # List of per-item dicts: {custom_id, user_id, profile_id, model_id,
+    # data_cutoff and source_data_cutoff (ISO or None: the window the
+    # prompt rendered), source_tokens}, plus `outcome` once the job is
+    # collected: "saved" | "refused" (cut off before any text; billed) |
+    # "failed" (no usable result) | "skipped" (not saved: account opted
+    # out or deleted, or a newer summary already covers the window).
+    items = db.Column(db.JSON, nullable=False, default=list)
+    submitted_at = db.Column(
+        db.DateTime, nullable=False, default=datetime.utcnow)
+    # Indexed: the refusal backoff counts failed items in jobs collected
+    # after the user's last saved summary (utils/refusal_backoff.py).
+    collected_at = db.Column(db.DateTime, nullable=True, index=True)
 
 
 class UserDataPurge(db.Model):

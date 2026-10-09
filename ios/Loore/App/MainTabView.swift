@@ -31,6 +31,9 @@ struct MainTabView: View {
                 .tabItem { Label(AppTab.more.title, systemImage: "ellipsis").environment(\.symbolVariants, .none) }
                 .tag(AppTab.more)
         }
+        // A node is loading from any screen (a thread, Text mode, the Log, Write
+        // New Entry): the screen stays, with the spinner, until the node's page opens.
+        .overlay { NodeOpeningSpinner() }
         .onChange(of: app.capabilities.showsCommons) { _, shows in
             if !shows && app.router.selectedTab == .commons { app.router.selectedTab = .reflect }
         }
@@ -72,7 +75,10 @@ struct RouteDestination: View {
         case .voice(let parentId, let resumeLLMId):
             VoiceView(parentId: parentId, resumeLLMId: resumeLLMId)
         case .thread(let id, let awaitLLM):
-            ThreadView(nodeId: id, awaitLLM: awaitLLM)
+            // A new page per node: a route replaced by another node's (a failed reply,
+            // a delete) would otherwise keep the old page and its model. Keyed by the
+            // id alone, so dropping a consumed `awaitLLM` keeps the page.
+            ThreadView(nodeId: id, awaitLLM: awaitLLM).id(id)
         case .log:
             LogView()
         case .textMode:

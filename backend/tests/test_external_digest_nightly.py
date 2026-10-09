@@ -226,6 +226,41 @@ def test_rebuild_stamps_the_corpus_state_not_the_finish_time(
     assert _digest.digest_is_stale(uid) is True
 
 
+def test_rebuild_does_not_retry_an_account_failure(app, monkeypatch):
+    """A rebuild refused for an account reason (#369) is not re-queued:
+    it fails the same way until someone fixes the account, and the
+    provider module has already alerted the admin. Any other failure is
+    still retried."""
+    class AccountError(RuntimeError):
+        pass
+
+    monkeypatch.setattr(_digest, "ProviderAccountError", AccountError)
+    uid = User.query.first().id
+    _mk_item(uid, "a")
+    retried = []
+
+    class _RecordingSelf(_FakeSelf):
+        def retry(self, exc=None, **kwargs):
+            retried.append(exc)
+            raise exc
+
+    def refuse(model_id, messages, api_keys, **kwargs):
+        raise AccountError("AI replies are temporarily unavailable.")
+    monkeypatch.setattr(_digest.LLMProvider, "get_completion",
+                        staticmethod(refuse))
+    with pytest.raises(AccountError):
+        _digest.rebuild_external_digest(_RecordingSelf(), uid)
+    assert retried == []
+
+    def overloaded(model_id, messages, api_keys, **kwargs):
+        raise RuntimeError("overloaded")
+    monkeypatch.setattr(_digest.LLMProvider, "get_completion",
+                        staticmethod(overloaded))
+    with pytest.raises(RuntimeError):
+        _digest.rebuild_external_digest(_RecordingSelf(), uid)
+    assert len(retried) == 1
+
+
 def _stub_batch_submit(monkeypatch, batch_id="batch_1"):
     """batch_submit stand-in: records what was submitted and answers with
     one batch id per provider key, the way llm_batch keys them."""

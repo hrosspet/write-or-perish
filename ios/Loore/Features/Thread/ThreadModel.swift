@@ -155,12 +155,13 @@ final class ThreadModel {
         guard let app else { return }
         loading = node == nil
         do {
-            // Opened from another node of the thread: fetched before the page opened.
+            // Opened from another node: fetched before the page opened (NodePrefetch),
+            // or still on its way after a slow answer (the same request, not a second).
             let fetched: NodeDetail
-            if node == nil, let prefetched = NodePrefetch.shared.take(nodeId) {
-                fetched = prefetched
-            } else {
-                fetched = try await app.api.nodeDetail(nodeId)
+            switch node == nil ? NodePrefetch.shared.take(nodeId) : nil {
+            case .arrived(let detail)?: fetched = detail
+            case .inFlight(let request)?: fetched = try await request.value
+            case nil: fetched = try await app.api.nodeDetail(nodeId)
             }
             node = fetched
             pageError = nil
@@ -254,6 +255,21 @@ final class ThreadModel {
         }
     }
 
+    // MARK: Moving to another node
+
+    /// Another node's page from this one: it opens once the node is in, with the
+    /// spinner meanwhile, instead of a "Loading node..." page (NodePrefetch).
+    func openThread(_ id: Int, awaitLLM: Int?) {
+        guard let app else { return }
+        NodePrefetch.shared.openThread(id, awaitLLM: awaitLLM, app: app)
+    }
+
+    /// The same, in place of this page (a failed reply, a deleted node).
+    private func replaceWithThread(_ id: Int) {
+        guard let app else { return }
+        NodePrefetch.shared.open(id, app: app) { app.router.replaceTop(with: .thread(id: id, awaitLLM: nil)) }
+    }
+
     // MARK: Awaited replies (`?awaitLlm=`)
 
     /// An entry that arrives with its reply pending goes on to the reply at once
@@ -265,7 +281,7 @@ final class ThreadModel {
             track(awaitLLM)
         } else {
             app.router.replaceLast(.thread(id: nodeId, awaitLLM: awaitLLM), with: .thread(id: nodeId, awaitLLM: nil))
-            app.open(.thread(id: awaitLLM, awaitLLM: awaitLLM))
+            openThread(awaitLLM, awaitLLM: awaitLLM)
         }
     }
 
@@ -309,7 +325,7 @@ final class ThreadModel {
                         if id != self.nodeId {
                             // Hand the batch wait to the pending node itself.
                             self.llmTaskNodeId = nil
-                            app.open(.thread(id: id, awaitLLM: nil))
+                            self.openThread(id, awaitLLM: nil)
                             return
                         }
                         batch = true
@@ -366,7 +382,7 @@ final class ThreadModel {
             let completedId = data.node?.id ?? trackedId
             if let cont = data.continuationNodeId {
                 llmTaskNodeId = nil
-                app.open(.thread(id: cont, awaitLLM: cont))
+                openThread(cont, awaitLLM: cont)
                 return
             }
             if completedId == nodeId {
@@ -378,7 +394,7 @@ final class ThreadModel {
                 streamTask = nil
                 refreshQuotesIfNeeded()
             } else {
-                app.open(.thread(id: completedId, awaitLLM: nil))
+                openThread(completedId, awaitLLM: nil)
             }
             llmTaskNodeId = nil
         case .cancelled?:
@@ -396,7 +412,7 @@ final class ThreadModel {
                 if case .thread(let prevId, _)? = app.router.previousRoute, prevId == parent.id {
                     app.router.pop()
                 } else {
-                    app.router.replaceTop(with: .thread(id: parent.id, awaitLLM: nil))
+                    replaceWithThread(parent.id)
                 }
             }
             llmTaskNodeId = nil
@@ -425,13 +441,13 @@ final class ThreadModel {
 
     /// The craft bar's LLM Response: the reply is watched on its own page (#367).
     func llmResponsePressed() {
-        guard let app, !llmRequesting else { return }
+        guard app != nil, !llmRequesting, !NodePrefetch.shared.isPending else { return }
         llmRequesting = true
         Task {
             defer { llmRequesting = false }
             do {
                 let newId = try await requestLLM(for: nodeId)
-                app.open(.thread(id: newId, awaitLLM: newId))
+                openThread(newId, awaitLLM: newId)
             } catch {
                 handleLLMRequestError(error)
             }
@@ -457,15 +473,15 @@ final class ThreadModel {
 
     /// After the inline form's send (web `handleInlineSuccess`).
     func inlineReplySent(_ result: NodeFormResult, autoGenerate: Binding<Bool>) async {
-        guard let app, let newId = result.id else { return }
+        guard app != nil, let newId = result.id else { return }
         do {
             if let llmId = try await tryAutoGenerate(for: newId, chainAIUsages: chainAIUsages, autoGenerate: autoGenerate) {
-                app.open(.thread(id: newId, awaitLLM: llmId))
+                openThread(newId, awaitLLM: llmId)
             } else {
-                app.open(.thread(id: newId, awaitLLM: nil))
+                openThread(newId, awaitLLM: nil)
             }
         } catch {
-            app.open(.thread(id: newId, awaitLLM: nil))
+            openThread(newId, awaitLLM: nil)
             handleLLMRequestError(error)
         }
     }
@@ -498,8 +514,8 @@ final class ThreadModel {
     }
 
     func readReplySent(_ result: NodeFormResult) {
-        guard let app, let userId = result.userNodeId ?? result.id else { return }
-        app.open(.thread(id: userId, awaitLLM: result.llmNodeId))
+        guard let userId = result.userNodeId ?? result.id else { return }
+        openThread(userId, awaitLLM: result.llmNodeId)
     }
 
     // MARK: Read (admin Community Archive feature, map D §5.9)
@@ -515,7 +531,7 @@ final class ThreadModel {
 
     /// `POST /api/read/from-node/<id>` (billed): a read turn under this node.
     func readFromNode(autoGenerate: Bool) {
-        guard let app, !readLoading else { return }
+        guard let app, !readLoading, !NodePrefetch.shared.isPending else { return }
         readLoading = true
         pageError = nil
         Task {
@@ -525,7 +541,7 @@ final class ThreadModel {
                 if let readModel { body["model"] = .string(readModel) }
                 let answer: Answer = try await app.api.post(APIPath.readFromNode(nodeId), json: .object(body))
                 readLoading = false
-                if let id = answer.llm_node_id ?? answer.prompt_node_id { app.open(.thread(id: id, awaitLLM: nil)) }
+                if let id = answer.llm_node_id ?? answer.prompt_node_id { openThread(id, awaitLLM: nil) }
             } catch {
                 readLoading = false
                 if SpendCap.isSpendCapError(error) { return }
@@ -724,7 +740,7 @@ final class ThreadModel {
         do {
             if let llmId = try await tryAutoGenerate(for: updated.id, chainAIUsages: chainAIUsages,
                                                      autoGenerate: autoGenerate) {
-                app.open(.thread(id: llmId, awaitLLM: llmId))
+                openThread(llmId, awaitLLM: llmId)
             }
         } catch {
             handleLLMRequestError(error)
@@ -798,7 +814,7 @@ final class ThreadModel {
                 }
                 let upper = ancestorIdx ?? node.ancestors.count
                 if let alive = node.ancestors.prefix(upper).last(where: { !$0.deleted }) {
-                    app.router.replaceTop(with: .thread(id: alive.id, awaitLLM: nil))
+                    replaceWithThread(alive.id)
                     return
                 }
                 leaveThread(isPublic: node.privacyLevel == .public)

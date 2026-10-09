@@ -33,9 +33,17 @@ celery.conf.update(
             'task': 'backend.tasks.exports.check_pending_profile_updates',
             'schedule': 3600.0,  # every hour
         },
+        # Submits each due user's recent context as a provider batch
+        # (#380, ~50% cheaper); the collector below saves the results.
         'check-recent-context-updates': {
             'task': 'backend.tasks.recent_context.check_pending_recent_context_updates',
             'schedule': 600.0,  # every 10 minutes
+        },
+        # Until a user's batch is collected, prompts read their previous
+        # summary, so collect promptly. No-op when nothing is pending.
+        'collect-recent-context-batches': {
+            'task': 'backend.tasks.recent_context.collect_recent_context_batches',
+            'schedule': 60.0,  # batches typically finish in 1-5 min
         },
         'cleanup-deleted-nodes': {
             'task': 'backend.tasks.node_cleanup.cleanup_deleted_nodes',

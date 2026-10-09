@@ -5,6 +5,8 @@ import Bubble, { splitPreview } from "./Bubble";
 import DeleteConfirmDialog from "./DeleteConfirmDialog";
 import RenameThreadDialog from "./RenameThreadDialog";
 import { useToast } from "../contexts/ToastContext";
+import NodeOpeningSpinner from "./NodeOpeningSpinner";
+import useNodePrefetch from "../hooks/useNodePrefetch";
 
 function Log({ onSearchClick }) {
   const [logNodes, setLogNodes] = useState([]);
@@ -20,6 +22,9 @@ function Log({ onSearchClick }) {
   const [renaming, setRenaming] = useState(false);
   const { addToast } = useToast();
   const navigate = useNavigate();
+  // A thread's page opens once its node is in, with a spinner here
+  // meanwhile, instead of a "Loading node..." page.
+  const { pending: openingNode, openNode } = useNodePrefetch();
 
   // The next page continues from the server's cursor (the last row of
   // the previous page), not from a page number or the count of cards on
@@ -92,7 +97,7 @@ function Log({ onSearchClick }) {
     if (e && (e.metaKey || e.ctrlKey)) {
       window.open(`/node/${targetId}`, '_blank');
     } else {
-      navigate(`/node/${targetId}`);
+      openNode(targetId, () => navigate(`/node/${targetId}`));
     }
   };
 
@@ -171,6 +176,7 @@ function Log({ onSearchClick }) {
 
   return (
     <div style={{ padding: "3rem 2rem 4rem", maxWidth: "720px", margin: "0 auto" }}>
+      {openingNode && <NodeOpeningSpinner />}
       <div style={{ marginBottom: "2.5rem" }}>
         <div style={{
           display: "flex",

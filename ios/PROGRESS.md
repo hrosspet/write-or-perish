@@ -636,11 +636,13 @@ Sign-out does not warn about unsent chunks (the review's optional logout warning
 - **Markdown**: `{quote:N}` markers show a "Loading quote…" chip until quotes load (the web shows
   the raw marker); because content is always split at markers, markdown never spans a marker
   (the web's final rendering, without its stateful-regex quirk). Footnotes are not parsed
-  (swift-markdown has no footnote extension). Images sit on their own rows inside a paragraph.
+  (swift-markdown has no footnote extension). Images sit on their own rows inside a paragraph;
+  only Loore's own media (`/media/…`) loads by itself, any other image is an "Image from <host>"
+  placeholder that loads in place when tapped (the web opens it in a new tab, #441).
   Links to deleted or inaccessible nodes are muted, non-tappable text ("[Node deleted]" /
   "[Node inaccessible]"; the web keeps them as links). External links open in an in-app Safari
-  view; `mailto:` and other schemes go to the system. The checklist "+" is always shown at 55 %
-  opacity (the web shows it on hover).
+  view and `mailto:` in Mail; links with any other scheme are plain text (`Router.externalHandling`,
+  #442). The checklist "+" is always shown at 55 % opacity (the web shows it on hover).
 - **Thread**: kebabs are iOS menus (Delete in the system's destructive red); the focal section is
   indented 8 pt (web 20 px) and each reply-tree level 24 pt (web 32 px) to fit a phone; the
   navigation title is the web's tab title but hidden (the page has its "Thread" heading; the title

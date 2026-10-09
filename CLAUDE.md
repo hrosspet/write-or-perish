@@ -4,6 +4,8 @@
 
 When implementing a feature that is underspecified, ambiguous, or specified in a possibly outdated doc, read `docs/LOORE-ESSENCE.md` first. It characterizes what Loore is and aspires to be, the vibes it should give, and the decision heuristics for resolving ambiguity (plus when to placeholder and ask instead of deciding).
 
+Decision log: docs/DECISION-LOG.md · intent doc: docs/LOORE-ESSENCE.md (read by the `decision-log` skill)
+
 ## CI/CD Pipeline - IMPORTANT
 
 **Pushing to `main` branch triggers automatic deployment to production.**
@@ -104,6 +106,7 @@ The dev stack runs:
 - Backend on `http://localhost:5010` (Flask dev server with hot reload)
 - Frontend on `http://localhost:3001` (React dev server with HMR)
 - PostgreSQL, Redis, and Celery are internal to the Docker network
+- **No Celery beat by default**: `celery-beat` sits behind the Compose profile `beat` in `docker-compose.override.yml`, so no periodic job (profile updates, recent-context summaries, embedding sweeps, digests, ...) runs locally. The worker still runs, so jobs you trigger (replies, transcription, TTS) work. To run beat, set `COMPOSE_PROFILES=beat` in `.env` (or `docker compose --profile beat up`); to fire one job, `.delay()` it from a flask shell.
 
 Source code is volume-mounted, so edits are reflected immediately without rebuilding.
 

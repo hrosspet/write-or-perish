@@ -258,6 +258,26 @@ def _luna_answers():
             ("gpt-6-luna", P3): M3}
 
 
+def _edits(*pairs, full=""):
+    """A reply of the merge by edits (#234)."""
+    return json.dumps({
+        "edits": [{"old_text": o, "new_text": n} for o, n in pairs],
+        "updated_content": full})
+
+
+# The stored merges as edits of their previous lists (V1 -> M1, M1 -> M2,
+# V4 -> M3): what --current-prompt sends back.
+E1 = _edits(("- [ ] call mom", "- [ ] call mom\n- [ ] buy milk"))
+E2 = _edits(("- [ ] write tests", "- [x] write tests"))
+E3 = _edits(("- [ ] gym", "- [ ] gym\n- [ ] read a book"))
+
+
+def _edit_answers(*models):
+    """These models reproduce every stored merge exactly, by edits."""
+    return {(model, proposal): reply for model in models
+            for proposal, reply in ((P1, E1), (P2, E2), (P3, E3))}
+
+
 # ── refusals ─────────────────────────────────────────────────────────────
 
 def test_cli_requires_an_explicit_user():
@@ -487,7 +507,7 @@ def test_messages_match_the_merge_task(app, monkeypatch):
         @staticmethod
         def get_completion(model_id, messages, api_keys, **kwargs):
             sent.append(messages)
-            return {"content": M1, "truncated": False, "input_tokens": 1,
+            return {"content": E1, "truncated": False, "input_tokens": 1,
                     "output_tokens": 1, "total_tokens": 2}
 
     monkeypatch.setattr(vtm, "LLMProvider", Recorder)
@@ -522,8 +542,11 @@ def test_messages_match_the_merge_task_for_lists_without_tasks(
         @staticmethod
         def get_completion(model_id, messages, api_keys, **kwargs):
             sent.append(messages)
-            return {"content": M1, "truncated": False, "input_tokens": 1,
-                    "output_tokens": 1, "total_tokens": 2}
+            # No tasks to anchor on: a full write that keeps the headings.
+            content = _edits(full=(previous or "") + "\n- [ ] buy milk")
+            return {"content": content, "truncated": False,
+                    "input_tokens": 1, "output_tokens": 1,
+                    "total_tokens": 2}
 
     monkeypatch.setattr(vtm, "LLMProvider", Recorder)
     monkeypatch.setattr(vtm, "get_api_keys_for_usage", lambda *a, **k: {})
@@ -553,8 +576,9 @@ def test_custom_merge_prompt_is_rebuilt_from_its_row(history, tmp_path):
     provider = FakeProvider(_luna_answers())
     out = tmp_path / "out.jsonl"
     cmp.run("peter", provider=provider, out_path=str(out))
+    from backend.utils.todo_merge_edits import REPLY_FORMAT
     assert {m[0]["content"][0]["text"] for _, m, _ in provider.calls} == {
-        "MY OWN MERGE RULES"}
+        "MY OWN MERGE RULES\n\n" + REPLY_FORMAT}
     merges = [r for r in _jsonl(out) if r["type"] == "merge"]
     assert {m["prompt"] for m in merges} == {f"user_prompt:{row.id}"}
 
@@ -867,3 +891,293 @@ def test_never_overwrites_an_existing_file(history, tmp_path):
         cmp.run("peter", provider=FakeProvider(_luna_answers()),
                 out_path=str(out))
     assert out.read_text() == "keep me"
+
+
+# ── --current-prompt ─────────────────────────────────────────────────────
+
+NEW_PROMPT = "TODAY'S MERGE RULES"
+
+
+@pytest.fixture
+def new_prompt_file(monkeypatch):
+    """The prompt file has changed since the past merges: the pinned hash
+    no longer matches, as after #417 deploys."""
+    import backend.utils.prompts as prompts
+    monkeypatch.setattr(prompts, "load_default_prompt",
+                        lambda key: NEW_PROMPT)
+    monkeypatch.setattr(cmp, "PROMPT_FILE_SHA256", "0" * 64)
+
+
+def test_current_prompt_flag_parses():
+    assert cmp.parse_args(["--user", "x"]).current_prompt is False
+    assert cmp.parse_args(
+        ["--user", "x", "--current-prompt"]).current_prompt is True
+
+
+def test_hash_check_is_skipped_only_with_current_prompt(
+        history, new_prompt_file, tmp_path):
+    provider = FakeProvider(_edit_answers("gpt-6-luna"))
+    with pytest.raises(SystemExit, match="orient_apply_todo.txt changed"):
+        cmp.run("peter", provider=provider,
+                out_path=str(tmp_path / "a.jsonl"))
+    with pytest.raises(SystemExit, match="orient_apply_todo.txt changed"):
+        cmp.run("peter", provider=provider, dry_run=True)
+    assert provider.calls == []
+    cmp.run("peter", provider=provider, current_prompt=True,
+            out_path=str(tmp_path / "b.jsonl"))
+    assert len(provider.calls) == 3
+
+
+def test_current_prompt_dry_run_works_on_a_changed_file(
+        history, new_prompt_file, capsys):
+    result = cmp.run("peter", provider=FakeProvider(), dry_run=True,
+                     current_prompt=True)
+    assert result["dry_run"] is True
+    assert "current file" in capsys.readouterr().out
+
+
+def test_every_call_uses_the_current_prompt_and_builder(
+        history, new_prompt_file, tmp_path):
+    provider = FakeProvider(_edit_answers("gpt-6-luna", "claude-opus-4.6"))
+    out = tmp_path / "out.jsonl"
+    cmp.run("peter", models=["gpt-6-luna"], rerun_original=True,
+            provider=provider, current_prompt=True, out_path=str(out))
+    # Same inputs as a normal run, only the prompt is today's; candidate
+    # and original re-run alike.
+    expected = [cmp.build_merge_messages(NEW_PROMPT, P3, V4),
+                cmp.build_merge_messages(NEW_PROMPT, P2, M1),
+                cmp.build_merge_messages(NEW_PROMPT, P1, V1)]
+    assert [m for model, m, _ in provider.calls
+            if model == "gpt-6-luna"] == expected
+    assert [m for model, m, _ in provider.calls
+            if model == "claude-opus-4.6"] == expected
+    assert len(provider.calls) == 6
+    merges = [r for r in _jsonl(out) if r["type"] == "merge"]
+    # The reference and the inputs are the past merge's own.
+    assert merges[0]["stored"]["text"] == M3
+    assert merges[0]["inputs"] == {"proposal_text": P3,
+                                   "previous_todo_text": V4}
+    assert [r["role"] for r in merges[0]["runs"]] == [
+        "candidate", "original_rerun"]
+    # Both run the merge by edits, with the task's structured output.
+    assert {r["mode"] for m in merges for r in m["runs"]} == {"edits"}
+    assert all(r["ok"] and r["vs_stored"]["exact_match"]
+               for m in merges for r in m["runs"])
+    from backend.utils.todo_merge_edits import TODO_EDITS_SCHEMA
+    assert all(kwargs == {"output_schema": TODO_EDITS_SCHEMA,
+                          "output_schema_name": "todo_edits"}
+               for _, _, kwargs in provider.calls)
+
+
+def test_current_prompt_is_recorded_in_the_run_and_each_merge(
+        history, new_prompt_file, tmp_path, capsys):
+    import hashlib
+    sha = hashlib.sha256(NEW_PROMPT.encode()).hexdigest()
+    out = tmp_path / "out.jsonl"
+    cmp.run("peter", provider=FakeProvider(_edit_answers("gpt-6-luna")),
+            current_prompt=True, out_path=str(out))
+    records = _jsonl(out)
+    run_rec = records[0]
+    assert run_rec["type"] == "run"
+    assert run_rec["current_prompt"] is True
+    assert run_rec["prompt_file_sha256"] == sha
+    merges = [r for r in records if r["type"] == "merge"]
+    assert merges and all(m["current_prompt"] is True
+                          and m["prompt"] == "current_file"
+                          and m["prompt_sha256"] == sha
+                          and m["stored_prompt"] == "file_default"
+                          for m in merges)
+    shown = capsys.readouterr().out
+    assert (f"prompt: current file {sha[:8]}, not the one these merges "
+            "used") in shown
+
+
+def test_a_normal_run_records_that_it_did_not_use_the_current_prompt(
+        history, tmp_path):
+    out = tmp_path / "out.jsonl"
+    cmp.run("peter", provider=FakeProvider(_luna_answers()),
+            out_path=str(out))
+    records = _jsonl(out)
+    assert records[0]["current_prompt"] is False
+    assert records[0]["prompt_file_sha256"] == cmp.PROMPT_FILE_SHA256
+    assert all(m["current_prompt"] is False and m["prompt"] == "file_default"
+               for m in records if m["type"] == "merge")
+
+
+def test_current_prompt_replaces_a_custom_prompt_and_does_not_read_it(
+        history, new_prompt_file, decrypted, tmp_path):
+    row = UserPrompt(user_id=history["peter"].id,
+                     prompt_key="orient_apply_todo", title="Apply to Todo",
+                     generated_by="user", created_at=T0 - timedelta(days=1))
+    row.set_content("MY OWN MERGE RULES")
+    _add(row)
+    provider = FakeProvider(_edit_answers("gpt-6-luna"))
+    out = tmp_path / "out.jsonl"
+    cmp.run("peter", provider=provider, current_prompt=True,
+            out_path=str(out))
+    from backend.utils.todo_merge_edits import REPLY_FORMAT
+    assert {m[0]["content"][0]["text"] for _, m, _ in provider.calls} == {
+        NEW_PROMPT + "\n\n" + REPLY_FORMAT}
+    assert not [s for s in decrypted if s[0] == "UserPrompt"]
+    merges = [r for r in _jsonl(out) if r["type"] == "merge"]
+    assert {m["prompt"] for m in merges} == {"current_file"}
+    assert {m["stored_prompt"] for m in merges} == {f"user_prompt:{row.id}"}
+
+
+def test_current_prompt_keeps_the_safety_properties(
+        history, new_prompt_file, tmp_path):
+    before = _counts()
+    out = tmp_path / "out.jsonl"
+    provider = FakeProvider(_edit_answers("gpt-6-luna"))
+    cmp.run("peter", provider=provider, current_prompt=True,
+            out_path=str(out))
+    assert len(provider.calls) == 3
+    assert _counts() == before
+    assert stat.S_IMODE(os.stat(out).st_mode) == 0o600
+    with pytest.raises(SystemExit):
+        cmp.run("eve", provider=FakeProvider(), current_prompt=True,
+                out_path=str(tmp_path / "eve.jsonl"))
+
+
+# ── --current-prompt runs the merge by edits (#234) ──────────────────────
+
+class ScriptedProvider(FakeProvider):
+    """Answers each (model, proposal) from a list, one reply per call, so
+    a merge's retry gets the next one."""
+
+    def get_completion(self, model_id, messages, api_keys, **kwargs):
+        self.calls.append((model_id, messages, kwargs))
+        proposal = messages[1]["content"][0]["text"]
+        answer = self.answers[(model_id, proposal)].pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return dict(self.usage, content=answer, truncated=False,
+                    total_tokens=sum(self.usage.values()))
+
+
+def test_peters_evaluation_command_is_in_the_docstring():
+    assert ("python backend/scripts/compare_todo_merge_models.py --user "
+            "hrosspet --current-prompt --models claude-opus-5.5") in cmp.__doc__
+
+
+def test_current_prompt_records_what_each_merge_by_edits_did(
+        history, new_prompt_file, tmp_path, capsys):
+    from backend.utils.cost import llm_cost_log_fields
+    luna = "gpt-6-luna"
+    altered = _edits(("- [ ] write tests", "- [x] write test"))
+    provider = ScriptedProvider({
+        # Newest merge: an anchor that isn't in the list, then the fix.
+        (luna, P3): [_edits(("- [ ] swim", "- [x] swim")), E3],
+        # Second: the ticked line altered twice; nothing saved.
+        (luna, P2): [altered, altered],
+        (luna, P1): [E1],
+    })
+    out = tmp_path / "out.jsonl"
+    summary = cmp.run("peter", provider=provider, current_prompt=True,
+                      out_path=str(out))
+
+    assert len(provider.calls) == 5
+    merges = [r for r in _jsonl(out) if r["type"] == "merge"]
+    newest, second, oldest = (m["runs"][0] for m in merges)
+    assert newest["ok"] and newest["vs_stored"]["exact_match"]
+    assert newest["text"] == M3
+    assert newest["edits"] == {
+        "calls": 2, "retries": 1, "edits_applied": 1, "full_write": False,
+        "format_errors": 0, "anchor_errors": 1, "rewrite_refusals": 0,
+        "kept_lines_failures": 0, "sub_items_moved_failures": 0,
+        "failure": None}
+    # Tokens and cost of both calls.
+    one_call = llm_cost_log_fields(luna, dict(provider.usage, content=E3))
+    assert newest["input_tokens"] == 2 * 5000
+    assert newest["output_tokens"] == 2 * 4000
+    assert newest["cost_usd"] == pytest.approx(
+        2 * one_call["cost_microdollars"] / 1e6)
+    assert newest["latency_s"] >= 0
+    assert len(newest["replies"]) == 2
+    assert not second["ok"]
+    assert second["error_type"] == "MergeFailed:kept_lines"
+    assert second["edits"]["kept_lines_failures"] == 2
+    assert second["edits"]["failure"] == "kept_lines"
+    assert [r["kind"] for r in second["refusals"]] == [
+        "kept_lines", "kept_lines"]
+    assert "line 2: - [ ] write tests" in second["refusals"][1]["reason"]
+    assert [r["kind"] for r in newest["refusals"]] == ["anchor"]
+    assert oldest["ok"] and oldest["edits"]["retries"] == 0
+
+    edits = summary[luna]["edits"]
+    assert edits == {
+        "merges": 3, "failed": 1, "failed_by_reason": {"kept_lines": 1},
+        "with_retry": 2, "calls": 5, "edits_applied": 2, "full_writes": 0,
+        "anchor_errors": 1, "with_anchor_error": 1,
+        "kept_lines_refusals": 2, "with_kept_lines_refusal": 1,
+        "sub_items_moved_refusals": 0, "with_sub_items_moved_refusal": 0,
+        "rewrite_refusals": 0, "format_errors": 0}
+    printed = capsys.readouterr().out
+    assert "kept-lines check refused 2 replies in 1 merges" in printed
+    assert "nesting check refused 0 replies in 0 merges" in printed
+    assert "anchor errors 1 in 1 merges" in printed
+    assert "edits: failed 1/3 (33%) (kept_lines 1)" in printed
+    assert "ERROR MergeFailed:kept_lines" in printed
+    # Counts only on the terminal, never the list.
+    for text in ("write tests", "call mom", "read a book", "swim"):
+        assert text not in printed
+
+
+def test_current_prompt_uses_the_tasks_apply_function(
+        history, new_prompt_file, tmp_path, monkeypatch):
+    from backend.utils import todo_merge_edits
+    seen = []
+
+    def fake_run(provider, model_id, messages, api_keys, current_todo,
+                 run=None):
+        seen.append((model_id, current_todo))
+        run.merged = current_todo + "\n- [ ] from the task"
+        return run
+    monkeypatch.setattr(todo_merge_edits, "run_todo_merge", fake_run)
+    out = tmp_path / "out.jsonl"
+    cmp.run("peter", provider=FakeProvider(), current_prompt=True,
+            out_path=str(out))
+    assert seen == [("gpt-6-luna", V4), ("gpt-6-luna", M1),
+                    ("gpt-6-luna", V1)]
+    merges = [r for r in _jsonl(out) if r["type"] == "merge"]
+    assert merges[0]["runs"][0]["text"] == V4 + "\n- [ ] from the task"
+
+
+def test_current_prompt_records_a_provider_error_with_the_calls_before_it(
+        history, new_prompt_file, tmp_path):
+    luna = "gpt-6-luna"
+    provider = ScriptedProvider({
+        (luna, P3): [_edits(("- [ ] swim", "x")),
+                     RuntimeError("upstream 500")],
+        (luna, P2): [E2], (luna, P1): [E1]})
+    out = tmp_path / "out.jsonl"
+    summary = cmp.run("peter", provider=provider, current_prompt=True,
+                      out_path=str(out))
+    newest = [r for r in _jsonl(out) if r["type"] == "merge"][0]["runs"][0]
+    assert not newest["ok"] and newest["error_type"] == "RuntimeError"
+    assert newest["edits"]["calls"] == 1
+    assert newest["input_tokens"] == 5000 and newest["cost_usd"] > 0
+    assert summary[luna]["errors"] == 1
+
+
+def test_current_prompt_dry_run_estimates_the_smaller_edits_output(
+        history, capsys):
+    from backend.utils.cost import calculate_llm_cost_microdollars
+    cmp.run("peter", models=["claude-opus-5.5"], dry_run=True,
+            rerun_original=True, current_prompt=True,
+            provider=FakeProvider())
+    printed = capsys.readouterr().out
+    # The fixture's past merges sent 4000 input tokens each.
+    once = calculate_llm_cost_microdollars(
+        "claude-opus-5.5", 4000 + cmp.EDITS_EXTRA_INPUT_TOKENS,
+        cmp.EDITS_OUTPUT_TOKENS)
+    assert once == 48400   # $4/M in, $20/M out: 4600 in, 1500 out
+    retry = calculate_llm_cost_microdollars(
+        "claude-opus-5.5", 4000 + cmp.EDITS_EXTRA_INPUT_TOKENS
+        + cmp.EDITS_OUTPUT_TOKENS, cmp.EDITS_OUTPUT_TOKENS)
+    assert "merges by edits" in printed
+    assert (f"claude-opus-5.5        ${3 * once / 1e6:.4f} total, "
+            f"${once / 1e6:.4f} per merge; up to "
+            f"${3 * (once + retry) / 1e6:.4f} if every merge retried"
+            ) in printed
+    assert "original re-run" in printed

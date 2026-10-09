@@ -304,6 +304,16 @@ def integration_due(user, latest_profile):
     return len(chain) >= 2
 
 
+def _log_profile_failure(user_id, exc):
+    """ProfileGenerationTask.on_failure's error line. It has no exc_info, so
+    Sentry can't tell an account failure (#369) from the message alone:
+    log_extra tags it with the cause's fingerprint, grouping it with the
+    task failure."""
+    from backend.utils.provider_alerts import log_extra
+    logger.error(f"Profile generation failed for user {user_id}: {exc}",
+                 extra=log_extra(exc))
+
+
 class ProfileGenerationTask(Task):
     """Custom task class with error handling."""
 
@@ -311,7 +321,7 @@ class ProfileGenerationTask(Task):
         """Called when task fails."""
         user_id = args[0] if args else None
         if user_id:
-            logger.error(f"Profile generation failed for user {user_id}: {exc}")
+            _log_profile_failure(user_id, exc)
 
 
 def _load_prompt(name, user_id=None):

@@ -30,10 +30,12 @@ final class VoiceRecorder: VoiceRecording {
     private let gate = SampleGate()
     private let inbox = ChunkInbox()
     private let log = Logger(subsystem: "org.loore.app", category: "recorder")
+    private let recordingLog: RecordingLog
 
-    init(uploader: ChunkUploader? = nil, debugFile: URL? = nil) {
+    init(uploader: ChunkUploader? = nil, debugFile: URL? = nil, recordingLog: RecordingLog = .shared) {
         self.uploader = uploader ?? .shared
         self.debugFile = debugFile
+        self.recordingLog = recordingLog
     }
 
     var elapsed: Double {
@@ -56,6 +58,7 @@ final class VoiceRecorder: VoiceRecording {
             self.onFatal?(message)
         }
         uploader.open(sessionId: sessionId, uploadURL: uploadURL, firstIndex: firstChunkIndex)
+        recordingLog.note("recorder start: session \(sessionId.prefix(8)), first chunk \(firstChunkIndex)")
         writer = try makeWriter(firstIndex: firstChunkIndex)
         let source = makeSource()
         let converter = PCMConverter()
@@ -106,12 +109,14 @@ final class VoiceRecorder: VoiceRecording {
     private func drainInbox() {
         guard let sessionId else { return }
         for chunk in inbox.popAll() {
+            recordingLog.note("chunk \(chunk.index): \(String(format: "%.1f", chunk.duration)) s, \(chunk.data.count / 1024) KB")
             chunkObserver?(chunk)
             uploader.enqueue(sessionId: sessionId, chunk: chunk)
         }
     }
 
     func pause() {
+        recordingLog.note("recorder pause (samples dropped, microphone on)")
         gate.set(open: false)
         writer?.flush()
         if debugFile != nil { source?.pause() }
@@ -126,9 +131,11 @@ final class VoiceRecorder: VoiceRecording {
         }
         try source.resume()
         gate.set(open: true)
+        recordingLog.note("recorder resume")
     }
 
     func interrupt() {
+        recordingLog.note("recorder interrupt (microphone stopped)")
         gate.set(open: false)
         writer?.flush()
         source?.pause()
@@ -144,12 +151,14 @@ final class VoiceRecorder: VoiceRecording {
             return ChunkUploader.Outcome(produced: 0, stored: 0, failed: [], fatalMessage: nil)
         }
         let outcome = await uploader.settle(sessionId: sessionId)
+        recordingLog.note("recorder stop: \(outcome.produced) chunks produced, \(outcome.stored) stored, failed \(outcome.failed)")
         writer = nil
         currentWriterUnsafe = nil
         return outcome
     }
 
     func cancel() {
+        if source != nil { recordingLog.note("recorder cancel") }
         gate.set(open: false)
         source?.stop()
         source = nil

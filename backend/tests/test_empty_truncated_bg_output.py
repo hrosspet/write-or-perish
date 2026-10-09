@@ -332,6 +332,59 @@ def test_second_refusal_stops_the_job_for_good(app):
         user.id, now=datetime.utcnow() + timedelta(days=365)) is True
 
 
+def test_a_stop_with_fewer_than_two_billed_failures_lifts_after_24_hours(
+        app, monkeypatch):
+    """#380 review: failures without a billed output (a provider outage,
+    a batch unreadable until abandoned) stop the job for
+    UNBILLED_STOP_EXPIRY, not until a new version. STOP_AFTER billed
+    failures keep the stop until a new version. The Sentry report says
+    which kind of stop it is."""
+    from datetime import timedelta
+    from backend.utils import refusal_backoff as rb
+    assert rb.UNBILLED_STOP_EXPIRY == timedelta(hours=24)
+    user = _user("outage")
+    types = rb.RECENT_CONTEXT_REQUEST_TYPES
+    now = datetime.utcnow()
+    since = now - timedelta(days=2)
+    older, newer = now - timedelta(hours=3), now - timedelta(hours=2)
+    lifts = newer + timedelta(hours=24)
+
+    # Two unbilled failures: stopped until 24 h after the newer one.
+    assert rb.backoff_state(user.id, types, since,
+                            unbilled_failures=[older, newer]) == (
+        2, lifts, True)
+    assert rb.in_backoff(user.id, types, since, "recent context",
+                         now=lifts - timedelta(seconds=1),
+                         unbilled_failures=[older, newer]) is True
+    assert rb.in_backoff(user.id, types, since, "recent context",
+                         now=lifts + timedelta(seconds=1),
+                         unbilled_failures=[older, newer]) is False
+
+    # One billed (a refusal) and one unbilled: fewer than two billed.
+    _refusal(user, timedelta(hours=3), "recent_context")
+    assert rb.backoff_state(user.id, types, since,
+                            unbilled_failures=[newer]) == (2, lifts, True)
+
+    # Two billed: stopped until a new version, however long it waits.
+    assert rb.backoff_state(user.id, types, since,
+                            billed_failures=[newer]) == (2, None, True)
+    assert rb.in_backoff(user.id, types, since, "recent context",
+                         now=now + timedelta(days=365),
+                         billed_failures=[newer]) is True
+
+    sentry = MagicMock()
+    monkeypatch.setitem(sys.modules, "sentry_sdk", sentry)
+    rb.report_stop(user.id, "recent context", 2, "gpt-5.5",
+                   "recent_context", cause="batch item failed or cut off",
+                   until=lifts)
+    assert sentry.capture_message.call_args.args[0] == (
+        "Background job stopped for 24 h after 2 runs in a row "
+        "(batch item failed or cut off): recent context")
+    scope = sentry.new_scope.return_value.__enter__.return_value
+    tags = {c.args[0]: c.args[1] for c in scope.set_tag.call_args_list}
+    assert tags["stop_lifts"] == "after_expiry"
+
+
 def test_sync_trigger_backs_off_after_a_refusal(app, monkeypatch):
     """#368: after a refused chunk the unfinished chain re-triggers every
     hour. The backoff holds the sync trigger for the wait, then lets it

@@ -22,16 +22,48 @@ Usage (on the prod VM, from the app dir, for your own account only):
     python backend/scripts/compare_todo_merge_models.py --user hrosspet \
         --models gpt-6-luna gpt-6-sol --since 2026-08-01 --limit 20 --rerun-original
 
+After the prompt file changed (#417), the past merges can't be rebuilt with
+the prompt they used, and the run above refuses. To test today's merge on
+the same past inputs, run (Luna is the default model):
+
+    python backend/scripts/compare_todo_merge_models.py --user hrosspet --current-prompt
+
+The evaluation of the merge by edits (#234) on Opus 5.5:
+
+    python backend/scripts/compare_todo_merge_models.py --user hrosspet --current-prompt --models claude-opus-5.5
+
+--current-prompt runs every merge (candidates and --rerun-original) the way
+the task runs it today: the CURRENT backend/prompts/orient_apply_todo.txt
+through the task's message builder (which appends the reply format,
+REPLY_FORMAT, after any merge prompt), the model replying with edits
+({old_text, new_text}), and the task's own function
+(backend/utils/todo_merge_edits.run_todo_merge) applying them to the
+previous todo list, with its one retry after a refused reply and its
+checks. The resulting list is compared with the stored output as in a
+normal run. Each run also records, over all calls of the merge: the edits
+applied, retries, anchor errors (old_text not found or not unique), how
+often the kept-lines check (an existing line changed or missing) and the
+nesting check (an existing sub-item now under a new line) refused a
+reply, refused full rewrites, unparseable replies, the final failure if
+the merge saved nothing, tokens, latency and cost; the JSONL also has each
+reply. The inputs (proposal, previous todo list) and the stored output the
+results are compared with stay those of the past merge. The
+PROMPT_FILE_SHA256 check does not apply in this mode; the run record, each
+merge record and the terminal summary say that the current prompt was used,
+with its sha256. A merge whose stored prompt was a custom UserPrompt row is
+run on the file prompt too, like the others (the custom row is not read).
+
 create_app loads .env.production (prod DB, KMS key, API keys) on its own.
 Before anything is decrypted, a run (not --dry-run) prints the account's
 username and asks you to type it to continue.
 Results go to ~/todo-merge-compare-u<id>-<UTC time>.jsonl (mode 0600, the
 todo texts are in it); the terminal shows counts and metrics only.
 
-Estimated cost per merge (one model call). Assumes a ~4k-token todo list:
-~5k input and ~4k output tokens, no cache hits. Reasoning tokens bill as
-output and come on top. `--dry-run` prints the estimate from the token
-counts of your own past merges (api_cost_log) instead.
+Estimated cost per merge, without --current-prompt (one model call that
+rewrites the list). Assumes a ~4k-token todo list: ~5k input and ~4k
+output tokens, no cache hits. Reasoning tokens bill as output and come on
+top. `--dry-run` prints the estimate from the token counts of your own
+past merges (api_cost_log) instead.
 
     gpt-6-luna         ~$0.0025   (20 merges: ~$0.05)    <- the default
     gpt-6-sol          ~$0.05
@@ -39,8 +71,23 @@ counts of your own past merges (api_cost_log) instead.
     claude-opus-4.6    ~$0.13
     claude-fable-5.1   ~$0.25     (gpt-6-astra the same)
 
-`--rerun-original` adds one call on the stored merge's own model per merge
-(a frontier model: ~$0.10-0.25 each, ~$2-5 for 20 merges).
+With --current-prompt (edits): the same input plus ~600 tokens (the longer
+prompt and the reply schema), and ~1.5k output tokens (the edits and the
+model's reasoning) instead of the whole list. A refused reply adds one
+retry call of about the same size.
+
+    gpt-6-luna         ~$0.0013
+    gpt-6-sol          ~$0.03
+    claude-opus-5.5    ~$0.05     (20 merges: ~$1; ~$2 if every merge retried)
+    claude-opus-4.6    ~$0.07
+    claude-fable-5.1   ~$0.13
+
+`--dry-run --current-prompt` prints this estimate per model from your own
+past merges' input tokens.
+
+`--rerun-original` adds one merge on the stored merge's own model per
+merge (a frontier model: ~$0.10-0.25 each, ~$2-5 for 20 merges; with
+--current-prompt about half that).
 
 Safety
 ------
@@ -76,7 +123,9 @@ The link is derived instead:
 
 * A merge commits its todo version, its api_cost_log row (request_type
   'todo_merge') and the proposal's apply_status='completed' together, so
-  merge outputs and applied proposals correspond one to one.
+  merge outputs and applied proposals correspond one to one. (A merge by
+  edits that needed a retry, #234, writes a row per call; its version's
+  tokens_used is the applied call's output, so it pairs with that row.)
 * Applying a proposal deletes every pending todo draft of the account, so
   proposals are applied in the order they were written, and merges run in
   that order (one at a time, under a per-user lock).
@@ -164,6 +213,13 @@ COST_ROW_TOLERANCE = timedelta(seconds=2)
 # Heuristic: a removed and an added item at least this similar
 # (difflib ratio) count as one reworded item.
 REWORD_SIMILARITY = 0.8
+# Heuristics for the --dry-run estimate of the merge by edits
+# (--current-prompt), which no past merge has token counts for: the edits
+# prompt and the reply schema add ~600 input tokens to what the past merge
+# sent; the reply (the edits and the model's reasoning) is ~1.5k output
+# tokens instead of the whole list.
+EDITS_EXTRA_INPUT_TOKENS = 600
+EDITS_OUTPUT_TOKENS = 1500
 
 SKIP_REASONS = {
     "before_floor": "made before 2026-04-03 (older prompt and proposal "
@@ -487,11 +543,13 @@ def build_merge_messages(merge_prompt, update_summary, current_todo):
                                      current_todo)
 
 
-def file_default_prompt():
+def file_default_prompt(check_hash=True):
+    """The prompt file's text. By default it must still be the file past
+    merges used (PROMPT_FILE_SHA256); --current-prompt skips that check."""
     from backend.utils.prompts import load_default_prompt
     text = load_default_prompt(PROMPT_KEY)
     digest = hashlib.sha256(text.encode()).hexdigest()
-    if digest != PROMPT_FILE_SHA256:
+    if check_hash and digest != PROMPT_FILE_SHA256:
         raise SystemExit(
             "Refusing to run: backend/prompts/orient_apply_todo.txt changed "
             "since this script was written, so past merges' default prompt "
@@ -528,6 +586,56 @@ def run_model(provider, model_id, messages, api_keys):
         "truncated": bool(response.get("truncated")),
         "text": text,
     }
+
+
+def run_model_edits(provider, model_id, messages, api_keys, previous_text):
+    """One merge as the task runs it now (--current-prompt): the model's
+    edits applied to *previous_text* by the task's own function, with its
+    retry and checks; timed over all its calls. Cost from the app's
+    calculator, summed over the calls; no api_cost_log row is written."""
+    from backend.utils.cost import llm_cost_log_fields
+    from backend.utils import todo_merge_edits
+    merge = todo_merge_edits.MergeRun()
+    started = time.monotonic()
+    raised = None
+    try:
+        todo_merge_edits.run_todo_merge(provider, model_id, messages,
+                                        api_keys, previous_text, merge)
+    except ReadOnlyViolation:
+        raise
+    except Exception as e:  # recorded with the calls made before it
+        raised = e
+    latency = time.monotonic() - started
+    fields = [llm_cost_log_fields(model_id, r) for r in merge.responses]
+
+    def total(key):
+        return sum(f.get(key, 0) or 0 for f in fields)
+
+    result = {
+        "model": model_id,
+        "mode": "edits",
+        "latency_s": round(latency, 3),
+        "input_tokens": total("input_tokens"),
+        "output_tokens": total("output_tokens"),
+        "cache_read_tokens": total("cache_read_tokens"),
+        "cache_write_tokens": total("cache_write_tokens"),
+        "cost_usd": total("cost_microdollars") / 1e6,
+        "truncated": any(r.get("truncated") for r in merge.responses),
+        "edits": merge.stats(),
+        # The JSONL only: replies and refusal reasons quote the list.
+        "replies": merge.replies,
+        "refusals": merge.refusals,
+        "text": merge.merged or "",
+    }
+    if raised is not None:
+        result.update(ok=False, error_type=type(raised).__name__,
+                      error=str(raised))
+    elif merge.failure is not None:
+        result.update(ok=False, error_type=f"MergeFailed:{merge.failure}",
+                      error=f"the merge saved nothing ({merge.failure})")
+    else:
+        result.update(ok=True, error_type=None, error=None)
+    return result
 
 
 # ── accuracy ─────────────────────────────────────────────────────────────
@@ -666,14 +774,33 @@ def _usd(microdollars):
     return (microdollars or 0) / 1e6
 
 
+def _fmt_edits(run):
+    """Counts of a merge by edits (no list text)."""
+    e = run.get("edits")
+    if not e:
+        return ""
+    return (f" edits={e['edits_applied']}"
+            + (" full-write" if e["full_write"] else "")
+            + f" retries={e['retries']} anchor-err={e['anchor_errors']}"
+            f" kept-lines-refused={e['kept_lines_failures']}"
+            f" sub-items-moved={e['sub_items_moved_failures']}"
+            f" rewrite-refused={e['rewrite_refusals']}"
+            f" format-err={e['format_errors']}")
+
+
 def _fmt_run(run):
     if not run["ok"]:
-        return f"{run['model']:<22} ERROR {run['error_type']}"
+        line = f"{run['model']:<22} ERROR {run['error_type']}"
+        if run.get("mode") == "edits":
+            line += (f"{_fmt_edits(run)} {run['latency_s']:.1f}s"
+                     f" ${run['cost_usd']:.4f}")
+        return line
     vs = run["vs_stored"]
     return (f"{run['model']:<22} exact={'yes' if vs['exact_match'] else 'no '}"
             f" +{vs['added']} -{vs['removed']} ~{vs['reworded']}"
             f" moved={vs['moved']} checkbox={vs['checkbox_changed']}"
             f" missing-input={run['missing_input_items']}"
+            f"{_fmt_edits(run)}"
             f" {run['latency_s']:.1f}s ${run['cost_usd']:.4f}"
             + (" TRUNCATED" if run["truncated"] else ""))
 
@@ -720,8 +847,40 @@ def summarize(runs_by_label):
             entry["exact_match_vs_original_rerun"] = sum(
                 r["vs_original_rerun"]["exact_match"] for r in vs_rerun)
             entry["compared_vs_original_rerun"] = len(vs_rerun)
+        edits = [r["edits"] for r in runs if r.get("edits")]
+        if edits:
+            entry["edits"] = _summarize_edits(edits)
         summary[label] = entry
     return summary
+
+
+def _summarize_edits(stats):
+    """Totals over the merges by edits of one model (MergeRun.stats())."""
+    def merges_with(key):
+        return sum(bool(s[key]) for s in stats)
+
+    def times(key):
+        return sum(s[key] for s in stats)
+
+    return {
+        "merges": len(stats),
+        "failed": sum(s["failure"] is not None for s in stats),
+        "failed_by_reason": dict(Counter(
+            s["failure"] for s in stats if s["failure"] is not None)),
+        "with_retry": merges_with("retries"),
+        "calls": times("calls"),
+        "edits_applied": times("edits_applied"),
+        "full_writes": merges_with("full_write"),
+        "anchor_errors": times("anchor_errors"),
+        "with_anchor_error": merges_with("anchor_errors"),
+        "kept_lines_refusals": times("kept_lines_failures"),
+        "with_kept_lines_refusal": merges_with("kept_lines_failures"),
+        "sub_items_moved_refusals": times("sub_items_moved_failures"),
+        "with_sub_items_moved_refusal": merges_with(
+            "sub_items_moved_failures"),
+        "rewrite_refusals": times("rewrite_refusals"),
+        "format_errors": times("format_errors"),
+    }
 
 
 def print_summary(summary, stored_stats, out):
@@ -757,6 +916,25 @@ def print_summary(summary, stored_stats, out):
                   f"{s['latency_median_s']}s | tokens mean in "
                   f"{s['input_tokens_mean']}, out {s['output_tokens_mean']}",
                   file=out)
+        e = s.get("edits")
+        if e:
+            m = e["merges"]
+            reasons = ", ".join(f"{k} {v}" for k, v in
+                                sorted(e["failed_by_reason"].items()))
+            print(f"    edits: failed {_pct(e['failed'], m)}"
+                  + (f" ({reasons})" if reasons else "")
+                  + f" | retried {_pct(e['with_retry'], m)}"
+                  f" | {e['calls']} calls, {e['edits_applied']} edits "
+                  f"applied, {e['full_writes']} full writes", file=out)
+            print(f"    kept-lines check refused {e['kept_lines_refusals']}"
+                  f" replies in {e['with_kept_lines_refusal']} merges"
+                  f" | nesting check refused "
+                  f"{e['sub_items_moved_refusals']} replies in "
+                  f"{e['with_sub_items_moved_refusal']} merges"
+                  f" | anchor errors {e['anchor_errors']} in "
+                  f"{e['with_anchor_error']} merges | rewrites refused "
+                  f"{e['rewrite_refusals']} | unparseable replies "
+                  f"{e['format_errors']}", file=out)
         print(f"    total cost ${s['cost_usd_total']:.4f}", file=out)
 
 
@@ -799,7 +977,8 @@ def classify(uid, username, since, limit, out):
     return window, usable[:limit]
 
 
-def rebuild_inputs(rec, uid, default_prompt, prompt_cache):
+def rebuild_inputs(rec, uid, default_prompt, prompt_cache,
+                   current_prompt=False):
     """Decrypt what one merge needs (one KMS call per row): the proposal,
     the previous todo version, the stored output, a custom prompt."""
     proposal_text = _decrypt(db.session.get(Node, rec["proposal"]["id"]),
@@ -809,7 +988,9 @@ def rebuild_inputs(rec, uid, default_prompt, prompt_cache):
                      if previous is not None else "")
     stored_text = _decrypt(db.session.get(UserTodo, rec["todo"].id), uid)
     prompt_id = rec["prompt_id"]
-    if prompt_id is None:
+    if prompt_id is None or current_prompt:
+        # --current-prompt: the file prompt for every merge, so a custom
+        # prompt row is not decrypted at all.
         merge_prompt = default_prompt
     else:
         if prompt_id not in prompt_cache:
@@ -821,17 +1002,23 @@ def rebuild_inputs(rec, uid, default_prompt, prompt_cache):
 
 
 def run_models(provider, models, original_model, messages, api_keys,
-               supported):
+               supported, previous_text=None):
     """Candidates in order, then the stored model when *original_model*
-    is given (--rerun-original)."""
+    is given (--rerun-original). With *previous_text* (--current-prompt)
+    each is a merge by edits applied to it, else one call that rewrites
+    the list."""
+    def one(model_id):
+        if previous_text is not None:
+            return run_model_edits(provider, model_id, messages, api_keys,
+                                   previous_text)
+        return run_model(provider, model_id, messages, api_keys)
+
     runs = []
     for model_id in models:
-        runs.append(dict(run_model(provider, model_id, messages, api_keys),
-                         role="candidate"))
+        runs.append(dict(one(model_id), role="candidate"))
     if original_model is not None:
         if original_model in supported:
-            original = run_model(provider, original_model, messages,
-                                 api_keys)
+            original = one(original_model)
         else:
             original = {"model": original_model, "ok": False,
                         "latency_s": 0, "cost_usd": 0,
@@ -856,7 +1043,7 @@ def score_runs(runs, stored_text, previous_text):
                 original["text"], result["text"])
 
 
-def _merge_line(rec, inputs, stored_missing, runs):
+def _merge_line(rec, inputs, stored_missing, runs, current_prompt=False):
     todo, proposal, cost = rec["todo"], rec["proposal"], rec["cost"]
     return {
         "type": "merge",
@@ -865,8 +1052,13 @@ def _merge_line(rec, inputs, stored_missing, runs):
         "proposal_node_id": proposal["id"],
         "proposal_created_at": _iso(proposal["created_at"]),
         "previous_todo_id": rec["previous"].id if rec["previous"] else None,
-        "prompt": ("file_default" if rec["prompt_id"] is None
+        "prompt": ("current_file" if current_prompt
+                   else "file_default" if rec["prompt_id"] is None
                    else f"user_prompt:{rec['prompt_id']}"),
+        "current_prompt": current_prompt,
+        # What the stored output was made with (the reference).
+        "stored_prompt": ("file_default" if rec["prompt_id"] is None
+                          else f"user_prompt:{rec['prompt_id']}"),
         "prompt_sha256": hashlib.sha256(
             inputs["merge_prompt"].encode()).hexdigest(),
         "stored": {
@@ -889,14 +1081,14 @@ def _merge_line(rec, inputs, stored_missing, runs):
 
 
 def compare_chosen(chosen, window, uid, models, rerun_original, provider,
-                   fh, out):
+                   fh, out, current_prompt=False):
     """Run and score each chosen merge, one at a time, writing a JSONL
     line per merge as it finishes. Returns (runs_by_label, stored)."""
     from flask import current_app
     from backend.utils.api_keys import get_api_keys_for_usage
     supported = current_app.config.get("SUPPORTED_MODELS", {})
     api_keys = get_api_keys_for_usage(current_app.config, "chat")
-    default_prompt = file_default_prompt()
+    default_prompt = file_default_prompt(check_hash=not current_prompt)
     for rec in window:
         if rec["skip"]:
             fh.write(json.dumps(_skipped_line(rec["todo"], rec["skip"]))
@@ -907,7 +1099,8 @@ def compare_chosen(chosen, window, uid, models, rerun_original, provider,
               "costs_usd": []}
     for n, rec in enumerate(chosen, 1):
         todo = rec["todo"]
-        inputs = rebuild_inputs(rec, uid, default_prompt, prompt_cache)
+        inputs = rebuild_inputs(rec, uid, default_prompt, prompt_cache,
+                                current_prompt)
         db.session.rollback()   # no open transaction during model calls
         if not inputs["proposal_text"].strip():
             fh.write(json.dumps(_skipped_line(todo, "proposal_empty"))
@@ -931,15 +1124,18 @@ def compare_chosen(chosen, window, uid, models, rerun_original, provider,
             inputs["previous_text"])
         runs = run_models(provider, models,
                           stored_model if rerun_original else None,
-                          messages, api_keys, supported)
+                          messages, api_keys, supported,
+                          previous_text=(inputs["previous_text"]
+                                         if current_prompt else None))
         score_runs(runs, inputs["stored_text"], inputs["previous_text"])
         for result in runs:
             label = (result["model"] if result["role"] == "candidate"
                      else f"{result['model']} (original re-run)")
             runs_by_label.setdefault(label, []).append(result)
             print("    " + _fmt_run(result), file=out)
-        fh.write(json.dumps(_merge_line(rec, inputs, stored_missing, runs))
-                 + "\n")
+        line = _merge_line(rec, inputs, stored_missing, runs,
+                           current_prompt)
+        fh.write(json.dumps(line) + "\n")
         fh.flush()
     costs = stored.pop("costs_usd")
     stored["cost_usd_mean"] = statistics.mean(costs) if costs else 0.0
@@ -947,8 +1143,49 @@ def compare_chosen(chosen, window, uid, models, rerun_original, provider,
     return runs_by_label, stored
 
 
-def _estimate(models, chosen, rerun_original, out):
+def edits_cost_microdollars(model_id, stored_input_tokens):
+    """Estimated cost of a merge by edits whose past merge sent
+    *stored_input_tokens*: (one call, one call and a retry). The retry
+    resends the first call's input with the reply and the reason it was
+    refused."""
     from backend.utils.cost import calculate_llm_cost_microdollars
+    first_input = (stored_input_tokens or 0) + EDITS_EXTRA_INPUT_TOKENS
+    once = calculate_llm_cost_microdollars(
+        model_id, first_input, EDITS_OUTPUT_TOKENS)
+    retry = calculate_llm_cost_microdollars(
+        model_id, first_input + EDITS_OUTPUT_TOKENS, EDITS_OUTPUT_TOKENS)
+    return once, once + retry
+
+
+def _estimate_edits(models, chosen, rerun_original, out):
+    print("\nEstimated cost of this run, merges by edits (the input tokens "
+          f"of these merges + {EDITS_EXTRA_INPUT_TOKENS}, and "
+          f"~{EDITS_OUTPUT_TOKENS} output tokens per call for the edits and "
+          "the model's reasoning; a refused reply adds one retry call):",
+          file=out)
+
+    def line(label, model_of):
+        once = retried = 0
+        for rec in chosen:
+            one, two = edits_cost_microdollars(model_of(rec),
+                                               rec["cost"].input_tokens)
+            once, retried = once + one, retried + two
+        per = once / len(chosen) if chosen else 0
+        print(f"  {label:<22} ${_usd(once):.4f} total, "
+              f"${_usd(per):.4f} per merge; up to ${_usd(retried):.4f} "
+              "if every merge retried", file=out)
+
+    for model_id in models:
+        line(model_id, lambda rec, m=model_id: m)
+    if rerun_original:
+        line("original re-run", lambda rec: rec["cost"].model_id)
+
+
+def _estimate(models, chosen, rerun_original, out, current_prompt=False):
+    from backend.utils.cost import calculate_llm_cost_microdollars
+    if current_prompt:
+        _estimate_edits(models, chosen, rerun_original, out)
+        return
     print("\nEstimated cost of this run (stored token counts of these "
           "merges; another model's tokenizer and reasoning tokens shift "
           "it):", file=out)
@@ -967,7 +1204,7 @@ def _estimate(models, chosen, rerun_original, out):
 
 def run(user_ident, models=None, limit=DEFAULT_LIMIT, since=None,
         rerun_original=False, out_path=None, dry_run=False,
-        provider=None, out=None):
+        provider=None, out=None, current_prompt=False):
     """The comparison, inside an app context. Returns the summary dict
     (per model label), or the counts on a dry run."""
     from flask import current_app
@@ -984,14 +1221,20 @@ def run(user_ident, models=None, limit=DEFAULT_LIMIT, since=None,
 
     with refuse_writes():
         user = resolve_user(user_ident)
-        file_default_prompt()   # refuse early if the prompt file moved on
+        # Refuse early if the prompt file moved on (not with
+        # --current-prompt: then the current file is what runs).
+        prompt_text = file_default_prompt(check_hash=not current_prompt)
+        prompt_sha = hashlib.sha256(prompt_text.encode()).hexdigest()
+        if current_prompt:
+            print(f"prompt: current file {prompt_sha[:8]}, not the one "
+                  "these merges used", file=out)
         window, chosen = classify(user.id, user.username, since, limit,
                                   out)
         print(f"Running {len(chosen)} (limit {limit}), newest first, on "
               f"{', '.join(models)}"
               + (" + the stored model" if rerun_original else ""), file=out)
         if dry_run:
-            _estimate(models, chosen, rerun_original, out)
+            _estimate(models, chosen, rerun_original, out, current_prompt)
             print("\nDry run: nothing decrypted, no model called, no file "
                   "written.", file=out)
             return {"dry_run": True, "chosen": len(chosen),
@@ -1006,15 +1249,20 @@ def run(user_ident, models=None, limit=DEFAULT_LIMIT, since=None,
                 "rerun_original": rerun_original, "limit": limit,
                 "since": _iso(since), "floor": _iso(FLOOR),
                 "started_at": _iso(datetime.utcnow()),
-                "prompt_file_sha256": PROMPT_FILE_SHA256,
+                "prompt_file_sha256": (prompt_sha if current_prompt
+                                       else PROMPT_FILE_SHA256),
+                "current_prompt": current_prompt,
             }) + "\n")
             runs_by_label, stored = compare_chosen(
                 chosen, window, user.id, models, rerun_original, provider,
-                fh, out)
+                fh, out, current_prompt)
             summary = summarize(runs_by_label)
             fh.write(json.dumps({"type": "summary", "stored": stored,
                                  "models": summary}) + "\n")
         print_summary(summary, stored, out)
+        if current_prompt:
+            print(f"\nprompt: current file {prompt_sha[:8]}, not the one "
+                  "these merges used", file=out)
         print(f"\nPer-merge results (with the todo texts): {out_path}",
               file=out)
         return summary
@@ -1054,6 +1302,15 @@ def parse_args(argv=None):
         help="also re-run each merge's stored model on the same inputs "
              "(adds one frontier-model call per merge)")
     parser.add_argument(
+        "--current-prompt", action="store_true",
+        help="run every merge (candidates and --rerun-original) as the "
+             "task runs it today: the CURRENT orient_apply_todo.txt, the "
+             "model replying with edits, applied and checked by the task's "
+             "own function (#234); inputs and the stored reference stay as "
+             "they were. Also records edits, retries, anchor errors, "
+             "kept-lines check refusals and nesting check refusals per "
+             "merge")
+    parser.add_argument(
         "--out", help="JSONL path (default: ~/todo-merge-compare-u<id>-"
                       "<UTC time>.jsonl; never overwritten)")
     parser.add_argument(
@@ -1078,7 +1335,8 @@ def main(argv=None):
         db.session.rollback()   # the next transaction starts read-only
         run(args.user, models=args.models, limit=args.limit,
             since=args.since, rerun_original=args.rerun_original,
-            out_path=args.out, dry_run=args.dry_run)
+            out_path=args.out, dry_run=args.dry_run,
+            current_prompt=args.current_prompt)
 
 
 if __name__ == "__main__":

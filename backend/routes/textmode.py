@@ -9,7 +9,8 @@ from backend.utils.prompts import get_user_prompt_record
 from backend.utils.placeholders import UserExportValidationError
 from backend.utils.llm_nodes import (
     ai_usage_refused_response, create_llm_placeholder,
-    pick_model_for_generation, reply_ai_usage, reply_refusal,
+    pick_model_for_generation, read_only_model_refusal,
+    read_only_model_response, reply_ai_usage, reply_refusal,
 )
 from backend.utils.context_artifacts import attach_context_artifacts
 from backend.utils.session_helpers import attach_agentic_prompt_under
@@ -102,6 +103,13 @@ def start_conversation():
 
     if model_id not in current_app.config["SUPPORTED_MODELS"]:
         return jsonify({"error": f"Unsupported model: {model_id}"}), 400
+
+    # A new thread is never a read: a read-only model is refused before
+    # anything is written, never swapped for another.
+    if auto_generate:
+        refused = read_only_model_refusal(model_id)
+        if refused is not None:
+            return read_only_model_response(refused)
 
     # 1. System node with the textmode prompt
     prompt_record = get_user_prompt_record(current_user.id, PROMPT_KEY)
@@ -253,6 +261,9 @@ def add_message(conversation_id):
     refused = reply_refusal(last_node, current_user.id, ai_usage)
     if refused is not None:
         return ai_usage_refused_response(refused)
+    refused = read_only_model_refusal(model_id, last_node, new_entry=True)
+    if refused is not None:
+        return read_only_model_response(refused)
 
     # Create user message node
     from backend.utils.tokens import approximate_token_count
@@ -400,6 +411,13 @@ def continue_from_node(node_id):
         model_id = pick_model_for_generation(node, current_user)
     if model_id not in current_app.config["SUPPORTED_MODELS"]:
         return jsonify({"error": f"Unsupported model: {model_id}"}), 400
+    if auto_generate:
+        # The reply answers the new message: under a read reply that is a
+        # chat turn, which a read-only model may not run. Refused before
+        # anything is written.
+        refused = read_only_model_refusal(model_id, node, new_entry=True)
+        if refused is not None:
+            return read_only_model_response(refused)
 
     prompt_node = attach_agentic_prompt_under(
         node, current_user.id, PROMPT_KEY, privacy_level, ai_usage)

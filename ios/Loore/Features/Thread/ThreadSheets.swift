@@ -13,7 +13,7 @@ struct ThreadSheets: ViewModifier {
                 NodeFormSheet(title: "Reply",
                               config: NodeFormConfig(parentId: target.id, hidePowerFeatures: !app.capabilities.craftMode)) { result in
                     model.replyTarget = nil
-                    if let id = result.id { app.open(.thread(id: id, awaitLLM: nil)) }
+                    if let id = result.id { model.openThread(id, awaitLLM: nil) }
                 } onClose: {
                     model.replyTarget = nil
                 }

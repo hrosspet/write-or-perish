@@ -68,11 +68,13 @@ def test_init_segment_name_suffixing():
 # ── Batch partitioning inside transcribe_chunk_batch ─────────────────────
 
 def _run_batch(tmp_path, monkeypatch, chunk_indices, boundary_indices,
-               ext=".webm"):
+               ext=".webm", short_merges=(), files_after=None):
     """Run transcribe_chunk_batch against synthetic fixtures.
 
     Returns (concat_calls, stored_text) where concat_calls captures
-    (paths, init_segment_path) per sub-batch merge.
+    (paths, init_segment_path) per sub-batch merge. Merges numbered in
+    `short_merges` (1-based) report holding less audio than their input;
+    `files_after`, when a list, gets the session dir's file names.
     """
     from flask import Flask
     from backend.extensions import db as _db
@@ -135,8 +137,12 @@ def _run_batch(tmp_path, monkeypatch, chunk_indices, boundary_indices,
 
         concat_calls = []
 
-        def fake_concat(paths, init_segment_path=None, output_suffix=None):
+        def fake_concat(paths, init_segment_path=None, output_suffix=None,
+                        report=None):
             concat_calls.append((list(paths), init_segment_path))
+            if report is not None:
+                report['holds_all_audio'] = (
+                    len(concat_calls) not in short_merges)
             out = tmp_path / f"merged_{len(concat_calls)}{output_suffix}"
             out.write_bytes(b"merged")
             return str(out)
@@ -167,6 +173,8 @@ def _run_batch(tmp_path, monkeypatch, chunk_indices, boundary_indices,
             session_id=session_id,
             chunk_index=min(chunk_indices)).first()
         stored_text = stored.get_text() if stored else None
+        if files_after is not None:
+            files_after.extend(sorted(f.name for f in chunk_dir.iterdir()))
         _db.session.rollback()
         _db.drop_all()
 
@@ -218,3 +226,20 @@ def test_mp4_resumed_batch_splits(tmp_path, monkeypatch):
         chunk_indices=[0, 1, 2, 3], boundary_indices=[2], ext=".mp4")
     assert len(concat_calls) == 2
     assert "init.2" in concat_calls[1][1]
+
+
+def test_chunks_kept_when_a_merge_holds_less_audio(tmp_path, monkeypatch):
+    """A merged file with less audio than its chunks: the batch file is
+    stored and transcribed, and that sub-batch's chunks are kept under a
+    name playback does not list; the other sub-batch's are deleted."""
+    files = []
+    concat_calls, stored = _run_batch(
+        tmp_path, monkeypatch,
+        chunk_indices=[0, 1, 2, 3], boundary_indices=[2], ext=".mp4",
+        short_merges=(2,), files_after=files)
+    assert stored == "part1\n\npart2"
+    assert "batch_0000-0001.mp4" in files
+    assert "batch_0002-0003.mp4" in files
+    assert "unmerged_chunk_0002.mp4" in files
+    assert "unmerged_chunk_0003.mp4" in files
+    assert not [f for f in files if f.startswith("chunk_")]

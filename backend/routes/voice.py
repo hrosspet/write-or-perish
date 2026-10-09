@@ -7,7 +7,8 @@ from backend.extensions import db
 from backend.utils.prompts import get_user_prompt_record
 from backend.utils.llm_nodes import (
     ai_usage_refused_response, create_llm_placeholder,
-    pick_model_for_generation, reply_ai_usage, voice_turn_refusal,
+    pick_model_for_generation, read_only_model_refusal,
+    read_only_model_response, reply_ai_usage, voice_turn_refusal,
 )
 from backend.utils.placeholders import UserExportValidationError
 from backend.utils.audio_storage import is_storage_id
@@ -56,6 +57,15 @@ def create_voice_from_node(node_id):
 
     has_prompt = ancestors_have_prompt(node, current_user.id, AGENTIC_PROMPT_KEYS)
     is_llm = is_llm_node(node)
+
+    if not is_llm:
+        # A reply starts here: directly under *node* inside an agentic
+        # thread, else under the Voice prompt added below it. A read-only
+        # model is refused before anything is written.
+        refused = read_only_model_refusal(
+            model_id, node, new_entry=not has_prompt)
+        if refused is not None:
+            return read_only_model_response(refused)
 
     if has_prompt and not is_llm:
         llm_node = create_llm_placeholder_node(
@@ -177,6 +187,11 @@ def create_voice_session():
         current_user, parent_node, None if parent_node else ai_usage)
     if refused is not None:
         return ai_usage_refused_response(refused)
+    # Nor on a read-only model outside a read: refused before the turn is
+    # written or its audio moved, never swapped for another model.
+    refused = read_only_model_refusal(model_id, parent_node, new_entry=True)
+    if refused is not None:
+        return read_only_model_response(refused)
 
     if not parent_id:
         prompt_record = get_user_prompt_record(current_user.id, PROMPT_KEY)
