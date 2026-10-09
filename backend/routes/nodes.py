@@ -1042,7 +1042,7 @@ def update_node(node_id):
     # subtree walk and a KMS unwrap per descendant on every save.
     return jsonify({
         "message": "Node updated",
-        "node": _focal_own_fields(node),
+        "node": _focal_own_fields(node, current_user.id),
         "descendants_updated": len(cascaded),
     }), 200
 
@@ -1089,12 +1089,13 @@ def _render_set_ciphertexts(nodes):
     return texts
 
 
-def _focal_own_fields(node):
+def _focal_own_fields(node, viewer_id):
     """The focal node's own serialized fields — everything GET /nodes/<id>
     returns except the tree (ancestors, children, child_count). Shared
     with PUT, whose response used to re-run the whole GET (subtree walk,
     every descendant decrypted) only for the UI to keep the node's own
-    fields and refetch the rest."""
+    fields and refetch the rest. *viewer_id* is the user the response is
+    for: fields that belong to the node's owner alone go to them only."""
     data = {
         "id": node.id,
         "content": node.get_content(),
@@ -1131,7 +1132,7 @@ def _focal_own_fields(node):
     # owner, each action's name and outcome for anyone else.
     if node.tool_calls_meta:
         from backend.utils.tool_meta import tool_calls_meta_for
-        visible = tool_calls_meta_for(node, current_user.id)
+        visible = tool_calls_meta_for(node, viewer_id)
         # A reply whose only entry was the app marker reads as a node
         # with no tool calls: no key, as before the marker existed.
         if visible:
@@ -1147,12 +1148,17 @@ def _focal_own_fields(node):
     data.update(_system_prompt_fields(node, current_user.id))
     # A Community Archive read reply: the thread page shows what the read
     # covered (the window, from the pinned render) and offers to read
-    # the day again. Focal node only — two small lookups.
+    # the day again. Focal node only — two small lookups. The window goes
+    # to the reply's owner only: its counts are taken after the owner's
+    # read tweets were left out (`excluded` is how many; the tweet and
+    # account counts are what remained), so they are the owner's read
+    # state. Another viewer of the reply gets it without the window.
     if node.node_type == "llm" or node.llm_model:
         from backend.utils.ca_feed import is_read_reply, read_window_fields
         if is_read_reply(node):
             data["read_reply"] = True
-            data["read_window"] = read_window_fields(node.feed_render)
+            if (node.human_owner_id or node.user_id) == viewer_id:
+                data["read_window"] = read_window_fields(node.feed_render)
     return data
 
 
@@ -1387,7 +1393,7 @@ def get_node(node_id):
         ) if serialized is not None
     ]
     _order_and_count_children(serialized_children)
-    focal = _focal_own_fields(node)
+    focal = _focal_own_fields(node, current_user.id)
     in_read_thread = bool(
         read_prompt_above
         or focal.get("read_reply")
@@ -1469,7 +1475,16 @@ def resolve_node_quotes(node_id):
     ext_owner_id = node.human_owner_id or node.user_id
     ext_quote_data = get_ext_quote_data(ext_quote_ids, ext_owner_id) \
         if ext_quote_ids else {}
-    if ext_quote_ids and ext_owner_id == current_user.id:
+    if ext_quote_ids and ext_owner_id != current_user.id:
+        # The quoted text is published with the node; the owner's read
+        # mark and verdict on each reference are not. Another viewer gets
+        # the quotes without them (the bubbles show them to the owner
+        # only anyway).
+        for quote in ext_quote_data.values():
+            if quote is not None:
+                quote.pop("read_at", None)
+                quote.pop("feedback", None)
+    elif ext_quote_ids:
         # The owner's controls show the verdict that counts for the
         # recommendation this reply made (#352), where it has one.
         from backend.models import FeedPick

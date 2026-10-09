@@ -805,6 +805,85 @@ def test_scan_statuses_reports_artifact_failure(app):
         assert notes2 == []
 
 
+# ── A thread two people reply in ─────────────────────────────────────────
+
+def _reply_for(owner, meta):
+    """An LLM reply made for *owner*, as the task writes one: authored by
+    the model's account, the human owner on human_owner_id."""
+    llm = User.query.filter_by(username="model-account").first()
+    if llm is None:
+        llm = User(username="model-account")
+        _db.session.add(llm)
+        _db.session.commit()
+    node = Node(user_id=llm.id, human_owner_id=owner.id, node_type="llm",
+                llm_model="test-model")
+    node.set_content("resp")
+    node.tool_calls_meta = json.dumps(meta)
+    _db.session.add(node)
+    _db.session.commit()
+    return node
+
+
+def _second_user():
+    bob = User(username="bob")
+    _db.session.add(bob)
+    _db.session.commit()
+    return bob
+
+
+def _apply_status(node):
+    return json.loads(Node.query.get(node.id).tool_calls_meta)[0][
+        "apply_status"]
+
+
+def test_new_proposal_supersedes_only_the_replying_users_own(app):
+    """A new todo proposal for bob replaces bob's pending one; alice's
+    pending proposal in the same thread keeps its status."""
+    with app.app_context():
+        alice, bob = User.query.first(), _second_user()
+        pending = [{"name": "propose_todo", "status": "success",
+                    "apply_status": "pending_approval"}]
+        alices = _reply_for(alice, pending)
+        bobs_earlier = _reply_for(bob, pending)
+        bobs_new = _reply_for(bob, [])
+
+        results = _auto_create_drafts(
+            "### New Tasks\n- call the bank", bobs_new,
+            [alices, bobs_earlier, bobs_new], bob.id)
+        _db.session.commit()
+        _db.session.expire_all()
+
+        assert [r["name"] for r in results] == ["propose_todo"]
+        assert _apply_status(bobs_earlier) == "superseded"
+        assert _apply_status(alices) == "pending_approval"
+
+
+def test_scan_statuses_reads_only_the_replying_users_replies(app):
+    """Bob's reply under alice's carries forward only bob's own pending
+    results. Alice's retrieval waiting for her next turn stays hers and
+    is not marked reported, so her next turn still gets it."""
+    with app.app_context():
+        alice, bob = User.query.first(), _second_user()
+        todo = _mk_todo(alice.id, "alice's own tasks")
+        alices = _reply_for(alice, [
+            {"name": "read_todo", "status": "success", "todo_id": todo.id},
+        ])
+        bobs = _reply_for(bob, [
+            {"name": "update_artifact", "status": "success",
+             "kind": "memory", "created": False},
+        ])
+
+        notes, to_mark = _scan_proposal_statuses([alices, bobs], bob.id)
+        assert notes == ["[Artifact 'memory' was updated.]"]
+        assert [(n.id, name) for n, name in to_mark] == [
+            (bobs.id, "update_artifact")]
+
+        _mark_status_reported(to_mark)
+        _db.session.commit()
+        notes, _ = _scan_proposal_statuses([alices, bobs], alice.id)
+        assert any("alice's own tasks" in n for n in notes)
+
+
 # ── Pinning ──────────────────────────────────────────────────────────────
 
 def test_attach_pins_artifacts_and_node_resolves_them(app):
