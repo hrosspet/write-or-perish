@@ -114,11 +114,33 @@ def owner_hidden(node) -> bool:
     reachable. The owner cannot be signed in meanwhile. The owner row
     comes from the session's identity map after the first look, so a
     thread costs one query per author."""
+    return owner_hidden_since(node) is not None
+
+
+def _owner(node):
     from backend.extensions import db
     from backend.models import User
     owner_id = getattr(node, 'human_owner_id', None) or node.user_id
-    owner = db.session.get(User, owner_id) if owner_id else None
-    return owner is not None and owner.deleted_at is not None
+    return db.session.get(User, owner_id) if owner_id else None
+
+
+def owner_hidden_since(node):
+    """When the node's owner deleted the account, while it is in its
+    grace period (#269); None otherwise."""
+    owner = _owner(node)
+    return owner.deleted_at if owner is not None else None
+
+
+def author_gone(node) -> bool:
+    """The node's author deleted the account: it is in its grace period
+    (#269), or already deleted (its placeholders then belong to the
+    ``loore-erased`` account). A tombstone of such a node shows no name,
+    so other people cannot tell an account in its grace period from a
+    deleted one, nor read a system account's name on it."""
+    from backend.utils.system_accounts import SYSTEM_USERNAMES
+    owner = _owner(node)
+    return owner is not None and (owner.deleted_at is not None
+                                  or owner.username in SYSTEM_USERNAMES)
 
 
 def hidden_owner_filter(node_model):
@@ -209,10 +231,24 @@ def can_user_see_node_or_tombstone(node, user_id: Optional[int] = None) -> bool:
     deletion on its own, e.g. a 410 for a deleted parent or a scrubbed
     message for a deleted ancestor.
 
+    A live node whose author deleted the account and is in its grace
+    period (#269) is not seen at all here, even by someone who sees its
+    placeholder in a thread: nobody else may reply to it, link it, or
+    have it read into an AI reply's context.
+
     Args:
         node: The Node object to check
         user_id: The user ID to check (defaults to current_user.id)
     """
+    if user_id is None:
+        if not current_user.is_authenticated:
+            return False
+        user_id = current_user.id
+    if (getattr(node, 'deleted_at', None) is None
+            and node.user_id != user_id
+            and getattr(node, 'human_owner_id', None) != user_id
+            and owner_hidden(node)):
+        return False
     return (can_user_access_node(node, user_id)
             or can_user_view_tombstone(node, user_id))
 

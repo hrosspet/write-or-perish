@@ -1,6 +1,6 @@
 import logging
 from datetime import datetime, timedelta, timezone
-from flask import Blueprint, jsonify, request, current_app
+from flask import abort, Blueprint, jsonify, request, current_app
 from flask_login import login_required, current_user
 from sqlalchemy.exc import IntegrityError
 from backend.models import Node, User, UserProfile
@@ -206,8 +206,12 @@ def get_dashboard():
 @dashboard_bp.route("/<string:username>", methods=["GET"])
 @login_required
 def get_public_dashboard(username):
-    # Lookup the user by their (unique) handle (username).
-    user = User.query.filter_by(username=username).first_or_404()
+    # Lookup the user by their (unique) handle (username). A deleted
+    # account in its grace period (#269) answers like a handle nobody
+    # holds: nothing about it, not even that it exists.
+    user = User.query.filter_by(username=username).first()
+    if user is None or user.deleted_at is not None:
+        abort(404)
 
     page = request.args.get("page", 1, type=int)
     per_page = request.args.get("per_page", 20, type=int)

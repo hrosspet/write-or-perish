@@ -1528,9 +1528,12 @@ def get_node_titles():
         nodes[i] for i in ids
         if i in nodes and can_user_access_node(nodes[i], current_user.id)
     ]
+    # A node whose author deleted the account (#269) titles as deleted,
+    # as it quotes and shows in threads.
     deleted = {
         i for i in ids
-        if i in nodes and nodes[i].deleted_at is not None
+        if i in nodes
+        and (nodes[i].deleted_at is not None or owner_hidden(nodes[i]))
         and can_user_view_tombstone(nodes[i], current_user.id)
     }
     threads = {

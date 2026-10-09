@@ -1031,10 +1031,13 @@ def schedule_purge(user, *, requested_by_id, source, at=None):
 
 def cancel_purge(user_id, cancelled_by_id):
     """Cancel the user's purge while it waits. Returns True when a job
-    was cancelled (False: none waiting, or it has started)."""
+    was cancelled (False: none waiting, or it has started). An account
+    deletion (#269) is not cancelled here: only a restore after signing
+    in undoes it (account_deletion.restore_account)."""
     n = UserDataPurge.query.filter(
         UserDataPurge.user_id == user_id,
         UserDataPurge.status == "scheduled",
+        UserDataPurge.delete_account.is_(False),
     ).update({UserDataPurge.status: "cancelled",
               UserDataPurge.cancelled_at: _now(),
               UserDataPurge.cancelled_by_id: cancelled_by_id},

@@ -559,6 +559,11 @@ def delete_account_route(user_id):
     refused."""
     from backend.utils import account_deletion, user_purge
     user = User.query.get_or_404(user_id)
+    if user.id == current_user.id:
+        # An admin's own account goes through the Account page, with its
+        # confirmation and grace period, like everyone's.
+        return jsonify({"error": "Delete your own account on the Account "
+                                 "page.", "code": "own_account"}), 409
     refusal = account_deletion.deletion_refusal(user)
     if refusal:
         code, message = refusal

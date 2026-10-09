@@ -53,7 +53,11 @@ def _make_app():
     from backend.routes.admin import admin_bp
     from backend.routes.auth import auth_bp
     from backend.routes.commons import commons_bp
+    from backend.routes.dashboard import dashboard_bp
+    from backend.routes.log import log_bp
+    app.register_blueprint(dashboard_bp, url_prefix="/api/dashboard")
     from backend.routes.public_pages import public_pages_bp
+    app.register_blueprint(log_bp, url_prefix="/api")
     app.register_blueprint(account_data_bp, url_prefix="/api/account")
     app.register_blueprint(account_deletion_bp, url_prefix="/api/account")
     app.register_blueprint(admin_bp, url_prefix="/api/admin")
@@ -252,6 +256,113 @@ def test_the_account_is_hidden_at_once(app, world, stubs):
     assert world.ids["A1"] not in visible and world.ids["B1"] in visible
     # Nothing was deleted yet.
     assert Node.query.filter_by(user_id=a.id).count() == 7
+
+
+def test_other_members_logs_do_not_show_a_hidden_accounts_reply(
+        app, world, stubs):
+    """Bob deleted the root of his thread; his Log card falls back to the
+    newest node still alive under it, which was alice's public reply.
+    Once alice's account is hidden, that reply counts as deleted there
+    too: neither her words nor her name appear in bob's Log."""
+    a7 = _db.session.get(Node, world.ids["A7"])
+    a7.privacy_level = "public"
+    a7.set_content("alice hidden words")
+    _db.session.get(Node, world.ids["B3"]).deleted_at = datetime.utcnow()
+    _db.session.commit()
+    c = _client(app, world.bob)
+
+    def cards():
+        return c.get("/api/log").get_json()["nodes"]
+    assert any(n["preview"].startswith("alice hidden words")
+               and n["username"] == "alice" for n in cards())
+    _schedule(world.alice)
+    for n in cards():
+        assert "alice hidden words" not in (n["preview"] or "")
+        assert n["username"] != "alice"
+
+
+def test_nobody_can_build_on_a_hidden_accounts_entry_or_read_it_into_ai(
+        app, world, stubs):
+    """Bob's public reply B1 sits under alice's public entry A1. While her
+    account is hidden, A1 cannot be replied to or linked (404, like a
+    node bob cannot see), and an AI reply for bob under B1 does not
+    read it."""
+    from backend.tests.test_context_artifact_pinning import _load_node_chain
+    from backend.utils.node_deletion import assert_parent_alive
+    from backend.utils.privacy import can_user_see_node_or_tombstone
+    b = world.bob
+    A1 = _db.session.get(Node, world.ids["A1"])
+    B1 = _db.session.get(Node, world.ids["B1"])
+    assert can_user_see_node_or_tombstone(A1, b.id)
+    assert assert_parent_alive(A1.id, b.id) is None
+    assert [n.id for n in _load_node_chain(B1, b.id)] == [A1.id, B1.id]
+
+    _schedule(world.alice)
+    _db.session.expire_all()
+    A1 = _db.session.get(Node, world.ids["A1"])
+    B1 = _db.session.get(Node, world.ids["B1"])
+    assert not can_user_see_node_or_tombstone(A1, b.id)
+    resp, status = assert_parent_alive(A1.id, b.id)
+    assert status == 404
+    assert [n.id for n in _load_node_chain(B1, b.id)] == [B1.id]
+
+
+def test_a_gone_authors_placeholders_carry_no_name(app, world, stubs):
+    """In the grace period and after the deletion alike, other people see
+    the account's entries as deleted placeholders with no name (neither
+    hers nor loore-erased), in threads and in quotes, and its replies
+    do not count."""
+    from backend.utils.quotes import get_quote_data
+    from backend.utils.serialization import serialize_node_status
+    from backend.utils.thread_tree import alive_child_counts
+    b = world.bob
+    a1 = world.ids["A1"]
+    assert alive_child_counts([a1])[a1] == 3      # A2 (hers), B1, LB
+    job = _schedule(world.alice)
+
+    def check():
+        _db.session.expire_all()
+        node = _db.session.get(Node, a1)
+        status = serialize_node_status(node, b.id)
+        assert status["deleted"] is True and status["deleted_at"]
+        assert status["username"] is None
+        quote = get_quote_data([a1], b.id)[a1]
+        assert quote["deleted"] is True
+        assert quote["username"] is None and quote["user_id"] is None
+    check()
+    assert alive_child_counts([a1])[a1] == 2      # B1, LB
+    assert _run_due(job, datetime.utcnow() + timedelta(days=31)) == "done"
+    check()
+
+
+def test_a_hidden_account_has_no_member_page(app, world, stubs):
+    c = _client(app, world.bob)
+    assert c.get("/api/dashboard/alice").status_code == 200
+    _schedule(world.alice)
+    r = c.get("/api/dashboard/alice")
+    unknown = c.get("/api/dashboard/nobody")
+    assert r.status_code == unknown.status_code == 404
+    assert r.get_data() == unknown.get_data()
+
+
+def test_an_admin_deletes_their_own_account_on_the_account_page(
+        app, world, stubs, monkeypatch):
+    _dispatcher(monkeypatch, stubs)
+    _add(User(username="second", approved=True, is_admin=True))
+    _db.session.commit()
+    c = _client(app, world.admin)
+    for url in (f"/api/admin/users/{world.admin.id}/delete_account?dry_run=1",
+                f"/api/admin/users/{world.admin.id}/delete_account"):
+        r = c.post(url, json={"confirm_username": "admin"})
+        assert r.status_code == 409 and r.get_json()["code"] == "own_account"
+    assert UserDataPurge.query.count() == 0
+    assert _db.session.get(User, world.admin.id).deleted_at is None
+
+
+def test_the_data_cancel_does_not_undo_an_account_deletion(app, world, stubs):
+    job = _schedule(world.alice)
+    assert up.cancel_purge(world.alice.id, world.alice.id) is False
+    assert _db.session.get(UserDataPurge, job.id).status == "scheduled"
 
 
 def _thread_ids(c, node_id):
@@ -544,9 +655,11 @@ def test_the_last_admin_cannot_be_deleted(app, world, stubs, monkeypatch):
     c2 = _client(app, second)
     r = c2.post("/api/account/delete", json={"confirm": "second"})
     assert r.status_code == 409 and r.get_json()["code"] == "last_admin"
+    assert acc.deletion_refusal(_db.session.get(User, second.id))[0] == "last_admin"
+    # The admin endpoint never acts on the caller's own account.
     r = c2.post(f"/api/admin/users/{second.id}/delete_account",
                 json={"confirm_username": "second"})
-    assert r.status_code == 409 and r.get_json()["code"] == "last_admin"
+    assert r.status_code == 409 and r.get_json()["code"] == "own_account"
 
 
 def test_the_last_admin_is_also_checked_when_the_deletion_runs(
