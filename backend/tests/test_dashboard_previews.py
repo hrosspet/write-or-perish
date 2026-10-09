@@ -85,3 +85,55 @@ def test_with_nothing_visible_below_the_card_shows_the_root(app):  # noqa: F811
     for card in _cards(app, alice.id):
         assert "BOB PRIVATE WORDS" not in card["preview"]
         assert card["id"] == root.id
+
+
+def test_soft_deleted_root_is_not_listed_or_counted(app):  # noqa: F811
+    alice, bob, root = _world()
+    gone = _node(alice, text="DELETED ROOT WORDS", at=T0 + timedelta(hours=1),
+                 deleted_at=T0 + timedelta(days=1))
+    _db.session.commit()
+
+    client = app.test_client()
+    _login(client, alice.id)
+    body = client.get("/api/dashboard/").get_json()
+    assert [c["id"] for c in body["nodes"]] == [root.id]
+    assert body["total_nodes"] == 1
+    assert gone.id not in [c["id"] for c in body["pinned_nodes"]]
+
+
+def test_deleted_pinned_root_is_not_listed(app):  # noqa: F811
+    alice, bob, root = _world()
+    gone = _node(alice, text="DELETED PINNED", at=T0 + timedelta(hours=1),
+                 pinned_at=T0, deleted_at=T0 + timedelta(days=1))
+    gone.pinned_by = alice.id
+    _db.session.commit()
+
+    client = app.test_client()
+    _login(client, alice.id)
+    body = client.get("/api/dashboard/").get_json()
+    assert [c["id"] for c in body["pinned_nodes"]] == [root.id]
+
+
+def test_child_count_counts_only_children_the_owner_can_see(app):  # noqa: F811
+    alice, bob, root = _world()
+    _node(alice, root, "alive", at=T0 + timedelta(minutes=1))
+    _node(alice, root, "deleted", at=T0 + timedelta(minutes=2),
+          deleted_at=T0 + timedelta(days=1))
+    _node(bob, root, "bob private", at=T0 + timedelta(minutes=3))
+    _db.session.commit()
+
+    cards = _cards(app, alice.id)
+    assert len(cards) == 2
+    for card in cards:
+        assert card["child_count"] == 1
+
+
+def test_username_is_the_author_of_the_previewed_entry(app):  # noqa: F811
+    alice, bob, root = _world()
+    _node(bob, root, "bob public words", privacy="public",
+          at=T0 + timedelta(minutes=1))
+    _db.session.commit()
+
+    for card in _cards(app, alice.id):
+        assert card["preview"] == "bob public words"
+        assert card["username"] == "bob"

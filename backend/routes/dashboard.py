@@ -102,7 +102,7 @@ def _serialize_node_for_list(node, viewer_id, child_counts=None):
                         else child_counts.get(node.id, 0)),
         "created_at": iso_utc(display_node.created_at),
         "pinned_at": iso_utc(node.pinned_at),
-        "username": node.user.username if node.user else "Unknown",
+        "username": display_node.user.username if display_node.user else "Unknown",
         "human_owner_username": human_owner_username,
         "llm_model": display_node.llm_model,
         "origin": display_node.origin,
@@ -122,15 +122,25 @@ def get_dashboard():
     # Pinned nodes for this user (separate from pagination)
     pinned_nodes = Node.query.filter(
         Node.pinned_by == current_user.id,
-        Node.pinned_at.isnot(None)
+        Node.pinned_at.isnot(None),
+        Node.deleted_at.is_(None)
     ).order_by(Node.pinned_at.desc()).all()
-    pinned_list = [_serialize_node_for_list(n, current_user.id)
+    pinned_counts = visible_child_counts(
+        [n.id for n in pinned_nodes], current_user.id)
+    pinned_list = [_serialize_node_for_list(n, current_user.id,
+                                            pinned_counts)
                    for n in pinned_nodes]
 
-    query = Node.query.filter_by(user_id=current_user.id, parent_id=None).order_by(Node.created_at.desc())
+    query = Node.query.filter(
+        Node.user_id == current_user.id,
+        Node.parent_id.is_(None),
+        Node.deleted_at.is_(None)
+    ).order_by(Node.created_at.desc())
     pagination = query.paginate(page=page, per_page=per_page, error_out=False)
 
-    nodes_list = [_serialize_node_for_list(node, current_user.id)
+    counts = visible_child_counts(
+        [n.id for n in pagination.items], current_user.id)
+    nodes_list = [_serialize_node_for_list(node, current_user.id, counts)
                   for node in pagination.items]
     # Determine if Voice Mode is enabled for this user (admin or paid plan)
     voice_mode_enabled = current_user.has_voice_mode
