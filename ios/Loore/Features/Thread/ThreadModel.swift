@@ -588,15 +588,20 @@ final class ThreadModel {
                                deleted: deleted, isSystemPrompt: isSystemPrompt, aiUsage: aiUsage, pending: pending)
     }
 
-    /// The action row's Glean: under this node, on the model picked beside it.
-    /// Under a failed gleaning the next one starts where it did (its parent), so
-    /// the failed reply is not part of what is read.
-    func gleanHere() {
-        if gleaningFailed, let parent = parentAncestor, !parent.deleted {
-            glean(under: parent.id, model: readModel)
-        } else {
-            glean(under: nodeId, model: readModel)
+    /// Where a glean asked for on this page's node starts (#435 review): a
+    /// failed reply is never read, so a glean on one (the Glean button or its
+    /// ⋯ entry) starts from its parent. The server applies the same rule.
+    var gleanTarget: Int {
+        if let node, node.isLLM, node.llmTaskStatus == .failed,
+           let parent = parentAncestor, !parent.deleted {
+            return parent.id
         }
+        return nodeId
+    }
+
+    /// The action row's Glean: on the model picked beside it, from `gleanTarget`.
+    func gleanHere() {
+        glean(under: gleanTarget, model: readModel)
     }
 
     /// `POST /api/read/from-node/<id>` (billed, a live call): a glean under the

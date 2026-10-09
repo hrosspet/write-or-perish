@@ -241,7 +241,7 @@ private struct ThreadContent: View {
         if model.offersGleanInMenu(owned: true, deleted: false, isSystemPrompt: node.systemPrompt.isSystemPrompt,
                                    aiUsage: node.aiUsage, pending: model.isLLMPending)
             && !model.readLoading && !NodePrefetch.shared.isPending {
-            list.append(gleanMenuAction(node.id))
+            list.append(gleanMenuAction(model.gleanTarget))
         }
         return list
     }

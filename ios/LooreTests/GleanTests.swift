@@ -341,6 +341,27 @@ final class GleanReworkTests: StubbedAppTestCase {
         model.stop()
     }
 
+    /// "Glean for this reflection" in a failed gleaning's own ⋯ menu, like its
+    /// Glean button, starts from the parent: the failed reply is never read.
+    func testAGleanOnAFailedReplyStartsFromItsParent() async {
+        let failed = await load(32, """
+        {"id":32,"content":"[LLM response generation pending...]","node_type":"llm","llm_model":"claude-haiku-5.5",
+         "user":{"id":3,"username":"claude-haiku-5.5"},"parent_user_id":5,"privacy_level":"private","ai_usage":"chat",
+         "llm_task_status":"failed","tool_calls_meta":[{"name":"_live"}],"child_count":0,"children":[],
+         "ancestors":[\(entry),\(readPrompt)],"in_read_thread":true,"glean_thread":false}
+        """)
+        XCTAssertEqual(failed.gleanTarget, 31)
+        XCTAssertTrue(failed.offersGleanInMenu(owned: true, deleted: false, isSystemPrompt: false, aiUsage: .chat))
+
+        let done = await load(33, """
+        {"id":33,"content":"A quiet day.","node_type":"llm","llm_model":"claude-haiku-5.5",
+         "user":{"id":3,"username":"claude-haiku-5.5"},"parent_user_id":5,"privacy_level":"private","ai_usage":"chat",
+         "llm_task_status":"completed","tool_calls_meta":[{"name":"_live"}],"child_count":0,"children":[],
+         "ancestors":[\(entry),\(readPrompt)],"in_read_thread":true,"glean_thread":false}
+        """)
+        XCTAssertEqual(done.gleanTarget, 33, "glean again under a finished gleaning keeps its picks in view")
+    }
+
     func testTheReadPromptsAreTaggedGlean() {
         XCTAssertEqual(BubblePreview.promptLabel("read"), "Glean")
         XCTAssertEqual(BubblePreview.promptLabel("read_thread"), "Glean")
