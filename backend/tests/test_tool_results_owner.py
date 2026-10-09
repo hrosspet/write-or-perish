@@ -272,3 +272,36 @@ def test_search_preview_shows_a_node_the_user_may_open(thread):
     text = _llm_task_mod._retrieval_injection_text(tr, t["bob"].id)
     assert "alice writes in public" in text
     assert "ALICE SEARCH HIT" not in text
+
+
+# ── The history lines of someone else's AI reply ────────────────────────
+
+def test_someone_elses_reply_adds_no_line_from_its_record(thread):
+    """alice's AI reply sits in bob's chain with its text only: no outcome
+    line for her artifact write, and her reply's mode does not stand in
+    for bob's. Proposal tags stay: the proposals are in the reply's text.
+    Her own next turn keeps every line."""
+    t = thread
+    alice_reply = _llm(t["entry"], t["alice"], "Noted. I updated a list.",
+                       status="completed")
+    alice_reply.tool_calls_meta = json.dumps([
+        {"name": "propose_todo", "status": "success",
+         "apply_status": "completed", "status_reported": True},
+        {"name": "update_artifact", "status": "success",
+         "kind": "alice-kind", "created": False, "status_reported": True},
+        {"name": "_mode", "source_mode": "textmode"},
+    ])
+    _db.session.commit()
+
+    payload, _ = _ask(alice_reply, t["bob"])
+
+    assert "alice-kind" not in payload
+    assert f"[todo-proposal:{alice_reply.id}]" in payload
+    # bob's first Text-mode turn here: the model is told his mode.
+    assert "[Mode: Text." in payload
+
+    payload, _ = _ask(alice_reply, t["alice"])
+    assert "[update_artifact: artifact 'alice-kind' updated.]" in payload
+    assert f"[todo-proposal:{alice_reply.id}]" in payload
+    # alice was in Text mode already.
+    assert "[Mode: Text." not in payload

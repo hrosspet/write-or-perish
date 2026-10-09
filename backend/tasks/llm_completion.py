@@ -959,14 +959,20 @@ def _turn_still_readable(node_ids):
     return all(ai_usage in AI_ALLOWED for (ai_usage,) in rows)
 
 
-def _get_previous_source_mode(node_chain):
+def _get_previous_source_mode(node_chain, user_id=None):
     """Find the source_mode of the most recent LLM node in the chain.
+
+    With *user_id*, only that user's own replies count (the ones they
+    asked for): the mode of another user's reply is theirs.
 
     Returns None if no previous LLM node has a stored source_mode
     (i.e. this is the first agentic turn in the thread).
     """
     for node in reversed(node_chain):
         if not node.tool_calls_meta:
+            continue
+        if (user_id is not None
+                and (node.human_owner_id or node.user_id) != user_id):
             continue
         try:
             meta = json.loads(node.tool_calls_meta)
@@ -3875,7 +3881,14 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                                             f"\n\n[share-proposal:"
                                             f"{node.id}]"
                                         )
-                                    elif ename == "update_artifact":
+                                    elif (ename == "update_artifact"
+                                          and (node.human_owner_id
+                                               or node.user_id) == user_id):
+                                        # The user's own replies only: on
+                                        # another user's reply the write
+                                        # and its artifact are theirs. The
+                                        # proposal tags above stay, as the
+                                        # proposals are in the reply's text.
                                         # Durable record of the outcome.
                                         # The within-turn result round is
                                         # injected only into that turn's
@@ -4084,7 +4097,8 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 # Inject mode indicator only when the mode changes
                 # (or on the first turn to establish the initial mode).
                 if is_agentic and source_mode:
-                    prev_mode = _get_previous_source_mode(node_chain)
+                    prev_mode = _get_previous_source_mode(
+                        node_chain, user_id)
                     if prev_mode != source_mode:
                         mode_labels = {
                             'voice': (
