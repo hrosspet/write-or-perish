@@ -51,7 +51,10 @@ def _ready_under_gleaning(node, has_prompt, ai_usage):
         )
         db.session.commit()
         parent_id = system_node.id
-    return jsonify({"mode": "ready", "parent_id": parent_id}), 200
+    # llm_node_id stays in the answer: the iPhone app decodes it on every
+    # answer of this route, and opens Voice without playing on "ready".
+    return jsonify({"mode": "ready", "parent_id": parent_id,
+                    "llm_node_id": node.id}), 200
 
 
 @voice_bp.route("/from-node/<int:node_id>", methods=["POST"])

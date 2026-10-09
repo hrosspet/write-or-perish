@@ -1641,7 +1641,10 @@ class TestGleanCardThreads:
         _login(client, ana.id)
         resp = client.post(f"/api/voice/from-node/{gleaning.id}", json={})
         assert resp.status_code == 200, resp.get_json()
-        assert resp.get_json() == {"mode": "ready", "parent_id": gleaning.id}
+        # "ready": open the record button, play nothing. llm_node_id stays
+        # for the iPhone app, which decodes it on every answer.
+        assert resp.get_json() == {"mode": "ready", "parent_id": gleaning.id,
+                                   "llm_node_id": gleaning.id}
 
 
 class TestGleanIsLiveOnTheUsersProvider:
