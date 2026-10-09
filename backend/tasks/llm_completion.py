@@ -1458,6 +1458,12 @@ def _reference_marks_note(item_ids, user_id):
     return note + "]"
 
 
+def _owned_by(node, user_id):
+    """The node is *user_id*'s: their own node, or a reply made for them
+    (an LLM node's human owner)."""
+    return (node.human_owner_id or node.user_id) == user_id
+
+
 def _scan_proposal_statuses(node_chain, licence=None):
     """Walk all nodes and collect proposal/tool status notes to inject.
 
@@ -1552,14 +1558,21 @@ def _mark_status_reported(to_mark):
             pass
 
 
-def _supersede_old_proposals(node_chain, tool_name, exclude_node_id):
+def _supersede_old_proposals(node_chain, tool_name, exclude_node_id,
+                             user_id):
     """Mark old pending_approval proposals as superseded.
 
-    Only supersedes entries matching *tool_name* (scoped by type).
-    Proposals already in 'started' or later states are left alone.
+    Only supersedes entries matching *tool_name* (scoped by type), and
+    only on replies that belong to *user_id*, the user whose new proposal
+    replaces them: in a thread other people reply in, their proposals
+    are theirs to accept or leave, and a new proposal for this user
+    changes none of them. Proposals already in 'started' or later states
+    are left alone.
     """
     for node in node_chain:
         if node.id == exclude_node_id or not node.tool_calls_meta:
+            continue
+        if not _owned_by(node, user_id):
             continue
         try:
             meta = json.loads(node.tool_calls_meta)
@@ -1605,7 +1618,7 @@ def _auto_create_drafts(llm_text, llm_node, node_chain, user_id):
                 db.session.flush()
             # Supersede old pending_approval update_todo proposals
             _supersede_old_proposals(
-                node_chain, "propose_todo", llm_node.id)
+                node_chain, "propose_todo", llm_node.id, user_id)
             results.append({
                 "name": "propose_todo",
                 "status": "success",
@@ -1634,7 +1647,7 @@ def _auto_create_drafts(llm_text, llm_node, node_chain, user_id):
                 db.session.flush()
             # Supersede old pending_approval issue proposals
             _supersede_old_proposals(
-                node_chain, "propose_github_issue", llm_node.id)
+                node_chain, "propose_github_issue", llm_node.id, user_id)
             results.append({
                 "name": "propose_github_issue",
                 "status": "success",
@@ -1662,7 +1675,7 @@ def _auto_create_drafts(llm_text, llm_node, node_chain, user_id):
                 db.session.flush()
             # Supersede old pending_approval feedback proposals
             _supersede_old_proposals(
-                node_chain, "propose_feedback", llm_node.id)
+                node_chain, "propose_feedback", llm_node.id, user_id)
             results.append({
                 "name": "propose_feedback",
                 "status": "success",
@@ -1694,7 +1707,7 @@ def _auto_create_drafts(llm_text, llm_node, node_chain, user_id):
                 db.session.flush()
             # Supersede old pending_approval share proposals
             _supersede_old_proposals(
-                node_chain, "propose_share", llm_node.id)
+                node_chain, "propose_share", llm_node.id, user_id)
             results.append({
                 "name": "propose_share",
                 "status": "success",
