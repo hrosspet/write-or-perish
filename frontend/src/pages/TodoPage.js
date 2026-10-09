@@ -6,6 +6,7 @@ import {
 import { useToast } from '../contexts/ToastContext';
 import MarkdownBody from '../components/MarkdownBody';
 import { formatDate } from '../utils/date';
+import { computeLineDiff } from '../utils/diff';
 import VersionHistoryDrawer from '../components/VersionHistoryDrawer';
 import ArtifactsNav from '../components/ArtifactsNav';
 import useSubmitShortcut from '../hooks/useSubmitShortcut';
@@ -231,12 +232,119 @@ function TodoItem({ item, onToggle, onInsertAfter, addingKey, setAddingKey, dept
   );
 }
 
+const choiceButtonStyle = (primary, disabled) => ({
+  padding: '6px 14px',
+  background: primary ? 'var(--accent)' : 'none',
+  border: primary ? 'none' : '1px solid var(--border)',
+  borderRadius: '6px',
+  color: primary ? 'var(--bg-deep)' : 'var(--text-secondary)',
+  fontFamily: 'var(--sans)',
+  fontSize: '0.8rem',
+  fontWeight: 400,
+  cursor: disabled ? 'not-allowed' : 'pointer',
+  opacity: disabled ? 0.6 : 1,
+});
+
+/**
+ * Shown in the editor when its Save was refused because the list changed
+ * after the editor was opened (#476): what changed, and the two choices.
+ */
+function EditConflictNotice({ opened, newest, saving, onSaveMine, onShowNewest }) {
+  const changes = computeLineDiff(opened ? opened.content : '', newest.content)
+    .filter((op) => op.type !== 'same' && op.text.trim());
+  return (
+    <div role="alert" style={{
+      border: '1px solid var(--accent-dim)', borderRadius: '8px',
+      padding: '14px 16px', marginBottom: '12px', background: 'var(--bg-card)',
+    }}>
+      <p style={{
+        margin: '0 0 10px', fontFamily: 'var(--sans)', fontSize: '0.85rem',
+        fontWeight: 300, color: 'var(--text-primary)', lineHeight: 1.5,
+      }}>
+        Your todo list changed after you opened the editor, so your text
+        wasn&rsquo;t saved. Saving it anyway replaces these changes; the newer
+        version stays in history.
+      </p>
+      {changes.length > 0 && (
+        <div style={{ maxHeight: '180px', overflowY: 'auto', marginBottom: '12px' }}>
+          {changes.map((op, i) => (
+            <div key={i} style={{
+              fontFamily: 'var(--sans)', fontSize: '0.8rem', fontWeight: 300,
+              lineHeight: 1.6, whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+              padding: '0 6px', borderRadius: '2px',
+              color: op.type === 'add' ? 'var(--text-primary)' : 'var(--text-muted)',
+              background: op.type === 'add'
+                ? 'color-mix(in srgb, var(--success) 12%, transparent)'
+                : 'color-mix(in srgb, var(--error) 10%, transparent)',
+              textDecoration: op.type === 'del' ? 'line-through' : 'none',
+            }}>
+              {op.type === 'add' ? '+ ' : '− '}{op.text}
+            </div>
+          ))}
+        </div>
+      )}
+      <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+        <button onClick={onSaveMine} disabled={saving} style={choiceButtonStyle(true, saving)}>
+          {saving ? 'Saving...' : 'Save mine anyway'}
+        </button>
+        <button onClick={onShowNewest} disabled={saving} style={choiceButtonStyle(false, saving)}>
+          Show the newest list
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The user's text after "Show the newest list" (#476): kept below the
+ * editor, read-only, to copy from, until the user discards it or leaves
+ * the editor.
+ */
+function KeptText({ text, onCopy, onDiscard }) {
+  return (
+    <div style={{ marginTop: '20px' }}>
+      <p style={{
+        margin: '0 0 8px', fontFamily: 'var(--sans)', fontSize: '0.8rem',
+        fontWeight: 300, color: 'var(--text-muted)',
+      }}>
+        Your text, not saved. Copy what you need into the list above, then Save.
+      </p>
+      <textarea
+        readOnly
+        value={text}
+        aria-label="Your text, not saved"
+        style={{
+          width: '100%', minHeight: '160px', background: 'var(--bg-surface)',
+          border: '1px dashed var(--border)', borderRadius: '8px',
+          color: 'var(--text-secondary)', fontFamily: 'var(--sans)',
+          fontSize: '0.85rem', fontWeight: 300, padding: '16px',
+          lineHeight: 1.6, resize: 'vertical',
+        }}
+      />
+      <div style={{ marginTop: '8px', display: 'flex', gap: '8px' }}>
+        <button onClick={onCopy} style={choiceButtonStyle(false, false)}>Copy</button>
+        <button onClick={onDiscard} style={choiceButtonStyle(false, false)}>Discard</button>
+      </div>
+    </div>
+  );
+}
+
 export default function TodoPage() {
   const [todo, setTodo] = useState(null);
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState(false);
   const [editContent, setEditContent] = useState('');
   const [saving, setSaving] = useState(false);
+
+  // The editor's Save is checked against the version it was opened on
+  // (#476). When the list changed meanwhile (a todo merge, a tick on
+  // another device), the server refuses with the newest version, and the
+  // editor shows the choice instead of dropping those changes: save the
+  // user's text anyway, or show the newest list with the user's text kept
+  // below it to copy from. Nothing typed is thrown away without a click.
+  const [editBase, setEditBase] = useState(null);
+  const [editConflict, setEditConflict] = useState(null);
+  const [keptText, setKeptText] = useState(null);
 
   // Which per-row "+" inline add-input is open (keyed by item text). Lifted so
   // opening one closes any other, and clicking a second "+" switches to it.
@@ -378,20 +486,64 @@ export default function TodoPage() {
     );
   };
 
-  const handleSave = async () => {
+  const openEditor = () => {
+    setEditContent(todo.content);
+    setEditBase(serverTodoRef.current);
+    setEditConflict(null);
+    setKeptText(null);
+    setEditing(true);
+  };
+
+  const closeEditor = () => {
+    setEditing(false);
+    setEditConflict(null);
+    setKeptText(null);
+    if (todo) setEditContent(todo.content);
+  };
+
+  // Saves the editor's text over `base`: the version the editor was opened
+  // on, or, for "Save mine anyway", the newest one the server showed. No
+  // base (Create) saves without the check.
+  const saveEditor = async (base) => {
     if (!editContent.trim()) return;
     setSaving(true);
     try {
-      const res = await api.put('/todo', {
-        content: editContent,
-        generated_by: 'user',
-      });
+      const body = { content: editContent, generated_by: 'user' };
+      if (base) body.base_revision = base.revision;
+      const res = await api.put('/todo', body);
       showTodo(res.data.todo);
       setEditing(false);
+      setEditConflict(null);
+      setKeptText(null);
     } catch (err) {
-      console.error('Failed to save todo:', err);
+      const newest = err.response?.status === 409 ? err.response.data?.todo : null;
+      if (newest) {
+        // The text stays in the editor; the page header shows the newest version.
+        showTodo(newest);
+        setEditConflict(newest);
+      } else {
+        console.error('Failed to save todo:', err);
+        const reason = err.response?.data?.error || err.message || 'Unknown error';
+        addToast(`Couldn't save the todo list (${reason})`);
+      }
     }
     setSaving(false);
+  };
+  const handleSave = () => saveEditor(editBase);
+  const handleSaveMineAnyway = () => saveEditor(editConflict);
+  const handleShowNewest = () => {
+    setKeptText(editContent);
+    setEditContent(editConflict.content);
+    setEditBase(editConflict);
+    setEditConflict(null);
+  };
+  const handleCopyKept = async () => {
+    try {
+      await navigator.clipboard.writeText(keptText);
+      addToast('Copied your text');
+    } catch (err) {
+      addToast("Couldn't copy; select the text and copy it instead");
+    }
   };
 
   const handleQuickAdd = async () => {
@@ -415,6 +567,9 @@ export default function TodoPage() {
   const handleCreate = async () => {
     const defaultContent = `## Today\n\n- [ ] \n\n## Upcoming\n\n- [ ] \n\n## Completed recently\n`;
     setEditContent(defaultContent);
+    setEditBase(null);
+    setEditConflict(null);
+    setKeptText(null);
     setEditing(true);
   };
 
@@ -464,11 +619,13 @@ export default function TodoPage() {
   // Cmd+Return / Ctrl+Enter primary-submit (#129): save the edit textarea,
   // or add the quick-add task. Plain Enter still inserts a newline in the
   // textarea; the quick-add input handles plain Enter itself.
-  useSubmitShortcut(editTextareaRef, () => handleSave(), editing && !saving && !!editContent.trim());
+  // While the editor shows the choice after a refused Save, the shortcut
+  // does nothing: the user picks one of the two buttons.
+  useSubmitShortcut(editTextareaRef, () => handleSave(), editing && !saving && !editConflict && !!editContent.trim());
   useSubmitShortcut(quickAddInputRef, () => handleQuickAdd(), quickAddOpen && !quickAddSaving && !!quickAddText.trim());
   // Esc cancels the edit (matches the Cancel button). The quick-add input
   // handles its own Esc inline.
-  useEscapeKey(() => { setEditing(false); if (todo) setEditContent(todo.content); }, editing && !saving);
+  useEscapeKey(closeEditor, editing && !saving);
 
   const generatedByLabel = (g) => {
     if (g === 'user' || g === 'manual') return 'edited manually';
@@ -508,7 +665,7 @@ export default function TodoPage() {
           <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
             <button
               onClick={() => {
-                if (editing) { handleSave(); } else { setEditing(true); setEditContent(todo.content); }
+                if (editing) { if (!editConflict) handleSave(); } else { openEditor(); }
               }}
               style={{
                 background: 'none', border: 'none', cursor: 'pointer', padding: 0,
@@ -655,6 +812,15 @@ export default function TodoPage() {
       {/* Editing mode */}
       {editing && (
         <div>
+          {editConflict && (
+            <EditConflictNotice
+              opened={editBase}
+              newest={editConflict}
+              saving={saving}
+              onSaveMine={handleSaveMineAnyway}
+              onShowNewest={handleShowNewest}
+            />
+          )}
           <textarea
             ref={editTextareaRef}
             value={editContent}
@@ -675,26 +841,28 @@ export default function TodoPage() {
             }}
           />
           <div style={{ marginTop: '12px', display: 'flex', gap: '8px' }}>
+            {!editConflict && (
+              <button
+                onClick={handleSave}
+                disabled={saving}
+                style={{
+                  padding: '8px 20px',
+                  background: 'var(--accent)',
+                  border: 'none',
+                  borderRadius: '6px',
+                  color: 'var(--bg-deep)',
+                  fontFamily: 'var(--sans)',
+                  fontSize: '0.85rem',
+                  fontWeight: 400,
+                  cursor: saving ? 'not-allowed' : 'pointer',
+                  opacity: saving ? 0.6 : 1,
+                }}
+              >
+                {saving ? 'Saving...' : 'Save'}
+              </button>
+            )}
             <button
-              onClick={handleSave}
-              disabled={saving}
-              style={{
-                padding: '8px 20px',
-                background: 'var(--accent)',
-                border: 'none',
-                borderRadius: '6px',
-                color: 'var(--bg-deep)',
-                fontFamily: 'var(--sans)',
-                fontSize: '0.85rem',
-                fontWeight: 400,
-                cursor: saving ? 'not-allowed' : 'pointer',
-                opacity: saving ? 0.6 : 1,
-              }}
-            >
-              {saving ? 'Saving...' : 'Save'}
-            </button>
-            <button
-              onClick={() => { setEditing(false); if (todo) setEditContent(todo.content); }}
+              onClick={closeEditor}
               style={{
                 padding: '8px 20px',
                 background: 'none',
@@ -709,6 +877,9 @@ export default function TodoPage() {
               Cancel
             </button>
           </div>
+          {keptText !== null && (
+            <KeptText text={keptText} onCopy={handleCopyKept} onDiscard={() => setKeptText(null)} />
+          )}
         </div>
       )}
 

@@ -36,6 +36,7 @@ and counts what happened; the task and the comparison script
 import json
 import re
 from collections import Counter
+from difflib import SequenceMatcher
 
 from backend.utils.text_edits import apply_text_edits
 
@@ -184,6 +185,9 @@ class MergeRun:
         self.kept_lines_failures = 0
         self.sub_items_moved_failures = 0
         self.merged = None
+        # The applied reply's edits (None for a full write): applied again
+        # to the newest list when it changed during the merge (#477).
+        self.edits = None
         self.failure = None
         # Each refused reply's kind and reason, as sent to the model; the
         # last reason is also in ``error``. A reason can quote lines of
@@ -428,7 +432,85 @@ def resolve_merge_reply(content, current_todo, run):
         return None, FAILURE_SUB_ITEMS_MOVED, sub_items_moved_error(moved)
     run.full_write = full_write
     run.edits_applied = 0 if full_write else len(edits)
+    run.edits = None if full_write else edits
     return merged, None, None
+
+
+# A list item's ticked checkbox, as rebase_merge clears it to compare.
+_TICKED_BOX_RE = re.compile(
+    r"^([ \t]*(?:[-*+]|\d+[.)])[ \t]+)\[[xX]\](?=[ \t]|$)", re.MULTILINE)
+
+
+def _boxes_cleared(text):
+    """*text* with every ticked list checkbox written `[ ]`. The length
+    stays the same, so a position in it is the same position in *text*."""
+    return _TICKED_BOX_RE.sub(lambda m: f"{m.group(1)}[ ]", text)
+
+
+def _with_user_boxes(old_text, found, new_text):
+    """*new_text* with the checkbox state the user gave, since the merge
+    read the list, to the lines of *old_text* (*found* is that text as it
+    is now; it differs from *old_text* in checkboxes only). The user's
+    tick or untick wins over what the edit wrote for that line."""
+    old_lines, found_lines = old_text.split("\n"), found.split("\n")
+    new_lines = new_text.split("\n")
+    changed = {i for i, (old, now) in enumerate(zip(old_lines, found_lines))
+               if old != now}
+    if not changed:
+        return new_text
+    # Which line of new_text is the edit's copy of each old_text line: the
+    # same text, checkboxes aside, in the same order.
+    matcher = SequenceMatcher(
+        None, [_boxes_cleared(line) for line in old_lines],
+        [_boxes_cleared(line) for line in new_lines], autojunk=False)
+    for block in matcher.get_matching_blocks():
+        for k in range(block.size):
+            if block.a + k in changed:
+                new_lines[block.b + k] = found_lines[block.a + k]
+    return "\n".join(new_lines)
+
+
+def _reapply_edits(text, edits):
+    """The merge's edits applied in order to *text*, the newest list, or
+    None when one no longer fits. An edit whose old_text is in the list
+    exactly once applies as it did. One that isn't, because the user
+    ticked or unticked a line of it meanwhile, applies where its text is,
+    checkboxes aside, exactly once; those lines keep the user's state."""
+    for edit in edits:
+        old, new = edit["old_text"], edit["new_text"]
+        if text.count(old) == 1:
+            text = text.replace(old, new, 1)
+            continue
+        cleared, old_cleared = _boxes_cleared(text), _boxes_cleared(old)
+        if cleared.count(old_cleared) != 1:
+            return None
+        start = cleared.index(old_cleared)
+        end = start + len(old)
+        new = _with_user_boxes(old, text[start:end], new)
+        text = text[:start] + new + text[end:]
+    return text
+
+
+def rebase_merge(run, previous, newest):
+    """The merge's result built on *newest*, the list as it is when the
+    merge saves, when it changed after the merge read *previous* (#477): a
+    tick, the row "+", quick-add, an editor Save or a revert made while
+    the model worked. The user's change is kept and the merge's edits are
+    applied on top of it. Returns None when they no longer fit (an edit's
+    line was changed or removed, or the merge wrote the whole list): the
+    merge then saves nothing and the user can apply it again."""
+    if newest == previous:
+        return run.merged
+    if run.edits is None:
+        return None
+    rebased = _reapply_edits(newest or "", run.edits)
+    if rebased is None or not rebased.strip():
+        return None
+    # The same checks as for the model's reply, against the newest list.
+    if (lines_not_kept(newest, rebased)
+            or lines_moved_under_new(newest, rebased)):
+        return None
+    return rebased
 
 
 def run_todo_merge(provider, model_id, messages, api_keys, current_todo,

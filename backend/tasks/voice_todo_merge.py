@@ -7,7 +7,10 @@ edits to the full todo (the artifact tool's {old_text, new_text} format),
 which code applies to the newest list (utils/todo_merge_edits.py, #234).
 
 Merges are serialized per user via a Redis lock so concurrent
-confirmations don't clobber each other's results.
+confirmations don't clobber each other's results. The save also takes the
+user's todo lock, which every todo writer takes (utils/todo_lock.py,
+#477), and builds on the list as it is then: a tick or an editor Save made
+while the model worked stays.
 """
 import json
 import redis
@@ -21,9 +24,10 @@ from backend.utils.api_keys import get_api_keys_for_usage
 from backend.utils.cost import llm_cost_log_fields
 from backend.models import APICostLog
 from backend.utils.refusal_backoff import REFUSED_REF
+from backend.utils.todo_lock import TodoBusy, lock_user_todo
 from backend.utils.todo_merge_edits import (
     FAILURE_EMPTY, FAILURE_TRUNCATED, REPLY_FORMAT, MergeRun, has_tasks,
-    run_todo_merge)
+    rebase_merge, run_todo_merge)
 
 logger = get_task_logger(__name__)
 
@@ -57,6 +61,17 @@ EMPTY_RESULT_MESSAGE = "Empty merge result"
 EDITS_FAILED_MESSAGE = (
     "The todo update couldn't be applied to your list, so nothing was "
     "changed.")
+# Shown on the card when the list changed while the model worked (a tick,
+# an editor Save) and the update's edits no longer fit it (#477). Nothing
+# was saved; the card offers "Apply again", which runs on the newest list.
+LIST_CHANGED_MESSAGE = (
+    "Your todo list changed while this update was being applied, and the "
+    "update no longer fits it, so nothing was changed.")
+# Shown on the card when another write of the list held the user's todo
+# lock past TODO_LOCK_WAIT_SECONDS (#477).
+LOCK_BUSY_MESSAGE = (
+    "Your todo list was busy saving another change, so nothing was "
+    "changed.")
 
 
 @celery.task(bind=True)
@@ -69,7 +84,8 @@ def apply_voice_todo(self, llm_node_id: int, model_id: str, user_id: int,
     2. Get the current user todo
     3. Call LLM with orient_apply_todo prompt for edits, apply them to
        the todo and check the result (utils/todo_merge_edits.py)
-    4. Save as new UserTodo
+    4. Save as new UserTodo, under the user's todo lock, on the newest
+       list (the edits applied again if it changed meanwhile, #477)
     5. Update tool_calls_meta on the originating LLM node
     """
     with flask_app.app_context():
@@ -187,7 +203,7 @@ def _run_merge(llm_node, update_summary, user_id, model_id,
     # AI may not read the todo list or the proposal: no model call. Asked
     # here, under the lock, because the list can change after the merge
     # was started (an earlier merge saves one with the account default).
-    from backend.routes.todo import todo_merge_refusal
+    from backend.routes.todo import todo_merge_refusal, todo_revision
     refusal = todo_merge_refusal(user_id, llm_node)
     if refusal is not None:
         logger.info(
@@ -202,6 +218,9 @@ def _run_merge(llm_node, update_summary, user_id, model_id,
         UserTodo.created_at.desc()
     ).first()
     current_todo = todo.get_content() if todo else ""
+    # Which version the merge read, to see at save time whether the list
+    # changed while the model worked (#477).
+    read_revision = todo_revision(todo) if todo else None
 
     # Get merge prompt
     from backend.utils.prompts import get_user_prompt
@@ -262,7 +281,13 @@ def _run_merge(llm_node, update_summary, user_id, model_id,
         db.session.commit()
         return
 
-    # Save new UserTodo
+    merged = _merged_on_newest_list(
+        llm_node, user_id, confirm_node_id, run, current_todo, read_revision)
+    if merged is None:
+        return
+
+    # Save new UserTodo (under the user's todo lock, which the commit below
+    # releases)
     merge_user = User.query.get(user_id)
     new_todo = UserTodo(
         user_id=user_id,
@@ -274,7 +299,7 @@ def _run_merge(llm_node, update_summary, user_id, model_id,
         # ai_usage follows the user's global default (#191).
         ai_usage=merge_user.default_ai_usage if merge_user else "chat",
     )
-    new_todo.set_content(run.merged)
+    new_todo.set_content(merged)
     db.session.add(new_todo)
     # Assigns new_todo.id, so the proposal's tool_calls_meta records which
     # todo version this merge produced (#410).
@@ -287,6 +312,52 @@ def _run_merge(llm_node, update_summary, user_id, model_id,
 
     db.session.commit()
     logger.info(f"Voice todo merge completed: todo_id={new_todo.id} for user {user_id}")
+
+
+def _merged_on_newest_list(llm_node, user_id, confirm_node_id, run,
+                           current_todo, read_revision):
+    """The list to save, built on the newest list, with the user's todo
+    lock held until the caller commits; or None when the merge failed
+    (recorded and committed here).
+
+    The list may have changed while the model worked (#477): a tick, the
+    row "+", quick-add, an editor Save or a revert. Then the merge's
+    edits are applied to the newest list (rebase_merge), so the user's
+    change stays. When they no longer fit, nothing is saved and the
+    proposal can be applied again (the user's edit wins)."""
+    from backend.routes.todo import newest_todo, todo_revision
+    llm_node_id = llm_node.id
+    # The calls were billed whatever happens next: their cost rows are
+    # committed before the wait for the lock, which can roll back.
+    db.session.commit()
+    try:
+        lock_user_todo(user_id)
+    except TodoBusy:
+        logger.warning(
+            f"Todo merge for node {llm_node_id}: the user's todo lock "
+            f"stayed taken; nothing saved (user {user_id})")
+        _merge_failed(llm_node, user_id, LOCK_BUSY_MESSAGE, confirm_node_id)
+        db.session.commit()
+        return None
+
+    newest = newest_todo(user_id)
+    if (todo_revision(newest) if newest else None) == read_revision:
+        return run.merged
+    merged = rebase_merge(
+        run, current_todo, newest.get_content() if newest else "")
+    if merged is None:
+        logger.warning(
+            f"Todo merge for node {llm_node_id}: the list changed during "
+            f"the merge and its edits no longer fit; nothing saved "
+            f"(user {user_id})")
+        _merge_failed(llm_node, user_id, LIST_CHANGED_MESSAGE,
+                      confirm_node_id)
+        db.session.commit()
+        return None
+    logger.info(
+        f"Todo merge for node {llm_node_id}: the list changed during the "
+        "merge; its edits were applied to the newest list")
+    return merged
 
 
 def _log_merge_costs(user_id, model_id, run):

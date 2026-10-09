@@ -95,3 +95,89 @@ test('quick ticks are saved in order, each on the list the previous save returne
   });
   expect(mockAddToast).not.toHaveBeenCalled();
 });
+
+// The editor's Save from a stale page must not drop changes it didn't make
+// (#476). It sends the revision the editor was opened on; on a 409 the
+// editor keeps the user's text and offers "Save mine anyway" or "Show the
+// newest list".
+describe('editor Save after the list changed elsewhere', () => {
+  const opened = todo(1, '## Today\n- [ ] call mom', 'r1');
+  const merged = todo(2, '## Today\n- [ ] call mom\n- [ ] buy milk', 'r2');
+  const mine = '## Today\n- [ ] call mom tonight';
+
+  // The editor's textarea (the first textbox; the kept text comes after it).
+  const editor = () => screen.getAllByRole('textbox')[0];
+
+  const openEditorAndType = async (text) => {
+    api.get.mockResolvedValue({ data: { todo: opened } });
+    render(<TodoPage />);
+    await screen.findByText('call mom');
+    fireEvent.click(screen.getByText(/^v1/));
+    expect(editor()).toHaveValue(opened.content);
+    fireEvent.change(editor(), { target: { value: text } });
+  };
+
+  test('a refused Save keeps the text and shows what changed', async () => {
+    await openEditorAndType(mine);
+    api.put.mockRejectedValueOnce(conflict(merged));
+
+    fireEvent.click(screen.getByText('Save'));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('changed after you opened the editor');
+    expect(api.put).toHaveBeenCalledWith('/todo', {
+      content: mine, generated_by: 'user', base_revision: 'r1',
+    });
+    // Nothing typed is lost, and the merge's new line is named.
+    expect(editor()).toHaveValue(mine);
+    expect(screen.getByRole('alert')).toHaveTextContent('+ - [ ] buy milk');
+    // The header shows the newest version.
+    expect(screen.getByText(/^v2/)).toBeInTheDocument();
+    expect(mockAddToast).not.toHaveBeenCalled();
+  });
+
+  test('"Save mine anyway" saves the text over the newest version', async () => {
+    await openEditorAndType(mine);
+    api.put
+      .mockRejectedValueOnce(conflict(merged))
+      .mockResolvedValueOnce({ data: { todo: todo(3, mine, 'r3') } });
+    fireEvent.click(screen.getByText('Save'));
+    fireEvent.click(await screen.findByText('Save mine anyway'));
+
+    await waitFor(() => expect(api.put).toHaveBeenCalledTimes(2));
+    expect(api.put.mock.calls[1][1]).toEqual({
+      content: mine, generated_by: 'user', base_revision: 'r2',
+    });
+    expect(await screen.findByText('call mom tonight')).toBeInTheDocument();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
+  test('"Show the newest list" loads it and keeps the text to copy from', async () => {
+    await openEditorAndType(mine);
+    api.put.mockRejectedValueOnce(conflict(merged));
+    fireEvent.click(screen.getByText('Save'));
+    fireEvent.click(await screen.findByText('Show the newest list'));
+
+    expect(editor()).toHaveValue(merged.content);
+    expect(screen.getByLabelText('Your text, not saved')).toHaveValue(mine);
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+
+    // The next Save is checked against the newest version.
+    api.put.mockResolvedValueOnce({ data: { todo: todo(3, merged.content, 'r3') } });
+    fireEvent.click(screen.getByText('Save'));
+    await waitFor(() => expect(api.put).toHaveBeenCalledTimes(2));
+    expect(api.put.mock.calls[1][1].base_revision).toBe('r2');
+  });
+
+  test('another failure keeps the text and says why', async () => {
+    await openEditorAndType(mine);
+    api.put.mockRejectedValueOnce(Object.assign(new Error('503'), {
+      response: { status: 503, data: { error: 'Your todo list is busy saving another change.' } },
+    }));
+
+    fireEvent.click(screen.getByText('Save'));
+
+    await waitFor(() => expect(mockAddToast).toHaveBeenCalledWith(
+      "Couldn't save the todo list (Your todo list is busy saving another change.)"));
+    expect(editor()).toHaveValue(mine);
+  });
+});
