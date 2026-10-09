@@ -6,11 +6,14 @@ give the same spoken text however the stream is cut, and the chapters
 (sections, titles, chunk boundaries) must stay as batch makes them.
 """
 import random
+import time
 
 import pytest
 
 from backend.utils.audio_processing import section_aware_chunk_text
-from backend.utils.spoken_links import LinkSpeaker, speak_address, speak_links
+from backend.utils.spoken_links import (
+    MAX_ADDRESS, MAX_BRACKET_DEPTH, MAX_LINE_HEAD, MAX_LINK_SOURCE,
+    MAX_LINK_TEXT, LinkSpeaker, speak_address, speak_links)
 from backend.utils.tts_stream_text import (
     AUDIO_PER_CHAR, GEN_RATE, OVERHEAD, ChunkPlanner, SpeechSchedule,
     SpokenTextProjector)
@@ -325,3 +328,99 @@ def test_parity_with_batch_on_random_replies():
         assert streamed == section_aware_chunk_text(speak_links(text))
         compared += 1
     assert compared > 120
+
+
+# ── Bounded link matching ───────────────────────────────────────────────
+
+_URL_AT_LIMIT = "https://x.com/" + "a" * (MAX_ADDRESS - len("https://x.com/"))
+_TEXT_AT_LIMIT = "t" * MAX_LINK_TEXT
+
+
+@pytest.mark.parametrize("text, spoken", [
+    # At a limit: still a link / an address.
+    (f"[{_TEXT_AT_LIMIT}](https://x.com) end", f"{_TEXT_AT_LIMIT} end"),
+    (f"[t]({_URL_AT_LIMIT}) end", "t end"),
+    (f"see {_URL_AT_LIMIT} end", "see a link to x.com end"),
+    (f"see <{_URL_AT_LIMIT}> end", "see a link to x.com end"),
+    (f'[t](u "{_TEXT_AT_LIMIT}") end', "t end"),
+    ("[" * MAX_BRACKET_DEPTH + "x" + "]" * MAX_BRACKET_DEPTH + "(u)",
+     "[" * (MAX_BRACKET_DEPTH - 1) + "x" + "]" * (MAX_BRACKET_DEPTH - 1)),
+    # One past: read as written (a bare address in it still counts).
+    (f"[{_TEXT_AT_LIMIT}t](https://x.com) end",
+     f"[{_TEXT_AT_LIMIT}t](a link to x.com) end"),
+    (f"[t]({_URL_AT_LIMIT}a) end", f"[t]({_URL_AT_LIMIT}a) end"),
+    (f"see {_URL_AT_LIMIT}a end", f"see {_URL_AT_LIMIT}a end"),
+    (f"see <{_URL_AT_LIMIT}a> end", f"see <{_URL_AT_LIMIT}a> end"),
+    (f'[t](u "{_TEXT_AT_LIMIT}t") end', f'[t](u "{_TEXT_AT_LIMIT}t") end'),
+    ("[" * (MAX_BRACKET_DEPTH + 1) + "x" + "]" * (MAX_BRACKET_DEPTH + 1)
+     + "(u)",
+     "[" * (MAX_BRACKET_DEPTH + 1) + "x" + "]" * (MAX_BRACKET_DEPTH + 1)
+     + "(u)"),
+])
+def test_limits(text, spoken):
+    assert speak_links(text) == spoken
+    for step in (1, 7, 100):
+        assert "".join(_stream([text[i:i + step]
+                                for i in range(0, len(text), step)])) == spoken
+
+
+def test_over_long_address_starts_no_address_in_the_rest_of_its_run():
+    long_run = "https://a.b/" + "c" * MAX_ADDRESS + ":https://b.c"
+    assert speak_links(f"x:{long_run} then https://e.f") == \
+        f"x:{long_run} then a link to e.f"
+
+
+def test_long_heading_and_fence_lines_are_ordinary_lines():
+    pad = "x" * MAX_LINE_HEAD
+    assert speak_links(f"```{pad}\n[a](https://x.com)\n```") == \
+        f"```{pad}\na\n```"
+    fence = "```" + "x" * (MAX_LINE_HEAD - 3)
+    assert speak_links(f"{fence}\n[a](https://x.com)\n```") == \
+        f"{fence}\n[a](https://x.com)\n```"
+
+
+_N = 200_000
+_WORST_CASES = {
+    "unclosed brackets": "[" * _N,
+    "nested brackets": "[" * (_N // 2) + "]" * (_N // 2),
+    "brackets before a close": ("[" * 400 + "](x)") * (_N // 404),
+    "images": "![" * (_N // 2),
+    "link openings": "[a](" * (_N // 4),
+    "destination never closed": "[a](" + "x" * _N,
+    "parentheses in a destination": "[a](" + "(" * _N,
+    "title never closed": '[a](u "' + "x" * _N,
+    "spaces in a link": "[a](" + " " * _N,
+    "long address": "https://example.com/" + "a" * _N,
+    "chained addresses": "x:https://a.b" * (_N // 13),
+    "closing parentheses after an address": "https://x.co/" + ")" * _N,
+    "angle brackets": "<" * _N,
+    "autolink never closed": "<https://" + "a" * _N,
+    "backticks": "`" * _N,
+    "long heading line": "## " + "x" * _N,
+    "long code line": "```\n" + "`" * _N + "\n```",
+}
+
+
+@pytest.mark.parametrize("name", list(_WORST_CASES))
+def test_long_hostile_text_takes_linear_time(name):
+    """~200k characters built to make a link scan go back over the text:
+    batch and streamed (small deltas, as a reply arrives) each finish well
+    under a second, the stream never holds back more than one link, and
+    both say the same thing."""
+    text = _WORST_CASES[name]
+    start = time.process_time()
+    whole = speak_links(text)
+    assert time.process_time() - start < 1.0
+
+    rng = random.Random(461)
+    speaker, out, i, held = LinkSpeaker(), [], 0, 0
+    start = time.process_time()
+    while i < len(text):
+        step = rng.randint(1, 32)
+        out.append(speaker.feed(text[i:i + step]))
+        held = max(held, len(speaker._buf))
+        i += step
+    out.append(speaker.close())
+    assert time.process_time() - start < 1.0
+    assert held <= MAX_LINK_SOURCE
+    assert "".join(out) == whole
