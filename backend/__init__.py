@@ -263,6 +263,19 @@ def create_app():
            request.path.startswith("/api/terms"):
             return
 
+        # Deleting the account (#269) is open to every account, waitlisted
+        # ones included (Deletion rule; App Store 5.1.1(v)): the request,
+        # the emailed link's confirmation, and the restore question. The
+        # restore routes act on the offer in the session, not on the
+        # signed-in account, so another waitlisted account signed in in the
+        # same browser must not block them either.
+        account_path = request.path.rstrip("/")
+        if (request.method == "POST" and account_path in (
+                "/api/account/delete", "/api/account/delete/confirm",
+                "/api/account/restore", "/api/account/restore/decline")) or \
+           (request.method == "GET" and account_path == "/api/account/restore"):
+            return
+
         # For API calls, check if the request expects JSON.
         accept_header = request.headers.get("Accept", "")
         if request.path.startswith("/api") or request.is_json or "application/json" in accept_header:
