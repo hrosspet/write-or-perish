@@ -208,22 +208,57 @@ private struct BlockView: View {
         case .list(let list):
             ListBlockView(list: list, context: context, depth: listDepth)
         case .code(_, let text):
-            ScrollView(.horizontal, showsIndicators: false) {
-                Text(text)
-                    .font(MarkdownFonts.mono(0.9 * style.fontSize))
-                    .foregroundStyle(style.color)
-                    .fixedSize(horizontal: true, vertical: true)
-                    .textSelection(.enabled)
-                    .padding(.vertical, 0.75 * 0.9 * style.fontSize)
-                    .padding(.horizontal, 0.9 * style.fontSize)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(LooreColor.bgCard, in: RoundedRectangle(cornerRadius: 6))
-            .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(LooreColor.border))
+            CodeBlockView(text: text, style: style)
         case .rule:
             Rectangle().fill(LooreColor.border).frame(height: 1).frame(maxWidth: .infinity)
         case .table(let table):
             TableBlockView(table: table, context: context)
+        }
+    }
+}
+
+/// A fenced code block: horizontal scroll, with a copy button at the top right
+/// (outside the scroll, so it stays visible on long lines). The icon turns into
+/// a check mark for 1.5 s after copying, like the web's copy button.
+private struct CodeBlockView: View {
+    let text: String
+    let style: MarkdownStyle
+    @State private var copied = false
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            Text(text)
+                .font(MarkdownFonts.mono(0.9 * style.fontSize))
+                .foregroundStyle(style.color)
+                .fixedSize(horizontal: true, vertical: true)
+                .textSelection(.enabled)
+                .padding(.vertical, 0.75 * 0.9 * style.fontSize)
+                .padding(.horizontal, 0.9 * style.fontSize)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(LooreColor.bgCard, in: RoundedRectangle(cornerRadius: 6))
+        .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(LooreColor.border))
+        .overlay(alignment: .topTrailing) {
+            Button(action: copy) {
+                Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                    .font(.system(size: 13))
+                    .foregroundStyle(copied ? LooreColor.success : LooreColor.textMuted)
+                    .frame(width: 32, height: 32)
+                    .background(LooreColor.bgCard, in: RoundedRectangle(cornerRadius: 4))
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(copied ? "Copied" : "Copy code")
+            .padding(2)
+        }
+    }
+
+    private func copy() {
+        UIPasteboard.general.string = text
+        copied = true
+        Task {
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            copied = false
         }
     }
 }
