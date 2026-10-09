@@ -336,7 +336,7 @@ def batch_check_and_collect(batch_ids, api_keys):
                     details = usage.get("prompt_tokens_details") or {}
                     choice = body["choices"][0]
                     results[cid] = {
-                        "content": choice["message"].get("content") or "",
+                        "content": choice["message"]["content"],
                         "refused": bool(choice["message"].get("refusal")),
                         "input_tokens": usage.get("prompt_tokens", 0) or 0,
                         "output_tokens": usage.get(
