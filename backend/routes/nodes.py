@@ -26,6 +26,8 @@ from backend.utils.privacy import (
     can_user_see_node_or_tombstone,
     can_user_view_tombstone,
     can_user_edit_node,
+    author_gone,
+    owner_hidden,
     speech_allowed,
     SPEECH_REFUSED_MESSAGE,
     PrivacyLevel,
@@ -521,6 +523,27 @@ def _context_artifact_fields(n):
     return artifacts if artifacts else None
 
 
+def _as_parent_user_id(parent):
+    """The parent_user_id that *parent*'s children carry: its effective
+    owner (the human owner of an AI reply). None when its author deleted
+    the account (#269): the placeholder names nobody, by id either."""
+    if parent is None or author_gone(parent):
+        return None
+    return parent.human_owner_id if parent.node_type == "llm" else parent.user_id
+
+
+def _parent_user_id_of(node):
+    """The parent_user_id of a focal node or an ancestor: its own human
+    owner for an AI reply, else its parent's author, or None when that
+    author deleted the account (#269)."""
+    if node.node_type == "llm":
+        return node.human_owner_id
+    parent = node.parent
+    if parent is None or author_gone(parent):
+        return None
+    return parent.user_id
+
+
 def serialize_node_recursive(n, user_id=None, parent_user_id=None):
     """Recursively serialize a node and its accessible children.
 
@@ -557,7 +580,7 @@ def serialize_node_recursive(n, user_id=None, parent_user_id=None):
     def _child_visible(child):
         if can_user_access_node(child, user_id):
             return True
-        if child.deleted_at is None:
+        if child.deleted_at is None and not owner_hidden(child):
             return False
         s = serialize_node_status(child, user_id)
         return s is not None and not s.get("inaccessible")
@@ -566,9 +589,7 @@ def serialize_node_recursive(n, user_id=None, parent_user_id=None):
     # Mirror the focal serializer's parent_user_id derivation (nodes.py
     # ~line 822) so the frontend's ownedByMe check works the same way
     # at every depth.
-    n_as_parent_user_id = (
-        n.human_owner_id if n.node_type == "llm" else n.user_id
-    )
+    n_as_parent_user_id = _as_parent_user_id(n)
     children_data = [
         serialized for serialized in (
             serialize_node_recursive(
@@ -1094,7 +1115,7 @@ def _focal_own_fields(node):
             "username": node.user.username,
         },
         # Include human owner ID for LLM nodes (so frontend can check edit/delete permission)
-        "parent_user_id": node.human_owner_id if node.node_type == "llm" else (node.parent.user_id if node.parent else None),
+        "parent_user_id": _parent_user_id_of(node),
         # Privacy settings
         "privacy_level": node.privacy_level,
         "ai_usage": node.ai_usage,
@@ -1305,10 +1326,7 @@ def get_node(node_id):
             # (nodes.py:822) so the frontend's ownedByMe check works on
             # ancestors. The walk already has current.parent in hand, no
             # extra query.
-            ancestor_parent_user_id = (
-                current.human_owner_id if current.node_type == "llm"
-                else (current.parent.user_id if current.parent else None)
-            )
+            ancestor_parent_user_id = _parent_user_id_of(current)
             ancestor_data = {
                 "id": current.id,
                 "username": current.user.username if current.user else "Unknown",
@@ -1351,7 +1369,7 @@ def get_node(node_id):
     def _child_visible(child):
         if can_user_access_node(child, current_user.id):
             return True
-        if child.deleted_at is None:
+        if child.deleted_at is None and not owner_hidden(child):
             return False
         s = serialize_node_status(child, current_user.id)
         return s is not None and not s.get("inaccessible")
@@ -1360,9 +1378,7 @@ def get_node(node_id):
 
     # Compute the focal node's effective owner so first-level children
     # carry the right parent_user_id without an N+1.
-    focal_as_parent_user_id = (
-        node.human_owner_id if node.node_type == "llm" else node.user_id
-    )
+    focal_as_parent_user_id = _as_parent_user_id(node)
 
     # Serialize children first (pruned tombstones drop out) so child_count
     # reflects what the viewer actually sees.
@@ -1527,9 +1543,12 @@ def get_node_titles():
         nodes[i] for i in ids
         if i in nodes and can_user_access_node(nodes[i], current_user.id)
     ]
+    # A node whose author deleted the account (#269) titles as deleted,
+    # as it quotes and shows in threads.
     deleted = {
         i for i in ids
-        if i in nodes and nodes[i].deleted_at is not None
+        if i in nodes
+        and (nodes[i].deleted_at is not None or owner_hidden(nodes[i]))
         and can_user_view_tombstone(nodes[i], current_user.id)
     }
     threads = {

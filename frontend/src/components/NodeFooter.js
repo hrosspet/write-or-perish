@@ -35,9 +35,13 @@ const NodeFooter = ({ username, createdAt, childrenCount, humanOwnerUsername, ll
 
   return (
     <div style={footerStyle}>
-      <Link to={linkUrl} style={{ color: "var(--text-muted)", textDecoration: "none", transition: "color 0.3s ease" }}>
-        {displayUsername}
-      </Link>
+      {/* A placeholder whose author deleted the account (#269) carries no
+          name: nothing to show or link to. */}
+      {displayUsername ? (
+        <Link to={linkUrl} style={{ color: "var(--text-muted)", textDecoration: "none", transition: "color 0.3s ease" }}>
+          {displayUsername}
+        </Link>
+      ) : null}
       {origin && (
         // Imported nodes carry their platform; Loore-native ones (the
         // default) stay unmarked.
@@ -46,7 +50,7 @@ const NodeFooter = ({ username, createdAt, childrenCount, humanOwnerUsername, ll
           <span title={`Imported from ${origin}`}>via {origin}</span>
         </>
       )}
-      <span style={{ color: "var(--border)" }}>&middot;</span>
+      {(displayUsername || origin) && <span style={{ color: "var(--border)" }}>&middot;</span>}
       <span>{formattedDateTime}</span>
       <span style={{ color: "var(--border)" }}>&middot;</span>
       {onReplyClick ? (

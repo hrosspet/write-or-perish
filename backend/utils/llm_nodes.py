@@ -199,13 +199,20 @@ class _Chain:
         """The nearest node a reply for *user_id* would send to the model
         whose ai_usage keeps AI out, else None. The walk is the completion
         task's (_load_node_chain): up from the node while *user_id* can
-        see it or its tombstone. A deleted node is passed over: the task
-        sends a notice in its place, never its text."""
-        from backend.utils.privacy import can_user_see_node_or_tombstone
-        for n in self.nodes:
-            if not can_user_see_node_or_tombstone(n, user_id):
+        see it or its placeholder. A deleted node, or one hidden with its
+        owner's deleted account (#269), is passed over: the task sends a
+        notice in its place, never its text."""
+        from backend.utils.privacy import (
+            can_user_see_node_or_placeholder, can_user_see_node_or_tombstone,
+            shown_as_deleted,
+        )
+        for i, n in enumerate(self.nodes):
+            seen = (can_user_see_node_or_tombstone if i == 0
+                    else can_user_see_node_or_placeholder)
+            if not seen(n, user_id):
                 return None
-            if n.deleted_at is None and n.ai_usage not in AI_ALLOWED:
+            if (not shown_as_deleted(n, user_id)
+                    and n.ai_usage not in AI_ALLOWED):
                 return n
         return None
 

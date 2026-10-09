@@ -150,7 +150,8 @@ class TestGenerateUniqueUsername:
             # The former-handle reservation (#253) is covered against a
             # real DB in test_public_pages; here nobody held the name.
             "backend.utils.username_history": MagicMock(
-                former_handle_owner=lambda name: None),
+                former_handle_owner=lambda name: None,
+                released_recently=lambda name: False),
         }
 
     def test_simple_email(self, app):

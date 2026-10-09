@@ -6,6 +6,9 @@ import CraftIcon from "../components/CraftIcon";
 import api from "../api";
 import useSubmitShortcut from "../hooks/useSubmitShortcut";
 import { emailState } from "../utils/emailState";
+import DeleteWritingDialog from "../components/DeleteWritingDialog";
+import DeleteAccountDialog from "../components/DeleteAccountDialog";
+import { formatDeletionDate, X_REMOVE_ACCESS_STEPS } from "../utils/dataDeletion";
 
 const backendUrl = process.env.REACT_APP_BACKEND_URL || "";
 
@@ -155,6 +158,55 @@ export default function AccountPage() {
     () => sendEmailLink(emailInput),
     !emailSaving && !!emailInput.trim(),
   );
+
+  // "Delete all my writing" (#268): scheduled after a grace period,
+  // cancellable until then. The state comes with the user (/dashboard).
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  const [deletionBusy, setDeletionBusy] = useState(false);
+  const [deletionMsg, setDeletionMsg] = useState(null);
+  const closeDeleteDialog = useCallback(() => setDeleteOpen(false), []);
+
+  const scheduleDeletion = async (typed) => {
+    const res = await api.delete("/account/data", { data: { confirm: typed } });
+    setUser((prev) => ({ ...prev, data_deletion: res.data }));
+    setDeleteOpen(false);
+    setDeletionMsg(null);
+  };
+
+  // "Delete my account" (#269): an email account gets a confirmation
+  // link; one without email is scheduled at once and signed out.
+  const [accountOpen, setAccountOpen] = useState(false);
+  const [accountLinkSent, setAccountLinkSent] = useState(false);
+  const closeAccountDialog = useCallback(() => setAccountOpen(false), []);
+
+  const requestAccountDeletion = async (typed) => {
+    const res = await api.post("/account/delete", { confirm: typed });
+    setAccountOpen(false);
+    if (res.data.status === "scheduled") {
+      // Signed out on the server: a full load drops the app's state.
+      window.location.assign(
+        `/account-deleted?on=${encodeURIComponent(res.data.delete_on || "")}`);
+      return;
+    }
+    setAccountLinkSent(true);
+  };
+
+  const cancelDeletion = async () => {
+    setDeletionBusy(true);
+    setDeletionMsg(null);
+    try {
+      const res = await api.post("/account/data/cancel");
+      setUser((prev) => ({ ...prev, data_deletion: res.data }));
+      setDeletionMsg({ type: "success", text: "Deletion cancelled. Your writing stays." });
+    } catch (e) {
+      setDeletionMsg({
+        type: "error",
+        text: e.response?.data?.error || "Could not cancel the deletion. Please try again.",
+      });
+    } finally {
+      setDeletionBusy(false);
+    }
+  };
 
   // Privacy / AI usage defaults
   const [privacySaving, setPrivacySaving] = useState(false);
@@ -706,6 +758,189 @@ export default function AccountPage() {
           Tone, style, boundaries. Updated automatically during Voice sessions.
         </div>
       </div>
+
+      {/* ─── Delete all my writing (#268). Anchor: /account#delete-data,
+          where the reminder banner links. ─── */}
+      <DeleteWritingSection
+        id="delete-data"
+        deletion={user.data_deletion}
+        busy={deletionBusy}
+        msg={deletionMsg}
+        onOpen={() => { setDeletionMsg(null); setDeleteOpen(true); }}
+        onCancel={cancelDeletion}
+        labelStyle={labelStyle}
+        helperStyle={helperStyle}
+      />
+      <DeleteWritingDialog
+        open={deleteOpen}
+        username={user.username}
+        graceDays={user.data_deletion?.grace_days}
+        xConnected={!!user.data_deletion?.x_connected}
+        onConfirm={scheduleDeletion}
+        onClose={closeDeleteDialog}
+      />
+
+      {/* ─── Delete my account (#269). Anchor: /account#delete-account ─── */}
+      <DeleteAccountSection
+        id="delete-account"
+        info={user.account_deletion}
+        email={user.email}
+        linkSent={accountLinkSent}
+        onOpen={() => setAccountOpen(true)}
+        labelStyle={labelStyle}
+        helperStyle={helperStyle}
+      />
+      <DeleteAccountDialog
+        open={accountOpen}
+        username={user.username}
+        email={user.email}
+        info={user.account_deletion}
+        xConnected={!!user.data_deletion?.x_connected}
+        writingDeletionAt={user.data_deletion?.status === "scheduled" ? user.data_deletion.purge_at : null}
+        onConfirm={requestAccountDeletion}
+        onClose={closeAccountDialog}
+      />
+    </div>
+  );
+}
+
+function DeleteAccountSection({ id, info, email, linkSent, onOpen, labelStyle, helperStyle }) {
+  const bodyStyle = { ...helperStyle, fontSize: "0.85rem", lineHeight: 1.6, marginTop: 0 };
+  const days = info?.grace_days || 30;
+  const refusal = info?.refusal;
+  const minutes = Math.round((info?.link_expires_in || 3600) / 60);
+  return (
+    <div id={id} style={{ scrollMarginTop: "72px" }}>
+      <h3 style={sectionTitleStyle}>Delete my account</h3>
+      {linkSent ? (
+        <p style={{ ...labelStyle, lineHeight: 1.6 }}>
+          Check your email: Loore sent a confirmation link to {email}.
+          Nothing changes until you open it and confirm there. The link works
+          for {minutes} minutes.
+        </p>
+      ) : (
+        <>
+          <p style={bodyStyle}>
+            Deletes your account at once and signs you out everywhere. For{" "}
+            {days} days you can restore it by signing in; after that it is
+            deleted forever, with everything in it.
+          </p>
+          {refusal ? (
+            <p style={bodyStyle}>{refusal.message}</p>
+          ) : (
+            <button
+              type="button"
+              onClick={onOpen}
+              style={{ ...quietButtonStyle, color: "var(--error)" }}
+            >
+              Delete my account…
+            </button>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+const sectionTitleStyle = {
+  fontFamily: "var(--serif)",
+  fontWeight: 300,
+  fontSize: "1.15rem",
+  color: "var(--text-primary)",
+  marginTop: "2.5rem",
+  marginBottom: "1rem",
+};
+
+const quietButtonStyle = {
+  padding: "8px 16px",
+  borderRadius: "6px",
+  border: "1px solid var(--border)",
+  background: "none",
+  fontFamily: "var(--sans)",
+  fontWeight: 300,
+  fontSize: "0.85rem",
+  cursor: "pointer",
+};
+
+function DeleteWritingSection({ id, deletion, busy, msg, onOpen, onCancel, labelStyle, helperStyle }) {
+  const status = deletion?.status || null;
+  const bodyStyle = { ...helperStyle, fontSize: "0.85rem", lineHeight: 1.6, marginTop: 0 };
+  return (
+    <div id={id} style={{ scrollMarginTop: "72px" }}>
+      <h3 style={sectionTitleStyle}>Delete all my writing</h3>
+
+      {status === "scheduled" && (
+        <>
+          <p style={{ ...labelStyle, lineHeight: 1.6 }}>
+            All your writing will be deleted on {formatDeletionDate(deletion.purge_at)}.
+          </p>
+          <p style={bodyStyle}>
+            Until then nothing is lost, and you can cancel. Anything you
+            write before that date is deleted too.
+          </p>
+          <button
+            type="button"
+            onClick={onCancel}
+            disabled={busy}
+            style={{ ...quietButtonStyle, borderColor: "var(--accent)", color: "var(--accent)" }}
+          >
+            {busy ? "Cancelling…" : "Cancel the deletion"}
+          </button>
+        </>
+      )}
+
+      {status === "running" && (
+        <p style={bodyStyle}>
+          Your writing is being deleted now. This can take a few minutes.
+        </p>
+      )}
+
+      {status === "failed" && (
+        <p style={bodyStyle}>
+          Deleting your writing did not finish. We have been told and will
+          complete it.
+        </p>
+      )}
+
+      {(status === null || status === "done") && (
+        <>
+          {status === "done" && (
+            <p style={bodyStyle}>
+              Your writing was deleted on {formatDeletionDate(deletion.finished_at)}.
+              {deletion.x_connection_removed && (
+                <> Loore no longer keeps your X connection and asked X to
+                  remove its access. If X still lists Loore, remove it
+                  yourself: {X_REMOVE_ACCESS_STEPS}</>
+              )}
+            </p>
+          )}
+          <p style={bodyStyle}>
+            Deletes everything you have written or recorded in Loore, and
+            what Loore made from it: the AI's replies, your profile, intentions
+            and other documents, saved references and imports. Your account,
+            username and settings stay. Loore waits {deletion?.grace_days || 30} days
+            before deleting, and you can cancel until then.
+          </p>
+          <button
+            type="button"
+            onClick={onOpen}
+            style={{ ...quietButtonStyle, color: "var(--error)" }}
+          >
+            Delete all my writing…
+          </button>
+        </>
+      )}
+
+      {msg && (
+        <div
+          style={{
+            ...helperStyle,
+            color: msg.type === "error" ? "var(--error)" : "var(--text-muted)",
+          }}
+        >
+          {msg.text}
+        </div>
+      )}
     </div>
   );
 }

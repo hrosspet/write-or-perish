@@ -25,6 +25,14 @@ from backend.utils.privacy import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _no_deleted_accounts(monkeypatch):
+    """The account-deletion check (#269) looks the author up in the
+    database; these unit tests have none, and no author is deleted."""
+    import backend.utils.privacy as privacy
+    monkeypatch.setattr(privacy, "owner_hidden", lambda node: False)
+
+
 class TestPrivacyEnums:
     """Test privacy level and AI usage enums."""
 

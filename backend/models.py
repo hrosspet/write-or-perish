@@ -42,6 +42,17 @@ class User(db.Model, UserMixin):
     email_change_token_hash = db.Column(db.String(128), nullable=True)
     email_change_expires_at = db.Column(db.DateTime, nullable=True)
     deactivated_at = db.Column(db.DateTime, nullable=True)
+    # Account deletion (#269). Set when the deletion is scheduled: from
+    # then on the account is hidden (it cannot sign in, its public pages
+    # answer 404, other members no longer see its public writing, no
+    # background job runs for it) until the purge deletes the row at the
+    # end of the grace period. Signing in before then offers a restore,
+    # which clears it. Null for a live account.
+    deleted_at = db.Column(db.DateTime, nullable=True)
+    # The link that confirms an email user's deletion request (#269):
+    # only its hash, like the sign-in and email-change links.
+    account_deletion_token_hash = db.Column(db.String(128), nullable=True)
+    account_deletion_expires_at = db.Column(db.DateTime, nullable=True)
     
     # Relationship to text nodes (explicit foreign_keys needed because Node has
     # multiple FKs pointing to User: user_id and pinned_by)
@@ -235,6 +246,14 @@ class User(db.Model, UserMixin):
           still KEEPS email / magic-link humans (``twitter_id`` NULL), who
           never author LLM nodes.
 
+        * An account whose data purge is running (#268) is left out, so
+          no scheduled job reads the writing the purge is deleting and
+          saves a new profile or summary from it after the purge has
+          passed. The account is eligible again once the purge is done.
+
+        * A deleted account in its grace period (#269) is left out: it
+          is hidden, and nothing runs for it unless it is restored.
+
         Shared helper (not an inline filter) so the profile and
         recent-context tasks can't drift apart again.
         """
@@ -242,11 +261,15 @@ class User(db.Model, UserMixin):
         llm_authors = db.session.query(Node.user_id).filter(
             Node.node_type == "llm", Node.user_id.isnot(None)
         ).distinct()
+        purging = db.session.query(UserDataPurge.user_id).filter(
+            UserDataPurge.status == "running")
         return cls.query.filter(
             cls.approved.is_(True),
             cls.plan.in_(list(cls.VOICE_MODE_PLANS)),
             cls.default_ai_usage.in_(list(AI_ALLOWED)),
             ~cls.id.in_(llm_authors),
+            ~cls.id.in_(purging),
+            cls.deleted_at.is_(None),
         )
 
 
@@ -688,7 +711,7 @@ class Thread(db.Model):
     # ORM delete of the root removes the row (one SELECT per purged root
     # — no passive_deletes, so it also holds where FK enforcement is off,
     # e.g. sqlite tests); the DB cascade covers bulk deletes that bypass
-    # the ORM (delete_my_data).
+    # the ORM (the user data purge deletes the rows explicitly as well).
     root = db.relationship(
         "Node",
         backref=db.backref(
@@ -1913,3 +1936,94 @@ class RecentContextBatchJob(db.Model):
     # Indexed: the refusal backoff counts failed items in jobs collected
     # after the user's last saved summary (utils/refusal_backoff.py).
     collected_at = db.Column(db.DateTime, nullable=True, index=True)
+
+
+class UserDataPurge(db.Model):
+    """One request to delete all of a user's data (#268), and the record
+    of what the purge did.
+
+    A user's own request ("Delete all my writing") waits out a grace
+    period (``scheduled_for``) during which the user can cancel it; an
+    admin purge is due at once. The beat task
+    ``backend.tasks.user_purge.process_user_data_purges`` claims due jobs
+    and jobs whose runner stopped sending heartbeats, so a purge resumes
+    after a crash or a deploy; every step of the purge is idempotent.
+
+    ``user_id`` and the requester carry no foreign key on purpose: the
+    record must outlive the account when account deletion (#269) drops
+    the user row. Nothing here is user content: ``counts`` holds row and
+    file counts per table, ``error`` the exception class and message of
+    a failed run (the purge never loads content, so none can be in it).
+
+    status: scheduled -> running -> done; scheduled -> cancelled;
+    running -> failed after PURGE_MAX_ATTEMPTS runs that did not finish.
+
+    With ``delete_account`` (#269) the job deletes the account too: after
+    the purge, the identity layer (backend/utils/account_deletion.py)
+    removes the user row and everything that must not outlive it. A
+    restore inside the grace period cancels the job.
+    """
+    __tablename__ = "user_data_purge"
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, nullable=False, index=True)
+    # "self" (the user's own request) | "admin"
+    source = db.Column(db.String(16), nullable=False)
+    requested_by_id = db.Column(db.Integer, nullable=True)
+    status = db.Column(db.String(16), nullable=False, default="scheduled",
+                       index=True)
+    requested_at = db.Column(db.DateTime, nullable=False,
+                             default=datetime.utcnow)
+    # When the purge may start: the end of the grace period for a user's
+    # own request, the request time for an admin purge.
+    scheduled_for = db.Column(db.DateTime, nullable=False, index=True)
+    cancelled_at = db.Column(db.DateTime, nullable=True)
+    cancelled_by_id = db.Column(db.Integer, nullable=True)
+    # When the first runner started.
+    started_at = db.Column(db.DateTime, nullable=True)
+    # When the runner of the current claim started; null while the claim
+    # waits in the Celery queue (such a claim is not an attempt).
+    runner_started_at = db.Column(db.DateTime, nullable=True)
+    # Set at the claim, touched by the runner after every chunk; a running
+    # job whose heartbeat is older than PURGE_STALE_AFTER is claimed again.
+    heartbeat_at = db.Column(db.DateTime, nullable=True)
+    # Since when the runner has been waiting for the user's in-flight
+    # tasks to end before it deletes anything (null when not waiting).
+    waiting_since = db.Column(db.DateTime, nullable=True)
+    finished_at = db.Column(db.DateTime, nullable=True)
+    # Runs that started (one per claim, counted when its runner starts);
+    # once PURGE_MAX_ATTEMPTS have started without finishing, the next
+    # beat marks the job failed instead of claiming it again.
+    attempts = db.Column(db.Integer, nullable=False, default=0,
+                         server_default="0")
+    # The claim token: the Celery task id of the runner that holds the
+    # job. A runner whose token no longer matches stops.
+    task_id = db.Column(db.String(64), nullable=True)
+    counts = db.Column(db.JSON, nullable=True)
+    error = db.Column(db.String(255), nullable=True)
+    # Account deletion (#269): the purge is followed by the deletion of
+    # the account itself.
+    delete_account = db.Column(db.Boolean, nullable=False, default=False,
+                               server_default=db.text("false"))
+
+    ACTIVE_STATUSES = ("scheduled", "running")
+
+
+class ReleasedUsername(db.Model):
+    """A username freed by an account deletion (#269), kept from new
+    accounts until ``reserved_until``: somebody else taking a deleted
+    account's handle could pass for that person, and old links to
+    /@<handle> would show the newcomer's pages. Covers the account's
+    current handle and its former ones (#253). No foreign key and no
+    other data: the account is gone, only the handle and the dates
+    remain, and the row may be deleted once the reservation is over."""
+    __tablename__ = "released_username"
+
+    id = db.Column(db.Integer, primary_key=True)
+    # Lowercased, like UsernameHistory: handles are unique
+    # case-insensitively and every lookup is an equality on this column.
+    username = db.Column(db.String(64), nullable=False, unique=True,
+                         index=True)
+    released_at = db.Column(db.DateTime, nullable=False,
+                            default=datetime.utcnow)
+    reserved_until = db.Column(db.DateTime, nullable=False)
