@@ -512,12 +512,64 @@ def _resolve(recorded):
     return path
 
 
+_ROW_FOLDER_RE = re.compile(
+    r"audio:(?:user/\d+/(?P<kind>node|item|profile)/(?P<id>\d+)"
+    r"|nodes/\d+/(?P<node>\d+)"
+    r"|(?P<sdir>drafts|streaming)/\d+/(?P<sid>[A-Za-z0-9_-]+))$")
+
+
+def _kept_row_ids(scope):
+    """What the purge of *scope* keeps although the request recorded its
+    folder: an entry the user re-imported (live again), a reference or
+    profile taken out of the hidden set (saved again), and the session
+    folders of drafts and nodes it keeps. Their files stay with them."""
+    with including_hidden_rows():
+        live_nodes = select(Node.id).where(Node.deleted_at.is_(None))
+        kept = {}
+        for kind, model in (("item", ExternalItem), ("profile", UserProfile)):
+            kept[kind] = {i for (i,) in db.session.query(model.id).filter(
+                model.user_id == scope.user_id,
+                ~model.id.in_(hidden_ids(model.__tablename__,
+                                         scope.job_id)))}
+        kept["node"] = {i for (i,) in db.session.query(Node.id).filter(
+            Node.id.in_(live_nodes),
+            or_(Node.user_id == scope.user_id,
+                Node.human_owner_id == scope.user_id))}
+        sessions = {s for (s,) in db.session.query(Draft.session_id).filter(
+            Draft.user_id == scope.user_id, Draft.session_id.isnot(None),
+            ~Draft.id.in_(hidden_ids("draft", scope.job_id)))}
+        sessions |= {s for (s,) in db.session.query(
+            Node.streaming_session_id).filter(
+            Node.deleted_at.is_(None), Node.streaming_session_id.isnot(None),
+            or_(Node.user_id == scope.user_id,
+                Node.human_owner_id == scope.user_id))}
+        kept["session"] = sessions
+    return kept
+
+
 def _recorded_paths(scope):
+    """The paths a "Delete all my writing" request recorded, less those
+    of rows the purge keeps (_kept_row_ids)."""
     if scope.everything:
         return []
-    return [p for (p,) in db.session.query(UserDataPurgeHidden.path).filter(
+    paths = [p for (p,) in db.session.query(UserDataPurgeHidden.path).filter(
         UserDataPurgeHidden.job_id == scope.job_id,
         UserDataPurgeHidden.kind == "file")]
+    if not paths:
+        return []
+    kept = _kept_row_ids(scope)
+    out = []
+    for path in paths:
+        m = _ROW_FOLDER_RE.match(path)
+        if m is not None:
+            if m.group("kind") and int(m.group("id")) in kept[m.group("kind")]:
+                continue
+            if m.group("node") and int(m.group("node")) in kept["node"]:
+                continue
+            if m.group("sid") and m.group("sid") in kept["session"]:
+                continue
+        out.append(path)
+    return out
 
 
 def _scope_files(scope, user):
@@ -1427,6 +1479,17 @@ def unhide_writing(job_ids):
                       Node.deleted_at.isnot(None)).update(
         {Node.deleted_at: None, Node.updated_at: Node.updated_at},
         synchronize_session=False)
+    # A poll answer whose AI draft was in flight when it was hidden got no
+    # draft (the collector and the submit skip a hidden answer): it comes
+    # back where the user can write it or ask for a draft again.
+    poll_ids = select(UserDataPurgeHidden.row_id).where(
+        UserDataPurgeHidden.job_id.in_(job_ids),
+        UserDataPurgeHidden.kind == "poll_response")
+    PollResponse.query.filter(
+        PollResponse.id.in_(poll_ids), PollResponse.status == "drafting",
+        PollResponse.content.is_(None),
+    ).update({PollResponse.status: "draft_failed"},
+             synchronize_session=False)
     UserDataPurgeHidden.query.filter(
         UserDataPurgeHidden.job_id.in_(job_ids)).delete(
         synchronize_session=False)

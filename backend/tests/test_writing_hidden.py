@@ -142,7 +142,15 @@ def test_restore_brings_back_exactly_what_the_request_hid(app, world, stubs):
     assert r.status_code == 200
     assert r.get_json()["status"] is None
     assert r.get_json()["restorable"] is False
-    assert _alice_snapshot(world) == before
+    # One documented change: the poll answer whose AI draft was in flight
+    # (R1, "drafting", no text) got no draft while hidden; it comes back
+    # where she can write it or ask again.
+    assert [r["status"] for r in before["poll_response"]] == ["drafting"]
+    after = _alice_snapshot(world)
+    before["poll_response"][0]["status"] = "draft_failed"
+    before["poll_response"][0]["updated_at"] = \
+        after["poll_response"][0]["updated_at"]
+    assert after == before
     assert _db.session.get(Node, gone_id).deleted_at == T0
     assert UserDataPurgeHidden.query.count() == 0
     assert UserDataPurge.query.one().status == "cancelled"
@@ -353,3 +361,95 @@ def test_hidden_rows_stay_out_of_counts_and_relationships(app, world, stubs):
     assert _db.session.get(UserProfile, p1) is None
     with including_hidden_rows():
         assert _db.session.get(UserProfile, p1) is not None
+
+
+# ── Review of the rework (comment 6088425994) ───────────────────────────
+
+def test_the_purge_keeps_the_files_of_rows_it_keeps(app, world, stubs):
+    """A reference saved again and an entry re-imported during the 30 days
+    are the user's again: the purge keeps their files (Listen works),
+    and deletes every other folder the request recorded."""
+    a = world.alice.id
+    a8_file = _file(stubs.audio / f"user/{a}/node/{world.ids['A8']}/original.webm")
+    item_tts = stubs.audio / f"user/{a}/item/{world.I1.id}/tts.mp3"
+    _ask(app, world)
+    job = UserDataPurge.query.one()
+    assert reclaim_external_items(a, ["e1"]) == 1
+    _db.session.get(Node, world.ids["A8"]).deleted_at = None
+    _db.session.commit()
+
+    tokens = []
+    up.dispatch_due_jobs(lambda j, t: tokens.append(t),
+                         now=job.scheduled_for + timedelta(minutes=1))
+    assert up.run_purge_job(job.id, tokens[0]) == "done"
+
+    assert item_tts.exists() and a8_file.exists()
+    assert TTSChunk.query.filter_by(item_id=world.I1.id).count() == 1
+    assert not any(f.exists() for f in world.files_alice if f != item_tts)
+    assert all(f.exists() for f in world.files_bob)
+
+
+def _poll_draft_module():
+    """The real poll_draft module against stub glue (as test_updates does):
+    backend.celery_app would boot the full app."""
+    import sys
+    from unittest.mock import MagicMock
+    mod = sys.modules.get("backend.tasks.poll_draft")
+    if mod is not None and not isinstance(mod, MagicMock):
+        return mod
+    saved = {k: sys.modules.get(k) for k in (
+        "backend.celery_app", "backend.tasks.poll_draft")}
+    sys.modules["backend.celery_app"] = MagicMock()
+    sys.modules.pop("backend.tasks.poll_draft", None)
+    import backend.tasks.poll_draft as mod
+    for k, v in saved.items():
+        if v is None:
+            sys.modules.pop(k, None)
+        else:
+            sys.modules[k] = v
+    return mod
+
+
+def test_a_poll_draft_collected_while_hidden_is_billed_and_saves_nothing(
+        app, world, stubs, monkeypatch):
+    """The batch with R1's AI draft ends after the request: its cost row
+    is written, no draft is saved, and after a restore the answer is
+    where she can write it or ask again ('draft_failed')."""
+    mod = _poll_draft_module()
+    monkeypatch.setattr(mod, "llm_cost_log_fields", lambda model_id, result, batch=False: {
+        "cost_microdollars": 77, "input_tokens": 10, "output_tokens": 5})
+    c, _ = _ask(app, world)
+    r1 = world.R1.id
+
+    mod._save_draft_result(
+        {"custom_id": "p1", "response_id": r1, "poll_id": world.poll.id,
+         "model_id": "m"},
+        {"content": "A drafted answer", "input_tokens": 10,
+         "output_tokens": 5})
+    _db.session.commit()
+
+    rows = APICostLog.query.filter_by(request_type="poll_draft").all()
+    assert [r.cost_microdollars for r in rows] == [77]
+    with including_hidden_rows():
+        hidden = _db.session.get(PollResponse, r1)
+        assert hidden.content is None and hidden.status == "draft_failed"
+    assert c.post("/api/account/data/restore").status_code == 200
+    _db.session.expire_all()
+    assert _db.session.get(PollResponse, r1).status == "draft_failed"
+
+
+def test_a_poll_draft_queued_before_the_request_is_answerable_after_a_restore(
+        app, world, stubs):
+    """A draft submit queued before the request skips the hidden answer;
+    the restore brings the answer back as 'draft_failed', not stuck in
+    'drafting' (the Updates modal then offers writing it or asking
+    again). Only an empty 'drafting' answer changes."""
+    mod = _poll_draft_module()
+    c, _ = _ask(app, world)
+    r1 = world.R1.id
+    mod._submit_poll_draft(r1)
+    with including_hidden_rows():
+        assert _db.session.get(PollResponse, r1).status == "drafting"
+    assert c.post("/api/account/data/restore").status_code == 200
+    _db.session.expire_all()
+    assert _db.session.get(PollResponse, r1).status == "draft_failed"
