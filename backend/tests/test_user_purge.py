@@ -1055,6 +1055,162 @@ def test_deletion_status_reports_a_removed_x_connection(world, stubs):
     assert ExternalAccount.query.filter_by(user_id=world.bob.id).count() == 1
 
 
+# ── Revoking Loore's access at X (Peter, 2026-10-09) ────────────────────
+
+ACCESS, REFRESH = "x-access-7f3a", "x-refresh-9c2e"
+
+
+class _XRevoke:
+    """A fake X revoke endpoint behind requests.post. Nothing leaves the
+    test: a call aimed anywhere else fails it."""
+
+    def __init__(self, monkeypatch, app, alice_id, outcome):
+        import requests
+        from backend.utils import external_content as ext
+        app.config["X_CLIENT_ID"] = "cid"
+        app.config["X_CLIENT_SECRET"] = "secret"
+        self.calls = []
+
+        def post(url, **kw):
+            assert url == ext.X_REVOKE_URL, url
+            # Revoked while the stored connection still exists.
+            rows = ExternalAccount.query.filter_by(user_id=alice_id).count()
+            self.calls.append((kw["data"]["token"], kw["auth"],
+                               kw["timeout"], rows))
+            if outcome == "timeout":
+                raise requests.Timeout("read timed out")
+            r = MagicMock()
+            if outcome == "error":
+                r.raise_for_status.side_effect = requests.HTTPError(
+                    "503 Server Error", response=MagicMock(status_code=503))
+            r.json.return_value = {"revoked": True}
+            return r
+        monkeypatch.setattr(ext.requests, "post", post)
+
+    @property
+    def tokens(self):
+        return [c[0] for c in self.calls]
+
+
+@pytest.fixture
+def x_revoke(world, app, monkeypatch):
+    """Alice's X connection with recognisable tokens, and X configured."""
+    acc = ExternalAccount.query.filter_by(user_id=world.alice.id).one()
+    acc.access_token, acc.refresh_token = ACCESS, REFRESH
+    _db.session.commit()
+    return lambda outcome="ok": _XRevoke(monkeypatch, app, world.alice.id,
+                                         outcome)
+
+
+def _purge_log(caplog):
+    return [(r.levelname, r.getMessage()) for r in caplog.records
+            if r.name == up.logger.name]
+
+
+def test_the_purge_revokes_the_stored_x_tokens_at_x(world, stubs, x_revoke,
+                                                    caplog):
+    x = x_revoke()
+    caplog.set_level("INFO", logger=up.logger.name)
+    _, outcome = _run_job()
+    assert outcome == "done"
+    assert x.tokens == [ACCESS, REFRESH]       # alice's only, never bob's
+    for _, auth, timeout, rows_then in x.calls:
+        assert auth == ("cid", "secret")
+        assert timeout == up.X_REVOKE_TIMEOUT_SECONDS
+        assert rows_then == 1
+    assert ExternalAccount.query.filter_by(user_id=world.alice.id).count() == 0
+    assert ExternalAccount.query.filter_by(user_id=world.bob.id).count() == 1
+    log = _purge_log(caplog)
+    assert any("2 stored X token(s) revoked" in m for _, m in log)
+    assert not any(lvl == "ERROR" for lvl, _ in log)
+    assert not any(ACCESS in m or REFRESH in m for _, m in log)
+
+
+@pytest.mark.parametrize("outcome", ["error", "timeout"])
+def test_a_failed_x_revoke_never_stops_the_purge(world, stubs, x_revoke,
+                                                 caplog, outcome):
+    x = x_revoke(outcome)
+    _, result = _run_job()
+    assert result == "done"
+    assert x.tokens == [ACCESS, REFRESH]       # both tried
+    assert ExternalAccount.query.filter_by(user_id=world.alice.id).count() == 0
+    assert up.leftovers(up.count_user_data(world.alice.id)) == {}
+    errors = [m for lvl, m in _purge_log(caplog) if lvl == "ERROR"]
+    assert len(errors) == 2 and all("X did not revoke" in m for m in errors)
+    assert not any(ACCESS in m or REFRESH in m for m in errors)
+    if outcome == "error":
+        assert all("HTTP 503" in m for m in errors)
+    else:
+        assert all("Timeout" in m for m in errors)
+
+
+def test_a_refusal_is_a_warning_for_a_connection_x_had_refused(
+        world, stubs, x_revoke, caplog):
+    x_revoke("error")
+    acc = ExternalAccount.query.filter_by(user_id=world.alice.id).one()
+    acc.revoked_at = datetime.utcnow()
+    _db.session.commit()
+    _, outcome = _run_job()
+    assert outcome == "done"
+    assert [lvl for lvl, m in _purge_log(caplog)
+            if "X did not revoke" in m] == ["WARNING", "WARNING"]
+
+
+def test_no_stored_x_token_means_no_call(world, stubs, x_revoke):
+    x = x_revoke()
+    acc = ExternalAccount.query.filter_by(user_id=world.alice.id).one()
+    acc.access_token = acc.refresh_token = None
+    _db.session.commit()
+    _, outcome = _run_job()
+    assert outcome == "done" and x.calls == []
+    assert ExternalAccount.query.filter_by(user_id=world.alice.id).count() == 0
+    # No X connection at all: no call either.
+    up.purge_user_content(world.alice.id)
+    assert x.calls == []
+
+
+def test_an_expired_access_token_is_not_sent(world, stubs, x_revoke):
+    x = x_revoke()
+    acc = ExternalAccount.query.filter_by(user_id=world.alice.id).one()
+    acc.token_expires_at = datetime.utcnow() - timedelta(minutes=1)
+    _db.session.commit()
+    _, outcome = _run_job()
+    assert outcome == "done" and x.tokens == [REFRESH]
+
+
+def test_without_x_configured_the_connection_is_deleted_without_a_call(
+        world, stubs, app, monkeypatch):
+    from backend.utils import external_content as ext
+
+    def post(url, **kw):
+        raise AssertionError("called X")
+    monkeypatch.setattr(ext.requests, "post", post)
+    assert not app.config.get("X_CLIENT_ID")
+    _, outcome = _run_job()
+    assert outcome == "done"
+    assert ExternalAccount.query.filter_by(user_id=world.alice.id).count() == 0
+
+
+def test_the_x_tokens_are_the_only_values_the_purge_decrypts(
+        world, stubs, x_revoke, monkeypatch):
+    """Decrypting the stored X tokens to revoke them is allowed (they are
+    credentials Loore holds, not writing); content is never decrypted."""
+    x = x_revoke()
+    decrypted = []
+
+    def only_tokens(value, *a, **k):
+        if value in (ACCESS, REFRESH):
+            decrypted.append(value)
+            return value
+        raise AssertionError("the purge decrypted content")
+    import backend.utils.encryption as enc
+    monkeypatch.setattr(enc, "decrypt_content", only_tokens)
+    monkeypatch.setattr(_real_backend_models, "decrypt_content", only_tokens)
+    _, outcome = _run_job()
+    assert outcome == "done"
+    assert decrypted == [ACCESS, REFRESH] and x.tokens == [ACCESS, REFRESH]
+
+
 def _stub_dispatch(monkeypatch, stubs):
     mod = MagicMock()
     mod.dispatch = lambda job_id, token: stubs.dispatched.append((job_id, token))

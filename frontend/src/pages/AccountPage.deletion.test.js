@@ -81,10 +81,22 @@ test('"Keep my writing" and Escape close the dialog without a request', () => {
   expect(mockDelete).not.toHaveBeenCalled();
 });
 
-test('the dialog tells a user with X connected how to remove Loore there', () => {
+test('the dialog tells a user with X connected that Loore removes its access there', () => {
   renderPage({ data_deletion: { status: null, grace_days: 30, x_connected: true } });
   fireEvent.click(screen.getByRole('button', { name: /delete all my writing…/i }));
-  expect(screen.getByText(/Connected apps, choose Loore/)).toBeTruthy();
+  const note = screen.getByText(/removes\s+its access on X/);
+  expect(note.textContent).toMatch(/If X still lists Loore afterwards, remove it\s+yourself: on X/);
+  expect(note.textContent).toMatch(/Connected apps, choose Loore/);
+});
+
+test('after the purge the page says Loore asked X to remove its access', () => {
+  renderPage({ data_deletion: {
+    status: 'done', grace_days: 30, finished_at: '2026-11-05T12:00:00Z',
+    x_connection_removed: true,
+  } });
+  const text = screen.getByText(/Your writing was deleted on/).textContent;
+  expect(text).toMatch(/asked X to\s+remove its access/);
+  expect(text).toMatch(/If X still lists Loore, remove it\s+yourself: on X/);
 });
 
 test('a scheduled deletion shows its date and cancels through the cancel route', async () => {

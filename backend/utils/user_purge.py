@@ -12,6 +12,8 @@ period) and by the admin dashboard's "Purge data" (at once):
   statement is scoped to the one user: other users' rows are changed only
   where a foreign key to a deleted row requires it (a reply's
   ``linked_node_id``, a draft's ``parent_id``), and then only that column.
+  Before it deletes the stored X connection, it revokes the connection's
+  tokens at X; a failed call is logged and never stops the purge.
 * ``count_user_data`` is the dry run: the same counts, nothing changed.
 
 The account itself stays (login, username, settings, plan). Cost rows
@@ -94,6 +96,11 @@ PURGE_WAIT_RETRY_SECONDS = 120
 # ...for at most this long: Celery's hard time limit (task_time_limit,
 # 1 h) has killed any task by then.
 PURGE_MAX_WAIT = timedelta(minutes=65)
+# Each call to X's token revoke endpoint (connect and read, each): the
+# purge does not wait longer for X, and a call that times out is logged
+# and the stored connection deleted anyway. X answers in well under a
+# second; at most two calls per connection.
+X_REVOKE_TIMEOUT_SECONDS = 10
 
 IN_FLIGHT_STATUSES = ("pending", "processing")
 # The user's own folders under AUDIO_STORAGE_PATH.
@@ -839,6 +846,69 @@ def _tombstone(ids, now):
     }, synchronize_session=False)
 
 
+def _revoke_x_access(user_id):
+    """Revoke the user's stored X tokens at X, before the purge deletes
+    them, so X stops listing Loore as an app with access to the account.
+
+    Never raises and never holds the purge up: a call X refuses, one that
+    times out (X_REVOKE_TIMEOUT_SECONDS) or a token that cannot be read is
+    logged without the token, and the purge deletes the connection
+    anyway. The user was told how to remove Loore on X themselves if it
+    is still listed. Logged as an error (Sentry), except for a connection
+    X had already refused (``revoked_at``), where a refusal is expected.
+
+    The tokens are decrypted here, one connection at a time, to send them
+    to X: they are credentials Loore holds, not the user's writing.
+    An access token past its expiry grants nothing and is not sent.
+    Returns how many tokens X confirmed revoked."""
+    from flask import current_app
+    from backend.utils.external_content import x_revoke_token
+
+    accounts = ExternalAccount.query.filter(
+        ExternalAccount.user_id == user_id).order_by(ExternalAccount.id).all()
+    if not accounts:
+        return 0
+    client_id = current_app.config.get("X_CLIENT_ID")
+    if not client_id:
+        logger.warning("user purge of user %s: X is not configured here, "
+                       "so the stored X connection is deleted without "
+                       "revoking it at X", user_id)
+        return 0
+    client_secret = current_app.config.get("X_CLIENT_SECRET")
+    now = _now()
+    revoked = 0
+    for account in accounts:
+        if account.provider != "twitter":
+            continue
+        expected = account.revoked_at is not None
+        kinds = []
+        if account.access_token and not (
+                account.token_expires_at and account.token_expires_at <= now):
+            kinds.append(("access", account.get_access_token))
+        if account.refresh_token:
+            kinds.append(("refresh", account.get_refresh_token))
+        for kind, read in kinds:
+            try:
+                token = read()
+                if not token:
+                    continue
+                x_revoke_token(token, client_id, client_secret,
+                               timeout=X_REVOKE_TIMEOUT_SECONDS)
+                revoked += 1
+            except Exception as e:  # noqa: BLE001 - never stops the purge
+                response = getattr(e, "response", None)
+                status = getattr(response, "status_code", None)
+                (logger.warning if expected else logger.error)(
+                    "user purge of user %s: X did not revoke the stored X "
+                    "%s token (%s%s); the connection is deleted anyway",
+                    user_id, kind, type(e).__name__,
+                    f", HTTP {status}" if status else "")
+    if revoked:
+        logger.info("user purge of user %s: %d stored X token(s) revoked "
+                    "at X", user_id, revoked)
+    return revoked
+
+
 def _beat(heartbeat):
     if heartbeat is not None:
         heartbeat()
@@ -854,6 +924,7 @@ def _purge_round(user, plan, counts, heartbeat):
     for chunk in _chunks(sessions):
         counts["node_transcript_chunk"] += _delete(
             NodeTranscriptChunk, _session_chunk_filter(chunk, owned_ids))
+    _revoke_x_access(U)
     counts["external_account"] += _delete(ExternalAccount,
                                           ExternalAccount.user_id == U)
     counts["draft"] += _delete(Draft, Draft.user_id == U)
@@ -1266,8 +1337,8 @@ def deletion_status(user_id):
     ).order_by(UserDataPurge.id.desc()).first()
     out = {"status": None, "grace_days": PURGE_GRACE_DAYS,
            "purge_at": None, "requested_at": None, "finished_at": None,
-           # X is connected for bookmarks: the purge removes the stored
-           # connection, and the user can remove Loore's access on X.
+           # X is connected for bookmarks: the purge revokes Loore's
+           # access at X and deletes the stored connection.
            "x_connected": db.session.query(ExternalAccount.id).filter(
                ExternalAccount.user_id == user_id).first() is not None,
            "x_connection_removed": False}

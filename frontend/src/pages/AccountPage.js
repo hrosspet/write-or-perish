@@ -908,8 +908,9 @@ function DeleteWritingSection({ id, deletion, busy, msg, onOpen, onCancel, label
             <p style={bodyStyle}>
               Your writing was deleted on {formatDeletionDate(deletion.finished_at)}.
               {deletion.x_connection_removed && (
-                <> Loore no longer keeps your X connection. To remove Loore's
-                  access on X as well: {X_REMOVE_ACCESS_STEPS}</>
+                <> Loore no longer keeps your X connection and asked X to
+                  remove its access. If X still lists Loore, remove it
+                  yourself: {X_REMOVE_ACCESS_STEPS}</>
               )}
             </p>
           )}
