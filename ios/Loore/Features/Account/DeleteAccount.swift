@@ -47,8 +47,8 @@ final class DeleteAccountModel {
     // MARK: Section
 
     var sectionText: String {
-        "Deletes your account at once and signs you out everywhere. For \(graceDays) days you can restore it "
-            + "by signing in; after that it is deleted forever, with everything in it."
+        "Deletes your account at once and signs you out everywhere. If you change your mind, you can still "
+            + "restore it by signing in within \(graceDays) days; after that it is deleted forever, with everything in it."
     }
 
     var linkSentText: String {
@@ -68,7 +68,7 @@ final class DeleteAccountModel {
         let date = deletionDate
         var paragraphs = [
             "Your account is deleted at once and you are signed out everywhere. Nobody can see your public writing any more.",
-            "For \(graceDays) days, until \(date), you can restore it by signing in. After that it is deleted forever, "
+            "If you change your mind, you can still restore it by signing in until \(date) (\(graceDays) days). After that it is deleted forever, "
                 + "with everything in it: your entries and recordings, the AI's replies, your profile, intentions and "
                 + "other documents, your todo list, drafts, shares, saved references, imports, poll answers, settings "
                 + "and sign-in. If other people replied to your entries, their replies stay and your entry shows as "
@@ -111,7 +111,7 @@ final class DeleteAccountModel {
 
     var confirmSubtitle: String {
         confirmsByEmail ? "Nothing changes until you confirm from the link."
-            : "Signs you out now. You can restore it until \(deletionDate)."
+            : "Signs you out now. If you change your mind, you can still restore it until \(deletionDate)."
     }
 
     /// The dialog opens empty (the web resets it on open).
@@ -329,8 +329,8 @@ final class ConfirmAccountDeletionModel {
         }
         let days = app.user?.accountDeletion?.graceDays ?? 30
         let date = AccountDeletion.formatDate(AccountDeletion.dateAfter(days: days, from: now()))
-        return "When you confirm, your account is deleted and you are signed out everywhere. Until \(date) you "
-            + "can restore it by signing in; after that it is deleted forever, with everything in it. Restoring "
+        return "When you confirm, your account is deleted and you are signed out everywhere. If you change your "
+            + "mind, you can still restore it by signing in until \(date); after that it is deleted forever, with everything in it. Restoring "
             + "it also cancels a request to delete all your writing, if one is waiting."
     }
 
