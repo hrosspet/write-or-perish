@@ -9,7 +9,7 @@ the two-column privacy system:
 from enum import Enum
 from typing import Optional
 from flask_login import current_user
-from sqlalchemy import and_, or_
+from sqlalchemy import and_, func, or_, select
 
 
 class PrivacyLevel(str, Enum):
@@ -106,6 +106,31 @@ def _can_user_access_ignoring_deleted(node, user_id: int) -> bool:
     return False
 
 
+def owner_hidden(node) -> bool:
+    """The node's owner deleted the account and it is in its grace
+    period (#269). Until the purge (or a restore) the node behaves like a
+    soft-deleted one for everyone: not accessible, shown as a tombstone
+    to those who could see it, and other people's replies below it stay
+    reachable. The owner cannot be signed in meanwhile. The owner row
+    comes from the session's identity map after the first look, so a
+    thread costs one query per author."""
+    from backend.extensions import db
+    from backend.models import User
+    owner_id = getattr(node, 'human_owner_id', None) or node.user_id
+    owner = db.session.get(User, owner_id) if owner_id else None
+    return owner is not None and owner.deleted_at is not None
+
+
+def hidden_owner_filter(node_model):
+    """Query-level counterpart of owner_hidden: the node's owner has not
+    deleted the account. An uncorrelated subquery over the accounts in
+    their grace period, which is usually empty."""
+    from backend.models import User
+    hidden = select(User.id).where(User.deleted_at.isnot(None))
+    return ~func.coalesce(
+        node_model.human_owner_id, node_model.user_id).in_(hidden)
+
+
 def can_user_access_node(node, user_id: Optional[int] = None) -> bool:
     """Check if a user can currently access a node (alive + privacy passes).
 
@@ -129,8 +154,16 @@ def can_user_access_node(node, user_id: Optional[int] = None) -> bool:
     # serialize_node, which uses can_user_view_tombstone.
     if getattr(node, 'deleted_at', None) is not None:
         return False
-
-    return _can_user_access_ignoring_deleted(node, user_id)
+    if not _can_user_access_ignoring_deleted(node, user_id):
+        return False
+    # Someone else's node whose author deleted the account and is in the
+    # grace period (#269). Checked last: the viewer's own nodes and nodes
+    # they cannot see anyway need no lookup of the author.
+    if node.user_id == user_id or (
+            getattr(node, 'human_owner_id', None)
+            and node.human_owner_id == user_id):
+        return True
+    return not owner_hidden(node)
 
 
 def can_user_view_tombstone(node, user_id: Optional[int] = None) -> bool:
@@ -154,8 +187,9 @@ def can_user_view_tombstone(node, user_id: Optional[int] = None) -> bool:
     Returns:
         True if a tombstone with metadata should be rendered for this viewer.
     """
-    if getattr(node, 'deleted_at', None) is None:
-        # Not deleted — this helper isn't meant for live nodes.
+    if getattr(node, 'deleted_at', None) is None and not owner_hidden(node):
+        # Not deleted (nor hidden with its author's deleted account, #269)
+        # — this helper isn't meant for live nodes.
         return False
 
     if user_id is None:
@@ -197,6 +231,12 @@ def accessible_nodes_filter(node_model, user_id: int):
     return and_(
         node_model.deleted_at.is_(None),
         accessible_nodes_filter_ignoring_deleted(node_model, user_id),
+        # Not by an account deleted and in its grace period (#269). The
+        # ignoring-deleted variant below walks through such nodes, like
+        # through tombstones.
+        or_(node_model.user_id == user_id,
+            node_model.human_owner_id == user_id,
+            hidden_owner_filter(node_model)),
     )
 
 

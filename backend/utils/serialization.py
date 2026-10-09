@@ -15,6 +15,7 @@ from typing import Optional
 from backend.utils.privacy import (
     can_user_access_node,
     can_user_view_tombstone,
+    owner_hidden,
 )
 from backend.utils.timefmt import iso_utc
 
@@ -43,6 +44,21 @@ def serialize_node_status(node, viewer_id: int) -> Optional[dict]:
                 "deleted": True,
                 "deleted_at": iso_utc(node.deleted_at),
                 "username": node.user.username if node.user else None,
+                "node_type": node.node_type,
+                "created_at": iso_utc(node.created_at),
+            }
+        return {"id": node.id, "inaccessible": True}
+
+    if owner_hidden(node):
+        # The author deleted the account and it is in its grace period
+        # (#269): shown as deleted, without the author's name, so other
+        # people's replies below it stay in their threads.
+        if can_user_view_tombstone(node, viewer_id):
+            return {
+                "id": node.id,
+                "deleted": True,
+                "deleted_at": None,
+                "username": None,
                 "node_type": node.node_type,
                 "created_at": iso_utc(node.created_at),
             }

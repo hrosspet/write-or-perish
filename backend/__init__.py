@@ -20,7 +20,7 @@ from backend.config import Config
 from backend.extensions import db
 from flask_migrate import Migrate
 from flask_login import LoginManager, current_user
-from backend.models import User
+from backend.models import User  # noqa: F401 - registers every model (migrations)
 from backend.oauth import init_twitter_blueprint
 from flask_cors import CORS
 from werkzeug.middleware.proxy_fix import ProxyFix
@@ -204,7 +204,10 @@ def create_app():
 
     @login_manager.user_loader
     def load_user(user_id):
-        return User.query.get(int(user_id))
+        # A deleted account in its grace period (#269) loads as nobody:
+        # every session and remember cookie stops working at once.
+        from backend.utils.account_deletion import session_user
+        return session_user(user_id)
 
     # --------------------------------------------------------------------
     # BLOCK UNAPPROVED USERS
@@ -285,6 +288,10 @@ def create_app():
     # "Delete all my writing" (#268).
     from backend.routes.account_data import account_data_bp
     app.register_blueprint(account_data_bp, url_prefix="/api/account")
+
+    # Account deletion and restore (#269).
+    from backend.routes.account_deletion import account_deletion_bp
+    app.register_blueprint(account_deletion_bp, url_prefix="/api/account")
 
     from backend.routes.export_data import export_bp
     app.register_blueprint(export_bp, url_prefix="/api")

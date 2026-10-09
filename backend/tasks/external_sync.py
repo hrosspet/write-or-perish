@@ -417,6 +417,8 @@ def sync_all_twitter_bookmarks():
         ).all()
         dispatched = 0
         for account in accounts:
+            if account.user is None or account.user.deleted_at is not None:
+                continue   # a deleted account in its grace period (#269)
             if user_local_hour(account.user) != NIGHTLY_SYNC_LOCAL_HOUR:
                 continue
             if (account.last_synced_at

@@ -26,6 +26,7 @@ from backend.utils.privacy import (
     can_user_see_node_or_tombstone,
     can_user_view_tombstone,
     can_user_edit_node,
+    owner_hidden,
     speech_allowed,
     SPEECH_REFUSED_MESSAGE,
     PrivacyLevel,
@@ -557,7 +558,7 @@ def serialize_node_recursive(n, user_id=None, parent_user_id=None):
     def _child_visible(child):
         if can_user_access_node(child, user_id):
             return True
-        if child.deleted_at is None:
+        if child.deleted_at is None and not owner_hidden(child):
             return False
         s = serialize_node_status(child, user_id)
         return s is not None and not s.get("inaccessible")
@@ -1351,7 +1352,7 @@ def get_node(node_id):
     def _child_visible(child):
         if can_user_access_node(child, current_user.id):
             return True
-        if child.deleted_at is None:
+        if child.deleted_at is None and not owner_hidden(child):
             return False
         s = serialize_node_status(child, current_user.id)
         return s is not None and not s.get("inaccessible")

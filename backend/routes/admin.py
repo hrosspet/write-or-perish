@@ -258,6 +258,8 @@ def list_users():
             "email": user.email,
             "plan": user.plan,
             "deactivated_at": iso_utc(user.deactivated_at),
+            # Account deleted and in its grace period (#269): hidden.
+            "deleted_at": iso_utc(user.deleted_at),
             "total_spending_usd": total_microdollars / 1_000_000,
             "current_month_spending_usd": month_microdollars / 1_000_000,
             # Prompt-cache hit-rate over conversation turns since
@@ -450,6 +452,8 @@ def _purge_job_json(job):
         "attempts": job.attempts or 0,
         "counts": job.counts,
         "error": job.error,
+        # An account deletion (#269), not only a data purge.
+        "delete_account": bool(job.delete_account),
     }
 
 
@@ -508,6 +512,13 @@ def purge_data_route(user_id):
     job, created = user_purge.schedule_purge(
         user, requested_by_id=current_user.id, source="admin",
         at=datetime.utcnow())
+    if not created and job.delete_account:
+        # The account itself is being deleted (#269): bringing that job
+        # forward would delete the account, not only its data.
+        return jsonify({"error": "This account is scheduled for deletion. "
+                                 "Use Delete account to delete it now.",
+                        "code": "account_deletion_scheduled",
+                        "job": _purge_job_json(job)}), 409
     if not created:
         if job.status == "running":
             return jsonify({"error": "A purge of this account is already "
@@ -527,6 +538,57 @@ def purge_data_route(user_id):
     except Exception as e:  # noqa: BLE001 - the beat picks it up
         logger.warning("Purge job %s: immediate dispatch failed (%s); the "
                        "beat will start it", job.id, type(e).__name__)
+    db.session.refresh(job)
+    return jsonify({"job": _purge_job_json(job)}), 202
+
+
+@admin_bp.route("/users/<int:user_id>/delete_account", methods=["POST"])
+@login_required
+@admin_required
+def delete_account_route(user_id):
+    """Delete an account at once (#269): its data (the #268 purge) and
+    then the account itself. Opt-outs, erasure requests, mistaken
+    whitelists and pre-fills.
+
+    ``?dry_run=1`` returns the purge's counts, the identity layer's and
+    the blast radius (public writing, replies in other people's threads),
+    and changes nothing. Otherwise the body must carry
+    ``{"confirm_username": "<the user's username>"}``: the account is
+    hidden at once and the job runs in Celery. Counts only, never
+    content. AI and system accounts (409) and the last admin (409) are
+    refused."""
+    from backend.utils import account_deletion, user_purge
+    user = User.query.get_or_404(user_id)
+    refusal = account_deletion.deletion_refusal(user)
+    if refusal:
+        code, message = refusal
+        return jsonify({"error": message, "code": code}), 409
+
+    if request.args.get("dry_run") in ("1", "true"):
+        dry = account_deletion.count_account_data(user.id)
+        return jsonify({"dry_run": True, "username": user.username,
+                        "has_email": bool(user.email),
+                        "job": _purge_job_json(user_purge.active_job(user.id)),
+                        **dry}), 200
+
+    data = request.get_json(silent=True) or {}
+    if (data.get("confirm_username") or "").strip() != user.username:
+        return jsonify({"error": "Type the username to confirm.",
+                        "code": "confirm_mismatch"}), 400
+    try:
+        job = account_deletion.schedule_account_deletion(
+            user, requested_by_id=current_user.id, source="admin",
+            at=datetime.utcnow())
+    except account_deletion.AccountDeletionRefused as e:
+        return jsonify({"error": e.message, "code": e.code}), 409
+    logger.warning("Admin %s started the deletion of account %s (job %s)",
+                   current_user.id, user_id, job.id)
+    from backend.tasks.user_purge import dispatch
+    try:
+        user_purge.start_job_now(job, dispatch)
+    except Exception as e:  # noqa: BLE001 - the beat picks it up
+        logger.warning("Account deletion job %s: immediate dispatch failed "
+                       "(%s); the beat will start it", job.id, type(e).__name__)
     db.session.refresh(job)
     return jsonify({"job": _purge_job_json(job)}), 202
 

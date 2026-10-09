@@ -349,6 +349,7 @@ def sweep_external_digests():
             user for user in User.query.filter(User.id.in_(stale_ids)).all()
             if user_local_hour(user) == NIGHTLY_DIGEST_LOCAL_HOUR
             and account_allows_ai(user)   # #346
+            and user.deleted_at is None   # hidden: account deleted (#269)
         ]
         if not due:
             return {"status": "ok", "submitted": 0}

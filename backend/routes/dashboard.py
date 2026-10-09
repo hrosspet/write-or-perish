@@ -24,6 +24,7 @@ from backend.utils.spend import user_is_capped
 from backend.utils.llm_nodes import effective_preferred_model, is_chat_model
 from backend.utils.own_entries import has_own_entries
 from backend.utils.user_purge import deletion_status
+from backend.utils.account_deletion import account_deletion_info
 
 logger = logging.getLogger(__name__)
 dashboard_bp = Blueprint("dashboard_bp", __name__)
@@ -187,6 +188,9 @@ def get_dashboard():
             # "Delete all my writing" (#268): a scheduled deletion shows
             # its date and a way to cancel on every page.
             "data_deletion": deletion_status(current_user.id),
+            # "Delete my account" (#269): the numbers the Account page
+            # states, and why the account cannot be deleted, if it can't.
+            "account_deletion": account_deletion_info(current_user),
         },
         "pinned_nodes": pinned_list,
         "nodes": nodes_list,

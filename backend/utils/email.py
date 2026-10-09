@@ -227,6 +227,78 @@ def send_x_connected_notice(to_email, handle):
           best_effort=True)
 
 
+def send_account_deletion_link_email(to_email, username, confirm_url,
+                                     expires_in_seconds, grace_days):
+    """The link that confirms an account deletion (#269). It works only
+    inside a signed-in session of the account, from a page with both
+    choices, so opening it deletes nothing."""
+    lifetime = _duration_words(expires_in_seconds)
+    text_body = (
+        "Confirm the deletion of your Loore account\n\n"
+        f"You asked to delete the Loore account @{username}. Open the link "
+        f"below to confirm:\n{confirm_url}\n\n"
+        "Once you confirm, the account is hidden and you are signed out. "
+        f"It is deleted with everything in it after {grace_days} days; "
+        "signing in before then lets you restore it.\n\n"
+        f"This link expires in {lifetime}. If you did not ask for this, "
+        "ignore this email and nothing changes."
+    )
+    html_body = _card(
+        "Confirm the deletion of your account",
+        [f"You asked to delete the Loore account <strong style=\"color: #ede8dd;\">@{escape(username)}</strong>.",
+         "Once you confirm, the account is hidden and you are signed out. "
+         f"It is deleted with everything in it after {grace_days} days; "
+         "signing in before then lets you restore it."],
+        "Review and confirm", confirm_url,
+        (f"This link expires in {lifetime}.",
+         "If you did not ask for this, ignore this email and nothing changes."))
+    _send(to_email, "Confirm the deletion of your Loore account", text_body,
+          html_body, "Account deletion link sent",
+          "Failed to send the account deletion link")
+
+
+def send_account_deletion_scheduled_email(to_email, username, delete_on):
+    """The deletion is scheduled (#269): when, and how to undo it.
+    Best-effort: the deletion already happened from the user's side."""
+    text_body = (
+        "Your Loore account will be deleted\n\n"
+        f"The account @{username} is hidden now and will be deleted with "
+        f"everything in it on {delete_on}.\n\n"
+        "To keep it, sign in to Loore before then and choose Restore.\n\n"
+        "If you did not do this, sign in and restore the account right away."
+    )
+    html_body = _card(
+        "Your account will be deleted",
+        [f"The account <strong style=\"color: #ede8dd;\">@{escape(username)}</strong> "
+         f"is hidden now and will be deleted with everything in it on {escape(delete_on)}.",
+         "To keep it, sign in to Loore before then and choose Restore."],
+        footnotes=("If you did not do this, sign in and restore the account right away.",))
+    _send(to_email, "Your Loore account will be deleted", text_body,
+          html_body, "Account deletion scheduled notice sent",
+          "Failed to send the account deletion scheduled notice",
+          best_effort=True)
+
+
+def send_account_deleted_email(to_email):
+    """The account and its data are gone (#269). The address is not kept
+    after this mail. Best-effort."""
+    text_body = (
+        "Your Loore account has been deleted\n\n"
+        "Your account and everything in it have been deleted. Loore keeps "
+        "only a record of what the AI use cost, without your name.\n\n"
+        "Backups are overwritten on their usual schedule."
+    )
+    html_body = _card(
+        "Your account has been deleted",
+        ["Your account and everything in it have been deleted. Loore keeps "
+         "only a record of what the AI use cost, without your name."],
+        footnotes=("Backups are overwritten on their usual schedule.",))
+    _send(to_email, "Your Loore account has been deleted", text_body,
+          html_body, "Account deleted notice sent",
+          "Failed to send the account deleted notice",
+          best_effort=True)
+
+
 def send_welcome_email(to_email, magic_link_url):
     text_body = (
         "Welcome to Loore\n\n"

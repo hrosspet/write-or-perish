@@ -550,7 +550,8 @@ def _render_sitemap():
                         Node.privacy_level == "public",
                         Node.deleted_at.is_(None),
                         Node.public_slug.isnot(None),
-                        User.public_sharing_enabled.is_(True))
+                        User.public_sharing_enabled.is_(True),
+                        User.deleted_at.is_(None))
                 .all())
         profiles = {}
         for username, slug, updated_at, created_at in rows:

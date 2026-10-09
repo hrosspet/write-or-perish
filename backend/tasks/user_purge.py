@@ -4,6 +4,7 @@ backend/utils/user_purge.py.
 ``process_user_data_purges`` (beat, every minute) claims the jobs that
 are due: a user's request whose grace period has ended, an admin purge,
 or a job whose runner stopped sending heartbeats (a deploy or a crash).
+Account deletions (#269) are the same jobs with ``delete_account``.
 It dispatches ``run_user_data_purge`` with a claim token; a runner whose
 token no longer matches the job's stops at its next heartbeat.
 """
@@ -35,9 +36,13 @@ def dispatch(job_id, token):
 
 @celery.task(name="backend.tasks.user_purge.process_user_data_purges")
 def process_user_data_purges():
-    """Beat: start due purges and resume interrupted ones."""
+    """Beat: start due purges and account deletions (#269), resume
+    interrupted ones, and forget deleted accounts' handles whose
+    reservation is over."""
+    from backend.utils.account_deletion import release_expired_usernames
     with flask_app.app_context():
         started = user_purge.dispatch_due_jobs(dispatch)
+        released = release_expired_usernames()
     if started:
         logger.info("user data purge: dispatched jobs %s", started)
-    return {"dispatched": started}
+    return {"dispatched": started, "usernames_released": released}
