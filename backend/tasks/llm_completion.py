@@ -1882,7 +1882,8 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
                     # Kick off async background merge using the
                     # proposal node (where the draft originated)
                     from backend.routes.todo import (
-                        _start_todo_merge, todo_merge_refusal,
+                        TODO_MERGE_RUNNING_MESSAGE, _start_todo_merge,
+                        todo_merge_refusal,
                     )
                     proposal_node = Node.query.get(draft.parent_id)
                     # The merge sends the todo list and the proposal to a
@@ -1898,8 +1899,13 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
                             draft, proposal_node or llm_node, user_id,
                             confirm_node_id=llm_node.id,
                         )
-                        result["status"] = "success"
-                        result["apply_task_id"] = task_id
+                        if task_id is None:
+                            # Another request started this merge.
+                            result["status"] = "error"
+                            result["error"] = TODO_MERGE_RUNNING_MESSAGE
+                        else:
+                            result["status"] = "success"
+                            result["apply_task_id"] = task_id
 
             elif name == "apply_github_issue":
                 draft = _find_pending_github_issue_draft(
