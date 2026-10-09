@@ -372,7 +372,7 @@ private struct FocalCard: View {
                               loaded: model.readPicksLoaded) { model.readPicksMarkedAll($0) }
             }
             if let meta = node.toolCallsMeta?.filter({ !$0.isInternal }), !meta.isEmpty {
-                ToolCallsDisclosure(meta: meta, expanded: $model.toolActionsExpanded)
+                ToolCallsDisclosure(meta: meta, detailed: model.isOwner, expanded: $model.toolActionsExpanded)
             }
         }
         .padding(.vertical, 28.8)
@@ -418,7 +418,7 @@ private struct FocalCard: View {
             }
             if showProposal {
                 ProposalCard(content: node.content, nodeId: node.id, toolCallsMeta: node.toolCallsMeta,
-                             shareOnly: !model.isLLMNode,
+                             shareOnly: !model.isLLMNode, canAct: model.isOwner,
                              onContentChange: model.isOwner ? { model.setContent($0) } : nil,
                              onApplied: { model.updateToolMeta($0, $1) })
                 if let after = split?.after, !after.isEmpty {
@@ -456,8 +456,11 @@ struct PulsingDots: View {
 }
 
 /// "▸ Actions taken (N)" and the tool-call rows (map D §2.3).
+/// `detailed` is true for the reply's owner, whose payload carries every
+/// field; anyone else gets `sharedLabel`.
 private struct ToolCallsDisclosure: View {
     let meta: [ToolCallMeta]
+    var detailed = true
     @Binding var expanded: Bool
     @Environment(AppState.self) private var app
 
@@ -490,8 +493,12 @@ private struct ToolCallsDisclosure: View {
         HStack(alignment: .firstTextBaseline, spacing: 4) {
             Text(tc.status == "success" ? "✓" : "✗")
                 .accessibilityLabel(tc.status == "success" ? "Succeeded:" : "Failed:")
-            label(tc)
-            if let err = tc["error"]?.stringValue, !err.isEmpty {
+            if detailed {
+                label(tc)
+            } else {
+                Text(tc.sharedLabel)
+            }
+            if detailed, let err = tc["error"]?.stringValue, !err.isEmpty {
                 Text(" — \(err)").foregroundStyle(LooreColor.accent)
             }
             Spacer(minLength: 0)
@@ -586,6 +593,33 @@ private struct ToolCallsDisclosure: View {
                 .foregroundStyle(LooreColor.accent)
         }
         .buttonStyle(.plain)
+    }
+}
+
+extension ToolCallMeta {
+    /// The line for someone who is not the reply's owner. The server sends
+    /// them each action's name and outcome only (no search query, link,
+    /// artifact kind or error), so it names the action and links nowhere:
+    /// a todo or share link would open the viewer's own.
+    var sharedLabel: String {
+        let ok = status == "success"
+        switch name {
+        case "propose_todo": return "Todo update proposed"
+        case "propose_github_issue": return "Issue proposed"
+        case "propose_feedback": return "Feedback proposed"
+        case "propose_share": return "Share proposed"
+        case "apply_todo_changes": return ok ? "Todo changes confirmed" : "Todo apply failed"
+        case "apply_github_issue": return ok ? "Issue creation confirmed" : "Issue creation failed"
+        case "apply_feedback": return ok ? "Feedback sent" : "Feedback send failed"
+        case "apply_share": return ok ? "Share saved as a draft" : "Share save failed"
+        case "update_ai_preferences": return "Preferences updated"
+        case "update_artifact": return "Wrote an artifact"
+        case "read_artifact": return "Read an artifact"
+        case "read_todo": return "Read the todo list"
+        case "semantic_search": return "Searched archive & references"
+        case "read_full": return ok ? "Read in full" : "Read in full (failed)"
+        default: return name.isEmpty ? "Action" : name
+        }
     }
 }
 

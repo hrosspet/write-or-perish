@@ -153,77 +153,22 @@ struct UserCapabilities: Equatable, Sendable {
     var showsCommons: Bool { approved && shareEnabled }
 }
 
-/// `GET /api/dashboard/` envelope.
+/// `GET /api/dashboard/` envelope: the signed-in user and the newest profile version
+/// (absent when the call sends `profile=0`, as `AppState.loadUser` does). The server
+/// sends no thread cards here (#481); the Log lists the threads.
 struct DashboardResponse: Decodable, Sendable {
     var user: CurrentUser
-    var pinnedNodes: [DashboardNodeCard]
-    var nodes: [DashboardNodeCard]
-    var hasMore: Bool
-    var page: Int
-    var totalNodes: Int
     var latestProfile: LatestProfile?
 
     enum CodingKeys: String, CodingKey {
-        case user, nodes, page
-        case pinnedNodes = "pinned_nodes"
-        case hasMore = "has_more"
-        case totalNodes = "total_nodes"
+        case user
         case latestProfile = "latest_profile"
     }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         user = try c.decode(CurrentUser.self, forKey: .user)
-        pinnedNodes = c.tolerant(.pinnedNodes, default: [])
-        nodes = c.tolerant(.nodes, default: [])
-        hasMore = c.tolerant(.hasMore, default: false)
-        page = c.tolerant(.page, default: 1)
-        totalNodes = c.tolerant(.totalNodes, default: 0)
         latestProfile = c.tolerant(.latestProfile)
-    }
-}
-
-/// `_serialize_node_for_list` (dashboard `nodes` / `pinned_nodes`).
-struct DashboardNodeCard: Decodable, Identifiable, Sendable {
-    var id: Int
-    var preview: String
-    var nodeType: NodeType
-    var childCount: Int
-    var createdAt: Date?
-    var pinnedAt: Date?
-    var username: String
-    var humanOwnerUsername: String?
-    var llmModel: String?
-    var origin: String?
-    var hasOriginalAudio: Bool
-    var promptKey: String?
-
-    enum CodingKeys: String, CodingKey {
-        case id, preview, username, origin
-        case nodeType = "node_type"
-        case childCount = "child_count"
-        case createdAt = "created_at"
-        case pinnedAt = "pinned_at"
-        case humanOwnerUsername = "human_owner_username"
-        case llmModel = "llm_model"
-        case hasOriginalAudio = "has_original_audio"
-        case promptKey = "prompt_key"
-    }
-
-    init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: CodingKeys.self)
-        id = try c.decode(Int.self, forKey: .id)
-        preview = c.tolerant(.preview, default: "")
-        nodeType = c.tolerant(.nodeType, default: .user)
-        childCount = c.tolerant(.childCount, default: 0)
-        createdAt = c.tolerant(.createdAt)
-        pinnedAt = c.tolerant(.pinnedAt)
-        username = c.tolerant(.username, default: "")
-        humanOwnerUsername = c.tolerant(.humanOwnerUsername)
-        llmModel = c.tolerant(.llmModel)
-        origin = c.tolerant(.origin)
-        hasOriginalAudio = c.tolerant(.hasOriginalAudio, default: false)
-        promptKey = c.tolerant(.promptKey)
     }
 }
 

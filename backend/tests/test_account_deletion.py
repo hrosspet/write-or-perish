@@ -694,16 +694,6 @@ def test_old_ai_replies_without_an_owner_are_hidden_with_the_account(
     assert can_user_access_node(_db.session.get(Node, ids["L2"]), b.id)
 
 
-def test_a_hidden_account_has_no_member_page(app, world, stubs):
-    c = _client(app, world.bob)
-    assert c.get("/api/dashboard/alice").status_code == 200
-    _schedule(world.alice)
-    r = c.get("/api/dashboard/alice")
-    unknown = c.get("/api/dashboard/nobody")
-    assert r.status_code == unknown.status_code == 404
-    assert r.get_data() == unknown.get_data()
-
-
 def test_an_admin_deletes_their_own_account_on_the_account_page(
         app, world, stubs, monkeypatch):
     _dispatcher(monkeypatch, stubs)

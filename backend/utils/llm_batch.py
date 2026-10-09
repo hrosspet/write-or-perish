@@ -287,6 +287,8 @@ def batch_check_and_collect(batch_ids, api_keys):
                         # refuse an empty cut-off result (#368).
                         "truncated": getattr(msg, "stop_reason", None)
                         in TRUNCATED_STOP_REASONS,
+                        "refused": getattr(msg, "stop_reason", None)
+                        == "refusal",
                         "batch": True,
                     }
                 else:
@@ -335,6 +337,7 @@ def batch_check_and_collect(batch_ids, api_keys):
                     choice = body["choices"][0]
                     results[cid] = {
                         "content": choice["message"]["content"],
+                        "refused": bool(choice["message"].get("refusal")),
                         "input_tokens": usage.get("prompt_tokens", 0) or 0,
                         "output_tokens": usage.get(
                             "completion_tokens", 0) or 0,
@@ -435,6 +438,7 @@ def anthropic_batch_collect_one(api_key, batch_id, custom_id):
                 usage, "cache_creation_input_tokens", 0) or 0,
             "tool_calls": [],
             "truncated": msg.stop_reason in TRUNCATED_STOP_REASONS,
+            "refused": msg.stop_reason == "refusal",
             "batch": True,
             "batch_id": batch_id,
         }
@@ -538,12 +542,15 @@ def openai_batch_collect_one(api_key, batch_id, custom_id):
                     f"Batch item {custom_id} failed: "
                     f"{entry.get('error') or body.get('error')}")
             content = ""
+            refused = False
             for item in body.get("output") or []:
                 if item.get("type") != "message":
                     continue
                 for block in item.get("content") or []:
                     if block.get("type") == "output_text":
                         content += block.get("text") or ""
+                    elif block.get("type") == "refusal":
+                        refused = True
             usage = body.get("usage") or {}
             in_toks = usage.get("input_tokens", 0)
             out_toks = usage.get("output_tokens", 0)
@@ -559,6 +566,7 @@ def openai_batch_collect_one(api_key, batch_id, custom_id):
                 "cache_write_subset_tokens": written,
                 "tool_calls": [],
                 "truncated": body.get("status") == "incomplete",
+                "refused": refused,
                 "batch": True,
                 "batch_id": batch_id,
             }

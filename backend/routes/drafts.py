@@ -4,6 +4,7 @@ from sqlalchemy.exc import IntegrityError
 from backend.models import Draft, Node, NodeTranscriptChunk
 from backend.extensions import db
 from backend.utils.privacy import can_user_edit_node
+from backend.utils.proposals import PROPOSAL_TOOLS
 import uuid
 import pathlib
 import os
@@ -56,10 +57,21 @@ def _session_dir(user_id, session_id):
 # must therefore exclude these labels, or composing a text reply under a
 # proposal node would hijack and then delete the pending proposal draft
 # (breaking "yes, send it" / "apply those changes" text confirmation). #158.
-_PROPOSAL_DRAFT_LABELS = (
-    "todo_pending", "github_issue_pending", "feedback_pending",
-    "share_pending",
-)
+_PROPOSAL_DRAFT_LABELS = tuple(PROPOSAL_TOOLS)
+
+# The labels a recording may carry, as the web and iPhone recorders send
+# them: "Voice" (voice mode) or none (dictation). "Reflect" and "Orient"
+# are the older workflow pages' labels, which finalize still names. Only
+# the server sets a proposal label, on the user's own AI reply
+# (utils/proposals).
+_RECORDING_LABELS = ("Voice", "Reflect", "Orient")
+
+
+def _recording_label_error(label):
+    """A 400 response unless *label* is one a recording may carry."""
+    if label is None or label in _RECORDING_LABELS:
+        return None
+    return jsonify({"error": "Invalid label"}), 400
 
 
 def _exclude_proposal_drafts(query):
@@ -152,6 +164,17 @@ def _parent_error(parent_id):
         return jsonify({"error": "Invalid parent_id"}), 400
     from backend.utils.node_deletion import parent_visibility_error
     return parent_visibility_error(Node.query.get(pid), current_user.id)
+
+
+def _live_parent_error(parent_id):
+    """_parent_error, and a 410 for a parent that has been deleted, as
+    POST /drafts/ answers."""
+    err = _parent_error(parent_id)
+    if err is not None or not parent_id:
+        return err
+    if Node.query.get(int(parent_id)).deleted_at is not None:
+        return jsonify({"error": "Parent node has been deleted"}), 410
+    return None
 
 
 def _editable_node(node_id):
@@ -581,6 +604,9 @@ def init_streaming():
     thread is not AI-readable (voice_turn_refusal). Voice mode exists to
     get a reply, and that reply would send the recording to a model.
 
+    400 for a label a recording doesn't carry (_RECORDING_LABELS), 410
+    for a parent that has been deleted.
+
     Request body:
     {
         "parent_id": 123,  // optional - parent node for the eventual node
@@ -595,13 +621,16 @@ def init_streaming():
 
     data = request.get_json() or {}
 
+    label = data.get("label")  # 'Voice', or none (_RECORDING_LABELS)
+    err = _recording_label_error(label)
+    if err is not None:
+        return err
     parent_id = data.get("parent_id")
-    err = _parent_error(parent_id)
+    err = _live_parent_error(parent_id)
     if err is not None:
         return err
     privacy_level = data.get("privacy_level", "private")
     ai_usage = data.get("ai_usage", "none")
-    label = data.get("label")  # 'Reflect', 'Orient', etc.
     if label == "Voice":
         parent = Node.query.get(int(parent_id)) if parent_id else None
         refused = voice_turn_refusal(
@@ -940,6 +969,9 @@ def finalize_streaming(session_id):
     Called when the user stops recording. Marks the session as finalizing
     and waits for all chunks to complete transcription.
 
+    400 for a label a recording doesn't carry (_RECORDING_LABELS), 410
+    for a parent that has been deleted; the session stays as it was.
+
     Request body:
     {
         "total_chunks": 5  // Total number of chunks sent
@@ -960,9 +992,12 @@ def finalize_streaming(session_id):
 
     data = request.get_json() or {}
     total_chunks = data.get("total_chunks")
-    label = data.get("label")  # e.g. "Reflect", "Orient"
+    label = data.get("label")  # 'Voice', or none (_RECORDING_LABELS)
+    err = _recording_label_error(label)
+    if err is not None:
+        return err
     parent_id = data.get("parent_id")  # thread parent for LLM chain
-    err = _parent_error(parent_id)
+    err = _live_parent_error(parent_id)
     if err is not None:
         return err
     model = data.get("model")  # LLM model for server-side generation

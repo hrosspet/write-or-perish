@@ -1,10 +1,10 @@
-import json
-
 from flask import Blueprint, jsonify, request, current_app
 from flask_login import login_required, current_user
 from backend.models import Node
 from backend.extensions import db
+from backend.utils.serialization import serialize_node_status
 from backend.utils.timefmt import iso_utc
+from backend.utils.tool_meta import tool_calls_meta_for
 from backend.utils.prompts import get_user_prompt_record
 from backend.utils.placeholders import UserExportValidationError
 from backend.utils.llm_nodes import (
@@ -15,7 +15,7 @@ from backend.utils.llm_nodes import (
 from backend.utils.context_artifacts import attach_context_artifacts
 from backend.utils.session_helpers import attach_agentic_prompt_under
 from backend.utils.privacy import (
-    can_user_see_node_or_tombstone, validate_ai_usage,
+    can_user_see_node_or_placeholder, validate_ai_usage,
 )
 
 textmode_bp = Blueprint("textmode", __name__)
@@ -23,9 +23,21 @@ textmode_bp = Blueprint("textmode", __name__)
 PROMPT_KEY = 'textmode'
 
 
-def _serialize_message(node):
-    """Serialize a node as a conversation message."""
+def _serialize_message(node, viewer_id):
+    """Serialize a node as a conversation message for *viewer_id*.
+
+    A deleted node, or one the viewer cannot access, comes back as the
+    thread view shows it (serialize_node_status): the deleted placeholder
+    or the inaccessible stub, with no content. An AI reply's
+    tool_calls_meta is in full for its owner only
+    (utils/tool_meta.tool_calls_meta_for)."""
     is_llm = node.node_type == "llm" or node.llm_model is not None
+    status = serialize_node_status(node, viewer_id)
+    if status is not None:
+        msg = dict(status, content=None)
+        if status.get("deleted"):
+            msg["role"] = "assistant" if is_llm else "user"
+        return msg
     msg = {
         "id": node.id,
         "role": "assistant" if is_llm else "user",
@@ -35,10 +47,9 @@ def _serialize_message(node):
         "llm_task_status": node.llm_task_status,
     }
     if is_llm and node.tool_calls_meta:
-        try:
-            msg["tool_calls_meta"] = json.loads(node.tool_calls_meta)
-        except (ValueError, TypeError):
-            pass
+        meta = tool_calls_meta_for(node, viewer_id)
+        if meta:
+            msg["tool_calls_meta"] = meta
     return msg
 
 
@@ -316,11 +327,19 @@ def get_conversation_from_node(node_id):
     node = Node.query.get_or_404(node_id)
     if node.human_owner_id != current_user.id:
         return jsonify({"error": "Unauthorized"}), 403
+    # A deleted node is not found, as in GET /api/nodes/<id>.
+    if node.deleted_at is not None:
+        return jsonify({"error": "Node not found"}), 404
 
     # Collect ancestor chain (including target node, excluding root).
     # Cycle-safe: stop if we revisit a node or exceed a sane hop limit.
     # The chain ends below the first ancestor the user cannot see, so the
-    # response never carries content that is not theirs to read.
+    # response never carries content that is not theirs to read. A deleted
+    # ancestor they could see before is a placeholder without content, and
+    # so is one hidden with its owner's deleted account (#269): the walk
+    # passes through it as through any placeholder, as the reply context
+    # does (llm_completion._load_node_chain) and as after the purge. The
+    # start node is the user's own, so it is never hidden from them.
     chain = []
     current = node
     visited = set()
@@ -328,7 +347,7 @@ def get_conversation_from_node(node_id):
     for _ in range(MAX_HOPS):
         if current is None or current.id in visited:
             break
-        if not can_user_see_node_or_tombstone(current, current_user.id):
+        if not can_user_see_node_or_placeholder(current, current_user.id):
             break
         visited.add(current.id)
         chain.append(current)
@@ -343,7 +362,8 @@ def get_conversation_from_node(node_id):
     root = chain[-1]
     # Reverse to chronological, skip root
     chain.reverse()
-    messages = [_serialize_message(n) for n in chain if n.id != root.id]
+    messages = [_serialize_message(n, current_user.id)
+                for n in chain if n.id != root.id]
 
     return jsonify({
         "conversation_id": root.id,

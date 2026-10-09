@@ -2,6 +2,7 @@ import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { Link } from 'react-router-dom';
 import api from '../api';
 import MarkdownBody from './MarkdownBody';
+import CopyButton from './CopyButton';
 import { insertItemAfter } from '../utils/markdown';
 
 export function stripInlineMarkdown(text) {
@@ -590,6 +591,11 @@ export default function ProposalInline({
   // ### headings are the user's formatting, never todo/issue/feedback
   // proposals (whose confirm endpoints would 404 without a pending draft).
   shareOnly = false,
+  // The proposal's owner (who asked for the reply) accepts it here. Anyone
+  // else sees the proposal without the accept buttons and their status:
+  // the accept endpoints only act on the owner's pending drafts, and
+  // whether the owner accepted is theirs.
+  canAct = true,
 }) {
   const parsed = parseOrientResponse(content || '');
   // A note alone is NOT a todo proposal (matches the backend detector) —
@@ -605,6 +611,9 @@ export default function ProposalInline({
   // to it instead of just cancelling the first.
   const [addingKey, setAddingKey] = useState(null);
   const [applyError, setApplyError] = useState(null);
+  // A failed todo merge leaves the proposal applicable (the server's
+  // `retryable`, #434): the card shows "Apply again" next to the error.
+  const [canApplyAgain, setCanApplyAgain] = useState(false);
   const [issueApplyStatus, setIssueApplyStatus] = useState(null);
   const [issueApplyError, setIssueApplyError] = useState(null);
   const [issueResult, setIssueResult] = useState(null);
@@ -665,6 +674,7 @@ export default function ProposalInline({
       else if (todoEntry.apply_status === 'failed') {
         setApplyStatus('error');
         setApplyError(todoEntry.apply_error || 'Todo merge failed');
+        setCanApplyAgain(!!todoEntry.retryable);
       } else if (todoEntry.apply_status === 'started') {
         setApplyStatus('started');
       }
@@ -705,6 +715,7 @@ export default function ProposalInline({
   }, []);
 
   const pollApplyStatus = useCallback((nId) => {
+    if (mergePollingRef.current) clearInterval(mergePollingRef.current);
     mergePollingRef.current = setInterval(async () => {
       try {
         const res = await api.get(`/nodes/${nId}/llm-status`);
@@ -719,9 +730,11 @@ export default function ProposalInline({
             clearInterval(mergePollingRef.current);
             setApplyStatus('error');
             setApplyError(todoEntry.apply_error || 'Todo merge failed');
+            setCanApplyAgain(!!todoEntry.retryable);
             onApplied?.('propose_todo', {
               apply_status: 'failed',
               apply_error: todoEntry.apply_error || 'Todo merge failed',
+              retryable: !!todoEntry.retryable,
             });
           }
         }
@@ -736,9 +749,17 @@ export default function ProposalInline({
       await api.post('/todo/apply-draft', { llm_node_id: nodeId });
       pollApplyStatus(nodeId);
     } catch (err) {
+      // Applied already from another tab: follow that merge.
+      if (err?.response?.data?.code === 'todo_merge_started') {
+        pollApplyStatus(nodeId);
+        return;
+      }
       const msg = err?.response?.data?.error || 'Todo update failed';
       setApplyStatus('error');
       setApplyError(msg);
+      // Nothing started, so the proposal is still pending, unless the
+      // server found no pending proposal (404).
+      setCanApplyAgain(err?.response?.status !== 404);
     }
   }, [nodeId, pollApplyStatus]);
 
@@ -775,16 +796,6 @@ export default function ProposalInline({
       setFeedbackApplyError(msg);
     }
   }, [nodeId, onApplied]);
-
-  // Index of the share card whose copy button just fired (null = none).
-  const [shareCopiedIdx, setShareCopiedIdx] = useState(null);
-  const handleCopyShare = useCallback((idx, text) => {
-    if (!text) return;
-    navigator.clipboard.writeText(text).then(() => {
-      setShareCopiedIdx(idx);
-      setTimeout(() => setShareCopiedIdx(null), 1500);
-    }).catch(() => { /* clipboard unavailable — no toast needed */ });
-  }, []);
 
   const handleSaveShare = useCallback(async (idx) => {
     if (!nodeId) return;
@@ -898,7 +909,7 @@ export default function ProposalInline({
         </div>
       )}
 
-      {hasTodoUpdate && (
+      {hasTodoUpdate && canAct && (
         <div style={styles.applyWrapper}>
           {!applyStatus && (
             <button onClick={handleApplyTodo} style={styles.button}>
@@ -920,6 +931,14 @@ export default function ProposalInline({
               {applyError || 'Todo update failed'}
             </StatusTag>
           )}
+          {applyStatus === 'error' && canApplyAgain && (
+            <button
+              onClick={handleApplyTodo}
+              style={{ ...styles.button, marginLeft: styles.roomy ? 0 : '10px' }}
+            >
+              Apply again
+            </button>
+          )}
         </div>
       )}
 
@@ -940,6 +959,7 @@ export default function ProposalInline({
               <span style={styles.issueCategory}>{parsed.issueCategory}</span>
             )}
           </div>
+          {canAct && (
           <div style={styles.issueButtonWrapper}>
             {!issueApplyStatus && (
               <button onClick={handleCreateIssue} style={styles.button}>
@@ -969,6 +989,7 @@ export default function ProposalInline({
               </StatusTag>
             )}
           </div>
+          )}
         </div>
       )}
 
@@ -986,6 +1007,7 @@ export default function ProposalInline({
               <span style={styles.issueCategory}>{parsed.feedbackCategory}</span>
             )}
           </div>
+          {canAct && (
           <div style={styles.issueButtonWrapper}>
             {!feedbackApplyStatus && (
               <button onClick={handleSendFeedback} style={styles.button}>
@@ -1008,6 +1030,7 @@ export default function ProposalInline({
               </StatusTag>
             )}
           </div>
+          )}
         </div>
       )}
 
@@ -1027,31 +1050,11 @@ export default function ProposalInline({
               }}
             >
               {/* One-click copy for pasting the share elsewhere (e.g. X). */}
-              <button
-                onClick={() => handleCopyShare(idx, share.content)}
+              <CopyButton
+                text={share.content}
                 title="Copy share text"
-                style={{
-                  position: 'absolute', top: '8px', right: '8px',
-                  background: 'none', border: 'none', cursor: 'pointer',
-                  padding: '4px', lineHeight: 0,
-                  color: shareCopiedIdx === idx ? 'var(--success)' : 'var(--text-muted)',
-                  opacity: shareCopiedIdx === idx ? 1 : 0.6,
-                  transition: 'opacity 0.15s ease, color 0.15s ease',
-                }}
-                onMouseEnter={(e) => { e.currentTarget.style.opacity = 1; }}
-                onMouseLeave={(e) => { if (shareCopiedIdx !== idx) e.currentTarget.style.opacity = 0.6; }}
-              >
-                {shareCopiedIdx === idx ? (
-                  <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-                    <path d="M3 8.5 L6.5 12 L13 4.5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"/>
-                  </svg>
-                ) : (
-                  <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-                    <rect x="5.5" y="5.5" width="8" height="8" rx="1.5" stroke="currentColor" strokeWidth="1.2"/>
-                    <path d="M10.5 5.5 V4 A1.5 1.5 0 0 0 9 2.5 H4 A1.5 1.5 0 0 0 2.5 4 V9 A1.5 1.5 0 0 0 4 10.5 H5.5" stroke="currentColor" strokeWidth="1.2"/>
-                  </svg>
-                )}
-              </button>
+                style={{ position: 'absolute', top: '8px', right: '8px' }}
+              />
               <MarkdownBody
                 style={styles.issueDescStyle}
                 paragraphMargin={styles.roomy ? '0 0 8px 0' : '0 0 6px 0'}
@@ -1062,6 +1065,7 @@ export default function ProposalInline({
                 <span style={styles.issueCategory}>{share.type}</span>
               )}
             </div>
+            {canAct && (
             <div style={styles.issueButtonWrapper}>
               {!state && (
                 <button onClick={() => handleSaveShare(idx)} style={styles.button}>
@@ -1088,6 +1092,7 @@ export default function ProposalInline({
                 </StatusTag>
               )}
             </div>
+            )}
             </div>
             );
           })}
