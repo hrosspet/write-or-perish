@@ -438,6 +438,30 @@ def test_unparseable_reply_fails_at_the_first_collect(app, monkeypatch, tmp_path
     assert "not JSON" in node.llm_task_error
 
 
+def test_refused_reply_fails_at_the_first_collect_naming_the_model(app, monkeypatch, tmp_path):  # noqa: F811
+    """#454: a refusal is not JSON, but the admin should read that the
+    model refused, not "not JSON". Terminal like a parse failure: the
+    stored result cannot change and no other provider is tried."""
+    from backend.utils.ca_feed import FeedReplyError
+    refused = _batch_resp()
+    refused["content"] = "I can't help with that."
+    refused["refused"] = True
+    calls = _script(monkeypatch, tmp_path, collect=lambda: ("completed", refused))
+    alice, read, llm_node = _read_thread()
+    task = _Task()
+
+    with pytest.raises(FeedReplyError):
+        _run(task, alice, read, llm_node)
+
+    assert task.retries == []
+    assert calls["submit"] == []
+    node = _reload(llm_node.id)
+    assert node.llm_task_status == "failed"
+    assert "refused the Read" in node.llm_task_error
+    assert "gpt-5" in node.llm_task_error
+    assert "not JSON" not in node.llm_task_error
+
+
 # ── the collecting run ───────────────────────────────────────────────────
 
 def test_interrupted_collect_polls_again_and_never_resubmits(app, monkeypatch, tmp_path):  # noqa: F811
