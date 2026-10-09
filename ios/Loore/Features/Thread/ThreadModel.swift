@@ -537,13 +537,25 @@ final class ThreadModel {
     /// The thread was started from the Glean card.
     var gleanThread: Bool { node?.gleanThread ?? false }
 
-    /// The Glean button (and its model picker) in the action row: a Glean-card
-    /// thread only, for its owner, whenever they could act (web `readActions`).
+    /// The Glean entry: the read prompt a glean attaches (shown as "Glean").
+    var isGleanEntry: Bool {
+        guard let node, node.systemPrompt.isSystemPrompt else { return false }
+        return ["read", "read_thread"].contains(node.systemPrompt.promptKey ?? "")
+    }
+
+    /// The Glean button (and its model picker) in the action row, for its owner,
+    /// whenever they could act (web `readActions`): every turn of a Glean-card
+    /// thread, and the Glean entry in any thread (Peter, 2026-10-09: it is Glean's
+    /// own entry, and where a failed gleaning is tried again). No other system
+    /// prompt: there is no reflection to glean from.
     func readActions(craftMode: Bool) -> Bool {
         guard let node else { return false }
-        return isOwner && gleanEnabled && gleanThread && node.aiUsage != .off && !isLLMPending
-            && !node.systemPrompt.isSystemPrompt
+        return isOwner && gleanEnabled && (gleanThread || isGleanEntry) && node.aiUsage != .off
+            && !isLLMPending && (!node.systemPrompt.isSystemPrompt || isGleanEntry)
     }
+
+    /// A gleaning that failed (#435): the page says so instead of its placeholder.
+    var gleaningFailed: Bool { isReadReply && node?.llmTaskStatus == .failed }
 
     /// "Glean for this reflection" in an entry's ⋯ menu (web `gleanFromMenu`): in
     /// any thread NOT started from the Glean card, on the user's own entries, at
@@ -561,8 +573,14 @@ final class ThreadModel {
     }
 
     /// The action row's Glean: under this node, on the model picked beside it.
+    /// Under a failed gleaning the next one starts where it did (its parent), so
+    /// the failed reply is not part of what is read.
     func gleanHere() {
-        glean(under: nodeId, model: readModel)
+        if gleaningFailed, let parent = parentAncestor, !parent.deleted {
+            glean(under: parent.id, model: readModel)
+        } else {
+            glean(under: nodeId, model: readModel)
+        }
     }
 
     /// `POST /api/read/from-node/<id>` (billed, a live call): a glean under the

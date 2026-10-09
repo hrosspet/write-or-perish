@@ -400,21 +400,6 @@ private struct FocalCard: View {
                 ReadReplyTail(nodeId: node.id, unread: model.readPicksUnread, total: model.readPickIds.count,
                               loaded: model.readPicksLoaded) { model.readPicksMarkedAll($0) }
             }
-            if model.gleaningDone && model.isOwner {
-                // The way back to the home screen's cards (#436 mockup).
-                Button { app.open(.home) } label: {
-                    Text("Back to Home")
-                        .font(LooreFont.sans(14.1, .light))
-                        .foregroundStyle(LooreColor.textPrimary)
-                        .padding(.horizontal, 16)
-                        .frame(minHeight: 44)
-                        .overlay(Capsule().strokeBorder(LooreColor.borderHover))
-                        .contentShape(Capsule())
-                }
-                .buttonStyle(.plain)
-                .padding(.top, 14)
-                .accessibilityIdentifier("thread.backToHome")
-            }
             if let meta = node.toolCallsMeta?.filter({ !$0.isInternal }), !meta.isEmpty {
                 ToolCallsDisclosure(meta: meta, detailed: model.isOwner, expanded: $model.toolActionsExpanded)
             }
@@ -447,6 +432,11 @@ private struct FocalCard: View {
                 PulsingDots()
             }
             .padding(.vertical, 8)
+        } else if model.gleaningFailed {
+            GleaningFailed(reason: node.llmTaskError,
+                           hint: !(model.isOwner && model.gleanEnabled) ? nil
+                               : model.readActions(craftMode: false) ? "Press Glean below to try again."
+                               : "To try again, choose “\(ThreadModel.gleanMenuLabel)” in your entry's ⋯ menu.")
         } else {
             let showProposal = model.showProposal
             let split = showProposal ? ProposalParser.splitProposalText(node.content, shareOnly: !model.isLLMNode) : nil
@@ -519,6 +509,37 @@ private struct GleaningsEmptyDay: View {
         .padding(.horizontal, 8)
         .accessibilityElement(children: .combine)
         .accessibilityIdentifier("thread.gleaningsEmpty")
+    }
+}
+
+/// A gleaning that failed (#435): what happened and where to try again, in place
+/// of the placeholder text the reply keeps (web `.gleaning-failed`).
+private struct GleaningFailed: View {
+    let reason: String?
+    let hint: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("This gleaning didn't come through.")
+                .font(LooreFont.serif(20.8, .regular, relativeTo: .title3))
+                .foregroundStyle(LooreColor.textPrimary)
+                .padding(.bottom, 2)
+            if let reason, !reason.isEmpty {
+                Text(reason)
+                    .font(LooreFont.sans(14.1, .light))
+                    .foregroundStyle(LooreColor.textMuted)
+            }
+            if let hint {
+                Text(hint)
+                    .font(LooreFont.sans(14.1, .light))
+                    .foregroundStyle(LooreColor.textMuted)
+            }
+        }
+        .fixedSize(horizontal: false, vertical: true)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, 6)
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("thread.gleaningFailed")
     }
 }
 

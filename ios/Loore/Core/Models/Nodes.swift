@@ -198,6 +198,9 @@ struct NodeDetail: Decodable, Identifiable, Sendable {
     /// nil = written in Loore; "twitter" | "chatgpt" | "claude" | "markdown" for imports.
     var origin: String?
     var llmTaskStatus: TaskStatus?
+    /// Why the reply failed, for its owner only (#435: shown under a failed
+    /// gleaning instead of its placeholder text).
+    var llmTaskError: String?
     var hasOriginalAudio: Bool
     var hasTTS: Bool
     /// Partial reply text while `llmTaskStatus` is pending/processing (#367).
@@ -233,6 +236,7 @@ struct NodeDetail: Decodable, Identifiable, Sendable {
         case pinnedAt = "pinned_at"
         case llmModel = "llm_model"
         case llmTaskStatus = "llm_task_status"
+        case llmTaskError = "llm_task_error"
         case hasOriginalAudio = "has_original_audio"
         case hasTTS = "has_tts"
         case streamingContent = "streaming_content"
@@ -263,6 +267,7 @@ struct NodeDetail: Decodable, Identifiable, Sendable {
         llmModel = c.tolerant(.llmModel)
         origin = c.tolerant(.origin)
         llmTaskStatus = c.tolerant(.llmTaskStatus)
+        llmTaskError = c.tolerant(.llmTaskError)
         hasOriginalAudio = c.tolerant(.hasOriginalAudio, default: false)
         hasTTS = c.tolerant(.hasTTS, default: false)
         streamingContent = c.tolerant(.streamingContent)

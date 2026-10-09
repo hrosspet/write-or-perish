@@ -204,3 +204,105 @@ final class TweetCardTests: XCTestCase {
         XCTAssertEqual(ExternalQuoteBubble.byline(clip).handle, "example.org")
     }
 }
+
+/// The rework after Peter's local test (2026-10-09): Glean and its picker on the
+/// Glean entry, a failed gleaning that says so and where to try again, the
+/// "Glean" tag, and no quote markers in a card.
+@MainActor
+final class GleanReworkTests: StubbedAppTestCase {
+    override func setUp() async throws {
+        try await super.setUp()
+        let user = try decode(CurrentUser.self, """
+        {"id":5,"username":"seowriter","approved":true,"terms_up_to_date":true,"plan":"alpha","craft_mode":false,
+         "preferred_model":"claude-opus-4.6","default_privacy_level":"private","default_ai_usage":"chat",
+         "voice_mode_enabled":true,"timezone":"UTC","glean_available":true,"glean_enabled":true}
+        """)
+        app.useForTesting(api: makeStubbedClient(environment: .local), user: user)
+    }
+
+    private let entry = """
+    {"id":20,"content":"I keep going back and forth.","node_type":"user","user_id":5,"ai_usage":"chat","privacy_level":"private"}
+    """
+    private let readPrompt = """
+    {"id":31,"content":"","node_type":"user","user_id":5,"ai_usage":"chat","privacy_level":"private",
+     "is_system_prompt":true,"prompt_key":"read_thread"}
+    """
+
+    private func load(_ id: Int, _ json: String) async -> ThreadModel {
+        StubURLProtocol.install { request in
+            let path = request.url?.path(percentEncoded: true) ?? ""
+            if path == "/api/nodes/\(id)" { return .json(200, json) }
+            if path.hasPrefix("/api/read/from-node/") { return .json(202, #"{"llm_node_id":41,"task_id":"t"}"#) }
+            return .json(200, "{}")
+        }
+        let model = ThreadModel(nodeId: id, awaitLLM: nil, app: app)
+        await model.load()
+        return model
+    }
+
+    private func gleanEntry(gleanThread: Bool) -> String {
+        """
+        {"id":31,"content":"","node_type":"user","user":{"id":5,"username":"seowriter"},"privacy_level":"private",
+         "ai_usage":"chat","is_system_prompt":true,"prompt_key":"read_thread","child_count":0,"children":[],
+         "ancestors":[\(entry)],"in_read_thread":true,"glean_thread":\(gleanThread)}
+        """
+    }
+
+    func testTheGleanEntryCarriesGleanInAnyThread() async {
+        for gleanThread in [true, false] {
+            let model = await load(31, gleanEntry(gleanThread: gleanThread))
+            XCTAssertTrue(model.isGleanEntry)
+            XCTAssertTrue(model.readActions(craftMode: false), "glean_thread \(gleanThread)")
+        }
+    }
+
+    func testTheThreadsOwnVoicePromptHasNoGlean() async {
+        let model = await load(10, """
+        {"id":10,"content":"","node_type":"user","user":{"id":5,"username":"seowriter"},"privacy_level":"private",
+         "ai_usage":"chat","is_system_prompt":true,"prompt_key":"voice","child_count":0,"children":[],
+         "ancestors":[],"glean_thread":true}
+        """)
+        XCTAssertFalse(model.isGleanEntry)
+        XCTAssertFalse(model.readActions(craftMode: false))
+    }
+
+    func testAFailedGleaningSaysWhyAndTheRetryStartsWhereItDid() async {
+        let model = await load(32, """
+        {"id":32,"content":"[LLM response generation pending...]","node_type":"llm","llm_model":"claude-haiku-5.5",
+         "user":{"id":3,"username":"claude-haiku-5.5"},"parent_user_id":5,"privacy_level":"private","ai_usage":"chat",
+         "llm_task_status":"failed","llm_task_error":"The model provider did not answer.",
+         "tool_calls_meta":[{"name":"_live"}],"child_count":0,"children":[],
+         "ancestors":[\(entry),\(readPrompt)],"in_read_thread":true,"read_reply_above":true,"glean_thread":true}
+        """)
+        XCTAssertTrue(model.gleaningFailed)
+        XCTAssertFalse(model.gleaningDone)
+        XCTAssertEqual(model.node?.llmTaskError, "The model provider did not answer.")
+        XCTAssertTrue(model.readActions(craftMode: false))
+        model.gleanHere()
+        let posted = await eventually {
+            StubURLProtocol.requests.contains { $0.url?.path(percentEncoded: true) == "/api/read/from-node/31" }
+        }
+        XCTAssertTrue(posted, "the next glean starts under the Glean entry, not under the failed reply")
+    }
+
+    func testTheReadPromptsAreTaggedGlean() {
+        XCTAssertEqual(BubblePreview.promptLabel("read"), "Glean")
+        XCTAssertEqual(BubblePreview.promptLabel("read_thread"), "Glean")
+    }
+
+    func testACardLeavesOutQuoteMarkers() {
+        let data = BubbleData(id: 1, content: "Two tweets today.\n\nWhy this one. {quote_ext:12}\n\nAnd {quote:7} this one.")
+        let shown = BubblePreview.display(text: data.text, threadName: nil)
+        XCTAssertEqual(shown.heading, "Two tweets today.")
+        XCTAssertFalse(shown.body.contains("{quote"))
+        XCTAssertTrue(shown.body.contains("And this one."))
+    }
+
+    private func eventually(_ condition: @escaping () -> Bool) async -> Bool {
+        for _ in 0..<40 {
+            if condition() { return true }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        return condition()
+    }
+}

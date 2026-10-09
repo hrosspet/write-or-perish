@@ -31,6 +31,17 @@ enum BubblePreview {
         return (heading, body)
     }
 
+    /// A reply's quote markers (`{quote:12}`, `{quote_ext:34}`) become cards on
+    /// the node's own page; in a card they would read as raw markup, so they are
+    /// left out (web `stripQuoteMarkers`; every earlier gleaning above a "Glean
+    /// again" is full of them, #435).
+    static func stripQuoteMarkers(_ text: String) -> String {
+        var s = JSRegex.replaceAll(text, #"[ \t]*\{quote(?:_ext)?:\d+\}[ \t]*"#, " ")
+        s = JSRegex.replaceAll(s, #" +\n"#, "\n")
+        s = JSRegex.replaceAll(s, #"\n{3,}"#, "\n\n")
+        return s.jsTrimmed
+    }
+
     /// Whether the collapsed card hides something (title > 120, body > 250, > 2 lines).
     static func canExpand(content: String?, text: String?) -> Bool {
         guard content != nil else { return false }
@@ -38,9 +49,10 @@ enum BubblePreview {
         return parts.title.jsLength > 120 || parts.body.jsLength > 250 || parts.body.jsLines.count > 2
     }
 
-    /// Prompt tags: both read prompts are "Read"; other keys capitalised, `_` → space.
+    /// Prompt tags: both read prompts are "Glean" (#435, Peter's name for the
+    /// read); other keys capitalised, `_` → space.
     static func promptLabel(_ key: String) -> String {
-        if key == "read" || key == "read_thread" { return "Read" }
+        if key == "read" || key == "read_thread" { return "Glean" }
         guard let first = key.first else { return key }
         return (String(first).uppercased() + key.dropFirst()).replacingOccurrences(of: "_", with: " ")
     }
@@ -65,7 +77,7 @@ struct BubbleData: Identifiable, Equatable {
     var hasOriginalAudio = false
     var isPublic = false
 
-    var text: String? { content ?? preview }
+    var text: String? { (content ?? preview).map(BubblePreview.stripQuoteMarkers) }
     var isPlaceholder: Bool { deleted || inaccessible }
 }
 
@@ -134,7 +146,7 @@ struct BubbleView: View {
             } else if data.inaccessible {
                 placeholderLine("[Node inaccessible]")
             } else if expanded, let content = data.content {
-                MarkdownView(markdown: content, style: .bubble)
+                MarkdownView(markdown: BubblePreview.stripQuoteMarkers(content), style: .bubble)
                     .padding(.bottom, 9.6)
             } else {
                 Text(heading)
