@@ -23,7 +23,7 @@ jest.mock('../api', () => ({
 }));
 let mockSessionOptions;
 let mockPhase;
-const mockPause = jest.fn();
+const mockStop = jest.fn();
 jest.mock('../hooks/useVoiceSession', () => ({
   useVoiceSession: (options) => {
     mockSessionOptions = options;
@@ -31,7 +31,7 @@ jest.mock('../hooks/useVoiceSession', () => ({
       phase: mockPhase, isStopping: false, hasError: false, isOnline: true,
       streaming: { isPaused: false, isInterrupted: false, duration: 0 },
       audio: {
-        isPlaying: true, pause: mockPause, play: jest.fn(),
+        isPlaying: true, pause: jest.fn(), stop: mockStop, play: jest.fn(),
         skipBackward: jest.fn(), skipForward: jest.fn(),
         cumulativeTime: 0, totalDuration: 0, chapterStartTime: () => 0,
         currentAudio: null,
@@ -85,7 +85,7 @@ const renderAt = (path, user = {}) => {
 beforeEach(() => {
   mockGet.mockReset();
   mockPost.mockReset();
-  mockPause.mockReset();
+  mockStop.mockReset();
   mockPoll.mockReset();
   mockSessionOptions = null;
   mockThreadParent = null;
@@ -122,7 +122,7 @@ test('a fresh Glean session: no Glean before the first recording, then under the
   expect(mockPost).toHaveBeenCalledWith('/read/from-node/55', {});
   // The voice reply stops; the gleaning is never handed to the voice
   // session, so it is never spoken.
-  expect(mockPause).toHaveBeenCalled();
+  expect(mockStop).toHaveBeenCalled();
   expect(screen.getByRole('button', { name: 'Gleaning' })).toBeDisabled();
   expect(mockPoll).toHaveBeenLastCalledWith('/nodes/57/llm-status', expect.objectContaining({ enabled: true }));
 });
