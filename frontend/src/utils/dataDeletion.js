@@ -9,8 +9,9 @@ export function formatDeletionDate(value) {
   return d.toLocaleDateString(undefined, { day: "numeric", month: "long", year: "numeric" });
 }
 
-// The purge deletes Loore's stored X connection but does not revoke it
-// at X, so the user is told how to do that themselves.
+// The purge revokes Loore's access at X and deletes the stored X
+// connection. If X still lists Loore (the call failed, or the user also
+// signs in with X), these are the steps to remove it there.
 export const X_REMOVE_ACCESS_STEPS =
   "on X, open Settings and privacy, then Security and account access, " +
   "Apps and sessions, Connected apps, choose Loore and revoke its permissions.";

@@ -82,7 +82,7 @@ export const PURGE_COUNT_LABELS = [
   ["feed_pick", "Read picks and quotes"],
   ["feed_render", "Read renders"],
   ["reference_action", "Reference opens, marks and verdicts"],
-  ["external_account", "X connection (deleted, not revoked at X)"],
+  ["external_account", "X connection (revoked at X, then deleted)"],
   ["files", "Files on disk (audio, imports, X dumps)"],
   ["api_cost_log", "Cost rows (kept, moved to loore-erased without the name)"],
   ["node.linked_node_id", "Other users' links to these entries (cleared)"],

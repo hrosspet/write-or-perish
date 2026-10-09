@@ -147,8 +147,9 @@ function DeleteWritingDialog({ open, username, graceDays, xConnected, onConfirm,
         </p>
         {xConnected && (
           <p style={bodyStyle}>
-            Loore also forgets your X connection for bookmarks. To remove
-            Loore's access on X as well: {X_REMOVE_ACCESS_STEPS}
+            Loore also forgets your X connection for bookmarks and removes
+            its access on X. If X still lists Loore afterwards, remove it
+            yourself: {X_REMOVE_ACCESS_STEPS}
           </p>
         )}
         <label htmlFor="delete-writing-confirm" style={{ ...bodyStyle, display: "block", marginBottom: "6px" }}>

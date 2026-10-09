@@ -257,31 +257,60 @@ def x_tweet_public_status(tweet_id, timeout=10):
 
 
 X_TOKEN_URL = "https://api.twitter.com/2/oauth2/token"
+# OAuth 2.0 token revocation (docs.x.com, "OAuth 2.0 Authorization Code
+# Flow with PKCE": POST /2/oauth2/revoke, form-encoded ``token``, the
+# client authenticated as on the token endpoint).
+X_REVOKE_URL = "https://api.x.com/2/oauth2/revoke"
+
+
+def _x_client_post(url, data, client_id, client_secret=None, timeout=30):
+    """POST to one of X's OAuth2 client endpoints (token, revoke),
+    authenticating the client the way the app's registration requires.
+
+    An app registered WITH a secret is a confidential client, and X then
+    demands HTTP Basic auth on every call — the refresh grant included.
+    A confidential client that sends only a body ``client_id`` gets
+    401 invalid_client. Every call goes through this one function so the
+    calls cannot drift apart again: for months only the code exchange
+    sent Basic auth, so every nightly refresh 401'd and the sync parked
+    the account as revoked (#313)."""
+    auth = (client_id, client_secret) if client_secret else None
+    return requests.post(
+        url,
+        data=dict(data, client_id=client_id),
+        auth=auth,
+        timeout=timeout,
+    )
 
 
 def x_token_request(grant, client_id, client_secret=None):
-    """POST one OAuth2 grant to X's token endpoint, authenticating the
-    client the way the app's registration requires.
-
-    An app registered WITH a secret is a confidential client, and X then
-    demands HTTP Basic auth on every grant — the refresh grant included.
-    A confidential client that sends only a body ``client_id`` gets
-    401 invalid_client. Both grants go through this one function so the
-    code exchange and the refresh cannot drift apart again: for months
-    only the code exchange sent Basic auth, so every nightly refresh
-    401'd and the sync parked the account as revoked (#313).
+    """POST one OAuth2 grant to X's token endpoint.
 
     Returns the token-endpoint JSON ({access_token, refresh_token, ...}).
     """
-    auth = (client_id, client_secret) if client_secret else None
-    resp = requests.post(
-        X_TOKEN_URL,
-        data=dict(grant, client_id=client_id),
-        auth=auth,
-        timeout=30,
-    )
+    resp = _x_client_post(X_TOKEN_URL, grant, client_id, client_secret)
     resp.raise_for_status()
     return resp.json()
+
+
+def x_revoke_token(token, client_id, client_secret=None, timeout=30):
+    """Revoke one OAuth2 token (access or refresh) at X, so X stops
+    listing Loore as an app with access through it.
+
+    Returns True when X confirms. Raises ``requests.RequestException``
+    (HTTP error, timeout, no connection) or ValueError (X answered 200
+    but did not confirm). The token goes in the form body only, never in
+    a URL, so an exception's text never carries it."""
+    resp = _x_client_post(X_REVOKE_URL, {"token": token}, client_id,
+                          client_secret, timeout=timeout)
+    resp.raise_for_status()
+    try:
+        body = resp.json()
+    except ValueError:
+        body = None
+    if isinstance(body, dict) and body.get("revoked") is False:
+        raise ValueError("X answered revoked=false")
+    return True
 
 
 def x_exchange_code(client_id, code, redirect_uri, code_verifier,
