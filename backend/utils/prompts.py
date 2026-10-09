@@ -32,18 +32,20 @@ PROMPT_DEFAULTS = {
         'title': 'Text Mode',
         'file': 'agentic.txt',
     },
-    # Community Archive reading (PoC, 2026-09-13): the prompt carries
-    # {ca_tweets}, which only admins may run, so the prompts page lists
-    # these for admins only (`admin`). 'read' roots a fresh thread on the
-    # profile and intentions alone; 'read_thread' is attached under an
-    # existing thread and reads the archive against it.
+    # Community Archive reading (PoC, 2026-09-13), called Glean since
+    # #435: the prompt carries {ca_tweets}; the prompts page lists these
+    # for admins only (`admin`). 'read' roots a fresh thread on the
+    # profile and intentions alone (admin experiments); 'read_thread' is
+    # attached under an existing thread and reads the archive against it
+    # (every glean). The titles are what the thread page shows on the
+    # prompt node, also for versions saved under the old titles.
     'read': {
-        'title': 'Read the archive',
+        'title': 'Glean from your profile',
         'file': 'read.txt',
         'admin': True,
     },
     'read_thread': {
-        'title': 'Read the archive for this thread',
+        'title': 'Glean',
         'file': 'read_thread.txt',
         'admin': True,
     },

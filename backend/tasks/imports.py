@@ -86,18 +86,27 @@ def snapshot_dir_for(config):
 
 
 @celery.task(name="backend.tasks.imports.refresh_community_archive_snapshot")
-def refresh_community_archive_snapshot():
-    """Beat sweep (every 30 min): keep the cached Community Archive export
-    current, so a read started after the nightly export (~07:00 UTC)
-    reads that day and does not wait on the 900 MB download itself (a
-    read also refreshes on its own before rendering, in case this sweep
-    is down). Maintains only a snapshot that exists — the first copy is
-    fetched by the pre-fill import or the CLI, never here, so staging
-    does not download a gigabyte per deploy."""
-    from backend.utils.ca_feed import refresh_snapshot_for_read
+def refresh_community_archive_snapshot(first_copy=False):
+    """Beat sweep (every 30 min), and queued by every read before it
+    renders (ca_feed.request_snapshot_refresh): keep the cached Community
+    Archive export current, so a read started after the nightly export
+    (~07:00 UTC) reads that day. A read never waits for the 900 MB
+    download: it reads the cached export and the next read gets the new
+    one. A refresh that finds another one downloading returns at once.
+    The sweep maintains only a snapshot that exists, so staging does not
+    download a gigabyte per deploy on its own. The first copy comes from
+    the pre-fill import, the CLI, or *first_copy*: a read that found no
+    export queues this with it (ca_feed.request_snapshot_refresh, #435
+    review), so the first glean on a fresh machine starts the fetch."""
+    from backend.utils.ca_feed import (
+        fetch_first_snapshot, refresh_snapshot_for_read,
+    )
     with flask_app.app_context():
-        export_id = refresh_snapshot_for_read(
-            snapshot_dir_for(flask_app.config), log=logger)
+        snapshot_dir = snapshot_dir_for(flask_app.config)
+        if first_copy:
+            export_id = fetch_first_snapshot(snapshot_dir, log=logger)
+        else:
+            export_id = refresh_snapshot_for_read(snapshot_dir, log=logger)
     return {"export_id": export_id}
 
 

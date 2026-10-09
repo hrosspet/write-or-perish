@@ -92,6 +92,8 @@ def get_ext_quote_data(item_ids: List[int], user_id: int) -> Dict[int, Optional[
             "content": item.get_content(),
             "source": item.source,
             "author_handle": item.author_handle,
+            # The tweet card's byline (#435): display name, then handle.
+            "author_name": item.author_name,
             "title": item.title,
             "url": item.url,
             "posted_at": iso_utc(item.posted_at) if item.posted_at else None,

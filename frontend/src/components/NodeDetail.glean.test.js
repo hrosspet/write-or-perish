@@ -1,0 +1,374 @@
+// Glean on the thread page (#435, Peter 2026-10-09):
+// - a thread started from the Glean card offers the Glean button in the
+//   action row of every turn;
+// - any other thread offers "Glean for this reflection" in the entry's
+//   menu instead, and no Glean button;
+// - a user without Glean (the gate or their own switch) sees neither;
+// - a finished gleaning is headed "Today's gleanings", and an empty day
+//   says so with the count of tweets read.
+const mockGet = jest.fn();
+const mockPost = jest.fn();
+jest.mock('../api', () => ({
+  __esModule: true,
+  default: {
+    get: (...args) => mockGet(...args),
+    post: (...args) => mockPost(...args),
+    put: jest.fn(() => Promise.resolve({ data: {} })),
+    delete: jest.fn(() => Promise.resolve({ data: {} })),
+  },
+}));
+
+let mockUser;
+jest.mock('../contexts/UserContext', () => ({ useUser: () => ({ user: mockUser }) }));
+jest.mock('../contexts/ToastContext', () => ({
+  useToast: () => ({ addToast: () => {}, removeToast: () => {} }),
+}));
+const mockTextStream = jest.fn();
+jest.mock('../hooks/useSSE', () => ({
+  useLlmTextStream: (...args) => mockTextStream(...args),
+}));
+
+jest.mock('./MarkdownBody', () => ({ children }) => <div>{children}</div>);
+jest.mock('./NodeForm', () => () => null);
+jest.mock('./NodeFormModal', () => () => null);
+// The picker stands in as a button that picks another provider's model.
+jest.mock('./ModelSelector', () => ({ purpose, onModelChange }) => (
+  <button
+    type="button"
+    data-testid={`${purpose || 'chat'}-model-picker`}
+    onClick={() => onModelChange('gpt-6-luna')}
+  />
+));
+jest.mock('./SpeakerIcon', () => () => null);
+jest.mock('./DownloadAudioIcon', () => () => null);
+jest.mock('./SemanticNeighbors', () => () => null);
+jest.mock('./FeedPicks', () => () => null);
+jest.mock('./NodeFooter', () => ({ children }) => <div>{children}</div>);
+jest.mock('./QuotedContent', () => ({ content }) => <div>{content}</div>);
+
+import React from 'react';
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { MemoryRouter, Routes, Route } from 'react-router-dom';
+import NodeDetailWrapper from './NodeDetailWrapper';
+
+const USER = { id: 1, username: 'ana', craft_mode: false, is_admin: false, glean_enabled: true };
+
+const VOICE_ROOT = {
+  id: 10, username: 'ana', user_id: 1, node_type: 'user', content: '',
+  is_system_prompt: true, prompt_key: 'voice', ai_usage: 'chat',
+  privacy_level: 'private', child_count: 1,
+};
+
+// A voice reply in a thread; glean_thread says where the thread started.
+const reply = (overrides = {}) => ({
+  id: 30, node_type: 'llm', llm_model: 'claude-opus-5.5',
+  user: { id: 2, username: 'claude-opus-5.5' }, user_id: 2, parent_user_id: 1,
+  content: 'That sounds like a real fork in the road.',
+  llm_task_status: 'completed', tool_calls_meta: null,
+  ai_usage: 'chat', privacy_level: 'private',
+  ancestors: [VOICE_ROOT, {
+    id: 20, username: 'ana', user_id: 1, node_type: 'user',
+    content: 'I keep going back and forth on onboarding.',
+    ai_usage: 'chat', privacy_level: 'private', child_count: 1,
+  }],
+  children: [], child_count: 0,
+  in_read_thread: false, read_reply_above: false,
+  glean_thread: false,
+  ...overrides,
+});
+
+const READ_PROMPT = {
+  id: 31, username: 'ana', user_id: 1, node_type: 'user', content: '',
+  is_system_prompt: true, prompt_key: 'read_thread', ai_usage: 'chat',
+  privacy_level: 'private', child_count: 1,
+};
+
+// A finished gleaning with *n* picks.
+const gleaning = (n, overrides = {}) => ({
+  id: 32, node_type: 'llm', llm_model: 'claude-haiku-5.5',
+  user: { id: 3, username: 'claude-haiku-5.5' }, user_id: 3, parent_user_id: 1,
+  content: ['A quiet day.', ...Array.from({ length: n },
+    (_, i) => `Why this one.\n\n{quote_ext:${100 + i}}`)].join('\n\n'),
+  llm_task_status: 'completed',
+  tool_calls_meta: [{ name: '_live' }],
+  read_reply: true,
+  read_window: { tweets: 1240, accounts: 300, excluded: 0,
+                 window_start: '2026-10-08T07:00:00Z', window_end: '2026-10-09T07:00:00Z' },
+  ai_usage: 'chat', privacy_level: 'private',
+  ancestors: [VOICE_ROOT, READ_PROMPT],
+  children: [], child_count: 0,
+  in_read_thread: true, read_reply_above: true, glean_thread: true,
+  ...overrides,
+});
+
+beforeAll(() => {
+  Element.prototype.scrollIntoView = () => {};
+});
+
+let routes;
+beforeEach(() => {
+  mockUser = USER;
+  routes = {};
+  mockGet.mockReset();
+  mockPost.mockReset();
+  mockTextStream.mockReset();
+  mockTextStream.mockReturnValue({ text: '', done: false });
+  localStorage.clear();
+  mockGet.mockImplementation((url) => {
+    if (url.endsWith('/llm-status')) return new Promise(() => {});
+    if (url.endsWith('/resolve-quotes')) {
+      return Promise.resolve({ data: { quotes: {}, external_quotes: {}, has_quotes: true } });
+    }
+    if (url in routes) return Promise.resolve({ data: routes[url] });
+    return Promise.reject(new Error(`unexpected GET ${url}`));
+  });
+  mockPost.mockResolvedValue({ data: { prompt_node_id: 40, llm_node_id: 41 } });
+  jest.spyOn(console, 'error').mockImplementation(() => {});
+});
+
+afterEach(() => {
+  console.error.mockRestore();
+});
+
+const renderAt = (path) => render(
+  <MemoryRouter initialEntries={[path]}>
+    <Routes>
+      <Route path="/node/:id" element={<NodeDetailWrapper />} />
+    </Routes>
+  </MemoryRouter>,
+);
+
+const gleanButton = () => Array.from(
+  document.querySelectorAll('[data-action-group] button'),
+).find((b) => b.textContent === 'Glean') || null;
+
+// The focal entry's menu: ancestors render above it, and these threads
+// have no children.
+const openMenu = () => fireEvent.click(screen.getAllByRole('button', { name: 'More actions' }).at(-1));
+
+describe('a thread started from the Glean card', () => {
+  test('offers the Glean button with its model picker, and no menu entry', async () => {
+    routes['/nodes/30'] = reply({ glean_thread: true });
+    renderAt('/node/30');
+    await screen.findByText(/fork in the road/);
+    const button = gleanButton();
+    expect(button).toBeInTheDocument();
+    // Everyone who gleans has the picker, not only admins (Peter, 2026-10-09).
+    expect(screen.getByTestId('read-model-picker')).toBeInTheDocument();
+    openMenu();
+    expect(screen.queryByRole('button', { name: 'Glean for this reflection' })).toBeNull();
+
+    fireEvent.click(button);
+    // Nothing picked: the server takes the default of the user's provider.
+    expect(mockPost).toHaveBeenCalledWith('/read/from-node/30', { model: undefined });
+  });
+
+  test("a non-admin's pick is sent, another provider's model too", async () => {
+    routes['/nodes/30'] = reply({ glean_thread: true });
+    renderAt('/node/30');
+    await screen.findByText(/fork in the road/);
+    fireEvent.click(screen.getByTestId('read-model-picker'));
+    fireEvent.click(gleanButton());
+    expect(mockPost).toHaveBeenCalledWith('/read/from-node/30', { model: 'gpt-6-luna' });
+  });
+
+  test('an admin gets the model picker beside it', async () => {
+    mockUser = { ...USER, is_admin: true };
+    routes['/nodes/30'] = reply({ glean_thread: true });
+    renderAt('/node/30');
+    await screen.findByText(/fork in the road/);
+    expect(gleanButton()).toBeInTheDocument();
+    expect(screen.getByTestId('read-model-picker')).toBeInTheDocument();
+  });
+});
+
+// The Glean entry: the read prompt a glean attaches, as the focal node.
+const gleanEntry = (overrides = {}) => ({
+  ...READ_PROMPT,
+  user: { id: 1, username: 'ana' },
+  ancestors: [VOICE_ROOT, {
+    id: 20, username: 'ana', user_id: 1, node_type: 'user',
+    content: 'I keep going back and forth on onboarding.',
+    ai_usage: 'chat', privacy_level: 'private', child_count: 1,
+  }],
+  children: [], child_count: 0,
+  in_read_thread: true, read_reply_above: false,
+  glean_thread: true,
+  ...overrides,
+});
+
+describe('the Glean entry (Peter, 2026-10-09)', () => {
+  test.each([
+    ['a Glean-card thread', true],
+    ['a Reflect thread', false],
+  ])('carries Glean and its model picker in %s', async (_, gleanThread) => {
+    routes['/nodes/31'] = gleanEntry({ glean_thread: gleanThread });
+    renderAt('/node/31');
+    await waitFor(() => expect(gleanButton()).toBeInTheDocument());
+    expect(screen.getByTestId('read-model-picker')).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId('read-model-picker'));
+    fireEvent.click(gleanButton());
+    expect(mockPost).toHaveBeenCalledWith('/read/from-node/31', { model: 'gpt-6-luna' });
+  });
+
+  test("the thread's own Voice prompt has none: no reflection to glean from", async () => {
+    routes['/nodes/10'] = {
+      ...VOICE_ROOT, user: { id: 1, username: 'ana' }, ancestors: [],
+      children: [], glean_thread: true, in_read_thread: false,
+      read_reply_above: false,
+    };
+    renderAt('/node/10');
+    await screen.findByText('Thread');
+    expect(gleanButton()).toBeNull();
+  });
+
+  test('is tagged "Glean", not "Read"', async () => {
+    routes['/nodes/32'] = gleaning(1);
+    renderAt('/node/32');
+    await screen.findByText("Today's gleanings");
+    expect(screen.queryByText('Read')).toBeNull();
+    expect(screen.getAllByText('Glean').some((el) => el.tagName !== 'BUTTON')).toBe(true);
+  });
+});
+
+describe('the Glean button', () => {
+  test("has Loore's own tooltip, not the browser's", async () => {
+    routes['/nodes/30'] = reply({ glean_thread: true });
+    renderAt('/node/30');
+    await screen.findByText(/fork in the road/);
+    const button = gleanButton();
+    expect(button).not.toHaveAttribute('title');
+    // Described always, as by `title`, not only while the tooltip is open.
+    const description = () => document.getElementById(button.getAttribute('aria-describedby'));
+    expect(description()).toHaveTextContent(/today's Community Archive tweets/);
+    fireEvent.mouseEnter(button);
+    const tip = await screen.findByRole('tooltip');
+    expect(tip).toHaveTextContent(/today's Community Archive tweets/);
+    fireEvent.mouseLeave(button);
+    expect(screen.queryByRole('tooltip')).toBeNull();
+    expect(description()).toHaveTextContent(/today's Community Archive tweets/);
+  });
+});
+
+describe('a failed gleaning', () => {
+  test('says so, with the reason, not the placeholder text', async () => {
+    routes['/nodes/32'] = gleaning(0, {
+      llm_task_status: 'failed', content: '[LLM response generation pending...]',
+      llm_task_error: 'The model provider did not answer.',
+    });
+    renderAt('/node/32');
+    expect(await screen.findByText("This gleaning didn't come through.")).toBeInTheDocument();
+    expect(screen.getByText('The model provider did not answer.')).toBeInTheDocument();
+    expect(screen.queryByText('[LLM response generation pending...]')).toBeNull();
+    // A Glean-card thread: the Glean button is right below.
+    expect(screen.getByText('Press Glean below to try again.')).toBeInTheDocument();
+    // The next one starts where the failed one did, under the Glean
+    // entry: the failed reply is not part of what is read.
+    fireEvent.click(gleanButton());
+    expect(mockPost).toHaveBeenCalledWith('/read/from-node/31', { model: undefined });
+  });
+
+  test('in a Reflect thread it points at the menu entry', async () => {
+    routes['/nodes/32'] = gleaning(0, {
+      llm_task_status: 'failed', content: '[LLM response generation pending...]',
+      glean_thread: false,
+    });
+    renderAt('/node/32');
+    expect(await screen.findByText(/choose “Glean for this reflection”/)).toBeInTheDocument();
+    expect(gleanButton()).toBeNull();
+    // The failed gleaning's own menu entry starts from its parent too: the
+    // failed reply is never read (#435 review).
+    openMenu();
+    fireEvent.click(screen.getByRole('button', { name: 'Glean for this reflection' }));
+    expect(mockPost).toHaveBeenCalledWith('/read/from-node/31', { model: undefined });
+  });
+});
+
+describe('no rerun buttons (Peter, 2026-10-09: Glean is live-only)', () => {
+  test.each(['processing', 'failed'])('not on a %s gleaning, not even for an admin', async (status) => {
+    mockUser = { ...USER, is_admin: true };
+    routes['/nodes/32'] = gleaning(0, { llm_task_status: status, content: '' });
+    renderAt('/node/32');
+    await screen.findByText('Thread');
+    expect(screen.queryByRole('button', { name: 'Rerun live' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Resubmit batch' })).toBeNull();
+  });
+});
+
+describe('a thread started from the Reflect card', () => {
+  test('has no Glean button; the entry menu says "Glean for this reflection"', async () => {
+    routes['/nodes/30'] = reply();
+    renderAt('/node/30');
+    await screen.findByText(/fork in the road/);
+    expect(gleanButton()).toBeNull();
+    openMenu();
+    fireEvent.click(screen.getByRole('button', { name: 'Glean for this reflection' }));
+    expect(mockPost).toHaveBeenCalledWith('/read/from-node/30', { model: undefined });
+    // We land on the pending gleaning.
+    await waitFor(() => expect(
+      mockGet.mock.calls.some(([url]) => url === '/nodes/41')).toBe(true));
+  });
+
+  test('works days later in a thread that has gleaned already (glean again)', async () => {
+    routes['/nodes/30'] = reply({ in_read_thread: true, read_reply_above: true });
+    renderAt('/node/30');
+    await screen.findByText(/fork in the road/);
+    expect(gleanButton()).toBeNull();
+    openMenu();
+    expect(screen.getByRole('button', { name: 'Glean for this reflection' })).toBeInTheDocument();
+  });
+
+  test('an earlier entry of the thread has it in its own menu; a system prompt does not', async () => {
+    routes['/nodes/30'] = reply();
+    renderAt('/node/30');
+    await screen.findByText(/fork in the road/);
+    const menus = screen.getAllByRole('button', { name: 'More actions' });
+    // [voice prompt, the user's entry, the focal reply]
+    fireEvent.click(menus[0]);
+    expect(screen.queryByRole('button', { name: 'Glean for this reflection' })).toBeNull();
+    fireEvent.click(menus[0]);
+    fireEvent.click(menus[1]);
+    fireEvent.click(screen.getByRole('button', { name: 'Glean for this reflection' }));
+    expect(mockPost).toHaveBeenCalledWith('/read/from-node/20', { model: undefined });
+  });
+});
+
+describe('a user without Glean', () => {
+  test.each([
+    ['the Glean card thread', { glean_thread: true }],
+    ['a Reflect thread', {}],
+  ])('sees no Glean button and no menu entry in %s', async (_, overrides) => {
+    mockUser = { ...USER, glean_enabled: false };
+    routes['/nodes/30'] = reply(overrides);
+    renderAt('/node/30');
+    await screen.findByText(/fork in the road/);
+    expect(gleanButton()).toBeNull();
+    openMenu();
+    expect(screen.queryByRole('button', { name: 'Glean for this reflection' })).toBeNull();
+  });
+});
+
+describe('the gleaning', () => {
+  test('is headed "Today\'s gleanings", with the number of picks', async () => {
+    routes['/nodes/32'] = gleaning(2);
+    renderAt('/node/32');
+    expect(await screen.findByText("Today's gleanings")).toBeInTheDocument();
+    expect(screen.getByText('2 tweets from today, chosen for what you said.')).toBeInTheDocument();
+    expect(screen.queryByText('Nothing worth your time today.')).toBeNull();
+  });
+
+  test('an empty day says so, with the count of tweets read', async () => {
+    routes['/nodes/32'] = gleaning(0);
+    renderAt('/node/32');
+    expect(await screen.findByText('Nothing worth your time today.')).toBeInTheDocument();
+    expect(screen.getByText("Loore read all 1,240 of today's tweets in the archive.")).toBeInTheDocument();
+  });
+
+  test('a pending gleaning says "Gleaning", not "Thinking"', async () => {
+    routes['/nodes/32'] = gleaning(0, { llm_task_status: 'processing', content: '' });
+    renderAt('/node/32');
+    expect(await screen.findByText('Gleaning')).toBeInTheDocument();
+    expect(screen.queryByText('Thinking')).toBeNull();
+    expect(screen.queryByText('Nothing worth your time today.')).toBeNull();
+  });
+});

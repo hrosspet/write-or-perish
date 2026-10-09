@@ -60,6 +60,8 @@ def _serialize_item(item):
         # hash for web clips.
         "external_id": item.external_id,
         "author_handle": item.author_handle,
+        # The tweet author's display name when the archive has one (#435).
+        "author_name": item.author_name,
         "title": item.title,
         "preview": content[:280] + ("…" if len(content) > 280 else ""),
         "url": item.url,
