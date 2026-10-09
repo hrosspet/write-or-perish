@@ -59,8 +59,8 @@ final class FakeVoiceBackend: VoiceBackend {
     }
 
     var gleanResult: Result<GleanStartResponse, Error> = .success(GleanStartResponse(llmNodeId: 900))
-    func startGlean(nodeId: Int, model: String?) async throws -> GleanStartResponse {
-        log.append("glean \(nodeId)" + (model.map { " model=\($0)" } ?? ""))
+    func startGlean(nodeId: Int) async throws -> GleanStartResponse {
+        log.append("glean \(nodeId)")
         return try gleanResult.get()
     }
 
@@ -1127,16 +1127,6 @@ final class VoiceTurnTests: XCTestCase {
         XCTAssertEqual(turn.threadParentId, 900, "the conversation continues under the gleaning")
         XCTAssertEqual(turn.gleanAnchor, 900)
         XCTAssertTrue(turn.gleaningDone)
-    }
-
-    func testThePickedModelGoesWithTheGleanAndIsForgottenWithTheConversation() async throws {
-        gleanSession(parentId: 7)
-        turn.gleanModel = "claude-sonnet-5.5"
-        backend.llmStatuses[900] = [try llm(900, "processing", tts: nil)]
-        _ = await turn.glean()
-        XCTAssertTrue(backend.log.contains("glean 7 model=claude-sonnet-5.5"), "\(backend.log)")
-        gleanSession(parentId: 8)
-        XCTAssertNil(turn.gleanModel, "a new conversation starts on the default again")
     }
 
     func testAFailedGleaningStillOpensItsThread() async throws {

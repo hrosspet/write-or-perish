@@ -17,9 +17,10 @@ protocol VoiceBackend: AnyObject {
     func legacyVoice(content: String, model: String?, aiUsage: String?, parentId: Int?,
                      sessionId: String?, entry: String?) async throws -> VoiceSessionResponse
     func llmStatus(nodeId: Int) async throws -> LLMStatus
-    /// `POST /api/read/from-node/<id>`: a glean under the node, a live call on the
-    /// model picked on the Voice screen, or (nil) the server's default.
-    func startGlean(nodeId: Int, model: String?) async throws -> GleanStartResponse
+    /// `POST /api/read/from-node/<id>` with `{}`: a glean under the node, a live
+    /// call on the server's default model (the Voice screen has no picker, as on
+    /// the web; the default is what `suggested-model?purpose=read` names).
+    func startGlean(nodeId: Int) async throws -> GleanStartResponse
     /// `POST /api/nodes/<id>/tts`: `.ready(url)` for 200, `.started` for 202.
     func requestTTS(nodeId: Int) async throws -> TTSTriggerOutcome
     func ttsStatus(nodeId: Int) async throws -> TTSStatus
@@ -202,8 +203,8 @@ final class LiveVoiceBackend: VoiceBackend {
         try await api().get(APIPath.llmStatus(nodeId), poll: true)
     }
 
-    func startGlean(nodeId: Int, model: String?) async throws -> GleanStartResponse {
-        try await api().post(APIPath.readFromNode(nodeId), json: GleanRequest.body(model: model))
+    func startGlean(nodeId: Int) async throws -> GleanStartResponse {
+        try await api().post(APIPath.readFromNode(nodeId), json: GleanRequest.body(model: nil))
     }
 
     func requestTTS(nodeId: Int) async throws -> TTSTriggerOutcome {

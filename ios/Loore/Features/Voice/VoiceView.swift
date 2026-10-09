@@ -251,16 +251,9 @@ struct VoiceView: View {
                                ? "Find today's tweets worth your time, from what you have said so far"
                                : "Glean waits for Loore's reply to your last message")
             .accessibilityIdentifier("voice.glean")
-            // The model picker beside Glean, for everyone who gleans (Peter,
-            // 2026-10-09): the read models of both providers, starting on the
-            // Glean model of the user's provider (`suggested-model?purpose=read`
-            // on the node the glean would start under; `default-model` before
-            // the thread's first reply).
-            ModelPicker(nodeId: voice.gleanAnchor ?? voice.threadParentId,
-                        selectedModel: Binding(get: { voice.gleanModel }, set: { voice.gleanModel = $0 }),
-                        purpose: .read, disabled: voice.isGleaning, standalone: true)
-                .padding(.top, 2)
-                .accessibilityIdentifier("voice.gleanModel")
+            // No model picker here, as on the web (#473): a voice glean runs on the
+            // server's default, a read model of the user's own provider. The
+            // picker is in the action row of a Glean-card thread.
         }
     }
 

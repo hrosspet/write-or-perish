@@ -72,11 +72,6 @@ final class VoiceTurnController {
     private(set) var gleanPhase: GleanPhase = .idle
     /// The last glean finished: the lock screen says so until the next recording.
     private(set) var gleaningDone = false
-    /// The model picked beside the Glean button (everyone who gleans has the
-    /// picker, Peter 2026-10-09); nil = the server's default, a read model of the
-    /// user's own provider. Kept for this conversation only (also the lock
-    /// screen's Glean uses it), never across threads.
-    var gleanModel: String?
     /// The gleaning finished, failed, or its wait gave up: the owner opens it in
     /// text mode (the thread page shows either and keeps watching). Never played.
     @ObservationIgnored var onGleaningReady: ((Int) -> Void)?
@@ -1143,12 +1138,11 @@ final class VoiceTurnController {
         gleanSession = session
         hasRecordedMessage = false
         gleanAnchor = nil
-        gleanModel = nil
     }
 
     /// The Glean button (Voice screen or lock screen). The voice reply stops with
-    /// its queue, the server starts a glean under `gleanAnchor` (a live call on
-    /// `gleanModel`, else its default), and the wait for it begins; `onGleaningReady` then opens the
+    /// its queue, the server starts a glean under `gleanAnchor` (a live call on its
+    /// default model: no picker in voice, as on the web), and the wait begins; `onGleaningReady` then opens the
     /// gleaning in text. The gleaning never goes to TTS. Returns once the request
     /// is answered (a lock-screen intent waits that long): false when it failed,
     /// with a toast saying why (none for the spend cap, whose banner says it).
@@ -1160,7 +1154,7 @@ final class VoiceTurnController {
         stopReplyForGlean()
         audio.refreshNowPlaying()
         do {
-            let answer = try await backend.startGlean(nodeId: anchor, model: gleanModel)
+            let answer = try await backend.startGlean(nodeId: anchor)
             guard gleanPhase == .starting else { return true }  // a new conversation meanwhile
             guard let id = answer.llmNodeId else {
                 gleanPhase = .idle

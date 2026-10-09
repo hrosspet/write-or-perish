@@ -84,9 +84,6 @@ struct ModelPicker: View {
     @Binding var selectedModel: String?
     var purpose: ModelPurpose = .chat
     var disabled = false
-    /// A quiet text button (the Voice screen's Glean, #475) instead of the half
-    /// joined to an action button's right edge.
-    var standalone = false
 
     @Environment(AppState.self) private var app
     @State private var catalog = ModelCatalog.shared
@@ -101,23 +98,18 @@ struct ModelPicker: View {
         Button {
             open = true
         } label: {
-            HStack(spacing: standalone ? 6 : 10) {
+            HStack(spacing: 10) {
                 Text(suggestionLoaded && models != nil ? (selected?.name ?? "") : "…")
                     .lineLimit(1)
                 Image(systemName: "chevron.down").font(.system(size: 10, weight: .semibold))
                     .foregroundStyle(LooreColor.textMuted)
             }
-            .font(standalone ? LooreFont.sans(13.6, .light) : LooreFont.button)
-            .foregroundStyle(standalone ? LooreColor.textMuted : LooreColor.textSecondary)
+            .font(LooreFont.button)
+            .foregroundStyle(LooreColor.textSecondary)
             .padding(.vertical, 10)
             .padding(.horizontal, 14)
-            .overlay {
-                if !standalone {
-                    UnevenRoundedRectangle(bottomTrailingRadius: LooreRadius.control,
-                                           topTrailingRadius: LooreRadius.control)
-                        .strokeBorder(LooreColor.border)
-                }
-            }
+            .overlay(UnevenRoundedRectangle(bottomTrailingRadius: LooreRadius.control, topTrailingRadius: LooreRadius.control)
+                .strokeBorder(LooreColor.border))
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
