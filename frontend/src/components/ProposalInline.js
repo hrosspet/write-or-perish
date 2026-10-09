@@ -605,6 +605,9 @@ export default function ProposalInline({
   // to it instead of just cancelling the first.
   const [addingKey, setAddingKey] = useState(null);
   const [applyError, setApplyError] = useState(null);
+  // A failed todo merge leaves the proposal applicable (the server's
+  // `retryable`, #434): the card shows "Apply again" next to the error.
+  const [canApplyAgain, setCanApplyAgain] = useState(false);
   const [issueApplyStatus, setIssueApplyStatus] = useState(null);
   const [issueApplyError, setIssueApplyError] = useState(null);
   const [issueResult, setIssueResult] = useState(null);
@@ -665,6 +668,7 @@ export default function ProposalInline({
       else if (todoEntry.apply_status === 'failed') {
         setApplyStatus('error');
         setApplyError(todoEntry.apply_error || 'Todo merge failed');
+        setCanApplyAgain(!!todoEntry.retryable);
       } else if (todoEntry.apply_status === 'started') {
         setApplyStatus('started');
       }
@@ -705,6 +709,7 @@ export default function ProposalInline({
   }, []);
 
   const pollApplyStatus = useCallback((nId) => {
+    if (mergePollingRef.current) clearInterval(mergePollingRef.current);
     mergePollingRef.current = setInterval(async () => {
       try {
         const res = await api.get(`/nodes/${nId}/llm-status`);
@@ -719,9 +724,11 @@ export default function ProposalInline({
             clearInterval(mergePollingRef.current);
             setApplyStatus('error');
             setApplyError(todoEntry.apply_error || 'Todo merge failed');
+            setCanApplyAgain(!!todoEntry.retryable);
             onApplied?.('propose_todo', {
               apply_status: 'failed',
               apply_error: todoEntry.apply_error || 'Todo merge failed',
+              retryable: !!todoEntry.retryable,
             });
           }
         }
@@ -736,9 +743,17 @@ export default function ProposalInline({
       await api.post('/todo/apply-draft', { llm_node_id: nodeId });
       pollApplyStatus(nodeId);
     } catch (err) {
+      // Applied already from another tab: follow that merge.
+      if (err?.response?.data?.code === 'todo_merge_started') {
+        pollApplyStatus(nodeId);
+        return;
+      }
       const msg = err?.response?.data?.error || 'Todo update failed';
       setApplyStatus('error');
       setApplyError(msg);
+      // Nothing started, so the proposal is still pending, unless the
+      // server found no pending proposal (404).
+      setCanApplyAgain(err?.response?.status !== 404);
     }
   }, [nodeId, pollApplyStatus]);
 
@@ -919,6 +934,14 @@ export default function ProposalInline({
             <StatusTag style={{ ...styles.statusText, color: 'var(--accent)' }}>
               {applyError || 'Todo update failed'}
             </StatusTag>
+          )}
+          {applyStatus === 'error' && canApplyAgain && (
+            <button
+              onClick={handleApplyTodo}
+              style={{ ...styles.button, marginLeft: styles.roomy ? 0 : '10px' }}
+            >
+              Apply again
+            </button>
           )}
         </div>
       )}
