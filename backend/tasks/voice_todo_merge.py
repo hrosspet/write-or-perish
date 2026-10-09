@@ -115,8 +115,7 @@ def apply_voice_todo(self, llm_node_id: int, model_id: str, user_id: int,
             logger.info(
                 f"Todo merge for node {llm_node_id} refused: AI usage keeps "
                 f"its inputs away from AI (user {user_id})")
-            _update_apply_status(llm_node, "failed", error=refusal,
-                                 confirm_node_id=confirm_node_id)
+            _merge_failed(llm_node, user_id, refusal, confirm_node_id)
             db.session.commit()
             return
 

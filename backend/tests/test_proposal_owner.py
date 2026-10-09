@@ -524,6 +524,24 @@ def test_task_refuses_a_proposal_marked_none_before_reading_it(app, effects):
     assert UserTodo.query.filter_by(user_id=alice.id).one().id == todo.id
 
 
+def test_task_refusal_over_ai_usage_keeps_apply_again(app, effects):
+    """The refusal over AI usage is a failed merge like the others (#434):
+    the pending draft comes back and the card offers Apply again, so the
+    proposal can be applied once the setting allows AI."""
+    alice = _user("alice")
+    _todo(alice)
+    node = _reply(alice, _msg(alice), "todo", ai_usage="none")
+
+    _run_task(node, alice)
+
+    assert _Provider.calls == []
+    entry = next(e for e in _meta(node.id) if e["name"] == "propose_todo")
+    assert entry["apply_status"] == "failed"
+    assert entry.get("retryable") is True
+    assert Draft.query.filter_by(user_id=alice.id, label="todo_pending",
+                                 parent_id=node.id).count() == 1
+
+
 def test_task_refusal_shows_on_the_users_confirming_reply(app, effects):
     alice = _user("alice")
     _todo(alice)
