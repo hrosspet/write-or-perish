@@ -113,6 +113,73 @@ def _serialize_node_for_list(node, viewer_id=None, child_counts=None):
 
 
 # Dashboard endpoint: only return top-level nodes (nodes with no parent)
+def _serialize_current_user():
+    """The signed-in user as the client holds it. GET /dashboard/ and
+    PUT /dashboard/user both answer with this: the client replaces its
+    whole user with either reply, so a field only one of them carried
+    would vanish from the page after the other (the Account page lost
+    its deletion state after any settings change)."""
+    voice_mode_enabled = current_user.has_voice_mode
+    return {
+        "id": current_user.id,
+        "username": current_user.username,
+        "description": current_user.description,
+        "accepted_terms_at": iso_utc(current_user.accepted_terms_at),
+        "terms_up_to_date": _terms_up_to_date(current_user),
+        "approved": current_user.approved,
+        "email": current_user.email,
+        "is_admin": current_user.is_admin,
+        "plan": current_user.plan,
+        "voice_mode_enabled": voice_mode_enabled,
+        "craft_mode": current_user.craft_mode,
+        "preferred_model": effective_preferred_model(current_user),
+        "profile_generation_task_id": current_user.profile_generation_task_id,
+        # Batch-pipeline builds set no task id (#258); the watcher starts
+        # polling /export/profile-progress on either flag.
+        "profile_batch_pending": bool(current_user.profile_batch_pending),
+        "default_privacy_level": current_user.default_privacy_level,
+        "default_ai_usage": current_user.default_ai_usage,
+        "twitter_login": bool(current_user.twitter_id),
+        "twitter_handle": current_user.twitter_handle,
+        "pending_email": current_user.pending_email,
+        "pending_email_expired": _pending_email_expired(current_user),
+        "prefill_consent": current_user.prefill_consent,
+        "prefilled_handle": current_user.prefilled_handle,
+        # False until the user has written an entry in Loore (imports
+        # and LLM replies don't count): the homepage, Voice and Text
+        # screens ask the welcome question until then (#391).
+        "has_own_entries": has_own_entries(current_user.id),
+        "timezone": current_user.timezone or "UTC",
+        # Lets the client block cost actions (e.g. starting a long voice
+        # recording) up front instead of after the fact (issue #85).
+        "spend_blocked": user_is_capped(current_user),
+        # Public side (#228): enabled = deployed (env) AND the user's
+        # own opt-in — every frontend surface keys off this. available
+        # = deployed only; it decides whether Account shows the toggle.
+        "share_v1_enabled": bool(
+            current_app.config.get("SHARE_V1", False)
+            and current_user.public_sharing_enabled),
+        "share_v1_available": bool(
+            current_app.config.get("SHARE_V1", False)),
+        "public_sharing_enabled": bool(
+            current_user.public_sharing_enabled),
+        # Saved external references (#208/#329): available = the env
+        # killswitch is on (decides whether Account shows the toggle);
+        # enabled = the user's own opt-in. Own-archive search is on for
+        # everyone under the same killswitch and has no toggle.
+        "external_content_available": bool(
+            current_app.config.get("SEMANTIC_SEARCH_AGENTIC", True)),
+        "external_content_enabled": bool(
+            current_user.external_content_enabled),
+        # "Delete all my writing" (#268): a scheduled deletion shows
+        # its date and a way to cancel on every page.
+        "data_deletion": deletion_status(current_user.id),
+        # "Delete my account" (#269): the numbers the Account page
+        # states, and why the account cannot be deleted, if it can't.
+        "account_deletion": account_deletion_info(current_user),
+    }
+
+
 @dashboard_bp.route("/", methods=["GET"])
 @login_required
 def get_dashboard():
@@ -131,67 +198,8 @@ def get_dashboard():
     pagination = query.paginate(page=page, per_page=per_page, error_out=False)
 
     nodes_list = [_serialize_node_for_list(node) for node in pagination.items]
-    # Determine if Voice Mode is enabled for this user (admin or paid plan)
-    voice_mode_enabled = current_user.has_voice_mode
     dashboard = {
-        "user": {
-            "id": current_user.id,
-            "username": current_user.username,
-            "description": current_user.description,
-            "accepted_terms_at": iso_utc(current_user.accepted_terms_at),
-            "terms_up_to_date": _terms_up_to_date(current_user),
-            "approved": current_user.approved,
-            "email": current_user.email,
-            "is_admin": current_user.is_admin,
-            "plan": current_user.plan,
-            "voice_mode_enabled": voice_mode_enabled,
-            "craft_mode": current_user.craft_mode,
-            "preferred_model": effective_preferred_model(current_user),
-            "profile_generation_task_id": current_user.profile_generation_task_id,
-            # Batch-pipeline builds set no task id (#258); the watcher starts
-            # polling /export/profile-progress on either flag.
-            "profile_batch_pending": bool(current_user.profile_batch_pending),
-            "default_privacy_level": current_user.default_privacy_level,
-            "default_ai_usage": current_user.default_ai_usage,
-            "twitter_login": bool(current_user.twitter_id),
-            "twitter_handle": current_user.twitter_handle,
-            "pending_email": current_user.pending_email,
-            "pending_email_expired": _pending_email_expired(current_user),
-            "prefill_consent": current_user.prefill_consent,
-            "prefilled_handle": current_user.prefilled_handle,
-            # False until the user has written an entry in Loore (imports
-            # and LLM replies don't count): the homepage, Voice and Text
-            # screens ask the welcome question until then (#391).
-            "has_own_entries": has_own_entries(current_user.id),
-            "timezone": current_user.timezone or "UTC",
-            # Lets the client block cost actions (e.g. starting a long voice
-            # recording) up front instead of after the fact (issue #85).
-            "spend_blocked": user_is_capped(current_user),
-            # Public side (#228): enabled = deployed (env) AND the user's
-            # own opt-in — every frontend surface keys off this. available
-            # = deployed only; it decides whether Account shows the toggle.
-            "share_v1_enabled": bool(
-                current_app.config.get("SHARE_V1", False)
-                and current_user.public_sharing_enabled),
-            "share_v1_available": bool(
-                current_app.config.get("SHARE_V1", False)),
-            "public_sharing_enabled": bool(
-                current_user.public_sharing_enabled),
-            # Saved external references (#208/#329): available = the env
-            # killswitch is on (decides whether Account shows the toggle);
-            # enabled = the user's own opt-in. Own-archive search is on for
-            # everyone under the same killswitch and has no toggle.
-            "external_content_available": bool(
-                current_app.config.get("SEMANTIC_SEARCH_AGENTIC", True)),
-            "external_content_enabled": bool(
-                current_user.external_content_enabled),
-            # "Delete all my writing" (#268): a scheduled deletion shows
-            # its date and a way to cancel on every page.
-            "data_deletion": deletion_status(current_user.id),
-            # "Delete my account" (#269): the numbers the Account page
-            # states, and why the account cannot be deleted, if it can't.
-            "account_deletion": account_deletion_info(current_user),
-        },
+        "user": _serialize_current_user(),
         "pinned_nodes": pinned_list,
         "nodes": nodes_list,
         "has_more": pagination.has_next,
@@ -589,50 +597,9 @@ def update_user():
             from backend.utils.public_cache import invalidate_for_user
             invalidate_for_user(current_user, former_handle=renamed_from)
         # Include voice mode feature flag and user plan in the response
-        voice_mode_enabled = current_user.has_voice_mode
         return jsonify({
             "message": "Profile updated successfully.",
-            "user": {
-                "id": current_user.id,
-                "username": current_user.username,
-                "description": current_user.description,
-                "email": current_user.email,
-                "approved": current_user.approved,
-                "accepted_terms_at": iso_utc(current_user.accepted_terms_at),
-                "terms_up_to_date": _terms_up_to_date(current_user),
-                "is_admin": current_user.is_admin,
-                "plan": current_user.plan,
-                "voice_mode_enabled": voice_mode_enabled,
-                "craft_mode": current_user.craft_mode,
-                "preferred_model": effective_preferred_model(current_user),
-                "profile_generation_task_id": current_user.profile_generation_task_id,
-                "profile_batch_pending": bool(current_user.profile_batch_pending),
-                "default_privacy_level": current_user.default_privacy_level,
-                "default_ai_usage": current_user.default_ai_usage,
-                "twitter_login": bool(current_user.twitter_id),
-                "twitter_handle": current_user.twitter_handle,
-                "pending_email": current_user.pending_email,
-                "pending_email_expired": _pending_email_expired(current_user),
-                "prefill_consent": current_user.prefill_consent,
-                "prefilled_handle": current_user.prefilled_handle,
-                # The client replaces its user with this object (e.g. the
-                # tweets opt-in on /welcome), so it carries the flag too.
-                "has_own_entries": has_own_entries(current_user.id),
-                "spend_blocked": user_is_capped(current_user),
-                "share_v1_enabled": bool(
-                    current_app.config.get("SHARE_V1", False)
-                    and current_user.public_sharing_enabled),
-                "share_v1_available": bool(
-                    current_app.config.get("SHARE_V1", False)),
-                "public_sharing_enabled": bool(
-                    current_user.public_sharing_enabled),
-                "external_content_available": bool(
-                    current_app.config.get(
-                        "SEMANTIC_SEARCH_AGENTIC", True)),
-                "external_content_enabled": bool(
-                    current_user.external_content_enabled),
-                "timezone": current_user.timezone or "UTC",
-            }
+            "user": _serialize_current_user(),
         }), 200
     except IntegrityError:
         # Two submissions of the same rename racing (username_history's

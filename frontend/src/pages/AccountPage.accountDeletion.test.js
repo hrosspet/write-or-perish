@@ -7,12 +7,13 @@ jest.mock('../contexts/UserContext', () => ({
   useUser: () => mockUserCtx,
 }));
 const mockPost = jest.fn();
+const mockPut = jest.fn();
 jest.mock('../api', () => ({
   __esModule: true,
   default: {
     post: (...args) => mockPost(...args),
     delete: jest.fn(),
-    put: jest.fn(),
+    put: (...args) => mockPut(...args),
     get: jest.fn(),
   },
 }));
@@ -149,4 +150,26 @@ test('the last admin sees why instead of the button', () => {
   });
   expect(screen.queryByRole('button', { name: /delete my account…/i })).toBeNull();
   expect(screen.getByText(/This is the last admin account/)).toBeTruthy();
+});
+
+test('after a settings change the dialog still has the email version and the deletion notes', async () => {
+  // The server answers a settings change with the same user as a page load,
+  // deletion state included; the page replaces its user with that reply.
+  const full = {
+    ...baseUser, default_ai_usage: 'train',
+    data_deletion: { status: 'scheduled', purge_at: '2026-11-01T12:00:00Z', grace_days: 30, x_connected: false },
+  };
+  mockPut.mockResolvedValue({ data: { user: full } });
+  const view = renderPage();
+  mockUserCtx.setUser.mockImplementation((next) => {
+    mockUserCtx = { ...mockUserCtx, user: next };
+    view.rerender(<MemoryRouter><AccountPage /></MemoryRouter>);
+  });
+  fireEvent.change(screen.getByDisplayValue('Chat'), { target: { value: 'train' } });
+  await waitFor(() => expect(mockPut).toHaveBeenCalledWith('/dashboard/user', { default_ai_usage: 'train' }));
+  await waitFor(() => expect(screen.getByDisplayValue('Train')).toBeTruthy());
+  openDialog();
+  expect(screen.getByRole('button', { name: /email me the confirmation link/i })).toBeTruthy();
+  expect(screen.queryByText(/Signs you out now/)).toBeNull();
+  expect(screen.getByRole('dialog').textContent).toMatch(/replaces your request to delete all your writing/);
 });
