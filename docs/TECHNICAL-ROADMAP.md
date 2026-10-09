@@ -806,7 +806,7 @@ This roadmap prioritizes **privacy & encryption first** (Phase -1), then **found
 19. ✅ **COMPLETED:** Proposal tracking with explicit IDs and lifecycle statuses, confirmation nodes
 19b. ✅ **COMPLETED:** Feature 2 Download as quote-as-response (#208) — substrate, nightly X sync, digest, labeled search + read_full, per-user easter-egg activation
 19c. ✅ **COMPLETED:** Delete all my writing / admin data purge (#268) — 30-day grace for the user's request, cost rows kept anonymised
-19d. ✅ **COMPLETED:** Account deletion (#269) — deleted at once, restore by signing in within 30 days, then deleted forever (purge + identity layer); admin deletion at once; the purge revokes the stored X tokens at X; web terms updated. Open: iPhone in-app deletion and terms (#482, App Store 5.1.1(v))
+19d. ✅ **COMPLETED:** Account deletion (#269) — deleted at once, restore by signing in within 30 days, then deleted forever (purge + identity layer); admin deletion at once; the purge revokes the stored X tokens at X, and the request revokes the session's "Sign in with X" token (OAuth 1.0a `oauth/invalidate_token`, best effort); web terms updated. Open: iPhone in-app deletion and terms (#482, App Store 5.1.1(v))
 20. **NOW:** Implement text mode — last major feature before expanding alpha to ~10 users
 21. **NOW:** Stabilize Voice/Todo workflow — open bugs: todo merge hangs (#87), checkbox UX (#93, #94), interactive proposal editing (#89), completed item deletion (#97)
 22. **NOW:** Protected usernames (#91) + Anthropic API spend monitoring (#85)
