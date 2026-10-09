@@ -115,7 +115,7 @@ struct ModelPicker: View {
         .buttonStyle(.plain)
         .disabled(inactive)
         .opacity(inactive && suggestionLoaded ? 0.45 : 1)
-        .accessibilityLabel("\(purpose == .read ? "Model for Read" : "Model"): \(selected?.name ?? "")")
+        .accessibilityLabel("\(purpose == .read ? "Model for Glean" : "Model"): \(selected?.name ?? "")")
         .popover(isPresented: $open, attachmentAnchor: .rect(.bounds), arrowEdge: .bottom) {
             list
                 .presentationCompactAdaptation(.popover)

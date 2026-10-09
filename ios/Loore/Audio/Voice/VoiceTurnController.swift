@@ -51,6 +51,57 @@ final class VoiceTurnController {
     /// Between an interim node's audio and its continuation's first chunk.
     private(set) var awaitingNextNode = false
 
+    // MARK: Glean (#435, #475)
+
+    /// What a glean is doing: its request, or the wait for the gleaning.
+    enum GleanPhase: Equatable {
+        case idle
+        case starting
+        case waiting(nodeId: Int)
+    }
+
+    /// The conversation was opened from the Glean card, or continues a thread
+    /// started there: it offers Glean once the thread has a recorded message.
+    private(set) var gleanSession = false
+    /// The thread has a recorded message (a continued thread has its messages).
+    private(set) var hasRecordedMessage = false
+    /// The node a glean starts under: the last finished reply, else the node the
+    /// session opened on. Nil while a turn's reply is still coming, so the glean
+    /// reads that reply too (web `gleanAnchor`).
+    private(set) var gleanAnchor: Int?
+    private(set) var gleanPhase: GleanPhase = .idle
+    /// The last glean finished: the lock screen says so until the next recording.
+    private(set) var gleaningDone = false
+    /// The gleaning finished, failed, or its wait gave up: the owner opens it in
+    /// text mode (the thread page shows either and keeps watching). Never played.
+    @ObservationIgnored var onGleaningReady: ((Int) -> Void)?
+    @ObservationIgnored private var gleanTask: Task<Void, Never>?
+    /// The glean wait's limits, counted only while the app is active: a locked
+    /// phone suspends the app after a lock-screen Glean, and that time must not
+    /// end the wait without asking the server again (review of #493).
+    @ObservationIgnored private var gleanDeadline = Date.distantFuture
+    @ObservationIgnored private var gleanLastAnswer = Date()
+    @ObservationIgnored private var gleanInactiveSince: Date?
+
+    var isGleaning: Bool { gleanPhase != .idle }
+    /// The server accepted the glean; the gleaning is being written.
+    var gleanAccepted: Bool {
+        if case .waiting = gleanPhase { return true }
+        return false
+    }
+    /// The labeled Glean button under the record button (and on the lock screen).
+    var showsGleanButton: Bool { gleanSession && hasRecordedMessage }
+    /// Glean may be pressed: its node is known, no glean runs, and no recording
+    /// or reply wait is on (the button sits under Record or Continue).
+    var canGlean: Bool {
+        showsGleanButton && gleanAnchor != nil && !isGleaning && (phase == .ready || phase == .playback)
+    }
+    /// The Live Activity's Glean button: pressable, dimmed while the reply comes, or none.
+    var lockScreenGlean: VoiceActivityAttributes.ContentState.GleanButton? {
+        guard showsGleanButton else { return nil }
+        return canGlean ? .ready : .waiting
+    }
+
     var phase: Phase {
         switch state {
         case .idle: return .ready
@@ -68,6 +119,9 @@ final class VoiceTurnController {
 
     @ObservationIgnored var model: () -> String? = { nil }
     @ObservationIgnored var aiUsage: () -> String = { "none" }
+    /// Whether the app is in the foreground (live: `UIApplication`); the glean
+    /// wait counts its limits only then.
+    @ObservationIgnored var appIsActive: () -> Bool = { true }
     /// Intervals (tests shorten them).
     @ObservationIgnored var timings = Timings()
 
@@ -89,6 +143,8 @@ final class VoiceTurnController {
         /// with tool rounds and slow TTS chunks must keep the cue, or iOS suspends a
         /// locked app mid-reply. Runaway turns end through the give-up timers above.
         var cueCap: Double = 10 * 60
+        /// llm-status while a glean runs (the web Voice screen's 2 s).
+        var gleanPoll: Double = 2
     }
 
     // MARK: Dependencies
@@ -165,7 +221,7 @@ final class VoiceTurnController {
     /// A new Voice screen: whatever the last turn was doing (thinking, playing,
     /// done) is set aside, as when the web's Voice page unmounts; the server
     /// still finishes a reply it is writing. Not while recording.
-    func startNewConversation(parentId: Int?) {
+    func startNewConversation(parentId: Int?, glean: Bool = false) {
         guard phase != .recording else { return }
         if state != .idle {
             timing.endTurn()
@@ -175,6 +231,11 @@ final class VoiceTurnController {
         }
         threadParentId = parentId
         lastReplyNodeId = nil
+        resetGlean(session: glean)
+        // A continued thread has its messages already; a glean starts under
+        // the node the screen opened on (web VoicePage).
+        hasRecordedMessage = parentId != nil
+        gleanAnchor = parentId
         audio.refreshNowPlaying()
     }
 
@@ -201,13 +262,13 @@ final class VoiceTurnController {
 
     /// Record tap (web `handleStart`). The caller checks the spend cap first.
     func start() {
-        guard state == .idle || state == .done else { return }
+        guard state == .idle || state == .done, !isGleaning else { return }
         beginRecording(resume: nil)
     }
 
     /// Record button in playback (web `handleContinue`): new turn, same thread.
     func continueConversation() {
-        guard phase == .playback else { return }
+        guard phase == .playback, !isGleaning else { return }
         timing.endTurn()
         resetTurn(keepQueue: false)
         beginRecording(resume: nil)
@@ -232,6 +293,7 @@ final class VoiceTurnController {
         isPaused = false
         isInterrupted = false
         longRecordingWarned = false
+        gleaningDone = false
         elapsed = draft.map { Double($0.chunkCount) * 15 } ?? 0
         audio.refreshNowPlaying()
         do {
@@ -476,7 +538,8 @@ final class VoiceTurnController {
             }
             do {
                 try await self.backend.finalize(sessionId: sid, totalChunks: outcome.totalForFinalize,
-                                                parentId: self.threadParentId, model: self.model())
+                                                parentId: self.threadParentId, model: self.model(),
+                                                entry: self.entry)
             } catch let error as APIError where Self.isAlreadyFinalizing(error) {
                 // A retried finalize whose first answer was lost (C §8.1).
             } catch {
@@ -550,11 +613,14 @@ final class VoiceTurnController {
             return
         }
         if let warning = status.warning {
+            // Only the reply was skipped: the recording is saved as an entry.
+            entrySaved()
             notices.toast(warning, duration: 8)
             finishQuietly()
             return
         }
         if let nodeId = status.llmNodeId {
+            entrySaved()
             timing.setTurnNode(nodeId)
             timing.mark("llm_node_known")
             beginReply(nodeId, gen)
@@ -563,8 +629,9 @@ final class VoiceTurnController {
         // Legacy path: the server chain created no reply node.
         do {
             let answer = try await backend.legacyVoice(content: status.content, model: model(), aiUsage: aiUsage(),
-                                                       parentId: threadParentId, sessionId: sid)
+                                                       parentId: threadParentId, sessionId: sid, entry: entry)
             guard gen == generation else { return }
+            entrySaved()
             timing.setTurnNode(answer.llmNodeId)
             timing.mark("llm_node_known")
             beginReply(answer.llmNodeId, gen)
@@ -590,6 +657,9 @@ final class VoiceTurnController {
         generation += 1
         initialResume = true
         threadParentId = parentId
+        // A resumed reply belongs to a thread with messages; Glean waits for it.
+        hasRecordedMessage = true
+        gleanAnchor = nil
         audio.activateForReply()
         cueUsed = 0
         cueOn()
@@ -673,6 +743,9 @@ final class VoiceTurnController {
                 } else {
                     threadParentId = nodeId
                 }
+                // Glean starts under the last finished reply (web `onLLMComplete`).
+                gleanAnchor = threadParentId ?? nodeId
+                audio.refreshNowPlaying()
             }
             let content = (status.content ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             if content.isEmpty {
@@ -941,6 +1014,7 @@ final class VoiceTurnController {
     /// Called when the app returns to the foreground.
     func appDidBecomeActive() {
         let gen = generation
+        gleanResumed()
         if state == .recording && isInterrupted {
             audio.playInterruptionAlert()
         }
@@ -1058,6 +1132,155 @@ final class VoiceTurnController {
         audio.stopCue()
     }
 
+    // MARK: Glean (#435, #475)
+
+    /// `entry` for the request that starts a fresh thread from the Glean card.
+    private var entry: String? { gleanSession && threadParentId == nil ? "glean" : nil }
+
+    /// The server saved the recording as an entry (web `onEntrySaved`): the
+    /// thread has a message, and Glean waits for this turn's reply.
+    private func entrySaved() {
+        hasRecordedMessage = true
+        gleanAnchor = nil
+        audio.refreshNowPlaying()
+    }
+
+    private func resetGlean(session: Bool) {
+        gleanTask?.cancel()
+        gleanTask = nil
+        gleanPhase = .idle
+        gleaningDone = false
+        gleanSession = session
+        hasRecordedMessage = false
+        gleanAnchor = nil
+    }
+
+    /// The Glean button (Voice screen or lock screen). The voice reply stops with
+    /// its queue, the server starts a glean under `gleanAnchor` (a live call on its
+    /// default model: no picker in voice, as on the web), and the wait begins; `onGleaningReady` then opens the
+    /// gleaning in text. The gleaning never goes to TTS. Returns once the request
+    /// is answered (a lock-screen intent waits that long): false when it failed,
+    /// with a toast saying why (none for the spend cap, whose banner says it).
+    @discardableResult
+    func glean() async -> Bool {
+        guard canGlean, let anchor = gleanAnchor else { return false }
+        gleanPhase = .starting
+        gleaningDone = false
+        stopReplyForGlean()
+        audio.refreshNowPlaying()
+        do {
+            let answer = try await backend.startGlean(nodeId: anchor)
+            guard gleanPhase == .starting else { return true }  // a new conversation meanwhile
+            guard let id = answer.llmNodeId else {
+                gleanPhase = .idle
+                audio.refreshNowPlaying()
+                if let prompt = answer.promptNodeId { onGleaningReady?(prompt) }
+                return true
+            }
+            gleanPhase = .waiting(nodeId: id)
+            audio.refreshNowPlaying()
+            waitForGleaning(id)
+            return true
+        } catch {
+            guard gleanPhase == .starting else { return false }
+            gleanPhase = .idle
+            audio.refreshNowPlaying()
+            if SpendCap.isSpendCapError(error) {
+                notices.spendCapped()
+            } else {
+                notices.toast((error as? APIError)?.userMessage(fallback: "Could not start the glean.")
+                              ?? "Could not start the glean.", duration: 6)
+            }
+            return false
+        }
+    }
+
+    /// The voice reply and its queue stop (web: `audio.stop()` before the glean);
+    /// the server still finishes writing the reply's audio.
+    private func stopReplyForGlean() {
+        guard state != .idle else { return }
+        timing.endTurn()
+        resetTurn(keepQueue: false)
+        state = .idle
+        audio.deactivate()
+    }
+
+    /// llm-status every `gleanPoll` until the gleaning finishes or fails, with the
+    /// reply's limits: no answer for `llmErrorGiveUp`, or `llmGiveUp` in all, ends
+    /// the wait (the thread page keeps watching).
+    private func waitForGleaning(_ id: Int) {
+        gleanTask?.cancel()
+        gleanDeadline = Date().addingTimeInterval(timings.llmGiveUp)
+        gleanLastAnswer = Date()
+        // A lock-screen Glean starts with the app in the background.
+        gleanInactiveSince = appIsActive() ? nil : Date()
+        gleanTask = Task { [weak self] in
+            guard let self else { return }
+            var outcome: TaskStatus?
+            while !Task.isCancelled, self.gleanPhase == .waiting(nodeId: id) {
+                do {
+                    let status = try await self.backend.llmStatus(nodeId: id)
+                    self.gleanLastAnswer = Date()
+                    if let s = status.status, s.isTerminal {
+                        outcome = s
+                        break
+                    }
+                } catch {
+                    // Transient: asked again below.
+                }
+                guard !Task.isCancelled, self.gleanPhase == .waiting(nodeId: id) else { return }
+                if self.gleanLimitReached() { break }
+                try? await Task.sleep(nanoseconds: UInt64(self.timings.gleanPoll * 1_000_000_000))
+            }
+            guard !Task.isCancelled, self.gleanPhase == .waiting(nodeId: id) else { return }
+            if outcome == nil, let last = try? await self.backend.llmStatus(nodeId: id),
+               let s = last.status, s.isTerminal {
+                // One more question before giving up: the gleaning may be in.
+                outcome = s
+            }
+            guard !Task.isCancelled, self.gleanPhase == .waiting(nodeId: id) else { return }
+            self.gleaningLanded(id, outcome)
+        }
+    }
+
+    /// The wait's limits (`llmGiveUp` in all, `llmErrorGiveUp` without an
+    /// answer), only while the app is active.
+    private func gleanLimitReached() -> Bool {
+        guard appIsActive() else { return false }
+        let now = Date()
+        return now >= gleanDeadline || now.timeIntervalSince(gleanLastAnswer) > timings.llmErrorGiveUp
+    }
+
+    /// The app went to the background: the glean wait's limits pause.
+    func appDidEnterBackground() {
+        if gleanAccepted && gleanInactiveSince == nil { gleanInactiveSince = Date() }
+    }
+
+    /// Back in the foreground: the time away does not count against the wait,
+    /// and the no-answer limit starts again (the first poll after waking may fail).
+    private func gleanResumed() {
+        guard gleanAccepted else { return }
+        if let since = gleanInactiveSince {
+            gleanDeadline = gleanDeadline.addingTimeInterval(Date().timeIntervalSince(since))
+        }
+        gleanInactiveSince = nil
+        gleanLastAnswer = Date()
+    }
+
+    /// The gleaning finished, failed, or the wait gave up: it opens in text, and
+    /// in every case the conversation moves to it, a step in the conversation
+    /// (web: Voice from a gleaning records under it, and Glean again starts there).
+    private func gleaningLanded(_ id: Int, _ outcome: TaskStatus?) {
+        gleanPhase = .idle
+        gleanTask = nil
+        gleanInactiveSince = nil
+        if state == .idle || state == .done { threadParentId = id }
+        gleanAnchor = id
+        gleaningDone = outcome == .completed
+        audio.refreshNowPlaying()
+        onGleaningReady?(id)
+    }
+
     // MARK: Cancel and reset
 
     /// The ✕ under "Thinking…", or lock-screen "next track" while thinking
@@ -1094,6 +1317,7 @@ final class VoiceTurnController {
         // The next Voice screen is a new conversation, not a reply to this one.
         threadParentId = nil
         lastReplyNodeId = nil
+        resetGlean(session: false)
         audio.deactivate()
         audio.voiceConversationEnded()
         audio.refreshNowPlaying()

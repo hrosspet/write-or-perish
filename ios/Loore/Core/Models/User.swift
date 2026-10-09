@@ -37,6 +37,11 @@ struct CurrentUser: Decodable, Equatable, Sendable {
     var accountDeletion: AccountDeletionInfo?
     /// "Delete all my writing" (#268), which an account deletion replaces.
     var dataDeletion: DataDeletionStatus?
+    /// Inside Glean's rollout gate (#435): the web's Account shows the switch.
+    var gleanAvailable: Bool
+    /// The gate and the user's own switch: every Glean card, button and menu
+    /// entry shows only when this is true (#475).
+    var gleanEnabled: Bool
 
     enum CodingKeys: String, CodingKey {
         case id, username, description, email, plan, timezone
@@ -65,6 +70,8 @@ struct CurrentUser: Decodable, Equatable, Sendable {
         case externalContentEnabled = "external_content_enabled"
         case accountDeletion = "account_deletion"
         case dataDeletion = "data_deletion"
+        case gleanAvailable = "glean_available"
+        case gleanEnabled = "glean_enabled"
     }
 
     init(from decoder: Decoder) throws {
@@ -100,6 +107,8 @@ struct CurrentUser: Decodable, Equatable, Sendable {
         externalContentEnabled = c.tolerant(.externalContentEnabled, default: false)
         accountDeletion = c.tolerant(.accountDeletion)
         dataDeletion = c.tolerant(.dataDeletion)
+        gleanAvailable = c.tolerant(.gleanAvailable, default: false)
+        gleanEnabled = c.tolerant(.gleanEnabled, default: false)
     }
 
     /// Applies an email-state answer from any `/api/dashboard/email*` call
@@ -129,6 +138,9 @@ struct UserCapabilities: Equatable, Sendable {
     var externalContentAvailable = false
     var twitterLogin = false
     var spendBlocked = false
+    /// Glean (#475): the Reflect / Glean home cards, the Glean buttons and
+    /// "Glean for this reflection". Off: today's app.
+    var gleanEnabled = false
 
     init() {}
 
@@ -147,6 +159,7 @@ struct UserCapabilities: Equatable, Sendable {
         externalContentAvailable = user.externalContentAvailable
         twitterLogin = user.twitterLogin
         spendBlocked = user.spendBlocked
+        gleanEnabled = user.gleanEnabled
     }
 
     /// Commons tab and Share card (map A §2.1: approved and `share_v1_enabled`).

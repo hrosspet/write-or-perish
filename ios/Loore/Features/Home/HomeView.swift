@@ -1,13 +1,16 @@
 import SwiftUI
 
-/// Reflect (web `HomePage`, route `/`): greeting, "What's on your mind?", and
-/// the mode cards: Voice (M3), Text, Share (flag), Read (admins).
+/// Home (web `HomePage`, route `/`): greeting, "What's on your mind?", and the
+/// cards. A user who gleans (#436) gets two cards by purpose, Reflect and
+/// Glean, each with Voice and Text, and Share (flag) in its own row below; a
+/// user without Glean keeps the mode cards: Voice, Text, Share (flag). The
+/// admin-only Read card is gone, as on the web (#474).
 struct HomeView: View {
     @Environment(AppState.self) private var app
     @State private var greeting = LooreDateFormat.greeting()
-    @State private var readStarting = false
 
     var body: some View {
+        let gleans = app.capabilities.gleanEnabled
         ScrollView {
             VStack(spacing: 0) {
                 Spacer(minLength: 24)
@@ -20,16 +23,20 @@ struct HomeView: View {
                     .font(LooreFont.hero)
                     .foregroundStyle(LooreColor.textPrimary)
                     .multilineTextAlignment(.center)
-                    .padding(.bottom, 40)
+                    .padding(.bottom, gleans ? 28 : 40)
                     .looreFadeIn(delay: 0.2, offset: 12)
                     .accessibilityAddTraits(.isHeader)
 
-                ViewThatFits(in: .horizontal) {
-                    HStack(alignment: .top, spacing: 16) { cards }
-                        .frame(minWidth: 640)
-                    VStack(spacing: 16) { cards }
+                if gleans {
+                    purposeCards
+                } else {
+                    ViewThatFits(in: .horizontal) {
+                        HStack(alignment: .top, spacing: 16) { cards }
+                            .frame(minWidth: 640)
+                        VStack(spacing: 16) { cards }
+                    }
+                    .frame(maxWidth: 900)
                 }
-                .frame(maxWidth: 900)
             }
             .padding(.horizontal, LooreSpacing.gutter)
             .padding(.vertical, 40)
@@ -40,6 +47,7 @@ struct HomeView: View {
         .onAppear { greeting = LooreDateFormat.greeting() }
     }
 
+    /// Without Glean: today's mode cards.
     @ViewBuilder private var cards: some View {
         WorkflowCard(title: "Voice", description: "Speak what's present.", delay: 0.4) {
             LooreLogo(size: 42)
@@ -50,50 +58,126 @@ struct HomeView: View {
         WorkflowCard(title: "Text", description: "Type what's on your mind.", delay: 0.52) {
             HomeIcons.text
         } action: {
-            app.open(.textMode)
+            app.open(.textMode())
         }
         .accessibilityIdentifier("home.text")
-        if app.capabilities.shareEnabled {
-            WorkflowCard(title: "Share", description: "Give something outward.", delay: 0.64) {
-                HomeIcons.share
-            } action: {
-                app.open(.share)
-            }
-            .accessibilityIdentifier("home.share")
+        if app.capabilities.shareEnabled { shareCard(delay: 0.64) }
+    }
+
+    /// The Share card, the same with and without Glean (Peter: "Share stays as today").
+    private func shareCard(delay: Double) -> some View {
+        WorkflowCard(title: "Share", description: "Give something outward.", delay: delay) {
+            HomeIcons.share
+        } action: {
+            app.open(.share)
         }
-        if app.capabilities.isAdmin {
-            WorkflowCard(title: "Read", description: readStarting ? "Starting…" : "What's worth your time today.",
-                         delay: 0.76) {
-                HomeIcons.read
-            } action: {
-                startRead()
+        .accessibilityIdentifier("home.share")
+    }
+
+    /// With Glean (#436): Reflect and Glean, side by side where they fit and
+    /// stacked on a phone; Share in its own row below.
+    private var purposeCards: some View {
+        VStack(spacing: 24) {
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .top, spacing: 16) { purposeCardViews }
+                    .frame(minWidth: 520)
+                VStack(spacing: 16) { purposeCardViews }
             }
-            .disabled(readStarting || NodePrefetch.shared.isPending)
-            .accessibilityIdentifier("home.read")
+            .frame(maxWidth: 560)
+            if app.capabilities.shareEnabled {
+                shareCard(delay: 0.54).frame(maxWidth: 560)
+            }
         }
     }
 
-    /// Admin-only Community Archive read (`POST /api/read/start`, billed):
-    /// the click creates the thread and lands on the reply (or the prompt).
-    private func startRead() {
-        guard !readStarting, !NodePrefetch.shared.isPending else { return }
-        readStarting = true
-        let stored = UserDefaults.standard.object(forKey: DefaultsKey.autoGenerate)
-        let autoGenerate = stored == nil ? true : UserDefaults.standard.bool(forKey: DefaultsKey.autoGenerate)
-        Task {
-            do {
-                struct Answer: Decodable { var llm_node_id: Int?; var prompt_node_id: Int? }
-                let answer: Answer = try await app.api.post(APIPath.readStart, json: .object(["auto_generate": .bool(autoGenerate)]))
-                readStarting = false
-                // The read's thread opens once its node is in (NodePrefetch), not on a loading page.
-                if let id = answer.llm_node_id ?? answer.prompt_node_id { NodePrefetch.shared.openThread(id, app: app) }
-            } catch {
-                readStarting = false
-                if SpendCap.isSpendCapError(error) { return }
-                app.toasts.show((error as? APIError)?.userMessage(fallback: "Could not start the read.")
-                                ?? "Could not start the read.", duration: 6)
+    @ViewBuilder private var purposeCardViews: some View {
+        ForEach(Array(HomePurpose.allCases.enumerated()), id: \.element) { index, purpose in
+            PurposeCard(purpose: purpose, delay: 0.3 + Double(index) * 0.12) { mode in
+                app.open(purpose.route(mode))
             }
         }
+    }
+}
+
+/// The home screen's cards by purpose (#436, web `purposeCards`).
+enum HomePurpose: String, CaseIterable, Hashable {
+    case reflect, glean
+
+    enum Mode: String, CaseIterable { case voice = "Voice", text = "Text" }
+
+    var title: String { self == .reflect ? "Reflect" : "Glean" }
+
+    var line: String {
+        self == .reflect ? "Talk it through with Loore." : "Reflect, and Loore gleans for you."
+    }
+
+    /// Glean opens the same screens as a Glean session: the thread it starts is
+    /// marked, so every turn of it offers Glean (#435).
+    func route(_ mode: Mode) -> AppRoute {
+        let glean = self == .glean
+        switch mode {
+        case .voice: return .voice(parentId: nil, resumeLLMId: nil, glean: glean)
+        case .text: return .textMode(glean: glean)
+        }
+    }
+}
+
+/// One purpose card (web `PurposeCard`): serif title, a short rule, the line,
+/// then its Voice and Text buttons.
+struct PurposeCard: View {
+    let purpose: HomePurpose
+    var delay: Double = 0
+    let open: (HomePurpose.Mode) -> Void
+
+    var body: some View {
+        VStack(spacing: 10) {
+            Text(purpose.title)
+                .font(LooreFont.serif(24.8, .regular, relativeTo: .title2))
+                .foregroundStyle(LooreColor.textPrimary)
+                .padding(.top, 4)
+                .accessibilityAddTraits(.isHeader)
+            Rectangle()
+                .fill(LooreColor.accentGlow)
+                .frame(width: 32, height: 1)
+                .padding(.vertical, 2)
+                .accessibilityHidden(true)
+            Text(purpose.line)
+                .font(LooreFont.sans(14.1, .light))
+                .foregroundStyle(LooreColor.textSecondary)
+                .lineSpacing(3)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 10) {
+                ForEach(HomePurpose.Mode.allCases, id: \.self) { mode in
+                    Button { open(mode) } label: {
+                        HStack(spacing: 7) {
+                            Image(systemName: mode == .voice ? "mic" : "text.alignleft")
+                                .font(.system(size: 13, weight: .light))
+                                .accessibilityHidden(true)
+                            Text(mode.rawValue)
+                        }
+                        .font(LooreFont.sans(14.1, .light))
+                        .foregroundStyle(LooreColor.textPrimary)
+                        .padding(.horizontal, 16)
+                        .frame(minHeight: 44)
+                        .overlay(Capsule().strokeBorder(LooreColor.borderHover))
+                        .contentShape(Capsule())
+                    }
+                    .buttonStyle(CardPressStyle())
+                    // A screen reader tells the two Voice buttons apart (web: "Glean: Voice").
+                    .accessibilityLabel("\(purpose.title): \(mode.rawValue)")
+                    .accessibilityIdentifier("home.\(purpose.rawValue).\(mode.rawValue.lowercased())")
+                }
+            }
+            .padding(.top, 6)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(EdgeInsets(top: 24, leading: 20, bottom: 20, trailing: 20))
+        .background(LooreColor.bgCard, in: RoundedRectangle(cornerRadius: LooreRadius.large))
+        .overlay(RoundedRectangle(cornerRadius: LooreRadius.large).strokeBorder(LooreColor.border))
+        .looreFadeIn(delay: delay, offset: 20)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("home.\(purpose.rawValue)")
     }
 }
 
@@ -148,21 +232,6 @@ struct CardPressStyle: ButtonStyle {
 /// The Home cards' line icons, from `HomePage.js`.
 enum HomeIcons {
     private static let box = CGSize(width: 42, height: 42)
-
-    /// An open book, one page marked (the web's Read card icon).
-    static var read: some View {
-        ZStack {
-            SVGShape("M6 11 C11 9.5 16 9.8 21 12.5 C26 9.8 31 9.5 36 11 L36 32 C31 30.5 26 30.8 21 33.5 C16 30.8 11 30.5 6 32 Z", viewBox: box)
-                .stroke(LooreColor.accent, style: StrokeStyle(lineWidth: 1.4, lineJoin: .round))
-            SVGShape("M21 12.5 L21 33.5", viewBox: box)
-                .stroke(LooreColor.accent.opacity(0.7), lineWidth: 1.1)
-            SVGShape("M10 16.5 C13 15.8 15.5 16 18 17.2 M10 21 C13 20.3 15.5 20.5 18 21.7 M10 25.5 C13 24.8 15.5 25 18 26.2 M24 16.5 C27 15.8 29.5 16 32 17.2 M24 21 C27 20.3 29.5 20.5 32 21.7", viewBox: box)
-                .stroke(LooreColor.accent.opacity(0.6), style: StrokeStyle(lineWidth: 1, lineCap: .round))
-            Circle().fill(LooreColor.accent).frame(width: 3.2, height: 3.2).position(x: 28, y: 26)
-        }
-        .frame(width: 42, height: 42)
-        .accessibilityHidden(true)
-    }
 
     static var text: some View {
         ZStack {

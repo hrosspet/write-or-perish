@@ -36,11 +36,14 @@ enum ReferenceUtils {
         return source
     }
 
-    /// `authorLabel(item)`: "@handle" for tweets, the byline as-is for a web
-    /// clip, nil when there is no handle.
-    static func authorLabel(source: String, handle: String?) -> String? {
+    /// `authorLabel(item)`: "@handle" for tweets, after the display name when
+    /// the archive has one (#435); the byline as-is for a web clip; nil when
+    /// there is no handle.
+    static func authorLabel(source: String, handle: String?, name: String? = nil) -> String? {
         guard let handle, !handle.isEmpty else { return nil }
-        return source == "web_clip" ? handle : "@\(handle)"
+        if source == "web_clip" { return handle }
+        if let name, !name.isEmpty { return "\(name) @\(handle)" }
+        return "@\(handle)"
     }
 
     /// `asCardNode(item)`: the title takes the thread-name slot; the date is

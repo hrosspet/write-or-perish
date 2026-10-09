@@ -41,7 +41,8 @@ final class ThreadModel {
     private(set) var pinLoading = false
     private(set) var voiceLoading = false
     private(set) var readLoading = false
-    /// The Read button's own model (read models only, #355); nil until its picker loads.
+    /// The Glean button's own model (read models only, #355): the picker beside
+    /// it, for everyone who gleans (#435, Peter 2026-10-09); nil until it loads.
     var readModel: String?
     var toolActionsExpanded = false
     var replyTarget: NodeTarget?
@@ -102,10 +103,12 @@ final class ThreadModel {
 
     var parentAncestor: AncestorNode? { node?.ancestors.last }
 
+    /// A gleaning (a read reply): a render or picks, a batch, the live or
+    /// glean-again marker, or a read prompt right above it — so a pending one too.
     var isReadReply: Bool {
         guard isLLMNode, let node else { return false }
         return node.readReply
-            || (node.toolCallsMeta?.contains { ["_batch", "_read"].contains($0.name) } ?? false)
+            || (node.toolCallsMeta?.contains { ["_batch", "_read", "_live"].contains($0.name) } ?? false)
             || ["read", "read_thread"].contains(parentAncestor?.systemPrompt.promptKey ?? "")
     }
 
@@ -138,7 +141,7 @@ final class ThreadModel {
 
     var tabTitle: String {
         guard let node else { return "Loore" }
-        if isLLMPending { return isBatchWait ? "Processing…" : "Thinking…" }
+        if isLLMPending { return isBatchWait ? "Processing…" : (isReadReply ? "Gleaning…" : "Thinking…") }
         let first = (node.content.jsTrimmed.jsLines.first ?? "")
         let line = JSRegex.replaceFirst(first, #"^[#>\s]+"#, "").jsPrefix(120)
         return line.isEmpty ? "Loore" : line
@@ -518,37 +521,98 @@ final class ThreadModel {
         openThread(userId, awaitLLM: result.llmNodeId)
     }
 
-    // MARK: Read (admin Community Archive feature, map D §5.9)
+    // MARK: Glean (#435, #475; the Community Archive read, map D §5.9)
 
-    static let readFurtherTitle = "Another pass over the day's tweets, against everything in this thread so far — your marks on these picks included."
-    static let readEntryTitle = "Loore reads the last day of Community Archive tweets and shows you the ones relevant to this thread"
+    static let gleanAgainTitle = "Another pass over today's tweets, against everything in this thread so far — your marks on the earlier picks included."
+    static let gleanTitle = "Loore reads today's Community Archive tweets and shows you the few worth your time, from what you said in this thread."
+    static let gleanMenuLabel = "Glean for this reflection"
+    static let gleaningsTitle = "Today's gleanings"
 
-    var readLabel: String { readReplyAbove ? "Read further" : "Read" }
+    /// The label stays "Glean" after the first gleaning; the hint says what the next press does.
+    var readLabel: String { "Glean" }
+    var readTitle: String { readReplyAbove ? Self.gleanAgainTitle : Self.gleanTitle }
 
+    /// The rollout gate and the user's own switch (`glean_enabled`).
+    var gleanEnabled: Bool { app?.capabilities.gleanEnabled ?? false }
+    /// The thread was started from the Glean card.
+    var gleanThread: Bool { node?.gleanThread ?? false }
+
+    /// The Glean button (and its model picker) in the action row: a Glean-card
+    /// thread only, for its owner, whenever they could act (web `readActions`).
     func readActions(craftMode: Bool) -> Bool {
-        isOwner && inReadThread && node?.aiUsage != .off && !isLLMPending
+        guard let node else { return false }
+        return isOwner && gleanEnabled && gleanThread && node.aiUsage != .off && !isLLMPending
+            && !node.systemPrompt.isSystemPrompt
     }
 
-    /// `POST /api/read/from-node/<id>` (billed): a read turn under this node.
-    func readFromNode(autoGenerate: Bool) {
+    /// "Glean for this reflection" in an entry's ⋯ menu (web `gleanFromMenu`): in
+    /// any thread NOT started from the Glean card, on the user's own entries, at
+    /// any time. Not on a system prompt, a reply still being written, or a node
+    /// whose AI usage is None.
+    static func offersGleanInMenu(gleanEnabled: Bool, gleanThread: Bool, owned: Bool, deleted: Bool,
+                                  isSystemPrompt: Bool, aiUsage: AIUsage?, pending: Bool) -> Bool {
+        gleanEnabled && !gleanThread && owned && !deleted && !isSystemPrompt && aiUsage != .off && !pending
+    }
+
+    func offersGleanInMenu(owned: Bool, deleted: Bool, isSystemPrompt: Bool, aiUsage: AIUsage?,
+                           pending: Bool = false) -> Bool {
+        Self.offersGleanInMenu(gleanEnabled: gleanEnabled, gleanThread: gleanThread, owned: owned,
+                               deleted: deleted, isSystemPrompt: isSystemPrompt, aiUsage: aiUsage, pending: pending)
+    }
+
+    /// The action row's Glean: under this node, on the model picked beside it.
+    func gleanHere() {
+        glean(under: nodeId, model: readModel)
+    }
+
+    /// `POST /api/read/from-node/<id>` (billed, a live call): a glean under the
+    /// node; the click is the request, so auto-generate does not apply. The menu
+    /// entry sends no model: the server's default, a read model of the user's own
+    /// provider. Lands on the pending gleaning, which its page watches.
+    func glean(under targetId: Int, model: String? = nil) {
         guard let app, !readLoading, !NodePrefetch.shared.isPending else { return }
         readLoading = true
         pageError = nil
         Task {
             do {
-                struct Answer: Decodable { var llm_node_id: Int?; var prompt_node_id: Int? }
-                var body: [String: JSONValue] = ["auto_generate": .bool(autoGenerateActive(autoGenerate))]
-                if let readModel { body["model"] = .string(readModel) }
-                let answer: Answer = try await app.api.post(APIPath.readFromNode(nodeId), json: .object(body))
+                let answer: GleanStartResponse = try await app.api.post(APIPath.readFromNode(targetId),
+                                                                        json: GleanRequest.body(model: model))
                 readLoading = false
-                if let id = answer.llm_node_id ?? answer.prompt_node_id { openThread(id, awaitLLM: nil) }
+                if let id = answer.openId { openThread(id, awaitLLM: nil) }
             } catch {
                 readLoading = false
                 if SpendCap.isSpendCapError(error) { return }
-                app.toasts.show((error as? APIError)?.userMessage(fallback: "Could not start the read.")
-                                ?? "Could not start the read.", duration: 6)
+                app.toasts.show((error as? APIError)?.userMessage(fallback: "Could not start the glean.")
+                                ?? "Could not start the glean.", duration: 6)
             }
         }
+    }
+
+    // MARK: The gleaning's head (web NodeDetail, #435)
+
+    var gleaningDone: Bool { isReadReply && node?.llmTaskStatus == .completed }
+
+    /// A finished gleaning with no picks: an empty day. Old replies that kept their
+    /// picks in rows only (FeedPicks) are not empty.
+    var gleaningEmpty: Bool {
+        gleaningDone && node?.readWindow != nil && readPickIds.isEmpty && (node?.feedPicksCount ?? 0) <= 0
+    }
+
+    /// "N tweets from today, chosen for what you said." once the picks are in.
+    var gleaningsSubline: String? {
+        guard gleaningDone else { return nil }
+        return Self.gleaningsSubline(picks: readPickIds.count)
+    }
+
+    static func gleaningsSubline(picks: Int) -> String? {
+        guard picks > 0 else { return nil }
+        return "\(picks) \(picks == 1 ? "tweet" : "tweets") from today, chosen for what you said."
+    }
+
+    /// The empty day's small line, from the reply's `read_window.tweets`.
+    static func emptyDayDetail(tweetsRead: Int) -> String {
+        tweetsRead > 0 ? "Loore read all \(jsLocaleNumber(tweetsRead)) of today's tweets in the archive."
+            : "The archive had no new tweets today."
     }
 
     // MARK: Voice hand-off
@@ -562,10 +626,13 @@ final class ThreadModel {
                 let answer: VoiceFromNodeResponse = try await app.api.post(APIPath.voiceFromNode(nodeId), json: .object([
                     "model": .optional(selectedModel),
                 ]))
+                // A thread started from the Glean card keeps its Glean button on the
+                // Voice screen too (#435). A gleaning answers "ready": nothing plays.
+                let glean = gleanThread && gleanEnabled
                 if answer.mode == "processing" {
-                    app.open(.voice(parentId: answer.parentId, resumeLLMId: answer.llmNodeId))
+                    app.open(.voice(parentId: answer.parentId, resumeLLMId: answer.llmNodeId, glean: glean))
                 } else {
-                    app.open(.voice(parentId: answer.parentId, resumeLLMId: nil))
+                    app.open(.voice(parentId: answer.parentId, resumeLLMId: nil, glean: glean))
                 }
                 voiceLoading = false
             } catch {
