@@ -150,6 +150,19 @@ def _render_variant(user_id):
             f"e{int(_external_references_for_user(user_id))}")
 
 
+def _system_render_variant(system_node, user_id):
+    """The #192 render-cache variant of *system_node* rendered for
+    *user_id*. The owner's is _render_variant alone (the key their cached
+    renders already use). Someone else's render of it (a reply in a
+    public thread) has the personal placeholders blanked and its own
+    toggles, so it is keyed by that user: it never reads the owner's
+    render, and never overwrites it."""
+    variant = _render_variant(user_id)
+    if not node_is_users(system_node, user_id):
+        variant += f"r{user_id}"
+    return variant
+
+
 def _account_ai_usage(user_id):
     """The account's AI-usage setting. The artifacts index is licensed by
     it (#326), so it is part of the render variant above: a switch takes
@@ -164,6 +177,55 @@ _ARTIFACT_PLACEHOLDERS = (
     USER_MEMORY_PLACEHOLDER, USER_SCRATCHPAD_PLACEHOLDER,
     USER_INTENTIONS_PLACEHOLDER, USER_ARTIFACTS_INDEX_PLACEHOLDER,
 )
+# Every placeholder that resolves to the user's own data ({user_export}
+# too, matched by USER_EXPORT_PATTERN since it takes parameters).
+PERSONAL_PLACEHOLDERS = (
+    USER_PROFILE_PLACEHOLDER, USER_TODO_PLACEHOLDER,
+    USER_RECENT_PLACEHOLDER, USER_RECENT_RAW_PLACEHOLDER,
+    USER_AI_PREFERENCES_PLACEHOLDER,
+) + _ARTIFACT_PLACEHOLDERS
+
+
+def node_is_users(node, user_id):
+    """True when *node* belongs to *user_id*: they wrote it, or (an AI
+    reply) asked for it. Only such a node's personal placeholders resolve
+    in that user's reply."""
+    return (node.human_owner_id or node.user_id) == user_id
+
+
+# Matches exactly what the resolvers fill: the plain placeholders above
+# (each resolved by exact string) and every {user_export...} form
+# (resolved by USER_EXPORT_PATTERN).
+PERSONAL_PLACEHOLDER_PATTERN = re.compile(
+    "|".join(re.escape(p) for p in PERSONAL_PLACEHOLDERS)
+    + "|" + USER_EXPORT_PATTERN.pattern)
+
+
+def blank_personal_placeholders(text):
+    """*text* with every personal placeholder removed. A node of someone
+    else's in the reply's chain (their system prompt in a public thread,
+    a message of theirs) contributes none of its pinned data, and none of
+    the requester's either: the placeholders read as empty. Removal
+    repeats until none is left, so a placeholder nested in another
+    ("{user_{user_todo}profile}") cannot leave a new one behind. Callers
+    also never resolve placeholders in such a node."""
+    while True:
+        text, removed = PERSONAL_PLACEHOLDER_PATTERN.subn("", text)
+        if not removed:
+            return text
+
+
+def _own_pin(row, user_id):
+    """*row* (an artifact version pinned on a node) when it is *user_id*'s,
+    else None. Callers resolve only nodes of the user's own; this keeps
+    any other path from handing a model someone else's version."""
+    if row is not None and row.user_id != user_id:
+        logger.warning(
+            "Pinned %s %s belongs to user %s, not %s; not used",
+            type(row).__name__, row.id, row.user_id, user_id)
+        return None
+    return row
+
 
 # Within-turn retrieval loop (#158, text mode only). When the model calls one
 # of these tools, the retrieved content is injected back into the message
@@ -781,7 +843,8 @@ def _todo_index_line(user_id, pinned_node=None):
     absent or empty todo is still listed (as ``(empty)``) so the model knows
     the surface exists. No open/priority counts (noise).
     """
-    todo = pinned_node.get_artifact("todo") if pinned_node else None
+    todo = _own_pin(
+        pinned_node.get_artifact("todo") if pinned_node else None, user_id)
     if todo is None:
         todo = UserTodo.query.filter_by(user_id=user_id).order_by(
             UserTodo.created_at.desc()
@@ -816,7 +879,11 @@ def get_user_artifacts_context(user_id, pinned_node=None, usage=None,
     placeholder is absent never reaches the payload, so it does not
     report.
     """
-    artifacts = pinned_node.get_user_artifacts() if pinned_node else {}
+    artifacts = {
+        kind: a for kind, a in (
+            pinned_node.get_user_artifacts() if pinned_node else {}).items()
+        if _own_pin(a, user_id) is not None
+    }
     if not artifacts:
         artifacts = UserArtifact.latest_per_kind(user_id)
     artifacts = {
@@ -891,7 +958,8 @@ def get_user_ai_preferences_content(user_id, pinned_node=None, usage=None):
     """
     art = None
     if pinned_node is not None:
-        art = pinned_node.get_user_artifacts().get("ai_preferences")
+        art = _own_pin(
+            pinned_node.get_user_artifacts().get("ai_preferences"), user_id)
         if art is not None and art.ai_usage not in AI_ALLOWED:
             art = None
     if art is None:
@@ -2226,7 +2294,9 @@ def get_user_profile_content(user_id, pinned_node=None, usage=None):
     re-checked on the resolved row so a mid-session opt-out is honored.
     The row reports to *usage* (#326).
     """
-    profile = pinned_node.get_artifact("profile") if pinned_node else None
+    profile = _own_pin(
+        pinned_node.get_artifact("profile") if pinned_node else None,
+        user_id)
     if profile is None:
         profile = UserProfile.query.filter_by(user_id=user_id).order_by(
             UserProfile.created_at.desc()
@@ -2249,7 +2319,8 @@ def get_user_todo_content(user_id, pinned_node=None, usage=None):
     resolved row so a mid-session opt-out is honored. The row reports to
     *usage* (#326).
     """
-    todo = pinned_node.get_artifact("todo") if pinned_node else None
+    todo = _own_pin(
+        pinned_node.get_artifact("todo") if pinned_node else None, user_id)
     if todo is None:
         todo = UserTodo.query.filter_by(user_id=user_id).order_by(
             UserTodo.created_at.desc()
@@ -2272,7 +2343,9 @@ def get_user_recent_content(user_id, pinned_node=None, usage=None):
     ai_usage is re-checked on the resolved row so a mid-session opt-out is
     honored. The row reports to *usage* (#326).
     """
-    rc = pinned_node.get_artifact("recent_context") if pinned_node else None
+    rc = _own_pin(
+        pinned_node.get_artifact("recent_context") if pinned_node else None,
+        user_id)
     if rc is None:
         profile = UserProfile.query.filter_by(user_id=user_id).filter(
             UserProfile.ai_usage.in_(AI_ALLOWED)
@@ -2785,24 +2858,10 @@ class LLMCompletionTask(Task):
                     logger.error(f"LLM completion failed for node {llm_node_id}: {exc}")
 
 
-def render_system_message(system_node, user_id, usage=None):
-    """Render the system node's full message text exactly as the
-    generation loop would (#192/#187).
-
-    Used by the finalize pre-warm so the provider-cache warm and the
-    real generation share byte-identical prefixes: the result is stored
-    in the #192 Redis cache, and generation prefers those cached bytes.
-    Only valid for prompts without volatile placeholders ({user_export},
-    {quote:..}, {quote_ext:..}) — callers must check first. The rows the
-    placeholders resolve to report to *usage* (a ContextUsage, #326).
-    """
-    owner = User.query.get(user_id)
-    user_tz = owner.timezone if owner and owner.timezone else "UTC"
-    author = system_node.user.username if system_node.user else "Unknown"
-    time_prefix = local_stamp(
-        system_node.updated_at or system_node.created_at, user_tz)
-    text = f"{time_prefix} author {author}: {system_node.get_content()}"
-
+def _resolve_own_system_placeholders(text, system_node, user_id, usage):
+    """*text* (the user's own system node) with its personal
+    placeholders filled from the versions pinned on the node; see
+    render_system_message."""
     if USER_PROFILE_PLACEHOLDER in text:
         profile_obj = get_user_profile_content(
             user_id, pinned_node=system_node, usage=usage)
@@ -2847,6 +2906,33 @@ def render_system_message(system_node, user_id, usage=None):
         text = text.replace(USER_INTENTIONS_PLACEHOLDER, intentions or "")
         text = text.replace(
             USER_ARTIFACTS_INDEX_PLACEHOLDER, index or "(none)")
+    return text
+
+
+def render_system_message(system_node, user_id, usage=None):
+    """Render the system node's full message text exactly as the
+    generation loop would (#192/#187).
+
+    Used by the finalize pre-warm so the provider-cache warm and the
+    real generation share byte-identical prefixes: the result is stored
+    in the #192 Redis cache, and generation prefers those cached bytes.
+    Only valid for prompts without volatile placeholders ({user_export},
+    {quote:..}, {quote_ext:..}) — callers must check first. The rows the
+    placeholders resolve to report to *usage* (a ContextUsage, #326).
+    A system node that is not *user_id*'s own renders its personal
+    placeholders empty, as the generation loop does.
+    """
+    owner = User.query.get(user_id)
+    user_tz = owner.timezone if owner and owner.timezone else "UTC"
+    author = system_node.user.username if system_node.user else "Unknown"
+    time_prefix = local_stamp(
+        system_node.updated_at or system_node.created_at, user_tz)
+    text = f"{time_prefix} author {author}: {system_node.get_content()}"
+    if node_is_users(system_node, user_id):
+        text = _resolve_own_system_placeholders(
+            text, system_node, user_id, usage)
+    else:
+        text = blank_personal_placeholders(text)
     if SHARE_GUIDANCE_PLACEHOLDER in text:
         text = text.replace(
             SHARE_GUIDANCE_PLACEHOLDER,
@@ -2945,7 +3031,7 @@ def _prewarm_anthropic_cache(system_node_id, user_id, model_id,
             from backend.utils.prompt_cache import (
                 get_cached_render, store_render,
             )
-            render_variant = _render_variant(user_id)
+            render_variant = _system_render_variant(system_node, user_id)
             cached = get_cached_render(
                 flask_app.config, system_node, render_variant)
             if cached is not None:
@@ -3170,10 +3256,11 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
 
             # Check if any node contains the {user_export} placeholder
             # Find the first node containing it to use its timestamp as cutoff
+            # (the user's own nodes only: someone else's reads as empty).
             export_node = None
             export_placeholder_match = None
             for node in node_chain:
-                if not _alive(node):
+                if not _alive(node) or not node_is_users(node, user_id):
                     continue
                 m = USER_EXPORT_PATTERN.search(node.get_content())
                 if m:
@@ -3341,7 +3428,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     and not has_quotes(_sys_text)
                     and not has_ext_quotes(_sys_text)
                 )
-                render_variant = _render_variant(user_id)
+                render_variant = _system_render_variant(system_node, user_id)
                 if system_render_cacheable:
                     _cached = get_cached_render(
                         flask_app.config, system_node, render_variant)
@@ -3350,10 +3437,15 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                             _cached)
 
             def _placeholder_node(placeholder):
+                """The first of the user's own nodes carrying
+                *placeholder*: its pins are the versions the reply
+                renders. Someone else's node never resolves one (its
+                placeholders read as empty, blank_personal_placeholders)."""
                 for n in node_chain:
                     if cached_system_render is not None and n is system_node:
                         continue  # already rendered — no fetch needed
-                    if _alive(n) and placeholder in n.get_content():
+                    if (_alive(n) and node_is_users(n, user_id)
+                            and placeholder in n.get_content()):
                         return n
                 return None
 
@@ -3876,11 +3968,20 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         message_text = (
                             f"{time_prefix} author {author}: {node_content}"
                         )
+                        # Someone else's node (their system prompt in a
+                        # public thread, a message of theirs): its personal
+                        # placeholders read as empty, and none of the
+                        # resolvers below run on it.
+                        owned = node_is_users(node, user_id)
+                        if not owned:
+                            message_text = blank_personal_placeholders(
+                                message_text)
                         # Replace {user_export} — first occurrence gets
                         # the archive, repeats get a stub (#139): the
                         # export is the heaviest placeholder and
                         # duplicating it doubles prompt cost.
-                        if user_export_content and export_placeholder_match:
+                        if (owned and user_export_content
+                                and export_placeholder_match):
                             if export_placeholder_match in message_text:
                                 if not replaced_export:
                                     message_text = message_text.replace(
@@ -3911,79 +4012,80 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                             else:
                                 message_text = CA_TWEETS_PATTERN.sub(
                                     CA_TWEETS_CHAT_STUB, message_text)
-                        # Replace {user_profile} — first occurrence
-                        # gets content, subsequent get emptied (dedup)
-                        if USER_PROFILE_PLACEHOLDER in message_text:
-                            if not replaced_profile:
+                        if owned:
+                            # Replace {user_profile} — first occurrence
+                            # gets content, subsequent get emptied (dedup)
+                            if USER_PROFILE_PLACEHOLDER in message_text:
+                                if not replaced_profile:
+                                    message_text = message_text.replace(
+                                        USER_PROFILE_PLACEHOLDER,
+                                        user_profile_content or ""
+                                    )
+                                    replaced_profile = True
+                                else:
+                                    message_text = message_text.replace(
+                                        USER_PROFILE_PLACEHOLDER,
+                                        "(see profile above)"
+                                    )
+                            # Replace {user_todo} — pinned snapshot (no dedup)
+                            if USER_TODO_PLACEHOLDER in message_text:
                                 message_text = message_text.replace(
-                                    USER_PROFILE_PLACEHOLDER,
-                                    user_profile_content or ""
+                                    USER_TODO_PLACEHOLDER,
+                                    user_todo_content or ""
                                 )
-                                replaced_profile = True
-                            else:
+                            # Replace {user_recent} — first occurrence only
+                            if USER_RECENT_PLACEHOLDER in message_text:
+                                if not replaced_recent:
+                                    message_text = message_text.replace(
+                                        USER_RECENT_PLACEHOLDER,
+                                        user_recent_content or ""
+                                    )
+                                    replaced_recent = True
+                                else:
+                                    message_text = message_text.replace(
+                                        USER_RECENT_PLACEHOLDER,
+                                        "(see recent context above)"
+                                    )
+                            # Replace {user_recent_raw} — first occurrence only
+                            if USER_RECENT_RAW_PLACEHOLDER in message_text:
+                                if not replaced_recent_raw:
+                                    message_text = message_text.replace(
+                                        USER_RECENT_RAW_PLACEHOLDER,
+                                        user_recent_raw_content or ""
+                                    )
+                                    replaced_recent_raw = True
+                                else:
+                                    message_text = message_text.replace(
+                                        USER_RECENT_RAW_PLACEHOLDER,
+                                        "(see recent raw data above)"
+                                    )
+                            # Replace {user_ai_preferences} — pinned snapshot
+                            if USER_AI_PREFERENCES_PLACEHOLDER in message_text:
                                 message_text = message_text.replace(
-                                    USER_PROFILE_PLACEHOLDER,
-                                    "(see profile above)"
+                                    USER_AI_PREFERENCES_PLACEHOLDER,
+                                    user_ai_preferences_content or ""
                                 )
-                        # Replace {user_todo} — pinned snapshot (no dedup)
-                        if USER_TODO_PLACEHOLDER in message_text:
-                            message_text = message_text.replace(
-                                USER_TODO_PLACEHOLDER,
-                                user_todo_content or ""
-                            )
-                        # Replace {user_recent} — first occurrence only
-                        if USER_RECENT_PLACEHOLDER in message_text:
-                            if not replaced_recent:
+                            # Replace artifact placeholders — pinned snapshot
+                            if USER_MEMORY_PLACEHOLDER in message_text:
                                 message_text = message_text.replace(
-                                    USER_RECENT_PLACEHOLDER,
-                                    user_recent_content or ""
+                                    USER_MEMORY_PLACEHOLDER,
+                                    user_memory_content or ""
                                 )
-                                replaced_recent = True
-                            else:
+                            if USER_SCRATCHPAD_PLACEHOLDER in message_text:
                                 message_text = message_text.replace(
-                                    USER_RECENT_PLACEHOLDER,
-                                    "(see recent context above)"
+                                    USER_SCRATCHPAD_PLACEHOLDER,
+                                    user_scratchpad_content or ""
                                 )
-                        # Replace {user_recent_raw} — first occurrence only
-                        if USER_RECENT_RAW_PLACEHOLDER in message_text:
-                            if not replaced_recent_raw:
+                            if USER_INTENTIONS_PLACEHOLDER in message_text:
                                 message_text = message_text.replace(
-                                    USER_RECENT_RAW_PLACEHOLDER,
-                                    user_recent_raw_content or ""
+                                    USER_INTENTIONS_PLACEHOLDER,
+                                    user_intentions_content or ""
                                 )
-                                replaced_recent_raw = True
-                            else:
+                            if USER_ARTIFACTS_INDEX_PLACEHOLDER in message_text:
                                 message_text = message_text.replace(
-                                    USER_RECENT_RAW_PLACEHOLDER,
-                                    "(see recent raw data above)"
+                                    USER_ARTIFACTS_INDEX_PLACEHOLDER,
+                                    user_artifacts_index or "(none)"
                                 )
-                        # Replace {user_ai_preferences} — pinned snapshot
-                        if USER_AI_PREFERENCES_PLACEHOLDER in message_text:
-                            message_text = message_text.replace(
-                                USER_AI_PREFERENCES_PLACEHOLDER,
-                                user_ai_preferences_content or ""
-                            )
-                        # Replace artifact placeholders — pinned snapshot
-                        if USER_MEMORY_PLACEHOLDER in message_text:
-                            message_text = message_text.replace(
-                                USER_MEMORY_PLACEHOLDER,
-                                user_memory_content or ""
-                            )
-                        if USER_SCRATCHPAD_PLACEHOLDER in message_text:
-                            message_text = message_text.replace(
-                                USER_SCRATCHPAD_PLACEHOLDER,
-                                user_scratchpad_content or ""
-                            )
-                        if USER_INTENTIONS_PLACEHOLDER in message_text:
-                            message_text = message_text.replace(
-                                USER_INTENTIONS_PLACEHOLDER,
-                                user_intentions_content or ""
-                            )
-                        if USER_ARTIFACTS_INDEX_PLACEHOLDER in message_text:
-                            message_text = message_text.replace(
-                                USER_ARTIFACTS_INDEX_PLACEHOLDER,
-                                user_artifacts_index or "(none)"
-                            )
                         # Replace {share_guidance} — flag-conditional, must
                         # mirror render_system_message byte-for-byte
                         if SHARE_GUIDANCE_PLACEHOLDER in message_text:
@@ -4045,11 +4147,17 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         if (system_render_cacheable
                                 and cached_system_render is None
                                 and attempt == 0):
+                            # Someone else's prompt renders none of the
+                            # user's rows (placeholders blanked), so its
+                            # render carries no verdict of theirs.
+                            _verdict_text = (
+                                _sys_text if node_is_users(system_node, user_id)
+                                else "")
                             store_render(
                                 flask_app.config, system_node, message_text,
                                 render_variant,
-                                unlicensed=context_usage.reason(_sys_text),
-                                rows=context_usage.rows(_sys_text))
+                                unlicensed=context_usage.reason(_verdict_text),
+                                rows=context_usage.rows(_verdict_text))
                     if role == "assistant":
                         last_assistant_index = len(messages)
                     messages.append({

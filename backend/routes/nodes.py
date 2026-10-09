@@ -397,8 +397,9 @@ def _prompt_version_number(prompt):
     ).count()
 
 
-def _system_prompt_fields(n):
-    """Return system prompt serialization fields for a node."""
+def _system_prompt_fields(n, viewer_id):
+    """Return system prompt serialization fields for a node, as
+    *viewer_id* may see them (see _context_artifact_fields)."""
     prompt = n.get_artifact("prompt")
     if prompt is not None:
         return {
@@ -407,13 +408,13 @@ def _system_prompt_fields(n):
             "prompt_key": prompt.prompt_key,
             "user_prompt_id": prompt.id,
             "prompt_version_number": _prompt_version_number(prompt),
-            "context_artifacts": _context_artifact_fields(n),
+            "context_artifacts": _context_artifact_fields(n, viewer_id),
         }
     # No linked prompt version. A root whose per-thread edit detached the
     # link keeps its prompt_key stamp: still the session's system prompt
     # (mode badge, Log preview), just with no title/version to show. Its
     # other context artifacts (pinned profile etc.) may still exist too.
-    artifacts = _context_artifact_fields(n)
+    artifacts = _context_artifact_fields(n, viewer_id)
     return {
         "is_system_prompt": n.is_system_prompt,
         "prompt_title": None,
@@ -424,10 +425,21 @@ def _system_prompt_fields(n):
     }
 
 
-def _context_artifact_fields(n):
-    """Build a dict of context artifacts attached to a node."""
+def _context_artifact_fields(n, viewer_id):
+    """Build a dict of context artifacts attached to a node.
+
+    The pinned personal versions (profile, todo, recent context, memory
+    and the other inline artifacts) and the recent-writing range are the
+    node owner's, shown to the owner only: a public thread's system
+    prompt shows other viewers the prompt, and its placeholders read as
+    not available. Each version is also checked to be the viewer's own.
+    """
+    is_owner = (viewer_id is not None
+                and (n.human_owner_id or n.user_id) == viewer_id)
     artifacts = {}
     for row in n.context_artifacts:
+        if row.artifact_type != "prompt" and not is_owner:
+            continue
         if row.artifact_type == "prompt":
             prompt = UserPrompt.query.get(row.artifact_id)
             if prompt:
@@ -439,7 +451,7 @@ def _context_artifact_fields(n):
                 }
         elif row.artifact_type == "profile":
             profile = UserProfile.query.get(row.artifact_id)
-            if profile:
+            if profile and profile.user_id == viewer_id:
                 artifacts["profile"] = {
                     "id": profile.id,
                     "version_number": UserProfile.query.filter(
@@ -450,7 +462,7 @@ def _context_artifact_fields(n):
                 }
         elif row.artifact_type == "todo":
             todo = UserTodo.query.get(row.artifact_id)
-            if todo:
+            if todo and todo.user_id == viewer_id:
                 artifacts["todo"] = {
                     "id": todo.id,
                     "version_number": UserTodo.query.filter(
@@ -461,7 +473,7 @@ def _context_artifact_fields(n):
                 }
         elif row.artifact_type == "recent_context":
             rc = UserRecentContext.query.get(row.artifact_id)
-            if rc:
+            if rc and rc.user_id == viewer_id:
                 artifacts["recent"] = {
                     "id": rc.id,
                     "content": rc.get_content(),
@@ -474,7 +486,8 @@ def _context_artifact_fields(n):
             # Non-inline kinds reach the model via the artifacts index / tools
             # and have no inline placeholder, so they're skipped here.
             art = UserArtifact.query.get(row.artifact_id)
-            if art and art.kind in UserArtifact.INLINE_KINDS:
+            if (art and art.kind in UserArtifact.INLINE_KINDS
+                    and art.user_id == viewer_id):
                 artifacts[art.kind] = {
                     "id": art.id,
                     "version_number": UserArtifact.query.filter(
@@ -505,7 +518,7 @@ def _context_artifact_fields(n):
                 "content": render_external_guidance(
                     current_app.config, n.human_owner_id or n.user_id),
             }
-        if "{user_recent_raw}" in content:
+        if "{user_recent_raw}" in content and is_owner:
             from backend.routes.export_data import get_raw_data_date_range
             earliest, latest, total_tokens = get_raw_data_date_range(
                 n.user_id, created_before=n.created_at,
@@ -619,7 +632,7 @@ def serialize_node_recursive(n, user_id=None, parent_user_id=None):
         "privacy_level": n.privacy_level,
         "ai_usage": n.ai_usage,
     }
-    data.update(_system_prompt_fields(n))
+    data.update(_system_prompt_fields(n, user_id))
     return data
 
 
@@ -1135,7 +1148,7 @@ def _focal_own_fields(node):
             from backend.models import FeedPick
             data["feed_picks_count"] = FeedPick.query.filter_by(
                 node_id=node.id, kind="read").count()
-    data.update(_system_prompt_fields(node))
+    data.update(_system_prompt_fields(node, current_user.id))
     # A Community Archive read reply: the thread page shows what the read
     # covered (the window, from the pinned render) and offers to read
     # the day again. Focal node only — two small lookups.
@@ -1330,7 +1343,8 @@ def get_node(node_id):
                 # persist it on save.
                 "privacy_level": current.privacy_level,
             }
-            ancestor_data.update(_system_prompt_fields(current))
+            ancestor_data.update(
+                _system_prompt_fields(current, current_user.id))
             ancestors.insert(0, ancestor_data)
         elif status.get("deleted"):
             ancestor_data = {
@@ -1339,7 +1353,8 @@ def get_node(node_id):
                 "ai_usage": current.ai_usage,
                 "privacy_level": current.privacy_level,
             }
-            ancestor_data.update(_system_prompt_fields(current))
+            ancestor_data.update(
+                _system_prompt_fields(current, current_user.id))
             ancestors.insert(0, ancestor_data)
         # else: status.get('inaccessible') — skip entirely (no leak of
         # structural fact "something is here" to a viewer who never had
