@@ -1438,16 +1438,16 @@ TodoVersion JSON (field presence varies by endpoint, listed per endpoint): `id: 
 ##### `PATCH /api/todo/`
 - Backend: routes/todo.py:patch_todo
 - Called from: pages/TodoPage.js (checkbox toggles, quick-add to the "Today" section, insert-after; optimistic update, reverted on failure).
-- Request: `{"content": string}` (full Markdown text).
+- Request: `{"content": string, "base_revision"?: string}` (full Markdown text; the `revision` of the list the edit was made on).
 - Response 200: `{"todo": {"id", "content", "generated_by", "tokens_used", "created_at", "version_number"}}` (no privacy_level/ai_usage).
-- Errors: 400 `"Content is required"`, `"Content cannot be empty"`; 404 `{"error": "No todo exists to update"}`.
+- Errors: 400 `"Content is required"`, `"Content cannot be empty"`; 404 `{"error": "No todo exists to update"}`; 409 `{"error", "code": "todo_changed", "todo": {…latest}}` when `base_revision` is not the latest version's (#430); 503 `{"error", "code": "todo_busy"}` when another write of the user's todo held the todo lock for more than 10 s (#477).
 
 ##### `PUT /api/todo/`
 - Backend: routes/todo.py:update_todo
 - Called from: pages/TodoPage.js (Save in edit mode).
-- Request: `{"content": string, "generated_by"?: string (default "user"), "tokens_used"?: int}`. The web app sends `generated_by: "user"`.
+- Request: `{"content": string, "generated_by"?: string (default "user"), "tokens_used"?: int, "base_revision"?: string}`. The web app sends `generated_by: "user"` and, except for the first create, the `revision` of the version the editor was opened on.
 - Response 200: same shape as PATCH (new row).
-- Errors: 400 `"Content is required"`, `"Content cannot be empty"`.
+- Errors: 400 `"Content is required"`, `"Content cannot be empty"`; 409 `todo_changed` with the latest version when `base_revision` is not the latest version's (#476); 503 `todo_busy` (#477).
 
 ##### `GET /api/todo/versions`
 - Called from: pages/TodoPage.js (history drawer).
@@ -1458,7 +1458,7 @@ TodoVersion JSON (field presence varies by endpoint, listed per endpoint): `id: 
 - Called from: TodoPage history drawer (selected + previous version for a diff).
 
 ##### `POST /api/todo/revert/<int:version_id>`
-- Response 200: `{"todo": {"id", "content", "generated_by": "revert", "created_at", "version_number"}}`. Errors: 404; 403.
+- Response 200: `{"todo": {"id", "content", "generated_by": "revert", "created_at", "version_number"}}`. Errors: 404; 403; 503 `todo_busy` (#477).
 
 ##### `POST /api/todo/apply-draft`
 - Backend: routes/todo.py:apply_todo_draft
@@ -1467,7 +1467,8 @@ TodoVersion JSON (field presence varies by endpoint, listed per endpoint): `id: 
 - Response 202: `{"status": "started", "task_id": string, "llm_node_id": int}` — Celery task `apply_voice_todo` merges the proposal into the todo with an LLM call (no visible node is created).
 - Errors: 400 `"llm_node_id is required"`; 404 `{"error": "No pending todo changes found"}`; 403; 409 `{"error", "code": "todo_merge_started"}` when a merge of this proposal is already running (a double click, a second tab): the cards show it as started and poll.
 - Completion polling (web): every 2 s `GET /api/nodes/<llm_node_id>/llm-status` (nodes section) and read `tool_calls_meta` → entry with `name == "propose_todo"`; `apply_status` goes `"started"` → `"completed"` or `"failed"` (with `apply_error`). No timeout in the web code.
-- A failed merge leaves the proposal applicable (#434): its pending draft comes back and the `propose_todo` entry gets `"retryable": true`, unless a newer todo proposal is pending (`false`). With `retryable` the cards show **"Apply again"** next to the error, which posts this route again.
+- A failed merge leaves the proposal applicable (#434): its pending draft comes back and the `propose_todo` entry gets `"retryable": true`, unless a newer todo proposal is pending, or was applied or is being applied (`false`, #477). With `retryable` the cards show **"Apply again"** next to the error, which posts this route again.
+- The merge saves on the newest list (#477): when the list changed during the model call, its edits are applied to the newest list; when they no longer fit, it fails with "Your todo list changed while this update was being applied, and the update no longer fits it, so nothing was changed." (retryable).
 
 ---
 

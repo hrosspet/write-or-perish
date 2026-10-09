@@ -11,6 +11,30 @@ private func json(_ body: [String: Any]) -> String {
     String(data: try! JSONSerialization.data(withJSONObject: body), encoding: .utf8)!
 }
 
+/// A todo version as `/api/todo/` returns it, with its revision (#430).
+private func todoJSON(_ content: String, _ revision: String, id: Int = 1) -> [String: Any] {
+    ["id": id, "content": content, "version_number": id, "revision": revision]
+}
+
+/// The 409 a todo save gets when the list changed since it was read.
+private func todoChanged(_ todo: [String: Any]) -> StubResponse {
+    .json(409, json(["error": "Your todo list changed since this page loaded, so this change wasn't saved.",
+                     "code": "todo_changed", "todo": todo]))
+}
+
+/// A thread-safe count, for stubs answered off the main thread.
+private final class Counter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = 0
+
+    func next() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        value += 1
+        return value
+    }
+}
+
 /// AccountPage.test.js.
 @MainActor
 final class AccountModelTests: StubbedAppTestCase {
@@ -364,6 +388,65 @@ final class TodoModelTests: StubbedAppTestCase {
         await m.toggle(item)
         XCTAssertEqual(m.todo?.content, shown)
         XCTAssertEqual(app.toasts.toasts.last?.message, "Couldn't save change — reverted (No todo exists to update)")
+    }
+
+    // MARK: Revisions (#476, #477)
+
+    private func sentBodies(_ method: String) -> [[String: Any]] {
+        StubURLProtocol.requests.filter { $0.httpMethod == method }.compactMap { request in
+            request.httpBody.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+        }
+    }
+
+    /// A merge saved a new version between the tick's GET and its PATCH: the
+    /// PATCH is refused, and the tick is applied to the newest list and saved.
+    func testATickRefusedForAStaleListIsAppliedToTheNewestList() async {
+        let m = TodoModel(app: app)
+        StubURLProtocol.install { [shown] _ in .json(200, json(["todo": todoJSON(shown, "r1")])) }
+        await m.fetch()
+        let patches = Counter()
+        StubURLProtocol.install { [shown, fresher] request in
+            if request.httpMethod == "GET" { return .json(200, json(["todo": todoJSON(shown, "r1")])) }
+            if patches.next() == 1 { return todoChanged(todoJSON(fresher, "r2", id: 2)) }
+            let sent = (try? JSONSerialization.jsonObject(with: request.httpBody ?? Data())) as? [String: Any]
+            return .json(200, json(["todo": todoJSON(sent?["content"] as? String ?? "", "r3", id: 2)]))
+        }
+        let item = TodoSections.parse(m.todo?.content).first!.items.first!
+        await m.toggle(item)
+        let bodies = sentBodies("PATCH")
+        XCTAssertEqual(bodies.count, 2)
+        XCTAssertEqual(bodies.first?["base_revision"] as? String, "r1")
+        XCTAssertEqual(bodies.last?["base_revision"] as? String, "r2")
+        let expected = "## Today\n\n- [x] water the plants\n- [ ] added by the AI\n"
+        XCTAssertEqual(bodies.last?["content"] as? String, expected, "the merge's item survives")
+        XCTAssertEqual(m.todo?.content, expected)
+        XCTAssertTrue(app.toasts.toasts.isEmpty)
+    }
+
+    /// The editor's Save sends the revision it was opened on; a refusal comes
+    /// back with the newest version, which is then shown.
+    func testASaveFromAStaleEditorReportsTheNewestList() async {
+        let m = TodoModel(app: app)
+        StubURLProtocol.install { [shown] _ in .json(200, json(["todo": todoJSON(shown, "r1")])) }
+        let opened = await m.fetch()
+        StubURLProtocol.install { [fresher] _ in todoChanged(todoJSON(fresher, "r2", id: 2)) }
+        let result = await m.save("## Today\n\n- [ ] water the plants tonight\n", over: opened)
+        XCTAssertEqual(sentBodies("PUT").last?["base_revision"] as? String, "r1")
+        XCTAssertEqual(result, .changed(TodoDoc(id: 2, content: fresher, versionNumber: 2, revision: "r2")))
+        XCTAssertEqual(m.todo?.content, fresher)
+        XCTAssertTrue(app.toasts.toasts.isEmpty)
+    }
+
+    /// A second "Show the newest list" keeps the first text too; each goes only
+    /// when discarded (review of #492).
+    func testKeptTextsStayUntilEachIsDiscarded() {
+        let m = TodoModel(app: app)
+        m.keep("text A")
+        m.keep("text B")
+        m.keep("text A")
+        XCTAssertEqual(m.keptTexts, ["text A", "text B"])
+        m.discardKept(at: 0)
+        XCTAssertEqual(m.keptTexts, ["text B"])
     }
 
     // MARK: Quick edits in a row (review B2)

@@ -2,10 +2,15 @@ import Foundation
 import Observation
 
 /// The todo document and its saves (web `TodoPage` + `useCheckboxToggle` /
-/// `useTaskInsert`). Saves overwrite the latest version without a version
-/// check (map E §15), so every in-place edit re-fetches the todo right before
-/// its `PATCH` and applies the same text-keyed edit to the fresh content
-/// (design doc §10); the page also re-fetches after "todo changed".
+/// `useTaskInsert`). Every in-place edit re-fetches the todo right before its
+/// `PATCH` and applies the same text-keyed edit to the fresh content (design
+/// doc §10); the page also re-fetches after "todo changed". The `PATCH` sends
+/// the revision of the list it edited (#477): when a save, revert or todo merge
+/// landed in between, the server refuses with the newest list (409
+/// `todo_changed`), and the edit is applied to that list and saved once more,
+/// as on the web (#430). The editor's Save sends the revision the editor was
+/// opened on (#476); a refusal comes back as `.changed` for the page to offer
+/// the choice.
 ///
 /// In-place edits are saved one at a time, in tap order: an edit's re-fetch
 /// waits for the previous edit's `PATCH`, so two quick ticks (or a quick-add and
@@ -45,19 +50,63 @@ final class TodoModel {
         return todo
     }
 
-    /// `PUT /api/todo/ {content, generated_by:'user'}`: a new version (edit-mode
-    /// Save and the first create). Returns false on failure.
-    func save(_ content: String) async -> Bool {
-        guard let app, !content.jsTrimmed.isEmpty else { return false }
+    /// What an editor Save came to.
+    enum SaveResult: Equatable {
+        case saved
+        /// The list changed after the editor was opened (#476): nothing was
+        /// saved. The newest version, which the page now shows.
+        case changed(TodoDoc)
+        /// Any other failure; a toast says why.
+        case failed
+    }
+
+    /// `PUT /api/todo/ {content, generated_by:'user', base_revision}`: a new
+    /// version (edit-mode Save and the first create). `base` is the version the
+    /// editor was opened on, or the newest one for "Save mine anyway"; nil (the
+    /// first create) saves without the check.
+    func save(_ content: String, over base: TodoDoc?) async -> SaveResult {
+        guard let app, !content.jsTrimmed.isEmpty else { return .failed }
+        var body: [String: JSONValue] = ["content": .string(content), "generated_by": "user"]
+        if let revision = base?.revision { body["base_revision"] = .string(revision) }
         do {
-            let envelope: TodoEnvelope = try await app.api.put(
-                APIPath.todo, json: ["content": .string(content), "generated_by": "user"])
+            let envelope: TodoEnvelope = try await app.api.put(APIPath.todo, json: .object(body))
             showServer(envelope.todo)
             app.signals.post(.todoChanged)
-            return true
+            return .saved
         } catch {
-            return false
+            if let newest = Self.newestTodo(in: error) {
+                showServer(newest)
+                return .changed(newest)
+            }
+            let apiError = error as? APIError
+            let reason = apiError?.serverMessage ?? apiError?.errorDescription ?? "Unknown error"
+            app.toasts.show("Couldn't save the todo list (\(reason))")
+            return .failed
         }
+    }
+
+    /// The user's editor texts kept by "Show the newest list" (#476), oldest
+    /// first. Each stays, also after the editor closes, until it is discarded.
+    private(set) var keptTexts: [String] = []
+
+    /// Keeps the editor's text before the newest list replaces it, next to any
+    /// kept before (an identical one is already there).
+    func keep(_ text: String) {
+        if !keptTexts.contains(text) { keptTexts.append(text) }
+    }
+
+    func discardKept(at index: Int) {
+        guard keptTexts.indices.contains(index) else { return }
+        keptTexts.remove(at: index)
+    }
+
+    /// The newest version a 409 `todo_changed` answer carries, or nil.
+    static func newestTodo(in error: Error) -> TodoDoc? {
+        guard let apiError = error as? APIError, apiError.status == 409,
+              apiError.code == "todo_changed",
+              let json = apiError.body?.extra["todo"],
+              let data = try? JSONEncoder().encode(json) else { return nil }
+        return try? APIClient.makeDecoder().decode(TodoDoc.self, from: data)
     }
 
     func adopt(_ todo: TodoDoc?) {
@@ -121,13 +170,25 @@ final class TodoModel {
         do {
             let fresh: TodoEnvelope = try await app.api.get(APIPath.todo, poll: true)
             if let latest = fresh.todo { confirmed = latest }
-            let updated = entry.apply(fresh.todo?.content ?? fallback)
-            let answer: TodoEnvelope = try await app.api.patch(APIPath.todo, json: ["content": .string(updated)])
-            var saved = answer.todo ?? confirmed
-            if answer.todo == nil { saved?.content = updated }
-            finish(entry, server: saved)
-            return true
+            var base = fresh.todo
+            var retried = false
+            while true {
+                do {
+                    let saved = try await sendPatch(entry, on: base, fallback: fallback, app: app)
+                    finish(entry, server: saved)
+                    return true
+                } catch {
+                    // A save, revert or todo merge landed between the GET and the
+                    // PATCH: the edit is applied to the newest list the 409 carries
+                    // and saved once more. A second 409 in a row is reported.
+                    guard !retried, let newest = Self.newestTodo(in: error) else { throw error }
+                    retried = true
+                    confirmed = newest
+                    base = newest
+                }
+            }
         } catch {
+            if let newest = Self.newestTodo(in: error) { confirmed = newest }
             finish(entry, server: confirmed)
             if let failure {
                 let apiError = error as? APIError
@@ -136,6 +197,18 @@ final class TodoModel {
             }
             return false
         }
+    }
+
+    /// `PATCH` the edit applied to `base` (the newest list the app has), with
+    /// `base`'s revision. Returns the saved version.
+    private func sendPatch(_ entry: PendingEdit, on base: TodoDoc?, fallback: String, app: AppState) async throws -> TodoDoc? {
+        let updated = entry.apply(base?.content ?? fallback)
+        var body: [String: JSONValue] = ["content": .string(updated)]
+        if let revision = base?.revision { body["base_revision"] = .string(revision) }
+        let answer: TodoEnvelope = try await app.api.patch(APIPath.todo, json: .object(body))
+        var saved = answer.todo ?? confirmed
+        if answer.todo == nil { saved?.content = updated }
+        return saved
     }
 
     private func finish(_ entry: PendingEdit, server: TodoDoc?) {
