@@ -1937,18 +1937,16 @@ class TestGleanInSomeoneElsesThread:
         from backend.utils.llm_nodes import glean_provider
         alice = _make_user("alice")
         _, reply = self._public_thread(alice)
-        bob, note = self._bob_under(app_glean, reply)
-        bob.preferred_model = "claude-opus-4.6"
-        llm = User.query.filter_by(username="gpt-6-sol").first() or _make_user(
-            "gpt-6-sol", twitter_id="llm-gpt-6-sol")
+        bob, note = self._bob_under(app_glean, reply)  # account: GPT-6 Sol
+        # Without an AI reply of his own: his account model, not Alice's
+        # Opus reply above his entry.
+        assert glean_provider(note, bob) == "openai"
+        # His own AI reply in the thread decides over the account model.
+        llm = User.query.filter_by(username="claude-opus-4.6").first()
         own = _make_node(llm, parent_id=note.id, node_type="llm",
-                         llm_model="gpt-6-sol", human_owner=bob)
+                         llm_model="claude-opus-4.6", human_owner=bob)
         _db.session.commit()
-        # His own AI reply on GPT-6 Sol decides, not his account default
-        # nor Alice's Opus reply above.
-        assert glean_provider(own, bob) == "openai"
-        # Without an AI reply of his own: his account model.
-        assert glean_provider(note, bob) == "anthropic"
+        assert glean_provider(own, bob) == "anthropic"
 
     def test_a_glean_on_a_public_entry_is_private(self, app_glean):
         alice = _make_user("alice")
