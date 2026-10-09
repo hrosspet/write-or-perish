@@ -60,7 +60,7 @@ final class AppRouteTests: XCTestCase {
     @MainActor
     func testVoiceFromAnotherTabBringsItsThreadToReflect() {
         let router = Router()
-        router.paths[.reflect] = [.voice(parentId: nil, resumeLLMId: nil), .textMode]
+        router.paths[.reflect] = [.voice(parentId: nil, resumeLLMId: nil), .textMode()]
         router.selectedTab = .log
         router.paths[.log] = [.thread(id: 5, awaitLLM: nil), .thread(id: 3, awaitLLM: nil)]
         router.open(.voice(parentId: 3, resumeLLMId: 9), environment: env, commonsAvailable: false)

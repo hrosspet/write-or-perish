@@ -100,7 +100,7 @@ ios/Loore/Audio/                M3: Recording/ (SegmentPackager + MP4Boxes, FMP4
                                 ListenAloud [+AudioDownloader]), Session/ (AudioSessionController,
                                 NowPlayingController), Dictation/ (DictationController), AudioCenter
                                 (owns all of it as AppState.audio; LooreAppDelegate for background sessions)
-ios/Loore/Features/Home/        HomeView (+Read card), PlaceholderScreen (only routes that never push)
+ios/Loore/Features/Home/        HomeView (+Reflect / Glean cards, #475), PlaceholderScreen (only routes that never push)
 ios/Loore/Features/Onboarding/  SignIn, Terms + TermsText, Waitlist + PrefillConsentCard, WelcomeView,
                                 ConfirmEmailView (+model, paste sheet)
 ios/Loore/Features/Updates/     UpdatesSheet
@@ -178,7 +178,8 @@ ios/scripts/                    check_terms_text.py, local_backend.sh
 - A container with `.accessibilityIdentifier` needs `.accessibilityElement(children: .contain)` first, or
   SwiftUI copies the identifier onto every child and UI tests cannot find the buttons inside.
 - Test identifiers: `thread.focal`, `thread.focalKebab`, `thread.llmResponse`, `nodeForm.text.<new|inline|edit>`,
-  `nodeForm.send.<…>`, `search.field`, `more.writeNew`, `home.read`, `tab.reflect`, `more.*`.
+  `nodeForm.send.<…>`, `search.field`, `more.writeNew`, `home.reflect.voice` / `home.glean.text` (…), `voice.glean`,
+  `thread.glean`, `tab.reflect` (the Home tab), `more.*`.
 - Per-device preferences use the web's localStorage names (`DefaultsKey`).
 - No content in logs (ids, statuses, byte counts only).
 
@@ -510,7 +511,7 @@ doc §6. **parity** = same behaviour (a web view where §6 says so); **deviation
 
 | # | Web route | App screen | Status | Note |
 |---|---|---|---|---|
-| 1 | `/` Home | Reflect tab, `HomeView` | parity | Voice, Text, Share (flag), Read (admin; unseen as admin); cards stack on a phone |
+| 1 | `/` Home | Home tab, `HomeView` | parity | with Glean (#475): Reflect and Glean cards (Voice, Text each), Share (flag) below; without: Voice, Text, Share (flag); cards stack on a phone |
 | 2 | `/landing` | signed out: native sign-in; links: Safari view | deviation | no marketing page before sign-in (design §6: web view when linked) |
 | 3 | `/login` | `SignInView` | deviation | link pasted back (design §4); default landing is Reflect, not `/profile`; a link's `next_url` is followed (M5) |
 | 4–6 | `/vision`, `/why-loore`, `/how-to` | Safari view (More → About, sign-in screen, waitlist ⋯) | parity | checked M5 |
@@ -743,9 +744,11 @@ Sign-out does not warn about unsent chunks (the review's optional logout warning
   an updated default prompt (banner), a running profile build (indicator; the watcher is unit-tested), filled
   intentions (fixture render only), `{quote_ext:N}` bubbles in a thread.
 - Real X OAuth (Connect X; only the immediate local landing was seen), X bookmarks connect and sync.
-- Admin: the web view and the admin read feature (Home Read card, the thread's Read / Read further with the
-  read-model picker) are built but unseen as an admin (user 5 is not one; admin pages show other users'
+- Admin: the web view is built but unseen as an admin (user 5 is not one; admin pages show other users'
   data). Not built: the admin rerun controls and the `SemanticNeighbors` rail.
+- Glean (#475): built against #473/#474's API and seen in the simulator against canned answers only (the
+  local backend runs `main`); the Voice glean, the Live Activity's Glean button and the ⋯ menu entry need
+  the device and staging checklists.
 
 **Not run against the backend** (billed, or would send mail / file issues)
 - Audio file upload and chunked upload, recovered-audio drafts, the todo apply *success* path (a billed merge),

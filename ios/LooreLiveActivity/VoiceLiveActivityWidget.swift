@@ -11,7 +11,8 @@ struct LooreLiveActivityBundle: WidgetBundle {
 }
 
 /// The voice conversation on the lock screen and in the Dynamic Island (#397):
-/// while recording only Pause/Resume and Stop; once Loore replies, Record. The
+/// while recording only Pause/Resume and Stop; once Loore replies, Record, and
+/// in a Glean-card conversation a labeled Glean button beside it (#475). The
 /// reply's own play/pause and ±10 s stay in the Now Playing controls.
 struct VoiceLiveActivityWidget: Widget {
     var body: some WidgetConfiguration {
@@ -29,7 +30,15 @@ struct VoiceLiveActivityWidget: Widget {
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 DynamicIslandExpandedRegion(.trailing) {
-                    Controls(state: context.state, size: 40).padding(.trailing, 4)
+                    Controls(state: context.state, size: 40, showsGlean: false).padding(.trailing, 4)
+                }
+                DynamicIslandExpandedRegion(.bottom) {
+                    // The Glean button gets its own row here: the trailing region is narrow.
+                    if let glean = context.state.glean {
+                        GleanButtonView(glean: glean, height: 36)
+                            .frame(maxWidth: .infinity, alignment: .trailing)
+                            .padding(.trailing, 4)
+                    }
                 }
             } compactLeading: {
                 LooreMark(size: 20)
@@ -78,6 +87,8 @@ private struct StatusText: View {
                 .font(.system(.headline, weight: .medium))
                 .foregroundStyle(Palette.text)
                 .lineLimit(1)
+                // Room for the Glean button beside Record (#475).
+                .minimumScaleFactor(0.8)
             detail
                 .font(.system(.subheadline).monospacedDigit())
                 .foregroundStyle(Palette.textSecondary)
@@ -87,7 +98,7 @@ private struct StatusText: View {
 
     private var title: String {
         switch state.phase {
-        case .ready: return "Voice"
+        case .ready: return state.gleaned ? "Gleaning ready" : "Voice"
         case .starting: return "Starting…"
         case .recording: return "Recording"
         case .paused: return "Paused"
@@ -96,6 +107,7 @@ private struct StatusText: View {
         case .thinking: return "Thinking…"
         case .replying: return "Loore is replying"
         case .finished: return "Reply finished"
+        case .gleaning: return "Gleaning…"
         }
     }
 
@@ -109,6 +121,10 @@ private struct StatusText: View {
             Text(clock(state.elapsed))
         case .interrupted:
             Text("\(clock(state.elapsed)) · a call or another app took the microphone")
+        case .ready where state.gleaned:
+            Text("Open Loore to read it")
+        case .gleaning:
+            Text("Loore · Glean")
         case .ready, .starting, .sending, .thinking, .replying, .finished:
             Text("Loore · Voice")
         }
@@ -130,7 +146,7 @@ private struct CompactStatus: View {
             }
         case .paused, .interrupted:
             Image(systemName: "pause.fill").foregroundStyle(Palette.accent)
-        case .starting, .sending, .thinking:
+        case .starting, .sending, .thinking, .gleaning:
             Image(systemName: "ellipsis").foregroundStyle(Palette.accent)
         case .replying:
             Image(systemName: "waveform").foregroundStyle(Palette.accent)
@@ -140,13 +156,19 @@ private struct CompactStatus: View {
     }
 }
 
-/// Recording: Pause (or Resume) and Stop. Replying or done: Record.
+/// Recording: Pause (or Resume) and Stop. Replying or done: Record, after the
+/// Glean button in a Glean-card conversation. Gleaning: nothing to press.
 private struct Controls: View {
     let state: VoiceActivityAttributes.ContentState
     let size: CGFloat
+    /// The Dynamic Island shows Glean in its own row.
+    var showsGlean = true
 
     var body: some View {
         HStack(spacing: 10) {
+            if showsGlean, let glean = state.glean {
+                GleanButtonView(glean: glean, height: size)
+            }
             switch state.phase {
             case .recording:
                 RoundButton(intent: PauseVoiceRecordingIntent(), symbol: "pause.fill",
@@ -161,10 +183,42 @@ private struct Controls: View {
             case .replying, .finished, .ready:
                 RoundButton(intent: RecordVoiceReplyIntent(), symbol: "mic.fill",
                             label: state.phase == .ready ? "Record" : "Record a reply", filled: true, size: size)
-            case .starting, .sending, .thinking:
+            case .starting, .sending, .thinking, .gleaning:
                 EmptyView()
             }
         }
+    }
+}
+
+/// The labeled Glean button (#475): a word, not an icon, so it never reads as
+/// a second record button. Dimmed and not pressable while the reply comes.
+private struct GleanButtonView: View {
+    let glean: VoiceActivityAttributes.ContentState.GleanButton
+    let height: CGFloat
+
+    var body: some View {
+        if glean == .ready {
+            Button(intent: GleanVoiceIntent()) { label }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Glean")
+        } else {
+            label
+                .opacity(0.45)
+                .accessibilityLabel("Glean, after Loore's reply")
+        }
+    }
+
+    private var label: some View {
+        Text("Glean")
+            .font(.system(.subheadline, weight: .semibold))
+            .foregroundStyle(Palette.accent)
+            .lineLimit(1)
+            .fixedSize()
+            .padding(.horizontal, 14)
+            .frame(height: height)
+            .background(Capsule().fill(Palette.accent.opacity(0.14)))
+            .overlay(Capsule().strokeBorder(Palette.accent, lineWidth: 1.5))
+            .contentShape(Capsule())
     }
 }
 

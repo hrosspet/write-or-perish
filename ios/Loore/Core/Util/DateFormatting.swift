@@ -73,11 +73,16 @@ enum SpendCap {
         return formatter.string(from: resetDate(now: now))
     }
 
-    enum Action { case record, upload }
+    enum Action { case record, upload, glean }
 
-    /// The toast that answers a refused record or upload press (#341).
+    /// The toast that answers a refused record, upload or glean press (#341, #435).
     static func toastMessage(_ action: Action, now: Date = Date()) -> String {
-        let what = action == .upload ? "upload audio" : "start a new recording"
+        let what: String
+        switch action {
+        case .upload: what = "upload audio"
+        case .glean: what = "glean"
+        case .record: what = "start a new recording"
+        }
         return "You've reached your monthly usage limit, so you can't \(what) until it resets on \(resetDateText(now: now))."
     }
 

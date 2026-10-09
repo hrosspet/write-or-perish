@@ -30,9 +30,28 @@ final class VoiceLiveActivity {
 
     var isShowing: Bool { activity != nil }
 
-    /// The lock screen's phase for the conversation's state.
+    /// The lock screen for the conversation's state. In a Glean-card conversation
+    /// (#475) a glean in flight is its own phase, and `glean` is the Glean button
+    /// where Record shows (it is not offered while recording or thinking).
     nonisolated static func state(turn: VoiceTurnController.State, isPaused: Bool, isInterrupted: Bool,
-                                  awaitingNextNode: Bool, elapsed: Double, now: Date = Date()) -> State {
+                                  awaitingNextNode: Bool, elapsed: Double, now: Date = Date(),
+                                  glean: State.GleanButton? = nil, gleaning: Bool = false,
+                                  gleaned: Bool = false) -> State {
+        if gleaning { return State(phase: .gleaning) }
+        var state = turnState(turn: turn, isPaused: isPaused, isInterrupted: isInterrupted,
+                              awaitingNextNode: awaitingNextNode, elapsed: elapsed, now: now)
+        switch state.phase {
+        case .ready, .replying, .finished:
+            state.glean = glean
+            state.gleaned = gleaned && state.phase == .ready
+        default:
+            break
+        }
+        return state
+    }
+
+    private nonisolated static func turnState(turn: VoiceTurnController.State, isPaused: Bool, isInterrupted: Bool,
+                                              awaitingNextNode: Bool, elapsed: Double, now: Date) -> State {
         switch turn {
         case .idle:
             return State(phase: .ready)

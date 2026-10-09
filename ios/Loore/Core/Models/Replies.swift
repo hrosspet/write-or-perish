@@ -91,6 +91,46 @@ extension LLMStatus: PollableStatus {
     var pollStatus: TaskStatus? { status }
 }
 
+/// `POST /api/read/from-node/<id>` answer (202): a glean (#435). The gleaning's
+/// pending node, or (the admin's auto-generate-off path) only the prompt node.
+struct GleanStartResponse: Decodable, Equatable, Sendable {
+    var llmNodeId: Int?
+    var promptNodeId: Int?
+    var taskId: String?
+
+    enum CodingKeys: String, CodingKey {
+        case llmNodeId = "llm_node_id"
+        case promptNodeId = "prompt_node_id"
+        case taskId = "task_id"
+    }
+
+    init(llmNodeId: Int?, promptNodeId: Int? = nil, taskId: String? = nil) {
+        self.llmNodeId = llmNodeId
+        self.promptNodeId = promptNodeId
+        self.taskId = taskId
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        llmNodeId = c.flexibleInt(.llmNodeId)
+        promptNodeId = c.flexibleInt(.promptNodeId)
+        taskId = c.tolerant(.taskId)
+    }
+
+    /// The node to open: the gleaning, else the prompt node.
+    var openId: Int? { llmNodeId ?? promptNodeId }
+}
+
+/// A glean (#435) as the clients send it: `POST /api/read/from-node/<id>` with
+/// `{}` (the server's default: a read model of the user's own provider) or
+/// `{"model": "<id>"}` from the picker beside the Glean button.
+enum GleanRequest {
+    static func body(model: String?) -> JSONValue {
+        guard let model, !model.isEmpty else { return .object([:]) }
+        return .object(["model": .string(model)])
+    }
+}
+
 /// `POST /api/nodes/<id>/tts` answers: 200 with `ttsURL` (play it) or 202 (subscribe to the stream).
 struct TTSRequestResponse: Decodable, Sendable {
     var message: String?

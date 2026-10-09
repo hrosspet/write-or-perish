@@ -59,6 +59,13 @@ final class Router {
         return path.count >= 2 ? path[path.count - 2] : nil
     }
 
+    /// Pushes `route` on the current tab, whatever tab it would open in by itself:
+    /// a tweet card's reference page opens over its thread, and Back returns there
+    /// (web: "‹ Today's gleanings", #435).
+    func push(_ route: AppRoute) {
+        paths[selectedTab, default: []].append(route)
+    }
+
     /// Replaces the top of the current tab's stack (`navigate(…, {replace: true})`).
     /// On a tab root, pushes instead.
     func replaceTop(with route: AppRoute) {

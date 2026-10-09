@@ -106,8 +106,29 @@ final class AudioCenter {
                                              audio: self, notices: self)
         controller.model = { [weak self] in self?.app?.user?.preferredModel }
         controller.aiUsage = { [weak self] in self?.app?.user?.defaultAIUsage.rawString ?? "none" }
+        controller.onGleaningReady = { [weak self] id in self?.openGleaning(id) }
         voiceController = controller
         return controller
+    }
+
+    /// A glean from the Voice screen (or its lock screen) landed (#475): the view
+    /// switches to text mode, the gleaning's thread page pushed over the Voice
+    /// screen, in the tab where it is. Back returns to the conversation, which
+    /// continues under the gleaning. Nothing moves when the Voice screen is not on
+    /// top (the user went on elsewhere): the gleaning is in the thread.
+    private func openGleaning(_ id: Int) {
+        guard let app else { return }
+        let router = app.router
+        let isVoice: (AppRoute?) -> Bool = { route in
+            if case .voice? = route { return true }
+            return false
+        }
+        guard let tab = AppTab.allCases.first(where: { isVoice(router.path(for: $0).last) }) else { return }
+        if router.selectedTab == tab {
+            NodePrefetch.shared.openThread(id, app: app)
+        } else {
+            router.setPath(router.path(for: tab) + [.thread(id: id, awaitLLM: nil)], for: tab)
+        }
     }
 
     var hasVoiceController: Bool { voiceController != nil }
@@ -207,7 +228,10 @@ final class AudioCenter {
             liveActivity.sync(VoiceLiveActivity.state(turn: voice.state, isPaused: voice.isPaused,
                                                       isInterrupted: voice.isInterrupted,
                                                       awaitingNextNode: voice.awaitingNextNode,
-                                                      elapsed: voice.elapsed),
+                                                      elapsed: voice.elapsed,
+                                                      glean: voice.lockScreenGlean,
+                                                      gleaning: voice.isGleaning,
+                                                      gleaned: voice.gleaningDone),
                               start: voice.state == .starting)
         }
         if let voice = voiceController, voice.isActive || (player.source == .voice && player.isLoaded) {
@@ -271,6 +295,30 @@ extension AudioCenter {
         case .resume: voice.resumeRecording()
         case .stop: voice.stop()
         case .record: await recordFromLockScreen(voice)
+        case .glean: await gleanFromLockScreen(voice)
+        }
+    }
+
+    /// Glean from the lock screen (#475): the same as the Voice screen's button.
+    /// The intent waits for the request (the app may be suspended after it); the
+    /// gleaning opens in text when the app runs again. A refusal or a failure
+    /// also notifies, since a toast is not seen on a locked phone.
+    private func gleanFromLockScreen(_ voice: VoiceTurnController) async {
+        guard voice.canGlean else { return }
+        if app?.spendCapped == true {
+            app?.notifySpendBlocked()
+            _ = app?.toasts.show(SpendCap.toastMessage(.glean), duration: 8)
+            LocalNotifier.post(.gleanFailed, body: SpendCap.toastMessage(.glean))
+            return
+        }
+        guard NetworkStatus.shared.isOnline else {
+            LocalNotifier.post(.gleanFailed, body: "You're offline. Glean again when you're back online.")
+            return
+        }
+        let tapped = Date()
+        if await !voice.glean() {
+            let reason = lastVoiceToast.flatMap { $0.at >= tapped ? $0.text : nil }
+            LocalNotifier.post(.gleanFailed, body: reason ?? LocalNotice.gleanFailed.body)
         }
     }
 
@@ -283,6 +331,8 @@ extension AudioCenter {
     /// (the Voice screen's Continue), or a new one between turns. On a locked
     /// phone a toast is not seen, so a refusal or a failed start also notifies.
     private func recordFromLockScreen(_ voice: VoiceTurnController) async {
+        // A glean runs: its card shows no Record button (a stale tap does nothing).
+        guard !voice.isGleaning else { return }
         if app?.spendCapped == true {
             app?.notifySpendBlocked()
             _ = app?.toasts.show(SpendCap.toastMessage(.record), duration: 8)

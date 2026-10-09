@@ -32,8 +32,9 @@ final class FakeVoiceBackend: VoiceBackend {
 
     func uploadURL(sessionId: String) -> URL { URL(string: "http://test/\(sessionId)/audio-chunk")! }
 
-    func finalize(sessionId: String, totalChunks: Int, parentId: Int?, model: String?) async throws {
-        log.append("finalize total=\(totalChunks) parent=\(parentId.map(String.init) ?? "nil") model=\(model ?? "nil")")
+    func finalize(sessionId: String, totalChunks: Int, parentId: Int?, model: String?, entry: String?) async throws {
+        log.append("finalize total=\(totalChunks) parent=\(parentId.map(String.init) ?? "nil") model=\(model ?? "nil")"
+                   + (entry.map { " entry=\($0)" } ?? ""))
         if let finalizeError { throw finalizeError }
     }
 
@@ -43,8 +44,8 @@ final class FakeVoiceBackend: VoiceBackend {
     }
 
     func legacyVoice(content: String, model: String?, aiUsage: String?, parentId: Int?,
-                     sessionId: String?) async throws -> VoiceSessionResponse {
-        log.append("legacy")
+                     sessionId: String?, entry: String?) async throws -> VoiceSessionResponse {
+        log.append("legacy" + (entry.map { " entry=\($0)" } ?? ""))
         if let legacyError { throw legacyError }
         guard let legacyResult else { throw APIError.server(status: 500, body: nil) }
         return legacyResult
@@ -55,6 +56,12 @@ final class FakeVoiceBackend: VoiceBackend {
         let next = list.count > 1 ? list.removeFirst() : list[0]
         llmStatuses[nodeId] = list
         return next
+    }
+
+    var gleanResult: Result<GleanStartResponse, Error> = .success(GleanStartResponse(llmNodeId: 900))
+    func startGlean(nodeId: Int, model: String?) async throws -> GleanStartResponse {
+        log.append("glean \(nodeId)" + (model.map { " model=\($0)" } ?? ""))
+        return try gleanResult.get()
     }
 
     func requestTTS(nodeId: Int) async throws -> TTSTriggerOutcome {
@@ -1020,6 +1027,155 @@ final class VoiceTurnTests: XCTestCase {
         XCTAssertEqual(notices.toasts.count, 1)
     }
 
+    // MARK: Glean (#435, #475)
+
+    private func gleanSession(parentId: Int? = nil, glean: Bool = true, gleanEnabled: Bool = true) {
+        var route = VoiceRouteParameters(parentId: parentId, resumeLLMId: nil, glean: glean)
+        route.applyOnce(to: turn, gleanEnabled: gleanEnabled)
+        turn.timings.gleanPoll = 0.01
+    }
+
+    func testGleanCardSessionMarksTheNewThread() async throws {
+        gleanSession()
+        try await runToDone()
+        XCTAssertTrue(backend.log.contains("finalize total=2 parent=nil model=gpt-6-luna entry=glean"),
+                      "\(backend.log)")
+    }
+
+    func testAContinuedThreadIsNotMarkedAgain() async throws {
+        gleanSession(parentId: 7)
+        try await runToDone()
+        XCTAssertTrue(backend.log.contains("finalize total=2 parent=7 model=gpt-6-luna"), "\(backend.log)")
+    }
+
+    func testTheLegacyPathMarksTheNewThreadToo() async throws {
+        gleanSession()
+        backend.statuses = [try status("completed")]
+        backend.legacyResult = try decode(VoiceSessionResponse.self, #"{"llm_node_id": 101, "user_node_id": 100}"#)
+        backend.llmStatuses[101] = [try llm(101, "processing")]
+        await recordAndStop()
+        await wait("legacy") { backend.log.contains { $0.hasPrefix("legacy") } }
+        XCTAssertTrue(backend.log.contains("legacy entry=glean"), "\(backend.log)")
+    }
+
+    func testReflectSessionHasNoGleanButtonAndNoMark() async throws {
+        gleanSession(glean: false)
+        try await runToDone()
+        XCTAssertFalse(turn.showsGleanButton)
+        XCTAssertNil(turn.lockScreenGlean)
+        XCTAssertFalse(backend.log.contains { $0.contains("entry=") })
+    }
+
+    func testAUserWithoutGleanGetsNone() async throws {
+        gleanSession(gleanEnabled: false)
+        try await runToDone()
+        XCTAssertFalse(turn.showsGleanButton)
+        XCTAssertFalse(backend.log.contains { $0.contains("entry=") })
+    }
+
+    func testGleanShowsAfterTheFirstRecordingAndWaitsForTheReply() async throws {
+        gleanSession()
+        XCTAssertFalse(turn.showsGleanButton, "no Glean before the first recording")
+        backend.statuses = [try status("completed", llm: 101)]
+        backend.llmStatuses[101] = [try llm(101, "processing")]
+        await recordAndStop()
+        await wait("entry saved") { turn.showsGleanButton }
+        XCTAssertFalse(turn.canGlean, "disabled while the reply is still coming")
+        XCTAssertEqual(turn.lockScreenGlean, .waiting)
+        backend.llmStatuses[101] = [try llm(101, "completed", content: "Short.")]
+        await wait("reply in") { turn.gleanAnchor == 101 }
+        await wait("attached") { backend.streams[101] != nil }
+        backend.push(101, "chunk_ready", #"{"chunk_index":0,"audio_url":"/media/g0.mp3","duration":2}"#)
+        await wait("playing") { turn.phase == .playback }
+        XCTAssertTrue(turn.canGlean, "pressable while the reply plays: it stops it")
+        XCTAssertEqual(turn.lockScreenGlean, .ready)
+    }
+
+    func testAContinuedGleanThreadOffersGleanAtOnce() {
+        gleanSession(parentId: 7)
+        XCTAssertTrue(turn.showsGleanButton)
+        XCTAssertTrue(turn.canGlean)
+        XCTAssertEqual(turn.gleanAnchor, 7)
+    }
+
+    func testGleanStopsTheReplyAndOpensTheGleaningWithoutReadingItAloud() async throws {
+        gleanSession()
+        backend.statuses = [try status("completed", llm: 101)]
+        backend.llmStatuses[101] = [try llm(101, "completed", content: "Short.")]
+        await recordAndStop()
+        await wait("attached") { backend.streams[101] != nil }
+        backend.push(101, "chunk_ready", #"{"chunk_index":0,"audio_url":"/media/g0.mp3","duration":2}"#)
+        await wait("playing") { turn.state == .playing }
+        var opened: [Int] = []
+        turn.onGleaningReady = { opened.append($0) }
+        backend.llmStatuses[900] = [try llm(900, "processing", tts: nil), try llm(900, "completed", tts: nil, content: "Picks.")]
+
+        let started = await turn.glean()
+        XCTAssertTrue(started)
+        XCTAssertTrue(backend.log.contains("glean 101"), "the glean starts under the last finished reply")
+        XCTAssertTrue(audio.fakeQueue.urls.isEmpty, "the voice reply stops with its queue")
+        XCTAssertEqual(turn.phase, .ready)
+        XCTAssertTrue(turn.isGleaning)
+        XCTAssertFalse(turn.canGlean)
+        turn.start()
+        XCTAssertEqual(turn.state, .idle, "no recording while the glean runs")
+
+        await wait("opened") { opened == [900] }
+        XCTAssertFalse(turn.isGleaning)
+        XCTAssertFalse(backend.log.contains("tts 900"), "a gleaning is never read aloud")
+        XCTAssertFalse(backend.streamRequests.contains { $0.0 == 900 })
+        XCTAssertEqual(turn.threadParentId, 900, "the conversation continues under the gleaning")
+        XCTAssertEqual(turn.gleanAnchor, 900)
+        XCTAssertTrue(turn.gleaningDone)
+    }
+
+    func testThePickedModelGoesWithTheGleanAndIsForgottenWithTheConversation() async throws {
+        gleanSession(parentId: 7)
+        turn.gleanModel = "claude-sonnet-5.5"
+        backend.llmStatuses[900] = [try llm(900, "processing", tts: nil)]
+        _ = await turn.glean()
+        XCTAssertTrue(backend.log.contains("glean 7 model=claude-sonnet-5.5"), "\(backend.log)")
+        gleanSession(parentId: 8)
+        XCTAssertNil(turn.gleanModel, "a new conversation starts on the default again")
+    }
+
+    func testAFailedGleaningStillOpensItsThread() async throws {
+        gleanSession(parentId: 7)
+        var opened: [Int] = []
+        turn.onGleaningReady = { opened.append($0) }
+        backend.llmStatuses[900] = [try llm(900, "failed", tts: nil, error: "Provider error")]
+        _ = await turn.glean()
+        await wait("opened") { opened == [900] }
+        XCTAssertEqual(turn.threadParentId, 7, "a failed gleaning is not part of the conversation")
+        XCTAssertEqual(turn.gleanAnchor, 7, "Glean can be pressed again")
+        XCTAssertFalse(turn.gleaningDone)
+    }
+
+    func testAGleanThatCannotStartSaysWhy() async throws {
+        gleanSession(parentId: 7)
+        backend.gleanResult = .failure(APIError.server(status: 403, body: ServerErrorBody(error: "Glean is off for your account.")))
+        let started = await turn.glean()
+        XCTAssertFalse(started)
+        XCTAssertFalse(turn.isGleaning)
+        XCTAssertTrue(turn.canGlean)
+        XCTAssertEqual(notices.toasts, ["Glean is off for your account."])
+    }
+
+    func testANewVoiceScreenDropsTheGleanWait() async throws {
+        gleanSession(parentId: 7)
+        var opened: [Int] = []
+        turn.onGleaningReady = { opened.append($0) }
+        backend.llmStatuses[900] = [try llm(900, "processing", tts: nil)]
+        _ = await turn.glean()
+        XCTAssertTrue(turn.isGleaning)
+        turn.tearDown()
+        XCTAssertFalse(turn.isGleaning)
+        XCTAssertFalse(turn.showsGleanButton)
+        backend.llmStatuses[900] = [try llm(900, "completed", tts: nil, content: "Picks.")]
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertTrue(opened.isEmpty, "nothing opens after the Voice screen closed")
+    }
+
     func testChapterTitlesMatchTheWeb() {
         XCTAssertEqual(ChapterTitle.from(content: "## Hello *world*"), "Hello world")
         XCTAssertNil(ChapterTitle.from(content: "  # "))
@@ -1066,6 +1222,26 @@ final class VoiceLiveActivityStateTests: XCTestCase {
         XCTAssertEqual(phase(.playing), .replying)
         XCTAssertEqual(phase(.done), .finished)
         XCTAssertEqual(phase(.idle), .ready)
+    }
+
+    // #475: the Glean button sits beside Record only; a glean in flight is its own phase.
+    func testGleanOnTheLockScreen() {
+        func state(_ turn: VoiceTurnController.State, glean: VoiceActivityAttributes.ContentState.GleanButton? = .ready,
+                   gleaning: Bool = false, gleaned: Bool = false) -> VoiceActivityAttributes.ContentState {
+            VoiceLiveActivity.state(turn: turn, isPaused: false, isInterrupted: false, awaitingNextNode: false,
+                                    elapsed: 0, glean: glean, gleaning: gleaning, gleaned: gleaned)
+        }
+        XCTAssertEqual(state(.idle).glean, .ready)
+        XCTAssertEqual(state(.playing).glean, .ready)
+        XCTAssertEqual(state(.done).glean, .ready)
+        XCTAssertEqual(state(.done, glean: .waiting).glean, .waiting)
+        XCTAssertNil(state(.recording).glean, "not while recording")
+        XCTAssertNil(state(.awaitingAudio).glean, "not while thinking")
+        XCTAssertNil(state(.idle, glean: nil).glean, "a Reflect conversation has none")
+        XCTAssertEqual(state(.idle, gleaning: true).phase, .gleaning)
+        XCTAssertNil(state(.idle, gleaning: true).glean, "no buttons while the glean runs")
+        XCTAssertTrue(state(.idle, gleaned: true).gleaned)
+        XCTAssertFalse(state(.playing, gleaned: true).gleaned)
     }
 
     func testTheRecordingClockStartsWhereTheRecordingIs() {

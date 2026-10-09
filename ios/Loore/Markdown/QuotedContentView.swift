@@ -109,8 +109,18 @@ struct InlineQuoteBubble: View {
     }
 }
 
-/// `{quote_ext:N}`: a saved reference quoted in a reply (web `ExternalQuoteBubble`).
-/// Tapping opens the original post; the owner marks it read and rates it.
+/// `{quote_ext:N}`: a saved reference quoted in a reply, the tweet card of a
+/// gleaning (web `ExternalQuoteBubble`, #435, Peter 2026-10-09). The byline is
+/// the author's display name when the archive has one, the @handle and the date
+/// (no avatar, no "Saved from" line); the text is cut at 500 characters with "…";
+/// then the actions: "Open on X", the ⊕/⊖ verdict and "Mark as read". Tapping
+/// the card itself opens the reference's page in Loore (full text, listen
+/// button, verdict); the actions never also open it. Only the reference's owner
+/// can open that page, so for anyone else the card is not tappable.
+///
+/// Opening the post is reading it: the owner's "Open on X" marks it read. A
+/// verdict marks it read server-side. Opening the reference page in Loore does
+/// not (a skim is not a read, #352).
 struct ExternalQuoteBubble: View {
     let quote: ResolvedQuotes.QuotedExternal?
     var loaded = true
@@ -122,10 +132,24 @@ struct ExternalQuoteBubble: View {
     @State private var readAt: Date?
     @State private var marking = false
 
-    static let sourceLabels = [
-        "community_archive": "Community Archive", "read_pick": "Community Archive",
-        "twitter_bookmark": "X bookmark", "twitter_like": "X like",
-    ]
+    /// Sources whose reference is a tweet: the card names its author.
+    static let tweetSources: Set<String> = ["community_archive", "read_pick", "twitter_bookmark", "twitter_like"]
+    /// The preview is cut here, with "…"; the reference page has the rest.
+    static let previewChars = 500
+
+    static func previewText(_ text: String) -> String {
+        text.jsLength > previewChars ? text.jsPrefix(previewChars) + "…" : text
+    }
+
+    /// The byline's two parts: the bold name (a tweet's display name, a page's
+    /// title) and the muted handle (a tweet's @handle, a page's byline or site).
+    static func byline(_ quote: ResolvedQuotes.QuotedExternal) -> (name: String?, handle: String?) {
+        func nonEmpty(_ s: String?) -> String? { s.flatMap { $0.isEmpty ? nil : $0 } }
+        if tweetSources.contains(quote.source ?? "") {
+            return (nonEmpty(quote.authorName), "@\(nonEmpty(quote.authorHandle) ?? "unknown")")
+        }
+        return (nonEmpty(quote.title), nonEmpty(quote.authorHandle) ?? quote.url.flatMap(ReferenceFooter.host))
+    }
 
     var body: some View {
         if !loaded {
@@ -140,27 +164,49 @@ struct ExternalQuoteBubble: View {
     }
 
     private func card(_ quote: ResolvedQuotes.QuotedExternal) -> some View {
-        let text = quote.content.jsLength > 500 ? quote.content.jsPrefix(500) + "..." : quote.content
         let mine = app.user?.id != nil && quote.userId == app.user?.id
+        let isTweet = Self.tweetSources.contains(quote.source ?? "")
+        let byline = Self.byline(quote)
         return VStack(alignment: .leading, spacing: 0) {
-            Text("Saved from @\(quote.authorHandle ?? "unknown") · \(Self.sourceLabels[quote.source ?? ""] ?? quote.source ?? "")")
-                .font(LooreFont.sansOblique(13.6, .regular))
-                .foregroundStyle(LooreColor.textMuted)
-                .padding(.bottom, 6)
-            MarkdownView(markdown: text, style: .quote)
-                .padding(.bottom, 8)
-            HStack(alignment: .center, spacing: 8) {
-                if let posted = quote.postedAt {
-                    Text(LooreDateFormat.date(posted, relative: false))
-                }
-                Spacer(minLength: 8)
-                if mine {
-                    if let rated = quote.ratedBefore?.objectValue, quote.feedback == nil,
-                       let verdict = rated["feedback"]?.stringValue {
-                        let at = rated["at"]?.stringValue.flatMap(LooreDate.parse)
-                        Text("You rated this \(verdict) on \(LooreDateFormat.date(at, relative: false))")
-                            .font(LooreFont.sansOblique(12.8, .light))
+            VStack(alignment: .leading, spacing: 6) {
+                FlowLayout(spacing: 8, lineSpacing: 2) {
+                    if let name = byline.name {
+                        Text(name)
+                            .font(LooreFont.sans(13.8, .medium))
+                            .foregroundStyle(LooreColor.textPrimary)
                     }
+                    if let handle = byline.handle {
+                        Text(handle)
+                            .font(LooreFont.sans(13.8, .light))
+                            .foregroundStyle(LooreColor.textMuted)
+                    }
+                    if let posted = quote.postedAt {
+                        Text("· \(LooreDateFormat.date(posted, relative: false))")
+                            .font(LooreFont.sans(13.8, .light))
+                            .foregroundStyle(LooreColor.textMuted)
+                    }
+                }
+                MarkdownView(markdown: Self.previewText(quote.content), style: .quote)
+                    .padding(.bottom, 4)
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityAddTraits(mine ? .isLink : [])
+            .accessibilityHint(mine ? "Opens this reference in Loore" : "")
+            .accessibilityAction { if mine { openReference(quote) } }
+            FlowLayout(spacing: 16, lineSpacing: 4) {
+                if quote.url != nil {
+                    Button { openOriginal(quote, mine: mine) } label: {
+                        Text(isTweet ? "Open on X ↗" : "Open original ↗")
+                            .font(LooreFont.sans(12.8, .regular))
+                            .foregroundStyle(LooreColor.textMuted)
+                            .padding(.vertical, 10)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityHint(isTweet ? "Opens the tweet on X" : "Opens the original")
+                    .accessibilityIdentifier("quote.openOriginal")
+                }
+                if mine {
                     ReferenceFeedbackControl(itemId: quote.id, feedback: quote.feedback, nodeId: nodeId,
                                              shared: quote.feedbackShared == true) { verdict, answeredReadAt in
                         onFeedbackChange?(quote.id, verdict)
@@ -174,26 +220,35 @@ struct ExternalQuoteBubble: View {
                         .font(LooreFont.sans(12.8, .regular))
                         .foregroundStyle(readAt != nil ? LooreColor.textMuted : LooreColor.accentDim)
                         .disabled(marking)
+                    if let rated = quote.ratedBefore?.objectValue, quote.feedback == nil,
+                       let verdict = rated["feedback"]?.stringValue {
+                        let at = rated["at"]?.stringValue.flatMap(LooreDate.parse)
+                        Text("You rated this \(verdict) on \(LooreDateFormat.date(at, relative: false))")
+                            .font(LooreFont.sansOblique(12.8, .light))
+                            .foregroundStyle(LooreColor.textMuted)
+                    }
                 }
             }
-            .font(LooreFont.sans(12.8, .light))
-            .foregroundStyle(LooreColor.textMuted)
         }
-        .padding(12)
+        .padding(.vertical, 12)
+        .padding(.horizontal, 14)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(LooreColor.bgCard, in: RoundedRectangle(cornerRadius: 6))
-        .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(LooreColor.border))
-        .overlay(alignment: .leading) {
-            UnevenRoundedRectangle(topLeadingRadius: 6, bottomLeadingRadius: 6).fill(LooreColor.info).frame(width: 3)
-        }
+        .background(LooreColor.bgSurface, in: RoundedRectangle(cornerRadius: 10))
+        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(LooreColor.border))
         .contentShape(Rectangle())
-        .onTapGesture { open(quote, mine: mine) }
+        // The card body opens the reference page; its buttons keep their own taps.
+        .onTapGesture { if mine { openReference(quote) } }
         .accessibilityElement(children: .contain)
-        .accessibilityAction(named: "Open original post") { open(quote, mine: mine) }
+        .accessibilityIdentifier("quote.card")
         .padding(.vertical, 10)
     }
 
-    private func open(_ quote: ResolvedQuotes.QuotedExternal, mine: Bool) {
+    /// The reference's page in Loore, pushed over the thread (Back returns to it).
+    private func openReference(_ quote: ResolvedQuotes.QuotedExternal) {
+        app.router.push(.reference(id: quote.id))
+    }
+
+    private func openOriginal(_ quote: ResolvedQuotes.QuotedExternal, mine: Bool) {
         guard let link = quote.url, let url = URL(string: link) else { return }
         app.open(.external(url))
         if mine && !marking { setRead(quote, true, via: "open") }
