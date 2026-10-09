@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback } from "react";
 import XLookupConfirmDialog from "./XLookupConfirmDialog";
 import PurgeDataDialog from "./PurgeDataDialog";
+import AdminDeleteAccountDialog from "./AdminDeleteAccountDialog";
 import ProfileBuildConfirmDialog from "./ProfileBuildConfirmDialog";
 import AdminRefusalDialog, { REFUSAL_TITLES } from "./AdminRefusalDialog";
 import { offeredModels } from "./ModelSelector";
@@ -531,9 +532,22 @@ const smallActionStyle = {
   borderRadius: "4px",
 };
 
-// The Users-row line for a user's latest data purge (#268).
-function purgeLabel(job) {
+// The Users-row line for a user's latest data purge (#268) or account
+// deletion (#269).
+export function purgeLabel(job) {
   if (!job) return "";
+  if (job.delete_account) {
+    switch (job.status) {
+      case "scheduled":
+        return `Account deleted by the user, hidden until ${formatDate(job.scheduled_for)}`;
+      case "running":
+        return "Deleting account…";
+      case "failed":
+        return `Account deletion failed: ${job.error || "unknown error"}`;
+      default:
+        return `Account deletion: ${job.status}`;
+    }
+  }
   switch (job.status) {
     case "scheduled":
       return `Data deletion requested by the user, due ${formatDate(job.scheduled_for)}`;
@@ -570,6 +584,10 @@ function AdminPanel() {
   // open, or null.
   const [purgeAsk, setPurgeAsk] = useState(null);
   const closePurge = useCallback(() => setPurgeAsk(null), []);
+  // "Delete account" (#269): the user row whose dry run / confirmation
+  // is open, or null.
+  const [deleteAsk, setDeleteAsk] = useState(null);
+  const closeDelete = useCallback(() => setDeleteAsk(null), []);
   // A pre-fill / intentions / profile build the backend refused for this
   // account (#346): { code, message, username }. Shown as a dialog.
   const [refusal, setRefusal] = useState(null);
@@ -1148,6 +1166,7 @@ function AdminPanel() {
       />
       <AdminRefusalDialog refusal={refusal} onClose={() => setRefusal(null)} />
       <PurgeDataDialog user={purgeAsk} onClose={closePurge} onStarted={() => fetchUsers()} />
+      <AdminDeleteAccountDialog user={deleteAsk} onClose={closeDelete} onStarted={() => fetchUsers()} />
 
       {error && <div style={{ color: "var(--error)" }}>{error}</div>}
       <table style={{ width: "100%", borderCollapse: "collapse", color: "var(--text-primary)" }}>
@@ -1461,6 +1480,14 @@ function AdminPanel() {
                   style={{ color: "var(--error)" }}
                 >
                   Purge data
+                </button>{" "}
+                <button
+                  onClick={() => setDeleteAsk(u)}
+                  disabled={u.data_purge?.status === "running"}
+                  title="Delete this account and all its data now (dry run first)."
+                  style={{ color: "var(--error)" }}
+                >
+                  Delete account
                 </button>
                 {u.data_purge && (
                   <div style={{ marginTop: "4px", fontSize: "0.85em", color: u.data_purge.status === "failed" ? "var(--error)" : "var(--text-secondary)" }}>
