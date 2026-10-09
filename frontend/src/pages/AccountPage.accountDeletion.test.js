@@ -112,6 +112,28 @@ test('the dialog says a waiting writing deletion is replaced, and how to remove 
     .toMatch(/removes\s+its access on X. If X still lists Loore afterwards, remove it\s+yourself: on X/);
 });
 
+test('an account that signs in with X gets the X note, whether or not this session can revoke', () => {
+  // This session holds the sign-in's token: the request revokes it.
+  renderPage({ account_deletion: { ...info, x_sign_in: true, x_sign_in_revocable: true } });
+  openDialog();
+  expect(screen.getByText(/removes the access to your X account that signing in with X gave it/).textContent)
+    .toMatch(/If X still lists Loore afterwards, remove it yourself: on X, open Settings/);
+});
+
+test('without the sign-in token in this session (e.g. an email sign-in), the note only', () => {
+  renderPage({ account_deletion: { ...info, x_sign_in: true, x_sign_in_revocable: false } });
+  openDialog();
+  expect(screen.queryByText(/removes the access to your X account/)).toBeNull();
+  expect(screen.getByText(/You sign in with X, so X may list Loore/).textContent)
+    .toMatch(/To remove it: on X, open Settings and privacy/);
+});
+
+test('no X note for an account without X', () => {
+  renderPage();
+  const dialog = openDialog();
+  expect(dialog.textContent).not.toMatch(/ X /);
+});
+
 test('a server refusal is shown in the dialog', async () => {
   mockPost.mockRejectedValue({ response: { data: { error: 'This is the last admin account.' } } });
   renderPage();

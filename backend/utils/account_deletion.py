@@ -40,6 +40,7 @@ commit.
 Nothing here reads content: ids, names of tables and counts only.
 """
 import logging
+import time
 from collections import Counter
 from datetime import datetime, timedelta
 
@@ -141,7 +142,85 @@ def account_deletion_info(user):
         "link_expires_in": DELETION_LINK_SECONDS,
         "refusal": ({"code": refusal[0], "message": refusal[1]}
                     if refusal else None),
+        # The account signs in with X, and whether this session holds that
+        # sign-in's token, which the deletion revokes at X (Peter,
+        # 2026-10-09). The dialog's X note depends on both.
+        "x_sign_in": bool(user.twitter_id),
+        "x_sign_in_revocable": session_x_sign_in_token(user) is not None,
     }
+
+
+# ── "Sign in with X" (Peter, 2026-10-09: "pls ship the PRs with revoke") ─
+
+def session_x_sign_in_token(user):
+    """The OAuth 1.0a token of this request's "Sign in with X", when it is
+    the X account *user* signs in with and has not expired; else None.
+
+    flask-dance keeps the token in the browser's session after the
+    sign-in; the server stores none. A session can hold another X
+    account's token (a shared browser that signed in with X, then by
+    email link), so the token's X user id must be the account's."""
+    from flask import current_app, has_request_context
+    if not has_request_context() or not user.twitter_id:
+        return None
+    bp = current_app.blueprints.get("twitter")
+    try:
+        token = bp.token if bp is not None else None
+    except Exception:  # noqa: BLE001 - an unreadable token is no token
+        return None
+    if not isinstance(token, dict):
+        return None
+    if str(token.get("user_id") or "") != str(user.twitter_id):
+        return None
+    if not token.get("oauth_token") or not token.get("oauth_token_secret"):
+        return None
+    expires_at = token.get("expires_at")   # a UTC Unix time (flask-dance)
+    if expires_at and float(expires_at) <= time.time():
+        return None
+    return token
+
+
+def end_x_sign_in(user):
+    """At the user's own deletion request: invalidate this session's
+    "Sign in with X" token at X, then drop it from the session.
+
+    Best effort, as the purge's revoke of the bookmark connection: one
+    call bounded by X_REVOKE_TIMEOUT_SECONDS; a failure is logged without
+    the token and never stops the deletion. X answering 401 means the
+    token was already invalid (the user removed Loore on X), a warning.
+    A restore stays possible: signing in with X again asks X again.
+    Returns True when X confirmed."""
+    from flask import current_app
+    from backend.utils.external_content import x_invalidate_sign_in_token
+    from backend.utils.user_purge import X_REVOKE_TIMEOUT_SECONDS
+    token = session_x_sign_in_token(user)
+    ok = False
+    if token is not None:
+        try:
+            x_invalidate_sign_in_token(
+                token["oauth_token"], token["oauth_token_secret"],
+                current_app.config.get("TWITTER_API_KEY"),
+                current_app.config.get("TWITTER_API_SECRET"),
+                timeout=X_REVOKE_TIMEOUT_SECONDS)
+            ok = True
+            logger.info("account deletion of user %s: the X sign-in was "
+                        "revoked at X", user.id)
+        except Exception as e:  # noqa: BLE001 - never stops the deletion
+            status = getattr(getattr(e, "response", None), "status_code",
+                             None)
+            (logger.warning if status == 401 else logger.error)(
+                "account deletion of user %s: X did not revoke the X "
+                "sign-in (%s%s); the deletion goes ahead", user.id,
+                type(e).__name__, f", HTTP {status}" if status else "")
+    # As routes/auth.py's _drop_x_token: the next "Sign in with X" in this
+    # browser goes through X again (it would fail on the revoked token).
+    bp = current_app.blueprints.get("twitter")
+    if bp is not None:
+        try:
+            del bp.token
+        except KeyError:
+            pass
+    return ok
 
 
 # ── The emailed confirmation link (email accounts) ──────────────────────

@@ -313,6 +313,32 @@ def x_revoke_token(token, client_id, client_secret=None, timeout=30):
     return True
 
 
+# "Sign in with X" is OAuth 1.0a (flask-dance's twitter blueprint), so its
+# user access token is invalidated here, not at the OAuth 2.0 revoke
+# endpoint above (docs.x.com, "POST oauth/invalidate_token": user context
+# with the access token to invalidate).
+X_INVALIDATE_SIGN_IN_URL = "https://api.x.com/1.1/oauth/invalidate_token"
+
+
+def x_invalidate_sign_in_token(oauth_token, oauth_token_secret,
+                               consumer_key, consumer_secret, timeout=30):
+    """Invalidate one OAuth 1.0a user access token at X, so X stops listing
+    Loore as an app the user signed in with.
+
+    The request is signed with the app's consumer keys and the token
+    itself. Returns True when X accepts it. Raises
+    ``requests.RequestException`` (HTTP error, timeout, no connection);
+    X answers 401 for a token that is already invalid. The token travels
+    only in the signed Authorization header, never in a URL."""
+    from requests_oauthlib import OAuth1
+    auth = OAuth1(consumer_key, client_secret=consumer_secret,
+                  resource_owner_key=oauth_token,
+                  resource_owner_secret=oauth_token_secret)
+    resp = requests.post(X_INVALIDATE_SIGN_IN_URL, auth=auth, timeout=timeout)
+    resp.raise_for_status()
+    return True
+
+
 def x_exchange_code(client_id, code, redirect_uri, code_verifier,
                     client_secret=None):
     """OAuth2 authorization-code grant (PKCE) — the connect callback."""

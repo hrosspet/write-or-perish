@@ -78,6 +78,31 @@ const subStyle = {
 const DAY_MS = 24 * 3600 * 1000;
 
 /**
+ * What the dialog says about X (#269; Peter, 2026-10-09: revoke). The
+ * stored bookmark connection is revoked by the purge; the "Sign in with
+ * X" token is revoked at the request when this session holds it
+ * (info.x_sign_in_revocable). Without either, an account that signs in
+ * with X gets the steps only. Null when X plays no part.
+ */
+export function deleteAccountXNote(xConnected, info) {
+  if (xConnected) {
+    return "Loore also forgets your X connection for bookmarks and removes its "
+      + "access on X. If X still lists Loore afterwards, remove it yourself: "
+      + X_REMOVE_ACCESS_STEPS;
+  }
+  if (info?.x_sign_in && info?.x_sign_in_revocable) {
+    return "Loore also removes the access to your X account that signing in "
+      + "with X gave it. If X still lists Loore afterwards, remove it "
+      + "yourself: " + X_REMOVE_ACCESS_STEPS;
+  }
+  if (info?.x_sign_in) {
+    return "You sign in with X, so X may list Loore as an app with access to "
+      + "your account. To remove it: " + X_REMOVE_ACCESS_STEPS;
+  }
+  return null;
+}
+
+/**
  * Asked before "Delete my account" (#269). Says what happens and when:
  * the account is deleted and signed out at once, can be restored by
  * signing in during the grace period, and is then deleted forever with
@@ -112,6 +137,7 @@ function DeleteAccountDialog({
   const byEmail = !!info?.confirm_by_email;
   const date = formatDeletionDate(new Date(Date.now() + days * DAY_MS));
   const matches = typed.trim().toLowerCase() === (username || "").toLowerCase();
+  const xNote = deleteAccountXNote(xConnected, info);
 
   const confirm = async () => {
     if (!matches || busy) return;
@@ -161,13 +187,7 @@ function DeleteAccountDialog({
             on {date} instead, and restoring your account cancels both.
           </p>
         )}
-        {xConnected && (
-          <p style={bodyStyle}>
-            Loore also forgets your X connection for bookmarks and removes
-            its access on X. If X still lists Loore afterwards, remove it
-            yourself: {X_REMOVE_ACCESS_STEPS}
-          </p>
-        )}
+        {xNote && <p style={bodyStyle}>{xNote}</p>}
         {byEmail && (
           <p style={bodyStyle}>
             To make sure it is you, Loore emails a confirmation link

@@ -211,6 +211,189 @@ def test_an_account_without_email_is_scheduled_at_once(app, world, stubs, mail):
     assert mail == []
 
 
+# ── "Sign in with X" revoked at the request (Peter, 2026-10-09) ─────────
+
+X_SIGN_IN = {"oauth_token": "1001-sign-in-7c1d", "oauth_token_secret":
+             "sign-in-secret-4b2a", "user_id": "1001",
+             "screen_name": "alicebirds"}
+
+
+def _with_x_sign_in(app):
+    """The real flask-dance blueprint, which keeps the X sign-in token
+    in the browser's session (as in production)."""
+    app.config["TWITTER_API_KEY"] = "consumer-key"
+    app.config["TWITTER_API_SECRET"] = "consumer-secret"
+    from backend.oauth import init_twitter_blueprint
+    init_twitter_blueprint(app)
+
+
+def _x_client(app, user, token=X_SIGN_IN):
+    c = _client(app, user)
+    if token is not None:
+        with c.session_transaction() as s:
+            s["twitter_oauth_token"] = dict(token)
+    return c
+
+
+class _XInvalidate:
+    """X's OAuth 1.0a invalidate endpoint behind requests.post; any other
+    call fails the test."""
+
+    def __init__(self, monkeypatch, outcome="ok"):
+        import requests
+        from backend.utils import external_content as ext
+        self.calls = []
+
+        def post(url, **kw):
+            assert url == ext.X_INVALIDATE_SIGN_IN_URL, url
+            auth = kw["auth"].client
+            self.calls.append((auth.client_key, auth.resource_owner_key,
+                               auth.resource_owner_secret, kw["timeout"]))
+            if outcome == "timeout":
+                raise requests.Timeout("read timed out")
+            r = MagicMock()
+            if outcome in ("error", "invalid"):
+                code = 503 if outcome == "error" else 401
+                r.raise_for_status.side_effect = requests.HTTPError(
+                    f"{code} Error", response=MagicMock(status_code=code))
+            return r
+        monkeypatch.setattr(ext.requests, "post", post)
+
+
+def _deletion_log(caplog):
+    return [(r.levelname, r.getMessage()) for r in caplog.records
+            if r.name == acc.logger.name and "X sign-in" in r.getMessage()]
+
+
+def test_the_x_sign_in_is_revoked_at_the_request_and_a_restore_still_works(
+        app, world, stubs, monkeypatch, caplog):
+    _with_x_sign_in(app)
+    x = _XInvalidate(monkeypatch)
+    caplog.set_level("INFO", logger=acc.logger.name)
+    a = world.alice
+    a.email = None
+    _db.session.commit()
+    c = _x_client(app, a)
+    r = c.post("/api/account/delete", json={"confirm": "alice"})
+    assert r.status_code == 202 and r.get_json()["status"] == "scheduled"
+    assert x.calls == [("consumer-key", X_SIGN_IN["oauth_token"],
+                        X_SIGN_IN["oauth_token_secret"],
+                        up.X_REVOKE_TIMEOUT_SECONDS)]
+    with c.session_transaction() as s:
+        assert "twitter_oauth_token" not in s     # dropped
+    assert not any(X_SIGN_IN["oauth_token"] in m or
+                   X_SIGN_IN["oauth_token_secret"] in m
+                   for _, m in _deletion_log(caplog))
+
+    # Signing in with X again goes through X (a new authorization), not
+    # through the revoked token...
+    r = c.get("/auth/login")
+    assert r.status_code == 302 and r.headers["Location"].endswith("/auth/twitter")
+    # ...and X's new token leads to the restore question, as before.
+    import backend.routes.auth as auth
+    fake = MagicMock()
+    fake.authorized = True
+    fake.get.return_value = MagicMock(
+        ok=True, json=lambda: {"id": 1001, "screen_name": "alicebirds"})
+    monkeypatch.setattr(auth, "twitter", fake)
+    r = c.get("/auth/login")
+    assert r.headers["Location"] == f"{FRONTEND}/account-restore"
+    r = c.post("/api/account/restore")
+    assert r.status_code == 200 and r.get_json()["status"] == "restored"
+    assert _db.session.get(User, a.id).deleted_at is None
+
+
+def test_an_email_account_revokes_when_it_confirms_not_when_it_asks(
+        app, world, stubs, mail, monkeypatch):
+    _with_x_sign_in(app)
+    x = _XInvalidate(monkeypatch)
+    c = _x_client(app, world.alice)
+    assert c.post("/api/account/delete",
+                  json={"confirm": "alice"}).status_code == 202
+    assert x.calls == []                          # only a link was sent
+    token = re.search(r"token=(\S+)", mail[-1][2]).group(1)
+    r = c.post("/api/account/delete/confirm", json={"token": token})
+    assert r.status_code == 202 and len(x.calls) == 1
+
+
+@pytest.mark.parametrize("outcome,level", [
+    ("error", "ERROR"), ("timeout", "ERROR"), ("invalid", "WARNING")])
+def test_a_failed_x_sign_in_revoke_never_stops_the_deletion(
+        app, world, stubs, monkeypatch, caplog, outcome, level):
+    _with_x_sign_in(app)
+    x = _XInvalidate(monkeypatch, outcome)
+    a = world.alice
+    a.email = None
+    _db.session.commit()
+    c = _x_client(app, a)
+    r = c.post("/api/account/delete", json={"confirm": "alice"})
+    assert r.status_code == 202 and len(x.calls) == 1
+    assert _db.session.get(User, a.id).deleted_at is not None
+    with c.session_transaction() as s:
+        assert "twitter_oauth_token" not in s
+    log = _deletion_log(caplog)
+    assert [lvl for lvl, _ in log] == [level]
+    assert "X did not revoke" in log[0][1]
+    assert X_SIGN_IN["oauth_token"] not in log[0][1]
+    assert X_SIGN_IN["oauth_token_secret"] not in log[0][1]
+
+
+@pytest.mark.parametrize("token", [
+    None,                                            # e.g. an email sign-in
+    dict(X_SIGN_IN, user_id="2002"),                 # another X account's
+    dict(X_SIGN_IN, expires_at=time.time() - 60),    # expired
+], ids=["none", "other_x_account", "expired"])
+def test_no_x_call_without_this_accounts_live_sign_in_token(
+        app, world, stubs, monkeypatch, token):
+    _with_x_sign_in(app)
+    x = _XInvalidate(monkeypatch)
+    a = world.alice
+    a.email = None
+    _db.session.commit()
+    c = _x_client(app, a, token)
+    r = c.post("/api/account/delete", json={"confirm": "alice"})
+    assert r.status_code == 202 and x.calls == []
+    with c.session_transaction() as s:
+        assert "twitter_oauth_token" not in s
+
+
+def test_the_dialog_knows_whether_the_x_sign_in_can_be_revoked(app, world):
+    _with_x_sign_in(app)
+    from flask import session
+    a = world.alice
+    with app.test_request_context():
+        info = acc.account_deletion_info(a)
+        assert info["x_sign_in"] is True
+        assert info["x_sign_in_revocable"] is False   # note only
+        session["twitter_oauth_token"] = dict(X_SIGN_IN)
+        assert acc.account_deletion_info(a)["x_sign_in_revocable"] is True
+        session["twitter_oauth_token"] = dict(X_SIGN_IN, user_id="2002")
+        assert acc.account_deletion_info(a)["x_sign_in_revocable"] is False
+    a.twitter_id = None
+    _db.session.commit()
+    with app.test_request_context():
+        info = acc.account_deletion_info(a)
+        assert info["x_sign_in"] is False and not info["x_sign_in_revocable"]
+
+
+def test_an_admin_deletion_never_touches_the_admins_x_sign_in(
+        app, world, stubs, monkeypatch):
+    _with_x_sign_in(app)
+    x = _XInvalidate(monkeypatch)
+    admin = world.admin
+    admin.twitter_id = "3003"
+    _db.session.commit()
+    c = _x_client(app, admin, dict(X_SIGN_IN, user_id="3003"))
+    r = c.post(f"/api/admin/users/{world.alice.id}/delete_account",
+               json={"confirm_username": "alice"})
+    assert r.status_code in (200, 202), r.get_json()
+    assert _db.session.get(User, world.alice.id) is None or \
+        _db.session.get(User, world.alice.id).deleted_at is not None
+    assert x.calls == []
+    with c.session_transaction() as s:
+        assert "twitter_oauth_token" in s
+
+
 # ── Hidden at once ──────────────────────────────────────────────────────
 
 def test_the_account_is_hidden_at_once(app, world, stubs):

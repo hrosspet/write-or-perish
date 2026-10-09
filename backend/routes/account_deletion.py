@@ -7,6 +7,9 @@ deleted account signs in during its grace period.
 - POST /api/account/delete/confirm {"token"}: the link's page, inside a
   signed-in session of the same account (as the email change of #260):
   schedules the deletion and ends the session.
+- Scheduling (either route) also revokes at X the "Sign in with X" token
+  this session holds, if it is the account's, and drops it from the
+  session; best effort, it never stops the deletion.
 - GET / POST /api/account/restore and POST /api/account/restore/decline:
   the question a sign-in into a deleted account leads to. The offer is
   in the browser's session (set by routes/auth.py), not a sign-in: the
@@ -25,8 +28,8 @@ from backend.models import User
 from backend.utils.account_deletion import (
     ACCOUNT_DELETION_GRACE_DAYS, DELETION_LINK_SECONDS, RESTORE_OFFER_SECONDS,
     RESTORE_SESSION_KEY, AccountDeletionRefused, check_confirmation,
-    deletion_refusal, format_day, issue_confirmation_link, restore_account,
-    restore_offer, schedule_account_deletion,
+    deletion_refusal, end_x_sign_in, format_day, issue_confirmation_link,
+    restore_account, restore_offer, schedule_account_deletion,
 )
 from backend.utils.timefmt import iso_utc
 
@@ -54,6 +57,9 @@ def _schedule_and_sign_out(user):
     job = schedule_account_deletion(
         user, requested_by_id=user.id, source="self")
     email, username, due = user.email, user.username, job.scheduled_for
+    # The X sign-in this session holds is revoked now (best effort); the
+    # stored bookmark connection is revoked by the purge after 30 days.
+    end_x_sign_in(user)
     logout_user()
     session.pop(RESTORE_SESSION_KEY, None)
     if email:
