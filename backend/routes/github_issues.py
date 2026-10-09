@@ -1,9 +1,11 @@
 from flask import Blueprint, jsonify, request
 from flask_login import login_required, current_user
-from backend.models import Node, Draft
+from backend.models import Node
 from backend.extensions import db
 from backend.utils.client_platform import request_client
 from backend.utils.github import create_github_issue
+from backend.utils.privacy import can_user_access_node
+from backend.utils.proposals import find_own_pending_proposal
 from backend.utils.tool_meta import parse_github_issue, update_tool_meta
 
 github_bp = Blueprint("github", __name__)
@@ -12,43 +14,29 @@ github_bp = Blueprint("github", __name__)
 @github_bp.route("/create-issue", methods=["POST"])
 @login_required
 def create_issue():
-    """Create a GitHub issue from a pending Voice proposal."""
+    """Create a GitHub issue from a pending Voice proposal.
+
+    404 unless the node, or the nearest node above it with a pending issue
+    draft, is the user's own live issue proposal: nothing is read or sent
+    to GitHub then."""
     data = request.get_json() or {}
     llm_node_id = data.get("llm_node_id")
 
     if not llm_node_id:
         return jsonify({"error": "llm_node_id is required"}), 400
 
-    # Find the pending draft by walking ancestor chain
     llm_node = Node.query.get(llm_node_id)
-    if not llm_node:
+    if not llm_node or not can_user_access_node(llm_node, current_user.id):
         return jsonify({"error": "Node not found"}), 404
 
-    draft = None
-    current_node = llm_node
-    visited = set()
-    while current_node and current_node.id not in visited:
-        visited.add(current_node.id)
-        draft = Draft.query.filter_by(
-            user_id=current_user.id,
-            parent_id=current_node.id,
-            label='github_issue_pending',
-        ).first()
-        if draft:
-            break
-        current_node = current_node.parent
-
+    # The pending proposal at or above the node, walking up its ancestors:
+    # only the user's own live proposal (utils/proposals).
+    draft, origin_node = find_own_pending_proposal(
+        llm_node, current_user.id, 'github_issue_pending')
     if not draft:
         return jsonify({"error": "No pending GitHub issue found"}), 404
 
-    if draft.user_id != current_user.id:
-        return jsonify({"error": "Unauthorized"}), 403
-
     # Parse issue from the originating LLM node content
-    origin_node = Node.query.get(draft.parent_id)
-    if not origin_node:
-        return jsonify({"error": "Origin node not found"}), 404
-
     issue_data = parse_github_issue(origin_node.get_content() or "")
     if not issue_data.get("title"):
         return jsonify({"error": "Could not parse issue from proposal"}), 400

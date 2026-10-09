@@ -137,6 +137,33 @@ def test_reply_context_shows_a_hidden_accounts_reply_as_deleted(app):  # noqa: F
     assert sent.count("deleted by the author") == 2
 
 
+def test_reply_below_a_deleted_entry_sends_a_notice_in_its_place(app):  # noqa: F811
+    """An entry deleted on its own (its replies kept) in the middle of a
+    thread, then an AI reply below it: the reply runs, and the model gets
+    the "deleted by the author" notice where the entry was, in the same
+    message format as the other turns, never the deleted text."""
+    from datetime import datetime
+    alice = _mk_user("alice", approved=True, plan="alpha")
+    llm_user = _mk_user("gpt-5", twitter_id="llm-gpt-5")
+    root = _node(alice, None, "ALICE ROOT ENTRY")
+    gone = _node(alice, root, "DELETED WORDS")
+    gone.deleted_at = datetime.utcnow()
+    latest = _node(alice, gone, "ALICE FOLLOW-UP")
+    llm_node = _placeholder(llm_user, latest, alice)
+
+    _ScriptedProvider.reset([_resp("An answer.")])
+    generate_llm_response(_FakeSelf(), latest.id, llm_node.id, "gpt-5",
+                          alice.id)
+
+    sent = _sent_text()
+    assert "ALICE ROOT ENTRY" in sent and "ALICE FOLLOW-UP" in sent
+    assert "DELETED WORDS" not in sent
+    assert sent.count("deleted by the author") == 1
+    reply = _fresh(llm_node.id)
+    assert reply.llm_task_status == "completed"
+    assert reply.get_content() == "An answer."
+
+
 def test_reply_context_scrubs_a_deleted_ancestor(app):  # noqa: F811
     """A soft-deleted entry in the middle of a thread is sent as a notice
     in the same message format as the others, never its text."""
@@ -157,4 +184,28 @@ def test_reply_context_scrubs_a_deleted_ancestor(app):  # noqa: F811
     assert "ALICE ROOT ENTRY" in sent and "ALICE FOLLOW-UP" in sent
     assert "DELETED WORDS" not in sent
     assert sent.count("deleted by the author") == 1
+    assert _fresh(llm_node.id).get_content() == "An answer."
+
+
+def test_reply_below_a_deleted_ai_reply_keeps_its_turn(app):  # noqa: F811
+    """A deleted AI reply mid-thread is sent as the notice in an assistant
+    turn, so the conversation keeps its turns."""
+    from datetime import datetime
+    alice = _mk_user("alice", approved=True, plan="alpha")
+    llm_user = _mk_user("gpt-5", twitter_id="llm-gpt-5")
+    root = _node(alice, None, "ALICE ROOT ENTRY")
+    gone = _node(llm_user, root, "DELETED AI WORDS", human_owner=alice,
+                 node_type="llm")
+    gone.deleted_at = datetime.utcnow()
+    latest = _node(alice, gone, "ALICE FOLLOW-UP")
+    llm_node = _placeholder(llm_user, latest, alice)
+
+    _ScriptedProvider.reset([_resp("An answer.")])
+    generate_llm_response(_FakeSelf(), latest.id, llm_node.id, "gpt-5",
+                          alice.id)
+
+    sent = _ScriptedProvider.calls[0]["messages"]
+    notices = [m for m in sent if "deleted by the author" in m["text"]]
+    assert [m["role"] for m in notices] == ["assistant"]
+    assert "DELETED AI WORDS" not in _sent_text()
     assert _fresh(llm_node.id).get_content() == "An answer."

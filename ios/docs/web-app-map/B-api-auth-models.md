@@ -1153,18 +1153,13 @@ Source files: `backend/routes/{dashboard,profile,todo,artifacts,prompts,log,sear
 ##### `GET /api/dashboard/`
 - Backend: routes/dashboard.py:get_dashboard
 - Auth: login_required; allowed for unapproved users (it is how the client learns `approved: false`).
-- Called from: contexts/UserContext.js (on app mount; this is the web app's "who am I" call), pages/ProfilePage.js (to read `latest_profile`).
-- Request: query `page` (int, default 1), `per_page` (int, default 20, max 100). The web app sends neither.
+- Called from: contexts/UserContext.js (on app mount, with `profile=0`; this is the web app's "who am I" call), pages/ProfilePage.js (to read `latest_profile`).
+- Request: query `profile` (optional). `profile=0` leaves out `latest_profile`, so the call decrypts nothing; the app-load calls (web `UserContext`, iPhone `AppState.loadUser`) send it. Without it the response carries `latest_profile` (the Profile page, and older iPhone builds everywhere).
 - Response 200:
 ```
 {
   "user": CurrentUser,                // see below; the app's current-user model
-  "pinned_nodes": [DashboardNodeCard],// nodes pinned by this user, newest pin first, not paginated
-  "nodes": [DashboardNodeCard],       // this user's top-level (parent_id null) nodes, newest first, paginated
-  "has_more": bool,
-  "page": int,
-  "total_nodes": int,
-  "latest_profile": LatestProfile | null
+  "latest_profile": LatestProfile | null   // absent with profile=0
 }
 
 CurrentUser = {
@@ -1199,21 +1194,6 @@ CurrentUser = {
   "external_content_enabled": bool     // user opt-in: AI may search saved references
 }
 
-DashboardNodeCard = {                  // _serialize_node_for_list
-  "id": int,                           // display node id: for a system-prompt root, its FIRST child
-  "preview": string,                   // first 200 chars + "..." if longer
-  "node_type": string,                 // "user" | "llm" | ... (see Node model section)
-  "child_count": int,                  // len(node.children) of the ROOT row (includes soft-deleted children)
-  "created_at": iso,
-  "pinned_at": iso | null,
-  "username": string,                  // author; "Unknown" if missing
-  "human_owner_username": string | null, // for llm nodes: the human the AI node belongs to
-  "llm_model": string | null,
-  "origin": string | null,             // import/source origin marker; null = native Loore
-  "has_original_audio": bool,          // recorded audio exists (audio_original_url or streaming transcription)
-  "prompt_key": string | null          // set when the root is a system-prompt root
-}
-
 LatestProfile = {                      // newest UserProfile row (including pipeline intermediates)
   "id": int,
   "content": string,                   // full Markdown profile text (can be long)
@@ -1228,14 +1208,7 @@ LatestProfile = {                      // newest UserProfile row (including pipe
 }
 ```
 - Errors: 401 unauthenticated. No other error paths.
-- Notes: The web app ignores `nodes`/`pinned_nodes` from this endpoint (the home list comes from `GET /api/log`). A native app can use it as `GET /me`. The web app calls `/api/dashboard` (no slash) and follows the 308.
-
-##### `GET /api/dashboard/<username>`
-- Backend: routes/dashboard.py:get_public_dashboard
-- Auth: login_required; GET is exempt from approval gating.
-- Called from: nobody (the web route `/dashboard/:username` now redirects client-side to the public profile page).
-- Response 200: same envelope as above but `user` is only `{"id", "username", "description"}`, and nodes are filtered to those the viewer can access. Not used by the frontend.
-- Errors: 404 (HTML 404 from `first_or_404`) for an unknown username.
+- Notes: Until #481 the response also carried the user's thread cards (`pinned_nodes`, `nodes`, `has_more`, `page`, `total_nodes`). No client read them (the home list comes from `GET /api/log`), and each card's preview was a decryption on every call, so they were dropped. `GET /api/dashboard/<username>`, the old public dashboard with the same cards, was removed with them: nothing called it. A native app can use it as `GET /me`. The web app calls `/api/dashboard` (no slash) and follows the 308.
 
 ##### `PUT /api/dashboard/user`
 - Backend: routes/dashboard.py:update_user
@@ -1438,16 +1411,16 @@ TodoVersion JSON (field presence varies by endpoint, listed per endpoint): `id: 
 ##### `PATCH /api/todo/`
 - Backend: routes/todo.py:patch_todo
 - Called from: pages/TodoPage.js (checkbox toggles, quick-add to the "Today" section, insert-after; optimistic update, reverted on failure).
-- Request: `{"content": string}` (full Markdown text).
+- Request: `{"content": string, "base_revision"?: string}` (full Markdown text; the `revision` of the list the edit was made on).
 - Response 200: `{"todo": {"id", "content", "generated_by", "tokens_used", "created_at", "version_number"}}` (no privacy_level/ai_usage).
-- Errors: 400 `"Content is required"`, `"Content cannot be empty"`; 404 `{"error": "No todo exists to update"}`.
+- Errors: 400 `"Content is required"`, `"Content cannot be empty"`; 404 `{"error": "No todo exists to update"}`; 409 `{"error", "code": "todo_changed", "todo": {…latest}}` when `base_revision` is not the latest version's (#430); 503 `{"error", "code": "todo_busy"}` when another write of the user's todo held the todo lock for more than 10 s (#477).
 
 ##### `PUT /api/todo/`
 - Backend: routes/todo.py:update_todo
 - Called from: pages/TodoPage.js (Save in edit mode).
-- Request: `{"content": string, "generated_by"?: string (default "user"), "tokens_used"?: int}`. The web app sends `generated_by: "user"`.
+- Request: `{"content": string, "generated_by"?: string (default "user"), "tokens_used"?: int, "base_revision"?: string}`. The web app sends `generated_by: "user"` and, except for the first create, the `revision` of the version the editor was opened on.
 - Response 200: same shape as PATCH (new row).
-- Errors: 400 `"Content is required"`, `"Content cannot be empty"`.
+- Errors: 400 `"Content is required"`, `"Content cannot be empty"`; 409 `todo_changed` with the latest version when `base_revision` is not the latest version's (#476); 503 `todo_busy` (#477).
 
 ##### `GET /api/todo/versions`
 - Called from: pages/TodoPage.js (history drawer).
@@ -1458,15 +1431,17 @@ TodoVersion JSON (field presence varies by endpoint, listed per endpoint): `id: 
 - Called from: TodoPage history drawer (selected + previous version for a diff).
 
 ##### `POST /api/todo/revert/<int:version_id>`
-- Response 200: `{"todo": {"id", "content", "generated_by": "revert", "created_at", "version_number"}}`. Errors: 404; 403.
+- Response 200: `{"todo": {"id", "content", "generated_by": "revert", "created_at", "version_number"}}`. Errors: 404; 403; 503 `todo_busy` (#477).
 
 ##### `POST /api/todo/apply-draft`
 - Backend: routes/todo.py:apply_todo_draft
 - Called from: components/ProposalInline.js ("Apply to todo" on an AI reply that proposed todo changes via the `propose_todo` tool).
 - Request: `{"llm_node_id": int}` (the AI reply node carrying the proposal).
 - Response 202: `{"status": "started", "task_id": string, "llm_node_id": int}` — Celery task `apply_voice_todo` merges the proposal into the todo with an LLM call (no visible node is created).
-- Errors: 400 `"llm_node_id is required"`; 404 `{"error": "No pending todo changes found"}`; 403.
+- Errors: 400 `"llm_node_id is required"`; 404 `{"error": "No pending todo changes found"}`; 403; 409 `{"error", "code": "todo_merge_started"}` when a merge of this proposal is already running (a double click, a second tab): the cards show it as started and poll.
 - Completion polling (web): every 2 s `GET /api/nodes/<llm_node_id>/llm-status` (nodes section) and read `tool_calls_meta` → entry with `name == "propose_todo"`; `apply_status` goes `"started"` → `"completed"` or `"failed"` (with `apply_error`). No timeout in the web code.
+- A failed merge leaves the proposal applicable (#434): its pending draft comes back and the `propose_todo` entry gets `"retryable": true`, unless a newer todo proposal is pending, or was applied or is being applied (`false`, #477). With `retryable` the cards show **"Apply again"** next to the error, which posts this route again.
+- The merge saves on the newest list (#477): when the list changed during the model call, its edits are applied to the newest list; when they no longer fit, it fails with "Your todo list changed while this update was being applied, and the update no longer fits it, so nothing was changed." (retryable).
 
 ---
 
@@ -1732,7 +1707,6 @@ PollResponse = { "status": "drafting" | "draft" | "draft_failed" | "sent" | "dec
 
 | Route | Note |
 |---|---|
-| `GET /api/dashboard/<username>` | Old public dashboard; web route now redirects. |
 | `GET /api/profile/<id>/tts-status` | Superseded by SSE `/api/sse/profiles/<id>/tts-stream`; usable as a polling fallback. |
 | `GET /api/artifacts/<kind>` | Web uses the list endpoint; handy for native single-artifact loads. |
 | `GET /health`, `GET /ready`, `GET /api/health`, `GET /api/ready` | Monitoring only. |
@@ -2382,7 +2356,7 @@ The backend has no shared serializer layer: each route builds its own dict, so t
 
 ### 5.2 Entities, relations and where their shapes live
 
-**User (current user).** From `GET /api/dashboard/` → `user` (29 keys: identity, `approved`, `terms_up_to_date`, `is_admin`, `plan`, `voice_mode_enabled`, `craft_mode`, `preferred_model`, defaults `default_privacy_level`/`default_ai_usage`, X link state, email + `pending_email`/`pending_email_expired`, `prefill_consent`, `timezone`, `spend_blocked`, share/external-content flags, profile-build state). Full shape: §2.4.1, "CurrentUser". Other users appear only as `username` strings (plus `user_id` ints) inside nodes; there is no public user object for the app except `GET /api/dashboard/<username>` (unused, returns another user's profile text) and public pages.
+**User (current user).** From `GET /api/dashboard/` → `user` (29 keys: identity, `approved`, `terms_up_to_date`, `is_admin`, `plan`, `voice_mode_enabled`, `craft_mode`, `preferred_model`, defaults `default_privacy_level`/`default_ai_usage`, X link state, email + `pending_email`/`pending_email_expired`, `prefill_consent`, `timezone`, `spend_blocked`, share/external-content flags, profile-build state). Full shape: §2.4.1, "CurrentUser". Other users appear only as `username` strings (plus `user_id` ints) inside nodes; there is no public user object for the app except public pages.
 
 **Node.** The core entity: every entry, reply and AI reply. A **thread** is a root node (`parent_id == null`) and its descendants. Relations:
 - `parent_id` / `children`: a tree. `GET /api/nodes/<id>` returns the focal node, its `ancestors` (root first, privacy-blocked ones omitted) and the **entire** subtree under it as nested `children` (no pagination, sorted by `descendant_count` desc).
@@ -2394,7 +2368,7 @@ The backend has no shared serializer layer: each route builds its own dict, so t
 - Other: `pinned_at`, `permalink` (public roots with a slug), `origin`, `privacy_level`, `ai_usage`, `reply_ai_usage`, `created_at`, `updated_at`. Soft-deleted nodes appear as tombstones `{id, deleted: true, deleted_at, username, node_type, created_at, …}` when they still have visible descendants.
 - Content markers the client must render: `{quote:<nodeId>}` and `{quote_ext:<itemId>}` (resolve with `GET /api/nodes/<id>/resolve-quotes`), links to `https://loore.org/node/<id>` (titles via `GET /api/nodes/titles?ids=`), fenced `:::share <type>` … `:::` blocks and `### <Section>` proposal headings in AI replies (§5.3). Content is Markdown.
 - Versions: edits store the previous text in `NodeVersion`, but **no endpoint exposes node versions** (only data export includes them).
-- Shapes: §2.2.0 A (`NodeDetail`), B (`AncestorNode`), C (`TreeNode`), D (create/upload); list cards: `LogCard` (§2.4.7), `DashboardNodeCard` (§2.4.1), `PublicNode` (§2.5.5), quote payloads (§2.2.2). Char cap 100 000 per node (create auto-splits into a chain and returns `split_into`, `tip_id`; edit returns 422).
+- Shapes: §2.2.0 A (`NodeDetail`), B (`AncestorNode`), C (`TreeNode`), D (create/upload); list cards: `LogCard` (§2.4.7), `PublicNode` (§2.5.5), quote payloads (§2.2.2). Char cap 100 000 per node (create auto-splits into a chain and returns `split_into`, `tip_id`; edit returns 422).
 
 **Thread name.** `thread_name` on `LogCard`; set via `PUT /api/nodes/<root>/thread-name`. Stored in a separate `Thread` table keyed by the root node.
 

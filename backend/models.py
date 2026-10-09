@@ -521,7 +521,7 @@ class Node(db.Model):
         """True when this node is an agentic session's system prompt: it
         links a UserPrompt version, or carries the prompt_key stamp left
         behind when a per-thread edit detached that link. Display code
-        (Log / dashboard cards, the mode badge, search exclusion) keys off
+        (Log cards, the mode badge, search exclusion) keys off
         this; use has_artifact("prompt") when the question is whether the
         content still resolves from a linked version."""
         return self.get_prompt_key() is not None
