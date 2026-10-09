@@ -63,6 +63,9 @@ export default function DataDeletionBanner() {
       aria-label="Writing deleted"
       style={{
         width: "100%",
+        // Flush under the navigation bar: it is 56 px high and the page
+        // content starts 60 px down (App.js).
+        marginTop: -4,
         background: "var(--accent-subtle)",
         borderBottom: "1px solid var(--border)",
       }}
