@@ -311,12 +311,13 @@ struct SignInView: View {
         }
     }
 
-    private func handleXLogin(_ result: Result<[HTTPCookie], AuthFailure>) {
+    private func handleXLogin(_ result: Result<WebLoginResult, AuthFailure>) {
         switch result {
-        case .success(let cookies):
+        case .success(let login):
             do {
-                try app.auth.adoptWebLoginCookies(cookies)
-                Task { await app.signInCompleted() }
+                try app.auth.adoptWebLoginCookies(login.cookies)
+                let landing = WebLoginRouting.appLanding(login.landing)
+                Task { await app.signInCompleted(landing: landing) }
             } catch {
                 xError = (error as? AuthFailure)?.message
             }

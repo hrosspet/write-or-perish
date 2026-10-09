@@ -6,10 +6,11 @@ import WebKit
 /// Loads `/auth/login?next=/profile`; the whole OAuth round trip stays in one
 /// cookie jar, so the backend's request-token check passes. When the web view
 /// is about to open the frontend after login, the navigation is cancelled and
-/// the `session` / `remember_token` cookies are handed to the app.
+/// the `session` / `remember_token` cookies are handed to the app, with the
+/// page the login was sending the browser to.
 struct WebLoginSheet: View {
     let environment: AppEnvironment
-    let onFinish: (Result<[HTTPCookie], AuthFailure>) -> Void
+    let onFinish: (Result<WebLoginResult, AuthFailure>) -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var isLoading = true
 
@@ -34,10 +35,17 @@ struct WebLoginSheet: View {
     }
 }
 
+/// A finished web login: its auth cookies and the frontend page it landed on
+/// (`/profile`, or `/account-restore` for an account in its deletion grace period).
+struct WebLoginResult {
+    var cookies: [HTTPCookie]
+    var landing: URL
+}
+
 struct WebLoginView: UIViewRepresentable {
     let environment: AppEnvironment
     @Binding var isLoading: Bool
-    let onFinish: (Result<[HTTPCookie], AuthFailure>) -> Void
+    let onFinish: (Result<WebLoginResult, AuthFailure>) -> Void
 
     static func startURL(for environment: AppEnvironment) -> URL {
         var components = URLComponents(url: environment.url(path: APIPath.xLogin), resolvingAgainstBaseURL: false)!
@@ -64,11 +72,11 @@ struct WebLoginView: UIViewRepresentable {
     final class Coordinator: NSObject, WKNavigationDelegate {
         let environment: AppEnvironment
         @Binding var isLoading: Bool
-        let onFinish: (Result<[HTTPCookie], AuthFailure>) -> Void
+        let onFinish: (Result<WebLoginResult, AuthFailure>) -> Void
         private var finished = false
 
         init(environment: AppEnvironment, isLoading: Binding<Bool>,
-             onFinish: @escaping (Result<[HTTPCookie], AuthFailure>) -> Void) {
+             onFinish: @escaping (Result<WebLoginResult, AuthFailure>) -> Void) {
             self.environment = environment
             _isLoading = isLoading
             self.onFinish = onFinish
@@ -93,7 +101,7 @@ struct WebLoginView: UIViewRepresentable {
                 if auth.isEmpty {
                     self.onFinish(.failure(AuthFailure(message: "Sign in with X did not finish. Please try again.")))
                 } else {
-                    self.onFinish(.success(auth))
+                    self.onFinish(.success(WebLoginResult(cookies: auth, landing: url)))
                 }
             }
         }
@@ -124,6 +132,13 @@ enum WebLoginRouting {
         }
         let path = url.path
         return !(path.hasPrefix("/auth/") || path == "/auth" || path.hasPrefix("/api/"))
+    }
+
+    /// The in-app landing of a finished X login: the restore question for an
+    /// account in its deletion grace period (#269), else nil (the app stays
+    /// on Reflect, as before; the web's `/profile` is not followed).
+    static func appLanding(_ url: URL) -> String? {
+        AccountDeletion.isRestoreLanding(url.absoluteString) ? AccountDeletion.restorePath : nil
     }
 
     /// `/login?error=<code>` → code.

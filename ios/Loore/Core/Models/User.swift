@@ -33,6 +33,10 @@ struct CurrentUser: Decodable, Equatable, Sendable {
     var publicSharingEnabled: Bool
     var externalContentAvailable: Bool
     var externalContentEnabled: Bool
+    /// Deleting the account (#269); nil when the server has no account deletion.
+    var accountDeletion: AccountDeletionInfo?
+    /// "Delete all my writing" (#268), which an account deletion replaces.
+    var dataDeletion: DataDeletionStatus?
 
     enum CodingKeys: String, CodingKey {
         case id, username, description, email, plan, timezone
@@ -59,6 +63,8 @@ struct CurrentUser: Decodable, Equatable, Sendable {
         case publicSharingEnabled = "public_sharing_enabled"
         case externalContentAvailable = "external_content_available"
         case externalContentEnabled = "external_content_enabled"
+        case accountDeletion = "account_deletion"
+        case dataDeletion = "data_deletion"
     }
 
     init(from decoder: Decoder) throws {
@@ -92,6 +98,8 @@ struct CurrentUser: Decodable, Equatable, Sendable {
         publicSharingEnabled = c.tolerant(.publicSharingEnabled, default: false)
         externalContentAvailable = c.tolerant(.externalContentAvailable, default: false)
         externalContentEnabled = c.tolerant(.externalContentEnabled, default: false)
+        accountDeletion = c.tolerant(.accountDeletion)
+        dataDeletion = c.tolerant(.dataDeletion)
     }
 
     /// Applies an email-state answer from any `/api/dashboard/email*` call

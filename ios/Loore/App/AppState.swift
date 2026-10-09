@@ -59,6 +59,12 @@ final class AppState {
         case signedIn
         /// Cookies exist but the backend could not be reached (or answered 5xx).
         case unreachable(String)
+        /// A sign-in reached an account in its deletion grace period (#269): the
+        /// server holds a restore question in the session, not a sign-in.
+        case restoreOffer
+        /// The user's own deletion was just scheduled and the server signed the
+        /// account out; `deleteOn` is the day it is deleted.
+        case accountDeleted(deleteOn: Date?)
     }
 
     private(set) var environment: AppEnvironment
@@ -339,11 +345,50 @@ final class AppState {
 
     /// After a successful magic-link verify or X web login. `landing` is the
     /// link's target page (`/welcome`, `/confirm-email?token=…`), as the web lands there.
+    /// A landing on `/account-restore` is not a sign-in: the account is in its
+    /// deletion grace period, and the restore question shows instead.
     func signInCompleted(landing: String? = nil) async {
+        if AccountDeletion.isRestoreLanding(landing) {
+            pendingLandingPath = nil
+            phase = .restoreOffer
+            return
+        }
         pendingLandingPath = landing
         phase = .launching
         updatesFetched = false
         await loadUser()
+    }
+
+    // MARK: Account deletion (#269)
+
+    /// The server scheduled this account's deletion and signed it out
+    /// everywhere: forget the session and show when the account is deleted.
+    /// The phase changes before anything waits, so answers still in flight
+    /// (401s) do not start a second sign-out, and leaving the page never
+    /// waits for the web data removal.
+    func accountDeletionScheduled(deleteOn: Date?) async {
+        resetSessionState(to: .accountDeleted(deleteOn: deleteOn))
+        await auth.clearLocalSession()
+    }
+
+    /// `POST /api/account/restore` answered: the jar holds a new sign-in.
+    /// Loads the user as after any sign-in. The server's `next` (the web's
+    /// `/profile` after X) is not followed: the app opens on Reflect, as after
+    /// a plain sign-in.
+    func restoreCompleted() async {
+        auth.captureCookies()
+        await signInCompleted()
+    }
+
+    /// Leaves the restore question or the "scheduled for deletion" page for
+    /// the sign-in screen. The restore offer's cookie is forgotten; after a
+    /// deletion the session was already cleared.
+    func leaveAccountDeletionScreen() async {
+        if case .accountDeleted = phase {
+            phase = .signedOut
+            return
+        }
+        await signOutLocally()
     }
 
     /// Logout: `GET /auth/logout`, then forget everything local.
@@ -358,10 +403,10 @@ final class AppState {
         resetSessionState()
     }
 
-    private func resetSessionState() {
+    private func resetSessionState(to newPhase: Phase = .signedOut) {
         audio.signedOut()
         user = nil
-        phase = .signedOut
+        phase = newPhase
         spendCapped = false
         spendCapBannerMessage = nil
         pendingUpdates = nil

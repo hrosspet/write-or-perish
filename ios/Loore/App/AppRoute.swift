@@ -41,6 +41,8 @@ enum AppRoute: Hashable, Sendable {
     case admin
     case welcome
     case confirmEmail(token: String?)
+    /// The emailed link that confirms an account deletion (#269).
+    case confirmAccountDeletion(token: String?)
     case waitlist
     /// Marketing and public pages shown as web views (`/@user`, `/vision`, …).
     case webPage(path: String)
@@ -120,6 +122,7 @@ enum AppRoute: Hashable, Sendable {
         case ("admin", 1): return .admin
         case ("welcome", 1): return .welcome
         case ("confirm-email", 1): return .confirmEmail(token: query["token"])
+        case ("confirm-account-deletion", 1): return .confirmAccountDeletion(token: query["token"])
         case ("alpha-thank-you", 1): return .waitlist
         case ("landing", 1), ("vision", 1), ("why-loore", 1), ("how-to", 1):
             return .webPage(path: "/" + first)
@@ -137,7 +140,8 @@ enum AppRoute: Hashable, Sendable {
         case .profile, .todo, .artifacts, .newArtifact: return .artifacts
         case .log: return .log
         case .commons: return .commons
-        case .account, .importData, .references, .reference, .prompts, .prompt, .admin, .confirmEmail:
+        case .account, .importData, .references, .reference, .prompts, .prompt, .admin, .confirmEmail,
+             .confirmAccountDeletion:
             return .more
         case .thread: return nil
         case .waitlist, .webPage, .external: return nil

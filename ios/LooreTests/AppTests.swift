@@ -200,6 +200,20 @@ final class TermsTextTests: XCTestCase {
         XCTAssertTrue(TermsText.blocks.contains(.footnote("*Terms Version: 2.0 — Last updated: February 9, 2026*")))
     }
 
+    /// Account deletion (#269): the web's sentence, Peter's text of
+    /// 2026-10-09, without a new terms version.
+    func testTheTermsDescribeAccountDeletion() {
+        let bullets = TermsText.blocks.flatMap { block -> [String] in
+            if case .bullets(let items) = block { return items }
+            return []
+        }
+        XCTAssertTrue(bullets.contains(
+            "You can delete your account on the Account page. If you change your mind, you can still recover your account within 30 days by signing in; "
+                + "after that it is deleted forever, with everything in it. Copies in our backups are erased within "
+                + "another 30 days. Loore keeps a record of what your AI use cost, without your name."))
+        XCTAssertFalse(bullets.contains { $0.contains("no account deletion") })
+    }
+
     func testInlineMarkdownParses() {
         let options = AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
         for block in TermsText.blocks {
