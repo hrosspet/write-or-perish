@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 from flask import Blueprint, jsonify, request, current_app
 from flask_login import login_required, current_user
 from sqlalchemy.exc import IntegrityError
-from backend.models import Node, User, UserProfile
+from backend.models import User, UserProfile
 from backend.extensions import db
 from backend.utils.email import (
     is_valid_email, send_email_change_email, send_email_changed_notice,
@@ -14,10 +14,7 @@ from backend.utils.magic_link import (
     verify_email_change_token, hash_token,
 )
 from backend.utils.timefmt import iso_utc, is_valid_timezone
-from backend.utils.privacy import (
-    accessible_nodes_filter, VALID_PRIVACY_LEVELS, VALID_AI_USAGE,
-)
-from backend.utils.thread_tree import visible_child_counts
+from backend.utils.privacy import VALID_PRIVACY_LEVELS, VALID_AI_USAGE
 from backend.routes.terms import CURRENT_TERMS_VERSION
 from backend.utils.reserved_usernames import validate_username
 from backend.utils.spend import user_is_capped
@@ -64,72 +61,17 @@ def get_latest_profile(user):
     return None
 
 
-def _serialize_node_for_list(node, viewer_id=None, child_counts=None):
-    """Serialize a node for dashboard list views (Log has its own).
-
-    *viewer_id*: when another user is looking (the public dashboard), a
-    system prompt root's card shows its first child only if that child is
-    accessible to the viewer. *child_counts* (from visible_child_counts)
-    then gives the card's child_count, so it counts only children the
-    viewer can see; without it every child row counts."""
-    # If this is a system prompt root, skip to the first child
-    display_node = node
-    prompt_key = None
-    if node.is_system_prompt:
-        prompt_key = node.get_prompt_key()
-        children = Node.query.filter(Node.parent_id == node.id)
-        if viewer_id is not None:
-            children = children.filter(accessible_nodes_filter(Node, viewer_id))
-        first_child = children.order_by(Node.created_at.asc()).first()
-        if first_child:
-            display_node = first_child
-
-    content = display_node.get_content()
-    preview = content[:200] + ("..." if len(content) > 200 else "")
-
-    # Determine human owner username for LLM nodes
-    human_owner_username = None
-    if display_node.node_type == "llm" and display_node.human_owner_id:
-        human_owner = User.query.get(display_node.human_owner_id)
-        if human_owner:
-            human_owner_username = human_owner.username
-
-    return {
-        "id": display_node.id,
-        "preview": preview,
-        "node_type": display_node.node_type,
-        "child_count": (len(node.children) if child_counts is None
-                        else child_counts.get(node.id, 0)),
-        "created_at": iso_utc(display_node.created_at),
-        "pinned_at": iso_utc(node.pinned_at),
-        "username": node.user.username if node.user else "Unknown",
-        "human_owner_username": human_owner_username,
-        "llm_model": display_node.llm_model,
-        "origin": display_node.origin,
-        "has_original_audio": bool(display_node.audio_original_url or display_node.streaming_transcription),
-        "prompt_key": prompt_key,
-    }
-
-
-# Dashboard endpoint: only return top-level nodes (nodes with no parent)
+# The signed-in user's own dashboard: who they are, and their newest profile
+# version. Both clients call it on every app load (web UserContext, iPhone
+# AppState) and read only `user`: they send ?profile=0, which leaves out
+# `latest_profile`, so an app load decrypts nothing. The Profile page calls
+# without it and reads `latest_profile` (older iPhone builds call without it
+# everywhere, so the profile stays the default). It lists no thread cards:
+# no client showed them, and each card's preview was one decryption per call
+# (#481). The Log (GET /api/log) lists the threads.
 @dashboard_bp.route("/", methods=["GET"])
 @login_required
 def get_dashboard():
-    page = request.args.get("page", 1, type=int)
-    per_page = request.args.get("per_page", 20, type=int)
-    per_page = min(per_page, 100)
-
-    # Pinned nodes for this user (separate from pagination)
-    pinned_nodes = Node.query.filter(
-        Node.pinned_by == current_user.id,
-        Node.pinned_at.isnot(None)
-    ).order_by(Node.pinned_at.desc()).all()
-    pinned_list = [_serialize_node_for_list(n) for n in pinned_nodes]
-
-    query = Node.query.filter_by(user_id=current_user.id, parent_id=None).order_by(Node.created_at.desc())
-    pagination = query.paginate(page=page, per_page=per_page, error_out=False)
-
-    nodes_list = [_serialize_node_for_list(node) for node in pagination.items]
     # Determine if Voice Mode is enabled for this user (admin or paid plan)
     voice_mode_enabled = current_user.has_voice_mode
     dashboard = {
@@ -189,67 +131,9 @@ def get_dashboard():
             # which every Glean card and button keys off.
             **glean_user_fields(current_user),
         },
-        "pinned_nodes": pinned_list,
-        "nodes": nodes_list,
-        "has_more": pagination.has_next,
-        "page": page,
-        "total_nodes": pagination.total,
-        "latest_profile": get_latest_profile(current_user)
     }
-    return jsonify(dashboard), 200
-
-
-# Public view of any user's dashboard; no private stats provided.
-@dashboard_bp.route("/<string:username>", methods=["GET"])
-@login_required
-def get_public_dashboard(username):
-    # Lookup the user by their (unique) handle (username).
-    user = User.query.filter_by(username=username).first_or_404()
-
-    page = request.args.get("page", 1, type=int)
-    per_page = request.args.get("per_page", 20, type=int)
-    per_page = min(per_page, 100)
-
-    # Pinned nodes for this user (filtered by accessibility)
-    pinned_nodes = Node.query.filter(
-        Node.pinned_by == user.id,
-        Node.pinned_at.isnot(None),
-        accessible_nodes_filter(Node, current_user.id)
-    ).order_by(Node.pinned_at.desc()).all()
-    pinned_counts = visible_child_counts(
-        [n.id for n in pinned_nodes], current_user.id)
-    pinned_list = [_serialize_node_for_list(n, current_user.id,
-                                            pinned_counts)
-                   for n in pinned_nodes]
-
-    query = Node.query.filter(
-        Node.user_id == user.id,
-        Node.parent_id.is_(None),
-        accessible_nodes_filter(Node, current_user.id)
-    ).order_by(Node.created_at.desc())
-    pagination = query.paginate(page=page, per_page=per_page, error_out=False)
-
-    counts = visible_child_counts(
-        [n.id for n in pagination.items], current_user.id)
-    nodes_list = [_serialize_node_for_list(node, current_user.id, counts)
-                  for node in pagination.items]
-
-    dashboard = {
-        "user": {
-            "id": user.id,
-            "username": user.username,
-            "description": user.description
-        },
-        "pinned_nodes": pinned_list,
-        "nodes": nodes_list,
-        "has_more": pagination.has_next,
-        "page": page,
-        "total_nodes": pagination.total,
-        # The AI-written profile is private to its owner: no public page
-        # shows it, and other users get null here.
-        "latest_profile": (get_latest_profile(user)
-                           if user.id == current_user.id else None),
-    }
+    if request.args.get("profile") != "0":
+        dashboard["latest_profile"] = get_latest_profile(current_user)
     return jsonify(dashboard), 200
 
 

@@ -27,7 +27,7 @@ from backend.models import (
 from backend.utils.api_keys import get_api_keys_for_usage
 from backend.utils.privacy import AI_ALLOWED, account_allows_ai
 from backend.utils.cost import llm_cost_log_fields
-from backend.llm_providers import is_empty_truncated
+from backend.llm_providers import is_empty_truncated, is_refused
 from backend.utils.llm_batch import (
     batch_submit, batch_check_and_collect, apply_batch_key_override,
 )
@@ -218,12 +218,15 @@ def _save_draft_result(item, result):
         request_ref=f"poll:{item['poll_id']}",
         **llm_cost_log_fields(item["model_id"], result, batch=True),
     ))
-    if is_empty_truncated(result):
-        # Cut off before any text (#368): no empty draft; the response
+    refused = is_refused(result)
+    if refused or is_empty_truncated(result):
+        # Cut off before any text (#368), or refused by the model (#470;
+        # empty or partial): no empty or apologetic draft; the response
         # fails like a missing item and the user writes their own.
         logger.warning(
-            "Poll draft for response %s cut off before any text (model %s, "
+            "Poll draft for response %s not saved: %s (model %s, "
             "output_tokens=%s); marking it failed", resp.id,
+            "refused by the model" if refused else "cut off before any text",
             item["model_id"], result.get("output_tokens"))
         _fail_response(resp)
         return

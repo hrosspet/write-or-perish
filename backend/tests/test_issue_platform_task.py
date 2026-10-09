@@ -33,7 +33,10 @@ def _confirm_turn(alice, user_node, llm_user_id, client):
     proposal = Node(user_id=llm_user_id, human_owner_id=alice.id,
                     parent_id=user_node.id, node_type="llm",
                     llm_model="gpt-5", llm_task_status="completed",
-                    privacy_level="private", ai_usage="chat")
+                    privacy_level="private", ai_usage="chat",
+                    tool_calls_meta=json.dumps([
+                        {"name": "propose_github_issue",
+                         "status": "success"}]))
     proposal.set_content(
         "### Issue Title\nRecord button does nothing\n"
         "### Description\nTapping record has no effect.\n"

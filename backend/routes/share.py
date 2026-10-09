@@ -11,13 +11,15 @@ Consent model, structurally enforced:
 """
 from flask import Blueprint, jsonify, request, current_app
 from flask_login import login_required, current_user
-from backend.models import Node, Draft, ShareDraft
+from backend.models import Node, ShareDraft
 from backend.extensions import db
 from backend.utils.share import save_share_drafts_from_node
 from backend.utils.tool_meta import update_tool_meta, get_tool_meta_entry
 from backend.utils.timefmt import iso_utc
 from backend.utils.slugs import permalink_for
-from backend.utils.privacy import PrivacyLevel, AIUsage
+from backend.utils.privacy import (
+    AIUsage, PrivacyLevel, can_user_access_node)
+from backend.utils.proposals import find_own_pending_proposal
 from datetime import datetime
 
 share_bp = Blueprint("share", __name__)
@@ -265,7 +267,8 @@ def save_proposal():
 
     Two origins are accepted:
     - LLM proposal nodes, located via the pending share_pending Draft the
-      completion task created (walking the ancestor chain).
+      completion task created (walking the ancestor chain): only the
+      user's own live proposal (utils/proposals).
     - The user's OWN nodes carrying :::share blocks they wrote or pasted
       themselves — no pending draft exists there, so the node itself is
       parsed directly (owner-only).
@@ -292,33 +295,20 @@ def save_proposal():
             return jsonify({"error": "Invalid share_index"}), 400
 
     node = Node.query.get(node_id)
-    if not node:
+    if not node or not can_user_access_node(node, current_user.id):
         return jsonify({"error": "Node not found"}), 404
 
-    # Find the pending draft by walking the ancestor chain.
-    draft = None
-    current_node = node
-    visited = set()
-    while current_node and current_node.id not in visited:
-        visited.add(current_node.id)
-        draft = Draft.query.filter_by(
-            user_id=current_user.id,
-            parent_id=current_node.id,
-            label='share_pending',
-        ).first()
-        if draft:
-            break
-        current_node = current_node.parent
-
-    if draft:
-        origin_node = Node.query.get(draft.parent_id)
-        if not origin_node:
-            return jsonify({"error": "Origin node not found"}), 404
-    elif node.node_type != "llm" and node.user_id == current_user.id:
-        # Self-authored share blocks — parse the addressed node directly.
-        origin_node = node
-    else:
-        return jsonify({"error": "No pending share found"}), 404
+    # The pending proposal at or above the node, walking up its ancestors:
+    # only the user's own live proposal (utils/proposals).
+    draft, origin_node = find_own_pending_proposal(
+        node, current_user.id, 'share_pending')
+    if draft is None:
+        if node.node_type != "llm" and node.user_id == current_user.id:
+            # Self-authored share blocks — parse the addressed node
+            # directly.
+            origin_node = node
+        else:
+            return jsonify({"error": "No pending share found"}), 404
 
     entry = get_tool_meta_entry(origin_node, "propose_share")
     already = set((entry or {}).get("saved_indexes") or [])
