@@ -498,26 +498,67 @@ def refresh_snapshot_for_read(snapshot_dir, log=log):
     return export_id
 
 
-def request_snapshot_refresh(snapshot_dir, log=log):
+# The reason a read gives when no archive export is cached yet (#435
+# review): plain words the user can act on, never the exception's text
+# (it names a server path).
+ARCHIVE_NOT_READY_TEXT = ("Glean is getting today's tweets ready. Try again "
+                          "in a few minutes.")
+
+
+class ArchiveNotReady(Exception):
+    """No Community Archive export is cached for a read. Its text is the
+    user's reason line (ARCHIVE_NOT_READY_TEXT)."""
+
+    def __init__(self):
+        super().__init__(ARCHIVE_NOT_READY_TEXT)
+
+
+def request_snapshot_refresh(snapshot_dir, log=log, first_copy=False):
     """Queue the archive refresh in the background (the beat sweep's task,
     imports.refresh_community_archive_snapshot) and return at once. A
     read calls this instead of refreshing inline: a glean is a live call
     the user waits for (#435), and a new nightly export is a ~900 MB
     download, minutes on a slow link. The read goes on with the cached
     export (its reply shows the window it covered); the next read gets
-    the new one. Only for a snapshot that exists (the refresh maintains
-    one, never fetches a first copy). Best effort: a queue that can't be
-    reached is logged, the read goes on."""
+    the new one. With no export cached, only *first_copy* (a read that
+    found none) queues one, as the first fetch; the beat sweep never
+    fetches a first copy. Best effort: a queue that can't be reached is
+    logged, the read goes on (or fails with its own reason)."""
     from backend.utils import community_archive as ca
-    if not ca.snapshot_export_id(snapshot_dir):
+    if not ca.snapshot_export_id(snapshot_dir) and not first_copy:
         return False
     try:
         from backend.tasks.imports import refresh_community_archive_snapshot
-        refresh_community_archive_snapshot.apply_async(retry=False)
+        if first_copy:
+            refresh_community_archive_snapshot.apply_async(
+                kwargs={"first_copy": True}, retry=False)
+        else:
+            refresh_community_archive_snapshot.apply_async(retry=False)
     except Exception as e:  # noqa: BLE001 - the read proceeds on the cache
         log.warning("Could not queue the Community Archive refresh: %s", e)
         return False
     return True
+
+
+def fetch_first_snapshot(snapshot_dir, log=log):
+    """Fetch the archive's first copy when none is cached (the background
+    task a read queues when it found none, #435 review). Returns the
+    export id in place, or None. A download already running elsewhere is
+    not waited for; a failure is logged (the next read asks again)."""
+    from backend.utils import community_archive as ca
+    current = ca.snapshot_export_id(snapshot_dir)
+    if current:
+        return current
+    try:
+        export_id = ca.ensure_snapshot(snapshot_dir, wait=False)
+    except ca.SnapshotBusy:
+        log.info("Community Archive first fetch: another download runs")
+        return None
+    except Exception as e:  # noqa: BLE001 - the next read asks again
+        log.warning("Community Archive first fetch failed: %s", e)
+        return None
+    log.info("Community Archive snapshot fetched: %s", export_id)
+    return export_id
 
 
 def parse_feed_reply(text, refs):

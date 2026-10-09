@@ -752,3 +752,74 @@ def test_a_read_never_waits_for_the_archive_download(app, monkeypatch, tmp_path)
     assert reply.llm_task_status == "completed"
     assert fetched == []
     assert queued == [{"retry": False}]
+
+
+def test_with_no_archive_cached_a_glean_says_so_plainly_and_starts_the_fetch(
+        app, monkeypatch, tmp_path):  # noqa: F811
+    """A fresh machine or data volume has no export: the glean fails with a
+    reason the user can act on (never the exception's text, which names
+    the server's path) and queues the first fetch in the background
+    (#435 review)."""
+    import sys
+    from backend.utils import community_archive as ca
+    from backend.utils.ca_feed import ARCHIVE_NOT_READY_TEXT
+    queued = []
+
+    class _Refresh:
+        @staticmethod
+        def apply_async(**kwargs):
+            queued.append(kwargs)
+
+    def _no_snapshot(*a, **k):
+        raise ca.CommunityArchiveError(
+            f"No Community Archive snapshot cached at {tmp_path}")
+
+    def _setup():
+        monkeypatch.setattr(sys.modules["backend.tasks.imports"],
+                            "refresh_community_archive_snapshot", _Refresh,
+                            raising=False)
+        monkeypatch.setattr(ca, "render_recent_tweets", _no_snapshot)
+    with pytest.raises(Exception) as raised:
+        _run_without_ca_live(monkeypatch, tmp_path, [{"name": "_live"}],
+                             before_run=_setup)
+    assert str(raised.value) == ARCHIVE_NOT_READY_TEXT
+    _db.session.expire_all()
+    reply = Node.query.filter(Node.node_type == "llm",
+                              Node.llm_task_status == "failed").one()
+    assert reply.llm_task_error == ARCHIVE_NOT_READY_TEXT
+    assert str(tmp_path) not in reply.llm_task_error
+    assert queued == [{"kwargs": {"first_copy": True}, "retry": False}]
+
+
+def test_the_first_fetch_only_when_nothing_is_cached(app, monkeypatch, tmp_path):  # noqa: F811
+    from backend.utils import community_archive as ca
+    from backend.utils.ca_feed import (
+        fetch_first_snapshot, request_snapshot_refresh,
+    )
+    fetched = []
+
+    def _ensure(d, on_progress=None, manifest=None, wait=True):
+        fetched.append(wait)
+        return "E1"
+    monkeypatch.setattr(ca, "ensure_snapshot", _ensure)
+    # Nothing cached: fetched, without waiting on a download elsewhere.
+    assert fetch_first_snapshot(tmp_path) == "E1"
+    assert fetched == [False]
+
+    def _busy(*a, **k):
+        raise ca.SnapshotBusy(str(tmp_path))
+    monkeypatch.setattr(ca, "ensure_snapshot", _busy)
+    assert fetch_first_snapshot(tmp_path) is None
+
+    # Something cached: the first fetch leaves it alone.
+    for name in ca.SNAPSHOT_FILES:
+        (tmp_path / name).write_bytes(b"")
+    (tmp_path / "export_id").write_text("cached")
+    monkeypatch.setattr(ca, "ensure_snapshot",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError()))
+    assert fetch_first_snapshot(tmp_path) == "cached"
+
+    # The sweep's own request never asks for a first copy.
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    assert request_snapshot_refresh(empty) is False

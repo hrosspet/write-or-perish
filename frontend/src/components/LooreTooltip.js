@@ -4,14 +4,18 @@ import { createPortal } from 'react-dom';
 // A tooltip in Loore's own type and colours, for a control whose native
 // `title` would show in the browser's style (#435: Peter, on Glean). It
 // shows after a short pause on hover, and at once on keyboard focus; it
-// hides on leave, blur and Escape. The text is the control's accessible
-// description (aria-describedby), so a screen reader reads it as a
-// title would be read.
+// hides on leave, blur and Escape.
+//
+// The text is also the control's accessible description, always (not only
+// while the tooltip is open): a visually hidden copy that the control's
+// `aria-describedby` points at, as `title` was.
 //
 // The tooltip is drawn in a portal with fixed position, above the control
 // (below it when there is no room above), kept inside the viewport, so
 // no container's overflow clips it. The child must be a single element
-// that takes a ref (a DOM element such as a button).
+// that takes a ref (a DOM element such as a button). With `wrap`, hover is
+// taken on a wrapper around it instead: a disabled button gets no hover
+// events in some browsers. The description stays on the child itself.
 const SHOW_DELAY_MS = 350;
 const GAP_PX = 8;
 const EDGE_PX = 8;
@@ -36,8 +40,22 @@ const tipStyle = {
   pointerEvents: 'none',
 };
 
-export default function LooreTooltip({ text, children }) {
-  const id = useId();
+// Read by screen readers, not shown (out of the layout's flow too).
+const visuallyHidden = {
+  position: 'absolute',
+  width: '1px',
+  height: '1px',
+  margin: '-1px',
+  padding: 0,
+  border: 0,
+  overflow: 'hidden',
+  clip: 'rect(0 0 0 0)',
+  whiteSpace: 'nowrap',
+};
+
+export default function LooreTooltip({ text, wrap = false, children }) {
+  const tipId = useId();
+  const descId = useId();
   const anchorRef = useRef(null);
   const tipRef = useRef(null);
   const timerRef = useRef(null);
@@ -94,33 +112,40 @@ export default function LooreTooltip({ text, children }) {
 
   if (!text) return children;
   const child = React.Children.only(children);
-  const chain = (name, fn) => (e) => {
-    fn(e);
-    if (child.props[name]) child.props[name](e);
+  const handlers = (own = {}) => {
+    const chain = (name, fn) => (e) => {
+      fn(e);
+      if (own[name]) own[name](e);
+    };
+    return {
+      onMouseEnter: chain('onMouseEnter', () => show(SHOW_DELAY_MS)),
+      onMouseLeave: chain('onMouseLeave', hide),
+      onFocus: chain('onFocus', (e) => {
+        // Keyboard focus only: a click focuses the button too, and the
+        // tooltip would then stay up after the click.
+        let keyboard = true;
+        try { keyboard = e.target.matches(':focus-visible'); } catch (err) { /* old browsers */ }
+        if (keyboard) show(0);
+      }),
+      onBlur: chain('onBlur', hide),
+      onClick: chain('onClick', hide),
+    };
   };
-  const anchor = cloneElement(child, {
-    ref: anchorRef,
-    'aria-describedby': open ? id : undefined,
-    onMouseEnter: chain('onMouseEnter', () => show(SHOW_DELAY_MS)),
-    onMouseLeave: chain('onMouseLeave', hide),
-    onFocus: chain('onFocus', (e) => {
-      // Keyboard focus only: a click focuses the button too, and the
-      // tooltip would then stay up after the click.
-      let keyboard = true;
-      try { keyboard = e.target.matches(':focus-visible'); } catch (err) { /* old browsers */ }
-      if (keyboard) show(0);
-    }),
-    onBlur: chain('onBlur', hide),
-    onClick: chain('onClick', hide),
-  });
+  const described = { 'aria-describedby': descId };
+  const anchor = wrap ? (
+    <span ref={anchorRef} style={{ display: 'inline-flex' }} {...handlers()}>
+      {cloneElement(child, described)}
+    </span>
+  ) : cloneElement(child, { ref: anchorRef, ...described, ...handlers(child.props) });
 
   return (
     <>
       {anchor}
+      <span id={descId} style={visuallyHidden}>{text}</span>
       {open && createPortal(
         <div
           ref={tipRef}
-          id={id}
+          id={tipId}
           role="tooltip"
           className="loore-tooltip"
           style={{ ...tipStyle, left: pos ? pos.left : -9999, top: pos ? pos.top : -9999 }}
