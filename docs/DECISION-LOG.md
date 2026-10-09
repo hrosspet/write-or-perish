@@ -503,7 +503,7 @@ Kinds (one per entry and per table row):
 - **Kind:** UX
 - **Situation:** #435: an entry written through the Glean card gets only the gleaning, no chat reply?
 - **Prediction:** yes, only the gleaning (55 %).
-- **Peter:** not a verbatim quote in the notes: text keeps the current logic, with a Glean button next to LLM Response; voice: an auto-generated voice reply, then a Glean button below the record button and on the lock screen; gleaning is always synchronous; the view switches to text mode when it is ready.
+- **Peter:** "the current logic should stay for text gleaning - they start with a reflection, whatever number of turns they need. The Glean button will be there alongside the LLM Response · for voice we'll need to add a glean button below the button for recording next user message. Also to the lockscreen. Voice mode has auto-generate on, so the user should get a standard voice mode response, and then be able to choose between recording more, or hitting glean. · glean will always be synchronous call · when glean recommendation is ready, the view should automatically switch to text mode to display the recommendations"
 - **Score:** miss
 - **Why it missed:** treated the Glean card as a mode with its own flow; Peter wants the existing thread flow, with Glean as an action inside it.
 - **Source:** Voice review in local Loore 2026-10-09 (Opus 5.5)
@@ -534,7 +534,7 @@ Kinds (one per entry and per table row):
 - **Kind:** UX
 - **Situation:** the mockup of the gleaning page labelled the feedback buttons "good" and "bad".
 - **Decision:** labelled the feedback buttons good and bad.
-- **Peter:** not a verbatim quote in the notes: keep the plus and minus icons.
+- **Peter:** "keep the plus minus icons instead of good bad. Could you make them visually fit with your mockup?"
 - **Score:** miss
 - **Why it missed:** replaced the existing reference-feedback framing (quote, plus and minus) with plain words in the mockup.
 - **Source:** Voice review in local Loore 2026-10-09 (Opus 5.5)
