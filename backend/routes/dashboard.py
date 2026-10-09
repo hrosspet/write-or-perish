@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 from flask import Blueprint, jsonify, request, current_app
 from flask_login import login_required, current_user
 from sqlalchemy.exc import IntegrityError
+from backend.utils.hidden_rows import reclaim_description, shown_description
 from backend.models import User, UserProfile
 from backend.extensions import db
 from backend.utils.email import (
@@ -20,6 +21,7 @@ from backend.utils.reserved_usernames import validate_username
 from backend.utils.spend import user_is_capped
 from backend.utils.llm_nodes import effective_preferred_model, is_chat_model
 from backend.utils.own_entries import has_own_entries
+from backend.utils.user_purge import deletion_status
 
 logger = logging.getLogger(__name__)
 dashboard_bp = Blueprint("dashboard_bp", __name__)
@@ -77,7 +79,7 @@ def get_dashboard():
         "user": {
             "id": current_user.id,
             "username": current_user.username,
-            "description": current_user.description,
+            "description": shown_description(current_user),
             "accepted_terms_at": iso_utc(current_user.accepted_terms_at),
             "terms_up_to_date": _terms_up_to_date(current_user),
             "approved": current_user.approved,
@@ -125,6 +127,9 @@ def get_dashboard():
                 current_app.config.get("SEMANTIC_SEARCH_AGENTIC", True)),
             "external_content_enabled": bool(
                 current_user.external_content_enabled),
+            # "Delete all my writing" (#268): a scheduled deletion shows
+            # its date and a way to cancel on every page.
+            "data_deletion": deletion_status(current_user.id),
         },
     }
     if request.args.get("profile") != "0":
@@ -398,7 +403,11 @@ def update_user():
         current_user.username = new_username
 
     if new_description is not None:
-        current_user.description = new_description
+        if new_description != shown_description(current_user):
+            # A description written while "Delete all my writing" hides
+            # the old one is the user's and stays after the purge (#268).
+            reclaim_description(current_user.id)
+            current_user.description = new_description
 
     if "craft_mode" in data:
         current_user.craft_mode = bool(data["craft_mode"])
@@ -467,7 +476,7 @@ def update_user():
             "user": {
                 "id": current_user.id,
                 "username": current_user.username,
-                "description": current_user.description,
+                "description": shown_description(current_user),
                 "email": current_user.email,
                 "approved": current_user.approved,
                 "accepted_terms_at": iso_utc(current_user.accepted_terms_at),
