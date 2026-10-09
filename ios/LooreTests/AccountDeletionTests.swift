@@ -108,6 +108,20 @@ final class DeleteAccountModelTests: AccountDeletionTestCase {
         XCTAssertEqual(app.phase, .signedOut)
     }
 
+    func testAWaitlistedAccountCanDeleteItself() async throws {
+        // The waitlist screen shows the same section (the server lets an
+        // unapproved account through to the deletion routes, #464).
+        try signIn(["approved": false])
+        let model = model()
+        XCTAssertTrue(model.isAvailable)
+        StubURLProtocol.install { _ in .json(202, #"{"status":"scheduled","delete_on":"2026-11-08T12:00:00Z","grace_days":30}"#) }
+        model.typed = "seowriter"
+        let closed = await model.requestDeletion()
+        XCTAssertTrue(closed)
+        XCTAssertEqual(calls, ["POST /api/account/delete"])
+        XCTAssertEqual(app.phase, .accountDeleted(deleteOn: LooreDate.parse("2026-11-08T12:00:00Z")))
+    }
+
     func testAnEmailAccountGetsTheLinkAndStaysSignedIn() async throws {
         var info = accountDeletionInfo
         info["confirm_by_email"] = true
