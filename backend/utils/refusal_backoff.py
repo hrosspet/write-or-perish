@@ -58,6 +58,7 @@ UNBILLED_STOP_EXPIRY = timedelta(hours=24)
 
 PROFILE_REQUEST_TYPES = ("profile", "profile_batch")
 RECENT_CONTEXT_REQUEST_TYPES = ("recent_context",)
+DIGEST_REQUEST_TYPES = ("external_digest",)
 
 
 def refusals_since(user_id, request_types, since):
@@ -128,6 +129,7 @@ def in_backoff(user_id, request_types, since, job, now=None,
 
 
 CUT_OFF_CAUSE = "output cut off"
+REFUSED_CAUSE = "refused by the model"
 
 
 def report_stop(user_id, job, n, model_id, request_type,
@@ -220,6 +222,27 @@ def recent_context_backoff_state(user_id):
     return backoff_state(
         user_id, RECENT_CONTEXT_REQUEST_TYPES, since,
         *recent_context_batch_failures_since(user_id, since))
+
+
+def latest_digest_at(user_id):
+    """created_at of the user's newest saved external digest: the streak
+    boundary for digest refusals (#470)."""
+    from backend.models import UserArtifact
+    row = (UserArtifact.query.with_entities(UserArtifact.created_at)
+           .filter(UserArtifact.user_id == user_id,
+                   UserArtifact.kind == "external_digest")
+           .order_by(UserArtifact.created_at.desc()).first())
+    return row[0] if row else None
+
+
+def digest_backoff_state(user_id):
+    return backoff_state(user_id, DIGEST_REQUEST_TYPES,
+                         latest_digest_at(user_id))
+
+
+def digest_in_backoff(user_id, now=None):
+    return in_backoff(user_id, DIGEST_REQUEST_TYPES,
+                      latest_digest_at(user_id), "external digest", now=now)
 
 
 def profile_in_backoff(user_id, now=None):
