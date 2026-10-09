@@ -387,3 +387,21 @@ final class AccountRestoreTests: AccountDeletionTestCase {
         XCTAssertEqual(full.accountDeletion, AccountDeletionInfo(confirmByEmail: true), "missing numbers take the web's defaults")
     }
 }
+
+/// The app replaces its user with the `PUT /api/dashboard/user` answer; the
+/// answer carries the deletion state like a page load, so a settings change
+/// leaves the email confirmation and the refusal as they were.
+@MainActor
+final class SettingsChangeKeepsDeletionStateTests: AccountDeletionTestCase {
+    func testTheUserFromASettingsChangeStillHasTheDeletionState() async throws {
+        var info = accountDeletionInfo
+        info["confirm_by_email"] = true
+        var user: [String: Any] = ["id": 5, "username": "seowriter", "approved": true, "terms_up_to_date": true,
+                                   "account_deletion": info]
+        StubURLProtocol.install { _ in .json(200, json(["message": "Profile updated successfully.", "user": user])) }
+        try signIn(["account_deletion": info])
+        user["default_ai_usage"] = "train"
+        _ = try await app.updateUser(["default_ai_usage": .string("train")])
+        XCTAssertTrue(DeleteAccountModel(app: app).confirmsByEmail)
+    }
+}
