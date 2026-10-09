@@ -285,6 +285,62 @@ final class GleanReworkTests: StubbedAppTestCase {
         XCTAssertTrue(posted, "the next glean starts under the Glean entry, not under the failed reply")
     }
 
+    /// A gleaning that finishes while its page is open: the poll's answer has no
+    /// render, so the node is fetched once more for the window line and the empty
+    /// day (web NodeDetail). A fetch that is not completed yet is not kept.
+    private func watchGleaning(reloadStatus: String) async -> ThreadModel {
+        final class Count: @unchecked Sendable {
+            private let lock = NSLock()
+            private var n = 0
+            func next() -> Int { lock.lock(); defer { lock.unlock() }; n += 1; return n }
+        }
+        let gets = Count()
+        let base = """
+        "id":32,"node_type":"llm","llm_model":"claude-haiku-5.5",
+        "user":{"id":3,"username":"claude-haiku-5.5"},"parent_user_id":5,"privacy_level":"private","ai_usage":"chat",
+        "tool_calls_meta":[{"name":"_live"}],"child_count":0,"children":[],
+        "ancestors":[\(entry),\(readPrompt)],"in_read_thread":true,"glean_thread":true
+        """
+        let pending = "{\(base),\"content\":\"[LLM response generation pending...]\",\"llm_task_status\":\"pending\"}"
+        let reloaded = """
+        {\(base),"content":"A quiet day.","llm_task_status":"\(reloadStatus)","read_reply":true,
+         "read_window":{"tweets":1240,"accounts":300,"excluded":0,
+                        "window_start":"2026-10-08T07:00:00Z","window_end":"2026-10-09T07:00:00Z"}}
+        """
+        StubURLProtocol.install { request in
+            switch request.url?.path(percentEncoded: true) ?? "" {
+            case "/api/nodes/32": return .json(200, gets.next() == 1 ? pending : reloaded)
+            case "/api/nodes/32/llm-status":
+                return .json(200, #"{"node_id":32,"status":"completed","content":"A quiet day.","tool_calls_meta":[{"name":"_live"}]}"#)
+            default: return .json(200, "{}")
+            }
+        }
+        let tab = app.router.selectedTab
+        app.router.setPath([.thread(id: 31, awaitLLM: nil), .thread(id: 32, awaitLLM: 32)], for: tab)
+        let model = ThreadModel(nodeId: 32, awaitLLM: 32, app: app)
+        await model.start()
+        return model
+    }
+
+    func testAGleaningFinishedWhileOpenGetsItsWindowAndEmptyDay() async {
+        let model = await watchGleaning(reloadStatus: "completed")
+        let shown = await eventually { model.node?.readWindow != nil }
+        XCTAssertTrue(shown, "the window line comes without leaving the page")
+        XCTAssertEqual(model.node?.readWindow?.tweets, 1240)
+        XCTAssertTrue(model.gleaningEmpty, "an empty day says so at once")
+        model.stop()
+    }
+
+    func testAReloadThatIsNotCompletedIsNotKept() async {
+        let model = await watchGleaning(reloadStatus: "processing")
+        let done = await eventually { model.node?.llmTaskStatus == .completed }
+        XCTAssertTrue(done)
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertEqual(model.node?.llmTaskStatus, .completed, "the page stays on the finished gleaning")
+        XCTAssertNil(model.node?.readWindow)
+        model.stop()
+    }
+
     func testTheReadPromptsAreTaggedGlean() {
         XCTAssertEqual(BubblePreview.promptLabel("read"), "Glean")
         XCTAssertEqual(BubblePreview.promptLabel("read_thread"), "Glean")

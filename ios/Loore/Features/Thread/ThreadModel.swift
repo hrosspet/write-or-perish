@@ -378,6 +378,21 @@ final class ThreadModel {
     }
 
     /// Completion, failure or cancellation of the tracked reply (map D §5.5–5.6).
+    /// A gleaning that finished while its page was open also has its render now
+    /// (which day it read, how many tweets: the window line and the empty day's
+    /// count), which the poll does not carry. Fetch the node once more and keep
+    /// the answer only when it is completed (web NodeDetail, #435 rework).
+    private func reloadFinishedGleaning() {
+        guard let app else { return }
+        let id = nodeId
+        Task { [weak self] in
+            guard let fresh = try? await app.api.nodeDetail(id) else { return }
+            guard let self, self.nodeId == id, fresh.llmTaskStatus == .completed else { return }
+            self.node = fresh
+            self.refreshQuotesIfNeeded()
+        }
+    }
+
     private func finish(_ data: LLMStatus, trackedId: Int) {
         guard let app else { return }
         switch data.status {
@@ -396,6 +411,7 @@ final class ThreadModel {
                 streamTask?.cancel()
                 streamTask = nil
                 refreshQuotesIfNeeded()
+                if isReadReply { reloadFinishedGleaning() }
             } else {
                 openThread(completedId, awaitLLM: nil)
             }
