@@ -177,14 +177,13 @@ def snapshot_export_id(snapshot_dir):
 
 @contextlib.contextmanager
 def _snapshot_lock(snapshot_dir, shared=False):
-    """One downloader per snapshot dir on this host, and no swap under a
-    reader. The downloader takes the lock exclusively; a render or a
-    lookup takes it shared, so it never sees half a swap (the two
-    parquets and the export marker are replaced one after another) and
-    a read that starts during a download waits for it — minutes at
-    most, bounded by the transfer (a stalled one raises after TIMEOUT)
-    — and then reads the fresh export. An fcntl lock dies with its
-    process, so a crashed holder never leaves the dir locked."""
+    """No swap under a reader. The swap of a finished download takes the
+    lock exclusively; a render or a lookup takes it shared, so it never
+    sees half a swap (the two parquets and the export marker are
+    replaced one after another). The transfer itself happens outside
+    it (_download_lock), so a read never waits for a download, only for
+    the renames. An fcntl lock dies with its process, so a crashed
+    holder never leaves the dir locked."""
     d = pathlib.Path(snapshot_dir)
     d.mkdir(parents=True, exist_ok=True)
     with open(d / ".lock", "w") as fh:
@@ -195,11 +194,38 @@ def _snapshot_lock(snapshot_dir, shared=False):
             fcntl.flock(fh, fcntl.LOCK_UN)
 
 
-def ensure_snapshot(snapshot_dir, on_progress=None, manifest=None):
+class SnapshotBusy(Exception):
+    """Another process is downloading into this snapshot dir."""
+
+
+@contextlib.contextmanager
+def _download_lock(snapshot_dir, wait=True):
+    """One downloader per snapshot dir on this host. Readers never take
+    it. With *wait* False a second downloader does not queue behind the
+    first: it raises SnapshotBusy at once (the background refresh, which
+    would otherwise hold a worker for the length of the transfer)."""
+    d = pathlib.Path(snapshot_dir)
+    d.mkdir(parents=True, exist_ok=True)
+    with open(d / ".download.lock", "w") as fh:
+        try:
+            fcntl.flock(fh, fcntl.LOCK_EX | (0 if wait else fcntl.LOCK_NB))
+        except BlockingIOError:
+            raise SnapshotBusy(str(d))
+        try:
+            yield
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
+
+
+def ensure_snapshot(snapshot_dir, on_progress=None, manifest=None,
+                    wait=True):
     """Make ``snapshot_dir`` hold the latest nightly export; download only
     when the export_id changed. Files stream to ``<name>.part`` and are
     renamed on completion, so a crashed download never masquerades as a
-    snapshot. ``on_progress(filename, bytes_done, bytes_total)``.
+    snapshot; readers go on with the cached export meanwhile.
+    ``on_progress(filename, bytes_done, bytes_total)``. With *wait* False
+    a download already running elsewhere raises SnapshotBusy instead of
+    being waited for.
 
     Returns the export_id in place."""
     manifest = manifest or fetch_latest_manifest()
@@ -207,7 +233,7 @@ def ensure_snapshot(snapshot_dir, on_progress=None, manifest=None):
     d = pathlib.Path(snapshot_dir)
     if snapshot_export_id(d) == export_id:
         return export_id
-    with _snapshot_lock(d):
+    with _download_lock(d, wait=wait):
         if snapshot_export_id(d) == export_id:
             return export_id  # another caller downloaded it meanwhile
         return _download_snapshot(d, manifest, on_progress)
@@ -217,7 +243,9 @@ def refresh_snapshot(snapshot_dir):
     """Bring an EXISTING snapshot up to the latest nightly export. Returns
     (export_id, refreshed). (None, False) when nothing is cached: the
     first copy is fetched by the pre-fill import or the CLI, never as a
-    side effect of a read (a gigabyte per deploy on staging otherwise)."""
+    side effect of a read (a gigabyte per deploy on staging otherwise).
+    While another refresh is downloading, returns (the cached export,
+    False) at once: that one brings the new export in."""
     current = snapshot_export_id(snapshot_dir)
     if not current:
         return None, False
@@ -225,7 +253,10 @@ def refresh_snapshot(snapshot_dir):
     latest = manifest["export_id"]
     if latest == current:
         return current, False
-    ensure_snapshot(snapshot_dir, manifest=manifest)
+    try:
+        ensure_snapshot(snapshot_dir, manifest=manifest, wait=False)
+    except SnapshotBusy:
+        return current, False
     return latest, True
 
 
@@ -249,8 +280,12 @@ def _download_snapshot(d, manifest, on_progress):
                 done += len(chunk)
                 if on_progress:
                     on_progress(name, done, total)
-        os.replace(part, d / name)
-    (d / "export_id").write_text(export_id)
+    # The transfer is done: swap the files in under the readers' lock, so
+    # no render sees one new parquet next to an old one.
+    with _snapshot_lock(d):
+        for name in SNAPSHOT_FILES:
+            os.replace(d / f"{name}.part", d / name)
+        (d / "export_id").write_text(export_id)
     return export_id
 
 

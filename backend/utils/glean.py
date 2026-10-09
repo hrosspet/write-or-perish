@@ -23,9 +23,11 @@ Glean button (text: next to LLM Response; voice: under the record
 button once a message is recorded). Any other thread offers "Glean for
 this reflection" in the entry's menu instead.
 
-A glean is always a live call, never the Batch API (READ_LIVE_MARKER on
-its placeholder, set by create_llm_placeholder for every read turn
-except the admin's /read/start experiments). By default it runs on the
+A glean is always a live call, never the Batch API: the completion task
+sends a read through the Batch API only when its placeholder carries
+READ_BATCH_MARKER, which only the admin's experiments set (/read/start,
+a batch rerun). Every other read turn is live, whatever else its node
+says (READ_LIVE_MARKER only labels a glean while it runs). By default it runs on the
 glean model of the provider the user's chat model is from
 (GLEAN_MODEL_ANTHROPIC / GLEAN_MODEL_OPENAI): Loore never moves a user to
 another provider on its own. The user may pick another read model in the
@@ -35,9 +37,16 @@ from flask import current_app
 
 GLEAN_ENTRY = "glean"
 
-# The node meta entry that makes a read turn a live call (llm_completion
-# reads it; routes/read.py's batch rerun removes it).
+# The node meta entry of a glean's reply (create_llm_placeholder adds it to
+# every read turn but the admin's batch experiments): the pages use it to
+# show a pending reply as "Gleaning". The task does not read it.
 READ_LIVE_MARKER = "_live"
+
+# The node meta entry that sends a read through the Batch API: only the
+# admin's experiments set it (/read/start, the batch rerun). A read
+# without it is a live call (#435: a glean is always live; the user
+# waits for it).
+READ_BATCH_MARKER = "_read_batch"
 
 # ExternalItem sources that are the user's own X / Community Archive data
 # (saved tweets: an archive import, X bookmarks or likes). A Glean pick's

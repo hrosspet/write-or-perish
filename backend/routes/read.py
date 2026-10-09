@@ -27,10 +27,12 @@ Three entry points:
                                   written since. Always a live call, and
                                   the reply is always created: the click
                                   is the request.
-  POST /api/read/<id>/rerun       admin: cancel the reply's pending batch
-                                  (if any) and run it again, through the
+  POST /api/read/<id>/rerun       admin API, no button (#435 rework):
+                                  cancel the reply's pending batch (if
+                                  any) and run it again, through the
                                   batch or, with {"live": true}, the live
-                                  API
+                                  API. Not while a live run of it is
+                                  still going.
 
 The prompt is never copied into a node. Like Voice / Text mode, the
 prompt node's content stays empty and resolves through the linked
@@ -143,8 +145,8 @@ def _start(prompt_key, parent, model_id, auto_generate=True, read_live=True):
     the prompt node back too: there is nothing to keep without the reply.
     With auto_generate off only the prompt node is created (the user
     picks a model and asks for the reply on the thread page), as
-    /textmode/start does. *read_live* False sends the read through the
-    Batch API (the admin's /read/start); a glean is always live."""
+    /textmode/start does. *read_live* False marks the read for the Batch
+    API (the admin's /read/start); a glean is always live."""
     from backend.utils.glean import GleanModelUnavailable
     prompt_node = _attach_prompt_node(
         prompt_key, parent.id if parent else None)
@@ -294,11 +296,14 @@ def rerun_read(node_id):
     """Cancel the reply's pending batch, if one is submitted, and run the
     reply again on the same node: through the batch again, or with
     {"live": true} through the live API (minutes instead of up to a day;
-    the admin's testing loop). Works on a reply that is still processing
-    or has failed; a completed reply is left alone (it has picks).
-    Admin-only (#435): a user retries a glean with Glean again. A batch
-    rerun of a glean drops its live marker, so it really is a batch."""
-    from backend.utils.glean import READ_LIVE_MARKER
+    the admin's testing loop). Works on a reply that has failed or waits
+    on a batch; a completed reply is left alone (it has picks), and so
+    is one whose live run is still going: a second run would render into
+    the same reply while the first one runs (#435). Admin-only, and only
+    through the API: a user retries a glean with Glean again. A batch
+    rerun marks the reply for the batch (READ_BATCH_MARKER); a live one
+    removes that mark."""
+    from backend.utils.glean import READ_BATCH_MARKER, READ_LIVE_MARKER
     if not getattr(current_user, "is_admin", False):
         return jsonify({"error": "Only an admin can rerun a glean."}), 403
     node = Node.query.get(node_id)
@@ -310,7 +315,8 @@ def rerun_read(node_id):
     is_llm = node.node_type == "llm" or node.llm_model is not None
     meta, batches = _batch_entries(node)
     marked = any(isinstance(m, dict) and m.get("name") in (
-        READ_FURTHER_MARKER, READ_LIVE_MARKER) for m in meta)
+        READ_FURTHER_MARKER, READ_LIVE_MARKER, READ_BATCH_MARKER)
+        for m in meta)
     is_read_reply = bool(batches) or marked or (
         parent is not None and parent.get_prompt_key() in READ_PROMPT_KEYS)
     if not is_llm or parent is None or not is_read_reply:
@@ -319,6 +325,10 @@ def rerun_read(node_id):
         return jsonify({
             "error": "This reply is finished; start a new read instead.",
         }), 409
+    waits_on_batch = any(e.get("status") in ("submitted", "cancelling")
+                         for e in batches)
+    if node.llm_task_status != "failed" and not waits_on_batch:
+        return jsonify({"error": "This glean is still running."}), 409
     if not node.llm_model:
         return jsonify({"error": "The reply has no model."}), 400
     # A run sends the thread again: not once it keeps AI out.
@@ -329,9 +339,13 @@ def rerun_read(node_id):
 
     data = request.get_json(silent=True) or {}
     live = bool(data.get("live", False))
-    if not live:
-        meta = [m for m in meta if not (
-            isinstance(m, dict) and m.get("name") == READ_LIVE_MARKER)]
+    drop = READ_BATCH_MARKER if live else READ_LIVE_MARKER
+    meta = [m for m in meta if not (
+        isinstance(m, dict) and m.get("name") == drop)]
+    if not live and not any(isinstance(m, dict)
+                            and m.get("name") == READ_BATCH_MARKER
+                            for m in meta):
+        meta.append({"name": READ_BATCH_MARKER})
     now = datetime.utcnow().isoformat(timespec="seconds")
     cancelled = []
     for entry in batches:

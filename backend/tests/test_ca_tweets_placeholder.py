@@ -459,7 +459,7 @@ class TestRefreshSnapshot:
         seen = []
 
         def _download(d, m, on_progress):
-            assert (d / ".lock").exists()
+            assert (d / ".download.lock").exists()
             seen.append(m["export_id"])
             (d / "export_id").write_text(m["export_id"])
             return m["export_id"]
@@ -467,6 +467,74 @@ class TestRefreshSnapshot:
         assert ca.refresh_snapshot(snapshot) == ("2026-09-19T07-02-55Z", True)
         assert seen == ["2026-09-19T07-02-55Z"]
         assert ca.snapshot_export_id(snapshot) == "2026-09-19T07-02-55Z"
+
+    def test_a_read_goes_on_while_a_newer_export_downloads(self, snapshot, monkeypatch):
+        """A read never waits for a transfer (#435: a glean is a live
+        call): it reads the cached export while the next one downloads,
+        and only the renames at the end are done under the readers'
+        lock."""
+        import io
+        import threading
+        from backend.utils import community_archive as ca
+        manifest = {"export_id": "2026-09-19T07-02-55Z", "package_paths": [
+            "v1/x/tweets.parquet", "v1/x/profiles.parquet"]}
+        started, release = threading.Event(), threading.Event()
+
+        class _Resp(io.BytesIO):
+            headers = {}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        def _urlopen(url):
+            started.set()
+            release.wait(10)
+            return _Resp(b"")
+        monkeypatch.setattr(ca, "_urlopen", _urlopen)
+        download = threading.Thread(
+            target=ca.ensure_snapshot, args=(snapshot,),
+            kwargs={"manifest": manifest})
+        download.start()
+        try:
+            assert started.wait(5)
+            done = []
+            reader = threading.Thread(target=lambda: done.append(
+                ca.render_recent_tweets(snapshot, days=1)))
+            reader.start()
+            reader.join(5)
+            assert done, "the read waited for the download"
+            assert done[0][1]["export_id"] == "2026-09-13T07-08-27Z"
+        finally:
+            release.set()
+            download.join(10)
+        assert ca.snapshot_export_id(snapshot) == "2026-09-19T07-02-55Z"
+
+    def test_a_second_refresh_does_not_wait_for_a_running_download(
+            self, snapshot, monkeypatch):
+        import threading
+        from backend.utils import community_archive as ca
+        monkeypatch.setattr(ca, "fetch_latest_manifest",
+                            lambda: {"export_id": "2026-09-19T07-02-55Z"})
+        monkeypatch.setattr(ca, "_download_snapshot",
+                            lambda *a: (_ for _ in ()).throw(AssertionError()))
+        holding, release = threading.Event(), threading.Event()
+
+        def _hold():
+            with ca._download_lock(snapshot):
+                holding.set()
+                release.wait(10)
+        holder = threading.Thread(target=_hold)
+        holder.start()
+        try:
+            assert holding.wait(5)
+            assert ca.refresh_snapshot(snapshot) == (
+                "2026-09-13T07-08-27Z", False)
+        finally:
+            release.set()
+            holder.join(10)
 
 
 # ── Display names (#435) ─────────────────────────────────────────────────
