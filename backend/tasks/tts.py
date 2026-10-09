@@ -356,7 +356,9 @@ def _run_entity_tts(task, entity_cls, entity_id, text_of, subdir,
                 db.session.commit()
                 return {'status': 'completed', 'tts_url': entity.audio_tts_url}
 
-            text = text_of(entity)
+            # Links spoken as their text, addresses short (#461): the same
+            # step as for nodes. The stored text is unchanged.
+            text = speak_links(text_of(entity) or "").strip()
             if not text:
                 raise ValueError("No content to generate TTS for")
 
