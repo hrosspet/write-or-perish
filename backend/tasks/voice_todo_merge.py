@@ -20,6 +20,8 @@ from backend.llm_providers import LLMProvider
 from backend.utils.api_keys import get_api_keys_for_usage
 from backend.utils.cost import llm_cost_log_fields
 from backend.models import APICostLog
+from backend.utils.proposals import is_own_live_proposal, node_is_users
+from backend.utils.tool_meta import update_tool_meta
 from backend.utils.refusal_backoff import REFUSED_REF
 from backend.utils.todo_merge_edits import (
     FAILURE_EMPTY, FAILURE_TRUNCATED, REPLY_FORMAT, MergeRun, has_tasks,
@@ -79,6 +81,30 @@ def apply_voice_todo(self, llm_node_id: int, model_id: str, user_id: int,
             logger.error(f"LLM node {llm_node_id} not found")
             return
 
+        # A todo merge runs only on the user's own live proposal
+        # (utils/proposals). Checked again here, before the proposal is
+        # read, since the task runs after the check that started it. Only
+        # the owner's merge writes the proposal's apply state.
+        if not is_own_live_proposal(llm_node, user_id, "todo_pending"):
+            logger.warning(
+                f"Todo merge for node {llm_node_id} refused: not a live "
+                f"todo proposal of user {user_id}")
+            _fail_confirm_node(llm_node_id, user_id, confirm_node_id)
+            return
+
+        # AI may not read the proposal or the todo list: no model call.
+        # Asked again under the lock (_run_merge), as the list can change.
+        from backend.routes.todo import todo_merge_refusal
+        refusal = todo_merge_refusal(user_id, llm_node)
+        if refusal is not None:
+            logger.info(
+                f"Todo merge for node {llm_node_id} refused: AI usage keeps "
+                f"its inputs away from AI (user {user_id})")
+            _update_apply_status(llm_node, "failed", error=refusal,
+                                 confirm_node_id=confirm_node_id)
+            db.session.commit()
+            return
+
         from backend.utils.spend import user_is_capped
         if user_is_capped(user_id):
             logger.warning(
@@ -133,6 +159,29 @@ def apply_voice_todo(self, llm_node_id: int, model_id: str, user_id: int,
             except redis.exceptions.LockNotOwnedError:
                 logger.warning(
                     f"Merge lock expired before release for user {user_id}")
+
+
+# Shown on the confirming reply when the proposal is no longer one the
+# user can apply (deleted in the meantime, say). The routes answer 404 with
+# the same words.
+PROPOSAL_NOT_FOUND_MESSAGE = "No pending todo changes found"
+
+
+def _fail_confirm_node(llm_node_id, user_id, confirm_node_id):
+    """A merge refused because its node isn't the user's own live todo
+    proposal: nothing is written on that node. The user's own confirming
+    reply (the voice apply_todo_changes turn), when there is a separate
+    one, shows the merge as failed."""
+    if not confirm_node_id or confirm_node_id == llm_node_id:
+        return
+    confirm_node = Node.query.get(confirm_node_id)
+    if confirm_node is None or not node_is_users(confirm_node, user_id):
+        return
+    update_tool_meta(confirm_node, "apply_todo_changes", {
+        "apply_status": "failed",
+        "apply_error": PROPOSAL_NOT_FOUND_MESSAGE,
+    })
+    db.session.commit()
 
 
 def build_merge_messages(merge_prompt, update_summary, current_todo):
