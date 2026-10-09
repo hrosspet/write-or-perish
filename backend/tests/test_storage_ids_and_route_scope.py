@@ -39,7 +39,7 @@ for _mod in ["flask_login", "backend.models", "backend.extensions"]:
 import flask_login as _real_flask_login  # noqa: E402
 from backend.extensions import db as _db  # noqa: E402
 from backend.models import (  # noqa: E402
-    User, Node, UserProfile, Draft, NodeTranscriptChunk,
+    User, Node, UserProfile, Draft, NodeTranscriptChunk, ExternalItem,
 )
 import backend.models as _real_backend_models  # noqa: E402
 
@@ -481,6 +481,45 @@ class TestSpeechFollowsAiUsage:
             None, profile.id, str(app.audio_root))
         assert result["status"] == "refused"
         assert speak.call_count == 1
+
+    def test_listen_speaks_links_in_node_profile_and_reference(
+            self, app, data):
+        """#461: every Listen source runs the same link step: a Markdown
+        link is spoken as its text, a bare GitHub PR address as "PR n",
+        another address as "a link to <domain>". The stored text is not
+        changed. TTS itself is mocked."""
+        tts = _load_tts_tasks(app)
+        spoken = []
+        tts._generate_tts_chunks = (
+            lambda task, entity, text, *a, **k: (
+                spoken.append(text) or "/media/new.mp3"))
+        pr = "https://github.com/hrosspet/write-or-perish/pull/460"
+        source = (f"See [the docs](https://example.com/a) and {pr} "
+                  "or https://www.example.org/x.")
+        want = "See the docs and PR 460 or a link to example.org."
+
+        entry = _node(data.alice, source)
+        tts.generate_tts_audio(None, entry.id, str(app.audio_root))
+
+        profile = UserProfile(user_id=data.alice.id, generated_by="user",
+                              tokens_used=0, ai_usage="chat")
+        profile.set_content(source)
+        _db.session.add(profile)
+        _db.session.commit()
+        tts.generate_tts_audio_for_profile(
+            None, profile.id, str(app.audio_root))
+
+        item = ExternalItem(user_id=data.alice.id, source="web_clip",
+                            external_id="a" * 64, title="Clip",
+                            url="https://example.com/clip")
+        item.set_content(source)
+        _db.session.add(item)
+        _db.session.commit()
+        tts.generate_tts_audio_for_item(None, item.id, str(app.audio_root))
+
+        assert spoken == [want, want, "# Clip\n\n" + want]
+        assert entry.get_content() == profile.get_content() == source
+        assert item.get_content() == source
 
     def test_speech_rule(self, app, data):
         from backend.utils.privacy import speech_allowed
