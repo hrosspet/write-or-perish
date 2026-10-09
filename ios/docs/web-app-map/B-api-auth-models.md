@@ -1153,13 +1153,13 @@ Source files: `backend/routes/{dashboard,profile,todo,artifacts,prompts,log,sear
 ##### `GET /api/dashboard/`
 - Backend: routes/dashboard.py:get_dashboard
 - Auth: login_required; allowed for unapproved users (it is how the client learns `approved: false`).
-- Called from: contexts/UserContext.js (on app mount; this is the web app's "who am I" call), pages/ProfilePage.js (to read `latest_profile`).
-- Request: no parameters.
+- Called from: contexts/UserContext.js (on app mount, with `profile=0`; this is the web app's "who am I" call), pages/ProfilePage.js (to read `latest_profile`).
+- Request: query `profile` (optional). `profile=0` leaves out `latest_profile`, so the call decrypts nothing; the app-load calls (web `UserContext`, iPhone `AppState.loadUser`) send it. Without it the response carries `latest_profile` (the Profile page, and older iPhone builds everywhere).
 - Response 200:
 ```
 {
   "user": CurrentUser,                // see below; the app's current-user model
-  "latest_profile": LatestProfile | null
+  "latest_profile": LatestProfile | null   // absent with profile=0
 }
 
 CurrentUser = {

@@ -62,9 +62,12 @@ def get_latest_profile(user):
 
 # The signed-in user's own dashboard: who they are, and their newest profile
 # version. Both clients call it on every app load (web UserContext, iPhone
-# AppState) and read `user`; the Profile page reads `latest_profile`. It
-# lists no thread cards: no client showed them, and each card's preview was
-# one decryption per call (#481). The Log (GET /api/log) lists the threads.
+# AppState) and read only `user`: they send ?profile=0, which leaves out
+# `latest_profile`, so an app load decrypts nothing. The Profile page calls
+# without it and reads `latest_profile` (older iPhone builds call without it
+# everywhere, so the profile stays the default). It lists no thread cards:
+# no client showed them, and each card's preview was one decryption per call
+# (#481). The Log (GET /api/log) lists the threads.
 @dashboard_bp.route("/", methods=["GET"])
 @login_required
 def get_dashboard():
@@ -123,8 +126,9 @@ def get_dashboard():
             "external_content_enabled": bool(
                 current_user.external_content_enabled),
         },
-        "latest_profile": get_latest_profile(current_user)
     }
+    if request.args.get("profile") != "0":
+        dashboard["latest_profile"] = get_latest_profile(current_user)
     return jsonify(dashboard), 200
 
 

@@ -145,8 +145,9 @@ struct UserCapabilities: Equatable, Sendable {
     var showsCommons: Bool { approved && shareEnabled }
 }
 
-/// `GET /api/dashboard/` envelope: the signed-in user and the newest profile version.
-/// The server sends no thread cards here (#481); the Log lists the threads.
+/// `GET /api/dashboard/` envelope: the signed-in user and the newest profile version
+/// (absent when the call sends `profile=0`, as `AppState.loadUser` does). The server
+/// sends no thread cards here (#481); the Log lists the threads.
 struct DashboardResponse: Decodable, Sendable {
     var user: CurrentUser
     var latestProfile: LatestProfile?

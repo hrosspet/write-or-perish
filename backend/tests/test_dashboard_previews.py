@@ -1,8 +1,15 @@
-"""The signed-in user's GET /api/dashboard/ lists no thread cards (#481):
-no client shows them, and each card's preview was a decryption on every
-app load. It carries the user and the newest profile version.
+"""The signed-in user's GET /api/dashboard/ (#481): no thread cards, and
+an app load decrypts nothing.
+
+It lists no cards: no client shows them, and each card's preview was a
+decryption on every app load. The app-load calls (web UserContext, iPhone
+AppState) read only `user` and send ?profile=0, which leaves out the
+profile and its decryption; the Profile page (and older iPhone builds)
+call without it and get `latest_profile`.
 
 Same harness as test_log_dashboard_privacy (minimal app, sqlite)."""
+import sys
+from contextlib import ExitStack
 from datetime import datetime, timedelta
 from unittest import mock
 
@@ -12,6 +19,8 @@ from backend.tests.test_log_dashboard_privacy import (  # noqa: F401 - fixture
 from backend.models import Node, User, UserProfile
 
 T0 = datetime(2026, 1, 1, 12, 0, 0)
+APP_LOAD = "/api/dashboard/?profile=0"
+PROFILE_PAGE = "/api/dashboard/"
 
 
 def _node(user, parent=None, text="", privacy="private", at=None, **kw):
@@ -73,57 +82,83 @@ def _owner_with_threads_and_profile():
     return alice
 
 
-def _own_dashboard(flask_app, user):
+def _get(flask_app, user, url):
     client = flask_app.test_client()
     _login(client, user.id)
-    resp = client.get("/api/dashboard/")
+    resp = client.get(url)
     assert resp.status_code == 200
     return resp.get_json()
 
 
-def _counting_decrypt():
-    """decrypt_content where Node and UserProfile look it up, wrapped in a
-    mock that counts the calls."""
-    namespace = Node.get_content.__globals__
-    decrypt = mock.Mock(side_effect=namespace["decrypt_content"])
-    return decrypt, mock.patch.dict(namespace, {"decrypt_content": decrypt})
-
-
-def test_own_dashboard_decrypts_no_entry(app):  # noqa: F811
-    alice = _owner_with_threads_and_profile()
-    decrypt, patched = _counting_decrypt()
-    with patched, mock.patch.object(
+def _decryptions(flask_app, user, url):
+    """GET *url* as *user*, counting content decryptions: decrypt_content
+    is wrapped in a counting mock in every module that holds it (the models
+    and anything else that imported it), and Node.get_content is counted
+    on its own. Returns (body, decryptions, entry reads)."""
+    real = Node.get_content.__globals__["decrypt_content"]
+    decrypt = mock.Mock(side_effect=real)
+    holders = [m for m in list(sys.modules.values())
+               if getattr(m, "decrypt_content", None) is real]
+    with ExitStack() as stack:
+        for module in holders:
+            stack.enter_context(
+                mock.patch.object(module, "decrypt_content", decrypt))
+        node_content = stack.enter_context(mock.patch.object(
             Node, "get_content", autospec=True,
-            side_effect=Node.get_content) as node_content:
-        body = _own_dashboard(app, alice)
+            side_effect=Node.get_content))
+        body = _get(flask_app, user, url)
+    return body, decrypt.call_count, node_content.call_count
 
-    assert node_content.call_count == 0
-    # The one decryption left is the profile the Profile page shows.
-    assert decrypt.call_count == 1
+
+def test_app_load_decrypts_nothing(app):  # noqa: F811
+    alice = _owner_with_threads_and_profile()
+    body, decryptions, entries = _decryptions(app, alice, APP_LOAD)
+
+    assert decryptions == 0
+    assert entries == 0
+    assert "latest_profile" not in body
+    assert USER_FIELDS <= set(body["user"])
+    assert body["user"]["username"] == "alice"
+
+
+def test_app_load_keeps_the_flag_through_the_slash_redirect(app):  # noqa: F811
+    # The web app calls /api/dashboard (no slash) and follows the 308.
+    alice = _owner_with_threads_and_profile()
+    client = app.test_client()
+    _login(client, alice.id)
+    resp = client.get("/api/dashboard?profile=0", follow_redirects=True)
+    assert resp.status_code == 200
+    assert "latest_profile" not in resp.get_json()
+
+
+def test_profile_page_request_decrypts_only_the_profile(app):  # noqa: F811
+    alice = _owner_with_threads_and_profile()
+    body, decryptions, entries = _decryptions(app, alice, PROFILE_PAGE)
+
+    assert entries == 0
+    assert decryptions == 1
     assert body["latest_profile"]["content"] == "PROFILE TEXT"
 
 
-def test_own_dashboard_without_a_profile_decrypts_nothing(app):  # noqa: F811
+def test_without_a_profile_nothing_is_decrypted(app):  # noqa: F811
     alice, bob, root = _world()
     _node(alice, root, "alice's own words", at=T0 + timedelta(minutes=1))
     _db.session.commit()
-    decrypt, patched = _counting_decrypt()
-    with patched:
-        body = _own_dashboard(app, alice)
+    body, decryptions, entries = _decryptions(app, alice, PROFILE_PAGE)
 
-    assert decrypt.call_count == 0
+    assert decryptions == 0
     assert body["latest_profile"] is None
 
 
-def test_own_dashboard_lists_no_cards(app):  # noqa: F811
+def test_no_cards_on_either_request(app):  # noqa: F811
     alice = _owner_with_threads_and_profile()
-    body = _own_dashboard(app, alice)
-    assert not CARD_KEYS & set(body)
+    for url in (APP_LOAD, PROFILE_PAGE):
+        assert not CARD_KEYS & set(_get(app, alice, url)), url
 
 
-def test_own_dashboard_keeps_what_the_clients_read(app):  # noqa: F811
+def test_profile_page_request_keeps_what_the_clients_read(app):  # noqa: F811
     alice = _owner_with_threads_and_profile()
-    body = _own_dashboard(app, alice)
+    body = _get(app, alice, PROFILE_PAGE)
     assert USER_FIELDS <= set(body["user"])
     assert body["user"]["id"] == alice.id
     assert body["user"]["username"] == "alice"
