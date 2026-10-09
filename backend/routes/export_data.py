@@ -308,12 +308,16 @@ def _preamble_content(row, filter_ai_usage):
     return row.get_content()
 
 
-def _artifact_ref_lines(node):
+def _artifact_ref_lines(node, user_id):
     """Reference lines for whatever context artifacts are pinned on *node*.
 
     Returns [] when nothing is pinned. Emitted for EVERY node (not just
     system-prompt nodes) so any node carrying pins — including interim
     retrieval nodes that pinned the artifact they read — surfaces them.
+    Only *user_id*'s own versions are listed: someone else's node in the
+    user's threads pins theirs (the export's preamble leaves them out
+    too). The system prompt is listed either way: its text is the node's
+    own content.
     """
     lines = []
     prompt = node.get_artifact("prompt")
@@ -328,7 +332,7 @@ def _artifact_ref_lines(node):
             f"(ref #{prompt.id})]")
 
     profile = node.get_artifact("profile")
-    if profile is not None:
+    if profile is not None and profile.user_id == user_id:
         profile_ver = UserProfile.query.filter(
             UserProfile.user_id == profile.user_id,
             UserProfile.created_at <= profile.created_at,
@@ -336,7 +340,7 @@ def _artifact_ref_lines(node):
         lines.append(f"[User Profile v{profile_ver} (ref #{profile.id})]")
 
     todo = node.get_artifact("todo")
-    if todo is not None:
+    if todo is not None and todo.user_id == user_id:
         todo_ver = UserTodo.query.filter(
             UserTodo.user_id == todo.user_id,
             UserTodo.created_at <= todo.created_at,
@@ -346,6 +350,8 @@ def _artifact_ref_lines(node):
     # ai_preferences is a UserArtifact (#158 Slice 5) → it flows through the
     # user_artifact loop below as [Artifact 'ai_preferences' vN].
     for kind, artifact in sorted(node.get_user_artifacts().items()):
+        if artifact.user_id != user_id:
+            continue
         artifact_ver = UserArtifact.query.filter(
             UserArtifact.user_id == artifact.user_id,
             UserArtifact.kind == kind,
@@ -366,7 +372,7 @@ def _format_node_text(node, index_path, user_id, embedded_quotes,
     result = _node_header_line(node, index_path)
     _note_entry(licence, node)
 
-    ref_lines = _artifact_ref_lines(node)
+    ref_lines = _artifact_ref_lines(node, user_id)
     is_prompt_node = node.get_artifact("prompt") is not None
 
     if is_prompt_node:
@@ -1535,9 +1541,13 @@ def build_user_export_content(
                         "version": vnum,
                         "content": n.get_content(),
                     }
+                # Pinned versions of the user's own only (see
+                # _artifact_ref_lines): another author's node in these
+                # threads pins theirs.
                 # Profile artifacts
                 profile = n.get_artifact("profile")
-                if profile is not None and profile.id not in profile_versions:
+                if (profile is not None and profile.user_id == user.id
+                        and profile.id not in profile_versions):
                     if licence is not None:
                         licence.note_usage(profile.ai_usage,
                                            f"archive profile {profile.id}",
@@ -1553,7 +1563,8 @@ def build_user_export_content(
                     }
                 # Todo artifacts
                 todo = n.get_artifact("todo")
-                if todo is not None and todo.id not in todo_versions:
+                if (todo is not None and todo.user_id == user.id
+                        and todo.id not in todo_versions):
                     if licence is not None:
                         licence.note_usage(todo.ai_usage,
                                            f"archive todo list {todo.id}",
@@ -1570,7 +1581,8 @@ def build_user_export_content(
                 # ai_preferences, custom):
                 # one entry per referenced version, full content.
                 for kind, artifact in sorted(n.get_user_artifacts().items()):
-                    if artifact.id in artifact_versions:
+                    if (artifact.id in artifact_versions
+                            or artifact.user_id != user.id):
                         continue
                     if licence is not None:
                         licence.note_usage(
