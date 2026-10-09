@@ -64,7 +64,9 @@ def get_latest_profile(user):
 
 
 def _serialize_node_for_list(node, viewer_id, child_counts=None):
-    """Serialize a node for dashboard list views (Log has its own).
+    """Serialize a node for the cards of GET /api/dashboard/<username>
+    (the Log has its own; the signed-in user's GET /api/dashboard/ lists
+    no cards, #481).
 
     *viewer_id*: who is looking, the owner or another user. A system
     prompt root's card shows its first child the viewer may see: not
@@ -111,37 +113,14 @@ def _serialize_node_for_list(node, viewer_id, child_counts=None):
     }
 
 
-# Dashboard endpoint: only return top-level nodes (nodes with no parent)
+# The signed-in user's own dashboard: who they are, and their newest profile
+# version. Both clients call it on every app load (web UserContext, iPhone
+# AppState) and read `user`; the Profile page reads `latest_profile`. It
+# lists no thread cards: no client showed them, and each card's preview was
+# one decryption per call (#481). The Log (GET /api/log) lists the threads.
 @dashboard_bp.route("/", methods=["GET"])
 @login_required
 def get_dashboard():
-    page = request.args.get("page", 1, type=int)
-    per_page = request.args.get("per_page", 20, type=int)
-    per_page = min(per_page, 100)
-
-    # Pinned nodes for this user (separate from pagination)
-    pinned_nodes = Node.query.filter(
-        Node.pinned_by == current_user.id,
-        Node.pinned_at.isnot(None),
-        Node.deleted_at.is_(None)
-    ).order_by(Node.pinned_at.desc()).all()
-    pinned_counts = visible_child_counts(
-        [n.id for n in pinned_nodes], current_user.id)
-    pinned_list = [_serialize_node_for_list(n, current_user.id,
-                                            pinned_counts)
-                   for n in pinned_nodes]
-
-    query = Node.query.filter(
-        Node.user_id == current_user.id,
-        Node.parent_id.is_(None),
-        Node.deleted_at.is_(None)
-    ).order_by(Node.created_at.desc())
-    pagination = query.paginate(page=page, per_page=per_page, error_out=False)
-
-    counts = visible_child_counts(
-        [n.id for n in pagination.items], current_user.id)
-    nodes_list = [_serialize_node_for_list(node, current_user.id, counts)
-                  for node in pagination.items]
     # Determine if Voice Mode is enabled for this user (admin or paid plan)
     voice_mode_enabled = current_user.has_voice_mode
     dashboard = {
@@ -197,11 +176,6 @@ def get_dashboard():
             "external_content_enabled": bool(
                 current_user.external_content_enabled),
         },
-        "pinned_nodes": pinned_list,
-        "nodes": nodes_list,
-        "has_more": pagination.has_next,
-        "page": page,
-        "total_nodes": pagination.total,
         "latest_profile": get_latest_profile(current_user)
     }
     return jsonify(dashboard), 200

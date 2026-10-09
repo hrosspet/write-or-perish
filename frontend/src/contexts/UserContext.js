@@ -53,8 +53,8 @@ export const UserProvider = ({ children }) => {
 
   // The user just wrote an entry (Voice or Text): from now on the screens
   // ask "What's on your mind?" instead of the welcome question (#391).
-  // Set here rather than refetched — /dashboard decrypts the profile and
-  // the node previews on every call.
+  // Set here rather than refetched — /dashboard decrypts the profile on
+  // every call.
   const markHasOwnEntries = useCallback(() => {
     setUser((prev) => (prev && prev.has_own_entries === false
       ? { ...prev, has_own_entries: true }
