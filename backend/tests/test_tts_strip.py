@@ -14,6 +14,8 @@ import os
 import sys
 from unittest.mock import MagicMock
 
+import pytest
+
 os.environ.setdefault("SECRET_KEY", "test-secret")
 os.environ.setdefault("ENCRYPTION_DISABLED", "true")
 
@@ -35,7 +37,7 @@ for _k, _v in _GLUE.items():
 sys.modules.pop("backend.tasks.tts", None)
 
 from backend.tasks.tts import (  # noqa: E402
-    _strip_heading_sections, _strip_quote_markers,
+    _node_spoken_text, _strip_heading_sections, _strip_quote_markers,
 )
 
 for _k, _v in _saved.items():
@@ -133,3 +135,61 @@ def test_quote_markers_never_spoken():
 def test_quote_marker_only_content_becomes_empty():
     assert _strip_quote_markers("{quote_ext:5}") == ""
     assert _strip_quote_markers("") == ""
+
+
+# ── Links (#461) ────────────────────────────────────────────────────────
+
+_PR = "https://github.com/hrosspet/write-or-perish/pull/460"
+_PROPOSAL_META = '[{"name": "propose_github_issue"}]'
+
+
+def test_node_text_speaks_links_and_addresses():
+    text = (f"Merged [459]({_PR[:-3]}459) and {{quote:12}} more.\n\n"
+            f"{_PR}\n\nhttps://www.example.com/a/b and <https://x.org/y>.")
+    assert _node_spoken_text(text) == (
+        "Merged 459 and more.\n\nPR 460\n\n"
+        "a link to example.com and a link to x.org.")
+
+
+def test_node_text_proposal_reply_speaks_links_in_its_prose():
+    text = (f"I'd file this, see [the PR]({_PR}).\n\n"
+            "### Issue Title\nBug\n### Description\nIt breaks.\n"
+            f"### Category\nbug\nMore at {_PR}.")
+    assert _node_spoken_text(text, _PROPOSAL_META) == (
+        "I'd file this, see the PR.\n\nMore at PR 460.")
+
+
+def test_node_text_with_only_an_image_is_empty():
+    """Nothing left to speak: the task skips TTS as for empty text."""
+    assert _node_spoken_text("![](https://x.com/p.png)") == ""
+    assert _node_spoken_text(None) == ""
+
+
+@pytest.mark.parametrize("text", [
+    f"A link [459]({_PR[:-3]}459) mid-sentence.",
+    f"Intro.\n\n## Fix [460]({_PR})\nBody.",
+    f"Merged:\n{_PR}\nThat's it.",
+    "Read https://www.example.com/a/b?c=d, then rest.",
+    "Autolink <https://example.org/x/y> here.",
+])
+def test_node_text_matches_the_streamed_reply(text):
+    """The batch task and a reply spoken while written say the same,
+    however the stream is cut (here: every split into two deltas)."""
+    from backend.utils.audio_processing import section_aware_chunk_text
+    from backend.utils.tts_stream_text import ChunkPlanner, SpokenTextProjector
+
+    def streamed(pieces):
+        proj, planner = SpokenTextProjector(), ChunkPlanner()
+        for piece in pieces:
+            planner.add(proj.feed(piece))
+        planner.add(proj.close())
+        planner.close()
+        chunks = []
+        while (c := planner.take(10_000)) is not None:
+            chunks.append((c.text, c.section_title, c.section_index))
+        return chunks
+
+    batch = section_aware_chunk_text(_node_spoken_text(text))
+    assert "https" not in str(batch)
+    for cut in range(1, len(text)):
+        assert streamed([text[:cut], text[cut:]]) == batch, cut
