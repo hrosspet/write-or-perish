@@ -165,14 +165,6 @@ _ARTIFACT_PLACEHOLDERS = (
     USER_INTENTIONS_PLACEHOLDER, USER_ARTIFACTS_INDEX_PLACEHOLDER,
 )
 
-
-def node_is_users(node, user_id):
-    """True when *node* belongs to *user_id*: they wrote it, or (an AI
-    reply) asked for it. Only such a node's pending tool results reach
-    that user's reply."""
-    return (node.human_owner_id or node.user_id) == user_id
-
-
 # Within-turn retrieval loop (#158, text mode only). When the model calls one
 # of these tools, the retrieved content is injected back into the message
 # stream and the model is re-called so it answers WITH the content in the same
@@ -1485,15 +1477,16 @@ def _scan_proposal_statuses(node_chain, user_id, licence=None):
     status_reported flag should be set after a successful LLM call.
     A retrieval delivered here reports its pull to *licence* (#325).
 
-    Only *user_id*'s own nodes (node_is_users) take part: the results and
-    outcomes on someone else's node in the chain (their AI reply in a
-    public thread) are theirs, so they are neither delivered into this
-    reply nor marked reported by it.
+    Only *user_id*'s own nodes take part, those they wrote or (an AI
+    reply) asked for: the results and outcomes on someone else's node in
+    the chain (their AI reply in a public thread) are theirs, so they are
+    neither delivered into this reply nor marked reported by it.
     """
     notes = []
     to_mark = []
     for node in node_chain:
-        if not node.tool_calls_meta or not node_is_users(node, user_id):
+        if (not node.tool_calls_meta
+                or (node.human_owner_id or node.user_id) != user_id):
             continue
         # Refresh from DB to pick up async merge updates
         db.session.refresh(node)
