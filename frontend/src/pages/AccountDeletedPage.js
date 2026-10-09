@@ -14,10 +14,12 @@ export default function AccountDeletedPage() {
       <p role="status" style={textStyle}>
         You are signed out.{" "}
         {date
-          ? <>Until {date} you can restore it by signing in; after that it
-            is deleted forever, with everything in it.</>
-          : <>For 30 days you can restore it by signing in; after that it is
-            deleted forever, with everything in it.</>}
+          ? <>If you change your mind, you can still restore it by signing in
+            until {date}; after that it is deleted forever, with everything
+            in it.</>
+          : <>If you change your mind, you can still restore it by signing in
+            within 30 days; after that it is deleted forever, with
+            everything in it.</>}
       </p>
       <Link to="/" style={linkStyle}>Back to Loore &rarr;</Link>
     </div>

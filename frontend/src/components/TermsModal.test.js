@@ -10,8 +10,8 @@ test('the terms describe account deletion instead of saying there is none', () =
   render(<TermsModal onAccepted={() => {}} />);
   expect(screen.queryByText(/no account deletion feature/)).toBeNull();
   expect(screen.getByText(
-    'You can delete your account on the Account page. You then have 30 days to recover it '
-    + 'by signing in; after that it is deleted forever, with everything in it. Copies in our '
-    + 'backups are erased within another 30 days. Loore keeps a record of what your AI use '
+    'You can delete your account on the Account page. If you change your mind, you can '
+    + 'still recover your account within 30 days by signing in; after that it is deleted forever, '
+    + 'with everything in it. Copies in our backups are erased within another 30 days. Loore keeps a record of what your AI use '
     + 'cost, without your name.')).toBeTruthy();
 });

@@ -56,13 +56,13 @@ final class DeleteAccountModelTests: AccountDeletionTestCase {
         XCTAssertEqual(model.dialogParagraphs.count, 3)
         XCTAssertEqual(model.dialogParagraphs[0],
                        "Your account is deleted at once and you are signed out everywhere. Nobody can see your public writing any more.")
-        XCTAssertTrue(model.dialogParagraphs[1].hasPrefix("For 30 days, until \(deleteDate), you can restore it by signing in. After that it is deleted forever, with everything in it: your entries and recordings, the AI's replies,"))
+        XCTAssertTrue(model.dialogParagraphs[1].hasPrefix("If you change your mind, you can still restore it by signing in until \(deleteDate) (30 days). After that it is deleted forever, with everything in it: your entries and recordings, the AI's replies,"))
         XCTAssertTrue(model.dialogParagraphs[1].hasSuffix("Loore keeps a record of what your AI use cost, without your name."))
         XCTAssertEqual(model.dialogParagraphs[2], "Once it is deleted forever, nobody else can take your username for 365 days.")
         XCTAssertFalse(model.dialogParagraphs.joined().contains("hidden"))
         XCTAssertEqual(model.confirmTitle, "Delete my account")
-        XCTAssertEqual(model.confirmSubtitle, "Signs you out now. You can restore it until \(deleteDate).")
-        XCTAssertEqual(model.sectionText, "Deletes your account at once and signs you out everywhere. For 30 days you can restore it by signing in; after that it is deleted forever, with everything in it.")
+        XCTAssertEqual(model.confirmSubtitle, "Signs you out now. If you change your mind, you can still restore it until \(deleteDate).")
+        XCTAssertEqual(model.sectionText, "Deletes your account at once and signs you out everywhere. If you change your mind, you can still restore it by signing in within 30 days; after that it is deleted forever, with everything in it.")
     }
 
     func testAWaitingWritingDeletionAndXAreMentioned() throws {
@@ -120,9 +120,9 @@ final class DeleteAccountModelTests: AccountDeletionTestCase {
         XCTAssertEqual(app.phase, .accountDeleted(deleteOn: LooreDate.parse("2026-11-08T12:00:00Z")))
         XCTAssertNil(app.user)
         XCTAssertEqual(AccountDeletedView.message(deleteOn: LooreDate.parse("2026-11-08T12:00:00Z")),
-                       "You are signed out. Until \(AccountDeletion.formatDate(LooreDate.parse("2026-11-08T12:00:00Z"))) you can restore it by signing in; after that it is deleted forever, with everything in it.")
+                       "You are signed out. If you change your mind, you can still restore it by signing in until \(AccountDeletion.formatDate(LooreDate.parse("2026-11-08T12:00:00Z"))); after that it is deleted forever, with everything in it.")
         XCTAssertEqual(AccountDeletedView.message(deleteOn: nil),
-                       "You are signed out. For 30 days you can restore it by signing in; after that it is deleted forever, with everything in it.")
+                       "You are signed out. If you change your mind, you can still restore it by signing in within 30 days; after that it is deleted forever, with everything in it.")
         // Answers still in flight from the signed-out session change nothing.
         app.handle(.unauthorized)
         XCTAssertEqual(app.phase, .accountDeleted(deleteOn: LooreDate.parse("2026-11-08T12:00:00Z")))
@@ -194,7 +194,7 @@ final class ConfirmAccountDeletionModelTests: AccountDeletionTestCase {
         let model = ConfirmAccountDeletionModel(app: app, token: "tok123")
         model.now = { pinnedNow }
         XCTAssertEqual(model.heading, "Delete @seowriter?")
-        XCTAssertEqual(model.message, "When you confirm, your account is deleted and you are signed out everywhere. Until \(deleteDate) you can restore it by signing in; after that it is deleted forever, with everything in it. Restoring it also cancels a request to delete all your writing, if one is waiting.")
+        XCTAssertEqual(model.message, "When you confirm, your account is deleted and you are signed out everywhere. If you change your mind, you can still restore it by signing in until \(deleteDate); after that it is deleted forever, with everything in it. Restoring it also cancels a request to delete all your writing, if one is waiting.")
         XCTAssertTrue(calls.isEmpty, "showing the question sends nothing")
         await model.confirm()
         XCTAssertEqual(calls, ["POST /api/account/delete/confirm"])
@@ -385,5 +385,23 @@ final class AccountRestoreTests: AccountDeletionTestCase {
         XCTAssertNil(user.dataDeletion)
         let full = try decode(CurrentUser.self, json(["id": 1, "username": "a", "account_deletion": ["confirm_by_email": true]]))
         XCTAssertEqual(full.accountDeletion, AccountDeletionInfo(confirmByEmail: true), "missing numbers take the web's defaults")
+    }
+}
+
+/// The app replaces its user with the `PUT /api/dashboard/user` answer; the
+/// answer carries the deletion state like a page load, so a settings change
+/// leaves the email confirmation and the refusal as they were.
+@MainActor
+final class SettingsChangeKeepsDeletionStateTests: AccountDeletionTestCase {
+    func testTheUserFromASettingsChangeStillHasTheDeletionState() async throws {
+        var info = accountDeletionInfo
+        info["confirm_by_email"] = true
+        var user: [String: Any] = ["id": 5, "username": "seowriter", "approved": true, "terms_up_to_date": true,
+                                   "account_deletion": info]
+        StubURLProtocol.install { _ in .json(200, json(["message": "Profile updated successfully.", "user": user])) }
+        try signIn(["account_deletion": info])
+        user["default_ai_usage"] = "train"
+        _ = try await app.updateUser(["default_ai_usage": .string("train")])
+        XCTAssertTrue(DeleteAccountModel(app: app).confirmsByEmail)
     }
 }

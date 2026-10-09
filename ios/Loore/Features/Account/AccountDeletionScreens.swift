@@ -157,8 +157,8 @@ struct AccountDeletedView: View {
     static func message(deleteOn: Date?) -> String {
         let date = AccountDeletion.formatDate(deleteOn)
         let when = date.isEmpty
-            ? "For 30 days you can restore it by signing in;"
-            : "Until \(date) you can restore it by signing in;"
+            ? "If you change your mind, you can still restore it by signing in within 30 days;"
+            : "If you change your mind, you can still restore it by signing in until \(date);"
         return "You are signed out. \(when) after that it is deleted forever, with everything in it."
     }
 

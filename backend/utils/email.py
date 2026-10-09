@@ -238,8 +238,9 @@ def send_account_deletion_link_email(to_email, username, confirm_url,
         f"You asked to delete the Loore account @{username}. Open the link "
         f"below to confirm:\n{confirm_url}\n\n"
         "Once you confirm, the account is deleted and you are signed out. "
-        f"For {grace_days} days, signing in lets you restore it; after "
-        "that it is deleted forever, with everything in it.\n\n"
+        "If you change your mind, you can still restore it by signing in "
+        f"within {grace_days} days; after that it is deleted forever, "
+        "with everything in it.\n\n"
         f"This link expires in {lifetime}. If you did not ask for this, "
         "ignore this email and nothing changes."
     )
@@ -247,8 +248,9 @@ def send_account_deletion_link_email(to_email, username, confirm_url,
         "Confirm the deletion of your account",
         [f"You asked to delete the Loore account <strong style=\"color: #ede8dd;\">@{escape(username)}</strong>.",
          "Once you confirm, the account is deleted and you are signed out. "
-         f"For {grace_days} days, signing in lets you restore it; after "
-         "that it is deleted forever, with everything in it."],
+         "If you change your mind, you can still restore it by signing in "
+         f"within {grace_days} days; after that it is deleted forever, "
+         "with everything in it."],
         "Review and confirm", confirm_url,
         (f"This link expires in {lifetime}.",
          "If you did not ask for this, ignore this email and nothing changes."))
@@ -262,16 +264,16 @@ def send_account_deletion_scheduled_email(to_email, username, delete_on):
     Best-effort: the deletion already happened from the user's side."""
     text_body = (
         "Your Loore account is deleted\n\n"
-        f"The account @{username} is deleted. Until {delete_on} you can "
-        "restore it: sign in to Loore and choose Restore. After that it is "
-        "deleted forever, with everything in it.\n\n"
+        f"The account @{username} is deleted. If you change your mind, "
+        f"you can still restore it until {delete_on}: sign in to Loore and "
+        "choose Restore. After that it is deleted forever, with everything in it.\n\n"
         "If you did not do this, sign in and restore the account right away."
     )
     html_body = _card(
         "Your account is deleted",
         [f"The account <strong style=\"color: #ede8dd;\">@{escape(username)}</strong> "
-         f"is deleted. Until {escape(delete_on)} you can restore it: sign in "
-         "to Loore and choose Restore.",
+         f"is deleted. If you change your mind, you can still restore it until "
+         f"{escape(delete_on)}: sign in to Loore and choose Restore.",
          "After that it is deleted forever, with everything in it."],
         footnotes=("If you did not do this, sign in and restore the account right away.",))
     _send(to_email, "Your Loore account is deleted", text_body,
