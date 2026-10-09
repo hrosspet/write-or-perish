@@ -26,6 +26,7 @@ from backend.utils.privacy import (
     can_user_see_node_or_tombstone,
     can_user_view_tombstone,
     can_user_edit_node,
+    is_node_owner,
     speech_allowed,
     SPEECH_REFUSED_MESSAGE,
     PrivacyLevel,
@@ -2140,11 +2141,14 @@ def get_transcription_status(node_id):
             current_app.logger.warning(f"Failed to check Celery task status: {e}")
             # Don't fail the request - just return DB status without real-time info
 
+    # The error text goes to the recording's author only, as the
+    # warnings below and the transcription stream do.
     payload = {
         "node_id": node.id,
         "status": node.transcription_status,
         "progress": node.transcription_progress or 0,
-        "error": node.transcription_error,
+        "error": (node.transcription_error
+                  if node.user_id == current_user.id else None),
         "started_at": iso_utc(node.transcription_started_at),
         "completed_at": iso_utc(node.transcription_completed_at),
         "content": node.get_content() if node.transcription_status == 'completed' else None,
@@ -2232,11 +2236,14 @@ def get_llm_status(node_id):
             current_app.logger.warning(f"Failed to check Celery task status: {e}")
             # Don't fail the request - just return DB status without real-time info
 
+    # A failed reply's error text and the task's warnings go to the
+    # reply's owner only; anyone else sees the status without them.
+    owner = is_node_owner(node, current_user.id)
     response_data = {
         "node_id": node.id,
         "status": node.llm_task_status,
         "progress": node.llm_task_progress or 0,
-        "error": node.llm_task_error,
+        "error": node.llm_task_error if owner else None,
         "task_info": task_info,
         # Within-turn retrieval chaining (#158): non-null when this node was
         # finalized as an interim retrieval step and the answer lives on the
@@ -2277,9 +2284,10 @@ def get_llm_status(node_id):
 
     # Include user-facing task warnings (rendered as toasts by
     # frontend useLlmTaskWarnings hook). Always include the key so the
-    # client can rely on its presence.
+    # client can rely on its presence. Owner only: a warning can say the
+    # owner hit the spend cap, or why their reply was not started.
     from backend.utils.task_warnings import load_task_warnings
-    response_data["warnings"] = load_task_warnings(node)
+    response_data["warnings"] = load_task_warnings(node) if owner else []
 
     if created_node:
         response_data["node"] = created_node
