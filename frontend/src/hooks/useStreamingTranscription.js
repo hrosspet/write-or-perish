@@ -862,6 +862,8 @@ export function useStreamingTranscription(options = {}) {
       // Include workflow params for server-side LLM + TTS chain
       if (extraParams?.parent_id) finalizePayload.parent_id = extraParams.parent_id;
       if (extraParams?.model) finalizePayload.model = extraParams.model;
+      // A fresh Voice thread started from the Glean card (#435).
+      if (extraParams?.entry) finalizePayload.entry = extraParams.entry;
       await api.post(`/drafts/streaming/${sessionIdRef.current}/finalize`,
         finalizePayload, {
         timeout: 120000, // 2 minutes for finalize (just queues the task)

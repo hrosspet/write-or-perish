@@ -1016,7 +1016,7 @@ class DraftFinalizationTask(Task):
 def finalize_draft_streaming(self, session_id: str, total_chunks: int,
                              label: str = None, user_id: int = None,
                              parent_id: int = None, model: str = None,
-                             client: str = None):
+                             client: str = None, entry: str = None):
     """
     Finalize streaming transcription for a draft.
 
@@ -1038,6 +1038,9 @@ def finalize_draft_streaming(self, session_id: str, total_chunks: int,
         model: LLM model ID (for server-side LLM chain)
         client: 'ios' / 'web' — the app the finalize request came from
             (utils/client_platform), stamped on the reply placeholder.
+        entry: "glean" when a fresh Voice session was started from the
+            Glean card (#435): the new thread's root is stamped so every
+            turn offers Glean (utils/glean.stamp_glean_entry).
     """
     logger.info(f"Finalizing draft streaming for session {session_id}, {total_chunks} chunks")
     # #371: where a voice turn's wait goes; marked under the reply node
@@ -1092,7 +1095,7 @@ def finalize_draft_streaming(self, session_id: str, total_chunks: int,
                     transcript_so_far = draft.get_content() or ""
                     if len(transcript_so_far) >= 500:
                         parent_id = _create_system_node_early(
-                            user_id, label.lower(), draft)
+                            user_id, label.lower(), draft, entry=entry)
                         cache_split_offset = len(transcript_so_far)
                         prewarm_token = new_prewarm_token()
                         prewarm_anthropic_cache.delay(
@@ -1292,6 +1295,7 @@ def finalize_draft_streaming(self, session_id: str, total_chunks: int,
                     prewarm_token=prewarm_token,
                     timing=timing,
                     client=client,
+                    entry=entry,
                 )
             except Exception as e:
                 logger.error(
@@ -1320,7 +1324,16 @@ def finalize_draft_streaming(self, session_id: str, total_chunks: int,
         }
 
 
-def _create_system_node_early(user_id, prompt_key, draft):
+def _stamp_glean_entry(system_node, user_id, entry):
+    """A fresh Voice thread started from the Glean card (#435)."""
+    if entry is None:
+        return
+    from backend.models import User
+    from backend.utils.glean import stamp_glean_entry
+    stamp_glean_entry(system_node, User.query.get(user_id), entry)
+
+
+def _create_system_node_early(user_id, prompt_key, draft, entry=None):
     """Create the thread's system node at finalize START (#187) so the
     cache pre-warm renders against real pinned artifacts. Returns its id.
 
@@ -1345,6 +1358,7 @@ def _create_system_node_early(user_id, prompt_key, draft):
     attach_context_artifacts(
         system_node.id, user_id, prompt_record=prompt_record,
     )
+    _stamp_glean_entry(system_node, user_id, entry)
     db.session.commit()
     return system_node.id
 
@@ -1365,7 +1379,8 @@ def _skip_voice_reply(draft, user_node, message):
 def _start_server_side_llm_chain(draft, session_id, transcript,
                                  user_id, parent_id, model, label,
                                  cache_split_offset=None, timing=None,
-                                 client=None, prewarm_token=None):
+                                 client=None, prewarm_token=None,
+                                 entry=None):
     """
     Create nodes and kick off LLM + TTS generation server-side.
 
@@ -1429,6 +1444,7 @@ def _start_server_side_llm_chain(draft, session_id, transcript,
         attach_context_artifacts(
             system_node.id, user_id, prompt_record=prompt_record,
         )
+        _stamp_glean_entry(system_node, user_id, entry)
         user_parent_id = system_node.id
 
     # User node with transcript

@@ -71,7 +71,8 @@ private struct ThreadContent: View {
                         header(node)
                         ForEach(node.ancestors) { ancestor in
                             BubbleView(data: BubbleData(ancestor), actions: actions(model.target(ancestor),
-                                       userId: ancestor.userId, parentUserId: ancestor.parentUserId, nodeType: ancestor.nodeType)) {
+                                       userId: ancestor.userId, parentUserId: ancestor.parentUserId, nodeType: ancestor.nodeType,
+                                       deleted: ancestor.deleted, isSystemPrompt: ancestor.systemPrompt.isSystemPrompt)) {
                                 openNode(ancestor.id)
                             }
                             .padding(.vertical, 8)
@@ -84,7 +85,9 @@ private struct ThreadContent: View {
                             ChildRowView(row: row) { child in
                                 AnyView(BubbleView(data: BubbleData(child),
                                                    actions: actions(model.target(child), userId: child.userId,
-                                                                    parentUserId: child.parentUserId, nodeType: child.nodeType)) {
+                                                                    parentUserId: child.parentUserId, nodeType: child.nodeType,
+                                                                    deleted: child.deleted,
+                                                                    isSystemPrompt: child.systemPrompt.isSystemPrompt)) {
                                     openNode(child.id)
                                 })
                             }
@@ -108,13 +111,24 @@ private struct ThreadContent: View {
         }
     }
 
-    private func actions(_ target: NodeTarget, userId: Int?, parentUserId: Int?, nodeType: NodeType) -> [BubbleAction] {
+    private func actions(_ target: NodeTarget, userId: Int?, parentUserId: Int?, nodeType: NodeType,
+                         deleted: Bool = false, isSystemPrompt: Bool = false) -> [BubbleAction] {
         var list = [BubbleAction(label: "Reply", kind: .reply) { model.beginReply(target) }]
         if model.ownedByMe(userId: userId, parentUserId: parentUserId, nodeType: nodeType) {
             list.append(BubbleAction(label: "Edit") { model.beginEdit(target) })
             list.append(BubbleAction(label: "Delete", destructive: true) { model.beginDelete(target) })
+            if model.offersGleanInMenu(owned: true, deleted: deleted, isSystemPrompt: isSystemPrompt,
+                                       aiUsage: target.aiUsage) {
+                list.append(gleanMenuAction(target.id))
+            }
         }
         return list
+    }
+
+    /// "Glean for this reflection" (#435): the way to glean in a thread not started
+    /// from the Glean card, at any time, on the server's default model.
+    private func gleanMenuAction(_ id: Int) -> BubbleAction {
+        BubbleAction(label: ThreadModel.gleanMenuLabel) { model.glean(under: id) }
     }
 
     // MARK: Header
@@ -127,8 +141,9 @@ private struct ThreadContent: View {
                 .accessibilityAddTraits(.isHeader)
             Spacer(minLength: 8)
             // Voice Mode shows on every owned thread: where AI usage is `none` the
-            // Voice screen says why it is closed. The read and auto-generate
-            // controls keep the AI-usage rule.
+            // Voice screen says why it is closed. Auto-generate keeps the AI-usage
+            // rule. Glean is not up here (#435): it is in the action row of a
+            // Glean-card thread, else in the entry's ⋯ menu.
             if model.isOwner && !model.isPublicThread {
                 VStack(alignment: .trailing, spacing: 6) {
                     TopRightButton(title: model.voiceLoading ? "Starting…" : "Voice Mode") {
@@ -136,15 +151,6 @@ private struct ThreadContent: View {
                     } action: { model.startVoice() }
                     .disabled(model.voiceLoading)
                     .accessibilityHint("Continue this conversation by voice")
-                    if app.capabilities.isAdmin && node.aiUsage != .off {
-                        TopRightButton(title: model.readLoading ? "Starting…"
-                                       : (model.inReadThread ? model.readLabel : "Relevant tweets")) {
-                            Image(systemName: "book").font(.system(size: 11)).accessibilityHidden(true)
-                        } action: { model.readFromNode(autoGenerate: autoGenerate) }
-                        .disabled(model.readLoading || NodePrefetch.shared.isPending)
-                        .accessibilityHint(model.inReadThread && model.readReplyAbove ? ThreadModel.readFurtherTitle
-                                           : ThreadModel.readEntryTitle)
-                    }
                     if craftMode && node.aiUsage != .off {
                         TopRightButton(title: "Auto-generate") {
                             LoorePillSwitch(isOn: autoGenerate)
@@ -168,10 +174,7 @@ private struct ThreadContent: View {
             HStack(alignment: .center, spacing: 4) {
                 FocalCard(model: model, node: node)
                 if model.isOwner {
-                    KebabMenu(actions: [
-                        BubbleAction(label: "Edit") { model.beginEdit(model.target(focal: node)) },
-                        BubbleAction(label: "Delete", destructive: true) { model.beginDelete(model.target(focal: node)) },
-                    ])
+                    KebabMenu(actions: focalActions(node))
                     .accessibilityIdentifier("thread.focalKebab")
                 } else {
                     Color.clear.frame(width: KebabMenu.width)
@@ -230,6 +233,19 @@ private struct ThreadContent: View {
         .padding(.leading, 8)
     }
 
+    private func focalActions(_ node: NodeDetail) -> [BubbleAction] {
+        var list = [
+            BubbleAction(label: "Edit") { model.beginEdit(model.target(focal: node)) },
+            BubbleAction(label: "Delete", destructive: true) { model.beginDelete(model.target(focal: node)) },
+        ]
+        if model.offersGleanInMenu(owned: true, deleted: false, isSystemPrompt: node.systemPrompt.isSystemPrompt,
+                                   aiUsage: node.aiUsage, pending: model.isLLMPending)
+            && !model.readLoading && !NodePrefetch.shared.isPending {
+            list.append(gleanMenuAction(model.gleanTarget))
+        }
+        return list
+    }
+
     private func inlineConfig(_ node: NodeDetail) -> NodeFormConfig {
         var config = NodeFormConfig(parentId: node.id, hidePowerFeatures: !craftMode, hideAudioUpload: !craftMode,
                                     compact: true,
@@ -249,12 +265,14 @@ private struct ThreadContent: View {
         return node.ancestors.last(where: { $0.nodeType != .llm })?.username
     }
 
-    /// "Read" / "Read further" with its own read-model picker (admin read threads).
+    /// Glean with its model picker (#435): a Glean-card thread, for everyone who
+    /// gleans (the read models of both providers; the default is a read model of
+    /// the user's own provider, from `suggested-model?purpose=read`).
     private func readRow(_ node: NodeDetail) -> some View {
-        // Another node is loading (NodePrefetch): a second press would start a second read.
+        // Another node is loading (NodePrefetch): a second press would start a second glean.
         let busy = model.readLoading || model.llmRequesting || model.llmTaskNodeId != nil || NodePrefetch.shared.isPending
         return AdaptiveStack(spacing: 0, verticalSpacing: 6) {
-            Button { model.readFromNode(autoGenerate: autoGenerate) } label: {
+            Button { model.gleanHere() } label: {
                 Text(model.readLoading ? "Starting…" : model.readLabel)
                     .font(LooreFont.button)
                     .foregroundStyle(LooreColor.textSecondary)
@@ -267,7 +285,8 @@ private struct ThreadContent: View {
             }
             .buttonStyle(.plain)
             .disabled(busy)
-            .accessibilityHint(model.readReplyAbove ? ThreadModel.readFurtherTitle : ThreadModel.readEntryTitle)
+            .accessibilityHint(model.readTitle)
+            .accessibilityIdentifier("thread.glean")
             ModelPicker(nodeId: node.id, selectedModel: $model.readModel, purpose: .read, disabled: busy)
                 .padding(.leading, -1)
             Spacer(minLength: 0)
@@ -300,6 +319,10 @@ private struct ThreadContent: View {
             .buttonStyle(.plain)
             .disabled(busy || underReadReply)
             .opacity(busy || underReadReply ? 0.45 : 1)
+            .accessibilityHint(underReadReply
+                               ? "To chat about the gleaning, send your reply first."
+                                 + (model.readActions(craftMode: craftMode) ? " To glean again, use Glean." : "")
+                               : "")
             .accessibilityIdentifier("thread.llmResponse")
             ModelPicker(nodeId: node.id, selectedModel: $model.selectedModel, disabled: busy || underReadReply)
                 .padding(.leading, -1)
@@ -359,6 +382,12 @@ private struct FocalCard: View {
                 .foregroundStyle(LooreColor.textMuted)
                 .padding(.bottom, 9.6)
             }
+            if model.isReadReply {
+                GleaningsHead(subline: model.gleaningsSubline)
+            }
+            if model.gleaningEmpty {
+                GleaningsEmptyDay(tweetsRead: node.readWindow?.tweets ?? 0)
+            }
             if model.isReadReply, let window = node.readWindow {
                 ReadWindowLine(window: window)
             }
@@ -397,12 +426,17 @@ private struct FocalCard: View {
             }
         } else if model.isLLMPending {
             HStack(spacing: 10) {
-                Text(model.isBatchWait ? "Processing" : "Thinking")
+                Text(model.isBatchWait ? "Processing" : (model.isReadReply ? "Gleaning" : "Thinking"))
                     .font(LooreFont.sansOblique(15.2, .light))
                     .foregroundStyle(LooreColor.textMuted)
                 PulsingDots()
             }
             .padding(.vertical, 8)
+        } else if model.gleaningFailed {
+            GleaningFailed(reason: node.llmTaskError,
+                           hint: !(model.isOwner && model.gleanEnabled) ? nil
+                               : model.readActions(craftMode: false) ? "Press Glean below to try again."
+                               : "To try again, choose “\(ThreadModel.gleanMenuLabel)” in your entry's ⋯ menu.")
         } else {
             let showProposal = model.showProposal
             let split = showProposal ? ProposalParser.splitProposalText(node.content, shareOnly: !model.isLLMNode) : nil
@@ -428,6 +462,84 @@ private struct FocalCard: View {
                 }
             }
         }
+    }
+}
+
+/// A gleaning's head (#435): "Today's gleanings" and, once the picks are in, how
+/// many and why (web `.gleanings-head`).
+private struct GleaningsHead: View {
+    let subline: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(ThreadModel.gleaningsTitle)
+                .font(LooreFont.serif(27.2, .regular, relativeTo: .title))
+                .foregroundStyle(LooreColor.textPrimary)
+                .accessibilityAddTraits(.isHeader)
+            if let subline {
+                Text(subline)
+                    .font(LooreFont.sans(13.6, .light))
+                    .foregroundStyle(LooreColor.textMuted)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(.bottom, 16)
+        .accessibilityIdentifier("thread.gleaningsHead")
+    }
+}
+
+/// An empty day is a real result: said plainly, in the middle (web `.gleanings-empty`).
+private struct GleaningsEmptyDay: View {
+    let tweetsRead: Int
+
+    var body: some View {
+        VStack(spacing: 6) {
+            Text("Nothing worth your time today.")
+                .font(LooreFont.serif(25.6, .regular, relativeTo: .title2))
+                .foregroundStyle(LooreColor.textPrimary)
+            Text(ThreadModel.emptyDayDetail(tweetsRead: tweetsRead))
+                .font(LooreFont.sans(14.1, .light))
+                .foregroundStyle(LooreColor.textMuted)
+        }
+        .multilineTextAlignment(.center)
+        .fixedSize(horizontal: false, vertical: true)
+        .frame(maxWidth: .infinity)
+        .padding(.top, 19)
+        .padding(.bottom, 22)
+        .padding(.horizontal, 8)
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("thread.gleaningsEmpty")
+    }
+}
+
+/// A gleaning that failed (#435): what happened and where to try again, in place
+/// of the placeholder text the reply keeps (web `.gleaning-failed`).
+private struct GleaningFailed: View {
+    let reason: String?
+    let hint: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("This gleaning didn't come through.")
+                .font(LooreFont.serif(20.8, .regular, relativeTo: .title3))
+                .foregroundStyle(LooreColor.textPrimary)
+                .padding(.bottom, 2)
+            if let reason, !reason.isEmpty {
+                Text(reason)
+                    .font(LooreFont.sans(14.1, .light))
+                    .foregroundStyle(LooreColor.textMuted)
+            }
+            if let hint {
+                Text(hint)
+                    .font(LooreFont.sans(14.1, .light))
+                    .foregroundStyle(LooreColor.textMuted)
+            }
+        }
+        .fixedSize(horizontal: false, vertical: true)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, 6)
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("thread.gleaningFailed")
     }
 }
 

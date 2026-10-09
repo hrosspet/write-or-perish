@@ -33,6 +33,11 @@ struct CurrentUser: Decodable, Equatable, Sendable {
     var publicSharingEnabled: Bool
     var externalContentAvailable: Bool
     var externalContentEnabled: Bool
+    /// Inside Glean's rollout gate (#435): the web's Account shows the switch.
+    var gleanAvailable: Bool
+    /// The gate and the user's own switch: every Glean card, button and menu
+    /// entry shows only when this is true (#475).
+    var gleanEnabled: Bool
 
     enum CodingKeys: String, CodingKey {
         case id, username, description, email, plan, timezone
@@ -59,6 +64,8 @@ struct CurrentUser: Decodable, Equatable, Sendable {
         case publicSharingEnabled = "public_sharing_enabled"
         case externalContentAvailable = "external_content_available"
         case externalContentEnabled = "external_content_enabled"
+        case gleanAvailable = "glean_available"
+        case gleanEnabled = "glean_enabled"
     }
 
     init(from decoder: Decoder) throws {
@@ -92,6 +99,8 @@ struct CurrentUser: Decodable, Equatable, Sendable {
         publicSharingEnabled = c.tolerant(.publicSharingEnabled, default: false)
         externalContentAvailable = c.tolerant(.externalContentAvailable, default: false)
         externalContentEnabled = c.tolerant(.externalContentEnabled, default: false)
+        gleanAvailable = c.tolerant(.gleanAvailable, default: false)
+        gleanEnabled = c.tolerant(.gleanEnabled, default: false)
     }
 
     /// Applies an email-state answer from any `/api/dashboard/email*` call
@@ -121,6 +130,9 @@ struct UserCapabilities: Equatable, Sendable {
     var externalContentAvailable = false
     var twitterLogin = false
     var spendBlocked = false
+    /// Glean (#475): the Reflect / Glean home cards, the Glean buttons and
+    /// "Glean for this reflection". Off: today's app.
+    var gleanEnabled = false
 
     init() {}
 
@@ -139,6 +151,7 @@ struct UserCapabilities: Equatable, Sendable {
         externalContentAvailable = user.externalContentAvailable
         twitterLogin = user.twitterLogin
         spendBlocked = user.spendBlocked
+        gleanEnabled = user.gleanEnabled
     }
 
     /// Commons tab and Share card (map A §2.1: approved and `share_v1_enabled`).

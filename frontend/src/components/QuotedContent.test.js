@@ -8,8 +8,12 @@ jest.mock('../contexts/UserContext', () => ({ useUser: () => ({ user: { id: 7 } 
 jest.mock('../contexts/ToastContext', () => ({ useToast: () => ({ addToast: jest.fn() }) }));
 
 import React from 'react';
-import { render, screen } from '@testing-library/react';
+import { render as rtlRender, screen } from '@testing-library/react';
+import { MemoryRouter } from 'react-router-dom';
 import QuotedContent from './QuotedContent';
+
+// The reference card links to the reference page (#435): it needs a router.
+const render = (ui) => rtlRender(<MemoryRouter>{ui}</MemoryRouter>);
 
 const externalQuotes = {
   42: {

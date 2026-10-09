@@ -60,7 +60,8 @@ from backend.utils.ca_feed import (
     FEED_AI_USAGE, READ_FURTHER_MARKER,
     FeedReplyError, count_dropped_picks, read_reply_ids, record_feed_render,
     ca_turn as _ca_turn,
-    refresh_snapshot_for_read, refs_from_render, seen_tweet_ids,
+    ArchiveNotReady, refs_from_render, request_snapshot_refresh,
+    seen_tweet_ids,
 )
 from backend.utils.tool_meta import (
     get_tool_meta_entry, update_tool_meta, parse_github_issue,
@@ -72,7 +73,6 @@ from backend.utils.proposals import is_own_live_proposal
 from backend.utils.placeholders import (
     CA_TWEETS_PATTERN,
     USER_EXPORT_PATTERN,
-    ca_tweets_allowed,
     ca_tweets_denied_message,
     parse_ca_tweets_days,
     parse_ca_tweets_scope,
@@ -2458,8 +2458,9 @@ def get_user_recent_raw_content(user_id, created_before=None, usage=None):
 
 
 # {ca_tweets} (PoC, 2026-09-13): the prompt carries a day of the Community
-# Archive corpus (~250k tokens) and is not latency-bound, so it goes through
-# the provider's Batch API. The task polls its own batch by re-queueing
+# Archive corpus (~250k tokens). A glean is a live call (#435); only the
+# admin's experiments that ask for it (READ_BATCH_MARKER) go through the
+# provider's Batch API. The task polls its own batch by re-queueing
 # itself (Celery retry with a countdown). A poll is one provider call made
 # before anything else is loaded: the chain and the {ca_tweets} render
 # (~66k tokens, a duckdb scan) are built only by the run that finds the
@@ -2500,6 +2501,28 @@ def _read_requested(node):
     meta, _ = _batch_meta(node)
     return any(isinstance(m, dict) and m.get("name") == READ_FURTHER_MARKER
                for m in meta)
+
+
+def _read_batch_requested(node):
+    """True only when an admin asked for this read through the Batch API
+    (READ_BATCH_MARKER: /read/start, a batch rerun). Every other read is
+    a live call (#435: a glean is always live, the user waits for it),
+    whatever else its node carries: the batch is the exception that has
+    to be asked for, so no glean can end up in one."""
+    from backend.utils.glean import READ_BATCH_MARKER
+    meta, _ = _batch_meta(node)
+    return any(isinstance(m, dict) and m.get("name") == READ_BATCH_MARKER
+               for m in meta)
+
+
+def _superseded(llm_node, this_task_id):
+    """Whether another run now owns *llm_node* (the admin's rerun gave it
+    a new task id): read from the database, not the session's copy."""
+    if not this_task_id:
+        return False
+    owner = db.session.query(Node.llm_task_id).filter(
+        Node.id == llm_node.id).scalar()
+    return bool(owner) and owner != this_task_id
 
 
 CA_BATCH_PROVIDERS = ("anthropic", "openai")
@@ -3383,8 +3406,11 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 from backend.utils import community_archive as ca
                 # Gate on the EFFECTIVE placeholder: the pre-flight in
                 # create_llm_placeholder only sees the parent entry, not
-                # an older message or the thread's system prompt.
-                if not ca_tweets_allowed(User.query.get(user_id)):
+                # an older message or the thread's system prompt. A
+                # non-admin's read comes only from a glean's read prompt,
+                # and only while they glean (#435).
+                from backend.utils.glean import read_turn_allowed
+                if not read_turn_allowed(User.query.get(user_id), ca_node):
                     raise ValueError(ca_tweets_denied_message())
                 ca_params = parse_placeholder_params(ca_placeholder_match)
                 ca_days = parse_ca_tweets_days(
@@ -3413,26 +3439,52 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 else:
                     ca_seen = ()
                     if batch_resp is None:
-                        # A read about to be sent: read today's export,
-                        # not the one cached whenever, and leave out
-                        # what the reader has already seen.
-                        refresh_snapshot_for_read(ca_snapshot_dir, log=logger)
+                        # A read about to be sent reads the export in the
+                        # cache and never waits for a newer one to
+                        # download (~900 MB; a glean is a live call, the
+                        # user waits, #435): the refresh is queued in the
+                        # background for the next read. Leave out what
+                        # the reader has already seen.
+                        request_snapshot_refresh(ca_snapshot_dir, log=logger)
                         ca_seen = seen_tweet_ids(user_id)
                     # else: a batch submitted before renders were pinned;
                     # re-render the day as it was rendered then (no seen
                     # filter) so its numbers still match.
-                    ca_tweets_content, ca_stats, ca_refs = ca.render_recent_tweets(
-                        ca_snapshot_dir, days=ca_days,
-                        exclude_usernames=[ca_owner.username,
-                                           ca_owner.prefilled_handle]
-                        if ca_owner else (),
-                        include_usernames=ca_follows,
-                        exclude_tweet_ids=ca_seen)
+                    try:
+                        ca_tweets_content, ca_stats, ca_refs = ca.render_recent_tweets(
+                            ca_snapshot_dir, days=ca_days,
+                            exclude_usernames=[ca_owner.username,
+                                               ca_owner.prefilled_handle]
+                            if ca_owner else (),
+                            include_usernames=ca_follows,
+                            exclude_tweet_ids=ca_seen)
+                    except ca.CommunityArchiveError as e:
+                        # No export cached yet (a fresh machine or data
+                        # volume): queue the first fetch, and give the
+                        # user a reason in plain words. The exception's
+                        # text names the server's snapshot path: logged,
+                        # never the reason line (#435 review).
+                        logger.warning("Node %s: no archive to render: %s",
+                                       llm_node_id, e)
+                        if not ca.snapshot_export_id(ca_snapshot_dir):
+                            request_snapshot_refresh(
+                                ca_snapshot_dir, log=logger, first_copy=True)
+                        raise ArchiveNotReady() from e
                     logger.info(
                         "Rendered %s for node %s: %s (~%d tokens)",
                         ca_placeholder_match, ca_node.id, ca_stats,
                         approximate_token_count(ca_tweets_content))
                     if batch_resp is None:
+                        # One run renders into a reply: a run another one
+                        # has replaced since it started (the admin's
+                        # rerun) stops here instead of rendering the day
+                        # into the same reply a second time.
+                        if _superseded(llm_node, this_task_id):
+                            logger.warning(
+                                "Node %s: task %s superseded; not rendering",
+                                llm_node_id, this_task_id)
+                            return {"status": "superseded",
+                                    "llm_node_id": llm_node_id}
                         # Pin the numbering this reply's picks will cite;
                         # lands in the next commit, before any submit.
                         record_feed_render(llm_node, ca_stats, ca_refs,
@@ -4374,20 +4426,23 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 # automatic prefix-cache routing.
                 thread_root_id = (node_chain[0].id if node_chain
                                   else parent_node_id)
-                # {ca_tweets}: not latency-bound and up to ~250k tokens,
-                # so the call goes through the provider's Batch API with
-                # the feed's structured output. The round-trip runs
-                # below, after _finalize is defined. Any provider the
-                # feed does not support fails here rather than silently
-                # running the full-price, unstructured live call.
-                # The admin's live rerun (ca_live) skips the batch and
-                # asks the live API for the same structured shape.
+                # {ca_tweets}: up to ~250k tokens with the feed's
+                # structured output. Only a read an admin asked to batch
+                # (READ_BATCH_MARKER: /read/start, a batch rerun) goes
+                # through the provider's Batch API, whose round-trip runs
+                # below, after _finalize is defined; every other read, a
+                # glean above all (#435: the user is waiting), and the
+                # admin's live rerun (ca_live) ask the live API for the
+                # same structured shape. Any provider the feed does not
+                # support fails here rather than silently running the
+                # unstructured call.
                 if needs_ca and provider not in CA_BATCH_PROVIDERS:
                     raise ValueError(
                         f"{{ca_tweets}} is not supported on {model_id} "
                         f"({provider}); pick an Anthropic or OpenAI "
                         "model.")
-                batch_mode = needs_ca and not ca_live
+                batch_mode = (needs_ca and not ca_live
+                              and _read_batch_requested(llm_node))
                 if batch_mode or batch_resp is not None:
                     response = None
                     break

@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Link, useNavigate, useParams } from 'react-router-dom';
+import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
 import api from '../api';
 import MarkdownBody from '../components/MarkdownBody';
 import BubbleKebabMenu from '../components/BubbleKebabMenu';
@@ -52,6 +52,10 @@ const tagStyle = {
 function ReferenceDetailPage() {
   const { id } = useParams();
   const navigate = useNavigate();
+  // Opened from a card in a thread (a gleaning, #435): the link back to it.
+  const location = useLocation();
+  const backTo = location.state && location.state.backTo;
+  const backLabel = (location.state && location.state.backLabel) || 'Back to the thread';
   const { addToast } = useToast();
   const [item, setItem] = useState(null);
   const [error, setError] = useState('');
@@ -157,6 +161,18 @@ function ReferenceDetailPage() {
 
   return (
     <div style={{ padding: '8px 12px 12px' }}>
+      {backTo && (
+        <Link
+          to={backTo}
+          style={{
+            display: 'inline-block', padding: '4px 0', marginBottom: '6px',
+            fontFamily: 'var(--sans)', fontSize: '0.86rem', fontWeight: 300,
+            color: 'var(--text-muted)', textDecoration: 'none',
+          }}
+        >
+          {`‹ ${backLabel}`}
+        </Link>
+      )}
       <div style={{
         display: 'flex',
         justifyContent: 'space-between',

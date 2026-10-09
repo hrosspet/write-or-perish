@@ -3,7 +3,7 @@ import SwiftUI
 /// The item helpers of `utils/references.js`, over the app's model.
 extension ExternalItem {
     var sourceLabel: String { ReferenceUtils.sourceLabel(source: source, url: url) }
-    var authorLabel: String? { ReferenceUtils.authorLabel(source: source, handle: authorHandle) }
+    var authorLabel: String? { ReferenceUtils.authorLabel(source: source, handle: authorHandle, name: authorName) }
     var tweetId: String? { ReferenceUtils.tweetId(source: source, externalId: externalId) }
     var youtubeVideo: ReferenceUtils.YouTubeVideo? { ReferenceUtils.youtubeVideo(source: source, url: url) }
     var bodyWithoutTitle: String { ReferenceUtils.bodyWithoutTitle(title: title, content: content ?? "") }

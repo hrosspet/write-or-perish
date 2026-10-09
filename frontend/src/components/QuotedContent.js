@@ -30,7 +30,7 @@ const COMBINED_PATTERN = /(\{quote_ext:\d+\}|\{quote:\d+\}|\{user_(?:profile|tod
  *     external-reference quotes are recommendations and get the good /
  *     bad verdict; a user's own quotes get only the read toggle (#363)
  */
-const QuotedContent = ({ content, quotes, externalQuotes, contextArtifacts, onQuoteClick, onCheckboxToggle, onAddTask, onExternalReadChange, onExternalFeedbackChange, nodeId, showRecommendationFeedback = false }) => {
+const QuotedContent = ({ content, quotes, externalQuotes, contextArtifacts, onQuoteClick, onCheckboxToggle, onAddTask, onExternalReadChange, onExternalFeedbackChange, nodeId, showRecommendationFeedback = false, referenceBackLabel }) => {
   if (!content) {
     return null;
   }
@@ -134,6 +134,7 @@ const QuotedContent = ({ content, quotes, externalQuotes, contextArtifacts, onQu
                 onReadChange={onExternalReadChange}
                 onFeedbackChange={onExternalFeedbackChange}
                 showRecommendationFeedback={showRecommendationFeedback}
+                backLabel={referenceBackLabel}
               />
             </div>
           );

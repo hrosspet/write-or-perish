@@ -61,3 +61,14 @@ test('a blank thread name falls back to the title', () => {
   render(<Bubble node={card({ thread_name: '   ' })} />);
   expect(screen.getByText('2026-09-05 12:12:01 Voice note')).toBeInTheDocument();
 });
+
+test("a reply's quote markers are left out of its card (#435: a gleaning above a Glean again)", () => {
+  render(<Bubble node={card({
+    preview: undefined,
+    content: 'Two tweets today.\n\nWhy this one. {quote_ext:12}\n\nAnd {quote:7} this one.',
+  })} />);
+  expect(screen.getByText('Two tweets today.')).toBeInTheDocument();
+  const body = screen.getByText(/Why this one\./);
+  expect(body.textContent).not.toMatch(/\{quote/);
+  expect(body.textContent).toMatch(/And this one\./);
+});
