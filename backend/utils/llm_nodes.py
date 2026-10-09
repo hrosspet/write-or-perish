@@ -429,18 +429,19 @@ def voice_turn_refusal(user, parent_node=None, ai_usage=None):
 
 
 def _read_turn_model(parent, owner, model_id, chain):
-    """The model a read turn under *parent* runs on: *model_id* while it
-    is a read model that keeps the owner on their provider (an admin may
-    name any read model), else resolve_read_model's choice for the owner
-    — never a model of another provider (#435)."""
-    from backend.utils.glean import model_provider, read_model_fits
-    provider = glean_provider(parent, owner, chain=chain)
-    if is_read_model(model_id) and read_model_fits(owner, model_id, provider):
+    """The model a read turn under *parent* runs on (#435): an admin's
+    named read model as named (their own evaluations, any provider);
+    for everyone else the server's choice, resolve_read_model for the
+    owner — a read model of their own provider, whatever model the
+    request carried."""
+    from backend.utils.glean import model_provider
+    if getattr(owner, "is_admin", False) and is_read_model(model_id):
         return model_id
     new_model_id = resolve_read_model(parent, chain=chain, user=owner)[0]
-    current_app.logger.info(
-        "Reply under node %s is a read: model %s -> %s (provider %s)",
-        parent.id, model_id, new_model_id, model_provider(new_model_id))
+    if new_model_id != model_id:
+        current_app.logger.info(
+            "Reply under node %s is a read: model %s -> %s (provider %s)",
+            parent.id, model_id, new_model_id, model_provider(new_model_id))
     return new_model_id
 
 
@@ -470,10 +471,9 @@ def create_llm_placeholder(parent_node_id, model_id, human_owner_id,
     A reply that is a read (a glean, #435) is a live call: it gets the
     READ_LIVE_MARKER, which the task reads, unless *read_live* is False
     (the admin's /read/start experiments, which go through the Batch
-    API). It runs on a read model of the owner's provider: a model of
-    another provider is replaced by the provider's own (an admin's
-    explicit choice excepted, utils/glean.read_model_fits), never the
-    other way round.
+    API). It runs on the read model the server chooses for the owner, of
+    their own provider (an admin's named read model excepted,
+    _read_turn_model), never another provider's.
 
     *client* ('ios' / 'web', utils/client_platform) is the app the user
     is talking from. It defaults to the current request's; a caller with
@@ -543,7 +543,11 @@ def create_llm_placeholder(parent_node_id, model_id, human_owner_id,
         unrestricted_allowed=bool(owner and owner.has_unrestricted_export),
         user_id=human_owner_id,
     )
-    check_ca_tweets_access(parent_content, owner)
+    # {ca_tweets} in the parent: a glean's own read prompt for a user who
+    # gleans, anything for an admin (#435).
+    check_ca_tweets_access(
+        parent_content, owner,
+        from_read_prompt=chain.keys.get(parent.id) in READ_PROMPT_KEYS)
 
     # The model the reply will actually run on (#355). A read runs only on
     # a read model: the read routes validate the one they are given, and

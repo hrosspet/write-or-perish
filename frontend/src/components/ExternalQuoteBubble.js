@@ -166,6 +166,7 @@ const ExternalQuoteBubble = ({ quote, nodeId, onReadChange, onFeedbackChange, sh
       onClick={mine ? onCardClick : undefined}
       onKeyDown={mine ? onCardKey : undefined}
       tabIndex={mine ? 0 : undefined}
+      role={mine ? 'link' : undefined}
       aria-label={mine ? 'Open this reference in Loore' : undefined}
     >
       <div className="ext-quote-byline">

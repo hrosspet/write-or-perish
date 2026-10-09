@@ -483,15 +483,19 @@ function VoiceSession({ recovery, blocked, threadId, onAiUsageRefused, onFinishI
   // The glean runs live at the provider; this page waits for it and then
   // opens it in text mode (finished or failed: the thread page shows
   // either). Never handed to the voice session, so it is never spoken.
-  const { status: gleanStatus } = useAsyncTaskPolling(
+  const { status: gleanStatus, error: gleanPollError } = useAsyncTaskPolling(
     gleanNodeId ? `/nodes/${gleanNodeId}/llm-status` : null,
     { enabled: !!gleanNodeId, interval: 2000 },
   );
+  // A poll that gives up (errors, or the 30-minute cap) opens the thread
+  // page too, which keeps watching the glean: the Voice screen never
+  // stays on "Gleaning" with its buttons disabled.
   useEffect(() => {
-    if (gleanNodeId && ['completed', 'failed', 'cancelled'].includes(gleanStatus)) {
+    if (gleanNodeId && (gleanPollError
+        || ['completed', 'failed', 'cancelled'].includes(gleanStatus))) {
       navigate(`/node/${gleanNodeId}`);
     }
-  }, [gleanNodeId, gleanStatus, navigate]);
+  }, [gleanNodeId, gleanStatus, gleanPollError, navigate]);
 
   const gleaning = gleanStarting || !!gleanNodeId;
   const gleanReady = !!gleanAnchor && !gleaning && isOnline;

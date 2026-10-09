@@ -119,6 +119,23 @@ def glean_enabled(user):
     return glean_default_on(user)
 
 
+def read_turn_allowed(user, ca_node):
+    """Whether the completion task may run a read for *user* whose
+    {ca_tweets} sits on *ca_node*: an admin always (the PoC's
+    experiments); anyone else only from one of the read prompts a glean
+    attaches, and only while they glean. Checked on the EFFECTIVE
+    placeholder, which can sit higher up the thread than the parent the
+    reply's pre-flight sees (#435 review)."""
+    from backend.utils.ca_feed import READ_PROMPT_KEYS
+    if user is None:
+        return False
+    if getattr(user, "is_admin", False):
+        return True
+    return (ca_node is not None
+            and ca_node.get_prompt_key() in READ_PROMPT_KEYS
+            and glean_enabled(user))
+
+
 def glean_user_fields(user):
     """The current-user payload's Glean fields. available = inside the
     gate (Account shows the switch); enabled = the switch's effective
@@ -202,12 +219,3 @@ def glean_model_for_provider(provider):
     if fallback and provider and model_provider(fallback) == provider:
         return fallback
     raise GleanModelUnavailable(provider)
-
-
-def read_model_fits(user, model_id, provider):
-    """Whether a read on *model_id* keeps the user on *provider*. An
-    admin may name any read model (their own evaluations); defaults never
-    cross providers for anyone."""
-    if getattr(user, "is_admin", False):
-        return True
-    return model_provider(model_id) == provider

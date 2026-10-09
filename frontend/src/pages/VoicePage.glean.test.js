@@ -47,11 +47,12 @@ jest.mock('../hooks/useVoiceSession', () => ({
 let mockThreadParent = null;
 // The glean's own poll: what the provider has done so far.
 let mockGleanStatus = null;
+let mockGleanError = null;
 const mockPoll = jest.fn();
 jest.mock('../hooks/useAsyncTaskPolling', () => ({
   useAsyncTaskPolling: (endpoint, options) => {
     mockPoll(endpoint, options);
-    return { status: endpoint ? mockGleanStatus : null, data: null, error: null };
+    return { status: endpoint ? mockGleanStatus : null, data: null, error: endpoint ? mockGleanError : null };
   },
 }));
 jest.mock('../components/OfflineBanner', () => () => null);
@@ -90,6 +91,7 @@ beforeEach(() => {
   mockSessionOptions = null;
   mockThreadParent = null;
   mockGleanStatus = null;
+  mockGleanError = null;
   mockPhase = 'ready';
   mockGet.mockImplementation((url) => {
     if (url === '/drafts/interrupted') return Promise.resolve({ data: [] });
@@ -136,6 +138,16 @@ test('when the gleaning is ready the view switches to text mode', async () => {
 
   mockGleanStatus = 'completed';
   // The next render picks the finished poll up (here: a state change).
+  act(() => { mockSessionOptions.onLLMComplete(42, ''); });
+  await waitFor(() => expect(screen.getByText('Thread page 57')).toBeInTheDocument());
+});
+
+test('a poll that gives up opens the thread page instead of staying on "Gleaning"', async () => {
+  renderAt('/voice?parent=42&glean=1');
+  await screen.findByText("What's on your mind?");
+  mockPost.mockResolvedValue({ data: { prompt_node_id: 56, llm_node_id: 57 } });
+  await act(async () => { fireEvent.click(glean()); });
+  mockGleanError = 'Polling timeout - task took too long';
   act(() => { mockSessionOptions.onLLMComplete(42, ''); });
   await waitFor(() => expect(screen.getByText('Thread page 57')).toBeInTheDocument());
 });
