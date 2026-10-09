@@ -268,9 +268,10 @@ function NavBar({ onNewEntryClick }) {
         </div>
         )}
 
-        {/* Reflect — the home page, same destination as the logo. The logo
-            alone wasn't reading as a link, so the way back to the three
-            writing modes gets a named button too. */}
+        {/* Home — the home page, same destination as the logo. The logo
+            alone wasn't reading as a link, so the way back gets a named
+            button too. Named "Home", not "Reflect" (#436, Peter
+            2026-10-09): the home page now has a Reflect card of its own. */}
         {(!user || user.approved) && (
           <Link
             to="/"
@@ -282,7 +283,7 @@ function NavBar({ onNewEntryClick }) {
                   : "var(--text-muted)",
             }}
           >
-            Reflect
+            Home
           </Link>
         )}
 

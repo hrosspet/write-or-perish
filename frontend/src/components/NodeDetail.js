@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useLayoutEffect, useRef, useCallback } from "react";
-import { useNavigate, useSearchParams, useLocation } from "react-router-dom";
+import { useNavigate, useSearchParams, useLocation, Link } from "react-router-dom";
 import { FaThumbtack, FaMicrophone, FaSpinner } from "react-icons/fa";
 import NodeFooter from "./NodeFooter";
 import SpeakerIcon from "./SpeakerIcon";
@@ -1568,6 +1568,16 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
             loaded={picksLoaded}
             onMarkedAll={handlePicksMarkedAll}
           />
+        )}
+        {/* The way back to the home page's cards (#436 mockup). */}
+        {gleaningDone && isOwner && (
+          <Link
+            to="/"
+            className="home-purpose-btn"
+            style={{ marginTop: '14px', textDecoration: 'none' }}
+          >
+            Back to Home
+          </Link>
         )}
         <ToolActionsTaken
           toolCallsMeta={node.tool_calls_meta}
