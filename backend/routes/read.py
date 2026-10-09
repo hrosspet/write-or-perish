@@ -87,8 +87,10 @@ def _resolve_model(anchor_node):
     evaluations); a model a non-admin's request names is ignored."""
     from backend.utils.glean import GleanModelUnavailable
     data = request.get_json(silent=True) or {}
+    # The role of this request's user (Flask-Login loads it per request);
+    # anything but an explicit admin gets the server's choice.
     model_id = data.get("model") if getattr(
-        current_user, "is_admin", False) else None
+        current_user, "is_admin", False) is True else None
     if not model_id:
         try:
             return resolve_read_model(anchor_node, user=current_user)[0], None

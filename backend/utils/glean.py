@@ -119,21 +119,34 @@ def glean_enabled(user):
     return glean_default_on(user)
 
 
+def is_glean_prompt_node(node):
+    """A read prompt node as a glean attaches it: keyed as a read prompt
+    AND still linked to a read prompt version that Loore wrote (from the
+    file default), not one a user wrote. A per-thread edit removes the
+    link and makes the text the user's own; a saved user version is the
+    user's text too. Either way it is no longer Glean's prompt. Fails
+    closed: no node, no link or an unknown version is not one."""
+    from backend.utils.ca_feed import READ_PROMPT_KEYS
+    if node is None or node.get_prompt_key() not in READ_PROMPT_KEYS:
+        return False
+    prompt = node.get_artifact("prompt")
+    return (prompt is not None
+            and prompt.prompt_key in READ_PROMPT_KEYS
+            and prompt.generated_by == "default")
+
+
 def read_turn_allowed(user, ca_node):
     """Whether the completion task may run a read for *user* whose
     {ca_tweets} sits on *ca_node*: an admin always (the PoC's
-    experiments); anyone else only from one of the read prompts a glean
-    attaches, and only while they glean. Checked on the EFFECTIVE
-    placeholder, which can sit higher up the thread than the parent the
-    reply's pre-flight sees (#435 review)."""
-    from backend.utils.ca_feed import READ_PROMPT_KEYS
+    experiments); anyone else only from a read prompt as a glean attaches
+    it (is_glean_prompt_node), and only while they glean. Checked on the
+    EFFECTIVE placeholder, which can sit higher up the thread than the
+    parent the reply's pre-flight sees (#435 review)."""
     if user is None:
         return False
     if getattr(user, "is_admin", False):
         return True
-    return (ca_node is not None
-            and ca_node.get_prompt_key() in READ_PROMPT_KEYS
-            and glean_enabled(user))
+    return is_glean_prompt_node(ca_node) and glean_enabled(user)
 
 
 def glean_user_fields(user):
@@ -208,14 +221,14 @@ def model_provider(model_id):
 
 
 def glean_model_for_provider(provider):
-    """The configured glean model of *provider*; READ_DEFAULT_MODEL when no
-    glean model is configured and that one is of the same provider.
-    Raises GleanModelUnavailable otherwise: never another provider's."""
+    """The configured glean model of *provider* (GLEAN_MODEL_ANTHROPIC /
+    GLEAN_MODEL_OPENAI), when it is a read model of that provider. Raises
+    GleanModelUnavailable otherwise: no other provider's model and no
+    other default is ever used in its place."""
     key = GLEAN_MODEL_KEYS.get(provider)
     model_id = current_app.config.get(key) if key else None
-    if model_id:
-        return model_id
-    fallback = current_app.config.get("READ_DEFAULT_MODEL")
-    if fallback and provider and model_provider(fallback) == provider:
-        return fallback
-    raise GleanModelUnavailable(provider)
+    cfg = current_app.config.get("SUPPORTED_MODELS", {}).get(model_id) or {}
+    if (not model_id or not cfg.get("read") or cfg.get("deprecated")
+            or cfg.get("provider") != provider):
+        raise GleanModelUnavailable(provider)
+    return model_id

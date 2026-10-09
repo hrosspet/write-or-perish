@@ -271,26 +271,37 @@ def resolve_read_model(anchor_node, chain=None, user=None):
     into the next read. There is no per-user read preference (#355).
 
     With *user* (every glean, #435) the read stays on the provider of the
-    user's chat model (glean_provider): an earlier read only counts when
-    it ran on that provider, and the default is that provider's glean
-    model (GLEAN_MODEL_ANTHROPIC / GLEAN_MODEL_OPENAI, "provider_default").
-    Raises GleanModelUnavailable when the provider has none. Without a
-    user, READ_DEFAULT_MODEL ("default")."""
-    from backend.utils.glean import model_provider
+    user's chat model (glean_provider) and the server chooses: for a
+    non-admin always that provider's glean model (GLEAN_MODEL_ANTHROPIC /
+    GLEAN_MODEL_OPENAI, "provider_default"), whatever an earlier read ran
+    on; for an admin an earlier read of the same provider first. Raises
+    GleanModelUnavailable when the provider can't be resolved or has no
+    glean model: never another provider's, never READ_DEFAULT_MODEL.
+    Without a user, READ_DEFAULT_MODEL ("default")."""
+    from backend.utils.glean import (
+        GleanModelUnavailable, glean_model_for_provider, model_provider,
+    )
     chain = chain or _Chain(anchor_node)
-    provider = (glean_provider(anchor_node, user, chain=chain)
-                if user is not None else None)
-    for node in chain.llm_replies():
-        if node.id not in chain.reads:
-            continue
-        if is_read_model(node.llm_model) and (
-                provider is None or model_provider(node.llm_model) == provider):
-            return node.llm_model, "predecessor"
-        break
-    if provider is not None:
-        from backend.utils.glean import glean_model_for_provider
-        return glean_model_for_provider(provider), "provider_default"
-    return current_app.config["READ_DEFAULT_MODEL"], "default"
+    if user is None:
+        for node in chain.llm_replies():
+            if node.id not in chain.reads:
+                continue
+            if is_read_model(node.llm_model):
+                return node.llm_model, "predecessor"
+            break
+        return current_app.config["READ_DEFAULT_MODEL"], "default"
+    provider = glean_provider(anchor_node, user, chain=chain)
+    if not provider:
+        raise GleanModelUnavailable(provider)
+    if getattr(user, "is_admin", False) is True:
+        for node in chain.llm_replies():
+            if node.id not in chain.reads:
+                continue
+            if (is_read_model(node.llm_model)
+                    and model_provider(node.llm_model) == provider):
+                return node.llm_model, "predecessor"
+            break
+    return glean_model_for_provider(provider), "provider_default"
 
 
 def pick_model_for_generation(parent_node, user):
@@ -435,7 +446,12 @@ def _read_turn_model(parent, owner, model_id, chain):
     owner — a read model of their own provider, whatever model the
     request carried."""
     from backend.utils.glean import model_provider
-    if getattr(owner, "is_admin", False) and is_read_model(model_id):
+    # The admin's choice holds only for a reply of their own under a node
+    # of their own: an admin never picks a model for someone else.
+    owns_parent = owner is not None and (
+        (parent.human_owner_id or parent.user_id) == owner.id)
+    if (getattr(owner, "is_admin", False) is True and owns_parent
+            and is_read_model(model_id)):
         return model_id
     new_model_id = resolve_read_model(parent, chain=chain, user=owner)[0]
     if new_model_id != model_id:
@@ -545,9 +561,9 @@ def create_llm_placeholder(parent_node_id, model_id, human_owner_id,
     )
     # {ca_tweets} in the parent: a glean's own read prompt for a user who
     # gleans, anything for an admin (#435).
+    from backend.utils.glean import is_glean_prompt_node
     check_ca_tweets_access(
-        parent_content, owner,
-        from_read_prompt=chain.keys.get(parent.id) in READ_PROMPT_KEYS)
+        parent_content, owner, from_read_prompt=is_glean_prompt_node(parent))
 
     # The model the reply will actually run on (#355). A read runs only on
     # a read model: the read routes validate the one they are given, and

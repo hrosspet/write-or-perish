@@ -133,9 +133,12 @@ def get_prompt(prompt_key):
 def _admin_prompt_refused(prompt_key):
     """A 403 when a non-admin tries to change an admin prompt (the read
     prompts, #435): a user's saved version would run on every glean of
-    theirs. The list route already hides these from non-admins."""
-    if (PROMPT_DEFAULTS[prompt_key].get('admin')
-            and not getattr(current_user, "is_admin", False)):
+    theirs. The list route already hides these from non-admins. Reads the
+    role of the request's user, loaded for this request; anything but an
+    explicit admin is refused."""
+    meta = PROMPT_DEFAULTS.get(prompt_key) or {}
+    if meta.get('admin', False) is not False and (
+            getattr(current_user, "is_admin", False) is not True):
         return jsonify({"error": "This prompt can't be changed."}), 403
     return None
 
@@ -278,6 +281,13 @@ def revert_prompt(prompt_key, version_id):
         return jsonify({"error": "Unauthorized"}), 403
     if old_prompt.prompt_key != prompt_key:
         return jsonify({"error": "Version does not belong to this prompt"}), 400
+    # The restored text passes the same {ca_tweets} check as a save: an
+    # older version must not bring back what a save refuses (#435).
+    from backend.utils.placeholders import check_ca_tweets_access
+    try:
+        check_ca_tweets_access(old_prompt.get_content(), current_user)
+    except UserExportValidationError as e:
+        return jsonify({"error": str(e)}), 400
 
     meta = PROMPT_DEFAULTS[prompt_key]
     new_prompt = UserPrompt(
@@ -302,6 +312,9 @@ def revert_to_default(prompt_key):
     """Create a new version from the file default."""
     if prompt_key not in PROMPT_DEFAULTS:
         return jsonify({"error": "Unknown prompt key"}), 404
+    refused = _admin_prompt_refused(prompt_key)
+    if refused is not None:
+        return refused
 
     content = load_default_prompt(prompt_key)
     if not content:
@@ -334,6 +347,9 @@ def acknowledge_default(prompt_key):
     """
     if prompt_key not in PROMPT_DEFAULTS:
         return jsonify({"error": "Unknown prompt key"}), 404
+    refused = _admin_prompt_refused(prompt_key)
+    if refused is not None:
+        return refused
 
     latest = UserPrompt.query.filter_by(
         user_id=current_user.id, prompt_key=prompt_key
