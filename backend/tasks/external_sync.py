@@ -38,7 +38,12 @@ def _upsert_items(user_id, source, items):
     That counts as created — it is new to the references, and the
     bookmark sync's early stop must not read it as a known bookmark."""
     from backend.models import TWEET_SOURCES
+    from backend.utils.hidden_rows import reclaim_external_items
     from backend.utils.reference_rows import pick_rows_by_tweet, save_pick_row
+    # A reference "Delete all my writing" hid and the user imports again
+    # is theirs again (#268), not a duplicate of a hidden row.
+    items = list(items)
+    reclaim_external_items(user_id, [i["external_id"] for i in items])
     existing = {
         row[0] for row in db.session.query(ExternalItem.external_id).filter_by(
             user_id=user_id, source=source).all()
@@ -208,10 +213,19 @@ def _mark_revoked(account, why):
              bind=True)
 def sync_twitter_bookmarks(self, user_id, max_items=800):
     with flask_app.app_context():
+        from backend.utils.hidden_rows import writing_on_hold
+        if writing_on_hold(user_id):
+            # "Delete all my writing" is waiting or running (#268): the
+            # sync would bring back the saved references it hid.
+            return {"status": "on_hold"}
         account = ExternalAccount.query.filter_by(
             user_id=user_id, provider="twitter").first()
         if account is None or not account.get_access_token():
             return {"status": "not_connected"}
+        if account.user is not None and account.user.deleted_at is not None:
+            # A deleted account in its 30 days (#269): a sync queued
+            # before the deletion does not call X for it.
+            return {"status": "account_deleted"}
         if account.revoked_at is not None:
             return {"status": "revoked"}
 
@@ -416,8 +430,13 @@ def sync_all_twitter_bookmarks():
             ExternalAccount.revoked_at.is_(None),
         ).all()
         dispatched = 0
+        from backend.utils.hidden_rows import writing_on_hold
         for account in accounts:
+            if account.user is None or account.user.deleted_at is not None:
+                continue   # a deleted account in its grace period (#269)
             if user_local_hour(account.user) != NIGHTLY_SYNC_LOCAL_HOUR:
+                continue
+            if writing_on_hold(account.user_id):   # #268
                 continue
             if (account.last_synced_at
                     and now - account.last_synced_at < NIGHTLY_SYNC_MIN_GAP):

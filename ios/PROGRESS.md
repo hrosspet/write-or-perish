@@ -530,6 +530,8 @@ doc §6. **parity** = same behaviour (a web view where §6 says so); **deviation
 | 26 | `/share` | `ShareView` | parity | "Not available." without the flag |
 | 27 | `/commons` | Commons tab (flag) | deviation | cards open the thread by id; never opened locally (staging) |
 | 28 | `/account` | `AccountView` | deviation | Connect X in a cookie web view; paste the confirmation link; real X OAuth unseen |
+| 28a | `/confirm-account-deletion` | `ConfirmAccountDeletionView` (paste sheet on Account) | deviation | the link is pasted, as for `/confirm-email` (#269) |
+| 28b | `/account-restore`, `/account-deleted` | `AccountRestoreView`, `AccountDeletedView` (root screens) | parity | the restore question follows a sign-in by link or X (#269) |
 | 29 | `/node/:id` (member) | `ThreadView` | deviation | iOS menus, narrower indents (Deviations, M2); visitors sign in first |
 | 29a | `/node/:id` admin extras | — | **gap** | `SemanticNeighbors` rail and read rerun controls not built (admin only) |
 | 30 | `/admin` | authenticated web view (More, admins) | parity | opened M5 as a non-admin (signed in, data refused); unseen as an admin |
@@ -903,3 +905,21 @@ From Peter's first run on his iPhone. 395 unit tests pass (one skipped), 5 of th
   stay words. The row is a `FlowLayout`, so it wraps instead of squeezing labels.
 - The model picker next to LLM Response / Read is as wide as the model's name (the web's inline button),
   not 200 pt.
+
+**#269 Account deletion (merges after the backend PR #464)**
+- Account → "Delete my account" (shown when the server sends `account_deletion`): the web's dialog text in a
+  sheet, the username typed, "Delete my account" / "Email me the confirmation link" and "Keep my account".
+  An X-only account is scheduled at once and lands on "Your account is scheduled for deletion". An email
+  account gets the link; the section then explains how to copy it from the email and offers "Paste the link"
+  ("I already have a confirmation link" stays available). The pasted link opens the web's confirm question
+  in the app's session (`POST /api/account/delete/confirm`). The waitlist screen shows the same section
+  (#464 lets an unapproved account through to the deletion and restore routes).
+- A sign-in into an account in its grace period (magic link landing, or the X web view landing on
+  `/account-restore`) shows the native restore question instead of loading the user: "Restore my account"
+  signs in as after any sign-in (Reflect, the server's `next` is not followed); "Keep it deleted" and
+  "Back to Loore" return to sign-in. 401s from the signed-out session change nothing on these screens.
+- Checked in the simulator against #464's backend on sqlite: X-only deletion, email deletion through the
+  pasted link, restore after a magic-link sign-in, keep it deleted, a waitlisted X account deleting itself
+  from the waitlist screen. Not seen: the X sign-in landing on the
+  restore question (needs real X), and a sign-in surviving a relaunch (the unsigned simulator build keeps
+  nothing in the Keychain, for any sign-in).

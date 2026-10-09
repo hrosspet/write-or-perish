@@ -310,7 +310,7 @@ Release build they are compiled out.
 ```sh
 cd ios && xcodegen
 xcodebuild -project Loore.xcodeproj -scheme Loore \
-  -destination 'platform=iOS Simulator,name=iPhone 17' test      # 451 unit tests
+  -destination 'platform=iOS Simulator,name=iPhone 17' test      # 487 unit tests
 python3 ios/scripts/check_terms_text.py                          # Terms text == TermsModal.js
 ```
 

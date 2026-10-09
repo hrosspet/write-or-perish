@@ -13,8 +13,10 @@ usual (since the JSON shape varies per endpoint).
 from typing import Optional
 
 from backend.utils.privacy import (
+    author_gone,
     can_user_access_node,
     can_user_view_tombstone,
+    owner_hidden_since,
 )
 from backend.utils.timefmt import iso_utc
 
@@ -36,13 +38,20 @@ def serialize_node_status(node, viewer_id: int) -> Optional[dict]:
     call site's responsibility, not this helper's. Breadcrumb and
     inline-quote paths always include.
     """
-    if getattr(node, "deleted_at", None) is not None:
+    # The author deleted the account and it is in its grace period
+    # (#269): shown as deleted from then, like any tombstone, so other
+    # people's replies below it stay in their threads.
+    deleted_at = getattr(node, "deleted_at", None) or owner_hidden_since(node)
+    if deleted_at is not None:
         if can_user_view_tombstone(node, viewer_id):
             return {
                 "id": node.id,
                 "deleted": True,
-                "deleted_at": iso_utc(node.deleted_at),
-                "username": node.user.username if node.user else None,
+                "deleted_at": iso_utc(deleted_at),
+                # No name once the author's account is deleted or being
+                # deleted (#269): neither theirs nor loore-erased.
+                "username": (None if author_gone(node)
+                             else node.user.username if node.user else None),
                 "node_type": node.node_type,
                 "created_at": iso_utc(node.created_at),
             }

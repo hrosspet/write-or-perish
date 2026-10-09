@@ -25,6 +25,12 @@ enum APIPath {
     static let termsAccept = "/api/terms/accept"
     static let health = "/api/health"
 
+    // MARK: Account deletion and restore (#269)
+    static let accountDelete = "/api/account/delete"
+    static let accountDeleteConfirm = "/api/account/delete/confirm"
+    static let accountRestore = "/api/account/restore"
+    static let accountRestoreDecline = "/api/account/restore/decline"
+
     // MARK: Updates channel
     static let updates = "/api/updates"
     static func changelog(_ id: String, action: String) -> String {

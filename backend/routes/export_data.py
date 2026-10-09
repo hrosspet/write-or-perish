@@ -1,8 +1,9 @@
 from flask import Blueprint, jsonify, Response, request, current_app
 from flask_login import login_required, current_user
+from backend.utils.hidden_rows import shown_description
 from backend.models import (
     Node, NodeVersion, UserProfile, UserPrompt, UserTodo,
-    UserArtifact, Thread,
+    UserArtifact,
 )
 from backend.extensions import db
 from backend.utils.tokens import approximate_token_count
@@ -31,13 +32,16 @@ def export_data():
             "id": current_user.id,
             "twitter_id": current_user.twitter_id,
             "username": current_user.username,
-            "description": current_user.description,
+            "description": shown_description(current_user),
             "created_at": iso_utc(current_user.created_at),
         },
         "nodes": [],
         "versions": []
     }
-    nodes = Node.query.filter_by(user_id=current_user.id).all()
+    # Deleted entries are not exported, including the ones a waiting
+    # "Delete all my writing" hid (#268).
+    nodes = Node.query.filter_by(user_id=current_user.id,
+                                 deleted_at=None).all()
     for node in nodes:
         user_data["nodes"].append({
             "id": node.id,
@@ -49,7 +53,8 @@ def export_data():
             "created_at": iso_utc(node.created_at),
             "updated_at": iso_utc(node.updated_at)
         })
-    versions = NodeVersion.query.join(Node, Node.id == NodeVersion.node_id).filter(Node.user_id == current_user.id).all()
+    versions = NodeVersion.query.join(Node, Node.id == NodeVersion.node_id).filter(
+        Node.user_id == current_user.id, Node.deleted_at.is_(None)).all()
     for version in versions:
         user_data["versions"].append({
             "id": version.id,
@@ -61,9 +66,15 @@ def export_data():
 
 
 def _node_author_label(node):
-    """Return a compact author label like 'User (alice)' or 'AI (claude-opus-4.6)'."""
+    """Return a compact author label like 'User (alice)' or 'AI (claude-opus-4.6)'.
+
+    No name when the author deleted the account (in its grace period or
+    deleted, #269): their placeholders name nobody, as in threads."""
+    from backend.utils.privacy import author_gone
     if node.node_type == "llm":
         return f"AI ({node.llm_model})" if node.llm_model else "AI (unknown)"
+    if author_gone(node):
+        return "User"
     author = node.user.username if node.user else "Unknown"
     return f"User ({author})"
 
@@ -189,15 +200,18 @@ def iter_with_dek_prefetch(roots, window=DEK_PREFETCH_WINDOW):
 
 
 def _filtered_children(node, filter_ai_usage, created_before, included_ids,
-                       keep_tombstones):
+                       keep_tombstones, user_id=None):
     """Children of *node* that should render, sorted chronologically.
 
     keep_tombstones: when a budget pre-selection (included_ids) is
     active, tombstones pass through even if not pre-selected — they take
     no real budget tokens and dropping them creates discontinuities
-    (§5a). The inaccessible-placeholder branch does not extend this
-    courtesy, matching the historical behavior.
+    (§5a). A node hidden with its owner's deleted account (#269) counts
+    as a tombstone for *user_id*, as it will after the purge. The
+    inaccessible-placeholder branch does not extend this courtesy,
+    matching the historical behavior.
     """
+    from backend.utils.privacy import shown_as_deleted
     children = node.children
     if filter_ai_usage:
         children = [c for c in children if c.ai_usage in AI_ALLOWED]
@@ -207,7 +221,7 @@ def _filtered_children(node, filter_ai_usage, created_before, included_ids,
         if keep_tombstones:
             children = [
                 c for c in children
-                if c.id in included_ids or c.deleted_at is not None
+                if c.id in included_ids or shown_as_deleted(c, user_id)
             ]
         else:
             children = [c for c in children if c.id in included_ids]
@@ -468,7 +482,14 @@ def format_node_tree(
     Returns:
         str: Formatted text representation of the node tree
     """
-    from backend.utils.privacy import can_user_view_tombstone
+    from backend.utils.privacy import can_user_view_tombstone, shown_as_deleted
+
+    def _deleted(n):
+        # Soft-deleted, or hidden with its owner's deleted account
+        # (#269): the same tombstone either way, as after the purge.
+        if user_id is None:
+            return n.deleted_at is not None
+        return shown_as_deleted(n, user_id)
 
     if processed_nodes is None:
         processed_nodes = set()
@@ -490,7 +511,7 @@ def format_node_tree(
             # caller is responsible for the pre-deletion-access check on
             # the entry node; child tombstones are checked at push time
             # below via can_user_view_tombstone.
-            if current.deleted_at is not None:
+            if _deleted(current):
                 kind = "tombstone"
 
         if kind == "node":
@@ -500,14 +521,14 @@ def format_node_tree(
                 licence=licence, filter_ai_usage=filter_ai_usage))
             children = _filtered_children(
                 current, filter_ai_usage, created_before, included_ids,
-                keep_tombstones=True)
+                keep_tombstones=True, user_id=user_id)
             child_frames = []
             for i, child in enumerate(children):
                 child_index = f"{path}.{i+1}"
                 # Mark branches (when there are multiple children)
                 if len(children) > 1 and i > 0:
                     child_frames.append(("text", "---\n**BRANCH**\n---\n\n"))
-                if child.deleted_at is not None:
+                if _deleted(child):
                     # Tombstone: render only with pre-deletion access;
                     # otherwise skip (don't leak structural "something
                     # is here").
@@ -541,7 +562,7 @@ def format_node_tree(
         processed_nodes.add(current.id)
         children = _filtered_children(
             current, filter_ai_usage, created_before, included_ids,
-            keep_tombstones=keep_tombstones)
+            keep_tombstones=keep_tombstones, user_id=user_id)
         stack.extend(reversed([
             ("node", gc, f"{path}.{j+1}")
             for j, gc in enumerate(children)
@@ -1958,24 +1979,7 @@ def get_profile_progress():
     }), 200
 
 
-# Delete all of the current user's data from our app.
-@export_bp.route("/delete_my_data", methods=["DELETE"])
-@login_required
-def delete_my_data():
-    try:
-        # Delete all node versions and thread names first, then nodes.
-        # (The thread FK cascades on Postgres; explicit so it also holds
-        # where FK enforcement is off, e.g. sqlite tests.)
-        own_node_ids = db.session.query(Node.id).filter_by(user_id=current_user.id)
-        NodeVersion.query.filter(
-            NodeVersion.node_id.in_(own_node_ids)
-        ).delete(synchronize_session=False)
-        Thread.query.filter(
-            Thread.root_node_id.in_(own_node_ids)
-        ).delete(synchronize_session=False)
-        Node.query.filter_by(user_id=current_user.id).delete(synchronize_session=False)
-        db.session.commit()
-    except Exception as e:
-        db.session.rollback()
-        return jsonify({"error": "Error deleting data", "details": str(e)}), 500
-    return jsonify({"message": "All your app data has been deleted."}), 200
+# DELETE /api/delete_my_data was removed (#268): it deleted only the
+# user's own node rows, missed imports, AI replies and every dependent
+# table, and failed on Postgres's foreign keys. "Delete all my writing"
+# is DELETE /api/account/data (backend/routes/account_data.py).

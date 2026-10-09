@@ -139,10 +139,28 @@ def _start(prompt_key, parent, privacy_level, model_id, auto_generate=True):
     }), 202
 
 
+# "Delete all my writing" waits or runs (#268): no Read starts, like the
+# other jobs that read the user's writing.
+READ_ON_HOLD_MESSAGE = ("Read is off while your writing waits to be deleted. "
+                        "Restore your writing on the Account page to read "
+                        "again.")
+
+
+def _on_hold_response():
+    from backend.utils.hidden_rows import writing_on_hold
+    if writing_on_hold(current_user.id):
+        return jsonify({"error": READ_ON_HOLD_MESSAGE,
+                        "code": "writing_on_hold"}), 409
+    return None
+
+
 @read_bp.route("/start", methods=["POST"])
 @login_required
 def start_read():
     """A fresh thread: the 'read' prompt as root, the reply under it."""
+    held = _on_hold_response()
+    if held is not None:
+        return held
     if not ca_tweets_allowed(current_user):
         return jsonify({"error": ca_tweets_denied_message()}), 403
     model_id, err = _resolve_model(None)
@@ -164,6 +182,9 @@ def start_read():
 def start_read_from_node(node_id):
     """The 'read_thread' prompt under *node_id*, the reply under that, so
     the archive is read against the whole conversation above."""
+    held = _on_hold_response()
+    if held is not None:
+        return held
     if not ca_tweets_allowed(current_user):
         return jsonify({"error": ca_tweets_denied_message()}), 403
     node = Node.query.get(node_id)
@@ -255,6 +276,9 @@ def rerun_read(node_id):
     or has failed; a completed reply is left alone (it has picks)."""
     if not ca_tweets_allowed(current_user):
         return jsonify({"error": ca_tweets_denied_message()}), 403
+    held = _on_hold_response()
+    if held is not None:
+        return held
     node = Node.query.get(node_id)
     if node is None or node.deleted_at is not None:
         return jsonify({"error": "Node not found"}), 404
