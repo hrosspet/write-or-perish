@@ -128,8 +128,8 @@ Then the button **"Write Profile"**, which opens an empty editor.
 **Purpose:** the concrete, finishable task list, stored as one markdown document with `## Section` headings and `- [ ]` / `- [x]` items. Versioned.
 
 **Endpoints (`backend/routes/todo.py`):**
-- `GET /api/todo/` → `{todo: null}` or `{todo:{id, content, generated_by, tokens_used, created_at, privacy_level, ai_usage, version_number}}`. `version_number` = count of the user's versions.
-- `PATCH /api/todo/ {content}` → **edits the latest version in place** (checkbox toggle, quick-add, per-row add). 400 when blank; 404 "No todo exists to update". Returns `{todo:{…}}`.
+- `GET /api/todo/` → `{todo: null}` or `{todo:{id, content, generated_by, tokens_used, created_at, privacy_level, ai_usage, version_number, revision}}`. `version_number` = count of the user's versions. `revision` names the stored text of that version and changes with every write, in-place `PATCH` included (#430). `PATCH`, `PUT` and revert return the same shape.
+- `PATCH /api/todo/ {content, base_revision?}` → **edits the latest version in place** (checkbox toggle, quick-add, per-row add). 400 when blank; 404 "No todo exists to update". Returns `{todo:{…}}`. With `base_revision` (the web sends it): when the latest version's `revision` differs, nothing is written and the answer is 409 `{error, code:'todo_changed', todo:{…latest}}`. Without it the latest version is overwritten (the iPhone app until it sends one).
 - `PUT /api/todo/ {content, generated_by:'user'}` → **creates a new version** (the Save button in edit mode, and the first create). `ai_usage` = the account default.
 - `GET /api/todo/versions` → `{versions:[{id, generated_by, tokens_used, created_at, version_number}]}`, newest first.
 - `GET /api/todo/versions/<id>` → `{todo:{id, content, …}}`.
@@ -187,7 +187,7 @@ Then the button **"Write Profile"**, which opens an empty editor.
 
 **Loading:** only ArtifactsNav. Errors: logged only.
 
-**Race to be aware of:** `PATCH` overwrites the latest row with whatever the client holds, and there is no version check. An AI todo merge (voice/text "apply to todo" writes a **new** version via Celery) that lands between load and toggle is overwritten with stale content plus the toggle. This happens on the web too. iOS should at least refetch on foreground and after a proposal is applied.
+**Saving in-place edits (#430):** the web saves the tick, the row "+" and quick-add one at a time, in order. Each save applies its edit to the newest list the server returned and sends that list's `revision` as `base_revision`. On a 409 (a todo merge or another device changed the list), it applies the same edit to the `todo` in the answer and saves once more; when the edit's item is not in that list (the merge reworded or removed it), nothing is saved, the newest list is shown and a toast says the item changed since the page loaded. A `PATCH` without `base_revision` still overwrites the latest row with whatever the client holds. The iPhone app re-fetches right before its `PATCH`, which narrows that window but does not close it; sending `base_revision` closes it.
 
 ### 1.4 ArtifactsPage (`pages/ArtifactsPage.js`) + IntentionsView
 **Purpose:** generic named, versioned documents that the AI and the user maintain together. Built-in kinds come first; users can create custom kinds.
