@@ -5,6 +5,7 @@ import NodeFooter from "./NodeFooter";
 import SpeakerIcon from "./SpeakerIcon";
 import DownloadAudioIcon from "./DownloadAudioIcon";
 import ModelSelector from "./ModelSelector";
+import LooreTooltip from "./LooreTooltip";
 import NodeForm from "./NodeForm";
 import ProposalInline, { hasProposalSections, hasShareBlocks, splitProposalText } from "./ProposalInline";
 import SemanticNeighbors from "./SemanticNeighbors";
@@ -145,7 +146,6 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
   const [pinLoading, setPinLoading] = useState(false);
   const [voiceLoading, setVoiceLoading] = useState(false);
   const [readLoading, setReadLoading] = useState(false);
-  const [rerunning, setRerunning] = useState(false);
   const [toolActionsExpanded, setToolActionsExpanded] = useState(false);
   const [showPromptEditConfirm, setShowPromptEditConfirm] = useState(false);
   // Per-bubble action targets. The kebab on any rendered Bubble (focal,
@@ -1006,26 +1006,6 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
       });
   };
 
-  // Admin's rerun of a read reply (a batch takes minutes to a day):
-  // cancels the submitted batch and runs the same reply again, through
-  // the batch or the live API. The node stays the same, so the page
-  // keeps polling it.
-  const rerunRead = (live) => {
-    setRerunning(true);
-    api
-      .post(`/read/${id}/rerun`, { live })
-      .then(() => api.get(`/nodes/${id}`))
-      .then((response) => {
-        setNode(response.data);
-        setLlmTaskNodeId(response.data.id);
-        addToast(live ? 'Running the glean live.' : 'Glean resubmitted as a batch.', 4000);
-      })
-      .catch((err) => {
-        addToast(err?.response?.data?.error || 'Could not rerun the glean.', 6000);
-      })
-      .finally(() => setRerunning(false));
-  };
-
   // Ancestors section rendered as a list of bubbles.
   const ancestorsSection = node.ancestors && node.ancestors.length > 0 && (
     <div style={{ display: "flex", flexDirection: "column", marginBottom: "10px" }}>
@@ -1090,9 +1070,8 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
     node.llm_task_status === 'pending'
     || node.llm_task_status === 'processing'
   );
-  // A read reply: it carries (or carried) a batch, or hangs under one of
-  // the read prompts. Only these get the admin's rerun controls, while
-  // the reply is pending or after it failed.
+  // A read reply: it carries (or carried) a batch, a glean's marker, or
+  // hangs under one of the read prompts.
   const parentAncestor = node.ancestors?.[node.ancestors.length - 1];
   const isReadReply = isLlmNode && (
     !!node.read_reply
@@ -1143,8 +1122,6 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
   // reflection" in the entry's menu.
   const gleanEnabled = !!currentUser?.glean_enabled;
   const gleanThread = !!node.glean_thread;
-  const canRerunRead = !!currentUser?.is_admin && isOwner && isReadReply
-    && (isLlmPending || node.llm_task_status === 'failed');
   // The gleaning's own head (#435): "Today's gleanings", how many picks,
   // or the empty day. Old replies that kept their picks in rows only
   // (FeedPicks below) are not empty.
@@ -1206,8 +1183,17 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
   // task's parent rule), and the way to talk about the picks is a
   // comment first, whose own row then offers LLM Response again.
   const underReadReply = isReadReply && node.llm_task_status === 'completed';
-  const readActions = isOwner && gleanEnabled && gleanThread
-    && node.ai_usage !== 'none' && !isLlmPending && !node.is_system_prompt;
+  // The Glean entry (the read prompt a glean attaches, shown as "Glean")
+  // carries Glean and its picker too (Peter, 2026-10-09), in any thread:
+  // it is Glean's own entry, and after a failed gleaning it is where the
+  // page lands, so it is where the user tries again. Any other system
+  // prompt has no reflection to glean from.
+  const isGleanEntry = !!node.is_system_prompt
+    && ['read', 'read_thread'].includes(node.prompt_key);
+  const readActions = isOwner && gleanEnabled
+    && (gleanThread || isGleanEntry)
+    && node.ai_usage !== 'none' && !isLlmPending
+    && (!node.is_system_prompt || isGleanEntry);
   // Before the first picks (the read prompt itself, or a note typed
   // under it) a reply asked for here would be that first read, so the
   // generic LLM Response is not offered at all: the row is "Read" and
@@ -1232,14 +1218,15 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
   const readBusy = readLoading || llmRequesting || !!llmTaskNodeId || moving;
   const readButton = (
     <span data-action-group style={actionGroupStyle}>
-      <button
-        onClick={() => handleReadFromNode()}
-        disabled={readBusy}
-        title={readTitle}
-        style={{ display: 'inline-flex', alignItems: 'center', gap: '8px', ...joinedButtonStyle }}
-      >
-        {readLoading ? 'Starting…' : readLabel}
-      </button>
+      <LooreTooltip text={readTitle}>
+        <button
+          onClick={() => handleReadFromNode()}
+          disabled={readBusy}
+          style={{ display: 'inline-flex', alignItems: 'center', gap: '8px', ...joinedButtonStyle }}
+        >
+          {readLoading ? 'Starting…' : readLabel}
+        </button>
+      </LooreTooltip>
       <ModelSelector
         nodeId={node.id}
         purpose="read"
@@ -1276,32 +1263,6 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
     boxSizing: 'border-box',
   };
 
-  const rerunControls = canRerunRead ? (
-    <div style={{
-      display: 'inline-flex', gap: '8px', flexWrap: 'wrap',
-      marginLeft: isLlmPending ? '12px' : 0,
-      marginTop: isLlmPending ? 0 : '8px',
-    }}>
-      <button
-        type="button"
-        onClick={() => rerunRead(true)}
-        disabled={rerunning}
-        style={{ ...topRightButtonStyle, width: 'auto', height: '26px', fontStyle: 'normal' }}
-        title="Cancel the batch and run this glean through the live API now"
-      >
-        {rerunning ? 'Rerunning…' : 'Rerun live'}
-      </button>
-      <button
-        type="button"
-        onClick={() => rerunRead(false)}
-        disabled={rerunning}
-        style={{ ...topRightButtonStyle, width: 'auto', height: '26px', fontStyle: 'normal' }}
-        title="Cancel the batch and submit this glean as a new batch"
-      >
-        Resubmit batch
-      </button>
-    </div>
-  ) : null;
 
   // Top-right controls (Voice Mode + Auto-generate). Rendered in the
   // same flex row as the Thread heading so they align vertically and
@@ -1486,7 +1447,6 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
                 }} />
               ))}
             </span>
-            {rerunControls}
             <style>{`
               @keyframes wopPulseDot {
                 0%, 60%, 100% { opacity: 0.3; transform: translateY(0); }
@@ -1551,7 +1511,6 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
             />
           </div>
         )}
-        {!isLlmPending && rerunControls}
         {/* Replies from before 2026-09-16 kept their picks in rows only;
             since then the reply text quotes each pick ({quote_ext:ID}),
             so the list is rendered by QuotedContent above. */}

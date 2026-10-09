@@ -6,6 +6,7 @@ import { useAsyncTaskPolling } from '../hooks/useAsyncTaskPolling';
 import { useUser } from '../contexts/UserContext';
 import { useInterruptedRecovery } from '../hooks/useInterruptedRecovery';
 import RecoveryBanner from '../components/RecoveryBanner';
+import LooreTooltip from '../components/LooreTooltip';
 import OfflineBanner from '../components/OfflineBanner';
 import ProposalInline from '../components/ProposalInline';
 import { useToast } from '../contexts/ToastContext';
@@ -525,18 +526,25 @@ function VoiceSession({ recovery, blocked, threadId, onAiUsageRefused, onFinishI
       .finally(() => setGleanStarting(false));
   };
   // Under the record button, once the thread has a recorded message.
+  // The tooltip sits on a wrapper: a disabled button (while Loore's reply
+  // is still coming) gets no hover events in some browsers.
   const gleanButton = gleanMode && hasMessage ? (
-    <button
-      type="button"
-      onClick={handleGlean}
-      disabled={!gleanReady}
-      aria-busy={gleaning}
-      title={gleanAnchor || gleaning ? "Find today's tweets worth your time, from what you have said so far"
+    <LooreTooltip
+      text={gleanAnchor || gleaning ? "Find today's tweets worth your time, from what you have said so far"
         : "Glean waits for Loore's reply to your last message"}
-      style={gleanButtonStyle(gleanReady)}
     >
-      {gleaning ? (<><Spinner /><span>Gleaning</span></>) : 'Glean'}
-    </button>
+      <span style={{ display: 'inline-flex' }}>
+        <button
+          type="button"
+          onClick={handleGlean}
+          disabled={!gleanReady}
+          aria-busy={gleaning}
+          style={gleanButtonStyle(gleanReady)}
+        >
+          {gleaning ? (<><Spinner /><span>Gleaning</span></>) : 'Glean'}
+        </button>
+      </span>
+    </LooreTooltip>
   ) : null;
 
   const displayTime = audio.cumulativeTime || 0;

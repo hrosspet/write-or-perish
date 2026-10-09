@@ -31,10 +31,11 @@ const tombstoneStyle = {
 };
 
 // The tag a prompt-rooted node wears. Keys are identifiers ("read_thread");
-// the tag is a word. Both read prompts are one thing to the user: a read.
+// the tag is a word. Both read prompts are one thing to the user: Glean
+// (#435, the name Peter gave the read).
 const PROMPT_LABELS = {
-  read: 'Read',
-  read_thread: 'Read',
+  read: 'Glean',
+  read_thread: 'Glean',
 };
 const promptLabel = (key) => PROMPT_LABELS[key]
   || (key.charAt(0).toUpperCase() + key.slice(1)).replace(/_/g, ' ');
