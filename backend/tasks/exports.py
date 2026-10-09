@@ -11,7 +11,8 @@ from backend.models import User, UserProfile, APICostLog
 from backend.extensions import db
 from backend.llm_providers import (
     LLMProvider, PromptTooLongError, DEFAULT_MAX_OUTPUT_TOKENS,
-    model_input_cap, is_empty_truncated, EmptyTruncatedOutputError)
+    model_input_cap, is_empty_truncated, is_refused,
+    EmptyTruncatedOutputError)
 
 from backend.utils.tokens import (
     approximate_token_count, reduce_export_tokens, format_date_metadata,
@@ -472,19 +473,23 @@ def refuse_truncated_profile(user, model_id, response, job, batch=False):
     stays the tip, and the next run resumes from it once the backoff
     (utils/refusal_backoff.py) allows: one more try after an hour, then
     the job stops for this user."""
-    if not response.get("truncated"):
+    refused = is_refused(response)
+    if not (response.get("truncated") or refused):
         return
+    # A model refusal (#470) is handled the same way: its text, empty or
+    # partial, is never a profile.
     _add_profile_cost_log(user, model_id, response, batch=batch,
                           refused=True)
     db.session.commit()
     empty = is_empty_truncated(response)
+    what = "refused by the model" if refused else "output cut off"
     n, until, stopped = refusal_backoff.profile_backoff_state(user.id)
     if stopped:
         # Second refusal in a row: no more automatic runs for this user.
         # Shown in the admin Profile column (seed_error); the next saved
         # version clears it.
         user.profile_seed_error = (
-            f"Stopped: output cut off {n} times in a row "
+            f"Stopped: {what} {n} times in a row "
             f"({job}); runs again after an import, a saved version "
             f"or Build profile")[:255]
         db.session.commit()
@@ -493,13 +498,13 @@ def refuse_truncated_profile(user, model_id, response, job, batch=False):
             "profile_batch" if batch else "profile")
     else:
         logger.warning(
-            "Truncated profile output for user %s (%s, model %s, empty=%s, "
-            "output_tokens=%s): no version saved, the previous one stays; "
-            "refusal %d, next try after %s", user.id, job, model_id, empty,
-            response.get("output_tokens"), n, until)
+            "Profile output not saved for user %s (%s, model %s, %s, "
+            "empty=%s, output_tokens=%s): no version saved, the previous "
+            "one stays; refusal %d, next try after %s", user.id, job,
+            model_id, what, empty, response.get("output_tokens"), n, until)
     raise EmptyTruncatedOutputError(
         f"profile {job} for user {user.id}", model_id,
-        response.get("output_tokens"), empty=empty)
+        response.get("output_tokens"), empty=empty, refused=refused)
 
 
 def retip_profile_chain(user_id, version):

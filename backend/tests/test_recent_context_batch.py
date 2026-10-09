@@ -491,6 +491,35 @@ def test_an_empty_cut_off_result_is_billed_refused_and_backs_off(
     assert _check(rc)["submitted"] == 1
 
 
+@pytest.mark.parametrize("text", ["", "I am not able to summarise"])
+def test_a_refused_result_is_billed_refused_and_keeps_the_old_summary(
+        app, rc, world, monkeypatch, text):
+    """#470: a model refusal (no text, or partial text) saves nothing, is
+    one strike for the backoff, and the previous summary stays."""
+    from backend.utils.refusal_backoff import REFUSED_REF
+    user = _user("refusedctx")
+    _previous_summary(user)
+    assert _check(rc)["submitted"] == 1
+
+    _collect_with(rc, monkeypatch, _summary(
+        user, text, refused=True, truncated=False, output_tokens=20))
+
+    assert _shown_summary(user) == "PREVIOUS CONTEXT"
+    assert UserRecentContext.query.count() == 1
+    assert APICostLog.query.one().request_ref == REFUSED_REF
+    assert _job_for(user)[0].items[0]["outcome"] == "refused"
+    assert _check(rc)["submitted"] == 0           # backoff, as for #368
+
+
+def test_a_normal_result_still_saves(app, rc, world, monkeypatch):
+    user = _user("normalctx")
+    _previous_summary(user)
+    assert _check(rc)["submitted"] == 1
+    _collect_with(rc, monkeypatch, _summary(user, "NEW SUMMARY",
+                                            refused=False))
+    assert _shown_summary(user).endswith("NEW SUMMARY")
+
+
 def test_an_empty_result_that_was_not_cut_off_is_billed_and_not_saved(
         app, rc, world, monkeypatch):
     user = _user("silent")

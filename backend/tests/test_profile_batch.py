@@ -1592,6 +1592,53 @@ def test_apply_result_refuses_partial_truncated_chunk(app, monkeypatch):
     assert log.request_ref == REFUSED_REF
 
 
+@pytest.mark.parametrize("text", ["", "I can't help with"])
+def test_poll_refused_chunk_saves_nothing_and_counts_attempt(
+        app, monkeypatch, text):
+    """#470: a model refusal (no text, or partial text) is not a profile.
+    Nothing is saved, the old tip stays, the attempt counts as failed and
+    the cost row is marked refused for the backoff."""
+    from backend.utils.refusal_backoff import REFUSED_REF
+    u = _user()
+    prev = _prev_profile(u, datetime(2026, 5, 1))
+    job, item = _chunk_job(u, prev)
+    monkeypatch.setattr(pb, "batch_check_and_collect", lambda bids, keys: (
+        {item["custom_id"]: {"content": text, "refused": True,
+                             "truncated": False,
+                             "input_tokens": 2000, "output_tokens": 20}},
+        {}, {}))
+    submit = MagicMock(return_value={})
+    monkeypatch.setattr(pb, "batch_submit", submit)
+
+    pb._poll_profile_batches()
+
+    assert UserProfile.query.filter_by(user_id=u.id).all() == [prev]
+    assert pb._exports.profile_update_base(u.id).id == prev.id
+    u2 = User.query.get(u.id)
+    assert u2.profile_batch_attempts == 1
+    assert u2.profile_batch_pending is False
+    submit.assert_not_called()
+    assert APICostLog.query.filter_by(
+        user_id=u.id).one().request_ref == REFUSED_REF
+
+
+def test_poll_refused_integration_saves_nothing(app, monkeypatch):
+    u = _user()
+    tip = _prev_profile(u, datetime(2026, 6, 1))
+    job, item = _integration_job(u, tip)
+    monkeypatch.setattr(pb, "batch_check_and_collect", lambda bids, keys: (
+        {item["custom_id"]: {"content": "Sorry, no.", "refused": True,
+                             "input_tokens": 100, "output_tokens": 5}},
+        {}, {}))
+    monkeypatch.setattr(pb, "batch_submit", MagicMock(return_value={}))
+
+    pb._poll_profile_batches()
+
+    assert UserProfile.query.filter_by(
+        user_id=u.id, generation_type="integration").count() == 0
+    assert User.query.get(u.id).profile_batch_attempts == 1
+
+
 def _refusal(user, ago, request_type="profile_batch"):
     from backend.utils.refusal_backoff import REFUSED_REF
     db.session.add(APICostLog(
