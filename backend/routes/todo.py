@@ -5,7 +5,7 @@ from backend.models import Node, Draft, UserTodo
 from backend.extensions import db
 from backend.utils.privacy import AI_ALLOWED
 from backend.utils.timefmt import iso_utc
-from backend.utils.tool_meta import update_tool_meta
+from backend.utils.tool_meta import get_tool_meta_entry
 
 todo_bp = Blueprint("todo", __name__)
 
@@ -249,6 +249,46 @@ def _find_pending_todo_draft(llm_node_id, user_id):
     return None, None
 
 
+# A second apply of a proposal whose merge is running (a double click, a
+# second tab): the answer's "code". The web and iPhone cards then show the
+# merge as started and follow it (#434).
+TODO_MERGE_RUNNING_CODE = "todo_merge_started"
+TODO_MERGE_RUNNING_MESSAGE = "These todo changes are already being applied."
+
+
+def _todo_merge_running_response():
+    return jsonify({
+        "error": TODO_MERGE_RUNNING_MESSAGE,
+        "code": TODO_MERGE_RUNNING_CODE,
+    }), 409
+
+
+def _todo_merge_running(node_id, user_id):
+    """Whether the user's proposal node has a merge running."""
+    node = Node.query.get(node_id)
+    if node is None or node.user_id != user_id:
+        return False
+    entry = get_tool_meta_entry(node, "propose_todo")
+    return bool(entry) and entry.get("apply_status") == "started"
+
+
+def restore_todo_draft(proposal_node, user_id):
+    """After a failed merge, make its proposal applicable again (#434): put
+    back the pending draft its start removed, so the card's "Apply again",
+    the apply-draft route and the voice apply_todo_changes tool all find
+    it. Not when the user has another todo proposal pending: a merge's
+    start removes every pending one, so that one is newer, and only one
+    proposal is pending at a time. Returns whether the proposal is pending
+    again. The caller commits."""
+    if Draft.query.filter_by(user_id=user_id, label='todo_pending').first():
+        return False
+    draft = Draft(user_id=user_id, parent_id=proposal_node.id,
+                  label='todo_pending')
+    draft.set_content("")
+    db.session.add(draft)
+    return True
+
+
 def _start_todo_merge(draft, llm_node, user_id, confirm_node_id=None):
     """Kick off async background todo merge. No visible nodes created.
 
@@ -263,43 +303,62 @@ def _start_todo_merge(draft, llm_node, user_id, confirm_node_id=None):
         confirm_node_id: Optional ID of the node where the user confirmed
             (apply_todo_changes). If provided, its meta is also updated
             with the final outcome.
+
+    Returns the task id, or None when another request already started a
+    merge of this proposal (a double click, a second tab): nothing is
+    started then.
     """
     merge_model = llm_node.llm_model or current_app.config.get(
         "DEFAULT_LLM_MODEL", "claude-opus-4.6"
     )
 
-    # Delete ALL pending todo drafts for this user (not just the one found)
-    all_pending = Draft.query.filter_by(
-        user_id=draft.user_id,
-        label='todo_pending',
-    ).all()
-    for d in all_pending:
-        db.session.delete(d)
+    # The draft says "this proposal can be applied now". Deleting it claims
+    # the merge: of two requests that found it, only the one whose delete
+    # removed the row goes on (the other's waits for that commit and then
+    # matches nothing). A failed merge puts the draft back (#434).
+    draft_id, owner_id = draft.id, draft.user_id
+    claimed = Draft.query.filter_by(id=draft_id).delete()
+    if not claimed:
+        return None
 
-    # Update tool_calls_meta on the LLM node to record apply started
-    update_tool_meta(llm_node, "propose_todo", {
-        "apply_status": "started",
-    })
+    # Delete ALL other pending todo drafts for this user too
+    Draft.query.filter_by(
+        user_id=owner_id,
+        label='todo_pending',
+    ).delete()
+
+    meta = []
+    if llm_node.tool_calls_meta:
+        try:
+            meta = json.loads(llm_node.tool_calls_meta)
+        except (json.JSONDecodeError, TypeError):
+            meta = []
+    # Record apply started on the proposal; a merge applied again after a
+    # failure drops the old error.
+    for entry in meta:
+        if entry.get("name") == "propose_todo":
+            entry["apply_status"] = "started"
+            entry.pop("apply_error", None)
+            entry.pop("retryable", None)
+            break
 
     # When confirmed via UI button (no separate confirmation node),
-    # add an apply_todo_changes entry on the proposal node itself
-    # so NodeDetail shows the confirmation action.
+    # the apply_todo_changes entry on the proposal node itself shows
+    # the confirmation action in NodeDetail.
     if not confirm_node_id:
         confirm_node_id = llm_node.id
-        meta = []
-        if llm_node.tool_calls_meta:
-            try:
-                meta = json.loads(llm_node.tool_calls_meta)
-            except (json.JSONDecodeError, TypeError):
-                meta = []
-        # Only add if not already present
-        if not any(e.get("name") == "apply_todo_changes" for e in meta):
+        confirm = next((e for e in meta
+                        if e.get("name") == "apply_todo_changes"), None)
+        if confirm is None:
             meta.append({
                 "name": "apply_todo_changes",
                 "status": "success",
                 "apply_status": "started",
             })
-            llm_node.tool_calls_meta = json.dumps(meta)
+        else:
+            confirm["apply_status"] = "started"
+            confirm.pop("apply_error", None)
+    llm_node.tool_calls_meta = json.dumps(meta)
 
     db.session.commit()
 
@@ -331,6 +390,8 @@ def apply_todo_draft():
     draft, llm_node = _find_pending_todo_draft(llm_node_id, current_user.id)
 
     if not draft:
+        if _todo_merge_running(llm_node_id, current_user.id):
+            return _todo_merge_running_response()
         return jsonify({"error": "No pending todo changes found"}), 404
 
     if draft.user_id != current_user.id:
@@ -344,6 +405,8 @@ def apply_todo_draft():
         return jsonify({"error": refusal, "code": AI_USAGE_NONE_CODE}), 403
 
     task_id = _start_todo_merge(draft, llm_node, current_user.id)
+    if task_id is None:
+        return _todo_merge_running_response()
 
     return jsonify({
         "status": "started",
