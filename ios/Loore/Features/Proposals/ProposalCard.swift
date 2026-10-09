@@ -21,6 +21,9 @@ struct ProposalCard: View {
     @Environment(AppState.self) private var app
     @State private var applyStatus: String?
     @State private var applyError: String?
+    /// A failed todo merge leaves the proposal applicable (the server's
+    /// `retryable`, #434): "Apply again" shows next to the error.
+    @State private var canApplyAgain = false
     @State private var issueStatus: String?
     @State private var issueError: String?
     @State private var issueURL: String?
@@ -87,6 +90,7 @@ struct ProposalCard: View {
             case "failed":
                 applyStatus = "error"
                 applyError = todo.applyError ?? "Todo merge failed"
+                canApplyAgain = todo["retryable"]?.boolValue ?? false
             case "started": applyStatus = "started"
             default: break
             }
@@ -288,7 +292,12 @@ struct ProposalCard: View {
             case "completed":
                 StatusText(text: "Todo updated", color: LooreColor.success)
             default:
-                StatusText(text: applyError ?? "Todo update failed", color: LooreColor.accent)
+                VStack(alignment: .leading, spacing: 8) {
+                    StatusText(text: applyError ?? "Todo update failed", color: LooreColor.accent)
+                    if canApplyAgain {
+                        ProposalButton(title: "Apply again", action: applyTodo)
+                    }
+                }
             }
         }
     }
@@ -302,8 +311,17 @@ struct ProposalCard: View {
                                            as: EmptyResponse.self)
                 pollApply()
             } catch {
+                let apiError = error as? APIError
+                // Applied already from another device or tab: follow that merge.
+                if apiError?.code == "todo_merge_started" {
+                    pollApply()
+                    return
+                }
                 applyStatus = "error"
-                applyError = (error as? APIError)?.userMessage(fallback: "Todo update failed") ?? "Todo update failed"
+                applyError = apiError?.userMessage(fallback: "Todo update failed") ?? "Todo update failed"
+                // Nothing started, so the proposal is still pending, unless the
+                // server found no pending proposal (404).
+                canApplyAgain = apiError?.status != 404
             }
         }
     }
@@ -323,10 +341,13 @@ struct ProposalCard: View {
                     return
                 }
                 if todo?.applyStatus == "failed" {
+                    let retryable = todo?["retryable"]?.boolValue ?? false
                     applyStatus = "error"
                     applyError = todo?.applyError ?? "Todo merge failed"
+                    canApplyAgain = retryable
                     onApplied("propose_todo", ["apply_status": .string("failed"),
-                                               "apply_error": .string(todo?.applyError ?? "Todo merge failed")])
+                                               "apply_error": .string(todo?.applyError ?? "Todo merge failed"),
+                                               "retryable": .bool(retryable)])
                     return
                 }
             }

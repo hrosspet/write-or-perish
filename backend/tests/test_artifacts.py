@@ -645,6 +645,27 @@ def test_apply_todo_changes_starts_the_merge_for_a_chat_todo_list(
         assert len(started) == 1
 
 
+def test_apply_todo_changes_when_another_request_started_the_merge(
+        app, monkeypatch):
+    """Two confirmations of one proposal start one merge (#434): the
+    second start finds its draft already claimed."""
+    with app.app_context():
+        uid = User.query.first().id
+        _mk_todo(uid, "- a task", ai_usage="chat")
+        proposal, _ = _pending_todo_proposal(uid)
+        import backend.routes.todo as todo_routes
+        monkeypatch.setattr(todo_routes, "_start_todo_merge",
+                            lambda *a, **k: None)
+
+        r = _execute_tool_calls(
+            [{"name": "apply_todo_changes", "input": {}}], proposal,
+            [proposal], uid)[0]
+
+        assert r["status"] == "error"
+        assert r["error"] == todo_routes.TODO_MERGE_RUNNING_MESSAGE
+        assert "apply_task_id" not in r
+
+
 def test_apply_feedback_without_pending_draft_errors(app):
     with app.app_context():
         uid = User.query.first().id
