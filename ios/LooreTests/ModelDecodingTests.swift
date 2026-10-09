@@ -16,8 +16,6 @@ final class ModelDecodingTests: XCTestCase {
         XCTAssertEqual(dashboard.user.plan, .alpha)
         XCTAssertEqual(dashboard.user.defaultPrivacyLevel, .private)
         XCTAssertNotNil(dashboard.user.acceptedTermsAt)
-        XCTAssertFalse(dashboard.nodes.isEmpty)
-        XCTAssertNotNil(dashboard.nodes.first?.createdAt)
         XCTAssertNil(dashboard.latestProfile)
         let caps = UserCapabilities(user: dashboard.user)
         XCTAssertTrue(caps.approved)

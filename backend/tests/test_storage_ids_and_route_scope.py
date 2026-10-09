@@ -600,32 +600,6 @@ class TestNotFoundForInvisibleNodes:
             assert resp.status_code == 404, method
 
 
-# ── Public dashboard child counts ────────────────────────────────────────
-
-class TestPublicDashboardChildCount:
-
-    def test_child_count_covers_only_children_the_viewer_can_see(
-            self, app, data):
-        root = _node(data.alice, "ALICE PUBLIC ROOT", privacy_level="public")
-        _node(data.alice, "alice private child", parent=root)
-        _node(data.alice, "alice public child", parent=root,
-              privacy_level="public")
-        gone = _node(data.alice, "deleted child", parent=root,
-                     privacy_level="public")
-        gone.deleted_at = datetime.utcnow()
-        _db.session.commit()
-
-        def count(viewer):
-            resp = _call(app, viewer, "GET", "/api/dashboard/alice")
-            assert resp.status_code == 200
-            card = next(n for n in resp.get_json()["nodes"]
-                        if n["id"] == root.id)
-            return card["child_count"]
-
-        assert count(data.bob) == 1
-        assert count(data.alice) == 2
-
-
 # ── Thread view counts ───────────────────────────────────────────────────
 
 def _alive_below(d):
@@ -647,7 +621,7 @@ def _assert_counts_match_tree(d):
 
 class TestThreadViewCounts:
     """GET /api/nodes/<id> counts only children and descendants the viewer
-    can see, like the public dashboard cards."""
+    can see."""
 
     @pytest.fixture
     def tree(self, data):

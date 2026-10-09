@@ -187,7 +187,7 @@ def accessible_nodes_filter(node_model, user_id: int):
     """Return a SQLAlchemy filter clause for nodes accessible by the given user.
 
     This is the query-level counterpart of can_user_access_node().
-    Use it to filter list queries (feed, public dashboard) so that only
+    Use it to filter list queries (e.g. the feed) so that only
     accessible nodes are returned from the database. Soft-deleted nodes are
     excluded.
 

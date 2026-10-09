@@ -1,53 +1,5 @@
 {
-  "has_more": true,
   "latest_profile": null,
-  "nodes": [
-    {
-      "child_count": 1,
-      "created_at": "2026-09-28T22:25:53.356335Z",
-      "has_original_audio": true,
-      "human_owner_username": null,
-      "id": 201103,
-      "llm_model": null,
-      "node_type": "user",
-      "origin": null,
-      "pinned_at": null,
-      "preview": "I want to think through my week. I have three projects: redesigning my garden, finishing a book chapter, and learning Czech. How should I split my time between them? Please explain your reasoning.",
-      "prompt_key": "voice",
-      "username": "seowriter"
-    },
-    {
-      "child_count": 1,
-      "created_at": "2026-09-28T22:13:37.452333Z",
-      "has_original_audio": true,
-      "human_owner_username": null,
-      "id": 201098,
-      "llm_model": null,
-      "node_type": "user",
-      "origin": null,
-      "pinned_at": null,
-      "preview": "Hi Lore, quick check-in, I slept well and I am about to start work. Just give me one short sentence of encouragement.",
-      "prompt_key": "voice",
-      "username": "seowriter"
-    },
-    {
-      "child_count": 1,
-      "created_at": "2026-09-28T21:33:55.599364Z",
-      "has_original_audio": false,
-      "human_owner_username": null,
-      "id": 201090,
-      "llm_model": null,
-      "node_type": "user",
-      "origin": null,
-      "pinned_at": null,
-      "preview": "What's on my todo list right now? Please check it.",
-      "prompt_key": "textmode",
-      "username": "seowriter"
-    }
-  ],
-  "page": 1,
-  "pinned_nodes": [],
-  "total_nodes": 32,
   "user": {
     "accepted_terms_at": "2026-09-09T17:59:34.734892Z",
     "approved": true,
