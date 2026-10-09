@@ -60,6 +60,7 @@ test('an email account confirms by link: nothing is sent until the username is t
   expect(screen.getByText(/hidden at once and you are signed out everywhere/)).toBeTruthy();
   expect(screen.getByText(/restore your account by signing in/)).toBeTruthy();
   expect(screen.getByText(/for\s+365 days after the deletion/)).toBeTruthy();
+  expect(screen.getByText(/imports, poll answers, settings\s+and sign-in/)).toBeTruthy();
   expect(screen.queryByRole('checkbox')).toBeNull();
   // Both choices are buttons.
   expect(screen.getByRole('button', { name: /keep my account/i })).toBeTruthy();

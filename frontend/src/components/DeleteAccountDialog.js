@@ -143,7 +143,8 @@ function DeleteAccountDialog({
           After {days} days, on {date}, Loore deletes the account and
           everything in it: your entries and recordings, the AI's replies,
           your profile, intentions and other documents, your todo list,
-          drafts, shares, saved references, imports, settings and sign-in.
+          drafts, shares, saved references, imports, poll answers, settings
+          and sign-in.
           If other people replied to your entries, their replies stay and
           your entry shows as deleted. Loore keeps a record of what your AI
           use cost, without your name.
@@ -169,7 +170,8 @@ function DeleteAccountDialog({
         {byEmail && (
           <p style={bodyStyle}>
             To make sure it is you, Loore emails a confirmation link
-            to <strong>{email}</strong>. Nothing happens until you open it.
+            to <strong>{email}</strong>. Nothing happens until you open it and
+            confirm there.
           </p>
         )}
         <label htmlFor="delete-account-confirm" style={{ ...bodyStyle, display: "block", marginBottom: "6px" }}>
@@ -204,7 +206,7 @@ function DeleteAccountDialog({
             </div>
             <div style={subStyle}>
               {byEmail
-                ? "Your account is deleted only after you open the link."
+                ? "Nothing changes until you confirm from the link."
                 : `Signs you out now. You can restore it until ${date}.`}
             </div>
           </button>

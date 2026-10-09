@@ -34,6 +34,10 @@ test('opening the link sends nothing; the delete button does', async () => {
   mockPost.mockResolvedValue({ data: { status: 'scheduled', delete_on: '2026-11-08T12:00:00Z' } });
   renderAt(alice);
   expect(screen.getByText('Delete @alice?')).toBeTruthy();
+  // What will happen once confirmed, not what has happened.
+  expect(screen.getByText(/When you confirm, your account is hidden/)).toBeTruthy();
+  expect(screen.queryByText(/hidden now/)).toBeNull();
+  expect(screen.getByText(/also cancels\s+a request to delete all your writing, if one is waiting/)).toBeTruthy();
   expect(mockPost).not.toHaveBeenCalled();
   expect(screen.getByText(/keep my account/i)).toBeTruthy();
   fireEvent.click(screen.getByRole('button', { name: /delete my account/i }));

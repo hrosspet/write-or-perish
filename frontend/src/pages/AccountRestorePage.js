@@ -72,7 +72,8 @@ export default function AccountRestorePage() {
       <>
         You deleted @{state.offer.username}. It is hidden, and on {date} it
         is deleted with everything in it. Restore it to keep using Loore,
-        or keep it deleted.
+        or keep it deleted. Restoring it also cancels a request to delete
+        all your writing, if one is waiting.
       </>
     );
     action = (

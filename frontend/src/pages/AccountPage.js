@@ -814,9 +814,9 @@ function DeleteAccountSection({ id, info, email, linkSent, onOpen, labelStyle, h
       <h3 style={sectionTitleStyle}>Delete my account</h3>
       {linkSent ? (
         <p style={{ ...labelStyle, lineHeight: 1.6 }}>
-          Check your email: Loore sent a confirmation link to {email}. Your
-          account is deleted only after you open it. The link works for{" "}
-          {minutes} minutes.
+          Check your email: Loore sent a confirmation link to {email}.
+          Nothing changes until you open it and confirm there. The link works
+          for {minutes} minutes.
         </p>
       ) : (
         <>

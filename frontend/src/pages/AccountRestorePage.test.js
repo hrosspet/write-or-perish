@@ -32,6 +32,7 @@ test('shows both choices; restoring signs in and opens the app', async () => {
   mockPost.mockResolvedValue({ data: { status: 'restored', next: '/' } });
   renderPage();
   await waitFor(() => expect(screen.getByText(/You deleted @alice/)).toBeTruthy());
+  expect(screen.getByText(/also cancels a request to delete\s+all your writing, if one is waiting/)).toBeTruthy();
   expect(screen.getByRole('button', { name: /keep it deleted/i })).toBeTruthy();
   fireEvent.click(screen.getByRole('button', { name: /restore my account/i }));
   await waitFor(() => expect(mockPost).toHaveBeenCalledWith('/account/restore'));
