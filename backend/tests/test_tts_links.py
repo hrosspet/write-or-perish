@@ -53,6 +53,8 @@ ISSUE = "https://github.com/hrosspet/write-or-perish/issues/423"
     # A link whose text is its own address reads as the address.
     (f"[{PR}]({PR})", "PR 460"),
     ("[github.com/o/r/pull/5](https://github.com/o/r/pull/5)", "PR 5"),
+    ("[README.md](README.md) and [backend/tasks/tts.py](backend/tasks/tts.py)",
+     "README.md and backend/tasks/tts.py"),
     # Not links: left alone.
     ("[not a link] (x) and [2026-09-28 10:00 UTC] stays.",
      "[not a link] (x) and [2026-09-28 10:00 UTC] stays."),

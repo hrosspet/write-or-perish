@@ -459,8 +459,10 @@ class LinkSpeaker:
         start = 2 if image else 1
         label = s[b + start:b + st.label_end]
         dest = s[b + st.dest_start:b + st.dest_end]
-        if label and _bare(label) == _bare(dest) and _bare(dest):
-            # A link whose text is its own address reads as an address.
+        if (label and _ADDRESS_HEAD_RE.match(dest)
+                and _bare(label) == _bare(dest)):
+            # A link whose text is its own web address reads as an
+            # address; a relative one ("README.md") keeps its text.
             spoken = speak_address(dest)
         else:
             spoken = _speak_inline(label)
