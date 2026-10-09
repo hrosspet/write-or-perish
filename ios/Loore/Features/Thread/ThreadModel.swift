@@ -577,6 +577,12 @@ final class ThreadModel {
                     app.open(.voice(parentId: nodeId, resumeLLMId: nil))
                     return
                 }
+                if let apiError = error as? APIError, apiError.status == 410 {
+                    // Deleted after the page opened (#480): a toast, as for LLM Response,
+                    // so the thread stays on screen instead of an error page.
+                    app.toasts.show(apiError.userMessage(fallback: "This node has been deleted."), duration: 8)
+                    return
+                }
                 pageError = (error as? APIError)?.userMessage(fallback: "Error starting voice session.")
                     ?? "Error starting voice session."
             }
