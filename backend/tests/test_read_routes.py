@@ -1842,9 +1842,9 @@ class TestGleanOnlyThroughGlean:
         linked = _make_prompt_node(ana, "read_thread")
         detached = _make_prompt_node(ana, "read_thread")
         _db.session.commit()
-        assert is_glean_prompt_node(linked) is True
+        assert is_glean_prompt_node(linked, ana) is True
         self._detach(detached, "Read it all. {ca_tweets?days=3}")
-        assert is_glean_prompt_node(detached) is False
+        assert is_glean_prompt_node(detached, ana) is False
         assert read_turn_allowed(ana, detached) is False
         with pytest.raises(CaTweetsValidationError):
             create_llm_placeholder(detached.id, "claude-opus-4.6", ana.id)
@@ -1862,7 +1862,7 @@ class TestGleanOnlyThroughGlean:
         _db.session.commit()
         _db.session.expire_all()
         assert record.generated_by == "default"
-        assert is_glean_prompt_node(Node.query.get(linked.id)) is False
+        assert is_glean_prompt_node(Node.query.get(linked.id), ana) is False
 
     def test_users_cannot_rewrite_a_read_prompt_in_a_thread(self, app_glean):
         client = app_glean.test_client()
@@ -1898,6 +1898,85 @@ class TestGleanOnlyThroughGlean:
         resp = client.post(f"/api/prompts/voice/revert/{old.id}")
         assert resp.status_code == 400
         assert UserPrompt.query.filter_by(user_id=ana.id, prompt_key="voice").count() == 1
+
+
+class TestGleanInSomeoneElsesThread:
+    """A glean is the user's own: their provider, their read prompt,
+    private (#435 review)."""
+
+    def _public_thread(self, alice, chat_model="claude-opus-4.6"):
+        root = _make_node(alice, content="a public post")
+        root.privacy_level = "public"
+        llm = _make_user(chat_model, twitter_id=f"llm-{chat_model}")
+        reply = _make_node(llm, parent_id=root.id, node_type="llm",
+                           llm_model=chat_model, human_owner=alice)
+        reply.privacy_level = "public"
+        _db.session.commit()
+        return root, reply
+
+    def _bob_under(self, app, parent):
+        bob = _glean_user(app, "bob", glean_enabled=True, preferred_model="gpt-6-sol")
+        note = _make_node(bob, parent_id=parent.id, content="my reflection on it")
+        note.privacy_level = "public"
+        _db.session.commit()
+        return bob, note
+
+    def test_the_provider_is_the_users_own_not_the_threads(self, app_glean):
+        """Bob's replies run on OpenAI; Alice's AI reply above his entry ran
+        on Anthropic. His glean stays on OpenAI."""
+        alice = _make_user("alice")
+        _, reply = self._public_thread(alice)
+        bob, note = self._bob_under(app_glean, reply)
+        client = app_glean.test_client()
+        _login(client, bob.id)
+        resp = client.post(f"/api/read/from-node/{note.id}", json={})
+        assert resp.status_code == 202, resp.get_json()
+        assert Node.query.get(resp.get_json()["llm_node_id"]).llm_model == "gpt-6-luna"
+
+    def test_the_users_own_ai_reply_in_the_thread_counts(self, app_glean):
+        from backend.utils.llm_nodes import glean_provider
+        alice = _make_user("alice")
+        _, reply = self._public_thread(alice)
+        bob, note = self._bob_under(app_glean, reply)  # account: GPT-6 Sol
+        # Without an AI reply of his own: his account model, not Alice's
+        # Opus reply above his entry.
+        assert glean_provider(note, bob) == "openai"
+        # His own AI reply in the thread decides over the account model.
+        llm = User.query.filter_by(username="claude-opus-4.6").first()
+        own = _make_node(llm, parent_id=note.id, node_type="llm",
+                         llm_model="claude-opus-4.6", human_owner=bob)
+        _db.session.commit()
+        assert glean_provider(own, bob) == "anthropic"
+
+    def test_a_glean_on_a_public_entry_is_private(self, app_glean):
+        alice = _make_user("alice")
+        _, reply = self._public_thread(alice)
+        bob, note = self._bob_under(app_glean, reply)
+        client = app_glean.test_client()
+        _login(client, bob.id)
+        data = client.post(f"/api/read/from-node/{note.id}", json={}).get_json()
+        assert Node.query.get(data["prompt_node_id"]).privacy_level == "private"
+        assert Node.query.get(data["llm_node_id"]).privacy_level == "private"
+
+    def test_someone_elses_read_prompt_is_never_reused(self, app_glean):
+        """Alice's read prompt above Bob's entry (an older public one) is
+        not Bob's: his glean attaches a read prompt of his own."""
+        from backend.utils.glean import is_glean_prompt_node, read_turn_allowed
+        alice = _glean_user(app_glean, "alice", glean_enabled=True)
+        root, reply = self._public_thread(alice)
+        alices = _make_prompt_node(alice, "read_thread", parent_id=reply.id)
+        alices.privacy_level = "public"
+        _db.session.commit()
+        bob, note = self._bob_under(app_glean, alices)
+        assert is_glean_prompt_node(alices, alice) is True
+        assert is_glean_prompt_node(alices, bob) is False
+        assert read_turn_allowed(bob, alices) is False
+        client = app_glean.test_client()
+        _login(client, bob.id)
+        data = client.post(f"/api/read/from-node/{note.id}", json={}).get_json()
+        prompt = Node.query.get(data["prompt_node_id"])
+        assert (prompt.parent_id, prompt.user_id) == (note.id, bob.id)
+        assert Node.query.get(data["llm_node_id"]).parent_id == prompt.id
 
 
 class TestGleanModelFailsClosed:

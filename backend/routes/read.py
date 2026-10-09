@@ -68,13 +68,17 @@ from backend.utils.placeholders import (
 )
 from backend.utils.context_artifacts import attach_context_artifacts
 from backend.utils.ca_feed import (
-    FEED_AI_USAGE, READ_PROMPT_KEYS, READ_FURTHER_MARKER, in_read_thread,
+    FEED_AI_USAGE, READ_PROMPT_KEYS, READ_FURTHER_MARKER,
 )
 
 read_bp = Blueprint("read", __name__)
 
 ROOT_PROMPT_KEY = 'read'
 THREAD_PROMPT_KEY = 'read_thread'
+# A glean's prompt node and reply are created private, whatever the
+# thread's privacy (#435): the prompt pins its owner's profile and
+# intentions. The owner can change the reply's privacy afterwards.
+READ_PRIVACY = 'private'
 
 
 def _resolve_model(anchor_node):
@@ -106,14 +110,17 @@ def _resolve_model(anchor_node):
     return model_id, None
 
 
-def _attach_prompt_node(prompt_key, parent_id, privacy_level):
+def _attach_prompt_node(prompt_key, parent_id):
+    """The read prompt node, always private whatever the thread's privacy
+    (#435): it pins its owner's profile and intentions, which are for
+    their own reads only."""
     prompt_record = get_user_prompt_record(current_user.id, prompt_key)
     prompt_node = Node(
         user_id=current_user.id,
         human_owner_id=current_user.id,
         parent_id=parent_id,
         node_type="user",
-        privacy_level=privacy_level,
+        privacy_level=READ_PRIVACY,
         ai_usage=FEED_AI_USAGE,
     )
     db.session.add(prompt_node)
@@ -124,9 +131,9 @@ def _attach_prompt_node(prompt_key, parent_id, privacy_level):
     return prompt_node
 
 
-def _start(prompt_key, parent, privacy_level, model_id, auto_generate=True,
-           read_live=True):
-    """Create the prompt node and its LLM placeholder; commit; respond.
+def _start(prompt_key, parent, model_id, auto_generate=True, read_live=True):
+    """Create the prompt node and its LLM placeholder, both private;
+    commit; respond.
     A refused placeholder (the pre-flight in create_llm_placeholder) rolls
     the prompt node back too: there is nothing to keep without the reply.
     With auto_generate off only the prompt node is created (the user
@@ -135,14 +142,14 @@ def _start(prompt_key, parent, privacy_level, model_id, auto_generate=True,
     Batch API (the admin's /read/start); a glean is always live."""
     from backend.utils.glean import GleanModelUnavailable
     prompt_node = _attach_prompt_node(
-        prompt_key, parent.id if parent else None, privacy_level)
+        prompt_key, parent.id if parent else None)
     if not auto_generate:
         db.session.commit()
         return jsonify({"prompt_node_id": prompt_node.id}), 202
     try:
         llm_node, task_id = create_llm_placeholder(
             prompt_node.id, model_id, current_user.id,
-            privacy_level=privacy_level, ai_usage=FEED_AI_USAGE,
+            privacy_level=READ_PRIVACY, ai_usage=FEED_AI_USAGE,
             read_live=read_live,
         )
     except (UserExportValidationError, GleanModelUnavailable) as e:
@@ -171,12 +178,9 @@ def start_read():
         return err
     if current_user.default_ai_usage == 'none':
         return ai_usage_refused_response(AIUsageRefused(scope="account"))
-    privacy_level = (
-        getattr(current_user, "default_privacy_level", None) or "private"
-    )
     data = request.get_json(silent=True) or {}
     auto_generate = bool(data.get("auto_generate", True))
-    return _start(ROOT_PROMPT_KEY, None, privacy_level, model_id,
+    return _start(ROOT_PROMPT_KEY, None, model_id,
                   auto_generate=auto_generate, read_live=False)
 
 
@@ -209,23 +213,26 @@ def start_read_from_node(node_id):
     model_id, err = _resolve_model(node)
     if err:
         return err
-    privacy_level = node.privacy_level or "private"
-    if in_read_thread(node):
-        return _glean_again(node, model_id, privacy_level)
-    return _start(THREAD_PROMPT_KEY, node, privacy_level, model_id)
+    # Glean again only where the thread has a read prompt of the user's
+    # own; else a new one of theirs under this node (#435).
+    from backend.utils.glean import own_read_prompt_above
+    if own_read_prompt_above(node, current_user, include_poc=getattr(
+            current_user, "is_admin", False) is True):
+        return _glean_again(node, model_id)
+    return _start(THREAD_PROMPT_KEY, node, model_id)
 
 
-def _glean_again(node, model_id, privacy_level):
-    """Read further: the thread already has its read prompt — a read turn
-    under *node*, the day rendered again against everything above. The
-    marker is what tells the task this is a read and not a chat about
-    the picks (_ca_turn); it is written in the commit that creates the
-    node."""
+def _glean_again(node, model_id):
+    """Read further: the thread already has the user's read prompt — a
+    read turn under *node*, the day rendered again against everything
+    above, created private. The marker is what tells the task this is a
+    read and not a chat about the picks (_ca_turn); it is written in the
+    commit that creates the node."""
     from backend.utils.glean import GleanModelUnavailable
     try:
         llm_node, task_id = create_llm_placeholder(
             node.id, model_id, current_user.id,
-            privacy_level=privacy_level, ai_usage=FEED_AI_USAGE,
+            privacy_level=READ_PRIVACY, ai_usage=FEED_AI_USAGE,
             meta=[{"name": READ_FURTHER_MARKER}],
         )
     except (UserExportValidationError, GleanModelUnavailable) as e:
