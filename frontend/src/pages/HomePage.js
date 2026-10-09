@@ -229,13 +229,6 @@ export const purposeCards = [
   },
 ];
 
-const purposeShareCard = {
-  key: 'share',
-  title: 'Share',
-  line: shareCard.description,
-  actions: [{ label: 'Open', path: '/share' }],
-};
-
 function PurposeCard({ card, delay }) {
   const ref = useRef(null);
   const isVisible = useOnScreen(ref);
@@ -303,10 +296,13 @@ export default function HomePage() {
   // Glean (#435 gate and the user's own switch): the cards by purpose.
   // Without it, today's home page. The admin-only Read card that started
   // a read with no reflection is gone; /read/start stays for experiments.
+  // Share stays exactly as today for everyone (Peter): the same card, in
+  // its own row under the purpose cards.
   const gleans = !!user?.glean_enabled;
+  const shares = !!user?.share_v1_enabled;
   const displayCards = gleans
-    ? [...purposeCards, ...(user?.share_v1_enabled ? [purposeShareCard] : [])]
-    : [...cards, ...(user?.share_v1_enabled ? [shareCard] : [])];
+    ? purposeCards
+    : [...cards, ...(shares ? [shareCard] : [])];
 
   return (
     <div style={{
@@ -353,19 +349,33 @@ export default function HomePage() {
       </h1>
 
       {gleans ? (
-        // Stacked on a phone, side by side on a wider screen (two cards
-        // in 560 px, three in 880 px).
-        <div style={{
-          display: 'grid',
-          gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))',
-          gap: '16px',
-          width: '100%',
-          maxWidth: displayCards.length > 2 ? '880px' : '560px',
-        }}>
-          {displayCards.map((card, i) => (
-            <PurposeCard key={card.key} card={card} delay={300 + i * 120} />
-          ))}
-        </div>
+        <>
+          {/* Stacked on a phone, side by side from about 520 px. */}
+          <div style={{
+            display: 'grid',
+            gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))',
+            gap: '16px',
+            width: '100%',
+            maxWidth: '560px',
+          }}>
+            {displayCards.map((card, i) => (
+              <PurposeCard key={card.key} card={card} delay={300 + i * 120} />
+            ))}
+          </div>
+          {shares && (
+            <div style={{
+              display: "flex",
+              gap: "1.5rem",
+              flexWrap: "wrap",
+              justifyContent: "center",
+              maxWidth: "580px",
+              width: "100%",
+              marginTop: "1.5rem",
+            }}>
+              <WorkflowCard card={shareCard} delay={400 + 2 * 120} />
+            </div>
+          )}
+        </>
       ) : cardRows(displayCards).map((row, r) => (
         <div key={r} style={{
           display: "flex",

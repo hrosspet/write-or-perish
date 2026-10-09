@@ -1,6 +1,6 @@
 // The home page by purpose (#436, Peter 2026-10-09): for a user who
 // gleans, a Reflect card and a Glean card, each with Voice and Text, and
-// Share as a third card when it is on. A user without Glean keeps the
+// Share, exactly as today, when it is on. A user without Glean keeps the
 // Voice and Text cards. The admin-only Read card is gone. The welcome
 // question applies to both cards, as to Voice and Text.
 let mockUserCtx;
@@ -51,13 +51,21 @@ test('a user who gleans gets the Reflect and Glean cards, each by voice or text'
   expect(mockNavigate).toHaveBeenLastCalledWith('/voice?glean=1');
   fireEvent.click(screen.getByRole('button', { name: 'Glean: Text' }));
   expect(mockNavigate).toHaveBeenLastCalledWith('/textmode?glean=1');
-  expect(screen.queryByRole('region', { name: 'Share' })).toBeNull();
+  expect(screen.queryByText('Share')).toBeNull();
 });
 
-test('Share stays as a third card when it is on', () => {
+test('Share stays exactly as today when it is on: the same card, opened by a click', () => {
+  // The card a user without Glean gets ...
+  const { container: today } = renderHome({ glean_enabled: false, share_v1_enabled: true });
+  const todays = screen.getByText('Give something outward.').closest('div[style]').outerHTML;
+  today.remove();
+  // ... is the card a user with Glean gets: no purpose-card look, no button.
   renderHome({ glean_enabled: true, share_v1_enabled: true });
-  expect(screen.getByRole('region', { name: 'Share' })).toBeInTheDocument();
-  fireEvent.click(screen.getByRole('button', { name: 'Share: Open' }));
+  expect(screen.queryByRole('region', { name: 'Share' })).toBeNull();
+  expect(screen.queryByRole('button', { name: /Share/ })).toBeNull();
+  const glean = screen.getByText('Give something outward.').closest('div[style]');
+  expect(glean.outerHTML).toBe(todays);
+  fireEvent.click(screen.getByText('Give something outward.'));
   expect(mockNavigate).toHaveBeenLastCalledWith('/share');
 });
 
