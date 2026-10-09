@@ -168,6 +168,33 @@ describe('editor Save after the list changed elsewhere', () => {
     expect(api.put.mock.calls[1][1].base_revision).toBe('r2');
   });
 
+  test('a second "Show the newest list" keeps both texts until each is discarded', async () => {
+    const newer = todo(3, '## Today\n- [x] call mom\n- [ ] buy milk', 'r3');
+    const second = '## Today\n- [ ] call mom\n- [ ] buy oat milk';
+    await openEditorAndType(mine);
+    api.put
+      .mockRejectedValueOnce(conflict(merged))
+      .mockRejectedValueOnce(conflict(newer))
+      .mockResolvedValueOnce({ data: { todo: todo(4, newer.content, 'r4') } });
+    fireEvent.click(screen.getByText('Save'));
+    fireEvent.click(await screen.findByText('Show the newest list'));
+    fireEvent.change(editor(), { target: { value: second } });
+    fireEvent.click(screen.getByText('Save'));
+    fireEvent.click(await screen.findByText('Show the newest list'));
+
+    expect(editor()).toHaveValue(newer.content);
+    expect(screen.getByLabelText('Your text, not saved (1 of 2)')).toHaveValue(mine);
+    expect(screen.getByLabelText('Your text, not saved (2 of 2)')).toHaveValue(second);
+
+    // Saving closes the editor; the kept texts stay until discarded.
+    fireEvent.click(screen.getByText('Save'));
+    await waitFor(() => expect(api.put).toHaveBeenCalledTimes(3));
+    expect(await screen.findByText('buy milk')).toBeInTheDocument();
+    expect(screen.getByLabelText('Your text, not saved (1 of 2)')).toHaveValue(mine);
+    fireEvent.click(screen.getAllByText('Discard')[0]);
+    expect(screen.getByLabelText('Your text, not saved')).toHaveValue(second);
+  });
+
   test('another failure keeps the text and says why', async () => {
     await openEditorAndType(mine);
     api.put.mockRejectedValueOnce(Object.assign(new Error('503'), {

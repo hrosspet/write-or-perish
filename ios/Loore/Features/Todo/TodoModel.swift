@@ -85,6 +85,21 @@ final class TodoModel {
         }
     }
 
+    /// The user's editor texts kept by "Show the newest list" (#476), oldest
+    /// first. Each stays, also after the editor closes, until it is discarded.
+    private(set) var keptTexts: [String] = []
+
+    /// Keeps the editor's text before the newest list replaces it, next to any
+    /// kept before (an identical one is already there).
+    func keep(_ text: String) {
+        if !keptTexts.contains(text) { keptTexts.append(text) }
+    }
+
+    func discardKept(at index: Int) {
+        guard keptTexts.indices.contains(index) else { return }
+        keptTexts.remove(at: index)
+    }
+
     /// The newest version a 409 `todo_changed` answer carries, or nil.
     static func newestTodo(in error: Error) -> TodoDoc? {
         guard let apiError = error as? APIError, apiError.status == 409,

@@ -27,8 +27,6 @@ struct TodoPage: View {
     @State private var editBase: TodoDoc?
     /// The newest version, after a Save was refused because the list changed.
     @State private var conflict: TodoDoc?
-    /// The user's text after "Show the newest list", kept to copy from.
-    @State private var keptText: String?
     @State private var quickAddOpen = false
     @State private var quickAddText = ""
     @State private var quickAddSaving = false
@@ -105,14 +103,19 @@ struct TodoPage: View {
             DocEditor(text: $editContent, identifier: "todo.editor", label: "Todo list")
             DocEditButtons(saving: saving, onSave: save, onCancel: {
                 editing = false
-                keptText = nil
                 if let todo { editContent = todo.content }
             })
-            if let keptText {
-                keptTextView(keptText)
-            }
         } else if let todo {
             checklist(todo)
+        }
+        // The user's texts kept by "Show the newest list" (#476): under the
+        // editor, and still here after it closes, until each is discarded.
+        let kept = model.keptTexts
+        ForEach(Array(kept.enumerated()), id: \.element) { index, text in
+            keptTextView(text, label: kept.count > 1
+                         ? "Your text, not saved (\(index + 1) of \(kept.count))"
+                         : "Your text, not saved",
+                         index: index)
         }
     }
 
@@ -147,7 +150,6 @@ struct TodoPage: View {
             Button("Create Todo") {
                 editContent = Self.createTemplate
                 editBase = nil
-                keptText = nil
                 editing = true
             }
             .buttonStyle(.looreFilled)
@@ -200,7 +202,6 @@ struct TodoPage: View {
     private func openEditor(on todo: TodoDoc) {
         editContent = todo.content
         editBase = todo
-        keptText = nil
         editing = true
     }
 
@@ -219,7 +220,6 @@ struct TodoPage: View {
             switch await model.save(editContent, over: base) {
             case .saved:
                 editing = false
-                keptText = nil
             case .changed(let newest):
                 conflict = newest
             case .failed:
@@ -230,16 +230,17 @@ struct TodoPage: View {
     }
 
     /// "Show the newest list": the editor gets the newest list, the next Save is
-    /// checked against it, and the user's text stays below to copy from.
+    /// checked against it, and the user's text is kept below to copy from, next
+    /// to any kept before.
     private func showNewest(_ newest: TodoDoc) {
-        keptText = editContent
+        model.keep(editContent)
         editContent = newest.content
         editBase = newest
     }
 
-    private func keptTextView(_ text: String) -> some View {
+    private func keptTextView(_ text: String, label: String, index: Int) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Your text, not saved. Copy what you need into the list above, then Save.")
+            Text("\(label). Copy what you need into the todo list.")
                 .font(LooreFont.sans(12.8, .light))
                 .foregroundStyle(LooreColor.textMuted)
             Text(text)
@@ -250,7 +251,7 @@ struct TodoPage: View {
                 .padding(12)
                 .overlay(RoundedRectangle(cornerRadius: LooreRadius.small)
                     .strokeBorder(LooreColor.border, style: StrokeStyle(lineWidth: 1, dash: [4])))
-                .accessibilityLabel("Your text, not saved")
+                .accessibilityLabel(label)
                 .accessibilityIdentifier("todo.keptText")
             HStack(spacing: 8) {
                 Button("Copy") {
@@ -258,7 +259,7 @@ struct TodoPage: View {
                     app.toasts.show("Copied your text")
                 }
                 .buttonStyle(.looreOutline)
-                Button("Discard") { keptText = nil }
+                Button("Discard") { model.discardKept(at: index) }
                     .buttonStyle(.looreOutline)
             }
         }

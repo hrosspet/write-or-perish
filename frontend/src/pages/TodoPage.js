@@ -297,22 +297,23 @@ function EditConflictNotice({ opened, newest, saving, onSaveMine, onShowNewest }
 
 /**
  * The user's text after "Show the newest list" (#476): kept below the
- * editor, read-only, to copy from, until the user discards it or leaves
- * the editor.
+ * editor (and below the list once the editor closes), read-only, to copy
+ * from, until the user discards it. Each "Show the newest list" keeps one
+ * more; `label` numbers them when there are several.
  */
-function KeptText({ text, onCopy, onDiscard }) {
+function KeptText({ text, label, onCopy, onDiscard }) {
   return (
     <div style={{ marginTop: '20px' }}>
       <p style={{
         margin: '0 0 8px', fontFamily: 'var(--sans)', fontSize: '0.8rem',
         fontWeight: 300, color: 'var(--text-muted)',
       }}>
-        Your text, not saved. Copy what you need into the list above, then Save.
+        {label}. Copy what you need into the todo list.
       </p>
       <textarea
         readOnly
         value={text}
-        aria-label="Your text, not saved"
+        aria-label={label}
         style={{
           width: '100%', minHeight: '160px', background: 'var(--bg-surface)',
           border: '1px dashed var(--border)', borderRadius: '8px',
@@ -341,10 +342,12 @@ export default function TodoPage() {
   // another device), the server refuses with the newest version, and the
   // editor shows the choice instead of dropping those changes: save the
   // user's text anyway, or show the newest list with the user's text kept
-  // below it to copy from. Nothing typed is thrown away without a click.
+  // below it to copy from. Nothing typed is thrown away without a click:
+  // every "Show the newest list" keeps one more text, oldest first, and
+  // each stays (also after the editor closes) until the user discards it.
   const [editBase, setEditBase] = useState(null);
   const [editConflict, setEditConflict] = useState(null);
-  const [keptText, setKeptText] = useState(null);
+  const [keptTexts, setKeptTexts] = useState([]);
 
   // Which per-row "+" inline add-input is open (keyed by item text). Lifted so
   // opening one closes any other, and clicking a second "+" switches to it.
@@ -490,14 +493,12 @@ export default function TodoPage() {
     setEditContent(todo.content);
     setEditBase(serverTodoRef.current);
     setEditConflict(null);
-    setKeptText(null);
     setEditing(true);
   };
 
   const closeEditor = () => {
     setEditing(false);
     setEditConflict(null);
-    setKeptText(null);
     if (todo) setEditContent(todo.content);
   };
 
@@ -514,7 +515,6 @@ export default function TodoPage() {
       showTodo(res.data.todo);
       setEditing(false);
       setEditConflict(null);
-      setKeptText(null);
     } catch (err) {
       const newest = err.response?.status === 409 ? err.response.data?.todo : null;
       if (newest) {
@@ -532,18 +532,23 @@ export default function TodoPage() {
   const handleSave = () => saveEditor(editBase);
   const handleSaveMineAnyway = () => saveEditor(editConflict);
   const handleShowNewest = () => {
-    setKeptText(editContent);
+    // One more kept text; an identical one is already there.
+    const mine = editContent;
+    setKeptTexts((kept) => (kept.includes(mine) ? kept : [...kept, mine]));
     setEditContent(editConflict.content);
     setEditBase(editConflict);
     setEditConflict(null);
   };
-  const handleCopyKept = async () => {
+  const handleCopyKept = async (text) => {
     try {
-      await navigator.clipboard.writeText(keptText);
+      await navigator.clipboard.writeText(text);
       addToast('Copied your text');
     } catch (err) {
       addToast("Couldn't copy; select the text and copy it instead");
     }
+  };
+  const handleDiscardKept = (index) => {
+    setKeptTexts((kept) => kept.filter((_, i) => i !== index));
   };
 
   const handleQuickAdd = async () => {
@@ -569,7 +574,6 @@ export default function TodoPage() {
     setEditContent(defaultContent);
     setEditBase(null);
     setEditConflict(null);
-    setKeptText(null);
     setEditing(true);
   };
 
@@ -877,9 +881,6 @@ export default function TodoPage() {
               Cancel
             </button>
           </div>
-          {keptText !== null && (
-            <KeptText text={keptText} onCopy={handleCopyKept} onDiscard={() => setKeptText(null)} />
-          )}
         </div>
       )}
 
@@ -915,6 +916,20 @@ export default function TodoPage() {
           ))}
         </div>
       )}
+
+      {/* The user's texts kept by "Show the newest list" (#476): under the
+          editor, and still here after it closes, until each is discarded. */}
+      {keptTexts.map((text, i) => (
+        <KeptText
+          key={text}
+          text={text}
+          label={keptTexts.length > 1
+            ? `Your text, not saved (${i + 1} of ${keptTexts.length})`
+            : 'Your text, not saved'}
+          onCopy={() => handleCopyKept(text)}
+          onDiscard={() => handleDiscardKept(i)}
+        />
+      ))}
 
       {/* Version History Drawer */}
       <VersionHistoryDrawer

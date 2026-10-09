@@ -387,6 +387,84 @@ def test_rebase_refuses_an_edit_whose_line_is_now_there_twice():
     assert rebase_merge(run, LIST, newest) is None
 
 
+# From the review of #492: an edit's old_text is usually one line with no
+# newline, so as plain text it also matches the start of a longer line.
+# Only whole lines count.
+TICK_BOB = (("- [ ] Email Bob", "- [x] Email Bob"),)
+
+
+def test_rebase_refuses_a_line_reworded_at_its_end():
+    """(a) The editor reworded the line the merge ticks: nothing saved,
+    not the reworded line ticked."""
+    from backend.utils.todo_merge_edits import rebase_merge
+    run = _accepted("- [ ] Email Bob", _reply(*TICK_BOB))
+    assert rebase_merge(run, "- [ ] Email Bob",
+                        "- [ ] Email Bob and Alice") is None
+
+
+def test_rebase_does_not_tick_a_new_task_that_starts_like_the_line():
+    """(b) The user ticked the line and quick-added a task that starts with
+    its text: the new task stays open."""
+    from backend.utils.todo_merge_edits import rebase_merge
+    run = _accepted("- [ ] Email Bob", _reply(*TICK_BOB))
+    newest = "- [x] Email Bob\n- [ ] Email Bob's landlord"
+    assert rebase_merge(run, "- [ ] Email Bob", newest) == newest
+
+
+def test_rebase_does_not_undo_an_untick_on_a_longer_line():
+    """(c) `- [ ] Call` is not the start of `Call mom`: the user's untick
+    of Call mom stays."""
+    from backend.utils.todo_merge_edits import rebase_merge
+    previous = "- [ ] Call\n- [x] Call mom"
+    run = _accepted(previous, _reply(("- [ ] Call", "- [x] Call")))
+    newest = "- [x] Call\n- [ ] Call mom"
+    assert rebase_merge(run, previous, newest) == newest
+
+
+def test_rebase_refuses_when_a_look_alike_line_was_added():
+    """The user ticked the line and added a new task with the same text:
+    which one the edit meant isn't certain."""
+    from backend.utils.todo_merge_edits import rebase_merge
+    run = _accepted("- [ ] Email Bob", _reply(*TICK_BOB))
+    newest = "- [x] Email Bob\n- [ ] Email Bob"
+    assert rebase_merge(run, "- [ ] Email Bob", newest) is None
+
+
+RECURRING = "## Today\n- [ ] Gym\n- [ ] call mom\n## Done\n- [x] Gym"
+
+
+def test_rebase_applies_to_the_same_copy_of_a_recurring_task():
+    from backend.utils.todo_merge_edits import rebase_merge
+    run = _accepted(RECURRING, _reply(("- [ ] Gym", "- [x] Gym")))
+    newest = RECURRING.replace("- [ ] call mom", "- [x] call mom")
+    assert rebase_merge(run, RECURRING, newest) == (
+        "## Today\n- [x] Gym\n- [x] call mom\n## Done\n- [x] Gym")
+
+
+def test_rebase_refuses_when_the_user_changed_a_copy_of_a_recurring_task():
+    """The user unticked the done copy and ticked the open one: the edit's
+    text now matches the other copy, so it isn't applied."""
+    from backend.utils.todo_merge_edits import rebase_merge
+    run = _accepted(RECURRING, _reply(("- [ ] Gym", "- [x] Gym")))
+    newest = "## Today\n- [x] Gym\n- [ ] call mom\n## Done\n- [ ] Gym"
+    assert rebase_merge(run, RECURRING, newest) is None
+
+
+def test_a_quick_add_during_a_merge_is_not_saved_as_done(app, merge):
+    """(b) through the merge task: the tick and the quick-add are made
+    while the model works."""
+    user = _user()
+    _todo(user.id, "## Today\n- [ ] Email Bob")
+    proposal = _proposal(user.id)
+
+    _run(merge, proposal, user, _reply(*TICK_BOB), meanwhile=_tick(
+        app, user, "## Today\n- [x] Email Bob\n- [ ] Email Bob's landlord"))
+
+    assert _contents(user.id)[-1] == (
+        "## Today\n- [x] Email Bob\n- [ ] Email Bob's landlord")
+    assert _entry(proposal.id)["apply_status"] == "completed"
+
+
 def test_rebase_keeps_the_users_boxes_in_a_multi_line_edit():
     from backend.utils.todo_merge_edits import rebase_merge
     previous = "## Today\n- [ ] a\n  - [ ] a1\n- [ ] b"

@@ -437,6 +437,18 @@ final class TodoModelTests: StubbedAppTestCase {
         XCTAssertTrue(app.toasts.toasts.isEmpty)
     }
 
+    /// A second "Show the newest list" keeps the first text too; each goes only
+    /// when discarded (review of #492).
+    func testKeptTextsStayUntilEachIsDiscarded() {
+        let m = TodoModel(app: app)
+        m.keep("text A")
+        m.keep("text B")
+        m.keep("text A")
+        XCTAssertEqual(m.keptTexts, ["text A", "text B"])
+        m.discardKept(at: 0)
+        XCTAssertEqual(m.keptTexts, ["text B"])
+    }
+
     // MARK: Quick edits in a row (review B2)
 
     /// A stub backend that keeps the PATCHed content; a PATCH whose content

@@ -470,24 +470,57 @@ def _with_user_boxes(old_text, found, new_text):
     return "\n".join(new_lines)
 
 
-def _reapply_edits(text, edits):
+def _whole_line_matches(text, old):
+    """Where *old* occurs in *text* as whole lines: each match starts at
+    the start of a line (or with old's own newline) and ends at the end of
+    a line (or with old's own newline), so `- [ ] Email Bob` doesn't match
+    the start of `- [ ] Email Bob's landlord`. Overlapping matches count.
+    Returns their start positions in order."""
+    starts = []
+    pos = text.find(old)
+    while pos != -1:
+        end = pos + len(old)
+        at_line_start = old.startswith("\n") or pos == 0 or text[pos - 1] == "\n"
+        at_line_end = old.endswith("\n") or end == len(text) or text[end] == "\n"
+        if at_line_start and at_line_end:
+            starts.append(pos)
+        pos = text.find(old, pos + 1)
+    return starts
+
+
+def _reapply_edits(previous, text, edits):
     """The merge's edits applied in order to *text*, the newest list, or
-    None when one no longer fits. An edit whose old_text is in the list
-    exactly once applies as it did. One that isn't, because the user
-    ticked or unticked a line of it meanwhile, applies where its text is,
-    checkboxes aside, exactly once; those lines keep the user's state."""
+    None when one no longer fits. *previous* is the list the model's edits
+    were applied to.
+
+    An edit applies only to the same whole lines it was applied to in
+    *previous*, found by their text with checkboxes ignored:
+    * one such place in both lists: the edit applies there, and lines the
+      user ticked or unticked meanwhile keep the user's state;
+    * several look-alike places (an open and a done copy of a recurring
+      task): the edit applies to the same one of them, counted in order,
+      only if the user changed none of them;
+    * otherwise (the line was reworded or removed, a look-alike line was
+      added, or the edit matched part of a line): None.
+    """
     for edit in edits:
         old, new = edit["old_text"], edit["new_text"]
-        if text.count(old) == 1:
-            text = text.replace(old, new, 1)
-            continue
-        cleared, old_cleared = _boxes_cleared(text), _boxes_cleared(old)
-        if cleared.count(old_cleared) != 1:
+        old_cleared = _boxes_cleared(old)
+        before = _whole_line_matches(_boxes_cleared(previous), old_cleared)
+        now = _whole_line_matches(_boxes_cleared(text), old_cleared)
+        # Where the model's edit applied (it was unique in previous).
+        applied_at = previous.find(old)
+        if applied_at not in before or len(now) != len(before):
             return None
-        start = cleared.index(old_cleared)
+        if len(before) > 1 and any(
+                previous[b:b + len(old)] != text[n:n + len(old)]
+                for b, n in zip(before, now)):
+            return None
+        start = now[before.index(applied_at)]
         end = start + len(old)
-        new = _with_user_boxes(old, text[start:end], new)
-        text = text[:start] + new + text[end:]
+        text = text[:start] + _with_user_boxes(old, text[start:end], new) \
+            + text[end:]
+        previous = previous.replace(old, new, 1)
     return text
 
 
@@ -496,14 +529,15 @@ def rebase_merge(run, previous, newest):
     merge saves, when it changed after the merge read *previous* (#477): a
     tick, the row "+", quick-add, an editor Save or a revert made while
     the model worked. The user's change is kept and the merge's edits are
-    applied on top of it. Returns None when they no longer fit (an edit's
-    line was changed or removed, or the merge wrote the whole list): the
-    merge then saves nothing and the user can apply it again."""
+    applied on top of it (_reapply_edits). Returns None when they no
+    longer fit (an edit's line was reworded or removed, a line like it was
+    added, or the merge wrote the whole list): the merge then saves
+    nothing and the user can apply it again."""
     if newest == previous:
         return run.merged
     if run.edits is None:
         return None
-    rebased = _reapply_edits(newest or "", run.edits)
+    rebased = _reapply_edits(previous or "", newest or "", run.edits)
     if rebased is None or not rebased.strip():
         return None
     # The same checks as for the model's reply, against the newest list.
