@@ -800,7 +800,10 @@ def test_signing_in_with_x_offers_a_restore(app, world, stubs, monkeypatch):
     assert r.status_code == 302
     assert r.headers["Location"] == f"{FRONTEND}/account-restore"
     assert c.get("/api/account/data").status_code == 401
-    assert c.get("/api/account/restore").get_json()["username"] == "alice"
+    offer = c.get("/api/account/restore").get_json()
+    assert offer["username"] == "alice"
+    # No "Delete all my writing" was waiting: no writing comes back.
+    assert offer["writing_comes_back"] is False
 
 
 def test_keeping_it_deleted_drops_the_offer(app, world, stubs, mail):
@@ -966,10 +969,22 @@ def test_a_waiting_writing_deletion_becomes_the_account_deletion(
     job = _schedule(a)
     assert job.id == data_job.id and UserDataPurge.query.count() == 1
     assert job.delete_account
+    # The account's deletion takes everything, not only what the writing
+    # request hid (#268 rework).
+    assert job.scope == "all"
+    assert up.scope_of(job).everything
     assert job.scheduled_for > datetime.utcnow() + timedelta(days=29)
-    # Restoring cancels both.
+    # Restoring cancels both, and the writing the first request hid
+    # comes back (Peter, 2026-10-09: restore undoes the soft deletion).
+    from backend.models import UserDataPurgeHidden, UserProfile
+    assert UserProfile.query.filter_by(user_id=a.id).count() == 0
+    assert acc.restore_offer(_db.session.get(User, a.id))[
+        "writing_comes_back"] is True
     assert acc.restore_account(_db.session.get(User, a.id))
     assert _db.session.get(UserDataPurge, job.id).status == "cancelled"
+    assert UserDataPurgeHidden.query.count() == 0
+    assert UserProfile.query.filter_by(user_id=a.id).count() == 2
+    assert _db.session.get(Node, world.ids["A2"]).deleted_at is None
 
 
 def test_released_handles_are_forgotten_after_the_reservation(app, world):

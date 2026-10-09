@@ -38,12 +38,20 @@ test('opening the link sends nothing; the delete button does', async () => {
   expect(screen.getByText(/When you confirm, your account is deleted/)).toBeTruthy();
   expect(screen.getByText(/after\s+that it is deleted forever/)).toBeTruthy();
   expect(screen.queryByText(/hidden/)).toBeNull();
-  expect(screen.getByText(/also cancels\s+a request to delete all your writing, if one is waiting/)).toBeTruthy();
+  expect(screen.queryByText(/the writing you deleted/)).toBeNull();
   expect(mockPost).not.toHaveBeenCalled();
   expect(screen.getByText(/keep my account/i)).toBeTruthy();
   fireEvent.click(screen.getByRole('button', { name: /delete my account/i }));
   await waitFor(() => expect(mockPost).toHaveBeenCalledWith('/account/delete/confirm', { token: 'tok' }));
   expect(assign).toHaveBeenCalledWith('/account-deleted?on=2026-11-08T12%3A00%3A00Z');
+});
+
+test('with a writing deletion waiting, says the writing comes back on a restore', () => {
+  renderAt({ ...alice, data_deletion: {
+    status: 'scheduled', purge_at: '2026-11-01T12:00:00Z', restorable: true,
+  } });
+  expect(screen.getByText(/When you confirm/).textContent)
+    .toMatch(/If you restore your account, the writing you deleted comes\s+back too\./);
 });
 
 test('a link for another account says so', async () => {

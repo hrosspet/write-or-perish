@@ -960,14 +960,18 @@ def test_the_purge_waits_for_the_recent_context_batch_lock(world, stubs):
 
 
 def test_profile_pipeline_skips_a_user_being_purged(world, stubs):
+    """Waiting (the writing is hidden) or running: no profile or recent
+    context is built (Peter, 2026-10-09); eligible again once done."""
     eligible = {u.id for u in User.profile_eligible_query()}
     assert world.alice.id in eligible
     job, _ = up.schedule_purge(world.alice, requested_by_id=world.alice.id,
                                source="admin", at=datetime.utcnow())
-    assert world.alice.id in {u.id for u in User.profile_eligible_query()}
+    assert world.alice.id not in {u.id for u in User.profile_eligible_query()}
     up.claim_job(job.id, "tok")
     assert world.alice.id not in {u.id for u in User.profile_eligible_query()}
     assert world.bob.id in {u.id for u in User.profile_eligible_query()}
+    assert up.run_purge_job(job.id, "tok") == "done"
+    assert world.alice.id in {u.id for u in User.profile_eligible_query()}
 
 
 # ── Grace period, cancel, endpoints ─────────────────────────────────────

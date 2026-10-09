@@ -550,7 +550,11 @@ export function purgeLabel(job) {
   }
   switch (job.status) {
     case "scheduled":
-      return `Data deletion requested by the user, due ${formatDate(job.scheduled_for)}`;
+      // The user's "Delete all my writing" hides the writing at once
+      // (#268, Peter 2026-10-09) and deletes it on the date.
+      return job.scope === "hidden"
+        ? `Writing hidden by the user, deleted on ${formatDate(job.scheduled_for)}`
+        : `Data purge due ${formatDate(job.scheduled_for)}`;
     case "running":
       return "Purging data…";
     case "done":

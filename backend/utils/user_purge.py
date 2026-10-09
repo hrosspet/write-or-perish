@@ -3,6 +3,16 @@
 One operation, used by the user's "Delete all my writing" (after a grace
 period) and by the admin dashboard's "Purge data" (at once):
 
+* ``schedule_purge`` of the user's own request hides at once everything
+  the purge will delete (Peter, 2026-10-09: "a soft-delete of everything
+  immediately + real deletion after 30 days"): the user's nodes are
+  soft-deleted and the rows of the per-user tables are left out of every
+  query (backend/utils/hidden_rows.py). What it hid is recorded per job
+  (UserDataPurgeHidden), so ``cancel_purge`` ("Restore my writing")
+  brings back exactly that, in one transaction, and the purge after the
+  grace period deletes exactly that (``Scope``): what the user writes
+  after the request stays.
+
 * ``stop_in_flight`` stops what would write the user's data again behind
   the purge: queued Celery tasks are revoked, provider batches that carry
   only this user's requests are cancelled, the user's items are taken out
@@ -54,21 +64,21 @@ import uuid
 from collections import Counter
 from contextlib import contextmanager
 from datetime import datetime, timedelta
-from typing import NamedTuple
+from typing import NamedTuple, Optional
 
-from sqlalchemy import and_, case, func, or_, select
+from sqlalchemy import and_, case, false, func, or_, select
 
 from backend.extensions import db
 from backend.models import (
-    APICostLog, ArtifactView, Draft, ExternalAccount, ExternalDigestBatchJob,
-    ExternalItem, ExternalItemEmbedding, FeedPick, FeedRender, Node,
-    NodeContextArtifact, NodeEmbedding, NodeTranscriptChunk, NodeVersion,
-    PollDraftBatchJob, PollResponse, ProfileBatchJob, RecentContextBatchJob,
-    ReferenceAction, ShareDraft, TTSChunk, Thread, User, UserArtifact,
-    UserDataPurge,
-    UserFeedback, UserNotification, UserProfile, UserPrompt,
-    UserRecentContext, UserTodo,
+    HIDDEN_ROW_TABLES, APICostLog, ArtifactView, Draft, ExternalAccount,
+    ExternalDigestBatchJob, ExternalItem, ExternalItemEmbedding, FeedPick,
+    FeedRender, Node, NodeContextArtifact, NodeEmbedding, NodeTranscriptChunk,
+    NodeVersion, PollDraftBatchJob, PollResponse, ProfileBatchJob,
+    RecentContextBatchJob, ReferenceAction, ShareDraft, TTSChunk, Thread,
+    User, UserArtifact, UserDataPurge, UserDataPurgeHidden, UserFeedback,
+    UserNotification, UserProfile, UserPrompt, UserRecentContext, UserTodo,
 )
+from backend.utils.hidden_rows import hidden_ids, including_hidden_rows
 
 logger = logging.getLogger(__name__)
 
@@ -231,32 +241,111 @@ def _not_owned(user_id, extras):
     return and_(*conds)
 
 
+class Scope(NamedTuple):
+    """What a purge deletes.
+
+    Everything of the user's (``job_id`` None): the admin purge, an
+    account deletion, an admin bringing a user's request forward.
+
+    What one "Delete all my writing" request hid (``job_id`` set,
+    UserDataPurgeHidden): the nodes it soft-deleted and the ones the
+    user had deleted before (still deleted now; a re-import that brought
+    one back made it the user's again), the rows of the per-user tables
+    it hid, the folders that existed then, and the cost rows written
+    until the request. What the user wrote afterwards stays. The X
+    connection, notifications and artifact views go either way, as the
+    dialog says."""
+    user_id: int
+    job_id: Optional[int] = None
+    requested_at: Optional[datetime] = None
+
+    @property
+    def everything(self):
+        return self.job_id is None
+
+    def rows(self, model):
+        """The user's rows of a per-user table that the purge deletes."""
+        cond = model.user_id == self.user_id
+        if self.everything or model not in HIDDEN_ROW_TABLES:
+            return cond
+        return and_(cond, model.id.in_(
+            hidden_ids(model.__tablename__, self.job_id)))
+
+    def other_rows(self, model):
+        """The exact complement of rows(): other users' rows, and the
+        user's rows the purge keeps."""
+        if self.everything or model not in HIDDEN_ROW_TABLES:
+            return model.user_id != self.user_id
+        return or_(model.user_id != self.user_id, ~model.id.in_(
+            hidden_ids(model.__tablename__, self.job_id)))
+
+    def nodes(self, extras):
+        """Filter for the nodes the purge deletes (S)."""
+        if self.everything:
+            return _owned(self.user_id, extras)
+        return and_(Node.deleted_at.isnot(None),
+                    or_(Node.id.in_(hidden_ids("node", self.job_id)),
+                        Node.id.in_(hidden_ids("node_deleted", self.job_id))))
+
+    def not_nodes(self, extras):
+        """The exact complement of nodes()."""
+        if self.everything:
+            return _not_owned(self.user_id, extras)
+        return or_(Node.deleted_at.is_(None),
+                   and_(~Node.id.in_(hidden_ids("node", self.job_id)),
+                        ~Node.id.in_(hidden_ids("node_deleted",
+                                                self.job_id))))
+
+    def cost_rows(self):
+        cond = APICostLog.user_id == self.user_id
+        if self.everything:
+            return cond
+        return and_(cond, APICostLog.created_at <= self.requested_at)
+
+
+def scope_of(job):
+    """The Scope a job purges. An account deletion (#269) takes
+    everything, whatever the request it replaced hid."""
+    if (job is not None and job.scope == "hidden"
+            and not getattr(job, "delete_account", False)):
+        return Scope(job.user_id, job.id, job.requested_at)
+    return Scope(job.user_id if job is not None else None)
+
+
 class NodePlan(NamedTuple):
     extras: set        # legacy AI replies that are the user's
     parents: dict      # S: node id -> parent id
     authors: dict      # S: node id -> {user_id, human_owner_id}
     keep: set          # K: tombstones (another user's node is below)
     deleted: list      # D: deepest first
-    others_under: int  # other users' nodes directly under a node of S
+    others_under: int  # nodes not in S directly under a node of S
+    scope: Scope = None
 
     def owned_select(self, user_id):
-        return select(Node.id).where(_owned(user_id, self.extras))
+        return select(Node.id).where(self._scope(user_id).nodes(self.extras))
 
     def deleted_select(self, user_id):
-        cond = _owned(user_id, self.extras)
+        cond = self._scope(user_id).nodes(self.extras)
         if self.keep:
             cond = and_(cond, ~Node.id.in_(sorted(self.keep)))
         return select(Node.id).where(cond)
 
+    def not_owned(self, user_id):
+        return self._scope(user_id).not_nodes(self.extras)
 
-def plan_nodes(user_id):
+    def _scope(self, user_id):
+        return self.scope if self.scope is not None else Scope(user_id)
+
+
+def plan_nodes(user_id, scope=None):
     """Which of the user's nodes are deleted (D) and which stay as
     tombstones (K). Ids and authors only."""
-    extras = _legacy_ai_reply_ids(user_id)
+    scope = scope or Scope(user_id)
+    extras = _legacy_ai_reply_ids(user_id) if scope.everything else set()
     parents, authors = {}, {}
     for r in db.session.query(
             Node.id, Node.parent_id, Node.user_id, Node.human_owner_id
-    ).filter(_owned(user_id, extras)):
+    ).filter(scope.nodes(extras)):
         parents[r.id] = r.parent_id
         authors[r.id] = {r.user_id, r.human_owner_id} - {None}
 
@@ -285,7 +374,8 @@ def plan_nodes(user_id):
             depth[x] = base
     deleted = sorted((n for n in parents if n not in keep),
                      key=lambda n: (-depth.get(n, 0), n))
-    return NodePlan(extras, parents, authors, keep, deleted, others_under)
+    return NodePlan(extras, parents, authors, keep, deleted, others_under,
+                    scope)
 
 
 def _session_ids(user_id, plan):
@@ -294,15 +384,22 @@ def _session_ids(user_id, plan):
     by abandoned recordings whose draft is gone). Draft session ids are
     server uuids, so none can be another user's."""
     from backend.utils.audio_storage import is_storage_id
+    scope = plan._scope(user_id)
     sessions = {s for (s,) in db.session.query(Draft.session_id).filter(
-        Draft.user_id == user_id, Draft.session_id.isnot(None))}
+        scope.rows(Draft), Draft.session_id.isnot(None))}
     for chunk in _chunks(plan.parents):
         sessions.update(s for (s,) in db.session.query(
             Node.streaming_session_id).filter(
             Node.id.in_(chunk), Node.streaming_session_id.isnot(None)))
-    folder = _audio_root() / "drafts" / str(user_id)
-    if folder.is_dir() and not folder.is_symlink():
-        sessions.update(p.name for p in folder.iterdir() if p.is_dir())
+    if scope.everything:
+        folder = _audio_root() / "drafts" / str(user_id)
+        if folder.is_dir() and not folder.is_symlink():
+            sessions.update(p.name for p in folder.iterdir() if p.is_dir())
+    else:
+        # The session folders that existed at the request.
+        prefix = f"audio:drafts/{user_id}/"
+        sessions.update(p[len(prefix):] for p in _recorded_paths(scope)
+                        if p.startswith(prefix) and "/" not in p[len(prefix):])
     return sorted(s for s in sessions if is_storage_id(s))
 
 
@@ -346,17 +443,99 @@ def _user_dirs(user_id):
     return dirs
 
 
+def _x_api_root():
+    return _stash_root().parent / "x-api"
+
+
 def _x_dump_files(handle):
     """X API dumps (backend.tasks.imports.x_api_dump_path) of the handle
     the account was pre-filled from: that account's public posts."""
     if not handle or not _HANDLE_RE.fullmatch(handle):
         return []
-    folder = _stash_root().parent / "x-api"
+    folder = _x_api_root()
     if not folder.is_dir() or folder.is_symlink():
         return []
     pattern = re.compile(re.escape(handle) + _X_DUMP_STAMP, re.IGNORECASE)
     return [p for p in folder.iterdir()
             if p.is_file() and pattern.fullmatch(p.name)]
+
+
+# Recorded paths ("<root>:<relative path>") of a "Delete all my writing"
+# request: what existed in the user's storage when it was made.
+_PATH_ROOTS = {"audio": _audio_root, "stash": _stash_root,
+               "xapi": _x_api_root}
+
+
+def _entries(folder):
+    folder = pathlib.Path(folder)
+    if folder.is_symlink() or not folder.is_dir():
+        return []
+    return sorted(folder.iterdir())
+
+
+def paths_at_request(user):
+    """The folders and files of the user's storage that exist now, as
+    recorded paths: every entry of the user's audio folders (one level
+    deeper under ``user/<id>/``, whose ``node``, ``profile`` and ``item``
+    folders also hold what is written later), of the import stash, and
+    the X API dumps of the handle the account was pre-filled from."""
+    from backend.utils.audio_storage import storage_path
+    out = []
+    audio = _audio_root()
+    for name in USER_AUDIO_FOLDERS:
+        base = storage_path(audio, name, user.id)
+        for entry in _entries(base):
+            if name == "user" and entry.is_dir() and not entry.is_symlink():
+                out.extend(sub for sub in _entries(entry))
+            else:
+                out.append(entry)
+    rel = [f"audio:{p.relative_to(audio).as_posix()}" for p in out]
+    stash = _stash_root()
+    rel += [f"stash:{p.relative_to(stash).as_posix()}"
+            for p in _entries(storage_path(stash, user.id))]
+    rel += [f"xapi:{p.name}" for p in _x_dump_files(user.prefilled_handle)]
+    return rel
+
+
+def _resolve(recorded):
+    """The absolute path of a recorded path, or None when it does not
+    name something inside its root (never followed outside it)."""
+    key, _, rel = recorded.partition(":")
+    root_of = _PATH_ROOTS.get(key)
+    if root_of is None or not rel or rel.startswith("/"):
+        return None
+    root = pathlib.Path(root_of())
+    path = root / rel
+    base = os.path.normpath(str(root))
+    if os.path.commonpath([base, os.path.normpath(str(path))]) != base:
+        return None
+    return path
+
+
+def _recorded_paths(scope):
+    if scope.everything:
+        return []
+    return [p for (p,) in db.session.query(UserDataPurgeHidden.path).filter(
+        UserDataPurgeHidden.job_id == scope.job_id,
+        UserDataPurgeHidden.kind == "file")]
+
+
+def _scope_files(scope, user):
+    """(dirs, files) of the user's storage the purge deletes, besides
+    the node folders: every folder of the user's and the pre-fill's X
+    dumps, or, for a "Delete all my writing" request, what existed when
+    it was made."""
+    if scope.everything:
+        return (_user_dirs(scope.user_id),
+                _x_dump_files(user.prefilled_handle if user else None))
+    dirs, files = [], []
+    for recorded in _recorded_paths(scope):
+        path = _resolve(recorded)
+        if path is None:
+            continue
+        (dirs if path.is_dir() and not path.is_symlink() else files).append(
+            path)
+    return dirs, files
 
 
 def _files_in(dirs):
@@ -440,13 +619,14 @@ def _task_ids(user_id, plan):
             NodeTranscriptChunk.session_id.in_(chunk),
             NodeTranscriptChunk.status.in_(IN_FLIGHT_STATUSES),
             NodeTranscriptChunk.task_id.isnot(None)))
+    scope = plan._scope(user_id)
     for model in (UserProfile, ExternalItem):
         ids.update(t for (t,) in db.session.query(model.tts_task_id).filter(
-            model.user_id == user_id,
+            scope.rows(model),
             model.tts_task_status.in_(IN_FLIGHT_STATUSES),
             model.tts_task_id.isnot(None)))
     ids.update(t for (t,) in db.session.query(PollResponse.draft_task_id)
-               .filter(PollResponse.user_id == user_id,
+               .filter(scope.rows(PollResponse),
                        PollResponse.status == "drafting",
                        PollResponse.draft_task_id.isnot(None)))
     user = db.session.get(User, user_id)
@@ -581,11 +761,17 @@ PIPELINE_FLAG_RESETS = {
 }
 
 
-def stop_in_flight(user_id, *, dry_run=False, plan=None):
+def stop_in_flight(user_id, *, dry_run=False, plan=None, scope=None):
     """Stop everything that could write the user's data again. Returns
     InFlight: counts, the task ids still executing (the runner waits for
     them) and whether a batch pipeline's lock was busy."""
-    plan = plan or plan_nodes(user_id)
+    with including_hidden_rows():
+        return _stop_in_flight(user_id, dry_run, plan, scope)
+
+
+def _stop_in_flight(user_id, dry_run, plan, scope):
+    plan = plan or plan_nodes(user_id, scope)
+    scope = plan._scope(user_id)
     counts = Counter()
     now = _now()
     task_ids = _task_ids(user_id, plan)
@@ -593,7 +779,7 @@ def stop_in_flight(user_id, *, dry_run=False, plan=None):
     node_batches = _node_batch_entries(plan)
     counts["provider_batches_cancelled"] += len(node_batches)
     response_ids = {r for (r,) in db.session.query(PollResponse.id).filter(
-        PollResponse.user_id == user_id)}
+        scope.rows(PollResponse))}
 
     if dry_run:
         for model, belongs, key in _batch_tables(user_id, response_ids):
@@ -697,15 +883,28 @@ def _count(model, *conds):
         *conds).scalar() or 0
 
 
-def count_user_data(user_id, plan=None):
+def count_user_data(user_id, plan=None, scope=None):
     """What a purge of *user_id* would delete, change or keep, per table.
     Changes nothing."""
-    plan = plan or plan_nodes(user_id)
+    with including_hidden_rows():
+        return _count_user_data(user_id, plan, scope)
+
+
+def _by_user(scope, model, col):
+    """Rows of a derived table found by the user's id: all of them when
+    the purge takes everything, none otherwise (they are found through
+    the rows they hang off)."""
+    return col == scope.user_id if scope.everything else false()
+
+
+def _count_user_data(user_id, plan, scope):
+    plan = plan or plan_nodes(user_id, scope)
+    scope = plan._scope(user_id)
     U = user_id
     owned_ids = plan.owned_select(U)
     deleted_ids = plan.deleted_select(U)
-    item_ids = select(ExternalItem.id).where(ExternalItem.user_id == U)
-    profile_ids = select(UserProfile.id).where(UserProfile.user_id == U)
+    item_ids = select(ExternalItem.id).where(scope.rows(ExternalItem))
+    profile_ids = select(UserProfile.id).where(scope.rows(UserProfile))
     sessions = _session_ids(U, plan)
 
     c = {
@@ -723,34 +922,38 @@ def count_user_data(user_id, plan=None):
         "node_context_artifact": _count(
             NodeContextArtifact, NodeContextArtifact.node_id.in_(owned_ids)),
         "node_embedding": _count(NodeEmbedding, or_(
-            NodeEmbedding.node_id.in_(owned_ids), NodeEmbedding.user_id == U)),
+            NodeEmbedding.node_id.in_(owned_ids),
+            _by_user(scope, NodeEmbedding, NodeEmbedding.user_id))),
         "thread": _count(Thread, Thread.root_node_id.in_(owned_ids)),
         "feed_pick": _count(FeedPick, or_(
-            FeedPick.node_id.in_(owned_ids), FeedPick.user_id == U,
+            FeedPick.node_id.in_(owned_ids), scope.rows(FeedPick),
             FeedPick.external_item_id.in_(item_ids))),
         "feed_render": _count(FeedRender, FeedRender.node_id.in_(owned_ids)),
         "reference_action": _count(ReferenceAction, or_(
-            ReferenceAction.node_id.in_(owned_ids), ReferenceAction.user_id == U,
+            ReferenceAction.node_id.in_(owned_ids),
+            scope.rows(ReferenceAction),
             ReferenceAction.item_id.in_(item_ids))),
-        "draft": _count(Draft, Draft.user_id == U),
-        "share_draft": _count(ShareDraft, ShareDraft.user_id == U),
-        "external_item": _count(ExternalItem, ExternalItem.user_id == U),
+        "draft": _count(Draft, scope.rows(Draft)),
+        "share_draft": _count(ShareDraft, scope.rows(ShareDraft)),
+        "external_item": _count(ExternalItem, scope.rows(ExternalItem)),
         "external_item_embedding": _count(ExternalItemEmbedding, or_(
             ExternalItemEmbedding.item_id.in_(item_ids),
-            ExternalItemEmbedding.user_id == U)),
-        "api_cost_log": _count(APICostLog, APICostLog.user_id == U),
+            _by_user(scope, ExternalItemEmbedding,
+                     ExternalItemEmbedding.user_id))),
+        "api_cost_log": _count(APICostLog, scope.cost_rows()),
     }
     for model, col, key in _REF_COLUMNS:
-        c[key] = _count(model, col.in_(deleted_ids), model.user_id != U)
+        c[key] = _count(model, col.in_(deleted_ids), scope.other_rows(model))
     for col, key in ((Node.linked_node_id, "node.linked_node_id"),
                      (Node.continuation_node_id, "node.continuation_node_id")):
-        c[key] = _count(Node, col.in_(deleted_ids), _not_owned(U, plan.extras))
+        c[key] = _count(Node, col.in_(deleted_ids), plan.not_owned(U))
     for model, key in _USER_TABLES:
-        c[key] = _count(model, model.user_id == U)
+        c[key] = _count(model, scope.rows(model))
 
     user = db.session.get(User, U)
-    files = _files_in(_node_dirs(plan, plan.parents) + _user_dirs(U))
-    files |= set(_x_dump_files(user.prefilled_handle if user else None))
+    dirs, extra_files = _scope_files(scope, user)
+    files = _files_in(_node_dirs(plan, plan.parents) + dirs)
+    files |= {f for f in extra_files if os.path.lexists(f)}
     c["files"] = len(files)
     return c
 
@@ -764,8 +967,9 @@ def batch_items_left(user_id):
     """Batch jobs that still carry the user's items, per table (the dry
     run of the strip). Poll-draft items are keyed by the user's poll
     responses, so they are found only while those rows exist."""
-    response_ids = {r for (r,) in db.session.query(PollResponse.id).filter(
-        PollResponse.user_id == user_id)}
+    with including_hidden_rows():
+        response_ids = {r for (r,) in db.session.query(
+            PollResponse.id).filter(PollResponse.user_id == user_id)}
     counts = Counter()
     for model, belongs, key in _batch_tables(user_id, response_ids):
         _strip_batch_jobs(model, belongs, True, _now(), counts, key)
@@ -797,27 +1001,28 @@ def _delete_node_rows_dependents(ids, counts):
         counts[key] += _delete(model, col.in_(ids))
 
 
-def _clear_references_to(ids, user_id, extras, counts):
+def _clear_references_to(ids, plan, counts):
     """Before the nodes *ids* are deleted: set to null every column that
-    points at them. Only that column changes on another user's row, and
-    its updated_at is kept (a bumped timestamp would look like an edit,
-    and would send a reply back through the embedding sweep)."""
+    points at them. Only that column changes on another user's row (or a
+    row of the user's the purge keeps), and its updated_at is kept (a
+    bumped timestamp would look like an edit, and would send a reply back
+    through the embedding sweep)."""
+    scope = plan.scope
     for model, col, key in _REF_COLUMNS:
         counts[key] += model.query.filter(
-            col.in_(ids), model.user_id != user_id,
+            col.in_(ids), scope.other_rows(model),
         ).update({col: None, model.updated_at: model.updated_at},
                  synchronize_session=False)
         # The user's own rows written since the first step of the round.
         table_key = "draft" if model is Draft else "share_draft"
-        counts[table_key] += _delete(model, col.in_(ids),
-                                     model.user_id == user_id)
+        counts[table_key] += _delete(model, col.in_(ids), scope.rows(model))
     for col, key in ((Node.linked_node_id, "node.linked_node_id"),
                      (Node.continuation_node_id, "node.continuation_node_id")):
         counts[key] += Node.query.filter(
-            col.in_(ids), _not_owned(user_id, extras),
+            col.in_(ids), scope.not_nodes(plan.extras),
         ).update({col: None, Node.updated_at: Node.updated_at},
                  synchronize_session=False)
-        Node.query.filter(col.in_(ids), _owned(user_id, extras)).update(
+        Node.query.filter(col.in_(ids), scope.nodes(plan.extras)).update(
             {col: None, Node.updated_at: Node.updated_at},
             synchronize_session=False)
 
@@ -916,6 +1121,7 @@ def _beat(heartbeat):
 
 def _purge_round(user, plan, counts, heartbeat):
     U = user.id
+    scope = plan.scope
     owned_ids = plan.owned_select(U)
 
     # 1. Rows of the user's that point at nodes, so the nodes can go.
@@ -927,14 +1133,16 @@ def _purge_round(user, plan, counts, heartbeat):
     _revoke_x_access(U)
     counts["external_account"] += _delete(ExternalAccount,
                                           ExternalAccount.user_id == U)
-    counts["draft"] += _delete(Draft, Draft.user_id == U)
-    counts["share_draft"] += _delete(ShareDraft, ShareDraft.user_id == U)
-    counts["feed_pick"] += _delete(FeedPick, FeedPick.user_id == U)
+    counts["draft"] += _delete(Draft, scope.rows(Draft))
+    counts["share_draft"] += _delete(ShareDraft, scope.rows(ShareDraft))
+    counts["feed_pick"] += _delete(FeedPick, scope.rows(FeedPick))
     counts["reference_action"] += _delete(ReferenceAction,
-                                          ReferenceAction.user_id == U)
-    counts["node_embedding"] += _delete(NodeEmbedding, NodeEmbedding.user_id == U)
-    counts["external_item_embedding"] += _delete(
-        ExternalItemEmbedding, ExternalItemEmbedding.user_id == U)
+                                          scope.rows(ReferenceAction))
+    if scope.everything:
+        counts["node_embedding"] += _delete(NodeEmbedding,
+                                            NodeEmbedding.user_id == U)
+        counts["external_item_embedding"] += _delete(
+            ExternalItemEmbedding, ExternalItemEmbedding.user_id == U)
     db.session.commit()
     _beat(heartbeat)
 
@@ -943,7 +1151,7 @@ def _purge_round(user, plan, counts, heartbeat):
     for chunk in _chunks(plan.deleted):
         counts["files"] += _delete_files(_node_dirs(plan, chunk))
         _delete_node_rows_dependents(chunk, counts)
-        _clear_references_to(chunk, U, plan.extras, counts)
+        _clear_references_to(chunk, plan, counts)
         counts["node"] += _delete(Node, Node.id.in_(chunk))
         db.session.commit()
         _beat(heartbeat)
@@ -962,7 +1170,7 @@ def _purge_round(user, plan, counts, heartbeat):
 
     # 4. Saved references.
     item_ids = [i for (i,) in db.session.query(ExternalItem.id).filter(
-        ExternalItem.user_id == U).order_by(ExternalItem.id)]
+        scope.rows(ExternalItem)).order_by(ExternalItem.id)]
     for chunk in _chunks(item_ids):
         counts["tts_chunk"] += _delete(TTSChunk, TTSChunk.item_id.in_(chunk))
         counts["feed_pick"] += _delete(FeedPick,
@@ -978,15 +1186,24 @@ def _purge_round(user, plan, counts, heartbeat):
 
     # 5. Profiles and the rest of the user's own tables.
     profile_ids = [p for (p,) in db.session.query(UserProfile.id).filter(
-        UserProfile.user_id == U)]
+        scope.rows(UserProfile))]
     for chunk in _chunks(profile_ids):
         counts["tts_chunk"] += _delete(TTSChunk, TTSChunk.profile_id.in_(chunk))
         UserProfile.query.filter(UserProfile.id.in_(chunk)).update(
             {UserProfile.parent_profile_id: None}, synchronize_session=False)
+        # A version the purge keeps (written after the request) may name
+        # a deleted one as its base.
+        UserProfile.query.filter(
+            UserProfile.parent_profile_id.in_(chunk)).update(
+            {UserProfile.parent_profile_id: None}, synchronize_session=False)
+        UserRecentContext.query.filter(
+            UserRecentContext.profile_id.in_(chunk),
+            scope.other_rows(UserRecentContext)).update(
+            {UserRecentContext.profile_id: None}, synchronize_session=False)
     for model, key in _USER_TABLES:
         if model is ExternalAccount:
             continue
-        counts[key] += _delete(model, model.user_id == U)
+        counts[key] += _delete(model, scope.rows(model))
     db.session.commit()
     _beat(heartbeat)
 
@@ -994,10 +1211,10 @@ def _purge_round(user, plan, counts, heartbeat):
     from backend.utils.system_accounts import get_erased_system_user
     counts["api_cost_log"] += 0   # reported even when there is none
     if db.session.query(APICostLog.id).filter(
-            APICostLog.user_id == U).first() is not None:
+            scope.cost_rows()).first() is not None:
         erased = get_erased_system_user()
         counts["api_cost_log"] += APICostLog.query.filter(
-            APICostLog.user_id == U,
+            scope.cost_rows(),
         ).update({
             APICostLog.user_id: erased.id,
             APICostLog.provider_response_id: None,
@@ -1006,9 +1223,10 @@ def _purge_round(user, plan, counts, heartbeat):
         }, synchronize_session=False)
         db.session.commit()
 
-    # 7. The user's folders and pre-fill dumps.
-    counts["files"] += _delete_files(
-        _user_dirs(U), _x_dump_files(user.prefilled_handle))
+    # 7. The user's folders and pre-fill dumps (for a "Delete all my
+    # writing" request: those that existed when it was made).
+    dirs, files = _scope_files(scope, user)
+    counts["files"] += _delete_files(dirs, files)
     _beat(heartbeat)
 
 
@@ -1027,17 +1245,25 @@ def _drop_public_pages(user):
                        "dropped (%s)", user.id, type(e).__name__)
 
 
-def purge_user_content(user_id, *, dry_run=False, heartbeat=None):
+def purge_user_content(user_id, *, dry_run=False, heartbeat=None,
+                       scope=None):
     """Delete all of *user_id*'s data (see the module docstring), or with
-    *dry_run* count it. Returns counts per table. Raises PurgeRefused for
-    an AI or system account. *heartbeat* is called after every commit and
-    may raise PurgeSuperseded to stop."""
+    *dry_run* count it; with a job's *scope*, what that "Delete all my
+    writing" request hid. Returns counts per table. Raises PurgeRefused
+    for an AI or system account. *heartbeat* is called after every commit
+    and may raise PurgeSuperseded to stop."""
+    with including_hidden_rows():
+        return _purge_user_content(user_id, dry_run, heartbeat,
+                                   scope or Scope(user_id))
+
+
+def _purge_user_content(user_id, dry_run, heartbeat, scope):
     user = db.session.get(User, user_id)
     reason = purge_refusal(user)
     if reason:
         raise PurgeRefused(reason)
     if dry_run:
-        plan = plan_nodes(user_id)
+        plan = plan_nodes(user_id, scope)
         counts = count_user_data(user_id, plan)
         counts.update(stop_in_flight(user_id, dry_run=True, plan=plan).counts)
         return counts
@@ -1045,9 +1271,9 @@ def purge_user_content(user_id, *, dry_run=False, heartbeat=None):
     _drop_public_pages(user)
     counts = Counter()
     for _ in range(PURGE_MAX_ROUNDS):
-        plan = plan_nodes(user_id)
+        plan = plan_nodes(user_id, scope)
         _purge_round(user, plan, counts, heartbeat)
-        left = leftovers(count_user_data(user_id))
+        left = leftovers(count_user_data(user_id, scope=scope))
         if not left:
             break
         logger.warning("user purge of user %s: rows written meanwhile (%s); "
@@ -1057,12 +1283,17 @@ def purge_user_content(user_id, *, dry_run=False, heartbeat=None):
             f"still left after {PURGE_MAX_ROUNDS} rounds: "
             + ", ".join(f"{k}={v}" for k, v in sorted(left.items())))
 
-    # The account stays; what described the writing does not.
+    # The account stays; what described the writing does not. A
+    # description the user wrote after a "Delete all my writing" request
+    # is theirs and stays.
     user = db.session.get(User, user_id)
     for attr, value in PIPELINE_FLAG_RESETS.items():
         setattr(user, attr, value)
     user.prefilled_handle = None
-    user.description = ""
+    if scope.everything or db.session.query(UserDataPurgeHidden.id).filter(
+            UserDataPurgeHidden.job_id == scope.job_id,
+            UserDataPurgeHidden.kind == "user_description").first():
+        user.description = ""
     db.session.commit()
     _drop_public_pages(user)
     return dict(counts)
@@ -1080,7 +1311,11 @@ def active_job(user_id):
 def schedule_purge(user, *, requested_by_id, source, at=None):
     """Create the user's purge job, due at *at* (default: after the grace
     period). Returns (job, created); an active job is returned as it is.
-    Raises PurgeRefused for an AI or system account."""
+    Raises PurgeRefused for an AI or system account.
+
+    The user's own request ("self") hides at once everything it will
+    delete (hide_writing), in the same transaction as the job: either
+    both are there or neither."""
     reason = purge_refusal(user)
     if reason:
         raise PurgeRefused(reason)
@@ -1091,30 +1326,162 @@ def schedule_purge(user, *, requested_by_id, source, at=None):
         db.session.commit()
         return job, False
     now = _now()
+    hides = source == "self"
     job = UserDataPurge(
         user_id=user.id, source=source, requested_by_id=requested_by_id,
         status="scheduled", requested_at=now,
+        scope="hidden" if hides else "all",
         scheduled_for=at or now + timedelta(days=PURGE_GRACE_DAYS))
     db.session.add(job)
+    if hides:
+        db.session.flush()
+        hide_writing(user, job, now)
     db.session.commit()
+    if hides:
+        _after_hiding(user, job)
     return job, True
 
 
+def _record(job_id, kind, model, *conds):
+    """Record the ids of *model*'s rows matching *conds* as hidden by the
+    job (one INSERT ... SELECT)."""
+    from sqlalchemy import insert, literal
+    sel = select(literal(job_id), literal(kind), model.id).where(*conds)
+    db.session.execute(insert(UserDataPurgeHidden).from_select(
+        ["job_id", "kind", "row_id"], sel))
+
+
+def hide_writing(user, job, now):
+    """Hide at once everything the purge of *job* will delete (Peter,
+    2026-10-09), and record it (UserDataPurgeHidden), so a restore brings
+    back exactly that and the purge deletes exactly that:
+
+    * the user's live nodes (their entries, recordings, imports and the AI
+      replies they asked for, legacy ones included) are soft-deleted, so
+      the user and everyone else see them as deleted, and other people's
+      replies below them stay as under any deleted entry; nodes the user
+      had deleted before are recorded apart and never restored;
+    * the rows of the per-user tables (HIDDEN_ROW_TABLES) are left out of
+      every query from now on;
+    * the short profile description is shown empty;
+    * the folders and files in the user's storage are recorded, so the
+      purge deletes those and not what the user records afterwards.
+
+    Runs in the caller's transaction and commits nothing. Ids, paths and
+    timestamps only: nothing is decrypted."""
+    U = user.id
+    with including_hidden_rows():
+        owned = _owned(U, _legacy_ai_reply_ids(U))
+        _record(job.id, "node", Node, owned, Node.deleted_at.is_(None))
+        _record(job.id, "node_deleted", Node, owned,
+                Node.deleted_at.isnot(None))
+        Node.query.filter(Node.id.in_(hidden_ids("node", job.id))).update(
+            {Node.deleted_at: now, Node.updated_at: Node.updated_at},
+            synchronize_session=False)
+        for model in HIDDEN_ROW_TABLES:
+            _record(job.id, model.__tablename__, model, model.user_id == U)
+        if user.description:
+            db.session.add(UserDataPurgeHidden(
+                job_id=job.id, kind="user_description", row_id=U))
+        for path in paths_at_request(user):
+            db.session.add(UserDataPurgeHidden(
+                job_id=job.id, kind="file", path=path))
+        db.session.flush()
+
+
+def _after_hiding(user, job):
+    """After the hide has committed: drop the cached public pages.
+
+    Nothing in flight is stopped here, so a restore finds everything as
+    it was. What is running finishes against hidden rows: an AI reply
+    whose node was soft-deleted discards its text (the completion task's
+    own check), and every job that would save something new from the
+    writing skips a user whose writing is on hold (profile, recent
+    context, digest, intentions, embeddings, TTS, bookmark sync;
+    hidden_rows.writing_on_hold). The purge stops what is still in
+    flight when it starts, as before."""
+    _drop_public_pages(user)
+
+
+def hidden_counts(job_id):
+    """{kind: count} of what a job hid (ids only), for the logs."""
+    return dict(db.session.query(
+        UserDataPurgeHidden.kind, func.count(UserDataPurgeHidden.id)
+    ).filter(UserDataPurgeHidden.job_id == job_id).group_by(
+        UserDataPurgeHidden.kind).all())
+
+
+def unhide_writing(job_ids):
+    """Show again what the jobs hid: the nodes they soft-deleted get
+    ``deleted_at`` cleared (never the ones the user had deleted before),
+    and the records go, so the hidden rows and the description show
+    again. In the caller's transaction (nothing commits here), so a
+    restore that fails half way changes nothing."""
+    job_ids = list(job_ids)
+    if not job_ids:
+        return
+    node_ids = select(UserDataPurgeHidden.row_id).where(
+        UserDataPurgeHidden.job_id.in_(job_ids),
+        UserDataPurgeHidden.kind == "node")
+    Node.query.filter(Node.id.in_(node_ids),
+                      Node.deleted_at.isnot(None)).update(
+        {Node.deleted_at: None, Node.updated_at: Node.updated_at},
+        synchronize_session=False)
+    UserDataPurgeHidden.query.filter(
+        UserDataPurgeHidden.job_id.in_(job_ids)).delete(
+        synchronize_session=False)
+
+
+def forget_hidden(job_id):
+    """After the purge: the records of what the job hid (the rows are
+    gone)."""
+    UserDataPurgeHidden.query.filter(
+        UserDataPurgeHidden.job_id == job_id).delete(
+        synchronize_session=False)
+
+
 def cancel_purge(user_id, cancelled_by_id):
-    """Cancel the user's purge while it waits. Returns True when a job
-    was cancelled (False: none waiting, or it has started). An account
-    deletion (#269) is not cancelled here: only a restore after signing
-    in undoes it (account_deletion.restore_account)."""
-    n = UserDataPurge.query.filter(
-        UserDataPurge.user_id == user_id,
-        UserDataPurge.status == "scheduled",
-        UserDataPurge.delete_account.is_(False),
-    ).update({UserDataPurge.status: "cancelled",
-              UserDataPurge.cancelled_at: _now(),
-              UserDataPurge.cancelled_by_id: cancelled_by_id},
-             synchronize_session=False)
+    """Cancel the user's own "Delete all my writing" while it waits, and
+    restore what it hid, in one transaction ("Restore my writing").
+    Returns True when a job was cancelled (False: none waiting, it has
+    started, or it is an admin's purge, which is never undone). The
+    cancel is a conditional update on the job's status, so a restore and
+    the beat's claim have one winner. An account deletion (#269) is not
+    cancelled here: only a restore after signing in undoes it
+    (account_deletion.restore_account)."""
+    cancelled = cancel_jobs(UserDataPurge.user_id == user_id,
+                            UserDataPurge.scope == "hidden",
+                            UserDataPurge.delete_account.is_(False),
+                            cancelled_by_id=cancelled_by_id)
     db.session.commit()
-    return n > 0
+    if cancelled:
+        user = db.session.get(User, user_id)
+        if user is not None:
+            _drop_public_pages(user)
+    return bool(cancelled)
+
+
+def cancel_jobs(*conds, cancelled_by_id):
+    """Cancel the scheduled jobs matching *conds* and restore what each
+    hid, in the caller's transaction (nothing commits here). Each job is
+    a conditional update on its status, so a cancel and the beat's claim
+    have one winner, and only a job this call cancelled is restored.
+    Returns the cancelled job ids."""
+    now = _now()
+    cancelled = []
+    for (job_id,) in db.session.query(UserDataPurge.id).filter(
+            UserDataPurge.status == "scheduled", *conds).all():
+        n = UserDataPurge.query.filter(
+            UserDataPurge.id == job_id,
+            UserDataPurge.status == "scheduled",
+        ).update({UserDataPurge.status: "cancelled",
+                  UserDataPurge.cancelled_at: now,
+                  UserDataPurge.cancelled_by_id: cancelled_by_id},
+                 synchronize_session=False)
+        if n:
+            cancelled.append(job_id)
+    unhide_writing(cancelled)
+    return cancelled
 
 
 def _claimable(now):
@@ -1265,8 +1632,9 @@ def run_purge_job(job_id, token):
         return "refused"
 
     heartbeat = _heartbeat_for(job_id, token)
+    scope = scope_of(job)
     try:
-        inflight = stop_in_flight(user.id)
+        inflight = stop_in_flight(user.id, scope=scope)
         job = db.session.get(UserDataPurge, job_id)
         now = _now()
         if inflight.must_wait:
@@ -1283,7 +1651,8 @@ def run_purge_job(job_id, token):
             logger.warning("user purge job %s: tasks still running after "
                            "%s; purging anyway", job_id, PURGE_MAX_WAIT)
         heartbeat()
-        counts = purge_user_content(user.id, heartbeat=heartbeat)
+        counts = purge_user_content(user.id, heartbeat=heartbeat,
+                                    scope=scope)
         # A batch job that still carries the user's item (its pipeline's
         # lock stayed busy past the longest wait) would save a result
         # from the purged writing when it is collected.
@@ -1306,6 +1675,7 @@ def run_purge_job(job_id, token):
         job.counts = counts
         job.error = None
         job.waiting_since = None
+        forget_hidden(job_id)
         db.session.commit()
         logger.info("user data purge job %s (user %s%s) done", job_id,
                     user_id, ", account deleted" if delete_account else "")
@@ -1337,6 +1707,9 @@ def deletion_status(user_id):
     ).order_by(UserDataPurge.id.desc()).first()
     out = {"status": None, "grace_days": PURGE_GRACE_DAYS,
            "purge_at": None, "requested_at": None, "finished_at": None,
+           # The writing is hidden now and "Restore my writing" brings
+           # it back (the user's own request, until it starts).
+           "restorable": False,
            # X is connected for bookmarks: the purge revokes Loore's
            # access at X and deletes the stored connection.
            "x_connected": db.session.query(ExternalAccount.id).filter(
@@ -1352,5 +1725,6 @@ def deletion_status(user_id):
         "requested_at": iso_utc(job.requested_at),
         "finished_at": iso_utc(job.finished_at),
         "x_connection_removed": bool((job.counts or {}).get("external_account")),
+        "restorable": job.status == "scheduled" and job.scope == "hidden",
     })
     return out

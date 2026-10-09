@@ -108,7 +108,8 @@ test('the dialog says a waiting writing deletion is replaced, and how to remove 
     data_deletion: { status: 'scheduled', grace_days: 30, purge_at: '2026-10-20T12:00:00Z', x_connected: true },
   });
   openDialog();
-  expect(screen.getByText(/This replaces your request to delete all your writing/)).toBeTruthy();
+  expect(screen.getByText(/This replaces your request to delete all your writing/).textContent)
+    .toMatch(/everything is deleted forever on .+ instead\. If you restore\s+your account, your writing comes back too\./);
   expect(screen.getByText(/forgets your X connection/).textContent)
     .toMatch(/removes\s+its access on X. If X still lists Loore afterwards, remove it\s+yourself: on X/);
 });

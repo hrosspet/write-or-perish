@@ -72,9 +72,10 @@ export default function AccountRestorePage() {
       <>
         You deleted @{state.offer.username}. You can restore it until{" "}
         {date}; after that it is deleted forever, with everything in it.
-        Restore it to keep using Loore, or keep it deleted. Restoring it
-        also cancels a request to delete all your writing, if one is
-        waiting.
+        Restore it to keep using Loore, or keep it deleted.
+        {state.offer.writing_comes_back && (
+          <> Restoring it also brings back the writing you deleted.</>
+        )}
       </>
     );
     action = (

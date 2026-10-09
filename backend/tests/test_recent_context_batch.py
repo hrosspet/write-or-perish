@@ -611,6 +611,41 @@ def test_a_result_for_an_account_opted_out_meanwhile_is_billed_not_saved(
     assert _job_for(user)[0].items[0]["outcome"] == "skipped"
 
 
+def _hold_writing(user):
+    """A waiting "Delete all my writing" of *user* (#268)."""
+    from datetime import datetime
+    from backend.models import UserDataPurge
+    job = UserDataPurge(user_id=user.id, source="self", scope="hidden",
+                        status="scheduled", scheduled_for=datetime.utcnow())
+    _db.session.add(job)
+    _db.session.commit()
+    return job
+
+
+def test_no_summary_while_the_writing_is_on_hold(app, rc, world, monkeypatch):
+    """#268: "Delete all my writing" hid the writing while the batch ran:
+    the result is billed and not saved; no new request goes out, and the
+    direct path builds nothing either."""
+    user = _user("hidden-meanwhile")
+    _check(rc)
+    hold = _hold_writing(user)
+
+    _collect_with(rc, monkeypatch, _summary(user))
+    assert UserRecentContext.query.count() == 0
+    assert APICostLog.query.count() == 1
+    assert _job_for(user)[0].items[0]["outcome"] == "skipped"
+
+    world["submitted"].clear()
+    _check(rc)
+    assert world["submitted"] == []
+    calls = []
+    monkeypatch.setattr(rc.LLMProvider, "get_completion",
+                        staticmethod(lambda *a, **k: calls.append(a)))
+    rc._generate_recent_context_impl(user.id)
+    assert calls == []
+    assert hold.status == "scheduled"
+
+
 def test_a_result_older_than_the_saved_summary_is_not_saved(
         app, rc, world, monkeypatch):
     """The direct path's 'nothing new' guard, re-checked at save time: if

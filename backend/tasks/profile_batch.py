@@ -46,6 +46,7 @@ from backend.utils.llm_batch import (
 # ImportError; attribute access at call time is fine.
 from backend.tasks import exports as _exports
 
+from backend.utils.hidden_rows import writing_on_hold
 logger = get_task_logger(__name__)
 
 # Mirror maybe_trigger_incremental_profile_update's gates (exports.py);
@@ -619,6 +620,10 @@ def _seed_profile_batches(users=None, ignore_backoff=False):
     for user in users:
         if user.profile_batch_pending:
             continue
+        # The immediate seed passes users in directly: one whose writing
+        # is on hold for deletion (#268) gets nothing built.
+        if writing_on_hold(user.id):
+            continue
         # profile_eligible_query already excludes opted-out accounts, but
         # the immediate seed (admin Build profile, pre-fill, import
         # hand-off) passes users in directly (#346).
@@ -734,6 +739,15 @@ def _poll_profile_batches():
         for item in job.items:
             user = User.query.get(item["user_id"])
             if not user:
+                continue
+            if writing_on_hold(user.id):
+                # "Delete all my writing" hid this user's writing after the
+                # request went out (#268): nothing is saved from it.
+                logger.info(f"Batch result for user {user.id} dropped: "
+                            "their writing is on hold for deletion")
+                if item.get("kind") != "intentions":
+                    user.profile_batch_pending = False
+                    db.session.commit()
                 continue
             result = results.get(item["custom_id"])
             if item.get("kind") == "intentions":

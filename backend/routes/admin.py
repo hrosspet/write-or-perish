@@ -5,6 +5,7 @@ from functools import wraps
 from flask import Blueprint, request, jsonify, abort, current_app
 from flask_login import login_required, current_user
 from sqlalchemy.exc import IntegrityError
+from backend.utils.hidden_rows import shown_description
 from backend.models import User, APICostLog
 from backend.extensions import db
 from backend.utils.timefmt import iso_utc
@@ -251,7 +252,7 @@ def list_users():
             "id": user.id,
             "twitter_id": user.twitter_id,
             "username": user.username,
-            "description": user.description,
+            "description": shown_description(user),
             "created_at": iso_utc(user.created_at),
             "accepted_terms_at": iso_utc(user.accepted_terms_at),
             "approved": user.approved,
@@ -445,6 +446,9 @@ def _purge_job_json(job):
         "id": job.id,
         "status": job.status,
         "source": job.source,
+        # "hidden": the user's own request, which hid the writing at once
+        # and deletes what it hid; "all": everything of the user's.
+        "scope": job.scope,
         "requested_at": iso_utc(job.requested_at),
         "scheduled_for": iso_utc(job.scheduled_for),
         "started_at": iso_utc(job.started_at),
@@ -525,9 +529,12 @@ def purge_data_route(user_id):
                                      "running.", "code": "already_running",
                             "job": _purge_job_json(job)}), 409
         # The user's own request is waiting out its grace period: the
-        # admin brings it forward.
+        # admin brings it forward, and it deletes everything of the
+        # user's (the counts the admin just saw), not only what the
+        # request hid. It can no longer be restored.
         UserDataPurge.query.filter_by(id=job.id, status="scheduled").update(
-            {UserDataPurge.scheduled_for: datetime.utcnow()},
+            {UserDataPurge.scheduled_for: datetime.utcnow(),
+             UserDataPurge.scope: "all"},
             synchronize_session=False)
         db.session.commit()
     logger.warning("Admin %s started a data purge of user %s (job %s)",
