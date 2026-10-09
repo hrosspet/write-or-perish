@@ -914,7 +914,7 @@ Kinds (one per entry and per table row):
 - **Kind:** product scope
 - **Situation:** #489 stops sending thread cards on app load. The builder listed "app load still decrypts the profile" under "Not in this PR" as a follow-up. Peter asked why the app load needs the profile at all.
 - **Decision:** left the profile decryption on every app load as a follow-up and wrote it down under "Not in this PR".
-- **Peter:** asked why the app load needs the profile; the app load now asks for the dashboard without the profile (his wording is not kept in the notes).
+- **Peter:** "what do we need the profile for when loading the app? Or by profile you don't mean the user profile artifact, but the user settings? Account settings, to be precise?"
 - **Score:** miss
 - **Why it missed:** a known waste in the same code path was left for later because it was outside the PR's purpose. Once Peter looked at the path, he wanted it gone now, as with the link speech for profiles in #471.
 - **Source:** Voice review in local Loore 2026-10-09 (Opus 5.5)
@@ -936,7 +936,7 @@ Kinds (one per entry and per table row):
 - **Kind:** testing
 - **Situation:** the Glean PRs #473 and #474 were put on the merge train as ready after code reviews and unit tests. Neither the builders nor the keeper had used the feature in a browser. Peter then tried it locally on train #495.
 - **Decision:** marked #473 and #474 ready on reviews and unit tests, with no browser pass.
-- **Peter:** "overall, this feature seems untested. Let's remove it from the train"
+- **Peter:** "overall, this feature seems like untested. Let's remove it from the train so that I can merge the rest."
 - **Score:** miss
 - **Why it missed:** reviews and unit tests passed, which was read as ready. A feature with a new flow needs one person to use it end to end before it is marked ready, and the first use found six problems (the entries below). Peter also took the account deletion PRs off the train; the new train is #497 and #495 is closed.
 - **Source:** Claude Code session 2026-10-09 (Opus 5.5)
@@ -948,7 +948,7 @@ Kinds (one per entry and per table row):
 - **Kind:** UX
 - **Situation:** Peter had decided that Glean runs synchronously and that, after a voice Glean, the screen switches to the text-mode view of the gleaning. In his local test, a voice Glean sat on a spinner and looked like a batch job.
 - **Decision:** shipped voice Glean in #473 as the synchronous flow Peter had decided, and marked it ready without trying it.
-- **Peter:** reported the stuck spinner while testing; the wording is not kept in the notes.
+- **Peter:** "gleaning from voice mode keeps me stuck on that same page with the button displaying a spinner wheel. It looks like it started a batch processing job. We agreed the feature should use sync call, instead. And take me directly to the text mode view of the Glean node."
 - **Score:** miss
 - **Why it missed:** the likely cause (unconfirmed on Peter's logs) is an inline refresh of a large Community Archive export before the render, which kept the screen waiting. The local log also showed a duplicate `feed_render` insert for the gleaning node, so a "rerun sync" ended in a rollback toast. No one ran a voice Glean with real data.
 - **Source:** Claude Code session 2026-10-09 (Opus 5.5)
@@ -960,7 +960,7 @@ Kinds (one per entry and per table row):
 - **Kind:** UX
 - **Situation:** #473 left "rerun sync" and a batch rerun on a gleaning, although Glean is synchronous only.
 - **Decision:** kept the rerun buttons on the gleaning.
-- **Peter:** said in his test that the buttons should not exist (wording not kept in the notes).
+- **Peter:** "I clicked rerun sync (these buttons shouldn't be there once we have only sync version)"
 - **Score:** miss
 - **Why it missed:** rerun controls were kept for a flow that is only synchronous. The rework removed the buttons and left a rerun API for admins.
 - **Source:** Claude Code session 2026-10-09 (Opus 5.5)
@@ -972,9 +972,9 @@ Kinds (one per entry and per table row):
 - **Kind:** user-facing text
 - **Situation:** #473 put a "Back to Home" link under a gleaning as a way out of it.
 - **Decision:** added "Back to Home" under a gleaning, on the candidate rule that every screen has a way home.
-- **Peter:** asked in his test to remove it (wording not kept in the notes).
+- **Peter:** "pls remove the back to home button from the Glean node. There is one in the NavBar, I thought this was just for the mockup, not the real thing"
 - **Score:** miss
-- **Why it missed:** a candidate rule from the builder's own notes ("every screen has a way home") was applied without a check against the screen. Peter had never confirmed the rule.
+- **Why it missed:** a candidate rule from the builder's own notes ("every screen has a way home") was applied without a check against the screen. Peter had never confirmed the rule, and he took the link for a mockup element.
 - **Source:** Claude Code session 2026-10-09 (Opus 5.5)
 - **Applies to:** #473
 - **Rule:** the candidate "every screen has a way home" is not supported.
@@ -984,7 +984,7 @@ Kinds (one per entry and per table row):
 - **Kind:** UX
 - **Situation:** #473 showed the Glean menu entry on every own entry except system prompts, pending entries and AI None. Threads started from the Glean card begin with a Glean system-prompt node, so they showed neither the button nor the model picker.
 - **Decision:** excluded system prompts from the Glean menu entry and the picker.
-- **Peter:** found in his test that the Glean button and picker were missing in a Glean thread (wording not kept in the notes).
+- **Peter:** "when I wanted to generate Gleans with a different model and went one level up to the Glean sys prompt, the Glean | glean model picker button wasn't there which it should!"
 - **Score:** miss
 - **Why it missed:** "not on system prompts" was copied from the other actions. In a Glean thread, the system prompt is the entry the user acts from.
 - **Source:** Claude Code session 2026-10-09 (Opus 5.5)
@@ -996,7 +996,7 @@ Kinds (one per entry and per table row):
 - **Kind:** UX
 - **Situation:** #473 explained the Glean button with the browser's native `title` tooltip.
 - **Decision:** used the native tooltip.
-- **Peter:** noted in his test that the tooltip is not styled like Loore (wording not kept in the notes).
+- **Peter:** "the tooltip is not in Loore-style … could we do anything about it? At least the same font color."
 - **Score:** miss
 - **Why it missed:** a native `title` was used, and no one looked at it in the browser. The rework added a Loore-styled tooltip (`LooreTooltip`).
 - **Source:** Claude Code session 2026-10-09 (Opus 5.5)
@@ -1008,7 +1008,7 @@ Kinds (one per entry and per table row):
 - **Kind:** UX
 - **Situation:** in a Reflect thread, "Glean for this reflection" lived only in the ⋯ menu of an entry.
 - **Decision:** put the action in the ⋯ menu only.
-- **Peter:** could not find how to glean from a normal reflection (wording not kept in the notes).
+- **Peter:** "I also started a new text mode thread and I don't know to get a Glean for it. How have we resolved the problem if the user starts normal reflection, but during/after it they realize they would like to get their Gleans for it?"
 - **Score:** miss
 - **Why it missed:** a menu entry was treated as discoverable for a new feature on the home page's second card. The next brief asks Peter where the action should live.
 - **Source:** Claude Code session 2026-10-09 (Opus 5.5)
@@ -1020,7 +1020,7 @@ Kinds (one per entry and per table row):
 - **Kind:** process
 - **Situation:** to let Peter test locally, the builder gave him a magic sign-in link and said it works for 2 hours.
 - **Decision:** told Peter the link works for 2 hours without checking the setting.
-- **Peter:** no reaction recorded; the builder found the error afterwards.
+- **Peter:** "But the link you gave me was already expired (even though newer than 2hrs)"
 - **Score:** miss
 - **Why it missed:** a number from memory about a different setting. The sign-in token expires after 15 minutes (`MAGIC_LINK_EXPIRY_SECONDS`), and one grep would have shown it.
 - **Source:** Claude Code session 2026-10-09 (Opus 5.5)
