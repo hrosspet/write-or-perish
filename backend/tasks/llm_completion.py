@@ -150,6 +150,19 @@ def _render_variant(user_id):
             f"e{int(_external_references_for_user(user_id))}")
 
 
+def _system_render_variant(system_node, user_id):
+    """The #192 render-cache variant of *system_node* rendered for
+    *user_id*. The owner's is _render_variant alone (the key their cached
+    renders already use). Someone else's render of it (a reply in a
+    public thread) has the personal placeholders blanked and its own
+    toggles, so it is keyed by that user: it never reads the owner's
+    render, and never overwrites it."""
+    variant = _render_variant(user_id)
+    if not node_is_users(system_node, user_id):
+        variant += f"r{user_id}"
+    return variant
+
+
 def _account_ai_usage(user_id):
     """The account's AI-usage setting. The artifacts index is licensed by
     it (#326), so it is part of the render variant above: a switch takes
@@ -164,6 +177,43 @@ _ARTIFACT_PLACEHOLDERS = (
     USER_MEMORY_PLACEHOLDER, USER_SCRATCHPAD_PLACEHOLDER,
     USER_INTENTIONS_PLACEHOLDER, USER_ARTIFACTS_INDEX_PLACEHOLDER,
 )
+# Every placeholder that resolves to the user's own data ({user_export}
+# too, matched by USER_EXPORT_PATTERN since it takes parameters).
+PERSONAL_PLACEHOLDERS = (
+    USER_PROFILE_PLACEHOLDER, USER_TODO_PLACEHOLDER,
+    USER_RECENT_PLACEHOLDER, USER_RECENT_RAW_PLACEHOLDER,
+    USER_AI_PREFERENCES_PLACEHOLDER,
+) + _ARTIFACT_PLACEHOLDERS
+
+
+def node_is_users(node, user_id):
+    """True when *node* belongs to *user_id*: they wrote it, or (an AI
+    reply) asked for it. Only such a node's personal placeholders resolve
+    in that user's reply."""
+    return (node.human_owner_id or node.user_id) == user_id
+
+
+def blank_personal_placeholders(text):
+    """*text* with every personal placeholder removed. A node of someone
+    else's in the reply's chain (their system prompt in a public thread,
+    a message of theirs) contributes none of its pinned data, and none of
+    the requester's either: the placeholders read as empty."""
+    for placeholder in PERSONAL_PLACEHOLDERS:
+        text = text.replace(placeholder, "")
+    return USER_EXPORT_PATTERN.sub("", text)
+
+
+def _own_pin(row, user_id):
+    """*row* (an artifact version pinned on a node) when it is *user_id*'s,
+    else None. Callers resolve only nodes of the user's own; this keeps
+    any other path from handing a model someone else's version."""
+    if row is not None and row.user_id != user_id:
+        logger.warning(
+            "Pinned %s %s belongs to user %s, not %s; not used",
+            type(row).__name__, row.id, row.user_id, user_id)
+        return None
+    return row
+
 
 # Within-turn retrieval loop (#158, text mode only). When the model calls one
 # of these tools, the retrieved content is injected back into the message
@@ -781,7 +831,8 @@ def _todo_index_line(user_id, pinned_node=None):
     absent or empty todo is still listed (as ``(empty)``) so the model knows
     the surface exists. No open/priority counts (noise).
     """
-    todo = pinned_node.get_artifact("todo") if pinned_node else None
+    todo = _own_pin(
+        pinned_node.get_artifact("todo") if pinned_node else None, user_id)
     if todo is None:
         todo = UserTodo.query.filter_by(user_id=user_id).order_by(
             UserTodo.created_at.desc()
@@ -816,7 +867,11 @@ def get_user_artifacts_context(user_id, pinned_node=None, usage=None,
     placeholder is absent never reaches the payload, so it does not
     report.
     """
-    artifacts = pinned_node.get_user_artifacts() if pinned_node else {}
+    artifacts = {
+        kind: a for kind, a in (
+            pinned_node.get_user_artifacts() if pinned_node else {}).items()
+        if _own_pin(a, user_id) is not None
+    }
     if not artifacts:
         artifacts = UserArtifact.latest_per_kind(user_id)
     artifacts = {
@@ -891,7 +946,8 @@ def get_user_ai_preferences_content(user_id, pinned_node=None, usage=None):
     """
     art = None
     if pinned_node is not None:
-        art = pinned_node.get_user_artifacts().get("ai_preferences")
+        art = _own_pin(
+            pinned_node.get_user_artifacts().get("ai_preferences"), user_id)
         if art is not None and art.ai_usage not in AI_ALLOWED:
             art = None
     if art is None:
@@ -2226,7 +2282,9 @@ def get_user_profile_content(user_id, pinned_node=None, usage=None):
     re-checked on the resolved row so a mid-session opt-out is honored.
     The row reports to *usage* (#326).
     """
-    profile = pinned_node.get_artifact("profile") if pinned_node else None
+    profile = _own_pin(
+        pinned_node.get_artifact("profile") if pinned_node else None,
+        user_id)
     if profile is None:
         profile = UserProfile.query.filter_by(user_id=user_id).order_by(
             UserProfile.created_at.desc()
@@ -2249,7 +2307,8 @@ def get_user_todo_content(user_id, pinned_node=None, usage=None):
     resolved row so a mid-session opt-out is honored. The row reports to
     *usage* (#326).
     """
-    todo = pinned_node.get_artifact("todo") if pinned_node else None
+    todo = _own_pin(
+        pinned_node.get_artifact("todo") if pinned_node else None, user_id)
     if todo is None:
         todo = UserTodo.query.filter_by(user_id=user_id).order_by(
             UserTodo.created_at.desc()
@@ -2272,7 +2331,9 @@ def get_user_recent_content(user_id, pinned_node=None, usage=None):
     ai_usage is re-checked on the resolved row so a mid-session opt-out is
     honored. The row reports to *usage* (#326).
     """
-    rc = pinned_node.get_artifact("recent_context") if pinned_node else None
+    rc = _own_pin(
+        pinned_node.get_artifact("recent_context") if pinned_node else None,
+        user_id)
     if rc is None:
         profile = UserProfile.query.filter_by(user_id=user_id).filter(
             UserProfile.ai_usage.in_(AI_ALLOWED)
@@ -2795,6 +2856,8 @@ def render_system_message(system_node, user_id, usage=None):
     Only valid for prompts without volatile placeholders ({user_export},
     {quote:..}, {quote_ext:..}) — callers must check first. The rows the
     placeholders resolve to report to *usage* (a ContextUsage, #326).
+    A system node that is not *user_id*'s own renders its personal
+    placeholders empty, as the generation loop does.
     """
     owner = User.query.get(user_id)
     user_tz = owner.timezone if owner and owner.timezone else "UTC"
@@ -2802,6 +2865,8 @@ def render_system_message(system_node, user_id, usage=None):
     time_prefix = local_stamp(
         system_node.updated_at or system_node.created_at, user_tz)
     text = f"{time_prefix} author {author}: {system_node.get_content()}"
+    if not node_is_users(system_node, user_id):
+        text = blank_personal_placeholders(text)
 
     if USER_PROFILE_PLACEHOLDER in text:
         profile_obj = get_user_profile_content(
@@ -2945,7 +3010,7 @@ def _prewarm_anthropic_cache(system_node_id, user_id, model_id,
             from backend.utils.prompt_cache import (
                 get_cached_render, store_render,
             )
-            render_variant = _render_variant(user_id)
+            render_variant = _system_render_variant(system_node, user_id)
             cached = get_cached_render(
                 flask_app.config, system_node, render_variant)
             if cached is not None:
@@ -3170,10 +3235,11 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
 
             # Check if any node contains the {user_export} placeholder
             # Find the first node containing it to use its timestamp as cutoff
+            # (the user's own nodes only: someone else's reads as empty).
             export_node = None
             export_placeholder_match = None
             for node in node_chain:
-                if not _alive(node):
+                if not _alive(node) or not node_is_users(node, user_id):
                     continue
                 m = USER_EXPORT_PATTERN.search(node.get_content())
                 if m:
@@ -3341,7 +3407,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     and not has_quotes(_sys_text)
                     and not has_ext_quotes(_sys_text)
                 )
-                render_variant = _render_variant(user_id)
+                render_variant = _system_render_variant(system_node, user_id)
                 if system_render_cacheable:
                     _cached = get_cached_render(
                         flask_app.config, system_node, render_variant)
@@ -3350,10 +3416,15 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                             _cached)
 
             def _placeholder_node(placeholder):
+                """The first of the user's own nodes carrying
+                *placeholder*: its pins are the versions the reply
+                renders. Someone else's node never resolves one (its
+                placeholders read as empty, blank_personal_placeholders)."""
                 for n in node_chain:
                     if cached_system_render is not None and n is system_node:
                         continue  # already rendered — no fetch needed
-                    if _alive(n) and placeholder in n.get_content():
+                    if (_alive(n) and node_is_users(n, user_id)
+                            and placeholder in n.get_content()):
                         return n
                 return None
 
@@ -3876,6 +3947,12 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         message_text = (
                             f"{time_prefix} author {author}: {node_content}"
                         )
+                        if not node_is_users(node, user_id):
+                            # Someone else's node (their system prompt in
+                            # a public thread, a message of theirs): its
+                            # personal placeholders read as empty.
+                            message_text = blank_personal_placeholders(
+                                message_text)
                         # Replace {user_export} — first occurrence gets
                         # the archive, repeats get a stub (#139): the
                         # export is the heaviest placeholder and
@@ -4045,11 +4122,17 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         if (system_render_cacheable
                                 and cached_system_render is None
                                 and attempt == 0):
+                            # Someone else's prompt renders none of the
+                            # user's rows (placeholders blanked), so its
+                            # render carries no verdict of theirs.
+                            _verdict_text = (
+                                _sys_text if node_is_users(system_node, user_id)
+                                else "")
                             store_render(
                                 flask_app.config, system_node, message_text,
                                 render_variant,
-                                unlicensed=context_usage.reason(_sys_text),
-                                rows=context_usage.rows(_sys_text))
+                                unlicensed=context_usage.reason(_verdict_text),
+                                rows=context_usage.rows(_verdict_text))
                     if role == "assistant":
                         last_assistant_index = len(messages)
                     messages.append({
