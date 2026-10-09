@@ -169,7 +169,7 @@ Feature 1 (Journaling) is production-ready and significantly expanded — see FO
 **Full details:** See `docs/LICENSE-TODO.md` for the complete checklist (15 items).
 
 **Key items requiring code changes:**
-1. **Account deletion feature** - Build it, then update terms to describe what's purged/retained. ✅ Built: the data purge (A.48, #268) and account deletion (A.49, #269). 🔧 The terms (web and iPhone) still say there is no account deletion; the iPhone app needs an in-app way to start it (App Store 5.1.1(v))
+1. **Account deletion feature** - Build it, then update terms to describe what's purged/retained. ✅ Built: the data purge (A.48, #268) and account deletion (A.49, #269). ✅ The web terms describe it (no new terms version; Peter, 2026-10-09). 🔧 The iPhone app's terms and in-app deletion are in #482 (App Store 5.1.1(v))
 2. **Data export / portability** - GDPR-required; implement and document
 3. **Cookie / tracking disclosure** - Disclose session cookies; may need cookie banner for EU
 4. **Separate consent step for AI training** - Distinct UI action, not just a toggle
@@ -573,7 +573,7 @@ Phase A (A.1–A.19) and B.1 are complete — see tables above for details.
 6. **NEXT:** Expand agentic tool use — intentions tracking, feedback submission, memory/artifacts management, long-running thread UX (soft nudge to start fresh vs. agentic retrieval)
 
 ### After alpha expansion
-7. **NEXT:** A.9 (License & legal compliance for beta) — the data purge (A.48, #268) and account deletion (A.49, #269) are done; the terms text is next
+7. **NEXT:** A.9 (License & legal compliance for beta) — the data purge (A.48, #268) and account deletion (A.49, #269) are done, and the web terms describe deletion; the rest of the terms text is next
 8. ✅ **MOSTLY DONE:** RAG / semantic search — manual Cmd+K semantic search live (#197); agentic search + quote-as-response over own archive AND saved external references shipped per-user dark (#208: substrate, nightly X sync, digest, read_full, quote cards). Remaining: flip more users' toggles (announcement via #207 channel), #233 overnight pre-selection, #231 tripwire, #232 extension
 8b. **PoC (2026-09-13):** Community Archive personal feed — A.26; second feedback round addressed 2026-09-19 (snapshot refresh ✅, seen filter ✅, read/chat turn semantics ✅); judge the picks over a few more mornings, then decide on a feed surface or drop it
 8c. 🔧 **IN PROGRESS:** Native iPhone app (A.37, PR #384) — device checklist and staging pass, then review and merge

@@ -57,9 +57,12 @@ test('an email account confirms by link: nothing is sent until the username is t
   renderPage();
   expect(screen.queryByRole('dialog')).toBeNull();
   openDialog();
-  expect(screen.getByText(/hidden at once and you are signed out everywhere/)).toBeTruthy();
-  expect(screen.getByText(/restore your account by signing in/)).toBeTruthy();
-  expect(screen.getByText(/for\s+365 days after the deletion/)).toBeTruthy();
+  const dialog = screen.getByRole('dialog').textContent;
+  expect(dialog).not.toMatch(/hidden/);
+  expect(screen.getByText(/deleted at once and you are signed out everywhere/)).toBeTruthy();
+  expect(dialog).toMatch(/For 30 days, until .*2026, you can restore it by signing in/);
+  expect(dialog).toMatch(/After that it is deleted forever, with everything in it/);
+  expect(screen.getByText(/Once it is deleted forever, nobody else can take your username\s+for 365 days/)).toBeTruthy();
   expect(screen.getByText(/imports, poll answers, settings\s+and sign-in/)).toBeTruthy();
   expect(screen.queryByRole('checkbox')).toBeNull();
   // Both choices are buttons.
@@ -105,7 +108,8 @@ test('the dialog says a waiting writing deletion is replaced, and how to remove 
   });
   openDialog();
   expect(screen.getByText(/This replaces your request to delete all your writing/)).toBeTruthy();
-  expect(screen.getByText(/forgets your X connection/)).toBeTruthy();
+  expect(screen.getByText(/forgets your X connection/).textContent)
+    .toMatch(/removes\s+its access on X. If X still lists Loore afterwards, remove it\s+yourself: on X/);
 });
 
 test('a server refusal is shown in the dialog', async () => {

@@ -349,9 +349,9 @@ function WaitlistDeleteAccount({ user }) {
           ? `Check your email: Loore sent a confirmation link to ${user.email}. `
             + "Nothing changes until you open it and confirm there. "
             + `The link works for ${minutes} minutes.`
-          : "Hides your account at once and signs you out everywhere. After "
-            + `${days} days the account and everything in it are deleted. `
-            + "Until then, signing in lets you restore it."}
+          : "Deletes your account at once and signs you out everywhere. For "
+            + `${days} days you can restore it by signing in; after that it is `
+            + "deleted forever, with everything in it."}
       </p>
       {!linkSent && (info.refusal ? (
         <p style={deleteTextStyle}>{info.refusal.message}</p>

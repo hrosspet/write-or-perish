@@ -237,18 +237,18 @@ def send_account_deletion_link_email(to_email, username, confirm_url,
         "Confirm the deletion of your Loore account\n\n"
         f"You asked to delete the Loore account @{username}. Open the link "
         f"below to confirm:\n{confirm_url}\n\n"
-        "Once you confirm, the account is hidden and you are signed out. "
-        f"It is deleted with everything in it after {grace_days} days; "
-        "signing in before then lets you restore it.\n\n"
+        "Once you confirm, the account is deleted and you are signed out. "
+        f"For {grace_days} days, signing in lets you restore it; after "
+        "that it is deleted forever, with everything in it.\n\n"
         f"This link expires in {lifetime}. If you did not ask for this, "
         "ignore this email and nothing changes."
     )
     html_body = _card(
         "Confirm the deletion of your account",
         [f"You asked to delete the Loore account <strong style=\"color: #ede8dd;\">@{escape(username)}</strong>.",
-         "Once you confirm, the account is hidden and you are signed out. "
-         f"It is deleted with everything in it after {grace_days} days; "
-         "signing in before then lets you restore it."],
+         "Once you confirm, the account is deleted and you are signed out. "
+         f"For {grace_days} days, signing in lets you restore it; after "
+         "that it is deleted forever, with everything in it."],
         "Review and confirm", confirm_url,
         (f"This link expires in {lifetime}.",
          "If you did not ask for this, ignore this email and nothing changes."))
@@ -261,19 +261,20 @@ def send_account_deletion_scheduled_email(to_email, username, delete_on):
     """The deletion is scheduled (#269): when, and how to undo it.
     Best-effort: the deletion already happened from the user's side."""
     text_body = (
-        "Your Loore account will be deleted\n\n"
-        f"The account @{username} is hidden now and will be deleted with "
-        f"everything in it on {delete_on}.\n\n"
-        "To keep it, sign in to Loore before then and choose Restore.\n\n"
+        "Your Loore account is deleted\n\n"
+        f"The account @{username} is deleted. Until {delete_on} you can "
+        "restore it: sign in to Loore and choose Restore. After that it is "
+        "deleted forever, with everything in it.\n\n"
         "If you did not do this, sign in and restore the account right away."
     )
     html_body = _card(
-        "Your account will be deleted",
+        "Your account is deleted",
         [f"The account <strong style=\"color: #ede8dd;\">@{escape(username)}</strong> "
-         f"is hidden now and will be deleted with everything in it on {escape(delete_on)}.",
-         "To keep it, sign in to Loore before then and choose Restore."],
+         f"is deleted. Until {escape(delete_on)} you can restore it: sign in "
+         "to Loore and choose Restore.",
+         "After that it is deleted forever, with everything in it."],
         footnotes=("If you did not do this, sign in and restore the account right away.",))
-    _send(to_email, "Your Loore account will be deleted", text_body,
+    _send(to_email, "Your Loore account is deleted", text_body,
           html_body, "Account deletion scheduled notice sent",
           "Failed to send the account deletion scheduled notice",
           best_effort=True)
@@ -283,17 +284,18 @@ def send_account_deleted_email(to_email):
     """The account and its data are gone (#269). The address is not kept
     after this mail. Best-effort."""
     text_body = (
-        "Your Loore account has been deleted\n\n"
-        "Your account and everything in it have been deleted. Loore keeps "
-        "only a record of what the AI use cost, without your name.\n\n"
-        "Backups are overwritten on their usual schedule."
+        "Your Loore account is deleted forever\n\n"
+        "Your account and everything in it are deleted forever. Loore "
+        "keeps only a record of what your AI use cost, without your "
+        "name.\n\n"
+        "Copies in our backups are erased within 30 days."
     )
     html_body = _card(
-        "Your account has been deleted",
-        ["Your account and everything in it have been deleted. Loore keeps "
-         "only a record of what the AI use cost, without your name."],
-        footnotes=("Backups are overwritten on their usual schedule.",))
-    _send(to_email, "Your Loore account has been deleted", text_body,
+        "Your account is deleted forever",
+        ["Your account and everything in it are deleted forever. Loore "
+         "keeps only a record of what your AI use cost, without your name."],
+        footnotes=("Copies in our backups are erased within 30 days.",))
+    _send(to_email, "Your Loore account is deleted forever", text_body,
           html_body, "Account deleted notice sent",
           "Failed to send the account deleted notice",
           best_effort=True)

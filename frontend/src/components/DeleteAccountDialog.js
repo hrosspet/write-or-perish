@@ -79,8 +79,9 @@ const DAY_MS = 24 * 3600 * 1000;
 
 /**
  * Asked before "Delete my account" (#269). Says what happens and when:
- * the account is hidden and signed out at once, deleted with everything
- * in it after the grace period, and restored by signing in before then.
+ * the account is deleted and signed out at once, can be restored by
+ * signing in during the grace period, and is then deleted forever with
+ * everything in it.
  * Both choices are buttons; the delete one stays disabled until the
  * username is typed. An account with an email address confirms from a
  * mailed link, which the button says. onConfirm(typed) returns a
@@ -136,23 +137,22 @@ function DeleteAccountDialog({
       >
         <h2 id="delete-account-title" style={titleStyle}>Delete your account?</h2>
         <p style={bodyStyle}>
-          Your account is hidden at once and you are signed out everywhere.
+          Your account is deleted at once and you are signed out everywhere.
           Nobody can see your public writing any more.
         </p>
         <p style={bodyStyle}>
-          After {days} days, on {date}, Loore deletes the account and
-          everything in it: your entries and recordings, the AI's replies,
-          your profile, intentions and other documents, your todo list,
-          drafts, shares, saved references, imports, poll answers, settings
-          and sign-in.
+          For {days} days, until {date}, you can restore it by signing in.
+          After that it is deleted forever, with everything in it: your
+          entries and recordings, the AI's replies, your profile, intentions
+          and other documents, your todo list, drafts, shares, saved
+          references, imports, poll answers, settings and sign-in.
           If other people replied to your entries, their replies stay and
           your entry shows as deleted. Loore keeps a record of what your AI
           use cost, without your name.
         </p>
         <p style={bodyStyle}>
-          Until then you can restore your account by signing in. Afterwards
-          it cannot be restored. Nobody else can take your username for{" "}
-          {reserveDays} days after the deletion.
+          Once it is deleted forever, nobody else can take your username
+          for {reserveDays} days.
         </p>
         {writingDeletionAt && (
           <p style={bodyStyle}>
@@ -163,8 +163,9 @@ function DeleteAccountDialog({
         )}
         {xConnected && (
           <p style={bodyStyle}>
-            Loore also forgets your X connection for bookmarks. To remove
-            Loore's access on X as well: {X_REMOVE_ACCESS_STEPS}
+            Loore also forgets your X connection for bookmarks and removes
+            its access on X. If X still lists Loore afterwards, remove it
+            yourself: {X_REMOVE_ACCESS_STEPS}
           </p>
         )}
         {byEmail && (

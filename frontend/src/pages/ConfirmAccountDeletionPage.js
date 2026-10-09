@@ -62,10 +62,11 @@ export default function ConfirmAccountDeletionPage() {
     heading = `Delete @${user.username}?`;
     body = (
       <>
-        When you confirm, your account is hidden and you are signed out
-        everywhere. On {date} it is deleted with everything in it. Until
-        then you can restore it by signing in. Restoring it also cancels
-        a request to delete all your writing, if one is waiting.
+        When you confirm, your account is deleted and you are signed out
+        everywhere. Until {date} you can restore it by signing in; after
+        that it is deleted forever, with everything in it. Restoring it
+        also cancels a request to delete all your writing, if one is
+        waiting.
       </>
     );
     action = (

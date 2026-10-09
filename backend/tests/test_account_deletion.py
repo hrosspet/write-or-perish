@@ -181,8 +181,9 @@ def test_an_email_account_confirms_from_the_link_in_its_own_session(
     # Signed out here and in every other session.
     assert c.get("/api/account/data").status_code == 401
     assert other_session.get("/api/account/data").status_code == 401
-    assert mail[-1][1] == "Your Loore account will be deleted"
-    assert "sign in to Loore before then" in mail[-1][2]
+    assert mail[-1][1] == "Your Loore account is deleted"
+    assert "sign in to Loore and choose Restore" in mail[-1][2]
+    assert "deleted forever" in mail[-1][2] and "hidden" not in mail[-1][2]
 
 
 def test_an_expired_link_confirms_nothing(app, world, stubs, mail):
@@ -725,7 +726,8 @@ def test_after_the_grace_period_nothing_of_the_account_is_left(
         days=acc.USERNAME_RESERVE_DAYS)
     # The confirmation goes to the address she had.
     assert mail[-1][:2] == ("alice@example.com",
-                            "Your Loore account has been deleted")
+                            "Your Loore account is deleted forever")
+    assert "Copies in our backups are erased within 30 days." in mail[-1][2]
     assert b.username == "bob"
 
 

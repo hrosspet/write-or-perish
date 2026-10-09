@@ -10,14 +10,14 @@ export default function AccountDeletedPage() {
   const date = formatDeletionDate(searchParams.get("on"));
   return (
     <div style={pageStyle}>
-      <h1 style={headingStyle}>Your account is scheduled for deletion</h1>
+      <h1 style={headingStyle}>Your account is deleted</h1>
       <p role="status" style={textStyle}>
-        It is hidden now, and you are signed out.{" "}
+        You are signed out.{" "}
         {date
-          ? <>On {date} it is deleted with everything in it. Until then you
-            can restore it by signing in.</>
-          : <>30 days after your request it is deleted with everything in
-            it. Until then you can restore it by signing in.</>}
+          ? <>Until {date} you can restore it by signing in; after that it
+            is deleted forever, with everything in it.</>
+          : <>For 30 days you can restore it by signing in; after that it is
+            deleted forever, with everything in it.</>}
       </p>
       <Link to="/" style={linkStyle}>Back to Loore &rarr;</Link>
     </div>

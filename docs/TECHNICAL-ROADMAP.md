@@ -171,7 +171,7 @@ Users have a `plan` column (string, max 16 chars) on the User model. The plan co
 
 **GDPR rights section in terms** - Add explicit mention of data subject rights: access, rectification, erasure, portability, right to object, right to lodge complaint with ÚOOÚ
 
-**Account deletion feature** - Build account deletion, then update terms to describe what's purged, retained, sent to AI providers, and in backups. ✅ Built: the data purge (#268) and the account layer (#269). 🔧 The terms still say there is no account deletion (web and iPhone), and the iPhone app has no in-app entry yet
+**Account deletion feature** - Build account deletion, then update terms to describe what's purged, retained, sent to AI providers, and in backups. ✅ Built: the data purge (#268) and the account layer (#269). ✅ The web terms describe it (no new terms version; Peter, 2026-10-09). 🔧 The iPhone app's terms and in-app entry are in #482
 
 **Data export / portability** - Implement GDPR-required data export feature and document it in terms
 
@@ -806,7 +806,7 @@ This roadmap prioritizes **privacy & encryption first** (Phase -1), then **found
 19. ✅ **COMPLETED:** Proposal tracking with explicit IDs and lifecycle statuses, confirmation nodes
 19b. ✅ **COMPLETED:** Feature 2 Download as quote-as-response (#208) — substrate, nightly X sync, digest, labeled search + read_full, per-user easter-egg activation
 19c. ✅ **COMPLETED:** Delete all my writing / admin data purge (#268) — 30-day grace for the user's request, cost rows kept anonymised
-19d. ✅ **COMPLETED:** Account deletion (#269) — hidden at once, restore by signing in within 30 days, then purge + identity layer; admin deletion at once. Open: terms text, iPhone in-app deletion (App Store 5.1.1(v))
+19d. ✅ **COMPLETED:** Account deletion (#269) — deleted at once, restore by signing in within 30 days, then deleted forever (purge + identity layer); admin deletion at once; the purge revokes the stored X tokens at X; web terms updated. Open: iPhone in-app deletion and terms (#482, App Store 5.1.1(v))
 20. **NOW:** Implement text mode — last major feature before expanding alpha to ~10 users
 21. **NOW:** Stabilize Voice/Todo workflow — open bugs: todo merge hangs (#87), checkbox UX (#93, #94), interactive proposal editing (#89), completed item deletion (#97)
 22. **NOW:** Protected usernames (#91) + Anthropic API spend monitoring (#85)

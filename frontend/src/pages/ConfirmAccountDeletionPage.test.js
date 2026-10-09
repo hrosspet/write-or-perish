@@ -35,8 +35,9 @@ test('opening the link sends nothing; the delete button does', async () => {
   renderAt(alice);
   expect(screen.getByText('Delete @alice?')).toBeTruthy();
   // What will happen once confirmed, not what has happened.
-  expect(screen.getByText(/When you confirm, your account is hidden/)).toBeTruthy();
-  expect(screen.queryByText(/hidden now/)).toBeNull();
+  expect(screen.getByText(/When you confirm, your account is deleted/)).toBeTruthy();
+  expect(screen.getByText(/after\s+that it is deleted forever/)).toBeTruthy();
+  expect(screen.queryByText(/hidden/)).toBeNull();
   expect(screen.getByText(/also cancels\s+a request to delete all your writing, if one is waiting/)).toBeTruthy();
   expect(mockPost).not.toHaveBeenCalled();
   expect(screen.getByText(/keep my account/i)).toBeTruthy();

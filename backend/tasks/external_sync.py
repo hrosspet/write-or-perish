@@ -212,6 +212,10 @@ def sync_twitter_bookmarks(self, user_id, max_items=800):
             user_id=user_id, provider="twitter").first()
         if account is None or not account.get_access_token():
             return {"status": "not_connected"}
+        if account.user is not None and account.user.deleted_at is not None:
+            # A deleted account in its 30 days (#269): a sync queued
+            # before the deletion does not call X for it.
+            return {"status": "account_deleted"}
         if account.revoked_at is not None:
             return {"status": "revoked"}
 
