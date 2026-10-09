@@ -641,6 +641,8 @@ const NodeForm = forwardRef(
             formData.append('ai_usage', aiUsage);
             if (replyOptions.agentic) formData.append('agentic', 'true');
             if (replyOptions.auto_generate) formData.append('auto_generate', 'true');
+            // A thread started from the Glean card (#435).
+            if (replyOptions.entry) formData.append('entry', replyOptions.entry);
 
             response = await api.post("/nodes/", formData, {
               headers: { 'Content-Type': 'multipart/form-data' }
