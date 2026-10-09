@@ -47,11 +47,10 @@ NO_TASKS_RULE = (
 EMPTY_TODO_MESSAGE = "The todo list is empty. " + NO_TASKS_RULE
 
 # Shown on the card when the model's output hit the output cap (#432).
-# The card has no retry button after a failed merge (its pending draft
-# is gone), so the message says how to get a new proposal.
+# A failed merge leaves its proposal applicable (#434): the card shows
+# "Apply again" next to the message.
 TRUNCATED_MESSAGE = (
-    "The todo update was cut off, so nothing was changed. "
-    "Ask for the todo update again to retry.")
+    "The todo update was cut off, so nothing was changed.")
 EMPTY_RESULT_MESSAGE = "Empty merge result"
 # Shown on the card when the model's edits were refused twice (#234): an
 # anchor not found or not unique, a full rewrite of a list with tasks, an
@@ -59,7 +58,7 @@ EMPTY_RESULT_MESSAGE = "Empty merge result"
 # Nothing was saved.
 EDITS_FAILED_MESSAGE = (
     "The todo update couldn't be applied to your list, so nothing was "
-    "changed. Ask for the todo update again to retry.")
+    "changed.")
 
 
 @celery.task(bind=True)
@@ -109,17 +108,17 @@ def apply_voice_todo(self, llm_node_id: int, model_id: str, user_id: int,
         if user_is_capped(user_id):
             logger.warning(
                 "User %s is spend-capped; skipping voice todo merge", user_id)
-            _update_apply_status(
-                llm_node, "failed", error="Monthly spend limit reached",
-                confirm_node_id=confirm_node_id)
+            _merge_failed(
+                llm_node, user_id, "Monthly spend limit reached",
+                confirm_node_id)
             db.session.commit()
             return
 
         update_summary = llm_node.get_content()
         if not update_summary:
             logger.error(f"LLM node {llm_node_id} has no content")
-            _update_apply_status(llm_node, "failed", error="No update summary",
-                                confirm_node_id=confirm_node_id)
+            _merge_failed(llm_node, user_id, "No update summary",
+                          confirm_node_id)
             db.session.commit()
             return
 
@@ -140,10 +139,10 @@ def apply_voice_todo(self, llm_node_id: int, model_id: str, user_id: int,
                 f"Could not acquire merge lock for user {user_id} "
                 f"(node {llm_node_id}), another merge held it too long"
             )
-            _update_apply_status(
-                llm_node, "failed",
-                error="Another todo merge is still running, please retry",
-                confirm_node_id=confirm_node_id,
+            _merge_failed(
+                llm_node, user_id,
+                "Another todo merge is still running, please retry",
+                confirm_node_id,
             )
             db.session.commit()
             return
@@ -243,8 +242,7 @@ def _run_merge(llm_node, update_summary, user_id, model_id,
         logger.info(
             f"Todo merge for node {llm_node_id} refused: AI usage keeps "
             f"its inputs away from AI (user {user_id})")
-        _update_apply_status(llm_node, "failed", error=refusal,
-                             confirm_node_id=confirm_node_id)
+        _merge_failed(llm_node, user_id, refusal, confirm_node_id)
         db.session.commit()
         return
 
@@ -273,8 +271,7 @@ def _run_merge(llm_node, update_summary, user_id, model_id,
         logger.error(f"LLM call failed for todo merge: {e}", exc_info=True)
         # Calls made before the failing one were billed.
         _log_merge_costs(user_id, model_id, run)
-        _update_apply_status(llm_node, "failed", error=str(e),
-                             confirm_node_id=confirm_node_id)
+        _merge_failed(llm_node, user_id, str(e), confirm_node_id)
         db.session.commit()
         return
 
@@ -310,8 +307,7 @@ def _run_merge(llm_node, update_summary, user_id, model_id,
                 f"{len(run.responses)} replies ({run.failure}); nothing "
                 "saved")
             error = EDITS_FAILED_MESSAGE
-        _update_apply_status(llm_node, "failed", error=error,
-                             confirm_node_id=confirm_node_id)
+        _merge_failed(llm_node, user_id, error, confirm_node_id)
         db.session.commit()
         return
 
@@ -357,12 +353,25 @@ def _log_merge_costs(user_id, model_id, run):
         ))
 
 
+def _merge_failed(llm_node, user_id, error, confirm_node_id):
+    """Record a failed merge. Its proposal becomes applicable again (#434):
+    the pending draft the start removed comes back, unless the user has a
+    newer todo proposal pending, and ``retryable`` tells the web and iPhone
+    cards whether to show "Apply again" next to the error."""
+    from backend.routes.todo import restore_todo_draft
+    retryable = restore_todo_draft(llm_node, user_id)
+    _update_apply_status(llm_node, "failed", error=error,
+                         confirm_node_id=confirm_node_id,
+                         retryable=retryable)
+
+
 def _update_apply_status(llm_node, status, error=None, todo_id=None,
-                         confirm_node_id=None):
+                         confirm_node_id=None, retryable=None):
     """Update the apply_status in the LLM node's tool_calls_meta.
 
     Also updates the confirmation node (where apply_todo_changes lives)
-    if confirm_node_id is provided.
+    if confirm_node_id is provided. A completed merge drops the error of
+    an earlier failed one.
     """
     meta = []
     if llm_node.tool_calls_meta:
@@ -372,11 +381,11 @@ def _update_apply_status(llm_node, status, error=None, todo_id=None,
             meta = []
     for entry in meta:
         if entry.get("name") == "propose_todo":
-            entry["apply_status"] = status
-            if error:
-                entry["apply_error"] = error
+            _set_apply_status(entry, status, error)
             if todo_id:
                 entry["todo_id"] = todo_id
+            if retryable is not None and status != "completed":
+                entry["retryable"] = retryable
             break
     llm_node.tool_calls_meta = json.dumps(meta)
 
@@ -388,12 +397,19 @@ def _update_apply_status(llm_node, status, error=None, todo_id=None,
                 cmeta = json.loads(confirm_node.tool_calls_meta)
                 for entry in cmeta:
                     if entry.get("name") == "apply_todo_changes":
-                        entry["apply_status"] = status
-                        if error:
-                            entry["apply_error"] = error
+                        _set_apply_status(entry, status, error)
                         break
                 confirm_node.tool_calls_meta = json.dumps(cmeta)
             except (json.JSONDecodeError, TypeError):
                 pass
 
     db.session.flush()
+
+
+def _set_apply_status(entry, status, error):
+    entry["apply_status"] = status
+    if error:
+        entry["apply_error"] = error
+    if status == "completed":
+        entry.pop("apply_error", None)
+        entry.pop("retryable", None)

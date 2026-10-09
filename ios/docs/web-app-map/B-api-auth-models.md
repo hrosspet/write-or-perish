@@ -1465,8 +1465,9 @@ TodoVersion JSON (field presence varies by endpoint, listed per endpoint): `id: 
 - Called from: components/ProposalInline.js ("Apply to todo" on an AI reply that proposed todo changes via the `propose_todo` tool).
 - Request: `{"llm_node_id": int}` (the AI reply node carrying the proposal).
 - Response 202: `{"status": "started", "task_id": string, "llm_node_id": int}` — Celery task `apply_voice_todo` merges the proposal into the todo with an LLM call (no visible node is created).
-- Errors: 400 `"llm_node_id is required"`; 404 `{"error": "No pending todo changes found"}`; 403.
+- Errors: 400 `"llm_node_id is required"`; 404 `{"error": "No pending todo changes found"}`; 403; 409 `{"error", "code": "todo_merge_started"}` when a merge of this proposal is already running (a double click, a second tab): the cards show it as started and poll.
 - Completion polling (web): every 2 s `GET /api/nodes/<llm_node_id>/llm-status` (nodes section) and read `tool_calls_meta` → entry with `name == "propose_todo"`; `apply_status` goes `"started"` → `"completed"` or `"failed"` (with `apply_error`). No timeout in the web code.
+- A failed merge leaves the proposal applicable (#434): its pending draft comes back and the `propose_todo` entry gets `"retryable": true`, unless a newer todo proposal is pending (`false`). With `retryable` the cards show **"Apply again"** next to the error, which posts this route again.
 
 ---
 
