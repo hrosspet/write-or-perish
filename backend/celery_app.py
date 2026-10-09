@@ -127,6 +127,14 @@ celery.conf.update(
             'task': 'backend.tasks.external_sync.verify_public_source_sweep',
             'schedule': 3600.0,  # hourly; the task itself gates on 05:00 UTC
         },
+        # User data purge (#268): starts a purge when the user's 30-day
+        # grace period ends (at once for an admin purge) and resumes one
+        # whose runner died. One indexed query on a small table when
+        # nothing is due.
+        'process-user-data-purges': {
+            'task': 'backend.tasks.user_purge.process_user_data_purges',
+            'schedule': 60.0,  # every minute
+        },
     },
 )
 
@@ -156,3 +164,4 @@ from backend.tasks import external_sync  # noqa: F401
 from backend.tasks import external_digest  # noqa: F401
 from backend.tasks import imports  # noqa: F401
 from backend.tasks import intentions  # noqa: F401
+from backend.tasks import user_purge  # noqa: F401

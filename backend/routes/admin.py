@@ -5,6 +5,7 @@ from functools import wraps
 from flask import Blueprint, request, jsonify, abort, current_app
 from flask_login import login_required, current_user
 from sqlalchemy.exc import IntegrityError
+from backend.utils.hidden_rows import shown_description
 from backend.models import User, APICostLog
 from backend.extensions import db
 from backend.utils.timefmt import iso_utc
@@ -200,6 +201,7 @@ def list_users():
     profile_status = _profile_status_map()
     intentions_status = _intentions_status_map()
     profile_backoff = _profile_backoff_map()
+    purge_jobs = _latest_purge_jobs()
 
     # Aggregate total (all-time) spending per user in a single query
     spending_rows = db.session.query(
@@ -250,13 +252,15 @@ def list_users():
             "id": user.id,
             "twitter_id": user.twitter_id,
             "username": user.username,
-            "description": user.description,
+            "description": shown_description(user),
             "created_at": iso_utc(user.created_at),
             "accepted_terms_at": iso_utc(user.accepted_terms_at),
             "approved": user.approved,
             "email": user.email,
             "plan": user.plan,
             "deactivated_at": iso_utc(user.deactivated_at),
+            # Account deleted and in its grace period (#269): hidden.
+            "deleted_at": iso_utc(user.deleted_at),
             "total_spending_usd": total_microdollars / 1_000_000,
             "current_month_spending_usd": month_microdollars / 1_000_000,
             # Prompt-cache hit-rate over conversation turns since
@@ -283,6 +287,9 @@ def list_users():
             # {state: "waiting"|"stopped", refusals, until} or null. The
             # Build profile button asks before overriding it.
             "profile_backoff": profile_backoff.get(user.id),
+            # Latest data purge (#268), scheduled, running, done or
+            # failed; null when there was none.
+            "data_purge": _purge_job_json(purge_jobs.get(user.id)),
             "profile": profile_status.get(user.id) or {
                 "versions": 0,
                 "last_generation_type": None,
@@ -430,6 +437,172 @@ def cancel_intentions_route(user_id):
     if not result["cancelled"]:
         return jsonify({**result, "message": "No intentions batch is in flight."}), 200
     return jsonify(result), 200
+
+
+def _purge_job_json(job):
+    if job is None:
+        return None
+    return {
+        "id": job.id,
+        "status": job.status,
+        "source": job.source,
+        # "hidden": the user's own request, which hid the writing at once
+        # and deletes what it hid; "all": everything of the user's.
+        "scope": job.scope,
+        "requested_at": iso_utc(job.requested_at),
+        "scheduled_for": iso_utc(job.scheduled_for),
+        "started_at": iso_utc(job.started_at),
+        "finished_at": iso_utc(job.finished_at),
+        "attempts": job.attempts or 0,
+        "counts": job.counts,
+        "error": job.error,
+        # An account deletion (#269), not only a data purge.
+        "delete_account": bool(job.delete_account),
+    }
+
+
+def _latest_purge_jobs():
+    """{user_id: latest non-cancelled purge job} for the Users table."""
+    from backend.models import UserDataPurge
+    latest = db.session.query(func.max(UserDataPurge.id)).filter(
+        UserDataPurge.status != "cancelled").group_by(UserDataPurge.user_id)
+    return {j.user_id: j for j in UserDataPurge.query.filter(
+        UserDataPurge.id.in_(latest)).all()}
+
+
+@admin_bp.route("/users/<int:user_id>/purge_data", methods=["GET"])
+@login_required
+@admin_required
+def purge_data_status(user_id):
+    """The user's latest purge job (status, counts, error)."""
+    from backend.models import UserDataPurge
+    job = UserDataPurge.query.filter_by(user_id=user_id).order_by(
+        UserDataPurge.id.desc()).first()
+    return jsonify({"job": _purge_job_json(job)}), 200
+
+
+@admin_bp.route("/users/<int:user_id>/purge_data", methods=["POST"])
+@login_required
+@admin_required
+def purge_data_route(user_id):
+    """Delete all of a user's data at once (#268): mistaken pre-fills,
+    opt-outs, erasure requests. The account itself stays.
+
+    ``?dry_run=1`` returns what the purge would delete, change and keep,
+    per table, and changes nothing. Otherwise the body must carry
+    ``{"confirm_username": "<the user's username>"}``; the purge runs in
+    Celery and its job row records who started it. Counts only, never
+    content. AI and system accounts are refused (409)."""
+    from backend.utils import user_purge
+    user = User.query.get_or_404(user_id)
+    reason = user_purge.purge_refusal(user)
+    if reason:
+        return jsonify({"error": f"Refused ({reason}): AI and system "
+                                 "accounts are never purged.",
+                        "code": "purge_refused", "reason": reason}), 409
+
+    if request.args.get("dry_run") in ("1", "true"):
+        counts = user_purge.purge_user_content(user.id, dry_run=True)
+        return jsonify({"dry_run": True, "username": user.username,
+                        "counts": counts,
+                        "job": _purge_job_json(user_purge.active_job(user.id))}), 200
+
+    data = request.get_json(silent=True) or {}
+    if (data.get("confirm_username") or "").strip() != user.username:
+        return jsonify({"error": "Type the username to confirm.",
+                        "code": "confirm_mismatch"}), 400
+
+    from backend.models import UserDataPurge
+    job, created = user_purge.schedule_purge(
+        user, requested_by_id=current_user.id, source="admin",
+        at=datetime.utcnow())
+    if not created and job.delete_account:
+        # The account itself is being deleted (#269): bringing that job
+        # forward would delete the account, not only its data.
+        return jsonify({"error": "This account is scheduled for deletion. "
+                                 "Use Delete account to delete it now.",
+                        "code": "account_deletion_scheduled",
+                        "job": _purge_job_json(job)}), 409
+    if not created:
+        if job.status == "running":
+            return jsonify({"error": "A purge of this account is already "
+                                     "running.", "code": "already_running",
+                            "job": _purge_job_json(job)}), 409
+        # The user's own request is waiting out its grace period: the
+        # admin brings it forward, and it deletes everything of the
+        # user's (the counts the admin just saw), not only what the
+        # request hid. It can no longer be restored.
+        UserDataPurge.query.filter_by(id=job.id, status="scheduled").update(
+            {UserDataPurge.scheduled_for: datetime.utcnow(),
+             UserDataPurge.scope: "all"},
+            synchronize_session=False)
+        db.session.commit()
+    logger.warning("Admin %s started a data purge of user %s (job %s)",
+                   current_user.id, user.id, job.id)
+    from backend.tasks.user_purge import dispatch
+    try:
+        user_purge.start_job_now(job, dispatch)
+    except Exception as e:  # noqa: BLE001 - the beat picks it up
+        logger.warning("Purge job %s: immediate dispatch failed (%s); the "
+                       "beat will start it", job.id, type(e).__name__)
+    db.session.refresh(job)
+    return jsonify({"job": _purge_job_json(job)}), 202
+
+
+@admin_bp.route("/users/<int:user_id>/delete_account", methods=["POST"])
+@login_required
+@admin_required
+def delete_account_route(user_id):
+    """Delete an account at once (#269): its data (the #268 purge) and
+    then the account itself. Opt-outs, erasure requests, mistaken
+    whitelists and pre-fills.
+
+    ``?dry_run=1`` returns the purge's counts, the identity layer's and
+    the blast radius (public writing, replies in other people's threads),
+    and changes nothing. Otherwise the body must carry
+    ``{"confirm_username": "<the user's username>"}``: the account is
+    hidden at once and the job runs in Celery. Counts only, never
+    content. AI and system accounts (409) and the last admin (409) are
+    refused."""
+    from backend.utils import account_deletion, user_purge
+    user = User.query.get_or_404(user_id)
+    if user.id == current_user.id:
+        # An admin's own account goes through the Account page, with its
+        # confirmation and grace period, like everyone's.
+        return jsonify({"error": "Delete your own account on the Account "
+                                 "page.", "code": "own_account"}), 409
+    refusal = account_deletion.deletion_refusal(user)
+    if refusal:
+        code, message = refusal
+        return jsonify({"error": message, "code": code}), 409
+
+    if request.args.get("dry_run") in ("1", "true"):
+        dry = account_deletion.count_account_data(user.id)
+        return jsonify({"dry_run": True, "username": user.username,
+                        "has_email": bool(user.email),
+                        "job": _purge_job_json(user_purge.active_job(user.id)),
+                        **dry}), 200
+
+    data = request.get_json(silent=True) or {}
+    if (data.get("confirm_username") or "").strip() != user.username:
+        return jsonify({"error": "Type the username to confirm.",
+                        "code": "confirm_mismatch"}), 400
+    try:
+        job = account_deletion.schedule_account_deletion(
+            user, requested_by_id=current_user.id, source="admin",
+            at=datetime.utcnow())
+    except account_deletion.AccountDeletionRefused as e:
+        return jsonify({"error": e.message, "code": e.code}), 409
+    logger.warning("Admin %s started the deletion of account %s (job %s)",
+                   current_user.id, user_id, job.id)
+    from backend.tasks.user_purge import dispatch
+    try:
+        user_purge.start_job_now(job, dispatch)
+    except Exception as e:  # noqa: BLE001 - the beat picks it up
+        logger.warning("Account deletion job %s: immediate dispatch failed "
+                       "(%s); the beat will start it", job.id, type(e).__name__)
+    db.session.refresh(job)
+    return jsonify({"job": _purge_job_json(job)}), 202
 
 
 @admin_bp.route("/users/<int:user_id>/toggle_spam", methods=["POST"])

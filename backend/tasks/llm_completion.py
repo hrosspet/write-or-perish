@@ -983,7 +983,10 @@ def _load_node_chain(parent_node, user_id):
     The chain holds only what *user_id* (the user the reply is for) can
     see: the walk stops below the first ancestor they cannot see (or
     could not see before it was deleted), so nothing above it reaches
-    the model.
+    the model. An ancestor hidden with its owner's deleted account
+    (#269) is passed through like a deleted one: the message builder
+    sends a notice in its place, as it does after the purge. The node
+    the reply is built on must itself be visible.
 
     Nor does it hold a node whose ai_usage keeps AI out (not chat /
     train): such a node is left out entirely. The reply routes and the
@@ -992,12 +995,18 @@ def _load_node_chain(parent_node, user_id):
     rule still sends nothing marked 'none'. With nothing left the reply
     is refused (AIUsageRefused)."""
     from backend.utils.encryption import prefetch_deks
-    from backend.utils.privacy import can_user_see_node_or_tombstone
+    from backend.utils.privacy import (
+        can_user_see_node_or_placeholder, can_user_see_node_or_tombstone,
+        shown_as_deleted,
+    )
     if user_id is None:
         raise ValueError("_load_node_chain needs the requesting user's id")
     visible = []
     current = parent_node
-    while current and can_user_see_node_or_tombstone(current, user_id):
+    if current is not None and not can_user_see_node_or_tombstone(
+            current, user_id):
+        current = None
+    while current and can_user_see_node_or_placeholder(current, user_id):
         visible.insert(0, current)
         current = current.parent
     if not visible:
@@ -1014,7 +1023,9 @@ def _load_node_chain(parent_node, user_id):
     if not node_chain:
         from backend.utils.llm_nodes import AIUsageRefused
         raise AIUsageRefused()
-    prefetch_deks(n.content for n in node_chain)
+    # Not the deleted nodes: their text is never read.
+    prefetch_deks(n.content for n in node_chain
+                  if not shown_as_deleted(n, user_id))
     return node_chain
 
 
@@ -2504,6 +2515,10 @@ def _read_requested(node):
 
 CA_BATCH_PROVIDERS = ("anthropic", "openai")
 CA_BATCH_LIVE_STATUSES = ("submitted", "cancelling")
+# A Read whose owner's "Delete all my writing" waited or ran (#268): it did
+# not run, or its result was dropped. Shown on the node after a restore.
+READ_ON_HOLD_TEXT = ("This read did not run: your writing was waiting to be "
+                     "deleted.")
 # What a read withdrawn at the provider says in place of its reply.
 CA_BATCH_WITHDRAWN_TEXT = (
     "This read was cancelled before it ran: the monthly spend cap was "
@@ -3304,9 +3319,15 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             # ancestors — those are scrubbed in the message-build loop
             # below, so any placeholders inside their (still-in-DB during
             # grace) content would be acting on content the user has
-            # asked to delete.
+            # asked to delete. The same for an ancestor hidden with its
+            # owner's deleted account (#269).
+            from backend.utils.privacy import shown_as_deleted
+
+            def _gone(n):
+                return shown_as_deleted(n, user_id)
+
             def _alive(n):
-                return n.deleted_at is None and n.get_content()
+                return not _gone(n) and n.get_content()
 
             # Check if any node contains the {user_export} placeholder
             # Find the first node containing it to use its timestamp as cutoff
@@ -3354,6 +3375,23 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             if ca_turn is not None:
                 logger.info("Node %s: {ca_tweets} turn is %r",
                             llm_node_id, ca_turn)
+            if needs_ca and batch_entry is None:
+                from backend.utils.hidden_rows import writing_on_hold
+                if writing_on_hold(llm_node.human_owner_id or user_id):
+                    # "Delete all my writing" waits or runs (#268): no Read
+                    # runs for the user, like the other background jobs.
+                    logger.info("Node %s: Read not run, the owner's writing "
+                                "is on hold for deletion", llm_node_id)
+                    llm_node.llm_task_status = 'failed'
+                    llm_node.llm_task_error = READ_ON_HOLD_TEXT
+                    llm_node.llm_task_progress = 100
+                    db.session.commit()
+                    return {
+                        'parent_node_id': parent_node_id,
+                        'llm_node_id': llm_node_id,
+                        'status': 'refused',
+                        'reason': 'writing_on_hold',
+                    }
             if needs_ca:
                 # A read runs against the user's own conversation, never
                 # under the agentic system prompt: it is a batch judgement
@@ -3463,7 +3501,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             )
             system_node = next(
                 (n for n in node_chain
-                 if n.deleted_at is None and n.has_artifact("prompt")),
+                 if not _gone(n) and n.has_artifact("prompt")),
                 None)
             system_render_cacheable = False
             cached_system_render = None
@@ -3799,6 +3837,41 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     **diag_fields,
                 ))
 
+            def _read_on_hold():
+                """The Read's owner pressed "Delete all my writing" while it
+                ran (#268): the request waits or the purge runs, or the
+                Read's node is hidden. Its picks would save tweets and
+                marks the user asked to delete."""
+                from backend.utils.hidden_rows import writing_on_hold
+                # Read from the database, not the (possibly stale) object;
+                # unlike a refresh this keeps the run's pending changes.
+                deleted_at = db.session.query(Node.deleted_at).filter(
+                    Node.id == llm_node.id).scalar()
+                return (deleted_at is not None
+                        or writing_on_hold(llm_node.human_owner_id or user_id))
+
+            def _drop_held_read(resp):
+                """A Read result that arrived while the writing is on hold:
+                the provider billed it, so its cost row is written (once
+                per batch result, as for a reply the collect cannot use),
+                and nothing else: no pick, no saved tweet, no reply text,
+                no hidden reference made visible again."""
+                if (not resp.get("cut_off")
+                        and _claim_failed_feed_cost(llm_node, resp)):
+                    _log_api_cost(resp, llm_node)
+                llm_node.llm_task_status = 'failed'
+                llm_node.llm_task_error = READ_ON_HOLD_TEXT
+                llm_node.llm_task_progress = 100
+                db.session.commit()
+                logger.info("Node %s: Read result dropped, the owner's "
+                            "writing is on hold for deletion", llm_node.id)
+                return {
+                    'parent_node_id': parent_node_id,
+                    'llm_node_id': llm_node.id,
+                    'status': 'cancelled',
+                    'reason': 'writing_on_hold',
+                }
+
             def _collect_feed(resp):
                 """_collect_feed_reply for this turn. A reply the collect
                 cannot use (FeedReplyError: not the promised object, or cut
@@ -3950,8 +4023,10 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     # ingest deleted user data. We still include the node so
                     # the conversation structure is preserved (better than
                     # an unexplained gap, which tends to make models try to
-                    # "fill in" what's missing).
-                    if node.deleted_at is not None:
+                    # "fill in" what's missing). An ancestor hidden with its
+                    # owner's deleted account (#269) is scrubbed the same
+                    # way, as it will be after the purge.
+                    if _gone(node):
                         message_text = (
                             f"{time_prefix} "
                             "[Earlier message in this thread was deleted "
@@ -3959,7 +4034,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         )
                         role = "assistant" if is_llm_node else "user"
                         # Text blocks, like every other message: the
-                        # context log below and the providers read them.
+                        # payload log below and the providers read them.
                         messages.append({
                             "role": role,
                             "content": [{"type": "text",
@@ -4421,6 +4496,8 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                             )),
                         stream=feed_schema is None)
                     if needs_ca:
+                        if _read_on_hold():
+                            return _drop_held_read(response)
                         response = _collect_feed(response)
                     break  # Success
                 except PromptTooLongError as e:
@@ -4645,6 +4722,11 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 # The collecting run: the poll above found the batch ended
                 # and holds its reply; the context was built for ca_refs.
                 response = batch_resp
+                # Only a Read goes through a batch: one collected while its
+                # owner's writing is on hold is dropped (#268), whether or
+                # not its thread was hidden with the rest.
+                if _read_on_hold():
+                    return _drop_held_read(response)
                 if ca_refs is not None:
                     response = _collect_feed(response)
                 return _finalize(llm_node, response)

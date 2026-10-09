@@ -1,5 +1,7 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import XLookupConfirmDialog from "./XLookupConfirmDialog";
+import PurgeDataDialog from "./PurgeDataDialog";
+import AdminDeleteAccountDialog from "./AdminDeleteAccountDialog";
 import ProfileBuildConfirmDialog from "./ProfileBuildConfirmDialog";
 import AdminRefusalDialog, { REFUSAL_TITLES } from "./AdminRefusalDialog";
 import { offeredModels } from "./ModelSelector";
@@ -530,6 +532,40 @@ const smallActionStyle = {
   borderRadius: "4px",
 };
 
+// The Users-row line for a user's latest data purge (#268) or account
+// deletion (#269).
+export function purgeLabel(job) {
+  if (!job) return "";
+  if (job.delete_account) {
+    switch (job.status) {
+      case "scheduled":
+        return `Account deleted by the user, hidden until ${formatDate(job.scheduled_for)}`;
+      case "running":
+        return "Deleting account…";
+      case "failed":
+        return `Account deletion failed: ${job.error || "unknown error"}`;
+      default:
+        return `Account deletion: ${job.status}`;
+    }
+  }
+  switch (job.status) {
+    case "scheduled":
+      // The user's "Delete all my writing" hides the writing at once
+      // (#268, Peter 2026-10-09) and deletes it on the date.
+      return job.scope === "hidden"
+        ? `Writing hidden by the user, deleted on ${formatDate(job.scheduled_for)}`
+        : `Data purge due ${formatDate(job.scheduled_for)}`;
+    case "running":
+      return "Purging data…";
+    case "done":
+      return `Data purged ${formatDate(job.finished_at)} (${job.source})`;
+    case "failed":
+      return `Data purge failed: ${job.error || "unknown error"}`;
+    default:
+      return `Data purge: ${job.status}`;
+  }
+}
+
 function AdminPanel() {
   const [activeTab, setActiveTab] = useState("users");
   const [users, setUsers] = useState([]);
@@ -548,6 +584,14 @@ function AdminPanel() {
   // Build profile on a user held by the refusal backoff (#368): the
   // confirmation dialog's user, or null.
   const [buildAsk, setBuildAsk] = useState(null);
+  // "Purge data" (#268): the user row whose dry run / confirmation is
+  // open, or null.
+  const [purgeAsk, setPurgeAsk] = useState(null);
+  const closePurge = useCallback(() => setPurgeAsk(null), []);
+  // "Delete account" (#269): the user row whose dry run / confirmation
+  // is open, or null.
+  const [deleteAsk, setDeleteAsk] = useState(null);
+  const closeDelete = useCallback(() => setDeleteAsk(null), []);
   // A pre-fill / intentions / profile build the backend refused for this
   // account (#346): { code, message, username }. Shown as a dialog.
   const [refusal, setRefusal] = useState(null);
@@ -1125,6 +1169,8 @@ function AdminPanel() {
         }}
       />
       <AdminRefusalDialog refusal={refusal} onClose={() => setRefusal(null)} />
+      <PurgeDataDialog user={purgeAsk} onClose={closePurge} onStarted={() => fetchUsers()} />
+      <AdminDeleteAccountDialog user={deleteAsk} onClose={closeDelete} onStarted={() => fetchUsers()} />
 
       {error && <div style={{ color: "var(--error)" }}>{error}</div>}
       <table style={{ width: "100%", borderCollapse: "collapse", color: "var(--text-primary)" }}>
@@ -1430,7 +1476,28 @@ function AdminPanel() {
                   style={u.spam ? { color: "var(--error)" } : undefined}
                 >
                   {u.spam ? "Not spam" : "Spam"}
+                </button>{" "}
+                <button
+                  onClick={() => setPurgeAsk(u)}
+                  disabled={u.data_purge?.status === "running"}
+                  title="Delete all of this user's data now (dry run first). The account stays."
+                  style={{ color: "var(--error)" }}
+                >
+                  Purge data
+                </button>{" "}
+                <button
+                  onClick={() => setDeleteAsk(u)}
+                  disabled={u.data_purge?.status === "running"}
+                  title="Delete this account and all its data now (dry run first)."
+                  style={{ color: "var(--error)" }}
+                >
+                  Delete account
                 </button>
+                {u.data_purge && (
+                  <div style={{ marginTop: "4px", fontSize: "0.85em", color: u.data_purge.status === "failed" ? "var(--error)" : "var(--text-secondary)" }}>
+                    {purgeLabel(u.data_purge)}
+                  </div>
+                )}
                 {(intentLabel(intent[u.id])) && (
                   <div style={{ marginTop: "4px", fontSize: "0.85em", color: intent[u.id]?.status === "failed" || (intent[u.id]?.error && !intent[u.id]?.status) ? "var(--error)" : "var(--text-secondary)" }}>
                     {intentLabel(intent[u.id])}

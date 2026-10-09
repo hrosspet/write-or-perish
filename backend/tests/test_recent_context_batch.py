@@ -611,6 +611,41 @@ def test_a_result_for_an_account_opted_out_meanwhile_is_billed_not_saved(
     assert _job_for(user)[0].items[0]["outcome"] == "skipped"
 
 
+def _hold_writing(user):
+    """A waiting "Delete all my writing" of *user* (#268)."""
+    from datetime import datetime
+    from backend.models import UserDataPurge
+    job = UserDataPurge(user_id=user.id, source="self", scope="hidden",
+                        status="scheduled", scheduled_for=datetime.utcnow())
+    _db.session.add(job)
+    _db.session.commit()
+    return job
+
+
+def test_no_summary_while_the_writing_is_on_hold(app, rc, world, monkeypatch):
+    """#268: "Delete all my writing" hid the writing while the batch ran:
+    the result is billed and not saved; no new request goes out, and the
+    direct path builds nothing either."""
+    user = _user("hidden-meanwhile")
+    _check(rc)
+    hold = _hold_writing(user)
+
+    _collect_with(rc, monkeypatch, _summary(user))
+    assert UserRecentContext.query.count() == 0
+    assert APICostLog.query.count() == 1
+    assert _job_for(user)[0].items[0]["outcome"] == "skipped"
+
+    world["submitted"].clear()
+    _check(rc)
+    assert world["submitted"] == []
+    calls = []
+    monkeypatch.setattr(rc.LLMProvider, "get_completion",
+                        staticmethod(lambda *a, **k: calls.append(a)))
+    rc._generate_recent_context_impl(user.id)
+    assert calls == []
+    assert hold.status == "scheduled"
+
+
 def test_a_result_older_than_the_saved_summary_is_not_saved(
         app, rc, world, monkeypatch):
     """The direct path's 'nothing new' guard, re-checked at save time: if
@@ -826,6 +861,92 @@ def test_a_check_between_claim_and_save_does_not_resubmit_the_user(
     assert inner == [{"status": "locked", "submitted": 0}]
     assert len(world["submitted"]) == 1
     assert _shown_summary(user).endswith("NEW SUMMARY")
+
+
+def test_an_item_taken_out_after_the_collector_loaded_the_job_is_not_saved(
+        app, rc, world, monkeypatch):
+    """A user data purge (#268) takes its user's item out of a pending
+    job under the collector's lock. A collector run that loaded the job
+    before that must save from the items as they are at its claim, or it
+    saves a summary of the purged writing after the purge."""
+    from sqlalchemy import update
+    kept, purged = _user("kept"), _user("purged")
+    assert _check(rc)["submitted"] == 2
+    [job] = _job_for(purged)
+    assert {i["user_id"] for i in job.items} == {kept.id, purged.id}
+
+    def purge_strips_meanwhile(batch_ids, api_keys):
+        # Another process: the session's loaded job is not updated.
+        _db.session.execute(
+            update(RecentContextBatchJob)
+            .where(RecentContextBatchJob.id == job.id)
+            .values(items=[i for i in job.items
+                           if i["user_id"] != purged.id])
+            .execution_options(synchronize_session=False))
+        return {**_summary(kept), **_summary(purged)}, {}, {}
+    monkeypatch.setattr(rc, "batch_check_and_collect", purge_strips_meanwhile)
+
+    assert rc._collect_recent_context_batches()["collected"] == 1
+    assert _shown_summary(kept).endswith("NEW SUMMARY")
+    assert UserRecentContext.query.filter_by(user_id=purged.id).count() == 0
+    assert APICostLog.query.filter_by(user_id=purged.id).count() == 0
+
+
+@pytest.mark.parametrize("shared", [True, False])
+def test_an_abandon_keeps_what_a_purge_did_after_the_job_was_loaded(
+        app, rc, world, monkeypatch, shared):
+    """The abandon of a job that never ended reads the job as it is under
+    the lock, not as the collector loaded it before the provider call. A
+    purge (#268) that took its user's item out of a shared job, or
+    cancelled a job that held only theirs, during that call stays done."""
+    from sqlalchemy import update
+    purged = _user("purged")
+    kept = _user("kept") if shared else None
+    assert _check(rc)["submitted"] == (2 if shared else 1)
+    [job] = _job_for(purged)
+    job.submitted_at = datetime.utcnow() - timedelta(hours=25, minutes=1)
+    _db.session.commit()
+    job_id = job.id
+    left = [i for i in job.items if i["user_id"] != purged.id]
+
+    def purge_meanwhile(batch_ids, api_keys):
+        # Another process: the session's loaded job is not updated.
+        values = ({"items": left} if shared
+                  else {"items": [], "status": "cancelled"})
+        _db.session.execute(
+            update(RecentContextBatchJob)
+            .where(RecentContextBatchJob.id == job_id)
+            .values(**values)
+            .execution_options(synchronize_session=False))
+        return {}, dict(batch_ids), {}
+    monkeypatch.setattr(rc, "batch_check_and_collect", purge_meanwhile)
+
+    result = rc._collect_recent_context_batches()
+    job = _db.session.get(RecentContextBatchJob, job_id)
+    assert all(i["user_id"] != purged.id for i in job.items)
+    if shared:
+        assert result == {"collected": 0, "abandoned": 1}
+        assert job.status == "abandoned"
+        assert [(i["user_id"], i["outcome"]) for i in job.items] == [
+            (kept.id, "failed")]
+    else:
+        assert result == {"collected": 0, "abandoned": 0}
+        assert job.status == "cancelled"
+        assert job.items == []
+
+
+def test_an_abandon_waits_while_the_lock_is_held(app, rc, world, monkeypatch):
+    user = _user("abandon-locked")
+    _check(rc)
+    [job] = _job_for(user)
+    job.submitted_at = datetime.utcnow() - timedelta(hours=25, minutes=1)
+    _db.session.commit()
+    with rc.recent_context_batch_lock():
+        assert _collect_with(rc, monkeypatch, pending=True) == {
+            "collected": 0, "abandoned": 0}
+    assert _job_for(user)[0].status == "pending"
+    assert _collect_with(rc, monkeypatch, pending=True) == {
+        "collected": 0, "abandoned": 1}
 
 
 def test_without_redis_the_check_and_collector_run_unlocked(
