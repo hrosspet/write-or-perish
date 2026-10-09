@@ -799,6 +799,35 @@ def test_a_check_between_claim_and_save_does_not_resubmit_the_user(
     assert _shown_summary(user).endswith("NEW SUMMARY")
 
 
+def test_an_item_taken_out_after_the_collector_loaded_the_job_is_not_saved(
+        app, rc, world, monkeypatch):
+    """A user data purge (#268) takes its user's item out of a pending
+    job under the collector's lock. A collector run that loaded the job
+    before that must save from the items as they are at its claim, or it
+    saves a summary of the purged writing after the purge."""
+    from sqlalchemy import update
+    kept, purged = _user("kept"), _user("purged")
+    assert _check(rc)["submitted"] == 2
+    [job] = _job_for(purged)
+    assert {i["user_id"] for i in job.items} == {kept.id, purged.id}
+
+    def purge_strips_meanwhile(batch_ids, api_keys):
+        # Another process: the session's loaded job is not updated.
+        _db.session.execute(
+            update(RecentContextBatchJob)
+            .where(RecentContextBatchJob.id == job.id)
+            .values(items=[i for i in job.items
+                           if i["user_id"] != purged.id])
+            .execution_options(synchronize_session=False))
+        return {**_summary(kept), **_summary(purged)}, {}, {}
+    monkeypatch.setattr(rc, "batch_check_and_collect", purge_strips_meanwhile)
+
+    assert rc._collect_recent_context_batches()["collected"] == 1
+    assert _shown_summary(kept).endswith("NEW SUMMARY")
+    assert UserRecentContext.query.filter_by(user_id=purged.id).count() == 0
+    assert APICostLog.query.filter_by(user_id=purged.id).count() == 0
+
+
 def test_without_redis_the_check_and_collector_run_unlocked(
         app, rc, world, monkeypatch):
     class RedisDown:

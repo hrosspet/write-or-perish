@@ -56,8 +56,9 @@ from backend.models import (
     APICostLog, ArtifactView, Draft, ExternalAccount, ExternalDigestBatchJob,
     ExternalItem, ExternalItemEmbedding, FeedPick, FeedRender, Node,
     NodeContextArtifact, NodeEmbedding, NodeTranscriptChunk, NodeVersion,
-    PollDraftBatchJob, PollResponse, ProfileBatchJob, ReferenceAction,
-    ShareDraft, TTSChunk, Thread, User, UserArtifact, UserDataPurge,
+    PollDraftBatchJob, PollResponse, ProfileBatchJob, RecentContextBatchJob,
+    ReferenceAction, ShareDraft, TTSChunk, Thread, User, UserArtifact,
+    UserDataPurge,
     UserFeedback, UserNotification, UserProfile, UserPrompt,
     UserRecentContext, UserTodo,
 )
@@ -388,7 +389,7 @@ def _delete_files(dirs, files=()):
 class InFlight(NamedTuple):
     counts: dict
     running: list       # task ids still executing
-    lock_busy: bool     # the profile batch pipeline holds its lock
+    lock_busy: bool     # a batch pipeline (profile, recent context) holds its lock
 
     @property
     def must_wait(self):
@@ -490,6 +491,16 @@ def _profile_batch_lock():
         yield ok
 
 
+@contextmanager
+def _recent_context_batch_lock():
+    """The recent-context collector's lock (held from its claim of an
+    ended job until the summaries are saved), so it cannot save this
+    user's summary from a job it read before the purge stripped it."""
+    from backend.tasks.recent_context import recent_context_batch_lock
+    with recent_context_batch_lock() as ok:
+        yield ok
+
+
 def _node_batch_entries(plan):
     """Live provider batches of the user's Reads ("_batch" entries in
     tool_calls_meta, one request each)."""
@@ -553,7 +564,7 @@ PIPELINE_FLAG_RESETS = {
 def stop_in_flight(user_id, *, dry_run=False, plan=None):
     """Stop everything that could write the user's data again. Returns
     InFlight: counts, the task ids still executing (the runner waits for
-    them) and whether the profile batch lock was busy."""
+    them) and whether a batch pipeline's lock was busy."""
     plan = plan or plan_nodes(user_id)
     counts = Counter()
     now = _now()
@@ -589,15 +600,19 @@ def stop_in_flight(user_id, *, dry_run=False, plan=None):
                                entry.get("key_type") or "chat")
 
     lock_busy = False
+    # The pipelines whose collectors save per-user results under a lock.
+    locks = {ProfileBatchJob: _profile_batch_lock,
+             RecentContextBatchJob: _recent_context_batch_lock}
     for model, belongs, key in _batch_tables(user_id, response_ids):
-        if model is ProfileBatchJob:
-            with _profile_batch_lock() as ok:
-                if not ok:
-                    lock_busy = True
-                    continue
-                _strip_batch_jobs(model, belongs, False, now, counts, key)
-                db.session.commit()
-        else:
+        lock = locks.get(model)
+        if lock is None:
+            _strip_batch_jobs(model, belongs, False, now, counts, key)
+            db.session.commit()
+            continue
+        with lock() as ok:
+            if not ok:
+                lock_busy = True
+                continue
             _strip_batch_jobs(model, belongs, False, now, counts, key)
             db.session.commit()
 
@@ -618,6 +633,8 @@ def _batch_tables(user_id, response_ids):
          "poll_draft_batch_job"),
         (ExternalDigestBatchJob, lambda i: i.get("user_id") == user_id,
          "external_digest_batch_job"),
+        (RecentContextBatchJob, lambda i: i.get("user_id") == user_id,
+         "recent_context_batch_job"),
     )
 
 
@@ -1142,7 +1159,7 @@ def run_purge_job(job_id, token):
                 db.session.commit()
                 logger.info("user purge job %s: waiting for %d running "
                             "task(s)%s", job_id, len(inflight.running),
-                            ", profile batch lock" if inflight.lock_busy else "")
+                            ", a batch pipeline lock" if inflight.lock_busy else "")
                 return "wait"
             logger.warning("user purge job %s: tasks still running after "
                            "%s; purging anyway", job_id, PURGE_MAX_WAIT)

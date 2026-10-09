@@ -726,7 +726,7 @@ def _claim_and_apply(job, results, now):
     # Claim the job before saving anything, so a collector run
     # overlapping this one (the beat fires every minute) cannot save the
     # same summaries twice.
-    batch_id, items = job.batch_id, [dict(i) for i in job.items]
+    batch_id = job.batch_id
     claimed = RecentContextBatchJob.query.filter_by(
         id=job.id, status="pending").update(
         {"status": "collected", "collected_at": now},
@@ -734,6 +734,11 @@ def _claim_and_apply(job, results, now):
     db.session.commit()
     if not claimed:
         return 0
+    # The items as they are now, read after the claim (the commit expired
+    # the job): a user data purge (#268) takes its user's item out of the
+    # job under the same lock, possibly after this run loaded the job.
+    db.session.refresh(job)
+    items = [dict(i) for i in job.items]
     for item in items:
         item["outcome"], item["billed"] = _apply_item(
             item, results.get(item["custom_id"]), batch_id)

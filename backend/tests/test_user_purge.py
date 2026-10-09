@@ -45,9 +45,9 @@ from backend.models import (  # noqa: E402
     ExternalAccount, ExternalDigestBatchJob, ExternalItem,
     ExternalItemEmbedding, FeedPick, FeedRender, Node, NodeContextArtifact,
     NodeEmbedding, NodeTranscriptChunk, NodeVersion, Poll,
-    PollDraftBatchJob, PollResponse, ProfileBatchJob, ReferenceAction,
-    ShareDraft, TTSChunk, Thread, User, UserArtifact, UserDataPurge,
-    UserFeedback, UserNotification, UserProfile, UserPrompt,
+    PollDraftBatchJob, PollResponse, ProfileBatchJob, RecentContextBatchJob,
+    ReferenceAction, ShareDraft, TTSChunk, Thread, User, UserArtifact,
+    UserDataPurge, UserFeedback, UserNotification, UserProfile, UserPrompt,
     UserRecentContext, UserTodo,
 )
 from backend.utils import user_purge as up  # noqa: E402
@@ -116,6 +116,7 @@ class Stubs:
         self.cancelled = []
         self.running = []
         self.lock_ok = True
+        self.rc_lock_ok = True
         self.dispatched = []
 
 
@@ -135,6 +136,11 @@ def stubs(monkeypatch, tmp_path):
     def lock():
         yield s.lock_ok
     monkeypatch.setattr(up, "_profile_batch_lock", lock)
+
+    @contextmanager
+    def rc_lock():
+        yield s.rc_lock_ok
+    monkeypatch.setattr(up, "_recent_context_batch_lock", rc_lock)
 
     from backend.utils import audio_storage, twitter_archive
     monkeypatch.setattr(audio_storage, "AUDIO_STORAGE_ROOT", tmp_path / "audio")
@@ -322,6 +328,10 @@ def world(app, stubs):
                                        status="collected",
                                        items=[{"custom_id": "d1", "user_id": a.id},
                                               {"custom_id": "d2", "user_id": b.id}]))
+    w.RJ = _add(RecentContextBatchJob(provider_key="anthropic", batch_id="rc",
+                                      status="pending",
+                                      items=[{"custom_id": "r1", "user_id": a.id},
+                                             {"custom_id": "r2", "user_id": b.id}]))
     _db.session.commit()
 
     au, d = stubs.audio, stubs.data
@@ -615,6 +625,9 @@ def test_in_flight_work_is_stopped(world, stubs):
     assert _db.session.get(PollDraftBatchJob, world.PJ.id).status == "cancelled"
     assert _db.session.get(ExternalDigestBatchJob, world.DJ.id).items == [
         {"custom_id": "d2", "user_id": world.bob.id}]
+    rj = _db.session.get(RecentContextBatchJob, world.RJ.id)
+    assert rj.status == "pending"
+    assert rj.items == [{"custom_id": "r2", "user_id": world.bob.id}]
 
 
 def test_read_batch_of_a_node_is_cancelled(world, stubs):
@@ -830,6 +843,22 @@ def test_the_purge_waits_for_the_profile_batch_lock(world, stubs):
     stubs.lock_ok = True
     job = _db.session.get(UserDataPurge, job_id)
     assert up.run_purge_job(job_id, job.task_id) == "done"
+
+
+def test_the_purge_waits_for_the_recent_context_batch_lock(world, stubs):
+    """The recent-context collector saves from a job it claimed under
+    its lock; the purge takes her item out under the same lock."""
+    stubs.rc_lock_ok = False
+    job_id, outcome = _run_job()
+    assert outcome == "wait"
+    assert [i["user_id"] for i in _db.session.get(
+        RecentContextBatchJob, world.RJ.id).items] == [
+        world.alice.id, world.bob.id]
+    stubs.rc_lock_ok = True
+    job = _db.session.get(UserDataPurge, job_id)
+    assert up.run_purge_job(job_id, job.task_id) == "done"
+    assert _db.session.get(RecentContextBatchJob, world.RJ.id).items == [
+        {"custom_id": "r2", "user_id": world.bob.id}]
 
 
 def test_profile_pipeline_skips_a_user_being_purged(world, stubs):

@@ -97,6 +97,7 @@ export const PURGE_COUNT_LABELS = [
   ["profile_batch_job", "Profile batch jobs changed"],
   ["poll_draft_batch_job", "Poll-draft batch jobs changed"],
   ["external_digest_batch_job", "Digest batch jobs changed"],
+  ["recent_context_batch_job", "Recent-context batch jobs changed"],
 ];
 
 export function purgeCountRows(counts) {
