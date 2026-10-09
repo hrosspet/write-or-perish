@@ -2539,8 +2539,9 @@ def _superseded(llm_node, this_task_id):
 CA_BATCH_PROVIDERS = ("anthropic", "openai")
 CA_BATCH_LIVE_STATUSES = ("submitted", "cancelling")
 # A Read whose owner's "Delete all my writing" waited or ran (#268): it did
-# not run, or its result was dropped. Shown on the node after a restore.
-READ_ON_HOLD_TEXT = ("This read did not run: your writing was waiting to be "
+# not run, or its result was dropped. Shown on the node after a restore,
+# as the reason of a failed gleaning: users know the read as Glean (#435).
+READ_ON_HOLD_TEXT = ("Glean did not run: your writing was waiting to be "
                      "deleted.")
 # What a read withdrawn at the provider says in place of its reply.
 CA_BATCH_WITHDRAWN_TEXT = (

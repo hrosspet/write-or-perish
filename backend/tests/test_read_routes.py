@@ -251,7 +251,7 @@ class TestReadStart:
         assert resp.status_code == 409
         assert resp.get_json()["code"] == "writing_on_hold"
         assert resp.get_json()["error"].startswith(
-            "Read is off while your writing waits to be deleted.")
+            "Glean is off while your writing waits to be deleted.")
         assert Node.query.count() == 0
 
 
@@ -1700,6 +1700,55 @@ class TestNoGleanUnderAFailedReply:
         _db.session.commit()
         again = client.post(f"/api/read/from-node/{done.id}", json={}).get_json()
         assert Node.query.get(again["llm_node_id"]).parent_id == done.id
+
+
+class TestNoGleanWhileTheWritingIsOnHold:
+    """#268 with #435: while "Delete all my writing" waits, a user who
+    gleans gets no glean, neither a first one nor Glean again under a
+    gleaning: 409 writing_on_hold in Glean's words, and nothing is
+    created. Once the request is gone, Glean works again."""
+
+    def _hold(self, user):
+        from datetime import datetime
+        from backend.models import UserDataPurge
+        job = UserDataPurge(
+            user_id=user.id, source="self", scope="hidden",
+            status="scheduled", scheduled_for=datetime.utcnow())
+        _db.session.add(job)
+        _db.session.commit()
+        return job
+
+    def _refused(self, resp):
+        assert resp.status_code == 409, resp.get_json()
+        body = resp.get_json()
+        assert body["code"] == "writing_on_hold"
+        assert body["error"] == (
+            "Glean is off while your writing waits to be deleted. Restore "
+            "your writing on the Account page to glean again.")
+
+    def test_no_glean_during_the_hold(self, app_glean):
+        client = app_glean.test_client()
+        ana = _glean_user(app_glean, glean_enabled=True)
+        entry = _make_node(ana, content="written after the request")
+        _db.session.commit()
+        _login(client, ana.id)
+        # A gleaning from before the request, to glean again under.
+        first = client.post(f"/api/read/from-node/{entry.id}", json={}).get_json()
+        done = Node.query.get(first["llm_node_id"])
+        done.llm_task_status = "completed"
+        _db.session.commit()
+        job = self._hold(ana)
+        before = Node.query.count()
+
+        self._refused(client.post(f"/api/read/from-node/{entry.id}", json={}))
+        self._refused(client.post(f"/api/read/from-node/{done.id}", json={}))
+        assert Node.query.count() == before
+
+        # Restored: the request is cancelled, and Glean goes through again.
+        job.status = "cancelled"
+        _db.session.commit()
+        resp = client.post(f"/api/read/from-node/{entry.id}", json={})
+        assert resp.status_code == 202, resp.get_json()
 
 
 class TestFailedGleaningSaysWhy:
