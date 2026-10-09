@@ -1647,6 +1647,40 @@ class TestGleanCardThreads:
                                    "llm_node_id": gleaning.id}
 
 
+class TestFailedGleaningSaysWhy:
+    """The thread page shows why a gleaning failed instead of its
+    placeholder text (#435): the reason is on the node, for its owner."""
+
+    def test_owner_gets_the_reason_others_do_not(self, app_glean):
+        client = app_glean.test_client()
+        ana = _glean_user(app_glean, glean_enabled=True)
+        bob = _make_user("bob")
+        llm = _make_user("claude-haiku-5.5", glean_enabled=None)
+        entry = _make_node(ana, content="a reflection")
+        entry.privacy_level = "public"
+        failed = _make_node(llm, parent_id=entry.id, node_type="llm",
+                            llm_model="claude-haiku-5.5", human_owner=ana,
+                            content="[LLM response generation pending...]")
+        failed.privacy_level = "public"
+        failed.llm_task_status = "failed"
+        failed.llm_task_error = "The model provider did not answer."
+        _db.session.commit()
+
+        _login(client, ana.id)
+        data = client.get(f"/api/nodes/{failed.id}").get_json()
+        assert data["llm_task_error"] == "The model provider did not answer."
+
+        # Flask-Login caches the user on g, which the fixture's app
+        # context keeps between clients.
+        from flask import g
+        g.pop("_login_user", None)
+        client = app_glean.test_client()
+        _login(client, bob.id)
+        data = client.get(f"/api/nodes/{failed.id}").get_json()
+        assert data["id"] == failed.id
+        assert "llm_task_error" not in data
+
+
 class TestGleanIsLiveOnTheUsersProvider:
     def _entry(self, app, **user_kwargs):
         client = app.test_client()
@@ -1670,8 +1704,22 @@ class TestGleanIsLiveOnTheUsersProvider:
         _db.session.commit()
         _login(client, boss.id)
         data = client.post("/api/read/start", json={}).get_json()
-        meta = Node.query.get(data["llm_node_id"]).tool_calls_meta
-        assert "_live" not in (meta or "")
+        meta = _json.loads(Node.query.get(data["llm_node_id"]).tool_calls_meta)
+        assert {"name": "_read_batch"} in meta
+        assert {"name": "_live"} not in meta
+
+    def test_a_glean_is_never_marked_for_the_batch(self, app_glean):
+        import json as _json
+        client, _, entry = self._entry(app_glean)
+        data = client.post(f"/api/read/from-node/{entry.id}", json={}).get_json()
+        meta = _json.loads(Node.query.get(data["llm_node_id"]).tool_calls_meta)
+        assert {"name": "_read_batch"} not in meta
+        # Glean again too.
+        data = client.post(f"/api/read/from-node/{data['llm_node_id']}",
+                           json={}).get_json()
+        meta = _json.loads(Node.query.get(data["llm_node_id"]).tool_calls_meta)
+        assert {"name": "_read_batch"} not in meta
+        assert {"name": "_live"} in meta
 
     def test_an_anthropic_user_gleans_on_an_anthropic_model(self, app_glean):
         client, _, entry = self._entry(app_glean, preferred_model="claude-opus-4.6")
@@ -1840,6 +1888,32 @@ class TestGleanIsLiveOnTheUsersProvider:
         assert resp.status_code == 202, resp.get_json()
         meta = _json.loads(Node.query.get(reply.id).tool_calls_meta or "[]")
         assert {"name": "_live"} not in meta
+        assert {"name": "_read_batch"} in meta
+        # A live rerun of it removes the batch mark again.
+        node = Node.query.get(reply.id)
+        node.llm_task_status = "failed"
+        _db.session.commit()
+        resp = client.post(f"/api/read/{reply.id}/rerun", json={"live": True})
+        assert resp.status_code == 202, resp.get_json()
+        meta = _json.loads(Node.query.get(reply.id).tool_calls_meta or "[]")
+        assert {"name": "_read_batch"} not in meta
+
+    def test_no_rerun_while_a_live_glean_runs(self, app_glean):
+        """A second run would render the day into the same reply while the
+        first one runs (#435: Peter's double render)."""
+        client = app_glean.test_client()
+        boss = _make_user("boss", is_admin=True, glean_enabled=True)
+        entry = _make_node(boss, content="a reflection")
+        _db.session.commit()
+        _login(client, boss.id)
+        data = client.post(f"/api/read/from-node/{entry.id}", json={}).get_json()
+        reply = Node.query.get(data["llm_node_id"])
+        for status in ("pending", "processing"):
+            reply.llm_task_status = status
+            _db.session.commit()
+            resp = client.post(f"/api/read/{reply.id}/rerun", json={"live": True})
+            assert resp.status_code == 409, resp.get_json()
+            assert resp.get_json()["error"] == "This glean is still running."
 
 
 class TestGleanOnlyThroughGlean:

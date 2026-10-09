@@ -327,7 +327,7 @@ def test_refresh_brings_an_existing_snapshot_up_to_date(app, monkeypatch, tmp_pa
 
     assert refresh_snapshot_for_read(tmp_path) == "new"
     assert downloaded == ["new"]
-    assert (tmp_path / ".lock").exists()
+    assert (tmp_path / ".download.lock").exists()
     # Current already: one manifest GET, no download.
     assert refresh_snapshot_for_read(tmp_path) == "new"
     assert downloaded == ["new"]
@@ -626,17 +626,22 @@ class _BatchSubmitted(Exception):
     pass
 
 
-def _run_without_ca_live(monkeypatch, tmp_path, meta):
+def _run_without_ca_live(monkeypatch, tmp_path, meta, task_self=None,
+                         task_id=None, before_run=None):
     """Run a first read the way the queue does (ca_live False), with
-    *meta* on the placeholder. Returns (provider calls, batch submits)."""
+    *meta* on the placeholder (and *task_id* as the node's task id).
+    Returns (provider calls, batch submits, the reply)."""
     _capture_render(monkeypatch, tmp_path)
+    if before_run is not None:
+        before_run()
     alice = _mk_user("alice", approved=True, plan="alpha", is_admin=True)
     llm_user = _mk_user("gpt-5", twitter_id="llm-gpt-5")
     read = _prompt_node(alice, "read_thread")
     reply = _placeholder(llm_user, alice, read.id)
     if meta is not None:
         reply.tool_calls_meta = json.dumps(meta)
-        _db.session.commit()
+    reply.llm_task_id = task_id
+    _db.session.commit()
     submits = []
 
     def _submit(*args, **kwargs):
@@ -648,8 +653,8 @@ def _run_without_ca_live(monkeypatch, tmp_path, meta):
         {"n": 1, "qt": "Worth it.", "relevance": 40, "recommend": True}]))])
     monkeypatch.setattr(_llm_task_mod, "LLMProvider", _CapturingProvider)
     try:
-        generate_llm_response(_FakeSelf(), read.id, reply.id, "gpt-5",
-                              alice.id, source_mode=None)
+        generate_llm_response(task_self or _FakeSelf(), read.id, reply.id,
+                              "gpt-5", alice.id, source_mode=None)
     except _BatchSubmitted:
         pass
     return _CapturingProvider.kwargs, submits, _fresh(reply.id)
@@ -666,9 +671,84 @@ def test_a_glean_goes_to_the_live_api(app, monkeypatch, tmp_path):  # noqa: F811
     assert "{quote_ext:" in reply.get_content()
 
 
-def test_an_unmarked_read_still_goes_through_the_batch(app, monkeypatch, tmp_path):  # noqa: F811
-    """The admin's /read/start experiments: no live marker, the Batch
+def test_an_unmarked_read_is_live(app, monkeypatch, tmp_path):  # noqa: F811
+    """A read whose node carries no marker (a glean whose placeholder
+    missed it, a read reached another way) is a live call too: the batch
+    has to be asked for (#435, Peter's voice glean)."""
+    calls, submits, reply = _run_without_ca_live(monkeypatch, tmp_path, None)
+    assert submits == []
+    assert len(calls) == 1
+    assert reply.llm_task_status == "completed"
+
+
+def test_a_glean_again_without_a_marker_is_live(app, monkeypatch, tmp_path):  # noqa: F811
+    """Glean again's own marker ("_read") alone: live."""
+    calls, submits, _ = _run_without_ca_live(
+        monkeypatch, tmp_path, [{"name": "_read"}])
+    assert submits == []
+    assert len(calls) == 1
+
+
+def test_only_a_read_marked_for_the_batch_goes_through_it(app, monkeypatch, tmp_path):  # noqa: F811
+    """The admin's /read/start experiments: READ_BATCH_MARKER, the Batch
     API, as before."""
-    calls, submits, _ = _run_without_ca_live(monkeypatch, tmp_path, None)
+    calls, submits, _ = _run_without_ca_live(
+        monkeypatch, tmp_path, [{"name": "_read_batch"}])
     assert calls == []
     assert len(submits) == 1
+
+
+class _TaskSelf(_FakeSelf):
+    def __init__(self, task_id):
+        self.request = type("Req", (), {"id": task_id})()
+
+
+def test_a_superseded_run_does_not_render_into_the_reply(app, monkeypatch, tmp_path):  # noqa: F811
+    """A run the admin's rerun replaced (the node has another task id
+    now) stops before it renders the day into the reply a second time
+    (#435: Peter's double render)."""
+    calls, submits, reply = _run_without_ca_live(
+        monkeypatch, tmp_path, [{"name": "_live"}],
+        task_self=_TaskSelf("old-task"), task_id="new-task")
+    assert calls == [] and submits == []
+    assert FeedRender.query.filter_by(node_id=reply.id).count() == 0
+
+
+def test_the_run_that_owns_the_reply_renders(app, monkeypatch, tmp_path):  # noqa: F811
+    calls, _, reply = _run_without_ca_live(
+        monkeypatch, tmp_path, [{"name": "_live"}],
+        task_self=_TaskSelf("the-task"), task_id="the-task")
+    assert len(calls) == 1
+    assert FeedRender.query.filter_by(node_id=reply.id).count() == 1
+
+
+def test_a_read_never_waits_for_the_archive_download(app, monkeypatch, tmp_path):  # noqa: F811
+    """With a cached export in place, the read queues the refresh in the
+    background and reads the cache: no manifest check and no download
+    inside the read (#435: Peter's voice glean waited on one)."""
+    import sys
+    from backend.utils import community_archive as ca
+    for name in ca.SNAPSHOT_FILES:
+        (tmp_path / name).write_bytes(b"")
+    (tmp_path / "export_id").write_text("cached")
+    fetched = []
+    monkeypatch.setattr(ca, "fetch_latest_manifest",
+                        lambda: fetched.append(1) or {"export_id": "newer"})
+    monkeypatch.setattr(ca, "ensure_snapshot",
+                        lambda *a, **k: fetched.append(2))
+    queued = []
+
+    class _Refresh:
+        @staticmethod
+        def apply_async(**kwargs):
+            queued.append(kwargs)
+
+    def _queue_here():
+        monkeypatch.setattr(sys.modules["backend.tasks.imports"],
+                            "refresh_community_archive_snapshot", _Refresh,
+                            raising=False)
+    calls, _, reply = _run_without_ca_live(
+        monkeypatch, tmp_path, [{"name": "_live"}], before_run=_queue_here)
+    assert reply.llm_task_status == "completed"
+    assert fetched == []
+    assert queued == [{"retry": False}]

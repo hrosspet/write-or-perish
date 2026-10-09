@@ -169,6 +169,19 @@ test('a Reflect session has no Glean button at any turn', async () => {
   expect(glean()).toBeNull();
 });
 
+test("the Glean button's tooltip is Loore's, also while it waits for the reply", async () => {
+  renderAt('/voice?glean=1');
+  await screen.findByText("What's on your mind?");
+  act(() => { mockSessionOptions.onEntrySaved(); });
+  const button = glean();
+  expect(button).toBeDisabled();
+  expect(button).not.toHaveAttribute('title');
+  // The wrapper carries the hover: a disabled button gets none.
+  fireEvent.mouseEnter(button.parentElement);
+  const tip = await screen.findByRole('tooltip');
+  expect(tip).toHaveTextContent("Glean waits for Loore's reply to your last message");
+});
+
 test('a user with Glean off gets no Glean button, even from a Glean link', async () => {
   renderAt('/voice?parent=42&glean=1', { glean_enabled: false });
   await screen.findByText("What's on your mind?");

@@ -488,14 +488,18 @@ def _read_turn_model(parent, owner, model_id, chain):
     return new_model_id
 
 
-def _with_live_marker(meta, live):
-    """*meta* as a list, with READ_LIVE_MARKER added when *live* (a glean:
-    always a live call, #435)."""
-    from backend.utils.glean import READ_LIVE_MARKER
+def _with_read_marker(meta, is_read_turn, live):
+    """*meta* as a list, with the read turn's marker added: READ_LIVE_MARKER
+    for a glean (always a live call, #435), READ_BATCH_MARKER for the
+    admin's batch experiments (*live* False). Nothing for a reply that
+    is not a read."""
+    from backend.utils.glean import READ_BATCH_MARKER, READ_LIVE_MARKER
     meta = list(meta or [])
-    if live and not any(isinstance(m, dict) and m.get("name") == READ_LIVE_MARKER
-                        for m in meta):
-        meta.append({"name": READ_LIVE_MARKER})
+    if not is_read_turn:
+        return meta
+    marker = READ_LIVE_MARKER if live else READ_BATCH_MARKER
+    if not any(isinstance(m, dict) and m.get("name") == marker for m in meta):
+        meta.append({"name": marker})
     return meta
 
 
@@ -511,10 +515,11 @@ def create_llm_placeholder(parent_node_id, model_id, human_owner_id,
     same commit that creates it, so a marker the task reads (the read
     thread's "_read", routes/read.py) is there before the task can start.
 
-    A reply that is a read (a glean, #435) is a live call: it gets the
-    READ_LIVE_MARKER, which the task reads, unless *read_live* is False
-    (the admin's /read/start experiments, which go through the Batch
-    API). It runs on the read model the owner named when they may choose
+    A reply that is a read (a glean, #435) is a live call: the task sends
+    a read through the Batch API only when *read_live* is False (the
+    admin's /read/start experiments), which marks it READ_BATCH_MARKER; a
+    glean gets READ_LIVE_MARKER, which the pages show as "Gleaning". It
+    runs on the read model the owner named when they may choose
     one (an admin or anyone who gleans; another provider's too), else on
     the default read model of their own provider (_read_turn_model).
 
@@ -651,7 +656,7 @@ def create_llm_placeholder(parent_node_id, model_id, human_owner_id,
         token_count=approximate_token_count(placeholder_text),
     )
     llm_node.set_content(placeholder_text)
-    meta = _with_live_marker(meta, is_read_turn and read_live)
+    meta = _with_read_marker(meta, is_read_turn, read_live)
     client = client or request_client()
     if client:
         meta.append({"name": CLIENT_MARKER, "client": client})

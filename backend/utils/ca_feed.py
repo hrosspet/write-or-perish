@@ -292,11 +292,22 @@ def record_feed_render(node, stats, refs, days=1, scope="all"):
     """Pin what this reply's render sent the model (see FeedRender). Adds
     to the session (or updates the reply's existing row on a rerun); the
     caller's next commit lands it, before any batch is submitted."""
+    from sqlalchemy.exc import IntegrityError
     from backend.extensions import db
     from backend.models import FeedRender
     row = FeedRender.query.filter_by(node_id=node.id).first()
     if row is None:
-        row = FeedRender(node_id=node.id)
+        # One row per reply (a unique node_id). Two runs of the same reply
+        # that render at the same time (a rerun started while the first
+        # waited) must not fail on it: the row is inserted in a
+        # savepoint, and when the other run's row landed first this one
+        # updates that row instead (#435: Peter's double render).
+        try:
+            with db.session.begin_nested():
+                db.session.add(FeedRender(node_id=node.id))
+        except IntegrityError:
+            pass
+        row = FeedRender.query.filter_by(node_id=node.id).first()
     row.export_id = stats.get("export_id")
     row.days = int(days)
     row.scope = scope or "all"
@@ -462,11 +473,13 @@ def refresh_snapshot_for_read(snapshot_dir, log=log):
     """Bring the cached archive up to the latest nightly export (the
     Community Archive exports around 07:00 UTC) so "the last day" is the
     last day and not the day the snapshot was last fetched. Called by
-    the read before it renders and by the beat sweep. Only maintains a
-    snapshot that exists; a failed refresh is logged and the read goes
-    on with the cached export (its reply shows the window it covered
-    either way). Returns the export id in place, or None when nothing
-    was checked."""
+    the background refresh (the beat sweep, and the one a read queues,
+    request_snapshot_refresh), never by a read itself: a read never waits
+    for the download. Only maintains a snapshot that exists; a failed
+    refresh is logged and reads go on with the cached export (a reply
+    shows the window it covered either way). While another refresh is
+    downloading, this one returns at once (ca.refresh_snapshot). Returns
+    the export id in place, or None when nothing was checked."""
     from backend.utils import community_archive as ca
     if not ca.snapshot_export_id(snapshot_dir):
         return None
@@ -483,6 +496,28 @@ def refresh_snapshot_for_read(snapshot_dir, log=log):
     if refreshed:
         log.info("Community Archive snapshot refreshed to %s", export_id)
     return export_id
+
+
+def request_snapshot_refresh(snapshot_dir, log=log):
+    """Queue the archive refresh in the background (the beat sweep's task,
+    imports.refresh_community_archive_snapshot) and return at once. A
+    read calls this instead of refreshing inline: a glean is a live call
+    the user waits for (#435), and a new nightly export is a ~900 MB
+    download, minutes on a slow link. The read goes on with the cached
+    export (its reply shows the window it covered); the next read gets
+    the new one. Only for a snapshot that exists (the refresh maintains
+    one, never fetches a first copy). Best effort: a queue that can't be
+    reached is logged, the read goes on."""
+    from backend.utils import community_archive as ca
+    if not ca.snapshot_export_id(snapshot_dir):
+        return False
+    try:
+        from backend.tasks.imports import refresh_community_archive_snapshot
+        refresh_community_archive_snapshot.apply_async(retry=False)
+    except Exception as e:  # noqa: BLE001 - the read proceeds on the cache
+        log.warning("Could not queue the Community Archive refresh: %s", e)
+        return False
+    return True
 
 
 def parse_feed_reply(text, refs):

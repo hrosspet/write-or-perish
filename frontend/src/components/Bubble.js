@@ -31,11 +31,18 @@ const tombstoneStyle = {
 };
 
 // The tag a prompt-rooted node wears. Keys are identifiers ("read_thread");
-// the tag is a word. Both read prompts are one thing to the user: a read.
+// the tag is a word. Both read prompts are one thing to the user: Glean
+// (#435, the name Peter gave the read).
 const PROMPT_LABELS = {
-  read: 'Read',
-  read_thread: 'Read',
+  read: 'Glean',
+  read_thread: 'Glean',
 };
+export const stripQuoteMarkers = (text) => (text || '')
+  .replace(/[ \t]*\{quote(?:_ext)?:\d+\}[ \t]*/g, ' ')
+  .replace(/ +\n/g, '\n')
+  .replace(/\n{3,}/g, '\n\n')
+  .trim();
+
 const promptLabel = (key) => PROMPT_LABELS[key]
   || (key.charAt(0).toUpperCase() + key.slice(1)).replace(/_/g, ' ');
 
@@ -82,8 +89,11 @@ const Bubble = ({
 
   useEffect(() => cancelHoverHide, []);
 
-  // Use full content if available; otherwise use preview.
-  const text = node.content || node.preview || "";
+  // Use full content if available; otherwise use preview. Quote markers
+  // ({quote:12}, {quote_ext:34}) become cards on the node's own page; in
+  // a card they would read as raw markup, so they are left out (a
+  // gleaning's picks above a "Glean again" are all markers, #435).
+  const text = stripQuoteMarkers(node.content || node.preview || "");
 
   // Extract title (first line, "# " stripped) and body (rest)
   const { title, body, isHeading } = splitPreview(text);
@@ -196,7 +206,7 @@ const Bubble = ({
           lineHeight: 1.7,
           marginBottom: "0.6rem",
         }}>
-          <MarkdownBody>{node.content}</MarkdownBody>
+          <MarkdownBody>{stripQuoteMarkers(node.content)}</MarkdownBody>
         </div>
       ) : (
         <>
