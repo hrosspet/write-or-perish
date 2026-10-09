@@ -937,6 +937,13 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
           navigate(`/voice?parent=${id}`);
           return;
         }
+        // 410: this node was deleted after the page opened (#480). A toast,
+        // as for the LLM Response button: setError() would replace the
+        // whole thread with the message and leave the user nowhere to go.
+        if (err?.response?.status === 410) {
+          addToast(err.response.data?.error || 'This node has been deleted.', 8000);
+          return;
+        }
         setError(err.response?.data?.error || `Error starting ${sessionType} session.`);
       });
   };
