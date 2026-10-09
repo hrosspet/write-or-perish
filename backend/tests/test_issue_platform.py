@@ -323,6 +323,8 @@ def _pending_issue(alice):
         "### Issue Title\nRecord button does nothing\n"
         "### Description\nTapping record has no effect.\n"
         "### Category\nbug"))
+    proposal.tool_calls_meta = json.dumps(
+        [{"name": "propose_github_issue", "status": "success"}])
     draft = Draft(user_id=alice.id, parent_id=proposal.id,
                   label="github_issue_pending")
     draft.set_content("")

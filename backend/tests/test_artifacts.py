@@ -528,8 +528,13 @@ FEEDBACK_TEXT = (
 )
 
 
-def _mk_llm_node(uid, content):
+def _mk_llm_node(uid, content, proposes=None):
+    """An AI reply of *uid*'s; *proposes* names the propose_* entry the
+    completion task writes on a proposal."""
     node = Node(user_id=uid, node_type="llm", llm_model="test-model")
+    if proposes:
+        node.tool_calls_meta = json.dumps(
+            [{"name": proposes, "status": "success"}])
     node.set_content(content)
     _db.session.add(node)
     _db.session.commit()
@@ -559,7 +564,8 @@ def test_auto_create_drafts_creates_feedback_draft(app):
 def test_apply_feedback_tool_submits(app):
     with app.app_context():
         uid = User.query.first().id
-        origin = _mk_llm_node(uid, FEEDBACK_TEXT)
+        origin = _mk_llm_node(uid, FEEDBACK_TEXT,
+                              proposes="propose_feedback")
         draft = Draft(user_id=uid, parent_id=origin.id,
                       label="feedback_pending")
         draft.set_content("")
@@ -584,7 +590,8 @@ def test_apply_feedback_tool_submits(app):
 
 def _pending_todo_proposal(uid):
     proposal = Node(user_id=uid, node_type="llm", llm_model="test-model",
-                    ai_usage="chat")
+                    ai_usage="chat", tool_calls_meta=json.dumps(
+                        [{"name": "propose_todo", "status": "success"}]))
     proposal.set_content("### New Tasks\n- buy milk")
     _db.session.add(proposal)
     _db.session.flush()
@@ -672,7 +679,8 @@ def test_apply_feedback_without_pending_draft_errors(app):
 def test_feedback_submit_route(app, client):
     with app.app_context():
         uid = User.query.first().id
-        origin = _mk_llm_node(uid, FEEDBACK_TEXT)
+        origin = _mk_llm_node(uid, FEEDBACK_TEXT,
+                              proposes="propose_feedback")
         draft = Draft(user_id=uid, parent_id=origin.id,
                       label="feedback_pending")
         draft.set_content("")
@@ -707,7 +715,8 @@ def test_composing_reply_under_proposal_does_not_clobber_draft(app, client):
     only because it never composes a reply)."""
     with app.app_context():
         uid = User.query.first().id
-        proposal = _mk_llm_node(uid, FEEDBACK_TEXT)
+        proposal = _mk_llm_node(uid, FEEDBACK_TEXT,
+                                proposes="propose_feedback")
         fb = Draft(user_id=uid, parent_id=proposal.id,
                    label="feedback_pending")
         fb.set_content("")

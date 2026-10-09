@@ -4,7 +4,8 @@ from flask import Blueprint, jsonify, request, current_app
 from flask_login import login_required, current_user
 from backend.models import Node, Draft, UserTodo
 from backend.extensions import db
-from backend.utils.privacy import AI_ALLOWED
+from backend.utils.privacy import AI_ALLOWED, can_user_access_node
+from backend.utils.proposals import find_own_pending_proposal
 from backend.utils.timefmt import iso_utc
 from backend.utils.todo_lock import (
     TODO_BUSY_CODE, TODO_BUSY_MESSAGE, TodoBusy, lock_user_todo)
@@ -301,24 +302,14 @@ def todo_merge_refusal(user_id, proposal_node):
 
 
 def _find_pending_todo_draft(llm_node_id, user_id):
-    """Find the todo_pending draft by walking ancestor chain from llm_node_id."""
+    """The user's pending todo proposal at or above *llm_node_id*: (its
+    todo_pending draft, the proposal node), or (None, None). A todo merge
+    runs only on the user's own live proposal (utils/proposals), so a node
+    they can't see, or a draft on any other node, finds nothing."""
     llm_node = Node.query.get(llm_node_id)
-    if not llm_node:
+    if not llm_node or not can_user_access_node(llm_node, user_id):
         return None, None
-
-    current_node = llm_node
-    visited = set()
-    while current_node and current_node.id not in visited:
-        visited.add(current_node.id)
-        draft = Draft.query.filter_by(
-            user_id=user_id,
-            parent_id=current_node.id,
-            label='todo_pending',
-        ).first()
-        if draft:
-            return draft, current_node
-        current_node = current_node.parent
-    return None, None
+    return find_own_pending_proposal(llm_node, user_id, 'todo_pending')
 
 
 # A second apply of a proposal whose merge is running (a double click, a
@@ -480,6 +471,8 @@ def apply_todo_draft():
     Kicks off an async orient_apply_todo LLM merge to apply the
     proposed changes to the full todo list.
 
+    404 unless the node, or the nearest node above it with a pending todo
+    draft, is the user's own live todo proposal (_find_pending_todo_draft).
     403 ``{"error", "code": "ai_usage_none"}`` when AI may not read the
     todo list or the proposal (todo_merge_refusal); nothing is started.
     """
