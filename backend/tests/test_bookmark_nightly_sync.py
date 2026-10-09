@@ -350,6 +350,24 @@ def test_revoked_account_is_skipped(app):
     assert result["status"] == "revoked"
 
 
+def test_a_sync_queued_before_an_account_deletion_does_not_call_x(
+        app, monkeypatch):
+    """A deleted account in its 30 days (#269): the nightly gate skips it,
+    and a sync already queued before the deletion stops before X."""
+    from datetime import datetime
+    uid = User.query.first().id
+    _mk_account(uid, expired=False)
+    User.query.get(uid).deleted_at = datetime.utcnow()
+    _db.session.commit()
+
+    def no_fetch(*a, **k):
+        raise AssertionError("called X")
+    monkeypatch.setattr(_sync_mod, "x_fetch_bookmark_pages", no_fetch)
+    monkeypatch.setattr(_sync_mod, "x_refresh_access_token", no_fetch)
+    result = _sync_mod.sync_twitter_bookmarks(_FakeSelf(), uid)
+    assert result["status"] == "account_deleted"
+
+
 def test_no_sync_while_the_writing_is_on_hold(app, monkeypatch):
     """#268: while "Delete all my writing" waits, the sync would bring
     back the saved references it hid: neither the nightly fan-out nor a

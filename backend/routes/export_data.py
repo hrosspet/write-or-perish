@@ -66,9 +66,15 @@ def export_data():
 
 
 def _node_author_label(node):
-    """Return a compact author label like 'User (alice)' or 'AI (claude-opus-4.6)'."""
+    """Return a compact author label like 'User (alice)' or 'AI (claude-opus-4.6)'.
+
+    No name when the author deleted the account (in its grace period or
+    deleted, #269): their placeholders name nobody, as in threads."""
+    from backend.utils.privacy import author_gone
     if node.node_type == "llm":
         return f"AI ({node.llm_model})" if node.llm_model else "AI (unknown)"
+    if author_gone(node):
+        return "User"
     author = node.user.username if node.user else "Unknown"
     return f"User ({author})"
 
@@ -194,15 +200,18 @@ def iter_with_dek_prefetch(roots, window=DEK_PREFETCH_WINDOW):
 
 
 def _filtered_children(node, filter_ai_usage, created_before, included_ids,
-                       keep_tombstones):
+                       keep_tombstones, user_id=None):
     """Children of *node* that should render, sorted chronologically.
 
     keep_tombstones: when a budget pre-selection (included_ids) is
     active, tombstones pass through even if not pre-selected — they take
     no real budget tokens and dropping them creates discontinuities
-    (§5a). The inaccessible-placeholder branch does not extend this
-    courtesy, matching the historical behavior.
+    (§5a). A node hidden with its owner's deleted account (#269) counts
+    as a tombstone for *user_id*, as it will after the purge. The
+    inaccessible-placeholder branch does not extend this courtesy,
+    matching the historical behavior.
     """
+    from backend.utils.privacy import shown_as_deleted
     children = node.children
     if filter_ai_usage:
         children = [c for c in children if c.ai_usage in AI_ALLOWED]
@@ -212,7 +221,7 @@ def _filtered_children(node, filter_ai_usage, created_before, included_ids,
         if keep_tombstones:
             children = [
                 c for c in children
-                if c.id in included_ids or c.deleted_at is not None
+                if c.id in included_ids or shown_as_deleted(c, user_id)
             ]
         else:
             children = [c for c in children if c.id in included_ids]
@@ -473,7 +482,14 @@ def format_node_tree(
     Returns:
         str: Formatted text representation of the node tree
     """
-    from backend.utils.privacy import can_user_view_tombstone
+    from backend.utils.privacy import can_user_view_tombstone, shown_as_deleted
+
+    def _deleted(n):
+        # Soft-deleted, or hidden with its owner's deleted account
+        # (#269): the same tombstone either way, as after the purge.
+        if user_id is None:
+            return n.deleted_at is not None
+        return shown_as_deleted(n, user_id)
 
     if processed_nodes is None:
         processed_nodes = set()
@@ -495,7 +511,7 @@ def format_node_tree(
             # caller is responsible for the pre-deletion-access check on
             # the entry node; child tombstones are checked at push time
             # below via can_user_view_tombstone.
-            if current.deleted_at is not None:
+            if _deleted(current):
                 kind = "tombstone"
 
         if kind == "node":
@@ -505,14 +521,14 @@ def format_node_tree(
                 licence=licence, filter_ai_usage=filter_ai_usage))
             children = _filtered_children(
                 current, filter_ai_usage, created_before, included_ids,
-                keep_tombstones=True)
+                keep_tombstones=True, user_id=user_id)
             child_frames = []
             for i, child in enumerate(children):
                 child_index = f"{path}.{i+1}"
                 # Mark branches (when there are multiple children)
                 if len(children) > 1 and i > 0:
                     child_frames.append(("text", "---\n**BRANCH**\n---\n\n"))
-                if child.deleted_at is not None:
+                if _deleted(child):
                     # Tombstone: render only with pre-deletion access;
                     # otherwise skip (don't leak structural "something
                     # is here").
@@ -546,7 +562,7 @@ def format_node_tree(
         processed_nodes.add(current.id)
         children = _filtered_children(
             current, filter_ai_usage, created_before, included_ids,
-            keep_tombstones=keep_tombstones)
+            keep_tombstones=keep_tombstones, user_id=user_id)
         stack.extend(reversed([
             ("node", gc, f"{path}.{j+1}")
             for j, gc in enumerate(children)

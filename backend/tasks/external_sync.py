@@ -222,6 +222,10 @@ def sync_twitter_bookmarks(self, user_id, max_items=800):
             user_id=user_id, provider="twitter").first()
         if account is None or not account.get_access_token():
             return {"status": "not_connected"}
+        if account.user is not None and account.user.deleted_at is not None:
+            # A deleted account in its 30 days (#269): a sync queued
+            # before the deletion does not call X for it.
+            return {"status": "account_deleted"}
         if account.revoked_at is not None:
             return {"status": "revoked"}
 
@@ -428,6 +432,8 @@ def sync_all_twitter_bookmarks():
         dispatched = 0
         from backend.utils.hidden_rows import writing_on_hold
         for account in accounts:
+            if account.user is None or account.user.deleted_at is not None:
+                continue   # a deleted account in its grace period (#269)
             if user_local_hour(account.user) != NIGHTLY_SYNC_LOCAL_HOUR:
                 continue
             if writing_on_hold(account.user_id):   # #268

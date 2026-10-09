@@ -304,8 +304,10 @@ class Scope(NamedTuple):
 
 
 def scope_of(job):
-    """The Scope a job purges."""
-    if job is not None and job.scope == "hidden":
+    """The Scope a job purges. An account deletion (#269) takes
+    everything, whatever the request it replaced hid."""
+    if (job is not None and job.scope == "hidden"
+            and not getattr(job, "delete_account", False)):
         return Scope(job.user_id, job.id, job.requested_at)
     return Scope(job.user_id if job is not None else None)
 
@@ -1507,9 +1509,12 @@ def cancel_purge(user_id, cancelled_by_id):
     Returns True when a job was cancelled (False: none waiting, it has
     started, or it is an admin's purge, which is never undone). The
     cancel is a conditional update on the job's status, so a restore and
-    the beat's claim have one winner."""
+    the beat's claim have one winner. An account deletion (#269) is not
+    cancelled here: only a restore after signing in undoes it
+    (account_deletion.restore_account)."""
     cancelled = cancel_jobs(UserDataPurge.user_id == user_id,
                             UserDataPurge.scope == "hidden",
+                            UserDataPurge.delete_account.is_(False),
                             cancelled_by_id=cancelled_by_id)
     db.session.commit()
     if cancelled:
@@ -1661,10 +1666,15 @@ def _heartbeat_for(job_id, token):
 def run_purge_job(job_id, token):
     """Run the claimed job. Returns "done", "wait" (call again after
     PURGE_WAIT_RETRY_SECONDS: the user's tasks are still running),
-    "superseded", "refused" or "error"."""
+    "superseded", "refused" or "error".
+
+    A job with ``delete_account`` (#269) deletes the account after the
+    purge (backend/utils/account_deletion.py), in the same commit as the
+    job's "done"."""
     if not start_runner(job_id, token):
         return "superseded"
     job = db.session.get(UserDataPurge, job_id)
+    delete_account = bool(job.delete_account)
     user = db.session.get(User, job.user_id)
     if user is None:
         job.status = "done"
@@ -1673,7 +1683,13 @@ def run_purge_job(job_id, token):
         job.error = "account no longer exists; nothing to purge"
         db.session.commit()
         return "done"
-    reason = purge_refusal(user)
+    user_id = user.id
+    if delete_account:
+        from backend.utils.account_deletion import deletion_refusal
+        refusal = deletion_refusal(user)
+        reason = refusal[1] if refusal else None
+    else:
+        reason = purge_refusal(user)
     if reason:
         _fail_job(job, f"refused: {reason}")
         return "refused"
@@ -1710,6 +1726,12 @@ def run_purge_job(job_id, token):
                 + ", ".join(f"{k}={v}" for k, v in sorted(left.items())))
         for key, value in inflight.counts.items():
             counts[key] = counts.get(key, 0) + value
+        after_commit = None
+        if delete_account:
+            from backend.utils.account_deletion import delete_identity
+            identity, after_commit = delete_identity(user_id)
+            for key, value in identity.items():
+                counts[key] = counts.get(key, 0) + value
         job = db.session.get(UserDataPurge, job_id)
         job.status = "done"
         job.finished_at = _now()
@@ -1718,7 +1740,10 @@ def run_purge_job(job_id, token):
         job.waiting_since = None
         forget_hidden(job_id)
         db.session.commit()
-        logger.info("user data purge job %s (user %s) done", job_id, user.id)
+        logger.info("user data purge job %s (user %s%s) done", job_id,
+                    user_id, ", account deleted" if delete_account else "")
+        if after_commit is not None:
+            after_commit()
         return "done"
     except PurgeSuperseded:
         db.session.rollback()

@@ -42,6 +42,17 @@ class User(db.Model, UserMixin):
     email_change_token_hash = db.Column(db.String(128), nullable=True)
     email_change_expires_at = db.Column(db.DateTime, nullable=True)
     deactivated_at = db.Column(db.DateTime, nullable=True)
+    # Account deletion (#269). Set when the deletion is scheduled: from
+    # then on the account is hidden (it cannot sign in, its public pages
+    # answer 404, other members no longer see its public writing, no
+    # background job runs for it) until the purge deletes the row at the
+    # end of the grace period. Signing in before then offers a restore,
+    # which clears it. Null for a live account.
+    deleted_at = db.Column(db.DateTime, nullable=True)
+    # The link that confirms an email user's deletion request (#269):
+    # only its hash, like the sign-in and email-change links.
+    account_deletion_token_hash = db.Column(db.String(128), nullable=True)
+    account_deletion_expires_at = db.Column(db.DateTime, nullable=True)
     
     # Relationship to text nodes (explicit foreign_keys needed because Node has
     # multiple FKs pointing to User: user_id and pinned_by)
@@ -241,6 +252,9 @@ class User(db.Model, UserMixin):
           can still be restored or is being deleted. The account is
           eligible again after a restore or once the purge is done.
 
+        * A deleted account in its grace period (#269) is left out: it
+          is hidden, and nothing runs for it unless it is restored.
+
         Shared helper (not an inline filter) so the profile and
         recent-context tasks can't drift apart again.
         """
@@ -256,6 +270,7 @@ class User(db.Model, UserMixin):
             cls.default_ai_usage.in_(list(AI_ALLOWED)),
             ~cls.id.in_(llm_authors),
             ~cls.id.in_(purging),
+            cls.deleted_at.is_(None),
         )
 
 
@@ -1947,6 +1962,11 @@ class UserDataPurge(db.Model):
 
     status: scheduled -> running -> done; scheduled -> cancelled;
     running -> failed after PURGE_MAX_ATTEMPTS runs that did not finish.
+
+    With ``delete_account`` (#269) the job deletes the account too: after
+    the purge, the identity layer (backend/utils/account_deletion.py)
+    removes the user row and everything that must not outlive it. A
+    restore inside the grace period cancels the job.
     """
     __tablename__ = "user_data_purge"
 
@@ -1992,8 +2012,32 @@ class UserDataPurge(db.Model):
     task_id = db.Column(db.String(64), nullable=True)
     counts = db.Column(db.JSON, nullable=True)
     error = db.Column(db.String(255), nullable=True)
+    # Account deletion (#269): the purge is followed by the deletion of
+    # the account itself.
+    delete_account = db.Column(db.Boolean, nullable=False, default=False,
+                               server_default=db.text("false"))
 
     ACTIVE_STATUSES = ("scheduled", "running")
+
+
+class ReleasedUsername(db.Model):
+    """A username freed by an account deletion (#269), kept from new
+    accounts until ``reserved_until``: somebody else taking a deleted
+    account's handle could pass for that person, and old links to
+    /@<handle> would show the newcomer's pages. Covers the account's
+    current handle and its former ones (#253). No foreign key and no
+    other data: the account is gone, only the handle and the dates
+    remain, and the row may be deleted once the reservation is over."""
+    __tablename__ = "released_username"
+
+    id = db.Column(db.Integer, primary_key=True)
+    # Lowercased, like UsernameHistory: handles are unique
+    # case-insensitively and every lookup is an equality on this column.
+    username = db.Column(db.String(64), nullable=False, unique=True,
+                         index=True)
+    released_at = db.Column(db.DateTime, nullable=False,
+                            default=datetime.utcnow)
+    reserved_until = db.Column(db.DateTime, nullable=False)
 
 
 class UserDataPurgeHidden(db.Model):
