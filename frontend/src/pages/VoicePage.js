@@ -502,8 +502,9 @@ function VoiceSession({ recovery, blocked, threadId, onAiUsageRefused, onFinishI
       addToast(spendCapToastMessage('glean'), 8000);
       return;
     }
-    // The voice reply stops: the user chose to glean.
-    if (audio.isPlaying) audio.pause();
+    // The voice reply stops, its queue too (the player is global, so a
+    // paused queue would follow the user to the gleaning's page).
+    audio.stop();
     setGleanStarting(true);
     api.post(`/read/from-node/${gleanAnchor}`, {})
       .then((res) => {
