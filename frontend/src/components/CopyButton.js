@@ -9,6 +9,7 @@ import React, { useState, useCallback, useEffect, useRef } from 'react';
  */
 const CopyButton = ({ text, title = 'Copy', style, ...rest }) => {
   const [copied, setCopied] = useState(false);
+  const [hovered, setHovered] = useState(false);
   const timer = useRef(null);
   useEffect(() => () => clearTimeout(timer.current), []);
 
@@ -24,6 +25,13 @@ const CopyButton = ({ text, title = 'Copy', style, ...rest }) => {
     } catch (err) { /* navigator.clipboard undefined — no toast needed */ }
   }, [text]);
 
+  // Dim the glyph, not the button: a backdrop passed in `style` (code blocks)
+  // must stay opaque so the text under it doesn't show through.
+  const glyphStyle = {
+    opacity: copied || hovered ? 1 : 0.6,
+    transition: 'opacity 0.15s ease',
+  };
+
   return (
     <button
       type="button"
@@ -34,20 +42,19 @@ const CopyButton = ({ text, title = 'Copy', style, ...rest }) => {
         background: 'none', border: 'none', cursor: 'pointer',
         padding: '4px', lineHeight: 0,
         color: copied ? 'var(--success)' : 'var(--text-muted)',
-        opacity: copied ? 1 : 0.6,
-        transition: 'opacity 0.15s ease, color 0.15s ease',
+        transition: 'color 0.15s ease',
         ...style,
       }}
-      onMouseEnter={(e) => { e.currentTarget.style.opacity = 1; }}
-      onMouseLeave={(e) => { if (!copied) e.currentTarget.style.opacity = 0.6; }}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
       {...rest}
     >
       {copied ? (
-        <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none" style={glyphStyle}>
           <path d="M3 8.5 L6.5 12 L13 4.5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"/>
         </svg>
       ) : (
-        <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none" style={glyphStyle}>
           <rect x="5.5" y="5.5" width="8" height="8" rx="1.5" stroke="currentColor" strokeWidth="1.2"/>
           <path d="M10.5 5.5 V4 A1.5 1.5 0 0 0 9 2.5 H4 A1.5 1.5 0 0 0 2.5 4 V9 A1.5 1.5 0 0 0 4 10.5 H5.5" stroke="currentColor" strokeWidth="1.2"/>
         </svg>
