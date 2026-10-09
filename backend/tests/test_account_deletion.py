@@ -286,10 +286,12 @@ def test_nobody_can_build_on_a_hidden_accounts_entry_or_read_it_into_ai(
     """Bob's public reply B1 sits under alice's public entry A1. While her
     account is hidden, A1 cannot be replied to or linked (404, like a
     node bob cannot see), and an AI reply for bob under B1 does not
-    read it."""
+    read it: A1 stays in the chain as a deleted placeholder, as after
+    the purge, and its text is never sent."""
     from backend.tests.test_context_artifact_pinning import _load_node_chain
     from backend.utils.node_deletion import assert_parent_alive
-    from backend.utils.privacy import can_user_see_node_or_tombstone
+    from backend.utils.privacy import (
+        can_user_see_node_or_tombstone, shown_as_deleted)
     b = world.bob
     A1 = _db.session.get(Node, world.ids["A1"])
     B1 = _db.session.get(Node, world.ids["B1"])
@@ -304,7 +306,11 @@ def test_nobody_can_build_on_a_hidden_accounts_entry_or_read_it_into_ai(
     assert not can_user_see_node_or_tombstone(A1, b.id)
     resp, status = assert_parent_alive(A1.id, b.id)
     assert status == 404
-    assert [n.id for n in _load_node_chain(B1, b.id)] == [B1.id]
+    assert [n.id for n in _load_node_chain(B1, b.id)] == [A1.id, B1.id]
+    assert shown_as_deleted(A1, b.id) and not shown_as_deleted(B1, b.id)
+    # Nobody builds an AI reply on A1 itself either.
+    with pytest.raises(ValueError):
+        _load_node_chain(A1, b.id)
 
 
 def test_a_gone_authors_placeholders_carry_no_name(app, world, stubs):
@@ -333,6 +339,175 @@ def test_a_gone_authors_placeholders_carry_no_name(app, world, stubs):
     assert alive_child_counts([a1])[a1] == 2      # B1, LB
     assert _run_due(job, datetime.utcnow() + timedelta(days=31)) == "done"
     check()
+
+
+def _reply_under_alices_public_reply(world):
+    """Bob's public root B3, alice's public reply A7, bob's reply BX."""
+    A7 = _db.session.get(Node, world.ids["A7"])
+    A7.privacy_level = "public"
+    A7.set_content("alice's words in bob's thread")
+    BX = _node(world.bob, A7, owner=world.bob.id, privacy="public",
+               text="bob answers her")
+    _db.session.commit()
+    return BX.id
+
+
+def test_an_ai_reply_below_a_hidden_accounts_reply_keeps_the_thread(
+        app, world, stubs):
+    """The context of bob's AI reply under BX is [B3, A7, BX] before the
+    request, in the grace period (A7 as a deleted placeholder) and after
+    the purge (A7 a tombstone): the same thread every time."""
+    from backend.tests.test_context_artifact_pinning import _load_node_chain
+    from backend.utils.llm_nodes import _Chain
+    from backend.utils.privacy import shown_as_deleted
+    b = world.bob
+    bx = _reply_under_alices_public_reply(world)
+    expected = [world.ids["B3"], world.ids["A7"], bx]
+
+    def chain():
+        _db.session.expire_all()
+        return _load_node_chain(_db.session.get(Node, bx), b.id)
+
+    assert [n.id for n in chain()] == expected
+    job = _schedule(world.alice)
+    nodes = chain()
+    assert [n.id for n in nodes] == expected
+    assert [shown_as_deleted(n, b.id) for n in nodes] == [False, True, False]
+    # The reply check walks the same chain: past A7 to bob's root, whose
+    # ai_usage then decides, as after the purge.
+    B3 = _db.session.get(Node, world.ids["B3"])
+    B3.ai_usage = "none"
+    _db.session.commit()
+    assert _Chain(_db.session.get(Node, bx)).unreadable(b.id).id == B3.id
+    B3.ai_usage = "chat"
+    _db.session.commit()
+
+    assert _run_due(job, datetime.utcnow() + timedelta(days=31)) == "done"
+    nodes = chain()
+    assert [n.id for n in nodes] == expected
+    assert [shown_as_deleted(n, b.id) for n in nodes] == [False, True, False]
+
+
+def test_exports_show_a_hidden_accounts_reply_without_a_name(
+        app, world, stubs):
+    """Bob's own export (the download, the background export and his
+    recent-context input) shows alice's reply in his thread as a deleted
+    placeholder without a name, in the grace period and after the purge,
+    with and without a token budget."""
+    from backend.routes.export_data import build_user_export_content
+    b = world.bob
+    _reply_under_alices_public_reply(world)
+
+    def exports():
+        _db.session.expire_all()
+        bob = _db.session.get(User, b.id)
+        return [build_user_export_content(bob, filter_ai_usage=False),
+                build_user_export_content(bob, filter_ai_usage=True),
+                build_user_export_content(bob, max_tokens=50_000,
+                                          filter_ai_usage=True),
+                build_user_export_content(
+                    bob, filter_ai_usage=True,
+                    created_after=datetime(2000, 1, 1))]
+
+    for text in exports():
+        assert "User (alice)" in text and "alice's words" in text
+    job = _schedule(world.alice)
+
+    def check():
+        for text in exports():
+            assert "alice" not in text
+            assert ERASED_SYSTEM_USERNAME not in text
+            assert "[Node deleted by author]" in text
+            assert "bob answers her" in text
+    check()
+    assert _run_due(job, datetime.utcnow() + timedelta(days=31)) == "done"
+    check()
+
+
+def test_node_json_does_not_name_a_hidden_parents_author_by_id(
+        app, world, stubs):
+    """parent_user_id under a hidden account's placeholder is None: on
+    the focal node, its ancestors and the children below the
+    placeholder, in the grace period and after the purge."""
+    from backend.routes.nodes import nodes_bp
+    app.register_blueprint(nodes_bp, url_prefix="/api/nodes")
+    a_id, b = world.alice.id, world.bob
+    bx = _reply_under_alices_public_reply(world)
+    c = _client(app, b)
+
+    def ids_named():
+        r = c.get(f"/api/nodes/{bx}")
+        assert r.status_code == 200
+        focal = r.get_json()
+        r = c.get(f"/api/nodes/{world.ids['B3']}")
+        assert r.status_code == 200
+        a7 = next(ch for ch in r.get_json()["children"]
+                  if ch["id"] == world.ids["A7"])
+        below = [ch["parent_user_id"] for ch in a7["children"]]
+        return ([focal["parent_user_id"]]
+                + [x.get("parent_user_id") for x in focal["ancestors"]]
+                + [x.get("user_id") for x in focal["ancestors"]]
+                + below)
+
+    assert a_id in ids_named()
+    job = _schedule(world.alice)
+    assert a_id not in ids_named()
+    assert ids_named()[0] is None
+    assert _run_due(job, datetime.utcnow() + timedelta(days=31)) == "done"
+    erased = User.query.filter_by(username=ERASED_SYSTEM_USERNAME).one()
+    named = ids_named()
+    assert a_id not in named and erased.id not in named
+
+
+def test_old_ai_replies_without_an_owner_are_hidden_with_the_account(
+        app, world, stubs):
+    """An AI reply stored before replies had a human owner counts as the
+    user's when its nearest ancestor that is not an AI reply is theirs
+    (the purge's rule). The request gives such replies their owner, so
+    they are hidden with the account; a restore leaves the owner as it
+    is. Replies whose chain leads to another person's entry, or to no
+    entry at all, get no owner."""
+    from backend.tests.test_context_artifact_pinning import _load_node_chain
+    from backend.utils.privacy import (
+        accessible_nodes_filter, can_user_access_node, shown_as_deleted)
+    a, b, llm = world.alice, world.bob, world.llm
+    for k in ("A1", "A2", "L2"):
+        _db.session.get(Node, world.ids[k]).privacy_level = "public"
+    L2 = _db.session.get(Node, world.ids["L2"])
+    BL = _node(b, L2, owner=b.id, privacy="public")
+    # An AI reply under an AI reply, and one with no entry above it.
+    L4 = _node(llm, L2, owner=None, node_type="llm", privacy="public")
+    orphan = _node(llm, None, owner=None, node_type="llm", privacy="public")
+    _db.session.commit()
+    ids = {"L2": L2.id, "L4": L4.id, "L3": world.ids["L3"],
+           "orphan": orphan.id, "BL": BL.id}
+    assert can_user_access_node(_db.session.get(Node, ids["L2"]), b.id)
+
+    _schedule(a)
+    _db.session.expire_all()
+
+    def owner(k):
+        return _db.session.get(Node, ids[k]).human_owner_id
+    assert owner("L2") == owner("L4") == a.id
+    assert owner("L3") is None          # under bob's entry
+    assert owner("orphan") is None      # no entry above it
+    L2 = _db.session.get(Node, ids["L2"])
+    assert not can_user_access_node(L2, b.id)
+    visible = {n.id for n in Node.query.filter(
+        accessible_nodes_filter(Node, b.id))}
+    assert ids["L2"] not in visible and ids["L4"] not in visible
+    assert ids["BL"] in visible
+    nodes = _load_node_chain(_db.session.get(Node, ids["BL"]), b.id)
+    assert [n.id for n in nodes] == [
+        world.ids["A1"], world.ids["A2"], ids["L2"], ids["BL"]]
+    assert [shown_as_deleted(n, b.id) for n in nodes] == [
+        True, True, True, False]
+
+    assert acc.restore_account(_db.session.get(User, a.id))
+    _db.session.expire_all()
+    assert owner("L2") == owner("L4") == a.id
+    assert owner("L3") is None and owner("orphan") is None
+    assert can_user_access_node(_db.session.get(Node, ids["L2"]), b.id)
 
 
 def test_a_hidden_account_has_no_member_page(app, world, stubs):

@@ -244,11 +244,35 @@ def can_user_see_node_or_tombstone(node, user_id: Optional[int] = None) -> bool:
         if not current_user.is_authenticated:
             return False
         user_id = current_user.id
-    if (getattr(node, 'deleted_at', None) is None
+    if hidden_from(node, user_id):
+        return False
+    return (can_user_access_node(node, user_id)
+            or can_user_view_tombstone(node, user_id))
+
+
+def hidden_from(node, user_id) -> bool:
+    """*node* is someone else's live node whose owner deleted the account
+    and is in its grace period (#269). For *user_id* it counts as deleted,
+    as it will after the purge. The viewer's own nodes never count."""
+    return (getattr(node, 'deleted_at', None) is None
             and node.user_id != user_id
             and getattr(node, 'human_owner_id', None) != user_id
-            and owner_hidden(node)):
-        return False
+            and owner_hidden(node))
+
+
+def shown_as_deleted(node, user_id) -> bool:
+    """For *user_id*, *node* is a deleted placeholder: soft-deleted, or
+    hidden with its owner's deleted account (#269)."""
+    return (getattr(node, 'deleted_at', None) is not None
+            or hidden_from(node, user_id))
+
+
+def can_user_see_node_or_placeholder(node, user_id) -> bool:
+    """For walks that show a deleted node as a placeholder in its place
+    (the context of an AI reply): True when *user_id* can see *node*, or
+    its placeholder, where a node hidden with its owner's deleted account
+    (#269) counts as deleted. The walk then passes through it as it does
+    after the purge; its text is never read."""
     return (can_user_access_node(node, user_id)
             or can_user_view_tombstone(node, user_id))
 

@@ -202,6 +202,29 @@ def _hide(user, now):
     user.account_deletion_expires_at = None
 
 
+def _own_legacy_ai_replies(user_id):
+    """Set ``human_owner_id`` on the user's legacy AI replies (stored
+    before the column existed, still NULL), so every check of a hidden
+    owner covers them during the grace period. Which replies is the
+    purge's own rule (``user_purge._legacy_ai_reply_ids``, the rule of
+    ``find_human_owner`` and of the ``backfill-human-owner`` command):
+    the nearest ancestor that is not an AI reply is the user's. A reply
+    whose chain ends without such an ancestor gets no owner. Only rows
+    still NULL change, ``updated_at`` is kept, and the value is the
+    user's whether the deletion goes ahead or the account is restored.
+    Returns how many rows changed."""
+    changed = 0
+    for chunk in user_purge._chunks(sorted(
+            user_purge._legacy_ai_reply_ids(user_id))):
+        changed += Node.query.filter(
+            Node.id.in_(chunk), Node.node_type == "llm",
+            Node.human_owner_id.is_(None),
+        ).update({Node.human_owner_id: user_id,
+                  Node.updated_at: Node.updated_at},
+                 synchronize_session=False)
+    return changed
+
+
 def schedule_account_deletion(user, *, requested_by_id, source, at=None):
     """Hide the account and schedule its deletion, due at *at* (default:
     after the grace period). A waiting purge of the user (their "Delete
@@ -228,6 +251,7 @@ def schedule_account_deletion(user, *, requested_by_id, source, at=None):
     job.requested_by_id = requested_by_id
     job.requested_at = now
     job.scheduled_for = due
+    _own_legacy_ai_replies(user.id)
     _hide(user, now)
     db.session.commit()
     _drop_public_pages(user)
