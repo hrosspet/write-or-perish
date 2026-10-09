@@ -590,6 +590,11 @@ export default function ProposalInline({
   // ### headings are the user's formatting, never todo/issue/feedback
   // proposals (whose confirm endpoints would 404 without a pending draft).
   shareOnly = false,
+  // The proposal's owner (who asked for the reply) accepts it here. Anyone
+  // else sees the proposal without the accept buttons and their status:
+  // the accept endpoints only act on the owner's pending drafts, and
+  // whether the owner accepted is theirs.
+  canAct = true,
 }) {
   const parsed = parseOrientResponse(content || '');
   // A note alone is NOT a todo proposal (matches the backend detector) —
@@ -898,7 +903,7 @@ export default function ProposalInline({
         </div>
       )}
 
-      {hasTodoUpdate && (
+      {hasTodoUpdate && canAct && (
         <div style={styles.applyWrapper}>
           {!applyStatus && (
             <button onClick={handleApplyTodo} style={styles.button}>
@@ -940,6 +945,7 @@ export default function ProposalInline({
               <span style={styles.issueCategory}>{parsed.issueCategory}</span>
             )}
           </div>
+          {canAct && (
           <div style={styles.issueButtonWrapper}>
             {!issueApplyStatus && (
               <button onClick={handleCreateIssue} style={styles.button}>
@@ -969,6 +975,7 @@ export default function ProposalInline({
               </StatusTag>
             )}
           </div>
+          )}
         </div>
       )}
 
@@ -986,6 +993,7 @@ export default function ProposalInline({
               <span style={styles.issueCategory}>{parsed.feedbackCategory}</span>
             )}
           </div>
+          {canAct && (
           <div style={styles.issueButtonWrapper}>
             {!feedbackApplyStatus && (
               <button onClick={handleSendFeedback} style={styles.button}>
@@ -1008,6 +1016,7 @@ export default function ProposalInline({
               </StatusTag>
             )}
           </div>
+          )}
         </div>
       )}
 
@@ -1062,6 +1071,7 @@ export default function ProposalInline({
                 <span style={styles.issueCategory}>{share.type}</span>
               )}
             </div>
+            {canAct && (
             <div style={styles.issueButtonWrapper}>
               {!state && (
                 <button onClick={() => handleSaveShare(idx)} style={styles.button}>
@@ -1088,6 +1098,7 @@ export default function ProposalInline({
                 </StatusTag>
               )}
             </div>
+            )}
             </div>
             );
           })}
