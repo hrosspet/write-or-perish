@@ -592,6 +592,8 @@ def _apply_item(item, result, batch_id):
             # any, is no summary): save nothing, keep the previous summary.
             # Cut off before any text, or refused = a refusal for the
             # backoff (#368).
+            if refused:
+                item["model_refused"] = True   # for the stop report
             if truncated or refused:
                 cost_log.request_ref = refusal_backoff.REFUSED_REF
             db.session.add(cost_log)
@@ -656,7 +658,9 @@ def _report_unsaved(items):
         if stopped:
             refusal_backoff.report_stop(
                 item["user_id"], "recent context", n, item["model_id"],
-                "recent_context", cause="batch item failed or cut off",
+                "recent_context",
+                cause=("refused by the model" if item.get("model_refused")
+                       else "batch item failed or cut off"),
                 until=until)
         else:
             logger.warning(
@@ -854,6 +858,8 @@ def _generate_recent_context_impl(user_id, profile_id=None,
         if stopped:
             refusal_backoff.report_stop(
                 user_id, "recent context", n, model_id, "recent_context",
+                cause=(refusal_backoff.REFUSED_CAUSE if refused
+                       else refusal_backoff.CUT_OFF_CAUSE),
                 until=until)
         else:
             logger.warning(

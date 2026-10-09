@@ -867,3 +867,22 @@ def test_the_direct_path_still_calls_the_model_at_full_price(
     assert APICostLog.query.one().cost_microdollars == 7500
     assert UserRecentContext.query.one().get_content().endswith(
         "DIRECT SUMMARY")
+
+
+def test_a_refusal_stop_is_reported_as_refused_not_cut_off(
+        app, rc, world, monkeypatch):
+    """#470: the stop report names the refusal as the cause."""
+    from backend.utils import refusal_backoff
+    stops = []
+    monkeypatch.setattr(refusal_backoff, "report_stop",
+                        lambda *a, **k: stops.append(k))
+    user = _user("refusedtwice")
+    _previous_summary(user)
+    for _ in range(2):
+        assert _check(rc)["submitted"] == 1
+        _collect_with(rc, monkeypatch, _summary(
+            user, "no", refused=True, output_tokens=5))
+        APICostLog.query.update({"created_at": datetime.utcnow()
+                                 - timedelta(hours=2)})
+        _db.session.commit()
+    assert stops and stops[-1]["cause"] == "refused by the model"

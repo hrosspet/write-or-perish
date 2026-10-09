@@ -495,7 +495,9 @@ def refuse_truncated_profile(user, model_id, response, job, batch=False):
         db.session.commit()
         refusal_backoff.report_stop(
             user.id, f"profile {job}", n, model_id,
-            "profile_batch" if batch else "profile")
+            "profile_batch" if batch else "profile",
+            cause=(refusal_backoff.REFUSED_CAUSE if refused
+                   else refusal_backoff.CUT_OFF_CAUSE))
     else:
         logger.warning(
             "Profile output not saved for user %s (%s, model %s, %s, "

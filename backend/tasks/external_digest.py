@@ -34,6 +34,7 @@ from backend.llm_providers import (
     LLMProvider, ProviderAccountError, is_refused)
 from backend.utils.api_keys import get_api_keys_for_usage
 from backend.utils.cost import llm_cost_log_fields
+from backend.utils import refusal_backoff
 from backend.utils.refusal_backoff import REFUSED_REF
 from backend.utils.privacy import account_allows_ai
 from backend.utils.llm_batch import (
@@ -201,6 +202,16 @@ def _log_empty_digest_cost(user_id, model_id, response, batch):
         "truncated=%s, output_tokens=%s); nothing saved", user_id,
         model_id, is_refused(response), bool(response.get("truncated")),
         response.get("output_tokens"))
+    if is_refused(response) or response.get("truncated"):
+        # Second refusal in a row: the sweep stops submitting this user
+        # until a digest is saved (#470); report it.
+        db.session.flush()
+        n, until, stopped = refusal_backoff.digest_backoff_state(user_id)
+        if stopped:
+            refusal_backoff.report_stop(
+                user_id, "external digest", n, model_id, "external_digest",
+                cause=(refusal_backoff.REFUSED_CAUSE if is_refused(response)
+                       else refusal_backoff.CUT_OFF_CAUSE), until=until)
 
 
 def _save_digest(user, model_id, digest_text, response, corpus_at, batch):
@@ -351,6 +362,9 @@ def sweep_external_digests():
             user for user in User.query.filter(User.id.in_(stale_ids)).all()
             if user_local_hour(user) == NIGHTLY_DIGEST_LOCAL_HOUR
             and account_allows_ai(user)   # #346
+            # After a refused or cut-off digest: wait an hour, then one
+            # more try, then stop until a digest is saved (#368/#470).
+            and not refusal_backoff.digest_in_backoff(user.id)
         ]
         if not due:
             return {"status": "ok", "submitted": 0}

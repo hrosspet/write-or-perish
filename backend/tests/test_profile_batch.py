@@ -1761,3 +1761,22 @@ def test_seeder_builds_the_integration_alone_after_a_refused_one(
     u.profile_batch_pending = False
     _refusal(u, timedelta(minutes=1))
     assert pb._should_seed(u) is False
+
+
+def test_profile_refusal_stop_is_reported_as_refused(app, monkeypatch):
+    """#470: the second refusal stops the job and the report says
+    "refused by the model", not "output cut off"."""
+    from backend.llm_providers import EmptyTruncatedOutputError
+    from backend.utils import refusal_backoff
+    stops = []
+    monkeypatch.setattr(refusal_backoff, "report_stop",
+                        lambda *a, **k: stops.append(k))
+    u = _user()
+    db.session.commit()
+    resp = {"content": "", "refused": True, "input_tokens": 1,
+            "output_tokens": 1, "total_tokens": 2}
+    for _ in range(2):
+        with pytest.raises(EmptyTruncatedOutputError):
+            pb._exports.refuse_truncated_profile(
+                u, "test-model", resp, "chunk", batch=True)
+    assert stops[-1]["cause"] == "refused by the model"
