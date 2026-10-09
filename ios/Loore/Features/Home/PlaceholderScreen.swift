@@ -67,6 +67,7 @@ extension AppRoute {
         case .admin: return "Admin"
         case .welcome: return "Welcome"
         case .confirmEmail: return "Confirm email"
+        case .confirmAccountDeletion: return "Delete my account"
         case .waitlist: return "Loore"
         case .webPage: return "Loore"
         case .external(let url): return url.host ?? "Link"
@@ -111,6 +112,8 @@ extension AppRoute {
         case .admin: return "/admin"
         case .welcome: return "/welcome"
         case .confirmEmail(let token): return "/confirm-email" + (token.map { "?token=\($0)" } ?? "")
+        case .confirmAccountDeletion(let token):
+            return "/confirm-account-deletion" + (token.map { "?token=\($0)" } ?? "")
         case .waitlist: return "/alpha-thank-you"
         case .webPage(let path): return path
         case .external: return nil
