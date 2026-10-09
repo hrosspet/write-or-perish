@@ -366,3 +366,127 @@ def test_recent_writing_in_my_own_thread_holds_none_of_their_versions(app, threa
     assert "BOB TODO" in block
     for marker in _markers("ALICE"):
         assert marker not in block, marker
+
+
+# ── Every form the resolver would fill is blanked first ─────────────────
+
+# Forms a placeholder can take in someone else's node. A nested one
+# leaves a new placeholder behind when its inner one is removed, so
+# removal repeats until none is left. Whitespace and case variants are
+# never filled by the resolver; they stay as written.
+NESTED = (
+    "{user_{user_todo}profile}",
+    "{user_{user_{user_todo}scratchpad}profile}",
+    "{user_{user_ai_preferences}memory}",
+    "{user_{user_recent}intentions}",
+)
+EXPORT_FORMS = (
+    "{user_{user_export}memory}",
+    "{user_{user_export?days=7}intentions}",
+    "{user_ex{user_todo}port?max_export_tokens=500}",
+    "{user_export?keep=newest&max_export_tokens=500}",
+    "{user_export?days=7&keep=oldest}",
+)
+LOOKALIKES = ("{ user_profile }", "{USER_PROFILE}", "{user_profile }")
+
+
+def _set_alices_prompt(system, forms):
+    system.get_artifact("prompt").set_content(BODY + "\n" + "\n".join(forms))
+    _db.session.commit()
+
+
+@pytest.mark.parametrize("form", NESTED + EXPORT_FORMS + PLACEHOLDERS)
+def test_blanking_leaves_nothing_the_resolver_would_fill(form):
+    from backend.utils.placeholders import USER_EXPORT_PATTERN
+    text = _llm_task_mod.blank_personal_placeholders(f"a {form} b")
+    for placeholder in PLACEHOLDERS:
+        assert placeholder not in text, (form, text)
+    assert not USER_EXPORT_PATTERN.search(text), (form, text)
+
+
+def test_no_form_in_someone_elses_prompt_is_filled(app, people):  # noqa: F811
+    """bob's own message names his placeholders, so his data resolves:
+    none of it may land in alice's prompt, whatever form hers take."""
+    alice, bob, system, entry, reply = people
+    _set_alices_prompt(system, NESTED + EXPORT_FORMS + LOOKALIKES)
+    bob_reply = _node(bob, reply, "bob asks {user_profile} {user_memory} "
+                      "{user_intentions} {user_scratchpad}")
+
+    _ask(bob_reply, bob)
+
+    block = _system_block()
+    for marker in _markers("ALICE") + _markers("BOB"):
+        assert marker not in block, marker
+    for placeholder in PLACEHOLDERS:
+        assert placeholder not in block, placeholder
+    for lookalike in LOOKALIKES:
+        assert lookalike in block
+    assert ("bob asks BOB PROFILE BOB MEMORY BOB INTENTIONS BOB SCRATCH"
+            in _sent_text())
+
+
+def test_no_nested_form_in_the_pre_warm_for_someone_else_is_filled(app, people, fake_redis, monkeypatch):  # noqa: F811
+    alice, bob, system, entry, reply = people
+    # A prompt with {user_export} is never pre-warmed; the nested forms
+    # without it are.
+    _set_alices_prompt(system, NESTED + LOOKALIKES)
+    monkeypatch.setitem(app.config, "SUPPORTED_MODELS", {
+        **app.config["SUPPORTED_MODELS"],
+        "claude-test": {"provider": "anthropic", "api_model": "claude-x"},
+    })
+    sent = []
+
+    def _call_anthropic(api_model, messages, api_key, **kw):
+        sent.append(messages)
+        raise RuntimeError("stop after capturing the request")
+    monkeypatch.setattr(_ScriptedProvider, "_call_anthropic",
+                        staticmethod(_call_anthropic), raising=False)
+
+    _llm_task_mod.prewarm_anthropic_cache(system.id, bob.id, "claude-test")
+
+    warm = sent[-1][0]["content"][0]["text"]
+    assert BODY in warm
+    for marker in _markers("ALICE") + _markers("BOB"):
+        assert marker not in warm, marker
+    for placeholder in PLACEHOLDERS:
+        assert placeholder not in warm, placeholder
+
+
+def test_a_cached_render_for_someone_else_holds_no_nested_form(app, people, fake_redis):  # noqa: F811
+    """The render cached for bob is the blanked one, on his turn and the
+    next."""
+    alice, bob, system, entry, reply = people
+    _set_alices_prompt(system, NESTED)
+    first = _node(bob, reply, "bob asks {user_profile}")
+    _ask(first, bob)
+    again = _node(bob, reply, "bob again {user_profile}")
+    _ask(again, bob)
+
+    block = _system_block()
+    for marker in _markers("ALICE") + _markers("BOB"):
+        assert marker not in block, marker
+    for value in fake_redis.store.values():
+        from backend.utils.encryption import decrypt_content
+        cached = decrypt_content(value.decode("utf-8"))
+        assert "BOB PROFILE" not in cached and "ALICE" not in cached
+
+
+def test_a_quoted_entry_with_placeholders_stays_as_written(app, people):  # noqa: F811
+    """A {quote:ID} is filled in after the placeholders, so a quoted
+    entry's placeholders reach the model as text, never as data, in my
+    message or someone else's."""
+    alice, bob, system, entry, reply = people
+    quoted = _node(alice, None, "alice quoted: {user_profile} {user_memory}")
+    bob_quoting = _node(bob, reply, "bob quotes {quote:%d}" % quoted.id)
+    alice_quoting = _node(alice, bob_quoting,
+                          "alice quotes {quote:%d}" % quoted.id)
+    bob_again = _node(bob, alice_quoting, "bob asks {user_profile}")
+
+    _ask(bob_again, bob)
+
+    sent = _sent_text()
+    assert sent.count("alice quoted:") == 2
+    assert "bob asks BOB PROFILE" in sent
+    for marker in _markers("ALICE"):
+        assert marker not in sent, marker
+    assert sent.count("BOB PROFILE") == 1

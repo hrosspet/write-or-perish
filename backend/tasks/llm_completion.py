@@ -193,14 +193,26 @@ def node_is_users(node, user_id):
     return (node.human_owner_id or node.user_id) == user_id
 
 
+# Matches exactly what the resolvers fill: the plain placeholders above
+# (each resolved by exact string) and every {user_export...} form
+# (resolved by USER_EXPORT_PATTERN).
+PERSONAL_PLACEHOLDER_PATTERN = re.compile(
+    "|".join(re.escape(p) for p in PERSONAL_PLACEHOLDERS)
+    + "|" + USER_EXPORT_PATTERN.pattern)
+
+
 def blank_personal_placeholders(text):
     """*text* with every personal placeholder removed. A node of someone
     else's in the reply's chain (their system prompt in a public thread,
     a message of theirs) contributes none of its pinned data, and none of
-    the requester's either: the placeholders read as empty."""
-    for placeholder in PERSONAL_PLACEHOLDERS:
-        text = text.replace(placeholder, "")
-    return USER_EXPORT_PATTERN.sub("", text)
+    the requester's either: the placeholders read as empty. Removal
+    repeats until none is left, so a placeholder nested in another
+    ("{user_{user_todo}profile}") cannot leave a new one behind. Callers
+    also never resolve placeholders in such a node."""
+    while True:
+        text, removed = PERSONAL_PLACEHOLDER_PATTERN.subn("", text)
+        if not removed:
+            return text
 
 
 def _own_pin(row, user_id):
@@ -2846,28 +2858,10 @@ class LLMCompletionTask(Task):
                     logger.error(f"LLM completion failed for node {llm_node_id}: {exc}")
 
 
-def render_system_message(system_node, user_id, usage=None):
-    """Render the system node's full message text exactly as the
-    generation loop would (#192/#187).
-
-    Used by the finalize pre-warm so the provider-cache warm and the
-    real generation share byte-identical prefixes: the result is stored
-    in the #192 Redis cache, and generation prefers those cached bytes.
-    Only valid for prompts without volatile placeholders ({user_export},
-    {quote:..}, {quote_ext:..}) — callers must check first. The rows the
-    placeholders resolve to report to *usage* (a ContextUsage, #326).
-    A system node that is not *user_id*'s own renders its personal
-    placeholders empty, as the generation loop does.
-    """
-    owner = User.query.get(user_id)
-    user_tz = owner.timezone if owner and owner.timezone else "UTC"
-    author = system_node.user.username if system_node.user else "Unknown"
-    time_prefix = local_stamp(
-        system_node.updated_at or system_node.created_at, user_tz)
-    text = f"{time_prefix} author {author}: {system_node.get_content()}"
-    if not node_is_users(system_node, user_id):
-        text = blank_personal_placeholders(text)
-
+def _resolve_own_system_placeholders(text, system_node, user_id, usage):
+    """*text* (the user's own system node) with its personal
+    placeholders filled from the versions pinned on the node; see
+    render_system_message."""
     if USER_PROFILE_PLACEHOLDER in text:
         profile_obj = get_user_profile_content(
             user_id, pinned_node=system_node, usage=usage)
@@ -2912,6 +2906,33 @@ def render_system_message(system_node, user_id, usage=None):
         text = text.replace(USER_INTENTIONS_PLACEHOLDER, intentions or "")
         text = text.replace(
             USER_ARTIFACTS_INDEX_PLACEHOLDER, index or "(none)")
+    return text
+
+
+def render_system_message(system_node, user_id, usage=None):
+    """Render the system node's full message text exactly as the
+    generation loop would (#192/#187).
+
+    Used by the finalize pre-warm so the provider-cache warm and the
+    real generation share byte-identical prefixes: the result is stored
+    in the #192 Redis cache, and generation prefers those cached bytes.
+    Only valid for prompts without volatile placeholders ({user_export},
+    {quote:..}, {quote_ext:..}) — callers must check first. The rows the
+    placeholders resolve to report to *usage* (a ContextUsage, #326).
+    A system node that is not *user_id*'s own renders its personal
+    placeholders empty, as the generation loop does.
+    """
+    owner = User.query.get(user_id)
+    user_tz = owner.timezone if owner and owner.timezone else "UTC"
+    author = system_node.user.username if system_node.user else "Unknown"
+    time_prefix = local_stamp(
+        system_node.updated_at or system_node.created_at, user_tz)
+    text = f"{time_prefix} author {author}: {system_node.get_content()}"
+    if node_is_users(system_node, user_id):
+        text = _resolve_own_system_placeholders(
+            text, system_node, user_id, usage)
+    else:
+        text = blank_personal_placeholders(text)
     if SHARE_GUIDANCE_PLACEHOLDER in text:
         text = text.replace(
             SHARE_GUIDANCE_PLACEHOLDER,
@@ -3947,17 +3968,20 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         message_text = (
                             f"{time_prefix} author {author}: {node_content}"
                         )
-                        if not node_is_users(node, user_id):
-                            # Someone else's node (their system prompt in
-                            # a public thread, a message of theirs): its
-                            # personal placeholders read as empty.
+                        # Someone else's node (their system prompt in a
+                        # public thread, a message of theirs): its personal
+                        # placeholders read as empty, and none of the
+                        # resolvers below run on it.
+                        owned = node_is_users(node, user_id)
+                        if not owned:
                             message_text = blank_personal_placeholders(
                                 message_text)
                         # Replace {user_export} — first occurrence gets
                         # the archive, repeats get a stub (#139): the
                         # export is the heaviest placeholder and
                         # duplicating it doubles prompt cost.
-                        if user_export_content and export_placeholder_match:
+                        if (owned and user_export_content
+                                and export_placeholder_match):
                             if export_placeholder_match in message_text:
                                 if not replaced_export:
                                     message_text = message_text.replace(
@@ -3988,79 +4012,80 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                             else:
                                 message_text = CA_TWEETS_PATTERN.sub(
                                     CA_TWEETS_CHAT_STUB, message_text)
-                        # Replace {user_profile} — first occurrence
-                        # gets content, subsequent get emptied (dedup)
-                        if USER_PROFILE_PLACEHOLDER in message_text:
-                            if not replaced_profile:
+                        if owned:
+                            # Replace {user_profile} — first occurrence
+                            # gets content, subsequent get emptied (dedup)
+                            if USER_PROFILE_PLACEHOLDER in message_text:
+                                if not replaced_profile:
+                                    message_text = message_text.replace(
+                                        USER_PROFILE_PLACEHOLDER,
+                                        user_profile_content or ""
+                                    )
+                                    replaced_profile = True
+                                else:
+                                    message_text = message_text.replace(
+                                        USER_PROFILE_PLACEHOLDER,
+                                        "(see profile above)"
+                                    )
+                            # Replace {user_todo} — pinned snapshot (no dedup)
+                            if USER_TODO_PLACEHOLDER in message_text:
                                 message_text = message_text.replace(
-                                    USER_PROFILE_PLACEHOLDER,
-                                    user_profile_content or ""
+                                    USER_TODO_PLACEHOLDER,
+                                    user_todo_content or ""
                                 )
-                                replaced_profile = True
-                            else:
+                            # Replace {user_recent} — first occurrence only
+                            if USER_RECENT_PLACEHOLDER in message_text:
+                                if not replaced_recent:
+                                    message_text = message_text.replace(
+                                        USER_RECENT_PLACEHOLDER,
+                                        user_recent_content or ""
+                                    )
+                                    replaced_recent = True
+                                else:
+                                    message_text = message_text.replace(
+                                        USER_RECENT_PLACEHOLDER,
+                                        "(see recent context above)"
+                                    )
+                            # Replace {user_recent_raw} — first occurrence only
+                            if USER_RECENT_RAW_PLACEHOLDER in message_text:
+                                if not replaced_recent_raw:
+                                    message_text = message_text.replace(
+                                        USER_RECENT_RAW_PLACEHOLDER,
+                                        user_recent_raw_content or ""
+                                    )
+                                    replaced_recent_raw = True
+                                else:
+                                    message_text = message_text.replace(
+                                        USER_RECENT_RAW_PLACEHOLDER,
+                                        "(see recent raw data above)"
+                                    )
+                            # Replace {user_ai_preferences} — pinned snapshot
+                            if USER_AI_PREFERENCES_PLACEHOLDER in message_text:
                                 message_text = message_text.replace(
-                                    USER_PROFILE_PLACEHOLDER,
-                                    "(see profile above)"
+                                    USER_AI_PREFERENCES_PLACEHOLDER,
+                                    user_ai_preferences_content or ""
                                 )
-                        # Replace {user_todo} — pinned snapshot (no dedup)
-                        if USER_TODO_PLACEHOLDER in message_text:
-                            message_text = message_text.replace(
-                                USER_TODO_PLACEHOLDER,
-                                user_todo_content or ""
-                            )
-                        # Replace {user_recent} — first occurrence only
-                        if USER_RECENT_PLACEHOLDER in message_text:
-                            if not replaced_recent:
+                            # Replace artifact placeholders — pinned snapshot
+                            if USER_MEMORY_PLACEHOLDER in message_text:
                                 message_text = message_text.replace(
-                                    USER_RECENT_PLACEHOLDER,
-                                    user_recent_content or ""
+                                    USER_MEMORY_PLACEHOLDER,
+                                    user_memory_content or ""
                                 )
-                                replaced_recent = True
-                            else:
+                            if USER_SCRATCHPAD_PLACEHOLDER in message_text:
                                 message_text = message_text.replace(
-                                    USER_RECENT_PLACEHOLDER,
-                                    "(see recent context above)"
+                                    USER_SCRATCHPAD_PLACEHOLDER,
+                                    user_scratchpad_content or ""
                                 )
-                        # Replace {user_recent_raw} — first occurrence only
-                        if USER_RECENT_RAW_PLACEHOLDER in message_text:
-                            if not replaced_recent_raw:
+                            if USER_INTENTIONS_PLACEHOLDER in message_text:
                                 message_text = message_text.replace(
-                                    USER_RECENT_RAW_PLACEHOLDER,
-                                    user_recent_raw_content or ""
+                                    USER_INTENTIONS_PLACEHOLDER,
+                                    user_intentions_content or ""
                                 )
-                                replaced_recent_raw = True
-                            else:
+                            if USER_ARTIFACTS_INDEX_PLACEHOLDER in message_text:
                                 message_text = message_text.replace(
-                                    USER_RECENT_RAW_PLACEHOLDER,
-                                    "(see recent raw data above)"
+                                    USER_ARTIFACTS_INDEX_PLACEHOLDER,
+                                    user_artifacts_index or "(none)"
                                 )
-                        # Replace {user_ai_preferences} — pinned snapshot
-                        if USER_AI_PREFERENCES_PLACEHOLDER in message_text:
-                            message_text = message_text.replace(
-                                USER_AI_PREFERENCES_PLACEHOLDER,
-                                user_ai_preferences_content or ""
-                            )
-                        # Replace artifact placeholders — pinned snapshot
-                        if USER_MEMORY_PLACEHOLDER in message_text:
-                            message_text = message_text.replace(
-                                USER_MEMORY_PLACEHOLDER,
-                                user_memory_content or ""
-                            )
-                        if USER_SCRATCHPAD_PLACEHOLDER in message_text:
-                            message_text = message_text.replace(
-                                USER_SCRATCHPAD_PLACEHOLDER,
-                                user_scratchpad_content or ""
-                            )
-                        if USER_INTENTIONS_PLACEHOLDER in message_text:
-                            message_text = message_text.replace(
-                                USER_INTENTIONS_PLACEHOLDER,
-                                user_intentions_content or ""
-                            )
-                        if USER_ARTIFACTS_INDEX_PLACEHOLDER in message_text:
-                            message_text = message_text.replace(
-                                USER_ARTIFACTS_INDEX_PLACEHOLDER,
-                                user_artifacts_index or "(none)"
-                            )
                         # Replace {share_guidance} — flag-conditional, must
                         # mirror render_system_message byte-for-byte
                         if SHARE_GUIDANCE_PLACEHOLDER in message_text:
