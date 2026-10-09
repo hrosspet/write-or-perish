@@ -3923,7 +3923,13 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                             "by the author]"
                         )
                         role = "assistant" if is_llm_node else "user"
-                        messages.append({"role": role, "content": message_text})
+                        # Text blocks, like every other message: the
+                        # context log below and the providers read them.
+                        messages.append({
+                            "role": role,
+                            "content": [{"type": "text",
+                                         "text": message_text}],
+                        })
                         continue
 
                     node_content = node.get_content()
