@@ -63,22 +63,23 @@ def get_latest_profile(user):
     return None
 
 
-def _serialize_node_for_list(node, viewer_id=None, child_counts=None):
+def _serialize_node_for_list(node, viewer_id, child_counts=None):
     """Serialize a node for dashboard list views (Log has its own).
 
-    *viewer_id*: when another user is looking (the public dashboard), a
-    system prompt root's card shows its first child only if that child is
-    accessible to the viewer. *child_counts* (from visible_child_counts)
-    then gives the card's child_count, so it counts only children the
-    viewer can see; without it every child row counts."""
+    *viewer_id*: who is looking, the owner or another user. A system
+    prompt root's card shows its first child the viewer may see: not
+    soft-deleted, and accessible to the viewer (another user's private
+    reply is skipped); with none, the root itself. *child_counts* (from
+    visible_child_counts) gives the card's child_count, so it counts only
+    children the viewer can see; without it every child row counts."""
     # If this is a system prompt root, skip to the first child
     display_node = node
     prompt_key = None
     if node.is_system_prompt:
         prompt_key = node.get_prompt_key()
-        children = Node.query.filter(Node.parent_id == node.id)
-        if viewer_id is not None:
-            children = children.filter(accessible_nodes_filter(Node, viewer_id))
+        children = Node.query.filter(
+            Node.parent_id == node.id,
+            accessible_nodes_filter(Node, viewer_id))
         first_child = children.order_by(Node.created_at.asc()).first()
         if first_child:
             display_node = first_child
@@ -101,7 +102,7 @@ def _serialize_node_for_list(node, viewer_id=None, child_counts=None):
                         else child_counts.get(node.id, 0)),
         "created_at": iso_utc(display_node.created_at),
         "pinned_at": iso_utc(node.pinned_at),
-        "username": node.user.username if node.user else "Unknown",
+        "username": display_node.user.username if display_node.user else "Unknown",
         "human_owner_username": human_owner_username,
         "llm_model": display_node.llm_model,
         "origin": display_node.origin,
@@ -121,14 +122,26 @@ def get_dashboard():
     # Pinned nodes for this user (separate from pagination)
     pinned_nodes = Node.query.filter(
         Node.pinned_by == current_user.id,
-        Node.pinned_at.isnot(None)
+        Node.pinned_at.isnot(None),
+        Node.deleted_at.is_(None)
     ).order_by(Node.pinned_at.desc()).all()
-    pinned_list = [_serialize_node_for_list(n) for n in pinned_nodes]
+    pinned_counts = visible_child_counts(
+        [n.id for n in pinned_nodes], current_user.id)
+    pinned_list = [_serialize_node_for_list(n, current_user.id,
+                                            pinned_counts)
+                   for n in pinned_nodes]
 
-    query = Node.query.filter_by(user_id=current_user.id, parent_id=None).order_by(Node.created_at.desc())
+    query = Node.query.filter(
+        Node.user_id == current_user.id,
+        Node.parent_id.is_(None),
+        Node.deleted_at.is_(None)
+    ).order_by(Node.created_at.desc())
     pagination = query.paginate(page=page, per_page=per_page, error_out=False)
 
-    nodes_list = [_serialize_node_for_list(node) for node in pagination.items]
+    counts = visible_child_counts(
+        [n.id for n in pagination.items], current_user.id)
+    nodes_list = [_serialize_node_for_list(node, current_user.id, counts)
+                  for node in pagination.items]
     # Determine if Voice Mode is enabled for this user (admin or paid plan)
     voice_mode_enabled = current_user.has_voice_mode
     dashboard = {

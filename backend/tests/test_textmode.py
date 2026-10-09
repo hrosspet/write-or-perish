@@ -5,7 +5,8 @@ Covers:
   privacy_level + ai_usage honored, creates system/user/LLM nodes.
 - POST /textmode/<conv_id>/message: requires parent_id, foreign auth,
   parent-not-descendant rejection, privacy inheritance from parent.
-- GET  /textmode/from-node/<id>: foreign auth.
+- GET  /textmode/from-node/<id>: foreign auth; deleted entries as
+  placeholders.
 - POST /nodes/<id>/llm: forwards source_mode to create_llm_placeholder.
 """
 
@@ -431,6 +432,90 @@ class TestTextmodeFromNode:
         assert data["conversation_id"] == root.id
         contents = [m["content"] for m in data["messages"]]
         assert contents == ["child", "grandchild"]  # root excluded
+
+    def test_another_members_deleted_reply_is_a_tombstone(self, app):
+        """Bob's public reply in alice's thread, deleted by bob: alice's
+        text-mode view of the thread shows it as deleted, as the thread
+        view does, never with its text."""
+        from datetime import datetime
+        client = app.test_client()
+        alice = _make_user("alice")
+        bob = _make_user("bob")
+        _db.session.commit()
+
+        root = _make_node(alice, content="root", privacy_level="public")
+        hers = _make_node(alice, parent_id=root.id, content="alice asks",
+                          privacy_level="public")
+        his = _make_node(bob, parent_id=hers.id, content="BOB DELETED WORDS",
+                         privacy_level="public")
+        latest = _make_node(alice, parent_id=his.id, content="alice again",
+                            privacy_level="public")
+        his.deleted_at = datetime.utcnow()
+        _db.session.commit()
+
+        _login(client, alice.id)
+        resp = client.get(f"/api/textmode/from-node/{latest.id}")
+        assert resp.status_code == 200
+        assert "BOB DELETED WORDS" not in resp.get_data(as_text=True)
+        data = resp.get_json()
+        assert data["conversation_id"] == root.id
+        assert [m["id"] for m in data["messages"]] == [
+            hers.id, his.id, latest.id]
+        gone = data["messages"][1]
+        assert gone["deleted"] is True
+        assert gone["content"] is None
+        assert gone["role"] == "user"
+        assert [m["content"] for m in data["messages"][::2]] == [
+            "alice asks", "alice again"]
+
+    def test_own_deleted_entry_is_a_tombstone(self, app):
+        """The thread view shows the owner's own deleted entry as deleted
+        too; so does text mode, without its text or its AI metadata."""
+        from datetime import datetime
+        client = app.test_client()
+        alice = _make_user("alice")
+        llm_user = _make_user("gpt-5", twitter_id="llm-gpt-5")
+        _db.session.commit()
+
+        root = _make_node(alice, content="root")
+        first = _make_node(alice, parent_id=root.id, content="first")
+        reply = _make_node(llm_user, parent_id=first.id,
+                           content="DELETED AI WORDS", node_type="llm",
+                           llm_model="gpt-5", human_owner=alice)
+        reply.tool_calls_meta = '[{"name": "secret_tool"}]'
+        latest = _make_node(alice, parent_id=reply.id, content="latest")
+        reply.deleted_at = datetime.utcnow()
+        _db.session.commit()
+
+        _login(client, alice.id)
+        resp = client.get(f"/api/textmode/from-node/{latest.id}")
+        assert resp.status_code == 200
+        body = resp.get_data(as_text=True)
+        assert "DELETED AI WORDS" not in body
+        assert "secret_tool" not in body
+        gone = resp.get_json()["messages"][1]
+        assert gone["id"] == reply.id
+        assert gone["deleted"] is True
+        assert gone["content"] is None
+        assert gone["role"] == "assistant"
+
+    def test_deleted_node_itself_is_not_found(self, app):
+        """GET /api/nodes/<id> answers 404 for a deleted node, even to its
+        owner; text mode does the same."""
+        from datetime import datetime
+        client = app.test_client()
+        alice = _make_user("alice")
+        _db.session.commit()
+
+        root = _make_node(alice, content="root")
+        gone = _make_node(alice, parent_id=root.id, content="DELETED WORDS")
+        gone.deleted_at = datetime.utcnow()
+        _db.session.commit()
+
+        _login(client, alice.id)
+        resp = client.get(f"/api/textmode/from-node/{gone.id}")
+        assert resp.status_code == 404
+        assert "DELETED WORDS" not in resp.get_data(as_text=True)
 
 
 # ── GET /nodes/<id> ancestor serialization ──────────────────────────────
