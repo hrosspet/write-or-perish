@@ -2515,6 +2515,10 @@ def _read_requested(node):
 
 CA_BATCH_PROVIDERS = ("anthropic", "openai")
 CA_BATCH_LIVE_STATUSES = ("submitted", "cancelling")
+# A Read whose owner's "Delete all my writing" waited or ran (#268): it did
+# not run, or its result was dropped. Shown on the node after a restore.
+READ_ON_HOLD_TEXT = ("This read did not run: your writing was waiting to be "
+                     "deleted.")
 # What a read withdrawn at the provider says in place of its reply.
 CA_BATCH_WITHDRAWN_TEXT = (
     "This read was cancelled before it ran: the monthly spend cap was "
@@ -3371,6 +3375,23 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             if ca_turn is not None:
                 logger.info("Node %s: {ca_tweets} turn is %r",
                             llm_node_id, ca_turn)
+            if needs_ca and batch_entry is None:
+                from backend.utils.hidden_rows import writing_on_hold
+                if writing_on_hold(llm_node.human_owner_id or user_id):
+                    # "Delete all my writing" waits or runs (#268): no Read
+                    # runs for the user, like the other background jobs.
+                    logger.info("Node %s: Read not run, the owner's writing "
+                                "is on hold for deletion", llm_node_id)
+                    llm_node.llm_task_status = 'failed'
+                    llm_node.llm_task_error = READ_ON_HOLD_TEXT
+                    llm_node.llm_task_progress = 100
+                    db.session.commit()
+                    return {
+                        'parent_node_id': parent_node_id,
+                        'llm_node_id': llm_node_id,
+                        'status': 'refused',
+                        'reason': 'writing_on_hold',
+                    }
             if needs_ca:
                 # A read runs against the user's own conversation, never
                 # under the agentic system prompt: it is a batch judgement
@@ -3815,6 +3836,41 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     **llm_cost_log_fields(model_id, resp),
                     **diag_fields,
                 ))
+
+            def _read_on_hold():
+                """The Read's owner pressed "Delete all my writing" while it
+                ran (#268): the request waits or the purge runs, or the
+                Read's node is hidden. Its picks would save tweets and
+                marks the user asked to delete."""
+                from backend.utils.hidden_rows import writing_on_hold
+                # Read from the database, not the (possibly stale) object;
+                # unlike a refresh this keeps the run's pending changes.
+                deleted_at = db.session.query(Node.deleted_at).filter(
+                    Node.id == llm_node.id).scalar()
+                return (deleted_at is not None
+                        or writing_on_hold(llm_node.human_owner_id or user_id))
+
+            def _drop_held_read(resp):
+                """A Read result that arrived while the writing is on hold:
+                the provider billed it, so its cost row is written (once
+                per batch result, as for a reply the collect cannot use),
+                and nothing else: no pick, no saved tweet, no reply text,
+                no hidden reference made visible again."""
+                if (not resp.get("cut_off")
+                        and _claim_failed_feed_cost(llm_node, resp)):
+                    _log_api_cost(resp, llm_node)
+                llm_node.llm_task_status = 'failed'
+                llm_node.llm_task_error = READ_ON_HOLD_TEXT
+                llm_node.llm_task_progress = 100
+                db.session.commit()
+                logger.info("Node %s: Read result dropped, the owner's "
+                            "writing is on hold for deletion", llm_node.id)
+                return {
+                    'parent_node_id': parent_node_id,
+                    'llm_node_id': llm_node.id,
+                    'status': 'cancelled',
+                    'reason': 'writing_on_hold',
+                }
 
             def _collect_feed(resp):
                 """_collect_feed_reply for this turn. A reply the collect
@@ -4440,6 +4496,8 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                             )),
                         stream=feed_schema is None)
                     if needs_ca:
+                        if _read_on_hold():
+                            return _drop_held_read(response)
                         response = _collect_feed(response)
                     break  # Success
                 except PromptTooLongError as e:
@@ -4664,6 +4722,11 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 # The collecting run: the poll above found the batch ended
                 # and holds its reply; the context was built for ca_refs.
                 response = batch_resp
+                # Only a Read goes through a batch: one collected while its
+                # owner's writing is on hold is dropped (#268), whether or
+                # not its thread was hidden with the rest.
+                if _read_on_hold():
+                    return _drop_held_read(response)
                 if ca_refs is not None:
                     response = _collect_feed(response)
                 return _finalize(llm_node, response)

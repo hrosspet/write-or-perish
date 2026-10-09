@@ -231,6 +231,26 @@ class TestReadStart:
         assert resp.status_code == 400
         assert Node.query.count() == 0
 
+    def test_no_read_while_the_writing_is_on_hold(self, app):
+        """#268: while "Delete all my writing" waits, no Read starts (the
+        start, read further and rerun routes share the guard)."""
+        from datetime import datetime
+        from backend.models import UserDataPurge
+        client = app.test_client()
+        alice = _make_user("alice", is_admin=True)
+        _db.session.add(UserDataPurge(
+            user_id=alice.id, source="self", scope="hidden",
+            status="scheduled", scheduled_for=datetime.utcnow()))
+        _db.session.commit()
+
+        _login(client, alice.id)
+        resp = client.post("/api/read/start", json={"model": "gpt-5"})
+        assert resp.status_code == 409
+        assert resp.get_json()["code"] == "writing_on_hold"
+        assert resp.get_json()["error"].startswith(
+            "Read is off while your writing waits to be deleted.")
+        assert Node.query.count() == 0
+
 
 class TestReadFromNode:
     def test_prompt_attached_under_node_with_placeholder_below(self, app):
