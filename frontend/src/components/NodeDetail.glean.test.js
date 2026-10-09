@@ -31,7 +31,14 @@ jest.mock('../hooks/useSSE', () => ({
 jest.mock('./MarkdownBody', () => ({ children }) => <div>{children}</div>);
 jest.mock('./NodeForm', () => () => null);
 jest.mock('./NodeFormModal', () => () => null);
-jest.mock('./ModelSelector', () => () => <span data-testid="read-model-picker" />);
+// The picker stands in as a button that picks another provider's model.
+jest.mock('./ModelSelector', () => ({ purpose, onModelChange }) => (
+  <button
+    type="button"
+    data-testid={`${purpose || 'chat'}-model-picker`}
+    onClick={() => onModelChange('gpt-6-luna')}
+  />
+));
 jest.mock('./SpeakerIcon', () => () => null);
 jest.mock('./DownloadAudioIcon', () => () => null);
 jest.mock('./SemanticNeighbors', () => () => null);
@@ -140,19 +147,29 @@ const gleanButton = () => Array.from(
 const openMenu = () => fireEvent.click(screen.getAllByRole('button', { name: 'More actions' }).at(-1));
 
 describe('a thread started from the Glean card', () => {
-  test('offers the Glean button, and no menu entry; no model picker for a non-admin', async () => {
+  test('offers the Glean button with its model picker, and no menu entry', async () => {
     routes['/nodes/30'] = reply({ glean_thread: true });
     renderAt('/node/30');
     await screen.findByText(/fork in the road/);
     const button = gleanButton();
     expect(button).toBeInTheDocument();
-    expect(screen.queryByTestId('read-model-picker')).toBeNull();
+    // Everyone who gleans has the picker, not only admins (Peter, 2026-10-09).
+    expect(screen.getByTestId('read-model-picker')).toBeInTheDocument();
     openMenu();
     expect(screen.queryByRole('button', { name: 'Glean for this reflection' })).toBeNull();
 
     fireEvent.click(button);
-    // The server picks the model of the user's provider.
+    // Nothing picked: the server takes the default of the user's provider.
     expect(mockPost).toHaveBeenCalledWith('/read/from-node/30', { model: undefined });
+  });
+
+  test("a non-admin's pick is sent, another provider's model too", async () => {
+    routes['/nodes/30'] = reply({ glean_thread: true });
+    renderAt('/node/30');
+    await screen.findByText(/fork in the road/);
+    fireEvent.click(screen.getByTestId('read-model-picker'));
+    fireEvent.click(gleanButton());
+    expect(mockPost).toHaveBeenCalledWith('/read/from-node/30', { model: 'gpt-6-luna' });
   });
 
   test('an admin gets the model picker beside it', async () => {

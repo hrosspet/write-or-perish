@@ -981,9 +981,10 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
     setError("");
     api
       .post(`/read/from-node/${targetId}`, {
-        // Only an admin picks the model; everyone else gleans on their
-        // provider's glean model, which the server chooses.
-        model: (currentUser?.is_admin && readModel) || undefined,
+        // The model picked beside the Glean button (everyone who gleans
+        // has the picker, #435); without one the server takes the
+        // default, a read model of the user's own provider.
+        model: readModel || undefined,
       })
       .then((response) => {
         const { llm_node_id, prompt_node_id } = response.data;
@@ -1188,16 +1189,17 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
   // (small screens), so the action travels with the node the user is on.
   // It shows whenever the owner could act, not only in craft mode; LLM
   // Response keeps the craft-bar rule. Any other thread has no Glean
-  // button: "Glean for this reflection" is in the entry's menu. Only an
-  // admin gets a model picker beside it: everyone else gleans on their
-  // provider's glean model. Directly under a finished gleaning LLM
+  // button: "Glean for this reflection" is in the entry's menu. Beside
+  // the button sits the model picker, for everyone who gleans (Peter,
+  // 2026-10-09: the same read models as admins, other providers'
+  // included); its default is a read model of the user's own provider
+  // (/suggested-model?purpose=read). Directly under a finished gleaning LLM
   // Response is disabled: a reply asked for there is another glean (the
   // task's parent rule), and the way to talk about the picks is a
   // comment first, whose own row then offers LLM Response again.
   const underReadReply = isReadReply && node.llm_task_status === 'completed';
   const readActions = isOwner && gleanEnabled && gleanThread
     && node.ai_usage !== 'none' && !isLlmPending && !node.is_system_prompt;
-  const readModelPicker = !!currentUser?.is_admin;
   // Before the first picks (the read prompt itself, or a note typed
   // under it) a reply asked for here would be that first read, so the
   // generic LLM Response is not offered at all: the row is "Read" and
@@ -1226,23 +1228,18 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
         onClick={() => handleReadFromNode()}
         disabled={readBusy}
         title={readTitle}
-        style={{
-          display: 'inline-flex', alignItems: 'center', gap: '8px',
-          ...(readModelPicker ? joinedButtonStyle : {}),
-        }}
+        style={{ display: 'inline-flex', alignItems: 'center', gap: '8px', ...joinedButtonStyle }}
       >
         {readLoading ? 'Starting…' : readLabel}
       </button>
-      {readModelPicker && (
-        <ModelSelector
-          nodeId={node.id}
-          purpose="read"
-          selectedModel={readModel}
-          onModelChange={setReadModel}
-          disabled={readBusy}
-          style={joinedPickerStyle}
-        />
-      )}
+      <ModelSelector
+        nodeId={node.id}
+        purpose="read"
+        selectedModel={readModel}
+        onModelChange={setReadModel}
+        disabled={readBusy}
+        style={joinedPickerStyle}
+      />
     </span>
   );
   const llmResponseTitle = underReadReply
