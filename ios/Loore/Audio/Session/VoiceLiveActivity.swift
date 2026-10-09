@@ -36,8 +36,12 @@ final class VoiceLiveActivity {
     nonisolated static func state(turn: VoiceTurnController.State, isPaused: Bool, isInterrupted: Bool,
                                   awaitingNextNode: Bool, elapsed: Double, now: Date = Date(),
                                   glean: State.GleanButton? = nil, gleaning: Bool = false,
-                                  gleaned: Bool = false) -> State {
-        if gleaning { return State(phase: .gleaning) }
+                                  gleanAccepted: Bool = false, gleaned: Bool = false) -> State {
+        if gleaning {
+            var state = State(phase: .gleaning)
+            state.gleanAccepted = gleanAccepted
+            return state
+        }
         var state = turnState(turn: turn, isPaused: isPaused, isInterrupted: isInterrupted,
                               awaitingNextNode: awaitingNextNode, elapsed: elapsed, now: now)
         switch state.phase {

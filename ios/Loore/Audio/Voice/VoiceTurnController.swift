@@ -76,8 +76,19 @@ final class VoiceTurnController {
     /// text mode (the thread page shows either and keeps watching). Never played.
     @ObservationIgnored var onGleaningReady: ((Int) -> Void)?
     @ObservationIgnored private var gleanTask: Task<Void, Never>?
+    /// The glean wait's limits, counted only while the app is active: a locked
+    /// phone suspends the app after a lock-screen Glean, and that time must not
+    /// end the wait without asking the server again (review of #493).
+    @ObservationIgnored private var gleanDeadline = Date.distantFuture
+    @ObservationIgnored private var gleanLastAnswer = Date()
+    @ObservationIgnored private var gleanInactiveSince: Date?
 
     var isGleaning: Bool { gleanPhase != .idle }
+    /// The server accepted the glean; the gleaning is being written.
+    var gleanAccepted: Bool {
+        if case .waiting = gleanPhase { return true }
+        return false
+    }
     /// The labeled Glean button under the record button (and on the lock screen).
     var showsGleanButton: Bool { gleanSession && hasRecordedMessage }
     /// Glean may be pressed: its node is known, no glean runs, and no recording
@@ -108,6 +119,9 @@ final class VoiceTurnController {
 
     @ObservationIgnored var model: () -> String? = { nil }
     @ObservationIgnored var aiUsage: () -> String = { "none" }
+    /// Whether the app is in the foreground (live: `UIApplication`); the glean
+    /// wait counts its limits only then.
+    @ObservationIgnored var appIsActive: () -> Bool = { true }
     /// Intervals (tests shorten them).
     @ObservationIgnored var timings = Timings()
 
@@ -1000,6 +1014,7 @@ final class VoiceTurnController {
     /// Called when the app returns to the foreground.
     func appDidBecomeActive() {
         let gen = generation
+        gleanResumed()
         if state == .recording && isInterrupted {
             audio.playInterruptionAlert()
         }
@@ -1195,39 +1210,73 @@ final class VoiceTurnController {
     /// the wait (the thread page keeps watching).
     private func waitForGleaning(_ id: Int) {
         gleanTask?.cancel()
+        gleanDeadline = Date().addingTimeInterval(timings.llmGiveUp)
+        gleanLastAnswer = Date()
+        // A lock-screen Glean starts with the app in the background.
+        gleanInactiveSince = appIsActive() ? nil : Date()
         gleanTask = Task { [weak self] in
             guard let self else { return }
-            let deadline = Date().addingTimeInterval(self.timings.llmGiveUp)
-            var lastAnswer = Date()
             var outcome: TaskStatus?
-            while !Task.isCancelled, self.gleanPhase == .waiting(nodeId: id), Date() < deadline {
+            while !Task.isCancelled, self.gleanPhase == .waiting(nodeId: id) {
                 do {
                     let status = try await self.backend.llmStatus(nodeId: id)
-                    lastAnswer = Date()
+                    self.gleanLastAnswer = Date()
                     if let s = status.status, s.isTerminal {
                         outcome = s
                         break
                     }
                 } catch {
-                    if Date().timeIntervalSince(lastAnswer) > self.timings.llmErrorGiveUp { break }
+                    // Transient: asked again below.
                 }
+                guard !Task.isCancelled, self.gleanPhase == .waiting(nodeId: id) else { return }
+                if self.gleanLimitReached() { break }
                 try? await Task.sleep(nanoseconds: UInt64(self.timings.gleanPoll * 1_000_000_000))
+            }
+            guard !Task.isCancelled, self.gleanPhase == .waiting(nodeId: id) else { return }
+            if outcome == nil, let last = try? await self.backend.llmStatus(nodeId: id),
+               let s = last.status, s.isTerminal {
+                // One more question before giving up: the gleaning may be in.
+                outcome = s
             }
             guard !Task.isCancelled, self.gleanPhase == .waiting(nodeId: id) else { return }
             self.gleaningLanded(id, outcome)
         }
     }
 
+    /// The wait's limits (`llmGiveUp` in all, `llmErrorGiveUp` without an
+    /// answer), only while the app is active.
+    private func gleanLimitReached() -> Bool {
+        guard appIsActive() else { return false }
+        let now = Date()
+        return now >= gleanDeadline || now.timeIntervalSince(gleanLastAnswer) > timings.llmErrorGiveUp
+    }
+
+    /// The app went to the background: the glean wait's limits pause.
+    func appDidEnterBackground() {
+        if gleanAccepted && gleanInactiveSince == nil { gleanInactiveSince = Date() }
+    }
+
+    /// Back in the foreground: the time away does not count against the wait,
+    /// and the no-answer limit starts again (the first poll after waking may fail).
+    private func gleanResumed() {
+        guard gleanAccepted else { return }
+        if let since = gleanInactiveSince {
+            gleanDeadline = gleanDeadline.addingTimeInterval(Date().timeIntervalSince(since))
+        }
+        gleanInactiveSince = nil
+        gleanLastAnswer = Date()
+    }
+
+    /// The gleaning finished, failed, or the wait gave up: it opens in text, and
+    /// in every case the conversation moves to it, a step in the conversation
+    /// (web: Voice from a gleaning records under it, and Glean again starts there).
     private func gleaningLanded(_ id: Int, _ outcome: TaskStatus?) {
         gleanPhase = .idle
         gleanTask = nil
-        if outcome == .completed {
-            // A step in the conversation: the next recording and the next glean
-            // go under the gleaning (web: Voice from a gleaning records under it).
-            if state == .idle || state == .done { threadParentId = id }
-            gleanAnchor = id
-            gleaningDone = true
-        }
+        gleanInactiveSince = nil
+        if state == .idle || state == .done { threadParentId = id }
+        gleanAnchor = id
+        gleaningDone = outcome == .completed
         audio.refreshNowPlaying()
         onGleaningReady?(id)
     }

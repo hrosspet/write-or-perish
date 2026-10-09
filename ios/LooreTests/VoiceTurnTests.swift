@@ -51,7 +51,13 @@ final class FakeVoiceBackend: VoiceBackend {
         return legacyResult
     }
 
+    /// Answers that fail before `llmStatuses` is used again (a dropped connection).
+    var llmStatusFailures: [Int: Int] = [:]
     func llmStatus(nodeId: Int) async throws -> LLMStatus {
+        if let failures = llmStatusFailures[nodeId], failures > 0 {
+            llmStatusFailures[nodeId] = failures - 1
+            throw APIError.transport(code: -1009, description: "offline")
+        }
         guard var list = llmStatuses[nodeId], !list.isEmpty else { throw APIError.transport(code: -1, description: "none") }
         let next = list.count > 1 ? list.removeFirst() : list[0]
         llmStatuses[nodeId] = list
@@ -1129,16 +1135,73 @@ final class VoiceTurnTests: XCTestCase {
         XCTAssertTrue(turn.gleaningDone)
     }
 
-    func testAFailedGleaningStillOpensItsThread() async throws {
+    func testAFailedGleaningStillOpensAndTheConversationMovesToIt() async throws {
         gleanSession(parentId: 7)
         var opened: [Int] = []
         turn.onGleaningReady = { opened.append($0) }
         backend.llmStatuses[900] = [try llm(900, "failed", tts: nil, error: "Provider error")]
         _ = await turn.glean()
         await wait("opened") { opened == [900] }
-        XCTAssertEqual(turn.threadParentId, 7, "a failed gleaning is not part of the conversation")
-        XCTAssertEqual(turn.gleanAnchor, 7, "Glean can be pressed again")
+        XCTAssertEqual(turn.threadParentId, 900, "whichever way the gleaning opens, the conversation is there")
+        XCTAssertEqual(turn.gleanAnchor, 900, "Glean again starts under it")
+        XCTAssertFalse(turn.gleaningDone, "the lock screen does not call a failed one ready")
+    }
+
+    // Review of #493: a Glean from the lock screen, Loore opened much later. The
+    // suspended time must not end the wait without asking the server again.
+    func testALongSuspensionDoesNotEndTheGleanWait() async throws {
+        var active = false
+        turn.appIsActive = { active }
+        gleanSession(parentId: 7)
+        turn.timings.llmGiveUp = 0.2
+        var opened: [Int] = []
+        turn.onGleaningReady = { opened.append($0) }
+        backend.llmStatuses[900] = [try llm(900, "processing", tts: nil)]
+        _ = await turn.glean()
+        XCTAssertTrue(turn.gleanAccepted)
+        try await Task.sleep(nanoseconds: 500_000_000)  // locked, past the 30-minute limit
+        XCTAssertTrue(opened.isEmpty, "the time away does not count")
+        backend.llmStatuses[900] = [try llm(900, "completed", tts: nil, content: "Picks.")]
+        active = true
+        turn.appDidBecomeActive()
+        await wait("opened") { opened == [900] }
+        XCTAssertEqual(turn.threadParentId, 900)
+        XCTAssertEqual(turn.gleanAnchor, 900)
+        XCTAssertTrue(turn.gleaningDone)
+    }
+
+    func testAFailedFirstPollAfterWakingDoesNotEndTheGleanWait() async throws {
+        var active = false
+        turn.appIsActive = { active }
+        gleanSession(parentId: 7)
+        turn.timings.llmErrorGiveUp = 0.2
+        var opened: [Int] = []
+        turn.onGleaningReady = { opened.append($0) }
+        backend.llmStatuses[900] = [try llm(900, "processing", tts: nil)]
+        _ = await turn.glean()
+        backend.llmStatusFailures[900] = 1_000_000  // no network while locked
+        try await Task.sleep(nanoseconds: 500_000_000)  // past the no-answer limit
+        XCTAssertTrue(opened.isEmpty)
+        backend.llmStatusFailures[900] = 1  // the first poll after waking fails
+        backend.llmStatuses[900] = [try llm(900, "completed", tts: nil, content: "Picks.")]
+        active = true
+        turn.appDidBecomeActive()
+        await wait("opened") { opened == [900] }
+        XCTAssertEqual(turn.threadParentId, 900)
+        XCTAssertTrue(turn.gleaningDone)
+    }
+
+    func testTheGleanWaitStillEndsWhileTheAppIsActive() async throws {
+        gleanSession(parentId: 7)
+        turn.timings.llmGiveUp = 0.1
+        var opened: [Int] = []
+        turn.onGleaningReady = { opened.append($0) }
+        backend.llmStatuses[900] = [try llm(900, "processing", tts: nil)]
+        _ = await turn.glean()
+        await wait("gave up") { opened == [900] }
+        XCTAssertEqual(turn.threadParentId, 900, "the thread page keeps watching; the conversation is there")
         XCTAssertFalse(turn.gleaningDone)
+        XCTAssertFalse(turn.isGleaning)
     }
 
     func testAGleanThatCannotStartSaysWhy() async throws {
@@ -1230,6 +1293,12 @@ final class VoiceLiveActivityStateTests: XCTestCase {
         XCTAssertNil(state(.idle, glean: nil).glean, "a Reflect conversation has none")
         XCTAssertEqual(state(.idle, gleaning: true).phase, .gleaning)
         XCTAssertNil(state(.idle, gleaning: true).glean, "no buttons while the glean runs")
+        XCTAssertFalse(state(.idle, gleaning: true).gleanAccepted, "the request is still on its way")
+        let accepted = VoiceLiveActivity.state(turn: .idle, isPaused: false, isInterrupted: false,
+                                               awaitingNextNode: false, elapsed: 0, glean: .ready, gleaning: true,
+                                               gleanAccepted: true)
+        XCTAssertEqual(accepted.phase, .gleaning)
+        XCTAssertTrue(accepted.gleanAccepted, "says to open Loore when it's ready: a locked app cannot update it")
         XCTAssertTrue(state(.idle, gleaned: true).gleaned)
         XCTAssertFalse(state(.playing, gleaned: true).gleaned)
     }

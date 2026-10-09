@@ -68,8 +68,9 @@ final class AudioCenter {
             MainActor.assumeIsolated { self?.voiceController?.appDidBecomeActive() }
         })
         observers.append(NotificationCenter.default.addObserver(forName: UIApplication.didEnterBackgroundNotification,
-                                                                object: nil, queue: .main) { _ in
+                                                                object: nil, queue: .main) { [weak self] _ in
             RecordingLog.shared.note("app in background")
+            MainActor.assumeIsolated { self?.voiceController?.appDidEnterBackground() }
         })
     }
 
@@ -107,6 +108,7 @@ final class AudioCenter {
         controller.model = { [weak self] in self?.app?.user?.preferredModel }
         controller.aiUsage = { [weak self] in self?.app?.user?.defaultAIUsage.rawString ?? "none" }
         controller.onGleaningReady = { [weak self] id in self?.openGleaning(id) }
+        controller.appIsActive = { UIApplication.shared.applicationState == .active }
         voiceController = controller
         return controller
     }
@@ -231,6 +233,7 @@ final class AudioCenter {
                                                       elapsed: voice.elapsed,
                                                       glean: voice.lockScreenGlean,
                                                       gleaning: voice.isGleaning,
+                                                      gleanAccepted: voice.gleanAccepted,
                                                       gleaned: voice.gleaningDone),
                               start: voice.state == .starting)
         }

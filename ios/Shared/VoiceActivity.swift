@@ -47,6 +47,10 @@ struct VoiceActivityAttributes: ActivityAttributes {
         var glean: GleanButton?
         /// The last glean finished: open Loore to read the gleaning.
         var gleaned = false
+        /// While gleaning: the server accepted the glean. A locked phone suspends
+        /// the app after this, so the card says what will happen instead of a
+        /// progress state that cannot update.
+        var gleanAccepted = false
     }
 }
 

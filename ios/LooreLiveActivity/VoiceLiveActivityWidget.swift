@@ -107,7 +107,7 @@ private struct StatusText: View {
         case .thinking: return "Thinking…"
         case .replying: return "Loore is replying"
         case .finished: return "Reply finished"
-        case .gleaning: return "Gleaning…"
+        case .gleaning: return state.gleanAccepted ? "Gleaning" : "Gleaning…"
         }
     }
 
@@ -123,6 +123,8 @@ private struct StatusText: View {
             Text("\(clock(state.elapsed)) · a call or another app took the microphone")
         case .ready where state.gleaned:
             Text("Open Loore to read it")
+        case .gleaning where state.gleanAccepted:
+            Text("Open Loore to read it when it's ready")
         case .gleaning:
             Text("Loore · Glean")
         case .ready, .starting, .sending, .thinking, .replying, .finished:
