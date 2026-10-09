@@ -68,6 +68,7 @@ from backend.utils.tool_meta import (
 from backend.utils.client_platform import CLIENT_MARKER
 from backend.utils.text_edits import apply_text_edits
 from backend.utils.privacy import AI_ALLOWED
+from backend.utils.proposals import is_own_live_proposal
 from backend.utils.placeholders import (
     CA_TWEETS_PATTERN,
     USER_EXPORT_PATTERN,
@@ -1874,8 +1875,12 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
 
         try:
             if name == "apply_todo_changes":
+                # Only on the user's own live proposal (utils/proposals).
                 draft = _find_pending_todo_draft(node_chain, user_id)
-                if not draft:
+                proposal_node = (Node.query.get(draft.parent_id)
+                                 if draft else None)
+                if not is_own_live_proposal(
+                        proposal_node, user_id, "todo_pending"):
                     result["status"] = "error"
                     result["error"] = "No pending todo changes found"
                 else:
@@ -1884,18 +1889,16 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
                     from backend.routes.todo import (
                         _start_todo_merge, todo_merge_refusal,
                     )
-                    proposal_node = Node.query.get(draft.parent_id)
                     # The merge sends the todo list and the proposal to a
                     # model: not where AI may not read them. The proposal
                     # stays pending; the model passes the message on.
-                    refusal = todo_merge_refusal(
-                        user_id, proposal_node or llm_node)
+                    refusal = todo_merge_refusal(user_id, proposal_node)
                     if refusal is not None:
                         result["status"] = "error"
                         result["error"] = refusal
                     else:
                         task_id = _start_todo_merge(
-                            draft, proposal_node or llm_node, user_id,
+                            draft, proposal_node, user_id,
                             confirm_node_id=llm_node.id,
                         )
                         result["status"] = "success"
@@ -1909,11 +1912,13 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
                     result["status"] = "error"
                     result["error"] = "No pending GitHub issue found"
                 else:
-                    # Find the LLM node that proposed the issue
+                    # The LLM node that proposed the issue: only the
+                    # user's own live proposal (utils/proposals).
                     origin_node = Node.query.get(draft.parent_id)
-                    if not origin_node:
+                    if not is_own_live_proposal(
+                            origin_node, user_id, "github_issue_pending"):
                         result["status"] = "error"
-                        result["error"] = "Origin node not found"
+                        result["error"] = "No pending GitHub issue found"
                     else:
                         issue_data = parse_github_issue(
                             origin_node.get_content() or ""
@@ -2197,10 +2202,12 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
                     result["status"] = "error"
                     result["error"] = "No pending feedback found"
                 else:
+                    # Only the user's own live proposal (utils/proposals).
                     origin_node = Node.query.get(draft.parent_id)
-                    if not origin_node:
+                    if not is_own_live_proposal(
+                            origin_node, user_id, "feedback_pending"):
                         result["status"] = "error"
-                        result["error"] = "Origin node not found"
+                        result["error"] = "No pending feedback found"
                     else:
                         from backend.utils.feedback import (
                             submit_feedback_from_node,
@@ -2236,10 +2243,12 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
                     result["status"] = "error"
                     result["error"] = "No pending share found"
                 else:
+                    # Only the user's own live proposal (utils/proposals).
                     origin_node = Node.query.get(draft.parent_id)
-                    if not origin_node:
+                    if not is_own_live_proposal(
+                            origin_node, user_id, "share_pending"):
                         result["status"] = "error"
-                        result["error"] = "Origin node not found"
+                        result["error"] = "No pending share found"
                     else:
                         from backend.utils.share import (
                             save_share_drafts_from_node,
@@ -3584,11 +3593,14 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 gated_voice_tools(flask_app.config)
                 if is_agentic else None)
 
-            # Check for pending drafts and inject context notes
+            # Check for pending drafts and inject context notes: only
+            # proposals the user can accept (utils/proposals).
             pending_draft_note = None
             if is_agentic:
                 pending = _find_pending_todo_draft(node_chain, user_id)
-                if pending:
+                if pending and is_own_live_proposal(
+                        Node.query.get(pending.parent_id), user_id,
+                        "todo_pending"):
                     pending_draft_note = (
                         f"[todo-proposal:{pending.parent_id}: pending "
                         f"confirmation. The user can say 'apply the "
@@ -3597,7 +3609,9 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 pending_issue = _find_pending_github_issue_draft(
                     node_chain, user_id
                 )
-                if pending_issue:
+                if pending_issue and is_own_live_proposal(
+                        Node.query.get(pending_issue.parent_id), user_id,
+                        "github_issue_pending"):
                     issue_note = (
                         f"[issue-proposal:{pending_issue.parent_id}: "
                         f"pending confirmation. The user can say "
