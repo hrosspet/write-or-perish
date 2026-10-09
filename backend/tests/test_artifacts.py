@@ -442,7 +442,7 @@ def test_scan_statuses_delivers_todo_content(app):
         node = _node_with_meta(uid, [
             {"name": "read_todo", "status": "success", "todo_id": todo.id},
         ])
-        notes, to_mark = _scan_proposal_statuses([node])
+        notes, to_mark = _scan_proposal_statuses([node], uid)
         joined = "\n".join(notes)
         assert "the actual tasks" in joined
         assert "current todo list" in joined
@@ -450,7 +450,7 @@ def test_scan_statuses_delivers_todo_content(app):
 
         _mark_status_reported(to_mark)
         _db.session.commit()
-        notes2, to_mark2 = _scan_proposal_statuses([node])
+        notes2, to_mark2 = _scan_proposal_statuses([node], uid)
         assert notes2 == []
 
 
@@ -771,7 +771,7 @@ def test_scan_statuses_reports_artifact_tools_once(app):
             {"name": "propose_feedback", "status": "success",
              "apply_status": "completed"},
         ])
-        notes, to_mark = _scan_proposal_statuses([node])
+        notes, to_mark = _scan_proposal_statuses([node], uid)
         joined = "\n".join(notes)
         assert "Artifact 'memory' was updated." in joined
         assert "the actual books" in joined  # read_artifact content delivery
@@ -780,7 +780,7 @@ def test_scan_statuses_reports_artifact_tools_once(app):
 
         _mark_status_reported(to_mark)
         _db.session.commit()
-        notes2, to_mark2 = _scan_proposal_statuses([node])
+        notes2, to_mark2 = _scan_proposal_statuses([node], uid)
         assert notes2 == []
         assert to_mark2 == []
 
@@ -795,13 +795,13 @@ def test_scan_statuses_reports_artifact_failure(app):
             {"name": "update_artifact", "status": "error",
              "kind": "memory", "error": "Anchor text not found"},
         ])
-        notes, to_mark = _scan_proposal_statuses([node])
+        notes, to_mark = _scan_proposal_statuses([node], uid)
         assert notes == ["[update_artifact failed — Anchor text not found]"]
         assert len(to_mark) == 1
 
         _mark_status_reported(to_mark)
         _db.session.commit()
-        notes2, _ = _scan_proposal_statuses([node])
+        notes2, _ = _scan_proposal_statuses([node], uid)
         assert notes2 == []
 
 
@@ -856,6 +856,32 @@ def test_new_proposal_supersedes_only_the_replying_users_own(app):
         assert [r["name"] for r in results] == ["propose_todo"]
         assert _apply_status(bobs_earlier) == "superseded"
         assert _apply_status(alices) == "pending_approval"
+
+
+def test_scan_statuses_reads_only_the_replying_users_replies(app):
+    """Bob's reply under alice's carries forward only bob's own pending
+    results. Alice's retrieval waiting for her next turn is neither put
+    into bob's prompt nor marked reported, so her next turn still gets it."""
+    with app.app_context():
+        alice, bob = User.query.first(), _second_user()
+        todo = _mk_todo(alice.id, "alice's own tasks")
+        alices = _reply_for(alice, [
+            {"name": "read_todo", "status": "success", "todo_id": todo.id},
+        ])
+        bobs = _reply_for(bob, [
+            {"name": "update_artifact", "status": "success",
+             "kind": "memory", "created": False},
+        ])
+
+        notes, to_mark = _scan_proposal_statuses([alices, bobs], bob.id)
+        assert notes == ["[Artifact 'memory' was updated.]"]
+        assert [(n.id, name) for n, name in to_mark] == [
+            (bobs.id, "update_artifact")]
+
+        _mark_status_reported(to_mark)
+        _db.session.commit()
+        notes, _ = _scan_proposal_statuses([alices, bobs], alice.id)
+        assert any("alice's own tasks" in n for n in notes)
 
 
 # ── Pinning ──────────────────────────────────────────────────────────────

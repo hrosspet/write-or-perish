@@ -1464,8 +1464,13 @@ def _owned_by(node, user_id):
     return (node.human_owner_id or node.user_id) == user_id
 
 
-def _scan_proposal_statuses(node_chain, licence=None):
+def _scan_proposal_statuses(node_chain, user_id, licence=None):
     """Walk all nodes and collect proposal/tool status notes to inject.
+
+    Only replies that belong to *user_id* (the user this reply is for)
+    count: the statuses, and the retrievals left for the next turn, of
+    other people's replies in a shared thread are theirs, neither read
+    into this prompt nor marked reported by it.
 
     Refreshes each node from the DB (the merge task may have updated
     tool_calls_meta asynchronously). Returns (notes_list, nodes_to_mark)
@@ -1476,7 +1481,7 @@ def _scan_proposal_statuses(node_chain, licence=None):
     notes = []
     to_mark = []
     for node in node_chain:
-        if not node.tool_calls_meta:
+        if not node.tool_calls_meta or not _owned_by(node, user_id):
             continue
         # Refresh from DB to pick up async merge updates
         db.session.refresh(node)
@@ -3604,7 +3609,8 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             proposal_to_mark = []
             if is_agentic:
                 proposal_notes, proposal_to_mark = (
-                    _scan_proposal_statuses(node_chain, licence=licence)
+                    _scan_proposal_statuses(
+                        node_chain, user_id, licence=licence)
                 )
 
             model_config = flask_app.config["SUPPORTED_MODELS"][model_id]
