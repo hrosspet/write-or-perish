@@ -238,12 +238,15 @@ describe('the Glean button', () => {
     await screen.findByText(/fork in the road/);
     const button = gleanButton();
     expect(button).not.toHaveAttribute('title');
+    // Described always, as by `title`, not only while the tooltip is open.
+    const description = () => document.getElementById(button.getAttribute('aria-describedby'));
+    expect(description()).toHaveTextContent(/today's Community Archive tweets/);
     fireEvent.mouseEnter(button);
     const tip = await screen.findByRole('tooltip');
     expect(tip).toHaveTextContent(/today's Community Archive tweets/);
-    expect(button).toHaveAttribute('aria-describedby', tip.id);
     fireEvent.mouseLeave(button);
     expect(screen.queryByRole('tooltip')).toBeNull();
+    expect(description()).toHaveTextContent(/today's Community Archive tweets/);
   });
 });
 
@@ -273,6 +276,11 @@ describe('a failed gleaning', () => {
     renderAt('/node/32');
     expect(await screen.findByText(/choose “Glean for this reflection”/)).toBeInTheDocument();
     expect(gleanButton()).toBeNull();
+    // The failed gleaning's own menu entry starts from its parent too: the
+    // failed reply is never read (#435 review).
+    openMenu();
+    fireEvent.click(screen.getByRole('button', { name: 'Glean for this reflection' }));
+    expect(mockPost).toHaveBeenCalledWith('/read/from-node/31', { model: undefined });
   });
 });
 

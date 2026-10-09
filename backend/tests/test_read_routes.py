@@ -1647,6 +1647,41 @@ class TestGleanCardThreads:
                                    "llm_node_id": gleaning.id}
 
 
+class TestNoGleanUnderAFailedReply:
+    """A glean asked for under a failed reply (the Glean button or the menu
+    entry on a failed gleaning) starts from its parent, so the failed
+    placeholder text never reaches the model (#435 review)."""
+
+    def test_it_starts_from_the_failed_replys_parent(self, app_glean):
+        client = app_glean.test_client()
+        ana = _glean_user(app_glean, glean_enabled=True)
+        entry = _make_node(ana, content="a reflection")
+        _db.session.commit()
+        _login(client, ana.id)
+        first = client.post(f"/api/read/from-node/{entry.id}", json={}).get_json()
+        failed = Node.query.get(first["llm_node_id"])
+        failed.llm_task_status = "failed"
+        _db.session.commit()
+
+        again = client.post(f"/api/read/from-node/{failed.id}", json={}).get_json()
+        new = Node.query.get(again["llm_node_id"])
+        assert new.parent_id == failed.parent_id == first["prompt_node_id"]
+
+    def test_a_finished_gleaning_is_still_gleaned_under(self, app_glean):
+        """Glean again under a finished gleaning keeps its picks in view."""
+        client = app_glean.test_client()
+        ana = _glean_user(app_glean, glean_enabled=True)
+        entry = _make_node(ana, content="a reflection")
+        _db.session.commit()
+        _login(client, ana.id)
+        first = client.post(f"/api/read/from-node/{entry.id}", json={}).get_json()
+        done = Node.query.get(first["llm_node_id"])
+        done.llm_task_status = "completed"
+        _db.session.commit()
+        again = client.post(f"/api/read/from-node/{done.id}", json={}).get_json()
+        assert Node.query.get(again["llm_node_id"]).parent_id == done.id
+
+
 class TestFailedGleaningSaysWhy:
     """The thread page shows why a gleaning failed instead of its
     placeholder text (#435): the reason is on the node, for its owner."""

@@ -212,6 +212,15 @@ def start_read_from_node(node_id):
         return jsonify({"error": "Node not found"}), 404
     if node.human_owner_id != current_user.id:
         return jsonify({"error": "Unauthorized"}), 403
+    # A failed reply is never read: a glean asked for under one (the Glean
+    # button or the menu entry on a failed gleaning) starts from its parent,
+    # so the failed placeholder text never reaches the model (#435 review).
+    parent = node.parent
+    if ((node.node_type == "llm" or node.llm_model)
+            and node.llm_task_status == "failed" and parent is not None
+            and parent.deleted_at is None
+            and parent.human_owner_id == current_user.id):
+        node = parent
     # The read sends the whole thread above the node: refused before the
     # prompt is attached when any of it keeps AI out.
     refused = reply_refusal(node, current_user.id)

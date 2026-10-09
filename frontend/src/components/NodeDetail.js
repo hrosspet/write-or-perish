@@ -580,9 +580,28 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
     && !node?.glean_thread && owned && !n.deleted && !n.is_system_prompt
     && n.ai_usage !== 'none'
     && !['pending', 'processing'].includes(n.llm_task_status);
+  // A failed reply is never read (#435 review): a glean asked for on one,
+  // from its menu or with the Glean button under it, starts from its
+  // parent. The server applies the same rule.
+  const gleanTargetOf = (n) => {
+    if (!(n.node_type === 'llm' || n.llm_model) || n.llm_task_status !== 'failed') return n.id;
+    const ancestors = node.ancestors || [];
+    if (n.id === node.id) return ancestors.length ? ancestors[ancestors.length - 1].id : n.id;
+    const i = ancestors.findIndex((a) => a.id === n.id);
+    if (i > 0) return ancestors[i - 1].id;
+    const parentIn = (kids, parentId) => {
+      for (const c of kids || []) {
+        if (c.id === n.id) return parentId;
+        const found = parentIn(c.children, c.id);
+        if (found) return found;
+      }
+      return null;
+    };
+    return parentIn(node.children, node.id) ?? n.id;
+  };
   const gleanMenuItem = (n) => ({
     label: GLEAN_MENU_LABEL,
-    action: () => handleReadFromNode(n.id),
+    action: () => handleReadFromNode(gleanTargetOf(n)),
     color: 'var(--text-primary)',
   });
 
@@ -1236,11 +1255,9 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
     <span data-action-group style={actionGroupStyle}>
       <LooreTooltip text={readTitle}>
         <button
-          // Under a failed gleaning the next one starts where it did (its
+          // Under a failed reply the next one starts where it did (its
           // parent), so the failed reply is not part of what is read.
-          onClick={() => handleReadFromNode(
-            gleaningFailed && parentAncestor && !parentAncestor.deleted
-              ? parentAncestor.id : undefined)}
+          onClick={() => handleReadFromNode(gleanTargetOf(node))}
           disabled={readBusy}
           style={{ display: 'inline-flex', alignItems: 'center', gap: '8px', ...joinedButtonStyle }}
         >

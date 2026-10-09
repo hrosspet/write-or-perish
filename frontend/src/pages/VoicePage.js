@@ -526,24 +526,24 @@ function VoiceSession({ recovery, blocked, threadId, onAiUsageRefused, onFinishI
       .finally(() => setGleanStarting(false));
   };
   // Under the record button, once the thread has a recorded message.
-  // The tooltip sits on a wrapper: a disabled button (while Loore's reply
-  // is still coming) gets no hover events in some browsers.
+  // The tooltip takes hover on a wrapper (`wrap`): a disabled button (while
+  // Loore's reply is still coming) gets no hover events in some browsers.
+  // Its text stays the button's own description.
   const gleanButton = gleanMode && hasMessage ? (
     <LooreTooltip
+      wrap
       text={gleanAnchor || gleaning ? "Find today's tweets worth your time, from what you have said so far"
         : "Glean waits for Loore's reply to your last message"}
     >
-      <span style={{ display: 'inline-flex' }}>
-        <button
-          type="button"
-          onClick={handleGlean}
-          disabled={!gleanReady}
-          aria-busy={gleaning}
-          style={gleanButtonStyle(gleanReady)}
-        >
-          {gleaning ? (<><Spinner /><span>Gleaning</span></>) : 'Glean'}
-        </button>
-      </span>
+      <button
+        type="button"
+        onClick={handleGlean}
+        disabled={!gleanReady}
+        aria-busy={gleaning}
+        style={gleanButtonStyle(gleanReady)}
+      >
+        {gleaning ? (<><Spinner /><span>Gleaning</span></>) : 'Glean'}
+      </button>
     </LooreTooltip>
   ) : null;
 
