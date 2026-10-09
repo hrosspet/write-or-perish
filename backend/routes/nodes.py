@@ -1127,19 +1127,15 @@ def _focal_own_fields(node):
     if node.llm_task_status in ("pending", "processing") \
             and node.streaming_content:
         data["streaming_content"] = node.get_streaming_content()
-    # Include tool call metadata for LLM nodes
+    # Include tool call metadata for LLM nodes: in full for the reply's
+    # owner, each action's name and outcome for anyone else.
     if node.tool_calls_meta:
-        import json as _json
-        from backend.utils.client_platform import without_client_marker
-        try:
-            visible = without_client_marker(
-                _json.loads(node.tool_calls_meta))
-            # A reply whose only entry was the app marker reads as a node
-            # with no tool calls: no key, as before the marker existed.
-            if visible:
-                data["tool_calls_meta"] = visible
-        except (ValueError, TypeError):
-            pass
+        from backend.utils.tool_meta import tool_calls_meta_for
+        visible = tool_calls_meta_for(node, current_user.id)
+        # A reply whose only entry was the app marker reads as a node
+        # with no tool calls: no key, as before the marker existed.
+        if visible:
+            data["tool_calls_meta"] = visible
         # A Community Archive feed reply carries picks (see FeedPick), as
         # does a control sample rendered through the same list; the
         # count is looked up only for nodes marked as either.
@@ -2242,17 +2238,13 @@ def get_llm_status(node_id):
     if node.llm_task_status in ('completed', 'cancelled'):
         response_data["content"] = node.get_content()
 
-    # Include tool call metadata if present
+    # Include tool call metadata if present: in full for the reply's
+    # owner, each action's name and outcome for anyone else.
     if node.tool_calls_meta:
-        import json
-        from backend.utils.client_platform import without_client_marker
-        try:
-            visible = without_client_marker(
-                json.loads(node.tool_calls_meta))
-            if visible:
-                response_data["tool_calls_meta"] = visible
-        except (json.JSONDecodeError, TypeError):
-            pass
+        from backend.utils.tool_meta import tool_calls_meta_for
+        visible = tool_calls_meta_for(node, current_user.id)
+        if visible:
+            response_data["tool_calls_meta"] = visible
     # Batch stage ({ca_tweets}): the synchronous part is done and the
     # turn is queued at the provider. The thread page uses this to stop
     # the generate spinner and hand the wait to the pending node.

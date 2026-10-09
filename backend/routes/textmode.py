@@ -1,10 +1,9 @@
-import json
-
 from flask import Blueprint, jsonify, request, current_app
 from flask_login import login_required, current_user
 from backend.models import Node
 from backend.extensions import db
 from backend.utils.timefmt import iso_utc
+from backend.utils.tool_meta import tool_calls_meta_for
 from backend.utils.prompts import get_user_prompt_record
 from backend.utils.placeholders import UserExportValidationError
 from backend.utils.llm_nodes import (
@@ -23,8 +22,10 @@ textmode_bp = Blueprint("textmode", __name__)
 PROMPT_KEY = 'textmode'
 
 
-def _serialize_message(node):
-    """Serialize a node as a conversation message."""
+def _serialize_message(node, viewer_id):
+    """Serialize a node as a conversation message, as *viewer_id* sees it:
+    an AI reply's tool_calls_meta is in full for its owner only
+    (utils/tool_meta.tool_calls_meta_for)."""
     is_llm = node.node_type == "llm" or node.llm_model is not None
     msg = {
         "id": node.id,
@@ -35,10 +36,9 @@ def _serialize_message(node):
         "llm_task_status": node.llm_task_status,
     }
     if is_llm and node.tool_calls_meta:
-        try:
-            msg["tool_calls_meta"] = json.loads(node.tool_calls_meta)
-        except (ValueError, TypeError):
-            pass
+        meta = tool_calls_meta_for(node, viewer_id)
+        if meta:
+            msg["tool_calls_meta"] = meta
     return msg
 
 
@@ -343,7 +343,8 @@ def get_conversation_from_node(node_id):
     root = chain[-1]
     # Reverse to chronological, skip root
     chain.reverse()
-    messages = [_serialize_message(n) for n in chain if n.id != root.id]
+    messages = [_serialize_message(n, current_user.id)
+                for n in chain if n.id != root.id]
 
     return jsonify({
         "conversation_id": root.id,

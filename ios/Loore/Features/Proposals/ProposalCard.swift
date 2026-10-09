@@ -8,6 +8,11 @@ struct ProposalCard: View {
     let nodeId: Int
     let toolCallsMeta: [ToolCallMeta]?
     var shareOnly = false
+    /// The proposal's owner (who asked for the reply) accepts it here. Anyone
+    /// else sees the proposal without the accept buttons and their status:
+    /// the accept endpoints only act on the owner's pending drafts, and
+    /// whether the owner accepted is theirs.
+    var canAct = true
     /// Owner only: the card edits the reply's text (tick, "+") and saves it.
     var onContentChange: ((String) -> Void)?
     /// Keeps the page's `tool_calls_meta` in step after an accept.
@@ -54,7 +59,7 @@ struct ProposalCard: View {
         if hasTodoUpdate || hasIssue || hasFeedback || hasShare || hasPrefs {
             VStack(alignment: .leading, spacing: 0) {
                 if hasTodo { todoSection(parsed) }
-                if hasTodoUpdate { applyTodoArea.padding(.top, 8) }
+                if hasTodoUpdate && canAct { applyTodoArea.padding(.top, 8) }
                 if hasIssue, let title = parsed.issueTitle { issueSection(title: title, parsed: parsed) }
                 if hasFeedback, let feedback = parsed.feedback { feedbackSection(feedback, category: parsed.feedbackCategory) }
                 if hasShare && !shares.isEmpty { shareSection(shares) }
@@ -340,26 +345,30 @@ struct ProposalCard: View {
                 }
                 if let category = parsed.issueCategory { CategoryBadge(text: category).padding(.top, 6) }
             }
-            Group {
-                switch issueStatus {
-                case nil: ProposalButton(title: "Create issue", action: createIssue)
-                case "started": StatusText(text: "Creating issue…", color: LooreColor.textMuted)
-                case "completed":
-                    HStack(spacing: 0) {
-                        StatusText(text: "Issue created", color: LooreColor.success)
-                        if let issueURL, let url = URL(string: issueURL) {
-                            StatusText(text: " — ", color: LooreColor.success)
-                            Button("#\(issueNumber.map(String.init) ?? "")") { app.open(.external(url)) }
-                                .buttonStyle(.plain).font(LooreFont.sans(11.5, .regular))
-                                .foregroundStyle(LooreColor.success).underline()
-                        }
-                    }
-                default: StatusText(text: issueError ?? "Issue creation failed", color: LooreColor.accent)
-                }
-            }
-            .padding(.top, 8)
+            if canAct { issueStatusArea }
         }
         .padding(.top, 12)
+    }
+
+    private var issueStatusArea: some View {
+        Group {
+            switch issueStatus {
+            case nil: ProposalButton(title: "Create issue", action: createIssue)
+            case "started": StatusText(text: "Creating issue…", color: LooreColor.textMuted)
+            case "completed":
+                HStack(spacing: 0) {
+                    StatusText(text: "Issue created", color: LooreColor.success)
+                    if let issueURL, let url = URL(string: issueURL) {
+                        StatusText(text: " — ", color: LooreColor.success)
+                        Button("#\(issueNumber.map(String.init) ?? "")") { app.open(.external(url)) }
+                            .buttonStyle(.plain).font(LooreFont.sans(11.5, .regular))
+                            .foregroundStyle(LooreColor.success).underline()
+                    }
+                }
+            default: StatusText(text: issueError ?? "Issue creation failed", color: LooreColor.accent)
+            }
+        }
+        .padding(.top, 8)
     }
 
     private func createIssue() {
@@ -388,17 +397,21 @@ struct ProposalCard: View {
                 MarkdownView(markdown: feedback, style: .proposal)
                 if let category { CategoryBadge(text: category).padding(.top, 6) }
             }
-            Group {
-                switch feedbackStatus {
-                case nil: ProposalButton(title: "Send feedback", action: sendFeedback)
-                case "started": StatusText(text: "Sending…", color: LooreColor.textMuted)
-                case "completed": StatusText(text: "Feedback sent — thank you", color: LooreColor.success)
-                default: StatusText(text: feedbackError ?? "Feedback send failed", color: LooreColor.accent)
-                }
-            }
-            .padding(.top, 8)
+            if canAct { feedbackStatusArea }
         }
         .padding(.top, 12)
+    }
+
+    private var feedbackStatusArea: some View {
+        Group {
+            switch feedbackStatus {
+            case nil: ProposalButton(title: "Send feedback", action: sendFeedback)
+            case "started": StatusText(text: "Sending…", color: LooreColor.textMuted)
+            case "completed": StatusText(text: "Feedback sent — thank you", color: LooreColor.success)
+            default: StatusText(text: feedbackError ?? "Feedback send failed", color: LooreColor.accent)
+            }
+        }
+        .padding(.top, 8)
     }
 
     private func sendFeedback() {
@@ -449,7 +462,7 @@ struct ProposalCard: View {
                         .buttonStyle(.plain)
                         .accessibilityLabel("Copy share text")
                     }
-                    shareStatus(index).padding(.top, 8)
+                    if canAct { shareStatus(index).padding(.top, 8) }
                 }
                 .padding(.top, index > 0 ? 14 : 0)
             }
