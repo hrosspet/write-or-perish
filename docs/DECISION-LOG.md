@@ -420,6 +420,8 @@ Choices that agents flagged in PRs and that the builder decided because a rule a
 | 2026-10-09 | #464 | privacy | Emails around an account deletion | The confirmation link, "will be deleted" with how to restore, and "has been deleted" to the address the account had | The issue's confirmation email; an erasure request gets an answer | Opus 5.5 | pending |
 | 2026-10-09 | #464 | data safety | Admin "Purge data" on an account scheduled for deletion | Refused (409) instead of bringing the account deletion forward | Show the choices | Opus 5.5 | pending |
 | 2026-10-09 | #464 | reliability | References to the account left after the identity layer | Counted from the schema; anything left fails the run and the user row stays | Problems show; verify by counting (#268) | Opus 5.5 | pending |
+| 2026-10-09 | #464 | privacy | AI replies stored before replies had a human owner, when their owner deletes the account | The request sets their owner by the purge's rule (the nearest entry above them is the user's), so they are hidden with the account; a restore keeps the owner | Fix the cause, not the symptom; no global backfill | Opus 5.5 | pending |
+| 2026-10-09 | #464 | data safety | Signing in to an account an admin deleted, before the deletion has started | No restore: an admin's deletion has no grace period; only the user's own request can be restored | Deletion: the grace period is for the user's own request; the admin action runs at once (#415) | Opus 5.5 | pending |
 
 ## Backfilled decisions
 
