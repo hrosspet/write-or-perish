@@ -7,9 +7,16 @@ import SwiftUI
 /// like the web page's unmount. Where AI usage is `none` (the account's default
 /// for a fresh conversation, or the thread it would continue) the screen says
 /// why instead of offering the record button (`VoiceAIBlock`).
+///
+/// Glean (#435, #475): a session opened from the Glean card, or continuing a
+/// thread started there (`glean`), shows a labeled Glean button under the record
+/// button once the thread has a recorded message. It waits for Loore's reply to
+/// the last message, stops the reply, and starts a live glean; the gleaning then
+/// opens in text mode and is never read aloud.
 struct VoiceView: View {
     let parentId: Int?
     let resumeLLMId: Int?
+    var glean = false
 
     @Environment(AppState.self) private var app
     @Environment(\.dynamicTypeSize) private var typeSize
@@ -21,10 +28,12 @@ struct VoiceView: View {
     @State private var threadAvailability: VoiceAvailability?
     @State private var availabilityChecked = false
 
-    init(parentId: Int?, resumeLLMId: Int?) {
+    init(parentId: Int?, resumeLLMId: Int?, glean: Bool = false) {
         self.parentId = parentId
         self.resumeLLMId = resumeLLMId
-        _route = State(initialValue: VoiceRouteParameters(parentId: parentId, resumeLLMId: resumeLLMId))
+        self.glean = glean
+        _route = State(initialValue: VoiceRouteParameters(parentId: parentId, resumeLLMId: resumeLLMId,
+                                                          glean: glean))
     }
 
     private var voice: VoiceTurnController { app.audio.voice }
@@ -142,11 +151,12 @@ struct VoiceView: View {
 
     @ViewBuilder private var recordControl: some View {
         if voice.phase == .ready {
-            VoiceRoundButton(enabled: online, action: startRecording) {
+            VoiceRoundButton(enabled: online && !voice.isGleaning, action: startRecording) {
                 RecordGlyph(enabled: online)
             }
             .accessibilityLabel("Record")
             .accessibilityIdentifier("voice.record")
+            gleanButton
         } else if voice.isPaused && !voice.isStopping {
             VoiceRoundButton(action: { voice.resumeRecording() }) {
                 Image(systemName: "play.fill").font(.system(size: 22)).foregroundStyle(LooreColor.accent)
@@ -202,11 +212,48 @@ struct VoiceView: View {
                               onApplied: { voice.updateToolMeta($0, $1) })
             Spacer().frame(height: 32)
             OfflineNotice()
-            VoiceRoundButton(size: 56, enabled: online, dimmed: 0.7, action: continueConversation) {
+            VoiceRoundButton(size: 56, enabled: online && !voice.isGleaning, dimmed: 0.7,
+                             action: continueConversation) {
                 RecordGlyph(enabled: online).scaleEffect(0.84)
             }
             .accessibilityLabel(online ? "Continue" : "You're offline")
             .accessibilityIdentifier("voice.continue")
+            gleanButton
+        }
+    }
+
+    /// Under the record (or Continue) button in a Glean session, once the thread
+    /// has a recorded message (web VoicePage): a labeled pill, so it never reads
+    /// as a second record button. Disabled while the turn's reply is coming.
+    @ViewBuilder private var gleanButton: some View {
+        if voice.showsGleanButton {
+            let enabled = voice.canGlean && online
+            Button(action: gleanPressed) {
+                HStack(spacing: 8) {
+                    if voice.isGleaning {
+                        ProgressView().controlSize(.small).tint(LooreColor.accent)
+                    }
+                    Text(voice.isGleaning ? "Gleaning" : "Glean")
+                }
+                .font(LooreFont.sans(15.2, .regular))
+                .foregroundStyle(LooreColor.accent)
+                .padding(.horizontal, 24)
+                .frame(minWidth: 150, minHeight: 44)
+                .background(LooreColor.accentSubtle, in: Capsule())
+                .overlay(Capsule().strokeBorder(LooreColor.accent))
+                .contentShape(Capsule())
+            }
+            .buttonStyle(.plain)
+            .disabled(!enabled)
+            .opacity(enabled ? 1 : 0.5)
+            .padding(.top, 22)
+            .accessibilityHint(voice.gleanAnchor != nil || voice.isGleaning
+                               ? "Find today's tweets worth your time, from what you have said so far"
+                               : "Glean waits for Loore's reply to your last message")
+            .accessibilityIdentifier("voice.glean")
+            // No model picker here, as on the web (#473): a voice glean runs on the
+            // server's default, a read model of the user's own provider. The
+            // picker is in the action row of a Glean-card thread.
         }
     }
 
@@ -288,7 +335,7 @@ struct VoiceView: View {
             if let id = voice.lastReplyNodeId {
                 NodePrefetch.shared.openThread(id, app: app)  // opens once the node is in
             } else {
-                app.open(.textMode)
+                app.open(.textMode())
             }
         } label: {
             HStack(spacing: 6) {
@@ -309,7 +356,12 @@ struct VoiceView: View {
     private func appear() {
         app.audio.voiceScreenVisible = true
         // Before the first check the route waits: a blocked thread's reply is not resumed.
-        if availabilityChecked && aiBlock == nil { route.applyOnce(to: voice) }
+        if availabilityChecked && aiBlock == nil { applyRoute() }
+    }
+
+    /// The route's `parent` / `resume` / `glean`, once per screen.
+    private func applyRoute() {
+        route.applyOnce(to: voice, gleanEnabled: app.capabilities.gleanEnabled)
     }
 
     /// Whether Voice mode may run here, once per screen and again on every return
@@ -319,7 +371,7 @@ struct VoiceView: View {
     private func checkAvailability() async {
         defer {
             availabilityChecked = true
-            if aiBlock == nil { route.applyOnce(to: voice) }
+            if aiBlock == nil { applyRoute() }
         }
         if availabilityChecked && aiBlock == nil { return }
         voice.clearAIBlock()
@@ -354,6 +406,18 @@ struct VoiceView: View {
             }
             voice.start()
         }
+    }
+
+    /// The Glean button: the reply stops and the glean starts (a live call); the
+    /// gleaning opens in text when it is in (`AudioCenter.openGleaning`).
+    private func gleanPressed() {
+        guard voice.canGlean, online else { return }
+        if app.spendCapped {
+            app.notifySpendBlocked()
+            app.toasts.show(SpendCap.toastMessage(.glean), duration: 8)
+            return
+        }
+        Task { await voice.glean() }
     }
 
     private func continueConversation() {
@@ -425,11 +489,15 @@ struct VoiceView: View {
 struct VoiceRouteParameters {
     let parentId: Int?
     let resumeLLMId: Int?
+    /// `?glean=1`: a Glean session (#435). Only for a user who gleans (a copied
+    /// link does nothing for a user without Glean).
+    let glean: Bool
     private(set) var applied = false
 
-    init(parentId: Int?, resumeLLMId: Int?) {
+    init(parentId: Int?, resumeLLMId: Int?, glean: Bool = false) {
         self.parentId = parentId
         self.resumeLLMId = resumeLLMId
+        self.glean = glean
     }
 
     /// A new Voice screen is a new conversation, as a new page is on the web: the
@@ -439,11 +507,11 @@ struct VoiceRouteParameters {
     /// replied to the last thread (deleted since, in the device test). A
     /// recording in progress is kept: it is the user's live audio.
     @MainActor
-    mutating func applyOnce(to voice: VoiceTurnController) {
+    mutating func applyOnce(to voice: VoiceTurnController, gleanEnabled: Bool = false) {
         guard !applied else { return }
         applied = true
         guard voice.phase != .recording else { return }
-        voice.startNewConversation(parentId: parentId)
+        voice.startNewConversation(parentId: parentId, glean: glean && gleanEnabled)
         if let resumeLLMId {
             voice.resumeReply(nodeId: resumeLLMId, parentId: parentId)
         }

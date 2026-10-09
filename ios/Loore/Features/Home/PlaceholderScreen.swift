@@ -47,7 +47,7 @@ extension AppRoute {
     /// Title the screen shows (the web's page titles).
     var screenTitle: String {
         switch self {
-        case .home: return "Reflect"
+        case .home: return "Home"
         case .voice: return "Voice"
         case .textMode: return "Text"
         case .log: return "Log"
@@ -89,12 +89,13 @@ extension AppRoute {
     var webPath: String? {
         switch self {
         case .home: return "/"
-        case .voice(let parent, let resume):
+        case .voice(let parent, let resume, let glean):
             var items: [String] = []
             if let resume { items.append("resume=\(resume)") }
             if let parent { items.append("parent=\(parent)") }
+            if glean { items.append("glean=1") }
             return "/voice" + (items.isEmpty ? "" : "?" + items.joined(separator: "&"))
-        case .textMode: return "/textmode"
+        case .textMode(let glean): return glean ? "/textmode?glean=1" : "/textmode"
         case .log: return "/log"
         case .thread(let id, _): return "/node/\(id)"
         case .profile: return "/profile"
