@@ -578,6 +578,7 @@ def save_feed_picks(user_id, node, picks, picked_by=None):
                 user_id=user_id, source=READ_PICK_SOURCE,
                 external_id=str(ref["tweet_id"]),
                 author_handle=ref["username"],
+                author_name=ref.get("display_name"),
                 url=tweet_url(ref["username"], ref["tweet_id"]),
                 posted_at=ref.get("posted_at"),
                 public_source=True,  # rendered from the public archive
@@ -585,6 +586,10 @@ def save_feed_picks(user_id, node, picks, picked_by=None):
             item.set_content(ref.get("text") or "")
             db.session.add(item)
             db.session.flush()
+        elif not item.author_name and ref.get("display_name"):
+            # The tweet card's byline (#435): the user's own row of the
+            # tweet (a bookmark, an import) gets the name it lacked.
+            item.author_name = ref["display_name"]
         row = FeedPick(
             user_id=user_id, node_id=node.id, external_item_id=item.id,
             kind=KIND_READ, rank=pick["rank"], relevance=pick["relevance"],
@@ -596,6 +601,40 @@ def save_feed_picks(user_id, node, picks, picked_by=None):
         db.session.add(row)
         rows.append(row)
     return rows
+
+
+def fill_pick_author_names(snapshot_dir, user_id=None, apply=False):
+    """The one-time fill of display names for picks saved before
+    ExternalItem.author_name existed (#435): every tweet row a Glean picked
+    (a FeedPick of kind 'read') that has a handle and no name gets the
+    name the snapshot's profiles.parquet has for that handle. Reads and
+    writes metadata only (handles and public display names); no content
+    is decrypted. Returns (rows without a name, rows filled). Writes only
+    with *apply*; the caller commits."""
+    from backend.extensions import db
+    from backend.models import ExternalItem, FeedPick, TWEET_SOURCES
+    from backend.utils.community_archive import fetch_display_names
+    from backend.utils.reference_log import KIND_READ
+    picked = (db.session.query(FeedPick.external_item_id)
+              .filter(FeedPick.kind == KIND_READ))
+    query = ExternalItem.query.filter(
+        ExternalItem.id.in_(picked),
+        ExternalItem.source.in_(TWEET_SOURCES),
+        ExternalItem.author_name.is_(None),
+        ExternalItem.author_handle.isnot(None))
+    if user_id:
+        query = query.filter(ExternalItem.user_id == user_id)
+    rows = query.all()
+    names = fetch_display_names(
+        snapshot_dir, {r.author_handle for r in rows}) if rows else {}
+    filled = 0
+    for row in rows:
+        name = names.get((row.author_handle or "").lower())
+        if name:
+            filled += 1
+            if apply:
+                row.author_name = name
+    return len(rows), filled
 
 
 def render_feed_reply(verdict, entries):

@@ -618,3 +618,57 @@ def test_is_feed_node_knows_the_poc_shape(app, monkeypatch, tmp_path):  # noqa: 
     _db.session.commit()
     assert _fresh(poc.id).ai_usage == "chat"
     assert _fresh(plain.id).ai_usage == "train"
+
+
+# ── a glean is always live (#435) ─────────────────────────────────────────
+
+class _BatchSubmitted(Exception):
+    pass
+
+
+def _run_without_ca_live(monkeypatch, tmp_path, meta):
+    """Run a first read the way the queue does (ca_live False), with
+    *meta* on the placeholder. Returns (provider calls, batch submits)."""
+    _capture_render(monkeypatch, tmp_path)
+    alice = _mk_user("alice", approved=True, plan="alpha", is_admin=True)
+    llm_user = _mk_user("gpt-5", twitter_id="llm-gpt-5")
+    read = _prompt_node(alice, "read_thread")
+    reply = _placeholder(llm_user, alice, read.id)
+    if meta is not None:
+        reply.tool_calls_meta = json.dumps(meta)
+        _db.session.commit()
+    submits = []
+
+    def _submit(*args, **kwargs):
+        submits.append(kwargs)
+        raise _BatchSubmitted()
+    monkeypatch.setattr(_llm_task_mod, "_ca_batch_submit", _submit)
+    _CapturingProvider.kwargs = []
+    _CapturingProvider.reset([_resp(_feed_json([
+        {"n": 1, "qt": "Worth it.", "relevance": 40, "recommend": True}]))])
+    monkeypatch.setattr(_llm_task_mod, "LLMProvider", _CapturingProvider)
+    try:
+        generate_llm_response(_FakeSelf(), read.id, reply.id, "gpt-5",
+                              alice.id, source_mode=None)
+    except _BatchSubmitted:
+        pass
+    return _CapturingProvider.kwargs, submits, _fresh(reply.id)
+
+
+def test_a_glean_goes_to_the_live_api(app, monkeypatch, tmp_path):  # noqa: F811
+    calls, submits, reply = _run_without_ca_live(
+        monkeypatch, tmp_path, [{"name": "_live"}])
+    assert submits == []
+    assert len(calls) == 1
+    # The same structured shape the batch asks for.
+    assert calls[0]["output_schema"]["required"] == ["verdict", "picks"]
+    assert reply.llm_task_status == "completed"
+    assert "{quote_ext:" in reply.get_content()
+
+
+def test_an_unmarked_read_still_goes_through_the_batch(app, monkeypatch, tmp_path):  # noqa: F811
+    """The admin's /read/start experiments: no live marker, the Batch
+    API, as before."""
+    calls, submits, _ = _run_without_ca_live(monkeypatch, tmp_path, None)
+    assert calls == []
+    assert len(submits) == 1

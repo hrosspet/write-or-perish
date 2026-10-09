@@ -212,6 +212,7 @@ export default function AccountPage() {
   const [privacySaving, setPrivacySaving] = useState(false);
   const [publicSideSaving, setPublicSideSaving] = useState(false);
   const [externalContentSaving, setExternalContentSaving] = useState(false);
+  const [gleanSaving, setGleanSaving] = useState(false);
   const [aiUsageSaving, setAiUsageSaving] = useState(false);
   const [craftSaving, setCraftSaving] = useState(false);
 
@@ -635,6 +636,31 @@ export default function AccountPage() {
           Default visibility for new entries.
         </div>
       </div>
+
+      {/* Glean (#435): the user's own switch, shown inside the rollout
+          gate. Without a choice it is on for accounts with Community
+          Archive or X data; the server says which (glean_enabled). */}
+      {user.glean_available && (
+        <div id="glean" style={{ ...rowStyle, scrollMarginTop: "72px" }}>
+          <div style={labelStyle}>Glean</div>
+          <select
+            value={user.glean_enabled ? "on" : "off"}
+            disabled={gleanSaving}
+            onChange={(e) =>
+              saveField("glean_enabled", e.target.value === "on", setGleanSaving)
+            }
+            style={selectStyle}
+          >
+            <option value="off">Off</option>
+            <option value="on">On</option>
+          </select>
+          <div style={helperStyle}>
+            When you ask, Loore reads the day's tweets in the Community
+            Archive against what you said and shows you the few worth
+            your time. With Glean off, Loore shows no Glean card or button.
+          </div>
+        </div>
+      )}
 
       {user.external_content_available && (
         <div id="references" style={{ ...rowStyle, scrollMarginTop: "72px" }}>

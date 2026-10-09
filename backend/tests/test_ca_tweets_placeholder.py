@@ -43,16 +43,34 @@ class TestPlaceholderParsing:
         assert parse_ca_tweets_days({"days": "3"}) == 3
 
     def test_admin_gate(self):
+        from flask import Flask
         from backend.utils.placeholders import (
             ca_tweets_allowed, check_ca_tweets_access)
         admin = types.SimpleNamespace(id=1, is_admin=True)
         user = types.SimpleNamespace(id=2, is_admin=False)
-        assert ca_tweets_allowed(admin) and not ca_tweets_allowed(user)
-        assert not ca_tweets_allowed(None)
-        check_ca_tweets_access("{ca_tweets}", admin)
-        check_ca_tweets_access("no placeholder", user)
-        with pytest.raises(CaTweetsValidationError, match="not available"):
-            check_ca_tweets_access("see {ca_tweets?days=1}", user)
+        app = Flask(__name__)
+        with app.app_context():
+            assert ca_tweets_allowed(admin) and not ca_tweets_allowed(user)
+            assert not ca_tweets_allowed(None)
+            check_ca_tweets_access("{ca_tweets}", admin)
+            check_ca_tweets_access("no placeholder", user)
+            with pytest.raises(CaTweetsValidationError, match="not available"):
+                check_ca_tweets_access("see {ca_tweets?days=1}", user)
+
+    def test_glean_rollout_gate(self):
+        """#435: the env switch turns Glean on for everyone; the id list
+        for the users on it; admins always."""
+        from flask import Flask
+        from backend.utils.placeholders import ca_tweets_allowed
+        user = types.SimpleNamespace(id=2, is_admin=False)
+        other = types.SimpleNamespace(id=3, is_admin=False)
+        app = Flask(__name__)
+        app.config["GLEAN_USER_IDS"] = {2}
+        with app.app_context():
+            assert ca_tweets_allowed(user)
+            assert not ca_tweets_allowed(other)
+            app.config["GLEAN_FOR_ALL"] = True
+            assert ca_tweets_allowed(other)
 
     def test_unknown_key_is_refused(self):
         with pytest.raises(CaTweetsValidationError) as exc:
@@ -449,3 +467,47 @@ class TestRefreshSnapshot:
         assert ca.refresh_snapshot(snapshot) == ("2026-09-19T07-02-55Z", True)
         assert seen == ["2026-09-19T07-02-55Z"]
         assert ca.snapshot_export_id(snapshot) == "2026-09-19T07-02-55Z"
+
+
+# ── Display names (#435) ─────────────────────────────────────────────────
+
+@pytest.fixture
+def named_snapshot(snapshot):
+    """The same snapshot, with profiles.parquet carrying display names as
+    the archive's exports do (Bob has none)."""
+    duckdb = pytest.importorskip("duckdb")
+    con = duckdb.connect()
+    profiles = snapshot / "profiles.parquet"
+    con.execute(
+        "copy (select * from (values ('a1', 'alice', 'Alice Aalto'), "
+        "('a2', 'Bob', NULL)) v(account_id, username, display_name)) "
+        f"to '{profiles}' (format parquet)")
+    return snapshot
+
+
+class TestDisplayNames:
+    def test_render_refs_carry_the_display_name(self, named_snapshot):
+        from backend.utils import community_archive as ca
+        _, _, refs = ca.render_recent_tweets(named_snapshot, days=1)
+        names = {r["tweet_id"]: r["display_name"] for r in refs.values()}
+        assert names == {"t3": "Alice Aalto", "t1": "Alice Aalto",
+                         "t2": None, "t6": None}
+
+    def test_a_snapshot_without_the_column_renders_as_before(self, snapshot):
+        from backend.utils import community_archive as ca
+        _, _, refs = ca.render_recent_tweets(snapshot, days=1)
+        assert {r["display_name"] for r in refs.values()} == {None}
+        assert ca.fetch_display_names(snapshot, ["alice"]) == {}
+
+    def test_fetch_by_id_carries_it_too(self, named_snapshot):
+        from backend.utils import community_archive as ca
+        found = ca.fetch_tweets_by_id(named_snapshot, ["t1", "t2"])
+        assert found["t1"]["display_name"] == "Alice Aalto"
+        assert found["t2"]["display_name"] is None
+
+    def test_fetch_display_names_by_handle(self, named_snapshot):
+        from backend.utils import community_archive as ca
+        assert ca.fetch_display_names(
+            named_snapshot, ["@ALICE", "bob", "nobody", None]) == {
+                "alice": "Alice Aalto"}
+        assert ca.fetch_display_names(named_snapshot, []) == {}

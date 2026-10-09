@@ -2,6 +2,7 @@ import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { useSearchParams, useNavigate, Link } from 'react-router-dom';
 import { FaPlay, FaPause, FaUndo, FaRedo, FaKeyboard } from 'react-icons/fa';
 import { useVoiceSession } from '../hooks/useVoiceSession';
+import { useAsyncTaskPolling } from '../hooks/useAsyncTaskPolling';
 import { useUser } from '../contexts/UserContext';
 import { useInterruptedRecovery } from '../hooks/useInterruptedRecovery';
 import RecoveryBanner from '../components/RecoveryBanner';
@@ -194,6 +195,28 @@ const containerStyle = {
   background: 'radial-gradient(ellipse at 50% 40%, rgba(196,149,106,0.06) 0%, transparent 70%)',
   position: 'relative',
 };
+
+// The Glean button under the record button (#435): a labeled pill, so
+// it never reads as a second record button.
+const gleanButtonStyle = (enabled) => ({
+  display: 'inline-flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  gap: '8px',
+  minWidth: '150px',
+  minHeight: '44px',
+  marginTop: '22px',
+  padding: '10px 24px',
+  borderRadius: '999px',
+  border: '1px solid var(--accent)',
+  background: 'var(--accent-subtle)',
+  color: 'var(--accent)',
+  fontFamily: 'var(--sans)',
+  fontSize: '0.95rem',
+  fontWeight: 400,
+  cursor: enabled ? 'pointer' : 'default',
+  opacity: enabled ? 1 : 0.5,
+});
 
 // Shown instead of the record button when AI usage keeps the account (a
 // fresh thread) or the thread Voice would continue away from AI. Voice mode
@@ -397,10 +420,27 @@ function VoiceSession({ recovery, blocked, threadId, onAiUsageRefused, onFinishI
   // (#391); a continued thread keeps the everyday one.
   const question = threadId ? EVERYDAY_QUESTION : entryQuestion(user);
 
+  // Glean (#435): a session opened from the Glean card (or continuing a
+  // thread started there) shows a Glean button under the record button
+  // once the thread has a recorded message. A glean is a live call; the
+  // page waits for it ("Gleaning") and then opens the gleaning in text
+  // mode. It is never read aloud.
+  const gleanMode = searchParams.get('glean') === '1' && !!user?.glean_enabled;
+  // A continued thread has its messages already; a fresh one gets its
+  // first when the server saves the recording.
+  const [hasMessage, setHasMessage] = useState(!!threadId);
+  // The node a glean starts under: the last finished reply (or the node
+  // the session opened on). Null while a turn's reply is still coming.
+  const [gleanAnchor, setGleanAnchor] = useState(
+    !resumeId && parentId ? Number(parentId) : null);
+  const [gleanStarting, setGleanStarting] = useState(false);
+  const [gleanNodeId, setGleanNodeId] = useState(null);
+  const getThreadParentIdRef = useRef(null);
+
   const {
     phase, isStopping, hasError, isOnline, streaming, audio, handleStart, handleStop,
     handleContinue, handleResumeSession, handleCancelProcessing, setThreadParentId,
-    handleResumeRecording,
+    handleResumeRecording, getThreadParentId,
   } = useVoiceSession({
     apiEndpoint: '/voice',
     ttsTitle: 'Voice',
@@ -408,12 +448,19 @@ function VoiceSession({ recovery, blocked, threadId, onAiUsageRefused, onFinishI
     initialParentId: parentId ? Number(parentId) : null,
     model: selectedModel,
     aiUsage: user?.default_ai_usage || 'none',
+    entry: gleanMode ? 'glean' : null,
     onAiUsageRefused,
     // The server saved the recording as an entry (#391). This does not wait
     // for the reply: if it fails or is skipped the entry still exists.
-    onEntrySaved: markHasOwnEntries,
+    onEntrySaved: () => {
+      markHasOwnEntries();
+      setHasMessage(true);
+      // A new turn: Glean waits for its reply, so the glean reads it too.
+      setGleanAnchor(null);
+    },
     onLLMComplete: (nodeId, content) => {
       lastLlmNodeIdRef.current = nodeId;
+      setGleanAnchor(getThreadParentIdRef.current?.() ?? nodeId);
       setLlmContent(content);
       // ProposalInline handles its own parsing + apply-status derivation
       // from tool_calls_meta. We just feed it the raw content + meta.
@@ -426,11 +473,71 @@ function VoiceSession({ recovery, blocked, threadId, onAiUsageRefused, onFinishI
   });
 
   setThreadParentIdRef.current = setThreadParentId;
+  getThreadParentIdRef.current = getThreadParentId;
 
   const voiceReset = useCallback(() => {
     setLlmContent(null);
     setToolCallsMeta(null);
   }, []);
+
+  // The glean runs live at the provider; this page waits for it and then
+  // opens it in text mode (finished or failed: the thread page shows
+  // either). Never handed to the voice session, so it is never spoken.
+  const { status: gleanStatus, error: gleanPollError } = useAsyncTaskPolling(
+    gleanNodeId ? `/nodes/${gleanNodeId}/llm-status` : null,
+    { enabled: !!gleanNodeId, interval: 2000 },
+  );
+  // A poll that gives up (errors, or the 30-minute cap) opens the thread
+  // page too, which keeps watching the glean: the Voice screen never
+  // stays on "Gleaning" with its buttons disabled.
+  useEffect(() => {
+    if (gleanNodeId && (gleanPollError
+        || ['completed', 'failed', 'cancelled'].includes(gleanStatus))) {
+      navigate(`/node/${gleanNodeId}`);
+    }
+  }, [gleanNodeId, gleanStatus, gleanPollError, navigate]);
+
+  const gleaning = gleanStarting || !!gleanNodeId;
+  const gleanReady = !!gleanAnchor && !gleaning && isOnline;
+  const handleGlean = () => {
+    if (!gleanReady) return;
+    if (isSpendBlocked()) {
+      notifySpendBlocked();
+      addToast(spendCapToastMessage('glean'), 8000);
+      return;
+    }
+    // The voice reply stops, its queue too (the player is global, so a
+    // paused queue would follow the user to the gleaning's page).
+    audio.stop();
+    setGleanStarting(true);
+    api.post(`/read/from-node/${gleanAnchor}`, {})
+      .then((res) => {
+        setGleanNodeId(res.data.llm_node_id || null);
+        if (!res.data.llm_node_id && res.data.prompt_node_id) {
+          navigate(`/node/${res.data.prompt_node_id}`);
+        }
+      })
+      .catch((err) => {
+        if (err?.response?.status !== 402) {
+          addToast(err?.response?.data?.error || 'Could not start the glean.', 6000);
+        }
+      })
+      .finally(() => setGleanStarting(false));
+  };
+  // Under the record button, once the thread has a recorded message.
+  const gleanButton = gleanMode && hasMessage ? (
+    <button
+      type="button"
+      onClick={handleGlean}
+      disabled={!gleanReady}
+      aria-busy={gleaning}
+      title={gleanAnchor || gleaning ? "Find today's tweets worth your time, from what you have said so far"
+        : "Glean waits for Loore's reply to your last message"}
+      style={gleanButtonStyle(gleanReady)}
+    >
+      {gleaning ? (<><Spinner /><span>Gleaning</span></>) : 'Glean'}
+    </button>
+  ) : null;
 
   const displayTime = audio.cumulativeTime || 0;
   const displayDuration = audio.totalDuration || 0;
@@ -647,15 +754,15 @@ function VoiceSession({ recovery, blocked, threadId, onAiUsageRefused, onFinishI
               }
               handleStart();
             }}
-            disabled={!isOnline}
+            disabled={!isOnline || gleaning}
             style={{
               width: '72px', height: '72px', borderRadius: '50%',
               border: `2px solid ${isOnline ? 'var(--accent)' : 'var(--text-muted)'}`,
               background: 'transparent',
-              cursor: isOnline ? 'pointer' : 'not-allowed',
+              cursor: isOnline && !gleaning ? 'pointer' : 'not-allowed',
               display: 'flex', alignItems: 'center', justifyContent: 'center',
               transition: 'all 0.2s ease',
-              opacity: isOnline ? 1 : 0.4,
+              opacity: isOnline && !gleaning ? 1 : 0.4,
             }}
           >
             <svg width="24" height="24" viewBox="0 0 24 24" fill={isOnline ? 'var(--accent)' : 'var(--text-muted)'}>
@@ -663,6 +770,8 @@ function VoiceSession({ recovery, blocked, threadId, onAiUsageRefused, onFinishI
             </svg>
           </button>
         )}
+
+        {phase === 'ready' && gleanButton}
 
         {phase === 'recording' && (
           streaming.isPaused && !isStopping ? (
@@ -948,24 +1057,26 @@ function VoiceSession({ recovery, blocked, threadId, onAiUsageRefused, onFinishI
           }
           handleContinue(voiceReset);
         }}
-        disabled={!isOnline}
+        disabled={!isOnline || gleaning}
         title={isOnline ? 'Continue' : "You're offline"}
         style={{
           width: '56px', height: '56px', borderRadius: '50%',
           border: `2px solid ${isOnline ? 'var(--accent)' : 'var(--text-muted)'}`,
           background: 'transparent',
-          cursor: isOnline ? 'pointer' : 'not-allowed',
+          cursor: isOnline && !gleaning ? 'pointer' : 'not-allowed',
           display: 'flex', alignItems: 'center', justifyContent: 'center',
           transition: 'all 0.2s ease',
-          opacity: isOnline ? 0.7 : 0.3,
+          opacity: isOnline && !gleaning ? 0.7 : 0.3,
         }}
-        onMouseEnter={(e) => { if (isOnline) e.currentTarget.style.opacity = '1'; }}
-        onMouseLeave={(e) => { if (isOnline) e.currentTarget.style.opacity = '0.7'; }}
+        onMouseEnter={(e) => { if (isOnline && !gleaning) e.currentTarget.style.opacity = '1'; }}
+        onMouseLeave={(e) => { if (isOnline && !gleaning) e.currentTarget.style.opacity = '0.7'; }}
       >
         <svg width="20" height="20" viewBox="0 0 24 24" fill={isOnline ? 'var(--accent)' : 'var(--text-muted)'}>
           <circle cx="12" cy="12" r="8" />
         </svg>
       </button>
+
+      {gleanButton}
     </div>
   );
 }

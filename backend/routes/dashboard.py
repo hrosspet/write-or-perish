@@ -25,6 +25,7 @@ from backend.utils.llm_nodes import effective_preferred_model, is_chat_model
 from backend.utils.own_entries import has_own_entries
 from backend.utils.user_purge import deletion_status
 from backend.utils.account_deletion import account_deletion_info
+from backend.utils.glean import glean_user_fields
 
 logger = logging.getLogger(__name__)
 dashboard_bp = Blueprint("dashboard_bp", __name__)
@@ -183,6 +184,10 @@ def get_dashboard():
             # "Delete my account" (#269): the numbers the Account page
             # states, and why the account cannot be deleted, if it can't.
             "account_deletion": account_deletion_info(current_user),
+            # Glean (#435): available = inside the rollout gate (Account
+            # shows the switch); enabled = the switch's effective value,
+            # which every Glean card and button keys off.
+            **glean_user_fields(current_user),
         },
         "latest_profile": get_latest_profile(current_user)
     }
@@ -529,6 +534,11 @@ def update_user():
         current_user.external_content_enabled = bool(
             data["external_content_enabled"])
 
+    # The user's own Glean switch (#435): an explicit choice, which wins
+    # over the default from their X / Community Archive data.
+    if "glean_enabled" in data:
+        current_user.glean_enabled = bool(data["glean_enabled"])
+
     if "preferred_model" in data:
         model_id = data["preferred_model"]
         # The default model drives replies and background work: never a
@@ -618,6 +628,7 @@ def update_user():
                         "SEMANTIC_SEARCH_AGENTIC", True)),
                 "external_content_enabled": bool(
                     current_user.external_content_enabled),
+                **glean_user_fields(current_user),
                 "timezone": current_user.timezone or "UTC",
             }
         }), 200

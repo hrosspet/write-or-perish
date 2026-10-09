@@ -65,6 +65,18 @@ def validate_default_model(config):
             raise RuntimeError(
                 f"READ_DEFAULT_MODEL={read_default!r} is not an active "
                 f"model flagged 'read'.")
+        # A glean runs on its provider's model and never on another
+        # provider's (#435), so a typo here would refuse every glean of
+        # that provider's users: a red deploy instead.
+        for key, provider in (("GLEAN_MODEL_ANTHROPIC", "anthropic"),
+                              ("GLEAN_MODEL_OPENAI", "openai")):
+            glean_model = config.get(key)
+            cfg = supported.get(glean_model) or {}
+            if glean_model and (not cfg.get("read") or cfg.get("deprecated")
+                                or cfg.get("provider") != provider):
+                raise RuntimeError(
+                    f"{key}={glean_model!r} is not an active {provider} "
+                    f"model flagged 'read'.")
         return
     hint = ""
     dotted = (model_id or "").replace("-", ".")

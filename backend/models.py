@@ -84,6 +84,14 @@ class User(db.Model, UserMixin):
         db.Boolean, nullable=False, default=False,
         server_default=db.text("false"))
 
+    # The user's own Glean switch (#435, Account settings), on top of the
+    # rollout gate (GLEAN_FOR_ALL / GLEAN_USER_IDS). NULL = the user has
+    # not chosen: on for an account with Community Archive or X data
+    # (arrived with it, or connected X later), off otherwise
+    # (utils/glean.glean_default_on). True / False = their explicit
+    # choice, which wins over the default.
+    glean_enabled = db.Column(db.Boolean, nullable=True)
+
     # Craft mode toggle — shows power-user features in the nav overflow menu
     craft_mode = db.Column(db.Boolean, default=False, nullable=False)
 
@@ -452,6 +460,13 @@ class Node(db.Model):
     # so detaching silently turned the thread non-agentic and the model
     # wrote its tool calls as prose. None on ordinary nodes.
     prompt_key = db.Column(db.String(64), nullable=True)
+
+    # Which home card started this thread, on its ROOT node only: "glean"
+    # for a Voice / Text session started from the Glean card (#435), whose
+    # every turn then offers the Glean button; NULL for everything else
+    # (the Reflect card, older threads), which offer "Glean for this
+    # reflection" in the entry's menu instead (utils/glean.py).
+    started_from = db.Column(db.String(16), nullable=True)
 
     # Within-turn retrieval chaining (#158): when a text-mode LLM node makes
     # a retrieval tool call, it is finalized as an interim node and a
@@ -1282,6 +1297,11 @@ class ExternalItem(db.Model):
     # the sha256 hex of the canonical URL (exactly 64 chars).
     external_id = db.Column(db.String(64), nullable=False)
     author_handle = db.Column(db.String(64), nullable=True)
+    # The tweet author's display name (#435), when the Community Archive
+    # has one: written when a Glean pick is saved (ca_feed.save_feed_picks)
+    # and filled once for older picks (scripts/backfill_pick_author_names).
+    # Public profile data, plaintext like the handle. NULL = unknown.
+    author_name = db.Column(db.String(128), nullable=True)
     # Page/article title for web clips (tweets have none). Plaintext:
     # a title is what the list and the quote card show before the user
     # opens anything, and it carries no more than the stored URL does.

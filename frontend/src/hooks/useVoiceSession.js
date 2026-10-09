@@ -67,8 +67,9 @@ function chapterTitleFromContent(content) {
  * @param {Function} [options.onEntrySaved] - Called once the server has confirmed it saved the user's recording as an entry, whether or not a reply follows (the reply can fail or be skipped)
  * @param {number|null} options.initialLlmNodeId - Resume in processing phase, polling this LLM node
  * @param {number|null} options.initialParentId - Resume in ready phase with thread parent pre-set
+ * @param {string|null} [options.entry] - 'glean' when the session was opened from the Glean card (#435): the thread the first recording starts is marked as a Glean thread
  */
-export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete, initialLlmNodeId = null, initialParentId = null, model = null, aiUsage = 'none', onAiUsageRefused = null, onEntrySaved = null }) {
+export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete, initialLlmNodeId = null, initialParentId = null, model = null, aiUsage = 'none', onAiUsageRefused = null, onEntrySaved = null, entry = null }) {
   const audio = useAudio();
   const isOnline = useOnlineStatus();
   const [phase, setPhase] = useState(initialLlmNodeId ? 'processing' : 'ready');
@@ -346,6 +347,8 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
         }
         if (threadParentIdRef.current) {
           payload.parent_id = threadParentIdRef.current;
+        } else if (entry) {
+          payload.entry = entry;
         }
         if (data.sessionId) {
           payload.session_id = data.sessionId;
@@ -877,6 +880,7 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
     // waiting for the frontend to foreground.
     const extraParams = {};
     if (threadParentIdRef.current) extraParams.parent_id = threadParentIdRef.current;
+    else if (entry) extraParams.entry = entry;
     if (model) extraParams.model = model;
     // Keep silent audio playing until stopStreaming completes — on iOS it's the
     // only thing preventing the OS from suspending JS while the final chunk
@@ -885,7 +889,7 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
       voiceTiming.mark('finalize_acked');
       stopSilentAudio();
     });
-  }, [streaming, stopSilentAudio, audio, model]);
+  }, [streaming, stopSilentAudio, audio, model, entry]);
 
   const handleContinue = useCallback((extraReset) => {
     voiceTiming.endTurn();
@@ -926,6 +930,10 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
     url.searchParams.set('parent', String(id));
     window.history.replaceState({}, '', url);
   }, []);
+
+  // The node the next turn hangs under: the last finished reply, else
+  // the thread node the session opened on. A glean (#435) starts there.
+  const getThreadParentId = useCallback(() => threadParentIdRef.current, []);
 
   const handleCancelProcessing = useCallback((extraReset) => {
     // Parent next recording to the user node (not the LLM node).
@@ -1054,5 +1062,6 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
     handleResumeSession,
     handleCancelProcessing,
     setThreadParentId,
+    getThreadParentId,
   };
 }
