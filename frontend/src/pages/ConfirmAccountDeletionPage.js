@@ -2,7 +2,7 @@ import React, { useState } from "react";
 import { Link, useLocation, useSearchParams } from "react-router-dom";
 import { useUser } from "../contexts/UserContext";
 import api from "../api";
-import { formatDeletionDate } from "../utils/dataDeletion";
+import { formatDeletionDate, writingRestorable } from "../utils/dataDeletion";
 import {
   choiceRowStyle, choiceStyle, headingStyle, linkStyle, pageStyle, textStyle,
 } from "./accountPageStyles";
@@ -65,8 +65,11 @@ export default function ConfirmAccountDeletionPage() {
         When you confirm, your account is deleted and you are signed out
         everywhere. If you change your mind, you can still restore it by signing
         in until {date}; after that it is deleted forever, with
-        everything in it. If you had also deleted all your writing,
-        restoring your account brings your writing back too.
+        everything in it.
+        {writingRestorable(user.data_deletion) && (
+          <> If you restore your account, the writing you deleted comes
+            back too.</>
+        )}
       </>
     );
     action = (

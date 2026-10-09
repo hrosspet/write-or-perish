@@ -405,12 +405,18 @@ def restore_offer(user):
     """What the restore page shows for a deleted account in its grace
     period: the username, when it is deleted, and whether it can still
     be restored."""
+    from backend.models import UserDataPurgeHidden
     from backend.utils.timefmt import iso_utc
     job = deletion_job(user.id)
     return {
         "username": user.username,
         "delete_on": iso_utc(job.scheduled_for) if job else None,
         "restorable": not _deletion_started(user.id),
+        # The deletion replaced a "Delete all my writing" whose writing is
+        # still hidden: a restore brings that writing back too (#268).
+        "writing_comes_back": job is not None and db.session.query(
+            UserDataPurgeHidden.id).filter(
+            UserDataPurgeHidden.job_id == job.id).first() is not None,
     }
 
 

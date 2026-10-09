@@ -800,7 +800,10 @@ def test_signing_in_with_x_offers_a_restore(app, world, stubs, monkeypatch):
     assert r.status_code == 302
     assert r.headers["Location"] == f"{FRONTEND}/account-restore"
     assert c.get("/api/account/data").status_code == 401
-    assert c.get("/api/account/restore").get_json()["username"] == "alice"
+    offer = c.get("/api/account/restore").get_json()
+    assert offer["username"] == "alice"
+    # No "Delete all my writing" was waiting: no writing comes back.
+    assert offer["writing_comes_back"] is False
 
 
 def test_keeping_it_deleted_drops_the_offer(app, world, stubs, mail):
@@ -975,6 +978,8 @@ def test_a_waiting_writing_deletion_becomes_the_account_deletion(
     # comes back (Peter, 2026-10-09: restore undoes the soft deletion).
     from backend.models import UserDataPurgeHidden, UserProfile
     assert UserProfile.query.filter_by(user_id=a.id).count() == 0
+    assert acc.restore_offer(_db.session.get(User, a.id))[
+        "writing_comes_back"] is True
     assert acc.restore_account(_db.session.get(User, a.id))
     assert _db.session.get(UserDataPurge, job.id).status == "cancelled"
     assert UserDataPurgeHidden.query.count() == 0
