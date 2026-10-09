@@ -279,8 +279,20 @@ def test_the_owner_still_gets_every_pinned_artifact(app, people):  # noqa: F811
         assert marker not in block, marker
 
 
-def test_the_owners_reply_and_pre_warm_render_the_same_bytes(app, people):  # noqa: F811
+def test_the_owners_reply_and_pre_warm_render_the_same_bytes(
+        app, people, monkeypatch):  # noqa: F811
     alice, bob, system, entry, reply = people
+    # The archive in the system block carries the render time to the
+    # second. Without Redis nothing caches the first render, so two
+    # renders a second apart differ; prod reuses the cached render.
+    import backend.routes.export_data as export_data
+
+    class _Frozen(datetime):
+        @classmethod
+        def utcnow(cls):
+            return datetime(2026, 10, 9, 12, 0, 0)
+
+    monkeypatch.setattr(export_data, "datetime", _Frozen)
     owner_entry = _node(alice, reply, "alice continues")
 
     _ask(owner_entry, alice)
