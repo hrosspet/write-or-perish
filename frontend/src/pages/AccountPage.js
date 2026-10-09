@@ -821,9 +821,9 @@ function DeleteAccountSection({ id, info, email, linkSent, onOpen, labelStyle, h
       ) : (
         <>
           <p style={bodyStyle}>
-            Deletes your account at once and signs you out everywhere. For{" "}
-            {days} days you can restore it by signing in; after that it is
-            deleted forever, with everything in it.
+            Deletes your account at once and signs you out everywhere. If you change{" "}
+            your mind, you can still restore it by signing in within {days}{" "}
+            days; after that it is deleted forever, with everything in it.
           </p>
           {refusal ? (
             <p style={bodyStyle}>{refusal.message}</p>

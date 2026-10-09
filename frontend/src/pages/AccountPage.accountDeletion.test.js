@@ -60,7 +60,7 @@ test('an email account confirms by link: nothing is sent until the username is t
   const dialog = screen.getByRole('dialog').textContent;
   expect(dialog).not.toMatch(/hidden/);
   expect(screen.getByText(/deleted at once and you are signed out everywhere/)).toBeTruthy();
-  expect(dialog).toMatch(/For 30 days, until .*2026, you can restore it by signing in/);
+  expect(dialog).toMatch(/If you change your mind, you can still restore it by signing in until\s+.*2026 \(30 days\)/);
   expect(dialog).toMatch(/After that it is deleted forever, with everything in it/);
   expect(screen.getByText(/Once it is deleted forever, nobody else can take your username\s+for 365 days/)).toBeTruthy();
   expect(screen.getByText(/imports, poll answers, settings\s+and sign-in/)).toBeTruthy();
