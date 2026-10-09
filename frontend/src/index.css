@@ -674,6 +674,23 @@ code {
   font-weight: 300;
   color: var(--text-muted);
 }
+/* A gleaning that failed (#435): what happened and where to try again. */
+.gleaning-failed {
+  padding: 0.4rem 0 0.6rem;
+}
+.gleaning-failed-big {
+  font-family: var(--serif);
+  font-size: 1.3rem;
+  margin: 0 0 6px;
+  color: var(--text-primary);
+}
+.gleaning-failed-small {
+  margin: 0 0 4px;
+  font-family: var(--sans);
+  font-size: 0.88rem;
+  font-weight: 300;
+  color: var(--text-muted);
+}
 .read-reply-body .ext-quote-slot:last-child {
   margin-bottom: 0;
 }

@@ -171,9 +171,10 @@ describe('#386: a pending read reply', () => {
     expect(await screen.findByText('Processing')).toBeInTheDocument();
     expect(screen.queryByText('Gleaning')).toBeNull();
     expect(document.title).toBe('Processing… — Loore');
-    // The admin's rerun controls sit with the waiting state.
-    expect(screen.getByRole('button', { name: 'Rerun live' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Resubmit batch' })).toBeInTheDocument();
+    // No rerun buttons, not even for an admin (Peter, 2026-10-09: Glean
+    // is live-only; a rerun rendered the day into the reply twice).
+    expect(screen.queryByRole('button', { name: 'Rerun live' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Resubmit batch' })).toBeNull();
     // A batch is never streamed: the text stream is let go.
     const [streamNodeId, streamOpts] = mockTextStream.mock.calls.at(-1);
     expect(streamNodeId).toBeNull();
