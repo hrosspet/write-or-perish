@@ -1,3 +1,4 @@
+import hashlib
 import json
 from flask import Blueprint, jsonify, request, current_app
 from flask_login import login_required, current_user
@@ -9,6 +10,41 @@ from backend.utils.timefmt import iso_utc
 from backend.utils.tool_meta import update_tool_meta
 
 todo_bp = Blueprint("todo", __name__)
+
+# A PATCH refused because the list changed since the client loaded it
+# (#430): the answer's "code".
+TODO_CHANGED_CODE = "todo_changed"
+TODO_CHANGED_MESSAGE = (
+    "Your todo list changed since this page loaded, so this change wasn't "
+    "saved.")
+
+
+def todo_revision(todo):
+    """Names the stored text of a todo version. It changes with every
+    write, an in-place PATCH included: the column holds ciphertext with a
+    fresh key and nonce per write (or, unencrypted, the text itself). Only
+    the stored column is hashed, so nothing is decrypted. A client sends it
+    back as base_revision on PATCH (#430)."""
+    stored = f"{todo.id}:{todo.content or ''}"
+    return hashlib.sha256(stored.encode("utf-8")).hexdigest()
+
+
+def _todo_json(todo, version_number):
+    return {
+        "id": todo.id,
+        "content": todo.get_content(),
+        "generated_by": todo.generated_by,
+        "tokens_used": todo.tokens_used,
+        "created_at": iso_utc(todo.created_at),
+        "privacy_level": todo.privacy_level,
+        "ai_usage": todo.ai_usage,
+        "version_number": version_number,
+        "revision": todo_revision(todo),
+    }
+
+
+def _version_count(user_id):
+    return UserTodo.query.filter_by(user_id=user_id).count()
 
 
 @todo_bp.route("/", methods=["GET"])
@@ -22,60 +58,58 @@ def get_todo():
     if not todo:
         return jsonify({"todo": None}), 200
 
-    # Count total versions for version number
-    version_count = UserTodo.query.filter_by(
-        user_id=current_user.id
-    ).count()
-
     return jsonify({
-        "todo": {
-            "id": todo.id,
-            "content": todo.get_content(),
-            "generated_by": todo.generated_by,
-            "tokens_used": todo.tokens_used,
-            "created_at": iso_utc(todo.created_at),
-            "privacy_level": todo.privacy_level,
-            "ai_usage": todo.ai_usage,
-            "version_number": version_count,
-        }
+        "todo": _todo_json(todo, _version_count(current_user.id))
     }), 200
 
 
 @todo_bp.route("/", methods=["PATCH"])
 @login_required
 def patch_todo():
-    """Update the latest todo version in-place (e.g. checkbox toggles)."""
-    data = request.get_json()
+    """Update the latest todo version in place (checkbox toggles, the row
+    "+", quick-add).
+
+    ``base_revision`` (optional): the revision of the version the client
+    applied its change to. When the latest version is no longer that text
+    (a todo merge, or an edit on another device or tab, landed in between),
+    nothing is written and the answer is 409 ``{"error", "code":
+    "todo_changed", "todo": <the latest version>}``, so the client can
+    apply its own change to the latest list and save again (#430).
+    Without it the request overwrites the latest version as before; the
+    iPhone app re-fetches the list right before it saves.
+    """
+    data = request.get_json() or {}
     content = data.get("content")
+    base_revision = data.get("base_revision")
 
     if content is None:
         return jsonify({"error": "Content is required"}), 400
     if not content.strip():
         return jsonify({"error": "Content cannot be empty"}), 400
 
+    # Locked until the commit, so two saves can't both pass the check
+    # against the same text.
     todo = UserTodo.query.filter_by(
         user_id=current_user.id
-    ).order_by(UserTodo.created_at.desc()).first()
+    ).order_by(UserTodo.created_at.desc()).with_for_update().first()
 
     if not todo:
         return jsonify({"error": "No todo exists to update"}), 404
 
+    if base_revision is not None and base_revision != todo_revision(todo):
+        latest = _todo_json(todo, _version_count(current_user.id))
+        db.session.rollback()
+        return jsonify({
+            "error": TODO_CHANGED_MESSAGE,
+            "code": TODO_CHANGED_CODE,
+            "todo": latest,
+        }), 409
+
     todo.set_content(content)
     db.session.commit()
 
-    version_count = UserTodo.query.filter_by(
-        user_id=current_user.id
-    ).count()
-
     return jsonify({
-        "todo": {
-            "id": todo.id,
-            "content": todo.get_content(),
-            "generated_by": todo.generated_by,
-            "tokens_used": todo.tokens_used,
-            "created_at": iso_utc(todo.created_at),
-            "version_number": version_count,
-        }
+        "todo": _todo_json(todo, _version_count(current_user.id))
     }), 200
 
 
@@ -104,19 +138,8 @@ def update_todo():
     db.session.add(todo)
     db.session.commit()
 
-    version_count = UserTodo.query.filter_by(
-        user_id=current_user.id
-    ).count()
-
     return jsonify({
-        "todo": {
-            "id": todo.id,
-            "content": todo.get_content(),
-            "generated_by": todo.generated_by,
-            "tokens_used": todo.tokens_used,
-            "created_at": iso_utc(todo.created_at),
-            "version_number": version_count,
-        }
+        "todo": _todo_json(todo, _version_count(current_user.id))
     }), 200
 
 
@@ -183,18 +206,8 @@ def revert_todo(version_id):
     db.session.add(new_todo)
     db.session.commit()
 
-    version_count = UserTodo.query.filter_by(
-        user_id=current_user.id
-    ).count()
-
     return jsonify({
-        "todo": {
-            "id": new_todo.id,
-            "content": new_todo.get_content(),
-            "generated_by": new_todo.generated_by,
-            "created_at": iso_utc(new_todo.created_at),
-            "version_number": version_count,
-        }
+        "todo": _todo_json(new_todo, _version_count(current_user.id))
     }), 200
 
 
