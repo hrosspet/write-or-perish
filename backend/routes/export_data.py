@@ -1,5 +1,6 @@
 from flask import Blueprint, jsonify, Response, request, current_app
 from flask_login import login_required, current_user
+from backend.utils.hidden_rows import shown_description
 from backend.models import (
     Node, NodeVersion, UserProfile, UserPrompt, UserTodo,
     UserArtifact,
@@ -31,13 +32,16 @@ def export_data():
             "id": current_user.id,
             "twitter_id": current_user.twitter_id,
             "username": current_user.username,
-            "description": current_user.description,
+            "description": shown_description(current_user),
             "created_at": iso_utc(current_user.created_at),
         },
         "nodes": [],
         "versions": []
     }
-    nodes = Node.query.filter_by(user_id=current_user.id).all()
+    # Deleted entries are not exported, including the ones a waiting
+    # "Delete all my writing" hid (#268).
+    nodes = Node.query.filter_by(user_id=current_user.id,
+                                 deleted_at=None).all()
     for node in nodes:
         user_data["nodes"].append({
             "id": node.id,
@@ -49,7 +53,8 @@ def export_data():
             "created_at": iso_utc(node.created_at),
             "updated_at": iso_utc(node.updated_at)
         })
-    versions = NodeVersion.query.join(Node, Node.id == NodeVersion.node_id).filter(Node.user_id == current_user.id).all()
+    versions = NodeVersion.query.join(Node, Node.id == NodeVersion.node_id).filter(
+        Node.user_id == current_user.id, Node.deleted_at.is_(None)).all()
     for version in versions:
         user_data["versions"].append({
             "id": version.id,

@@ -732,6 +732,10 @@ def clip():
 
     user = g.api_user
     source, external_id, canon = classify_clip(url)
+    # Saving again a reference "Delete all my writing" hid makes it the
+    # user's again (#268) instead of failing on the hidden row.
+    from backend.utils.hidden_rows import reclaim_external_items
+    reclaim_external_items(user.id, [external_id])
 
     def reclip(existing):
         updated = _upgrade_clip(existing, content, title, author, posted_at)

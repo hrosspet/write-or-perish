@@ -8,7 +8,10 @@ import useSubmitShortcut from "../hooks/useSubmitShortcut";
 import { emailState } from "../utils/emailState";
 import DeleteWritingDialog from "../components/DeleteWritingDialog";
 import DeleteAccountDialog from "../components/DeleteAccountDialog";
-import { formatDeletionDate, X_REMOVE_ACCESS_STEPS } from "../utils/dataDeletion";
+import {
+  formatDeletionDate, reloadUser, restoreWriting, writingRestorable,
+  X_REMOVE_ACCESS_STEPS,
+} from "../utils/dataDeletion";
 
 const backendUrl = process.env.REACT_APP_BACKEND_URL || "";
 
@@ -159,8 +162,9 @@ export default function AccountPage() {
     !emailSaving && !!emailInput.trim(),
   );
 
-  // "Delete all my writing" (#268): scheduled after a grace period,
-  // cancellable until then. The state comes with the user (/dashboard).
+  // "Delete all my writing" (#268): the writing is hidden at once and
+  // deleted forever after the grace period; until then "Restore my
+  // writing" brings it back. The state comes with the user (/dashboard).
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [deletionBusy, setDeletionBusy] = useState(false);
   const [deletionMsg, setDeletionMsg] = useState(null);
@@ -171,6 +175,8 @@ export default function AccountPage() {
     setUser((prev) => ({ ...prev, data_deletion: res.data }));
     setDeleteOpen(false);
     setDeletionMsg(null);
+    // The description and has_own_entries change with the writing.
+    reloadUser(setUser);
   };
 
   // "Delete my account" (#269): an email account gets a confirmation
@@ -191,17 +197,16 @@ export default function AccountPage() {
     setAccountLinkSent(true);
   };
 
-  const cancelDeletion = async () => {
+  const restoreDeletedWriting = async () => {
     setDeletionBusy(true);
     setDeletionMsg(null);
     try {
-      const res = await api.post("/account/data/cancel");
-      setUser((prev) => ({ ...prev, data_deletion: res.data }));
-      setDeletionMsg({ type: "success", text: "Deletion cancelled. Your writing stays." });
+      await restoreWriting(setUser);
+      setDeletionMsg({ type: "success", text: "Your writing is restored." });
     } catch (e) {
       setDeletionMsg({
         type: "error",
-        text: e.response?.data?.error || "Could not cancel the deletion. Please try again.",
+        text: e.response?.data?.error || "Could not restore your writing. Please try again.",
       });
     } finally {
       setDeletionBusy(false);
@@ -767,7 +772,7 @@ export default function AccountPage() {
         busy={deletionBusy}
         msg={deletionMsg}
         onOpen={() => { setDeletionMsg(null); setDeleteOpen(true); }}
-        onCancel={cancelDeletion}
+        onRestore={restoreDeletedWriting}
         labelStyle={labelStyle}
         helperStyle={helperStyle}
       />
@@ -862,36 +867,42 @@ const quietButtonStyle = {
   cursor: "pointer",
 };
 
-function DeleteWritingSection({ id, deletion, busy, msg, onOpen, onCancel, labelStyle, helperStyle }) {
+function DeleteWritingSection({ id, deletion, busy, msg, onOpen, onRestore, labelStyle, helperStyle }) {
   const status = deletion?.status || null;
   const bodyStyle = { ...helperStyle, fontSize: "0.85rem", lineHeight: 1.6, marginTop: 0 };
   return (
     <div id={id} style={{ scrollMarginTop: "72px" }}>
       <h3 style={sectionTitleStyle}>Delete all my writing</h3>
 
-      {status === "scheduled" && (
+      {status === "scheduled" && writingRestorable(deletion) && (
         <>
           <p style={{ ...labelStyle, lineHeight: 1.6 }}>
-            All your writing will be deleted on {formatDeletionDate(deletion.purge_at)}.
+            Your writing is deleted.
           </p>
           <p style={bodyStyle}>
-            Until then nothing is lost, and you can cancel. Anything you
-            write before that date is deleted too.
+            You can restore it safely until {formatDeletionDate(deletion.purge_at)}.
+            After that it is deleted forever. What you write from now on stays.
           </p>
           <button
             type="button"
-            onClick={onCancel}
+            onClick={onRestore}
             disabled={busy}
             style={{ ...quietButtonStyle, borderColor: "var(--accent)", color: "var(--accent)" }}
           >
-            {busy ? "Cancelling…" : "Cancel the deletion"}
+            {busy ? "Restoring…" : "Restore my writing"}
           </button>
         </>
       )}
 
+      {status === "scheduled" && !writingRestorable(deletion) && (
+        <p style={bodyStyle}>
+          Your writing will be deleted forever on {formatDeletionDate(deletion.purge_at)}.
+        </p>
+      )}
+
       {status === "running" && (
         <p style={bodyStyle}>
-          Your writing is being deleted now. This can take a few minutes.
+          Your writing is being deleted forever now. This can take a few minutes.
         </p>
       )}
 
@@ -906,7 +917,7 @@ function DeleteWritingSection({ id, deletion, busy, msg, onOpen, onCancel, label
         <>
           {status === "done" && (
             <p style={bodyStyle}>
-              Your writing was deleted on {formatDeletionDate(deletion.finished_at)}.
+              Your writing was deleted forever on {formatDeletionDate(deletion.finished_at)}.
               {deletion.x_connection_removed && (
                 <> Loore no longer keeps your X connection and asked X to
                   remove its access. If X still lists Loore, remove it
@@ -918,8 +929,8 @@ function DeleteWritingSection({ id, deletion, busy, msg, onOpen, onCancel, label
             Deletes everything you have written or recorded in Loore, and
             what Loore made from it: the AI's replies, your profile, intentions
             and other documents, saved references and imports. Your account,
-            username and settings stay. Loore waits {deletion?.grace_days || 30} days
-            before deleting, and you can cancel until then.
+            username and settings stay. You can restore your writing safely
+            within {deletion?.grace_days || 30} days. After that it is deleted forever.
           </p>
           <button
             type="button"

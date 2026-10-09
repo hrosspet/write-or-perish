@@ -361,7 +361,8 @@ def profile_og_image(username):
     if moved:
         return _canonical_redirect(f"/@{user.username}/og.png")
     from backend.utils.og_image import render_profile_card
-    png = render_profile_card(username, user.description)
+    from backend.utils.hidden_rows import shown_description
+    png = render_profile_card(username, shown_description(user))
     resp = Response(png, mimetype="image/png")
     resp.headers["Cache-Control"] = "public, max-age=3600"
     return resp
@@ -449,8 +450,11 @@ def _render_profile(username):
     origin = base_url()
     canonical = f"{origin}/@{username}"
     parts = [f"<h1>@{escape(username)}</h1>"]
-    if user.description:
-        parts.append(f"<p>{escape(user.description)}</p>")
+    # Empty while "Delete all my writing" hides it (#268).
+    from backend.utils.hidden_rows import shown_description
+    shown = shown_description(user)
+    if shown:
+        parts.append(f"<p>{escape(shown)}</p>")
     parts.append('<section aria-label="Published pieces">')
     for root in roots:
         content = root.get_content() or ""
@@ -471,7 +475,7 @@ def _render_profile(username):
         parts.append("</article>")
     parts.append("</section>")
 
-    description = (user.description
+    description = (shown
                    or f"Writing published by @{username} on Loore.")
     meta = {
         "title": f"@{username} — Loore",

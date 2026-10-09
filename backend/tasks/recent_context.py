@@ -43,6 +43,8 @@ from backend.utils.llm_batch import (
 )
 from backend.utils import refusal_backoff
 
+from backend.utils.hidden_rows import writing_on_hold
+
 logger = get_task_logger(__name__)
 
 RECENT_CONTEXT_TOKEN_THRESHOLD = 10000
@@ -614,6 +616,12 @@ def _apply_item(item, result, batch_id):
             logger.info("User %s opted out of AI usage while their recent "
                         "context ran; not saved", user_id)
             return "skipped", billed
+        if writing_on_hold(user_id):
+            # "Delete all my writing" hid the writing it summarises while
+            # the batch ran (#268): don't store it.
+            logger.info("User %s: writing on hold for deletion; recent "
+                        "context not saved", user_id)
+            return "skipped", billed
         profile_id = item.get("profile_id")
         latest_ts = _from_iso(item.get("source_data_cutoff"))
         # The direct path's guard, re-checked at save time: a summary that
@@ -810,6 +818,10 @@ def _generate_recent_context_impl(user_id, profile_id=None,
     if not user:
         logger.warning(f"User {user_id} not found")
         return
+    if writing_on_hold(user_id):
+        logger.info(f"User {user_id}: writing on hold for deletion; no "
+                    "recent context")
+        return
 
     data_cutoff = (
         datetime.fromisoformat(data_cutoff_iso)
@@ -899,6 +911,14 @@ def _generate_recent_context_impl(user_id, profile_id=None,
         raise EmptyTruncatedOutputError(
             f"recent context for user {user_id}", model_id,
             response.get("output_tokens"), refused=refused)
+
+    if writing_on_hold(user_id):
+        # Hidden for deletion while the call ran (#268): cost logged,
+        # nothing saved.
+        db.session.commit()
+        logger.info(f"User {user_id}: writing put on hold for deletion "
+                    "during the recent context; not saved")
+        return
 
     # Save the recent context
     _save_recent_context(

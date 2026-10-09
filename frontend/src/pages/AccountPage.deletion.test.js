@@ -1,19 +1,21 @@
 // "Delete all my writing" on the Account page (#268): a dialog, never a
-// pre-ticked option; the typed username is required; the date and the
-// way to cancel are shown; Cancel goes to the cancel route.
+// pre-ticked option; the typed username is required; the writing goes at
+// once and can be restored until the date (Peter, 2026-10-09); "Restore my
+// writing" goes to the restore route.
 let mockUserCtx;
 jest.mock('../contexts/UserContext', () => ({
   useUser: () => mockUserCtx,
 }));
 const mockPost = jest.fn();
 const mockDelete = jest.fn();
+const mockGet = jest.fn();
 jest.mock('../api', () => ({
   __esModule: true,
   default: {
     post: (...args) => mockPost(...args),
     delete: (...args) => mockDelete(...args),
     put: jest.fn(),
-    get: jest.fn(),
+    get: (...args) => mockGet(...args),
   },
 }));
 jest.mock('../components/ModelSelector', () => () => null);
@@ -37,21 +39,26 @@ const renderPage = (user) => {
 beforeEach(() => {
   mockPost.mockReset();
   mockDelete.mockReset();
+  mockGet.mockReset();
+  mockGet.mockResolvedValue({ data: {} });
 });
 
 test('the delete button opens a dialog; nothing is sent until the username is typed', async () => {
-  const scheduled = { status: 'scheduled', grace_days: 30, purge_at: '2026-11-05T12:00:00Z' };
+  const scheduled = { status: 'scheduled', grace_days: 30, purge_at: '2026-11-05T12:00:00Z', restorable: true };
   mockDelete.mockResolvedValue({ data: scheduled });
   renderPage();
 
+  expect(screen.getByText(/You can restore your writing safely\s+within 30 days\. After that it is deleted forever\./)).toBeTruthy();
   expect(screen.queryByRole('dialog')).toBeNull();
   fireEvent.click(screen.getByRole('button', { name: /delete all my writing…/i }));
   expect(screen.getByRole('dialog')).toBeTruthy();
-  expect(screen.getByText(/Nothing is deleted for 30 days/)).toBeTruthy();
+  const when = screen.getByText(/It disappears at once, for you and for everyone else/).textContent;
+  expect(when).toMatch(/you can restore your writing safely within\s+30 days, until .+, on the Account page\. After that it\s+is deleted forever\. What you write from now on stays\./);
+  expect(screen.queryByText(/Nothing is deleted for/)).toBeNull();
   // No checkbox anywhere in the dialog: the choice is the button itself.
   expect(screen.queryByRole('checkbox')).toBeNull();
 
-  const confirm = screen.getByRole('button', { name: /delete all my writing on/i });
+  const confirm = screen.getByRole('button', { name: /^delete all my writing you can restore it until/i });
   expect(confirm.disabled).toBe(true);
   fireEvent.click(confirm);
   expect(mockDelete).not.toHaveBeenCalled();
@@ -94,28 +101,42 @@ test('after the purge the page says Loore asked X to remove its access', () => {
     status: 'done', grace_days: 30, finished_at: '2026-11-05T12:00:00Z',
     x_connection_removed: true,
   } });
-  const text = screen.getByText(/Your writing was deleted on/).textContent;
+  const text = screen.getByText(/Your writing was deleted forever on/).textContent;
   expect(text).toMatch(/asked X to\s+remove its access/);
   expect(text).toMatch(/If X still lists Loore, remove it\s+yourself: on X/);
 });
 
-test('a scheduled deletion shows its date and cancels through the cancel route', async () => {
+test('a deleted writing shows the date and restores through the restore route', async () => {
   mockPost.mockResolvedValue({ data: { status: null, grace_days: 30 } });
   renderPage({ data_deletion: {
     status: 'scheduled', grace_days: 30, purge_at: '2026-11-05T12:00:00Z',
+    restorable: true,
   } });
-  expect(screen.getByText(/All your writing will be deleted on/)).toBeTruthy();
+  expect(screen.getByText('Your writing is deleted.')).toBeTruthy();
+  expect(screen.getByText(/You can restore it safely until .+\.\s+After that it is deleted forever\. What you write from now on stays\./)).toBeTruthy();
   expect(screen.queryByRole('button', { name: /delete all my writing…/i })).toBeNull();
+  expect(screen.queryByText(/cancel the deletion/i)).toBeNull();
 
-  fireEvent.click(screen.getByRole('button', { name: /cancel the deletion/i }));
-  await waitFor(() => expect(mockPost).toHaveBeenCalledWith('/account/data/cancel'));
-  await waitFor(() => expect(screen.getByText(/Deletion cancelled/)).toBeTruthy());
+  fireEvent.click(screen.getByRole('button', { name: 'Restore my writing' }));
+  await waitFor(() => expect(mockPost).toHaveBeenCalledWith('/account/data/restore'));
+  await waitFor(() => expect(screen.getByText('Your writing is restored.')).toBeTruthy());
+  // The whole user is read again (description, has_own_entries).
+  expect(mockGet).toHaveBeenCalledWith('/dashboard', { params: { profile: 0 } });
   expect(mockDelete).not.toHaveBeenCalled();
+});
+
+test('an admin purge waiting to start offers no restore', () => {
+  renderPage({ data_deletion: {
+    status: 'scheduled', grace_days: 30, purge_at: '2026-11-05T12:00:00Z',
+    restorable: false, source: 'admin',
+  } });
+  expect(screen.getByText(/will be deleted forever on/)).toBeTruthy();
+  expect(screen.queryByRole('button', { name: /restore my writing/i })).toBeNull();
 });
 
 test('a deletion in progress cannot be started again', () => {
   renderPage({ data_deletion: { status: 'running', grace_days: 30 } });
-  expect(screen.getByText(/being deleted now/)).toBeTruthy();
+  expect(screen.getByText(/being deleted forever now/)).toBeTruthy();
   expect(screen.queryByRole('button', { name: /delete all my writing…/i })).toBeNull();
-  expect(screen.queryByRole('button', { name: /cancel the deletion/i })).toBeNull();
+  expect(screen.queryByRole('button', { name: /restore my writing/i })).toBeNull();
 });
