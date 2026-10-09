@@ -235,10 +235,11 @@ class User(db.Model, UserMixin):
           still KEEPS email / magic-link humans (``twitter_id`` NULL), who
           never author LLM nodes.
 
-        * An account whose data purge is running (#268) is left out, so
-          no scheduled job reads the writing the purge is deleting and
-          saves a new profile or summary from it after the purge has
-          passed. The account is eligible again once the purge is done.
+        * An account with a data purge waiting or running (#268) is left
+          out: "Delete all my writing" hides the writing at once, and no
+          scheduled job may build a profile or summary from it while it
+          can still be restored or is being deleted. The account is
+          eligible again after a restore or once the purge is done.
 
         Shared helper (not an inline filter) so the profile and
         recent-context tasks can't drift apart again.
@@ -248,7 +249,7 @@ class User(db.Model, UserMixin):
             Node.node_type == "llm", Node.user_id.isnot(None)
         ).distinct()
         purging = db.session.query(UserDataPurge.user_id).filter(
-            UserDataPurge.status == "running")
+            UserDataPurge.status.in_(UserDataPurge.ACTIVE_STATUSES))
         return cls.query.filter(
             cls.approved.is_(True),
             cls.plan.in_(list(cls.VOICE_MODE_PLANS)),
@@ -1927,9 +1928,13 @@ class UserDataPurge(db.Model):
     """One request to delete all of a user's data (#268), and the record
     of what the purge did.
 
-    A user's own request ("Delete all my writing") waits out a grace
-    period (``scheduled_for``) during which the user can cancel it; an
-    admin purge is due at once. The beat task
+    A user's own request ("Delete all my writing") hides everything it
+    will delete at once (``scope = "hidden"``; what it hid is recorded in
+    ``UserDataPurgeHidden``) and waits out a grace period
+    (``scheduled_for``) during which the user can restore it; the purge
+    then deletes what the request hid, and what the user writes after it
+    stays. An admin purge (``scope = "all"``) is due at once and deletes
+    everything of the user's. The beat task
     ``backend.tasks.user_purge.process_user_data_purges`` claims due jobs
     and jobs whose runner stopped sending heartbeats, so a purge resumes
     after a crash or a deploy; every step of the purge is idempotent.
@@ -1949,6 +1954,12 @@ class UserDataPurge(db.Model):
     user_id = db.Column(db.Integer, nullable=False, index=True)
     # "self" (the user's own request) | "admin"
     source = db.Column(db.String(16), nullable=False)
+    # What the purge deletes: "hidden" = what the user's own request hid
+    # when it was made (UserDataPurgeHidden); "all" = everything of the
+    # user's (an admin purge, an account deletion, or an admin bringing a
+    # user's request forward).
+    scope = db.Column(db.String(16), nullable=False, default="all",
+                      server_default="all")
     requested_by_id = db.Column(db.Integer, nullable=True)
     status = db.Column(db.String(16), nullable=False, default="scheduled",
                        index=True)
@@ -1983,3 +1994,55 @@ class UserDataPurge(db.Model):
     error = db.Column(db.String(255), nullable=True)
 
     ACTIVE_STATUSES = ("scheduled", "running")
+
+
+class UserDataPurgeHidden(db.Model):
+    """What one "Delete all my writing" request hid (#268; Peter,
+    2026-10-09: everything is hidden at once, "Restore my writing" brings
+    back exactly that, and the purge deletes it after the grace period).
+
+    One row per hidden thing, written in the same transaction as the job:
+    * ``kind`` = "node", ``row_id`` = a node of the user's that was live
+      at the request; the request soft-deleted it (``deleted_at``) and a
+      restore clears that again.
+    * ``kind`` = "node_deleted": a node the user had deleted before the
+      request. Purged with it, never restored.
+    * ``kind`` = a per-user table (``HIDDEN_ROW_TABLES``), ``row_id`` =
+      its row: hidden while this row exists (backend/utils/hidden_rows.py
+      leaves it out of every ORM query).
+    * ``kind`` = "user_description", ``row_id`` = the user: the short
+      profile description is shown empty.
+    * ``kind`` = "file", ``path`` = a folder or file of the user's audio
+      or import storage that existed at the request ("audio:<rel>" or
+      "stash:<rel>"), so the purge deletes those and not what the user
+      records afterwards.
+
+    Deleted by a restore (the rows show again) and at the end of the
+    purge (the rows are gone). Ids and paths only, never content."""
+    __tablename__ = "user_data_purge_hidden"
+
+    id = db.Column(db.Integer, primary_key=True)
+    job_id = db.Column(db.Integer, db.ForeignKey("user_data_purge.id"),
+                       nullable=False, index=True)
+    kind = db.Column(db.String(48), nullable=False)
+    row_id = db.Column(db.Integer, nullable=True)
+    path = db.Column(db.String(512), nullable=True)
+
+    __table_args__ = (
+        db.Index("ix_user_data_purge_hidden_kind_row", "kind", "row_id"),
+    )
+
+
+# The per-user tables whose rows a waiting "Delete all my writing" hides
+# (UserDataPurgeHidden): every ORM query leaves them out until a restore
+# or the purge. Nodes are hidden by deleted_at instead, so a thread keeps
+# its placeholders and other people's replies.
+HIDDEN_ROW_TABLES = (
+    UserProfile, UserRecentContext, UserTodo, UserArtifact, Draft,
+    ShareDraft, ExternalItem, UserPrompt, PollResponse, FeedPick,
+    ReferenceAction, UserFeedback,
+)
+
+from backend.utils.hidden_rows import install as _install_hidden_rows  # noqa: E402
+
+_install_hidden_rows()

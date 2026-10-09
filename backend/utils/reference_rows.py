@@ -20,6 +20,10 @@ def find_tweet_row(user_id, tweet_id):
     first (the oldest, when an older import left two), else the Read
     pick's. None when the tweet has no row."""
     from backend.models import ExternalItem, TWEET_SOURCES
+    from backend.utils.hidden_rows import reclaim_external_items
+    # A row "Delete all my writing" hid is the user's again when a Read
+    # picks the tweet again (#268); its unique key would refuse a new one.
+    reclaim_external_items(user_id, [tweet_id], TWEET_SOURCES)
     rows = (ExternalItem.query
             .filter(ExternalItem.user_id == user_id,
                     ExternalItem.source.in_(TWEET_SOURCES),

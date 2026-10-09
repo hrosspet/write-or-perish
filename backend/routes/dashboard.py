@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 from flask import Blueprint, jsonify, request, current_app
 from flask_login import login_required, current_user
 from sqlalchemy.exc import IntegrityError
+from backend.utils.hidden_rows import reclaim_description, shown_description
 from backend.models import User, UserProfile
 from backend.extensions import db
 from backend.utils.email import (
@@ -78,7 +79,7 @@ def get_dashboard():
         "user": {
             "id": current_user.id,
             "username": current_user.username,
-            "description": current_user.description,
+            "description": shown_description(current_user),
             "accepted_terms_at": iso_utc(current_user.accepted_terms_at),
             "terms_up_to_date": _terms_up_to_date(current_user),
             "approved": current_user.approved,
@@ -402,7 +403,11 @@ def update_user():
         current_user.username = new_username
 
     if new_description is not None:
-        current_user.description = new_description
+        if new_description != shown_description(current_user):
+            # A description written while "Delete all my writing" hides
+            # the old one is the user's and stays after the purge (#268).
+            reclaim_description(current_user.id)
+            current_user.description = new_description
 
     if "craft_mode" in data:
         current_user.craft_mode = bool(data["craft_mode"])
@@ -471,7 +476,7 @@ def update_user():
             "user": {
                 "id": current_user.id,
                 "username": current_user.username,
-                "description": current_user.description,
+                "description": shown_description(current_user),
                 "email": current_user.email,
                 "approved": current_user.approved,
                 "accepted_terms_at": iso_utc(current_user.accepted_terms_at),

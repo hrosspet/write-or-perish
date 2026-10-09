@@ -79,10 +79,12 @@ const subStyle = {
 
 /**
  * Asked before "Delete all my writing" (#268). Says in plain words what
- * goes and what stays, and when: nothing is deleted until the grace
- * period ends, and the user can cancel until then. The user types their
- * username to confirm; the delete option stays disabled until it matches.
- * onConfirm(typed) returns a promise; a rejection's message is shown.
+ * goes and what stays, and when: the writing disappears at once, can be
+ * restored safely until the end of the grace period, and is then deleted
+ * forever (Peter, 2026-10-09, in the framing of his terms text). The user
+ * types their username to confirm; the delete option stays disabled until
+ * it matches. onConfirm(typed) returns a promise; a rejection's message
+ * is shown.
  */
 function DeleteWritingDialog({ open, username, graceDays, xConnected, onConfirm, onClose }) {
   const [typed, setTyped] = useState("");
@@ -113,7 +115,7 @@ function DeleteWritingDialog({ open, username, graceDays, xConnected, onConfirm,
     try {
       await onConfirm(typed.trim());
     } catch (e) {
-      setError(e?.response?.data?.error || "Could not schedule the deletion. Please try again.");
+      setError(e?.response?.data?.error || "Could not delete your writing. Please try again.");
     } finally {
       setBusy(false);
     }
@@ -142,8 +144,10 @@ function DeleteWritingDialog({ open, username, graceDays, xConnected, onConfirm,
           of what your AI use cost, without your name.
         </p>
         <p style={bodyStyle}>
-          Nothing is deleted for {days} days. Until {date} you can cancel on
-          the Account page. Anything you write before then is deleted too.
+          It disappears at once, for you and for everyone else. If you
+          change your mind, you can restore your writing safely within
+          {" "}{days} days, until {date}, on the Account page. After that it
+          is deleted forever. What you write from now on stays.
         </p>
         {xConnected && (
           <p style={bodyStyle}>
@@ -180,9 +184,9 @@ function DeleteWritingDialog({ open, username, graceDays, xConnected, onConfirm,
             }}
           >
             <div style={{ fontWeight: 500 }}>
-              {busy ? "Scheduling…" : `Delete all my writing on ${date}`}
+              {busy ? "Deleting…" : "Delete all my writing"}
             </div>
-            <div style={subStyle}>You can cancel until then.</div>
+            <div style={subStyle}>You can restore it until {date}.</div>
           </button>
           <button
             onClick={onClose}
