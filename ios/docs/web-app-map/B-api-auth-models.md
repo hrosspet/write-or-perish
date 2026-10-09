@@ -1154,16 +1154,11 @@ Source files: `backend/routes/{dashboard,profile,todo,artifacts,prompts,log,sear
 - Backend: routes/dashboard.py:get_dashboard
 - Auth: login_required; allowed for unapproved users (it is how the client learns `approved: false`).
 - Called from: contexts/UserContext.js (on app mount; this is the web app's "who am I" call), pages/ProfilePage.js (to read `latest_profile`).
-- Request: query `page` (int, default 1), `per_page` (int, default 20, max 100). The web app sends neither.
+- Request: no parameters.
 - Response 200:
 ```
 {
   "user": CurrentUser,                // see below; the app's current-user model
-  "pinned_nodes": [DashboardNodeCard],// nodes pinned by this user, newest pin first, not paginated
-  "nodes": [DashboardNodeCard],       // this user's top-level (parent_id null) nodes, newest first, paginated
-  "has_more": bool,
-  "page": int,
-  "total_nodes": int,
   "latest_profile": LatestProfile | null
 }
 
@@ -1199,7 +1194,7 @@ CurrentUser = {
   "external_content_enabled": bool     // user opt-in: AI may search saved references
 }
 
-DashboardNodeCard = {                  // _serialize_node_for_list
+DashboardNodeCard = {                  // _serialize_node_for_list; only GET /api/dashboard/<username> sends cards
   "id": int,                           // display node id: for a system-prompt root, its FIRST child
   "preview": string,                   // first 200 chars + "..." if longer
   "node_type": string,                 // "user" | "llm" | ... (see Node model section)
@@ -1228,13 +1223,14 @@ LatestProfile = {                      // newest UserProfile row (including pipe
 }
 ```
 - Errors: 401 unauthenticated. No other error paths.
-- Notes: The web app ignores `nodes`/`pinned_nodes` from this endpoint (the home list comes from `GET /api/log`). A native app can use it as `GET /me`. The web app calls `/api/dashboard` (no slash) and follows the 308.
+- Notes: Until #481 the response also carried the user's thread cards (`pinned_nodes`, `nodes`, `has_more`, `page`, `total_nodes`). No client read them (the home list comes from `GET /api/log`), and each card's preview was a decryption on every call, so they were dropped. A native app can use it as `GET /me`. The web app calls `/api/dashboard` (no slash) and follows the 308.
 
 ##### `GET /api/dashboard/<username>`
 - Backend: routes/dashboard.py:get_public_dashboard
 - Auth: login_required; GET is exempt from approval gating.
 - Called from: nobody (the web route `/dashboard/:username` now redirects client-side to the public profile page).
-- Response 200: same envelope as above but `user` is only `{"id", "username", "description"}`, and nodes are filtered to those the viewer can access. Not used by the frontend.
+- Request: query `page` (int, default 1), `per_page` (int, default 20, max 100).
+- Response 200: `{"user": {"id", "username", "description"}, "pinned_nodes": [DashboardNodeCard], "nodes": [DashboardNodeCard], "has_more": bool, "page": int, "total_nodes": int, "latest_profile": LatestProfile | null}`. `pinned_nodes`: nodes pinned by this user, newest pin first, not paginated; `nodes`: this user's top-level nodes, newest first, paginated; both filtered to those the viewer can access. `latest_profile` is null unless the viewer is the user. Not used by the frontend.
 - Errors: 404 (HTML 404 from `first_or_404`) for an unknown username.
 
 ##### `PUT /api/dashboard/user`
