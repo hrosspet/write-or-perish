@@ -167,8 +167,8 @@ function DeleteAccountDialog({
           Nobody can see your public writing any more.
         </p>
         <p style={bodyStyle}>
-          For {days} days, until {date}, you can restore it by signing in.
-          After that it is deleted forever, with everything in it: your
+          If you change your mind, you can still restore it by signing in until{" "}
+          {date} ({days} days). After that it is deleted forever, with everything in it: your
           entries and recordings, the AI's replies, your profile, intentions
           and other documents, your todo list, drafts, shares, saved
           references, imports, poll answers, settings and sign-in.
@@ -228,7 +228,7 @@ function DeleteAccountDialog({
             <div style={subStyle}>
               {byEmail
                 ? "Nothing changes until you confirm from the link."
-                : `Signs you out now. You can restore it until ${date}.`}
+                : `Signs you out now. If you change your mind, you can still restore it until ${date}.`}
             </div>
           </button>
           <button

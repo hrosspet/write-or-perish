@@ -13,7 +13,7 @@ test('says the account is deleted, can be restored until the date, then is delet
   renderAt('/account-deleted?on=2026-11-08T12%3A00%3A00Z');
   expect(screen.getByRole('heading').textContent).toBe('Your account is deleted');
   const status = screen.getByRole('status').textContent;
-  expect(status).toMatch(/Until .*2026.* you can restore it by signing in/);
+  expect(status).toMatch(/If you change your mind, you can still restore it by signing in\s+until .*2026/);
   expect(status).toMatch(/deleted forever, with everything in it/);
   expect(status).not.toMatch(/hidden/);
 });
@@ -21,6 +21,6 @@ test('says the account is deleted, can be restored until the date, then is delet
 test('without a date it still says for how long it can be restored', () => {
   renderAt('/account-deleted');
   const status = screen.getByRole('status').textContent;
-  expect(status).toMatch(/For 30 days you can restore it by signing in/);
+  expect(status).toMatch(/you can still restore it by signing in\s+within 30 days/);
   expect(status).toMatch(/deleted forever/);
 });

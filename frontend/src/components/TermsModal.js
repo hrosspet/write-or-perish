@@ -116,7 +116,7 @@ function TermsModal({ onAccepted }) {
           <li style={text}>The app <strong style={{ color: "var(--text-primary)" }}>will</strong> contain bugs. Features <strong style={{ color: "var(--text-primary)" }}>will</strong> change or disappear without notice.</li>
           <li style={text}><strong style={{ color: "var(--text-primary)" }}>Data loss is possible.</strong> While we back up the server daily, we make no guarantee that your data will survive any particular incident &mdash; infrastructure failure, migration error, bug, or anything else.</li>
           <li style={text}><strong style={{ color: "var(--text-primary)" }}>There is no uptime guarantee.</strong> The service may be unavailable at any time, for any duration, without notice.</li>
-          <li style={text}>You can delete your account on the Account page. You then have 30 days to recover it by signing in; after that it is deleted forever, with everything in it. Copies in our backups are erased within another 30 days. Loore keeps a record of what your AI use cost, without your name.</li>
+          <li style={text}>You can delete your account on the Account page. If you change your mind, you can still recover your account within 30 days by signing in; after that it is deleted forever, with everything in it. Copies in our backups are erased within another 30 days. Loore keeps a record of what your AI use cost, without your name.</li>
           <li style={text}><strong style={{ color: "var(--text-primary)" }}>No SLA, no support guarantees, no refunds.</strong> This is alpha.</li>
         </ul>
         <p style={text}>

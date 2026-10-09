@@ -63,8 +63,9 @@ export default function ConfirmAccountDeletionPage() {
     body = (
       <>
         When you confirm, your account is deleted and you are signed out
-        everywhere. Until {date} you can restore it by signing in; after
-        that it is deleted forever, with everything in it. Restoring it
+        everywhere. If you change your mind, you can still restore it by signing
+        in until {date}; after that it is deleted forever, with
+        everything in it. Restoring it
         also cancels a request to delete all your writing, if one is
         waiting.
       </>
