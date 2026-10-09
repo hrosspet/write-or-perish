@@ -76,6 +76,25 @@ final class DeleteAccountModelTests: AccountDeletionTestCase {
         XCTAssertEqual(model().dialogParagraphs.count, 3, "a finished writing deletion is not replaced")
     }
 
+    func testAnAccountThatSignsInWithXGetsTheXNote() throws {
+        let steps = AccountDeletion.xRemoveAccessSteps
+        // This session holds the sign-in's token: the request revokes it.
+        try signIn(["account_deletion": ["grace_days": 30, "x_sign_in": true, "x_sign_in_revocable": true]])
+        XCTAssertEqual(model().dialogParagraphs.last,
+                       "Loore also removes the access to your X account that signing in with X gave it. "
+                        + "If X still lists Loore afterwards, remove it yourself: " + steps)
+        // Without the token here (an email sign-in): the steps only.
+        try signIn(["account_deletion": ["grace_days": 30, "x_sign_in": true, "x_sign_in_revocable": false]])
+        XCTAssertEqual(model().dialogParagraphs.last,
+                       "You sign in with X, so X may list Loore as an app with access to your account. "
+                        + "To remove it: " + steps)
+        // The bookmark connection's text wins when there is one.
+        XCTAssertTrue(DeleteAccountModel.xNote(
+            xConnected: true, info: AccountDeletionInfo(xSignIn: true, xSignInRevocable: true))!
+            .hasPrefix("Loore also forgets your X connection for bookmarks"))
+        XCTAssertNil(DeleteAccountModel.xNote(xConnected: false, info: AccountDeletionInfo()))
+    }
+
     func testTheDeleteButtonWaitsForTheUsername() async throws {
         try signIn()
         let model = model()

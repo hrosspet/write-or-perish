@@ -21,6 +21,11 @@ struct AccountDeletionInfo: Decodable, Equatable, Sendable {
     var linkExpiresIn: Int
     /// Why this account cannot be deleted (the last admin), if it can't.
     var refusal: Refusal?
+    /// The account signs in with X.
+    var xSignIn: Bool
+    /// This session holds that sign-in's token, which the deletion request
+    /// revokes at X (#464; Peter, 2026-10-09).
+    var xSignInRevocable: Bool
 
     enum CodingKeys: String, CodingKey {
         case refusal
@@ -28,15 +33,20 @@ struct AccountDeletionInfo: Decodable, Equatable, Sendable {
         case usernameReserveDays = "username_reserve_days"
         case confirmByEmail = "confirm_by_email"
         case linkExpiresIn = "link_expires_in"
+        case xSignIn = "x_sign_in"
+        case xSignInRevocable = "x_sign_in_revocable"
     }
 
     init(graceDays: Int = 30, usernameReserveDays: Int = 365, confirmByEmail: Bool = false,
-         linkExpiresIn: Int = 3600, refusal: Refusal? = nil) {
+         linkExpiresIn: Int = 3600, refusal: Refusal? = nil, xSignIn: Bool = false,
+         xSignInRevocable: Bool = false) {
         self.graceDays = graceDays
         self.usernameReserveDays = usernameReserveDays
         self.confirmByEmail = confirmByEmail
         self.linkExpiresIn = linkExpiresIn
         self.refusal = refusal
+        self.xSignIn = xSignIn
+        self.xSignInRevocable = xSignInRevocable
     }
 
     // The web's fallbacks (`info?.grace_days || 30`, …).
@@ -47,6 +57,8 @@ struct AccountDeletionInfo: Decodable, Equatable, Sendable {
         confirmByEmail = c.tolerant(.confirmByEmail, default: false)
         linkExpiresIn = c.tolerant(.linkExpiresIn, default: 3600)
         refusal = c.tolerant(.refusal)
+        xSignIn = c.tolerant(.xSignIn, default: false)
+        xSignInRevocable = c.tolerant(.xSignInRevocable, default: false)
     }
 }
 

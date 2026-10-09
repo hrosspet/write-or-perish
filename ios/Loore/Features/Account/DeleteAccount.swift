@@ -80,11 +80,28 @@ final class DeleteAccountModel {
             paragraphs.append("This replaces your request to delete all your writing on \(AccountDeletion.formatDate(writing)): "
                 + "everything is deleted on \(date) instead, and restoring your account cancels both.")
         }
-        if user?.dataDeletion?.xConnected == true {
-            paragraphs.append("Loore also forgets your X connection for bookmarks and removes its access on X. "
-                + "If X still lists Loore afterwards, remove it yourself: " + AccountDeletion.xRemoveAccessSteps)
+        if let xNote = Self.xNote(xConnected: user?.dataDeletion?.xConnected == true, info: info) {
+            paragraphs.append(xNote)
         }
         return paragraphs
+    }
+
+    /// The web's `deleteAccountXNote`: the bookmark connection (revoked by
+    /// the purge), the "Sign in with X" this session holds (revoked at the
+    /// request), or, for an account that signs in with X without that
+    /// token here, the steps only.
+    static func xNote(xConnected: Bool, info: AccountDeletionInfo?) -> String? {
+        if xConnected {
+            return "Loore also forgets your X connection for bookmarks and removes its access on X. "
+                + "If X still lists Loore afterwards, remove it yourself: " + AccountDeletion.xRemoveAccessSteps
+        }
+        guard let info, info.xSignIn else { return nil }
+        if info.xSignInRevocable {
+            return "Loore also removes the access to your X account that signing in with X gave it. "
+                + "If X still lists Loore afterwards, remove it yourself: " + AccountDeletion.xRemoveAccessSteps
+        }
+        return "You sign in with X, so X may list Loore as an app with access to your account. To remove it: "
+            + AccountDeletion.xRemoveAccessSteps
     }
 
     var confirmTitle: String {
