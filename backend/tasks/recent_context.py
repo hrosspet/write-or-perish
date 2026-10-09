@@ -364,8 +364,9 @@ def _lock_redis():
 
 @contextmanager
 def recent_context_batch_lock():
-    """Held by the check for its whole pass and by the collector from the
-    claim of an ended job until its outcomes are saved. Same pattern as
+    """Held by the check for its whole pass, by the collector from the
+    claim of an ended job until its outcomes are saved, and by the
+    collector while it abandons a job. Same pattern as
     profile_batch.batch_pipeline_lock: a non-blocking acquire with a TTL;
     yields False when another pass holds it (the caller skips this run),
     True when acquired or when Redis is unreachable (tests, local: run
@@ -694,20 +695,7 @@ def _collect_recent_context_batches():
             results = {}
         if still_pending:
             if now - job.submitted_at > BATCH_JOB_MAX_AGE:
-                logger.error(
-                    "Recent-context batch %s not ended after %s; "
-                    "abandoning (%d users keep their previous summary)",
-                    job.batch_id, BATCH_JOB_MAX_AGE, len(job.items))
-                # Status and outcomes in one commit: a check sees these
-                # users either in flight or failed (not billed), so the
-                # abandon needs no lock.
-                job.items = [dict(item, outcome="failed", billed=False)
-                             for item in job.items]
-                job.status = "abandoned"
-                job.collected_at = now
-                db.session.commit()
-                _report_unsaved(job.items)
-                abandoned += 1
+                abandoned += _abandon(job, now)
             continue
         ended.append((job, results))
 
@@ -727,13 +715,49 @@ def _collect_recent_context_batches():
     return {"collected": collected, "abandoned": abandoned}
 
 
+def _abandon(job, now):
+    """Close a job that never ended: status "abandoned", its items failed
+    (not billed). Returns 1 if this run abandoned it, 0 if not (lock
+    held elsewhere, or the job is no longer pending).
+
+    Under the collector's lock and from the job as it is now, not as this
+    run loaded it before the provider call: a user data purge (#268)
+    takes its user's item out of a pending job, or cancels a job that
+    held only theirs, under the same lock."""
+    with recent_context_batch_lock() as acquired:
+        if not acquired:
+            logger.info("Recent-context batch %s: abandon deferred, the "
+                        "lock is held; next run", job.batch_id)
+            return 0
+        db.session.refresh(job)
+        if job.status != "pending":
+            return 0
+        items = [dict(item, outcome="failed", billed=False)
+                 for item in job.items]
+        # Status and outcomes in one commit: a check sees these users
+        # either in flight or failed (not billed).
+        claimed = RecentContextBatchJob.query.filter_by(
+            id=job.id, status="pending").update(
+            {"status": "abandoned", "collected_at": now, "items": items},
+            synchronize_session=False)
+        db.session.commit()
+        if not claimed:
+            return 0
+    logger.error(
+        "Recent-context batch %s not ended after %s; abandoned (%d users "
+        "keep their previous summary)",
+        job.batch_id, BATCH_JOB_MAX_AGE, len(items))
+    _report_unsaved(items)
+    return 1
+
+
 def _claim_and_apply(job, results, now):
     """Claim an ended job and save its items. Returns 1 if this run
     claimed it, 0 if another collector run already had."""
     # Claim the job before saving anything, so a collector run
     # overlapping this one (the beat fires every minute) cannot save the
     # same summaries twice.
-    batch_id, items = job.batch_id, [dict(i) for i in job.items]
+    batch_id = job.batch_id
     claimed = RecentContextBatchJob.query.filter_by(
         id=job.id, status="pending").update(
         {"status": "collected", "collected_at": now},
@@ -741,6 +765,11 @@ def _claim_and_apply(job, results, now):
     db.session.commit()
     if not claimed:
         return 0
+    # The items as they are now, read after the claim (the commit expired
+    # the job): a user data purge (#268) takes its user's item out of the
+    # job under the same lock, possibly after this run loaded the job.
+    db.session.refresh(job)
+    items = [dict(i) for i in job.items]
     for item in items:
         item["outcome"], item["billed"] = _apply_item(
             item, results.get(item["custom_id"]), batch_id)

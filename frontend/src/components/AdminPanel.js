@@ -1,5 +1,6 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import XLookupConfirmDialog from "./XLookupConfirmDialog";
+import PurgeDataDialog from "./PurgeDataDialog";
 import ProfileBuildConfirmDialog from "./ProfileBuildConfirmDialog";
 import AdminRefusalDialog, { REFUSAL_TITLES } from "./AdminRefusalDialog";
 import { offeredModels } from "./ModelSelector";
@@ -530,6 +531,23 @@ const smallActionStyle = {
   borderRadius: "4px",
 };
 
+// The Users-row line for a user's latest data purge (#268).
+function purgeLabel(job) {
+  if (!job) return "";
+  switch (job.status) {
+    case "scheduled":
+      return `Data deletion requested by the user, due ${formatDate(job.scheduled_for)}`;
+    case "running":
+      return "Purging data…";
+    case "done":
+      return `Data purged ${formatDate(job.finished_at)} (${job.source})`;
+    case "failed":
+      return `Data purge failed: ${job.error || "unknown error"}`;
+    default:
+      return `Data purge: ${job.status}`;
+  }
+}
+
 function AdminPanel() {
   const [activeTab, setActiveTab] = useState("users");
   const [users, setUsers] = useState([]);
@@ -548,6 +566,10 @@ function AdminPanel() {
   // Build profile on a user held by the refusal backoff (#368): the
   // confirmation dialog's user, or null.
   const [buildAsk, setBuildAsk] = useState(null);
+  // "Purge data" (#268): the user row whose dry run / confirmation is
+  // open, or null.
+  const [purgeAsk, setPurgeAsk] = useState(null);
+  const closePurge = useCallback(() => setPurgeAsk(null), []);
   // A pre-fill / intentions / profile build the backend refused for this
   // account (#346): { code, message, username }. Shown as a dialog.
   const [refusal, setRefusal] = useState(null);
@@ -1125,6 +1147,7 @@ function AdminPanel() {
         }}
       />
       <AdminRefusalDialog refusal={refusal} onClose={() => setRefusal(null)} />
+      <PurgeDataDialog user={purgeAsk} onClose={closePurge} onStarted={() => fetchUsers()} />
 
       {error && <div style={{ color: "var(--error)" }}>{error}</div>}
       <table style={{ width: "100%", borderCollapse: "collapse", color: "var(--text-primary)" }}>
@@ -1430,7 +1453,20 @@ function AdminPanel() {
                   style={u.spam ? { color: "var(--error)" } : undefined}
                 >
                   {u.spam ? "Not spam" : "Spam"}
+                </button>{" "}
+                <button
+                  onClick={() => setPurgeAsk(u)}
+                  disabled={u.data_purge?.status === "running"}
+                  title="Delete all of this user's data now (dry run first). The account stays."
+                  style={{ color: "var(--error)" }}
+                >
+                  Purge data
                 </button>
+                {u.data_purge && (
+                  <div style={{ marginTop: "4px", fontSize: "0.85em", color: u.data_purge.status === "failed" ? "var(--error)" : "var(--text-secondary)" }}>
+                    {purgeLabel(u.data_purge)}
+                  </div>
+                )}
                 {(intentLabel(intent[u.id])) && (
                   <div style={{ marginTop: "4px", fontSize: "0.85em", color: intent[u.id]?.status === "failed" || (intent[u.id]?.error && !intent[u.id]?.status) ? "var(--error)" : "var(--text-secondary)" }}>
                     {intentLabel(intent[u.id])}
