@@ -161,6 +161,29 @@ def apply_voice_todo(self, llm_node_id: int, model_id: str, user_id: int,
                     f"Merge lock expired before release for user {user_id}")
 
 
+# Shown on the confirming reply when the proposal is no longer one the
+# user can apply (deleted in the meantime, say). The routes answer 404 with
+# the same words.
+PROPOSAL_NOT_FOUND_MESSAGE = "No pending todo changes found"
+
+
+def _fail_confirm_node(llm_node_id, user_id, confirm_node_id):
+    """A merge refused because its node isn't the user's own live todo
+    proposal: nothing is written on that node. The user's own confirming
+    reply (the voice apply_todo_changes turn), when there is a separate
+    one, shows the merge as failed."""
+    if not confirm_node_id or confirm_node_id == llm_node_id:
+        return
+    confirm_node = Node.query.get(confirm_node_id)
+    if confirm_node is None or not node_is_users(confirm_node, user_id):
+        return
+    update_tool_meta(confirm_node, "apply_todo_changes", {
+        "apply_status": "failed",
+        "apply_error": PROPOSAL_NOT_FOUND_MESSAGE,
+    })
+    db.session.commit()
+
+
 def build_merge_messages(merge_prompt, update_summary, current_todo):
     """The merge call's messages: system=merge_prompt followed by the
     reply format, assistant=the proposal, user=the current todo list.
@@ -332,29 +355,6 @@ def _log_merge_costs(user_id, model_id, run):
                          else None),
             **llm_cost_log_fields(model_id, response),
         ))
-
-
-# Shown on the confirming reply when the proposal is no longer one the
-# user can apply (deleted in the meantime, say). The routes answer 404 with
-# the same words.
-PROPOSAL_NOT_FOUND_MESSAGE = "No pending todo changes found"
-
-
-def _fail_confirm_node(llm_node_id, user_id, confirm_node_id):
-    """A merge refused because its node isn't the user's own live todo
-    proposal: nothing is written on that node. The user's own confirming
-    reply (the voice apply_todo_changes turn), when there is a separate
-    one, shows the merge as failed."""
-    if not confirm_node_id or confirm_node_id == llm_node_id:
-        return
-    confirm_node = Node.query.get(confirm_node_id)
-    if confirm_node is None or not node_is_users(confirm_node, user_id):
-        return
-    update_tool_meta(confirm_node, "apply_todo_changes", {
-        "apply_status": "failed",
-        "apply_error": PROPOSAL_NOT_FOUND_MESSAGE,
-    })
-    db.session.commit()
 
 
 def _update_apply_status(llm_node, status, error=None, todo_id=None,
