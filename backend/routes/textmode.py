@@ -4,6 +4,7 @@ from flask import Blueprint, jsonify, request, current_app
 from flask_login import login_required, current_user
 from backend.models import Node
 from backend.extensions import db
+from backend.utils.serialization import serialize_node_status
 from backend.utils.timefmt import iso_utc
 from backend.utils.prompts import get_user_prompt_record
 from backend.utils.placeholders import UserExportValidationError
@@ -23,9 +24,19 @@ textmode_bp = Blueprint("textmode", __name__)
 PROMPT_KEY = 'textmode'
 
 
-def _serialize_message(node):
-    """Serialize a node as a conversation message."""
+def _serialize_message(node, viewer_id):
+    """Serialize a node as a conversation message for *viewer_id*.
+
+    A deleted node, or one the viewer cannot access, comes back as the
+    thread view shows it (serialize_node_status): the deleted placeholder
+    or the inaccessible stub, with no content."""
     is_llm = node.node_type == "llm" or node.llm_model is not None
+    status = serialize_node_status(node, viewer_id)
+    if status is not None:
+        msg = dict(status, content=None)
+        if status.get("deleted"):
+            msg["role"] = "assistant" if is_llm else "user"
+        return msg
     msg = {
         "id": node.id,
         "role": "assistant" if is_llm else "user",
@@ -316,11 +327,15 @@ def get_conversation_from_node(node_id):
     node = Node.query.get_or_404(node_id)
     if node.human_owner_id != current_user.id:
         return jsonify({"error": "Unauthorized"}), 403
+    # A deleted node is not found, as in GET /api/nodes/<id>.
+    if node.deleted_at is not None:
+        return jsonify({"error": "Node not found"}), 404
 
     # Collect ancestor chain (including target node, excluding root).
     # Cycle-safe: stop if we revisit a node or exceed a sane hop limit.
     # The chain ends below the first ancestor the user cannot see, so the
-    # response never carries content that is not theirs to read.
+    # response never carries content that is not theirs to read. A deleted
+    # ancestor they could see before is a placeholder without content.
     chain = []
     current = node
     visited = set()
@@ -343,7 +358,8 @@ def get_conversation_from_node(node_id):
     root = chain[-1]
     # Reverse to chronological, skip root
     chain.reverse()
-    messages = [_serialize_message(n) for n in chain if n.id != root.id]
+    messages = [_serialize_message(n, current_user.id)
+                for n in chain if n.id != root.id]
 
     return jsonify({
         "conversation_id": root.id,
