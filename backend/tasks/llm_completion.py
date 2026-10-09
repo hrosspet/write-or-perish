@@ -1027,14 +1027,20 @@ def _turn_still_readable(node_ids):
     return all(ai_usage in AI_ALLOWED for (ai_usage,) in rows)
 
 
-def _get_previous_source_mode(node_chain):
+def _get_previous_source_mode(node_chain, user_id=None):
     """Find the source_mode of the most recent LLM node in the chain.
+
+    With *user_id*, only that user's own replies count (the ones they
+    asked for): the mode of another user's reply is theirs.
 
     Returns None if no previous LLM node has a stored source_mode
     (i.e. this is the first agentic turn in the thread).
     """
     for node in reversed(node_chain):
         if not node.tool_calls_meta:
+            continue
+        if (user_id is not None
+                and (node.human_owner_id or node.user_id) != user_id):
             continue
         try:
             meta = json.loads(node.tool_calls_meta)
@@ -1182,12 +1188,18 @@ def _note_artifact_content(licence, artifact):
     licence.note_usage(artifact.ai_usage, f"the {artifact.kind} artifact")
 
 
-def _retrieval_injection_text(tr, with_labels=False, licence=None):
+def _retrieval_injection_text(tr, user_id, with_labels=False, licence=None):
     """Build the context-injection string for a successful retrieval tool
     result (read_artifact / read_todo / semantic_search), re-resolving the
     content fresh from the source row — content is never stored in
     tool_calls_meta. Re-checks ai_usage so a mid-session opt-out is honored.
     Returns None if nothing is (still) available.
+
+    Everything resolves as *user_id*, the user the reply is for: an
+    artifact, a todo list or a saved reference only when it is theirs, an
+    entry (read in full or a search match) only when they may open it.
+    Callers pass only the user's own results (_scan_proposal_statuses);
+    this keeps any other path from handing a model someone else's data.
 
     Everything returned here enters the payload after the chain decided
     the API key, so a pull reports to *licence* (a PayloadLicence, #325):
@@ -1204,7 +1216,8 @@ def _retrieval_injection_text(tr, with_labels=False, licence=None):
     name = tr.get("name")
     if name == "read_artifact":
         artifact = UserArtifact.query.get(tr.get("artifact_id"))
-        if artifact is None or artifact.ai_usage not in AI_ALLOWED:
+        if (artifact is None or artifact.user_id != user_id
+                or artifact.ai_usage not in AI_ALLOWED):
             return None
         if licence is not None:
             _note_artifact_content(licence, artifact)
@@ -1212,27 +1225,28 @@ def _retrieval_injection_text(tr, with_labels=False, licence=None):
                 f"requested:\n{artifact.get_content()}]")
     if name == "read_todo":
         todo = UserTodo.query.get(tr.get("todo_id"))
-        if todo is None or todo.ai_usage not in AI_ALLOWED:
+        if (todo is None or todo.user_id != user_id
+                or todo.ai_usage not in AI_ALLOWED):
             return None
         if licence is not None:
             licence.note_usage(todo.ai_usage, "the todo list")
         return f"[Your current todo list:\n{todo.get_content()}]"
     if name == "read_full":
         # Re-resolve via the quote machinery (permission + ai_usage checks
-        # built in; depth 1 — nested {quote:ID} stay as placeholders).
+        # built in; depth 1 — nested {quote:ID} stay as placeholders), as
+        # the user the reply is for, not as the user the entry records.
         kind, ref_id = tr.get("kind"), tr.get("ref_id")
-        reader_id = tr.get("user_id")
-        if ref_id is None or reader_id is None:
+        if ref_id is None:
             return None
         if kind == "external":
             q_text, resolved = resolve_ext_quotes(
-                "{quote_ext:%d}" % ref_id, reader_id, for_llm=True)
+                "{quote_ext:%d}" % ref_id, user_id, for_llm=True)
             if licence is not None:
                 licence.note_external(resolved, what="read reference")
         else:
-            reader = User.query.get(reader_id)
+            reader = User.query.get(user_id)
             q_text, resolved = resolve_quotes(
-                "{quote:%d}" % ref_id, reader_id, for_llm=True,
+                "{quote:%d}" % ref_id, user_id, for_llm=True,
                 max_depth=QUOTE_PULL_DEPTH,
                 tz_name=reader.timezone if reader else None)
             if licence is not None:
@@ -1247,15 +1261,17 @@ def _retrieval_injection_text(tr, with_labels=False, licence=None):
                 f"([{tr.get('ref', '?')}]):\n{q_text}]")
     if name == "semantic_search":
         # Re-resolve each matched node from its id (content never stored in
-        # meta); re-check ai_usage + soft-delete at injection time. These are
-        # PREVIEWS for triage — to read one in full, the model quotes it
-        # (resolved by the loop's quote step).
+        # meta); re-check ai_usage, soft-delete and the user's access at
+        # injection time. These are PREVIEWS for triage — to read one in
+        # full, the model quotes it (resolved by the loop's quote step).
+        from backend.utils.privacy import can_user_access_node
         matches = tr.get("matches") or []
         lines = []
         for m in matches:
             node = Node.query.get(m.get("node_id"))
-            if (node is None or node.deleted_at is not None
-                    or node.ai_usage not in AI_ALLOWED):
+            # can_user_access_node also refuses a soft-deleted node.
+            if (node is None or node.ai_usage not in AI_ALLOWED
+                    or not can_user_access_node(node, user_id)):
                 continue
             text = (node.get_content() or "").strip()
             if not text:
@@ -1279,7 +1295,7 @@ def _retrieval_injection_text(tr, with_labels=False, licence=None):
         # (see ExternalItem.read_at), never by surfacing.
         for m in (tr.get("ext_matches") or []):
             item = ExternalItem.query.get(m.get("item_id"))
-            if item is None:
+            if item is None or item.user_id != user_id:
                 continue
             text = (item.get_content() or "").strip()
             if not text:
@@ -1526,7 +1542,7 @@ def _reference_marks_note(item_ids, user_id):
     return note + "]"
 
 
-def _scan_proposal_statuses(node_chain, licence=None):
+def _scan_proposal_statuses(node_chain, user_id, licence=None):
     """Walk all nodes and collect proposal/tool status notes to inject.
 
     Refreshes each node from the DB (the merge task may have updated
@@ -1534,11 +1550,17 @@ def _scan_proposal_statuses(node_chain, licence=None):
     where nodes_to_mark is a list of (node, tool_name) tuples whose
     status_reported flag should be set after a successful LLM call.
     A retrieval delivered here reports its pull to *licence* (#325).
+
+    Only *user_id*'s own nodes take part, those they wrote or (an AI
+    reply) asked for: the results and outcomes on someone else's node in
+    the chain (their AI reply in a public thread) are theirs, so they are
+    neither delivered into this reply nor marked reported by it.
     """
     notes = []
     to_mark = []
     for node in node_chain:
-        if not node.tool_calls_meta:
+        if (not node.tool_calls_meta
+                or (node.human_owner_id or node.user_id) != user_id):
             continue
         # Refresh from DB to pick up async merge updates
         db.session.refresh(node)
@@ -1596,7 +1618,8 @@ def _scan_proposal_statuses(node_chain, licence=None):
                 if entry.get("status") == "success":
                     # Re-resolved fresh from the encrypted row — content is
                     # never stored in tool_calls_meta.
-                    text = _retrieval_injection_text(entry, licence=licence)
+                    text = _retrieval_injection_text(
+                        entry, user_id, licence=licence)
                     if text is not None:
                         notes.append(text)
                 else:
@@ -2144,8 +2167,9 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
                     result["status"] = "success"
                     result["kind"], result["ref_id"] = target
                     result["ref"] = ref
-                    # Injection re-resolves content with permission checks,
-                    # which need the requesting user (also cross-turn).
+                    # Who asked, for the record. Injection re-resolves the
+                    # content with permission checks as the user of the
+                    # reply that delivers it (_retrieval_injection_text).
                     result["user_id"] = user_id
                     # Display metadata for the Actions-taken chip: the user
                     # never sees search labels, so the chip links to the
@@ -3683,7 +3707,8 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             proposal_to_mark = []
             if is_agentic:
                 proposal_notes, proposal_to_mark = (
-                    _scan_proposal_statuses(node_chain, licence=licence)
+                    _scan_proposal_statuses(
+                        node_chain, user_id, licence=licence)
                 )
 
             model_config = flask_app.config["SUPPORTED_MODELS"][model_id]
@@ -3948,7 +3973,14 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                                             f"\n\n[share-proposal:"
                                             f"{node.id}]"
                                         )
-                                    elif ename == "update_artifact":
+                                    elif (ename == "update_artifact"
+                                          and (node.human_owner_id
+                                               or node.user_id) == user_id):
+                                        # The user's own replies only: on
+                                        # another user's reply the write
+                                        # and its artifact are theirs. The
+                                        # proposal tags above stay, as the
+                                        # proposals are in the reply's text.
                                         # Durable record of the outcome.
                                         # The within-turn result round is
                                         # injected only into that turn's
@@ -4173,7 +4205,8 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 # Inject mode indicator only when the mode changes
                 # (or on the first turn to establish the initial mode).
                 if is_agentic and source_mode:
-                    prev_mode = _get_previous_source_mode(node_chain)
+                    prev_mode = _get_previous_source_mode(
+                        node_chain, user_id)
                     if prev_mode != source_mode:
                         mode_labels = {
                             'voice': (
@@ -4695,7 +4728,8 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                                 injection_strings.append(echo)
                         elif tr.get("status") == "success":
                             text = _retrieval_injection_text(
-                                tr, with_labels=True, licence=licence)
+                                tr, user_id, with_labels=True,
+                                licence=licence)
                             if text is not None:
                                 injection_strings.append(text)
                                 a_type, a_id = _retrieval_pin(tr)
