@@ -103,6 +103,8 @@ struct RouteDestination: View {
             WelcomeView()
         case .confirmEmail(let token):
             ConfirmEmailView(token: token)
+        case .confirmAccountDeletion(let token):
+            ConfirmAccountDeletionView(token: token)
         default:
             PlaceholderScreen(route: route)
         }
