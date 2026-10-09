@@ -126,6 +126,9 @@ def start_conversation():
     attach_context_artifacts(
         system_node.id, current_user.id, prompt_record=prompt_record,
     )
+    # Started from the Glean card (#435): every turn offers Glean.
+    from backend.utils.glean import stamp_glean_entry
+    stamp_glean_entry(system_node, current_user, data.get("entry"))
 
     # 2. User message node
     from backend.utils.tokens import approximate_token_count

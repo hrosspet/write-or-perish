@@ -312,16 +312,26 @@ def parse_ca_tweets_days(params, *, placeholder=None):
 
 
 def ca_tweets_allowed(user):
-    """Who may run {ca_tweets}: admins, while it is a PoC. A day of the
-    archive is a ~$0.02–$0.50 batch request per run with no plan gate
-    behind it, so it must not be reachable from any account that can
-    type the placeholder."""
-    return bool(user is not None and getattr(user, "is_admin", False))
+    """Who may run {ca_tweets} — the Glean rollout gate (#435): admins,
+    every user while GLEAN_FOR_ALL is on, else the users listed in
+    GLEAN_USER_IDS. A day of the archive is a paid request of a few cents
+    per run (live gleans cost twice the batch price), so it must not be
+    reachable from any account outside the gate. The user's own Glean
+    switch (utils/glean.glean_enabled) sits on top of this; this is the
+    one check for the placeholder and the completion task."""
+    if user is None:
+        return False
+    if getattr(user, "is_admin", False):
+        return True
+    from flask import current_app
+    if current_app.config.get("GLEAN_FOR_ALL", False):
+        return True
+    return getattr(user, "id", None) in (
+        current_app.config.get("GLEAN_USER_IDS") or set())
 
 
 def ca_tweets_denied_message():
-    return ("{ca_tweets} (the Community Archive feed) is not available on "
-            "your account yet.")
+    return "Glean is not available on your account yet."
 
 
 def check_ca_tweets_access(text, user, *, log=None):

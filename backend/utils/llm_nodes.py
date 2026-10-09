@@ -253,20 +253,43 @@ def resolve_chat_model(parent_node, user, chain=None):
             "default")
 
 
-def resolve_read_model(anchor_node, chain=None):
+def glean_provider(anchor_node, user, chain=None):
+    """The provider a glean under *anchor_node* for *user* must stay on:
+    the provider of the model a chat reply there would run on
+    (resolve_chat_model: the thread's last chat model, else the user's
+    preference, else the default). A user's provider is never switched,
+    not even for a read (Peter, 2026-10-02 and 2026-10-09)."""
+    from backend.utils.glean import model_provider
+    return model_provider(resolve_chat_model(anchor_node, user, chain=chain)[0])
+
+
+def resolve_read_model(anchor_node, chain=None, user=None):
     """The model for a read under *anchor_node* (None for a fresh thread)
     when the request named none: the closest earlier read's model while it
-    is still a read model ("predecessor"), else READ_DEFAULT_MODEL
-    ("default"). Chat replies in between are skipped, so a conversation
-    held on Opus never carries into the next read. There is no per-user
-    read preference yet (#355)."""
+    is still a read model ("predecessor"), else the default. Chat replies
+    in between are skipped, so a conversation held on Opus never carries
+    into the next read. There is no per-user read preference (#355).
+
+    With *user* (every glean, #435) the read stays on the provider of the
+    user's chat model (glean_provider): an earlier read only counts when
+    it ran on that provider, and the default is that provider's glean
+    model (GLEAN_MODEL_ANTHROPIC / GLEAN_MODEL_OPENAI, "provider_default").
+    Raises GleanModelUnavailable when the provider has none. Without a
+    user, READ_DEFAULT_MODEL ("default")."""
+    from backend.utils.glean import model_provider
     chain = chain or _Chain(anchor_node)
+    provider = (glean_provider(anchor_node, user, chain=chain)
+                if user is not None else None)
     for node in chain.llm_replies():
         if node.id not in chain.reads:
             continue
-        if is_read_model(node.llm_model):
+        if is_read_model(node.llm_model) and (
+                provider is None or model_provider(node.llm_model) == provider):
             return node.llm_model, "predecessor"
         break
+    if provider is not None:
+        from backend.utils.glean import glean_model_for_provider
+        return glean_model_for_provider(provider), "provider_default"
     return current_app.config["READ_DEFAULT_MODEL"], "default"
 
 
@@ -405,17 +428,52 @@ def voice_turn_refusal(user, parent_node=None, ai_usage=None):
     return None
 
 
+def _read_turn_model(parent, owner, model_id, chain):
+    """The model a read turn under *parent* runs on: *model_id* while it
+    is a read model that keeps the owner on their provider (an admin may
+    name any read model), else resolve_read_model's choice for the owner
+    — never a model of another provider (#435)."""
+    from backend.utils.glean import model_provider, read_model_fits
+    provider = glean_provider(parent, owner, chain=chain)
+    if is_read_model(model_id) and read_model_fits(owner, model_id, provider):
+        return model_id
+    new_model_id = resolve_read_model(parent, chain=chain, user=owner)[0]
+    current_app.logger.info(
+        "Reply under node %s is a read: model %s -> %s (provider %s)",
+        parent.id, model_id, new_model_id, model_provider(new_model_id))
+    return new_model_id
+
+
+def _with_live_marker(meta, live):
+    """*meta* as a list, with READ_LIVE_MARKER added when *live* (a glean:
+    always a live call, #435)."""
+    from backend.utils.glean import READ_LIVE_MARKER
+    meta = list(meta or [])
+    if live and not any(isinstance(m, dict) and m.get("name") == READ_LIVE_MARKER
+                        for m in meta):
+        meta.append({"name": READ_LIVE_MARKER})
+    return meta
+
+
 def create_llm_placeholder(parent_node_id, model_id, human_owner_id,
                            privacy_level="private", ai_usage="chat",
                            placeholder_text="[LLM response generation pending...]",
                            enqueue=True, source_mode=None, meta=None,
-                           client=None):
+                           client=None, read_live=True):
     """Create an LLM placeholder node, optionally enqueue generation task.
 
     Returns (llm_node, task_id) -- task_id is None if enqueue=False.
     *meta* seeds the node's tool_calls_meta (a list of entries) in the
     same commit that creates it, so a marker the task reads (the read
     thread's "_read", routes/read.py) is there before the task can start.
+
+    A reply that is a read (a glean, #435) is a live call: it gets the
+    READ_LIVE_MARKER, which the task reads, unless *read_live* is False
+    (the admin's /read/start experiments, which go through the Batch
+    API). It runs on a read model of the owner's provider: a model of
+    another provider is replaced by the provider's own (an admin's
+    explicit choice excepted, utils/glean.read_model_fits), never the
+    other way round.
 
     *client* ('ios' / 'web', utils/client_platform) is the app the user
     is talking from. It defaults to the current request's; a caller with
@@ -504,13 +562,9 @@ def create_llm_placeholder(parent_node_id, model_id, human_owner_id,
     # routes that write the user's entry first ask read_only_model_refusal
     # before writing.
     turn = reply_read_turn(parent, meta, parent_content, chain=chain)
-    if turn in ("read", "read_again"):
-        if not is_read_model(model_id):
-            new_model_id = resolve_read_model(parent, chain=chain)[0]
-            current_app.logger.info(
-                "Reply under node %s is a read: model %s -> %s",
-                parent.id, model_id, new_model_id)
-            model_id = new_model_id
+    is_read_turn = turn in ("read", "read_again")
+    if is_read_turn:
+        model_id = _read_turn_model(parent, owner, model_id, chain)
     elif is_active_model(model_id) and not is_chat_model(model_id):
         raise ReadOnlyModelRefused(model_id)
     elif not is_chat_model(model_id):
@@ -549,7 +603,7 @@ def create_llm_placeholder(parent_node_id, model_id, human_owner_id,
         token_count=approximate_token_count(placeholder_text),
     )
     llm_node.set_content(placeholder_text)
-    meta = list(meta or [])
+    meta = _with_live_marker(meta, is_read_turn and read_live)
     client = client or request_client()
     if client:
         meta.append({"name": CLIENT_MARKER, "client": client})

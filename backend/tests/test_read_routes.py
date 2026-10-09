@@ -115,6 +115,9 @@ def _login(client, user_id):
 
 
 def _make_user(username, **kwargs):
+    # Glean is on by the user's own choice (#435): these tests are about
+    # the read itself, not the switch (test_glean.py covers that).
+    kwargs.setdefault("glean_enabled", True)
     u = User(username=username, approved=True, plan="alpha", **kwargs)
     _db.session.add(u)
     _db.session.flush()
@@ -255,7 +258,9 @@ class TestReadFromNode:
         assert prompt_node.privacy_level == entry.privacy_level
         assert llm_node.parent_id == prompt_node.id
 
-    def test_auto_generate_off_attaches_only_the_prompt(self, app):
+    def test_a_glean_always_creates_the_reply(self, app):
+        """#435: the Glean button is the request, so auto_generate does
+        not apply: the prompt and the reply under it, always."""
         client = app.test_client()
         alice = _make_user("alice", is_admin=True)
         entry = _make_node(alice, content="entry")
@@ -267,11 +272,11 @@ class TestReadFromNode:
 
         assert resp.status_code == 202, resp.get_json()
         data = resp.get_json()
-        assert "llm_node_id" not in data
         prompt_node = Node.query.get(data["prompt_node_id"])
         assert prompt_node.parent_id == entry.id
         assert prompt_node.prompt_key == "read_thread"
-        assert Node.query.count() == 2
+        assert Node.query.get(data["llm_node_id"]).parent_id == prompt_node.id
+        assert Node.query.filter_by(node_type="user").count() == 2
 
     def test_inside_a_read_thread_it_reads_further_without_a_second_prompt(self, app):
         """The thread has its read prompt: the button makes a read turn
@@ -295,7 +300,9 @@ class TestReadFromNode:
         llm_node = Node.query.get(data["llm_node_id"])
         assert llm_node.parent_id == comment.id
         assert llm_node.node_type == "llm"
-        assert json.loads(llm_node.tool_calls_meta) == [{"name": "_read"}]
+        # A glean is always live (#435): the "_live" marker.
+        assert json.loads(llm_node.tool_calls_meta) == [
+            {"name": "_read"}, {"name": "_live"}]
         assert Node.query.count() == before + 1
         assert data["task_id"] == "fake-task-id"
 
@@ -731,6 +738,8 @@ MODELS_355 = {
                    "read": True},
     "gpt-6-sol": {"provider": "openai", "display_name": "GPT-6 Sol",
                   "read": True},
+    "claude-haiku-5.5": {"provider": "anthropic", "display_name": "Haiku 5.5",
+                         "read": True, "chat": False},
 }
 
 
@@ -739,6 +748,9 @@ def app355(app):
     app.config["SUPPORTED_MODELS"] = MODELS_355
     app.config["DEFAULT_LLM_MODEL"] = "claude-opus-4.6"
     app.config["READ_DEFAULT_MODEL"] = "gpt-6-luna"
+    # A glean stays on the provider of the user's chat model (#435).
+    app.config["GLEAN_MODEL_ANTHROPIC"] = "claude-haiku-5.5"
+    app.config["GLEAN_MODEL_OPENAI"] = "gpt-6-luna"
     return app
 
 
@@ -796,25 +808,40 @@ class TestModelChoice:
     def test_read_further_without_a_model_takes_the_threads_read_model(self, app355):
         client = app355.test_client()
         alice = _make_user("alice", is_admin=True)
-        t = _read_thread(alice)
+        # The conversation runs on OpenAI, like the thread's last read.
+        t = _read_thread(alice, chat_model="gpt-6-luna")
         _login(client, alice.id)
         resp = client.post(f"/api/read/from-node/{t['note2'].id}", json={})
         assert resp.status_code == 202, resp.get_json()
         assert Node.query.get(resp.get_json()["llm_node_id"]).llm_model == "gpt-6-sol"
+
+    def test_read_further_never_follows_a_read_of_another_provider(self, app355):
+        """#435: the conversation runs on Anthropic, so the next glean does
+        too, whatever model the thread's last read ran on."""
+        client = app355.test_client()
+        alice = _make_user("alice", is_admin=True)
+        t = _read_thread(alice)  # chat on Opus 4.6, the read on GPT-6 Sol
+        _login(client, alice.id)
+        resp = client.post(f"/api/read/from-node/{t['note2'].id}", json={})
+        assert resp.status_code == 202, resp.get_json()
+        assert (Node.query.get(resp.get_json()["llm_node_id"]).llm_model
+                == "claude-haiku-5.5")
 
     def test_placeholder_under_a_read_reply_runs_on_a_read_model(self, app355):
         from backend.utils.llm_nodes import create_llm_placeholder
         alice = _make_user("alice", is_admin=True)
         t = _read_thread(alice)
         _render(t["read"])  # a finished read has its render pinned
-        # Directly under the read reply a reply is another read.
+        # Directly under the read reply a reply is another read, on a read
+        # model of the user's provider (Anthropic: the chat default), not
+        # the GPT-6 Sol of the read before it (#435).
         node, _ = create_llm_placeholder(t["read"].id, "claude-opus-4.6", alice.id)
-        assert node.llm_model == "gpt-6-sol"
+        assert node.llm_model == "claude-haiku-5.5"
         # Under the prompt (below a typed note) it is the first read.
         pnote = _make_node(alice, parent_id=t["prompt"].id, content="first")
         _db.session.commit()
         node, _ = create_llm_placeholder(pnote.id, "claude-opus-4.6", alice.id)
-        assert node.llm_model == "gpt-6-luna"
+        assert node.llm_model == "claude-haiku-5.5"
         # A note after the read reply makes it a chat: the model stays.
         node, _ = create_llm_placeholder(t["note"].id, "claude-opus-4.6", alice.id)
         assert node.llm_model == "claude-opus-4.6"
@@ -850,7 +877,8 @@ class TestPlaceholderAgreesWithTheTask:
         _db.session.commit()
         assert reply_read_turn(note) == "read"
         node, _ = create_llm_placeholder(note.id, "claude-opus-4.6", alice.id)
-        assert node.llm_model == "gpt-6-luna"
+        # A read, on the read model of the user's provider (#435).
+        assert node.llm_model == "claude-haiku-5.5"
 
     def test_a_reply_on_a_failed_read_further_is_a_chat(self, app355):
         from backend.utils.llm_nodes import create_llm_placeholder, reply_read_turn
@@ -899,10 +927,13 @@ class TestModelEndpoints:
         alice = _make_user("alice", is_admin=True, preferred_model="claude-opus-5")
         t = _read_thread(alice)
         _login(client, alice.id)
+        # The user's replies run on Anthropic (the chat default, Opus 4.6):
+        # a glean does too (#435), not the thread's GPT-6 Sol read.
         read = client.get(f"/api/nodes/{t['note2'].id}/suggested-model?purpose=read").get_json()
-        assert read == {"suggested_model": "gpt-6-sol", "source": "predecessor"}
+        assert read == {"suggested_model": "claude-haiku-5.5",
+                        "source": "provider_default"}
         fresh = client.get("/api/nodes/default-model?purpose=read").get_json()
-        assert fresh["suggested_model"] == "gpt-6-luna"
+        assert fresh["suggested_model"] == "claude-haiku-5.5"
         chat = client.get("/api/nodes/default-model").get_json()
         assert chat == {"suggested_model": "claude-opus-4.6", "source": "default"}
         assert client.get("/api/nodes/default-model?purpose=x").status_code == 400
@@ -1205,6 +1236,8 @@ def app_ro(app):
     app.config["SUPPORTED_MODELS"] = MODELS_RO
     app.config["DEFAULT_LLM_MODEL"] = "claude-opus-4.6"
     app.config["READ_DEFAULT_MODEL"] = "gpt-6-luna"
+    app.config["GLEAN_MODEL_ANTHROPIC"] = "claude-sonnet-5.5"
+    app.config["GLEAN_MODEL_OPENAI"] = "gpt-6-luna"
     from backend.routes.admin import admin_bp
     from backend.routes.dashboard import dashboard_bp
     app.register_blueprint(admin_bp, url_prefix="/api/admin")
@@ -1245,10 +1278,11 @@ class TestReadOnlyModels:
         assert resp.status_code == 202, resp.get_json()
         assert Node.query.get(resp.get_json()["llm_node_id"]).llm_model == "claude-sonnet-5.5"
 
-        t = _read_thread(alice, read_model="gpt-6.1-sol")
+        t = _read_thread(alice, read_model="gpt-6.1-sol", chat_model="gpt-6-luna")
         resp = client.post(f"/api/read/from-node/{t['note2'].id}", json={})
         assert resp.status_code == 202, resp.get_json()
-        # The thread's last read was on GPT-6.1 Sol: the next one is too.
+        # The thread's last read was on GPT-6.1 Sol, of the provider the
+        # conversation runs on: the next one is too.
         assert Node.query.get(resp.get_json()["llm_node_id"]).llm_model == "gpt-6.1-sol"
 
     def test_a_read_turn_keeps_the_read_only_model(self, app_ro):
@@ -1398,3 +1432,394 @@ class TestReadOnlyModels:
             assert (cfg["read"], cfg["chat"]) == (True, False), key
             assert (cfg["api_model"], cfg["provider"]) == (api_model, provider)
             assert not cfg.get("deprecated") and not cfg.get("featured")
+
+
+# ── Glean (#435, Peter 2026-10-09) ───────────────────────────────────────
+
+MODELS_GLEAN = {
+    "claude-opus-4.6": {"provider": "anthropic", "display_name": "Opus 4.6"},
+    "gpt-6-sol": {"provider": "openai", "display_name": "GPT-6 Sol"},
+    "gpt-6-luna": {"provider": "openai", "display_name": "GPT-6 Luna",
+                   "read": True},
+    "claude-haiku-5.5": {"provider": "anthropic", "display_name": "Haiku 5.5",
+                         "read": True, "chat": False},
+}
+
+
+@pytest.fixture
+def app_glean(app):
+    app.config["SUPPORTED_MODELS"] = MODELS_GLEAN
+    app.config["DEFAULT_LLM_MODEL"] = "claude-opus-4.6"
+    app.config["READ_DEFAULT_MODEL"] = "gpt-6-luna"
+    app.config["GLEAN_MODEL_ANTHROPIC"] = "claude-haiku-5.5"
+    app.config["GLEAN_MODEL_OPENAI"] = "gpt-6-luna"
+    app.config["GLEAN_FOR_ALL"] = False
+    app.config["GLEAN_USER_IDS"] = set()
+    from backend.routes.dashboard import dashboard_bp
+    from backend.routes.textmode import textmode_bp
+    from backend.routes.voice import voice_bp
+    app.register_blueprint(dashboard_bp, url_prefix="/api/dashboard")
+    app.register_blueprint(textmode_bp, url_prefix="/api/textmode")
+    app.register_blueprint(voice_bp, url_prefix="/api/voice")
+    return app
+
+
+def _glean_user(app, username="ana", **kwargs):
+    """A non-admin on the Glean list, with no explicit choice unless one
+    is given."""
+    kwargs.setdefault("glean_enabled", None)
+    u = _make_user(username, **kwargs)
+    app.config["GLEAN_USER_IDS"] = set(app.config["GLEAN_USER_IDS"]) | {u.id}
+    _db.session.commit()
+    return u
+
+
+def _add_x_account(user):
+    from backend.models import ExternalAccount
+    _db.session.add(ExternalAccount(user_id=user.id, provider="twitter"))
+    _db.session.commit()
+
+
+def _add_saved_tweet(user, source="community_archive"):
+    from backend.models import ExternalItem
+    item = ExternalItem(user_id=user.id, source=source, external_id="1")
+    item.set_content("a tweet")
+    _db.session.add(item)
+    _db.session.commit()
+
+
+def _add_imported_tweet(user):
+    n = _make_node(user, content="my old tweet")
+    n.origin = "twitter"
+    _db.session.commit()
+
+
+class TestGleanSwitch:
+    """Who gleans: the rollout gate, then the user's own switch. Without a
+    choice it is on with Community Archive or X data, off without."""
+
+    def test_off_without_x_or_archive_data(self, app_glean):
+        from backend.utils.glean import glean_enabled
+        ana = _glean_user(app_glean)
+        assert glean_enabled(ana) is False
+
+    @pytest.mark.parametrize("give", [
+        lambda u: setattr(u, "twitter_id", "123"),          # X sign-up / Connect X
+        lambda u: setattr(u, "prefilled_handle", "ana"),    # Community Archive prefill
+        _add_x_account,                                     # X connected for bookmarks
+        _add_imported_tweet,                                # an uploaded X archive
+        _add_saved_tweet,                                   # saved archive tweets
+        lambda u: _add_saved_tweet(u, "twitter_bookmark"),  # X bookmarks
+    ])
+    def test_on_by_default_with_x_or_archive_data(self, app_glean, give):
+        from backend.utils.glean import glean_enabled
+        ana = _glean_user(app_glean)
+        give(ana)
+        _db.session.commit()
+        assert glean_enabled(ana) is True
+
+    def test_connecting_x_later_turns_it_on(self, app_glean):
+        from backend.utils.glean import glean_enabled
+        ana = _glean_user(app_glean)
+        assert glean_enabled(ana) is False
+        _add_x_account(ana)
+        assert glean_enabled(ana) is True
+
+    def test_a_glean_pick_is_not_the_users_own_data(self, app_glean):
+        from backend.utils.glean import glean_enabled
+        ana = _glean_user(app_glean)
+        _add_saved_tweet(ana, "read_pick")
+        assert glean_enabled(ana) is False
+
+    def test_the_explicit_choice_wins(self, app_glean):
+        from backend.utils.glean import glean_enabled
+        off = _glean_user(app_glean, "off", twitter_id="123", glean_enabled=False)
+        on = _glean_user(app_glean, "on", glean_enabled=True)
+        assert glean_enabled(off) is False
+        assert glean_enabled(on) is True
+
+    def test_outside_the_gate_never(self, app_glean):
+        from backend.utils.glean import glean_enabled
+        bob = _make_user("bob", glean_enabled=True, twitter_id="9")
+        _db.session.commit()
+        assert glean_enabled(bob) is False
+        app_glean.config["GLEAN_FOR_ALL"] = True
+        assert glean_enabled(bob) is True
+
+    def test_the_payload_and_the_account_switch(self, app_glean):
+        client = app_glean.test_client()
+        ana = _glean_user(app_glean, twitter_id="123")
+        _login(client, ana.id)
+        user = client.get("/api/dashboard/").get_json()["user"]
+        assert (user["glean_available"], user["glean_enabled"]) == (True, True)
+
+        resp = client.put("/api/dashboard/user", json={"glean_enabled": False})
+        assert resp.status_code == 200, resp.get_json()
+        assert resp.get_json()["user"]["glean_enabled"] is False
+        assert User.query.get(ana.id).glean_enabled is False
+        # With the switch off the glean route refuses too.
+        entry = _make_node(ana, content="a reflection")
+        _db.session.commit()
+        resp = client.post(f"/api/read/from-node/{entry.id}", json={})
+        assert resp.status_code == 403
+        assert "Account settings" in resp.get_json()["error"]
+
+    def test_outside_the_gate_the_payload_hides_it(self, app_glean):
+        client = app_glean.test_client()
+        bob = _make_user("bob", glean_enabled=True)
+        _db.session.commit()
+        _login(client, bob.id)
+        user = client.get("/api/dashboard/").get_json()["user"]
+        assert (user["glean_available"], user["glean_enabled"]) == (False, False)
+
+
+class TestGleanCardThreads:
+    """A thread started from the Glean card carries started_from on its
+    root; every node of it reports glean_thread."""
+
+    def test_text_mode_from_the_glean_card(self, app_glean):
+        client = app_glean.test_client()
+        ana = _glean_user(app_glean, glean_enabled=True)
+        _login(client, ana.id)
+        resp = client.post("/api/textmode/start", json={
+            "content": "On my mind.", "entry": "glean", "ai_usage": "chat"})
+        assert resp.status_code == 202, resp.get_json()
+        data = resp.get_json()
+        assert Node.query.get(data["conversation_id"]).started_from == "glean"
+        for node_id in (data["user_node_id"], data["llm_node_id"]):
+            assert client.get(f"/api/nodes/{node_id}").get_json()["glean_thread"] is True
+
+    def test_text_mode_from_the_reflect_card(self, app_glean):
+        client = app_glean.test_client()
+        ana = _glean_user(app_glean, glean_enabled=True)
+        _login(client, ana.id)
+        data = client.post("/api/textmode/start", json={
+            "content": "On my mind.", "ai_usage": "chat"}).get_json()
+        assert Node.query.get(data["conversation_id"]).started_from is None
+        assert client.get(f"/api/nodes/{data['user_node_id']}").get_json()["glean_thread"] is False
+
+    def test_no_mark_for_a_user_without_glean(self, app_glean):
+        client = app_glean.test_client()
+        ana = _glean_user(app_glean, glean_enabled=False)
+        _login(client, ana.id)
+        data = client.post("/api/textmode/start", json={
+            "content": "On my mind.", "entry": "glean", "ai_usage": "chat"}).get_json()
+        assert Node.query.get(data["conversation_id"]).started_from is None
+
+    def test_voice_from_the_glean_card(self, app_glean):
+        client = app_glean.test_client()
+        ana = _glean_user(app_glean, glean_enabled=True)
+        _login(client, ana.id)
+        resp = client.post("/api/voice/", json={"content": "Spoken.", "entry": "glean"})
+        assert resp.status_code == 202, resp.get_json()
+        assert Node.query.get(resp.get_json()["parent_id"]).started_from == "glean"
+
+    def test_the_finalize_task_marks_a_fresh_voice_thread(self, app_glean):
+        from types import SimpleNamespace
+        from backend.tasks.streaming_transcription import _create_system_node_early
+        ana = _glean_user(app_glean, glean_enabled=True)
+        root_id = _create_system_node_early(
+            ana.id, "voice", SimpleNamespace(ai_usage="chat"), entry="glean")
+        assert Node.query.get(root_id).started_from == "glean"
+        plain = _create_system_node_early(
+            ana.id, "voice", SimpleNamespace(ai_usage="chat"))
+        assert Node.query.get(plain).started_from is None
+
+    def test_voice_never_plays_a_gleaning(self, app_glean):
+        """Continuing by voice from a gleaning opens the record button
+        under it: the gleaning is never read aloud."""
+        client = app_glean.test_client()
+        ana = _glean_user(app_glean, glean_enabled=True)
+        root = _make_prompt_node(ana, "voice")
+        root.prompt_key = "voice"
+        prompt = _make_prompt_node(ana, "read_thread", parent_id=root.id)
+        llm = _make_user("claude-haiku-5.5", twitter_id="llm-claude-haiku-5.5")
+        gleaning = _make_node(llm, parent_id=prompt.id, node_type="llm",
+                              llm_model="claude-haiku-5.5", human_owner=ana)
+        gleaning.llm_task_status = "completed"
+        _db.session.commit()
+        _login(client, ana.id)
+        resp = client.post(f"/api/voice/from-node/{gleaning.id}", json={})
+        assert resp.status_code == 200, resp.get_json()
+        assert resp.get_json() == {"mode": "ready", "parent_id": gleaning.id}
+
+
+class TestGleanIsLiveOnTheUsersProvider:
+    def _entry(self, app, **user_kwargs):
+        client = app.test_client()
+        ana = _glean_user(app, glean_enabled=True, **user_kwargs)
+        entry = _make_node(ana, content="a reflection")
+        _db.session.commit()
+        _login(client, ana.id)
+        return client, ana, entry
+
+    def test_a_glean_is_a_live_call(self, app_glean):
+        import json as _json
+        client, _, entry = self._entry(app_glean)
+        data = client.post(f"/api/read/from-node/{entry.id}", json={}).get_json()
+        meta = _json.loads(Node.query.get(data["llm_node_id"]).tool_calls_meta)
+        assert {"name": "_live"} in meta
+
+    def test_the_admins_read_start_stays_a_batch(self, app_glean):
+        import json as _json
+        client = app_glean.test_client()
+        boss = _make_user("boss", is_admin=True, preferred_model="gpt-6-sol")
+        _db.session.commit()
+        _login(client, boss.id)
+        data = client.post("/api/read/start", json={}).get_json()
+        meta = Node.query.get(data["llm_node_id"]).tool_calls_meta
+        assert "_live" not in (meta or "")
+
+    def test_an_anthropic_user_gleans_on_an_anthropic_model(self, app_glean):
+        client, _, entry = self._entry(app_glean, preferred_model="claude-opus-4.6")
+        data = client.post(f"/api/read/from-node/{entry.id}", json={}).get_json()
+        assert Node.query.get(data["llm_node_id"]).llm_model == "claude-haiku-5.5"
+
+    def test_an_openai_user_gleans_on_an_openai_model(self, app_glean):
+        client, _, entry = self._entry(app_glean, preferred_model="gpt-6-sol")
+        data = client.post(f"/api/read/from-node/{entry.id}", json={}).get_json()
+        assert Node.query.get(data["llm_node_id"]).llm_model == "gpt-6-luna"
+
+    def test_the_glean_model_is_a_setting(self, app_glean):
+        app_glean.config["SUPPORTED_MODELS"] = {
+            **MODELS_GLEAN,
+            "claude-sonnet-5.5": {"provider": "anthropic", "display_name": "Sonnet 5.5",
+                                  "read": True, "chat": False},
+        }
+        app_glean.config["GLEAN_MODEL_ANTHROPIC"] = "claude-sonnet-5.5"
+        client, _, entry = self._entry(app_glean, preferred_model="claude-opus-4.6")
+        data = client.post(f"/api/read/from-node/{entry.id}", json={}).get_json()
+        assert Node.query.get(data["llm_node_id"]).llm_model == "claude-sonnet-5.5"
+
+    def test_a_user_cannot_name_another_providers_model(self, app_glean):
+        client, _, entry = self._entry(app_glean, preferred_model="claude-opus-4.6")
+        resp = client.post(f"/api/read/from-node/{entry.id}", json={"model": "gpt-6-luna"})
+        assert resp.status_code == 400
+        assert "Anthropic" in resp.get_json()["error"]
+        assert Node.query.count() == 1  # nothing written
+
+    def test_an_admin_may_for_an_evaluation(self, app_glean):
+        client = app_glean.test_client()
+        boss = _make_user("boss", is_admin=True, preferred_model="claude-opus-4.6")
+        entry = _make_node(boss, content="a reflection")
+        _db.session.commit()
+        _login(client, boss.id)
+        data = client.post(f"/api/read/from-node/{entry.id}",
+                           json={"model": "gpt-6-luna"}).get_json()
+        assert Node.query.get(data["llm_node_id"]).llm_model == "gpt-6-luna"
+
+    def test_a_reply_under_the_glean_prompt_stays_on_the_users_provider(self, app_glean):
+        """A read reached another way (LLM Response under the prompt with a
+        picker that offered an OpenAI model) runs on the user's provider."""
+        from backend.utils.llm_nodes import create_llm_placeholder
+        ana = _glean_user(app_glean, glean_enabled=True, preferred_model="claude-opus-4.6")
+        prompt = _make_prompt_node(ana, "read_thread")
+        _db.session.commit()
+        node, _ = create_llm_placeholder(prompt.id, "gpt-6-luna", ana.id)
+        assert node.llm_model == "claude-haiku-5.5"
+
+    def test_rerun_is_admin_only(self, app_glean):
+        client, ana, entry = self._entry(app_glean)
+        data = client.post(f"/api/read/from-node/{entry.id}", json={}).get_json()
+        reply = Node.query.get(data["llm_node_id"])
+        reply.llm_task_status = "failed"
+        _db.session.commit()
+        resp = client.post(f"/api/read/{reply.id}/rerun", json={"live": True})
+        assert resp.status_code == 403
+
+    def test_a_batch_rerun_drops_the_live_marker(self, app_glean):
+        import json as _json
+        client = app_glean.test_client()
+        boss = _make_user("boss", is_admin=True, glean_enabled=True)
+        entry = _make_node(boss, content="a reflection")
+        _db.session.commit()
+        _login(client, boss.id)
+        data = client.post(f"/api/read/from-node/{entry.id}", json={}).get_json()
+        reply = Node.query.get(data["llm_node_id"])
+        reply.llm_task_status = "failed"
+        _db.session.commit()
+        resp = client.post(f"/api/read/{reply.id}/rerun", json={"live": False})
+        assert resp.status_code == 202, resp.get_json()
+        meta = _json.loads(Node.query.get(reply.id).tool_calls_meta or "[]")
+        assert {"name": "_live"} not in meta
+
+
+class TestPickDisplayNames:
+    def _picks(self, ana, node, refs):
+        from backend.utils.ca_feed import save_feed_picks
+        picks = [{"n": n, "rank": i + 1, "qt": "why", "relevance": 50,
+                  "recommend": True, "ref": ref}
+                 for i, (n, ref) in enumerate(sorted(refs.items()))]
+        rows = save_feed_picks(ana.id, node, picks, picked_by="gpt-6-luna")
+        _db.session.commit()
+        return rows
+
+    def test_saving_a_pick_keeps_the_display_name(self, app_glean):
+        ana = _glean_user(app_glean)
+        node = _make_node(ana, content="reply", node_type="llm", llm_model="gpt-6-luna")
+        rows = self._picks(ana, node, {
+            1: {"username": "alice", "tweet_id": "11", "text": "t",
+                "display_name": "Alice Aalto"},
+            2: {"username": "bob", "tweet_id": "22", "text": "t",
+                "display_name": None},
+        })
+        assert [r.item.author_name for r in rows] == ["Alice Aalto", None]
+
+    def test_the_users_own_row_gets_the_name_it_lacked(self, app_glean):
+        from backend.models import ExternalItem
+        ana = _glean_user(app_glean)
+        own = ExternalItem(user_id=ana.id, source="twitter_bookmark",
+                           external_id="11", author_handle="alice")
+        own.set_content("t")
+        _db.session.add(own)
+        node = _make_node(ana, content="reply", node_type="llm", llm_model="gpt-6-luna")
+        self._picks(ana, node, {1: {"username": "alice", "tweet_id": "11",
+                                    "text": "t", "display_name": "Alice Aalto"}})
+        assert ExternalItem.query.get(own.id).author_name == "Alice Aalto"
+
+    def test_the_one_time_fill_for_past_picks(self, app_glean, tmp_path, monkeypatch):
+        from backend.models import ExternalItem
+        from backend.utils import community_archive as ca
+        from backend.utils.ca_feed import fill_pick_author_names
+        ana = _glean_user(app_glean)
+        node = _make_node(ana, content="reply", node_type="llm", llm_model="gpt-6-luna")
+        rows = self._picks(ana, node, {
+            1: {"username": "alice", "tweet_id": "11", "text": "t"},
+            2: {"username": "Nobody", "tweet_id": "22", "text": "t"},
+        })
+        # A saved tweet nobody picked is not touched.
+        other = ExternalItem(user_id=ana.id, source="twitter_bookmark",
+                             external_id="33", author_handle="alice")
+        other.set_content("t")
+        _db.session.add(other)
+        _db.session.commit()
+        asked = []
+
+        def _names(snapshot_dir, handles):
+            asked.append(sorted(handles))
+            return {"alice": "Alice Aalto"}
+        monkeypatch.setattr(ca, "fetch_display_names", _names)
+
+        assert fill_pick_author_names(tmp_path) == (2, 1)   # dry run
+        assert ExternalItem.query.get(rows[0].item.id).author_name is None
+        assert fill_pick_author_names(tmp_path, apply=True) == (2, 1)
+        _db.session.commit()
+        assert ExternalItem.query.get(rows[0].item.id).author_name == "Alice Aalto"
+        assert ExternalItem.query.get(rows[1].item.id).author_name is None
+        assert ExternalItem.query.get(other.id).author_name is None
+        assert asked[0] == ["Nobody", "alice"]
+        # Idempotent: only the one the archive has no name for is left.
+        assert fill_pick_author_names(tmp_path, apply=True) == (1, 0)
+
+    def test_the_card_and_the_reference_page_get_it(self, app_glean):
+        from backend.models import ExternalItem
+        from backend.utils.quotes import get_ext_quote_data
+        from backend.routes.external import _serialize_item
+        ana = _glean_user(app_glean)
+        item = ExternalItem(user_id=ana.id, source="read_pick", external_id="11",
+                            author_handle="alice", author_name="Alice Aalto")
+        item.set_content("t")
+        _db.session.add(item)
+        _db.session.commit()
+        assert get_ext_quote_data([item.id], ana.id)[item.id]["author_name"] == "Alice Aalto"
+        assert _serialize_item(item)["author_name"] == "Alice Aalto"

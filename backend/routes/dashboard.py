@@ -23,6 +23,7 @@ from backend.utils.reserved_usernames import validate_username
 from backend.utils.spend import user_is_capped
 from backend.utils.llm_nodes import effective_preferred_model, is_chat_model
 from backend.utils.own_entries import has_own_entries
+from backend.utils.glean import glean_user_fields
 
 logger = logging.getLogger(__name__)
 dashboard_bp = Blueprint("dashboard_bp", __name__)
@@ -183,6 +184,10 @@ def get_dashboard():
                 current_app.config.get("SEMANTIC_SEARCH_AGENTIC", True)),
             "external_content_enabled": bool(
                 current_user.external_content_enabled),
+            # Glean (#435): available = inside the rollout gate (Account
+            # shows the switch); enabled = the switch's effective value,
+            # which every Glean card and button keys off.
+            **glean_user_fields(current_user),
         },
         "pinned_nodes": pinned_list,
         "nodes": nodes_list,
@@ -530,6 +535,11 @@ def update_user():
         current_user.external_content_enabled = bool(
             data["external_content_enabled"])
 
+    # The user's own Glean switch (#435): an explicit choice, which wins
+    # over the default from their X / Community Archive data.
+    if "glean_enabled" in data:
+        current_user.glean_enabled = bool(data["glean_enabled"])
+
     if "preferred_model" in data:
         model_id = data["preferred_model"]
         # The default model drives replies and background work: never a
@@ -619,6 +629,7 @@ def update_user():
                         "SEMANTIC_SEARCH_AGENTIC", True)),
                 "external_content_enabled": bool(
                     current_user.external_content_enabled),
+                **glean_user_fields(current_user),
                 "timezone": current_user.timezone or "UTC",
             }
         }), 200

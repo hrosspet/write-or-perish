@@ -1,14 +1,20 @@
-"""Community Archive reading (PoC, 2026-09-13): one request that reads a
-day of the archive against the user and answers whether anything in it
-is worth their time (see backend/utils/ca_feed.py for the reply shape).
+"""Community Archive reading (PoC, 2026-09-13), called Glean in the app
+since #435: one request that reads a day of the archive against the user
+and answers whether anything in it is worth their time (see
+backend/utils/ca_feed.py for the reply shape, utils/glean.py for who
+gleans).
 
-Three entry points, all admin-only while the placeholder is:
+Three entry points:
 
-  POST /api/read/start            a fresh thread rooted on the 'read'
-                                  prompt (profile + intentions + archive);
-                                  honours auto_generate like /textmode/start
-  POST /api/read/from-node/<id>   the 'read_thread' prompt attached under
-                                  an existing node, so the archive is read
+  POST /api/read/start            admin experiments: a fresh thread rooted
+                                  on the 'read' prompt (profile +
+                                  intentions + archive, no reflection),
+                                  through the Batch API; honours
+                                  auto_generate like /textmode/start
+  POST /api/read/from-node/<id>   a glean, for every user who gleans (the
+                                  rollout gate and their own switch): the
+                                  'read_thread' prompt attached under an
+                                  existing node, so the archive is read
                                   against the conversation above it; inside
                                   a thread that already has a read prompt
                                   it reads FURTHER instead: no second
@@ -16,14 +22,13 @@ Three entry points, all admin-only while the placeholder is:
                                   "_read" in its tool_calls_meta) with the
                                   whole thread so far in view — the earlier
                                   picks, the user's marks and whatever was
-                                  written since
-  POST /api/read/<id>/rerun       cancel the reply's pending batch (if
-                                  any) and run it again, through the batch
-                                  or, with {"live": true}, the live API
-
-The first two honour `auto_generate` (default true) like /textmode/start:
-off means only the prompt node is created, and the user picks a model
-and asks for the reply on the thread page.
+                                  written since. Always a live call, and
+                                  the reply is always created: the click
+                                  is the request.
+  POST /api/read/<id>/rerun       admin: cancel the reply's pending batch
+                                  (if any) and run it again, through the
+                                  batch or, with {"live": true}, the live
+                                  API
 
 The prompt is never copied into a node. Like Voice / Text mode, the
 prompt node's content stays empty and resolves through the linked
@@ -56,7 +61,7 @@ from backend.extensions import db
 from backend.utils.prompts import get_user_prompt_record
 from backend.utils.llm_nodes import (
     AIUsageRefused, ai_usage_refused_response, create_llm_placeholder,
-    is_read_model, reply_refusal, resolve_read_model,
+    glean_provider, is_read_model, reply_refusal, resolve_read_model,
 )
 from backend.utils.placeholders import (
     UserExportValidationError, ca_tweets_allowed, ca_tweets_denied_message,
@@ -73,19 +78,35 @@ THREAD_PROMPT_KEY = 'read_thread'
 
 
 def _resolve_model(anchor_node):
-    """A read runs only on a read model (#355): the one the request names,
-    else the thread's last read's, else READ_DEFAULT_MODEL. Never the
-    chat default: a conversation on Opus does not carry into a read."""
+    """A read runs only on a read model (#355) of the provider the user's
+    chat model is from (#435: a user's provider is never switched): the
+    one the request names, else the thread's last read's, else the
+    provider's glean model (GLEAN_MODEL_*). Never the chat default: a
+    conversation on Opus does not carry into a read. Only an admin may
+    name a read model of another provider (their own evaluations)."""
+    from backend.utils.glean import (
+        GleanModelUnavailable, model_provider, provider_name, read_model_fits,
+    )
     data = request.get_json(silent=True) or {}
     model_id = data.get("model")
     if not model_id:
-        return resolve_read_model(anchor_node)[0], None
+        try:
+            return resolve_read_model(anchor_node, user=current_user)[0], None
+        except GleanModelUnavailable as e:
+            return None, (jsonify({"error": str(e)}), 400)
     if not is_read_model(model_id):
         names = [cfg.get("display_name", key)
                  for key, cfg in current_app.config["SUPPORTED_MODELS"].items()
                  if is_read_model(key)]
         return None, (jsonify({
             "error": f"Reads run on {', '.join(names)}; not on {model_id}.",
+        }), 400)
+    provider = glean_provider(anchor_node, current_user)
+    if not read_model_fits(current_user, model_id, provider):
+        return None, (jsonify({
+            "error": (f"Your replies run on {provider_name(provider)} "
+                      f"models, so Glean does too; {model_id} is a "
+                      f"{provider_name(model_provider(model_id))} model."),
         }), 400)
     return model_id, None
 
@@ -108,13 +129,16 @@ def _attach_prompt_node(prompt_key, parent_id, privacy_level):
     return prompt_node
 
 
-def _start(prompt_key, parent, privacy_level, model_id, auto_generate=True):
+def _start(prompt_key, parent, privacy_level, model_id, auto_generate=True,
+           read_live=True):
     """Create the prompt node and its LLM placeholder; commit; respond.
     A refused placeholder (the pre-flight in create_llm_placeholder) rolls
     the prompt node back too: there is nothing to keep without the reply.
     With auto_generate off only the prompt node is created (the user
     picks a model and asks for the reply on the thread page), as
-    /textmode/start does."""
+    /textmode/start does. *read_live* False sends the read through the
+    Batch API (the admin's /read/start); a glean is always live."""
+    from backend.utils.glean import GleanModelUnavailable
     prompt_node = _attach_prompt_node(
         prompt_key, parent.id if parent else None, privacy_level)
     if not auto_generate:
@@ -124,8 +148,9 @@ def _start(prompt_key, parent, privacy_level, model_id, auto_generate=True):
         llm_node, task_id = create_llm_placeholder(
             prompt_node.id, model_id, current_user.id,
             privacy_level=privacy_level, ai_usage=FEED_AI_USAGE,
+            read_live=read_live,
         )
-    except UserExportValidationError as e:
+    except (UserExportValidationError, GleanModelUnavailable) as e:
         db.session.rollback()
         return jsonify({"error": str(e)}), 400
     except AIUsageRefused as e:
@@ -156,16 +181,25 @@ def start_read():
     data = request.get_json(silent=True) or {}
     auto_generate = bool(data.get("auto_generate", True))
     return _start(ROOT_PROMPT_KEY, None, privacy_level, model_id,
-                  auto_generate=auto_generate)
+                  auto_generate=auto_generate, read_live=False)
 
 
 @read_bp.route("/from-node/<int:node_id>", methods=["POST"])
 @login_required
 def start_read_from_node(node_id):
-    """The 'read_thread' prompt under *node_id*, the reply under that, so
-    the archive is read against the whole conversation above."""
+    """A glean (#435): the 'read_thread' prompt under *node_id*, the reply
+    under that, so the archive is read against the whole conversation
+    above. For users who glean (the rollout gate and their own switch).
+    The click is the request: the reply is always created, as a live
+    call (create_llm_placeholder marks it)."""
+    from backend.utils.glean import glean_enabled
     if not ca_tweets_allowed(current_user):
         return jsonify({"error": ca_tweets_denied_message()}), 403
+    if not glean_enabled(current_user):
+        return jsonify({
+            "error": "Glean is off for your account. You can turn it on "
+                     "in Account settings.",
+        }), 403
     node = Node.query.get(node_id)
     if node is None or node.deleted_at is not None:
         return jsonify({"error": "Node not found"}), 404
@@ -181,30 +215,31 @@ def start_read_from_node(node_id):
         return err
     privacy_level = node.privacy_level or "private"
     if in_read_thread(node):
-        # Read further: the thread already has its read prompt, so the
-        # click is the request itself (auto_generate does not apply) —
-        # a read turn under this node, the day rendered again against
-        # everything above. The marker is what tells the task this is
-        # a read and not a chat about the picks (_ca_turn); it is
-        # written in the commit that creates the node.
-        try:
-            llm_node, task_id = create_llm_placeholder(
-                node.id, model_id, current_user.id,
-                privacy_level=privacy_level, ai_usage=FEED_AI_USAGE,
-                meta=[{"name": READ_FURTHER_MARKER}],
-            )
-        except UserExportValidationError as e:
-            db.session.rollback()
-            return jsonify({"error": str(e)}), 400
-        except AIUsageRefused as e:
-            db.session.rollback()
-            return ai_usage_refused_response(e)
-        db.session.commit()
-        return jsonify({"llm_node_id": llm_node.id, "task_id": task_id}), 202
-    data = request.get_json(silent=True) or {}
-    auto_generate = bool(data.get("auto_generate", True))
-    return _start(THREAD_PROMPT_KEY, node, privacy_level,
-                  model_id, auto_generate=auto_generate)
+        return _glean_again(node, model_id, privacy_level)
+    return _start(THREAD_PROMPT_KEY, node, privacy_level, model_id)
+
+
+def _glean_again(node, model_id, privacy_level):
+    """Read further: the thread already has its read prompt — a read turn
+    under *node*, the day rendered again against everything above. The
+    marker is what tells the task this is a read and not a chat about
+    the picks (_ca_turn); it is written in the commit that creates the
+    node."""
+    from backend.utils.glean import GleanModelUnavailable
+    try:
+        llm_node, task_id = create_llm_placeholder(
+            node.id, model_id, current_user.id,
+            privacy_level=privacy_level, ai_usage=FEED_AI_USAGE,
+            meta=[{"name": READ_FURTHER_MARKER}],
+        )
+    except (UserExportValidationError, GleanModelUnavailable) as e:
+        db.session.rollback()
+        return jsonify({"error": str(e)}), 400
+    except AIUsageRefused as e:
+        db.session.rollback()
+        return ai_usage_refused_response(e)
+    db.session.commit()
+    return jsonify({"llm_node_id": llm_node.id, "task_id": task_id}), 202
 
 
 def _batch_entries(node):
@@ -252,9 +287,12 @@ def rerun_read(node_id):
     reply again on the same node: through the batch again, or with
     {"live": true} through the live API (minutes instead of up to a day;
     the admin's testing loop). Works on a reply that is still processing
-    or has failed; a completed reply is left alone (it has picks)."""
-    if not ca_tweets_allowed(current_user):
-        return jsonify({"error": ca_tweets_denied_message()}), 403
+    or has failed; a completed reply is left alone (it has picks).
+    Admin-only (#435): a user retries a glean with Glean again. A batch
+    rerun of a glean drops its live marker, so it really is a batch."""
+    from backend.utils.glean import READ_LIVE_MARKER
+    if not getattr(current_user, "is_admin", False):
+        return jsonify({"error": "Only an admin can rerun a glean."}), 403
     node = Node.query.get(node_id)
     if node is None or node.deleted_at is not None:
         return jsonify({"error": "Node not found"}), 404
@@ -263,7 +301,9 @@ def rerun_read(node_id):
     parent = Node.query.get(node.parent_id) if node.parent_id else None
     is_llm = node.node_type == "llm" or node.llm_model is not None
     meta, batches = _batch_entries(node)
-    is_read_reply = bool(batches) or (
+    marked = any(isinstance(m, dict) and m.get("name") in (
+        READ_FURTHER_MARKER, READ_LIVE_MARKER) for m in meta)
+    is_read_reply = bool(batches) or marked or (
         parent is not None and parent.get_prompt_key() in READ_PROMPT_KEYS)
     if not is_llm or parent is None or not is_read_reply:
         return jsonify({"error": "Not a read reply."}), 400
@@ -281,6 +321,9 @@ def rerun_read(node_id):
 
     data = request.get_json(silent=True) or {}
     live = bool(data.get("live", False))
+    if not live:
+        meta = [m for m in meta if not (
+            isinstance(m, dict) and m.get("name") == READ_LIVE_MARKER)]
     now = datetime.utcnow().isoformat(timespec="seconds")
     cancelled = []
     for entry in batches:

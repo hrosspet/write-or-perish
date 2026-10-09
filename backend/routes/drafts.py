@@ -966,6 +966,9 @@ def finalize_streaming(session_id):
     if err is not None:
         return err
     model = data.get("model")  # LLM model for server-side generation
+    # "glean": a fresh Voice session started from the Glean card (#435);
+    # the thread's root is stamped when the chain creates it.
+    entry = data.get("entry") if data.get("entry") == "glean" else None
     if not model and label in ("Reflect", "Orient", "Voice"):
         # Resolve a model when the client didn't send one (e.g. user has no
         # preferred_model). Without this, should_chain is False for Voice and
@@ -996,6 +999,7 @@ def finalize_streaming(session_id):
         # The reply placeholder is made in the task, outside this
         # request: hand it the app the user is talking from.
         client=request_client(),
+        entry=entry,
     )
 
     # Log chunk status at time of finalize request
@@ -1272,6 +1276,9 @@ def save_streaming_as_node(session_id):
         attach_context_artifacts(
             system_node.id, current_user.id, prompt_record=prompt_record,
         )
+        # Started from the Glean card (#435): every turn offers Glean.
+        from backend.utils.glean import stamp_glean_entry
+        stamp_glean_entry(system_node, current_user, data.get("entry"))
         user_parent_id = system_node.id
 
     # Create the node

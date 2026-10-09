@@ -130,7 +130,7 @@ const ModelSelector = ({
   const rows = optionModels(options);
   const navIds = [...rows.map((m) => m.id), ...(options.more ? [MORE] : [])];
   const selected = (models || []).find((m) => m.id === selectedModel);
-  const label = purpose === 'read' ? 'Model for Read' : 'Model';
+  const label = purpose === 'read' ? 'Model for Glean' : 'Model';
 
   const closeMenu = (refocus = true) => {
     setOpen(false);

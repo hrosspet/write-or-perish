@@ -2383,6 +2383,16 @@ def _read_requested(node):
                for m in meta)
 
 
+def _read_live(node):
+    """True when this read is a glean, which is always a live call (#435):
+    create_llm_placeholder marks every read turn READ_LIVE_MARKER except
+    the admin's batch experiments (/read/start, "Resubmit batch")."""
+    from backend.utils.glean import READ_LIVE_MARKER
+    meta, _ = _batch_meta(node)
+    return any(isinstance(m, dict) and m.get("name") == READ_LIVE_MARKER
+               for m in meta)
+
+
 CA_BATCH_PROVIDERS = ("anthropic", "openai")
 CA_BATCH_LIVE_STATUSES = ("submitted", "cancelling")
 # What a read withdrawn at the provider says in place of its reply.
@@ -4198,14 +4208,16 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 # below, after _finalize is defined. Any provider the
                 # feed does not support fails here rather than silently
                 # running the full-price, unstructured live call.
-                # The admin's live rerun (ca_live) skips the batch and
-                # asks the live API for the same structured shape.
+                # A glean (READ_LIVE_MARKER, #435: the user is waiting)
+                # and the admin's live rerun (ca_live) skip the batch and
+                # ask the live API for the same structured shape.
                 if needs_ca and provider not in CA_BATCH_PROVIDERS:
                     raise ValueError(
                         f"{{ca_tweets}} is not supported on {model_id} "
                         f"({provider}); pick an Anthropic or OpenAI "
                         "model.")
-                batch_mode = needs_ca and not ca_live
+                batch_mode = (needs_ca and not ca_live
+                              and not _read_live(llm_node))
                 if batch_mode or batch_resp is not None:
                     response = None
                     break

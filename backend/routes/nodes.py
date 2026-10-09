@@ -401,9 +401,16 @@ def _system_prompt_fields(n):
     """Return system prompt serialization fields for a node."""
     prompt = n.get_artifact("prompt")
     if prompt is not None:
+        # The read prompts are shown under Glean's name (#435), also on
+        # prompt versions saved under the earlier titles.
+        from backend.utils.ca_feed import READ_PROMPT_KEYS
+        from backend.utils.prompts import PROMPT_DEFAULTS
+        title = prompt.title
+        if prompt.prompt_key in READ_PROMPT_KEYS:
+            title = PROMPT_DEFAULTS[prompt.prompt_key]["title"]
         return {
             "is_system_prompt": True,
-            "prompt_title": prompt.title,
+            "prompt_title": title,
             "prompt_key": prompt.prompt_key,
             "user_prompt_id": prompt.id,
             "prompt_version_number": _prompt_version_number(prompt),
@@ -710,8 +717,12 @@ def create_node():
         system_node = None
         if agentic:
             from backend.utils.session_helpers import create_agentic_root
+            from backend.utils.glean import stamp_glean_entry
             system_node = create_agentic_root(
                 current_user.id, "textmode", privacy_level, ai_usage)
+            # Started from the Glean card (#435).
+            stamp_glean_entry(system_node, current_user,
+                              request.form.get("entry"))
 
         # Placeholder content until transcription is ready.
         placeholder_text = "[Voice note – transcription pending]"
@@ -1401,6 +1412,9 @@ def get_node(node_id):
         from backend.utils.llm_nodes import reply_ai_usage
         reply_usage = reply_ai_usage(
             node, current_user, parent_content=focal.get("content"))
+    # A thread started from the Glean card (#435): its root carries the
+    # stamp, and every turn offers the Glean button. The chain is in hand.
+    from backend.utils.glean import is_glean_root
     node_data = {
         **focal,
         "child_count": len(serialized_children),
@@ -1409,6 +1423,8 @@ def get_node(node_id):
         "in_read_thread": in_read_thread,
         "read_reply_above": read_reply_above,
         "reply_ai_usage": reply_usage,
+        "glean_thread": is_glean_root(
+            ancestor_nodes[-1] if ancestor_nodes else node),
     }
     # The owner opened a finished Read reply (FeedRender.opened_at, once).
     # Last, because it commits: the payload above is built.
@@ -1597,10 +1613,20 @@ def get_default_model():
     if purpose is None:
         return jsonify({"error": "purpose must be 'chat' or 'read'"}), 400
     if purpose == "read":
-        model_id, source = resolve_read_model(None)
+        model_id, source = _suggested_read_model(None)
     else:
         model_id, source = resolve_chat_model(None, current_user)
     return jsonify({"suggested_model": model_id, "source": source}), 200
+
+
+def _suggested_read_model(anchor):
+    """The Glean picker's default: a read model of the user's provider
+    (#435); (None, "unavailable") when that provider has no glean model."""
+    from backend.utils.glean import GleanModelUnavailable
+    try:
+        return resolve_read_model(anchor, user=current_user)
+    except GleanModelUnavailable:
+        return None, "unavailable"
 
 
 # Get the suggested model for a new LLM response based on the thread's context
@@ -1618,7 +1644,7 @@ def get_suggested_model(node_id):
     if purpose is None:
         return jsonify({"error": "purpose must be 'chat' or 'read'"}), 400
     if purpose == "read":
-        model_id, source = resolve_read_model(node)
+        model_id, source = _suggested_read_model(node)
     else:
         model_id, source = resolve_chat_model(node, current_user)
     return jsonify({"suggested_model": model_id, "source": source}), 200
@@ -2430,8 +2456,11 @@ def init_chunked_upload():
     system_node = None
     if agentic:
         from backend.utils.session_helpers import create_agentic_root
+        from backend.utils.glean import stamp_glean_entry
         system_node = create_agentic_root(
             current_user.id, "textmode", privacy_level, ai_usage)
+        # Started from the Glean card (#435).
+        stamp_glean_entry(system_node, current_user, data.get("entry"))
 
     # Create placeholder node
     placeholder_text = "[Voice note – upload in progress]"

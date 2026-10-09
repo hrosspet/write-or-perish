@@ -263,6 +263,45 @@ def _duckdb(snapshot_dir):
     return con, str(d / "tweets.parquet"), str(d / "profiles.parquet")
 
 
+def _display_name_sql(con, profiles):
+    """The select expression for an account's display name (#435):
+    ``p.display_name`` when profiles.parquet has the column (the archive's
+    exports do), else NULL, so a snapshot without it renders as before."""
+    cols = [d[0] for d in con.execute(
+        "select * from read_parquet(?) limit 0", [profiles]).description]
+    return "p.display_name" if "display_name" in cols else "NULL"
+
+
+def _clean_display_name(name):
+    name = (name or "").strip()
+    return name[:128] or None
+
+
+def fetch_display_names(snapshot_dir, handles):
+    """{lowercased handle: display name} for the given handles, from the
+    cached snapshot's profiles.parquet. Handles the archive does not hold,
+    or holds without a name, are absent. Public profile data only."""
+    wanted = sorted({(h or "").strip().lstrip("@").lower()
+                     for h in handles if h})
+    if not wanted:
+        return {}
+    with _snapshot_lock(snapshot_dir, shared=True):
+        con, _, profiles = _duckdb(snapshot_dir)
+        name_sql = _display_name_sql(con, profiles).replace("p.", "")
+        if name_sql == "NULL":
+            return {}
+        rows = con.execute(
+            f"select username, {name_sql} from read_parquet(?) "
+            "where lower(username) in (select unnest(?::VARCHAR[]))",
+            [profiles, wanted]).fetchall()
+    out = {}
+    for username, name in rows:
+        name = _clean_display_name(name)
+        if username and name:
+            out[username.lower()] = name
+    return out
+
+
 def count_parquet(account_id, snapshot_dir):
     """Rows the cached snapshot holds for an account (0 if absent)."""
     con, tweets, _ = _duckdb(snapshot_dir)
@@ -494,11 +533,12 @@ def _render_recent_tweets(snapshot_dir, export_id, newest, days, excluded,
     # Seen tweets are skipped (and counted) in the row loop below rather
     # than in SQL: one scan of the parquet, not two.
     excluded_tweets = 0
+    name_sql = _display_name_sql(con, profiles)
     cur = con.execute(
         "select coalesce(p.username, t.account_id) as username, "
         "t.tweet_id, t.full_text, "
         "strftime(t.created_at at time zone 'UTC', '%Y-%m-%d %H:%M:%S') "
-        "as posted "
+        f"as posted, {name_sql} as display_name "
         + from_where
         + "order by lower(coalesce(p.username, t.account_id)), t.created_at, "
         "t.tweet_id",
@@ -524,7 +564,7 @@ def _render_recent_tweets(snapshot_dir, export_id, newest, days, excluded,
         rows = cur.fetchmany(2000)
         if not rows:
             break
-        for username, tweet_id, text, posted in rows:
+        for username, tweet_id, text, posted, display_name in rows:
             if str(tweet_id) in seen:
                 excluded_tweets += 1
                 continue
@@ -539,6 +579,7 @@ def _render_recent_tweets(snapshot_dir, export_id, newest, days, excluded,
                 "text": text,
                 "posted_at": datetime.strptime(posted, "%Y-%m-%d %H:%M:%S")
                 if posted else None,
+                "display_name": _clean_display_name(display_name),
             }
             body.append(f"[#{total}] {text}")
             body.append("")
@@ -579,21 +620,24 @@ def fetch_tweets_by_id(snapshot_dir, tweet_ids):
         return {}
     with _snapshot_lock(snapshot_dir, shared=True):
         con, tweets, profiles = _duckdb(snapshot_dir)
+        name_sql = _display_name_sql(con, profiles)
         rows = con.execute(
             "select coalesce(p.username, t.account_id), t.tweet_id, "
             "t.full_text, "
-            "strftime(t.created_at at time zone 'UTC', '%Y-%m-%d %H:%M:%S') "
+            "strftime(t.created_at at time zone 'UTC', '%Y-%m-%d %H:%M:%S'), "
+            f"{name_sql} "
             "from read_parquet(?) t "
             "left join read_parquet(?) p on p.account_id = t.account_id "
             "where t.tweet_id in (select unnest(?::VARCHAR[]))",
             [tweets, profiles, ids]).fetchall()
     out = {}
-    for username, tweet_id, text, posted in rows:
+    for username, tweet_id, text, posted, display_name in rows:
         out[str(tweet_id)] = {
             "username": username, "tweet_id": str(tweet_id),
             "text": (text or "").strip(),
             "posted_at": datetime.strptime(posted, "%Y-%m-%d %H:%M:%S")
             if posted else None,
+            "display_name": _clean_display_name(display_name),
         }
     return out
 

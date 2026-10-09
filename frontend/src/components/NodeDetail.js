@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useLayoutEffect, useRef, useCallback } from "react";
 import { useNavigate, useSearchParams, useLocation, Link } from "react-router-dom";
-import { FaThumbtack, FaMicrophone, FaSpinner, FaBookOpen } from "react-icons/fa";
+import { FaThumbtack, FaMicrophone, FaSpinner } from "react-icons/fa";
 import NodeFooter from "./NodeFooter";
 import SpeakerIcon from "./SpeakerIcon";
 import DownloadAudioIcon from "./DownloadAudioIcon";
@@ -26,12 +26,15 @@ import { ReadWindowLine, ReadReplyTail } from "./ReadReply";
 import DeleteConfirmDialog from "./DeleteConfirmDialog";
 
 
-// One tooltip for both "Read further" buttons on the thread page: the
-// top-right one and the one in the action row under each node of a
-// read thread.
-const READ_FURTHER_TITLE = "Another pass over the day's tweets, against everything in this thread so far "
-  + "— your marks on these picks included.";
-const READ_ENTRY_TITLE = "Loore reads the last day of Community Archive tweets and shows you the ones relevant to this thread";
+// Glean (#435) is the Community Archive read under its user-facing name.
+// The Glean button's tooltip before the thread's first gleaning, and
+// after it (another pass over the day).
+const GLEAN_AGAIN_TITLE = "Another pass over today's tweets, against everything in this thread so far "
+  + "— your marks on the earlier picks included.";
+const GLEAN_TITLE = "Loore reads today's Community Archive tweets and shows you the few worth your time, "
+  + "from what you said in this thread.";
+export const GLEAN_MENU_LABEL = 'Glean for this reflection';
+export const GLEANINGS_TITLE = "Today's gleanings";
 
 // Recursive component to render children nodes.
 function RenderChildTree({ nodes, onBubbleClick, buildActions }) {
@@ -87,10 +90,16 @@ const tabTitleFor = (node) => {
   const pending = (node?.node_type === 'llm' || !!node?.llm_model)
     && (node?.llm_task_status === 'pending' || node?.llm_task_status === 'processing');
   if (pending) {
-    const batch = Array.isArray(node?.tool_calls_meta)
-      && node.tool_calls_meta.some(tc => tc?.name === '_batch'
-                                      && ['submitted', 'cancelling'].includes(tc.status));
-    return `${batch ? 'Processing' : 'Thinking'}… — Loore`;
+    const meta = Array.isArray(node?.tool_calls_meta) ? node.tool_calls_meta : [];
+    const batch = meta.some(tc => tc?.name === '_batch'
+                                  && ['submitted', 'cancelling'].includes(tc.status));
+    // A glean (#435): its live marker, a glean-again marker, or the read
+    // prompt right above it.
+    const parent = node?.ancestors?.[node.ancestors.length - 1];
+    const glean = !!node?.read_reply
+      || meta.some(tc => ['_live', '_read'].includes(tc?.name))
+      || ['read', 'read_thread'].includes(parent?.prompt_key);
+    return `${batch ? 'Processing' : (glean ? 'Gleaning' : 'Thinking')}… — Loore`;
   }
   const firstLine = (node?.content || '')
     .trim().split('\n')[0].replace(/^[#>\s]+/, '').slice(0, 120);
@@ -547,6 +556,20 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
     || (n.node_type === "llm" && n.parent_user_id === currentUser.id)
   );
 
+  // "Glean for this reflection" (#435): in a thread NOT started from the
+  // Glean card, the way to glean is the entry's menu, at any time, days
+  // later too. Not on a system prompt (no reflection there) nor on a
+  // reply still being written or kept away from AI.
+  const gleanFromMenu = (n, owned = ownedByMe(n)) => !!currentUser?.glean_enabled
+    && !node?.glean_thread && owned && !n.deleted && !n.is_system_prompt
+    && n.ai_usage !== 'none'
+    && !['pending', 'processing'].includes(n.llm_task_status);
+  const gleanMenuItem = (n) => ({
+    label: GLEAN_MENU_LABEL,
+    action: () => handleReadFromNode(n.id),
+    color: 'var(--text-primary)',
+  });
+
   const buildActions = (n) => {
     // `kind` is the stable identifier — Bubble pulls the reply action
     // out of this list to wire the comment-icon click. The label is
@@ -568,6 +591,7 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
         action: () => setExclusiveTarget('delete', n),
         color: 'var(--accent)',
       });
+      if (gleanFromMenu(n)) actions.push(gleanMenuItem(n));
     }
     return actions;
   };
@@ -916,13 +940,17 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
       .post(`/${sessionType}/from-node/${id}`, { model: selectedModel })
       .then((response) => {
         const { mode, llm_node_id, parent_id, fresh } = response.data;
+        // A thread started from the Glean card keeps its Glean button
+        // on the Voice screen too (#435).
+        const glean = (sessionType === 'voice' && node?.glean_thread
+          && currentUser?.glean_enabled) ? '&glean=1' : '';
         if (mode === "processing") {
           let url = `/voice?resume=${llm_node_id}`;
           if (parent_id) url += `&parent=${parent_id}`;
           if (fresh) url += `&fresh=1`;
-          navigate(url);
+          navigate(url + glean);
         } else {
-          navigate(`/voice?parent=${parent_id}`);
+          navigate(`/voice?parent=${parent_id}${glean}`);
         }
       })
       .catch((err) => {
@@ -941,22 +969,21 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
       });
   };
 
-  // Community Archive read against this thread (admin-only PoC): the
-  // 'read_thread' prompt is attached under this node by reference. With
-  // auto-generate on, the batch reply parks under it and we land on the
-  // pending reply, which this page polls as "Processing…" until the
-  // picks arrive. With it off, only the prompt is attached and we land
-  // on it, where Read and its model picker wait for the user.
-  // Inside a read thread the same call reads further (no prompt, a read
-  // turn under this node; the click is the request, so auto-generate
-  // does not apply) and we land on the pending reply.
-  const handleReadFromNode = () => {
+  // Glean (#435): the 'read_thread' prompt is attached under the node by
+  // reference and the reply under it, a live call; we land on the pending
+  // gleaning, which this page polls until the picks arrive. Inside a
+  // thread that has gleaned already the same call gleans again (no
+  // prompt, a read turn under the node). The click is the request, so
+  // auto-generate does not apply. *targetId* is the node whose menu
+  // asked ("Glean for this reflection"), else this page's node.
+  const handleReadFromNode = (targetId = id) => {
     setReadLoading(true);
     setError("");
     api
-      .post(`/read/from-node/${id}`, {
-        model: readModel || undefined,
-        auto_generate: autoGenerateActive,
+      .post(`/read/from-node/${targetId}`, {
+        // Only an admin picks the model; everyone else gleans on their
+        // provider's glean model, which the server chooses.
+        model: (currentUser?.is_admin && readModel) || undefined,
       })
       .then((response) => {
         const { llm_node_id, prompt_node_id } = response.data;
@@ -965,7 +992,7 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
       .catch((err) => {
         setReadLoading(false);
         if (err?.response?.status === 402) return;
-        const msg = err.response?.data?.error || 'Could not start the read.';
+        const msg = err.response?.data?.error || 'Could not start the glean.';
         addToast(msg, 6000);
       });
   };
@@ -982,10 +1009,10 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
       .then((response) => {
         setNode(response.data);
         setLlmTaskNodeId(response.data.id);
-        addToast(live ? 'Running the read live.' : 'Read resubmitted as a batch.', 4000);
+        addToast(live ? 'Running the glean live.' : 'Glean resubmitted as a batch.', 4000);
       })
       .catch((err) => {
-        addToast(err?.response?.data?.error || 'Could not rerun the read.', 6000);
+        addToast(err?.response?.data?.error || 'Could not rerun the glean.', 6000);
       })
       .finally(() => setRerunning(false));
   };
@@ -1061,7 +1088,7 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
   const isReadReply = isLlmNode && (
     !!node.read_reply
     || (Array.isArray(node.tool_calls_meta)
-      && node.tool_calls_meta.some(tc => ['_batch', '_read'].includes(tc?.name)))
+      && node.tool_calls_meta.some(tc => ['_batch', '_read', '_live'].includes(tc?.name)))
     || ['read', 'read_thread'].includes(parentAncestor?.prompt_key)
   );
   // A read reply's picks are its {quote_ext:ID} markers. Their read state
@@ -1089,21 +1116,33 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
     });
     return next;
   });
-  // Inside a read thread the Read button (top right, and the tail's
-  // "Read further") reads further: /read/from-node makes a read turn
-  // under this node with the whole thread in view, no second prompt.
-  // The backend says which it is (in_read_thread: a read prompt above,
-  // by key or by the {ca_tweets} placeholder in a PoC-era prompt's
-  // text), the same test the route applies; a read reply is one by
-  // definition.
+  // Inside a read thread the Glean button gleans again: /read/from-node
+  // makes a read turn under this node with the whole thread in view, no
+  // second prompt. The backend says which it is (in_read_thread: a read
+  // prompt above, by key or by the {ca_tweets} placeholder in a PoC-era
+  // prompt's text), the same test the route applies; a read reply is one
+  // by definition.
   const inReadThread = !!node.in_read_thread || isReadReply;
-  // Before the thread has any picks the read action is "Read"; once a
-  // read reply sits at or above this node it is "Read further".
+  // Has the thread gleaned already? The button's label stays "Glean"; its
+  // tooltip says what the next press does.
   const readReplyAbove = !!node.read_reply_above || isReadReply;
-  const readLabel = readReplyAbove ? 'Read further' : 'Read';
-  const readTitle = readReplyAbove ? READ_FURTHER_TITLE : READ_ENTRY_TITLE;
+  const readLabel = 'Glean';
+  const readTitle = readReplyAbove ? GLEAN_AGAIN_TITLE : GLEAN_TITLE;
+  // Who sees Glean at all (#435): the rollout gate and the user's own
+  // switch, both in glean_enabled. A thread started from the Glean card
+  // offers the Glean button; any other thread "Glean for this
+  // reflection" in the entry's menu.
+  const gleanEnabled = !!currentUser?.glean_enabled;
+  const gleanThread = !!node.glean_thread;
   const canRerunRead = !!currentUser?.is_admin && isOwner && isReadReply
     && (isLlmPending || node.llm_task_status === 'failed');
+  // The gleaning's own head (#435): "Today's gleanings", how many picks,
+  // or the empty day. Old replies that kept their picks in rows only
+  // (FeedPicks below) are not empty.
+  const gleaningDone = isReadReply && node.llm_task_status === 'completed';
+  const gleaningEmpty = gleaningDone && !!node.read_window
+    && pickIds.length === 0 && !(node.feed_picks_count > 0);
+  const tweetsRead = Number(node.read_window?.tweets || 0);
   const showProposal = !!node.content && !isLlmPending && (
     (isLlmNode && hasProposalSections(node.content))
     // User-authored nodes: the owner can write/paste fenced :::share
@@ -1143,19 +1182,22 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
   const showCraftBar = isOwner && (craftMode || isPublicThread)
     && (!autoGenerateActive || awaitsChoiceInRead)
     && node.ai_usage !== 'none' && !isLlmPending;
-  // In a read thread the action row under every node also carries
-  // "Read further" — the conversation under the picks can get long and
-  // nothing is pinned to the viewport (small screens), so the action
-  // travels with the node the user is on. It shows whenever the owner
-  // could act, not only in craft mode; LLM Response keeps the craft-bar
-  // rule. Each carries its own model picker: reads run only on the read
-  // models (#355). Directly under a finished read reply LLM Response is
-  // disabled: a reply asked for there is another read (the task's
-  // parent rule), and the way to talk about the picks is a comment
-  // first, whose own row then offers LLM Response again.
+  // In a thread started from the Glean card (#435) the action row under
+  // every node carries the Glean button, next to LLM Response — the
+  // conversation can get long and nothing is pinned to the viewport
+  // (small screens), so the action travels with the node the user is on.
+  // It shows whenever the owner could act, not only in craft mode; LLM
+  // Response keeps the craft-bar rule. Any other thread has no Glean
+  // button: "Glean for this reflection" is in the entry's menu. Only an
+  // admin gets a model picker beside it: everyone else gleans on their
+  // provider's glean model. Directly under a finished gleaning LLM
+  // Response is disabled: a reply asked for there is another glean (the
+  // task's parent rule), and the way to talk about the picks is a
+  // comment first, whose own row then offers LLM Response again.
   const underReadReply = isReadReply && node.llm_task_status === 'completed';
-  const readActions = isOwner && inReadThread && node.ai_usage !== 'none'
-    && !isLlmPending;
+  const readActions = isOwner && gleanEnabled && gleanThread
+    && node.ai_usage !== 'none' && !isLlmPending && !node.is_system_prompt;
+  const readModelPicker = !!currentUser?.is_admin;
   // Before the first picks (the read prompt itself, or a note typed
   // under it) a reply asked for here would be that first read, so the
   // generic LLM Response is not offered at all: the row is "Read" and
@@ -1181,25 +1223,30 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
   const readButton = (
     <span data-action-group style={actionGroupStyle}>
       <button
-        onClick={handleReadFromNode}
+        onClick={() => handleReadFromNode()}
         disabled={readBusy}
         title={readTitle}
-        style={{ display: 'inline-flex', alignItems: 'center', gap: '8px', ...joinedButtonStyle }}
+        style={{
+          display: 'inline-flex', alignItems: 'center', gap: '8px',
+          ...(readModelPicker ? joinedButtonStyle : {}),
+        }}
       >
         {readLoading ? 'Starting…' : readLabel}
       </button>
-      <ModelSelector
-        nodeId={node.id}
-        purpose="read"
-        selectedModel={readModel}
-        onModelChange={setReadModel}
-        disabled={readBusy}
-        style={joinedPickerStyle}
-      />
+      {readModelPicker && (
+        <ModelSelector
+          nodeId={node.id}
+          purpose="read"
+          selectedModel={readModel}
+          onModelChange={setReadModel}
+          disabled={readBusy}
+          style={joinedPickerStyle}
+        />
+      )}
     </span>
   );
   const llmResponseTitle = underReadReply
-    ? "To chat about the recommendations, send your reply first. To read further, use the button on the right."
+    ? `To chat about the gleaning, send your reply first.${readActions ? ' To glean again, use Glean.' : ''}`
     : (inReadThread ? "Chat about the picks" : undefined);
 
   // Shared shell for the top-right controls. Voice Mode + Auto-generate
@@ -1235,7 +1282,7 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
         onClick={() => rerunRead(true)}
         disabled={rerunning}
         style={{ ...topRightButtonStyle, width: 'auto', height: '26px', fontStyle: 'normal' }}
-        title="Cancel the batch and run this read through the live API now"
+        title="Cancel the batch and run this glean through the live API now"
       >
         {rerunning ? 'Rerunning…' : 'Rerun live'}
       </button>
@@ -1244,7 +1291,7 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
         onClick={() => rerunRead(false)}
         disabled={rerunning}
         style={{ ...topRightButtonStyle, width: 'auto', height: '26px', fontStyle: 'normal' }}
-        title="Cancel the batch and submit this read as a new batch"
+        title="Cancel the batch and submit this glean as a new batch"
       >
         Resubmit batch
       </button>
@@ -1255,8 +1302,9 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
   // same flex row as the Thread heading so they align vertically and
   // scroll away with content (no absolute positioning / viewport
   // anchoring). Voice Mode shows on a node AI may not read too: the
-  // Voice screen explains there instead of recording. Read and
-  // Auto-generate need AI and stay hidden on it.
+  // Voice screen explains there instead of recording. Auto-generate
+  // needs AI and stays hidden on it. Glean is not up here (#435): it is
+  // in the action row of a Glean-card thread, else in the entry's menu.
   const nodeAllowsAi = node.ai_usage !== 'none';
   const topRightControls = isOwner && !isPublicThread && (
     <div style={{
@@ -1282,25 +1330,6 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
           <FaMicrophone size={12} />
         </span>
       </button>
-      {currentUser?.is_admin && nodeAllowsAi && (
-        <button
-          onClick={handleReadFromNode}
-          disabled={readLoading || moving}
-          style={{ ...topRightButtonStyle, justifyContent: 'space-between' }}
-          title={inReadThread ? readTitle : READ_ENTRY_TITLE}
-        >
-          <span>{readLoading ? 'Starting…' : (inReadThread ? readLabel : 'Relevant tweets')}</span>
-          <span style={{
-            width: '32px',
-            display: 'inline-flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            lineHeight: 0,
-          }}>
-            <FaBookOpen size={12} />
-          </span>
-        </button>
-      )}
       {craftMode && nodeAllowsAi && (
         <button
           type="button"
@@ -1352,6 +1381,8 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
                 action: () => setExclusiveTarget('delete', node),
                 color: 'var(--accent)',
               },
+              ...(gleanFromMenu(node, isOwner) && !readLoading && !moving
+                ? [gleanMenuItem(node)] : []),
             ]}
           />
         )}
@@ -1377,6 +1408,26 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
                 {'\u00B7'} TODO v{node.context_artifacts.todo.version_number}
               </span>
             )}
+          </div>
+        )}
+        {isReadReply && (
+          <div className="gleanings-head">
+            <h3 className="gleanings-title">{GLEANINGS_TITLE}</h3>
+            {gleaningDone && pickIds.length > 0 && (
+              <p className="gleanings-sub">
+                {`${pickIds.length} ${pickIds.length === 1 ? 'tweet' : 'tweets'} from today, chosen for what you said.`}
+              </p>
+            )}
+          </div>
+        )}
+        {gleaningEmpty && (
+          <div className="gleanings-empty">
+            <p className="gleanings-empty-big">Nothing worth your time today.</p>
+            <p className="gleanings-empty-small">
+              {tweetsRead > 0
+                ? `Loore read all ${tweetsRead.toLocaleString('en-US')} of today's tweets in the archive.`
+                : 'The archive had no new tweets today.'}
+            </p>
           </div>
         )}
         {isReadReply && node.read_window && (
@@ -1420,7 +1471,7 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
             fontStyle: 'italic',
             padding: '8px 0',
           }}>
-            <span>{batchMeta ? 'Processing' : 'Thinking'}</span>
+            <span>{batchMeta ? 'Processing' : (isReadReply ? 'Gleaning' : 'Thinking')}</span>
             <span style={{ display: 'inline-flex', gap: '3px' }}>
               {[0, 1, 2].map(i => (
                 <span key={i} style={{
@@ -1449,6 +1500,7 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
                 onExternalReadChange={handleExternalReadChange}
                 onExternalFeedbackChange={handleExternalFeedbackChange}
                 showRecommendationFeedback={isLlmNode}
+                referenceBackLabel={isReadReply ? GLEANINGS_TITLE : undefined}
                 contextArtifacts={node.context_artifacts || null}
                 onQuoteClick={handleBubbleClick}
                 onCheckboxToggle={isOwner ? handleCheckboxToggle : undefined}
@@ -1487,6 +1539,7 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
               onExternalReadChange={handleExternalReadChange}
               onExternalFeedbackChange={handleExternalFeedbackChange}
               showRecommendationFeedback={isLlmNode}
+              referenceBackLabel={isReadReply ? GLEANINGS_TITLE : undefined}
               contextArtifacts={node.context_artifacts || null}
               onQuoteClick={handleBubbleClick}
             />
