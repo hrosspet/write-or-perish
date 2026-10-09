@@ -76,9 +76,9 @@ final class DeleteAccountModel {
             "Once it is deleted forever, nobody else can take your username for "
                 + "\(info?.usernameReserveDays ?? 365) days.",
         ]
-        if let writing = user?.dataDeletion?.scheduledWritingDeletion {
-            paragraphs.append("This replaces your request to delete all your writing on \(AccountDeletion.formatDate(writing)): "
-                + "everything is deleted on \(date) instead, and restoring your account cancels both.")
+        if user?.dataDeletion?.scheduledWritingDeletion != nil {
+            paragraphs.append("This replaces your request to delete all your writing: everything is deleted forever "
+                + "on \(date) instead. If you restore your account, your writing comes back too.")
         }
         if let xNote = Self.xNote(xConnected: user?.dataDeletion?.xConnected == true, info: info) {
             paragraphs.append(xNote)
@@ -329,9 +329,10 @@ final class ConfirmAccountDeletionModel {
         }
         let days = app.user?.accountDeletion?.graceDays ?? 30
         let date = AccountDeletion.formatDate(AccountDeletion.dateAfter(days: days, from: now()))
-        return "When you confirm, your account is deleted and you are signed out everywhere. If you change your "
-            + "mind, you can still restore it by signing in until \(date); after that it is deleted forever, with everything in it. Restoring "
-            + "it also cancels a request to delete all your writing, if one is waiting."
+        let message = "When you confirm, your account is deleted and you are signed out everywhere. If you change your "
+            + "mind, you can still restore it by signing in until \(date); after that it is deleted forever, with everything in it."
+        guard app.user?.dataDeletion?.writingRestorable == true else { return message }
+        return message + " If you restore your account, the writing you deleted comes back too."
     }
 
     /// The error line; for another account's link it says whose session this is.

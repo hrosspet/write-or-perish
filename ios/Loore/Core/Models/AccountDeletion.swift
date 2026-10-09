@@ -63,22 +63,29 @@ struct AccountDeletionInfo: Decodable, Equatable, Sendable {
 }
 
 /// `user.data_deletion`: the user's "Delete all my writing" request (#268),
-/// which the account deletion replaces, and whether X is connected.
+/// which the account deletion replaces, and whether X is connected. The
+/// request hides the writing at once; until `purge_at` it can be restored
+/// (`restorable`, sent since the 2026-10-09 rework).
 struct DataDeletionStatus: Decodable, Equatable, Sendable {
     var status: String?
     var purgeAt: Date?
     var xConnected: Bool
+    var restorable: Bool?
+    var source: String?
 
     enum CodingKeys: String, CodingKey {
-        case status
+        case status, restorable, source
         case purgeAt = "purge_at"
         case xConnected = "x_connected"
     }
 
-    init(status: String? = nil, purgeAt: Date? = nil, xConnected: Bool = false) {
+    init(status: String? = nil, purgeAt: Date? = nil, xConnected: Bool = false,
+         restorable: Bool? = nil, source: String? = nil) {
         self.status = status
         self.purgeAt = purgeAt
         self.xConnected = xConnected
+        self.restorable = restorable
+        self.source = source
     }
 
     init(from decoder: Decoder) throws {
@@ -86,10 +93,19 @@ struct DataDeletionStatus: Decodable, Equatable, Sendable {
         status = c.tolerant(.status)
         purgeAt = c.tolerant(.purgeAt)
         xConnected = c.tolerant(.xConnected, default: false)
+        restorable = c.tolerant(.restorable)
+        source = c.tolerant(.source)
     }
 
     /// A writing deletion waiting out its grace period: its date.
     var scheduledWritingDeletion: Date? { status == "scheduled" ? purgeAt : nil }
+
+    /// The writing is hidden and can still be restored (the web's
+    /// `writingRestorable`): the user's own request, until it starts.
+    var writingRestorable: Bool {
+        guard status == "scheduled" else { return false }
+        return restorable ?? (source != "admin")
+    }
 }
 
 /// `POST /api/account/delete` and `POST /api/account/delete/confirm` (202):
@@ -121,16 +137,22 @@ struct RestoreOffer: Decodable, Equatable, Sendable {
     var username: String
     var deleteOn: Date?
     var restorable: Bool
+    /// The deletion replaced a "Delete all my writing" whose writing is
+    /// still hidden: a restore brings it back too (#268).
+    var writingComesBack: Bool
 
     enum CodingKeys: String, CodingKey {
         case username, restorable
         case deleteOn = "delete_on"
+        case writingComesBack = "writing_comes_back"
     }
 
-    init(username: String, deleteOn: Date?, restorable: Bool) {
+    init(username: String, deleteOn: Date?, restorable: Bool,
+         writingComesBack: Bool = false) {
         self.username = username
         self.deleteOn = deleteOn
         self.restorable = restorable
+        self.writingComesBack = writingComesBack
     }
 
     init(from decoder: Decoder) throws {
@@ -138,6 +160,7 @@ struct RestoreOffer: Decodable, Equatable, Sendable {
         username = c.tolerant(.username, default: "")
         deleteOn = c.tolerant(.deleteOn)
         restorable = c.tolerant(.restorable, default: false)
+        writingComesBack = c.tolerant(.writingComesBack, default: false)
     }
 }
 
