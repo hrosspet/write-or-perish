@@ -354,8 +354,9 @@ describe('the gleaning', () => {
     renderAt('/node/32');
     expect(await screen.findByText('Nothing worth your time today.')).toBeInTheDocument();
     expect(screen.getByText("Loore read all 1,240 of today's tweets in the archive.")).toBeInTheDocument();
-    // #436: the way back to the home page's cards.
-    expect(screen.getByRole('link', { name: 'Back to Home' })).toHaveAttribute('href', '/');
+    // No "Back to Home" under a gleaning: the nav bar has Home (Peter,
+    // 2026-10-09).
+    expect(screen.queryByText('Back to Home')).toBeNull();
   });
 
   test('a pending gleaning says "Gleaning", not "Thinking"', async () => {
