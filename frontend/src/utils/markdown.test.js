@@ -1,4 +1,4 @@
-import { stripInlineMarkdown, toggleCheckbox, insertItemAfter } from './markdown';
+import { stripInlineMarkdown, toggleCheckbox, insertItemAfter, hasCheckboxItem } from './markdown';
 
 // The Todo page parses raw source lines itself, so its item labels keep their
 // inline markdown. The helpers match lines by stripped plain text; keying on
@@ -24,4 +24,12 @@ test('a link-bearing item toggles when keyed by its stripped label', () => {
 test('inserting after a link-bearing item lands below it', () => {
   const out = insertItemAfter(content, stripInlineMarkdown(rawLabel).trim(), 'New task');
   expect(out.split('\n')[3]).toBe('- [ ] New task');
+});
+
+test('hasCheckboxItem matches the same lines toggleCheckbox changes', () => {
+  expect(hasCheckboxItem(content, stripInlineMarkdown(rawLabel).trim())).toBe(true);
+  expect(hasCheckboxItem(content, 'Monitor markets')).toBe(true);
+  // A heading or a reworded item is not a match.
+  expect(hasCheckboxItem(content, 'Financial investments')).toBe(false);
+  expect(hasCheckboxItem(content, 'Monitor the markets')).toBe(false);
 });

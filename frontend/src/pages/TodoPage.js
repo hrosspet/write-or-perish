@@ -1,6 +1,9 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import api from '../api';
-import { useCheckboxToggle, useTaskInsert, appendItemToSection, stripInlineMarkdown } from '../utils/markdown';
+import {
+  appendItemToSection, hasCheckboxItem, insertItemAfter, stripInlineMarkdown, toggleCheckbox,
+} from '../utils/markdown';
+import { useToast } from '../contexts/ToastContext';
 import MarkdownBody from '../components/MarkdownBody';
 import { formatDate } from '../utils/date';
 import VersionHistoryDrawer from '../components/VersionHistoryDrawer';
@@ -253,10 +256,90 @@ export default function TodoPage() {
   const [versionContent, setVersionContent] = useState(null);
   const [previousVersionContent, setPreviousVersionContent] = useState(null);
 
+  const { addToast } = useToast();
+
+  // In-place edits (tick, row "+", quick-add) are shown at once and saved
+  // one at a time, in order (#430). A save applies its edit to the newest
+  // list the server returned and sends that list's revision. When the list
+  // changed elsewhere in between (a todo merge, another device or tab), the
+  // server refuses with the newest list (409); the edit is then applied to
+  // that list and saved again, so the user's change lands and the other
+  // change stays. An edit whose item is no longer in the newest list is
+  // dropped, and the newest list is shown, rather than guessing where it
+  // belongs. What the page shows is the server's list with the edits still
+  // being saved applied on top. An edit is a function from a list's content
+  // to the new content, or to null when its item isn't in that list.
+  const serverTodoRef = useRef(null);
+  const pendingEditsRef = useRef([]);
+  const saveChainRef = useRef(Promise.resolve());
+
+  const showTodo = useCallback((server) => {
+    serverTodoRef.current = server;
+    if (!server) {
+      setTodo(null);
+      return;
+    }
+    const content = pendingEditsRef.current.reduce(
+      (text, entry) => entry.edit(text) ?? text, server.content);
+    setTodo({ ...server, content });
+  }, []);
+
+  const saveEdit = useCallback(async (edit) => {
+    let base = serverTodoRef.current;
+    if (!base) return { ok: false, reason: 'error', newest: null };
+    // The first try, and one more on the newest list after a 409.
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const content = edit(base.content);
+      if (content === null) return { ok: false, reason: 'gone', newest: base };
+      // Already so in the newest list (e.g. ticked on another device).
+      if (content === base.content) return { ok: true, newest: base };
+      try {
+        const res = await api.patch('/todo', { content, base_revision: base.revision });
+        return { ok: true, newest: res.data.todo };
+      } catch (err) {
+        const newest = err.response?.status === 409 ? err.response.data?.todo : null;
+        if (!newest) return { ok: false, reason: 'error', err, newest: base };
+        base = newest;
+      }
+    }
+    return { ok: false, reason: 'changed', newest: base };
+  }, []);
+
+  // Resolves to whether the edit was saved. `failure` names the action in
+  // the toast ("Couldn't save change"); without it nothing is toasted.
+  const applyEdit = useCallback((edit, { failure, gone } = {}) => {
+    if (!serverTodoRef.current) return Promise.resolve(false);
+    const entry = { edit };
+    pendingEditsRef.current = [...pendingEditsRef.current, entry];
+    showTodo(serverTodoRef.current);
+    const run = saveChainRef.current.then(async () => {
+      const result = await saveEdit(edit);
+      pendingEditsRef.current = pendingEditsRef.current.filter((e) => e !== entry);
+      showTodo(result.newest);
+      if (!result.ok && failure) {
+        if (result.reason === 'gone') {
+          addToast(gone || `${failure}: the item changed since this page loaded. Showing the newest list.`);
+        } else if (result.reason === 'changed') {
+          addToast(`${failure}: the list changed again while saving. Showing the newest list.`);
+        } else {
+          console.error(`${failure}:`, result.err);
+          const reason = result.err?.response?.data?.error
+            || result.err?.response?.statusText
+            || result.err?.message
+            || 'Unknown error';
+          addToast(`${failure} — reverted (${reason})`);
+        }
+      }
+      return result.ok;
+    });
+    saveChainRef.current = run.catch(() => false);
+    return run;
+  }, [showTodo, saveEdit, addToast]);
+
   const fetchTodo = useCallback(async () => {
     try {
       const res = await api.get('/todo');
-      setTodo(res.data.todo);
+      showTodo(res.data.todo);
       if (res.data.todo) {
         setEditContent(res.data.todo.content);
       }
@@ -265,28 +348,34 @@ export default function TodoPage() {
       console.error('Failed to load todo:', err);
       setLoading(false);
     }
-  }, []);
+  }, [showTodo]);
 
   useEffect(() => {
     fetchTodo();
   }, [fetchTodo]);
 
-  const getTodoContent = useCallback(() => todo?.content, [todo]);
-  const setTodoContent = useCallback((newContent) => {
-    setTodo(prev => prev ? { ...prev, content: newContent } : prev);
-    setEditContent(newContent);
-  }, []);
-  const saveTodoContent = useCallback((newContent) => api.patch('/todo', { content: newContent }), []);
-  const checkboxToggle = useCheckboxToggle(getTodoContent, setTodoContent, saveTodoContent);
-  const taskInsert = useTaskInsert(getTodoContent, setTodoContent, saveTodoContent);
-
   // item.text is the raw source label (may contain links/bold); the markdown
   // helpers match lines by their stripped plain text, so key on that.
   const handleToggle = (item) => {
-    checkboxToggle(stripInlineMarkdown(item.text).trim(), item.checked);
+    const key = stripInlineMarkdown(item.text).trim();
+    const checked = item.checked;
+    applyEdit(
+      (content) => (hasCheckboxItem(content, key) ? toggleCheckbox(content, key, checked) : null),
+      { failure: "Couldn't save change" },
+    );
   };
   const handleInsertAfter = (item, text) => {
-    taskInsert(stripInlineMarkdown(item.text).trim(), text);
+    const key = stripInlineMarkdown(item.text).trim();
+    applyEdit(
+      (content) => {
+        const next = insertItemAfter(content, key, text);
+        return next === content ? null : next;
+      },
+      {
+        failure: "Couldn't add task",
+        gone: `Couldn't add "${text}": the item above it changed since this page loaded. Showing the newest list.`,
+      },
+    );
   };
 
   const handleSave = async () => {
@@ -297,7 +386,7 @@ export default function TodoPage() {
         content: editContent,
         generated_by: 'user',
       });
-      setTodo(res.data.todo);
+      showTodo(res.data.todo);
       setEditing(false);
     } catch (err) {
       console.error('Failed to save todo:', err);
@@ -308,23 +397,16 @@ export default function TodoPage() {
   const handleQuickAdd = async () => {
     const task = quickAddText.trim();
     if (!task || quickAddSaving || !todo) return;
-    const prevContent = todo.content;
-    const newContent = appendItemToSection(prevContent, 'Today', task, { createAtStart: true });
     setQuickAddSaving(true);
-    // Optimistic update so the new task appears immediately.
-    setTodo(prev => prev ? { ...prev, content: newContent } : prev);
-    setEditContent(newContent);
     setQuickAddText('');
-    try {
-      const res = await api.patch('/todo', { content: newContent });
-      if (res.data?.todo) setTodo(res.data.todo);
+    // Shown at once; on failure the typed text comes back (no toast).
+    const saved = await applyEdit(
+      (content) => appendItemToSection(content, 'Today', task, { createAtStart: true }),
+    );
+    if (saved) {
       // Keep the input open and focused for rapid entry of multiple tasks.
       if (quickAddInputRef.current) quickAddInputRef.current.focus();
-    } catch (err) {
-      console.error('Failed to add task:', err);
-      // Revert optimistic update on failure.
-      setTodo(prev => prev ? { ...prev, content: prevContent } : prev);
-      setEditContent(prevContent);
+    } else {
       setQuickAddText(task);
     }
     setQuickAddSaving(false);
@@ -369,7 +451,7 @@ export default function TodoPage() {
   const handleRevert = async (id) => {
     try {
       const res = await api.post(`/todo/revert/${id}`);
-      setTodo(res.data.todo);
+      showTodo(res.data.todo);
       setEditContent(res.data.todo.content);
       setDrawerOpen(false);
       setSelectedVersionId(null);
