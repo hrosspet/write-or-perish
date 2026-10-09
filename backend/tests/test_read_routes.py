@@ -1822,6 +1822,144 @@ class TestGleanOnlyThroughGlean:
         _login(client, ana.id)
         assert client.post("/api/read/start", json={}).status_code == 403
 
+    def _detach(self, node, text):
+        from backend.models import NodeContextArtifact
+        NodeContextArtifact.query.filter_by(
+            node_id=node.id, artifact_type="prompt").delete()
+        node.prompt_key = "read_thread"
+        node.set_content(text)
+        _db.session.commit()
+
+    def test_a_read_prompt_with_the_users_own_text_is_not_glean(self, app_glean):
+        """A read prompt whose link to Loore's version is gone (a
+        per-thread edit) or points to a version the user wrote keeps its
+        key but is the user's text: no read for a non-admin."""
+        from backend.models import UserPrompt
+        from backend.utils.glean import is_glean_prompt_node, read_turn_allowed
+        from backend.utils.llm_nodes import create_llm_placeholder
+        from backend.utils.placeholders import CaTweetsValidationError
+        ana = _glean_user(app_glean, glean_enabled=True)
+        linked = _make_prompt_node(ana, "read_thread")
+        detached = _make_prompt_node(ana, "read_thread")
+        _db.session.commit()
+        assert is_glean_prompt_node(linked) is True
+        self._detach(detached, "Read it all. {ca_tweets?days=3}")
+        assert is_glean_prompt_node(detached) is False
+        assert read_turn_allowed(ana, detached) is False
+        with pytest.raises(CaTweetsValidationError):
+            create_llm_placeholder(detached.id, "claude-opus-4.6", ana.id)
+        # Linked to a version the user wrote.
+        record = linked.get_artifact("prompt")
+        own = UserPrompt(user_id=ana.id, prompt_key="read_thread",
+                         title="Glean", generated_by="user")
+        own.set_content("Mine. {ca_tweets?days=3}")
+        _db.session.add(own)
+        _db.session.flush()
+        from backend.models import NodeContextArtifact
+        NodeContextArtifact.query.filter_by(
+            node_id=linked.id, artifact_type="prompt").update(
+                {"artifact_id": own.id})
+        _db.session.commit()
+        _db.session.expire_all()
+        assert record.generated_by == "default"
+        assert is_glean_prompt_node(Node.query.get(linked.id)) is False
+
+    def test_users_cannot_rewrite_a_read_prompt_in_a_thread(self, app_glean):
+        client = app_glean.test_client()
+        ana = _glean_user(app_glean, glean_enabled=True)
+        prompt = _make_prompt_node(ana, "read_thread")
+        _db.session.commit()
+        _login(client, ana.id)
+        resp = client.put(f"/api/nodes/{prompt.id}", json={
+            "content": "Read it all. {ca_tweets?days=3}", "detach_prompt": True})
+        assert resp.status_code == 403
+        assert Node.query.get(prompt.id).get_artifact("prompt") is not None
+        # A settings-only edit (the same text) stays open.
+        same = Node.query.get(prompt.id).get_content()
+        resp = client.put(f"/api/nodes/{prompt.id}", json={
+            "content": same, "privacy_level": "private"})
+        assert resp.status_code == 200, resp.get_json()
+
+    def test_prompt_writes_on_read_prompts_are_admin_only(self, app_glean):
+        from backend.models import UserPrompt
+        from backend.routes.prompts import prompts_bp
+        app_glean.register_blueprint(prompts_bp, url_prefix="/api/prompts")
+        client = app_glean.test_client()
+        ana = _glean_user(app_glean, glean_enabled=True)
+        _login(client, ana.id)
+        assert client.post("/api/prompts/read_thread/revert-to-default").status_code == 403
+        assert client.post("/api/prompts/read_thread/acknowledge-default").status_code == 403
+        # Restoring an older version runs the same {ca_tweets} check as a save.
+        old = UserPrompt(user_id=ana.id, prompt_key="voice", title="Voice Mode",
+                         generated_by="user")
+        old.set_content("old text {ca_tweets?days=3}")
+        _db.session.add(old)
+        _db.session.commit()
+        resp = client.post(f"/api/prompts/voice/revert/{old.id}")
+        assert resp.status_code == 400
+        assert UserPrompt.query.filter_by(user_id=ana.id, prompt_key="voice").count() == 1
+
+
+class TestGleanModelFailsClosed:
+    """The read model is the server's choice and fails rather than falls
+    back (#435)."""
+
+    def test_an_unresolvable_provider_fails(self, app_glean, monkeypatch):
+        from backend.utils import llm_nodes
+        from backend.utils.glean import GleanModelUnavailable
+        ana = _glean_user(app_glean, glean_enabled=True)
+        entry = _make_node(ana, content="a reflection")
+        _db.session.commit()
+        monkeypatch.setattr(llm_nodes, "glean_provider", lambda *a, **k: None)
+        with pytest.raises(GleanModelUnavailable):
+            llm_nodes.resolve_read_model(entry, user=ana)
+
+    def test_a_missing_or_wrong_glean_model_setting_fails(self, app_glean):
+        from backend.utils.glean import GleanModelUnavailable
+        from backend.utils.llm_nodes import resolve_read_model
+        ana = _glean_user(app_glean, glean_enabled=True, preferred_model="gpt-6-sol")
+        entry = _make_node(ana, content="a reflection")
+        _db.session.commit()
+        # No OpenAI glean model configured: no READ_DEFAULT_MODEL in its place.
+        app_glean.config["GLEAN_MODEL_OPENAI"] = None
+        with pytest.raises(GleanModelUnavailable):
+            resolve_read_model(entry, user=ana)
+        # Configured to another provider's model: refused, not used.
+        app_glean.config["GLEAN_MODEL_OPENAI"] = "claude-haiku-5.5"
+        with pytest.raises(GleanModelUnavailable):
+            resolve_read_model(entry, user=ana)
+
+    def test_a_non_admin_never_reuses_a_stored_read_model(self, app_glean):
+        """An earlier read in the thread on another read model of the same
+        provider is not reused for a non-admin: the configured glean model
+        is."""
+        from backend.utils.llm_nodes import resolve_read_model
+        app_glean.config["SUPPORTED_MODELS"] = {
+            **MODELS_GLEAN,
+            "gpt-6.1-sol": {"provider": "openai", "display_name": "GPT-6.1 Sol",
+                            "read": True, "chat": False},
+        }
+        ana = _glean_user(app_glean, glean_enabled=True, preferred_model="gpt-6-sol")
+        t = _read_thread(ana, read_model="gpt-6.1-sol", chat_model="gpt-6-sol")
+        assert resolve_read_model(t["note2"], user=ana) == ("gpt-6-luna", "provider_default")
+        boss = _make_user("boss", is_admin=True, preferred_model="gpt-6-sol")
+        b = _read_thread(boss, read_model="gpt-6.1-sol", chat_model="gpt-6-sol")
+        assert resolve_read_model(b["note2"], user=boss) == ("gpt-6.1-sol", "predecessor")
+
+    def test_an_admin_never_names_the_model_under_someone_elses_node(self, app_glean):
+        """The admin exception holds only under a node of the admin's own."""
+        from backend.utils.llm_nodes import create_llm_placeholder
+        ana = _glean_user(app_glean, glean_enabled=True)
+        prompt = _make_prompt_node(ana, "read_thread")
+        boss = _make_user("boss", is_admin=True, preferred_model="claude-opus-4.6")
+        _db.session.commit()
+        node, _ = create_llm_placeholder(prompt.id, "gpt-6-luna", boss.id)
+        assert node.llm_model == "claude-haiku-5.5"
+        own = _make_prompt_node(boss, "read_thread")
+        _db.session.commit()
+        node, _ = create_llm_placeholder(own.id, "gpt-6-luna", boss.id)
+        assert node.llm_model == "gpt-6-luna"
+
 
 class TestPickDisplayNames:
     def _picks(self, ana, node, refs):

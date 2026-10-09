@@ -916,6 +916,14 @@ def update_node(node_id):
             "char_cap": NODE_CHAR_CAP,
         }), 422
 
+    # A read prompt's text is Glean's (#435): only an admin may change it,
+    # here as on the Prompts page. Settings-only edits stay open.
+    from backend.utils.ca_feed import READ_PROMPT_KEYS
+    if (node.get_prompt_key() in READ_PROMPT_KEYS
+            and getattr(current_user, "is_admin", False) is not True
+            and (new_content or "").strip() != (node.get_content() or "").strip()):
+        return jsonify({"error": "This prompt can't be changed."}), 403
+
     old_privacy, old_ai_usage = node.privacy_level, node.ai_usage
     # Handle privacy settings updates (optional)
     if "privacy_level" in data:
