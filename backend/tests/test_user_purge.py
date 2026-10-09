@@ -730,6 +730,104 @@ def test_a_job_that_keeps_failing_is_marked_failed(world, stubs, monkeypatch,
                for r in caplog.records)
 
 
+def _rerun_until_failed(job_id):
+    """Let the beat retry the job until it has used up its attempts."""
+    for _ in range(up.PURGE_MAX_ATTEMPTS):
+        tokens = []
+        up.dispatch_due_jobs(lambda j, t: tokens.append(t))
+        if not tokens:
+            break
+        up.run_purge_job(job_id, tokens[0])
+    up.dispatch_due_jobs(lambda j, t: None)
+    return _db.session.get(UserDataPurge, job_id)
+
+
+def test_rows_left_after_the_last_round_fail_the_run(
+        world, stubs, monkeypatch, caplog):
+    """A purge that still finds the user's rows after its last round has
+    not deleted everything: the run fails (retried, then the job is
+    marked failed and logged as an error), it is never reported done."""
+    real_round = up._purge_round
+
+    def round_and_write(user, plan, counts, heartbeat):
+        real_round(user, plan, counts, heartbeat)
+        _node(_db.session.get(User, user.id), owner=user.id, text="late")
+        _db.session.commit()
+    monkeypatch.setattr(up, "_purge_round", round_and_write)
+    job_id, outcome = _run_job()
+    assert outcome == "error"
+    job = _db.session.get(UserDataPurge, job_id)
+    assert job.status == "running" and job.heartbeat_at is None
+    assert job.error.startswith("PurgeIncomplete") and "node" in job.error
+    caplog.clear()
+    job = _rerun_until_failed(job_id)
+    assert job.status == "failed" and job.error.startswith("PurgeIncomplete")
+    assert any(r.levelname == "ERROR" for r in caplog.records)
+
+
+def test_a_file_that_cannot_be_deleted_fails_the_run(world, stubs, monkeypatch):
+    real_unlink = up.os.unlink
+
+    def refuse(path, *a, **k):
+        if str(path).endswith("tts.mp3"):
+            raise PermissionError("read-only")
+        return real_unlink(path, *a, **k)
+    monkeypatch.setattr(up.os, "unlink", refuse)
+    job_id, outcome = _run_job()
+    assert outcome == "error"
+    job = _db.session.get(UserDataPurge, job_id)
+    assert job.status != "done" and "files" in job.error
+    monkeypatch.setattr(up.os, "unlink", real_unlink)
+    tokens = []
+    up.dispatch_due_jobs(lambda j, t: tokens.append(t))
+    assert up.run_purge_job(job_id, tokens[0]) == "done"
+
+
+def test_batch_items_left_behind_a_busy_lock_fail_the_run(world, stubs):
+    """Past the longest wait the purge deletes what it can, but while her
+    item is still in a batch job its collector can save a profile from
+    the purged writing: the run is not done."""
+    stubs.lock_ok = False
+    job_id, outcome = _run_job()
+    assert outcome == "wait"
+    job = _db.session.get(UserDataPurge, job_id)
+    job.waiting_since = datetime.utcnow() - up.PURGE_MAX_WAIT - timedelta(minutes=1)
+    _db.session.commit()
+    assert up.run_purge_job(job_id, job.task_id) == "error"
+    job = _db.session.get(UserDataPurge, job_id)
+    assert job.status != "done" and "profile_batch_job" in job.error
+    assert _db.session.get(Node, world.ids["A2"]) is None   # the rest went
+    stubs.lock_ok = True
+    tokens = []
+    up.dispatch_due_jobs(lambda j, t: tokens.append(t))
+    assert up.run_purge_job(job_id, tokens[0]) == "done"
+    assert _db.session.get(ProfileBatchJob, world.J_mixed.id).items == [
+        {"custom_id": "c3", "user_id": world.bob.id}]
+
+
+def test_an_unreadable_task_state_counts_as_running(world, stubs, monkeypatch):
+    def down(ids):
+        raise ConnectionError("result backend down")
+    monkeypatch.setattr(up, "_running_tasks", down)
+    job_id, outcome = _run_job()
+    assert outcome == "wait"
+    assert _db.session.get(Node, world.ids["A2"]) is not None
+
+
+def test_a_failed_revoke_waits_and_revokes_again(world, stubs, monkeypatch):
+    def down(ids):
+        raise ConnectionError("broker down")
+    monkeypatch.setattr(up, "_revoke_tasks", down)
+    job_id, outcome = _run_job()
+    assert outcome == "wait"
+    assert _db.session.get(Node, world.ids["A2"]) is not None
+    monkeypatch.setattr(up, "_revoke_tasks",
+                        lambda ids: stubs.revoked.extend(ids))
+    job = _db.session.get(UserDataPurge, job_id)
+    assert up.run_purge_job(job_id, job.task_id) == "done"
+    assert "t-a2" in stubs.revoked
+
+
 def test_a_backed_up_queue_does_not_use_up_attempts(world, stubs, caplog):
     """The beat claims a due job every time its claim goes stale, but a
     claim whose runner is still waiting in the Celery queue is not an

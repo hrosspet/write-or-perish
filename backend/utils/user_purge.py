@@ -37,6 +37,11 @@ pre-filled from. Every stored audio URL points inside these folders.
 
 Re-running is safe: each step selects what is still there. A purge that
 crashed half way continues where it stopped.
+
+Verified by counting: after the last round the dry-run count must be
+zero for every table and file, and no batch job may still carry the
+user's items. Otherwise the run fails with PurgeIncomplete and is
+retried; it is never reported done with anything left.
 """
 import json
 import logging
@@ -113,6 +118,13 @@ class PurgeRefused(Exception):
 
 class PurgeSuperseded(Exception):
     """Another runner claimed the job; this one stops."""
+
+
+class PurgeIncomplete(Exception):
+    """The user's rows, files or batch items are still there after the
+    purge. The run fails: the beat retries it, and after
+    PURGE_MAX_ATTEMPTS the job is marked failed and logged as an error.
+    The message names tables and counts, never content."""
 
 
 def _now():
@@ -361,7 +373,8 @@ def _delete_files(dirs, files=()):
     """Delete the files under *dirs* and the *files*, then the emptied
     folders. Returns how many files were deleted. A file that cannot be
     deleted is logged by path (paths hold ids, never content) and the
-    purge goes on; the next run tries again."""
+    purge goes on; the count at the end still finds it, so the run fails
+    and the next run tries again."""
     deleted = 0
     for f in sorted(_files_in(dirs) | set(files)):
         try:
@@ -590,10 +603,13 @@ def stop_in_flight(user_id, *, dry_run=False, plan=None):
             setattr(user, attr, value)
     db.session.commit()
 
+    revoke_failed = False
     try:
         _revoke_tasks(task_ids)
-    except Exception as e:  # noqa: BLE001 - the broker being down must not stop it
-        logger.warning("user purge: revoke failed (%s)", type(e).__name__)
+    except Exception as e:  # noqa: BLE001 - recorded below: the runner waits
+        logger.warning("user purge: revoke failed (%s); waiting to revoke "
+                       "again", type(e).__name__)
+        revoke_failed = True
     for entry in node_batches:
         _cancel_provider_batch(entry.get("provider") or "anthropic",
                                entry["batch_id"],
@@ -619,9 +635,13 @@ def stop_in_flight(user_id, *, dry_run=False, plan=None):
     try:
         running = _running_tasks(task_ids)
     except Exception as e:  # noqa: BLE001
-        logger.warning("user purge: task state check failed (%s)",
-                       type(e).__name__)
-        running = []
+        # Unknown is not "none running": wait and look again.
+        logger.warning("user purge: task state check failed (%s); treating "
+                       "the user's tasks as running", type(e).__name__)
+        running = list(task_ids)
+    if revoke_failed:
+        # A queued task may still start and write: wait, then revoke again.
+        running = list(task_ids)
     return InFlight(dict(counts), running, lock_busy)
 
 
@@ -731,6 +751,19 @@ def count_user_data(user_id, plan=None):
 def leftovers(counts):
     """The part of *counts* the purge should have brought to zero."""
     return {k: v for k, v in counts.items() if v and k not in INFO_KEYS}
+
+
+def batch_items_left(user_id):
+    """Batch jobs that still carry the user's items, per table (the dry
+    run of the strip). Poll-draft items are keyed by the user's poll
+    responses, so they are found only while those rows exist."""
+    response_ids = {r for (r,) in db.session.query(PollResponse.id).filter(
+        PollResponse.user_id == user_id)}
+    counts = Counter()
+    for model, belongs, key in _batch_tables(user_id, response_ids):
+        _strip_batch_jobs(model, belongs, True, _now(), counts, key)
+    counts.pop("provider_batches_cancelled", None)
+    return {k: v for k, v in counts.items() if v}
 
 
 # ── The purge ───────────────────────────────────────────────────────────
@@ -949,8 +982,9 @@ def purge_user_content(user_id, *, dry_run=False, heartbeat=None):
         logger.warning("user purge of user %s: rows written meanwhile (%s); "
                        "another round", user_id, sorted(left))
     else:
-        logger.error("user purge of user %s: rows still left after %d rounds",
-                     user_id, PURGE_MAX_ROUNDS)
+        raise PurgeIncomplete(
+            f"still left after {PURGE_MAX_ROUNDS} rounds: "
+            + ", ".join(f"{k}={v}" for k, v in sorted(left.items())))
 
     # The account stays; what described the writing does not.
     user = db.session.get(User, user_id)
@@ -1165,6 +1199,14 @@ def run_purge_job(job_id, token):
                            "%s; purging anyway", job_id, PURGE_MAX_WAIT)
         heartbeat()
         counts = purge_user_content(user.id, heartbeat=heartbeat)
+        # A batch job that still carries the user's item (its pipeline's
+        # lock stayed busy past the longest wait) would save a result
+        # from the purged writing when it is collected.
+        left = batch_items_left(user.id)
+        if left:
+            raise PurgeIncomplete(
+                "batch items still left: "
+                + ", ".join(f"{k}={v}" for k, v in sorted(left.items())))
         for key, value in inflight.counts.items():
             counts[key] = counts.get(key, 0) + value
         job = db.session.get(UserDataPurge, job_id)
