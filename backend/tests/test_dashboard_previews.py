@@ -1,11 +1,6 @@
-"""A user's dashboard page (GET /api/dashboard/<username>) shows a
-session's card by the first entry under its system prompt root. That entry
-is the first one the viewer may see: not soft-deleted, and not another
-user's entry the viewer cannot open. The card tests below look at the
-owner's own page.
-
-The signed-in user's GET /api/dashboard/ lists no cards (#481): no client
-shows them, and each card's preview was a decryption on every app load.
+"""The signed-in user's GET /api/dashboard/ lists no thread cards (#481):
+no client shows them, and each card's preview was a decryption on every
+app load. It carries the user and the newest profile version.
 
 Same harness as test_log_dashboard_privacy (minimal app, sqlite)."""
 from datetime import datetime, timedelta
@@ -40,111 +35,6 @@ def _world():
     root.pinned_by = alice.id
     return alice, bob, root
 
-
-def _own_page(flask_app, user):
-    client = flask_app.test_client()
-    _login(client, user.id)
-    return client.get(f"/api/dashboard/{user.username}").get_json()
-
-
-def _cards(flask_app, user):
-    body = _own_page(flask_app, user)
-    return body["nodes"] + body["pinned_nodes"]
-
-
-def test_preview_skips_another_users_entry_the_owner_cannot_open(app):  # noqa: F811
-    alice, bob, root = _world()
-    _node(bob, root, "BOB PRIVATE WORDS", at=T0 + timedelta(minutes=1))
-    _node(alice, root, "alice's own words", at=T0 + timedelta(minutes=2))
-    _db.session.commit()
-
-    cards = _cards(app, alice)
-    assert len(cards) == 2
-    for card in cards:
-        assert "BOB PRIVATE WORDS" not in card["preview"]
-        assert card["preview"] == "alice's own words"
-
-
-def test_preview_skips_a_deleted_entry(app):  # noqa: F811
-    alice, bob, root = _world()
-    _node(alice, root, "DELETED WORDS", at=T0 + timedelta(minutes=1),
-          deleted_at=T0 + timedelta(days=1))
-    _node(alice, root, "alice's own words", at=T0 + timedelta(minutes=2))
-    _db.session.commit()
-
-    for card in _cards(app, alice):
-        assert card["preview"] == "alice's own words"
-
-
-def test_preview_shows_another_users_public_entry(app):  # noqa: F811
-    alice, bob, root = _world()
-    _node(bob, root, "bob public words", privacy="public",
-          at=T0 + timedelta(minutes=1))
-    _db.session.commit()
-
-    for card in _cards(app, alice):
-        assert card["preview"] == "bob public words"
-
-
-def test_with_nothing_visible_below_the_card_shows_the_root(app):  # noqa: F811
-    alice, bob, root = _world()
-    _node(bob, root, "BOB PRIVATE WORDS", at=T0 + timedelta(minutes=1))
-    _db.session.commit()
-
-    for card in _cards(app, alice):
-        assert "BOB PRIVATE WORDS" not in card["preview"]
-        assert card["id"] == root.id
-
-
-def test_soft_deleted_root_is_not_listed_or_counted(app):  # noqa: F811
-    alice, bob, root = _world()
-    gone = _node(alice, text="DELETED ROOT WORDS", at=T0 + timedelta(hours=1),
-                 deleted_at=T0 + timedelta(days=1))
-    _db.session.commit()
-
-    body = _own_page(app, alice)
-    assert [c["id"] for c in body["nodes"]] == [root.id]
-    assert body["total_nodes"] == 1
-    assert gone.id not in [c["id"] for c in body["pinned_nodes"]]
-
-
-def test_deleted_pinned_root_is_not_listed(app):  # noqa: F811
-    alice, bob, root = _world()
-    gone = _node(alice, text="DELETED PINNED", at=T0 + timedelta(hours=1),
-                 pinned_at=T0, deleted_at=T0 + timedelta(days=1))
-    gone.pinned_by = alice.id
-    _db.session.commit()
-
-    body = _own_page(app, alice)
-    assert [c["id"] for c in body["pinned_nodes"]] == [root.id]
-
-
-def test_child_count_counts_only_children_the_owner_can_see(app):  # noqa: F811
-    alice, bob, root = _world()
-    _node(alice, root, "alive", at=T0 + timedelta(minutes=1))
-    _node(alice, root, "deleted", at=T0 + timedelta(minutes=2),
-          deleted_at=T0 + timedelta(days=1))
-    _node(bob, root, "bob private", at=T0 + timedelta(minutes=3))
-    _db.session.commit()
-
-    cards = _cards(app, alice)
-    assert len(cards) == 2
-    for card in cards:
-        assert card["child_count"] == 1
-
-
-def test_username_is_the_author_of_the_previewed_entry(app):  # noqa: F811
-    alice, bob, root = _world()
-    _node(bob, root, "bob public words", privacy="public",
-          at=T0 + timedelta(minutes=1))
-    _db.session.commit()
-
-    for card in _cards(app, alice):
-        assert card["preview"] == "bob public words"
-        assert card["username"] == "bob"
-
-
-# ── GET /api/dashboard/: the signed-in user, no cards (#481) ──────────────
 
 # What the clients read from `user`: the web app keeps the whole object
 # (UserContext), the iPhone app decodes it as CurrentUser.
