@@ -334,13 +334,32 @@ def ca_tweets_denied_message():
     return "Glean is not available on your account yet."
 
 
-def check_ca_tweets_access(text, user, *, log=None):
-    """Refuse {ca_tweets} in `text` for users ca_tweets_allowed() rejects.
-    Raises CaTweetsValidationError (→ 400 + toast at every call site),
-    before any node exists. No-op without the placeholder."""
+def ca_tweets_text_allowed(user, *, from_read_prompt=False):
+    """Who may have {ca_tweets} in a text that is sent: an admin anywhere
+    (the PoC's own experiments: typed into an entry or a saved prompt);
+    anyone else only when it comes from one of the read prompts a glean
+    attaches, and only while they glean (the rollout gate and their own
+    switch, utils/glean.glean_enabled). A typed placeholder would run a
+    read outside Glean: on any days= value, on the chat model, with the
+    switch off (#435 review)."""
+    if user is None:
+        return False
+    if getattr(user, "is_admin", False):
+        return True
+    if not from_read_prompt:
+        return False
+    from backend.utils.glean import glean_enabled
+    return glean_enabled(user)
+
+
+def check_ca_tweets_access(text, user, *, from_read_prompt=False, log=None):
+    """Refuse {ca_tweets} in `text` for users ca_tweets_text_allowed()
+    rejects. *from_read_prompt*: the text is a read prompt a glean
+    attached. Raises CaTweetsValidationError (→ 400 + toast at every call
+    site), before any node exists. No-op without the placeholder."""
     if not text or not CA_TWEETS_PATTERN.search(text):
         return
-    if not ca_tweets_allowed(user):
+    if not ca_tweets_text_allowed(user, from_read_prompt=from_read_prompt):
         log = log if log is not None else _default_logger
         log.warning("Refused {ca_tweets} for user_id=%s: not allowed",
                     getattr(user, "id", None))

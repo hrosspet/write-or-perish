@@ -61,7 +61,7 @@ from backend.extensions import db
 from backend.utils.prompts import get_user_prompt_record
 from backend.utils.llm_nodes import (
     AIUsageRefused, ai_usage_refused_response, create_llm_placeholder,
-    glean_provider, is_read_model, reply_refusal, resolve_read_model,
+    is_read_model, reply_refusal, resolve_read_model,
 )
 from backend.utils.placeholders import (
     UserExportValidationError, ca_tweets_allowed, ca_tweets_denied_message,
@@ -80,15 +80,15 @@ THREAD_PROMPT_KEY = 'read_thread'
 def _resolve_model(anchor_node):
     """A read runs only on a read model (#355) of the provider the user's
     chat model is from (#435: a user's provider is never switched): the
-    one the request names, else the thread's last read's, else the
+    thread's last read's while it is on that provider, else the
     provider's glean model (GLEAN_MODEL_*). Never the chat default: a
-    conversation on Opus does not carry into a read. Only an admin may
-    name a read model of another provider (their own evaluations)."""
-    from backend.utils.glean import (
-        GleanModelUnavailable, model_provider, provider_name, read_model_fits,
-    )
+    conversation on Opus does not carry into a read. The server chooses:
+    only an admin may name a model (any read model, for their own
+    evaluations); a model a non-admin's request names is ignored."""
+    from backend.utils.glean import GleanModelUnavailable
     data = request.get_json(silent=True) or {}
-    model_id = data.get("model")
+    model_id = data.get("model") if getattr(
+        current_user, "is_admin", False) else None
     if not model_id:
         try:
             return resolve_read_model(anchor_node, user=current_user)[0], None
@@ -100,13 +100,6 @@ def _resolve_model(anchor_node):
                  if is_read_model(key)]
         return None, (jsonify({
             "error": f"Reads run on {', '.join(names)}; not on {model_id}.",
-        }), 400)
-    provider = glean_provider(anchor_node, current_user)
-    if not read_model_fits(current_user, model_id, provider):
-        return None, (jsonify({
-            "error": (f"Your replies run on {provider_name(provider)} "
-                      f"models, so Glean does too; {model_id} is a "
-                      f"{provider_name(model_provider(model_id))} model."),
         }), 400)
     return model_id, None
 
@@ -167,8 +160,9 @@ def _start(prompt_key, parent, privacy_level, model_id, auto_generate=True,
 @read_bp.route("/start", methods=["POST"])
 @login_required
 def start_read():
-    """A fresh thread: the 'read' prompt as root, the reply under it."""
-    if not ca_tweets_allowed(current_user):
+    """A fresh thread: the 'read' prompt as root, the reply under it.
+    Admin experiments only (#435): a glean always answers a reflection."""
+    if not getattr(current_user, "is_admin", False):
         return jsonify({"error": ca_tweets_denied_message()}), 403
     model_id, err = _resolve_model(None)
     if err:

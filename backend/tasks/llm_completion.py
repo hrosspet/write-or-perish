@@ -71,7 +71,6 @@ from backend.utils.privacy import AI_ALLOWED
 from backend.utils.placeholders import (
     CA_TWEETS_PATTERN,
     USER_EXPORT_PATTERN,
-    ca_tweets_allowed,
     ca_tweets_denied_message,
     parse_ca_tweets_days,
     parse_ca_tweets_scope,
@@ -3252,8 +3251,11 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 from backend.utils import community_archive as ca
                 # Gate on the EFFECTIVE placeholder: the pre-flight in
                 # create_llm_placeholder only sees the parent entry, not
-                # an older message or the thread's system prompt.
-                if not ca_tweets_allowed(User.query.get(user_id)):
+                # an older message or the thread's system prompt. A
+                # non-admin's read comes only from a glean's read prompt,
+                # and only while they glean (#435).
+                from backend.utils.glean import read_turn_allowed
+                if not read_turn_allowed(User.query.get(user_id), ca_node):
                     raise ValueError(ca_tweets_denied_message())
                 ca_params = parse_placeholder_params(ca_placeholder_match)
                 ca_days = parse_ca_tweets_days(

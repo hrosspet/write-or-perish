@@ -130,12 +130,25 @@ def get_prompt(prompt_key):
         }), 200
 
 
+def _admin_prompt_refused(prompt_key):
+    """A 403 when a non-admin tries to change an admin prompt (the read
+    prompts, #435): a user's saved version would run on every glean of
+    theirs. The list route already hides these from non-admins."""
+    if (PROMPT_DEFAULTS[prompt_key].get('admin')
+            and not getattr(current_user, "is_admin", False)):
+        return jsonify({"error": "This prompt can't be changed."}), 403
+    return None
+
+
 @prompts_bp.route("/<prompt_key>", methods=["PUT"])
 @login_required
 def update_prompt(prompt_key):
     """Save a new version of a prompt."""
     if prompt_key not in PROMPT_DEFAULTS:
         return jsonify({"error": "Unknown prompt key"}), 404
+    refused = _admin_prompt_refused(prompt_key)
+    if refused is not None:
+        return refused
 
     data = request.get_json() or {}
     content = data.get("content")
@@ -154,6 +167,10 @@ def update_prompt(prompt_key):
             unrestricted_allowed=current_user.has_unrestricted_export,
             user_id=current_user.id,
         )
+        # {ca_tweets} in a saved prompt is for admins: a user's reads
+        # come only from the read prompts Glean attaches (#435).
+        from backend.utils.placeholders import check_ca_tweets_access
+        check_ca_tweets_access(content, current_user)
     except UserExportValidationError as e:
         return jsonify({"error": str(e)}), 400
 
@@ -251,6 +268,9 @@ def revert_prompt(prompt_key, version_id):
     """Create a new version from a historical one."""
     if prompt_key not in PROMPT_DEFAULTS:
         return jsonify({"error": "Unknown prompt key"}), 404
+    refused = _admin_prompt_refused(prompt_key)
+    if refused is not None:
+        return refused
 
     old_prompt = UserPrompt.query.get_or_404(version_id)
 

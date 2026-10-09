@@ -1694,12 +1694,20 @@ class TestGleanIsLiveOnTheUsersProvider:
         data = client.post(f"/api/read/from-node/{entry.id}", json={}).get_json()
         assert Node.query.get(data["llm_node_id"]).llm_model == "claude-sonnet-5.5"
 
-    def test_a_user_cannot_name_another_providers_model(self, app_glean):
+    @pytest.mark.parametrize("named", ["gpt-6-luna", "claude-sonnet-5.5"])
+    def test_the_server_chooses_a_users_model(self, app_glean, named):
+        """A model a non-admin's request names is ignored, another
+        provider's or a pricier one of their own: the glean runs on their
+        provider's glean model."""
+        app_glean.config["SUPPORTED_MODELS"] = {
+            **MODELS_GLEAN,
+            "claude-sonnet-5.5": {"provider": "anthropic", "display_name": "Sonnet 5.5",
+                                  "read": True, "chat": False},
+        }
         client, _, entry = self._entry(app_glean, preferred_model="claude-opus-4.6")
-        resp = client.post(f"/api/read/from-node/{entry.id}", json={"model": "gpt-6-luna"})
-        assert resp.status_code == 400
-        assert "Anthropic" in resp.get_json()["error"]
-        assert Node.query.count() == 1  # nothing written
+        resp = client.post(f"/api/read/from-node/{entry.id}", json={"model": named})
+        assert resp.status_code == 202, resp.get_json()
+        assert Node.query.get(resp.get_json()["llm_node_id"]).llm_model == "claude-haiku-5.5"
 
     def test_an_admin_may_for_an_evaluation(self, app_glean):
         client = app_glean.test_client()
@@ -1745,6 +1753,74 @@ class TestGleanIsLiveOnTheUsersProvider:
         assert resp.status_code == 202, resp.get_json()
         meta = _json.loads(Node.query.get(reply.id).tool_calls_meta or "[]")
         assert {"name": "_live"} not in meta
+
+
+class TestGleanOnlyThroughGlean:
+    """A non-admin's read runs only as a glean: from the read prompt Glean
+    attaches, while they glean. The raw {ca_tweets} placeholder, the read
+    prompts' text and /read/start stay admin experiments (#435 review)."""
+
+    def test_a_typed_placeholder_is_admin_only(self, app_glean):
+        from backend.utils.llm_nodes import create_llm_placeholder
+        from backend.utils.placeholders import CaTweetsValidationError
+        ana = _glean_user(app_glean, glean_enabled=True)
+        entry = _make_node(ana, content="{ca_tweets?days=3} what now?")
+        _db.session.commit()
+        with pytest.raises(CaTweetsValidationError):
+            create_llm_placeholder(entry.id, "claude-opus-4.6", ana.id)
+        boss = _make_user("boss", is_admin=True)
+        own = _make_node(boss, content="{ca_tweets?days=1}")
+        _db.session.commit()
+        node, _ = create_llm_placeholder(own.id, "gpt-6-luna", boss.id)
+        assert node.llm_model == "gpt-6-luna"
+
+    def test_the_read_prompt_needs_the_switch(self, app_glean):
+        from backend.utils.llm_nodes import create_llm_placeholder
+        from backend.utils.placeholders import CaTweetsValidationError
+        ana = _glean_user(app_glean, glean_enabled=False)
+        prompt = _make_prompt_node(ana, "read_thread")
+        _db.session.commit()
+        with pytest.raises(CaTweetsValidationError):
+            create_llm_placeholder(prompt.id, "claude-opus-4.6", ana.id)
+
+    def test_the_task_gate_checks_where_the_placeholder_is(self, app_glean):
+        from backend.utils.glean import read_turn_allowed
+        ana = _glean_user(app_glean, glean_enabled=True)
+        read_prompt = _make_prompt_node(ana, "read_thread")
+        voice_prompt = _make_prompt_node(ana, "voice")
+        plain = _make_node(ana, content="{ca_tweets}")
+        boss = _make_user("boss", is_admin=True)
+        _db.session.commit()
+        assert read_turn_allowed(ana, read_prompt) is True
+        assert read_turn_allowed(ana, voice_prompt) is False
+        assert read_turn_allowed(ana, plain) is False
+        assert read_turn_allowed(boss, plain) is True
+        ana.glean_enabled = False
+        _db.session.commit()
+        assert read_turn_allowed(ana, read_prompt) is False
+        assert read_turn_allowed(None, read_prompt) is False
+
+    def test_users_cannot_change_the_read_prompts(self, app_glean):
+        from backend.routes.prompts import prompts_bp
+        app_glean.register_blueprint(prompts_bp, url_prefix="/api/prompts")
+        client = app_glean.test_client()
+        ana = _glean_user(app_glean, glean_enabled=True)
+        _login(client, ana.id)
+        resp = client.put("/api/prompts/read_thread", json={"content": "x {ca_tweets}"})
+        assert resp.status_code == 403
+        resp = client.post("/api/prompts/read_thread/revert/1")
+        assert resp.status_code == 403
+        # Nor carry the placeholder in a prompt of their own.
+        resp = client.put("/api/prompts/voice", json={"content": "and {ca_tweets?days=3}"})
+        assert resp.status_code == 400
+        resp = client.put("/api/prompts/voice", json={"content": "a prompt of mine"})
+        assert resp.status_code == 200
+
+    def test_read_start_is_admin_only(self, app_glean):
+        client = app_glean.test_client()
+        ana = _glean_user(app_glean, glean_enabled=True)
+        _login(client, ana.id)
+        assert client.post("/api/read/start", json={}).status_code == 403
 
 
 class TestPickDisplayNames:
