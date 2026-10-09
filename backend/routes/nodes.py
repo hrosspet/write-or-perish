@@ -1142,6 +1142,12 @@ def _focal_own_fields(node, viewer_id):
         # prompt (#66).
         "has_tts": bool(node.audio_tts_url),
     }
+    # Why a reply failed, for its owner only: the thread page says it under
+    # a failed gleaning instead of the placeholder text (#435). The
+    # llm-status poll carries the same text.
+    if (node.llm_task_status == "failed" and node.llm_task_error
+            and viewer_id == (node.human_owner_id or node.user_id)):
+        data["llm_task_error"] = node.llm_task_error
     # The reply's text so far while it is generated (#367): a reload
     # mid-generation shows it at once; the llm-stream SSE takes over.
     if node.llm_task_status in ("pending", "processing") \

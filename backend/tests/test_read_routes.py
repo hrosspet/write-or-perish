@@ -1647,6 +1647,40 @@ class TestGleanCardThreads:
                                    "llm_node_id": gleaning.id}
 
 
+class TestFailedGleaningSaysWhy:
+    """The thread page shows why a gleaning failed instead of its
+    placeholder text (#435): the reason is on the node, for its owner."""
+
+    def test_owner_gets_the_reason_others_do_not(self, app_glean):
+        client = app_glean.test_client()
+        ana = _glean_user(app_glean, glean_enabled=True)
+        bob = _make_user("bob")
+        llm = _make_user("claude-haiku-5.5", glean_enabled=None)
+        entry = _make_node(ana, content="a reflection")
+        entry.privacy_level = "public"
+        failed = _make_node(llm, parent_id=entry.id, node_type="llm",
+                            llm_model="claude-haiku-5.5", human_owner=ana,
+                            content="[LLM response generation pending...]")
+        failed.privacy_level = "public"
+        failed.llm_task_status = "failed"
+        failed.llm_task_error = "The model provider did not answer."
+        _db.session.commit()
+
+        _login(client, ana.id)
+        data = client.get(f"/api/nodes/{failed.id}").get_json()
+        assert data["llm_task_error"] == "The model provider did not answer."
+
+        # Flask-Login caches the user on g, which the fixture's app
+        # context keeps between clients.
+        from flask import g
+        g.pop("_login_user", None)
+        client = app_glean.test_client()
+        _login(client, bob.id)
+        data = client.get(f"/api/nodes/{failed.id}").get_json()
+        assert data["id"] == failed.id
+        assert "llm_task_error" not in data
+
+
 class TestGleanIsLiveOnTheUsersProvider:
     def _entry(self, app, **user_kwargs):
         client = app.test_client()

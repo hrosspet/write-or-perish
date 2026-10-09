@@ -247,6 +247,35 @@ describe('the Glean button', () => {
   });
 });
 
+describe('a failed gleaning', () => {
+  test('says so, with the reason, not the placeholder text', async () => {
+    routes['/nodes/32'] = gleaning(0, {
+      llm_task_status: 'failed', content: '[LLM response generation pending...]',
+      llm_task_error: 'The model provider did not answer.',
+    });
+    renderAt('/node/32');
+    expect(await screen.findByText("This gleaning didn't come through.")).toBeInTheDocument();
+    expect(screen.getByText('The model provider did not answer.')).toBeInTheDocument();
+    expect(screen.queryByText('[LLM response generation pending...]')).toBeNull();
+    // A Glean-card thread: the Glean button is right below.
+    expect(screen.getByText('Press Glean below to try again.')).toBeInTheDocument();
+    // The next one starts where the failed one did, under the Glean
+    // entry: the failed reply is not part of what is read.
+    fireEvent.click(gleanButton());
+    expect(mockPost).toHaveBeenCalledWith('/read/from-node/31', { model: undefined });
+  });
+
+  test('in a Reflect thread it points at the menu entry', async () => {
+    routes['/nodes/32'] = gleaning(0, {
+      llm_task_status: 'failed', content: '[LLM response generation pending...]',
+      glean_thread: false,
+    });
+    renderAt('/node/32');
+    expect(await screen.findByText(/choose “Glean for this reflection”/)).toBeInTheDocument();
+    expect(gleanButton()).toBeNull();
+  });
+});
+
 describe('no rerun buttons (Peter, 2026-10-09: Glean is live-only)', () => {
   test.each(['processing', 'failed'])('not on a %s gleaning, not even for an admin', async (status) => {
     mockUser = { ...USER, is_admin: true };

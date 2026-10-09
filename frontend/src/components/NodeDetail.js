@@ -86,6 +86,16 @@ const partialReplyText = (text) => (text || '')
 // goes back to it instead of adding it to the history a second time.
 const FROM_PARENT = { fromParent: true };
 
+// A glean's reply (#435), pending or done: its live marker, a glean-again
+// marker, or the read prompt right above it.
+const isGleaningNode = (node) => {
+  const meta = Array.isArray(node?.tool_calls_meta) ? node.tool_calls_meta : [];
+  const parent = node?.ancestors?.[node.ancestors.length - 1];
+  return !!node?.read_reply
+    || meta.some(tc => ['_live', '_read'].includes(tc?.name))
+    || ['read', 'read_thread'].includes(parent?.prompt_key);
+};
+
 // The browser tab's title for a node: its first line, or a state word
 // while an AI reply is still being generated.
 const tabTitleFor = (node) => {
@@ -95,12 +105,7 @@ const tabTitleFor = (node) => {
     const meta = Array.isArray(node?.tool_calls_meta) ? node.tool_calls_meta : [];
     const batch = meta.some(tc => tc?.name === '_batch'
                                   && ['submitted', 'cancelling'].includes(tc.status));
-    // A glean (#435): its live marker, a glean-again marker, or the read
-    // prompt right above it.
-    const parent = node?.ancestors?.[node.ancestors.length - 1];
-    const glean = !!node?.read_reply
-      || meta.some(tc => ['_live', '_read'].includes(tc?.name))
-      || ['read', 'read_thread'].includes(parent?.prompt_key);
+    const glean = isGleaningNode(node);
     return `${batch ? 'Processing' : (glean ? 'Gleaning' : 'Thinking')}… — Loore`;
   }
   const firstLine = (node?.content || '')
@@ -422,6 +427,16 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
           feed_picks_count: llmData.feed_picks_count ?? prev.feed_picks_count,
           llm_task_status: 'completed',
         } : prev);
+        // A finished gleaning also has its render now (which day it read,
+        // how many tweets: the window line and the empty day's count),
+        // which the poll does not carry: fetch the node once more.
+        if (isGleaningNode(node)) {
+          api.get(`/nodes/${id}`)
+            .then((res) => {
+              if (res.data?.llm_task_status === 'completed') setNode(res.data);
+            })
+            .catch(() => {});
+        }
       } else if (completedId) {
         navigate(`/node/${completedId}`);
       }
@@ -1129,6 +1144,7 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
   const gleaningEmpty = gleaningDone && !!node.read_window
     && pickIds.length === 0 && !(node.feed_picks_count > 0);
   const tweetsRead = Number(node.read_window?.tweets || 0);
+  const gleaningFailed = isReadReply && node.llm_task_status === 'failed';
   const showProposal = !!node.content && !isLlmPending && (
     (isLlmNode && hasProposalSections(node.content))
     // User-authored nodes: the owner can write/paste fenced :::share
@@ -1220,7 +1236,11 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
     <span data-action-group style={actionGroupStyle}>
       <LooreTooltip text={readTitle}>
         <button
-          onClick={() => handleReadFromNode()}
+          // Under a failed gleaning the next one starts where it did (its
+          // parent), so the failed reply is not part of what is read.
+          onClick={() => handleReadFromNode(
+            gleaningFailed && parentAncestor && !parentAncestor.deleted
+              ? parentAncestor.id : undefined)}
           disabled={readBusy}
           style={{ display: 'inline-flex', alignItems: 'center', gap: '8px', ...joinedButtonStyle }}
         >
@@ -1453,6 +1473,22 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
                 30% { opacity: 1; transform: translateY(-2px); }
               }
             `}</style>
+          </div>
+        ) : gleaningFailed ? (
+          // A failed gleaning keeps the placeholder text as its content;
+          // say what happened instead, and where to try again (#435).
+          <div className="gleaning-failed" role="status">
+            <p className="gleaning-failed-big">This gleaning didn't come through.</p>
+            {node.llm_task_error && (
+              <p className="gleaning-failed-small">{node.llm_task_error}</p>
+            )}
+            {isOwner && gleanEnabled && (
+              <p className="gleaning-failed-small">
+                {readActions
+                  ? 'Press Glean below to try again.'
+                  : `To try again, choose “${GLEAN_MENU_LABEL}” in your entry's ⋯ menu.`}
+              </p>
+            )}
           </div>
         ) : (
           (!showProposal || displayContent) && (
