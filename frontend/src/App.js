@@ -5,6 +5,7 @@ import Log from "./components/Log";
 import NavBar from "./components/NavBar";
 import NodeFormModal from "./components/NodeFormModal";
 import SpendCapBanner from "./components/SpendCapBanner";
+import DataDeletionBanner from "./components/DataDeletionBanner";
 import TermsModal from "./components/TermsModal";
 import AdminPanel from "./components/AdminPanel";
 import NodeDetailWrapper from "./components/NodeDetailWrapper";
@@ -173,6 +174,7 @@ function App() {
         <NavBar onNewEntryClick={() => setShowNewEntry(true)} />
         <SpendCapBanner />
         <div style={{ paddingTop: "60px" }}>
+        <DataDeletionBanner />
         {showNewEntry && (
           <NodeFormModal
             title="Write New Entry"

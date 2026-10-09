@@ -6,6 +6,11 @@ import CraftIcon from "../components/CraftIcon";
 import api from "../api";
 import useSubmitShortcut from "../hooks/useSubmitShortcut";
 import { emailState } from "../utils/emailState";
+import DeleteWritingDialog from "../components/DeleteWritingDialog";
+import {
+  formatDeletionDate, reloadUser, restoreWriting, writingRestorable,
+  X_REMOVE_ACCESS_STEPS,
+} from "../utils/dataDeletion";
 
 const backendUrl = process.env.REACT_APP_BACKEND_URL || "";
 
@@ -155,6 +160,39 @@ export default function AccountPage() {
     () => sendEmailLink(emailInput),
     !emailSaving && !!emailInput.trim(),
   );
+
+  // "Delete all my writing" (#268): the writing is hidden at once and
+  // deleted forever after the grace period; until then "Restore my
+  // writing" brings it back. The state comes with the user (/dashboard).
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  const [deletionBusy, setDeletionBusy] = useState(false);
+  const [deletionMsg, setDeletionMsg] = useState(null);
+  const closeDeleteDialog = useCallback(() => setDeleteOpen(false), []);
+
+  const scheduleDeletion = async (typed) => {
+    const res = await api.delete("/account/data", { data: { confirm: typed } });
+    setUser((prev) => ({ ...prev, data_deletion: res.data }));
+    setDeleteOpen(false);
+    setDeletionMsg(null);
+    // The description and has_own_entries change with the writing.
+    reloadUser(setUser);
+  };
+
+  const restoreDeletedWriting = async () => {
+    setDeletionBusy(true);
+    setDeletionMsg(null);
+    try {
+      await restoreWriting(setUser);
+      setDeletionMsg({ type: "success", text: "Your writing is restored." });
+    } catch (e) {
+      setDeletionMsg({
+        type: "error",
+        text: e.response?.data?.error || "Could not restore your writing. Please try again.",
+      });
+    } finally {
+      setDeletionBusy(false);
+    }
+  };
 
   // Privacy / AI usage defaults
   const [privacySaving, setPrivacySaving] = useState(false);
@@ -706,6 +744,136 @@ export default function AccountPage() {
           Tone, style, boundaries. Updated automatically during Voice sessions.
         </div>
       </div>
+
+      {/* ─── Delete all my writing (#268). Anchor: /account#delete-data,
+          where the reminder banner links. ─── */}
+      <DeleteWritingSection
+        id="delete-data"
+        deletion={user.data_deletion}
+        busy={deletionBusy}
+        msg={deletionMsg}
+        onOpen={() => { setDeletionMsg(null); setDeleteOpen(true); }}
+        onRestore={restoreDeletedWriting}
+        labelStyle={labelStyle}
+        helperStyle={helperStyle}
+      />
+      <DeleteWritingDialog
+        open={deleteOpen}
+        username={user.username}
+        graceDays={user.data_deletion?.grace_days}
+        xConnected={!!user.data_deletion?.x_connected}
+        onConfirm={scheduleDeletion}
+        onClose={closeDeleteDialog}
+      />
+    </div>
+  );
+}
+
+const sectionTitleStyle = {
+  fontFamily: "var(--serif)",
+  fontWeight: 300,
+  fontSize: "1.15rem",
+  color: "var(--text-primary)",
+  marginTop: "2.5rem",
+  marginBottom: "1rem",
+};
+
+const quietButtonStyle = {
+  padding: "8px 16px",
+  borderRadius: "6px",
+  border: "1px solid var(--border)",
+  background: "none",
+  fontFamily: "var(--sans)",
+  fontWeight: 300,
+  fontSize: "0.85rem",
+  cursor: "pointer",
+};
+
+function DeleteWritingSection({ id, deletion, busy, msg, onOpen, onRestore, labelStyle, helperStyle }) {
+  const status = deletion?.status || null;
+  const bodyStyle = { ...helperStyle, fontSize: "0.85rem", lineHeight: 1.6, marginTop: 0 };
+  return (
+    <div id={id} style={{ scrollMarginTop: "72px" }}>
+      <h3 style={sectionTitleStyle}>Delete all my writing</h3>
+
+      {status === "scheduled" && writingRestorable(deletion) && (
+        <>
+          <p style={{ ...labelStyle, lineHeight: 1.6 }}>
+            Your writing is deleted.
+          </p>
+          <p style={bodyStyle}>
+            You can restore it safely until {formatDeletionDate(deletion.purge_at)}.
+            After that it is deleted forever. What you write from now on stays.
+          </p>
+          <button
+            type="button"
+            onClick={onRestore}
+            disabled={busy}
+            style={{ ...quietButtonStyle, borderColor: "var(--accent)", color: "var(--accent)" }}
+          >
+            {busy ? "Restoring…" : "Restore my writing"}
+          </button>
+        </>
+      )}
+
+      {status === "scheduled" && !writingRestorable(deletion) && (
+        <p style={bodyStyle}>
+          Your writing will be deleted forever on {formatDeletionDate(deletion.purge_at)}.
+        </p>
+      )}
+
+      {status === "running" && (
+        <p style={bodyStyle}>
+          Your writing is being deleted forever now. This can take a few minutes.
+        </p>
+      )}
+
+      {status === "failed" && (
+        <p style={bodyStyle}>
+          Deleting your writing did not finish. We have been told and will
+          complete it.
+        </p>
+      )}
+
+      {(status === null || status === "done") && (
+        <>
+          {status === "done" && (
+            <p style={bodyStyle}>
+              Your writing was deleted forever on {formatDeletionDate(deletion.finished_at)}.
+              {deletion.x_connection_removed && (
+                <> Loore no longer keeps your X connection and asked X to
+                  remove its access. If X still lists Loore, remove it
+                  yourself: {X_REMOVE_ACCESS_STEPS}</>
+              )}
+            </p>
+          )}
+          <p style={bodyStyle}>
+            Deletes everything you have written or recorded in Loore, and
+            what Loore made from it: the AI's replies, your profile, intentions
+            and other documents, saved references and imports. Your account,
+            username and settings stay. You can restore your writing safely
+            within {deletion?.grace_days || 30} days. After that it is deleted forever.
+          </p>
+          <button
+            type="button"
+            onClick={onOpen}
+            style={{ ...quietButtonStyle, color: "var(--error)" }}
+          >
+            Delete all my writing…
+          </button>
+        </>
+      )}
+
+      {msg && (
+        <div
+          style={{
+            ...helperStyle,
+            color: msg.type === "error" ? "var(--error)" : "var(--text-muted)",
+          }}
+        >
+          {msg.text}
+        </div>
+      )}
     </div>
   );
 }

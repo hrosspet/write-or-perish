@@ -198,6 +198,31 @@ def test_candidates_skip_owners_whose_account_is_none(app):
         assert ref_ids == {refs[0].id}
 
 
+def test_candidates_skip_a_user_whose_writing_is_on_hold(app):
+    """#268: while "Delete all my writing" waits (or the purge runs),
+    nothing new of the user's is embedded, not even what they write
+    after the request; after a restore it is again."""
+    from datetime import datetime
+    from backend.models import UserDataPurge
+    with app.app_context():
+        user = User.query.first()
+        node = _mk_node(user.id, "written after the request")
+        item = ExternalItem(user_id=user.id, source="web_clip",
+                            external_id="f" * 64)
+        item.set_content("a page")
+        job = UserDataPurge(user_id=user.id, source="self", scope="hidden",
+                            status="scheduled",
+                            scheduled_for=datetime.utcnow())
+        _db.session.add_all([item, job])
+        _db.session.commit()
+        assert node.id not in {n.id for n, _, _, _ in _candidate_nodes(50)}
+        assert item.id not in {i.id for i, _ in _candidate_external_items(50)}
+        job.status = "cancelled"
+        _db.session.commit()
+        assert node.id in {n.id for n, _, _, _ in _candidate_nodes(50)}
+        assert item.id in {i.id for i, _ in _candidate_external_items(50)}
+
+
 def test_embedding_owner_is_human_not_llm_author(app):
     # AI-reply nodes are authored by the synthetic llm-<model> account but
     # owned by the human (human_owner_id). Embedding cost + the row must both
