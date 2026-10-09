@@ -1563,6 +1563,16 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
             onMarkedAll={handlePicksMarkedAll}
           />
         )}
+        {/* The way back to the home page's cards (#436 mockup). */}
+        {gleaningDone && isOwner && (
+          <Link
+            to="/"
+            className="home-purpose-btn"
+            style={{ marginTop: '14px', textDecoration: 'none' }}
+          >
+            Back to Home
+          </Link>
+        )}
         {(() => {
           const visibleTools = (node.tool_calls_meta || [])
             .filter(tc => !tc.name || !tc.name.startsWith('_'));

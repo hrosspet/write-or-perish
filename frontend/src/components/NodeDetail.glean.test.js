@@ -232,6 +232,8 @@ describe('the gleaning', () => {
     renderAt('/node/32');
     expect(await screen.findByText('Nothing worth your time today.')).toBeInTheDocument();
     expect(screen.getByText("Loore read all 1,240 of today's tweets in the archive.")).toBeInTheDocument();
+    // #436: the way back to the home page's cards.
+    expect(screen.getByRole('link', { name: 'Back to Home' })).toHaveAttribute('href', '/');
   });
 
   test('a pending gleaning says "Gleaning", not "Thinking"', async () => {

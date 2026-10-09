@@ -1,10 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useUser } from '../contexts/UserContext';
-import { useToast } from '../contexts/ToastContext';
-import api from '../api';
-import NodeOpeningSpinner from '../components/NodeOpeningSpinner';
-import useNodePrefetch from '../hooks/useNodePrefetch';
 import { entryQuestion } from '../utils/entryPrompt';
 
 function useOnScreen(ref, threshold = 0.1) {
@@ -75,7 +71,7 @@ function WorkflowCard({ card, delay }) {
 
   const disabled = card.disabled || card.busy;
   // A card either opens a page (`path`) or starts something itself
-  // (`onSelect`, e.g. Read fires the request and lands on the reply).
+  // (`onSelect`).
   const select = () => {
     if (disabled) return;
     if (card.onSelect) card.onSelect();
@@ -184,39 +180,121 @@ const shareCard = {
   ),
 };
 
-// Community Archive read (admin-only while the placeholder behind it is):
-// what the archive holds that is worth this person's time today. Like
-// Text mode, the click creates the thread: the 'read' prompt as the
-// root and the reply under it, on the user's preferred model. There is
-// nothing to type, so the card fires the request itself.
-const readCard = {
-  key: "read",
-  title: "Read",
-  description: "What's worth your time today.",
-  icon: (
-    <svg width="42" height="42" viewBox="0 0 42 42" fill="none">
-      {/* An open book, one page marked: the read is a small marked place
-          in a large corpus, not a stack of cards. */}
-      <path d="M6 11 C11 9.5 16 9.8 21 12.5 C26 9.8 31 9.5 36 11 L36 32 C31 30.5 26 30.8 21 33.5 C16 30.8 11 30.5 6 32 Z"
-            stroke="var(--accent)" strokeWidth="1.4" fill="none" strokeLinejoin="round"/>
-      <path d="M21 12.5 L21 33.5" stroke="var(--accent)" strokeWidth="1.1" opacity="0.7"/>
-      <path d="M10 16.5 C13 15.8 15.5 16 18 17.2 M10 21 C13 20.3 15.5 20.5 18 21.7 M10 25.5 C13 24.8 15.5 25 18 26.2"
-            stroke="var(--accent)" strokeWidth="1" strokeLinecap="round" opacity="0.6"/>
-      <path d="M24 16.5 C27 15.8 29.5 16 32 17.2 M24 21 C27 20.3 29.5 20.5 32 21.7"
-            stroke="var(--accent)" strokeWidth="1" strokeLinecap="round" opacity="0.6"/>
-      <circle cx="28" cy="26" r="1.6" fill="var(--accent)"/>
-    </svg>
-  ),
-};
-
 // At most three cards to a row. Four or more split into two rows of the
 // same count; an odd count puts Voice and Text alone on the first row
-// and the rest below. (Seven or more would overflow the second row;
-// there are four cards today, five at most in sight.)
+// and the rest below. (Seven or more would overflow the second row.)
 function cardRows(list) {
   if (list.length <= 3) return [list];
   const first = list.length % 2 === 0 ? list.length / 2 : 2;
   return [list.slice(0, first), list.slice(first)];
+}
+
+// ── Cards by purpose (#436, Peter 2026-10-09) ─────────────────────────────
+// For a user who gleans, the home page offers two purposes, each by voice
+// or by text: Reflect (talk it through with Loore) and Glean (reflect,
+// and Loore finds today's tweets worth your time). Share stays as a third
+// card when it is on. A user without Glean keeps the Voice / Text cards.
+
+const MicIcon = () => (
+  <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor"
+       strokeWidth="1.3" aria-hidden="true">
+    <rect x="5.5" y="1.5" width="5" height="8.5" rx="2.5" />
+    <path d="M3 7.5a5 5 0 0 0 10 0M8 12.5v2" />
+  </svg>
+);
+
+const LinesIcon = () => (
+  <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor"
+       strokeWidth="1.3" aria-hidden="true">
+    <path d="M2.5 3.5h11M2.5 7.5h11M2.5 11.5h7" />
+  </svg>
+);
+
+export const purposeCards = [
+  {
+    key: 'reflect',
+    title: 'Reflect',
+    line: 'Talk it through with Loore.',
+    actions: [
+      { label: 'Voice', path: '/voice', icon: <MicIcon /> },
+      { label: 'Text', path: '/textmode', icon: <LinesIcon /> },
+    ],
+  },
+  {
+    key: 'glean',
+    title: 'Glean',
+    line: 'Reflect, and Loore gleans for you.',
+    // The session marks its thread as started here, so every turn of it
+    // offers Glean (#435).
+    actions: [
+      { label: 'Voice', path: '/voice?glean=1', icon: <MicIcon /> },
+      { label: 'Text', path: '/textmode?glean=1', icon: <LinesIcon /> },
+    ],
+  },
+];
+
+const purposeShareCard = {
+  key: 'share',
+  title: 'Share',
+  line: shareCard.description,
+  actions: [{ label: 'Open', path: '/share' }],
+};
+
+function PurposeCard({ card, delay }) {
+  const ref = useRef(null);
+  const isVisible = useOnScreen(ref);
+  const navigate = useNavigate();
+  return (
+    <section
+      ref={ref}
+      aria-label={card.title}
+      style={{
+        background: 'var(--bg-card)',
+        border: '1px solid var(--border)',
+        borderRadius: '12px',
+        padding: '24px 20px 20px',
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center',
+        gap: '10px',
+        minWidth: 0,
+        textAlign: 'center',
+        opacity: isVisible ? 1 : 0,
+        transform: isVisible ? 'translateY(0)' : 'translateY(20px)',
+        transition: `opacity 0.5s ease ${delay}ms, transform 0.5s ease ${delay}ms`,
+      }}
+    >
+      <h3 style={{
+        fontFamily: 'var(--serif)', fontWeight: 400, fontSize: '1.55rem',
+        color: 'var(--text-primary)', margin: '4px 0 0',
+      }}>
+        {card.title}
+      </h3>
+      <div aria-hidden="true" style={{
+        width: '32px', height: '1px', background: 'var(--accent-glow)', margin: '2px 0 4px',
+      }} />
+      <p style={{
+        fontFamily: 'var(--sans)', fontWeight: 300, fontSize: '0.88rem',
+        color: 'var(--text-secondary)', lineHeight: 1.45, margin: 0, maxWidth: '40ch',
+      }}>
+        {card.line}
+      </p>
+      <div style={{ display: 'flex', gap: '10px', marginTop: '6px', flexWrap: 'wrap', justifyContent: 'center' }}>
+        {card.actions.map((action) => (
+          <button
+            key={action.label}
+            type="button"
+            className="home-purpose-btn"
+            aria-label={`${card.title}: ${action.label}`}
+            onClick={() => navigate(action.path)}
+          >
+            {action.icon}
+            {action.label}
+          </button>
+        ))}
+      </div>
+    </section>
+  );
 }
 
 export default function HomePage() {
@@ -225,41 +303,14 @@ export default function HomePage() {
   const greetingVisible = useOnScreen(greetingRef);
   const questionVisible = useOnScreen(questionRef);
   const { user } = useUser();
-  const { addToast } = useToast();
-  const navigate = useNavigate();
-  const [readStarting, setReadStarting] = useState(false);
-  // The read's thread opens once its node is in, with a spinner here
-  // meanwhile; the button stays on "Starting…" until then.
-  const { pending: openingNode, openNode } = useNodePrefetch();
 
-  const startRead = async () => {
-    setReadStarting(true);
-    try {
-      // Same preference Text mode honours (`loore_auto_generate`, default
-      // on). Off: only the root prompt node is created and we land on it,
-      // where the model picker and LLM Response wait for the user.
-      const stored = localStorage.getItem('loore_auto_generate');
-      const autoGenerate = stored === null ? true : stored === 'true';
-      const res = await api.post('/read/start', { auto_generate: autoGenerate });
-      const id = res.data.llm_node_id || res.data.prompt_node_id;
-      openNode(id, () => navigate(`/node/${id}`));
-    } catch (err) {
-      setReadStarting(false);
-      if (err?.response?.status === 402) return;
-      addToast(err?.response?.data?.error || 'Could not start the read.', 6000);
-    }
-  };
-
-  const displayCards = [
-    ...cards,
-    ...(user?.share_v1_enabled ? [shareCard] : []),
-    ...(user?.is_admin ? [{
-      ...readCard,
-      onSelect: startRead,
-      busy: readStarting,
-      description: readStarting ? 'Starting…' : readCard.description,
-    }] : []),
-  ];
+  // Glean (#435 gate and the user's own switch): the cards by purpose.
+  // Without it, today's home page. The admin-only Read card that started
+  // a read with no reflection is gone; /read/start stays for experiments.
+  const gleans = !!user?.glean_enabled;
+  const displayCards = gleans
+    ? [...purposeCards, ...(user?.share_v1_enabled ? [purposeShareCard] : [])]
+    : [...cards, ...(user?.share_v1_enabled ? [shareCard] : [])];
 
   return (
     <div style={{
@@ -271,7 +322,6 @@ export default function HomePage() {
       padding: "40px 24px",
       background: "radial-gradient(ellipse at 50% 40%, rgba(196,149,106,0.06) 0%, transparent 70%)",
     }}>
-      {openingNode && <NodeOpeningSpinner />}
       <p
         ref={greetingRef}
         style={{
@@ -295,7 +345,7 @@ export default function HomePage() {
           fontSize: "clamp(1.8rem, 4.5vw, 2.8rem)",
           fontWeight: 300,
           color: "var(--text-primary)",
-          margin: "0 0 48px 0",
+          margin: gleans ? "0 0 32px 0" : "0 0 48px 0",
           maxWidth: "760px",
           textAlign: "center",
           opacity: questionVisible ? 1 : 0,
@@ -306,7 +356,21 @@ export default function HomePage() {
         {entryQuestion(user)}
       </h1>
 
-      {cardRows(displayCards).map((row, r) => (
+      {gleans ? (
+        // Stacked on a phone, side by side on a wider screen (two cards
+        // in 560 px, three in 880 px).
+        <div style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))',
+          gap: '16px',
+          width: '100%',
+          maxWidth: displayCards.length > 2 ? '880px' : '560px',
+        }}>
+          {displayCards.map((card, i) => (
+            <PurposeCard key={card.key} card={card} delay={300 + i * 120} />
+          ))}
+        </div>
+      ) : cardRows(displayCards).map((row, r) => (
         <div key={r} style={{
           display: "flex",
           gap: "1.5rem",
