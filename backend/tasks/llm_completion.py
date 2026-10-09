@@ -60,7 +60,8 @@ from backend.utils.ca_feed import (
     FEED_AI_USAGE, READ_FURTHER_MARKER,
     FeedReplyError, count_dropped_picks, read_reply_ids, record_feed_render,
     ca_turn as _ca_turn,
-    refs_from_render, request_snapshot_refresh, seen_tweet_ids,
+    ArchiveNotReady, refs_from_render, request_snapshot_refresh,
+    seen_tweet_ids,
 )
 from backend.utils.tool_meta import (
     get_tool_meta_entry, update_tool_meta, parse_github_issue,
@@ -3449,13 +3450,26 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     # else: a batch submitted before renders were pinned;
                     # re-render the day as it was rendered then (no seen
                     # filter) so its numbers still match.
-                    ca_tweets_content, ca_stats, ca_refs = ca.render_recent_tweets(
-                        ca_snapshot_dir, days=ca_days,
-                        exclude_usernames=[ca_owner.username,
-                                           ca_owner.prefilled_handle]
-                        if ca_owner else (),
-                        include_usernames=ca_follows,
-                        exclude_tweet_ids=ca_seen)
+                    try:
+                        ca_tweets_content, ca_stats, ca_refs = ca.render_recent_tweets(
+                            ca_snapshot_dir, days=ca_days,
+                            exclude_usernames=[ca_owner.username,
+                                               ca_owner.prefilled_handle]
+                            if ca_owner else (),
+                            include_usernames=ca_follows,
+                            exclude_tweet_ids=ca_seen)
+                    except ca.CommunityArchiveError as e:
+                        # No export cached yet (a fresh machine or data
+                        # volume): queue the first fetch, and give the
+                        # user a reason in plain words. The exception's
+                        # text names the server's snapshot path: logged,
+                        # never the reason line (#435 review).
+                        logger.warning("Node %s: no archive to render: %s",
+                                       llm_node_id, e)
+                        if not ca.snapshot_export_id(ca_snapshot_dir):
+                            request_snapshot_refresh(
+                                ca_snapshot_dir, log=logger, first_copy=True)
+                        raise ArchiveNotReady() from e
                     logger.info(
                         "Rendered %s for node %s: %s (~%d tokens)",
                         ca_placeholder_match, ca_node.id, ca_stats,

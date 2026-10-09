@@ -176,6 +176,9 @@ test("the Glean button's tooltip is Loore's, also while it waits for the reply",
   const button = glean();
   expect(button).toBeDisabled();
   expect(button).not.toHaveAttribute('title');
+  // The button itself is described, always (#435 review), as by `title`.
+  expect(document.getElementById(button.getAttribute('aria-describedby')))
+    .toHaveTextContent("Glean waits for Loore's reply to your last message");
   // The wrapper carries the hover: a disabled button gets none.
   fireEvent.mouseEnter(button.parentElement);
   const tip = await screen.findByRole('tooltip');
