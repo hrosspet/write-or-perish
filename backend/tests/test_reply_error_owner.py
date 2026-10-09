@@ -146,6 +146,57 @@ class TestStreamDone:
         assert _done_event(_client(sse_app, bob), reply.id)["error"] == ERROR
 
 
+class TestCancelledRead:
+    """A Read withdrawn because its owner hit the spend cap, as
+    llm_completion._withdraw_batch_reply leaves it (test_read_batch_poll
+    checks the task writes this)."""
+
+    NEUTRAL = "This read was cancelled."
+    REASON = ("This read was cancelled before it ran: the monthly spend "
+              "cap was reached while it was queued at the provider, so the "
+              "request was withdrawn and nothing was billed.")
+
+    def _cancelled_read(self, alice):
+        reply = _reply(_node(alice, privacy_level="public"), alice,
+                       content=self.NEUTRAL)
+        reply.privacy_level = "public"
+        reply.llm_task_status = "cancelled"
+        reply.llm_task_error = self.REASON
+        reply.tool_calls_meta = json.dumps([{
+            "name": "_batch", "batch_id": "batch_1", "status": "cancelled",
+            "cancel_reason": "spend_cap", "cancel_outcome": "not_processed"}])
+        _db.session.commit()
+        return reply
+
+    def test_another_viewer_sees_the_neutral_text_only(self, app):  # noqa: F811
+        alice = _user("alice")
+        reply = self._cancelled_read(alice)
+        bob = _user("bob")
+        _db.session.commit()
+        bobs = _client(app, bob)
+
+        status = bobs.get(f"/api/nodes/{reply.id}/llm-status")
+        assert status.get_json()["status"] == "cancelled"
+        assert status.get_json()["content"] == self.NEUTRAL
+        assert status.get_json()["error"] is None
+        node = bobs.get(f"/api/nodes/{reply.id}")
+        assert node.get_json()["content"] == self.NEUTRAL
+        for resp in (status, node):
+            assert resp.status_code == 200, resp.get_json()
+            body = resp.get_data(as_text=True)
+            assert "spend" not in body
+            assert "billed" not in body
+
+    def test_the_owner_gets_the_reason(self, app):  # noqa: F811
+        alice = _user("alice")
+        reply = self._cancelled_read(alice)
+
+        data = _client(app, alice).get(
+            f"/api/nodes/{reply.id}/llm-status").get_json()
+        assert data["content"] == self.NEUTRAL
+        assert data["error"] == self.REASON
+
+
 class TestTranscriptionStatus:
     def test_a_failed_recordings_error_goes_to_its_author_only(
             self, app):  # noqa: F811

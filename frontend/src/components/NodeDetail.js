@@ -426,7 +426,8 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
       navigate(`/node/${llmTaskNodeId}`);
     } else if (llmStatus === 'cancelled') {
       // A read withdrawn before it ran (the spend cap was reached while
-      // it was queued): nothing was billed, and the node's text says so.
+      // it was queued): nothing was billed. The node's text says only
+      // that it was cancelled; the error, sent to the owner only, says why.
       addToast(llmData?.error || 'Read cancelled', 8000);
       if (String(llmTaskNodeId) === String(id)) {
         setNode(prev => prev ? {

@@ -724,8 +724,11 @@ def test_withdrawn_batch_that_never_ran_is_cancelled_unbilled(app, monkeypatch, 
     node = _reload(llm_node.id)
     assert node.llm_task_status == "cancelled"
     assert node.llm_task_progress == 100
-    assert "nothing was billed" in node.get_content()
-    assert node.llm_task_error == node.get_content()
+    # The text says only that the read was cancelled, for anyone who can
+    # see it; why (the owner's spend cap) is the error, the owner's alone.
+    assert node.get_content() == "This read was cancelled."
+    assert "spend cap" in node.llm_task_error
+    assert "nothing was billed" in node.llm_task_error
     entry = _entry(node)
     assert entry["status"] == "cancelled"
     assert entry["cancel_outcome"] == "not_processed"

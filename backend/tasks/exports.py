@@ -619,6 +619,11 @@ def update_user_profile(self, user_id: int, model_id: str,
     )
 
     with flask_app.app_context():
+        # /export/profile-progress?task_id= answers for this task id to
+        # this user only, whatever the outcome.
+        from backend.utils.task_owner import record_task_owner
+        record_task_owner(self.request.id, user_id, flask_app.config)
+
         user = User.query.get(user_id)
         if not user:
             raise ValueError(f"User {user_id} not found")

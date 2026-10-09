@@ -2504,7 +2504,12 @@ def _read_requested(node):
 
 CA_BATCH_PROVIDERS = ("anthropic", "openai")
 CA_BATCH_LIVE_STATUSES = ("submitted", "cancelling")
-# What a read withdrawn at the provider says in place of its reply.
+# What a read withdrawn at the provider says in place of its reply, the
+# same for everyone who can see it.
+CA_BATCH_CANCELLED_TEXT = "This read was cancelled."
+# Why it was withdrawn: the reply's error, which goes to its owner only
+# (llm-status, the llm-stream done event). A spend-limit message is the
+# owner's alone.
 CA_BATCH_WITHDRAWN_TEXT = (
     "This read was cancelled before it ran: the monthly spend cap was "
     "reached while it was queued at the provider, so the request was "
@@ -2554,16 +2559,16 @@ def _request_batch_cancel(entry, api_key, provider):
 
 def _withdraw_batch_reply(llm_node, meta, entry):
     """The provider confirmed the withdrawn batch never ran: nothing was
-    billed, so no cost row; the reply says why it is empty and the node
-    ends 'cancelled'."""
+    billed, so no cost row; the node ends 'cancelled', its text says the
+    read was cancelled and its error, for the owner only, says why."""
     now = datetime.utcnow().isoformat(timespec="seconds")
     entry["status"] = "cancelled"
     entry["cancelled_at"] = now
     entry["cancel_outcome"] = "not_processed"
     entry["last_polled_at"] = now
     llm_node.tool_calls_meta = json.dumps(meta)
-    llm_node.set_content(CA_BATCH_WITHDRAWN_TEXT)
-    llm_node.token_count = approximate_token_count(CA_BATCH_WITHDRAWN_TEXT)
+    llm_node.set_content(CA_BATCH_CANCELLED_TEXT)
+    llm_node.token_count = approximate_token_count(CA_BATCH_CANCELLED_TEXT)
     llm_node.llm_task_status = "cancelled"
     llm_node.llm_task_progress = 100
     llm_node.llm_task_error = CA_BATCH_WITHDRAWN_TEXT

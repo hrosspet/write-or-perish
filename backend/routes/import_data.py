@@ -1314,6 +1314,7 @@ def confirm_twitter_import():
         return conflict
 
     from backend.tasks.imports import import_twitter_archive
+    from backend.utils.task_owner import record_task_owner
     task = import_twitter_archive.delay(current_user.id, data['import_token'], {
         "import_type": import_type,
         "include_replies": include_replies,
@@ -1321,6 +1322,8 @@ def confirm_twitter_import():
         "ai_usage": ai_usage,
         "on_deleted": on_deleted,
     })
+    # /import/status answers for this task id to this user only.
+    record_task_owner(task.id, current_user.id, current_app.config)
     return jsonify({
         "task_id": task.id,
         "status": "queued",
@@ -1336,15 +1339,20 @@ def import_status(task_id):
     {"status": "queued" | "running" | "completed" | "failed",
      "done": N, "total": N, "result": {...} | null, "error": str | null}
 
-    Task meta carries the owning user_id; anyone else's task id reads
-    as "queued" forever rather than leaking counts.
+    Answers for the caller's own import only: the task's meta carries
+    the owning user_id while it runs and once it succeeds, and the
+    confirm request recorded the owner (utils/task_owner), which also
+    covers a failure. Anyone else's task id reads as "queued" forever.
+    A failure says only text written for the user, else "Import failed".
     """
     from backend.celery_app import celery
+    from backend.utils.task_owner import failure_text, task_owned_by
 
     task = celery.AsyncResult(task_id)
     info = task.info if isinstance(task.info, dict) else {}
-    owner = info.get("user_id")
-    if task.state in ("PROGRESS", "SUCCESS") and owner != current_user.id:
+    mine = (info.get("user_id") == current_user.id
+            or task_owned_by(task_id, current_user.id, current_app.config))
+    if not mine:
         return jsonify({"task_id": task_id, "status": "queued",
                         "done": 0, "total": None, "result": None,
                         "error": None}), 200
@@ -1360,10 +1368,9 @@ def import_status(task_id):
                         "result": {k: v for k, v in info.items() if k != "user_id"},
                         "error": None}), 200
     if task.state == "FAILURE":
-        err = task.info
         return jsonify({"task_id": task_id, "status": "failed",
                         "done": 0, "total": None, "result": None,
-                        "error": str(err) if err else "Import failed"}), 200
+                        "error": failure_text(task.info, "Import failed")}), 200
     return jsonify({"task_id": task_id, "status": "queued",
                     "done": 0, "total": None, "result": None,
                     "error": None}), 200

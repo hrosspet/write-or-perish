@@ -10,8 +10,9 @@ with its own KMS-wrapped DEK. That is minutes of work — far past what a
 request should hold open, and it used to run inside the confirm request
 with the whole tweet list in memory twice (request body + Python).
 
-Progress meta always carries ``user_id`` so the status endpoint can
-refuse to leak another user's import.
+Progress meta always carries ``user_id``, and the confirm request records
+the task's owner (utils/task_owner), so the status endpoint answers for
+the user's own import only, a failed one included.
 """
 import json
 from datetime import datetime, timezone
@@ -35,11 +36,14 @@ def import_twitter_archive(self, user_id, token, options):
     from backend.routes.import_data import (
         PROVENANCE_ARCHIVE_UPLOAD, create_twitter_nodes)
     from backend.utils import twitter_archive as ta
+    from backend.utils.task_owner import UserFacingTaskError
 
     with flask_app.app_context():
         path = ta.stash_path(user_id, token)
         if path is None or not path.exists():
-            raise RuntimeError("Import data expired — please upload the archive again.")
+            # Written for the user: /import/status returns it as it is.
+            raise UserFacingTaskError(
+                "Import data expired — please upload the archive again.")
 
         total = ta.stash_count(path)
 
