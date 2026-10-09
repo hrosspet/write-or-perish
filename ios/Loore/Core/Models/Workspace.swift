@@ -199,20 +199,27 @@ struct TodoDoc: Decodable, Equatable, Sendable {
     var generatedBy: String?
     var createdAt: Date?
     var versionNumber: Int?
+    /// Names the stored text of this version; it changes with every write.
+    /// Sent back as `base_revision` on PATCH and PUT, so a save made on an
+    /// older list is refused (409 `todo_changed`) instead of dropping newer
+    /// changes (#430, #476, #477).
+    var revision: String?
 
     enum CodingKeys: String, CodingKey {
-        case id, content
+        case id, content, revision
         case generatedBy = "generated_by"
         case createdAt = "created_at"
         case versionNumber = "version_number"
     }
 
-    init(id: Int, content: String, generatedBy: String? = nil, createdAt: Date? = nil, versionNumber: Int? = nil) {
+    init(id: Int, content: String, generatedBy: String? = nil, createdAt: Date? = nil, versionNumber: Int? = nil,
+         revision: String? = nil) {
         self.id = id
         self.content = content
         self.generatedBy = generatedBy
         self.createdAt = createdAt
         self.versionNumber = versionNumber
+        self.revision = revision
     }
 
     init(from decoder: Decoder) throws {
@@ -222,6 +229,7 @@ struct TodoDoc: Decodable, Equatable, Sendable {
         generatedBy = c.tolerant(.generatedBy)
         createdAt = c.tolerant(.createdAt)
         versionNumber = c.flexibleInt(.versionNumber)
+        revision = c.tolerant(.revision)
     }
 }
 

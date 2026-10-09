@@ -487,6 +487,8 @@ class ExportQuoteResolver:
         # Generic artifact tracking: (artifact_type, artifact_id) → content
         self._artifact_contents: Dict[Tuple[str, int], str] = {}
         self._artifact_tokens: Dict[Tuple[str, int], int] = {}
+        # (artifact_type, artifact_id) → the user the version belongs to
+        self._artifact_owner: Dict[Tuple[str, int], Optional[int]] = {}
         self.referenced_artifacts: Dict[str, Set[int]] = {
             "prompt": set(), "profile": set(), "todo": set(),
         }
@@ -535,6 +537,14 @@ class ExportQuoteResolver:
 
         quote_ids = find_quote_ids(content)
 
+        # Only the export user's own versions: a node of someone else's
+        # in the user's threads (their system prompt above the user's
+        # reply, their AI reply that read their todo) pins theirs.
+        artifacts = [
+            (atype, aid) for atype, aid in (artifacts or [])
+            if atype == "prompt" or self._artifact_is_own(atype, aid)
+        ]
+
         entry = NodeEntry(
             node_id=node_id,
             created_at=created_at,
@@ -564,6 +574,15 @@ class ExportQuoteResolver:
             'quote_ids': quote_ids,
             'content': content
         }
+
+    def _artifact_is_own(self, artifact_type, artifact_id):
+        """Whether the pinned version belongs to the export's user."""
+        from backend.utils.context_artifacts import pinned_row
+        key = (artifact_type, artifact_id)
+        if key not in self._artifact_owner:
+            row = pinned_row(artifact_type, artifact_id)
+            self._artifact_owner[key] = row.user_id if row else None
+        return self._artifact_owner[key] == self.user_id
 
     @staticmethod
     def _load_artifact_content(artifact_type, artifact_id,

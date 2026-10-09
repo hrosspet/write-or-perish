@@ -144,8 +144,13 @@ MULTI_SHARE_TEXT = (
 )
 
 
-def _mk_llm_node(uid, content):
+def _mk_llm_node(uid, content, proposes=None):
+    """An AI reply of *uid*'s; *proposes* names the propose_* entry the
+    completion task writes on a proposal."""
     node = Node(user_id=uid, node_type="llm", llm_model="test-model")
+    if proposes:
+        node.tool_calls_meta = json.dumps(
+            [{"name": proposes, "status": "success"}])
     node.set_content(content)
     _db.session.add(node)
     _db.session.commit()
@@ -348,7 +353,7 @@ def test_apply_share_without_pending_draft_errors(app):
 def test_save_proposal_route(app, client):
     with app.app_context():
         uid = User.query.first().id
-        origin = _mk_llm_node(uid, SHARE_TEXT)
+        origin = _mk_llm_node(uid, SHARE_TEXT, proposes="propose_share")
         draft = Draft(user_id=uid, parent_id=origin.id, label="share_pending")
         draft.set_content("")
         _db.session.add(draft)
@@ -443,7 +448,8 @@ def test_save_proposal_partial_keeps_pending_draft(app, client):
     and go away once every block is saved."""
     with app.app_context():
         uid = User.query.first().id
-        origin = _mk_llm_node(uid, MULTI_SHARE_TEXT)
+        origin = _mk_llm_node(uid, MULTI_SHARE_TEXT,
+                              proposes="propose_share")
         draft = Draft(user_id=uid, parent_id=origin.id, label="share_pending")
         draft.set_content("")
         _db.session.add(draft)
@@ -638,7 +644,7 @@ def test_composing_reply_under_share_proposal_does_not_clobber_draft(
     or 'yes save that' text confirmation breaks."""
     with app.app_context():
         uid = User.query.first().id
-        proposal = _mk_llm_node(uid, SHARE_TEXT)
+        proposal = _mk_llm_node(uid, SHARE_TEXT, proposes="propose_share")
         pending = Draft(user_id=uid, parent_id=proposal.id,
                         label="share_pending")
         pending.set_content("")

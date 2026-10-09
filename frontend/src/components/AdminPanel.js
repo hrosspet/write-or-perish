@@ -1322,10 +1322,10 @@ function AdminPanel() {
                   <div
                     style={{ color: u.profile_backoff.state === "stopped" ? "var(--error)" : "var(--warning)" }}
                     title={u.profile_backoff.state === "stopped"
-                      ? "The model's output was cut off twice in a row, so the profile job is stopped for this user: the hourly seeder skips it. An import that triggers a rebuild, a saved version, or Build profile (after confirming) starts it again."
-                      : `The model's output was cut off once; the next automatic try is after ${formatDateTime(u.profile_backoff.until)}. A second cut-off stops the profile job.`}
+                      ? "The model's output was cut off or refused twice in a row, so the profile job is stopped for this user: the hourly seeder skips it. An import that triggers a rebuild, a saved version, or Build profile (after confirming) starts it again."
+                      : `The model's output was cut off or refused once; the next automatic try is after ${formatDateTime(u.profile_backoff.until)}. A second one stops the profile job.`}
                   >
-                    {u.profile_backoff.state === "stopped" ? "⛔ stopped: output cut off" : "⏸ retry after cut-off"}
+                    {u.profile_backoff.state === "stopped" ? "⛔ stopped: output cut off or refused" : "⏸ retry after cut-off or refusal"}
                   </div>
                 )}
                 {u.intentions && u.intentions.state === "generating" && (

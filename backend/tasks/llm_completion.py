@@ -68,6 +68,7 @@ from backend.utils.tool_meta import (
 from backend.utils.client_platform import CLIENT_MARKER
 from backend.utils.text_edits import apply_text_edits
 from backend.utils.privacy import AI_ALLOWED
+from backend.utils.proposals import is_own_live_proposal
 from backend.utils.placeholders import (
     CA_TWEETS_PATTERN,
     USER_EXPORT_PATTERN,
@@ -150,6 +151,19 @@ def _render_variant(user_id):
             f"e{int(_external_references_for_user(user_id))}")
 
 
+def _system_render_variant(system_node, user_id):
+    """The #192 render-cache variant of *system_node* rendered for
+    *user_id*. The owner's is _render_variant alone (the key their cached
+    renders already use). Someone else's render of it (a reply in a
+    public thread) has the personal placeholders blanked and its own
+    toggles, so it is keyed by that user: it never reads the owner's
+    render, and never overwrites it."""
+    variant = _render_variant(user_id)
+    if not node_is_users(system_node, user_id):
+        variant += f"r{user_id}"
+    return variant
+
+
 def _account_ai_usage(user_id):
     """The account's AI-usage setting. The artifacts index is licensed by
     it (#326), so it is part of the render variant above: a switch takes
@@ -164,6 +178,55 @@ _ARTIFACT_PLACEHOLDERS = (
     USER_MEMORY_PLACEHOLDER, USER_SCRATCHPAD_PLACEHOLDER,
     USER_INTENTIONS_PLACEHOLDER, USER_ARTIFACTS_INDEX_PLACEHOLDER,
 )
+# Every placeholder that resolves to the user's own data ({user_export}
+# too, matched by USER_EXPORT_PATTERN since it takes parameters).
+PERSONAL_PLACEHOLDERS = (
+    USER_PROFILE_PLACEHOLDER, USER_TODO_PLACEHOLDER,
+    USER_RECENT_PLACEHOLDER, USER_RECENT_RAW_PLACEHOLDER,
+    USER_AI_PREFERENCES_PLACEHOLDER,
+) + _ARTIFACT_PLACEHOLDERS
+
+
+def node_is_users(node, user_id):
+    """True when *node* belongs to *user_id*: they wrote it, or (an AI
+    reply) asked for it. Only such a node's personal placeholders resolve
+    in that user's reply."""
+    return (node.human_owner_id or node.user_id) == user_id
+
+
+# Matches exactly what the resolvers fill: the plain placeholders above
+# (each resolved by exact string) and every {user_export...} form
+# (resolved by USER_EXPORT_PATTERN).
+PERSONAL_PLACEHOLDER_PATTERN = re.compile(
+    "|".join(re.escape(p) for p in PERSONAL_PLACEHOLDERS)
+    + "|" + USER_EXPORT_PATTERN.pattern)
+
+
+def blank_personal_placeholders(text):
+    """*text* with every personal placeholder removed. A node of someone
+    else's in the reply's chain (their system prompt in a public thread,
+    a message of theirs) contributes none of its pinned data, and none of
+    the requester's either: the placeholders read as empty. Removal
+    repeats until none is left, so a placeholder nested in another
+    ("{user_{user_todo}profile}") cannot leave a new one behind. Callers
+    also never resolve placeholders in such a node."""
+    while True:
+        text, removed = PERSONAL_PLACEHOLDER_PATTERN.subn("", text)
+        if not removed:
+            return text
+
+
+def _own_pin(row, user_id):
+    """*row* (an artifact version pinned on a node) when it is *user_id*'s,
+    else None. Callers resolve only nodes of the user's own; this keeps
+    any other path from handing a model someone else's version."""
+    if row is not None and row.user_id != user_id:
+        logger.warning(
+            "Pinned %s %s belongs to user %s, not %s; not used",
+            type(row).__name__, row.id, row.user_id, user_id)
+        return None
+    return row
+
 
 # Within-turn retrieval loop (#158, text mode only). When the model calls one
 # of these tools, the retrieved content is injected back into the message
@@ -781,7 +844,8 @@ def _todo_index_line(user_id, pinned_node=None):
     absent or empty todo is still listed (as ``(empty)``) so the model knows
     the surface exists. No open/priority counts (noise).
     """
-    todo = pinned_node.get_artifact("todo") if pinned_node else None
+    todo = _own_pin(
+        pinned_node.get_artifact("todo") if pinned_node else None, user_id)
     if todo is None:
         todo = UserTodo.query.filter_by(user_id=user_id).order_by(
             UserTodo.created_at.desc()
@@ -816,7 +880,11 @@ def get_user_artifacts_context(user_id, pinned_node=None, usage=None,
     placeholder is absent never reaches the payload, so it does not
     report.
     """
-    artifacts = pinned_node.get_user_artifacts() if pinned_node else {}
+    artifacts = {
+        kind: a for kind, a in (
+            pinned_node.get_user_artifacts() if pinned_node else {}).items()
+        if _own_pin(a, user_id) is not None
+    }
     if not artifacts:
         artifacts = UserArtifact.latest_per_kind(user_id)
     artifacts = {
@@ -891,7 +959,8 @@ def get_user_ai_preferences_content(user_id, pinned_node=None, usage=None):
     """
     art = None
     if pinned_node is not None:
-        art = pinned_node.get_user_artifacts().get("ai_preferences")
+        art = _own_pin(
+            pinned_node.get_user_artifacts().get("ai_preferences"), user_id)
         if art is not None and art.ai_usage not in AI_ALLOWED:
             art = None
     if art is None:
@@ -959,14 +1028,20 @@ def _turn_still_readable(node_ids):
     return all(ai_usage in AI_ALLOWED for (ai_usage,) in rows)
 
 
-def _get_previous_source_mode(node_chain):
+def _get_previous_source_mode(node_chain, user_id=None):
     """Find the source_mode of the most recent LLM node in the chain.
+
+    With *user_id*, only that user's own replies count (the ones they
+    asked for): the mode of another user's reply is theirs.
 
     Returns None if no previous LLM node has a stored source_mode
     (i.e. this is the first agentic turn in the thread).
     """
     for node in reversed(node_chain):
         if not node.tool_calls_meta:
+            continue
+        if (user_id is not None
+                and (node.human_owner_id or node.user_id) != user_id):
             continue
         try:
             meta = json.loads(node.tool_calls_meta)
@@ -1114,12 +1189,18 @@ def _note_artifact_content(licence, artifact):
     licence.note_usage(artifact.ai_usage, f"the {artifact.kind} artifact")
 
 
-def _retrieval_injection_text(tr, with_labels=False, licence=None):
+def _retrieval_injection_text(tr, user_id, with_labels=False, licence=None):
     """Build the context-injection string for a successful retrieval tool
     result (read_artifact / read_todo / semantic_search), re-resolving the
     content fresh from the source row — content is never stored in
     tool_calls_meta. Re-checks ai_usage so a mid-session opt-out is honored.
     Returns None if nothing is (still) available.
+
+    Everything resolves as *user_id*, the user the reply is for: an
+    artifact, a todo list or a saved reference only when it is theirs, an
+    entry (read in full or a search match) only when they may open it.
+    Callers pass only the user's own results (_scan_proposal_statuses);
+    this keeps any other path from handing a model someone else's data.
 
     Everything returned here enters the payload after the chain decided
     the API key, so a pull reports to *licence* (a PayloadLicence, #325):
@@ -1136,7 +1217,8 @@ def _retrieval_injection_text(tr, with_labels=False, licence=None):
     name = tr.get("name")
     if name == "read_artifact":
         artifact = UserArtifact.query.get(tr.get("artifact_id"))
-        if artifact is None or artifact.ai_usage not in AI_ALLOWED:
+        if (artifact is None or artifact.user_id != user_id
+                or artifact.ai_usage not in AI_ALLOWED):
             return None
         if licence is not None:
             _note_artifact_content(licence, artifact)
@@ -1144,27 +1226,28 @@ def _retrieval_injection_text(tr, with_labels=False, licence=None):
                 f"requested:\n{artifact.get_content()}]")
     if name == "read_todo":
         todo = UserTodo.query.get(tr.get("todo_id"))
-        if todo is None or todo.ai_usage not in AI_ALLOWED:
+        if (todo is None or todo.user_id != user_id
+                or todo.ai_usage not in AI_ALLOWED):
             return None
         if licence is not None:
             licence.note_usage(todo.ai_usage, "the todo list")
         return f"[Your current todo list:\n{todo.get_content()}]"
     if name == "read_full":
         # Re-resolve via the quote machinery (permission + ai_usage checks
-        # built in; depth 1 — nested {quote:ID} stay as placeholders).
+        # built in; depth 1 — nested {quote:ID} stay as placeholders), as
+        # the user the reply is for, not as the user the entry records.
         kind, ref_id = tr.get("kind"), tr.get("ref_id")
-        reader_id = tr.get("user_id")
-        if ref_id is None or reader_id is None:
+        if ref_id is None:
             return None
         if kind == "external":
             q_text, resolved = resolve_ext_quotes(
-                "{quote_ext:%d}" % ref_id, reader_id, for_llm=True)
+                "{quote_ext:%d}" % ref_id, user_id, for_llm=True)
             if licence is not None:
                 licence.note_external(resolved, what="read reference")
         else:
-            reader = User.query.get(reader_id)
+            reader = User.query.get(user_id)
             q_text, resolved = resolve_quotes(
-                "{quote:%d}" % ref_id, reader_id, for_llm=True,
+                "{quote:%d}" % ref_id, user_id, for_llm=True,
                 max_depth=QUOTE_PULL_DEPTH,
                 tz_name=reader.timezone if reader else None)
             if licence is not None:
@@ -1179,15 +1262,17 @@ def _retrieval_injection_text(tr, with_labels=False, licence=None):
                 f"([{tr.get('ref', '?')}]):\n{q_text}]")
     if name == "semantic_search":
         # Re-resolve each matched node from its id (content never stored in
-        # meta); re-check ai_usage + soft-delete at injection time. These are
-        # PREVIEWS for triage — to read one in full, the model quotes it
-        # (resolved by the loop's quote step).
+        # meta); re-check ai_usage, soft-delete and the user's access at
+        # injection time. These are PREVIEWS for triage — to read one in
+        # full, the model quotes it (resolved by the loop's quote step).
+        from backend.utils.privacy import can_user_access_node
         matches = tr.get("matches") or []
         lines = []
         for m in matches:
             node = Node.query.get(m.get("node_id"))
-            if (node is None or node.deleted_at is not None
-                    or node.ai_usage not in AI_ALLOWED):
+            # can_user_access_node also refuses a soft-deleted node.
+            if (node is None or node.ai_usage not in AI_ALLOWED
+                    or not can_user_access_node(node, user_id)):
                 continue
             text = (node.get_content() or "").strip()
             if not text:
@@ -1211,7 +1296,7 @@ def _retrieval_injection_text(tr, with_labels=False, licence=None):
         # (see ExternalItem.read_at), never by surfacing.
         for m in (tr.get("ext_matches") or []):
             item = ExternalItem.query.get(m.get("item_id"))
-            if item is None:
+            if item is None or item.user_id != user_id:
                 continue
             text = (item.get_content() or "").strip()
             if not text:
@@ -1458,7 +1543,7 @@ def _reference_marks_note(item_ids, user_id):
     return note + "]"
 
 
-def _scan_proposal_statuses(node_chain, licence=None):
+def _scan_proposal_statuses(node_chain, user_id, licence=None):
     """Walk all nodes and collect proposal/tool status notes to inject.
 
     Refreshes each node from the DB (the merge task may have updated
@@ -1466,11 +1551,17 @@ def _scan_proposal_statuses(node_chain, licence=None):
     where nodes_to_mark is a list of (node, tool_name) tuples whose
     status_reported flag should be set after a successful LLM call.
     A retrieval delivered here reports its pull to *licence* (#325).
+
+    Only *user_id*'s own nodes take part, those they wrote or (an AI
+    reply) asked for: the results and outcomes on someone else's node in
+    the chain (their AI reply in a public thread) are theirs, so they are
+    neither delivered into this reply nor marked reported by it.
     """
     notes = []
     to_mark = []
     for node in node_chain:
-        if not node.tool_calls_meta:
+        if (not node.tool_calls_meta
+                or (node.human_owner_id or node.user_id) != user_id):
             continue
         # Refresh from DB to pick up async merge updates
         db.session.refresh(node)
@@ -1528,7 +1619,8 @@ def _scan_proposal_statuses(node_chain, licence=None):
                 if entry.get("status") == "success":
                     # Re-resolved fresh from the encrypted row — content is
                     # never stored in tool_calls_meta.
-                    text = _retrieval_injection_text(entry, licence=licence)
+                    text = _retrieval_injection_text(
+                        entry, user_id, licence=licence)
                     if text is not None:
                         notes.append(text)
                 else:
@@ -1552,14 +1644,21 @@ def _mark_status_reported(to_mark):
             pass
 
 
-def _supersede_old_proposals(node_chain, tool_name, exclude_node_id):
+def _supersede_old_proposals(node_chain, tool_name, exclude_node_id,
+                             user_id):
     """Mark old pending_approval proposals as superseded.
 
-    Only supersedes entries matching *tool_name* (scoped by type).
-    Proposals already in 'started' or later states are left alone.
+    Only supersedes entries matching *tool_name* (scoped by type), and
+    only on replies that belong to *user_id*, the user whose new proposal
+    replaces them: in a thread other people reply in, their proposals
+    are theirs to accept or leave, and a new proposal for this user
+    changes none of them. Proposals already in 'started' or later states
+    are left alone.
     """
     for node in node_chain:
         if node.id == exclude_node_id or not node.tool_calls_meta:
+            continue
+        if not node_is_users(node, user_id):
             continue
         try:
             meta = json.loads(node.tool_calls_meta)
@@ -1605,7 +1704,7 @@ def _auto_create_drafts(llm_text, llm_node, node_chain, user_id):
                 db.session.flush()
             # Supersede old pending_approval update_todo proposals
             _supersede_old_proposals(
-                node_chain, "propose_todo", llm_node.id)
+                node_chain, "propose_todo", llm_node.id, user_id)
             results.append({
                 "name": "propose_todo",
                 "status": "success",
@@ -1634,7 +1733,7 @@ def _auto_create_drafts(llm_text, llm_node, node_chain, user_id):
                 db.session.flush()
             # Supersede old pending_approval issue proposals
             _supersede_old_proposals(
-                node_chain, "propose_github_issue", llm_node.id)
+                node_chain, "propose_github_issue", llm_node.id, user_id)
             results.append({
                 "name": "propose_github_issue",
                 "status": "success",
@@ -1662,7 +1761,7 @@ def _auto_create_drafts(llm_text, llm_node, node_chain, user_id):
                 db.session.flush()
             # Supersede old pending_approval feedback proposals
             _supersede_old_proposals(
-                node_chain, "propose_feedback", llm_node.id)
+                node_chain, "propose_feedback", llm_node.id, user_id)
             results.append({
                 "name": "propose_feedback",
                 "status": "success",
@@ -1694,7 +1793,7 @@ def _auto_create_drafts(llm_text, llm_node, node_chain, user_id):
                 db.session.flush()
             # Supersede old pending_approval share proposals
             _supersede_old_proposals(
-                node_chain, "propose_share", llm_node.id)
+                node_chain, "propose_share", llm_node.id, user_id)
             results.append({
                 "name": "propose_share",
                 "status": "success",
@@ -1776,32 +1875,40 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
 
         try:
             if name == "apply_todo_changes":
+                # Only on the user's own live proposal (utils/proposals).
                 draft = _find_pending_todo_draft(node_chain, user_id)
-                if not draft:
+                proposal_node = (Node.query.get(draft.parent_id)
+                                 if draft else None)
+                if not is_own_live_proposal(
+                        proposal_node, user_id, "todo_pending"):
                     result["status"] = "error"
                     result["error"] = "No pending todo changes found"
                 else:
                     # Kick off async background merge using the
                     # proposal node (where the draft originated)
                     from backend.routes.todo import (
-                        _start_todo_merge, todo_merge_refusal,
+                        TODO_MERGE_RUNNING_MESSAGE, _start_todo_merge,
+                        todo_merge_refusal,
                     )
-                    proposal_node = Node.query.get(draft.parent_id)
                     # The merge sends the todo list and the proposal to a
                     # model: not where AI may not read them. The proposal
                     # stays pending; the model passes the message on.
-                    refusal = todo_merge_refusal(
-                        user_id, proposal_node or llm_node)
+                    refusal = todo_merge_refusal(user_id, proposal_node)
                     if refusal is not None:
                         result["status"] = "error"
                         result["error"] = refusal
                     else:
                         task_id = _start_todo_merge(
-                            draft, proposal_node or llm_node, user_id,
+                            draft, proposal_node, user_id,
                             confirm_node_id=llm_node.id,
                         )
-                        result["status"] = "success"
-                        result["apply_task_id"] = task_id
+                        if task_id is None:
+                            # Another request started this merge.
+                            result["status"] = "error"
+                            result["error"] = TODO_MERGE_RUNNING_MESSAGE
+                        else:
+                            result["status"] = "success"
+                            result["apply_task_id"] = task_id
 
             elif name == "apply_github_issue":
                 draft = _find_pending_github_issue_draft(
@@ -1811,11 +1918,13 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
                     result["status"] = "error"
                     result["error"] = "No pending GitHub issue found"
                 else:
-                    # Find the LLM node that proposed the issue
+                    # The LLM node that proposed the issue: only the
+                    # user's own live proposal (utils/proposals).
                     origin_node = Node.query.get(draft.parent_id)
-                    if not origin_node:
+                    if not is_own_live_proposal(
+                            origin_node, user_id, "github_issue_pending"):
                         result["status"] = "error"
-                        result["error"] = "Origin node not found"
+                        result["error"] = "No pending GitHub issue found"
                     else:
                         issue_data = parse_github_issue(
                             origin_node.get_content() or ""
@@ -2076,8 +2185,9 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
                     result["status"] = "success"
                     result["kind"], result["ref_id"] = target
                     result["ref"] = ref
-                    # Injection re-resolves content with permission checks,
-                    # which need the requesting user (also cross-turn).
+                    # Who asked, for the record. Injection re-resolves the
+                    # content with permission checks as the user of the
+                    # reply that delivers it (_retrieval_injection_text).
                     result["user_id"] = user_id
                     # Display metadata for the Actions-taken chip: the user
                     # never sees search labels, so the chip links to the
@@ -2098,10 +2208,12 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
                     result["status"] = "error"
                     result["error"] = "No pending feedback found"
                 else:
+                    # Only the user's own live proposal (utils/proposals).
                     origin_node = Node.query.get(draft.parent_id)
-                    if not origin_node:
+                    if not is_own_live_proposal(
+                            origin_node, user_id, "feedback_pending"):
                         result["status"] = "error"
-                        result["error"] = "Origin node not found"
+                        result["error"] = "No pending feedback found"
                     else:
                         from backend.utils.feedback import (
                             submit_feedback_from_node,
@@ -2137,10 +2249,12 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
                     result["status"] = "error"
                     result["error"] = "No pending share found"
                 else:
+                    # Only the user's own live proposal (utils/proposals).
                     origin_node = Node.query.get(draft.parent_id)
-                    if not origin_node:
+                    if not is_own_live_proposal(
+                            origin_node, user_id, "share_pending"):
                         result["status"] = "error"
-                        result["error"] = "Origin node not found"
+                        result["error"] = "No pending share found"
                     else:
                         from backend.utils.share import (
                             save_share_drafts_from_node,
@@ -2226,7 +2340,9 @@ def get_user_profile_content(user_id, pinned_node=None, usage=None):
     re-checked on the resolved row so a mid-session opt-out is honored.
     The row reports to *usage* (#326).
     """
-    profile = pinned_node.get_artifact("profile") if pinned_node else None
+    profile = _own_pin(
+        pinned_node.get_artifact("profile") if pinned_node else None,
+        user_id)
     if profile is None:
         profile = UserProfile.query.filter_by(user_id=user_id).order_by(
             UserProfile.created_at.desc()
@@ -2249,7 +2365,8 @@ def get_user_todo_content(user_id, pinned_node=None, usage=None):
     resolved row so a mid-session opt-out is honored. The row reports to
     *usage* (#326).
     """
-    todo = pinned_node.get_artifact("todo") if pinned_node else None
+    todo = _own_pin(
+        pinned_node.get_artifact("todo") if pinned_node else None, user_id)
     if todo is None:
         todo = UserTodo.query.filter_by(user_id=user_id).order_by(
             UserTodo.created_at.desc()
@@ -2272,7 +2389,9 @@ def get_user_recent_content(user_id, pinned_node=None, usage=None):
     ai_usage is re-checked on the resolved row so a mid-session opt-out is
     honored. The row reports to *usage* (#326).
     """
-    rc = pinned_node.get_artifact("recent_context") if pinned_node else None
+    rc = _own_pin(
+        pinned_node.get_artifact("recent_context") if pinned_node else None,
+        user_id)
     if rc is None:
         profile = UserProfile.query.filter_by(user_id=user_id).filter(
             UserProfile.ai_usage.in_(AI_ALLOWED)
@@ -2642,6 +2761,14 @@ def _collect_feed_reply(llm_node, resp, ca_refs):
     from backend.utils.ca_feed import (
         parse_feed_reply, render_feed_reply, save_feed_picks)
     from backend.utils.community_archive import expand_ca_citations
+    # A refusal is the provider's verdict on this request (#454): the text
+    # is an apology, not JSON. Say so, naming the model, before parsing.
+    # Terminal like a parse failure (the stored batch result is immutable);
+    # the same request would likely be refused again, and a user's provider
+    # is never switched.
+    if resp.get("refused"):
+        raise FeedReplyError(
+            f"the model refused the Read ({llm_node.llm_model or 'unknown model'})")
     # A reply cut off at the output limit is not the promised object even
     # where its prefix happens to parse. Like a parse failure it is a
     # verdict on this reply (FeedReplyError), not a condition a later
@@ -2785,24 +2912,10 @@ class LLMCompletionTask(Task):
                     logger.error(f"LLM completion failed for node {llm_node_id}: {exc}")
 
 
-def render_system_message(system_node, user_id, usage=None):
-    """Render the system node's full message text exactly as the
-    generation loop would (#192/#187).
-
-    Used by the finalize pre-warm so the provider-cache warm and the
-    real generation share byte-identical prefixes: the result is stored
-    in the #192 Redis cache, and generation prefers those cached bytes.
-    Only valid for prompts without volatile placeholders ({user_export},
-    {quote:..}, {quote_ext:..}) — callers must check first. The rows the
-    placeholders resolve to report to *usage* (a ContextUsage, #326).
-    """
-    owner = User.query.get(user_id)
-    user_tz = owner.timezone if owner and owner.timezone else "UTC"
-    author = system_node.user.username if system_node.user else "Unknown"
-    time_prefix = local_stamp(
-        system_node.updated_at or system_node.created_at, user_tz)
-    text = f"{time_prefix} author {author}: {system_node.get_content()}"
-
+def _resolve_own_system_placeholders(text, system_node, user_id, usage):
+    """*text* (the user's own system node) with its personal
+    placeholders filled from the versions pinned on the node; see
+    render_system_message."""
     if USER_PROFILE_PLACEHOLDER in text:
         profile_obj = get_user_profile_content(
             user_id, pinned_node=system_node, usage=usage)
@@ -2847,6 +2960,33 @@ def render_system_message(system_node, user_id, usage=None):
         text = text.replace(USER_INTENTIONS_PLACEHOLDER, intentions or "")
         text = text.replace(
             USER_ARTIFACTS_INDEX_PLACEHOLDER, index or "(none)")
+    return text
+
+
+def render_system_message(system_node, user_id, usage=None):
+    """Render the system node's full message text exactly as the
+    generation loop would (#192/#187).
+
+    Used by the finalize pre-warm so the provider-cache warm and the
+    real generation share byte-identical prefixes: the result is stored
+    in the #192 Redis cache, and generation prefers those cached bytes.
+    Only valid for prompts without volatile placeholders ({user_export},
+    {quote:..}, {quote_ext:..}) — callers must check first. The rows the
+    placeholders resolve to report to *usage* (a ContextUsage, #326).
+    A system node that is not *user_id*'s own renders its personal
+    placeholders empty, as the generation loop does.
+    """
+    owner = User.query.get(user_id)
+    user_tz = owner.timezone if owner and owner.timezone else "UTC"
+    author = system_node.user.username if system_node.user else "Unknown"
+    time_prefix = local_stamp(
+        system_node.updated_at or system_node.created_at, user_tz)
+    text = f"{time_prefix} author {author}: {system_node.get_content()}"
+    if node_is_users(system_node, user_id):
+        text = _resolve_own_system_placeholders(
+            text, system_node, user_id, usage)
+    else:
+        text = blank_personal_placeholders(text)
     if SHARE_GUIDANCE_PLACEHOLDER in text:
         text = text.replace(
             SHARE_GUIDANCE_PLACEHOLDER,
@@ -2945,7 +3085,7 @@ def _prewarm_anthropic_cache(system_node_id, user_id, model_id,
             from backend.utils.prompt_cache import (
                 get_cached_render, store_render,
             )
-            render_variant = _render_variant(user_id)
+            render_variant = _system_render_variant(system_node, user_id)
             cached = get_cached_render(
                 flask_app.config, system_node, render_variant)
             if cached is not None:
@@ -3170,10 +3310,11 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
 
             # Check if any node contains the {user_export} placeholder
             # Find the first node containing it to use its timestamp as cutoff
+            # (the user's own nodes only: someone else's reads as empty).
             export_node = None
             export_placeholder_match = None
             for node in node_chain:
-                if not _alive(node):
+                if not _alive(node) or not node_is_users(node, user_id):
                     continue
                 m = USER_EXPORT_PATTERN.search(node.get_content())
                 if m:
@@ -3341,7 +3482,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     and not has_quotes(_sys_text)
                     and not has_ext_quotes(_sys_text)
                 )
-                render_variant = _render_variant(user_id)
+                render_variant = _system_render_variant(system_node, user_id)
                 if system_render_cacheable:
                     _cached = get_cached_render(
                         flask_app.config, system_node, render_variant)
@@ -3350,10 +3491,15 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                             _cached)
 
             def _placeholder_node(placeholder):
+                """The first of the user's own nodes carrying
+                *placeholder*: its pins are the versions the reply
+                renders. Someone else's node never resolves one (its
+                placeholders read as empty, blank_personal_placeholders)."""
                 for n in node_chain:
                     if cached_system_render is not None and n is system_node:
                         continue  # already rendered — no fetch needed
-                    if _alive(n) and placeholder in n.get_content():
+                    if (_alive(n) and node_is_users(n, user_id)
+                            and placeholder in n.get_content()):
                         return n
                 return None
 
@@ -3461,11 +3607,14 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 gated_voice_tools(flask_app.config)
                 if is_agentic else None)
 
-            # Check for pending drafts and inject context notes
+            # Check for pending drafts and inject context notes: only
+            # proposals the user can accept (utils/proposals).
             pending_draft_note = None
             if is_agentic:
                 pending = _find_pending_todo_draft(node_chain, user_id)
-                if pending:
+                if pending and is_own_live_proposal(
+                        Node.query.get(pending.parent_id), user_id,
+                        "todo_pending"):
                     pending_draft_note = (
                         f"[todo-proposal:{pending.parent_id}: pending "
                         f"confirmation. The user can say 'apply the "
@@ -3474,7 +3623,9 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 pending_issue = _find_pending_github_issue_draft(
                     node_chain, user_id
                 )
-                if pending_issue:
+                if pending_issue and is_own_live_proposal(
+                        Node.query.get(pending_issue.parent_id), user_id,
+                        "github_issue_pending"):
                     issue_note = (
                         f"[issue-proposal:{pending_issue.parent_id}: "
                         f"pending confirmation. The user can say "
@@ -3591,7 +3742,8 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             proposal_to_mark = []
             if is_agentic:
                 proposal_notes, proposal_to_mark = (
-                    _scan_proposal_statuses(node_chain, licence=licence)
+                    _scan_proposal_statuses(
+                        node_chain, user_id, licence=licence)
                 )
 
             model_config = flask_app.config["SUPPORTED_MODELS"][model_id]
@@ -3806,7 +3958,13 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                             "by the author]"
                         )
                         role = "assistant" if is_llm_node else "user"
-                        messages.append({"role": role, "content": message_text})
+                        # Text blocks, like every other message: the
+                        # context log below and the providers read them.
+                        messages.append({
+                            "role": role,
+                            "content": [{"type": "text",
+                                         "text": message_text}],
+                        })
                         continue
 
                     node_content = node.get_content()
@@ -3856,7 +4014,14 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                                             f"\n\n[share-proposal:"
                                             f"{node.id}]"
                                         )
-                                    elif ename == "update_artifact":
+                                    elif (ename == "update_artifact"
+                                          and (node.human_owner_id
+                                               or node.user_id) == user_id):
+                                        # The user's own replies only: on
+                                        # another user's reply the write
+                                        # and its artifact are theirs. The
+                                        # proposal tags above stay, as the
+                                        # proposals are in the reply's text.
                                         # Durable record of the outcome.
                                         # The within-turn result round is
                                         # injected only into that turn's
@@ -3876,11 +4041,20 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         message_text = (
                             f"{time_prefix} author {author}: {node_content}"
                         )
+                        # Someone else's node (their system prompt in a
+                        # public thread, a message of theirs): its personal
+                        # placeholders read as empty, and none of the
+                        # resolvers below run on it.
+                        owned = node_is_users(node, user_id)
+                        if not owned:
+                            message_text = blank_personal_placeholders(
+                                message_text)
                         # Replace {user_export} — first occurrence gets
                         # the archive, repeats get a stub (#139): the
                         # export is the heaviest placeholder and
                         # duplicating it doubles prompt cost.
-                        if user_export_content and export_placeholder_match:
+                        if (owned and user_export_content
+                                and export_placeholder_match):
                             if export_placeholder_match in message_text:
                                 if not replaced_export:
                                     message_text = message_text.replace(
@@ -3911,79 +4085,80 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                             else:
                                 message_text = CA_TWEETS_PATTERN.sub(
                                     CA_TWEETS_CHAT_STUB, message_text)
-                        # Replace {user_profile} — first occurrence
-                        # gets content, subsequent get emptied (dedup)
-                        if USER_PROFILE_PLACEHOLDER in message_text:
-                            if not replaced_profile:
+                        if owned:
+                            # Replace {user_profile} — first occurrence
+                            # gets content, subsequent get emptied (dedup)
+                            if USER_PROFILE_PLACEHOLDER in message_text:
+                                if not replaced_profile:
+                                    message_text = message_text.replace(
+                                        USER_PROFILE_PLACEHOLDER,
+                                        user_profile_content or ""
+                                    )
+                                    replaced_profile = True
+                                else:
+                                    message_text = message_text.replace(
+                                        USER_PROFILE_PLACEHOLDER,
+                                        "(see profile above)"
+                                    )
+                            # Replace {user_todo} — pinned snapshot (no dedup)
+                            if USER_TODO_PLACEHOLDER in message_text:
                                 message_text = message_text.replace(
-                                    USER_PROFILE_PLACEHOLDER,
-                                    user_profile_content or ""
+                                    USER_TODO_PLACEHOLDER,
+                                    user_todo_content or ""
                                 )
-                                replaced_profile = True
-                            else:
+                            # Replace {user_recent} — first occurrence only
+                            if USER_RECENT_PLACEHOLDER in message_text:
+                                if not replaced_recent:
+                                    message_text = message_text.replace(
+                                        USER_RECENT_PLACEHOLDER,
+                                        user_recent_content or ""
+                                    )
+                                    replaced_recent = True
+                                else:
+                                    message_text = message_text.replace(
+                                        USER_RECENT_PLACEHOLDER,
+                                        "(see recent context above)"
+                                    )
+                            # Replace {user_recent_raw} — first occurrence only
+                            if USER_RECENT_RAW_PLACEHOLDER in message_text:
+                                if not replaced_recent_raw:
+                                    message_text = message_text.replace(
+                                        USER_RECENT_RAW_PLACEHOLDER,
+                                        user_recent_raw_content or ""
+                                    )
+                                    replaced_recent_raw = True
+                                else:
+                                    message_text = message_text.replace(
+                                        USER_RECENT_RAW_PLACEHOLDER,
+                                        "(see recent raw data above)"
+                                    )
+                            # Replace {user_ai_preferences} — pinned snapshot
+                            if USER_AI_PREFERENCES_PLACEHOLDER in message_text:
                                 message_text = message_text.replace(
-                                    USER_PROFILE_PLACEHOLDER,
-                                    "(see profile above)"
+                                    USER_AI_PREFERENCES_PLACEHOLDER,
+                                    user_ai_preferences_content or ""
                                 )
-                        # Replace {user_todo} — pinned snapshot (no dedup)
-                        if USER_TODO_PLACEHOLDER in message_text:
-                            message_text = message_text.replace(
-                                USER_TODO_PLACEHOLDER,
-                                user_todo_content or ""
-                            )
-                        # Replace {user_recent} — first occurrence only
-                        if USER_RECENT_PLACEHOLDER in message_text:
-                            if not replaced_recent:
+                            # Replace artifact placeholders — pinned snapshot
+                            if USER_MEMORY_PLACEHOLDER in message_text:
                                 message_text = message_text.replace(
-                                    USER_RECENT_PLACEHOLDER,
-                                    user_recent_content or ""
+                                    USER_MEMORY_PLACEHOLDER,
+                                    user_memory_content or ""
                                 )
-                                replaced_recent = True
-                            else:
+                            if USER_SCRATCHPAD_PLACEHOLDER in message_text:
                                 message_text = message_text.replace(
-                                    USER_RECENT_PLACEHOLDER,
-                                    "(see recent context above)"
+                                    USER_SCRATCHPAD_PLACEHOLDER,
+                                    user_scratchpad_content or ""
                                 )
-                        # Replace {user_recent_raw} — first occurrence only
-                        if USER_RECENT_RAW_PLACEHOLDER in message_text:
-                            if not replaced_recent_raw:
+                            if USER_INTENTIONS_PLACEHOLDER in message_text:
                                 message_text = message_text.replace(
-                                    USER_RECENT_RAW_PLACEHOLDER,
-                                    user_recent_raw_content or ""
+                                    USER_INTENTIONS_PLACEHOLDER,
+                                    user_intentions_content or ""
                                 )
-                                replaced_recent_raw = True
-                            else:
+                            if USER_ARTIFACTS_INDEX_PLACEHOLDER in message_text:
                                 message_text = message_text.replace(
-                                    USER_RECENT_RAW_PLACEHOLDER,
-                                    "(see recent raw data above)"
+                                    USER_ARTIFACTS_INDEX_PLACEHOLDER,
+                                    user_artifacts_index or "(none)"
                                 )
-                        # Replace {user_ai_preferences} — pinned snapshot
-                        if USER_AI_PREFERENCES_PLACEHOLDER in message_text:
-                            message_text = message_text.replace(
-                                USER_AI_PREFERENCES_PLACEHOLDER,
-                                user_ai_preferences_content or ""
-                            )
-                        # Replace artifact placeholders — pinned snapshot
-                        if USER_MEMORY_PLACEHOLDER in message_text:
-                            message_text = message_text.replace(
-                                USER_MEMORY_PLACEHOLDER,
-                                user_memory_content or ""
-                            )
-                        if USER_SCRATCHPAD_PLACEHOLDER in message_text:
-                            message_text = message_text.replace(
-                                USER_SCRATCHPAD_PLACEHOLDER,
-                                user_scratchpad_content or ""
-                            )
-                        if USER_INTENTIONS_PLACEHOLDER in message_text:
-                            message_text = message_text.replace(
-                                USER_INTENTIONS_PLACEHOLDER,
-                                user_intentions_content or ""
-                            )
-                        if USER_ARTIFACTS_INDEX_PLACEHOLDER in message_text:
-                            message_text = message_text.replace(
-                                USER_ARTIFACTS_INDEX_PLACEHOLDER,
-                                user_artifacts_index or "(none)"
-                            )
                         # Replace {share_guidance} — flag-conditional, must
                         # mirror render_system_message byte-for-byte
                         if SHARE_GUIDANCE_PLACEHOLDER in message_text:
@@ -4045,11 +4220,17 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         if (system_render_cacheable
                                 and cached_system_render is None
                                 and attempt == 0):
+                            # Someone else's prompt renders none of the
+                            # user's rows (placeholders blanked), so its
+                            # render carries no verdict of theirs.
+                            _verdict_text = (
+                                _sys_text if node_is_users(system_node, user_id)
+                                else "")
                             store_render(
                                 flask_app.config, system_node, message_text,
                                 render_variant,
-                                unlicensed=context_usage.reason(_sys_text),
-                                rows=context_usage.rows(_sys_text))
+                                unlicensed=context_usage.reason(_verdict_text),
+                                rows=context_usage.rows(_verdict_text))
                     if role == "assistant":
                         last_assistant_index = len(messages)
                     messages.append({
@@ -4065,7 +4246,8 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 # Inject mode indicator only when the mode changes
                 # (or on the first turn to establish the initial mode).
                 if is_agentic and source_mode:
-                    prev_mode = _get_previous_source_mode(node_chain)
+                    prev_mode = _get_previous_source_mode(
+                        node_chain, user_id)
                     if prev_mode != source_mode:
                         mode_labels = {
                             'voice': (
@@ -4587,7 +4769,8 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                                 injection_strings.append(echo)
                         elif tr.get("status") == "success":
                             text = _retrieval_injection_text(
-                                tr, with_labels=True, licence=licence)
+                                tr, user_id, with_labels=True,
+                                licence=licence)
                             if text is not None:
                                 injection_strings.append(text)
                                 a_type, a_id = _retrieval_pin(tr)

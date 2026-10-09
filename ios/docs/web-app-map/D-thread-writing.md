@@ -178,6 +178,8 @@ Inside the card:
 | semantic_search | "Searched archive & references — “<query>”" |
 | read_full | external: "Read in full — [@handle's post]" (url) or "Read a saved reference in full"; node: "Read in full — [entry #<ref_id>]"; failed: "Read in full (failed)" |
 | other | the raw tool name |
+
+  These labels are the reply's owner's (the user who asked for it). Anyone else gets only each entry's `name` and `status` from the server (`/nodes/<id>`, `/llm-status`, `/textmode/from-node`), and each row names the action without details or links: "Searched archive & references", "Read in full", "Wrote an artifact", "Read an artifact", "Read the todo list", "Todo changes confirmed", "Share saved as a draft", and the proposal / apply labels without their apply state (`sharedToolLabel` on the web, `ToolCallMeta.sharedLabel` on iOS).
 | any with `error` | " — <error>" in accent color |
 
 Below the card:
@@ -498,14 +500,14 @@ Section labels: 0.68rem uppercase, 0.18em tracking, accent at 60 % opacity.
   - Label **"Updated from your sharing"** then rows: Completed items (filled `--accent-dim` 16 px circle with ✓, text struck through at 40 % opacity) and New Tasks items (empty circle `--border-hover`).
   - **"Suggested priority order"**: numbered cards (serif number, text, muted hint).
   - Note: "A note: <text>".
-  - Apply area (shown whenever there's a todo proposal or a `propose_todo` meta): **"Apply changes to my Todo"** → "Todo update started…" → **"Todo updated"** (success color) / error text (default "Todo update failed").
+  - Apply area (shown whenever there's a todo proposal or a `propose_todo` meta): **"Apply changes to my Todo"** → "Todo update started…" → **"Todo updated"** (success color) / error text (default "Todo update failed"). After a failed merge whose `propose_todo` meta has `retryable: true`, or a failed apply request other than 404, an **"Apply again"** button follows the error (#434).
 - **GitHub issue** (needs `issueTitle`): label **"GitHub Issue"**, card with title (serif), description (markdown), category badge (uppercase pill); button **"Create issue"** → "Creating issue…" → **"Issue created — #<n>"** (link to issue_url) / error ("Issue creation failed").
 - **Feedback**: label **"Feedback"**, card with markdown + category badge; **"Send feedback"** → "Sending…" → **"Feedback sent — thank you"** / error ("Feedback send failed").
 - **Shares**: label **"Share"** / **"Shares"** (roomy: "Proposed Share(s)"); one card per block with markdown body, type badge, a copy button (top-right; copies block text; check icon for 1.5 s; title "Copy share text"); per-block **"Save to shares"** → "Saving…" → **"Saved as a private draft — publish from your [Share page]"** / error ("Saving the share failed").
 - **Preferences**: "Preferences updated" when `update_ai_preferences` succeeded.
 - Roomy (Voice) variant labels: "GitHub Issue Proposal", "Create GitHub Issue", "Feedback for the Team", "Send feedback to the team", "Save to your shares", plus pulsing AI dot on labels.
 
-State from `tool_calls_meta` on load: `propose_todo.apply_status` completed/failed(+apply_error)/started, or `apply_todo_changes` success → completed; issue completed (with `issue_url`, `issue_number`); feedback completed; share completed (all) or `saved_indexes` (per block).
+State from `tool_calls_meta` on load: `propose_todo.apply_status` completed/failed(+apply_error)/started, or `apply_todo_changes` success → completed; issue completed (with `issue_url`, `issue_number`); feedback completed; share completed (all) or `saved_indexes` (per block). The accept buttons and their status show to the reply's owner only; anyone else sees the proposal's text and the share copy button.
 
 ### 6.4 Accept flows (no explicit "reject")
 
