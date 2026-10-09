@@ -778,11 +778,17 @@ class LLMProvider:
             raise mapped from e
 
         content = ""
+        refused = False
         tool_calls = []
         import json
         for item in response.output:
             if item.type == "message":
                 for block in item.content:
+                    # A Responses API refusal is a content block of type
+                    # "refusal" (its text in .refusal), not output_text.
+                    if getattr(block, "type", None) == "refusal":
+                        refused = True
+                        continue
                     text = getattr(block, "text", None)
                     if text:
                         content += text
@@ -827,6 +833,7 @@ class LLMProvider:
             "cache_write_subset_tokens": cache_write_tokens,
             "tool_calls": tool_calls,
             "truncated": truncated,
+            "refused": refused,
             "response_id": getattr(response, "id", None),
         }
         # Whether the comparison actually went out (it is dropped on the
@@ -1083,6 +1090,8 @@ class LLMProvider:
             "cache_creation_input_tokens": cache_write,
             "tool_calls": tool_calls,
             "truncated": truncated,
+            # The model declined (#454): the text is a refusal, not an answer.
+            "refused": stop_reason == "refusal",
         }
 
 

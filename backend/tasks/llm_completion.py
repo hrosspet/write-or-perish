@@ -2746,6 +2746,14 @@ def _collect_feed_reply(llm_node, resp, ca_refs):
     from backend.utils.ca_feed import (
         parse_feed_reply, render_feed_reply, save_feed_picks)
     from backend.utils.community_archive import expand_ca_citations
+    # A refusal is the provider's verdict on this request (#454): the text
+    # is an apology, not JSON. Say so, naming the model, before parsing.
+    # Terminal like a parse failure (the stored batch result is immutable);
+    # the same request would likely be refused again, and a user's provider
+    # is never switched.
+    if resp.get("refused"):
+        raise FeedReplyError(
+            f"the model refused the Read ({llm_node.llm_model or 'unknown model'})")
     # A reply cut off at the output limit is not the promised object even
     # where its prefix happens to parse. Like a parse failure it is a
     # verdict on this reply (FeedReplyError), not a condition a later
