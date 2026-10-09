@@ -25,6 +25,7 @@ from backend.utils.audio_processing import section_aware_chunk_text
 from backend.utils.api_keys import get_openai_chat_key
 from backend.utils.encryption import encrypt_file
 from backend.utils.cost import calculate_audio_cost_microdollars
+from backend.utils.spoken_links import speak_links
 
 logger = get_task_logger(__name__)
 
@@ -95,6 +96,27 @@ def _strip_heading_sections(text):
         return "\n\n".join(parts)
     # Fallback: return full text if no structure detected
     return text.strip()
+
+
+_PROPOSAL_TOOLS = {'propose_todo', 'propose_github_issue', 'propose_feedback'}
+
+
+def _node_spoken_text(content, tool_calls_meta=None):
+    """The text TTS speaks for a node: quote markers and share blocks
+    removed; for a Voice tool-use reply with a proposal card, only its
+    prose (``_strip_heading_sections``: otherwise the heading words get
+    read aloud); then links spoken as their text and addresses short
+    (#461). The stored text is unchanged. A streamed reply's TTS does the
+    same in tts_stream_text.SpokenTextProjector."""
+    text = _strip_share_blocks(_strip_quote_markers(content or ""))
+    if text and tool_calls_meta:
+        try:
+            tool_names = {m.get('name') for m in json.loads(tool_calls_meta)}
+        except (json.JSONDecodeError, TypeError):
+            tool_names = set()
+        if tool_names & _PROPOSAL_TOOLS:
+            text = _strip_heading_sections(text)
+    return speak_links(text).strip()
 
 
 # Silence appended to a chapter's final audio chunk (#145 v3): the
@@ -602,10 +624,9 @@ def generate_tts_audio(self, node_id: int, audio_storage_root: str,
                     'tts_url': node.audio_tts_url
                 }
 
-            text = _strip_share_blocks(
-                _strip_quote_markers(node.get_content() or ""))
+            text = _node_spoken_text(node.get_content(), node.tool_calls_meta)
             if not text:
-                logger.info(f"No text content for node {node_id}, skipping TTS")
+                logger.info(f"No text to speak for node {node_id}, skipping TTS")
                 node.tts_task_status = 'completed'
                 node.tts_task_progress = 100
                 db.session.commit()
@@ -615,32 +636,6 @@ def generate_tts_audio(self, node_id: int, audio_storage_root: str,
                     'tts_url': None,
                     'skipped': True,
                 }
-
-            # For Voice tool-use responses: strip the structured ### sections
-            # (shown visually in the proposal card) so TTS speaks only the prose
-            # — intro, ### Note, and trailing commentary. Applies to every
-            # proposal type that renders a card (todo / issue / feedback);
-            # otherwise the heading words get read aloud.
-            if node.tool_calls_meta:
-                try:
-                    _meta = json.loads(node.tool_calls_meta)
-                    _tool_names = {m.get('name') for m in _meta}
-                except (json.JSONDecodeError, TypeError):
-                    _tool_names = set()
-                if _tool_names & {'propose_todo', 'propose_github_issue',
-                                  'propose_feedback'}:
-                    text = _strip_heading_sections(text)
-                if not text.strip():
-                    logger.debug(f"No conversational text after stripping sections for node {node_id}, skipping TTS")
-                    node.tts_task_status = 'completed'
-                    node.tts_task_progress = 100
-                    db.session.commit()
-                    return {
-                        'node_id': node_id,
-                        'status': 'completed',
-                        'tts_url': None,
-                        'skipped': True,
-                    }
 
             target_dir = (
                 Path(audio_storage_root)
