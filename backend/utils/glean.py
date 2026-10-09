@@ -119,18 +119,25 @@ def glean_enabled(user):
     return glean_default_on(user)
 
 
-def is_glean_prompt_node(node):
-    """A read prompt node as a glean attaches it: keyed as a read prompt
-    AND still linked to a read prompt version that Loore wrote (from the
-    file default), not one a user wrote. A per-thread edit removes the
-    link and makes the text the user's own; a saved user version is the
-    user's text too. Either way it is no longer Glean's prompt. Fails
-    closed: no node, no link or an unknown version is not one."""
+def is_glean_prompt_node(node, user):
+    """A read prompt node as a glean attaches it FOR *user*: the user's
+    own node, keyed as a read prompt, still linked to the user's own read
+    prompt version that Loore wrote (from the file default). A per-thread
+    edit removes the link and makes the text the user's own; a saved user
+    version is the user's text too; another user's prompt node is theirs.
+    None of those is this user's Glean prompt. Fails closed: no node, no
+    user, no link or an unknown version is not one."""
     from backend.utils.ca_feed import READ_PROMPT_KEYS
-    if node is None or node.get_prompt_key() not in READ_PROMPT_KEYS:
+    user_id = getattr(user, "id", None)
+    if node is None or user_id is None:
+        return False
+    if (node.human_owner_id or node.user_id) != user_id:
+        return False
+    if node.get_prompt_key() not in READ_PROMPT_KEYS:
         return False
     prompt = node.get_artifact("prompt")
     return (prompt is not None
+            and prompt.user_id == user_id
             and prompt.prompt_key in READ_PROMPT_KEYS
             and prompt.generated_by == "default")
 
@@ -138,15 +145,41 @@ def is_glean_prompt_node(node):
 def read_turn_allowed(user, ca_node):
     """Whether the completion task may run a read for *user* whose
     {ca_tweets} sits on *ca_node*: an admin always (the PoC's
-    experiments); anyone else only from a read prompt as a glean attaches
-    it (is_glean_prompt_node), and only while they glean. Checked on the
-    EFFECTIVE placeholder, which can sit higher up the thread than the
-    parent the reply's pre-flight sees (#435 review)."""
+    experiments); anyone else only from their own read prompt as a glean
+    attaches it (is_glean_prompt_node), and only while they glean.
+    Checked on the EFFECTIVE placeholder, which can sit higher up the
+    thread than the parent the reply's pre-flight sees (#435 review)."""
     if user is None:
         return False
     if getattr(user, "is_admin", False):
         return True
-    return is_glean_prompt_node(ca_node) and glean_enabled(user)
+    return is_glean_prompt_node(ca_node, user) and glean_enabled(user)
+
+
+def own_read_prompt_above(node, user, include_poc=False):
+    """Whether *node* or an alive ancestor is a read prompt of *user*'s
+    own: only then may a glean continue that thread's read ("glean
+    again"); a read prompt someone else attached higher up a public
+    thread is never reused. *include_poc* (admins) also counts the
+    2026-09-13 PoC shape, {ca_tweets} typed into the user's own node.
+    Walks the chain (one lookup per level; the PoC check decrypts)."""
+    from backend.utils.ca_feed import READ_PROMPT_KEYS
+    from backend.utils.placeholders import CA_TWEETS_PATTERN
+    user_id = getattr(user, "id", None)
+    seen = set()
+    current = node
+    while (user_id is not None and current is not None
+           and current.id not in seen):
+        seen.add(current.id)
+        if (current.deleted_at is None
+                and (current.human_owner_id or current.user_id) == user_id):
+            if current.get_prompt_key() in READ_PROMPT_KEYS:
+                return True
+            if include_poc and CA_TWEETS_PATTERN.search(
+                    current.get_content() or ""):
+                return True
+        current = current.parent
+    return False
 
 
 def glean_user_fields(user):

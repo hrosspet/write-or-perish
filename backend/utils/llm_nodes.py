@@ -255,12 +255,28 @@ def resolve_chat_model(parent_node, user, chain=None):
 
 def glean_provider(anchor_node, user, chain=None):
     """The provider a glean under *anchor_node* for *user* must stay on:
-    the provider of the model a chat reply there would run on
-    (resolve_chat_model: the thread's last chat model, else the user's
-    preference, else the default). A user's provider is never switched,
-    not even for a read (Peter, 2026-10-02 and 2026-10-09)."""
+    the provider of the user's own conversation there — the closest chat
+    reply in the thread that was made FOR this user (their own AI reply:
+    human owner == user), else the user's preference, else the default.
+    Replies made for someone else (another user's AI reply higher up a
+    public thread) never count. A user's provider is never switched, not
+    even for a read (Peter, 2026-10-02 and 2026-10-09)."""
     from backend.utils.glean import model_provider
-    return model_provider(resolve_chat_model(anchor_node, user, chain=chain)[0])
+    supported = current_app.config.get("SUPPORTED_MODELS", {})
+    chain = chain or _Chain(anchor_node)
+    user_id = getattr(user, "id", None)
+    for node in chain.llm_replies():
+        if node.id in chain.reads or user_id is None:
+            continue
+        if (node.human_owner_id or node.user_id) != user_id:
+            continue
+        if is_chat_model(node.llm_model):
+            return model_provider(node.llm_model)
+        if node.llm_model in supported:
+            break  # the user's own reply on a model no longer offered
+    return model_provider(
+        effective_preferred_model(user)
+        or current_app.config.get("DEFAULT_LLM_MODEL", "claude-opus-4.6"))
 
 
 def resolve_read_model(anchor_node, chain=None, user=None):
@@ -563,7 +579,8 @@ def create_llm_placeholder(parent_node_id, model_id, human_owner_id,
     # gleans, anything for an admin (#435).
     from backend.utils.glean import is_glean_prompt_node
     check_ca_tweets_access(
-        parent_content, owner, from_read_prompt=is_glean_prompt_node(parent))
+        parent_content, owner,
+        from_read_prompt=is_glean_prompt_node(parent, owner))
 
     # The model the reply will actually run on (#355). A read runs only on
     # a read model: the read routes validate the one they are given, and
