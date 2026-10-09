@@ -837,6 +837,58 @@ def test_the_last_admin_cannot_be_deleted(app, world, stubs, monkeypatch):
     assert r.status_code == 409 and r.get_json()["code"] == "own_account"
 
 
+def test_the_last_admin_check_reads_the_admins_under_the_lock(
+        app, world, stubs, monkeypatch):
+    """Two admins deleting at the same moment: the second request reads
+    the other admins after it holds the row locks, so it sees the first
+    one's deletion and is refused, and nothing of its own changes."""
+    second = _add(User(username="second", approved=True, is_admin=True))
+    _db.session.commit()
+    real_active_job = acc.active_job
+
+    def the_other_admin_was_deleted_meanwhile(user_id):
+        # What the request finds once it holds the locks: the other
+        # admin's deletion committed while it waited.
+        _db.session.get(User, second.id).deleted_at = datetime.utcnow()
+        _db.session.flush()
+        return real_active_job(user_id)
+    monkeypatch.setattr(acc, "active_job",
+                        the_other_admin_was_deleted_meanwhile)
+    with pytest.raises(acc.AccountDeletionRefused) as refused:
+        _schedule(world.admin)
+    assert refused.value.code == "last_admin"
+    _db.session.expire_all()
+    assert _db.session.get(User, world.admin.id).deleted_at is None
+    assert UserDataPurge.query.count() == 0
+
+
+def test_an_admins_deletion_cannot_be_restored(
+        app, world, stubs, monkeypatch, mail):
+    """An admin's deletion has no grace period. Even before its runner has
+    claimed it, signing in offers no restore and a restore changes
+    nothing; the user's own request stays restorable."""
+    _dispatcher(monkeypatch, stubs)
+
+    def claim_fails(job, dispatch):
+        raise RuntimeError("database busy")
+    monkeypatch.setattr(up, "start_job_now", claim_fails)
+    r = _client(app, world.admin).post(
+        f"/api/admin/users/{world.alice.id}/delete_account",
+        json={"confirm_username": "alice"})
+    assert r.status_code == 202
+    job = UserDataPurge.query.one()
+    assert job.status == "scheduled" and job.source == "admin"
+
+    c = app.test_client()
+    _sign_in_by_link(c, mail)
+    assert c.get("/api/account/restore").get_json()["restorable"] is False
+    r = c.post("/api/account/restore")
+    assert r.status_code == 409 and r.get_json()["code"] == "already_started"
+    _db.session.expire_all()
+    assert _db.session.get(User, world.alice.id).deleted_at is not None
+    assert _db.session.get(UserDataPurge, job.id).status == "scheduled"
+
+
 def test_the_last_admin_is_also_checked_when_the_deletion_runs(
         app, world, stubs):
     second = _add(User(username="second", approved=True, is_admin=True))

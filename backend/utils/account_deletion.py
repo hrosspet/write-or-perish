@@ -44,7 +44,7 @@ from collections import Counter
 from datetime import datetime, timedelta
 
 from itsdangerous import BadSignature, SignatureExpired
-from sqlalchemy import func, or_
+from sqlalchemy import and_, func, or_
 
 from backend.extensions import db
 from backend.models import (
@@ -230,14 +230,24 @@ def schedule_account_deletion(user, *, requested_by_id, source, at=None):
     after the grace period). A waiting purge of the user (their "Delete
     all my writing", or an earlier account deletion) becomes this job.
     Returns the job. Raises AccountDeletionRefused."""
-    refusal = deletion_refusal(user)
-    if refusal:
-        raise AccountDeletionRefused(*refusal)
     now = _now()
     due = at or now + timedelta(days=ACCOUNT_DELETION_GRACE_DAYS)
-    # One active job per user: the user row lock serialises requests.
-    db.session.query(User).filter(User.id == user.id).with_for_update().one()
+    # One active job per user: the user row lock serialises requests. For
+    # an admin, every admin row is locked (in id order, so two requests
+    # cannot deadlock): the last-admin check reads the other admins, and
+    # two admins deleting at the same moment must not both pass it.
+    if user.is_admin:
+        db.session.query(User.id).filter(User.is_admin.is_(True)).order_by(
+            User.id).with_for_update().all()
+    else:
+        db.session.query(User).filter(
+            User.id == user.id).with_for_update().one()
     job = active_job(user.id)
+    # Checked under the locks.
+    refusal = deletion_refusal(user)
+    if refusal:
+        db.session.rollback()
+        raise AccountDeletionRefused(*refusal)
     if job is not None and job.status == "running":
         db.session.commit()
         raise AccountDeletionRefused(
@@ -263,9 +273,9 @@ def schedule_account_deletion(user, *, requested_by_id, source, at=None):
 def restore_account(user):
     """Cancel the waiting deletion and show the account again. True when
     the account is live afterwards; False once the deletion has started
-    (it can no longer be undone). The cancel is a conditional update on
-    the job's status, so a restore and the beat's claim have one
-    winner."""
+    (it can no longer be undone), and for an admin's deletion, which has
+    no grace period. The cancel is a conditional update on the job's
+    status, so a restore and the beat's claim have one winner."""
     if user.deleted_at is None:
         return True
     now = _now()
@@ -273,6 +283,7 @@ def restore_account(user):
         UserDataPurge.user_id == user.id,
         UserDataPurge.delete_account.is_(True),
         UserDataPurge.status == "scheduled",
+        UserDataPurge.source == "self",
     ).update({UserDataPurge.status: "cancelled",
               UserDataPurge.cancelled_at: now,
               UserDataPurge.cancelled_by_id: user.id},
@@ -288,10 +299,14 @@ def restore_account(user):
 
 
 def _deletion_started(user_id):
+    """The account deletion can no longer be undone: it has started, or
+    an admin asked for it (due at once, no grace period)."""
     return db.session.query(UserDataPurge.id).filter(
         UserDataPurge.user_id == user_id,
         UserDataPurge.delete_account.is_(True),
-        UserDataPurge.status.in_(("running", "failed", "done")),
+        or_(UserDataPurge.status.in_(("running", "failed", "done")),
+            and_(UserDataPurge.status == "scheduled",
+                 UserDataPurge.source != "self")),
     ).first() is not None
 
 
@@ -313,8 +328,7 @@ def restore_offer(user):
     return {
         "username": user.username,
         "delete_on": iso_utc(job.scheduled_for) if job else None,
-        "restorable": (job is not None and job.status == "scheduled")
-        or (job is None and not _deletion_started(user.id)),
+        "restorable": not _deletion_started(user.id),
     }
 
 
