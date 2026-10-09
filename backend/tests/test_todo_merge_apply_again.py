@@ -209,6 +209,31 @@ def test_a_failed_merge_can_be_applied_again(app, merge, dispatched):
     assert _pending_drafts(user.id) == []
 
 
+def test_the_agent_hears_how_a_merge_applied_again_ends(
+        app, merge, dispatched):
+    user = _user()
+    _todo(user.id, "- an old task")
+    proposal = _proposal(user.id)
+    _pending_draft(user.id, proposal)
+    client = _client(app, user)
+    client.post("/api/todo/apply-draft", json={"llm_node_id": proposal.id})
+    _run(merge, proposal, user, [("- a\n- a", True), ("- a\n- a", True)])
+
+    # The next reply told the agent about the failure.
+    node = Node.query.get(proposal.id)
+    meta = json.loads(node.tool_calls_meta)
+    for e in meta:
+        if e["name"] == "propose_todo":
+            e["status_reported"] = True
+    node.tool_calls_meta = json.dumps(meta)
+    _db.session.commit()
+
+    again = client.post("/api/todo/apply-draft",
+                        json={"llm_node_id": proposal.id})
+    assert again.status_code == 202
+    assert "status_reported" not in _entry(proposal.id, "propose_todo")
+
+
 def test_a_second_apply_while_the_merge_runs_starts_nothing(
         app, merge, dispatched):
     user = _user()

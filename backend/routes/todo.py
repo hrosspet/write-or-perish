@@ -340,6 +340,9 @@ def _start_todo_merge(draft, llm_node, user_id, confirm_node_id=None):
             entry["apply_status"] = "started"
             entry.pop("apply_error", None)
             entry.pop("retryable", None)
+            # The agent was told about the failure; it must hear how this
+            # merge ends too.
+            entry.pop("status_reported", None)
             break
 
     # When confirmed via UI button (no separate confirmation node),
