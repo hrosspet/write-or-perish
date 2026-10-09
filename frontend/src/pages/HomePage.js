@@ -69,13 +69,9 @@ function WorkflowCard({ card, delay }) {
     }
   }, [isVisible, hasAnimated, delay]);
 
-  const disabled = card.disabled || card.busy;
-  // A card either opens a page (`path`) or starts something itself
-  // (`onSelect`).
+  const disabled = !!card.disabled;
   const select = () => {
-    if (disabled) return;
-    if (card.onSelect) card.onSelect();
-    else navigate(card.path);
+    if (!disabled) navigate(card.path);
   };
 
   return (
