@@ -1174,3 +1174,19 @@ def test_admin_delete_brings_a_users_own_request_forward(
     assert UserDataPurge.query.count() == 1
     assert job.source == "admin" and job.requested_by_id == world.admin.id
     assert job.status == "running" and len(stubs.dispatched) == 1
+
+
+def test_the_settings_reply_carries_the_same_user_as_the_dashboard(app, world):
+    """The Account page replaces its user with the PUT reply; a reply
+    without the deletion state hid the email confirmation, the X note and
+    the writing-deletion date until the page was reloaded."""
+    c = _client(app, world.alice)
+    got = c.get("/api/dashboard/").get_json()["user"]
+    r = c.put("/api/dashboard/user", json={"default_ai_usage": "chat"})
+    assert r.status_code == 200
+    put = r.get_json()["user"]
+    assert "account_deletion" in put and "data_deletion" in put
+    assert put["account_deletion"] == got["account_deletion"]
+    assert put["data_deletion"] == got["data_deletion"]
+    assert put["default_ai_usage"] == "chat"
+    assert set(put) == set(got)
