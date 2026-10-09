@@ -48,7 +48,7 @@ import { MemoryRouter, Routes, Route } from 'react-router-dom';
 // the node id (#447).
 import NodeDetailWrapper from './NodeDetailWrapper';
 
-const ME = { id: 1, username: 'peter', craft_mode: true, is_admin: true };
+const ME = { id: 1, username: 'peter', craft_mode: true, is_admin: true, glean_enabled: true };
 
 const BATCH = {
   name: '_batch', batch_id: 'msgbatch_1', custom_id: 'node-50',
@@ -89,6 +89,8 @@ const uploadUnderPicks = (overrides = {}) => ({
   ],
   children: [], child_count: 0,
   in_read_thread: true, read_reply_above: true,
+  // Started from the Glean card (#435): the action row carries Glean.
+  glean_thread: true,
   ...overrides,
 });
 
@@ -151,9 +153,9 @@ describe('#386: a pending read reply', () => {
     pollAnswers.push(firstPoll.promise);
 
     renderAt('/node/50');
-    // Fetched before the batch existed: the model is still at work.
-    expect(await screen.findByText('Thinking')).toBeInTheDocument();
-    expect(document.title).toBe('Thinking… — Loore');
+    // Fetched before the batch existed: the glean is still at work.
+    expect(await screen.findByText('Gleaning')).toBeInTheDocument();
+    expect(document.title).toBe('Gleaning… — Loore');
     await waitFor(() => expect(mockGet).toHaveBeenCalledWith(
       '/nodes/50/llm-status', expect.anything()));
 
@@ -167,30 +169,31 @@ describe('#386: a pending read reply', () => {
     });
 
     expect(await screen.findByText('Processing')).toBeInTheDocument();
-    expect(screen.queryByText('Thinking')).toBeNull();
+    expect(screen.queryByText('Gleaning')).toBeNull();
     expect(document.title).toBe('Processing… — Loore');
-    // The admin's rerun controls sit with the waiting state.
-    expect(screen.getByRole('button', { name: 'Rerun live' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Resubmit batch' })).toBeInTheDocument();
+    // No rerun buttons, not even for an admin (Peter, 2026-10-09: Glean
+    // is live-only; a rerun rendered the day into the reply twice).
+    expect(screen.queryByRole('button', { name: 'Rerun live' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Resubmit batch' })).toBeNull();
     // A batch is never streamed: the text stream is let go.
     const [streamNodeId, streamOpts] = mockTextStream.mock.calls.at(-1);
     expect(streamNodeId).toBeNull();
     expect(streamOpts.enabled).toBe(false);
   });
 
-  test('a pending reply that is not a batch stays "Thinking…"', async () => {
+  test('a pending glean that is not a batch stays "Gleaning…" (#435: live)', async () => {
     routes['/nodes/50'] = pendingRead();
     pollAnswers.push(Promise.resolve({ data: {
       node_id: 50, status: 'processing', progress: 10,
-      tool_calls_meta: [{ name: '_read' }], warnings: [],
+      tool_calls_meta: [{ name: '_read' }, { name: '_live' }], warnings: [],
     } }));
 
     renderAt('/node/50');
-    expect(await screen.findByText('Thinking')).toBeInTheDocument();
+    expect(await screen.findByText('Gleaning')).toBeInTheDocument();
     await waitFor(() => expect(mockGet).toHaveBeenCalledWith(
       '/nodes/50/llm-status', expect.anything()));
     await act(async () => { await Promise.resolve(); });
-    expect(screen.getByText('Thinking')).toBeInTheDocument();
+    expect(screen.getByText('Gleaning')).toBeInTheDocument();
     expect(screen.queryByText('Processing')).toBeNull();
     // Still streamed while it is written.
     const [streamNodeId, streamOpts] = mockTextStream.mock.calls.at(-1);
@@ -199,16 +202,15 @@ describe('#386: a pending read reply', () => {
   });
 });
 
-describe('#387: the action row in a read thread', () => {
-  // The action row under the node (the admin's top-right Read button
-  // carries the same label, so look only at the row's groups).
+describe('#387: the action row in a read thread (a Glean-card thread)', () => {
+  // The action row under the node.
   const buttons = () => {
     const row = Array.from(document.querySelectorAll('[data-action-group] button'));
     const named = (label) => row.find((b) => b.textContent === label) || null;
-    return { llm: named('LLM Response'), read: named('Read further') };
+    return { llm: named('LLM Response'), read: named('Glean') };
   };
 
-  test('with auto-generate on, an upload under the picks offers both LLM Response and Read further', async () => {
+  test('with auto-generate on, an upload under the picks offers both LLM Response and Glean', async () => {
     localStorage.setItem('loore_auto_generate', 'true');
     routes['/nodes/60'] = uploadUnderPicks();
 
@@ -231,7 +233,7 @@ describe('#387: the action row in a read thread', () => {
     expect(buttons().read).toBeInTheDocument();
   });
 
-  test('with auto-generate on, a reply it already answered offers Read further only', async () => {
+  test('with auto-generate on, a reply it already answered offers Glean only', async () => {
     localStorage.setItem('loore_auto_generate', 'true');
     routes['/nodes/60'] = uploadUnderPicks({
       content: 'A typed reply.', children: [AI_REPLY_CHILD], child_count: 1,
@@ -247,6 +249,7 @@ describe('#387: the action row in a read thread', () => {
     localStorage.setItem('loore_auto_generate', 'true');
     routes['/nodes/60'] = uploadUnderPicks({
       content: 'A note.', ancestors: [], in_read_thread: false, read_reply_above: false,
+      glean_thread: false,
     });
 
     renderAt('/node/60');

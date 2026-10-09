@@ -292,11 +292,22 @@ def record_feed_render(node, stats, refs, days=1, scope="all"):
     """Pin what this reply's render sent the model (see FeedRender). Adds
     to the session (or updates the reply's existing row on a rerun); the
     caller's next commit lands it, before any batch is submitted."""
+    from sqlalchemy.exc import IntegrityError
     from backend.extensions import db
     from backend.models import FeedRender
     row = FeedRender.query.filter_by(node_id=node.id).first()
     if row is None:
-        row = FeedRender(node_id=node.id)
+        # One row per reply (a unique node_id). Two runs of the same reply
+        # that render at the same time (a rerun started while the first
+        # waited) must not fail on it: the row is inserted in a
+        # savepoint, and when the other run's row landed first this one
+        # updates that row instead (#435: Peter's double render).
+        try:
+            with db.session.begin_nested():
+                db.session.add(FeedRender(node_id=node.id))
+        except IntegrityError:
+            pass
+        row = FeedRender.query.filter_by(node_id=node.id).first()
     row.export_id = stats.get("export_id")
     row.days = int(days)
     row.scope = scope or "all"
@@ -462,11 +473,13 @@ def refresh_snapshot_for_read(snapshot_dir, log=log):
     """Bring the cached archive up to the latest nightly export (the
     Community Archive exports around 07:00 UTC) so "the last day" is the
     last day and not the day the snapshot was last fetched. Called by
-    the read before it renders and by the beat sweep. Only maintains a
-    snapshot that exists; a failed refresh is logged and the read goes
-    on with the cached export (its reply shows the window it covered
-    either way). Returns the export id in place, or None when nothing
-    was checked."""
+    the background refresh (the beat sweep, and the one a read queues,
+    request_snapshot_refresh), never by a read itself: a read never waits
+    for the download. Only maintains a snapshot that exists; a failed
+    refresh is logged and reads go on with the cached export (a reply
+    shows the window it covered either way). While another refresh is
+    downloading, this one returns at once (ca.refresh_snapshot). Returns
+    the export id in place, or None when nothing was checked."""
     from backend.utils import community_archive as ca
     if not ca.snapshot_export_id(snapshot_dir):
         return None
@@ -482,6 +495,69 @@ def refresh_snapshot_for_read(snapshot_dir, log=log):
         return None
     if refreshed:
         log.info("Community Archive snapshot refreshed to %s", export_id)
+    return export_id
+
+
+# The reason a read gives when no archive export is cached yet (#435
+# review): plain words the user can act on, never the exception's text
+# (it names a server path).
+ARCHIVE_NOT_READY_TEXT = ("Glean is getting today's tweets ready. Try again "
+                          "in a few minutes.")
+
+
+class ArchiveNotReady(Exception):
+    """No Community Archive export is cached for a read. Its text is the
+    user's reason line (ARCHIVE_NOT_READY_TEXT)."""
+
+    def __init__(self):
+        super().__init__(ARCHIVE_NOT_READY_TEXT)
+
+
+def request_snapshot_refresh(snapshot_dir, log=log, first_copy=False):
+    """Queue the archive refresh in the background (the beat sweep's task,
+    imports.refresh_community_archive_snapshot) and return at once. A
+    read calls this instead of refreshing inline: a glean is a live call
+    the user waits for (#435), and a new nightly export is a ~900 MB
+    download, minutes on a slow link. The read goes on with the cached
+    export (its reply shows the window it covered); the next read gets
+    the new one. With no export cached, only *first_copy* (a read that
+    found none) queues one, as the first fetch; the beat sweep never
+    fetches a first copy. Best effort: a queue that can't be reached is
+    logged, the read goes on (or fails with its own reason)."""
+    from backend.utils import community_archive as ca
+    if not ca.snapshot_export_id(snapshot_dir) and not first_copy:
+        return False
+    try:
+        from backend.tasks.imports import refresh_community_archive_snapshot
+        if first_copy:
+            refresh_community_archive_snapshot.apply_async(
+                kwargs={"first_copy": True}, retry=False)
+        else:
+            refresh_community_archive_snapshot.apply_async(retry=False)
+    except Exception as e:  # noqa: BLE001 - the read proceeds on the cache
+        log.warning("Could not queue the Community Archive refresh: %s", e)
+        return False
+    return True
+
+
+def fetch_first_snapshot(snapshot_dir, log=log):
+    """Fetch the archive's first copy when none is cached (the background
+    task a read queues when it found none, #435 review). Returns the
+    export id in place, or None. A download already running elsewhere is
+    not waited for; a failure is logged (the next read asks again)."""
+    from backend.utils import community_archive as ca
+    current = ca.snapshot_export_id(snapshot_dir)
+    if current:
+        return current
+    try:
+        export_id = ca.ensure_snapshot(snapshot_dir, wait=False)
+    except ca.SnapshotBusy:
+        log.info("Community Archive first fetch: another download runs")
+        return None
+    except Exception as e:  # noqa: BLE001 - the next read asks again
+        log.warning("Community Archive first fetch failed: %s", e)
+        return None
+    log.info("Community Archive snapshot fetched: %s", export_id)
     return export_id
 
 
@@ -578,6 +654,7 @@ def save_feed_picks(user_id, node, picks, picked_by=None):
                 user_id=user_id, source=READ_PICK_SOURCE,
                 external_id=str(ref["tweet_id"]),
                 author_handle=ref["username"],
+                author_name=ref.get("display_name"),
                 url=tweet_url(ref["username"], ref["tweet_id"]),
                 posted_at=ref.get("posted_at"),
                 public_source=True,  # rendered from the public archive
@@ -585,6 +662,10 @@ def save_feed_picks(user_id, node, picks, picked_by=None):
             item.set_content(ref.get("text") or "")
             db.session.add(item)
             db.session.flush()
+        elif not item.author_name and ref.get("display_name"):
+            # The tweet card's byline (#435): the user's own row of the
+            # tweet (a bookmark, an import) gets the name it lacked.
+            item.author_name = ref["display_name"]
         row = FeedPick(
             user_id=user_id, node_id=node.id, external_item_id=item.id,
             kind=KIND_READ, rank=pick["rank"], relevance=pick["relevance"],
@@ -596,6 +677,40 @@ def save_feed_picks(user_id, node, picks, picked_by=None):
         db.session.add(row)
         rows.append(row)
     return rows
+
+
+def fill_pick_author_names(snapshot_dir, user_id=None, apply=False):
+    """The one-time fill of display names for picks saved before
+    ExternalItem.author_name existed (#435): every tweet row a Glean picked
+    (a FeedPick of kind 'read') that has a handle and no name gets the
+    name the snapshot's profiles.parquet has for that handle. Reads and
+    writes metadata only (handles and public display names); no content
+    is decrypted. Returns (rows without a name, rows filled). Writes only
+    with *apply*; the caller commits."""
+    from backend.extensions import db
+    from backend.models import ExternalItem, FeedPick, TWEET_SOURCES
+    from backend.utils.community_archive import fetch_display_names
+    from backend.utils.reference_log import KIND_READ
+    picked = (db.session.query(FeedPick.external_item_id)
+              .filter(FeedPick.kind == KIND_READ))
+    query = ExternalItem.query.filter(
+        ExternalItem.id.in_(picked),
+        ExternalItem.source.in_(TWEET_SOURCES),
+        ExternalItem.author_name.is_(None),
+        ExternalItem.author_handle.isnot(None))
+    if user_id:
+        query = query.filter(ExternalItem.user_id == user_id)
+    rows = query.all()
+    names = fetch_display_names(
+        snapshot_dir, {r.author_handle for r in rows}) if rows else {}
+    filled = 0
+    for row in rows:
+        name = names.get((row.author_handle or "").lower())
+        if name:
+            filled += 1
+            if apply:
+                row.author_name = name
+    return len(rows), filled
 
 
 def render_feed_reply(verdict, entries):

@@ -15,10 +15,14 @@ export function sourceLabel(item) {
   return SOURCE_LABEL[item.source] || item.source;
 }
 
-// Tweets carry an @handle; a page's author is a byline or the site.
+// Tweets carry an @handle, after the display name when the archive has
+// one (#435); a page's author is a byline or the site.
 export function authorLabel(item) {
   if (!item.author_handle) return null;
-  return item.source === 'web_clip' ? item.author_handle : `@${item.author_handle}`;
+  if (item.source === 'web_clip') return item.author_handle;
+  return item.author_name
+    ? `${item.author_name} @${item.author_handle}`
+    : `@${item.author_handle}`;
 }
 
 // Bubble reads a node; hand it a reference in node clothing. The title
