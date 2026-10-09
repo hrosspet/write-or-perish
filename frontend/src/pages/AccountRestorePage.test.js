@@ -35,7 +35,7 @@ test('shows both choices; restoring signs in and opens the app', async () => {
   const body = screen.getByText(/You deleted @alice/).textContent;
   expect(body).toMatch(/You can restore it until\s+.*2026; after that it is deleted forever/);
   expect(body).not.toMatch(/hidden/);
-  expect(screen.getByText(/also cancels a request to delete\s+all your writing, if one is waiting/)).toBeTruthy();
+  expect(screen.getByText(/If you had\s+also deleted all your writing, restoring your account brings your\s+writing back too\./)).toBeTruthy();
   expect(screen.getByRole('button', { name: /keep it deleted/i })).toBeTruthy();
   fireEvent.click(screen.getByRole('button', { name: /restore my account/i }));
   await waitFor(() => expect(mockPost).toHaveBeenCalledWith('/account/restore'));

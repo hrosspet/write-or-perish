@@ -304,8 +304,10 @@ class Scope(NamedTuple):
 
 
 def scope_of(job):
-    """The Scope a job purges."""
-    if job is not None and job.scope == "hidden":
+    """The Scope a job purges. An account deletion (#269) takes
+    everything, whatever the request it replaced hid."""
+    if (job is not None and job.scope == "hidden"
+            and not getattr(job, "delete_account", False)):
         return Scope(job.user_id, job.id, job.requested_at)
     return Scope(job.user_id if job is not None else None)
 

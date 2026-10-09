@@ -336,6 +336,10 @@ def schedule_account_deletion(user, *, requested_by_id, source, at=None):
         job = UserDataPurge(user_id=user.id, status="scheduled")
         db.session.add(job)
     job.delete_account = True
+    # Everything of the account's goes, also what a waiting "Delete all
+    # my writing" did not hide (what the user wrote after it). The
+    # writing that request hid stays hidden with the account.
+    job.scope = "all"
     job.source = source
     job.requested_by_id = requested_by_id
     job.requested_at = now
@@ -354,19 +358,18 @@ def restore_account(user):
     the account is live afterwards; False once the deletion has started
     (it can no longer be undone), and for an admin's deletion, which has
     no grace period. The cancel is a conditional update on the job's
-    status, so a restore and the beat's claim have one winner."""
+    status, so a restore and the beat's claim have one winner. If the
+    deletion replaced a "Delete all my writing", the writing that request
+    hid is shown again too (restoring cancels both)."""
     if user.deleted_at is None:
         return True
-    now = _now()
-    cancelled = UserDataPurge.query.filter(
+    # A "Delete all my writing" this deletion replaced is cancelled with
+    # it, and the writing it hid comes back, in the same transaction.
+    cancelled = user_purge.cancel_jobs(
         UserDataPurge.user_id == user.id,
         UserDataPurge.delete_account.is_(True),
-        UserDataPurge.status == "scheduled",
         UserDataPurge.source == "self",
-    ).update({UserDataPurge.status: "cancelled",
-              UserDataPurge.cancelled_at: now,
-              UserDataPurge.cancelled_by_id: user.id},
-             synchronize_session=False)
+        cancelled_by_id=user.id)
     if not cancelled and _deletion_started(user.id):
         db.session.rollback()
         return False
