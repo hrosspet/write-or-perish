@@ -444,6 +444,9 @@ def _purge_job_json(job):
         "id": job.id,
         "status": job.status,
         "source": job.source,
+        # "hidden": the user's own request, which hid the writing at once
+        # and deletes what it hid; "all": everything of the user's.
+        "scope": job.scope,
         "requested_at": iso_utc(job.requested_at),
         "scheduled_for": iso_utc(job.scheduled_for),
         "started_at": iso_utc(job.started_at),
