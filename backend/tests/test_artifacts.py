@@ -442,7 +442,7 @@ def test_scan_statuses_delivers_todo_content(app):
         node = _node_with_meta(uid, [
             {"name": "read_todo", "status": "success", "todo_id": todo.id},
         ])
-        notes, to_mark = _scan_proposal_statuses([node])
+        notes, to_mark = _scan_proposal_statuses([node], uid)
         joined = "\n".join(notes)
         assert "the actual tasks" in joined
         assert "current todo list" in joined
@@ -450,7 +450,7 @@ def test_scan_statuses_delivers_todo_content(app):
 
         _mark_status_reported(to_mark)
         _db.session.commit()
-        notes2, to_mark2 = _scan_proposal_statuses([node])
+        notes2, to_mark2 = _scan_proposal_statuses([node], uid)
         assert notes2 == []
 
 
@@ -495,7 +495,7 @@ def test_semantic_search_tool_returns_refs_and_reresolves(app, monkeypatch):
         # The raw snippet text must NOT be persisted in tool meta.
         assert "RAW_SNIPPET" not in json.dumps(r)
         # Injection re-resolves the actual node content fresh.
-        text = _retrieval_injection_text(r)
+        text = _retrieval_injection_text(r, uid)
         assert "leaving my job" in text
         assert "career change" in text
 
@@ -518,7 +518,7 @@ def test_semantic_search_injection_skips_opted_out_node(app, monkeypatch):
         _db.session.commit()
         r = {"name": "semantic_search", "status": "success", "query": "x",
              "matches": [{"node_id": node.id, "score": 0.9}]}
-        assert _retrieval_injection_text(r) is None
+        assert _retrieval_injection_text(r, uid) is None
 
 
 # ── Feedback propose → confirm flow ──────────────────────────────────────
@@ -771,7 +771,7 @@ def test_scan_statuses_reports_artifact_tools_once(app):
             {"name": "propose_feedback", "status": "success",
              "apply_status": "completed"},
         ])
-        notes, to_mark = _scan_proposal_statuses([node])
+        notes, to_mark = _scan_proposal_statuses([node], uid)
         joined = "\n".join(notes)
         assert "Artifact 'memory' was updated." in joined
         assert "the actual books" in joined  # read_artifact content delivery
@@ -780,7 +780,7 @@ def test_scan_statuses_reports_artifact_tools_once(app):
 
         _mark_status_reported(to_mark)
         _db.session.commit()
-        notes2, to_mark2 = _scan_proposal_statuses([node])
+        notes2, to_mark2 = _scan_proposal_statuses([node], uid)
         assert notes2 == []
         assert to_mark2 == []
 
@@ -795,13 +795,13 @@ def test_scan_statuses_reports_artifact_failure(app):
             {"name": "update_artifact", "status": "error",
              "kind": "memory", "error": "Anchor text not found"},
         ])
-        notes, to_mark = _scan_proposal_statuses([node])
+        notes, to_mark = _scan_proposal_statuses([node], uid)
         assert notes == ["[update_artifact failed — Anchor text not found]"]
         assert len(to_mark) == 1
 
         _mark_status_reported(to_mark)
         _db.session.commit()
-        notes2, _ = _scan_proposal_statuses([node])
+        notes2, _ = _scan_proposal_statuses([node], uid)
         assert notes2 == []
 
 
