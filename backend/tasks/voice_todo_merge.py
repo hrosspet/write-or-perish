@@ -21,8 +21,8 @@ from backend.utils.api_keys import get_api_keys_for_usage
 from backend.utils.cost import llm_cost_log_fields
 from backend.models import APICostLog
 from backend.utils.proposals import is_own_live_proposal, node_is_users
-from backend.utils.refusal_backoff import REFUSED_REF
 from backend.utils.tool_meta import update_tool_meta
+from backend.utils.refusal_backoff import REFUSED_REF
 from backend.utils.todo_merge_edits import (
     FAILURE_EMPTY, FAILURE_TRUNCATED, REPLY_FORMAT, MergeRun, has_tasks,
     run_todo_merge)
