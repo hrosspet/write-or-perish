@@ -362,6 +362,7 @@ def sweep_external_digests():
             user for user in User.query.filter(User.id.in_(stale_ids)).all()
             if user_local_hour(user) == NIGHTLY_DIGEST_LOCAL_HOUR
             and account_allows_ai(user)   # #346
+            and user.deleted_at is None   # hidden: account deleted (#269)
             # After a refused or cut-off digest: wait an hour, then one
             # more try, then stop until a digest is saved (#368/#470).
             and not refusal_backoff.digest_in_backoff(user.id)

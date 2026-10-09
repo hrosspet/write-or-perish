@@ -1,6 +1,6 @@
 import logging
 from datetime import datetime, timedelta, timezone
-from flask import Blueprint, jsonify, request, current_app
+from flask import abort, Blueprint, jsonify, request, current_app
 from flask_login import login_required, current_user
 from sqlalchemy.exc import IntegrityError
 from backend.models import Node, User, UserProfile
@@ -24,6 +24,7 @@ from backend.utils.spend import user_is_capped
 from backend.utils.llm_nodes import effective_preferred_model, is_chat_model
 from backend.utils.own_entries import has_own_entries
 from backend.utils.user_purge import deletion_status
+from backend.utils.account_deletion import account_deletion_info
 
 logger = logging.getLogger(__name__)
 dashboard_bp = Blueprint("dashboard_bp", __name__)
@@ -179,6 +180,9 @@ def get_dashboard():
             # "Delete all my writing" (#268): a scheduled deletion shows
             # its date and a way to cancel on every page.
             "data_deletion": deletion_status(current_user.id),
+            # "Delete my account" (#269): the numbers the Account page
+            # states, and why the account cannot be deleted, if it can't.
+            "account_deletion": account_deletion_info(current_user),
         },
         "latest_profile": get_latest_profile(current_user)
     }
@@ -189,8 +193,12 @@ def get_dashboard():
 @dashboard_bp.route("/<string:username>", methods=["GET"])
 @login_required
 def get_public_dashboard(username):
-    # Lookup the user by their (unique) handle (username).
-    user = User.query.filter_by(username=username).first_or_404()
+    # Lookup the user by their (unique) handle (username). A deleted
+    # account in its grace period (#269) answers like a handle nobody
+    # holds: nothing about it, not even that it exists.
+    user = User.query.filter_by(username=username).first()
+    if user is None or user.deleted_at is not None:
+        abort(404)
 
     page = request.args.get("page", 1, type=int)
     per_page = request.args.get("per_page", 20, type=int)

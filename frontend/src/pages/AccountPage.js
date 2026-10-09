@@ -7,6 +7,7 @@ import api from "../api";
 import useSubmitShortcut from "../hooks/useSubmitShortcut";
 import { emailState } from "../utils/emailState";
 import DeleteWritingDialog from "../components/DeleteWritingDialog";
+import DeleteAccountDialog from "../components/DeleteAccountDialog";
 import { formatDeletionDate, X_REMOVE_ACCESS_STEPS } from "../utils/dataDeletion";
 
 const backendUrl = process.env.REACT_APP_BACKEND_URL || "";
@@ -170,6 +171,24 @@ export default function AccountPage() {
     setUser((prev) => ({ ...prev, data_deletion: res.data }));
     setDeleteOpen(false);
     setDeletionMsg(null);
+  };
+
+  // "Delete my account" (#269): an email account gets a confirmation
+  // link; one without email is scheduled at once and signed out.
+  const [accountOpen, setAccountOpen] = useState(false);
+  const [accountLinkSent, setAccountLinkSent] = useState(false);
+  const closeAccountDialog = useCallback(() => setAccountOpen(false), []);
+
+  const requestAccountDeletion = async (typed) => {
+    const res = await api.post("/account/delete", { confirm: typed });
+    setAccountOpen(false);
+    if (res.data.status === "scheduled") {
+      // Signed out on the server: a full load drops the app's state.
+      window.location.assign(
+        `/account-deleted?on=${encodeURIComponent(res.data.delete_on || "")}`);
+      return;
+    }
+    setAccountLinkSent(true);
   };
 
   const cancelDeletion = async () => {
@@ -760,6 +779,65 @@ export default function AccountPage() {
         onConfirm={scheduleDeletion}
         onClose={closeDeleteDialog}
       />
+
+      {/* ─── Delete my account (#269). Anchor: /account#delete-account ─── */}
+      <DeleteAccountSection
+        id="delete-account"
+        info={user.account_deletion}
+        email={user.email}
+        linkSent={accountLinkSent}
+        onOpen={() => setAccountOpen(true)}
+        labelStyle={labelStyle}
+        helperStyle={helperStyle}
+      />
+      <DeleteAccountDialog
+        open={accountOpen}
+        username={user.username}
+        email={user.email}
+        info={user.account_deletion}
+        xConnected={!!user.data_deletion?.x_connected}
+        writingDeletionAt={user.data_deletion?.status === "scheduled" ? user.data_deletion.purge_at : null}
+        onConfirm={requestAccountDeletion}
+        onClose={closeAccountDialog}
+      />
+    </div>
+  );
+}
+
+function DeleteAccountSection({ id, info, email, linkSent, onOpen, labelStyle, helperStyle }) {
+  const bodyStyle = { ...helperStyle, fontSize: "0.85rem", lineHeight: 1.6, marginTop: 0 };
+  const days = info?.grace_days || 30;
+  const refusal = info?.refusal;
+  const minutes = Math.round((info?.link_expires_in || 3600) / 60);
+  return (
+    <div id={id} style={{ scrollMarginTop: "72px" }}>
+      <h3 style={sectionTitleStyle}>Delete my account</h3>
+      {linkSent ? (
+        <p style={{ ...labelStyle, lineHeight: 1.6 }}>
+          Check your email: Loore sent a confirmation link to {email}.
+          Nothing changes until you open it and confirm there. The link works
+          for {minutes} minutes.
+        </p>
+      ) : (
+        <>
+          <p style={bodyStyle}>
+            Deletes your account at once and signs you out everywhere. For{" "}
+            {days} days you can restore it by signing in; after that it is
+            deleted forever, with everything in it.
+          </p>
+          {refusal ? (
+            <p style={bodyStyle}>{refusal.message}</p>
+          ) : (
+            <button
+              type="button"
+              onClick={onOpen}
+              style={{ ...quietButtonStyle, color: "var(--error)" }}
+            >
+              Delete my account…
+            </button>
+          )}
+        </>
+      )}
     </div>
   );
 }

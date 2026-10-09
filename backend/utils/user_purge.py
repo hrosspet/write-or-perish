@@ -1102,10 +1102,13 @@ def schedule_purge(user, *, requested_by_id, source, at=None):
 
 def cancel_purge(user_id, cancelled_by_id):
     """Cancel the user's purge while it waits. Returns True when a job
-    was cancelled (False: none waiting, or it has started)."""
+    was cancelled (False: none waiting, or it has started). An account
+    deletion (#269) is not cancelled here: only a restore after signing
+    in undoes it (account_deletion.restore_account)."""
     n = UserDataPurge.query.filter(
         UserDataPurge.user_id == user_id,
         UserDataPurge.status == "scheduled",
+        UserDataPurge.delete_account.is_(False),
     ).update({UserDataPurge.status: "cancelled",
               UserDataPurge.cancelled_at: _now(),
               UserDataPurge.cancelled_by_id: cancelled_by_id},
@@ -1233,10 +1236,15 @@ def _heartbeat_for(job_id, token):
 def run_purge_job(job_id, token):
     """Run the claimed job. Returns "done", "wait" (call again after
     PURGE_WAIT_RETRY_SECONDS: the user's tasks are still running),
-    "superseded", "refused" or "error"."""
+    "superseded", "refused" or "error".
+
+    A job with ``delete_account`` (#269) deletes the account after the
+    purge (backend/utils/account_deletion.py), in the same commit as the
+    job's "done"."""
     if not start_runner(job_id, token):
         return "superseded"
     job = db.session.get(UserDataPurge, job_id)
+    delete_account = bool(job.delete_account)
     user = db.session.get(User, job.user_id)
     if user is None:
         job.status = "done"
@@ -1245,7 +1253,13 @@ def run_purge_job(job_id, token):
         job.error = "account no longer exists; nothing to purge"
         db.session.commit()
         return "done"
-    reason = purge_refusal(user)
+    user_id = user.id
+    if delete_account:
+        from backend.utils.account_deletion import deletion_refusal
+        refusal = deletion_refusal(user)
+        reason = refusal[1] if refusal else None
+    else:
+        reason = purge_refusal(user)
     if reason:
         _fail_job(job, f"refused: {reason}")
         return "refused"
@@ -1280,6 +1294,12 @@ def run_purge_job(job_id, token):
                 + ", ".join(f"{k}={v}" for k, v in sorted(left.items())))
         for key, value in inflight.counts.items():
             counts[key] = counts.get(key, 0) + value
+        after_commit = None
+        if delete_account:
+            from backend.utils.account_deletion import delete_identity
+            identity, after_commit = delete_identity(user_id)
+            for key, value in identity.items():
+                counts[key] = counts.get(key, 0) + value
         job = db.session.get(UserDataPurge, job_id)
         job.status = "done"
         job.finished_at = _now()
@@ -1287,7 +1307,10 @@ def run_purge_job(job_id, token):
         job.error = None
         job.waiting_since = None
         db.session.commit()
-        logger.info("user data purge job %s (user %s) done", job_id, user.id)
+        logger.info("user data purge job %s (user %s%s) done", job_id,
+                    user_id, ", account deleted" if delete_account else "")
+        if after_commit is not None:
+            after_commit()
         return "done"
     except PurgeSuperseded:
         db.session.rollback()

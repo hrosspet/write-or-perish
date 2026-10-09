@@ -982,7 +982,10 @@ def _load_node_chain(parent_node, user_id):
     The chain holds only what *user_id* (the user the reply is for) can
     see: the walk stops below the first ancestor they cannot see (or
     could not see before it was deleted), so nothing above it reaches
-    the model.
+    the model. An ancestor hidden with its owner's deleted account
+    (#269) is passed through like a deleted one: the message builder
+    sends a notice in its place, as it does after the purge. The node
+    the reply is built on must itself be visible.
 
     Nor does it hold a node whose ai_usage keeps AI out (not chat /
     train): such a node is left out entirely. The reply routes and the
@@ -991,12 +994,18 @@ def _load_node_chain(parent_node, user_id):
     rule still sends nothing marked 'none'. With nothing left the reply
     is refused (AIUsageRefused)."""
     from backend.utils.encryption import prefetch_deks
-    from backend.utils.privacy import can_user_see_node_or_tombstone
+    from backend.utils.privacy import (
+        can_user_see_node_or_placeholder, can_user_see_node_or_tombstone,
+        shown_as_deleted,
+    )
     if user_id is None:
         raise ValueError("_load_node_chain needs the requesting user's id")
     visible = []
     current = parent_node
-    while current and can_user_see_node_or_tombstone(current, user_id):
+    if current is not None and not can_user_see_node_or_tombstone(
+            current, user_id):
+        current = None
+    while current and can_user_see_node_or_placeholder(current, user_id):
         visible.insert(0, current)
         current = current.parent
     if not visible:
@@ -1013,7 +1022,9 @@ def _load_node_chain(parent_node, user_id):
     if not node_chain:
         from backend.utils.llm_nodes import AIUsageRefused
         raise AIUsageRefused()
-    prefetch_deks(n.content for n in node_chain)
+    # Not the deleted nodes: their text is never read.
+    prefetch_deks(n.content for n in node_chain
+                  if not shown_as_deleted(n, user_id))
     return node_chain
 
 
@@ -3295,9 +3306,15 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             # ancestors — those are scrubbed in the message-build loop
             # below, so any placeholders inside their (still-in-DB during
             # grace) content would be acting on content the user has
-            # asked to delete.
+            # asked to delete. The same for an ancestor hidden with its
+            # owner's deleted account (#269).
+            from backend.utils.privacy import shown_as_deleted
+
+            def _gone(n):
+                return shown_as_deleted(n, user_id)
+
             def _alive(n):
-                return n.deleted_at is None and n.get_content()
+                return not _gone(n) and n.get_content()
 
             # Check if any node contains the {user_export} placeholder
             # Find the first node containing it to use its timestamp as cutoff
@@ -3454,7 +3471,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             )
             system_node = next(
                 (n for n in node_chain
-                 if n.deleted_at is None and n.has_artifact("prompt")),
+                 if not _gone(n) and n.has_artifact("prompt")),
                 None)
             system_render_cacheable = False
             cached_system_render = None
@@ -3936,8 +3953,10 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     # ingest deleted user data. We still include the node so
                     # the conversation structure is preserved (better than
                     # an unexplained gap, which tends to make models try to
-                    # "fill in" what's missing).
-                    if node.deleted_at is not None:
+                    # "fill in" what's missing). An ancestor hidden with its
+                    # owner's deleted account (#269) is scrubbed the same
+                    # way, as it will be after the purge.
+                    if _gone(node):
                         message_text = (
                             f"{time_prefix} "
                             "[Earlier message in this thread was deleted "
@@ -3945,7 +3964,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         )
                         role = "assistant" if is_llm_node else "user"
                         # Text blocks, like every other message: the
-                        # context log below and the providers read them.
+                        # payload log below and the providers read them.
                         messages.append({
                             "role": role,
                             "content": [{"type": "text",
