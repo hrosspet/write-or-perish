@@ -7,10 +7,11 @@ that kind (utils/proposals). That holds for the card's routes, the voice
 and text tools (llm_completion._execute_tool_calls) and the todo merge
 task, which checks again before it reads the proposal. Recordings can't
 carry a proposal label, and a recording can't start or finish under a
-deleted parent.
+deleted parent. The one-time clean-up script removes the proposal drafts
+that don't belong to their node's owner.
 
-In each refusal case alice holds a pending draft on the node, as if one had
-been parked there, so only the new rule stops the action. Nothing reaches a
+In each refusal case alice holds a pending draft on the node, so the rule
+itself is what refuses. Nothing reaches a
 model or GitHub: the model, the GitHub call and the task dispatch are fakes,
 and Node.get_content is recorded to show the node was never read.
 
@@ -19,6 +20,7 @@ module and the merge task module are imported for real against stub celery
 glue, as in test_share.py and test_retrieval_loop.py.
 """
 import importlib
+import importlib.util
 import json
 import os
 import sys
@@ -356,7 +358,7 @@ def test_route_refuses_a_node_that_is_not_the_users_live_proposal(
 
     assert resp.status_code == 404
     _nothing_happened(effects, alice, node, kind, todo)
-    # The parked draft is left alone (the clean-up script removes it).
+    # The draft stays; the clean-up script removes such drafts.
     assert Draft.query.filter_by(user_id=alice.id,
                                  label=KINDS[kind][0]).count() == 1
 
@@ -488,7 +490,7 @@ def _run_task(node, user, confirm_node_id=None):
 @pytest.mark.parametrize("case", ["other", "deleted", "not_proposal"])
 def test_task_refuses_a_node_that_is_not_the_users_live_proposal(
         app, effects, case):
-    """Called directly, as a parked draft or a retry could start it."""
+    """The task body called directly, without a route's check."""
     alice = _user("alice")
     todo = _todo(alice)
     node = _case(case, alice, "todo")
@@ -667,3 +669,60 @@ def test_finalize_still_finishes_the_clients_recordings(
 
     assert resp.status_code == 202, resp.get_json()
     finalize_task.assert_called_once()
+
+
+# ── The clean-up script ──────────────────────────────────────────────────
+
+def _script():
+    path = os.path.join(os.path.dirname(__file__), "..", "scripts",
+                        "remove_stray_proposal_drafts.py")
+    spec = importlib.util.spec_from_file_location(
+        "remove_stray_proposal_drafts", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_cleanup_removes_proposal_drafts_that_dont_belong_to_the_owner(
+        app, tmp_path):
+    from backend.models import NodeTranscriptChunk
+    script = _script()
+    alice = _user("alice")
+    bob = _user("bob")
+    own = _reply(alice, _msg(alice), "todo")
+    bobs = _reply(bob, _msg(bob, privacy="public"), "issue",
+                  privacy="public")
+    keep = [_pending(alice, own, "todo")]
+    on_bobs = _pending(alice, bobs, "issue")
+    on_entry = _pending(alice, _msg(alice), "feedback")
+    no_parent = Draft(user_id=alice.id, label="share_pending")
+    session = Draft(user_id=alice.id, parent_id=own.id, label="todo_pending",
+                    session_id="session-x", streaming_status="recording")
+    voice = Draft(user_id=alice.id, session_id="session-v",
+                  streaming_status="recording", label="Voice")
+    typed = Draft(user_id=alice.id, parent_id=bobs.id)
+    for d in (no_parent, session, voice, typed):
+        d.set_content("")
+        _db.session.add(d)
+    _db.session.add(NodeTranscriptChunk(session_id="session-x",
+                                        chunk_index=0, status="completed"))
+    _db.session.commit()
+    keep += [voice, typed]
+    folder = tmp_path / "drafts" / str(alice.id) / "session-x"
+    folder.mkdir(parents=True)
+
+    stray = script.stray_drafts()
+    reasons = {d.id: reason for d, reason in stray}
+    assert reasons == {
+        on_bobs.id: script.OTHER_OWNER,
+        on_entry.id: script.NOT_AI_REPLY,
+        no_parent.id: script.NO_PARENT,
+        session.id: script.SESSION,
+    }
+
+    assert script.remove(stray, tmp_path) == 1
+    _db.session.commit()
+
+    assert {d.id for d in Draft.query.all()} == {d.id for d in keep}
+    assert NodeTranscriptChunk.query.count() == 0
+    assert not folder.exists()
