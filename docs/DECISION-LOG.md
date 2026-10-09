@@ -820,8 +820,8 @@ Kinds (one per entry and per table row):
 - **Kind:** user-facing text
 - **Situation:** Peter said of the backups sentence "I'd drop it, unless it's necessary". The builder found that the backups outlive the promise unless the sentence says so, and that "deleted for good" is otherwise untrue.
 - **Decision:** kept a plain sentence, "Copies in our backups are erased within 30 days after that.", after checking the backup retention. Predicted that Peter accepts (60 %) and drops it anyway (30 %).
-- **Peter:** no reaction yet.
-- **Score:** not scored: no reaction yet
+- **Peter:** kept the sentence in his own rewrite: "Copies in our backups are erased within another 30 days."
+- **Score:** hit
 - **Source:** Voice review in local Loore 2026-10-09 (Opus 5.5)
 - **Applies to:** #464
 
@@ -830,18 +830,20 @@ Kinds (one per entry and per table row):
 - **Kind:** user-facing text
 - **Situation:** after Peter's correction of the deletion text.
 - **Decision:** rewrote the terms text as deleted, 30 days to recover by signing in, then deleted for good. Predicted that Peter accepts (70 %).
-- **Peter:** no reaction yet.
-- **Score:** not scored: no reaction yet
+- **Peter:** "this sounds like pushing people to recover their account. I'd phrase it like this: … If you change your mind, you can still recover your account within 30 days by signing in; after that it is deleted forever…"
+- **Score:** miss
+- **Why it missed:** followed his earlier wording closely but put the recovery first, so the sentence read as an invitation to come back. He wants the deletion stated first and the recovery offered to someone who changes their mind.
 - **Source:** Voice review in local Loore 2026-10-09 (Opus 5.5)
 - **Applies to:** #464
+- **Rule:** candidate: user-facing text says what happens first and offers the way back second.
 
 ### 2026-10-09 · An AI reply in someone else's public thread uses no profile
 
 - **Kind:** privacy
 - **Situation:** #483: user B asks for an AI reply in user A's public thread. Use B's own profile and notes, or none (as built)?
 - **Decision:** none: B's private context would shape a public reply. Reversible and safe. Decided in the reply to Peter instead of asking; predicted that Peter accepts (75 %).
-- **Peter:** no reaction yet.
-- **Score:** not scored: no reaction yet
+- **Peter:** "i can see some potential further problems, but let's leave it as it is. We'll be thinking more about public discussion on Loore after the Beta release"
+- **Score:** hit
 - **Source:** Voice review in local Loore 2026-10-09 (Opus 5.5)
 - **Applies to:** #483
 
@@ -850,8 +852,8 @@ Kinds (one per entry and per table row):
 - **Kind:** escalation
 - **Situation:** #483: user B asks for an AI reply in user A's public thread. Use B's own profile and notes, or none?
 - **Decision:** decided without asking Peter
-- **Peter:** no reaction yet.
-- **Score:** not scored: no reaction yet
+- **Peter:** "i can see some potential further problems, but let's leave it as it is. We'll be thinking more about public discussion on Loore after the Beta release"
+- **Score:** hit
 - **Source:** Voice review in local Loore 2026-10-09 (Opus 5.5)
 - **Applies to:** #483
 
@@ -896,6 +898,169 @@ Kinds (one per entry and per table row):
 - **Source:** Voice review in local Loore 2026-10-09 (Opus 5.5)
 - **Applies to:** #493, #473
 
+### 2026-10-09 · A dead dashboard endpoint is removed
+
+- **Kind:** release/ops
+- **Situation:** #489 removes the card fields from the dashboard response. Peter asked "Isn't it dead code?" about `GET /api/dashboard/<username>`, which no client calls.
+- **Decision:** removed the endpoint in #489 and in train #495, in the reply to Peter, without asking. Predicted that Peter accepts (85 %).
+- **Peter:** "great"
+- **Score:** hit
+- **Source:** Voice review in local Loore 2026-10-09 (Opus 5.5)
+- **Applies to:** #489, #495
+- **Rule:** Fix the root cause
+
+### 2026-10-09 · The app load no longer decrypts the profile
+
+- **Kind:** product scope
+- **Situation:** #489 stops sending thread cards on app load. The builder listed "app load still decrypts the profile" under "Not in this PR" as a follow-up. Peter asked why the app load needs the profile at all.
+- **Decision:** left the profile decryption on every app load as a follow-up and wrote it down under "Not in this PR".
+- **Peter:** asked why the app load needs the profile; the app load now asks for the dashboard without the profile (his wording is not kept in the notes).
+- **Score:** miss
+- **Why it missed:** a known waste in the same code path was left for later because it was outside the PR's purpose. Once Peter looked at the path, he wanted it gone now, as with the link speech for profiles in #471.
+- **Source:** Voice review in local Loore 2026-10-09 (Opus 5.5)
+- **Applies to:** #489
+- **Rule:** candidate: a small, known waste in the code a PR already changes is fixed in that PR.
+
+### 2026-10-09 · A privacy fix joins the merge train
+
+- **Kind:** process
+- **Situation:** the privacy fix PR #490 (read replies and proposals) was ready while train #486 was being assembled. Add it to the train or merge it on its own?
+- **Decision:** added #490 to train #486 without asking.
+- **Peter:** "ok"
+- **Score:** hit
+- **Source:** Voice review in local Loore 2026-10-09 (Opus 5.5)
+- **Applies to:** #490, #486
+
+### 2026-10-09 · Glean marked ready on unit tests and reviews alone
+
+- **Kind:** testing
+- **Situation:** the Glean PRs #473 and #474 were put on the merge train as ready after code reviews and unit tests. Neither the builders nor the keeper had used the feature in a browser. Peter then tried it locally on train #495.
+- **Decision:** marked #473 and #474 ready on reviews and unit tests, with no browser pass.
+- **Peter:** "overall, this feature seems untested. Let's remove it from the train"
+- **Score:** miss
+- **Why it missed:** reviews and unit tests passed, which was read as ready. A feature with a new flow needs one person to use it end to end before it is marked ready, and the first use found six problems (the entries below). Peter also took the account deletion PRs off the train; the new train is #497 and #495 is closed.
+- **Source:** Claude Code session 2026-10-09 (Opus 5.5)
+- **Applies to:** #473, #474, #493, #495, #497
+- **Rule:** candidate: a user-facing feature is used in a browser, with screenshots, before it is marked ready.
+
+### 2026-10-09 · Voice Glean ran as a batch job
+
+- **Kind:** UX
+- **Situation:** Peter had decided that Glean runs synchronously and that, after a voice Glean, the screen switches to the text-mode view of the gleaning. In his local test, a voice Glean sat on a spinner and looked like a batch job.
+- **Decision:** shipped voice Glean in #473 as the synchronous flow Peter had decided, and marked it ready without trying it.
+- **Peter:** reported the stuck spinner while testing; the wording is not kept in the notes.
+- **Score:** miss
+- **Why it missed:** the likely cause (unconfirmed on Peter's logs) is an inline refresh of a large Community Archive export before the render, which kept the screen waiting. The local log also showed a duplicate `feed_render` insert for the gleaning node, so a "rerun sync" ended in a rollback toast. No one ran a voice Glean with real data.
+- **Source:** Claude Code session 2026-10-09 (Opus 5.5)
+- **Applies to:** #473, #474
+- **Rule:** Problems show
+
+### 2026-10-09 · Rerun buttons on a Glean that is always synchronous
+
+- **Kind:** UX
+- **Situation:** #473 left "rerun sync" and a batch rerun on a gleaning, although Glean is synchronous only.
+- **Decision:** kept the rerun buttons on the gleaning.
+- **Peter:** said in his test that the buttons should not exist (wording not kept in the notes).
+- **Score:** miss
+- **Why it missed:** rerun controls were kept for a flow that is only synchronous. The rework removed the buttons and left a rerun API for admins.
+- **Source:** Claude Code session 2026-10-09 (Opus 5.5)
+- **Applies to:** #473, #474
+- **Rule:** Admin tools stay admin tools
+
+### 2026-10-09 · No "Back to Home" under a gleaning
+
+- **Kind:** user-facing text
+- **Situation:** #473 put a "Back to Home" link under a gleaning as a way out of it.
+- **Decision:** added "Back to Home" under a gleaning, on the candidate rule that every screen has a way home.
+- **Peter:** asked in his test to remove it (wording not kept in the notes).
+- **Score:** miss
+- **Why it missed:** a candidate rule from the builder's own notes ("every screen has a way home") was applied without a check against the screen. Peter had never confirmed the rule.
+- **Source:** Claude Code session 2026-10-09 (Opus 5.5)
+- **Applies to:** #473
+- **Rule:** the candidate "every screen has a way home" is not supported.
+
+### 2026-10-09 · Glean and its picker on the Glean entry too
+
+- **Kind:** UX
+- **Situation:** #473 showed the Glean menu entry on every own entry except system prompts, pending entries and AI None. Threads started from the Glean card begin with a Glean system-prompt node, so they showed neither the button nor the model picker.
+- **Decision:** excluded system prompts from the Glean menu entry and the picker.
+- **Peter:** found in his test that the Glean button and picker were missing in a Glean thread (wording not kept in the notes).
+- **Score:** miss
+- **Why it missed:** "not on system prompts" was copied from the other actions. In a Glean thread, the system prompt is the entry the user acts from.
+- **Source:** Claude Code session 2026-10-09 (Opus 5.5)
+- **Applies to:** #473
+- **Rule:** candidate: actions show where the user's flow needs them, even on prompts.
+
+### 2026-10-09 · The Glean tooltip is Loore's own
+
+- **Kind:** UX
+- **Situation:** #473 explained the Glean button with the browser's native `title` tooltip.
+- **Decision:** used the native tooltip.
+- **Peter:** noted in his test that the tooltip is not styled like Loore (wording not kept in the notes).
+- **Score:** miss
+- **Why it missed:** a native `title` was used, and no one looked at it in the browser. The rework added a Loore-styled tooltip (`LooreTooltip`).
+- **Source:** Claude Code session 2026-10-09 (Opus 5.5)
+- **Applies to:** #473
+- **Rule:** Reuse form patterns
+
+### 2026-10-09 · Gleaning from a normal reflection is hard to find
+
+- **Kind:** UX
+- **Situation:** in a Reflect thread, "Glean for this reflection" lived only in the ⋯ menu of an entry.
+- **Decision:** put the action in the ⋯ menu only.
+- **Peter:** could not find how to glean from a normal reflection (wording not kept in the notes).
+- **Score:** miss
+- **Why it missed:** a menu entry was treated as discoverable for a new feature on the home page's second card. The next brief asks Peter where the action should live.
+- **Source:** Claude Code session 2026-10-09 (Opus 5.5)
+- **Applies to:** #473
+- **Rule:** candidate: a new main action is visible without opening a menu.
+
+### 2026-10-09 · A sign-in link lasts 15 minutes, not 2 hours
+
+- **Kind:** process
+- **Situation:** to let Peter test locally, the builder gave him a magic sign-in link and said it works for 2 hours.
+- **Decision:** told Peter the link works for 2 hours without checking the setting.
+- **Peter:** no reaction recorded; the builder found the error afterwards.
+- **Score:** miss
+- **Why it missed:** a number from memory about a different setting. The sign-in token expires after 15 minutes (`MAGIC_LINK_EXPIRY_SECONDS`), and one grep would have shown it.
+- **Source:** Claude Code session 2026-10-09 (Opus 5.5)
+- **Applies to:** #473
+
+### 2026-10-09 · Writing stays visible during the 30 days of a deletion
+
+- **Kind:** data safety
+- **Situation:** #415 "Needs Peter" 1: when a user deletes their writing, does it stay visible for the 30 days (as built) or disappear at once?
+- **Decision:** defaulted to "as built" (the writing stays visible for the 30 days). The item was listed in the PR body but never reached a brief.
+- **Peter:** "a soft-delete of everything immediately + real deletion after 30 days. The Cancel deletion button undoing the soft deletion"
+- **Score:** miss
+- **Why it missed:** the builder's recommendation was "as built". Peter's model of "delete" is that the writing is gone now and can be restored until the 30 days end.
+- **Source:** Claude Code session 2026-10-09 (Opus 5.5)
+- **Applies to:** #415, #464, #482
+- **Rule:** candidate: deletion hides at once and removes for good after the grace period.
+
+### 2026-10-09 · Writing deletion: the PR's Needs-Peter item was never asked
+
+- **Kind:** escalation
+- **Situation:** #415 "Needs Peter" 1: writing visible for the 30 days, or hidden at once.
+- **Decision:** decided without asking Peter
+- **Peter:** "a soft-delete of everything immediately + real deletion after 30 days. The Cancel deletion button undoing the soft deletion"
+- **Score:** miss
+- **Why it missed:** the item was listed as "Needs Peter" in the PR body but never reached a brief, so the default applied silently. Item 2 (the admin purge runs at once and cannot be undone) was left out the same way and goes into the next brief.
+- **Source:** Claude Code session 2026-10-09 (Opus 5.5)
+- **Applies to:** #415, #464
+
+### 2026-10-09 · The writing-deletion text
+
+- **Kind:** user-facing text
+- **Situation:** #415 and #464 needed a sentence for the dialog and the status of a writing deletion.
+- **Decision:** wrote the text for deleting a writing.
+- **Peter:** "You can restore your writings safely within 30 days. After that they are deleted forever."
+- **Score:** miss
+- **Why it missed:** the same pattern as the account text earlier on 2026-10-09: Peter's reframe is one line in the user's words (restore safely, then deleted forever).
+- **Source:** Claude Code session 2026-10-09 (Opus 5.5)
+- **Applies to:** #415, #464, #482
+- **Rule:** candidate: user-facing text says what happens to the user, in the user's words, not in the implementation's.
+
 ## Decided by the builder
 
 Choices that agents flagged in PRs and that the builder decided because a rule above already covers them (Peter, 2026-10-02: decide what the log supports, raise only real judgement calls). Each is also recorded on its PR, or in the session where Peter asked. The Decided column holds only the builder's part; a rule or decision of Peter's goes in the Rule column. Questions raised to Peter instead are not listed; his answers become entries. Model is the model that wrote the PR (its Co-Authored-By line). Result is "accepted by merge (PR #N, date)" once the PR has merged and Peter didn't correct the choice, "pending" until it merges, and "corrected → entry <title>" when he overrules it; the entry is then scored as a miss.
@@ -936,7 +1101,7 @@ Choices that agents flagged in PRs and that the builder decided because a rule a
 | 2026-10-09 | #473 | cost | Which Glean turns run live | Every read turn, except `/read/start` and the batch rerun | Every added heuristic is named | Opus 5.5 | pending |
 | 2026-10-09 | #473 | UX | What a click on Glean does | Always creates the reply | Latency counts as quality | Opus 5.5 | pending |
 | 2026-10-09 | #473 | user-facing text | The label of the action | Stays "Glean" | Peter named the card (2026-10-09) | Opus 5.5 | pending |
-| 2026-10-09 | #473 | UX | Where the menu entry for Glean shows | On every own entry, not on system prompts, pending entries or AI None | candidate: actions show where they can run | Opus 5.5 | pending |
+| 2026-10-09 | #473 | UX | Where the menu entry for Glean shows | On every own entry, not on system prompts, pending entries or AI None | candidate: actions show where they can run | Opus 5.5 | corrected → entry Glean and its picker on the Glean entry too |
 | 2026-10-09 | #473 | UX | Voice Glean while the reply is still coming | Disabled until the reply lands; opens the thread on finish or failure | Problems show | Opus 5.5 | pending |
 | 2026-10-09 | #473 | release/ops | The Glean route with the switch off | 403 | Dark features stay dark | Opus 5.5 | pending |
 | 2026-10-09 | #473 | product scope | The per-user Glean switch's default | Computed live from six kinds of data (Community Archive, X and others) | Every added heuristic is named | Opus 5.5 | pending |
@@ -947,7 +1112,7 @@ Choices that agents flagged in PRs and that the builder decided because a rule a
 | 2026-10-09 | #473 | release/ops | Environment variable names | `GLEAN_*` | candidate: names follow the product name | Opus 5.5 | pending |
 | 2026-10-09 | #473 | user-facing text | Why a pick appears | "chosen for what you said" | candidate: say what happened in the user's words | Opus 5.5 | pending |
 | 2026-10-09 | #473 | user-facing text | A changelog entry while the feature is dark | None | Dark features stay dark | Opus 5.5 | pending |
-| 2026-10-09 | #473 | user-facing text | A way out of a gleaning | "Back to Home" under it | candidate: every screen has a way home | Opus 5.5 | pending |
+| 2026-10-09 | #473 | user-facing text | A way out of a gleaning | "Back to Home" under it | candidate: every screen has a way home | Opus 5.5 | corrected → entry No "Back to Home" under a gleaning |
 | 2026-10-09 | #473 | privacy | Reads for non-admins | Only through Glean (typed `{ca_tweets}`, read-prompt text, `/read/start` admin-only) | Experiments run on Peter's data; admin tools stay admin tools | Opus 5.5 | pending |
 | 2026-10-09 | #473 | cost | Who picks a non-admin's Glean model | The server always picks; no reuse of an earlier read's model | Cost is Peter's call | Opus 5.5 | corrected → entry A model picker for Glean users |
 | 2026-10-09 | #473 | reliability | A glean when the provider or the setting can't be resolved | Refused | Problems show | Opus 5.5 | pending |
@@ -978,7 +1143,7 @@ Choices that agents flagged in PRs and that the builder decided because a rule a
 | 2026-10-09 | #488 | reliability | A refusal in a digest or a poll draft | Follows the existing empty-result path | Fix the root cause | Sonnet 5.5 | pending |
 | 2026-10-09 | #489 | release/ops | The dashboard card fields | Removed entirely, with no `?cards` flag, because no client reads them | Fix the root cause | Opus 5.5 | pending |
 | 2026-10-09 | #489 | release/ops | The pagination keys of those fields | Removed with them | Fix the root cause | Opus 5.5 | pending |
-| 2026-10-09 | #489 | release/ops | Decrypting the profile on every app load | Left as a follow-up ("Not in this PR") | One PR, one purpose | Opus 5.5 | pending |
+| 2026-10-09 | #489 | release/ops | Decrypting the profile on every app load | Left as a follow-up ("Not in this PR") | One PR, one purpose | Opus 5.5 | corrected → entry The app load no longer decrypts the profile |
 | 2026-10-09 | #491 | data safety | Editing a deleted thread's start node (#480) | The same 410, check and lock as `POST /nodes/` | The user's edit wins | Opus 5.5 | pending |
 | 2026-10-09 | #491 | UX | The order of the 410 and the AI-usage check | 410 first | Problems show | Opus 5.5 | pending |
 | 2026-10-09 | #491 | data safety | Which nodes are checked | Only the start node | candidate: check where the user's words enter | Opus 5.5 | pending |
@@ -1004,6 +1169,32 @@ Choices that agents flagged in PRs and that the builder decided because a rule a
 | 2026-10-09 | #493 | reliability | How long a glean may wait (review fix) | Counts only in the foreground; one more status check before giving up | Problems show | Opus 5.5 | pending |
 | 2026-10-09 | #493 | UX | The conversation when a gleaning opens (review fix) | Always moves under the gleaning | One behaviour across clients | Opus 5.5 | pending |
 | 2026-10-09 | #493 | user-facing text | The lock-screen card after accept (review fix) | "Gleaning · Open Loore to read it when it's ready", no buttons | candidate: user-facing text says what happens | Opus 5.5 | pending |
+| 2026-10-09 | #490 | privacy | What other viewers of a thread see of the owner's reading | No read-window line at all; the counts all derive from the owner's marks | Fix the root cause | Opus 5.5 | accepted by merge (PR #486, 2026-10-09) |
+| 2026-10-09 | #490 | privacy | Quote read marks | Owner-only on every node | Fix the root cause | Opus 5.5 | accepted by merge (PR #486, 2026-10-09) |
+| 2026-10-09 | #496 | privacy | When the todo merge runs from a proposal | Only on the user's own live AI reply that carries the proposal (`utils/proposals.py`) | Fix the root cause | Opus 5.5 | accepted by merge (PR #486, 2026-10-09) |
+| 2026-10-09 | #496 | privacy | The answer when the thread has other messages, and for AI None | 404 with existing messages; 403 kept for AI None | Fix the root cause | Opus 5.5 | accepted by merge (PR #486, 2026-10-09) |
+| 2026-10-09 | #496 | data safety | The walk over a thread for proposals | Stops at the first pending draft | Fix the root cause | Opus 5.5 | accepted by merge (PR #486, 2026-10-09) |
+| 2026-10-09 | #496 | privacy | Streaming labels | An allowlist (none, Voice, Reflect, Orient) | Fix the root cause | Opus 5.5 | accepted by merge (PR #486, 2026-10-09) |
+| 2026-10-09 | #496 | data safety | Finalizing a draft whose parent was deleted | 410 | The user's edit wins | Opus 5.5 | accepted by merge (PR #486, 2026-10-09) |
+| 2026-10-09 | #496 | release/ops | The clean-up script for earlier data | Dry run by default | No heavy scripts on the prod VM | Opus 5.5 | accepted by merge (PR #486, 2026-10-09) |
+| 2026-10-09 | #415 | data safety | What deleting a writing hides | A global ORM hook hides 12 per-user tables while the deletion waits; `user_data_purge_hidden` records what it hid | Peter's soft-delete model (2026-10-09) | Opus 5.5 | pending |
+| 2026-10-09 | #415 | data safety | Restoring writing | One transaction | The user's edit wins | Opus 5.5 | pending |
+| 2026-10-09 | #415 | data safety | What the purge deletes | Only what the request hid; cost rows go to the request | Cost records are kept in anonymous form (Peter, 2026-10-02) | Opus 5.5 | pending |
+| 2026-10-09 | #415 | data safety | Writing, saves and imports during the 30 days | They survive (reclaim) | Peter's soft-delete model (2026-10-09) | Opus 5.5 | pending |
+| 2026-10-09 | #415 | reliability | Jobs in flight when a deletion is requested | Not stopped; save guards instead | Fix the root cause | Opus 5.5 | pending |
+| 2026-10-09 | #415 | product scope | The X connection, notifications and artifact views | Not hidden | candidate: findings that break no promise are left | Opus 5.5 | pending |
+| 2026-10-09 | #464 | UX | The status bar while writing is hidden | Reuses SpendCapBanner's label and RecoveryBanner's button; no ×; the page reloads after a restore | Reuse form patterns | Opus 5.5 | pending |
+| 2026-10-09 | #415 | data safety | The JSON export during the wait | Leaves out deleted entries | Peter's soft-delete model (2026-10-09) | Opus 5.5 | pending |
+| 2026-10-09 | #482 | data safety | Restoring an account | Brings hidden writing back | Peter's soft-delete model (2026-10-09) | Opus 5.5 | pending |
+| 2026-10-09 | #464 | user-facing text | All texts about deleting writing | Reframed in the user's words (list in the PR) | candidate: user-facing text says what happens | Opus 5.5 | pending |
+| 2026-10-09 | #473 | reliability | The cause of the voice Glean wait | Judged to be an inline refresh of a large Community Archive export before the render, not a batch (unconfirmed on Peter's logs) | Fix the root cause | Opus 5.5 | pending |
+| 2026-10-09 | #473 | reliability | Fixes for it | Refresh in the background; batch only for `_read_batch`; a superseded run stops; the render runs in a savepoint | Fix the root cause | Opus 5.5 | pending |
+| 2026-10-09 | #473 | UX | Rerun of a gleaning | An admin-only API; no buttons | Admin tools stay admin tools | Opus 5.5 | pending |
+| 2026-10-09 | #473 | UX | Glean on the Glean entry | Glean and the picker appear in every thread | One behaviour across clients | Opus 5.5 | pending |
+| 2026-10-09 | #473 | UX | The tooltip | `LooreTooltip`: 350 ms hover, 260 px wide, 8 px offset | Every added heuristic is named | Opus 5.5 | pending |
+| 2026-10-09 | #473 | user-facing text | A gleaning that failed | "This gleaning didn't come through." with the reason and a retry from the parent | candidate: user-facing text says what happened | Opus 5.5 | pending |
+| 2026-10-09 | #473 | user-facing text | The "Read" tag | Now "Glean" | Peter named the card (2026-10-09) | Opus 5.5 | pending |
+| 2026-10-09 | #473 | UX | `{quote_ext}` markers on cards | Hidden | candidate: say what happened in the user's words | Opus 5.5 | pending |
 
 ## Backfilled decisions
 
