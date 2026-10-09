@@ -872,7 +872,7 @@ def test_inline_kinds_surface_in_node_display(app):
         attach_context_artifacts(node.id, uid)
         _db.session.commit()
 
-        fields = _context_artifact_fields(node)
+        fields = _context_artifact_fields(node, uid)
         for kind in UserArtifact.INLINE_KINDS:
             assert kind in fields, f"{kind} missing from display fields"
             assert fields[kind]["content"] == f"{kind}-body"
@@ -903,16 +903,16 @@ def test_share_guidance_display_mirrors_llm_substitution(app):
 
         app.config["SHARE_V1"] = True
         user.public_sharing_enabled = False
-        fields = _context_artifact_fields(node)
+        fields = _context_artifact_fields(node, user.id)
         assert fields["share_guidance"]["content"] == ""
 
         user.public_sharing_enabled = True
-        fields = _context_artifact_fields(node)
+        fields = _context_artifact_fields(node, user.id)
         assert fields["share_guidance"]["content"] == SHARE_GUIDANCE_TEXT
 
         # Killswitch off → same as user-disabled
         app.config["SHARE_V1"] = False
-        fields = _context_artifact_fields(node)
+        fields = _context_artifact_fields(node, user.id)
         assert fields["share_guidance"]["content"] == ""
 
 
