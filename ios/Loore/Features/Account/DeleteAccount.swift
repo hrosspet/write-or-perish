@@ -47,8 +47,8 @@ final class DeleteAccountModel {
     // MARK: Section
 
     var sectionText: String {
-        "Hides your account at once and signs you out everywhere. After \(graceDays) days the account and "
-            + "everything in it are deleted. Until then, signing in lets you restore it."
+        "Deletes your account at once and signs you out everywhere. For \(graceDays) days you can restore it "
+            + "by signing in; after that it is deleted forever, with everything in it."
     }
 
     var linkSentText: String {
@@ -67,22 +67,22 @@ final class DeleteAccountModel {
     var dialogParagraphs: [String] {
         let date = deletionDate
         var paragraphs = [
-            "Your account is hidden at once and you are signed out everywhere. Nobody can see your public writing any more.",
-            "After \(graceDays) days, on \(date), Loore deletes the account and everything in it: your entries and "
-                + "recordings, the AI's replies, your profile, intentions and other documents, your todo list, drafts, "
-                + "shares, saved references, imports, poll answers, settings and sign-in. If other people replied to "
-                + "your entries, their replies stay and your entry shows as deleted. Loore keeps a record of what your "
-                + "AI use cost, without your name.",
-            "Until then you can restore your account by signing in. Afterwards it cannot be restored. Nobody else "
-                + "can take your username for \(info?.usernameReserveDays ?? 365) days after the deletion.",
+            "Your account is deleted at once and you are signed out everywhere. Nobody can see your public writing any more.",
+            "For \(graceDays) days, until \(date), you can restore it by signing in. After that it is deleted forever, "
+                + "with everything in it: your entries and recordings, the AI's replies, your profile, intentions and "
+                + "other documents, your todo list, drafts, shares, saved references, imports, poll answers, settings "
+                + "and sign-in. If other people replied to your entries, their replies stay and your entry shows as "
+                + "deleted. Loore keeps a record of what your AI use cost, without your name.",
+            "Once it is deleted forever, nobody else can take your username for "
+                + "\(info?.usernameReserveDays ?? 365) days.",
         ]
         if let writing = user?.dataDeletion?.scheduledWritingDeletion {
             paragraphs.append("This replaces your request to delete all your writing on \(AccountDeletion.formatDate(writing)): "
                 + "everything is deleted on \(date) instead, and restoring your account cancels both.")
         }
         if user?.dataDeletion?.xConnected == true {
-            paragraphs.append("Loore also forgets your X connection for bookmarks. To remove Loore's access on X as well: "
-                + AccountDeletion.xRemoveAccessSteps)
+            paragraphs.append("Loore also forgets your X connection for bookmarks and removes its access on X. "
+                + "If X still lists Loore afterwards, remove it yourself: " + AccountDeletion.xRemoveAccessSteps)
         }
         return paragraphs
     }
@@ -312,9 +312,9 @@ final class ConfirmAccountDeletionModel {
         }
         let days = app.user?.accountDeletion?.graceDays ?? 30
         let date = AccountDeletion.formatDate(AccountDeletion.dateAfter(days: days, from: now()))
-        return "When you confirm, your account is hidden and you are signed out everywhere. On \(date) it is "
-            + "deleted with everything in it. Until then you can restore it by signing in. Restoring it also "
-            + "cancels a request to delete all your writing, if one is waiting."
+        return "When you confirm, your account is deleted and you are signed out everywhere. Until \(date) you "
+            + "can restore it by signing in; after that it is deleted forever, with everything in it. Restoring "
+            + "it also cancels a request to delete all your writing, if one is waiting."
     }
 
     /// The error line; for another account's link it says whose session this is.

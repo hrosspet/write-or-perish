@@ -55,13 +55,14 @@ final class DeleteAccountModelTests: AccountDeletionTestCase {
         let model = model()
         XCTAssertEqual(model.dialogParagraphs.count, 3)
         XCTAssertEqual(model.dialogParagraphs[0],
-                       "Your account is hidden at once and you are signed out everywhere. Nobody can see your public writing any more.")
-        XCTAssertTrue(model.dialogParagraphs[1].hasPrefix("After 30 days, on \(deleteDate), Loore deletes the account and everything in it: your entries and recordings, the AI's replies,"))
+                       "Your account is deleted at once and you are signed out everywhere. Nobody can see your public writing any more.")
+        XCTAssertTrue(model.dialogParagraphs[1].hasPrefix("For 30 days, until \(deleteDate), you can restore it by signing in. After that it is deleted forever, with everything in it: your entries and recordings, the AI's replies,"))
         XCTAssertTrue(model.dialogParagraphs[1].hasSuffix("Loore keeps a record of what your AI use cost, without your name."))
-        XCTAssertTrue(model.dialogParagraphs[2].hasSuffix("Nobody else can take your username for 365 days after the deletion."))
+        XCTAssertEqual(model.dialogParagraphs[2], "Once it is deleted forever, nobody else can take your username for 365 days.")
+        XCTAssertFalse(model.dialogParagraphs.joined().contains("hidden"))
         XCTAssertEqual(model.confirmTitle, "Delete my account")
         XCTAssertEqual(model.confirmSubtitle, "Signs you out now. You can restore it until \(deleteDate).")
-        XCTAssertTrue(model.sectionText.hasPrefix("Hides your account at once and signs you out everywhere. After 30 days"))
+        XCTAssertEqual(model.sectionText, "Deletes your account at once and signs you out everywhere. For 30 days you can restore it by signing in; after that it is deleted forever, with everything in it.")
     }
 
     func testAWaitingWritingDeletionAndXAreMentioned() throws {
@@ -70,7 +71,7 @@ final class DeleteAccountModelTests: AccountDeletionTestCase {
         XCTAssertEqual(paragraphs.count, 5)
         let writingDate = AccountDeletion.formatDate(LooreDate.parse("2026-10-20T08:00:00Z"))
         XCTAssertEqual(paragraphs[3], "This replaces your request to delete all your writing on \(writingDate): everything is deleted on \(deleteDate) instead, and restoring your account cancels both.")
-        XCTAssertTrue(paragraphs[4].hasPrefix("Loore also forgets your X connection for bookmarks. To remove Loore's access on X as well: on X, open Settings and privacy"))
+        XCTAssertTrue(paragraphs[4].hasPrefix("Loore also forgets your X connection for bookmarks and removes its access on X. If X still lists Loore afterwards, remove it yourself: on X, open Settings and privacy"))
         try signIn(["data_deletion": ["status": "done", "purge_at": "2026-10-01T08:00:00Z", "x_connected": false]])
         XCTAssertEqual(model().dialogParagraphs.count, 3, "a finished writing deletion is not replaced")
     }
@@ -100,7 +101,9 @@ final class DeleteAccountModelTests: AccountDeletionTestCase {
         XCTAssertEqual(app.phase, .accountDeleted(deleteOn: LooreDate.parse("2026-11-08T12:00:00Z")))
         XCTAssertNil(app.user)
         XCTAssertEqual(AccountDeletedView.message(deleteOn: LooreDate.parse("2026-11-08T12:00:00Z")),
-                       "It is hidden now, and you are signed out. On \(AccountDeletion.formatDate(LooreDate.parse("2026-11-08T12:00:00Z"))) it is deleted with everything in it. Until then you can restore it by signing in.")
+                       "You are signed out. Until \(AccountDeletion.formatDate(LooreDate.parse("2026-11-08T12:00:00Z"))) you can restore it by signing in; after that it is deleted forever, with everything in it.")
+        XCTAssertEqual(AccountDeletedView.message(deleteOn: nil),
+                       "You are signed out. For 30 days you can restore it by signing in; after that it is deleted forever, with everything in it.")
         // Answers still in flight from the signed-out session change nothing.
         app.handle(.unauthorized)
         XCTAssertEqual(app.phase, .accountDeleted(deleteOn: LooreDate.parse("2026-11-08T12:00:00Z")))
@@ -172,7 +175,7 @@ final class ConfirmAccountDeletionModelTests: AccountDeletionTestCase {
         let model = ConfirmAccountDeletionModel(app: app, token: "tok123")
         model.now = { pinnedNow }
         XCTAssertEqual(model.heading, "Delete @seowriter?")
-        XCTAssertEqual(model.message, "When you confirm, your account is hidden and you are signed out everywhere. On \(deleteDate) it is deleted with everything in it. Until then you can restore it by signing in. Restoring it also cancels a request to delete all your writing, if one is waiting.")
+        XCTAssertEqual(model.message, "When you confirm, your account is deleted and you are signed out everywhere. Until \(deleteDate) you can restore it by signing in; after that it is deleted forever, with everything in it. Restoring it also cancels a request to delete all your writing, if one is waiting.")
         XCTAssertTrue(calls.isEmpty, "showing the question sends nothing")
         await model.confirm()
         XCTAssertEqual(calls, ["POST /api/account/delete/confirm"])
@@ -273,7 +276,7 @@ final class AccountRestoreTests: AccountDeletionTestCase {
         XCTAssertEqual(calls, ["GET /api/account/restore"])
         XCTAssertEqual(model.heading, "Restore your account?")
         let date = AccountDeletion.formatDate(LooreDate.parse("2026-11-08T12:00:00Z"))
-        XCTAssertEqual(model.message, "You deleted @seowriter. It is hidden, and on \(date) it is deleted with everything in it. Restore it to keep using Loore, or keep it deleted. Restoring it also cancels a request to delete all your writing, if one is waiting.")
+        XCTAssertEqual(model.message, "You deleted @seowriter. You can restore it until \(date); after that it is deleted forever, with everything in it. Restore it to keep using Loore, or keep it deleted. Restoring it also cancels a request to delete all your writing, if one is waiting.")
     }
 
     func testAStartedDeletionCannotBeUndone() async throws {

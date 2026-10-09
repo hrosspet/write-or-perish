@@ -141,9 +141,9 @@ final class AccountRestoreModel {
             return "The deletion of @\(offer.username) has started and cannot be undone."
         case .offer(let offer):
             let date = AccountDeletion.formatDate(offer.deleteOn)
-            return "You deleted @\(offer.username). It is hidden, and on \(date) it is deleted with everything in it. "
-                + "Restore it to keep using Loore, or keep it deleted. Restoring it also cancels a request to "
-                + "delete all your writing, if one is waiting."
+            return "You deleted @\(offer.username). You can restore it until \(date); after that it is deleted "
+                + "forever, with everything in it. Restore it to keep using Loore, or keep it deleted. Restoring it "
+                + "also cancels a request to delete all your writing, if one is waiting."
         }
     }
 }
@@ -157,13 +157,13 @@ struct AccountDeletedView: View {
     static func message(deleteOn: Date?) -> String {
         let date = AccountDeletion.formatDate(deleteOn)
         let when = date.isEmpty
-            ? "30 days after your request it is deleted with everything in it."
-            : "On \(date) it is deleted with everything in it."
-        return "It is hidden now, and you are signed out. \(when) Until then you can restore it by signing in."
+            ? "For 30 days you can restore it by signing in;"
+            : "Until \(date) you can restore it by signing in;"
+        return "You are signed out. \(when) after that it is deleted forever, with everything in it."
     }
 
     var body: some View {
-        AccountMessagePage(heading: "Your account is scheduled for deletion", message: Self.message(deleteOn: deleteOn)) {
+        AccountMessagePage(heading: "Your account is deleted", message: Self.message(deleteOn: deleteOn)) {
             PageLinkButton(title: "Back to Loore →") { Task { await app.leaveAccountDeletionScreen() } }
         }
         .accessibilityIdentifier("accountDeleted")
