@@ -75,8 +75,14 @@ def test_edit_while_account_none_saves_a_none_version(app, alice):  # noqa: F811
 
 
 def test_edit_in_place_when_no_text_moves_into_a_readable_row(app, alice):  # noqa: F811
-    """Account 'chat', or a row that is already 'none': edited in place."""
-    readable = _profile(alice)
+    """Account 'chat' editing a version the user wrote, or a row that is
+    already 'none': edited in place. (An edit of a readable generated
+    version is saved as a new version, #183 — test_profile_edit_versions.)"""
+    readable = UserProfile(user_id=alice.id, generated_by="user",
+                           tokens_used=0, ai_usage="chat")
+    readable.set_content("my own words")
+    _db.session.add(readable)
+    _db.session.commit()
     client = app.test_client()
     _login(client, alice)
     resp = client.put(f"/profile/{readable.id}", json={"content": "v2"})
