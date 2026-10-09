@@ -16,8 +16,6 @@ final class ModelDecodingTests: XCTestCase {
         XCTAssertEqual(dashboard.user.plan, .alpha)
         XCTAssertEqual(dashboard.user.defaultPrivacyLevel, .private)
         XCTAssertNotNil(dashboard.user.acceptedTermsAt)
-        XCTAssertFalse(dashboard.nodes.isEmpty)
-        XCTAssertNotNil(dashboard.nodes.first?.createdAt)
         XCTAssertNil(dashboard.latestProfile)
         let caps = UserCapabilities(user: dashboard.user)
         XCTAssertTrue(caps.approved)
@@ -121,6 +119,37 @@ final class ModelDecodingTests: XCTestCase {
         XCTAssertTrue(node.children[1].inaccessible)
         XCTAssertEqual(node.childCount, 0)
         XCTAssertNil(node.replyAIUsage)
+    }
+
+    /// Someone else's AI reply: each action arrives as its name and outcome
+    /// only. It decodes, and every row has a line of its own with no query,
+    /// link or kind.
+    func testToolCallsMetaForSomeoneElse() throws {
+        let json = #"""
+        {"id": 7, "content": "reply", "node_type": "llm", "privacy_level": "public", "ai_usage": "chat",
+         "tool_calls_meta": [{"name": "semantic_search", "status": "success"},
+                             {"name": "read_full", "status": "success"},
+                             {"name": "read_full", "status": "error"},
+                             {"name": "update_artifact", "status": "success"},
+                             {"name": "read_artifact", "status": "success"},
+                             {"name": "read_todo", "status": "success"},
+                             {"name": "apply_todo_changes", "status": "success"},
+                             {"name": "apply_share", "status": "success"},
+                             {"name": "propose_todo", "status": "success"},
+                             {"name": "_mode"},
+                             {"name": "some_new_tool", "status": "success"}]}
+        """#
+        let node = try decode(NodeDetail.self, json)
+        let meta = try XCTUnwrap(node.toolCallsMeta)
+        XCTAssertEqual(meta.count, 11)
+        XCTAssertEqual(meta.map(\.sharedLabel), [
+            "Searched archive & references", "Read in full", "Read in full (failed)",
+            "Wrote an artifact", "Read an artifact", "Read the todo list",
+            "Todo changes confirmed", "Share saved as a draft", "Todo update proposed",
+            "_mode", "some_new_tool",
+        ])
+        XCTAssertNil(meta[9].status)
+        XCTAssertTrue(meta[9].isInternal)
     }
 
     // MARK: Deep reply trees (review M6)

@@ -4,6 +4,7 @@ import remarkGfm from 'remark-gfm';
 import { useInRouterContext, useNavigate } from 'react-router-dom';
 import { parseNodeLink, fetchNodeTitle, cachedNodeTitle } from '../utils/nodeLinks';
 import { classifyImageSource } from '../utils/markdownImages';
+import CopyButton from './CopyButton';
 
 /**
  * The app never renders raw HTML (no rehype-raw), so anything the markdown
@@ -412,6 +413,51 @@ function MarkdownLink({ node, children, href, ...props }) {
   );
 }
 
+/** Plain text of a React node tree (code children can be nested elements). */
+function nodeText(node) {
+  if (node == null || typeof node === 'boolean') return '';
+  if (typeof node === 'string' || typeof node === 'number') return String(node);
+  if (Array.isArray(node)) return node.map(nodeText).join('');
+  return nodeText(node.props && node.props.children);
+}
+
+/**
+ * Fenced code block with a copy button at its top right. The button sits on a
+ * wrapper outside the scrolling <pre>, so it stays visible on long or
+ * horizontally scrolling blocks; it has a card-colored backdrop so it never
+ * leaves text half hidden beneath it. Copies the text as shown (the parser's
+ * single trailing newline is dropped). Inline code never goes through here.
+ */
+export const CodeBlock = ({ node, children, ...props }) => {
+  const text = nodeText(children).replace(/\n$/, '');
+  return (
+    <div style={{ position: 'relative', margin: '0.75em 0' }}>
+      <pre
+        style={{
+          background: 'var(--bg-card)',
+          border: '1px solid var(--border)',
+          borderRadius: '6px',
+          padding: '0.75em 1em',
+          margin: 0,
+          overflowX: 'auto',
+          fontSize: '0.9em',
+        }}
+        {...props}
+      >
+        {children}
+      </pre>
+      <CopyButton
+        text={text}
+        title="Copy code"
+        style={{
+          position: 'absolute', top: '6px', right: '6px',
+          background: 'var(--bg-card)', borderRadius: '4px',
+        }}
+      />
+    </div>
+  );
+};
+
 const REMARK_PLUGINS = [remarkGfm, remarkHtmlAsCode];
 
 /**
@@ -513,20 +559,7 @@ const MarkdownBody = ({ children, style, paragraphMargin = '0.5em 0', flowText =
     hr: ({ node, ...props }) => (
       <hr style={{ border: 'none', borderTop: '1px solid var(--border)', margin: '20px 0' }} {...props} />
     ),
-    pre: ({ node, ...props }) => (
-      <pre
-        style={{
-          background: 'var(--bg-card)',
-          border: '1px solid var(--border)',
-          borderRadius: '6px',
-          padding: '0.75em 1em',
-          margin: '0.75em 0',
-          overflowX: 'auto',
-          fontSize: '0.9em',
-        }}
-        {...props}
-      />
-    ),
+    pre: CodeBlock,
     code: ({ node, inline, className, children, ...props }) =>
       inline ? (
         <code style={{ whiteSpace: 'pre-wrap', overflowWrap: 'break-word', fontSize: '0.9em' }} {...props}>

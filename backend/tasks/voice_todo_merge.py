@@ -7,7 +7,10 @@ edits to the full todo (the artifact tool's {old_text, new_text} format),
 which code applies to the newest list (utils/todo_merge_edits.py, #234).
 
 Merges are serialized per user via a Redis lock so concurrent
-confirmations don't clobber each other's results.
+confirmations don't clobber each other's results. The save also takes the
+user's todo lock, which every todo writer takes (utils/todo_lock.py,
+#477), and builds on the list as it is then: a tick or an editor Save made
+while the model worked stays.
 """
 import json
 import redis
@@ -20,10 +23,13 @@ from backend.llm_providers import LLMProvider
 from backend.utils.api_keys import get_api_keys_for_usage
 from backend.utils.cost import llm_cost_log_fields
 from backend.models import APICostLog
+from backend.utils.proposals import is_own_live_proposal, node_is_users
+from backend.utils.tool_meta import update_tool_meta
 from backend.utils.refusal_backoff import REFUSED_REF
+from backend.utils.todo_lock import TodoBusy, lock_user_todo
 from backend.utils.todo_merge_edits import (
     FAILURE_EMPTY, FAILURE_TRUNCATED, REPLY_FORMAT, MergeRun, has_tasks,
-    run_todo_merge)
+    rebase_merge, run_todo_merge)
 
 logger = get_task_logger(__name__)
 
@@ -45,11 +51,10 @@ NO_TASKS_RULE = (
 EMPTY_TODO_MESSAGE = "The todo list is empty. " + NO_TASKS_RULE
 
 # Shown on the card when the model's output hit the output cap (#432).
-# The card has no retry button after a failed merge (its pending draft
-# is gone), so the message says how to get a new proposal.
+# A failed merge leaves its proposal applicable (#434): the card shows
+# "Apply again" next to the message.
 TRUNCATED_MESSAGE = (
-    "The todo update was cut off, so nothing was changed. "
-    "Ask for the todo update again to retry.")
+    "The todo update was cut off, so nothing was changed.")
 EMPTY_RESULT_MESSAGE = "Empty merge result"
 # Shown on the card when the model's edits were refused twice (#234): an
 # anchor not found or not unique, a full rewrite of a list with tasks, an
@@ -57,7 +62,18 @@ EMPTY_RESULT_MESSAGE = "Empty merge result"
 # Nothing was saved.
 EDITS_FAILED_MESSAGE = (
     "The todo update couldn't be applied to your list, so nothing was "
-    "changed. Ask for the todo update again to retry.")
+    "changed.")
+# Shown on the card when the list changed while the model worked (a tick,
+# an editor Save) and the update's edits no longer fit it (#477). Nothing
+# was saved; the card offers "Apply again", which runs on the newest list.
+LIST_CHANGED_MESSAGE = (
+    "Your todo list changed while this update was being applied, and the "
+    "update no longer fits it, so nothing was changed.")
+# Shown on the card when another write of the list held the user's todo
+# lock past TODO_LOCK_WAIT_SECONDS (#477).
+LOCK_BUSY_MESSAGE = (
+    "Your todo list was busy saving another change, so nothing was "
+    "changed.")
 
 
 @celery.task(bind=True)
@@ -70,7 +86,8 @@ def apply_voice_todo(self, llm_node_id: int, model_id: str, user_id: int,
     2. Get the current user todo
     3. Call LLM with orient_apply_todo prompt for edits, apply them to
        the todo and check the result (utils/todo_merge_edits.py)
-    4. Save as new UserTodo
+    4. Save as new UserTodo, under the user's todo lock, on the newest
+       list (the edits applied again if it changed meanwhile, #477)
     5. Update tool_calls_meta on the originating LLM node
     """
     with flask_app.app_context():
@@ -79,21 +96,44 @@ def apply_voice_todo(self, llm_node_id: int, model_id: str, user_id: int,
             logger.error(f"LLM node {llm_node_id} not found")
             return
 
+        # A todo merge runs only on the user's own live proposal
+        # (utils/proposals). Checked again here, before the proposal is
+        # read, since the task runs after the check that started it. Only
+        # the owner's merge writes the proposal's apply state.
+        if not is_own_live_proposal(llm_node, user_id, "todo_pending"):
+            logger.warning(
+                f"Todo merge for node {llm_node_id} refused: not a live "
+                f"todo proposal of user {user_id}")
+            _fail_confirm_node(llm_node_id, user_id, confirm_node_id)
+            return
+
+        # AI may not read the proposal or the todo list: no model call.
+        # Asked again under the lock (_run_merge), as the list can change.
+        from backend.routes.todo import todo_merge_refusal
+        refusal = todo_merge_refusal(user_id, llm_node)
+        if refusal is not None:
+            logger.info(
+                f"Todo merge for node {llm_node_id} refused: AI usage keeps "
+                f"its inputs away from AI (user {user_id})")
+            _merge_failed(llm_node, user_id, refusal, confirm_node_id)
+            db.session.commit()
+            return
+
         from backend.utils.spend import user_is_capped
         if user_is_capped(user_id):
             logger.warning(
                 "User %s is spend-capped; skipping voice todo merge", user_id)
-            _update_apply_status(
-                llm_node, "failed", error="Monthly spend limit reached",
-                confirm_node_id=confirm_node_id)
+            _merge_failed(
+                llm_node, user_id, "Monthly spend limit reached",
+                confirm_node_id)
             db.session.commit()
             return
 
         update_summary = llm_node.get_content()
         if not update_summary:
             logger.error(f"LLM node {llm_node_id} has no content")
-            _update_apply_status(llm_node, "failed", error="No update summary",
-                                confirm_node_id=confirm_node_id)
+            _merge_failed(llm_node, user_id, "No update summary",
+                          confirm_node_id)
             db.session.commit()
             return
 
@@ -114,10 +154,10 @@ def apply_voice_todo(self, llm_node_id: int, model_id: str, user_id: int,
                 f"Could not acquire merge lock for user {user_id} "
                 f"(node {llm_node_id}), another merge held it too long"
             )
-            _update_apply_status(
-                llm_node, "failed",
-                error="Another todo merge is still running, please retry",
-                confirm_node_id=confirm_node_id,
+            _merge_failed(
+                llm_node, user_id,
+                "Another todo merge is still running, please retry",
+                confirm_node_id,
             )
             db.session.commit()
             return
@@ -133,6 +173,29 @@ def apply_voice_todo(self, llm_node_id: int, model_id: str, user_id: int,
             except redis.exceptions.LockNotOwnedError:
                 logger.warning(
                     f"Merge lock expired before release for user {user_id}")
+
+
+# Shown on the confirming reply when the proposal is no longer one the
+# user can apply (deleted in the meantime, say). The routes answer 404 with
+# the same words.
+PROPOSAL_NOT_FOUND_MESSAGE = "No pending todo changes found"
+
+
+def _fail_confirm_node(llm_node_id, user_id, confirm_node_id):
+    """A merge refused because its node isn't the user's own live todo
+    proposal: nothing is written on that node. The user's own confirming
+    reply (the voice apply_todo_changes turn), when there is a separate
+    one, shows the merge as failed."""
+    if not confirm_node_id or confirm_node_id == llm_node_id:
+        return
+    confirm_node = Node.query.get(confirm_node_id)
+    if confirm_node is None or not node_is_users(confirm_node, user_id):
+        return
+    update_tool_meta(confirm_node, "apply_todo_changes", {
+        "apply_status": "failed",
+        "apply_error": PROPOSAL_NOT_FOUND_MESSAGE,
+    })
+    db.session.commit()
 
 
 def build_merge_messages(merge_prompt, update_summary, current_todo):
@@ -188,14 +251,13 @@ def _run_merge(llm_node, update_summary, user_id, model_id,
     # AI may not read the todo list or the proposal: no model call. Asked
     # here, under the lock, because the list can change after the merge
     # was started (an earlier merge saves one with the account default).
-    from backend.routes.todo import todo_merge_refusal
+    from backend.routes.todo import todo_merge_refusal, todo_revision
     refusal = todo_merge_refusal(user_id, llm_node)
     if refusal is not None:
         logger.info(
             f"Todo merge for node {llm_node_id} refused: AI usage keeps "
             f"its inputs away from AI (user {user_id})")
-        _update_apply_status(llm_node, "failed", error=refusal,
-                             confirm_node_id=confirm_node_id)
+        _merge_failed(llm_node, user_id, refusal, confirm_node_id)
         db.session.commit()
         return
 
@@ -204,6 +266,9 @@ def _run_merge(llm_node, update_summary, user_id, model_id,
         UserTodo.created_at.desc()
     ).first()
     current_todo = todo.get_content() if todo else ""
+    # Which version the merge read, to see at save time whether the list
+    # changed while the model worked (#477).
+    read_revision = todo_revision(todo) if todo else None
 
     # Get merge prompt
     from backend.utils.prompts import get_user_prompt
@@ -224,8 +289,7 @@ def _run_merge(llm_node, update_summary, user_id, model_id,
         logger.error(f"LLM call failed for todo merge: {e}", exc_info=True)
         # Calls made before the failing one were billed.
         _log_merge_costs(user_id, model_id, run)
-        _update_apply_status(llm_node, "failed", error=str(e),
-                             confirm_node_id=confirm_node_id)
+        _merge_failed(llm_node, user_id, str(e), confirm_node_id)
         db.session.commit()
         return
 
@@ -261,12 +325,17 @@ def _run_merge(llm_node, update_summary, user_id, model_id,
                 f"{len(run.responses)} replies ({run.failure}); nothing "
                 "saved")
             error = EDITS_FAILED_MESSAGE
-        _update_apply_status(llm_node, "failed", error=error,
-                             confirm_node_id=confirm_node_id)
+        _merge_failed(llm_node, user_id, error, confirm_node_id)
         db.session.commit()
         return
 
-    # Save new UserTodo
+    merged = _merged_on_newest_list(
+        llm_node, user_id, confirm_node_id, run, current_todo, read_revision)
+    if merged is None:
+        return
+
+    # Save new UserTodo (under the user's todo lock, which the commit below
+    # releases)
     merge_user = User.query.get(user_id)
     new_todo = UserTodo(
         user_id=user_id,
@@ -278,7 +347,7 @@ def _run_merge(llm_node, update_summary, user_id, model_id,
         # ai_usage follows the user's global default (#191).
         ai_usage=merge_user.default_ai_usage if merge_user else "chat",
     )
-    new_todo.set_content(run.merged)
+    new_todo.set_content(merged)
     db.session.add(new_todo)
     # Assigns new_todo.id, so the proposal's tool_calls_meta records which
     # todo version this merge produced (#410).
@@ -291,6 +360,52 @@ def _run_merge(llm_node, update_summary, user_id, model_id,
 
     db.session.commit()
     logger.info(f"Voice todo merge completed: todo_id={new_todo.id} for user {user_id}")
+
+
+def _merged_on_newest_list(llm_node, user_id, confirm_node_id, run,
+                           current_todo, read_revision):
+    """The list to save, built on the newest list, with the user's todo
+    lock held until the caller commits; or None when the merge failed
+    (recorded and committed here).
+
+    The list may have changed while the model worked (#477): a tick, the
+    row "+", quick-add, an editor Save or a revert. Then the merge's
+    edits are applied to the newest list (rebase_merge), so the user's
+    change stays. When they no longer fit, nothing is saved and the
+    proposal can be applied again (the user's edit wins)."""
+    from backend.routes.todo import newest_todo, todo_revision
+    llm_node_id = llm_node.id
+    # The calls were billed whatever happens next: their cost rows are
+    # committed before the wait for the lock, which can roll back.
+    db.session.commit()
+    try:
+        lock_user_todo(user_id)
+    except TodoBusy:
+        logger.warning(
+            f"Todo merge for node {llm_node_id}: the user's todo lock "
+            f"stayed taken; nothing saved (user {user_id})")
+        _merge_failed(llm_node, user_id, LOCK_BUSY_MESSAGE, confirm_node_id)
+        db.session.commit()
+        return None
+
+    newest = newest_todo(user_id)
+    if (todo_revision(newest) if newest else None) == read_revision:
+        return run.merged
+    merged = rebase_merge(
+        run, current_todo, newest.get_content() if newest else "")
+    if merged is None:
+        logger.warning(
+            f"Todo merge for node {llm_node_id}: the list changed during "
+            f"the merge and its edits no longer fit; nothing saved "
+            f"(user {user_id})")
+        _merge_failed(llm_node, user_id, LIST_CHANGED_MESSAGE,
+                      confirm_node_id)
+        db.session.commit()
+        return None
+    logger.info(
+        f"Todo merge for node {llm_node_id}: the list changed during the "
+        "merge; its edits were applied to the newest list")
+    return merged
 
 
 def _log_merge_costs(user_id, model_id, run):
@@ -308,12 +423,25 @@ def _log_merge_costs(user_id, model_id, run):
         ))
 
 
+def _merge_failed(llm_node, user_id, error, confirm_node_id):
+    """Record a failed merge. Its proposal becomes applicable again (#434):
+    the pending draft the start removed comes back, unless the user has a
+    newer todo proposal pending, and ``retryable`` tells the web and iPhone
+    cards whether to show "Apply again" next to the error."""
+    from backend.routes.todo import restore_todo_draft
+    retryable = restore_todo_draft(llm_node, user_id)
+    _update_apply_status(llm_node, "failed", error=error,
+                         confirm_node_id=confirm_node_id,
+                         retryable=retryable)
+
+
 def _update_apply_status(llm_node, status, error=None, todo_id=None,
-                         confirm_node_id=None):
+                         confirm_node_id=None, retryable=None):
     """Update the apply_status in the LLM node's tool_calls_meta.
 
     Also updates the confirmation node (where apply_todo_changes lives)
-    if confirm_node_id is provided.
+    if confirm_node_id is provided. A completed merge drops the error of
+    an earlier failed one.
     """
     meta = []
     if llm_node.tool_calls_meta:
@@ -323,11 +451,11 @@ def _update_apply_status(llm_node, status, error=None, todo_id=None,
             meta = []
     for entry in meta:
         if entry.get("name") == "propose_todo":
-            entry["apply_status"] = status
-            if error:
-                entry["apply_error"] = error
+            _set_apply_status(entry, status, error)
             if todo_id:
                 entry["todo_id"] = todo_id
+            if retryable is not None and status != "completed":
+                entry["retryable"] = retryable
             break
     llm_node.tool_calls_meta = json.dumps(meta)
 
@@ -339,12 +467,19 @@ def _update_apply_status(llm_node, status, error=None, todo_id=None,
                 cmeta = json.loads(confirm_node.tool_calls_meta)
                 for entry in cmeta:
                     if entry.get("name") == "apply_todo_changes":
-                        entry["apply_status"] = status
-                        if error:
-                            entry["apply_error"] = error
+                        _set_apply_status(entry, status, error)
                         break
                 confirm_node.tool_calls_meta = json.dumps(cmeta)
             except (json.JSONDecodeError, TypeError):
                 pass
 
     db.session.flush()
+
+
+def _set_apply_status(entry, status, error):
+    entry["apply_status"] = status
+    if error:
+        entry["apply_error"] = error
+    if status == "completed":
+        entry.pop("apply_error", None)
+        entry.pop("retryable", None)

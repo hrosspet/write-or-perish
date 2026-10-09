@@ -4,10 +4,16 @@ import SwiftUI
 /// (collapsed by default), tick/untick, per-row "+", quick-add to Today, raw
 /// markdown editing, version history.
 ///
-/// Saves overwrite the latest version with no version check (E §15), so every
-/// in-place edit (`PATCH`) re-fetches the todo first and applies the same
-/// text-keyed edit to the fresh content (design doc §10); the list is also
-/// re-fetched after a "todo changed" signal and when the app comes back.
+/// Every in-place edit (`PATCH`) re-fetches the todo first and applies the same
+/// text-keyed edit to the fresh content (design doc §10), sending the revision
+/// it edited (TodoModel); the list is also re-fetched after a "todo changed"
+/// signal and when the app comes back.
+///
+/// The editor's Save is checked against the version the editor was opened on
+/// (#476). When the list changed meanwhile (a todo merge, a tick elsewhere), the
+/// page shows the choice instead of dropping those changes: save the user's
+/// text anyway, or show the newest list with the user's text kept below the
+/// editor to copy from.
 struct TodoPage: View {
     let onSelect: (WorkspaceDocument) -> Void
 
@@ -17,6 +23,10 @@ struct TodoPage: View {
     @State private var editing = false
     @State private var editContent = ""
     @State private var saving = false
+    /// The version the editor was opened on (nil for Create).
+    @State private var editBase: TodoDoc?
+    /// The newest version, after a Save was refused because the list changed.
+    @State private var conflict: TodoDoc?
     @State private var quickAddOpen = false
     @State private var quickAddText = ""
     @State private var quickAddSaving = false
@@ -41,6 +51,15 @@ struct TodoPage: View {
         .sheet(isPresented: $showHistory) {
             VersionHistorySheet(source: historySource)
         }
+        .alert("Your todo list changed after you opened the editor",
+               isPresented: Binding(get: { conflict != nil }, set: { if !$0 { conflict = nil } }),
+               presenting: conflict) { newest in
+            Button("Save mine anyway") { save(over: newest) }
+            Button("Show the newest list") { showNewest(newest) }
+            Button("Keep editing", role: .cancel) {}
+        } message: { _ in
+            Text("Your text wasn't saved. Saving it anyway replaces those changes; the newer version stays in history.")
+        }
     }
 
     private var todo: TodoDoc? { model.todo }
@@ -50,10 +69,7 @@ struct TodoPage: View {
             if let todo {
                 HStack(spacing: 12) {
                     VersionChip(text: "v\(todo.versionNumber.map(String.init) ?? "") · \(LooreDateFormat.date(todo.createdAt))") {
-                        if editing { save() } else {
-                            editContent = todo.content
-                            editing = true
-                        }
+                        if editing { save() } else { openEditor(on: todo) }
                     }
                     HistoryLink { showHistory = true }
                     if !editing { quickAddToggle }
@@ -92,6 +108,15 @@ struct TodoPage: View {
         } else if let todo {
             checklist(todo)
         }
+        // The user's texts kept by "Show the newest list" (#476): under the
+        // editor, and still here after it closes, until each is discarded.
+        let kept = model.keptTexts
+        ForEach(Array(kept.enumerated()), id: \.element) { index, text in
+            keptTextView(text, label: kept.count > 1
+                         ? "Your text, not saved (\(index + 1) of \(kept.count))"
+                         : "Your text, not saved",
+                         index: index)
+        }
     }
 
     private var quickAddToggle: some View {
@@ -124,6 +149,7 @@ struct TodoPage: View {
                 .foregroundStyle(LooreColor.textMuted)
             Button("Create Todo") {
                 editContent = Self.createTemplate
+                editBase = nil
                 editing = true
             }
             .buttonStyle(.looreFilled)
@@ -173,14 +199,71 @@ struct TodoPage: View {
         if let fresh, !editing { editContent = fresh.content }
     }
 
-    /// `PUT /api/todo/` (Save in edit mode and the first create): a new version.
+    private func openEditor(on todo: TodoDoc) {
+        editContent = todo.content
+        editBase = todo
+        editing = true
+    }
+
+    /// `PUT /api/todo/` (Save in edit mode and the first create): a new version,
+    /// checked against the version the editor was opened on.
     private func save() {
+        save(over: editBase)
+    }
+
+    /// Saves the editor's text over `base`: the version the editor was opened
+    /// on, or the newest one for "Save mine anyway". A refusal shows the choice.
+    private func save(over base: TodoDoc?) {
         guard !saving, !editContent.jsTrimmed.isEmpty else { return }
         saving = true
         Task {
-            if await model.save(editContent) { editing = false }
+            switch await model.save(editContent, over: base) {
+            case .saved:
+                editing = false
+            case .changed(let newest):
+                conflict = newest
+            case .failed:
+                break
+            }
             saving = false
         }
+    }
+
+    /// "Show the newest list": the editor gets the newest list, the next Save is
+    /// checked against it, and the user's text is kept below to copy from, next
+    /// to any kept before.
+    private func showNewest(_ newest: TodoDoc) {
+        model.keep(editContent)
+        editContent = newest.content
+        editBase = newest
+    }
+
+    private func keptTextView(_ text: String, label: String, index: Int) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("\(label). Copy what you need into the todo list.")
+                .font(LooreFont.sans(12.8, .light))
+                .foregroundStyle(LooreColor.textMuted)
+            Text(text)
+                .font(LooreFont.sans(13.6, .light))
+                .foregroundStyle(LooreColor.textSecondary)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(12)
+                .overlay(RoundedRectangle(cornerRadius: LooreRadius.small)
+                    .strokeBorder(LooreColor.border, style: StrokeStyle(lineWidth: 1, dash: [4])))
+                .accessibilityLabel(label)
+                .accessibilityIdentifier("todo.keptText")
+            HStack(spacing: 8) {
+                Button("Copy") {
+                    UIPasteboard.general.string = text
+                    app.toasts.show("Copied your text")
+                }
+                .buttonStyle(.looreOutline)
+                Button("Discard") { model.discardKept(at: index) }
+                    .buttonStyle(.looreOutline)
+            }
+        }
+        .padding(.top, 20)
     }
 
     private func toggle(_ item: TodoSections.Item) {

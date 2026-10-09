@@ -5,12 +5,13 @@ backend/utils/tts_stream.py.
 
 SpokenTextProjector is the streaming version of the text preparation the
 batch TTS task does on a finished reply (``_strip_quote_markers``,
-``strip_edge_timestamps``, ``_strip_heading_sections``). It takes the raw
-text deltas and releases a character only once no later text can scrub or
-restructure it: an ambiguous tail — the start of a quote marker, of a
-timestamp, of a heading or a share fence — is held until it is decided.
-Its output is a list of events: ("text", str) and ("heading", title) for
-an h1/h2 chapter heading.
+``strip_edge_timestamps``, ``_strip_heading_sections``, then
+``spoken_links.speak_links``). It takes the raw text deltas and releases a
+character only once no later text can scrub or restructure it: an
+ambiguous tail — the start of a quote marker, of a timestamp, of a heading
+or a share fence, a link or an address not yet complete — is held until it
+is decided. Its output is a list of events: ("text", str) and ("heading",
+title) for an h1/h2 chapter heading.
 
 ChunkPlanner is the streaming version of ``section_aware_chunk_text``: it
 keeps the released text per section and cuts chunks that stay inside one
@@ -25,6 +26,7 @@ from collections import deque
 from backend.utils.audio_processing import (
     MIN_FIRST_CHUNK_CHARS, TTS_AUDIO_SECS_PER_CHAR, TTS_CHUNK_OVERHEAD_SECS,
     TTS_GEN_CHARS_PER_SEC, TTS_MAX_CHARS, _split_at_sentence, _split_at_word)
+from backend.utils.spoken_links import LinkSpeaker
 from backend.utils.timefmt import _EDGE_STAMP_RE
 
 _STAMP_RE = re.compile(_EDGE_STAMP_RE)
@@ -106,6 +108,8 @@ class SpokenTextProjector:
         # dropped if the reply ends with them.
         self._held = ""
         self._events = []
+        # The last step, as in batch: links and addresses as spoken (#461).
+        self._links = LinkSpeaker()
 
     # ── public ──────────────────────────────────────────────────────────
     def feed(self, text):
@@ -116,12 +120,30 @@ class SpokenTextProjector:
     def close(self):
         self._process(final=True)
         self._held = ""
-        return self._take()
+        return self._take(final=True)
 
     # ── output ──────────────────────────────────────────────────────────
-    def _take(self):
+    def _take(self, final=False):
         events, self._events = self._events, []
-        return events
+        out = []
+
+        def add_text(text):
+            if not text:
+                return
+            if out and out[-1][0] == "text":
+                out[-1] = ("text", out[-1][1] + text)
+            else:
+                out.append(("text", text))
+
+        for kind, value in events:
+            if kind == "text":
+                add_text(self._links.feed(value))
+            else:
+                add_text(self._links.end_line())
+                out.append(("heading", self._links.heading(value)))
+        if final:
+            add_text(self._links.close())
+        return out
 
     def _emit_text(self, text):
         if not text:

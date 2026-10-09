@@ -245,7 +245,7 @@ def test_collect_anthropic_succeeded(monkeypatch):
     assert results["profile:1:0:1:chunk"] == {
         "content": "PROFILE TEXT", "input_tokens": 100, "output_tokens": 50,
         "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0,
-        "truncated": False, "batch": True}
+        "truncated": False, "refused": False, "batch": True}
     assert durations["anthropic"] == 120.0
 
 
@@ -285,7 +285,7 @@ def test_collect_openai_completed(monkeypatch):
     assert results["profile:2:0:1:chunk"] == {
         "content": "P", "input_tokens": 100, "output_tokens": 50,
         "cached_tokens": 0, "cache_write_subset_tokens": 0,
-        "truncated": False, "batch": True}
+        "truncated": False, "refused": False, "batch": True}
     assert durations["openai:gpt-x"] == 120.0
 
 
@@ -338,7 +338,7 @@ def test_collect_openai_reads_chat_completions_cache_details(monkeypatch):
     assert results["c2"] == {
         "content": "P", "input_tokens": 6018, "output_tokens": 50,
         "cached_tokens": 2815, "cache_write_subset_tokens": 3000,
-        "truncated": False, "batch": True}
+        "truncated": False, "refused": False, "batch": True}
 
 
 def test_collect_marks_cut_off_results_truncated(monkeypatch):

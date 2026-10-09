@@ -181,10 +181,13 @@ final class AppState {
         await loadUser()
     }
 
-    /// `GET /api/dashboard/`, the app's "who am I" call (web `UserContext`).
+    /// `GET /api/dashboard/?profile=0`, the app's "who am I" call (web `UserContext`).
+    /// Only `user` is read here, so the server leaves out the profile and decrypts
+    /// nothing (#481); the Profile page asks for the profile itself.
     func loadUser() async {
         do {
-            let dashboard: DashboardResponse = try await api.get(APIPath.dashboard)
+            let dashboard: DashboardResponse = try await api.get(
+                APIPath.dashboard, query: [URLQueryItem(name: "profile", value: "0")])
             didLoad(dashboard.user)
         } catch APIError.unauthorized {
             await signOutLocally()
