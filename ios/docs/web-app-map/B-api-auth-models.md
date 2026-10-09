@@ -1194,21 +1194,6 @@ CurrentUser = {
   "external_content_enabled": bool     // user opt-in: AI may search saved references
 }
 
-DashboardNodeCard = {                  // _serialize_node_for_list; only GET /api/dashboard/<username> sends cards
-  "id": int,                           // display node id: for a system-prompt root, its FIRST child
-  "preview": string,                   // first 200 chars + "..." if longer
-  "node_type": string,                 // "user" | "llm" | ... (see Node model section)
-  "child_count": int,                  // len(node.children) of the ROOT row (includes soft-deleted children)
-  "created_at": iso,
-  "pinned_at": iso | null,
-  "username": string,                  // author; "Unknown" if missing
-  "human_owner_username": string | null, // for llm nodes: the human the AI node belongs to
-  "llm_model": string | null,
-  "origin": string | null,             // import/source origin marker; null = native Loore
-  "has_original_audio": bool,          // recorded audio exists (audio_original_url or streaming transcription)
-  "prompt_key": string | null          // set when the root is a system-prompt root
-}
-
 LatestProfile = {                      // newest UserProfile row (including pipeline intermediates)
   "id": int,
   "content": string,                   // full Markdown profile text (can be long)
@@ -1223,15 +1208,7 @@ LatestProfile = {                      // newest UserProfile row (including pipe
 }
 ```
 - Errors: 401 unauthenticated. No other error paths.
-- Notes: Until #481 the response also carried the user's thread cards (`pinned_nodes`, `nodes`, `has_more`, `page`, `total_nodes`). No client read them (the home list comes from `GET /api/log`), and each card's preview was a decryption on every call, so they were dropped. A native app can use it as `GET /me`. The web app calls `/api/dashboard` (no slash) and follows the 308.
-
-##### `GET /api/dashboard/<username>`
-- Backend: routes/dashboard.py:get_public_dashboard
-- Auth: login_required; GET is exempt from approval gating.
-- Called from: nobody (the web route `/dashboard/:username` now redirects client-side to the public profile page).
-- Request: query `page` (int, default 1), `per_page` (int, default 20, max 100).
-- Response 200: `{"user": {"id", "username", "description"}, "pinned_nodes": [DashboardNodeCard], "nodes": [DashboardNodeCard], "has_more": bool, "page": int, "total_nodes": int, "latest_profile": LatestProfile | null}`. `pinned_nodes`: nodes pinned by this user, newest pin first, not paginated; `nodes`: this user's top-level nodes, newest first, paginated; both filtered to those the viewer can access. `latest_profile` is null unless the viewer is the user. Not used by the frontend.
-- Errors: 404 (HTML 404 from `first_or_404`) for an unknown username.
+- Notes: Until #481 the response also carried the user's thread cards (`pinned_nodes`, `nodes`, `has_more`, `page`, `total_nodes`). No client read them (the home list comes from `GET /api/log`), and each card's preview was a decryption on every call, so they were dropped. `GET /api/dashboard/<username>`, the old public dashboard with the same cards, was removed with them: nothing called it. A native app can use it as `GET /me`. The web app calls `/api/dashboard` (no slash) and follows the 308.
 
 ##### `PUT /api/dashboard/user`
 - Backend: routes/dashboard.py:update_user
@@ -1730,7 +1707,6 @@ PollResponse = { "status": "drafting" | "draft" | "draft_failed" | "sent" | "dec
 
 | Route | Note |
 |---|---|
-| `GET /api/dashboard/<username>` | Old public dashboard; web route now redirects. |
 | `GET /api/profile/<id>/tts-status` | Superseded by SSE `/api/sse/profiles/<id>/tts-stream`; usable as a polling fallback. |
 | `GET /api/artifacts/<kind>` | Web uses the list endpoint; handy for native single-artifact loads. |
 | `GET /health`, `GET /ready`, `GET /api/health`, `GET /api/ready` | Monitoring only. |
@@ -2380,7 +2356,7 @@ The backend has no shared serializer layer: each route builds its own dict, so t
 
 ### 5.2 Entities, relations and where their shapes live
 
-**User (current user).** From `GET /api/dashboard/` → `user` (29 keys: identity, `approved`, `terms_up_to_date`, `is_admin`, `plan`, `voice_mode_enabled`, `craft_mode`, `preferred_model`, defaults `default_privacy_level`/`default_ai_usage`, X link state, email + `pending_email`/`pending_email_expired`, `prefill_consent`, `timezone`, `spend_blocked`, share/external-content flags, profile-build state). Full shape: §2.4.1, "CurrentUser". Other users appear only as `username` strings (plus `user_id` ints) inside nodes; there is no public user object for the app except `GET /api/dashboard/<username>` (unused, returns another user's profile text) and public pages.
+**User (current user).** From `GET /api/dashboard/` → `user` (29 keys: identity, `approved`, `terms_up_to_date`, `is_admin`, `plan`, `voice_mode_enabled`, `craft_mode`, `preferred_model`, defaults `default_privacy_level`/`default_ai_usage`, X link state, email + `pending_email`/`pending_email_expired`, `prefill_consent`, `timezone`, `spend_blocked`, share/external-content flags, profile-build state). Full shape: §2.4.1, "CurrentUser". Other users appear only as `username` strings (plus `user_id` ints) inside nodes; there is no public user object for the app except public pages.
 
 **Node.** The core entity: every entry, reply and AI reply. A **thread** is a root node (`parent_id == null`) and its descendants. Relations:
 - `parent_id` / `children`: a tree. `GET /api/nodes/<id>` returns the focal node, its `ancestors` (root first, privacy-blocked ones omitted) and the **entire** subtree under it as nested `children` (no pagination, sorted by `descendant_count` desc).
@@ -2392,7 +2368,7 @@ The backend has no shared serializer layer: each route builds its own dict, so t
 - Other: `pinned_at`, `permalink` (public roots with a slug), `origin`, `privacy_level`, `ai_usage`, `reply_ai_usage`, `created_at`, `updated_at`. Soft-deleted nodes appear as tombstones `{id, deleted: true, deleted_at, username, node_type, created_at, …}` when they still have visible descendants.
 - Content markers the client must render: `{quote:<nodeId>}` and `{quote_ext:<itemId>}` (resolve with `GET /api/nodes/<id>/resolve-quotes`), links to `https://loore.org/node/<id>` (titles via `GET /api/nodes/titles?ids=`), fenced `:::share <type>` … `:::` blocks and `### <Section>` proposal headings in AI replies (§5.3). Content is Markdown.
 - Versions: edits store the previous text in `NodeVersion`, but **no endpoint exposes node versions** (only data export includes them).
-- Shapes: §2.2.0 A (`NodeDetail`), B (`AncestorNode`), C (`TreeNode`), D (create/upload); list cards: `LogCard` (§2.4.7), `DashboardNodeCard` (§2.4.1), `PublicNode` (§2.5.5), quote payloads (§2.2.2). Char cap 100 000 per node (create auto-splits into a chain and returns `split_into`, `tip_id`; edit returns 422).
+- Shapes: §2.2.0 A (`NodeDetail`), B (`AncestorNode`), C (`TreeNode`), D (create/upload); list cards: `LogCard` (§2.4.7), `PublicNode` (§2.5.5), quote payloads (§2.2.2). Char cap 100 000 per node (create auto-splits into a chain and returns `split_into`, `tip_id`; edit returns 422).
 
 **Thread name.** `thread_name` on `LogCard`; set via `PUT /api/nodes/<root>/thread-name`. Stored in a separate `Thread` table keyed by the root node.
 

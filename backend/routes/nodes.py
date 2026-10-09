@@ -3107,7 +3107,7 @@ def get_streaming_status(node_id):
 @nodes_bp.route("/<int:node_id>/pin", methods=["POST"])
 @login_required
 def pin_node(node_id):
-    """Pin a node to the current user's profile (Dashboard + Log)."""
+    """Pin a node to the current user's Log."""
     node = Node.query.get_or_404(node_id)
 
     owner_id = node.human_owner_id or node.user_id
