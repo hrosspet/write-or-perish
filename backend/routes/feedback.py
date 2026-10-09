@@ -1,8 +1,10 @@
 from flask import Blueprint, jsonify, request
 from flask_login import login_required, current_user
-from backend.models import Node, Draft
+from backend.models import Node
 from backend.extensions import db
 from backend.utils.feedback import submit_feedback_from_node
+from backend.utils.privacy import can_user_access_node
+from backend.utils.proposals import find_own_pending_proposal
 from backend.utils.tool_meta import update_tool_meta
 
 feedback_bp = Blueprint("feedback", __name__)
@@ -16,7 +18,10 @@ def submit():
     Mirrors /github/create-issue: the feedback text lives in the visible
     LLM node content (under ### Feedback); this confirms + persists it only
     when the user clicks Send. The user is the gate — feedback is never sent
-    without this explicit action (or the equivalent apply_feedback tool)."""
+    without this explicit action (or the equivalent apply_feedback tool).
+
+    404 unless the node, or the nearest node above it with a pending
+    feedback draft, is the user's own live feedback proposal."""
     data = request.get_json() or {}
     llm_node_id = data.get("llm_node_id")
 
@@ -24,33 +29,15 @@ def submit():
         return jsonify({"error": "llm_node_id is required"}), 400
 
     llm_node = Node.query.get(llm_node_id)
-    if not llm_node:
+    if not llm_node or not can_user_access_node(llm_node, current_user.id):
         return jsonify({"error": "Node not found"}), 404
 
-    # Find the pending draft by walking the ancestor chain.
-    draft = None
-    current_node = llm_node
-    visited = set()
-    while current_node and current_node.id not in visited:
-        visited.add(current_node.id)
-        draft = Draft.query.filter_by(
-            user_id=current_user.id,
-            parent_id=current_node.id,
-            label='feedback_pending',
-        ).first()
-        if draft:
-            break
-        current_node = current_node.parent
-
+    # The pending proposal at or above the node, walking up its ancestors:
+    # only the user's own live proposal (utils/proposals).
+    draft, origin_node = find_own_pending_proposal(
+        llm_node, current_user.id, 'feedback_pending')
     if not draft:
         return jsonify({"error": "No pending feedback found"}), 404
-
-    if draft.user_id != current_user.id:
-        return jsonify({"error": "Unauthorized"}), 403
-
-    origin_node = Node.query.get(draft.parent_id)
-    if not origin_node:
-        return jsonify({"error": "Origin node not found"}), 404
 
     feedback, err = submit_feedback_from_node(origin_node, current_user.id)
     if err:
