@@ -254,13 +254,15 @@ def resolve_chat_model(parent_node, user, chain=None):
 
 
 def glean_provider(anchor_node, user, chain=None):
-    """The provider a glean under *anchor_node* for *user* must stay on:
-    the provider of the user's own conversation there — the closest chat
-    reply in the thread that was made FOR this user (their own AI reply:
-    human owner == user), else the user's preference, else the default.
-    Replies made for someone else (another user's AI reply higher up a
-    public thread) never count. A user's provider is never switched, not
-    even for a read (Peter, 2026-10-02 and 2026-10-09)."""
+    """The provider of a glean's DEFAULT model under *anchor_node* for
+    *user*: the provider of the user's own conversation there — the
+    closest chat reply in the thread that was made FOR this user (their
+    own AI reply: human owner == user), else their account model, else
+    the server default. Replies made for someone else (another user's AI
+    reply higher up a public thread) never count. Loore never moves a
+    user to another provider on its own, not even for a read (Peter,
+    2026-10-02 and 2026-10-09); the user may pick another provider's
+    model in the Glean picker (glean.may_choose_glean_model)."""
     from backend.utils.glean import model_provider
     supported = current_app.config.get("SUPPORTED_MODELS", {})
     chain = chain or _Chain(anchor_node)
@@ -286,16 +288,21 @@ def resolve_read_model(anchor_node, chain=None, user=None):
     in between are skipped, so a conversation held on Opus never carries
     into the next read. There is no per-user read preference (#355).
 
-    With *user* (every glean, #435) the read stays on the provider of the
-    user's chat model (glean_provider) and the server chooses: for a
-    non-admin always that provider's glean model (GLEAN_MODEL_ANTHROPIC /
-    GLEAN_MODEL_OPENAI, "provider_default"), whatever an earlier read ran
-    on; for an admin an earlier read of the same provider first. Raises
-    GleanModelUnavailable when the provider can't be resolved or has no
-    glean model: never another provider's, never READ_DEFAULT_MODEL.
-    Without a user, READ_DEFAULT_MODEL ("default")."""
+    With *user* (every glean, #435; also the Glean picker's default) the
+    default stays on the provider of the user's chat model
+    (glean_provider): an earlier read of the user's own in the thread on
+    that provider ("predecessor", so "glean again" keeps a model the user
+    picked there), else that provider's glean model
+    (GLEAN_MODEL_ANTHROPIC / GLEAN_MODEL_OPENAI, "provider_default"). A
+    read on another provider, picked by the user, is never the default.
+    Only a user who may choose the model (glean.may_choose_glean_model)
+    gets the predecessor; anyone else always the provider's glean model.
+    Raises GleanModelUnavailable when the provider can't be resolved or
+    has no glean model: never another provider's, never
+    READ_DEFAULT_MODEL. Without a user, READ_DEFAULT_MODEL ("default")."""
     from backend.utils.glean import (
-        GleanModelUnavailable, glean_model_for_provider, model_provider,
+        GleanModelUnavailable, glean_model_for_provider,
+        may_choose_glean_model, model_provider,
     )
     chain = chain or _Chain(anchor_node)
     if user is None:
@@ -309,9 +316,12 @@ def resolve_read_model(anchor_node, chain=None, user=None):
     provider = glean_provider(anchor_node, user, chain=chain)
     if not provider:
         raise GleanModelUnavailable(provider)
-    if getattr(user, "is_admin", False) is True:
+    if may_choose_glean_model(user):
         for node in chain.llm_replies():
-            if node.id not in chain.reads:
+            # The user's own earlier read only: a read made for someone
+            # else higher up a public thread is not their choice.
+            if (node.id not in chain.reads
+                    or (node.human_owner_id or node.user_id) != user.id):
                 continue
             if (is_read_model(node.llm_model)
                     and model_provider(node.llm_model) == provider):
@@ -456,18 +466,19 @@ def voice_turn_refusal(user, parent_node=None, ai_usage=None):
 
 
 def _read_turn_model(parent, owner, model_id, chain):
-    """The model a read turn under *parent* runs on (#435): an admin's
-    named read model as named (their own evaluations, any provider);
-    for everyone else the server's choice, resolve_read_model for the
-    owner — a read model of their own provider, whatever model the
-    request carried."""
-    from backend.utils.glean import model_provider
-    # The admin's choice holds only for a reply of their own under a node
-    # of their own: an admin never picks a model for someone else.
+    """The model a read turn under *parent* runs on (#435): the read model
+    the request named, when the owner may choose it (an admin or anyone
+    who gleans, glean.may_choose_glean_model; any read model, another
+    provider's too: the user's own choice); otherwise, or when the named
+    model is not a read model, the default, resolve_read_model for the
+    owner — a read model of their own provider."""
+    from backend.utils.glean import may_choose_glean_model, model_provider
+    # The choice holds only for a reply of the owner's own under a node of
+    # their own: nobody picks a model for someone else's thread.
     owns_parent = owner is not None and (
         (parent.human_owner_id or parent.user_id) == owner.id)
-    if (getattr(owner, "is_admin", False) is True and owns_parent
-            and is_read_model(model_id)):
+    if (owns_parent and is_read_model(model_id)
+            and may_choose_glean_model(owner)):
         return model_id
     new_model_id = resolve_read_model(parent, chain=chain, user=owner)[0]
     if new_model_id != model_id:
@@ -503,9 +514,9 @@ def create_llm_placeholder(parent_node_id, model_id, human_owner_id,
     A reply that is a read (a glean, #435) is a live call: it gets the
     READ_LIVE_MARKER, which the task reads, unless *read_live* is False
     (the admin's /read/start experiments, which go through the Batch
-    API). It runs on the read model the server chooses for the owner, of
-    their own provider (an admin's named read model excepted,
-    _read_turn_model), never another provider's.
+    API). It runs on the read model the owner named when they may choose
+    one (an admin or anyone who gleans; another provider's too), else on
+    the default read model of their own provider (_read_turn_model).
 
     *client* ('ios' / 'web', utils/client_platform) is the app the user
     is talking from. It defaults to the current request's; a caller with

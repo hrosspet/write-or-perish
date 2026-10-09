@@ -1695,10 +1695,10 @@ class TestGleanIsLiveOnTheUsersProvider:
         assert Node.query.get(data["llm_node_id"]).llm_model == "claude-sonnet-5.5"
 
     @pytest.mark.parametrize("named", ["gpt-6-luna", "claude-sonnet-5.5"])
-    def test_the_server_chooses_a_users_model(self, app_glean, named):
-        """A model a non-admin's request names is ignored, another
-        provider's or a pricier one of their own: the glean runs on their
-        provider's glean model."""
+    def test_a_user_who_gleans_names_the_model(self, app_glean, named):
+        """Peter, 2026-10-09: everyone on Glean picks from the same read
+        models as admins. An Anthropic user's pick runs as picked, another
+        provider's model or a pricier one of their own."""
         app_glean.config["SUPPORTED_MODELS"] = {
             **MODELS_GLEAN,
             "claude-sonnet-5.5": {"provider": "anthropic", "display_name": "Sonnet 5.5",
@@ -1707,7 +1707,89 @@ class TestGleanIsLiveOnTheUsersProvider:
         client, _, entry = self._entry(app_glean, preferred_model="claude-opus-4.6")
         resp = client.post(f"/api/read/from-node/{entry.id}", json={"model": named})
         assert resp.status_code == 202, resp.get_json()
-        assert Node.query.get(resp.get_json()["llm_node_id"]).llm_model == "claude-haiku-5.5"
+        assert Node.query.get(resp.get_json()["llm_node_id"]).llm_model == named
+
+    def test_a_named_model_must_be_a_read_model(self, app_glean):
+        client, _, entry = self._entry(app_glean, preferred_model="claude-opus-4.6")
+        before = Node.query.count()
+        resp = client.post(f"/api/read/from-node/{entry.id}",
+                           json={"model": "claude-opus-4.6"})
+        assert resp.status_code == 400
+        assert "Haiku 5.5" in resp.get_json()["error"]
+        assert Node.query.count() == before
+
+    def test_glean_again_on_the_named_model(self, app_glean):
+        """A second glean in the thread runs on the model named for it,
+        another provider's too."""
+        client, _, entry = self._entry(app_glean, preferred_model="claude-opus-4.6")
+        first = client.post(f"/api/read/from-node/{entry.id}", json={}).get_json()
+        reply = Node.query.get(first["llm_node_id"])
+        assert reply.llm_model == "claude-haiku-5.5"
+        reply.llm_task_status = "completed"
+        _db.session.commit()
+        resp = client.post(f"/api/read/from-node/{reply.id}",
+                           json={"model": "gpt-6-luna"})
+        assert resp.status_code == 202, resp.get_json()
+        again = Node.query.get(resp.get_json()["llm_node_id"])
+        assert (again.parent_id, again.llm_model) == (reply.id, "gpt-6-luna")
+
+    @pytest.mark.parametrize("who", ["outside the gate", "switch off"])
+    def test_without_glean_a_named_model_is_refused(self, app_glean, who):
+        """A user who may not glean can't name a model either: the glean is
+        refused before anything is created, and the model choice is not
+        theirs anywhere else (may_choose_glean_model)."""
+        from backend.utils.glean import may_choose_glean_model
+        client = app_glean.test_client()
+        if who == "outside the gate":
+            ana = _make_user("ana", glean_enabled=True)  # not on GLEAN_USER_IDS
+        else:
+            ana = _glean_user(app_glean, glean_enabled=False)
+        entry = _make_node(ana, content="a reflection")
+        _db.session.commit()
+        _login(client, ana.id)
+        before = Node.query.count()
+        resp = client.post(f"/api/read/from-node/{entry.id}",
+                           json={"model": "gpt-6-luna"})
+        assert resp.status_code == 403
+        assert Node.query.count() == before
+        assert may_choose_glean_model(ana) is False
+
+    def test_who_may_choose_the_model(self, app_glean):
+        from backend.utils.glean import may_choose_glean_model
+        boss = _make_user("boss", is_admin=True, glean_enabled=False)
+        ana = _glean_user(app_glean, glean_enabled=True)
+        assert may_choose_glean_model(boss) is True
+        assert may_choose_glean_model(ana) is True
+        assert may_choose_glean_model(None) is False
+
+    @pytest.mark.parametrize("account_model,expected", [
+        ("claude-opus-4.6", "claude-haiku-5.5"),
+        ("gpt-6-sol", "gpt-6-luna"),
+    ])
+    def test_the_pickers_default_follows_the_account_models_provider(
+            self, app_glean, account_model, expected):
+        """The Glean picker's default (and a glean with no model named) is
+        the glean model of the provider the user's own model is from:
+        Loore's default never crosses providers."""
+        client, _, entry = self._entry(app_glean, preferred_model=account_model)
+        resp = client.get(f"/api/nodes/{entry.id}/suggested-model?purpose=read")
+        assert resp.get_json() == {"suggested_model": expected,
+                                   "source": "provider_default"}
+        resp = client.get("/api/nodes/default-model?purpose=read")
+        assert resp.get_json()["suggested_model"] == expected
+        data = client.post(f"/api/read/from-node/{entry.id}", json={}).get_json()
+        assert Node.query.get(data["llm_node_id"]).llm_model == expected
+
+    def test_another_users_node_is_refused_with_a_named_model(self, app_glean):
+        client, _, _ = self._entry(app_glean)
+        bob = _glean_user(app_glean, "bob", glean_enabled=True)
+        bobs = _make_node(bob, content="bob's reflection")
+        _db.session.commit()
+        before = Node.query.count()
+        resp = client.post(f"/api/read/from-node/{bobs.id}",
+                           json={"model": "gpt-6-luna"})
+        assert resp.status_code == 403
+        assert Node.query.count() == before
 
     def test_an_admin_may_for_an_evaluation(self, app_glean):
         client = app_glean.test_client()
@@ -1719,15 +1801,20 @@ class TestGleanIsLiveOnTheUsersProvider:
                            json={"model": "gpt-6-luna"}).get_json()
         assert Node.query.get(data["llm_node_id"]).llm_model == "gpt-6-luna"
 
-    def test_a_reply_under_the_glean_prompt_stays_on_the_users_provider(self, app_glean):
-        """A read reached another way (LLM Response under the prompt with a
-        picker that offered an OpenAI model) runs on the user's provider."""
+    def test_a_reply_under_the_glean_prompt(self, app_glean):
+        """A read reached another way (a reply asked for under the prompt):
+        a chat model sent with it gives way to the default of the user's
+        provider; a read model the user names is used, another
+        provider's too."""
         from backend.utils.llm_nodes import create_llm_placeholder
         ana = _glean_user(app_glean, glean_enabled=True, preferred_model="claude-opus-4.6")
         prompt = _make_prompt_node(ana, "read_thread")
+        other = _make_prompt_node(ana, "read_thread")
         _db.session.commit()
-        node, _ = create_llm_placeholder(prompt.id, "gpt-6-luna", ana.id)
+        node, _ = create_llm_placeholder(prompt.id, "claude-opus-4.6", ana.id)
         assert node.llm_model == "claude-haiku-5.5"
+        node, _ = create_llm_placeholder(other.id, "gpt-6-luna", ana.id)
+        assert node.llm_model == "gpt-6-luna"
 
     def test_rerun_is_admin_only(self, app_glean):
         client, ana, entry = self._entry(app_glean)
@@ -2008,10 +2095,12 @@ class TestGleanModelFailsClosed:
         with pytest.raises(GleanModelUnavailable):
             resolve_read_model(entry, user=ana)
 
-    def test_a_non_admin_never_reuses_a_stored_read_model(self, app_glean):
-        """An earlier read in the thread on another read model of the same
-        provider is not reused for a non-admin: the configured glean model
-        is."""
+    def test_the_default_keeps_the_users_own_earlier_read_of_that_provider(self, app_glean):
+        """As the admin picker did before (#435): an earlier read of the
+        user's own in the thread, on the default's provider, is the
+        default ("glean again" keeps a model picked there). Without the
+        choice (Glean switched off) it is always the provider's glean
+        model."""
         from backend.utils.llm_nodes import resolve_read_model
         app_glean.config["SUPPORTED_MODELS"] = {
             **MODELS_GLEAN,
@@ -2020,20 +2109,53 @@ class TestGleanModelFailsClosed:
         }
         ana = _glean_user(app_glean, glean_enabled=True, preferred_model="gpt-6-sol")
         t = _read_thread(ana, read_model="gpt-6.1-sol", chat_model="gpt-6-sol")
-        assert resolve_read_model(t["note2"], user=ana) == ("gpt-6-luna", "provider_default")
+        assert resolve_read_model(t["note2"], user=ana) == ("gpt-6.1-sol", "predecessor")
         boss = _make_user("boss", is_admin=True, preferred_model="gpt-6-sol")
         b = _read_thread(boss, read_model="gpt-6.1-sol", chat_model="gpt-6-sol")
         assert resolve_read_model(b["note2"], user=boss) == ("gpt-6.1-sol", "predecessor")
+        ana.glean_enabled = False
+        _db.session.commit()
+        assert resolve_read_model(t["note2"], user=ana) == ("gpt-6-luna", "provider_default")
 
-    def test_an_admin_never_names_the_model_under_someone_elses_node(self, app_glean):
-        """The admin exception holds only under a node of the admin's own."""
+    def test_a_pick_on_another_provider_is_never_the_default(self, app_glean):
+        """Ana's conversation is on Anthropic; she gleaned once on GPT-6
+        Luna. The next default is Haiku 5.5 again."""
+        from backend.utils.llm_nodes import resolve_read_model
+        ana = _glean_user(app_glean, glean_enabled=True, preferred_model="claude-opus-4.6")
+        t = _read_thread(ana, read_model="gpt-6-luna", chat_model="claude-opus-4.6")
+        assert resolve_read_model(t["note2"], user=ana) == (
+            "claude-haiku-5.5", "provider_default")
+
+    def test_someone_elses_earlier_read_is_not_the_default(self, app_glean):
+        """A read made for Alice higher up the thread is not Bob's choice."""
+        from backend.utils.llm_nodes import resolve_read_model
+        app_glean.config["SUPPORTED_MODELS"] = {
+            **MODELS_GLEAN,
+            "gpt-6.1-sol": {"provider": "openai", "display_name": "GPT-6.1 Sol",
+                            "read": True, "chat": False},
+        }
+        alice = _glean_user(app_glean, "alice", glean_enabled=True, preferred_model="gpt-6-sol")
+        t = _read_thread(alice, read_model="gpt-6.1-sol", chat_model="gpt-6-sol")
+        bob = _glean_user(app_glean, "bob", glean_enabled=True, preferred_model="gpt-6-sol")
+        note = _make_node(bob, parent_id=t["note2"].id, content="mine")
+        _db.session.commit()
+        assert resolve_read_model(note, user=bob) == ("gpt-6-luna", "provider_default")
+
+    @pytest.mark.parametrize("chooser", ["admin", "glean user"])
+    def test_nobody_names_the_model_under_someone_elses_node(self, app_glean, chooser):
+        """The choice holds only under a node of the user's own, for admins
+        and everyone who gleans."""
         from backend.utils.llm_nodes import create_llm_placeholder
         ana = _glean_user(app_glean, glean_enabled=True)
         prompt = _make_prompt_node(ana, "read_thread")
-        boss = _make_user("boss", is_admin=True, preferred_model="claude-opus-4.6")
+        if chooser == "admin":
+            boss = _make_user("boss", is_admin=True, preferred_model="claude-opus-4.6")
+        else:
+            boss = _glean_user(app_glean, "bob", glean_enabled=True,
+                               preferred_model="claude-opus-4.6")
         _db.session.commit()
-        node, _ = create_llm_placeholder(prompt.id, "gpt-6-luna", boss.id)
-        assert node.llm_model == "claude-haiku-5.5"
+        from backend.utils.llm_nodes import _Chain, _read_turn_model
+        assert _read_turn_model(prompt, boss, "gpt-6-luna", _Chain(prompt)) == "claude-haiku-5.5"
         own = _make_prompt_node(boss, "read_thread")
         _db.session.commit()
         node, _ = create_llm_placeholder(own.id, "gpt-6-luna", boss.id)

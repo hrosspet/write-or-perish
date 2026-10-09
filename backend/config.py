@@ -49,10 +49,12 @@ class Config:
         os.environ.get("GLEAN_USER_IDS", "").replace(" ", "").split(",")
         if x
     }
-    # The read model a glean runs on, by the provider of the user's chat
-    # model: a user's provider is never switched, not even as a fallback
-    # (Peter, 2026-10-02), so an Anthropic user gleans on an Anthropic
-    # model and an OpenAI user on an OpenAI one. Settings, so an
+    # The read model a glean runs on by default, by the provider of the
+    # user's chat model: Loore never moves a user to another provider on
+    # its own, not even as a fallback (Peter, 2026-10-02), so an
+    # Anthropic user's default is an Anthropic model and an OpenAI
+    # user's an OpenAI one. The user may pick another read model, another
+    # provider's too, in the Glean picker (Peter, 2026-10-09). Settings, so an
     # evaluation can change them without a code change. Defaults: Haiku
     # 5.5 for Anthropic (Peter, 2026-10-09), GPT-6 Luna for OpenAI. Each
     # must be an active "read" model of that provider (checked at boot,

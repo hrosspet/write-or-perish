@@ -12,7 +12,9 @@ Three entry points:
                                   through the Batch API; honours
                                   auto_generate like /textmode/start
   POST /api/read/from-node/<id>   a glean, for every user who gleans (the
-                                  rollout gate and their own switch): the
+                                  rollout gate and their own switch), on
+                                  the read model they pick or the default
+                                  of their own provider: the
                                   'read_thread' prompt attached under an
                                   existing node, so the archive is read
                                   against the conversation above it; inside
@@ -82,19 +84,22 @@ READ_PRIVACY = 'private'
 
 
 def _resolve_model(anchor_node):
-    """A read runs only on a read model (#355) of the provider the user's
-    chat model is from (#435: a user's provider is never switched): the
-    thread's last read's while it is on that provider, else the
-    provider's glean model (GLEAN_MODEL_*). Never the chat default: a
-    conversation on Opus does not carry into a read. The server chooses:
-    only an admin may name a model (any read model, for their own
-    evaluations); a model a non-admin's request names is ignored."""
-    from backend.utils.glean import GleanModelUnavailable
+    """A read runs only on a read model (#355). The model the request
+    names, when the user may choose one: an admin, or anyone who gleans
+    (Peter, 2026-10-09: everyone on Glean picks from the same read models
+    as admins, other providers' included); it must be a read model.
+    Otherwise, or with no model named, the default: a read model of the
+    provider the user's chat model is from (#435: Loore never moves a
+    user to another provider on its own) — the user's earlier read of
+    that provider in the thread, else the provider's glean model
+    (GLEAN_MODEL_*). Never the chat default: a conversation on Opus does
+    not carry into a read. A model named by a user who may not choose is
+    ignored."""
+    from backend.utils.glean import GleanModelUnavailable, may_choose_glean_model
     data = request.get_json(silent=True) or {}
-    # The role of this request's user (Flask-Login loads it per request);
-    # anything but an explicit admin gets the server's choice.
-    model_id = data.get("model") if getattr(
-        current_user, "is_admin", False) is True else None
+    # The request's user (Flask-Login loads it per request).
+    model_id = data.get("model") if may_choose_glean_model(
+        current_user) else None
     if not model_id:
         try:
             return resolve_read_model(anchor_node, user=current_user)[0], None

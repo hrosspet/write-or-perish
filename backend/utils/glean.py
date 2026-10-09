@@ -25,9 +25,11 @@ this reflection" in the entry's menu instead.
 
 A glean is always a live call, never the Batch API (READ_LIVE_MARKER on
 its placeholder, set by create_llm_placeholder for every read turn
-except the admin's /read/start experiments). It runs on a read model of
-the provider the user's chat model is from, never another provider's
-(GLEAN_MODEL_ANTHROPIC / GLEAN_MODEL_OPENAI).
+except the admin's /read/start experiments). By default it runs on the
+glean model of the provider the user's chat model is from
+(GLEAN_MODEL_ANTHROPIC / GLEAN_MODEL_OPENAI): Loore never moves a user to
+another provider on its own. The user may pick another read model in the
+picker beside Glean, another provider's too (may_choose_glean_model).
 """
 from flask import current_app
 
@@ -117,6 +119,20 @@ def glean_enabled(user):
     if choice is not None:
         return bool(choice)
     return glean_default_on(user)
+
+
+def may_choose_glean_model(user):
+    """Whether *user* may name the model a glean runs on: an admin, or
+    anyone who gleans (Peter, 2026-10-09: while Glean is tested,
+    everyone on it picks from the same models as admins, other
+    providers' included). The choice is the user's; Loore's default
+    never crosses providers (resolve_read_model). Only under the user's
+    own node (llm_nodes._read_turn_model)."""
+    if user is None:
+        return False
+    if getattr(user, "is_admin", False) is True:
+        return True
+    return glean_enabled(user)
 
 
 def is_glean_prompt_node(node, user):
