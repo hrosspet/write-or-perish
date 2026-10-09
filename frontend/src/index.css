@@ -275,6 +275,34 @@ code {
   opacity: 1;
 }
 
+/* The Voice / Text buttons of the home page's purpose cards (#436). */
+.home-purpose-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 40px;
+  padding: 8px 16px;
+  border: 1px solid var(--border-hover);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-primary);
+  font-family: var(--sans);
+  font-size: 0.88rem;
+  font-weight: 300;
+  cursor: pointer;
+  transition: color 0.15s ease, border-color 0.15s ease;
+}
+.home-purpose-btn:hover,
+.home-purpose-btn:focus-visible {
+  background: transparent;
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.home-purpose-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 /* The quoted reference / tweet card (ExternalQuoteBubble, #435): byline,
    text, then one row of actions. For the reference's owner the card
    itself opens the reference page in Loore; the actions do only their
