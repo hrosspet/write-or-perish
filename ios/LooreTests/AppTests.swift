@@ -233,3 +233,20 @@ final class TermsTextTests: XCTestCase {
         }
     }
 }
+
+/// The app's "who am I" call (`AppState.loadUser`, at launch and after an X login or
+/// an import) reads only `user`, so it asks the server to leave out the profile and
+/// its decryption (#481). The Profile page asks for the profile itself.
+@MainActor
+final class UserLoadTests: StubbedAppTestCase {
+    func testLoadingTheUserAsksForNoProfile() async throws {
+        StubURLProtocol.install { _ in .json(200, #"{"user":\#(Self.userJSON)}"#) }
+        await app.loadUser()
+        let load = try XCTUnwrap(StubURLProtocol.requests.first {
+            $0.httpMethod == "GET" && $0.url?.path(percentEncoded: true) == "/api/dashboard/"
+        })
+        let query = URLComponents(url: try XCTUnwrap(load.url), resolvingAgainstBaseURL: false)?.queryItems
+        XCTAssertEqual(query, [URLQueryItem(name: "profile", value: "0")])
+        XCTAssertEqual(app.user?.username, "seowriter")
+    }
+}
