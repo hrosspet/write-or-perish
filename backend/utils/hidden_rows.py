@@ -19,6 +19,14 @@ and the rows show again; the purge deletes the rows.
 The purge, the restore and the counts read the hidden rows through
 ``including_hidden_rows()``. Writes (UPDATE, DELETE) are never filtered.
 
+Not filtered, so a new query written this way sees hidden rows (and an
+ORM backfill written the other way skips them): a hidden table that
+appears only in a join or an IN / correlated subquery under another
+top-level entity, a Core ``Table`` select or raw SQL, an object already
+in the session's identity map, and UPDATE / DELETE. Select the model (or
+one of its columns) at the top, filter on ``hidden_ids`` yourself, or
+run a script that must see every row inside ``including_hidden_rows()``.
+
 A table with a unique key on the user's rows needs the hidden row out of
 the way when the user saves the same thing again during the grace
 period: ``reclaim_*`` below.
