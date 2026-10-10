@@ -2541,8 +2541,8 @@ CA_BATCH_LIVE_STATUSES = ("submitted", "cancelling")
 # A Read whose owner's "Delete all my writing" waited or ran (#268): it did
 # not run, or its result was dropped. Shown on the node after a restore,
 # as the reason of a failed gleaning: users know the read as Glean (#435).
-READ_ON_HOLD_TEXT = ("Glean did not run: your writing was waiting to be "
-                     "deleted.")
+READ_ON_HOLD_TEXT = ("Glean did not run: your writing was deleted. You "
+                     "can restore it on the Account page.")
 # What a read withdrawn at the provider says in place of its reply.
 CA_BATCH_WITHDRAWN_TEXT = (
     "This read was cancelled before it ran: the monthly spend cap was "

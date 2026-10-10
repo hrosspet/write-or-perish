@@ -176,9 +176,9 @@ def _start(prompt_key, parent, model_id, auto_generate=True, read_live=True):
 # "Delete all my writing" waits or runs (#268): no Read starts, like the
 # other jobs that read the user's writing. Users know the read as Glean
 # (#435); the web and the iPhone app show this text as it comes.
-READ_ON_HOLD_MESSAGE = ("Glean is off while your writing waits to be "
-                        "deleted. Restore your writing on the Account page "
-                        "to glean again.")
+READ_ON_HOLD_MESSAGE = ("Glean is off while your writing is deleted. "
+                        "Restore your writing on the Account page to glean "
+                        "again.")
 
 
 def _on_hold_response():

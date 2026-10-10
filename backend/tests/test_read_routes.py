@@ -251,7 +251,7 @@ class TestReadStart:
         assert resp.status_code == 409
         assert resp.get_json()["code"] == "writing_on_hold"
         assert resp.get_json()["error"].startswith(
-            "Glean is off while your writing waits to be deleted.")
+            "Glean is off while your writing is deleted.")
         assert Node.query.count() == 0
 
 
@@ -1723,7 +1723,7 @@ class TestNoGleanWhileTheWritingIsOnHold:
         body = resp.get_json()
         assert body["code"] == "writing_on_hold"
         assert body["error"] == (
-            "Glean is off while your writing waits to be deleted. Restore "
+            "Glean is off while your writing is deleted. Restore "
             "your writing on the Account page to glean again.")
 
     def test_no_glean_during_the_hold(self, app_glean):
