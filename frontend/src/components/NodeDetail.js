@@ -22,7 +22,7 @@ import BubbleKebabMenu from "./BubbleKebabMenu";
 import QuotedContent from "./QuotedContent";
 import FeedPicks from "./FeedPicks";
 import ToolActionsTaken from "./ToolActionsTaken";
-import { ReadWindowLine, ReadReplyTail } from "./ReadReply";
+import { ReadWindowLine, ReadReplyTail, ReadCancelledLine } from "./ReadReply";
 
 import DeleteConfirmDialog from "./DeleteConfirmDialog";
 
@@ -426,7 +426,9 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
       navigate(`/node/${llmTaskNodeId}`);
     } else if (llmStatus === 'cancelled') {
       // A read withdrawn before it ran (the spend cap was reached while
-      // it was queued): nothing was billed, and the node's text says so.
+      // it was queued): nothing was billed. The node's text says only
+      // that it was cancelled; the error, sent to the owner only, says
+      // why, here as a toast and under the text (ReadCancelledLine).
       addToast(llmData?.error || 'Read cancelled', 8000);
       if (String(llmTaskNodeId) === String(id)) {
         setNode(prev => prev ? {
@@ -434,6 +436,7 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
           content: llmData?.content ?? prev.content,
           tool_calls_meta: llmData?.tool_calls_meta ?? prev.tool_calls_meta,
           llm_task_status: 'cancelled',
+          llm_task_error: llmData?.error ?? prev.llm_task_error,
         } : prev);
       }
       setLlmTaskNodeId(null);
@@ -1500,6 +1503,10 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
               onQuoteClick={handleBubbleClick}
             />
           </div>
+        )}
+        {isReadReply && node.llm_task_status === 'cancelled' && (
+          // The server sends the reason to the reply's owner only.
+          <ReadCancelledLine reason={node.llm_task_error} />
         )}
         {!isLlmPending && rerunControls}
         {/* Replies from before 2026-09-16 kept their picks in rows only;
