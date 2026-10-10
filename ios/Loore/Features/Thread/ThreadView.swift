@@ -363,6 +363,9 @@ private struct FocalCard: View {
                 ReadWindowLine(window: window)
             }
             content
+            if model.isReadReply && node.llmTaskStatus == .cancelled {
+                ReadCancelledLine(reason: node.llmTaskError)
+            }
             if !model.isLLMPending && model.isOwner && (node.feedPicksCount ?? 0) > 0
                 && !JSRegex.test(node.content, #"\{quote_ext:\d+\}"#) {
                 FeedPicksView(nodeId: node.id)

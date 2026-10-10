@@ -1,12 +1,13 @@
 """A failed reply's error text goes to its owner only.
 
-When an AI reply fails, its node keeps the reason (llm_task_error). The
-reply's owner (the user who asked for it, else the node's author: the
-owner GET /nodes/<id> and the access checks use) gets that text on the
-status poll (GET /nodes/<id>/llm-status) and in the llm-stream SSE's
-done event. Anyone else who can see the reply, admins included, gets the
-status 'failed' with error null. The same holds for a task's warnings on
-the status poll, and for a failed recording's transcription error on
+When an AI reply fails, or a Read is cancelled, its node keeps the reason
+(llm_task_error). The reply's owner (the user who asked for it, else the
+node's author: the owner GET /nodes/<id> and the access checks use) gets
+that text on the status poll (GET /nodes/<id>/llm-status), in the
+llm-stream SSE's done event and with the node itself (GET /nodes/<id>).
+Anyone else who can see the reply, admins included, gets the status
+without it. The same holds for a task's warnings on the status poll, and
+for a failed recording's transcription error on
 GET /nodes/<id>/transcription-status.
 
 Routes run in the test_no_replies_for_none harness (in-memory sqlite, the
@@ -104,6 +105,19 @@ class TestStatusPoll:
         assert _client(app, bob).get(
             f"/api/nodes/{reply.id}/llm-status").get_json()["error"] == ERROR
 
+    def test_the_thread_page_carries_the_text_for_the_owner_only(
+            self, app):  # noqa: F811
+        alice = _user("alice")
+        reply = _public_failed_reply(alice)
+        bob = _user("bob")
+        _db.session.commit()
+
+        mine = _client(app, alice).get(f"/api/nodes/{reply.id}").get_json()
+        assert mine["llm_task_error"] == ERROR
+        theirs = _client(app, bob).get(f"/api/nodes/{reply.id}")
+        assert "llm_task_error" not in theirs.get_json()
+        assert ERROR not in theirs.get_data(as_text=True)
+
     def test_warnings_go_to_the_owner_only(self, app):  # noqa: F811
         alice = _user("alice")
         entry = _node(alice, privacy_level="public")
@@ -181,6 +195,7 @@ class TestCancelledRead:
         assert status.get_json()["error"] is None
         node = bobs.get(f"/api/nodes/{reply.id}")
         assert node.get_json()["content"] == self.NEUTRAL
+        assert "llm_task_error" not in node.get_json()
         for resp in (status, node):
             assert resp.status_code == 200, resp.get_json()
             body = resp.get_data(as_text=True)
@@ -190,11 +205,33 @@ class TestCancelledRead:
     def test_the_owner_gets_the_reason(self, app):  # noqa: F811
         alice = _user("alice")
         reply = self._cancelled_read(alice)
+        alices = _client(app, alice)
 
-        data = _client(app, alice).get(
-            f"/api/nodes/{reply.id}/llm-status").get_json()
+        data = alices.get(f"/api/nodes/{reply.id}/llm-status").get_json()
         assert data["content"] == self.NEUTRAL
         assert data["error"] == self.REASON
+
+    def test_the_owner_opening_it_later_gets_the_reason(self, app):  # noqa: F811
+        # No poll was running when the read was withdrawn: the thread
+        # page opens it with GET /nodes/<id>, which carries the reason.
+        alice = _user("alice")
+        reply = self._cancelled_read(alice)
+
+        data = _client(app, alice).get(f"/api/nodes/{reply.id}").get_json()
+        assert data["content"] == self.NEUTRAL
+        assert data["llm_task_status"] == "cancelled"
+        assert data["llm_task_error"] == self.REASON
+
+    def test_an_admin_who_is_not_the_owner_gets_no_reason(self, app):  # noqa: F811
+        alice = _user("alice")
+        reply = self._cancelled_read(alice)
+        admin = _user("admin")
+        admin.is_admin = True
+        _db.session.commit()
+
+        data = _client(app, admin).get(f"/api/nodes/{reply.id}").get_json()
+        assert data["content"] == self.NEUTRAL
+        assert "llm_task_error" not in data
 
 
 class TestTranscriptionStatus:

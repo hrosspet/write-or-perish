@@ -1146,6 +1146,13 @@ def _focal_own_fields(node, viewer_id):
             from backend.models import FeedPick
             data["feed_picks_count"] = FeedPick.query.filter_by(
                 node_id=node.id, kind="read").count()
+    # Why a reply failed or was cancelled, for its owner only, as on the
+    # llm-status poll: the thread page shows it under a cancelled read's
+    # text whenever the owner opens it, not only to a page that was
+    # polling when the read was withdrawn.
+    if (node.llm_task_status in ("failed", "cancelled")
+            and node.llm_task_error and is_node_owner(node, viewer_id)):
+        data["llm_task_error"] = node.llm_task_error
     data.update(_system_prompt_fields(node, current_user.id))
     # A Community Archive read reply: the thread page shows what the read
     # covered (the window, from the pinned render) and offers to read
@@ -2256,7 +2263,8 @@ def get_llm_status(node_id):
     }
 
     # Include content when completed (needed by VoicePage polling) and
-    # when cancelled (a withdrawn read: the text says why it is empty).
+    # when cancelled (a withdrawn read: the text says only that it was
+    # cancelled; why is in "error", for the owner only).
     if node.llm_task_status in ('completed', 'cancelled'):
         response_data["content"] = node.get_content()
 
