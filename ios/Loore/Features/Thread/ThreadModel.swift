@@ -421,6 +421,8 @@ final class ThreadModel {
             if trackedId == nodeId {
                 if let content = data.content { node?.content = content }
                 if let meta = data.toolCallsMeta { node?.toolCallsMeta = meta }
+                // Why, under the text (ReadCancelledLine); owner only, like the toast.
+                if let error = data.error { node?.llmTaskError = error }
                 node?.llmTaskStatus = .cancelled
             }
             llmTaskNodeId = nil

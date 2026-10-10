@@ -164,19 +164,70 @@ def test_idle_reports_latest_version(client, user):
     assert body["latest_profile"]["id"] == p.id
 
 
+class _FakeRedis:
+    """The task-owner records (utils/task_owner) in a dict."""
+
+    def __init__(self):
+        self.data = {}
+
+    def setex(self, key, ttl, value):
+        self.data[key] = value.encode()
+
+    def get(self, key):
+        return self.data.get(key)
+
+
+@pytest.fixture
+def owners(monkeypatch):
+    """Records which user started which task, as update_user_profile
+    does when it starts."""
+    import backend.utils.task_owner as task_owner
+    fake = _FakeRedis()
+    monkeypatch.setattr(task_owner, "_redis", lambda config: fake)
+    return lambda task_id, user_id: task_owner.record_task_owner(
+        task_id, user_id, {})
+
+
 @pytest.mark.parametrize("state,expected", [
     ("SUCCESS", "completed"),
     ("FAILURE", "failed"),
     ("REVOKED", "failed"),
     ("PENDING", "completed"),   # id Celery no longer knows: it finished
 ])
-def test_outcome_of_last_seen_sync_task(client, monkeypatch, state, expected):
+def test_outcome_of_last_seen_sync_task(client, user, owners, monkeypatch,
+                                        state, expected):
+    owners("t-1", user.id)
     _fake_celery(monkeypatch, {"t-1": (state, RuntimeError("boom"))})
     body = client.get("/api/export/profile-progress?task_id=t-1").get_json()
     assert body["running"] is False
     assert body["status"] == expected
     if expected == "failed":
-        assert body["error"] == "boom"
+        # Not the raw exception: a fixed line.
+        assert body["error"] == "The profile update failed."
+
+
+def test_another_users_task_id_reads_as_idle(client, user, owners,
+                                             monkeypatch):
+    owners("t-theirs", user.id + 1)
+    _fake_celery(monkeypatch, {
+        "t-theirs": ("FAILURE", RuntimeError("SELECT secret FROM x")),
+        "t-unknown": ("FAILURE", RuntimeError("SELECT secret FROM x"))})
+    for task_id in ("t-theirs", "t-unknown"):
+        r = client.get(f"/api/export/profile-progress?task_id={task_id}")
+        body = r.get_json()
+        assert body["status"] == "idle"
+        assert body["error"] is None
+        assert "secret" not in r.get_data(as_text=True)
+
+
+def test_a_failure_written_for_the_user_is_returned(client, user, owners,
+                                                    monkeypatch):
+    from backend.llm_providers import ProviderAccountError
+    owners("t-1", user.id)
+    _fake_celery(monkeypatch, {"t-1": ("FAILURE", ProviderAccountError())})
+    body = client.get("/api/export/profile-progress?task_id=t-1").get_json()
+    assert body["status"] == "failed"
+    assert body["error"] == ProviderAccountError.USER_MESSAGE
 
 
 # ── synchronous task ─────────────────────────────────────────────────────
@@ -241,7 +292,7 @@ def test_sync_task_failed_with_guard_still_set(client, user, monkeypatch):
     body = client.get("/api/export/profile-progress").get_json()
     assert body["running"] is False
     assert body["status"] == "failed"
-    assert body["error"] == "kaboom"
+    assert body["error"] == "The profile update failed."
     assert User.query.get(user.id).profile_generation_task_id is None
 
 

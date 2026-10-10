@@ -17,6 +17,7 @@ from backend.utils.quotes import (
 )
 from backend.utils.timefmt import iso_utc
 from backend.utils.encryption import prefetch_deks
+from backend.utils.task_owner import failure_text, task_owned_by
 from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import subqueryload
 from datetime import datetime
@@ -1826,6 +1827,10 @@ _SYNC_STATUS_MAP = {
     'REVOKED': 'failed',
 }
 
+# A failed profile build's error, unless the failure was written for the
+# user (utils/task_owner.failure_text).
+PROFILE_FAILED_TEXT = "The profile update failed."
+
 
 def _pending_batch_item(user_id):
     """The user's in-flight profile step, from the item meta of the
@@ -1911,8 +1916,8 @@ def _sync_progress(user):
             "progress": 100 if status == 'completed' else 0,
             "message": "",
             "task_id": task_id,
-            "error": (str(task.info)
-                      if status == 'failed' and task.info else None),
+            "error": (failure_text(task.info, PROFILE_FAILED_TEXT)
+                      if status == 'failed' else None),
             "latest_profile": _latest_profile_snapshot(user),
         }
 
@@ -1944,7 +1949,10 @@ def get_profile_progress():
     task's own `finally` clears the guard before the client can observe
     the terminal state, so with nothing in flight the outcome of that
     task is resolved from the Celery result (kept 24 h) — the client
-    gets `completed` / `failed` instead of a bare `idle`.
+    gets `completed` / `failed` instead of a bare `idle`. Only for the
+    user's own task (the task records its owner, utils/task_owner);
+    any other id is ignored. A failure says only text written for the
+    user, else a fixed line.
     """
     if current_user.profile_batch_pending:
         return jsonify(_batch_progress(current_user)), 200
@@ -1953,12 +1961,13 @@ def get_profile_progress():
 
     status, error = "idle", None
     last_task_id = request.args.get("task_id")
-    if last_task_id:
+    if last_task_id and task_owned_by(last_task_id, current_user.id,
+                                      current_app.config):
         from backend.celery_app import celery
         task = celery.AsyncResult(last_task_id)
         if task.state in ('FAILURE', 'REVOKED'):
             status = "failed"
-            error = str(task.info) if task.info else None
+            error = failure_text(task.info, PROFILE_FAILED_TEXT)
         else:
             # SUCCESS, or PENDING for an id Celery no longer knows: the
             # task finished (the guard is gone).

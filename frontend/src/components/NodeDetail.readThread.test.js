@@ -258,3 +258,52 @@ describe('#387: the action row in a read thread (a Glean-card thread)', () => {
     expect(buttons().read).toBeNull();
   });
 });
+
+describe('a read cancelled before it ran', () => {
+  const NEUTRAL = 'This read was cancelled.';
+  const REASON = 'This read was cancelled before it ran: the monthly spend '
+    + 'cap was reached while it was queued at the provider, so the request '
+    + 'was withdrawn and nothing was billed.';
+  const cancelledRead = (overrides = {}) => ({
+    ...pendingRead(),
+    content: NEUTRAL,
+    llm_task_status: 'cancelled',
+    tool_calls_meta: [{ ...BATCH, status: 'cancelled' }],
+    read_reply: true,
+    ...overrides,
+  });
+
+  test('its owner, opening it later, sees why under the text', async () => {
+    // The server sends llm_task_error to the reply's owner only.
+    routes['/nodes/50'] = cancelledRead({ llm_task_error: REASON });
+
+    renderAt('/node/50');
+    expect(await screen.findByText(NEUTRAL)).toBeInTheDocument();
+    expect(screen.getByText(REASON)).toHaveClass('read-note');
+    // Nothing is polled for a finished node: the reason came with it.
+    expect(mockGet).not.toHaveBeenCalledWith(
+      '/nodes/50/llm-status', expect.anything());
+  });
+
+  test('anyone else sees the text only', async () => {
+    mockUser = { id: 3, username: 'someone', craft_mode: true };
+    routes['/nodes/50'] = cancelledRead();
+
+    renderAt('/node/50');
+    expect(await screen.findByText(NEUTRAL)).toBeInTheDocument();
+    expect(document.querySelector('.read-note')).toBeNull();
+  });
+
+  test('a page open when the read is withdrawn shows the reason too', async () => {
+    routes['/nodes/50'] = pendingRead();
+    pollAnswers.push(Promise.resolve({ data: {
+      node_id: 50, status: 'cancelled', progress: 100, content: NEUTRAL,
+      error: REASON, tool_calls_meta: [{ ...BATCH, status: 'cancelled' }],
+      warnings: [],
+    } }));
+
+    renderAt('/node/50');
+    expect(await screen.findByText(NEUTRAL)).toBeInTheDocument();
+    expect(screen.getByText(REASON)).toHaveClass('read-note');
+  });
+});

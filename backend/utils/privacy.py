@@ -79,6 +79,15 @@ def find_human_owner(node) -> Optional[int]:
     return None
 
 
+def is_node_owner(node, user_id: Optional[int]) -> bool:
+    """True when *user_id* owns *node*: for an AI reply the user who asked
+    for it (human_owner_id), else the node's author. Things that belong to
+    the owner alone, such as a failed reply's error text, go to this user
+    only; anyone else who can see the node gets the node without them."""
+    return user_id is not None \
+        and (node.human_owner_id or node.user_id) == user_id
+
+
 def _can_user_access_ignoring_deleted(node, user_id: int) -> bool:
     """Same body as can_user_access_node, minus the deleted_at short-circuit.
 

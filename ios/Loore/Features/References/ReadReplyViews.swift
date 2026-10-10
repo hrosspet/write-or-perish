@@ -31,6 +31,29 @@ struct ReadWindowLine: View {
     }
 }
 
+/// Why a read was cancelled, under its text ("This read was cancelled."), for the
+/// reply's owner (web `ReadCancelledLine`). The server sends `llm_task_error` to the
+/// owner only, so anyone else gets no line.
+struct ReadCancelledLine: View {
+    let reason: String?
+
+    static func text(_ reason: String?) -> String? {
+        guard let reason, !reason.jsTrimmed.isEmpty else { return nil }
+        return reason
+    }
+
+    var body: some View {
+        if let text = Self.text(reason) {
+            Text(text)
+                .font(LooreFont.sans(12.8, .light))
+                .foregroundStyle(LooreColor.textMuted)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.top, 9.6)
+                .accessibilityIdentifier("thread.readCancelled")
+        }
+    }
+}
+
 /// The read state of a read reply's picks under the card (web `ReadReplyTail`).
 struct ReadReplyTail: View {
     let nodeId: Int

@@ -198,8 +198,9 @@ struct NodeDetail: Decodable, Identifiable, Sendable {
     /// nil = written in Loore; "twitter" | "chatgpt" | "claude" | "markdown" for imports.
     var origin: String?
     var llmTaskStatus: TaskStatus?
-    /// Why the reply failed, for its owner only (#435: shown under a failed
-    /// gleaning instead of its placeholder text).
+    /// Why the reply failed or was cancelled, for its owner only: shown under
+    /// a failed gleaning instead of its placeholder text (#435), and under a
+    /// cancelled read's text (`ReadCancelledLine`).
     var llmTaskError: String?
     var hasOriginalAudio: Bool
     var hasTTS: Bool

@@ -439,12 +439,71 @@ def test_status_maps_states_and_hides_other_users(app, monkeypatch):
     _fake_celery(monkeypatch, "SUCCESS", dict(done, user_id=u.id + 1))
     assert client.get("/api/import/status/t1").get_json()["status"] == "queued"
 
-    _fake_celery(monkeypatch, "FAILURE", RuntimeError("boom"))
-    body = client.get("/api/import/status/t1").get_json()
-    assert body["status"] == "failed" and "boom" in body["error"]
-
     _fake_celery(monkeypatch, "PENDING", None)
     assert client.get("/api/import/status/t1").get_json()["status"] == "queued"
+
+
+class _FakeRedis:
+    """The task-owner records (utils/task_owner) in a dict."""
+
+    def __init__(self):
+        self.data = {}
+
+    def setex(self, key, ttl, value):
+        self.data[key] = value.encode()
+
+    def get(self, key):
+        return self.data.get(key)
+
+
+@pytest.fixture
+def owners(monkeypatch):
+    import backend.utils.task_owner as task_owner
+    fake = _FakeRedis()
+    monkeypatch.setattr(task_owner, "_redis", lambda config: fake)
+    return fake
+
+
+def test_confirm_records_the_tasks_owner(app, monkeypatch, owners):
+    from backend.utils.task_owner import task_owned_by
+    client = app.test_client()
+    u = _make_user("alice")
+    _login(client, u.id)
+    _fake_task_module(monkeypatch)
+    token = ta.stash_write(u.id, _rows())
+    resp = client.post("/api/import/twitter/confirm",
+                       json={"import_token": token})
+    assert resp.status_code == 202, resp.get_json()
+    assert task_owned_by("task-123", u.id, {})
+    assert not task_owned_by("task-123", u.id + 1, {})
+
+
+def test_a_failed_import_answers_its_owner_only_without_raw_text(
+        app, monkeypatch, owners):
+    from backend.utils.task_owner import (
+        UserFacingTaskError, record_task_owner)
+    client = app.test_client()
+    u = _make_user("alice")
+    _login(client, u.id)
+    record_task_owner("mine", u.id, {})
+    record_task_owner("theirs", u.id + 1, {})
+
+    raw = RuntimeError('(psycopg2) duplicate key "node_pkey" in /srv/app')
+    _fake_celery(monkeypatch, "FAILURE", raw)
+    body = client.get("/api/import/status/mine").get_json()
+    assert body["status"] == "failed"
+    assert body["error"] == "Import failed"
+    for other in ("theirs", "never-recorded"):
+        resp = client.get(f"/api/import/status/{other}")
+        assert resp.get_json()["status"] == "queued"
+        assert resp.get_json()["error"] is None
+        assert "psycopg2" not in resp.get_data(as_text=True)
+
+    expired = UserFacingTaskError(
+        "Import data expired — please upload the archive again.")
+    _fake_celery(monkeypatch, "FAILURE", expired)
+    body = client.get("/api/import/status/mine").get_json()
+    assert body["error"] == str(expired)
 
 
 # ── Community Archive pre-fill (admin cold-start bootstrap) ───────────────
