@@ -198,6 +198,10 @@ struct NodeDetail: Decodable, Identifiable, Sendable {
     /// nil = written in Loore; "twitter" | "chatgpt" | "claude" | "markdown" for imports.
     var origin: String?
     var llmTaskStatus: TaskStatus?
+    /// Why the reply failed or was cancelled, for its owner only: shown under
+    /// a failed gleaning instead of its placeholder text (#435), and under a
+    /// cancelled read's text (`ReadCancelledLine`).
+    var llmTaskError: String?
     var hasOriginalAudio: Bool
     var hasTTS: Bool
     /// Partial reply text while `llmTaskStatus` is pending/processing (#367).
@@ -218,6 +222,9 @@ struct NodeDetail: Decodable, Identifiable, Sendable {
     var readReplyAbove: Bool
     /// The `ai_usage` a new reply under this node should default to (#362).
     var replyAIUsage: AIUsage?
+    /// The thread was started from the Glean card (#435): every turn offers
+    /// the Glean button. Any other thread offers "Glean for this reflection".
+    var gleanThread: Bool
 
     enum CodingKeys: String, CodingKey {
         case id, content, permalink, user, origin, ancestors, children
@@ -230,6 +237,7 @@ struct NodeDetail: Decodable, Identifiable, Sendable {
         case pinnedAt = "pinned_at"
         case llmModel = "llm_model"
         case llmTaskStatus = "llm_task_status"
+        case llmTaskError = "llm_task_error"
         case hasOriginalAudio = "has_original_audio"
         case hasTTS = "has_tts"
         case streamingContent = "streaming_content"
@@ -241,6 +249,7 @@ struct NodeDetail: Decodable, Identifiable, Sendable {
         case inReadThread = "in_read_thread"
         case readReplyAbove = "read_reply_above"
         case replyAIUsage = "reply_ai_usage"
+        case gleanThread = "glean_thread"
     }
 
     init(from decoder: Decoder) throws {
@@ -259,6 +268,7 @@ struct NodeDetail: Decodable, Identifiable, Sendable {
         llmModel = c.tolerant(.llmModel)
         origin = c.tolerant(.origin)
         llmTaskStatus = c.tolerant(.llmTaskStatus)
+        llmTaskError = c.tolerant(.llmTaskError)
         hasOriginalAudio = c.tolerant(.hasOriginalAudio, default: false)
         hasTTS = c.tolerant(.hasTTS, default: false)
         streamingContent = c.tolerant(.streamingContent)
@@ -273,6 +283,7 @@ struct NodeDetail: Decodable, Identifiable, Sendable {
         inReadThread = c.tolerant(.inReadThread, default: false)
         readReplyAbove = c.tolerant(.readReplyAbove, default: false)
         replyAIUsage = c.tolerant(.replyAIUsage)
+        gleanThread = c.tolerant(.gleanThread, default: false)
     }
 
     var isLLM: Bool { nodeType == .llm }
@@ -560,6 +571,8 @@ struct ResolvedQuotes: Decodable, Sendable {
         var content: String
         var source: String?
         var authorHandle: String?
+        /// The tweet author's display name when the archive has one (#435).
+        var authorName: String?
         var title: String?
         var url: String?
         var postedAt: Date?
@@ -573,6 +586,7 @@ struct ResolvedQuotes: Decodable, Sendable {
         enum CodingKeys: String, CodingKey {
             case id, content, source, title, url, feedback
             case authorHandle = "author_handle"
+            case authorName = "author_name"
             case postedAt = "posted_at"
             case userId = "user_id"
             case readAt = "read_at"
@@ -587,6 +601,7 @@ struct ResolvedQuotes: Decodable, Sendable {
             content = c.tolerant(.content, default: "")
             source = c.tolerant(.source)
             authorHandle = c.tolerant(.authorHandle)
+            authorName = c.tolerant(.authorName)
             title = c.tolerant(.title)
             url = c.tolerant(.url)
             postedAt = c.tolerant(.postedAt)

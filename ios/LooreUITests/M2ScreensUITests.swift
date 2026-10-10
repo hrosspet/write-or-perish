@@ -57,7 +57,7 @@ final class M2ScreensUITests: XCTestCase {
         snapshot("m2c-write-new")
         app.buttons["Close"].tap()
         sleep(1)
-        app.tabBars.buttons["Reflect"].tap()
+        app.tabBars.buttons["Home"].tap()
         sleep(2)
         snapshot("m2c-thread-top")
         app.swipeUp()

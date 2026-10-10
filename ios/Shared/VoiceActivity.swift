@@ -26,6 +26,16 @@ struct VoiceActivityAttributes: ActivityAttributes {
             case replying
             /// The reply has played: Record a reply.
             case finished
+            /// A glean runs (#475): no buttons until the gleaning is in.
+            case gleaning
+        }
+
+        /// The labeled Glean button of a Glean-card conversation (#475), beside Record.
+        enum GleanButton: String, Codable, Hashable {
+            /// Pressable.
+            case ready
+            /// Shown dimmed: Loore's reply to the last message is still coming.
+            case waiting
         }
 
         var phase: Phase
@@ -33,12 +43,20 @@ struct VoiceActivityAttributes: ActivityAttributes {
         var clockStart: Date?
         /// While paused or interrupted: the recording's length in whole seconds.
         var elapsed: Int = 0
+        /// nil: no Glean button (a Reflect conversation, or no recorded message yet).
+        var glean: GleanButton?
+        /// The last glean finished: open Loore to read the gleaning.
+        var gleaned = false
+        /// While gleaning: the server accepted the glean. A locked phone suspends
+        /// the app after this, so the card says what will happen instead of a
+        /// progress state that cannot update.
+        var gleanAccepted = false
     }
 }
 
 /// What a Live Activity button asks the voice conversation to do.
 enum VoiceActivityCommand: String, Sendable {
-    case pause, resume, stop, record
+    case pause, resume, stop, record, glean
 }
 
 /// Pause from the lock screen. The microphone keeps running (samples are
@@ -89,6 +107,20 @@ struct RecordVoiceReplyIntent: AudioRecordingIntent, LiveActivityIntent {
 
     func perform() async throws -> some IntentResult {
         await VoiceActivityCommands.run(.record)
+        return .result()
+    }
+}
+
+/// Glean from the lock screen (#475), in a Glean-card conversation: the reply
+/// stops and the glean starts, as with the Voice screen's Glean button. The
+/// gleaning opens in text mode in the app; it is never read aloud.
+@available(iOS 18.0, *)
+struct GleanVoiceIntent: LiveActivityIntent {
+    static let title: LocalizedStringResource = "Glean"
+    static let isDiscoverable = false
+
+    func perform() async throws -> some IntentResult {
+        await VoiceActivityCommands.run(.glean)
         return .result()
     }
 }

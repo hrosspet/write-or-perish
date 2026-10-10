@@ -26,6 +26,9 @@ from backend.utils.privacy import (
     can_user_see_node_or_tombstone,
     can_user_view_tombstone,
     can_user_edit_node,
+    author_gone,
+    owner_hidden,
+    is_node_owner,
     speech_allowed,
     SPEECH_REFUSED_MESSAGE,
     PrivacyLevel,
@@ -402,9 +405,16 @@ def _system_prompt_fields(n, viewer_id):
     *viewer_id* may see them (see _context_artifact_fields)."""
     prompt = n.get_artifact("prompt")
     if prompt is not None:
+        # The read prompts are shown under Glean's name (#435), also on
+        # prompt versions saved under the earlier titles.
+        from backend.utils.ca_feed import READ_PROMPT_KEYS
+        from backend.utils.prompts import PROMPT_DEFAULTS
+        title = prompt.title
+        if prompt.prompt_key in READ_PROMPT_KEYS:
+            title = PROMPT_DEFAULTS[prompt.prompt_key]["title"]
         return {
             "is_system_prompt": True,
-            "prompt_title": prompt.title,
+            "prompt_title": title,
             "prompt_key": prompt.prompt_key,
             "user_prompt_id": prompt.id,
             "prompt_version_number": _prompt_version_number(prompt),
@@ -534,6 +544,27 @@ def _context_artifact_fields(n, viewer_id):
     return artifacts if artifacts else None
 
 
+def _as_parent_user_id(parent):
+    """The parent_user_id that *parent*'s children carry: its effective
+    owner (the human owner of an AI reply). None when its author deleted
+    the account (#269): the placeholder names nobody, by id either."""
+    if parent is None or author_gone(parent):
+        return None
+    return parent.human_owner_id if parent.node_type == "llm" else parent.user_id
+
+
+def _parent_user_id_of(node):
+    """The parent_user_id of a focal node or an ancestor: its own human
+    owner for an AI reply, else its parent's author, or None when that
+    author deleted the account (#269)."""
+    if node.node_type == "llm":
+        return node.human_owner_id
+    parent = node.parent
+    if parent is None or author_gone(parent):
+        return None
+    return parent.user_id
+
+
 def serialize_node_recursive(n, user_id=None, parent_user_id=None):
     """Recursively serialize a node and its accessible children.
 
@@ -570,7 +601,7 @@ def serialize_node_recursive(n, user_id=None, parent_user_id=None):
     def _child_visible(child):
         if can_user_access_node(child, user_id):
             return True
-        if child.deleted_at is None:
+        if child.deleted_at is None and not owner_hidden(child):
             return False
         s = serialize_node_status(child, user_id)
         return s is not None and not s.get("inaccessible")
@@ -579,9 +610,7 @@ def serialize_node_recursive(n, user_id=None, parent_user_id=None):
     # Mirror the focal serializer's parent_user_id derivation (nodes.py
     # ~line 822) so the frontend's ownedByMe check works the same way
     # at every depth.
-    n_as_parent_user_id = (
-        n.human_owner_id if n.node_type == "llm" else n.user_id
-    )
+    n_as_parent_user_id = _as_parent_user_id(n)
     children_data = [
         serialized for serialized in (
             serialize_node_recursive(
@@ -723,8 +752,12 @@ def create_node():
         system_node = None
         if agentic:
             from backend.utils.session_helpers import create_agentic_root
+            from backend.utils.glean import stamp_glean_entry
             system_node = create_agentic_root(
                 current_user.id, "textmode", privacy_level, ai_usage)
+            # Started from the Glean card (#435).
+            stamp_glean_entry(system_node, current_user,
+                              request.form.get("entry"))
 
         # Placeholder content until transcription is ready.
         placeholder_text = "[Voice note – transcription pending]"
@@ -918,6 +951,14 @@ def update_node(node_id):
             "char_cap": NODE_CHAR_CAP,
         }), 422
 
+    # A read prompt's text is Glean's (#435): only an admin may change it,
+    # here as on the Prompts page. Settings-only edits stay open.
+    from backend.utils.ca_feed import READ_PROMPT_KEYS
+    if (node.get_prompt_key() in READ_PROMPT_KEYS
+            and getattr(current_user, "is_admin", False) is not True
+            and (new_content or "").strip() != (node.get_content() or "").strip()):
+        return jsonify({"error": "This prompt can't be changed."}), 403
+
     old_privacy, old_ai_usage = node.privacy_level, node.ai_usage
     # Handle privacy settings updates (optional)
     if "privacy_level" in data:
@@ -1108,7 +1149,7 @@ def _focal_own_fields(node, viewer_id):
             "username": node.user.username,
         },
         # Include human owner ID for LLM nodes (so frontend can check edit/delete permission)
-        "parent_user_id": node.human_owner_id if node.node_type == "llm" else (node.parent.user_id if node.parent else None),
+        "parent_user_id": _parent_user_id_of(node),
         # Privacy settings
         "privacy_level": node.privacy_level,
         "ai_usage": node.ai_usage,
@@ -1123,6 +1164,14 @@ def _focal_own_fields(node, viewer_id):
         # prompt (#66).
         "has_tts": bool(node.audio_tts_url),
     }
+    # Why a reply failed or was cancelled, for its owner only, as on the
+    # llm-status poll: the thread page says it under a failed gleaning
+    # instead of the placeholder text (#435), and under a cancelled read's
+    # text whenever the owner opens it, not only to a page that was
+    # polling when the read was withdrawn.
+    if (node.llm_task_status in ("failed", "cancelled")
+            and node.llm_task_error and is_node_owner(node, viewer_id)):
+        data["llm_task_error"] = node.llm_task_error
     # The reply's text so far while it is generated (#367): a reload
     # mid-generation shows it at once; the llm-stream SSE takes over.
     if node.llm_task_status in ("pending", "processing") \
@@ -1320,10 +1369,7 @@ def get_node(node_id):
             # (nodes.py:822) so the frontend's ownedByMe check works on
             # ancestors. The walk already has current.parent in hand, no
             # extra query.
-            ancestor_parent_user_id = (
-                current.human_owner_id if current.node_type == "llm"
-                else (current.parent.user_id if current.parent else None)
-            )
+            ancestor_parent_user_id = _parent_user_id_of(current)
             ancestor_data = {
                 "id": current.id,
                 "username": current.user.username if current.user else "Unknown",
@@ -1368,7 +1414,7 @@ def get_node(node_id):
     def _child_visible(child):
         if can_user_access_node(child, current_user.id):
             return True
-        if child.deleted_at is None:
+        if child.deleted_at is None and not owner_hidden(child):
             return False
         s = serialize_node_status(child, current_user.id)
         return s is not None and not s.get("inaccessible")
@@ -1377,9 +1423,7 @@ def get_node(node_id):
 
     # Compute the focal node's effective owner so first-level children
     # carry the right parent_user_id without an N+1.
-    focal_as_parent_user_id = (
-        node.human_owner_id if node.node_type == "llm" else node.user_id
-    )
+    focal_as_parent_user_id = _as_parent_user_id(node)
 
     # Serialize children first (pruned tombstones drop out) so child_count
     # reflects what the viewer actually sees.
@@ -1418,6 +1462,9 @@ def get_node(node_id):
         from backend.utils.llm_nodes import reply_ai_usage
         reply_usage = reply_ai_usage(
             node, current_user, parent_content=focal.get("content"))
+    # A thread started from the Glean card (#435): its root carries the
+    # stamp, and every turn offers the Glean button. The chain is in hand.
+    from backend.utils.glean import is_glean_root
     node_data = {
         **focal,
         "child_count": len(serialized_children),
@@ -1426,6 +1473,8 @@ def get_node(node_id):
         "in_read_thread": in_read_thread,
         "read_reply_above": read_reply_above,
         "reply_ai_usage": reply_usage,
+        "glean_thread": is_glean_root(
+            ancestor_nodes[-1] if ancestor_nodes else node),
     }
     # The owner opened a finished Read reply (FeedRender.opened_at, once).
     # Last, because it commits: the payload above is built.
@@ -1553,9 +1602,12 @@ def get_node_titles():
         nodes[i] for i in ids
         if i in nodes and can_user_access_node(nodes[i], current_user.id)
     ]
+    # A node whose author deleted the account (#269) titles as deleted,
+    # as it quotes and shows in threads.
     deleted = {
         i for i in ids
-        if i in nodes and nodes[i].deleted_at is not None
+        if i in nodes
+        and (nodes[i].deleted_at is not None or owner_hidden(nodes[i]))
         and can_user_view_tombstone(nodes[i], current_user.id)
     }
     threads = {
@@ -1623,10 +1675,20 @@ def get_default_model():
     if purpose is None:
         return jsonify({"error": "purpose must be 'chat' or 'read'"}), 400
     if purpose == "read":
-        model_id, source = resolve_read_model(None)
+        model_id, source = _suggested_read_model(None)
     else:
         model_id, source = resolve_chat_model(None, current_user)
     return jsonify({"suggested_model": model_id, "source": source}), 200
+
+
+def _suggested_read_model(anchor):
+    """The Glean picker's default: a read model of the user's provider
+    (#435); (None, "unavailable") when that provider has no glean model."""
+    from backend.utils.glean import GleanModelUnavailable
+    try:
+        return resolve_read_model(anchor, user=current_user)
+    except GleanModelUnavailable:
+        return None, "unavailable"
 
 
 # Get the suggested model for a new LLM response based on the thread's context
@@ -1644,7 +1706,7 @@ def get_suggested_model(node_id):
     if purpose is None:
         return jsonify({"error": "purpose must be 'chat' or 'read'"}), 400
     if purpose == "read":
-        model_id, source = resolve_read_model(node)
+        model_id, source = _suggested_read_model(node)
     else:
         model_id, source = resolve_chat_model(node, current_user)
     return jsonify({"suggested_model": model_id, "source": source}), 200
@@ -2140,11 +2202,14 @@ def get_transcription_status(node_id):
             current_app.logger.warning(f"Failed to check Celery task status: {e}")
             # Don't fail the request - just return DB status without real-time info
 
+    # The error text goes to the recording's author only, as the
+    # warnings below and the transcription stream do.
     payload = {
         "node_id": node.id,
         "status": node.transcription_status,
         "progress": node.transcription_progress or 0,
-        "error": node.transcription_error,
+        "error": (node.transcription_error
+                  if node.user_id == current_user.id else None),
         "started_at": iso_utc(node.transcription_started_at),
         "completed_at": iso_utc(node.transcription_completed_at),
         "content": node.get_content() if node.transcription_status == 'completed' else None,
@@ -2232,11 +2297,14 @@ def get_llm_status(node_id):
             current_app.logger.warning(f"Failed to check Celery task status: {e}")
             # Don't fail the request - just return DB status without real-time info
 
+    # A failed reply's error text and the task's warnings go to the
+    # reply's owner only; anyone else sees the status without them.
+    owner = is_node_owner(node, current_user.id)
     response_data = {
         "node_id": node.id,
         "status": node.llm_task_status,
         "progress": node.llm_task_progress or 0,
-        "error": node.llm_task_error,
+        "error": node.llm_task_error if owner else None,
         "task_info": task_info,
         # Within-turn retrieval chaining (#158): non-null when this node was
         # finalized as an interim retrieval step and the answer lives on the
@@ -2249,7 +2317,8 @@ def get_llm_status(node_id):
     }
 
     # Include content when completed (needed by VoicePage polling) and
-    # when cancelled (a withdrawn read: the text says why it is empty).
+    # when cancelled (a withdrawn read: the text says only that it was
+    # cancelled; why is in "error", for the owner only).
     if node.llm_task_status in ('completed', 'cancelled'):
         response_data["content"] = node.get_content()
 
@@ -2277,9 +2346,10 @@ def get_llm_status(node_id):
 
     # Include user-facing task warnings (rendered as toasts by
     # frontend useLlmTaskWarnings hook). Always include the key so the
-    # client can rely on its presence.
+    # client can rely on its presence. Owner only: a warning can say the
+    # owner hit the spend cap, or why their reply was not started.
     from backend.utils.task_warnings import load_task_warnings
-    response_data["warnings"] = load_task_warnings(node)
+    response_data["warnings"] = load_task_warnings(node) if owner else []
 
     if created_node:
         response_data["node"] = created_node
@@ -2452,8 +2522,11 @@ def init_chunked_upload():
     system_node = None
     if agentic:
         from backend.utils.session_helpers import create_agentic_root
+        from backend.utils.glean import stamp_glean_entry
         system_node = create_agentic_root(
             current_user.id, "textmode", privacy_level, ai_usage)
+        # Started from the Glean card (#435).
+        stamp_glean_entry(system_node, current_user, data.get("entry"))
 
     # Create placeholder node
     placeholder_text = "[Voice note – upload in progress]"

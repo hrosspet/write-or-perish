@@ -287,6 +287,23 @@ final class ReadReplyTests: StubbedAppTestCase {
         XCTAssertNil(ReadWindowLine.text(try decode(ReadWindow.self, #"{"tweets":3}"#)), "no line without a window")
     }
 
+    func testCancelledLineSaysWhyToTheOwnerOnly() throws {
+        // The server sends llm_task_error to the reply's owner only.
+        let owners = try decode(NodeDetail.self, """
+        {"id":50,"content":"This read was cancelled.","node_type":"llm","llm_task_status":"cancelled",\
+        "llm_task_error":"The monthly spend cap was reached, so nothing was billed."}
+        """)
+        XCTAssertEqual(owners.llmTaskStatus, .cancelled)
+        XCTAssertEqual(ReadCancelledLine.text(owners.llmTaskError),
+                       "The monthly spend cap was reached, so nothing was billed.")
+        let theirs = try decode(NodeDetail.self, """
+        {"id":50,"content":"This read was cancelled.","node_type":"llm","llm_task_status":"cancelled"}
+        """)
+        XCTAssertNil(theirs.llmTaskError)
+        XCTAssertNil(ReadCancelledLine.text(theirs.llmTaskError), "no line for anyone else")
+        XCTAssertNil(ReadCancelledLine.text("  "))
+    }
+
     func testTailStates() {
         XCTAssertEqual(ReadReplyTail.stateText(unread: 3, total: 3, loaded: true), "3 unread")
         XCTAssertEqual(ReadReplyTail.stateText(unread: 1, total: 3, loaded: true), "1 of 3 unread")

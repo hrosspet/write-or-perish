@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// The tab shell (design doc §5): Reflect, Artifacts, Log, Commons (flagged), More.
+/// The tab shell (design doc §5): Home, Artifacts, Log, Commons (flagged), More.
 /// No badges or counts on tabs (docs/LOORE-ESSENCE.md: nothing counts the user).
 struct MainTabView: View {
     @Environment(AppState.self) private var app
@@ -72,8 +72,8 @@ struct RouteDestination: View {
             HomeView()
         case .account(let anchor):
             AccountView(anchor: anchor)
-        case .voice(let parentId, let resumeLLMId):
-            VoiceView(parentId: parentId, resumeLLMId: resumeLLMId)
+        case .voice(let parentId, let resumeLLMId, let glean):
+            VoiceView(parentId: parentId, resumeLLMId: resumeLLMId, glean: glean)
         case .thread(let id, let awaitLLM):
             // A new page per node: a route replaced by another node's (a failed reply,
             // a delete) would otherwise keep the old page and its model. Keyed by the
@@ -81,8 +81,8 @@ struct RouteDestination: View {
             ThreadView(nodeId: id, awaitLLM: awaitLLM).id(id)
         case .log:
             LogView()
-        case .textMode:
-            TextModeView()
+        case .textMode(let glean):
+            TextModeView(glean: glean)
         case .profile, .todo, .artifacts, .newArtifact:
             WorkspaceView(pinned: route.workspaceDocument)
         case .references:
@@ -103,6 +103,8 @@ struct RouteDestination: View {
             WelcomeView()
         case .confirmEmail(let token):
             ConfirmEmailView(token: token)
+        case .confirmAccountDeletion(let token):
+            ConfirmAccountDeletionView(token: token)
         default:
             PlaceholderScreen(route: route)
         }

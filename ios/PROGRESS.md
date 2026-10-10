@@ -100,7 +100,7 @@ ios/Loore/Audio/                M3: Recording/ (SegmentPackager + MP4Boxes, FMP4
                                 ListenAloud [+AudioDownloader]), Session/ (AudioSessionController,
                                 NowPlayingController), Dictation/ (DictationController), AudioCenter
                                 (owns all of it as AppState.audio; LooreAppDelegate for background sessions)
-ios/Loore/Features/Home/        HomeView (+Read card), PlaceholderScreen (only routes that never push)
+ios/Loore/Features/Home/        HomeView (+Reflect / Glean cards, #475), PlaceholderScreen (only routes that never push)
 ios/Loore/Features/Onboarding/  SignIn, Terms + TermsText, Waitlist + PrefillConsentCard, WelcomeView,
                                 ConfirmEmailView (+model, paste sheet)
 ios/Loore/Features/Updates/     UpdatesSheet
@@ -178,7 +178,8 @@ ios/scripts/                    check_terms_text.py, local_backend.sh
 - A container with `.accessibilityIdentifier` needs `.accessibilityElement(children: .contain)` first, or
   SwiftUI copies the identifier onto every child and UI tests cannot find the buttons inside.
 - Test identifiers: `thread.focal`, `thread.focalKebab`, `thread.llmResponse`, `nodeForm.text.<new|inline|edit>`,
-  `nodeForm.send.<…>`, `search.field`, `more.writeNew`, `home.read`, `tab.reflect`, `more.*`.
+  `nodeForm.send.<…>`, `search.field`, `more.writeNew`, `home.reflect.voice` / `home.glean.text` (…), `voice.glean`,
+  `thread.glean`, `tab.reflect` (the Home tab), `more.*`.
 - Per-device preferences use the web's localStorage names (`DefaultsKey`).
 - No content in logs (ids, statuses, byte counts only).
 
@@ -510,7 +511,7 @@ doc §6. **parity** = same behaviour (a web view where §6 says so); **deviation
 
 | # | Web route | App screen | Status | Note |
 |---|---|---|---|---|
-| 1 | `/` Home | Reflect tab, `HomeView` | parity | Voice, Text, Share (flag), Read (admin; unseen as admin); cards stack on a phone |
+| 1 | `/` Home | Home tab, `HomeView` | parity | with Glean (#475): Reflect and Glean cards (Voice, Text each), Share (flag) below; without: Voice, Text, Share (flag); cards stack on a phone |
 | 2 | `/landing` | signed out: native sign-in; links: Safari view | deviation | no marketing page before sign-in (design §6: web view when linked) |
 | 3 | `/login` | `SignInView` | deviation | link pasted back (design §4); default landing is Reflect, not `/profile`; a link's `next_url` is followed (M5) |
 | 4–6 | `/vision`, `/why-loore`, `/how-to` | Safari view (More → About, sign-in screen, waitlist ⋯) | parity | checked M5 |
@@ -530,6 +531,8 @@ doc §6. **parity** = same behaviour (a web view where §6 says so); **deviation
 | 26 | `/share` | `ShareView` | parity | "Not available." without the flag |
 | 27 | `/commons` | Commons tab (flag) | deviation | cards open the thread by id; never opened locally (staging) |
 | 28 | `/account` | `AccountView` | deviation | Connect X in a cookie web view; paste the confirmation link; real X OAuth unseen |
+| 28a | `/confirm-account-deletion` | `ConfirmAccountDeletionView` (paste sheet on Account) | deviation | the link is pasted, as for `/confirm-email` (#269) |
+| 28b | `/account-restore`, `/account-deleted` | `AccountRestoreView`, `AccountDeletedView` (root screens) | parity | the restore question follows a sign-in by link or X (#269) |
 | 29 | `/node/:id` (member) | `ThreadView` | deviation | iOS menus, narrower indents (Deviations, M2); visitors sign in first |
 | 29a | `/node/:id` admin extras | — | **gap** | `SemanticNeighbors` rail and read rerun controls not built (admin only) |
 | 30 | `/admin` | authenticated web view (More, admins) | parity | opened M5 as a non-admin (signed in, data refused); unseen as an admin |
@@ -743,9 +746,11 @@ Sign-out does not warn about unsent chunks (the review's optional logout warning
   an updated default prompt (banner), a running profile build (indicator; the watcher is unit-tested), filled
   intentions (fixture render only), `{quote_ext:N}` bubbles in a thread.
 - Real X OAuth (Connect X; only the immediate local landing was seen), X bookmarks connect and sync.
-- Admin: the web view and the admin read feature (Home Read card, the thread's Read / Read further with the
-  read-model picker) are built but unseen as an admin (user 5 is not one; admin pages show other users'
+- Admin: the web view is built but unseen as an admin (user 5 is not one; admin pages show other users'
   data). Not built: the admin rerun controls and the `SemanticNeighbors` rail.
+- Glean (#475): built against #473/#474's API and seen in the simulator against canned answers only (the
+  local backend runs `main`); the Voice glean, the Live Activity's Glean button and the ⋯ menu entry need
+  the device and staging checklists.
 
 **Not run against the backend** (billed, or would send mail / file issues)
 - Audio file upload and chunked upload, recovered-audio drafts, the todo apply *success* path (a billed merge),
@@ -903,3 +908,21 @@ From Peter's first run on his iPhone. 395 unit tests pass (one skipped), 5 of th
   stay words. The row is a `FlowLayout`, so it wraps instead of squeezing labels.
 - The model picker next to LLM Response / Read is as wide as the model's name (the web's inline button),
   not 200 pt.
+
+**#269 Account deletion (merges after the backend PR #464)**
+- Account → "Delete my account" (shown when the server sends `account_deletion`): the web's dialog text in a
+  sheet, the username typed, "Delete my account" / "Email me the confirmation link" and "Keep my account".
+  An X-only account is scheduled at once and lands on "Your account is scheduled for deletion". An email
+  account gets the link; the section then explains how to copy it from the email and offers "Paste the link"
+  ("I already have a confirmation link" stays available). The pasted link opens the web's confirm question
+  in the app's session (`POST /api/account/delete/confirm`). The waitlist screen shows the same section
+  (#464 lets an unapproved account through to the deletion and restore routes).
+- A sign-in into an account in its grace period (magic link landing, or the X web view landing on
+  `/account-restore`) shows the native restore question instead of loading the user: "Restore my account"
+  signs in as after any sign-in (Reflect, the server's `next` is not followed); "Keep it deleted" and
+  "Back to Loore" return to sign-in. 401s from the signed-out session change nothing on these screens.
+- Checked in the simulator against #464's backend on sqlite: X-only deletion, email deletion through the
+  pasted link, restore after a magic-link sign-in, keep it deleted, a waitlisted X account deleting itself
+  from the waitlist screen. Not seen: the X sign-in landing on the
+  restore question (needs real X), and a sign-in surviving a relaunch (the unsigned simulator build keeps
+  nothing in the Keychain, for any sign-in).

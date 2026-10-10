@@ -60,7 +60,7 @@ final class AppRouteTests: XCTestCase {
     @MainActor
     func testVoiceFromAnotherTabBringsItsThreadToReflect() {
         let router = Router()
-        router.paths[.reflect] = [.voice(parentId: nil, resumeLLMId: nil), .textMode]
+        router.paths[.reflect] = [.voice(parentId: nil, resumeLLMId: nil), .textMode()]
         router.selectedTab = .log
         router.paths[.log] = [.thread(id: 5, awaitLLM: nil), .thread(id: 3, awaitLLM: nil)]
         router.open(.voice(parentId: 3, resumeLLMId: 9), environment: env, commonsAvailable: false)
@@ -198,6 +198,20 @@ final class TermsTextTests: XCTestCase {
         XCTAssertEqual(sections.last, "10. Contact")
         XCTAssertEqual(TermsText.version, "2.0")
         XCTAssertTrue(TermsText.blocks.contains(.footnote("*Terms Version: 2.0 — Last updated: February 9, 2026*")))
+    }
+
+    /// Account deletion (#269): the web's sentence, Peter's text of
+    /// 2026-10-09, without a new terms version.
+    func testTheTermsDescribeAccountDeletion() {
+        let bullets = TermsText.blocks.flatMap { block -> [String] in
+            if case .bullets(let items) = block { return items }
+            return []
+        }
+        XCTAssertTrue(bullets.contains(
+            "You can delete your account on the Account page. If you change your mind, you can still recover your account within 30 days by signing in; "
+                + "after that it is deleted forever, with everything in it. Copies in our backups are erased within "
+                + "another 30 days. Loore keeps a record of what your AI use cost, without your name."))
+        XCTAssertFalse(bullets.contains { $0.contains("no account deletion") })
     }
 
     func testInlineMarkdownParses() {

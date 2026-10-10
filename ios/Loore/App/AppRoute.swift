@@ -6,7 +6,9 @@ enum AppTab: String, CaseIterable, Hashable, Sendable {
 
     var title: String {
         switch self {
-        case .reflect: return "Reflect"
+        // "Home", not "Reflect" (#436, Peter 2026-10-09): the home screen has a
+        // Reflect card of its own. The case keeps its name (test identifiers).
+        case .reflect: return "Home"
         case .artifacts: return "Artifacts"
         case .log: return "Log"
         case .commons: return "Commons"
@@ -19,8 +21,12 @@ enum AppTab: String, CaseIterable, Hashable, Sendable {
 /// in markdown, notifications and changelog entries open native screens.
 enum AppRoute: Hashable, Sendable {
     case home
-    case voice(parentId: Int?, resumeLLMId: Int?)
-    case textMode
+    /// `glean`: opened from the Glean card (`?glean=1`, #435), or continuing a
+    /// thread started there: the thread offers the Glean button.
+    case voice(parentId: Int?, resumeLLMId: Int?, glean: Bool = false)
+    /// `glean`: opened from the Glean card (`/textmode?glean=1`): the new
+    /// thread is marked as a Glean thread.
+    case textMode(glean: Bool = false)
     case log
     case thread(id: Int, awaitLLM: Int?)
     case profile
@@ -41,6 +47,8 @@ enum AppRoute: Hashable, Sendable {
     case admin
     case welcome
     case confirmEmail(token: String?)
+    /// The emailed link that confirms an account deletion (#269).
+    case confirmAccountDeletion(token: String?)
     case waitlist
     /// Marketing and public pages shown as web views (`/@user`, `/vision`, …).
     case webPage(path: String)
@@ -98,8 +106,9 @@ enum AppRoute: Hashable, Sendable {
         case ("node", 2):
             if let id = Int(parts[1]) { return .thread(id: id, awaitLLM: int("awaitLlm")) }
             return .home
-        case ("voice", 1): return .voice(parentId: int("parent"), resumeLLMId: int("resume"))
-        case ("textmode", 1): return .textMode
+        case ("voice", 1):
+            return .voice(parentId: int("parent"), resumeLLMId: int("resume"), glean: query["glean"] == "1")
+        case ("textmode", 1): return .textMode(glean: query["glean"] == "1")
         case ("log", 1), ("feed", 1): return .log
         case ("profile", 1), ("dashboard", 1): return .profile
         case ("dashboard", 2): return .webPage(path: "/@\(parts[1])")
@@ -120,6 +129,7 @@ enum AppRoute: Hashable, Sendable {
         case ("admin", 1): return .admin
         case ("welcome", 1): return .welcome
         case ("confirm-email", 1): return .confirmEmail(token: query["token"])
+        case ("confirm-account-deletion", 1): return .confirmAccountDeletion(token: query["token"])
         case ("alpha-thank-you", 1): return .waitlist
         case ("landing", 1), ("vision", 1), ("why-loore", 1), ("how-to", 1):
             return .webPage(path: "/" + first)
@@ -137,7 +147,8 @@ enum AppRoute: Hashable, Sendable {
         case .profile, .todo, .artifacts, .newArtifact: return .artifacts
         case .log: return .log
         case .commons: return .commons
-        case .account, .importData, .references, .reference, .prompts, .prompt, .admin, .confirmEmail:
+        case .account, .importData, .references, .reference, .prompts, .prompt, .admin, .confirmEmail,
+             .confirmAccountDeletion:
             return .more
         case .thread: return nil
         case .waitlist, .webPage, .external: return nil
@@ -149,7 +160,7 @@ enum AppRoute: Hashable, Sendable {
     /// as on the web. Pushed onto Reflect's own stack it landed on that tab's older
     /// screens, and Back led into them.
     var carriesItsThreadToReflect: Bool {
-        if case .voice(let parentId, let resumeLLMId) = self { return parentId != nil || resumeLLMId != nil }
+        if case .voice(let parentId, let resumeLLMId, _) = self { return parentId != nil || resumeLLMId != nil }
         return false
     }
 

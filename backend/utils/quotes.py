@@ -92,6 +92,8 @@ def get_ext_quote_data(item_ids: List[int], user_id: int) -> Dict[int, Optional[
             "content": item.get_content(),
             "source": item.source,
             "author_handle": item.author_handle,
+            # The tweet card's byline (#435): display name, then handle.
+            "author_name": item.author_name,
             "title": item.title,
             "url": item.url,
             "posted_at": iso_utc(item.posted_at) if item.posted_at else None,
@@ -212,7 +214,8 @@ def get_quote_data(node_ids: List[int], user_id: int) -> Dict[int, Optional[dict
     """
     from backend.models import Node
     from backend.utils.privacy import (
-        can_user_access_node, can_user_view_tombstone,
+        author_gone, can_user_access_node, can_user_view_tombstone,
+        owner_hidden,
     )
 
     result = {}
@@ -223,15 +226,18 @@ def get_quote_data(node_ids: List[int], user_id: int) -> Dict[int, Optional[dict
             result[node_id] = None
             continue
         # Soft-deleted: emit a tombstone payload iff viewer had pre-deletion
-        # access; otherwise None (renders as "not accessible").
-        if node.deleted_at is not None:
+        # access; otherwise None (renders as "not accessible"). A node whose
+        # author deleted the account (#269) quotes as deleted, without a name.
+        if node.deleted_at is not None or owner_hidden(node):
             if can_user_view_tombstone(node, user_id):
+                gone = author_gone(node)
                 result[node_id] = {
                     "id": node.id,
                     "deleted": True,
                     "content": None,
-                    "username": node.user.username if node.user else "Unknown",
-                    "user_id": node.user_id,
+                    "username": (None if gone else node.user.username
+                                 if node.user else "Unknown"),
+                    "user_id": None if gone else node.user_id,
                     "created_at": iso_utc(node.created_at),
                     "node_type": node.node_type,
                     "ai_usage": node.ai_usage,

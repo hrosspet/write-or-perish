@@ -2,7 +2,8 @@ import SwiftUI
 
 /// The waitlist screen for signed-in users who are not approved yet
 /// (web `AlphaThankYouPage`, route `/alpha-thank-you`). Every other API is 403
-/// for them, so this screen is all they get, plus About and Logout in the ⋯ menu.
+/// for them, so this screen is all they get, plus About and Logout in the ⋯ menu,
+/// and "Delete my account" (#269): every account can delete itself.
 struct WaitlistView: View {
     @Environment(AppState.self) private var app
 
@@ -13,6 +14,7 @@ struct WaitlistView: View {
     @State private var editing = false
     @State private var resent = false
     @State private var pastingConfirmation = false
+    @State private var deleteModel: DeleteAccountModel?
     @FocusState private var emailFocused: Bool
 
     /// The only hint about an address that already belongs to another account
@@ -79,6 +81,12 @@ struct WaitlistView: View {
                             .buttonStyle(.looreLink)
                     }
                     .looreFadeIn(delay: 0.42)
+                    if let deleteModel, deleteModel.isAvailable {
+                        DeleteAccountSection(model: deleteModel)
+                            .frame(maxWidth: 420)
+                            .padding(.top, 48)
+                            .looreFadeIn(delay: 0.48)
+                    }
                 }
                 .padding(.horizontal, LooreSpacing.lg)
                 .padding(.vertical, 56)
@@ -101,7 +109,10 @@ struct WaitlistView: View {
             }
             .toolbarBackground(.hidden, for: .navigationBar)
         }
-        .onAppear { email = user?.email ?? "" }
+        .onAppear {
+            email = user?.email ?? ""
+            if deleteModel == nil { deleteModel = DeleteAccountModel(app: app) }
+        }
     }
 
     // MARK: Cards

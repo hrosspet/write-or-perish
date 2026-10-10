@@ -20,7 +20,7 @@ from backend.config import Config
 from backend.extensions import db
 from flask_migrate import Migrate
 from flask_login import LoginManager, current_user
-from backend.models import User
+from backend.models import User  # noqa: F401 - registers every model (migrations)
 from backend.oauth import init_twitter_blueprint
 from flask_cors import CORS
 from werkzeug.middleware.proxy_fix import ProxyFix
@@ -65,6 +65,18 @@ def validate_default_model(config):
             raise RuntimeError(
                 f"READ_DEFAULT_MODEL={read_default!r} is not an active "
                 f"model flagged 'read'.")
+        # A glean runs on its provider's model and never on another
+        # provider's (#435), so a typo here would refuse every glean of
+        # that provider's users: a red deploy instead.
+        for key, provider in (("GLEAN_MODEL_ANTHROPIC", "anthropic"),
+                              ("GLEAN_MODEL_OPENAI", "openai")):
+            glean_model = config.get(key)
+            cfg = supported.get(glean_model) or {}
+            if glean_model and (not cfg.get("read") or cfg.get("deprecated")
+                                or cfg.get("provider") != provider):
+                raise RuntimeError(
+                    f"{key}={glean_model!r} is not an active {provider} "
+                    f"model flagged 'read'.")
         return
     hint = ""
     dotted = (model_id or "").replace("-", ".")
@@ -204,7 +216,10 @@ def create_app():
 
     @login_manager.user_loader
     def load_user(user_id):
-        return User.query.get(int(user_id))
+        # A deleted account in its grace period (#269) loads as nobody:
+        # every session and remember cookie stops working at once.
+        from backend.utils.account_deletion import session_user
+        return session_user(user_id)
 
     # --------------------------------------------------------------------
     # BLOCK UNAPPROVED USERS
@@ -260,6 +275,19 @@ def create_app():
            request.path.startswith("/api/terms"):
             return
 
+        # Deleting the account (#269) is open to every account, waitlisted
+        # ones included (Deletion rule; App Store 5.1.1(v)): the request,
+        # the emailed link's confirmation, and the restore question. The
+        # restore routes act on the offer in the session, not on the
+        # signed-in account, so another waitlisted account signed in in the
+        # same browser must not block them either.
+        account_path = request.path.rstrip("/")
+        if (request.method == "POST" and account_path in (
+                "/api/account/delete", "/api/account/delete/confirm",
+                "/api/account/restore", "/api/account/restore/decline")) or \
+           (request.method == "GET" and account_path == "/api/account/restore"):
+            return
+
         # For API calls, check if the request expects JSON.
         accept_header = request.headers.get("Accept", "")
         if request.path.startswith("/api") or request.is_json or "application/json" in accept_header:
@@ -281,6 +309,14 @@ def create_app():
 
     from backend.routes.dashboard import dashboard_bp
     app.register_blueprint(dashboard_bp, url_prefix="/api/dashboard")
+
+    # "Delete all my writing" (#268).
+    from backend.routes.account_data import account_data_bp
+    app.register_blueprint(account_data_bp, url_prefix="/api/account")
+
+    # Account deletion and restore (#269).
+    from backend.routes.account_deletion import account_deletion_bp
+    app.register_blueprint(account_deletion_bp, url_prefix="/api/account")
 
     from backend.routes.export_data import export_bp
     app.register_blueprint(export_bp, url_prefix="/api")

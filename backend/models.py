@@ -42,6 +42,17 @@ class User(db.Model, UserMixin):
     email_change_token_hash = db.Column(db.String(128), nullable=True)
     email_change_expires_at = db.Column(db.DateTime, nullable=True)
     deactivated_at = db.Column(db.DateTime, nullable=True)
+    # Account deletion (#269). Set when the deletion is scheduled: from
+    # then on the account is hidden (it cannot sign in, its public pages
+    # answer 404, other members no longer see its public writing, no
+    # background job runs for it) until the purge deletes the row at the
+    # end of the grace period. Signing in before then offers a restore,
+    # which clears it. Null for a live account.
+    deleted_at = db.Column(db.DateTime, nullable=True)
+    # The link that confirms an email user's deletion request (#269):
+    # only its hash, like the sign-in and email-change links.
+    account_deletion_token_hash = db.Column(db.String(128), nullable=True)
+    account_deletion_expires_at = db.Column(db.DateTime, nullable=True)
     
     # Relationship to text nodes (explicit foreign_keys needed because Node has
     # multiple FKs pointing to User: user_id and pinned_by)
@@ -72,6 +83,14 @@ class User(db.Model, UserMixin):
     external_content_enabled = db.Column(
         db.Boolean, nullable=False, default=False,
         server_default=db.text("false"))
+
+    # The user's own Glean switch (#435, Account settings), on top of the
+    # rollout gate (GLEAN_FOR_ALL / GLEAN_USER_IDS). NULL = the user has
+    # not chosen: on for an account with Community Archive or X data
+    # (arrived with it, or connected X later), off otherwise
+    # (utils/glean.glean_default_on). True / False = their explicit
+    # choice, which wins over the default.
+    glean_enabled = db.Column(db.Boolean, nullable=True)
 
     # Craft mode toggle — shows power-user features in the nav overflow menu
     craft_mode = db.Column(db.Boolean, default=False, nullable=False)
@@ -235,6 +254,15 @@ class User(db.Model, UserMixin):
           still KEEPS email / magic-link humans (``twitter_id`` NULL), who
           never author LLM nodes.
 
+        * An account with a data purge waiting or running (#268) is left
+          out: "Delete all my writing" hides the writing at once, and no
+          scheduled job may build a profile or summary from it while it
+          can still be restored or is being deleted. The account is
+          eligible again after a restore or once the purge is done.
+
+        * A deleted account in its grace period (#269) is left out: it
+          is hidden, and nothing runs for it unless it is restored.
+
         Shared helper (not an inline filter) so the profile and
         recent-context tasks can't drift apart again.
         """
@@ -242,11 +270,15 @@ class User(db.Model, UserMixin):
         llm_authors = db.session.query(Node.user_id).filter(
             Node.node_type == "llm", Node.user_id.isnot(None)
         ).distinct()
+        purging = db.session.query(UserDataPurge.user_id).filter(
+            UserDataPurge.status.in_(UserDataPurge.ACTIVE_STATUSES))
         return cls.query.filter(
             cls.approved.is_(True),
             cls.plan.in_(list(cls.VOICE_MODE_PLANS)),
             cls.default_ai_usage.in_(list(AI_ALLOWED)),
             ~cls.id.in_(llm_authors),
+            ~cls.id.in_(purging),
+            cls.deleted_at.is_(None),
         )
 
 
@@ -429,6 +461,13 @@ class Node(db.Model):
     # so detaching silently turned the thread non-agentic and the model
     # wrote its tool calls as prose. None on ordinary nodes.
     prompt_key = db.Column(db.String(64), nullable=True)
+
+    # Which home card started this thread, on its ROOT node only: "glean"
+    # for a Voice / Text session started from the Glean card (#435), whose
+    # every turn then offers the Glean button; NULL for everything else
+    # (the Reflect card, older threads), which offer "Glean for this
+    # reflection" in the entry's menu instead (utils/glean.py).
+    started_from = db.Column(db.String(16), nullable=True)
 
     # Within-turn retrieval chaining (#158): when a text-mode LLM node makes
     # a retrieval tool call, it is finalized as an interim node and a
@@ -688,7 +727,7 @@ class Thread(db.Model):
     # ORM delete of the root removes the row (one SELECT per purged root
     # — no passive_deletes, so it also holds where FK enforcement is off,
     # e.g. sqlite tests); the DB cascade covers bulk deletes that bypass
-    # the ORM (delete_my_data).
+    # the ORM (the user data purge deletes the rows explicitly as well).
     root = db.relationship(
         "Node",
         backref=db.backref(
@@ -1259,6 +1298,11 @@ class ExternalItem(db.Model):
     # the sha256 hex of the canonical URL (exactly 64 chars).
     external_id = db.Column(db.String(64), nullable=False)
     author_handle = db.Column(db.String(64), nullable=True)
+    # The tweet author's display name (#435), when the Community Archive
+    # has one: written when a Glean pick is saved (ca_feed.save_feed_picks)
+    # and filled once for older picks (scripts/backfill_pick_author_names).
+    # Public profile data, plaintext like the handle. NULL = unknown.
+    author_name = db.Column(db.String(128), nullable=True)
     # Page/article title for web clips (tweets have none). Plaintext:
     # a title is what the list and the quote card show before the user
     # opens anything, and it carries no more than the stored URL does.
@@ -1913,3 +1957,156 @@ class RecentContextBatchJob(db.Model):
     # Indexed: the refusal backoff counts failed items in jobs collected
     # after the user's last saved summary (utils/refusal_backoff.py).
     collected_at = db.Column(db.DateTime, nullable=True, index=True)
+
+
+class UserDataPurge(db.Model):
+    """One request to delete all of a user's data (#268), and the record
+    of what the purge did.
+
+    A user's own request ("Delete all my writing") hides everything it
+    will delete at once (``scope = "hidden"``; what it hid is recorded in
+    ``UserDataPurgeHidden``) and waits out a grace period
+    (``scheduled_for``) during which the user can restore it; the purge
+    then deletes what the request hid, and what the user writes after it
+    stays. An admin purge (``scope = "all"``) is due at once and deletes
+    everything of the user's. The beat task
+    ``backend.tasks.user_purge.process_user_data_purges`` claims due jobs
+    and jobs whose runner stopped sending heartbeats, so a purge resumes
+    after a crash or a deploy; every step of the purge is idempotent.
+
+    ``user_id`` and the requester carry no foreign key on purpose: the
+    record must outlive the account when account deletion (#269) drops
+    the user row. Nothing here is user content: ``counts`` holds row and
+    file counts per table, ``error`` the exception class and message of
+    a failed run (the purge never loads content, so none can be in it).
+
+    status: scheduled -> running -> done; scheduled -> cancelled;
+    running -> failed after PURGE_MAX_ATTEMPTS runs that did not finish.
+
+    With ``delete_account`` (#269) the job deletes the account too: after
+    the purge, the identity layer (backend/utils/account_deletion.py)
+    removes the user row and everything that must not outlive it. A
+    restore inside the grace period cancels the job.
+    """
+    __tablename__ = "user_data_purge"
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, nullable=False, index=True)
+    # "self" (the user's own request) | "admin"
+    source = db.Column(db.String(16), nullable=False)
+    # What the purge deletes: "hidden" = what the user's own request hid
+    # when it was made (UserDataPurgeHidden); "all" = everything of the
+    # user's (an admin purge, an account deletion, or an admin bringing a
+    # user's request forward).
+    scope = db.Column(db.String(16), nullable=False, default="all",
+                      server_default="all")
+    requested_by_id = db.Column(db.Integer, nullable=True)
+    status = db.Column(db.String(16), nullable=False, default="scheduled",
+                       index=True)
+    requested_at = db.Column(db.DateTime, nullable=False,
+                             default=datetime.utcnow)
+    # When the purge may start: the end of the grace period for a user's
+    # own request, the request time for an admin purge.
+    scheduled_for = db.Column(db.DateTime, nullable=False, index=True)
+    cancelled_at = db.Column(db.DateTime, nullable=True)
+    cancelled_by_id = db.Column(db.Integer, nullable=True)
+    # When the first runner started.
+    started_at = db.Column(db.DateTime, nullable=True)
+    # When the runner of the current claim started; null while the claim
+    # waits in the Celery queue (such a claim is not an attempt).
+    runner_started_at = db.Column(db.DateTime, nullable=True)
+    # Set at the claim, touched by the runner after every chunk; a running
+    # job whose heartbeat is older than PURGE_STALE_AFTER is claimed again.
+    heartbeat_at = db.Column(db.DateTime, nullable=True)
+    # Since when the runner has been waiting for the user's in-flight
+    # tasks to end before it deletes anything (null when not waiting).
+    waiting_since = db.Column(db.DateTime, nullable=True)
+    finished_at = db.Column(db.DateTime, nullable=True)
+    # Runs that started (one per claim, counted when its runner starts);
+    # once PURGE_MAX_ATTEMPTS have started without finishing, the next
+    # beat marks the job failed instead of claiming it again.
+    attempts = db.Column(db.Integer, nullable=False, default=0,
+                         server_default="0")
+    # The claim token: the Celery task id of the runner that holds the
+    # job. A runner whose token no longer matches stops.
+    task_id = db.Column(db.String(64), nullable=True)
+    counts = db.Column(db.JSON, nullable=True)
+    error = db.Column(db.String(255), nullable=True)
+    # Account deletion (#269): the purge is followed by the deletion of
+    # the account itself.
+    delete_account = db.Column(db.Boolean, nullable=False, default=False,
+                               server_default=db.text("false"))
+
+    ACTIVE_STATUSES = ("scheduled", "running")
+
+
+class ReleasedUsername(db.Model):
+    """A username freed by an account deletion (#269), kept from new
+    accounts until ``reserved_until``: somebody else taking a deleted
+    account's handle could pass for that person, and old links to
+    /@<handle> would show the newcomer's pages. Covers the account's
+    current handle and its former ones (#253). No foreign key and no
+    other data: the account is gone, only the handle and the dates
+    remain, and the row may be deleted once the reservation is over."""
+    __tablename__ = "released_username"
+
+    id = db.Column(db.Integer, primary_key=True)
+    # Lowercased, like UsernameHistory: handles are unique
+    # case-insensitively and every lookup is an equality on this column.
+    username = db.Column(db.String(64), nullable=False, unique=True,
+                         index=True)
+    released_at = db.Column(db.DateTime, nullable=False,
+                            default=datetime.utcnow)
+    reserved_until = db.Column(db.DateTime, nullable=False)
+
+
+class UserDataPurgeHidden(db.Model):
+    """What one "Delete all my writing" request hid (#268; Peter,
+    2026-10-09: everything is hidden at once, "Restore my writing" brings
+    back exactly that, and the purge deletes it after the grace period).
+
+    One row per hidden thing, written in the same transaction as the job:
+    * ``kind`` = "node", ``row_id`` = a node of the user's that was live
+      at the request; the request soft-deleted it (``deleted_at``) and a
+      restore clears that again.
+    * ``kind`` = "node_deleted": a node the user had deleted before the
+      request. Purged with it, never restored.
+    * ``kind`` = a per-user table (``HIDDEN_ROW_TABLES``), ``row_id`` =
+      its row: hidden while this row exists (backend/utils/hidden_rows.py
+      leaves it out of every ORM query).
+    * ``kind`` = "user_description", ``row_id`` = the user: the short
+      profile description is shown empty.
+    * ``kind`` = "file", ``path`` = a folder or file of the user's audio
+      or import storage that existed at the request ("audio:<rel>" or
+      "stash:<rel>"), so the purge deletes those and not what the user
+      records afterwards.
+
+    Deleted by a restore (the rows show again) and at the end of the
+    purge (the rows are gone). Ids and paths only, never content."""
+    __tablename__ = "user_data_purge_hidden"
+
+    id = db.Column(db.Integer, primary_key=True)
+    job_id = db.Column(db.Integer, db.ForeignKey("user_data_purge.id"),
+                       nullable=False, index=True)
+    kind = db.Column(db.String(48), nullable=False)
+    row_id = db.Column(db.Integer, nullable=True)
+    path = db.Column(db.String(512), nullable=True)
+
+    __table_args__ = (
+        db.Index("ix_user_data_purge_hidden_kind_row", "kind", "row_id"),
+    )
+
+
+# The per-user tables whose rows a waiting "Delete all my writing" hides
+# (UserDataPurgeHidden): every ORM query leaves them out until a restore
+# or the purge. Nodes are hidden by deleted_at instead, so a thread keeps
+# its placeholders and other people's replies.
+HIDDEN_ROW_TABLES = (
+    UserProfile, UserRecentContext, UserTodo, UserArtifact, Draft,
+    ShareDraft, ExternalItem, UserPrompt, PollResponse, FeedPick,
+    ReferenceAction, UserFeedback,
+)
+
+from backend.utils.hidden_rows import install as _install_hidden_rows  # noqa: E402
+
+_install_hidden_rows()

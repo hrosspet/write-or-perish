@@ -674,6 +674,34 @@ def test_poll_failed_item_bumps_attempts_and_clears_pending(app, monkeypatch):
         parent_profile_id=prev.id).first() is None
 
 
+def test_poll_saves_nothing_for_a_user_whose_writing_is_on_hold(app, monkeypatch):
+    """#268: "Delete all my writing" hid the writing after the request went
+    out: the result is dropped (no profile, no failed attempt), and the
+    immediate seed builds nothing for the user meanwhile."""
+    from backend.models import UserDataPurge
+    u = _user()
+    prev = _prev_profile(u, datetime(2026, 5, 1))
+    job, item = _chunk_job(u, prev)
+    db.session.add(UserDataPurge(user_id=u.id, source="self", scope="hidden",
+                                 status="scheduled",
+                                 scheduled_for=datetime.utcnow()))
+    db.session.commit()
+    monkeypatch.setattr(pb, "batch_check_and_collect",
+                        lambda bids, keys: ({item["custom_id"]: {
+                            "content": "a profile", "input_tokens": 1,
+                            "output_tokens": 1}}, {}, {}))
+    monkeypatch.setattr(pb, "batch_submit", MagicMock(return_value={}))
+
+    pb._poll_profile_batches()
+
+    u2 = User.query.get(u.id)
+    assert u2.profile_batch_pending is False
+    assert (u2.profile_batch_attempts or 0) == 0
+    assert UserProfile.query.filter_by(
+        parent_profile_id=prev.id).first() is None
+    assert pb._seed_profile_batches(users=[u2], ignore_backoff=True) == 0
+
+
 def test_poll_apply_exception_bumps_attempts_and_clears_pending(app, monkeypatch):
     """A result that raises while being applied counts as a failed attempt,
     so retries stay bounded and the progress endpoint's batch_step_failed
