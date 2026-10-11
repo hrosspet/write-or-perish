@@ -577,26 +577,14 @@ struct ProposalCard: View {
 private struct SectionLabel: View {
     let text: String
     var roomy = false
-    @State private var pulse = false
 
     var body: some View {
-        HStack(spacing: 8) {
-            if roomy {
-                // Web `AiDot`: 6 px accent dot pulsing 0.4 to 1 opacity over 2 s, with a glow at the peak.
-                Circle().fill(LooreColor.accent).frame(width: 6, height: 6)
-                    .shadow(color: LooreColor.accentGlow.opacity(pulse ? 1 : 0), radius: 4)
-                    .opacity(pulse ? 1 : 0.4)
-                    .animation(.easeInOut(duration: 1).repeatForever(autoreverses: true), value: pulse)
-                    .onAppear { pulse = true }
-                    .accessibilityHidden(true)
-            }
-            Text(text.uppercased())
-                .font(LooreFont.sans(10.9, .regular))
-                .tracking(2)
-                .foregroundStyle(LooreColor.accent.opacity(0.6))
-        }
-        .padding(.top, roomy ? 0 : 16)
-        .padding(.bottom, roomy ? 19.2 : 12.8)
+        Text(text.uppercased())
+            .font(LooreFont.sans(10.9, .regular))
+            .tracking(2)
+            .foregroundStyle(LooreColor.accent.opacity(0.6))
+            .padding(.top, roomy ? 0 : 16)
+            .padding(.bottom, roomy ? 19.2 : 12.8)
     }
 }
 

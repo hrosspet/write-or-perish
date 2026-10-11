@@ -505,7 +505,7 @@ Section labels: 0.68rem uppercase, 0.18em tracking, accent at 60 % opacity.
 - **Feedback**: label **"Feedback"**, card with markdown + category badge; **"Send feedback"** → "Sending…" → **"Feedback sent — thank you"** / error ("Feedback send failed").
 - **Shares**: label **"Share"** / **"Shares"** (roomy: "Proposed Share(s)"); one card per block with markdown body, type badge, a copy button (top-right; copies block text; check icon for 1.5 s; title "Copy share text"); per-block **"Save to shares"** → "Saving…" → **"Saved as a private draft — publish from your [Share page]"** / error ("Saving the share failed").
 - **Preferences**: "Preferences updated" when `update_ai_preferences` succeeded.
-- Roomy (Voice) variant labels: "GitHub Issue Proposal", "Create GitHub Issue", "Feedback for the Team", "Send feedback to the team", "Save to your shares", plus pulsing AI dot on labels.
+- Roomy (Voice) variant labels: "GitHub Issue Proposal", "Create GitHub Issue", "Feedback for the Team", "Send feedback to the team", "Save to your shares". No dot before section labels in any variant (Peter, 2026-10-11).
 
 State from `tool_calls_meta` on load: `propose_todo.apply_status` completed/failed(+apply_error)/started, or `apply_todo_changes` success → completed; issue completed (with `issue_url`, `issue_number`); feedback completed; share completed (all) or `saved_indexes` (per block). The accept buttons and their status show to the reply's owner only; anyone else sees the proposal's text and the share copy button.
 

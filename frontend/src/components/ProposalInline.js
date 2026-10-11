@@ -328,28 +328,6 @@ export function stripProposalSections(text) {
   return [before, after].filter(Boolean).join('\n\n');
 }
 
-// Decorative pulsing dot rendered next to section labels in the roomy
-// variant. Inline keyframes keep the component self-contained.
-function AiDot() {
-  return (
-    <span style={{
-      display: 'inline-block',
-      width: '6px',
-      height: '6px',
-      borderRadius: '50%',
-      background: 'var(--accent)',
-      animation: 'proposalAiDotPulse 2s ease infinite',
-    }}>
-      <style>{`
-        @keyframes proposalAiDotPulse {
-          0%, 100% { opacity: 0.4; }
-          50% { opacity: 1; box-shadow: 0 0 8px var(--accent-glow); }
-        }
-      `}</style>
-    </span>
-  );
-}
-
 // Per-variant styling. Compact (default) suits inline rendering under a
 // highlighted card in NodeDetail. Roomy matches Voice mode's larger,
 // more breathable layout for "playing back" a response at arm's length.
@@ -838,7 +816,6 @@ export default function ProposalInline({
   const StatusTag = styles.statusTag;
   const sectionLabel = (text) => (
     <div style={styles.sectionLabel}>
-      {styles.roomy && <AiDot />}
       {text}
     </div>
   );
