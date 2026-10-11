@@ -8,7 +8,7 @@ struct ProposalCard: View {
     let nodeId: Int
     let toolCallsMeta: [ToolCallMeta]?
     var shareOnly = false
-    /// Web `size="roomy"` (Voice page): larger rows, a dot before section labels,
+    /// Web `size="roomy"` (Voice page): larger rows, web spacing,
     /// a centred Apply button. Compact (default) is the thread view.
     var roomy = false
     /// The proposal's owner (who asked for the reply) accepts it here. Anyone
@@ -55,6 +55,8 @@ struct ProposalCard: View {
 
     /// Web `sectionWrapper` margins collapse into the Apply area's margin, so
     /// the gap above Apply is the larger of the two (40 when a section is above).
+    private var hasNote: Bool { !(parsed.note ?? "").isEmpty }
+
     private var hasTodoSections: Bool {
         let p = parsed
         return p.completed != nil || p.newTasks != nil || p.priority != nil
@@ -76,7 +78,7 @@ struct ProposalCard: View {
             VStack(alignment: .leading, spacing: 0) {
                 if hasTodo { todoSection(parsed) }
                 if hasTodoUpdate && canAct {
-                    applyTodoArea.padding(.top, roomy ? (hasTodoSections ? 0 : 24) : 8)
+                    applyTodoArea.padding(.top, roomy ? (hasNote || !hasTodoSections ? 24 : 0) : 8)
                 }
                 if hasIssue, let title = parsed.issueTitle { issueSection(title: title, parsed: parsed) }
                 if hasFeedback, let feedback = parsed.feedback { feedbackSection(feedback, category: parsed.feedbackCategory) }
@@ -201,6 +203,10 @@ struct ProposalCard: View {
         let circle: CGFloat = roomy ? 18 : 16
         let gap: CGFloat = roomy ? 12 : 10
         let pad: CGFloat = roomy ? 12 : 8
+        // Web line-height 1.5 on 14.72 px = 22.08 px. Outfit's own line is about 19 pt, so
+        // lineSpacing adds the 3.08 between lines and each end of the row gets half of it
+        // (CSS half-leading); the bottom also gets the web's 1 px border.
+        let halfLeading: CGFloat = roomy ? 1.54 : 0
         let textSize: CGFloat = roomy ? 14.72 : 13.6
         func startAdding() {
             addText = ""
@@ -233,7 +239,7 @@ struct ProposalCard: View {
                 .buttonStyle(.plain)
                 .disabled(!toggleable)
                 .padding(-6)
-                .padding(.top, 2)
+                .padding(.top, 2 - halfLeading)
                 .accessibilityLabel(item)
                 .accessibilityHint(toggleable ? (completed ? "Unmark as done" : "Mark as done") : "")
                 .accessibilityValue(completed ? "Done" : "Not done")
@@ -242,23 +248,34 @@ struct ProposalCard: View {
                     .foregroundStyle(LooreColor.textSecondary)
                     .strikethrough(completed)
                     .opacity(completed ? 0.4 : 1)
-                    .lineSpacing(roomy ? 3.5 : 3)
+                    .lineSpacing(roomy ? 3.08 : 3)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .accessibilityAction(named: "Add an item below") { if toggleable { startAdding() } }
-                if toggleable {
-                    // Web: hidden until the row is hovered (touch: tapped), then accent.
-                    Button(action: startAdding) {
-                        Text("+").font(LooreFont.sans(19.2, .regular)).foregroundStyle(LooreColor.accent)
-                            .frame(width: 28, height: 24).contentShape(Rectangle())
+                    .accessibilityActions {
+                        if toggleable { Button("Add an item below", action: startAdding) }
                     }
-                    .buttonStyle(.plain)
-                    .opacity(selected ? 1 : 0)
-                    .allowsHitTesting(selected)
-                    .accessibilityHidden(!selected)
-                    .accessibilityLabel("Add an item below")
+                if toggleable {
+                    // Web: hidden until the row is hovered (touch: tapped), then accent. Only the
+                    // visible one is in the tree. The slot keeps the web's layout footprint
+                    // (glyph + 8 px padding = about 19 pt); the touch area is 28 wide and
+                    // overlaps the text's end by 9 pt.
+                    Group {
+                        if selected {
+                            Button(action: startAdding) {
+                                Text("+").font(LooreFont.sans(19.2, .regular)).foregroundStyle(LooreColor.accent)
+                                    .frame(width: 28, height: 24).contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("Add an item below")
+                            .transition(.opacity)
+                        } else {
+                            Color.clear.frame(width: 28, height: 24)
+                        }
+                    }
+                    .padding(.leading, -9)
                 }
             }
-            .padding(.vertical, pad)
+            .padding(.top, pad + halfLeading)
+            .padding(.bottom, pad + halfLeading + (roomy ? 1 : 0))
             .contentShape(Rectangle())
             .onTapGesture {
                 guard toggleable else { return }
@@ -413,7 +430,7 @@ struct ProposalCard: View {
             }
             if canAct { issueStatusArea }
         }
-        .padding(.top, 12)
+        .padding(.top, roomy ? 32 : 12)
     }
 
     private var issueStatusArea: some View {
@@ -465,7 +482,7 @@ struct ProposalCard: View {
             }
             if canAct { feedbackStatusArea }
         }
-        .padding(.top, 12)
+        .padding(.top, roomy ? 32 : 12)
     }
 
     private var feedbackStatusArea: some View {
@@ -533,7 +550,7 @@ struct ProposalCard: View {
                 .padding(.top, index > 0 ? 14 : 0)
             }
         }
-        .padding(.top, 12)
+        .padding(.top, roomy ? 32 : 12)
     }
 
     @ViewBuilder private func shareStatus(_ index: Int) -> some View {
