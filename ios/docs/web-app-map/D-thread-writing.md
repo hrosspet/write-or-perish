@@ -530,7 +530,7 @@ After each success the page's copy of `tool_calls_meta` is updated (`onApplied`)
   3. If a target section exists: insert the raw line right after its heading (`prepend`, used when unticking) or after the last consecutive non-blank line following the heading (append, used when ticking).
   4. **If the target section doesn't exist (#377, fixed in fee95d2 / #378)**: create it next to the source section in prompt order (Completed before New Tasks): target ranks earlier → insert `### Completed`, the line, and a blank line right above the source heading; target ranks later → insert a blank line, `### New Tasks`, the line after the source section's last non-blank line. So the item is never dropped.
   Then optimistic `onContentChange(new)` + `PUT /nodes/<id> {content}`; failure reverts and reports "Couldn't save change — reverted (<reason>)".
-- **"+" on a row** → inline input "New item…" (Enter adds, Esc/blur-empty cancels, only one open at a time) → `insertItemAfter` (same as §3.5) + PUT; failure "Couldn't add task — reverted (<reason>)".
+- **"+" on a row** → the "+" shows only on the hovered row (iOS: the last row tapped; tapping it again, the circle, or "+" clears it) and is accent-coloured; it opens an inline input "New item…" (Enter adds, Esc/blur-empty cancels, only one open at a time) → `insertItemAfter` (same as §3.5) + PUT; failure "Couldn't add task — reverted (<reason>)".
 
 ---
 
