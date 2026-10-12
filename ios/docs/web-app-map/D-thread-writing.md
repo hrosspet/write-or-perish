@@ -505,7 +505,7 @@ Section labels: 0.68rem uppercase, 0.18em tracking, accent at 60 % opacity.
 - **Feedback**: label **"Feedback"**, card with markdown + category badge; **"Send feedback"** → "Sending…" → **"Feedback sent — thank you"** / error ("Feedback send failed").
 - **Shares**: label **"Share"** / **"Shares"** (roomy: "Proposed Share(s)"); one card per block with markdown body, type badge, a copy button (top-right; copies block text; check icon for 1.5 s; title "Copy share text"); per-block **"Save to shares"** → "Saving…" → **"Saved as a private draft — publish from your [Share page]"** / error ("Saving the share failed").
 - **Preferences**: "Preferences updated" when `update_ai_preferences` succeeded.
-- Roomy (Voice) variant labels: "GitHub Issue Proposal", "Create GitHub Issue", "Feedback for the Team", "Send feedback to the team", "Save to your shares", plus pulsing AI dot on labels.
+- Roomy (Voice) variant labels: "GitHub Issue Proposal", "Create GitHub Issue", "Feedback for the Team", "Send feedback to the team", "Save to your shares". No dot before section labels in any variant (Peter, 2026-10-11).
 
 State from `tool_calls_meta` on load: `propose_todo.apply_status` completed/failed(+apply_error)/started, or `apply_todo_changes` success → completed; issue completed (with `issue_url`, `issue_number`); feedback completed; share completed (all) or `saved_indexes` (per block). The accept buttons and their status show to the reply's owner only; anyone else sees the proposal's text and the share copy button.
 
@@ -530,7 +530,7 @@ After each success the page's copy of `tool_calls_meta` is updated (`onApplied`)
   3. If a target section exists: insert the raw line right after its heading (`prepend`, used when unticking) or after the last consecutive non-blank line following the heading (append, used when ticking).
   4. **If the target section doesn't exist (#377, fixed in fee95d2 / #378)**: create it next to the source section in prompt order (Completed before New Tasks): target ranks earlier → insert `### Completed`, the line, and a blank line right above the source heading; target ranks later → insert a blank line, `### New Tasks`, the line after the source section's last non-blank line. So the item is never dropped.
   Then optimistic `onContentChange(new)` + `PUT /nodes/<id> {content}`; failure reverts and reports "Couldn't save change — reverted (<reason>)".
-- **"+" on a row** → inline input "New item…" (Enter adds, Esc/blur-empty cancels, only one open at a time) → `insertItemAfter` (same as §3.5) + PUT; failure "Couldn't add task — reverted (<reason>)".
+- **"+" on a row** → the "+" shows only on the hovered row (iOS: the last row tapped; tapping it again, the circle, or "+" clears it) and is accent-coloured; it opens an inline input "New item…" (Enter adds, Esc/blur-empty cancels, only one open at a time) → `insertItemAfter` (same as §3.5) + PUT; failure "Couldn't add task — reverted (<reason>)".
 
 ---
 
