@@ -896,6 +896,49 @@ Kinds (one per entry and per table row):
 - **Source:** Voice review in local Loore 2026-10-09 (Opus 5.5)
 - **Applies to:** #493, #473
 
+### 2026-10-13 · A failed voice reply makes a sound
+
+- **Kind:** UX
+- **Situation:** on 2026-10-12 Peter was in a voice conversation on the iPhone while driving. OpenAI's TTS hung on several calls in a row, and the audio of two replies failed. The app and the web both ended such a turn with no sound or message, only a red dot for 3 s. Asked whether a failed reply should play the existing error sound in both clients.
+- **Prediction:** yes, build it now (70 %); wants more than a sound (a spoken notice, or the phone reading the text) 20 %.
+- **Peter:** "Q1 - yes"
+- **Score:** hit
+- **Source:** Claude Code session 2026-10-13 (Opus 5.5)
+- **Applies to:** #504
+- **Rule:** candidate: in voice mode, every failure can be heard
+
+### 2026-10-13 · Shorter wait and more attempts for hung TTS calls
+
+- **Kind:** reliability
+- **Situation:** #382's temporary retry gives a TTS call 3 attempts and cancels an attempt after 30 s without data. On 2026-10-12, 15:03–15:19 UTC, 13 of 21 attempts hung with no data, the other 8 ran at normal speed, and three chunks failed every attempt. Before that day every resent call had worked. Proposed: wait at most 10 s for data, allow up to 5 attempts, and let the last one wait 30 s. At that hang rate a chunk would fail about 9 % of the time instead of about 24 %, and the worst-case wait would be 70 s instead of 90 s.
+- **Prediction:** accepts as proposed (70 %); accepts with other numbers 20 %; wants to wait 10 %.
+- **Peter:** "Q2 - no, wait one more week whether the API health improves"
+- **Score:** miss
+- **Why it missed:** treated one bad afternoon as enough reason to extend temporary code. Peter waits for the weekly check of #382 to show whether the API's health improves before changing it.
+- **Source:** Claude Code session 2026-10-13 (Opus 5.5)
+- **Applies to:** #382
+- **Rule:** candidate: a temporary workaround for a provider's slowness changes only when the weekly check shows a trend, not after one incident
+
+### 2026-10-13 · Shorter wait for hung TTS calls: ask or decide
+
+- **Kind:** escalation
+- **Situation:** #382's temporary retry: proposed a 10 s wait and up to 5 attempts after one afternoon of hung TTS calls.
+- **Decision:** asked Peter instead of deciding. The builder had planned to decide it as a reliability change inside #382's approved retry, and asked because Peter asked to answer the open questions.
+- **Peter:** "Q2 - no, wait one more week whether the API health improves"
+- **Score:** hit, deciding alone would have built a change he declined
+- **Source:** Claude Code session 2026-10-13 (Opus 5.5)
+- **Applies to:** #382
+
+### 2026-10-13 · No fallback to `tts-1` when TTS calls fail
+
+- **Kind:** reliability
+- **Situation:** when `gpt-4o-mini-tts` fails every attempt, the last attempt could go to OpenAI's older `tts-1` model: the same provider and voice name, but a flatter sound, and the voice would change partway through a reply. After the log showed most attempts answering at normal speed, the builder recommended not now.
+- **Prediction:** not now, revisit only if a better retry still loses chunks (65 %); add it now 25 %; never, for voice quality 10 %.
+- **Peter:** "Q3 - no"
+- **Score:** hit, not built either way
+- **Source:** Claude Code session 2026-10-13 (Opus 5.5)
+- **Applies to:** #382
+
 ## Decided by the builder
 
 Choices that agents flagged in PRs and that the builder decided because a rule above already covers them (Peter, 2026-10-02: decide what the log supports, raise only real judgement calls). Each is also recorded on its PR, or in the session where Peter asked. The Decided column holds only the builder's part; a rule or decision of Peter's goes in the Rule column. Questions raised to Peter instead are not listed; his answers become entries. Model is the model that wrote the PR (its Co-Authored-By line). Result is "accepted by merge (PR #N, date)" once the PR has merged and Peter didn't correct the choice, "pending" until it merges, and "corrected → entry <title>" when he overrules it; the entry is then scored as a miss.
@@ -1004,6 +1047,8 @@ Choices that agents flagged in PRs and that the builder decided because a rule a
 | 2026-10-09 | #493 | reliability | How long a glean may wait (review fix) | Counts only in the foreground; one more status check before giving up | Problems show | Opus 5.5 | pending |
 | 2026-10-09 | #493 | UX | The conversation when a gleaning opens (review fix) | Always moves under the gleaning | One behaviour across clients | Opus 5.5 | pending |
 | 2026-10-09 | #493 | user-facing text | The lock-screen card after accept (review fix) | "Gleaning · Open Loore to read it when it's ready", no buttons | candidate: user-facing text says what happens | Opus 5.5 | pending |
+| 2026-10-13 | #504 | UX | When the error sound plays if part of the failed reply is already queued | After that audio has played; at once if nothing played; once per reply; not for a turn that is no longer current | Peter's Q1 "yes" (2026-10-13) | Opus 5.5 | pending |
+| 2026-10-13 | #504 | UX | Which voice failures get the error sound | Every failure that ended silently, beyond the failed audio asked about: transcription too slow, the reply can't start, the reply's text fails, the app gives up on the reply; AI usage None and a cancelled reply stay silent | Peter's Q1: "so you know it failed without looking" | Opus 5.5 | pending |
 
 ## Backfilled decisions
 
