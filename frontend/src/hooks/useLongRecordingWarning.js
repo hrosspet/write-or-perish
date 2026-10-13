@@ -7,7 +7,7 @@ export const LONG_RECORDING_WARNING_SEC = 59 * 60;
 /**
  * Play a rising two-note "wrap up soon" chime via the Web Audio API.
  * Rising + repeated so it reads as an attention cue, not a failure (cf.
- * the descending playErrorSound in useStreamingTranscription — same idiom).
+ * the descending playErrorSound in utils/errorSound — same idiom).
  * The sound matters more than the toast here: long recordings often run
  * with the screen off / phone pocketed via headphones, where a visual
  * toast is never seen. Best-effort — silently ignored if audio is
