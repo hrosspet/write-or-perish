@@ -43,6 +43,7 @@
   /* Fonts */
   --serif: 'Cormorant Garamond', Georgia, 'Times New Roman', serif;
   --sans: 'Outfit', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --reading-serif: 'Newsreader', Georgia, 'Times New Roman', serif;
 }
 
 /* Light mode — warm parchment palette */
@@ -635,11 +636,12 @@ code {
   margin-bottom: 28px;
 }
 /* Loore's note on each pick comes first and is set larger than the
-   tweet under it (#435 mockup). */
+   tweet under it (#435 mockup). Newsreader, a text serif: Cormorant
+   Garamond was hard to read at this size (Peter, 2026-10-13). */
 .read-reply-body .loore-md > p {
-  font-family: var(--serif);
-  font-size: 1.15rem;
-  line-height: 1.5;
+  font-family: var(--reading-serif);
+  font-size: 1.07rem;
+  line-height: 1.6;
   color: var(--text-primary);
 }
 .read-reply-body .ext-quote-slot .loore-md > p {
