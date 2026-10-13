@@ -327,6 +327,35 @@ describe('a thread started from the Reflect card', () => {
     expect(mockPost).toHaveBeenCalledWith('/read/from-node/20', { model: 'gpt-6-luna' });
   });
 
+  // The focal node's real payload has user: {id} and no user_id.
+  const focalEntry = (overrides = {}) => ({
+    id: 50, node_type: 'user', user: { id: 1, username: 'ana' }, username: 'ana',
+    content: 'The open entry.', ai_usage: 'chat', privacy_level: 'private',
+    ancestors: [], children: [], child_count: 0, glean_thread: false, ...overrides,
+  });
+
+  test('an open entry that is the only one of the user\'s still gets the button', async () => {
+    routes['/nodes/50'] = focalEntry();
+    renderAt('/node/50');
+    await screen.findByText('The open entry.');
+    fireEvent.click(screen.getByRole('button', { name: 'Glean' }));
+    expect(mockPost).toHaveBeenCalledWith('/read/from-node/50', { model: undefined });
+  });
+
+  test('when the open entry is the newest, the button gleans from it, not an older ancestor', async () => {
+    routes['/nodes/50'] = focalEntry({
+      created_at: '2026-10-10T10:00:00Z',
+      ancestors: [{
+        id: 20, user_id: 1, node_type: 'user', content: 'Older.', created_at: '2026-10-09T10:00:00Z',
+        ai_usage: 'chat', privacy_level: 'private', child_count: 1,
+      }],
+    });
+    renderAt('/node/50');
+    await screen.findByText('The open entry.');
+    fireEvent.click(screen.getByRole('button', { name: 'Glean' }));
+    expect(mockPost).toHaveBeenCalledWith('/read/from-node/50', { model: undefined });
+  });
+
   test('the top button picks the newest entry by created_at, over thread order', async () => {
     routes['/nodes/30'] = reply({
       ancestors: [VOICE_ROOT,

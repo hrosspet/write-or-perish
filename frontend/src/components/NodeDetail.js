@@ -1328,7 +1328,8 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
     walk(node.children);
     let best = null;
     flat.forEach((n) => {
-      if (n.node_type === 'llm' || n.user_id !== currentUser.id) return;
+      // The focal node has `user: {id}` and no user_id; the rest have user_id.
+      if (n.node_type === 'llm' || (n.user_id ?? n.user?.id) !== currentUser.id) return;
       if (!gleanFromMenu(n, true)) return;
       if (!best || !n.created_at || !best.created_at || n.created_at >= best.created_at) best = n;
     });
