@@ -1,17 +1,20 @@
 """Delete all of one user's data (#268).
 
-One operation, used by the user's "Delete all my writing" (after a grace
-period) and by the admin dashboard's "Purge data" (at once):
+One operation, used by the user's "Delete all my writing" and by the
+admin dashboard's "Purge data", both after the same grace period (Peter,
+2026-10-13, of the admin's: "it should definitely work the same as user
+doing themselves"):
 
-* ``schedule_purge`` of the user's own request hides at once everything
-  the purge will delete (Peter, 2026-10-09: "a soft-delete of everything
-  immediately + real deletion after 30 days"): the user's nodes are
-  soft-deleted and the rows of the per-user tables are left out of every
-  query (backend/utils/hidden_rows.py). What it hid is recorded per job
-  (UserDataPurgeHidden), so ``cancel_purge`` ("Restore my writing")
-  brings back exactly that, in one transaction, and the purge after the
-  grace period deletes exactly that (``Scope``): what the user writes
-  after the request stays.
+* ``schedule_purge`` hides at once everything the purge will delete
+  (Peter, 2026-10-09: "a soft-delete of everything immediately + real
+  deletion after 30 days"): the user's nodes are soft-deleted and the
+  rows of the per-user tables are left out of every query
+  (backend/utils/hidden_rows.py). What it hid is recorded per job
+  (UserDataPurgeHidden), so ``cancel_purge`` ("Restore my writing", the
+  user's, also of an admin's request) and ``undo_admin_purge`` (the
+  admin's Undo of an admin's request) bring back exactly that, in one
+  transaction, and the purge after the grace period deletes exactly that
+  (``Scope``): what the user writes after the request stays.
 
 * ``stop_in_flight`` stops what would write the user's data again behind
   the purge: queued Celery tasks are revoked, provider batches that carry
@@ -244,10 +247,11 @@ def _not_owned(user_id, extras):
 class Scope(NamedTuple):
     """What a purge deletes.
 
-    Everything of the user's (``job_id`` None): the admin purge, an
-    account deletion, an admin bringing a user's request forward.
+    Everything of the user's (``job_id`` None): an account deletion, or
+    a job created from a shell with ``scope="all"``.
 
-    What one "Delete all my writing" request hid (``job_id`` set,
+    What one "Delete all my writing" request, the user's own or an
+    admin's "Purge data", hid (``job_id`` set,
     UserDataPurgeHidden): the nodes it soft-deleted and the ones the
     user had deleted before (still deleted now; a re-import that brought
     one back made it the user's again), the rows of the per-user tables
@@ -1360,14 +1364,23 @@ def active_job(user_id):
     ).order_by(UserDataPurge.id.desc()).first()
 
 
-def schedule_purge(user, *, requested_by_id, source, at=None):
+def schedule_purge(user, *, requested_by_id, source, at=None,
+                   scope="hidden"):
     """Create the user's purge job, due at *at* (default: after the grace
     period). Returns (job, created); an active job is returned as it is.
     Raises PurgeRefused for an AI or system account.
 
-    The user's own request ("self") hides at once everything it will
-    delete (hide_writing), in the same transaction as the job: either
-    both are there or neither."""
+    The request, the user's own ("self") or an admin's ("admin"), hides
+    at once everything it will delete (hide_writing), in the same
+    transaction as the job: either both are there or neither. The user
+    can restore either (cancel_purge); the admin can undo an admin's
+    (undo_admin_purge).
+
+    ``scope="all"`` hides nothing and deletes everything of the user's
+    when it is due: the app never asks for it (an account deletion makes
+    its own job); it is for an erasure that cannot wait, from a shell."""
+    if scope not in ("hidden", "all"):
+        raise ValueError(f"unknown purge scope {scope!r}")
     reason = purge_refusal(user)
     if reason:
         raise PurgeRefused(reason)
@@ -1378,11 +1391,10 @@ def schedule_purge(user, *, requested_by_id, source, at=None):
         db.session.commit()
         return job, False
     now = _now()
-    hides = source == "self"
+    hides = scope == "hidden"
     job = UserDataPurge(
         user_id=user.id, source=source, requested_by_id=requested_by_id,
-        status="scheduled", requested_at=now,
-        scope="hidden" if hides else "all",
+        status="scheduled", requested_at=now, scope=scope,
         scheduled_for=at or now + timedelta(days=PURGE_GRACE_DAYS))
     db.session.add(job)
     if hides:
@@ -1504,14 +1516,15 @@ def forget_hidden(job_id):
 
 
 def cancel_purge(user_id, cancelled_by_id):
-    """Cancel the user's own "Delete all my writing" while it waits, and
-    restore what it hid, in one transaction ("Restore my writing").
-    Returns True when a job was cancelled (False: none waiting, it has
-    started, or it is an admin's purge, which is never undone). The
-    cancel is a conditional update on the job's status, so a restore and
-    the beat's claim have one winner. An account deletion (#269) is not
-    cancelled here: only a restore after signing in undoes it
-    (account_deletion.restore_account)."""
+    """Cancel the user's waiting "Delete all my writing", their own or an
+    admin's "Purge data" (Peter, 2026-10-13: the admin's works the same
+    way), and restore what it hid, in one transaction ("Restore my
+    writing"). Returns True when a job was cancelled (False: none
+    waiting, or it has started). The cancel is a conditional update on
+    the job's status, so a restore and the beat's claim have one winner.
+    An account deletion (#269) is not cancelled here: only a restore
+    after signing in undoes it (account_deletion.restore_account), or the
+    admin's Undo of an admin's deletion."""
     cancelled = cancel_jobs(UserDataPurge.user_id == user_id,
                             UserDataPurge.scope == "hidden",
                             UserDataPurge.delete_account.is_(False),
@@ -1519,6 +1532,26 @@ def cancel_purge(user_id, cancelled_by_id):
     db.session.commit()
     if cancelled:
         user = db.session.get(User, user_id)
+        if user is not None:
+            _drop_public_pages(user)
+    return bool(cancelled)
+
+
+def undo_admin_purge(job_id, admin_id):
+    """The admin's Undo of an admin's waiting "Purge data": cancel the job
+    and restore what it hid, in one transaction, as the user's "Restore
+    my writing" does (a ``scope="all"`` job from a shell hid nothing, so
+    it is only cancelled). Only an admin's request: the user's own is
+    theirs to restore. Returns True when the job was cancelled (False: it
+    is not an admin's waiting writing deletion any more)."""
+    cancelled = cancel_jobs(UserDataPurge.id == job_id,
+                            UserDataPurge.source == "admin",
+                            UserDataPurge.delete_account.is_(False),
+                            cancelled_by_id=admin_id)
+    db.session.commit()
+    if cancelled:
+        job = db.session.get(UserDataPurge, job_id)
+        user = db.session.get(User, job.user_id) if job else None
         if user is not None:
             _drop_public_pages(user)
     return bool(cancelled)
@@ -1609,7 +1642,7 @@ def _fail_job(job, error):
 
 
 def dispatch_due_jobs(dispatch, now=None):
-    """Beat: claim every due job (end of grace, admin purge, a runner that
+    """Beat: claim every due job (end of grace, a job due now, a runner that
     went quiet) and hand it to *dispatch(job_id, token)*. A job that has
     used up PURGE_MAX_ATTEMPTS is marked failed instead. Returns the ids
     dispatched."""
@@ -1641,8 +1674,9 @@ def dispatch_due_jobs(dispatch, now=None):
 
 
 def start_job_now(job, dispatch):
-    """Claim and dispatch *job* at once (admin purge). False when another
-    runner holds it."""
+    """Claim and dispatch *job* at once (a job due now, e.g. one created
+    from a shell with ``scope="all"``). False when another runner holds
+    it."""
     token = str(uuid.uuid4())
     if not claim_job(job.id, token):
         return False
@@ -1771,7 +1805,8 @@ def deletion_status(user_id):
     out = {"status": None, "grace_days": PURGE_GRACE_DAYS,
            "purge_at": None, "requested_at": None, "finished_at": None,
            # The writing is hidden now and "Restore my writing" brings
-           # it back (the user's own request, until it starts).
+           # it back (the user's own request or an admin's, until it
+           # starts).
            "restorable": False,
            # X is connected for bookmarks: the purge revokes Loore's
            # access at X and deletes the stored connection.

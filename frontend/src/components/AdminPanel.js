@@ -533,13 +533,15 @@ const smallActionStyle = {
 };
 
 // The Users-row line for a user's latest data purge (#268) or account
-// deletion (#269).
+// deletion (#269). An admin's request waits out the same grace period as
+// the user's own (Peter, 2026-10-13), so the line says who asked.
 export function purgeLabel(job) {
   if (!job) return "";
+  const who = job.source === "admin" ? "an admin" : "the user";
   if (job.delete_account) {
     switch (job.status) {
       case "scheduled":
-        return `Account deleted by the user, hidden until ${formatDate(job.scheduled_for)}`;
+        return `Account deleted by ${who}, hidden until ${formatDate(job.scheduled_for)}`;
       case "running":
         return "Deleting account…";
       case "failed":
@@ -550,10 +552,11 @@ export function purgeLabel(job) {
   }
   switch (job.status) {
     case "scheduled":
-      // The user's "Delete all my writing" hides the writing at once
-      // (#268, Peter 2026-10-09) and deletes it on the date.
+      // "Delete all my writing" and the admin's "Purge data" hide the
+      // writing at once (#268, Peter 2026-10-09 and 2026-10-13) and
+      // delete it on the date.
       return job.scope === "hidden"
-        ? `Writing hidden by the user, deleted on ${formatDate(job.scheduled_for)}`
+        ? `Writing hidden by ${who}, deleted on ${formatDate(job.scheduled_for)}`
         : `Data purge due ${formatDate(job.scheduled_for)}`;
     case "running":
       return "Purging data…";
@@ -807,6 +810,25 @@ function AdminPanel() {
       if (showRefusal(err, userId)) return;
       console.error(err);
       setError("Error queueing profile build.");
+    }
+  };
+
+  // Undo an admin's waiting "Purge data" or "Delete account" (Peter,
+  // 2026-10-13): what it hid shows again. The job id guards against a
+  // stale row undoing another request.
+  const undoDeletion = async (u) => {
+    const job = u.data_purge;
+    if (!job || !job.undoable) return;
+    const question = job.delete_account
+      ? `Undo the deletion of the account @${u.username}? The account is shown again and can sign in.`
+      : `Undo the purge of @${u.username}? Their writing shows again at once.`;
+    if (!window.confirm(question)) return;
+    try {
+      await api.post(`/admin/users/${u.id}/undo_deletion`, { job_id: job.id });
+      fetchUsers();
+    } catch (err) {
+      setError(err.response?.data?.error || "Could not undo the deletion.");
+      fetchUsers();
     }
   };
 
@@ -1480,7 +1502,7 @@ function AdminPanel() {
                 <button
                   onClick={() => setPurgeAsk(u)}
                   disabled={u.data_purge?.status === "running"}
-                  title="Delete all of this user's data now (dry run first). The account stays."
+                  title={'Hide all of this user\'s writing now and delete it after the grace period, like their own "Delete all my writing" (dry run first). The account stays.'}
                   style={{ color: "var(--error)" }}
                 >
                   Purge data
@@ -1488,7 +1510,7 @@ function AdminPanel() {
                 <button
                   onClick={() => setDeleteAsk(u)}
                   disabled={u.data_purge?.status === "running"}
-                  title="Delete this account and all its data now (dry run first)."
+                  title="Delete this account and all its data, like the user's own account deletion: hidden now, deleted after the grace period (dry run first)."
                   style={{ color: "var(--error)" }}
                 >
                   Delete account
@@ -1496,6 +1518,20 @@ function AdminPanel() {
                 {u.data_purge && (
                   <div style={{ marginTop: "4px", fontSize: "0.85em", color: u.data_purge.status === "failed" ? "var(--error)" : "var(--text-secondary)" }}>
                     {purgeLabel(u.data_purge)}
+                    {u.data_purge.undoable && (
+                      <>
+                        {" "}
+                        <button
+                          onClick={() => undoDeletion(u)}
+                          style={smallActionStyle}
+                          title={u.data_purge.delete_account
+                            ? "Show the account again, as the user's own restore does"
+                            : "Show the writing again, as the user's own restore does"}
+                        >
+                          Undo
+                        </button>
+                      </>
+                    )}
                   </div>
                 )}
                 {(intentLabel(intent[u.id])) && (

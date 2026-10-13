@@ -458,6 +458,10 @@ def _purge_job_json(job):
         "error": job.error,
         # An account deletion (#269), not only a data purge.
         "delete_account": bool(job.delete_account),
+        # An admin's request still waiting out its grace period: the
+        # Users row offers Undo (Peter, 2026-10-13). The user's own
+        # request is theirs to restore.
+        "undoable": job.status == "scheduled" and job.source == "admin",
     }
 
 
@@ -485,14 +489,22 @@ def purge_data_status(user_id):
 @login_required
 @admin_required
 def purge_data_route(user_id):
-    """Delete all of a user's data at once (#268): mistaken pre-fills,
-    opt-outs, erasure requests. The account itself stays.
+    """Delete all of a user's writing (#268): mistaken pre-fills, opt-outs,
+    erasure requests. The account itself stays.
+
+    It works exactly like the user's own "Delete all my writing" (Peter,
+    2026-10-13: "it should definitely work the same as user doing
+    themselves"): everything is hidden at once, the user sees the
+    "Writing deleted" status bar and can restore it, the admin can undo
+    it (``undo_deletion``), and it is deleted for good after the same
+    grace period (PURGE_GRACE_DAYS).
 
     ``?dry_run=1`` returns what the purge would delete, change and keep,
     per table, and changes nothing. Otherwise the body must carry
-    ``{"confirm_username": "<the user's username>"}``; the purge runs in
-    Celery and its job row records who started it. Counts only, never
-    content. AI and system accounts are refused (409)."""
+    ``{"confirm_username": "<the user's username>"}``; the job row
+    records who asked. Counts only, never content. AI and system
+    accounts are refused (409), and so is a second request while one
+    waits or runs (409): the user's own request keeps its date."""
     from backend.utils import user_purge
     user = User.query.get_or_404(user_id)
     reason = user_purge.purge_refusal(user)
@@ -505,6 +517,7 @@ def purge_data_route(user_id):
         counts = user_purge.purge_user_content(user.id, dry_run=True)
         return jsonify({"dry_run": True, "username": user.username,
                         "counts": counts,
+                        "grace_days": user_purge.PURGE_GRACE_DAYS,
                         "job": _purge_job_json(user_purge.active_job(user.id))}), 200
 
     data = request.get_json(silent=True) or {}
@@ -512,10 +525,8 @@ def purge_data_route(user_id):
         return jsonify({"error": "Type the username to confirm.",
                         "code": "confirm_mismatch"}), 400
 
-    from backend.models import UserDataPurge
     job, created = user_purge.schedule_purge(
-        user, requested_by_id=current_user.id, source="admin",
-        at=datetime.utcnow())
+        user, requested_by_id=current_user.id, source="admin")
     if not created and job.delete_account:
         # The account itself is being deleted (#269): bringing that job
         # forward would delete the account, not only its data.
@@ -528,24 +539,18 @@ def purge_data_route(user_id):
             return jsonify({"error": "A purge of this account is already "
                                      "running.", "code": "already_running",
                             "job": _purge_job_json(job)}), 409
-        # The user's own request is waiting out its grace period: the
-        # admin brings it forward, and it deletes everything of the
-        # user's (the counts the admin just saw), not only what the
-        # request hid. It can no longer be restored.
-        UserDataPurge.query.filter_by(id=job.id, status="scheduled").update(
-            {UserDataPurge.scheduled_for: datetime.utcnow(),
-             UserDataPurge.scope: "all"},
-            synchronize_session=False)
-        db.session.commit()
-    logger.warning("Admin %s started a data purge of user %s (job %s)",
-                   current_user.id, user.id, job.id)
-    from backend.tasks.user_purge import dispatch
-    try:
-        user_purge.start_job_now(job, dispatch)
-    except Exception as e:  # noqa: BLE001 - the beat picks it up
-        logger.warning("Purge job %s: immediate dispatch failed (%s); the "
-                       "beat will start it", job.id, type(e).__name__)
-    db.session.refresh(job)
+        # A request is already waiting (the user's own or an admin's): its
+        # writing is hidden and its date stays. A second request would
+        # change nothing the admin can see now.
+        who = "an admin" if job.source == "admin" else "the user"
+        return jsonify({"error": f"The writing was already deleted by {who}. "
+                                 "It is deleted forever on "
+                                 f"{job.scheduled_for:%Y-%m-%d}.",
+                        "code": "already_scheduled",
+                        "job": _purge_job_json(job)}), 409
+    logger.warning("Admin %s deleted the writing of user %s (job %s, "
+                   "restorable until %s)", current_user.id, user.id, job.id,
+                   job.scheduled_for)
     return jsonify({"job": _purge_job_json(job)}), 202
 
 
@@ -553,17 +558,23 @@ def purge_data_route(user_id):
 @login_required
 @admin_required
 def delete_account_route(user_id):
-    """Delete an account at once (#269): its data (the #268 purge) and
-    then the account itself. Opt-outs, erasure requests, mistaken
-    whitelists and pre-fills.
+    """Delete an account (#269): its data (the #268 purge) and then the
+    account itself. Opt-outs, erasure requests, mistaken whitelists and
+    pre-fills.
+
+    It works like the user's own account deletion (Peter, 2026-10-13:
+    "it should definitely work the same as user doing themselves"): the
+    account is hidden at once and deleted for good after the same grace
+    period; signing in until then offers the user a restore, and the
+    admin can undo it (``undo_deletion``). The account's address gets
+    the same notice as after the user's own request.
 
     ``?dry_run=1`` returns the purge's counts, the identity layer's and
     the blast radius (public writing, replies in other people's threads),
     and changes nothing. Otherwise the body must carry
-    ``{"confirm_username": "<the user's username>"}``: the account is
-    hidden at once and the job runs in Celery. Counts only, never
-    content. AI and system accounts (409) and the last admin (409) are
-    refused."""
+    ``{"confirm_username": "<the user's username>"}``. Counts only, never
+    content. AI and system accounts (409), the last admin (409) and an
+    account whose deletion already waits (409) are refused."""
     from backend.utils import account_deletion, user_purge
     user = User.query.get_or_404(user_id)
     if user.id == current_user.id:
@@ -580,6 +591,7 @@ def delete_account_route(user_id):
         dry = account_deletion.count_account_data(user.id)
         return jsonify({"dry_run": True, "username": user.username,
                         "has_email": bool(user.email),
+                        "grace_days": account_deletion.ACCOUNT_DELETION_GRACE_DAYS,
                         "job": _purge_job_json(user_purge.active_job(user.id)),
                         **dry}), 200
 
@@ -589,20 +601,61 @@ def delete_account_route(user_id):
                         "code": "confirm_mismatch"}), 400
     try:
         job = account_deletion.schedule_account_deletion(
-            user, requested_by_id=current_user.id, source="admin",
-            at=datetime.utcnow())
+            user, requested_by_id=current_user.id, source="admin")
     except account_deletion.AccountDeletionRefused as e:
-        return jsonify({"error": e.message, "code": e.code}), 409
-    logger.warning("Admin %s started the deletion of account %s (job %s)",
-                   current_user.id, user_id, job.id)
-    from backend.tasks.user_purge import dispatch
-    try:
-        user_purge.start_job_now(job, dispatch)
-    except Exception as e:  # noqa: BLE001 - the beat picks it up
-        logger.warning("Account deletion job %s: immediate dispatch failed "
-                       "(%s); the beat will start it", job.id, type(e).__name__)
-    db.session.refresh(job)
+        return jsonify({"error": e.message, "code": e.code,
+                        "job": _purge_job_json(
+                            user_purge.active_job(user.id))}), 409
+    logger.warning("Admin %s deleted account %s (job %s, restorable until "
+                   "%s)", current_user.id, user_id, job.id, job.scheduled_for)
+    if user.email:
+        from backend.utils.email import send_account_deletion_scheduled_email
+        send_account_deletion_scheduled_email(
+            user.email, user.username,
+            account_deletion.format_day(job.scheduled_for), by_admin=True)
     return jsonify({"job": _purge_job_json(job)}), 202
+
+
+@admin_bp.route("/users/<int:user_id>/undo_deletion", methods=["POST"])
+@login_required
+@admin_required
+def undo_deletion_route(user_id):
+    """Undo an admin's waiting "Purge data" or "Delete account" (Peter,
+    2026-10-13): what it hid shows again, as after the user's own
+    restore. Body: ``{"job_id": <the job the Users row showed>}``, so a
+    stale page cannot undo another request. The user's own request is
+    theirs to restore (409), and a job that has started can no longer be
+    undone (409)."""
+    from backend.utils import account_deletion, user_purge
+    job = user_purge.active_job(user_id)
+    data = request.get_json(silent=True) or {}
+    if job is None or (data.get("job_id") is not None
+                       and data.get("job_id") != job.id):
+        return jsonify({"error": "There is nothing to undo. Reload the "
+                                 "Users table.", "code": "not_scheduled"}), 404
+    if job.status != "scheduled":
+        return jsonify({"error": "The deletion has started and can no longer "
+                                 "be undone.", "code": "already_running",
+                        "job": _purge_job_json(job)}), 409
+    if job.source != "admin":
+        return jsonify({"error": "The user asked for this deletion. Only "
+                                 "they can restore it.", "code": "users_own",
+                        "job": _purge_job_json(job)}), 409
+    if job.delete_account:
+        done = account_deletion.undo_admin_deletion(job.id, current_user.id)
+    else:
+        done = user_purge.undo_admin_purge(job.id, current_user.id)
+    if not done:
+        db.session.expire_all()
+        return jsonify({"error": "The deletion changed meanwhile (it started, "
+                                 "or the user restored it). Reload the Users "
+                                 "table.", "code": "changed",
+                        "job": _purge_job_json(
+                            user_purge.active_job(user_id))}), 409
+    logger.warning("Admin %s undid deletion job %s of user %s",
+                   current_user.id, job.id, user_id)
+    latest = _latest_purge_jobs().get(user_id)
+    return jsonify({"job": _purge_job_json(latest)}), 200
 
 
 @admin_bp.route("/users/<int:user_id>/toggle_spam", methods=["POST"])

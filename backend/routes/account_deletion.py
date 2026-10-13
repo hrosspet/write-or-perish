@@ -47,7 +47,8 @@ def _json_object():
 
 
 def _refused(e):
-    status = 409 if e.code in ("last_admin", "already_running") else 403
+    status = 409 if e.code in ("last_admin", "already_running",
+                               "already_scheduled") else 403
     return jsonify({"error": e.message, "code": e.code}), status
 
 

@@ -7,15 +7,20 @@ Asking:
   inside a signed-in session of the account (as the email change of
   #260 does); an account without one is scheduled at once.
 * An admin deletes from the dashboard: dry-run counts first, the
-  username typed, then it runs at once (as the admin purge does).
+  username typed. It works the same as the user's own deletion (Peter,
+  2026-10-13: "it should definitely work the same as user doing
+  themselves"): the same grace period, and the user can restore it by
+  signing in; until it starts, the admin can undo it
+  (``undo_admin_deletion``).
 
 Scheduling (``schedule_account_deletion``) hides the account at once
 (``User.deleted_at``): every session stops working, sign-in links are
 invalidated, the public pages answer 404, other members see its public
 writing as deleted, and no background job runs for it. The deletion is
 a ``UserDataPurge`` job with ``delete_account``, due after the grace
-period (an admin's at once). A waiting "Delete all my writing" request
-of the user becomes this job.
+period. A waiting "Delete all my writing" request of the user (theirs
+or an admin's) becomes this job; what it was is kept in
+``UserDataPurge.replaced``.
 
 Signing in during the grace period offers a restore
 (``restore_account``): the job is cancelled and the account shown again.
@@ -45,7 +50,7 @@ from collections import Counter
 from datetime import datetime, timedelta
 
 from itsdangerous import BadSignature, SignatureExpired
-from sqlalchemy import and_, func, or_
+from sqlalchemy import func, null, or_
 
 from backend.extensions import db
 from backend.models import (
@@ -306,9 +311,12 @@ def _own_legacy_ai_replies(user_id):
 
 def schedule_account_deletion(user, *, requested_by_id, source, at=None):
     """Hide the account and schedule its deletion, due at *at* (default:
-    after the grace period). A waiting purge of the user (their "Delete
-    all my writing", or an earlier account deletion) becomes this job.
-    Returns the job. Raises AccountDeletionRefused."""
+    after the grace period, for the user's own request and an admin's
+    alike). A waiting "Delete all my writing" of the user (theirs or an
+    admin's) becomes this job, and what it was is kept in ``replaced``.
+    Returns the job. Raises AccountDeletionRefused, also when the account
+    deletion is already waiting (an admin's request does not move the
+    user's date, nor the other way round)."""
     now = _now()
     due = at or now + timedelta(days=ACCOUNT_DELETION_GRACE_DAYS)
     # One active job per user: the user row lock serialises requests. For
@@ -332,9 +340,24 @@ def schedule_account_deletion(user, *, requested_by_id, source, at=None):
         raise AccountDeletionRefused(
             "already_running", "A deletion of this account's data is "
             "running now. Try again when it has finished.")
+    if job is not None and job.delete_account:
+        db.session.commit()
+        raise AccountDeletionRefused(
+            "already_scheduled", "This account is already deleted. It is "
+            f"deleted forever on {format_day(job.scheduled_for)}.")
     if job is None:
         job = UserDataPurge(user_id=user.id, status="scheduled")
         db.session.add(job)
+    else:
+        # The waiting "Delete all my writing" this job replaces, so an
+        # admin's Undo of the account deletion can put it back as it was.
+        job.replaced = {
+            "source": job.source,
+            "requested_by_id": job.requested_by_id,
+            "scope": job.scope,
+            "requested_at": job.requested_at.isoformat(),
+            "scheduled_for": job.scheduled_for.isoformat(),
+        }
     job.delete_account = True
     # Everything of the account's goes, also what a waiting "Delete all
     # my writing" did not hide (what the user wrote after it). The
@@ -354,13 +377,13 @@ def schedule_account_deletion(user, *, requested_by_id, source, at=None):
 
 
 def restore_account(user):
-    """Cancel the waiting deletion and show the account again. True when
-    the account is live afterwards; False once the deletion has started
-    (it can no longer be undone), and for an admin's deletion, which has
-    no grace period. The cancel is a conditional update on the job's
-    status, so a restore and the beat's claim have one winner. If the
-    deletion replaced a "Delete all my writing", the writing that request
-    hid is shown again too (restoring cancels both)."""
+    """Cancel the waiting deletion, the user's own or an admin's, and show
+    the account again. True when the account is live afterwards; False
+    once the deletion has started (it can no longer be undone). The
+    cancel is a conditional update on the job's status, so a restore and
+    the beat's claim have one winner. If the deletion replaced a "Delete
+    all my writing", the writing that request hid is shown again too
+    (restoring cancels both)."""
     if user.deleted_at is None:
         return True
     # A "Delete all my writing" this deletion replaced is cancelled with
@@ -368,7 +391,6 @@ def restore_account(user):
     cancelled = user_purge.cancel_jobs(
         UserDataPurge.user_id == user.id,
         UserDataPurge.delete_account.is_(True),
-        UserDataPurge.source == "self",
         cancelled_by_id=user.id)
     if not cancelled and _deletion_started(user.id):
         db.session.rollback()
@@ -380,15 +402,67 @@ def restore_account(user):
     return True
 
 
+def undo_admin_deletion(job_id, admin_id):
+    """The admin's Undo of an admin's waiting account deletion: the
+    account is shown again, as the user's restore after signing in does.
+
+    If the deletion replaced a waiting "Delete all my writing"
+    (``replaced``), that request is put back (its source, requester,
+    scope and request date): the writing it hid stays hidden, and if the
+    request was the user's own, only the user can restore it. Its due
+    date is the later of its own and the account deletion's, never
+    earlier than what the user was last told: otherwise an Undo after the
+    old date would let the next beat delete for good writing that was
+    shown as restorable until the account deletion's date.
+    Otherwise the job is cancelled. Either way a conditional update on
+    the job's status, so an Undo and the beat's claim have one winner.
+    Returns True when the account is live afterwards; False when the job
+    is not an admin's waiting account deletion any more (it started, or
+    the user restored it)."""
+    job = db.session.get(UserDataPurge, job_id)
+    if job is None:
+        return False
+    user = db.session.get(User, job.user_id)
+    if user is None:
+        return False
+    waiting = (UserDataPurge.id == job_id,
+               UserDataPurge.status == "scheduled",
+               UserDataPurge.delete_account.is_(True),
+               UserDataPurge.source == "admin")
+    replaced = job.replaced
+    if replaced:
+        n = UserDataPurge.query.filter(*waiting).update({
+            UserDataPurge.delete_account: False,
+            UserDataPurge.scope: replaced["scope"],
+            UserDataPurge.source: replaced["source"],
+            UserDataPurge.requested_by_id: replaced["requested_by_id"],
+            UserDataPurge.requested_at: datetime.fromisoformat(
+                replaced["requested_at"]),
+            UserDataPurge.scheduled_for: max(
+                datetime.fromisoformat(replaced["scheduled_for"]),
+                job.scheduled_for),
+            UserDataPurge.replaced: null(),
+        }, synchronize_session=False)
+    else:
+        n = len(user_purge.cancel_jobs(*waiting, cancelled_by_id=admin_id))
+    if not n:
+        db.session.rollback()
+        return False
+    user.deleted_at = None
+    db.session.commit()
+    _drop_public_pages(user)
+    logger.warning("Admin %s undid the deletion of account %s (job %s%s)",
+                   admin_id, user.id, job_id,
+                   "; its writing deletion waits again" if replaced else "")
+    return True
+
+
 def _deletion_started(user_id):
-    """The account deletion can no longer be undone: it has started, or
-    an admin asked for it (due at once, no grace period)."""
+    """The account deletion can no longer be undone: it has started."""
     return db.session.query(UserDataPurge.id).filter(
         UserDataPurge.user_id == user_id,
         UserDataPurge.delete_account.is_(True),
-        or_(UserDataPurge.status.in_(("running", "failed", "done")),
-            and_(UserDataPurge.status == "scheduled",
-                 UserDataPurge.source != "self")),
+        UserDataPurge.status.in_(("running", "failed", "done")),
     ).first() is not None
 
 

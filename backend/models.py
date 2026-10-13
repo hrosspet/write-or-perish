@@ -1963,13 +1963,17 @@ class UserDataPurge(db.Model):
     """One request to delete all of a user's data (#268), and the record
     of what the purge did.
 
-    A user's own request ("Delete all my writing") hides everything it
-    will delete at once (``scope = "hidden"``; what it hid is recorded in
-    ``UserDataPurgeHidden``) and waits out a grace period
-    (``scheduled_for``) during which the user can restore it; the purge
-    then deletes what the request hid, and what the user writes after it
-    stays. An admin purge (``scope = "all"``) is due at once and deletes
-    everything of the user's. The beat task
+    A request to delete all of a user's writing, the user's own ("Delete
+    all my writing") or an admin's ("Purge data"; Peter, 2026-10-13: "it
+    should definitely work the same as user doing themselves"), hides
+    everything it will delete at once (``scope = "hidden"``; what it hid
+    is recorded in ``UserDataPurgeHidden``) and waits out a grace period
+    (``scheduled_for``) during which the user can restore it, and the
+    admin can undo an admin's request; the purge then deletes what the
+    request hid, and what the user writes after it stays. A job with
+    ``scope = "all"`` deletes everything of the user's: an account
+    deletion, or one created from a shell for an erasure that cannot
+    wait (the app offers none). The beat task
     ``backend.tasks.user_purge.process_user_data_purges`` claims due jobs
     and jobs whose runner stopped sending heartbeats, so a purge resumes
     after a crash or a deploy; every step of the purge is idempotent.
@@ -1994,10 +1998,9 @@ class UserDataPurge(db.Model):
     user_id = db.Column(db.Integer, nullable=False, index=True)
     # "self" (the user's own request) | "admin"
     source = db.Column(db.String(16), nullable=False)
-    # What the purge deletes: "hidden" = what the user's own request hid
-    # when it was made (UserDataPurgeHidden); "all" = everything of the
-    # user's (an admin purge, an account deletion, or an admin bringing a
-    # user's request forward).
+    # What the purge deletes: "hidden" = what the request hid when it was
+    # made (UserDataPurgeHidden), the user's own request or an admin's;
+    # "all" = everything of the user's (an account deletion).
     scope = db.Column(db.String(16), nullable=False, default="all",
                       server_default="all")
     requested_by_id = db.Column(db.Integer, nullable=True)
@@ -2005,8 +2008,8 @@ class UserDataPurge(db.Model):
                        index=True)
     requested_at = db.Column(db.DateTime, nullable=False,
                              default=datetime.utcnow)
-    # When the purge may start: the end of the grace period for a user's
-    # own request, the request time for an admin purge.
+    # When the purge may start: the end of the grace period
+    # (PURGE_GRACE_DAYS), for the user's own request and an admin's alike.
     scheduled_for = db.Column(db.DateTime, nullable=False, index=True)
     cancelled_at = db.Column(db.DateTime, nullable=True)
     cancelled_by_id = db.Column(db.Integer, nullable=True)
@@ -2036,6 +2039,12 @@ class UserDataPurge(db.Model):
     # the account itself.
     delete_account = db.Column(db.Boolean, nullable=False, default=False,
                                server_default=db.text("false"))
+    # The waiting "Delete all my writing" (the user's or an admin's) that
+    # an account deletion replaced: its source, requester, scope and dates
+    # (JSON, ids and ISO dates only). An admin's Undo of the account
+    # deletion puts that request back as it was, so the writing it hid
+    # stays hidden (account_deletion.undo_admin_deletion). Null otherwise.
+    replaced = db.Column(db.JSON, nullable=True)
 
     ACTIVE_STATUSES = ("scheduled", "running")
 
@@ -2061,9 +2070,11 @@ class ReleasedUsername(db.Model):
 
 
 class UserDataPurgeHidden(db.Model):
-    """What one "Delete all my writing" request hid (#268; Peter,
-    2026-10-09: everything is hidden at once, "Restore my writing" brings
-    back exactly that, and the purge deletes it after the grace period).
+    """What one "Delete all my writing" request hid, the user's own or an
+    admin's "Purge data" (#268; Peter, 2026-10-09: everything is hidden at
+    once, "Restore my writing" brings back exactly that, and the purge
+    deletes it after the grace period; 2026-10-13: the admin's works the
+    same way).
 
     One row per hidden thing, written in the same transaction as the job:
     * ``kind`` = "node", ``row_id`` = a node of the user's that was live

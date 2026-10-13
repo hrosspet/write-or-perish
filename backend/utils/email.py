@@ -259,15 +259,23 @@ def send_account_deletion_link_email(to_email, username, confirm_url,
           "Failed to send the account deletion link")
 
 
-def send_account_deletion_scheduled_email(to_email, username, delete_on):
+def send_account_deletion_scheduled_email(to_email, username, delete_on,
+                                          by_admin=False):
     """The deletion is scheduled (#269): when, and how to undo it.
-    Best-effort: the deletion already happened from the user's side."""
+    Best-effort: the deletion already happened from the user's side.
+    *by_admin*: a Loore admin deleted the account; the user can restore
+    it the same way (Peter, 2026-10-13), and the last line says who did
+    it instead of "If you did not do this"."""
+    footnote = (
+        "A Loore admin deleted this account. If you did not ask for this, "
+        "sign in and restore it." if by_admin else
+        "If you did not do this, sign in and restore the account right away.")
     text_body = (
         "Your Loore account is deleted\n\n"
         f"The account @{username} is deleted. If you change your mind, "
         f"you can still restore it until {delete_on}: sign in to Loore and "
         "choose Restore. After that it is deleted forever, with everything in it.\n\n"
-        "If you did not do this, sign in and restore the account right away."
+        f"{footnote}"
     )
     html_body = _card(
         "Your account is deleted",
@@ -275,7 +283,7 @@ def send_account_deletion_scheduled_email(to_email, username, delete_on):
          f"is deleted. If you change your mind, you can still restore it until "
          f"{escape(delete_on)}: sign in to Loore and choose Restore.",
          "After that it is deleted forever, with everything in it."],
-        footnotes=("If you did not do this, sign in and restore the account right away.",))
+        footnotes=(footnote,))
     _send(to_email, "Your Loore account is deleted", text_body,
           html_body, "Account deletion scheduled notice sent",
           "Failed to send the account deletion scheduled notice",
