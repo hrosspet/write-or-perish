@@ -501,6 +501,7 @@ final class VoiceTurnTests: XCTestCase {
         await wait("idle") { turn.state == .idle }
         XCTAssertFalse(audio.cueOn)
         XCTAssertEqual(notices.toasts, ["The reply is taking too long. It will be in the thread once it's ready."])
+        XCTAssertEqual(errorSounds, 1)
     }
 
     func testUnreachableReplyStatusEndsTheTurn() async throws {
@@ -511,6 +512,7 @@ final class VoiceTurnTests: XCTestCase {
         await wait("idle") { turn.state == .idle }
         XCTAssertFalse(audio.cueOn)
         XCTAssertEqual(notices.toasts, ["Can't reach Loore to get the reply. It will be in the thread once it's ready."])
+        XCTAssertEqual(errorSounds, 1)
     }
 
     func testCueTimeIsCappedPerWait() async throws {
@@ -764,6 +766,7 @@ final class VoiceTurnTests: XCTestCase {
         XCTAssertEqual(turn.aiBlock, VoiceAIBlock(scope: .thread))
         XCTAssertTrue(notices.toasts.isEmpty)
         XCTAssertFalse(audio.cueOn)
+        XCTAssertEqual(errorSounds, 0, "a blocked state with its own screen, not a failure")
     }
 
     func testRecordingSavedWithoutAReplyIsToasted() async throws {
@@ -839,6 +842,7 @@ final class VoiceTurnTests: XCTestCase {
         await wait("idle") { turn.state == .idle }
         XCTAssertEqual(notices.toasts, ["Please break the request into smaller steps"])
         XCTAssertFalse(audio.cueOn)
+        XCTAssertEqual(errorSounds, 1)
     }
 
     func testFatalUploadEndsTheTurn() async throws {
@@ -1028,6 +1032,79 @@ final class VoiceTurnTests: XCTestCase {
         try await Task.sleep(nanoseconds: 50_000_000)
         XCTAssertEqual(errorSounds, 0, "the new reply played whole")
         XCTAssertEqual(audio.events.last, "deactivate")
+    }
+
+    // Every voice turn that ends in a failure sounds (coordinator, 2026-10-13,
+    // under Peter's Q1 "yes"), except a blocked AI usage and a cancelled reply.
+
+    func testTranscriptionTakingTooLongSounds() async throws {
+        turn.timings.statusGiveUp = 0.15
+        backend.statuses = [try status("finalizing")]
+        await recordAndStop()
+        await wait("idle") { turn.state == .idle }
+        XCTAssertEqual(notices.toasts, ["Transcription is taking too long. Your recording is saved; try again in a moment."])
+        XCTAssertEqual(errorSounds, 1)
+        await wait("deactivated after the sound") { deactivatedAfterTheSound() }
+    }
+
+    func testReplyThatCannotStartWithAMessageSounds() async throws {
+        backend.statuses = [try status("completed")]
+        backend.legacyError = APIError.server(status: 400, body: ServerErrorBody(error: "The reply template is broken."))
+        await recordAndStop()
+        await wait("idle") { turn.state == .idle }
+        XCTAssertEqual(notices.toasts, ["The reply template is broken."])
+        XCTAssertEqual(errorSounds, 1)
+    }
+
+    func testReplyThatCannotStartSounds() async throws {
+        backend.statuses = [try status("completed")]
+        backend.legacyError = APIError.server(status: 500, body: nil)
+        await recordAndStop()
+        await wait("idle") { turn.state == .idle }
+        XCTAssertEqual(errorSounds, 1)
+    }
+
+    func testReplyTextFailureAfterSomeAudioSoundsOnceThatAudioHasPlayed() async throws {
+        try await playFirstChunk()
+        backend.llmStatuses[101] = [try llm(101, "failed", error: "The provider failed.")]
+        await wait("toasted") { notices.toasts == ["The provider failed."] }
+        await wait("generation over") { !audio.fakeQueue.generatingTTS }
+        XCTAssertEqual(errorSounds, 0, "not over the reply's voice")
+        XCTAssertEqual(turn.state, .playing, "what came still plays")
+        turn.queueFinished()
+        XCTAssertEqual(errorSounds, 1)
+    }
+
+    func testGivingUpAfterSomeAudioSoundsOnceThatAudioHasPlayed() async throws {
+        turn.timings.llmGiveUp = 0.3
+        try await playFirstChunk()
+        await wait("gave up") { notices.toasts == ["The reply is taking too long. It will be in the thread once it's ready."] }
+        XCTAssertEqual(errorSounds, 0, "not over the reply's voice")
+        XCTAssertEqual(turn.state, .playing)
+        turn.queueFinished()
+        XCTAssertEqual(errorSounds, 1)
+    }
+
+    func testAudioAndTextFailingForOneReplySoundOnce() async throws {
+        try await playFirstChunk()
+        failTTS()
+        await wait("generation over") { !audio.fakeQueue.generatingTTS }
+        // The reply's text then fails too (it was still being written).
+        backend.llmStatuses[101] = [try llm(101, "failed", error: "The provider failed.")]
+        await wait("toasted") { notices.toasts == ["The provider failed."] }
+        XCTAssertEqual(turn.state, .playing, "the second failure does not end the turn under the audio")
+        turn.queueFinished()
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(errorSounds, 1)
+    }
+
+    func testCancelledReplyStaysSilent() async throws {
+        backend.statuses = [try status("completed", llm: 101)]
+        backend.llmStatuses[101] = [try llm(101, "cancelled")]
+        await recordAndStop()
+        await wait("idle") { turn.state == .idle }
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(errorSounds, 0)
     }
 
     // MARK: Recording controls

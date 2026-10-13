@@ -116,8 +116,8 @@ final class VoiceTurnController {
         var provisionalChunk: Int?
         var ttsAttemptAt: Date?
         var ttsCompletedSeenAt: Date?
-        /// This node's audio failure was handled (and sounded).
-        var ttsFailed = false
+        /// This node's failure was handled (and sounded).
+        var failureHandled = false
     }
 
     @ObservationIgnored private var generation = 0
@@ -126,7 +126,7 @@ final class VoiceTurnController {
     @ObservationIgnored private var nodes: [Int: NodeTrack] = [:]
     @ObservationIgnored private var receivedChunks: Set<String> = []
     @ObservationIgnored private var turnHasAudio = false
-    /// The generation whose reply's audio failed after part of it was queued:
+    /// The generation whose reply failed after part of its audio was queued:
     /// the error sound waits until that audio has played (`queueFinished`).
     /// Any newer generation (cancel, new turn, leaving Voice) drops it.
     @ObservationIgnored private var errorSoundAfterQueue: Int?
@@ -548,7 +548,7 @@ final class VoiceTurnController {
             try? await Task.sleep(nanoseconds: UInt64(timings.statusPoll * 1_000_000_000))
         }
         if gen == generation, !Task.isCancelled {
-            endTurnWithError("Transcription is taking too long. Your recording is saved; try again in a moment.", sound: false)
+            endTurnWithError("Transcription is taking too long. Your recording is saved; try again in a moment.", sound: true)
         }
     }
 
@@ -579,12 +579,13 @@ final class VoiceTurnController {
         } catch {
             guard gen == generation else { return }
             if let block = VoiceAIBlock.from(error, fallback: threadParentId == nil ? .account : .thread) {
+                // A blocked state with its own screen, not a failure: no sound.
                 aiBlock = block
                 finishQuietly()
             } else if let apiError = error as? APIError, apiError.status == 400 {
-                endTurnWithError(apiError.userMessage(fallback: "Could not start the reply."), sound: false)
+                endTurnWithError(apiError.userMessage(fallback: "Could not start the reply."), sound: true)
             } else {
-                endTurnWithError(nil, sound: false)
+                endTurnWithError(nil, sound: true)
             }
         }
     }
@@ -629,29 +630,23 @@ final class VoiceTurnController {
                 } catch {
                     guard gen == self.generation, self.currentNodeId == nodeId, !Task.isCancelled else { return }
                     if Date().timeIntervalSince(lastAnswer) > self.timings.llmErrorGiveUp {
-                        self.giveUpOnReply("Can't reach Loore to get the reply. It will be in the thread once it's ready.")
+                        self.giveUpOnReply("Can't reach Loore to get the reply. It will be in the thread once it's ready.",
+                                           nodeId, gen)
                         return
                     }
                 }
                 try? await Task.sleep(nanoseconds: UInt64(self.timings.llmPoll * 1_000_000_000))
             }
             guard !Task.isCancelled, gen == self.generation, self.currentNodeId == nodeId else { return }
-            self.giveUpOnReply("The reply is taking too long. It will be in the thread once it's ready.")
+            self.giveUpOnReply("The reply is taking too long. It will be in the thread once it's ready.", nodeId, gen)
         }
     }
 
     /// llm-status kept failing or the reply never finished: end the turn instead
     /// of thinking (and cueing) forever (M12). Audio already queued stays playable.
-    private func giveUpOnReply(_ message: String) {
+    private func giveUpOnReply(_ message: String, _ nodeId: Int, _ gen: Int) {
         log.error("giving up on the reply")
-        closeStream()
-        if turnHasAudio {
-            notices.toast(message, duration: 8)
-            flagError()
-            finishGenerating()
-        } else {
-            endTurnWithError(message, sound: false)
-        }
+        replyFailed(nodeId, gen, message: message)
     }
 
     /// Returns true when polling for this node can stop.
@@ -704,11 +699,11 @@ final class VoiceTurnController {
                 failureToasted.insert(nodeId)
                 notices.toast(status.error ?? "Response generation failed", duration: 8)
             }
-            closeStream()
-            endTurnWithError(nil, sound: false)
+            replyFailed(nodeId, gen)
             return true
         case .cancelled?:
             // Terminal (the web ignores it and stays on "Thinking…", C §10.13).
+            // No error sound: nobody on this phone is waiting for a cancelled reply.
             closeStream()
             if turnHasAudio {
                 finishGenerating()
@@ -752,7 +747,6 @@ final class VoiceTurnController {
                 log.info("POST /tts failed while the stream is attached; keeping the stream")
                 return
             }
-            closeStream()
             handleTTSFailure(nodeId, gen)
         }
     }
@@ -915,15 +909,28 @@ final class VoiceTurnController {
     }
 
     /// The reply's audio failed: the server marked its TTS failed, or refused to
-    /// start it. The error sound says so to someone not looking at the screen
-    /// (Peter, 2026-10-13); with part of the reply queued, it plays after that
-    /// audio, not over it. Once per node: the stream and the reconcile checks
-    /// can both see the same failure.
+    /// start it.
     private func handleTTSFailure(_ nodeId: Int, _ gen: Int) {
-        guard gen == generation, let track = nodes[nodeId], !track.ttsFailed else { return }
-        nodes[nodeId]?.ttsFailed = true
         log.error("TTS failed for the reply")
+        replyFailed(nodeId, gen)
+    }
+
+    /// The reply will not come, or not all of it: its audio or its text failed,
+    /// or the turn gave up waiting for it. The error sound says so to someone
+    /// not looking at the screen (Peter, 2026-10-13); with part of the reply
+    /// queued, it plays after that audio, not over it. Once per node: the stream
+    /// and the reconcile checks can both see the same failure.
+    private func replyFailed(_ nodeId: Int, _ gen: Int, message: String? = nil) {
+        guard gen == generation, let track = nodes[nodeId] else { return }
+        guard !track.failureHandled else {
+            // Already handled (sound, red dot): a further message still shows.
+            if let message { notices.toast(message, duration: 8) }
+            return
+        }
+        nodes[nodeId]?.failureHandled = true
+        closeStream()
         if turnHasAudio {
+            if let message { notices.toast(message, duration: 8) }
             errorSoundAfterQueue = generation
             flagError()
             finishGenerating()
@@ -934,7 +941,7 @@ final class VoiceTurnController {
                 playErrorSoundThenDeactivate()
             }
         } else {
-            endTurnWithError(nil, sound: true)
+            endTurnWithError(message, sound: true)
         }
     }
 
