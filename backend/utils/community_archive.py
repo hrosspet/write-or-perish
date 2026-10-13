@@ -494,9 +494,6 @@ def snapshot_newest_tweet_at(snapshot_dir):
     return row[0] if row else None
 
 
-CA_CITATION_RE = re.compile(r"(?<![\w/#\[])#(\d{1,6})\b")
-
-
 def render_recent_tweets(snapshot_dir, days=1, exclude_usernames=(),
                          include_usernames=None, exclude_tweet_ids=()):
     """The last ``days`` days of the whole Community Archive corpus as
@@ -505,11 +502,15 @@ def render_recent_tweets(snapshot_dir, days=1, exclude_usernames=(),
     the import drops them. ``n`` is a sequential number within the
     render (2 tokens) instead of the 19-digit tweet id (~10 tokens, and
     a copy-fidelity hazard when the model cites 20 of them out of 5k);
-    the model cites ``#n`` and expand_ca_citations() turns that into the
-    x.com link. No per-tweet timestamp: the window is in the header,
-    order is preserved by the numbering, and a stamp was ~10 tokens per
-    tweet (a quarter of the prompt) for nothing the model could use. The window ends at the newest tweet in the snapshot (the
-    export lags a few hours; see placeholders.py).
+    a pick names its tweet by ``n`` and the collect maps it back through
+    ``refs``. The numbers belong to this render alone (the next one, a
+    day later or after the reader marked a tweet read, numbers afresh),
+    so the header asks the model to keep them out of its prose, which
+    is stored as written, unlinked. No per-tweet timestamp: the window
+    is in the header, order is preserved by the numbering, and a stamp
+    was ~10 tokens per tweet (a quarter of the prompt) for nothing the
+    model could use. The window ends at the newest tweet in the snapshot
+    (the export lags a few hours; see placeholders.py).
 
     ``exclude_usernames`` drops those accounts (case-insensitive) — the
     reader's own handle, so the feed never recommends their own tweets.
@@ -633,7 +634,10 @@ def _render_recent_tweets(snapshot_dir, export_id, newest, days, excluded,
         f"# Community Archive — tweets from {window_start} to {newest} UTC "
         f"(last {int(days)} day(s) of export {export_id}): {total} tweets "
         f"by {accounts} accounts, retweets omitted.{scope_note}{seen_note} "
-        f"Each tweet is numbered; cite a tweet by its number, e.g. #123.")
+        "Each tweet is numbered, and a pick names its tweet by that "
+        "number. The numbers belong to this list alone and the reader "
+        "never sees them: in the verdict and the quote-tweets, name a "
+        "tweet by its author, never by its number.")
     text = "\n".join([header, ""] + sections).rstrip() + "\n"
     stats = {"export_id": export_id, "window_start": window_start,
              "window_end": newest, "window_start_at": start,
@@ -687,21 +691,3 @@ def following_handles(snapshot_dir, username):
         return None
     data = json.loads(path.read_text())
     return [u for u in data.get("usernames", []) if u]
-
-
-def expand_ca_citations(reply, refs):
-    """Turn ``#n`` citations in a model reply into markdown links to the
-    tweet: ``#12`` → ``[#12](https://x.com/<user>/status/<id>)``. Numbers
-    not in ``refs`` (a hashtag, a year) are left alone; a ``#n`` already
-    inside a link or URL is skipped by the lookbehind."""
-    if not reply or not refs:
-        return reply
-
-    def sub(m):
-        n = int(m.group(1))
-        ref = refs.get(n)
-        if not ref:
-            return m.group(0)
-        return (f"[#{n}](https://x.com/{ref['username']}/status/"
-                f"{ref['tweet_id']})")
-    return CA_CITATION_RE.sub(sub, reply)

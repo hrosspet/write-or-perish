@@ -130,7 +130,10 @@ class TestRenderRecentTweets:
             "# Community Archive — tweets from 2026-09-12 06:00 to "
             "2026-09-13 06:00 UTC (last 1 day(s) of export 2026-09-13T07-08-27Z): "
             "4 tweets by 3 accounts, retweets omitted. Each tweet is "
-            "numbered; cite a tweet by its number, e.g. #123.")
+            "numbered, and a pick names its tweet by that number. The "
+            "numbers belong to this list alone and the reader never sees "
+            "them: in the verdict and the quote-tweets, name a tweet by its "
+            "author, never by its number.")
         # Sections sorted by username (case-insensitive), tweets by time.
         assert text.index("# Tweets by alice") < text.index("# Tweets by Bob") \
             < text.index("# Tweets by zz")
@@ -242,31 +245,6 @@ class TestBatchCollectOne:
         monkeypatch.setattr(anthropic, "Anthropic", self._client("ended", [entry]))
         with pytest.raises(RuntimeError, match="errored"):
             anthropic_batch_collect_one("k", "b1", "node-7")
-
-
-class TestExpandCitations:
-    refs = {1: {"username": "alice", "tweet_id": "t3"},
-            12: {"username": "Bob", "tweet_id": "2098672387051175981"}}
-
-    def test_links_known_numbers_only(self):
-        from backend.utils.community_archive import expand_ca_citations
-        out = expand_ca_citations(
-            "★ @Bob #12 — worth it. Also #1, but #2026 and #AI are not "
-            "tweets. #99 unknown.", self.refs)
-        assert out == (
-            "★ @Bob [#12](https://x.com/Bob/status/2098672387051175981) — "
-            "worth it. Also [#1](https://x.com/alice/status/t3), but #2026 "
-            "and #AI are not tweets. #99 unknown.")
-
-    def test_already_linked_or_in_url_untouched(self):
-        from backend.utils.community_archive import expand_ca_citations
-        text = "[#1](https://x.com/alice/status/t3) and https://x.com/a/#1"
-        assert expand_ca_citations(text, self.refs) == text
-
-    def test_empty(self):
-        from backend.utils.community_archive import expand_ca_citations
-        assert expand_ca_citations("", self.refs) == ""
-        assert expand_ca_citations("#1", {}) == "#1"
 
 
 class TestOpenAIBatchOne:
