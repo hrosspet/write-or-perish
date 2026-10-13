@@ -318,6 +318,15 @@ describe('a thread started from the Reflect card', () => {
     expect(mockPost).toHaveBeenCalledWith('/read/from-node/20', { model: undefined });
   });
 
+  test('the top button has the model picker beside it and sends the pick', async () => {
+    routes['/nodes/30'] = reply();
+    renderAt('/node/30');
+    await screen.findByText(/fork in the road/);
+    fireEvent.click(screen.getByTestId('read-model-picker'));
+    fireEvent.click(screen.getByRole('button', { name: 'Glean' }));
+    expect(mockPost).toHaveBeenCalledWith('/read/from-node/20', { model: 'gpt-6-luna' });
+  });
+
   test('the top button picks the newest entry by created_at, over thread order', async () => {
     routes['/nodes/30'] = reply({
       ancestors: [VOICE_ROOT,

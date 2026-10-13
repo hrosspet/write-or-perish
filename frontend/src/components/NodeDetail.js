@@ -1334,17 +1334,34 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
     });
     return best;
   })();
-  const topGleanButton = newestOwnEntry && (
-    <LooreTooltip text={GLEAN_THREAD_TITLE}>
-      <button
-        type="button"
-        onClick={() => handleReadFromNode(gleanTargetOf(newestOwnEntry))}
-        disabled={readLoading || llmRequesting || !!llmTaskNodeId || moving}
-        style={{ ...topRightButtonStyle, justifyContent: 'center' }}
-      >
-        {readLoading ? 'Starting…' : 'Glean'}
-      </button>
-    </LooreTooltip>
+  // Beside the Glean button sits the model picker (Peter, 2026-10-09), the
+  // same control and state as in a Glean-card thread; the group is the
+  // other top-right buttons' 160px wide, so it lines up with them.
+  const topGleanBusy = readLoading || llmRequesting || !!llmTaskNodeId || moving;
+  // Not on the Glean entry itself: its action row already has Glean and its picker.
+  const topGleanButton = newestOwnEntry && !readActions && (
+    <span style={{ display: 'inline-flex', alignItems: 'stretch', width: '160px', height: '32px' }}>
+      <LooreTooltip text={GLEAN_THREAD_TITLE}>
+        <button
+          type="button"
+          onClick={() => handleReadFromNode(gleanTargetOf(newestOwnEntry))}
+          disabled={topGleanBusy}
+          style={{
+            ...topRightButtonStyle, ...joinedButtonStyle, width: '80px', padding: '0 8px',
+          }}
+        >
+          {readLoading ? 'Starting…' : 'Glean'}
+        </button>
+      </LooreTooltip>
+      <ModelSelector
+        nodeId={newestOwnEntry.id}
+        purpose="read"
+        selectedModel={readModel}
+        onModelChange={setReadModel}
+        disabled={topGleanBusy}
+        style={{ ...joinedPickerStyle, width: '80px', height: '32px', boxSizing: 'border-box' }}
+      />
+    </span>
   );
   const nodeAllowsAi = node.ai_usage !== 'none';
   const topRightControls = isOwner && !isPublicThread && (
