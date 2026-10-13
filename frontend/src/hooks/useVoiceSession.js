@@ -12,6 +12,7 @@ import api from '../api';
 import * as voiceTiming from '../utils/voiceTiming';
 import { isAiUsageRefusedError, aiUsageRefusalScope } from '../utils/aiUsage';
 import { onPageReturn } from '../utils/pageReturn';
+import { playErrorSound } from '../utils/errorSound';
 
 // iOS devices can't autoplay audio regardless of warmup, and playing silent audio
 // while the mic stream is active crashes Bluetooth headphones on multi-device setups.
@@ -235,6 +236,48 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
     onEntrySavedRef.current = onEntrySaved;
   }, [onEntrySaved]);
 
+  // A voice turn that fails plays the error sound, so a user who isn't
+  // looking at the screen (driving) knows the reply stopped (Peter,
+  // 2026-10-13): the reply could not start, its text failed, its TTS was
+  // marked 'failed', or POST /tts was refused. With part of the reply in
+  // the queue, the sound waits until that audio has played: the queue then
+  // drains (waiting for chunks that won't come) or ends. Once per reply
+  // node: one return to the page can fire more than one REST check, and
+  // the text and the audio of one reply can both fail.
+  // turnRef is bumped when the user starts, continues, resumes or cancels
+  // a turn, or leaves the page: a failure noticed for an earlier turn, or
+  // a sound still waiting for its queue, makes no sound then.
+  const turnRef = useRef(0);
+  // The turn whose audio is in the queue (set when its first audio lands).
+  const audioTurnRef = useRef(null);
+  const failureSoundedForNodeRef = useRef(null);
+  // { turn, finishedCount }: an error sound waiting for the queued audio.
+  const errorSoundAfterQueueRef = useRef(null);
+  const latestAudioRef = useRef(audio);
+  latestAudioRef.current = audio;
+  // nodeId: the reply node, or null when the reply never started.
+  const soundReplyFailure = useCallback((nodeId, turn) => {
+    if (turn !== turnRef.current) return;
+    if (nodeId != null) {
+      if (failureSoundedForNodeRef.current === nodeId) return;
+      failureSoundedForNodeRef.current = nodeId;
+    }
+    const queue = latestAudioRef.current;
+    if (audioTurnRef.current === turn && queue.generatingTTS && !queue.waitingForChunks) {
+      errorSoundAfterQueueRef.current = { turn, finishedCount: queue.queueFinishedCount };
+    } else {
+      playErrorSound();
+    }
+  }, []);
+  useEffect(() => {
+    const waiting = errorSoundAfterQueueRef.current;
+    if (!waiting || waiting.turn !== turnRef.current) return;
+    if (audio.waitingForChunks || audio.queueFinishedCount !== waiting.finishedCount) {
+      errorSoundAfterQueueRef.current = null;
+      playErrorSound();
+    }
+  }, [audio.waitingForChunks, audio.queueFinishedCount]);
+
   // Streaming transcription
   // Derive label from apiEndpoint: '/voice' → 'Voice'
   const workflowLabel = apiEndpoint ? apiEndpoint.replace('/', '').charAt(0).toUpperCase() + apiEndpoint.replace('/', '').slice(1) : null;
@@ -300,6 +343,7 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
       setPhase('ready');
     },
     onComplete: async (data) => {
+      const turn = turnRef.current;
       setIsStopping(false);
       setPhase('processing');
       // Clear any stale audio from previous pages (e.g. SpeakerIcon in Log)
@@ -357,12 +401,15 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
         if (onEntrySavedRef.current) onEntrySavedRef.current();
       } catch (err) {
         console.error(`${apiEndpoint} API error:`, err);
-        // AI usage keeps the thread away from AI: the page explains.
+        // AI usage keeps the thread away from AI: the page explains (a
+        // blocked state with its own screen, not a failure: no sound).
         if (isAiUsageRefusedError(err) && onAiUsageRefusedRef.current) {
           setPhase('ready');
           onAiUsageRefusedRef.current(aiUsageRefusalScope(err));
           return;
         }
+        // The reply could not start.
+        soundReplyFailure(null, turn);
         // Server returned a structured validation error (400) — surface
         // the message as a toast so the user knows what to fix.
         const apiErr = err?.response?.data?.error;
@@ -398,7 +445,7 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
     llmNodeId ? `/nodes/${llmNodeId}/llm-status` : null,
     { enabled: !!llmNodeId, interval: 1500 }
   );
-  // Node whose failure was already toasted: the effect below re-runs on
+  // Node whose failure was already handled: the effect below re-runs on
   // unrelated dep changes while the status stays 'failed'.
   const failureToastedForNodeRef = useRef(null);
 
@@ -422,6 +469,7 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
       // nodes have chunk URLs that differ from the full-file URL.)
       if (restDeliveredForNodeRef.current === llmNodeId) return;
       sseDeliveredForNodeRef.current = llmNodeId;
+      audioTurnRef.current = turnRef.current;
       awaitingNextNodeRef.current = false;
       if (firstChunkRef.current) {
         firstChunkRef.current = false;
@@ -533,6 +581,7 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
       ? rawUrl
       : `${process.env.REACT_APP_BACKEND_URL || ''}${rawUrl}`;
     restDeliveredForNodeRef.current = llmNodeId;
+    audioTurnRef.current = turnRef.current;
     stopSilentAudio();
     if (continuingChainRef.current) {
       // Mid-chain: append this node's full audio to the live queue.
@@ -674,6 +723,7 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
       // TTS_TRIGGER_WATCHDOG_MS. The endpoint is idempotent (200 if
       // already generated, 202-no-reenqueue if in progress).
       ttsAttemptAtRef.current = Date.now();
+      const turn = turnRef.current;
       // Await the TTS POST before enabling SSE to avoid the race where
       // the EventSource connects before tts_task_status is set to 'pending'.
       api.post(`/nodes/${llmNodeId}/tts`).then((res) => {
@@ -700,17 +750,25 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
           ttsTriggeredForNodeRef.current = null;
           return;
         }
+        soundReplyFailure(llmNodeId, turn);
         setHasError(true);
         setTtsGenerating(false);
         setPhase('ready');
       });
-    } else if (llmStatus === 'failed') {
+    } else if (llmStatus === 'failed' && llmData && llmData.node_id === llmNodeId) {
+      // Once per node, and only for the node the status is about: this
+      // effect runs again on most renders, and the render that sets the
+      // next reply node still carries the last one's 'failed'. Run again,
+      // it reset a new recording's phase to 'ready' (no stop button), or
+      // took the last reply's failure for the next one's.
+      if (failureToastedForNodeRef.current === llmNodeId) return;
+      failureToastedForNodeRef.current = llmNodeId;
       // The red dot alone didn't say why; the server's error is written
       // for the user (e.g. "break the request into smaller steps").
-      if (failureToastedForNodeRef.current !== llmNodeId) {
-        failureToastedForNodeRef.current = llmNodeId;
-        addToast(llmError || 'Response generation failed', 8000);
-      }
+      addToast(llmError || 'Response generation failed', 8000);
+      // Audio of this reply already queued plays to its end (generatingTTS
+      // goes off below), and the sound follows it.
+      soundReplyFailure(llmNodeId, turnRef.current);
       // A TTS stream attached while the reply was written (#367) won't
       // complete for a failed node: close it.
       setTtsGenerating(false);
@@ -723,7 +781,7 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
     // (llm-status polling already stopped on 'completed', so no other dep
     // changes).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [llmStatus, llmData, llmNodeId, audio, ttsTitle, stopSilentAudio, advanceChain, deliverFullTts, ttsRetriggerNonce]);
+  }, [llmStatus, llmData, llmNodeId, audio, ttsTitle, stopSilentAudio, advanceChain, deliverFullTts, ttsRetriggerNonce, soundReplyFailure]);
 
   // Safety net: TTS is being generated (POST /tts returned 202) but no
   // chunk arrived within 60s — SSE is probably dead; transition to
@@ -761,9 +819,10 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
   //    safe).
   // Latest values for the reconcile closure. The effect below must depend
   // only on the primitives that define "undelivered turn" (phase,
-  // ttsGenerating, llmNodeId) — llm-status polling re-renders every 1.5s
-  // and ttsSSE/deliverFullTts get fresh identities each render, which as
-  // deps would reset the interval before it ever fired.
+  // ttsGenerating, llmNodeId; soundReplyFailure never changes) — llm-status
+  // polling re-renders every 1.5s and ttsSSE/deliverFullTts get fresh
+  // identities each render, which as deps would reset the interval before
+  // it ever fired.
   const llmStatusRef = useRef(llmStatus);
   llmStatusRef.current = llmStatus;
   const deliverFullTtsRef = useRef(deliverFullTts);
@@ -776,6 +835,7 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
     if (phase !== 'processing' && !ttsGenerating) return;
 
     let cancelled = false;
+    const turn = turnRef.current;
     // When /tts-status first said this node's TTS completed while the SSE
     // was still open (see TTS_SSE_CATCH_UP_MS).
     let completedSeenAt = null;
@@ -830,6 +890,7 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
               deliverFullTtsRef.current(res.data.node.audio_tts_url);
             }
           } else if (res.data.status === 'failed') {
+            soundReplyFailure(llmNodeId, turn);
             setHasError(true);
             setTtsGenerating(false);
             setPhase('ready');
@@ -848,7 +909,7 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
       clearTimeout(catchUpTimer);
       stopListening();
     };
-  }, [phase, ttsGenerating, llmNodeId]);
+  }, [phase, ttsGenerating, llmNodeId, soundReplyFailure]);
 
   // Clear error indicator after a few seconds
   useEffect(() => {
@@ -859,6 +920,7 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
   }, [hasError]);
 
   const handleStart = useCallback(() => {
+    turnRef.current += 1;
     setPhase('recording');
     setHasError(false);
     startSilentAudio(); // User gesture context — activates iOS lock screen controls
@@ -888,6 +950,7 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
   }, [streaming, stopSilentAudio, audio, model]);
 
   const handleContinue = useCallback((extraReset) => {
+    turnRef.current += 1;
     voiceTiming.endTurn();
     audio.stop();
     ttsSSE.disconnect();
@@ -933,6 +996,7 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
     if (lastUserNodeIdRef.current) {
       threadParentIdRef.current = lastUserNodeIdRef.current;
     }
+    turnRef.current += 1;
     voiceTiming.endTurn();
     stopSilentAudio();
     audio.stop();
@@ -965,6 +1029,7 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
   // same family chunk 0 was uploaded with (otherwise the server rejects with
   // mime_mismatch).
   const handleResumeSession = useCallback(({ sessionId, draftId, chunkCount, parentId: draftParentId, mimeType }) => {
+    turnRef.current += 1;
     // Restore thread context so finalization uses the correct parent
     if (draftParentId != null) {
       threadParentIdRef.current = draftParentId;
@@ -1029,6 +1094,7 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
   // Cleanup on unmount
   useEffect(() => {
     return () => {
+      turnRef.current += 1;
       stopSilentAudio();
       audio.stop();
       ttsSSE.disconnect();

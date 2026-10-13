@@ -294,7 +294,7 @@ A completed node's stream replays every chunk after `last_chunk` and then `all_c
 
 iOS Safari suspends the page when it is backgrounded or locked with no audio playing, and silently kills in-flight XHRs and EventSources (no error event). The Voice page therefore reconciles against REST while a turn is undelivered (`phase==='processing' || ttsGenerating`), every 7 s and on foreground:
 1. **Lost trigger**: node completed, not delivered, SSE off, last `/tts` attempt > 20 s ago → re-arm and re-fire `POST /tts`. A POST that failed without an HTTP response re-arms instead of failing the turn.
-2. **Dead or lagging SSE**: `GET /tts-status`; if `completed`, wait 3 s for the SSE to catch up (not on foreground), then: if some chunks of this node came by SSE → `reconnect()` (the stream replays; dedupe makes it safe); if none → `deliverFullTts(tts.mp3)` via REST (later SSE chunks for that node are then ignored). `failed` → error, `ready`.
+2. **Dead or lagging SSE**: `GET /tts-status`; if `completed`, wait 3 s for the SSE to catch up (not on foreground), then: if some chunks of this node came by SSE → `reconnect()` (the stream replays; dedupe makes it safe); if none → `deliverFullTts(tts.mp3)` via REST (later SSE chunks for that node are then ignored). `failed` → error, `ready`, and the error sound once per node (as for a `POST /tts` refused with an HTTP error); with part of the reply queued, the sound waits until the queue drains.
 3. **60 s safety net** (§1.4).
 The #376 bug: the reconcile closed a healthy stream up to 1 s before it delivered the last chunk (the SSE polls the DB once a second), and the reconnect got the JSON answer; the reply stopped at 19 s of 56. Fixed by serving completed nodes as a replaying stream plus the 3 s grace.
 
