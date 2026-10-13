@@ -1,7 +1,8 @@
-// A voice reply whose audio fails (its TTS marked 'failed', or POST /tts
-// refused) plays the error sound, so a user who isn't looking at the
-// screen knows the reply stopped (Peter, 2026-10-13). With part of the
-// reply queued, the sound waits until that audio has played.
+// A voice turn that fails plays the error sound, so a user who isn't
+// looking at the screen knows the reply stopped (Peter, 2026-10-13): the
+// reply's audio fails (its TTS marked 'failed', or POST /tts refused), its
+// text fails, or it can't start. With part of the reply queued, the sound
+// waits until that audio has played.
 const mockAudio = {
   stop: jest.fn(),
   warmup: jest.fn(),
@@ -12,6 +13,7 @@ const mockAudio = {
   renameChapter: jest.fn(),
   generatingTTS: false,
   waitingForChunks: false,
+  queueFinishedCount: 0,
 };
 jest.mock('../contexts/AudioContext', () => ({ useAudio: () => mockAudio }));
 
@@ -26,8 +28,14 @@ const mockStreaming = {
   isInterrupted: false,
   duration: 0,
 };
+// What the session hands useStreamingTranscription (its onComplete runs
+// when the recording's transcription is final).
+let mockStreamingOptions;
 jest.mock('./useStreamingTranscription', () => ({
-  useStreamingTranscription: () => mockStreaming,
+  useStreamingTranscription: (options) => {
+    mockStreamingOptions = options;
+    return mockStreaming;
+  },
 }));
 jest.mock('./useLongRecordingWarning', () => ({
   useLongRecordingWarning: () => ({ armAlertContext: () => {} }),
@@ -119,6 +127,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   mockAudio.generatingTTS = false;
   mockAudio.waitingForChunks = false;
+  mockAudio.queueFinishedCount = 0;
   // CRA's jest resets mock implementations before each test.
   mockAudio.setGeneratingTTS.mockImplementation((value) => { mockAudio.generatingTTS = value; });
   window.history.replaceState({}, '', '/voice');
@@ -126,6 +135,7 @@ beforeEach(() => {
     llm: { status: 'completed', content: 'The reply.' },
     tts: { status: 'processing' },
     ttsPost: () => Promise.resolve({ status: 202, data: { status: 'pending' } }),
+    voicePost: () => Promise.resolve({ data: { llm_node_id: 42, user_node_id: 41 } }),
   };
   mockGet.mockImplementation((url) => {
     if (url === '/nodes/42/llm-status') {
@@ -138,6 +148,7 @@ beforeEach(() => {
   });
   mockPost.mockImplementation((url) => {
     if (url === '/nodes/42/tts') return server.ttsPost();
+    if (url === '/voice') return server.voicePost();
     return Promise.reject(new Error(`unexpected POST ${url}`));
   });
   jest.spyOn(console, 'log').mockImplementation(() => {});
@@ -165,8 +176,8 @@ const renderWaiting = () => renderHook(() => useVoiceSession({
 }));
 
 // Reply 42 is spoken while it is written: its first chunk is queued and
-// playing when its TTS fails.
-const renderSpeaking = async () => {
+// playing.
+const renderPlaying = async () => {
   server.llm = { status: 'processing', tts_streaming: true };
   const hook = renderWaiting();
   await flush();
@@ -175,6 +186,12 @@ const renderSpeaking = async () => {
   }));
   await flush();
   expect(hook.result.current.phase).toBe('playback');
+  return hook;
+};
+
+// ... and then its TTS fails.
+const renderSpeaking = async () => {
+  const hook = await renderPlaying();
   server.tts = { status: 'failed' };
   await nextRestCheck();
   return hook;
@@ -184,6 +201,37 @@ const renderSpeaking = async () => {
 const queueRunsOut = (rerender) => {
   mockAudio.waitingForChunks = true;
   rerender();
+};
+
+// The queue played to its end, nothing more coming (generatingTTS off).
+const queueEnds = (rerender) => {
+  mockAudio.queueFinishedCount += 1;
+  rerender();
+};
+
+// The next llm-status poll.
+const nextPoll = async () => {
+  act(() => { jest.advanceTimersByTime(1500); });
+  await flush();
+};
+
+// A fresh Voice page whose recording was just transcribed; the server
+// made no reply node, so the page asks for the reply itself (POST /voice).
+const finishRecordingWithoutReplyNode = async (options = {}) => {
+  const hook = renderHook(() => useVoiceSession({
+    apiEndpoint: '/voice', ttsTitle: 'Voice', aiUsage: 'chat', ...options,
+  }));
+  await act(async () => {
+    await mockStreamingOptions.onComplete({ sessionId: 's1', content: 'my words', llmNodeId: null });
+  });
+  await flush();
+  return hook;
+};
+
+const httpError = (status, data) => {
+  const err = new Error(`Request failed with status code ${status}`);
+  err.response = { status, data };
+  return err;
 };
 
 test('a reply whose audio failed before any of it played sounds at once', async () => {
@@ -263,6 +311,76 @@ test('recording again before the queued audio has played drops the sound', async
 
   act(() => result.current.handleStart());
   queueRunsOut(rerender);
+
+  expect(mockPlayErrorSound).not.toHaveBeenCalled();
+});
+
+// Every voice turn that fails sounds (coordinator, 2026-10-13, under
+// Peter's Q1 "yes"), except a blocked AI usage and a cancelled reply.
+
+test('a reply that cannot start with a message sounds at once', async () => {
+  server.voicePost = () => Promise.reject(httpError(400, { error: 'The reply template is broken.' }));
+  const { result } = await finishRecordingWithoutReplyNode();
+
+  expect(mockPost).toHaveBeenCalledWith('/voice', expect.anything());
+  expect(mockPlayErrorSound).toHaveBeenCalledTimes(1);
+  expect(result.current.phase).toBe('ready');
+});
+
+test('a reply that cannot start sounds at once', async () => {
+  server.voicePost = () => Promise.reject(httpError(500, {}));
+  const { result } = await finishRecordingWithoutReplyNode();
+
+  expect(mockPlayErrorSound).toHaveBeenCalledTimes(1);
+  expect(result.current.phase).toBe('ready');
+  expect(result.current.hasError).toBe(true);
+});
+
+test('a reply refused for AI usage None stays silent (the page explains)', async () => {
+  server.voicePost = () => Promise.reject(httpError(403, { code: 'ai_usage_none', scope: 'thread' }));
+  const onAiUsageRefused = jest.fn();
+  await finishRecordingWithoutReplyNode({ onAiUsageRefused });
+
+  expect(onAiUsageRefused).toHaveBeenCalledWith('thread');
+  expect(mockPlayErrorSound).not.toHaveBeenCalled();
+});
+
+test('a reply whose text failed before any audio sounds at once', async () => {
+  server.llm = { status: 'failed', error: 'The provider failed.' };
+  const { result } = renderWaiting();
+  await flush();
+
+  expect(mockPlayErrorSound).toHaveBeenCalledTimes(1);
+  expect(result.current.phase).toBe('ready');
+  expect(result.current.hasError).toBe(true);
+});
+
+test('a reply whose text failed after some audio sounds once that audio has played', async () => {
+  const { rerender } = await renderPlaying();
+  server.llm = { status: 'failed', error: 'The provider failed.' };
+  await nextPoll();
+  expect(mockAudio.setGeneratingTTS).toHaveBeenLastCalledWith(false);
+  expect(mockPlayErrorSound).not.toHaveBeenCalled();
+
+  queueEnds(rerender);
+  expect(mockPlayErrorSound).toHaveBeenCalledTimes(1);
+});
+
+test('a reply whose audio and then text fail sounds once', async () => {
+  const { rerender } = await renderSpeaking();
+  server.llm = { status: 'failed', error: 'The provider failed.' };
+  await nextPoll();
+
+  queueEnds(rerender);
+  rerender();
+  expect(mockPlayErrorSound).toHaveBeenCalledTimes(1);
+});
+
+test('a cancelled reply stays silent', async () => {
+  server.llm = { status: 'cancelled' };
+  renderWaiting();
+  await flush();
+  await nextPoll();
 
   expect(mockPlayErrorSound).not.toHaveBeenCalled();
 });
