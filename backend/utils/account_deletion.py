@@ -407,9 +407,13 @@ def undo_admin_deletion(job_id, admin_id):
     account is shown again, as the user's restore after signing in does.
 
     If the deletion replaced a waiting "Delete all my writing"
-    (``replaced``), that request is put back as it was (its source,
-    requester, scope and dates): the writing it hid stays hidden, and if
-    the request was the user's own, only the user can restore it.
+    (``replaced``), that request is put back (its source, requester,
+    scope and request date): the writing it hid stays hidden, and if the
+    request was the user's own, only the user can restore it. Its due
+    date is the later of its own and the account deletion's, never
+    earlier than what the user was last told: otherwise an Undo after the
+    old date would let the next beat delete for good writing that was
+    shown as restorable until the account deletion's date.
     Otherwise the job is cancelled. Either way a conditional update on
     the job's status, so an Undo and the beat's claim have one winner.
     Returns True when the account is live afterwards; False when the job
@@ -434,8 +438,9 @@ def undo_admin_deletion(job_id, admin_id):
             UserDataPurge.requested_by_id: replaced["requested_by_id"],
             UserDataPurge.requested_at: datetime.fromisoformat(
                 replaced["requested_at"]),
-            UserDataPurge.scheduled_for: datetime.fromisoformat(
-                replaced["scheduled_for"]),
+            UserDataPurge.scheduled_for: max(
+                datetime.fromisoformat(replaced["scheduled_for"]),
+                job.scheduled_for),
             UserDataPurge.replaced: null(),
         }, synchronize_session=False)
     else:

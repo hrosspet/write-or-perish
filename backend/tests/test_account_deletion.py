@@ -987,6 +987,55 @@ def test_a_waiting_writing_deletion_becomes_the_account_deletion(
     assert _db.session.get(Node, world.ids["A2"]).deleted_at is None
 
 
+def test_an_undo_after_the_writing_deletions_old_date_keeps_it_restorable(
+        app, world, stubs, monkeypatch, mail):
+    """Her "Delete all my writing" is due 31 Oct; the admin deletes the
+    account on 30 Oct (due 29 Nov) and presses Undo on 5 Nov. The writing
+    deletion comes back due 29 Nov, the date she was told last: still
+    restorable after the Undo, and purged only after that date."""
+    from backend.models import Node, UserDataPurgeHidden, UserProfile
+    _dispatcher(monkeypatch, stubs)
+    a = world.alice
+    oct30 = datetime(2026, 10, 30, 12, 0)
+    monkeypatch.setattr(up, "_now", lambda: oct30 - timedelta(days=29))
+    data_job, _ = up.schedule_purge(a, requested_by_id=a.id, source="self")
+    assert data_job.scheduled_for == datetime(2026, 10, 31, 12, 0)
+    monkeypatch.setattr(acc, "_now", lambda: oct30)
+    job = _admin_delete(app, world)
+    nov29 = oct30 + timedelta(days=acc.ACCOUNT_DELETION_GRACE_DAYS)
+    assert job.scheduled_for == nov29
+
+    # 5 Nov: the admin undoes the account deletion.
+    r = _client(app, world.admin).post(
+        f"/api/admin/users/{a.id}/undo_deletion", json={"job_id": job.id})
+    assert r.status_code == 200, r.get_json()
+    _db.session.expire_all()
+    job = _db.session.get(UserDataPurge, data_job.id)
+    assert job.status == "scheduled" and not job.delete_account
+    assert job.scheduled_for == nov29
+    # The beat on 5 Nov (and on any day before 29 Nov) does not take it.
+    nov5 = datetime(2026, 11, 5, 12, 0)
+    for day in (nov5, nov29 - timedelta(minutes=1)):
+        assert up.dispatch_due_jobs(lambda j, t: pytest.fail("too early"),
+                                    now=day) == []
+    # Still restorable: the writing is hidden, nothing is deleted.
+    assert up.deletion_status(a.id)["restorable"] is True
+    assert UserProfile.query.filter_by(user_id=a.id).count() == 0
+    hidden = UserDataPurgeHidden.query.filter_by(job_id=job.id).count()
+    assert hidden > 0
+    a2_id = world.ids["A2"]
+    assert _db.session.get(Node, a2_id).deleted_at is not None
+
+    # After 29 Nov the purge runs and deletes what it hid.
+    tokens = []
+    assert up.dispatch_due_jobs(lambda j, t: tokens.append(t),
+                                now=nov29 + timedelta(minutes=1)) == [job.id]
+    assert up.run_purge_job(job.id, tokens[0]) == "done"
+    _db.session.expire_all()
+    assert _db.session.get(Node, a2_id) is None
+    assert _db.session.get(User, a.id).deleted_at is None
+
+
 def test_released_handles_are_forgotten_after_the_reservation(app, world):
     now = datetime.utcnow()
     _add(ReleasedUsername(username="gone", released_at=now - timedelta(days=400),
@@ -1168,6 +1217,7 @@ def test_the_admins_undo_puts_back_the_writing_deletion_it_replaced(
     assert job.id == data_job.id and job.delete_account
     assert job.source == "admin" and job.scope == "all"
     assert job.replaced["source"] == writing_source
+    account_due = job.scheduled_for
 
     r = _client(app, world.admin).post(
         f"/api/admin/users/{a.id}/undo_deletion", json={"job_id": job.id})
@@ -1181,7 +1231,10 @@ def test_the_admins_undo_puts_back_the_writing_deletion_it_replaced(
     assert job.status == "scheduled" and not job.delete_account
     assert job.scope == "hidden" and job.source == writing_source
     assert job.requested_by_id == requester
-    assert job.scheduled_for == due and job.requested_at == asked
+    # Never earlier than the account deletion's date, which she was told
+    # last (her own was in 3 days).
+    assert job.scheduled_for == account_due > due
+    assert job.requested_at == asked
     assert job.replaced is None
     # The writing is still hidden, with its records.
     assert UserDataPurgeHidden.query.count() == hidden
