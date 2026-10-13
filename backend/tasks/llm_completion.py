@@ -60,8 +60,8 @@ from backend.utils.ca_feed import (
     FEED_AI_USAGE, READ_FURTHER_MARKER,
     FeedReplyError, count_dropped_picks, read_reply_ids, record_feed_render,
     ca_turn as _ca_turn,
-    ArchiveNotReady, refs_from_render, request_snapshot_refresh,
-    seen_tweet_ids,
+    ArchiveNotReady, refs_from_render, render_read_reply_for_model,
+    request_snapshot_refresh, seen_tweet_ids,
 )
 from backend.utils.tool_meta import (
     get_tool_meta_entry, update_tool_meta, parse_github_issue,
@@ -1511,16 +1511,22 @@ def _action_result_text(tr):
     return f"[{name} failed — {tr.get('error', 'unknown error')}]"
 
 
-def _reference_marks_note(item_ids, user_id):
+def _reference_marks_note(item_ids, user_id, labels=None):
     """The user's own marks on references the assistant quoted earlier in
     this thread, as one bracketed note for the synthetic final user
     message. Assistant turns keep their raw {quote_ext:ID} markers (they
     are the model's own output and part of the cached prefix), so this is
     the only place a continued conversation learns whether the user read
-    the pick and how they rated it. Handles and marks only — no reference
-    text, so nothing here bears on the API key (#325). Returns None when
-    nothing is marked.
+    the pick and how they rated it. A reference is named as the model
+    sees it: by its id where its turn shows the raw marker, and by
+    *labels* ({item_id: ca_feed.pick_label}) for a read reply's picks,
+    which the model sees by author and text with no number
+    (ca_feed.render_read_reply_for_model). Handles and marks, and for a
+    pick the opening of the tweet its turn already quotes in full, so
+    nothing here adds to what bears on the API key (#325). Returns None
+    when nothing is marked.
     """
+    labels = labels or {}
     if not item_ids:
         return None
     seen = []
@@ -1542,6 +1548,9 @@ def _reference_marks_note(item_ids, user_id):
             parts.append(f"rated a {it.feedback} quote")
         if not parts:
             unmarked += 1
+            continue
+        if iid in labels:
+            marked.append(f"{labels[iid]} — " + ", ".join(parts))
             continue
         who = f"@{it.author_handle}" if it.author_handle else it.source
         marked.append(f"reference {it.id} ({who}) — " + ", ".join(parts))
@@ -2804,7 +2813,6 @@ def _collect_feed_reply(llm_node, resp, ca_refs):
     same path serves the batch collect and the admin's live rerun."""
     from backend.utils.ca_feed import (
         parse_feed_reply, render_feed_reply, save_feed_picks)
-    from backend.utils.community_archive import expand_ca_citations
     # A refusal is the provider's verdict on this request (#454): the text
     # is an apology, not JSON. Say so, naming the model, before parsing.
     # Terminal like a parse failure (the stored batch result is immutable);
@@ -2841,10 +2849,12 @@ def _collect_feed_reply(llm_node, resp, ca_refs):
                 resp["content"], ca_refs)
     verdict, picks = parse_feed_reply(resp["content"], ca_refs)
     rows = save_feed_picks(llm_node.human_owner_id, llm_node, picks)
-    resp["content"] = expand_ca_citations(
-        render_feed_reply(
-            verdict, [(r.get_why(), r.external_item_id) for r in rows]),
-        ca_refs)
+    # The picks are the tweets the reply shows. A "#12" in the verdict or
+    # a quote-tweet stays text: the number belongs to this run's list,
+    # and linking it showed the user a tweet the model never meant (a
+    # verdict's "the list runs only to #5619", 2026-10-13).
+    resp["content"] = render_feed_reply(
+        verdict, [(r.get_why(), r.external_item_id) for r in rows])
     logger.info("Node %s: feed reply with %d picks (%d recommended)",
                 llm_node.id, len(rows),
                 sum(1 for r in rows if r.recommended))
@@ -4061,6 +4071,9 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 # order — collected here where the content is already
                 # decrypted (no second KMS pass), noted after the loop.
                 quoted_ext_ids = []
+                # How the note names a read reply's picks (author and
+                # text, no number; ca_feed.pick_label), by item id.
+                pick_labels = {}
                 for node in node_chain:
                     author = node.user.username if node.user else "Unknown"
                     is_llm_node = node.node_type == "llm" or (node.llm_model is not None)
@@ -4112,14 +4125,21 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                                 # A read reply quotes tweets the model
                                 # never wrote out (it cited numbers; the
                                 # markers were filled in on collect), so
-                                # give it the tweets back. Marks stay out
-                                # of this rendering — it is re-sent on
-                                # every later turn and must not change
-                                # under the user's hand; they travel in
-                                # the note at the end of the prompt.
-                                message_text, picked = resolve_ext_quotes(
-                                    message_text, user_id, for_llm=True,
-                                    marks=False)
+                                # give it the tweets back, by author and
+                                # text and with no number: the numbers
+                                # it picked by belonged to that read's
+                                # list, and a row id read as one collides
+                                # with today's (Glean again after the
+                                # archive refreshed, 2026-10-13). Marks
+                                # stay out of this rendering — it is
+                                # re-sent on every later turn and must
+                                # not change under the user's hand; they
+                                # travel in the note at the end of the
+                                # prompt, naming each pick the same way.
+                                message_text, picked, labels = (
+                                    render_read_reply_for_model(
+                                        message_text, user_id))
+                                pick_labels.update(labels)
                                 licence.note_external(picked)
                         # Tag proposals with node ID for tracking
                         if is_agentic and node.tool_calls_meta:
@@ -4416,7 +4436,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 # the read reply, #323), and then they ride with the
                 # agentic notes.
                 reference_marks = _reference_marks_note(
-                    quoted_ext_ids, user_id)
+                    quoted_ext_ids, user_id, labels=pick_labels)
                 ca_note = None
                 if ca_turn == "read_again":
                     ca_note = CA_READ_AGAIN_TURN

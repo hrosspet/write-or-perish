@@ -10,6 +10,7 @@ batch is never paid for twice. Runs the real task body through the
 test_retrieval_loop harness with the provider's batch calls scripted.
 """
 import json
+import re
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 
@@ -955,7 +956,11 @@ def test_empty_render_still_asks_for_the_feed_shape(app, monkeypatch, tmp_path):
     assert FeedPick.query.filter_by(node_id=node.id).count() == 0
 
 
-def test_pinned_collect_links_citations_in_the_verdict(app, monkeypatch, tmp_path):  # noqa: F811
+def test_pinned_collect_links_no_number_in_the_verdict(app, monkeypatch, tmp_path):  # noqa: F811
+    """A "#N" in the verdict is the model's own words, stored as written:
+    the number belongs to this read's list, and a link made from it once
+    showed the user an unrelated tweet (2026-10-13). Only the picks are
+    fetched; they are the tweets the reply shows."""
     state = {"resp": None}
     _script(monkeypatch, tmp_path,
             collect=lambda: (("completed", state["resp"]) if state["resp"]
@@ -969,10 +974,11 @@ def test_pinned_collect_links_citations_in_the_verdict(app, monkeypatch, tmp_pat
         "picks": [{"n": 2, "qt": "Q", "relevance": 40, "recommend": True}]}))
     result = _run(_Task(), alice, read, llm_node)
     assert result["status"] == "completed"
-    assert fetched == [["111", "222"]]
+    assert fetched == [["222"]]
     content = _reload(llm_node.id).get_content()
-    assert "[#1](https://x.com/alice_w/status/111)" in content
-    assert "[#2](https://x.com/bob_b/status/222)" in content
+    assert content.startswith("Only #1 is worth a look; #2 is the pick.")
+    assert "x.com" not in content
+    assert len(re.findall(r"\{quote_ext:\d+\}", content)) == 1
 
 
 # ── what the Read records for the reports (2026-10-02) ───────────────────

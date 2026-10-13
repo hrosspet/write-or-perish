@@ -175,14 +175,18 @@ def test_reply_directly_under_a_read_reply_is_another_read(app, monkeypatch, tmp
     assistant = [m for m in call["messages"] if m["role"] == "assistant"]
     assert len(assistant) == 1
     assert "second tweet" in assistant[0]["text"]
-    assert '<quoted_reference id="%d"' % pick.id in assistant[0]["text"]
+    assert ('<picked_tweet author="@bob_b">\nsecond tweet\n</picked_tweet>'
+            in assistant[0]["text"])
+    assert "quoted_reference" not in assistant[0]["text"]
+    assert "id=" not in assistant[0]["text"]
     assert 'read="' not in assistant[0]["text"]
     assert "{quote_ext:" not in assistant[0]["text"]
     # ... and the closing user turn carries the marks and the request.
     last = call["messages"][-1]
     assert last["role"] == "user"
-    assert ("reference %d (@bob_b) — read 2026-09-19, rated a good quote"
-            % pick.id) in last["text"]
+    assert ('@bob_b\'s tweet "second tweet" — read 2026-09-19, rated a '
+            'good quote') in last["text"]
+    assert "reference %d" % pick.id not in last["text"]
     assert CA_READ_AGAIN_TURN in last["text"]
     assert "[continue]" not in last["text"]
 
@@ -217,7 +221,8 @@ def test_user_message_after_a_read_reply_is_chat(app, monkeypatch, tmp_path):  #
     assert "why the second one?" in joined
     last = call["messages"][-1]
     assert last["role"] == "user"
-    assert ("reference %d (@bob_b) — rated a bad quote" % pick.id) in last["text"]
+    assert ('@bob_b\'s tweet "second tweet" — rated a bad quote'
+            in last["text"])
     assert CA_READ_AGAIN_TURN not in last["text"]
     # ... and the closing note says this is a conversation, not a read
     # (the prompt above still asks for a verdict and picks).
@@ -256,8 +261,8 @@ def test_read_further_from_a_comment_is_a_read_with_the_thread_in_view(app, monk
     assert kwargs["output_schema"]["required"] == ["verdict", "picks"]
     last = call["messages"][-1]
     assert last["role"] == "user"
-    assert ("reference %d (@bob_b) — read 2026-09-21, rated a bad quote"
-            % pick.id) in last["text"]
+    assert ('@bob_b\'s tweet "second tweet" — read 2026-09-21, rated a '
+            'bad quote') in last["text"]
     assert CA_READ_AGAIN_TURN in last["text"]
     assert CA_CHAT_TURN_NOTE not in last["text"]
     # The read pick is out of the list; the render is pinned on the reply.
@@ -445,7 +450,8 @@ def test_chat_turn_under_a_read_root_is_agentic_once_text_mode_is_attached(app, 
     assert "[#1] first tweet" not in joined
     last = call["messages"][-1]
     assert last["role"] == "user"
-    assert ("reference %d (@bob_b) — rated a bad quote" % pick.id) in last["text"]
+    assert ('@bob_b\'s tweet "second tweet" — rated a bad quote'
+            in last["text"])
     assert CA_CHAT_TURN_NOTE in last["text"]
     assert _fresh(chat.id).get_content() == "Because it fit."
     assert FeedRender.query.filter_by(node_id=chat.id).first() is None

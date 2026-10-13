@@ -21,9 +21,12 @@ The reply node's text is the whole rendered feed: the verdict, then each
 quote-tweet followed by a {quote_ext:ID} marker for the tweet it quotes.
 Everything the thread page shows is therefore in the node content, which
 is what later turns (a second read under the same thread), exports and
-search see; the marker resolves to the reference with the user's marks on
-it (quotes.resolve_ext_quotes), so the next read knows what was already
-surfaced, read and rated.
+search see. For the model a later turn resolves each marker to the tweet
+by its author and text, with no number (render_read_reply_for_model), and
+the user's marks on it come in a note of their own, so the next read knows
+what was already surfaced, read and rated. The numbers of a read's list
+belong to that read alone: the next one, a day later or after the reader
+marked something read, numbers its tweets afresh.
 
 Turns of a read thread (2026-09-19, after the second feedback round):
 the day of tweets is fed to the model only for a READ — the reply that
@@ -41,6 +44,7 @@ later resolves its numbers against what was actually sent.
 """
 import json
 import logging
+import re
 from datetime import datetime
 
 log = logging.getLogger(__name__)
@@ -57,12 +61,14 @@ CA_TWEETS_CHAT_STUB = (
 # anywhere in a read thread, or a reply asked for directly under a read
 # reply). It replaces the generic "[continue]".
 CA_READ_AGAIN_TURN = (
-    "Read further: go through the day again against everything above — "
-    "your earlier picks, my marks on them, and whatever I have written "
-    "since. Tweets I have read are out of the list; an unread earlier "
-    "pick is yours to repeat if it still stands. Beyond that, find what "
-    "else is worth my time. Answer in the same shape, a verdict and the "
-    "picks.")
+    "Read further: go through today's tweets again against everything "
+    "above — your earlier picks, my marks on them, and whatever I have "
+    "written since. Your earlier picks are quoted above by author and "
+    "text; they carry no numbers, as the numbers belong to today's list "
+    "alone. Tweets I have read are out of that list; an unread earlier "
+    "pick is yours to repeat if it still stands and is in today's list, "
+    "by its number there. Beyond that, find what else is worth my time. "
+    "Answer in the same shape, a verdict and the picks.")
 
 # tool_calls_meta entry name on a placeholder the Read button created
 # inside a read thread: the task reads it as "this turn is a read", not
@@ -92,7 +98,9 @@ FEED_SCHEMA = {
             "type": "string",
             "description": "One short paragraph: is there anything here "
                            "worth the reader's time today, and why or why "
-                           "not.",
+                           "not. Name a tweet by its author, never by "
+                           "its number: the reader never sees the "
+                           "numbers.",
         },
         "picks": {
             "type": "array",
@@ -413,17 +421,10 @@ def refs_from_render(row, reply_text, snapshot_dir):
     number outside the render (parse_feed_reply logs both as unknown
     numbers). How many of the model's picks were dropped either way is
     recorded on the render (FeedRender.dropped_picks), each number once;
-    a number cited only in the verdict is not a pick and not counted."""
-    from backend.utils.community_archive import (
-        CA_CITATION_RE, fetch_tweets_by_id)
+    a number cited only in the verdict is not a pick and not counted, and
+    not fetched: the verdict's words are stored as written, unlinked."""
+    from backend.utils.community_archive import fetch_tweets_by_id
     numbers = pick_numbers(reply_text)
-    # Numbers cited in the verdict prose too, so expand_ca_citations can
-    # link them (they need no pick row, just the tweet behind them).
-    try:
-        verdict = (json.loads(reply_text) or {}).get("verdict") or ""
-    except (TypeError, ValueError, AttributeError):
-        verdict = ""
-    numbers += [int(m.group(1)) for m in CA_CITATION_RE.finditer(verdict)]
     wanted = {}
     for n in numbers:
         tweet_id = row.tweet_id_for(n)
@@ -721,13 +722,94 @@ def fill_pick_author_names(snapshot_dir, user_id=None, apply=False):
     return len(rows), filled
 
 
+# How much of a tweet's text names an earlier pick in the marks note
+# (pick_label): enough to tell two picks of one author apart.
+PICK_EXCERPT_CHARS = 60
+
+# A citation link an earlier read wrote into its verdict, before verdict
+# numbers stopped being linked (2026-10-13): "[#12](https://x.com/u/status/1)".
+_STALE_CITATION_RE = re.compile(
+    r"\[#\d{1,6}\]\(https://x\.com/([^/\s)]+)/status/[^\s)]+\)")
+
+
+def _excerpt(text, limit=PICK_EXCERPT_CHARS):
+    """The opening of *text* on one line, cut at a word boundary."""
+    flat = " ".join((text or "").split())
+    if len(flat) <= limit:
+        return flat
+    cut = flat[:limit].rsplit(" ", 1)[0] or flat[:limit]
+    return cut + "…"
+
+
+def pick_label(handle, text):
+    """How the marks note names an earlier pick: its author and the
+    opening of its text, never a number (see render_read_reply_for_model)."""
+    who = f"@{handle}" if handle else "an unknown author"
+    return f'{who}\'s tweet "{_excerpt(text)}"'
+
+
+def render_read_reply_for_model(text, user_id):
+    """An earlier read reply as the model reads it on a later turn of the
+    thread (Glean again, a new read, a chat about the picks). Each pick's
+    {quote_ext:ID} marker becomes the tweet itself, by its author and text:
+
+        <picked_tweet author="@bob" posted_at="2026-10-12">
+        the tweet's text
+        </picked_tweet>
+
+    with no number of any kind. The marker's id is a row id, and the
+    model read it as a number of the day's list: after the archive
+    refreshed, a Glean again told the user that the earlier picks
+    "numbered 1126 through 1131" did not match today's tweets (#435,
+    2026-10-13). A citation link an older verdict carries
+    ("[#12](https://x.com/bob/status/…)") becomes "@bob's tweet": its
+    number belonged to that read's list, not to today's.
+
+    No marks here: the rendering is re-sent on every later turn and must
+    stay byte-identical as the user marks things; the marks travel in the
+    note at the end of the prompt (llm_completion._reference_marks_note),
+    which names each pick with pick_label. Owner-only, like every
+    {quote_ext} resolution. Returns (text, resolved_item_ids, labels),
+    labels being {item_id: pick_label}."""
+    from backend.utils.quotes import (
+        EXT_QUOTE_PLACEHOLDER_PATTERN, find_ext_quote_ids, get_ext_quote_data)
+    if not text:
+        return text, [], {}
+    text = _STALE_CITATION_RE.sub(lambda m: f"@{m.group(1)}'s tweet", text)
+    item_ids = find_ext_quote_ids(text)
+    if not item_ids:
+        return text, [], {}
+    data = get_ext_quote_data(item_ids, user_id)
+    resolved, labels = [], {}
+
+    def replace(match):
+        item_id = int(match.group(1))
+        d = data.get(item_id)
+        if d is None:
+            return "[A tweet picked here earlier is no longer available.]"
+        resolved.append(item_id)
+        handle = d.get("author_handle")
+        labels[item_id] = pick_label(handle, d.get("content"))
+        author = f"@{handle}" if handle else "unknown"
+        posted = (f' posted_at="{d["posted_at"][:10]}"'
+                  if d.get("posted_at") else "")
+        return (f'<picked_tweet author="{author}"{posted}>\n'
+                f'{d.get("content") or ""}\n</picked_tweet>')
+
+    text = re.sub(EXT_QUOTE_PLACEHOLDER_PATTERN, replace, text)
+    return text, resolved, labels
+
+
 def render_feed_reply(verdict, entries):
     """The reply node's text: the verdict, then each pick as the model's
     quote-tweet followed by the {quote_ext:ID} marker of the tweet it
     quotes. ``entries`` is [(qt_text, external_item_id)] in rank order.
     The marker is what the thread page renders as the quoted tweet (with
     the reference's own read mark and good/bad verdict) and what a later
-    turn resolves to the tweet plus the user's marks on it."""
+    turn resolves to the tweet (render_read_reply_for_model), the user's
+    marks on it travelling in a note of their own. The model's own words
+    are stored as written: a "#12" in them is not linked to a tweet, as
+    the number belongs to this read's list alone."""
     verdict = verdict or "Nothing here would change what you do next."
     parts = [verdict]
     for qt, item_id in entries:
