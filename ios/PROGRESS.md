@@ -178,7 +178,7 @@ ios/scripts/                    check_terms_text.py, local_backend.sh
 - A container with `.accessibilityIdentifier` needs `.accessibilityElement(children: .contain)` first, or
   SwiftUI copies the identifier onto every child and UI tests cannot find the buttons inside.
 - Test identifiers: `thread.focal`, `thread.focalKebab`, `thread.llmResponse`, `nodeForm.text.<new|inline|edit>`,
-  `nodeForm.send.<…>`, `search.field`, `more.writeNew`, `home.reflect.voice` / `home.glean.text` (…), `voice.glean`,
+  `nodeForm.send.<…>`, `search.field`, `more.writeNew`, `home.reflect` / `home.glean` (the cards), `home.reflect.mode` (a card's switch), `voice.glean`,
   `thread.glean`, `tab.reflect` (the Home tab), `more.*`.
 - Per-device preferences use the web's localStorage names (`DefaultsKey`).
 - No content in logs (ids, statuses, byte counts only).
@@ -511,7 +511,7 @@ doc §6. **parity** = same behaviour (a web view where §6 says so); **deviation
 
 | # | Web route | App screen | Status | Note |
 |---|---|---|---|---|
-| 1 | `/` Home | Home tab, `HomeView` | parity | with Glean (#475): Reflect and Glean cards (Voice, Text each), Share (flag) below; without: Voice, Text, Share (flag); cards stack on a phone |
+| 1 | `/` Home | Home tab, `HomeView` | parity | with Glean (#475): Reflect and Glean cards, each with a Voice / Text switch that only picks the mode (remembered per card on the device, `home.reflectMode` / `home.gleanMode`, Voice by default) while the card opens it (2026-10-13); Share (flag) below; without: Voice, Text, Share (flag); cards stack on a phone |
 | 2 | `/landing` | signed out: native sign-in; links: Safari view | deviation | no marketing page before sign-in (design §6: web view when linked) |
 | 3 | `/login` | `SignInView` | deviation | link pasted back (design §4); default landing is Reflect, not `/profile`; a link's `next_url` is followed (M5) |
 | 4–6 | `/vision`, `/why-loore`, `/how-to` | Safari view (More → About, sign-in screen, waitlist ⋯) | parity | checked M5 |

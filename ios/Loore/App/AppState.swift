@@ -165,7 +165,9 @@ final class AppState {
         #if DEBUG
         if launch.resetState {
             auth.vault.clear()
-            for key in [DefaultsKey.theme, DefaultsKey.craftMode] { defaults.removeObject(forKey: key) }
+            for key in [DefaultsKey.theme, DefaultsKey.craftMode, DefaultsKey.homeReflectMode, DefaultsKey.homeGleanMode] {
+                defaults.removeObject(forKey: key)
+            }
             theme.forget()
             for cookie in api.cookieStorage.cookies ?? [] { api.cookieStorage.deleteCookie(cookie) }
         }
