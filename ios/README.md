@@ -210,7 +210,7 @@ without a declared reason (ITMS-91053). `Loore/Resources/PrivacyInfo.xcprivacy` 
 
 | Category | Reason | Used by |
 |---|---|---|
-| `NSPrivacyAccessedAPICategoryUserDefaults` | `CA92.1`: data only the app reads and writes | preferences (theme, auto-generate, last privacy level, thinking cue; the backend choice in Debug builds) |
+| `NSPrivacyAccessedAPICategoryUserDefaults` | `CA92.1`: data only the app reads and writes | preferences (theme, auto-generate, last privacy level, thinking cue, the home cards' Voice / Text; the backend choice in Debug builds) |
 | `NSPrivacyAccessedAPICategoryFileTimestamp` | `C617.1`: files inside the app container | ZIPFoundation, linked into the app binary: extracting a Claude or ChatGPT export sets each extracted file's modification date (`lstat`, `FileAttributeKey.modificationDate`) in the app's temporary directory |
 
 No tracking, so `NSPrivacyTracking` is false and no tracking domains are listed.
@@ -310,7 +310,7 @@ Release build they are compiled out.
 ```sh
 cd ios && xcodegen
 xcodebuild -project Loore.xcodeproj -scheme Loore \
-  -destination 'platform=iOS Simulator,name=iPhone 17' test      # 540 unit tests
+  -destination 'platform=iOS Simulator,name=iPhone 17' test      # 547 unit tests
 python3 ios/scripts/check_terms_text.py                          # Terms text == TermsModal.js
 ```
 
@@ -339,6 +339,7 @@ xcodebuild -project Loore.xcodeproj -scheme LooreUITests \
 | `M5ParityUITests` (M5) | signed-out About link, a sign-in link landing on Welcome, a permalink opening the native thread, a toast above the mini-player | `LOORE_WELCOME_LINK` (`magic-link /welcome`), `LOORE_PERMALINK` (a live `/@user/slug` of the test user), `LOORE_LISTEN_NODE` (a node whose audio already exists) |
 | `VoiceUITests`, `VoiceWiringUITests` (M3) | a voice turn, Continue; speaker, download, dictation, Voice Mode from a thread | billed, see below |
 | `NodeOpeningUITests` (#447) | Text → Send (auto-generate off), then the same entry from the Log: each time the screen stays with the spinner and the thread opens with no "Loading node..." page | `LOORE_BACKEND_URL=http://localhost:5099` with `python3 scripts/delay_proxy.py 5099 0.8` running (node GETs held 0.8 s; without a delay the spinner is too short to see). The test user's sent entries stay in the Log |
+| `HomeCardsUITests` (2026-10-13) | a user who gleans: a tap on a card's Voice / Text switch (middle, edge, end) opens nothing and changes what the card opens; the card opens Text mode or Voice; each card's choice survives a relaunch; the home in both modes, dark and light | a user with Glean (skips otherwise); no billed step |
 | `TextModeDraftUITests` (#425, #427) | Reflect home → Text → Send (auto-generate off) or Discard → back → Text again: the text must not come back as the draft | Send right after typing: `LOORE_BACKEND_URL=http://localhost:5099` with `python3 scripts/delay_proxy.py` running (production-like latency; without it the race cannot fail locally). Send or Discard next to a dead Voice session: `state clear_top_drafts dead_voice_session` before each test. The test user's sent entries stay in the Log |
 
 Notes: the M2 tests cancel every dialog and delete what they create; craft mode is
