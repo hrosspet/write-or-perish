@@ -309,6 +309,42 @@ describe('a thread started from the Reflect card', () => {
       mockGet.mock.calls.some(([url]) => url === '/nodes/41')).toBe(true));
   });
 
+  test("has a Glean button next to Voice Mode that gleans from the user's newest entry", async () => {
+    routes['/nodes/30'] = reply();
+    renderAt('/node/30');
+    await screen.findByText(/fork in the road/);
+    fireEvent.click(screen.getByRole('button', { name: 'Glean' }));
+    // The reply (30) is Loore's; the newest entry of the user's is 20.
+    expect(mockPost).toHaveBeenCalledWith('/read/from-node/20', { model: undefined });
+  });
+
+  test('the top button picks the newest entry by created_at, over thread order', async () => {
+    routes['/nodes/30'] = reply({
+      ancestors: [VOICE_ROOT,
+        { id: 20, user_id: 1, node_type: 'user', content: 'Later one.', created_at: '2026-10-09T10:00:00Z',
+          ai_usage: 'chat', privacy_level: 'private', child_count: 1 },
+        { id: 21, user_id: 1, node_type: 'user', content: 'Earlier one.', created_at: '2026-10-08T10:00:00Z',
+          ai_usage: 'chat', privacy_level: 'private', child_count: 1 }],
+    });
+    renderAt('/node/30');
+    await screen.findByText(/fork in the road/);
+    fireEvent.click(screen.getByRole('button', { name: 'Glean' }));
+    expect(mockPost).toHaveBeenCalledWith('/read/from-node/20', { model: undefined });
+  });
+
+  test('no top button while the thread has no entry of the user\'s', async () => {
+    // The only entry of theirs is kept away from AI, so nothing can be gleaned.
+    routes['/nodes/20'] = {
+      id: 20, username: 'ana', user: { id: 1, username: 'ana' }, user_id: 1,
+      node_type: 'user', content: 'Private note.',
+      ai_usage: 'none', privacy_level: 'private', ancestors: [], children: [], child_count: 0,
+      glean_thread: false,
+    };
+    renderAt('/node/20');
+    await screen.findByText('Private note.');
+    expect(screen.queryByRole('button', { name: 'Glean' })).toBeNull();
+  });
+
   test('works days later in a thread that has gleaned already (glean again)', async () => {
     routes['/nodes/30'] = reply({ in_read_thread: true, read_reply_above: true });
     renderAt('/node/30');
@@ -343,6 +379,7 @@ describe('a user without Glean', () => {
     renderAt('/node/30');
     await screen.findByText(/fork in the road/);
     expect(gleanButton()).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Glean' })).toBeNull();
     openMenu();
     expect(screen.queryByRole('button', { name: 'Glean for this reflection' })).toBeNull();
   });

@@ -35,6 +35,8 @@ const GLEAN_AGAIN_TITLE = "Another pass over today's tweets, against everything 
   + "— your marks on the earlier picks included.";
 const GLEAN_TITLE = "Loore reads today's Community Archive tweets and shows you the few worth your time, "
   + "from what you said in this thread.";
+const GLEAN_THREAD_TITLE = "Loore reads today's Community Archive tweets against your latest entry in this thread "
+  + 'and shows you the few worth your time.';
 export const GLEAN_MENU_LABEL = 'Glean for this reflection';
 export const GLEANINGS_TITLE = "Today's gleanings";
 
@@ -1309,8 +1311,41 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
   // scroll away with content (no absolute positioning / viewport
   // anchoring). Voice Mode shows on a node AI may not read too: the
   // Voice screen explains there instead of recording. Auto-generate
-  // needs AI and stays hidden on it. Glean is not up here (#435): it is
-  // in the action row of a Glean-card thread, else in the entry's menu.
+  // needs AI and stays hidden on it. In a Glean-card thread Glean is in the
+  // action row; in any other thread it is here and in the entry's menu.
+  // Glean in a Reflect thread (voice review, Peter, 2026-10-13): a Glean
+  // button next to Voice Mode that does what "Glean for this reflection"
+  // does on the user's own newest entry of the thread (same route, same
+  // refusals, same failed-gleaning display). Hidden when the thread has
+  // no entry of theirs yet. The newest is by created_at; entries without
+  // one keep thread order (ancestors, this node, then its descendants).
+  const newestOwnEntry = (() => {
+    if (!currentUser?.glean_enabled || node.glean_thread) return null;
+    const flat = [];
+    const walk = (kids) => (kids || []).forEach((c) => { flat.push(c); walk(c.children); });
+    walk(node.ancestors);
+    flat.push(node);
+    walk(node.children);
+    let best = null;
+    flat.forEach((n) => {
+      if (n.node_type === 'llm' || n.user_id !== currentUser.id) return;
+      if (!gleanFromMenu(n, true)) return;
+      if (!best || !n.created_at || !best.created_at || n.created_at >= best.created_at) best = n;
+    });
+    return best;
+  })();
+  const topGleanButton = newestOwnEntry && (
+    <LooreTooltip text={GLEAN_THREAD_TITLE}>
+      <button
+        type="button"
+        onClick={() => handleReadFromNode(gleanTargetOf(newestOwnEntry))}
+        disabled={readLoading || llmRequesting || !!llmTaskNodeId || moving}
+        style={{ ...topRightButtonStyle, justifyContent: 'center' }}
+      >
+        {readLoading ? 'Starting…' : 'Glean'}
+      </button>
+    </LooreTooltip>
+  );
   const nodeAllowsAi = node.ai_usage !== 'none';
   const topRightControls = isOwner && !isPublicThread && (
     <div style={{
@@ -1336,6 +1371,7 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
           <FaMicrophone size={12} />
         </span>
       </button>
+      {topGleanButton}
       {craftMode && nodeAllowsAi && (
         <button
           type="button"
