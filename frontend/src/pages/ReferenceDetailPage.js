@@ -1,9 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
+import { FiFileText, FiMessageSquare, FiPlayCircle } from 'react-icons/fi';
 import api from '../api';
 import MarkdownBody from '../components/MarkdownBody';
 import BubbleKebabMenu from '../components/BubbleKebabMenu';
-import ReferenceFooter from '../components/ReferenceFooter';
 import DeleteConfirmDialog from '../components/DeleteConfirmDialog';
 import ReferenceEditForm from '../components/ReferenceEditForm';
 import NodeFormModal from '../components/NodeFormModal';
@@ -11,43 +11,73 @@ import RegenerateTtsDialog from '../components/RegenerateTtsDialog';
 import SpeakerIcon from '../components/SpeakerIcon';
 import ReferenceFeedback from '../components/ReferenceFeedback';
 import { useToast } from '../contexts/ToastContext';
-import { formatDate } from '../utils/date';
-import TweetEmbed from '../components/TweetEmbed';
+import { formatDate, formatDateTime } from '../utils/date';
 import YouTubeEmbed from '../components/YouTubeEmbed';
-import { bodyWithoutTitle, sourceLabel, tweetId, youtubeVideo } from '../utils/references';
+import {
+  bodyWithoutTitle, referenceKind, sourceLine, sourceLinkLabel, youtubeVideo,
+} from '../utils/references';
 
-// The focal card of a thread (NodeDetail's highlightedTextStyle), so a
-// reference opens the way a node does.
-const cardStyle = {
-  boxSizing: 'border-box',
-  padding: '1.8rem 2rem',
-  margin: '18px 0 10px 0',
-  backgroundColor: 'var(--bg-card)',
-  border: '1px solid var(--border)',
-  borderLeft: '3px solid var(--accent)',
-  borderRadius: '10px',
+// The card sits where a thread's focal node sits, with the same gutter
+// on the right for the kebab, which stays outside the card. Its look is
+// in index.css (.ref-card). The line under the card keeps its indent.
+const CARD_INDENT = '20px';
+const cardPlacement = {
   width: 'calc(100% - 50px)',
-  maxWidth: '1500px',
-  marginLeft: '20px',
-  position: 'relative',
+  margin: `18px 0 0 ${CARD_INDENT}`,
 };
 
-const tagStyle = {
-  fontFamily: 'var(--sans)',
-  fontSize: '0.65rem',
-  fontWeight: 500,
-  textTransform: 'uppercase',
-  letterSpacing: '0.08em',
-  padding: '3px 8px',
-  borderRadius: '4px',
-  color: 'var(--accent-dim)',
-  backgroundColor: 'var(--accent-subtle)',
+const SOURCE_GLYPH = {
+  tweet: FiMessageSquare,
+  video: FiPlayCircle,
+  page: FiFileText,
 };
+
+// The SpeakerIcon button in the action row: a larger tap target, its
+// icon in line with the card's left edge.
+const listenButtonStyle = { padding: '10px 8px', marginLeft: '-8px' };
 
 /**
- * One saved reference (#232), read in full. Same shell as a thread's
- * focal node: heading row, accent-edged card, kebab with the actions,
- * footer with author, date and source link.
+ * Who wrote it and when, under the source line: a tweet's display name
+ * and @handle (opening the account), a page's or video's byline, then
+ * the date. The site is already named in the source line.
+ */
+function Byline({ item }) {
+  const when = formatDateTime(item.posted_at || item.fetched_at);
+  let author = null;
+  if (referenceKind(item) === 'tweet' && item.author_handle) {
+    author = (
+      <a
+        className="ref-card-author"
+        href={`https://x.com/${item.author_handle}`}
+        target="_blank"
+        rel="noopener noreferrer"
+        title="Open the account on Twitter in a new tab"
+      >
+        {item.author_name && <span className="ref-card-name">{item.author_name}</span>}
+        <span className="ref-card-handle">@{item.author_handle}</span>
+      </a>
+    );
+  } else if (item.author_name || item.author_handle) {
+    author = <span className="ref-card-name">{item.author_name || item.author_handle}</span>;
+  }
+  if (!author && !when) return null;
+  return (
+    <div className="ref-card-byline" data-testid="reference-byline">
+      {author}
+      {when && <span className="ref-card-date">{author ? `· ${when}` : when}</span>}
+    </div>
+  );
+}
+
+/**
+ * One saved reference (#232), read in full. Option A of the 2026-10-13
+ * mockup (Peter): the gleaning's tweet card at page size, for every kind
+ * of reference. The card has a full hairline border and no accent rail,
+ * so it never reads as one of the user's own entries. Top to bottom: the
+ * source in a plain sentence, the byline, a page's title, the stored
+ * text (a video's player, its description behind a toggle), then Listen,
+ * the link out, the verdict and the read toggle. No tweet embed: the
+ * stored text is the tweet. Under the card, how often Loore showed it.
  */
 function ReferenceDetailPage() {
   const { id } = useParams();
@@ -60,10 +90,7 @@ function ReferenceDetailPage() {
   const [item, setItem] = useState(null);
   const [error, setError] = useState('');
   const [deleting, setDeleting] = useState(false);
-  // For tweets: the embed's state decides whether the stored text is
-  // the main body (embed unavailable) or a disclosure under the embed.
-  // A YouTube iframe cannot report failure, so it counts as shown.
-  const [embedStatus, setEmbedStatus] = useState('loading');
+  // A video's description sits under the player behind this toggle.
   const [showStored, setShowStored] = useState(false);
   const [marking, setMarking] = useState(false);
   const [editing, setEditing] = useState(false);
@@ -108,15 +135,22 @@ function ReferenceDetailPage() {
   // Only the user marks a reference read. Opening the page is not a
   // read (a skim is not a read), and the AI surfacing it is tracked
   // separately as surfaced_count.
-  const toggleRead = () => {
+  const setRead = (want, via) => {
     setMarking(true);
-    const req = item.read_at
-      ? api.delete(`/external/items/${item.id}/read`)
-      : api.post(`/external/items/${item.id}/read`);
+    const req = want
+      ? api.post(`/external/items/${item.id}/read`, via ? { via } : {})
+      : api.delete(`/external/items/${item.id}/read`);
     req
       .then((res) => setItem((prev) => ({ ...prev, read_at: res.data.read_at })))
       .catch(() => addToast('Could not update the read mark.', 4000))
       .finally(() => setMarking(false));
+  };
+
+  // Opening the original is reading it, as on the gleaning card: the
+  // open is logged and an unread reference is marked read (a read one
+  // keeps its date). The link itself opens the tab.
+  const openedOriginal = () => {
+    if (!marking) setRead(true, 'open');
   };
 
   const saveEdit = ({ title, content }, regenerateTts) => {
@@ -147,7 +181,8 @@ function ReferenceDetailPage() {
   if (!item) return <div style={{ padding: '20px', color: 'var(--text-muted)' }}>Loading...</div>;
 
   const video = youtubeVideo(item);
-  const embedShown = video || (tweetId(item) && embedStatus === 'shown');
+  const Glyph = SOURCE_GLYPH[referenceKind(item)];
+  const body = bodyWithoutTitle(item);
 
   const actions = [
     ...(item.url ? [{
@@ -160,7 +195,7 @@ function ReferenceDetailPage() {
   ];
 
   return (
-    <div style={{ padding: '8px 12px 12px' }}>
+    <div style={{ padding: '8px 12px 12px', maxWidth: '820px', margin: '0 auto' }}>
       {backTo && (
         <Link
           to={backTo}
@@ -197,90 +232,60 @@ function ReferenceDetailPage() {
           All references
         </Link>
       </div>
-      <div style={cardStyle}>
+      <article className="ref-card" style={cardPlacement}>
         <BubbleKebabMenu visible={true} items={actions} />
-        {/* The title row carries the speaker (a tweet has no title: the
-            icon then stands alone at the top of the card). */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: '2px', margin: '0 0 0.8rem 0' }}>
-          {item.title && (
-            <h1 style={{
-              fontFamily: 'var(--serif)', fontWeight: 400, fontSize: '1.5rem',
-              color: 'var(--text-primary)', margin: 0, lineHeight: 1.3,
-            }}>
-              {item.title}
-            </h1>
-          )}
-          {/* Cormorant's glyphs sit below the line-box center; the nudge
-              puts the icon on the title's optical middle. */}
-          <span style={{ display: 'flex', alignItems: 'center', color: 'var(--text-muted)', fontSize: '1rem', position: 'relative', top: '0.18em' }}>
-            <SpeakerIcon
-              itemId={item.id}
-              content={item.title ? `# ${item.title}\n${item.content || ''}` : item.content}
-              isPublic={false}
-              onTtsGenerated={() => setItem((prev) => (prev ? { ...prev, has_tts: true } : prev))}
-            />
-          </span>
-        </div>
-        {tweetId(item) && (
-          <TweetEmbed tweetId={tweetId(item)} onStatus={setEmbedStatus} />
-        )}
+        <span className="ref-card-source">
+          <Glyph aria-hidden="true" strokeWidth={1.6} />
+          {sourceLine(item)}
+        </span>
+        <Byline item={item} />
+        {item.title && <h1 className="ref-card-title">{item.title}</h1>}
         {video && <YouTubeEmbed videoId={video.id} start={video.start} />}
-        {embedShown ? (
-          <div style={{ marginTop: '10px' }}>
+        {video ? (
+          // A video's stored text is its description (with the chapter
+          // list): under the player, behind the toggle.
+          <>
             <button
               type="button"
+              className="ref-card-stored-toggle"
+              aria-expanded={showStored}
               onClick={() => setShowStored((v) => !v)}
-              style={{
-                background: 'none', border: 'none', padding: 0, cursor: 'pointer',
-                fontFamily: 'var(--sans)', fontSize: '0.8rem', fontWeight: 300,
-                color: 'var(--text-muted)',
-              }}
             >
               {showStored ? 'Hide stored text' : 'Show stored text'}
             </button>
             {showStored && (
-              <div style={{
-                marginTop: '8px', fontFamily: 'var(--sans)', fontSize: '0.9rem',
-                fontWeight: 300, color: 'var(--text-secondary)', lineHeight: 1.7,
-              }}>
-                <MarkdownBody>{item.content || ''}</MarkdownBody>
+              <div className="ref-card-text" data-testid="reference-text">
+                <MarkdownBody>{body}</MarkdownBody>
               </div>
             )}
-          </div>
+          </>
         ) : (
-          // Pages, and tweets whose embed is still loading or unavailable
-          // (deleted tweet, blocked script, offline): the stored text.
-          // The stored text also carries the video description, whose
-          // chapter list the toggle above reveals.
-          <div style={{
-            fontFamily: 'var(--sans)', fontSize: '0.95rem', fontWeight: 300,
-            color: 'var(--text-secondary)', lineHeight: 1.7,
-          }}>
-            <MarkdownBody>{bodyWithoutTitle(item)}</MarkdownBody>
+          <div className="ref-card-text" data-testid="reference-text">
+            <MarkdownBody>{body}</MarkdownBody>
           </div>
         )}
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '8px' }}>
-          <ReferenceFooter item={item} />
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '12px' }}>
-            {item.read_at && <span style={tagStyle}>Read</span>}
-            <span style={tagStyle}>{sourceLabel(item)}</span>
-          </div>
-        </div>
-        <div style={{
-          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-          flexWrap: 'wrap', gap: '8px', marginTop: '14px',
-          paddingTop: '12px', borderTop: '1px solid var(--border)',
-        }}>
-          <span style={{
-            fontFamily: 'var(--sans)', fontSize: '0.78rem', fontWeight: 300,
-            color: 'var(--text-muted)',
-          }}>
-            {item.surfaced_count
-              ? `Shown by Loore ${item.surfaced_count}× · last ${formatDate(item.last_surfaced_at)}`
-              : 'Not yet shown by Loore in a conversation'}
-            {item.read_at ? ` · you read it ${formatDate(item.read_at)}` : ''}
-            {item.edited_at ? ` · edited ${formatDate(item.edited_at)}` : ''}
+        <div className="ref-card-foot">
+          <span className="ref-card-listen">
+            <SpeakerIcon
+              itemId={item.id}
+              content={item.title ? `# ${item.title}\n${item.content || ''}` : item.content}
+              isPublic={false}
+              buttonStyle={listenButtonStyle}
+              onTtsGenerated={() => setItem((prev) => (prev ? { ...prev, has_tts: true } : prev))}
+            />
           </span>
+          {item.url && (
+            <a
+              className="ref-card-out"
+              href={item.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              onClick={openedOriginal}
+            >
+              {sourceLinkLabel(item)}
+            </a>
+          )}
+          <span className="ref-card-spacer" />
           {/* No gap: ReferenceFeedback spaces itself from the button. */}
           <span style={{ display: 'inline-flex', alignItems: 'center' }}>
             <ReferenceFeedback
@@ -293,21 +298,23 @@ function ReferenceDetailPage() {
             />
             <button
               type="button"
-              onClick={toggleRead}
+              className="ref-card-read"
+              data-read={item.read_at ? 'true' : 'false'}
+              onClick={() => setRead(!item.read_at)}
               disabled={marking}
-              style={{
-                padding: '6px 14px', borderRadius: '6px', cursor: 'pointer',
-                fontFamily: 'var(--sans)', fontSize: '0.82rem', fontWeight: 400,
-                background: item.read_at ? 'none' : 'var(--accent)',
-                border: item.read_at ? '1px solid var(--border)' : '1px solid var(--accent)',
-                color: item.read_at ? 'var(--text-muted)' : 'var(--bg-deep)',
-              }}
             >
               {item.read_at ? 'Mark as unread' : 'Mark as read'}
             </button>
           </span>
         </div>
-      </div>
+      </article>
+      <p className="ref-card-shown" style={{ marginLeft: CARD_INDENT }}>
+        {item.surfaced_count
+          ? `Shown by Loore ${item.surfaced_count}× · last ${formatDate(item.last_surfaced_at)}`
+          : 'Not yet shown by Loore in a conversation'}
+        {item.read_at ? ` · you read it ${formatDate(item.read_at)}` : ''}
+        {item.edited_at ? ` · edited ${formatDate(item.edited_at)}` : ''}
+      </p>
       {editing && (
         <NodeFormModal title="Edit Reference" onClose={() => setEditing(false)}>
           <ReferenceEditForm

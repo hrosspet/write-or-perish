@@ -6,6 +6,7 @@
 export const SOURCE_LABEL = {
   web_clip: 'Page',
   twitter_bookmark: 'Tweet',
+  twitter_like: 'Tweet',
   community_archive: 'Archive tweet',
   read_pick: 'Archive tweet',
 };
@@ -13,6 +14,51 @@ export const SOURCE_LABEL = {
 export function sourceLabel(item) {
   if (youtubeVideo(item)) return 'Video';
   return SOURCE_LABEL[item.source] || item.source;
+}
+
+// Sources whose reference is a tweet (the backend's TWEET_SOURCES).
+export const TWEET_SOURCES = ['twitter_bookmark', 'twitter_like', 'community_archive', 'read_pick'];
+
+export function hostOf(url) {
+  try { return url ? new URL(url).hostname.replace(/^www\./, '') : null; } catch (e) { return null; }
+}
+
+// What a reference is, for its page: a YouTube clip is a 'video', the
+// tweet sources are a 'tweet', and everything else is a 'page'.
+export function referenceKind(item) {
+  if (youtubeVideo(item)) return 'video';
+  if (TWEET_SOURCES.includes(item.source)) return 'tweet';
+  return 'page';
+}
+
+const TWEET_ORIGIN = {
+  community_archive: 'Tweet from the Community Archive',
+  read_pick: 'Tweet from the Community Archive',
+  twitter_bookmark: 'Tweet from your Twitter bookmarks',
+  twitter_like: 'Tweet from your Twitter likes',
+};
+
+// The first line of a reference's card (Peter, 2026-10-13): what it is
+// and where it came from, in a plain sentence.
+export function sourceLine(item) {
+  const kind = referenceKind(item);
+  if (kind === 'video') return 'Video from YouTube';
+  if (kind === 'tweet') return TWEET_ORIGIN[item.source];
+  if (item.source === 'web_clip') {
+    const host = hostOf(item.url);
+    return host ? `Page from ${host}` : 'Saved page';
+  }
+  // A source this list does not know yet: its label, as the log shows it.
+  return sourceLabel(item);
+}
+
+// The link out of a reference's card, named after where it goes. The
+// tweet's label matches the gleaning card's.
+export function sourceLinkLabel(item) {
+  const kind = referenceKind(item);
+  if (kind === 'tweet') return 'Twitter ↗';
+  if (kind === 'video') return 'YouTube ↗';
+  return 'Open page ↗';
 }
 
 // Tweets carry an @handle, after the display name when the archive has
@@ -51,12 +97,6 @@ export function bodyWithoutTitle(item) {
     return content.slice(m[0].length);
   }
   return content;
-}
-
-// The tweet sources key items by tweet id.
-export function tweetId(item) {
-  if (!['twitter_bookmark', 'community_archive', 'read_pick'].includes(item.source)) return null;
-  return item.external_id || null;
 }
 
 const YOUTUBE_HOSTS = new Set(['youtube.com', 'www.youtube.com', 'm.youtube.com', 'music.youtube.com', 'youtu.be', 'www.youtube-nocookie.com']);

@@ -926,3 +926,18 @@ From Peter's first run on his iPhone. 395 unit tests pass (one skipped), 5 of th
   from the waitlist screen. Not seen: the X sign-in landing on the
   restore question (needs real X), and a sign-in surviving a relaunch (the unsigned simulator build keeps
   nothing in the Keychain, for any sign-in).
+
+## Reference page card (option A, Peter 2026-10-13)
+
+- Every reference kind sits in one card like the gleaning's tweet card: a full `borderHover` hairline, radius
+  12, no accent rail. Top to bottom: the source in a sentence with an SF Symbol ("Tweet from the Community
+  Archive", "Page from example.com", "Video from YouTube") and the kebab, the byline (name and @handle
+  opening the account, or a page's byline, then the date), a page's title, the stored text, then Listen,
+  the link out ("Twitter ↗", "Open page ↗", "YouTube ↗"; it marks the reference read, as on the gleaning
+  card), ⊕/⊖ and a text "Mark as read". The surfacing line sits under the card; the "Read" and source tags
+  are gone.
+- No tweet embed: `TweetEmbedView` and the web view's message channel are removed; the YouTube player stays,
+  with its description behind "Show stored text".
+- The stored text is in the system serif, New York (`LooreFont.reading`, `MarkdownStyle.Face.readingSerif`),
+  where the web uses Newsreader: the app bundles no Newsreader. 17 pt, line height 1.62.
+- Checked in the simulator against a mocked `/api` (tweet, page, video; dark and light).

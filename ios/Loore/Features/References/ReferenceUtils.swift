@@ -24,6 +24,7 @@ enum ReferenceUtils {
     static let sourceLabels: [String: String] = [
         "web_clip": "Page",
         "twitter_bookmark": "Tweet",
+        "twitter_like": "Tweet",
         "community_archive": "Archive tweet",
         "read_pick": "Archive tweet",
     ]
@@ -34,6 +35,58 @@ enum ReferenceUtils {
         if youtubeVideo(source: source, url: url) != nil { return "Video" }
         if let label = sourceLabels[source], !label.isEmpty { return label }
         return source
+    }
+
+    /// `TWEET_SOURCES`: sources whose reference is a tweet (the backend's).
+    static let tweetSources: Set<String> = ["twitter_bookmark", "twitter_like", "community_archive", "read_pick"]
+
+    /// `referenceKind(item)`: what a reference is, for its page.
+    enum Kind: Equatable, Sendable {
+        case tweet, page, video
+    }
+
+    /// A YouTube clip is a video, the tweet sources are tweets, everything else a page.
+    static func kind(source: String, url: String?) -> Kind {
+        if youtubeVideo(source: source, url: url) != nil { return .video }
+        if tweetSources.contains(source) { return .tweet }
+        return .page
+    }
+
+    /// `hostOf(url)`: the URL's host without a leading `www.`.
+    static func host(_ link: String?) -> String? {
+        guard let link, let host = URL(string: link)?.host, !host.isEmpty else { return nil }
+        return host.hasPrefix("www.") ? String(host.dropFirst(4)) : host
+    }
+
+    private static let tweetOrigins: [String: String] = [
+        "community_archive": "Tweet from the Community Archive",
+        "read_pick": "Tweet from the Community Archive",
+        "twitter_bookmark": "Tweet from your Twitter bookmarks",
+        "twitter_like": "Tweet from your Twitter likes",
+    ]
+
+    /// `sourceLine(item)`: the first line of a reference's card (Peter,
+    /// 2026-10-13), what it is and where it came from in a plain sentence.
+    static func sourceLine(source: String, url: String?) -> String {
+        switch kind(source: source, url: url) {
+        case .video:
+            return "Video from YouTube"
+        case .tweet:
+            return tweetOrigins[source] ?? "Tweet"
+        case .page:
+            guard source == "web_clip" else { return sourceLabel(source: source, url: url) }
+            return host(url).map { "Page from \($0)" } ?? "Saved page"
+        }
+    }
+
+    /// `sourceLinkLabel(item)`: the link out of the card, named after where it
+    /// goes. The tweet's label matches the gleaning card's.
+    static func sourceLinkLabel(source: String, url: String?) -> String {
+        switch kind(source: source, url: url) {
+        case .tweet: return "Twitter ↗"
+        case .video: return "YouTube ↗"
+        case .page: return "Open page ↗"
+        }
     }
 
     /// `authorLabel(item)`: "@handle" for tweets, after the display name when
@@ -65,13 +118,6 @@ enum ReferenceUtils {
             return content.jsSubstring(whole.jsLength)
         }
         return content
-    }
-
-    /// `tweetId(item)`: the external id of a tweet-like source, else nil.
-    static func tweetId(source: String, externalId: String?) -> String? {
-        guard ["twitter_bookmark", "community_archive", "read_pick"].contains(source) else { return nil }
-        guard let externalId, !externalId.isEmpty else { return nil }
-        return externalId
     }
 
     /// `YOUTUBE_HOSTS`.

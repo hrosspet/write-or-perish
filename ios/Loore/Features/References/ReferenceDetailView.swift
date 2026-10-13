@@ -1,17 +1,21 @@
 import SwiftUI
 
-/// One saved reference, read in full (web `ReferenceDetailPage`, map E §4.2):
-/// title with listen-aloud, tweet / YouTube embed or the stored markdown,
-/// footer and tags, the surfacing line, feedback, the read toggle, and
-/// Open source / Edit / Delete.
+/// One saved reference, read in full (web `ReferenceDetailPage`, map E §4.2).
+/// Option A of the 2026-10-13 mockup (Peter): the gleaning's tweet card at
+/// page size, for every kind of reference. A full hairline border and no
+/// accent rail, so it never reads as one of the user's own entries. Top to
+/// bottom: the source in a plain sentence (with the kebab: Open source / Edit
+/// / Delete), the byline, a page's title, the stored text in the reading
+/// serif (a video's player, its description behind a toggle), then Listen,
+/// the link out, the verdict and the read toggle. No tweet embed: the stored
+/// text is the tweet. Under the card, how often Loore showed it.
 struct ReferenceDetailView: View {
     let itemId: Int
 
     @Environment(AppState.self) private var app
-    @Environment(\.colorScheme) private var colorScheme
     @State private var item: ExternalItem?
     @State private var error: String?
-    @State private var embedStatus = "loading"
+    /// A video's description sits under the player behind this toggle.
     @State private var showStored = false
     @State private var marking = false
     @State private var editing = false
@@ -27,6 +31,12 @@ struct ReferenceDetailView: View {
                     Text(error).font(LooreFont.body).foregroundStyle(LooreColor.accent).padding(.top, 20)
                 } else if let item {
                     card(item)
+                    Text(Self.surfacingLine(item))
+                        .font(LooreFont.sans(12.5, .light))
+                        .foregroundStyle(LooreColor.textMuted)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.top, 10)
+                        .accessibilityIdentifier("reference.surfacing")
                 } else {
                     LoadingLine()
                 }
@@ -75,100 +85,182 @@ struct ReferenceDetailView: View {
         .padding(.bottom, 12)
     }
 
+    /// The web's `max-width: 65ch` for the text at 1.12rem (641 px there).
+    static let textMeasure: CGFloat = 640
+
     private func card(_ item: ExternalItem) -> some View {
-        let video = item.youtubeVideo
-        let embedShown = video != nil || (item.tweetId != nil && embedStatus == "shown")
-        return HStack(alignment: .top, spacing: 4) {
-            VStack(alignment: .leading, spacing: 0) {
-                HStack(alignment: .center, spacing: 2) {
-                    if let title = item.title, !title.isEmpty {
-                        Text(title)
-                            .font(LooreFont.serif(24, .regular, relativeTo: .title2))
-                            .foregroundStyle(LooreColor.textPrimary)
-                            .lineSpacing(2)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    SpeakerButton(target: .item(item.id), content: speakerContent(item),
-                                  onTtsGenerated: { self.item?.hasTTS = true })
-                }
-                .padding(.bottom, 12.8)
-
-                if let tweet = item.tweetId {
-                    TweetEmbedView(tweetId: tweet, dark: colorScheme == .dark) { embedStatus = $0 }
-                }
-                if let video {
-                    YouTubeEmbedView(videoId: video.id, start: video.start)
-                }
-                if embedShown {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Button(showStored ? "Hide stored text" : "Show stored text") { showStored.toggle() }
-                            .buttonStyle(.plain)
-                            .font(LooreFont.sans(12.8, .light))
-                            .foregroundStyle(LooreColor.textMuted)
-                            .accessibilityIdentifier("reference.storedToggle")
-                        if showStored {
-                            MarkdownView(markdown: item.content ?? "", style: .profile)
-                        }
-                    }
-                    .padding(.top, 10)
-                } else {
-                    MarkdownView(markdown: item.bodyWithoutTitle, style: .referenceBody)
-                        .accessibilityElement(children: .contain)
-            .accessibilityIdentifier("reference.body")
-                }
-
-                ViewThatFits(in: .horizontal) {
-                    HStack(alignment: .center, spacing: 8) {
-                        ReferenceFooter(item: item).fixedSize()
-                        Spacer(minLength: 0)
-                        tags(item).fixedSize()
-                    }
-                    VStack(alignment: .leading, spacing: 0) {
-                        ReferenceFooter(item: item)
-                        tags(item)
-                    }
-                }
-
-                VStack(alignment: .leading, spacing: 8) {
-                    Text(Self.surfacingLine(item))
-                        .font(LooreFont.sans(12.5, .light))
-                        .foregroundStyle(LooreColor.textMuted)
-                        .fixedSize(horizontal: false, vertical: true)
-                    HStack(spacing: 0) {
-                        ReferenceFeedbackControl(itemId: item.id, feedback: item.feedback, size: 18) { verdict, readAt in
-                            self.item?.feedback = verdict
-                            if let readAt { self.item?.readAt = readAt }
-                        }
-                        Button(item.readAt != nil ? "Mark as unread" : "Mark as read") { toggleRead() }
-                            .buttonStyle(ReadToggleStyle(read: item.readAt != nil))
-                            .disabled(marking)
-                            .accessibilityIdentifier("reference.readToggle")
-                    }
-                }
-                .padding(.top, 12)
-                .overlay(alignment: .top) { HairlineDivider() }
-                .padding(.top, 14)
+        VStack(alignment: .leading, spacing: 12) {
+            sourceRow(item)
+            byline(item)
+            if let title = item.title, !title.isEmpty {
+                Text(title)
+                    .font(LooreFont.serif(24, .regular, relativeTo: .title2))
+                    .foregroundStyle(LooreColor.textPrimary)
+                    .lineSpacing(2)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityAddTraits(.isHeader)
             }
-            KebabMenu(actions: actions(item))
+            if let video = item.youtubeVideo {
+                // A video's stored text is its description (with the chapter
+                // list): under the player, behind the toggle.
+                YouTubeEmbedView(videoId: video.id, start: video.start)
+                Button(showStored ? "Hide stored text" : "Show stored text") { showStored.toggle() }
+                    .buttonStyle(.plain)
+                    .font(LooreFont.sans(12.8, .light))
+                    .foregroundStyle(LooreColor.textMuted)
+                    .accessibilityIdentifier("reference.storedToggle")
+                if showStored { text(item) }
+            } else {
+                text(item)
+            }
+            footer(item)
         }
-        .padding(.vertical, 28.8)
-        .padding(.leading, 32)
-        .padding(.trailing, 12)
-        .background(LooreColor.bgCard, in: RoundedRectangle(cornerRadius: LooreRadius.card))
-        .overlay(RoundedRectangle(cornerRadius: LooreRadius.card).strokeBorder(LooreColor.border))
-        .overlay(alignment: .leading) {
-            UnevenRoundedRectangle(topLeadingRadius: LooreRadius.card, bottomLeadingRadius: LooreRadius.card)
-                .fill(LooreColor.accent).frame(width: 3)
-        }
+        .padding(.top, 18)
+        .padding(.horizontal, 20)
+        .padding(.bottom, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(LooreColor.bgCard, in: RoundedRectangle(cornerRadius: LooreRadius.large))
+        .overlay(RoundedRectangle(cornerRadius: LooreRadius.large).strokeBorder(LooreColor.borderHover))
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("reference.card")
         .padding(.top, 18)
     }
 
-    private func tags(_ item: ExternalItem) -> some View {
-        HStack(spacing: 8) {
-            if item.readAt != nil { LooreTag(text: "Read") }
-            LooreTag(text: item.sourceLabel)
+    /// "Tweet from the Community Archive" with a small glyph, and the kebab.
+    private func sourceRow(_ item: ExternalItem) -> some View {
+        HStack(alignment: .center, spacing: 6) {
+            Image(systemName: Self.glyph(item.kind))
+                .font(.system(size: 11, weight: .light))
+                .accessibilityHidden(true)
+            Text(item.sourceLine)
+                .font(LooreFont.sans(12.5, .light))
+                .accessibilityIdentifier("reference.source")
+            Spacer(minLength: 8)
+            // The 44 pt tap target overhangs the row instead of making it taller.
+            KebabMenu(actions: actions(item))
+                .padding(.vertical, -14)
+                .padding(.trailing, -8)
         }
-        .padding(.top, 12)
+        .foregroundStyle(LooreColor.textMuted)
+    }
+
+    /// The SF Symbol before the source line (the web's Feather glyphs).
+    static func glyph(_ kind: ReferenceUtils.Kind) -> String {
+        switch kind {
+        case .tweet: return "bubble.left"
+        case .video: return "play.circle"
+        case .page: return "doc.text"
+        }
+    }
+
+    /// Who wrote it and when: a tweet's display name and @handle (opening the
+    /// account), a page's or video's byline, then the date. The site is
+    /// already named in the source line.
+    struct Byline: Equatable {
+        var name: String?
+        var handle: String?
+        var date: String?
+    }
+
+    static func byline(_ item: ExternalItem) -> Byline {
+        func nonEmpty(_ s: String?) -> String? { s.flatMap { $0.isEmpty ? nil : $0 } }
+        let date = nonEmpty(LooreDateFormat.dateTime(item.postedAt ?? item.fetchedAt))
+        if item.kind == .tweet, let handle = nonEmpty(item.authorHandle) {
+            return Byline(name: nonEmpty(item.authorName), handle: "@\(handle)", date: date)
+        }
+        return Byline(name: nonEmpty(item.authorName) ?? nonEmpty(item.authorHandle), handle: nil, date: date)
+    }
+
+    @ViewBuilder
+    private func byline(_ item: ExternalItem) -> some View {
+        let parts = Self.byline(item)
+        let hasAuthor = parts.name != nil || parts.handle != nil
+        if hasAuthor || parts.date != nil {
+            FlowLayout(spacing: 6, lineSpacing: 2) {
+                if hasAuthor {
+                    let author = HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        if let name = parts.name {
+                            Text(name).font(LooreFont.sans(13.6, .regular)).foregroundStyle(LooreColor.textPrimary)
+                        }
+                        if let handle = parts.handle {
+                            Text(handle).font(LooreFont.sans(13.6, .light)).foregroundStyle(LooreColor.textMuted)
+                        }
+                    }
+                    if parts.handle != nil, let handle = item.authorHandle,
+                       let url = URL(string: "https://x.com/\(handle)") {
+                        Button { app.open(.external(url)) } label: { author }
+                            .buttonStyle(.plain)
+                            .accessibilityHint("Opens the account on Twitter")
+                    } else {
+                        author
+                    }
+                }
+                if let date = parts.date {
+                    Text(hasAuthor ? "· \(date)" : date)
+                        .font(LooreFont.sans(13.6, .light))
+                        .foregroundStyle(LooreColor.textMuted)
+                }
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityIdentifier("reference.byline")
+        }
+    }
+
+    private func text(_ item: ExternalItem) -> some View {
+        MarkdownView(markdown: item.bodyWithoutTitle, style: .referenceText)
+            .frame(maxWidth: Self.textMeasure, alignment: .leading)
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("reference.body")
+    }
+
+    /// Listen and the link out on the left; the verdict and the read toggle
+    /// on the right, or on a line of their own when the row is too narrow.
+    private func footer(_ item: ExternalItem) -> some View {
+        let leading = HStack(spacing: 10) {
+            // The speaker's 28 pt frame: its icon in line with the text edge.
+            SpeakerButton(target: .item(item.id), content: speakerContent(item),
+                          onTtsGenerated: { self.item?.hasTTS = true })
+                .padding(.leading, -7.5)
+            if let link = item.url, let url = URL(string: link) {
+                Button { openOriginal(url) } label: {
+                    Text(item.sourceLinkLabel)
+                        .font(LooreFont.sans(12.5, .light))
+                        .foregroundStyle(LooreColor.textMuted)
+                        .padding(.vertical, 10)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("reference.openOriginal")
+            }
+        }
+        let trailing = HStack(spacing: 0) {
+            ReferenceFeedbackControl(itemId: item.id, feedback: item.feedback, size: 18) { verdict, readAt in
+                self.item?.feedback = verdict
+                if let readAt { self.item?.readAt = readAt }
+            }
+            Button(item.readAt != nil ? "Mark as unread" : "Mark as read") { setRead(item.readAt == nil) }
+                .buttonStyle(.plain)
+                .font(LooreFont.sans(12.8, .regular))
+                .foregroundStyle(item.readAt != nil ? LooreColor.textMuted : LooreColor.accent)
+                .frame(minHeight: 40)
+                .contentShape(Rectangle())
+                .disabled(marking)
+                .accessibilityIdentifier("reference.readToggle")
+        }
+        return ViewThatFits(in: .horizontal) {
+            HStack(spacing: 10) {
+                leading
+                Spacer(minLength: 0)
+                trailing
+            }
+            VStack(alignment: .leading, spacing: 0) {
+                leading
+                // The ⊕ glyph, not its 40 pt target, in line with the text edge.
+                trailing.padding(.leading, -11)
+            }
+        }
+        .padding(.top, 4)
+        .overlay(alignment: .top) { HairlineDivider() }
     }
 
     private func speakerContent(_ item: ExternalItem) -> String {
@@ -209,16 +301,29 @@ struct ReferenceDetailView: View {
         }
     }
 
-    private func toggleRead() {
+    /// Opening the original is reading it, as on the gleaning card: the open
+    /// is logged and an unread reference is marked read (a read one keeps its date).
+    private func openOriginal(_ url: URL) {
+        app.open(.external(url))
+        if !marking { setRead(true, via: "open") }
+    }
+
+    /// Only the user marks a reference read; opening this page is not a read.
+    private func setRead(_ want: Bool, via: String? = nil) {
         guard let current = item else { return }
         marking = true
         Task {
             defer { marking = false }
             do {
                 let path = APIPath.externalItemRead(current.id)
-                let answer: ReadMarkAnswer = current.readAt != nil
-                    ? try await app.api.delete(path)
-                    : try await app.api.post(path)
+                let answer: ReadMarkAnswer
+                if !want {
+                    answer = try await app.api.delete(path)
+                } else if let via {
+                    answer = try await app.api.post(path, json: .object(["via": .string(via)]))
+                } else {
+                    answer = try await app.api.post(path)
+                }
                 item?.readAt = answer.readAt
                 app.signals.post(.referencesChanged)
             } catch {
@@ -269,19 +374,19 @@ struct ReferenceDetailView: View {
     }
 }
 
-/// "Mark as read" (accent fill) / "Mark as unread" (outline).
-private struct ReadToggleStyle: ButtonStyle {
-    let read: Bool
+/// The edit sheet's Save (accent fill) and Cancel (outline).
+private struct SheetButtonStyle: ButtonStyle {
+    let filled: Bool
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .font(LooreFont.sans(13.1, .regular))
-            .foregroundStyle(read ? LooreColor.textMuted : LooreColor.bgDeep)
+            .foregroundStyle(filled ? LooreColor.bgDeep : LooreColor.textMuted)
             .padding(.vertical, 6)
             .padding(.horizontal, 14)
-            .background(read ? Color.clear : LooreColor.accent, in: RoundedRectangle(cornerRadius: LooreRadius.control))
+            .background(filled ? LooreColor.accent : Color.clear, in: RoundedRectangle(cornerRadius: LooreRadius.control))
             .overlay(RoundedRectangle(cornerRadius: LooreRadius.control)
-                .strokeBorder(read ? LooreColor.border : LooreColor.accent))
+                .strokeBorder(filled ? LooreColor.accent : LooreColor.border))
             .opacity(configuration.isPressed ? 0.8 : 1)
             .frame(minHeight: 40)
             .contentShape(Rectangle())
@@ -359,11 +464,11 @@ private struct ReferenceEditSheet: View {
     private var buttons: some View {
         HStack(spacing: 8) {
             Button("Cancel") { dismiss() }
-                .buttonStyle(ReadToggleStyle(read: true))
+                .buttonStyle(SheetButtonStyle(filled: false))
                 .disabled(saving)
                 .keyboardShortcut(.cancelAction)
             Button(saving ? "Saving…" : "Save") { onSave(title.jsTrimmed, content) }
-                .buttonStyle(ReadToggleStyle(read: false))
+                .buttonStyle(SheetButtonStyle(filled: true))
                 .opacity(canSave ? 1 : 0.5)
                 .disabled(!canSave)
                 .keyboardShortcut(.return, modifiers: .command)
@@ -373,6 +478,13 @@ private struct ReferenceEditSheet: View {
 }
 
 extension MarkdownStyle {
-    /// The reference body (sans .95rem 300, secondary, line-height 1.7).
+    /// Secondary sans body text (sans .95rem 300, secondary, line-height 1.7): Commons posts.
     static let referenceBody = MarkdownStyle(fontSize: 15.2, weight: .light, color: LooreColor.textSecondary, lineHeight: 1.7)
+    /// A reference's stored text on its page: the reading serif (the web's
+    /// Newsreader 1.12rem; New York's larger x-height reads the same at 17 pt),
+    /// primary, line-height 1.62. The paragraph margin is 0.9em, not the web's
+    /// 0.5em: CSS line-height also adds half-leading at a paragraph's edges,
+    /// which SwiftUI's line spacing does not.
+    static let referenceText = MarkdownStyle(fontSize: 17, weight: .regular, color: LooreColor.textPrimary,
+                                             lineHeight: 1.62, paragraphMargin: 0.9, face: .readingSerif)
 }

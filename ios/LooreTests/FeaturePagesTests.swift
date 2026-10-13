@@ -752,11 +752,47 @@ final class FeaturePageModelTests: XCTestCase {
         XCTAssertTrue(artifacts.artifacts[1].exists)
         XCTAssertEqual(ArtifactsPage.subtitle(artifacts.artifacts[1]), "A persistent document shared between you and the AI. · last updated by edited manually")
         let page = try decode(ExternalItemsPage.self, #"{"items":[{"id":1,"source":"twitter_bookmark","external_id":"20","author_handle":"jack","preview":"p","url":"https://x.com/i/status/20","fetched_at":"2026-09-12T10:49:47.176523Z","has_tts":false,"surfaced_count":0}],"total":1,"has_more":false,"counts":{"twitter_bookmark":1}}"#)
-        XCTAssertEqual(page.items.first?.tweetId, "20")
+        XCTAssertEqual(page.items.first?.kind, .tweet)
         XCTAssertEqual(page.items.first?.sourceLabel, "Tweet")
+        XCTAssertEqual(page.items.first?.sourceLine, "Tweet from your Twitter bookmarks")
+        XCTAssertEqual(page.items.first?.sourceLinkLabel, "Twitter ↗")
         XCTAssertEqual(page.counts["twitter_bookmark"], 1)
         XCTAssertEqual(ReferenceDetailView.surfacingLine(page.items[0]), "Not yet shown by Loore in a conversation")
         XCTAssertEqual(ReferenceFooter.host("https://www.example.com/a"), "example.com")
+        // The byline under the source line: no display name here, the @handle, the saved date.
+        XCTAssertEqual(ReferenceDetailView.byline(page.items[0]),
+                       .init(name: nil, handle: "@jack", date: LooreDateFormat.dateTime(page.items[0].fetchedAt)))
+    }
+
+    func testReferencePageBylinePerKind() throws {
+        let tweet = try decode(ExternalItem.self, #"{"id":42,"source":"community_archive","external_id":"1","author_handle":"miraokafor","author_name":"Mira Okafor","preview":"p","url":"https://x.com/miraokafor/status/1","posted_at":"2026-10-12T21:07:00Z","fetched_at":"2026-10-13T08:00:00Z","has_tts":false,"surfaced_count":1}"#)
+        XCTAssertEqual(ReferenceDetailView.byline(tweet),
+                       .init(name: "Mira Okafor", handle: "@miraokafor", date: LooreDateFormat.dateTime(tweet.postedAt)))
+        XCTAssertEqual(ReferenceDetailView.glyph(tweet.kind), "bubble.left")
+
+        // A page's byline is its author (or site); the domain is in the source line, not repeated.
+        let page = try decode(ExternalItem.self, #"{"id":43,"source":"web_clip","external_id":"a","author_handle":"Jane Doe","title":"On slow evenings","preview":"p","url":"https://www.example.com/essays/slow","fetched_at":"2026-10-13T08:00:00Z","has_tts":false,"surfaced_count":0}"#)
+        XCTAssertEqual(page.sourceLine, "Page from example.com")
+        XCTAssertEqual(page.sourceLinkLabel, "Open page ↗")
+        XCTAssertEqual(ReferenceDetailView.byline(page),
+                       .init(name: "Jane Doe", handle: nil, date: LooreDateFormat.dateTime(page.fetchedAt)))
+        XCTAssertEqual(ReferenceDetailView.glyph(page.kind), "doc.text")
+
+        let video = try decode(ExternalItem.self, #"{"id":44,"source":"web_clip","external_id":"b","preview":"p","url":"https://www.youtube.com/watch?v=dQw4w9WgXcQ","has_tts":false,"surfaced_count":0}"#)
+        XCTAssertEqual(video.sourceLine, "Video from YouTube")
+        XCTAssertEqual(video.sourceLinkLabel, "YouTube ↗")
+        XCTAssertEqual(ReferenceDetailView.byline(video), .init(name: nil, handle: nil, date: nil))
+        XCTAssertEqual(ReferenceDetailView.glyph(video.kind), "play.circle")
+    }
+
+    func testReferenceTextUsesTheReadingSerif() {
+        XCTAssertEqual(MarkdownStyle.referenceText.face, .readingSerif)
+        XCTAssertEqual(MarkdownStyle.focal.face, .sans)
+        // CSS line-height 1.62 over the serif's own line height, not Outfit's.
+        let expected = (1.62 - LooreFont.readingLineHeight) * MarkdownStyle.referenceText.fontSize
+        XCTAssertEqual(MarkdownStyle.referenceText.lineSpacing, expected, accuracy: 0.001)
+        XCTAssertEqual(LooreFont.readingUIFont(17).fontDescriptor.symbolicTraits.contains(.traitItalic), false)
+        XCTAssertTrue(LooreFont.readingUIFont(17, italic: true).fontDescriptor.symbolicTraits.contains(.traitItalic))
     }
 
     func testShareAndCommonsPayloads() throws {

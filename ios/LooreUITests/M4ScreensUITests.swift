@@ -193,7 +193,7 @@ final class M4ScreensUITests: XCTestCase {
         card.coordinate(withNormalizedOffset: CGVector(dx: 0.3, dy: 0.2)).tap()
         let toggle = app.buttons["reference.readToggle"]
         XCTAssertTrue(toggle.waitForExistence(timeout: 10))
-        sleep(6) // the tweet embed
+        sleep(1)
         snapshot("m4-reference-detail")
         let before = toggle.label
         toggle.tap()
