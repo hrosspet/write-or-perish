@@ -377,7 +377,7 @@ def test_the_dialog_knows_whether_the_x_sign_in_can_be_revoked(app, world):
 
 
 def test_an_admin_deletion_never_touches_the_admins_x_sign_in(
-        app, world, stubs, monkeypatch):
+        app, world, stubs, monkeypatch, mail):
     _with_x_sign_in(app)
     x = _XInvalidate(monkeypatch)
     admin = world.admin
@@ -1052,31 +1052,144 @@ def test_the_last_admin_check_reads_the_admins_under_the_lock(
     assert UserDataPurge.query.count() == 0
 
 
-def test_an_admins_deletion_cannot_be_restored(
-        app, world, stubs, monkeypatch, mail):
-    """An admin's deletion has no grace period. Even before its runner has
-    claimed it, signing in offers no restore and a restore changes
-    nothing; the user's own request stays restorable."""
-    _dispatcher(monkeypatch, stubs)
-
-    def claim_fails(job, dispatch):
-        raise RuntimeError("database busy")
-    monkeypatch.setattr(up, "start_job_now", claim_fails)
+def _admin_delete(app, world, user=None):
+    user = user or world.alice
     r = _client(app, world.admin).post(
-        f"/api/admin/users/{world.alice.id}/delete_account",
-        json={"confirm_username": "alice"})
-    assert r.status_code == 202
-    job = UserDataPurge.query.one()
+        f"/api/admin/users/{user.id}/delete_account",
+        json={"confirm_username": user.username})
+    assert r.status_code == 202, r.get_json()
+    return _db.session.get(UserDataPurge, r.get_json()["job"]["id"])
+
+
+def test_an_admins_deletion_is_restored_by_signing_in(
+        app, world, stubs, monkeypatch, mail):
+    """Peter, 2026-10-13: the admin's deletion works the same as the
+    user's own. The account is hidden at once, due after the grace
+    period, the address gets the same notice, and signing in offers the
+    restore."""
+    _dispatcher(monkeypatch, stubs)
+    job = _admin_delete(app, world)
     assert job.status == "scheduled" and job.source == "admin"
+    assert job.delete_account and job.replaced is None
+    assert job.scheduled_for > datetime.utcnow() + timedelta(
+        days=acc.ACCOUNT_DELETION_GRACE_DAYS - 1)
+    assert stubs.dispatched == []
+    assert _db.session.get(User, world.alice.id).deleted_at is not None
+    to, subject, text = mail[-1]
+    assert to == "alice@example.com"
+    assert subject == "Your Loore account is deleted"
+    assert "sign in to Loore and choose Restore" in text
+    assert "A Loore admin deleted this account." in text
 
     c = app.test_client()
     _sign_in_by_link(c, mail)
-    assert c.get("/api/account/restore").get_json()["restorable"] is False
+    assert c.get("/api/account/restore").get_json()["restorable"] is True
     r = c.post("/api/account/restore")
-    assert r.status_code == 409 and r.get_json()["code"] == "already_started"
+    assert r.status_code == 200 and r.get_json()["status"] == "restored"
+    _db.session.expire_all()
+    assert _db.session.get(User, world.alice.id).deleted_at is None
+    job = _db.session.get(UserDataPurge, job.id)
+    assert job.status == "cancelled" and job.cancelled_by_id == world.alice.id
+    assert up.dispatch_due_jobs(lambda j, t: pytest.fail("restored"),
+                                now=datetime.utcnow() + timedelta(days=40)) == []
+
+
+def test_the_admins_undo_restores_the_account(
+        app, world, stubs, monkeypatch, mail):
+    _dispatcher(monkeypatch, stubs)
+    job = _admin_delete(app, world)
+    admin = _client(app, world.admin)
+    r = admin.post(f"/api/admin/users/{world.alice.id}/undo_deletion",
+                   json={"job_id": job.id})
+    assert r.status_code == 200, r.get_json()
+    assert r.get_json()["job"] is None
+    _db.session.expire_all()
+    assert _db.session.get(User, world.alice.id).deleted_at is None
+    job = _db.session.get(UserDataPurge, job.id)
+    assert job.status == "cancelled"
+    assert job.cancelled_by_id == world.admin.id
+    # She signs in as usual again.
+    c = app.test_client()
+    r = _sign_in_by_link(c, mail)
+    assert r.headers["Location"] != f"{FRONTEND}/account-restore"
+    assert c.get("/api/account/data").status_code == 200
+
+
+def test_the_admin_cannot_undo_her_own_account_deletion(app, world, stubs):
+    job = _schedule(world.alice)
+    r = _client(app, world.admin).post(
+        f"/api/admin/users/{world.alice.id}/undo_deletion",
+        json={"job_id": job.id})
+    assert r.status_code == 409 and r.get_json()["code"] == "users_own"
+    assert acc.undo_admin_deletion(job.id, world.admin.id) is False
     _db.session.expire_all()
     assert _db.session.get(User, world.alice.id).deleted_at is not None
     assert _db.session.get(UserDataPurge, job.id).status == "scheduled"
+
+
+def test_no_undo_once_the_admins_deletion_has_started(
+        app, world, stubs, monkeypatch, mail):
+    _dispatcher(monkeypatch, stubs)
+    job = _admin_delete(app, world)
+    tokens = []
+    up.dispatch_due_jobs(lambda j, t: tokens.append(t),
+                         now=job.scheduled_for + timedelta(minutes=1))
+    assert tokens
+    r = _client(app, world.admin).post(
+        f"/api/admin/users/{world.alice.id}/undo_deletion",
+        json={"job_id": job.id})
+    assert r.status_code == 409 and r.get_json()["code"] == "already_running"
+    c = app.test_client()
+    _sign_in_by_link(c, mail)
+    assert c.get("/api/account/restore").get_json()["restorable"] is False
+    assert up.run_purge_job(job.id, tokens[-1]) == "done"
+    assert _db.session.get(User, world.alice.id) is None
+
+
+@pytest.mark.parametrize("writing_source", ["self", "admin"])
+def test_the_admins_undo_puts_back_the_writing_deletion_it_replaced(
+        app, world, stubs, monkeypatch, mail, writing_source):
+    """An admin's account deletion that replaced a waiting "Delete all my
+    writing" is undone into that request as it was: the account is live,
+    the writing stays hidden with its own date, and her own request stays
+    hers to restore (the admin's stays undoable)."""
+    from backend.models import UserDataPurgeHidden, UserProfile
+    _dispatcher(monkeypatch, stubs)
+    a = world.alice
+    requester = a.id if writing_source == "self" else world.admin.id
+    data_job, _ = up.schedule_purge(a, requested_by_id=requester,
+                                    source=writing_source,
+                                    at=datetime.utcnow() + timedelta(days=3))
+    due, asked = data_job.scheduled_for, data_job.requested_at
+    hidden = UserDataPurgeHidden.query.count()
+    assert hidden > 0
+
+    job = _admin_delete(app, world)
+    assert job.id == data_job.id and job.delete_account
+    assert job.source == "admin" and job.scope == "all"
+    assert job.replaced["source"] == writing_source
+
+    r = _client(app, world.admin).post(
+        f"/api/admin/users/{a.id}/undo_deletion", json={"job_id": job.id})
+    assert r.status_code == 200, r.get_json()
+    row = r.get_json()["job"]
+    assert row["id"] == job.id and row["delete_account"] is False
+    assert row["undoable"] is (writing_source == "admin")
+    _db.session.expire_all()
+    assert _db.session.get(User, a.id).deleted_at is None
+    job = _db.session.get(UserDataPurge, job.id)
+    assert job.status == "scheduled" and not job.delete_account
+    assert job.scope == "hidden" and job.source == writing_source
+    assert job.requested_by_id == requester
+    assert job.scheduled_for == due and job.requested_at == asked
+    assert job.replaced is None
+    # The writing is still hidden, with its records.
+    assert UserDataPurgeHidden.query.count() == hidden
+    assert UserProfile.query.filter_by(user_id=a.id).count() == 0
+    assert up.deletion_status(a.id)["restorable"] is True
+    # She restores it herself, as before the account deletion.
+    assert up.cancel_purge(a.id, a.id)
+    assert UserProfile.query.filter_by(user_id=a.id).count() == 2
 
 
 def test_the_last_admin_is_also_checked_when_the_deletion_runs(
@@ -1109,7 +1222,7 @@ def test_ai_and_system_accounts_are_refused(app, world, stubs):
 
 # ── Admin ───────────────────────────────────────────────────────────────
 
-def test_admin_dry_run_shows_counts_only_then_deletes_at_once(
+def test_admin_dry_run_shows_counts_only_then_deletes_after_the_grace(
         app, world, stubs, monkeypatch, mail):
     _dispatcher(monkeypatch, stubs)
     a_id = world.alice.id
@@ -1142,10 +1255,16 @@ def test_admin_dry_run_shows_counts_only_then_deletes_at_once(
     job = UserDataPurge.query.one()
     assert job.delete_account and job.source == "admin"
     assert job.requested_by_id == world.admin.id
-    assert job.scheduled_for <= datetime.utcnow()
+    assert job.scheduled_for > datetime.utcnow() + timedelta(
+        days=acc.ACCOUNT_DELETION_GRACE_DAYS - 1)
     assert _db.session.get(User, a_id).deleted_at is not None
-    assert len(stubs.dispatched) == 1
-    assert up.run_purge_job(job.id, stubs.dispatched[0][1]) == "done"
+    assert stubs.dispatched == []
+    r = c.get(f"/api/admin/users/{a_id}/purge_data")
+    assert r.get_json()["job"]["undoable"] is True
+    assert up.dispatch_due_jobs(lambda j, t: pytest.fail("too early"),
+                                now=job.scheduled_for
+                                - timedelta(minutes=1)) == []
+    assert _run_due(job, job.scheduled_for + timedelta(minutes=1)) == "done"
     assert _db.session.get(User, a_id) is None
     r = c.get(f"/api/admin/users/{a_id}/purge_data")
     assert r.get_json()["job"]["delete_account"] is True
@@ -1167,18 +1286,24 @@ def test_admin_purge_data_does_not_bring_an_account_deletion_forward(
     assert stubs.dispatched == []
 
 
-def test_admin_delete_brings_a_users_own_request_forward(
+def test_admin_delete_leaves_the_users_own_deletion_as_it_is(
         app, world, stubs, monkeypatch):
+    """The user's own account deletion already waits: the admin's request
+    changes nothing (no earlier or later date, still hers to restore)."""
     _dispatcher(monkeypatch, stubs)
     job = _schedule(world.alice)
+    due = job.scheduled_for
     c = _client(app, world.admin)
     r = c.post(f"/api/admin/users/{world.alice.id}/delete_account",
                json={"confirm_username": "alice"})
-    assert r.status_code == 202
+    assert r.status_code == 409
+    assert r.get_json()["code"] == "already_scheduled"
+    assert r.get_json()["job"]["id"] == job.id
     job = _db.session.get(UserDataPurge, job.id)
     assert UserDataPurge.query.count() == 1
-    assert job.source == "admin" and job.requested_by_id == world.admin.id
-    assert job.status == "running" and len(stubs.dispatched) == 1
+    assert job.source == "self" and job.requested_by_id == world.alice.id
+    assert job.status == "scheduled" and job.scheduled_for == due
+    assert stubs.dispatched == []
 
 
 def test_the_settings_reply_carries_the_same_user_as_the_dashboard(app, world):

@@ -313,36 +313,176 @@ def test_answering_a_poll_again_replaces_the_hidden_answer(app, world, stubs):
     assert UserDataPurgeHidden.query.filter_by(kind="poll_response").count() == 0
 
 
-def test_an_admin_bringing_the_request_forward_deletes_everything(
+# ── The admin's "Purge data" works the same way (Peter, 2026-10-13) ────
+
+def _admin_purge(app, world):
+    r = _client(app, world.admin).post(
+        f"/api/admin/users/{world.alice.id}/purge_data",
+        json={"confirm_username": "alice"})
+    assert r.status_code == 202, r.get_json()
+    return r.get_json()["job"]
+
+
+def _same_as(before, after):
+    """The restore's one documented change (see the test above): the
+    poll answer whose AI draft was in flight comes back as draft_failed."""
+    before["poll_response"][0]["status"] = "draft_failed"
+    before["poll_response"][0]["updated_at"] = \
+        after["poll_response"][0]["updated_at"]
+    return after == before
+
+
+def test_an_admin_purge_hides_her_writing_at_once_and_she_restores_it(
+        app, world, stubs, monkeypatch):
+    """Peter, 2026-10-13: "it should definitely work the same as user
+    doing themselves". Hidden at once, for her and for bob; she sees the
+    same deletion state and restores it herself."""
+    _stub_dispatch(monkeypatch, stubs)
+    a = world.alice.id
+    gone_id = _deleted_before(world)
+    before = _alice_snapshot(world)
+    bob_before = _bob_snapshot(world)
+
+    job = _admin_purge(app, world)
+    assert job["status"] == "scheduled" and job["scope"] == "hidden"
+    assert job["source"] == "admin" and job["undoable"] is True
+    assert stubs.dispatched == []      # nothing runs before the 30 days
+    _db.session.expire_all()
+    for n in _alice_nodes(world):
+        assert n.deleted_at is not None, n.id
+    for model in HIDDEN_ROW_TABLES:
+        assert model.query.filter_by(user_id=a).count() == 0, model
+    assert shown_description(_db.session.get(User, a)) == ""
+    assert writing_on_hold(a) is True
+    assert _bob_snapshot(world) == bob_before
+
+    # She sees the same state as after her own request: the status bar
+    # and the Account page read it from here.
+    c = _client(app, world.alice)
+    state = c.get("/api/account/data").get_json()
+    assert state["status"] == "scheduled" and state["restorable"] is True
+    assert state["purge_at"] == job["scheduled_for"]
+    assert state["grace_days"] == up.PURGE_GRACE_DAYS
+
+    r = c.post("/api/account/data/restore")
+    assert r.status_code == 200 and r.get_json()["status"] is None
+    assert _same_as(before, _alice_snapshot(world))
+    assert _db.session.get(Node, gone_id).deleted_at == T0
+    done = UserDataPurge.query.one()
+    assert done.status == "cancelled" and done.cancelled_by_id == a
+    assert UserDataPurgeHidden.query.count() == 0
+    assert writing_on_hold(a) is False
+
+
+def test_the_admins_undo_restores_what_the_admin_purge_hid(
+        app, world, stubs, monkeypatch):
+    _stub_dispatch(monkeypatch, stubs)
+    gone_id = _deleted_before(world)
+    before = _alice_snapshot(world)
+    job = _admin_purge(app, world)
+    admin = _client(app, world.admin)
+
+    # A stale page (another job id) undoes nothing.
+    r = admin.post(f"/api/admin/users/{world.alice.id}/undo_deletion",
+                   json={"job_id": job["id"] + 1})
+    assert r.status_code == 404
+    assert UserDataPurge.query.one().status == "scheduled"
+
+    r = admin.post(f"/api/admin/users/{world.alice.id}/undo_deletion",
+                   json={"job_id": job["id"]})
+    assert r.status_code == 200, r.get_json()
+    # The Users row has no waiting purge any more.
+    assert r.get_json()["job"] is None
+    assert _same_as(before, _alice_snapshot(world))
+    assert _db.session.get(Node, gone_id).deleted_at == T0
+    undone = UserDataPurge.query.one()
+    assert undone.status == "cancelled"
+    assert undone.cancelled_by_id == world.admin.id
+    assert UserDataPurgeHidden.query.count() == 0
+    assert up.deletion_status(world.alice.id)["status"] is None
+    # Nothing left to undo, and the purge never starts.
+    r = admin.post(f"/api/admin/users/{world.alice.id}/undo_deletion",
+                   json={"job_id": job["id"]})
+    assert r.status_code == 404
+    later = datetime.utcnow() + timedelta(days=up.PURGE_GRACE_DAYS + 1)
+    assert up.dispatch_due_jobs(lambda j, t: pytest.fail("undone"),
+                                now=later) == []
+
+
+def test_the_admin_cannot_undo_her_own_request(app, world, stubs):
+    _ask(app, world)
+    job = UserDataPurge.query.one()
+    r = _client(app, world.admin).post(
+        f"/api/admin/users/{world.alice.id}/undo_deletion",
+        json={"job_id": job.id})
+    assert r.status_code == 409 and r.get_json()["code"] == "users_own"
+    assert up.undo_admin_purge(job.id, world.admin.id) is False
+    _db.session.expire_all()
+    assert _db.session.get(UserDataPurge, job.id).status == "scheduled"
+    assert all(n.deleted_at is not None for n in _alice_nodes(world))
+    assert UserProfile.query.filter_by(user_id=world.alice.id).count() == 0
+
+
+def test_an_admin_purge_deletes_for_good_only_after_the_grace_period(
         app, world, stubs, monkeypatch):
     _stub_dispatch(monkeypatch, stubs)
     a = world.alice.id
-    c, _ = _ask(app, world)
-    n1 = _node(_db.session.get(User, a), owner=a, text="after the request")
+    job = _db.session.get(UserDataPurge, _admin_purge(app, world)["id"])
+    # Written after the admin's request: it stays, as after her own.
+    n1 = _node(_db.session.get(User, a), owner=a, text="after the purge")
     _db.session.commit()
-    r = _client(app, world.admin).post(f"/api/admin/users/{a}/purge_data",
-                                       json={"confirm_username": "alice"})
-    assert r.status_code == 202
-    job = UserDataPurge.query.one()
-    assert job.scope == "all" and job.status == "running"
-    # No restore once the admin brought it forward.
+    n1_id = n1.id
+
+    tokens = []
+    almost = job.requested_at + timedelta(days=up.PURGE_GRACE_DAYS) \
+        - timedelta(minutes=1)
+    assert up.dispatch_due_jobs(lambda j, t: tokens.append(t),
+                                now=almost) == []
+    assert _db.session.get(UserDataPurge, job.id).status == "scheduled"
+    later = job.requested_at + timedelta(days=up.PURGE_GRACE_DAYS,
+                                         minutes=1)
+    assert up.dispatch_due_jobs(lambda j, t: tokens.append(t),
+                                now=later) == [job.id]
+    # Started: neither the user nor the admin can bring it back now.
     assert _client(app, world.alice).post(
         "/api/account/data/restore").status_code == 409
-    n1_id = n1.id
-    assert up.run_purge_job(job.id, stubs.dispatched[0][1]) == "done"
-    _db.session.expunge_all()
-    assert Node.query.filter_by(id=n1_id).first() is None
+    r = _client(app, world.admin).post(
+        f"/api/admin/users/{a}/undo_deletion", json={"job_id": job.id})
+    assert r.status_code == 409 and r.get_json()["code"] == "already_running"
+    assert up.run_purge_job(job.id, tokens[0]) == "done"
+    _db.session.expire_all()
+    left = {n.id for n in _alice_nodes(world)}
+    tombstones = {world.ids[k] for k in ("A1", "A4", "A5")}
+    assert left == {n1_id} | tombstones
+    assert _db.session.get(Node, n1_id).deleted_at is None
+    assert UserProfile.query.filter_by(user_id=a).count() == 0
+    assert not any(f.exists() for f in world.files_alice)
+    assert all(f.exists() for f in world.files_bob)
     assert UserDataPurgeHidden.query.count() == 0
+    assert up.deletion_status(a)["status"] == "done"
 
 
-def test_an_admin_purge_cannot_be_restored_by_the_user(app, world, stubs):
-    up.schedule_purge(world.alice, requested_by_id=world.admin.id,
-                      source="admin", at=datetime.utcnow())
-    assert not up.cancel_purge(world.alice.id, world.alice.id)
-    assert UserDataPurge.query.one().status == "scheduled"
-    assert up.deletion_status(world.alice.id)["restorable"] is False
-    # An admin purge hides nothing ahead: it runs at once.
-    assert UserDataPurgeHidden.query.count() == 0
+def test_her_request_during_an_admins_purge_changes_nothing(
+        app, world, stubs, monkeypatch):
+    """Two requests for the same user never make two jobs: hers while
+    the admin's waits returns the admin's (its date stays), and the
+    admin's while hers waits is refused (test_user_purge.py)."""
+    _stub_dispatch(monkeypatch, stubs)
+    job = _admin_purge(app, world)
+    c = _client(app, world.alice)
+    r = c.delete("/api/account/data", json={"confirm": "alice"})
+    assert r.status_code == 200
+    assert r.get_json()["purge_at"] == job["scheduled_for"]
+    assert UserDataPurge.query.count() == 1
+    assert UserDataPurge.query.one().source == "admin"
+    # A second admin request is refused the same way.
+    r = _client(app, world.admin).post(
+        f"/api/admin/users/{world.alice.id}/purge_data",
+        json={"confirm_username": "alice"})
+    assert r.status_code == 409
+    assert r.get_json()["code"] == "already_scheduled"
+    assert "already deleted by an admin" in r.get_json()["error"]
+    assert UserDataPurge.query.count() == 1
 
 
 def test_hidden_rows_stay_out_of_counts_and_relationships(app, world, stubs):

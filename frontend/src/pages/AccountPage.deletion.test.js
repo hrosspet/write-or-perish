@@ -125,7 +125,17 @@ test('a deleted writing shows the date and restores through the restore route', 
   expect(mockDelete).not.toHaveBeenCalled();
 });
 
-test('an admin purge waiting to start offers no restore', () => {
+test("an admin's purge shows the same restore as her own request", () => {
+  // Peter, 2026-10-13: the admin's "Purge data" works the same way.
+  renderPage({ data_deletion: {
+    status: 'scheduled', grace_days: 30, purge_at: '2026-11-05T12:00:00Z',
+    restorable: true, source: 'admin',
+  } });
+  expect(screen.getByText('Your writing is deleted.')).toBeTruthy();
+  expect(screen.getByRole('button', { name: 'Restore my writing' })).toBeTruthy();
+});
+
+test('a purge the server says is not restorable offers no restore', () => {
   renderPage({ data_deletion: {
     status: 'scheduled', grace_days: 30, purge_at: '2026-11-05T12:00:00Z',
     restorable: false, source: 'admin',

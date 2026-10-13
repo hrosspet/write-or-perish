@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from "react";
 import api from "../api";
+import { formatDeletionDate } from "../utils/dataDeletion";
 
 const overlayStyle = {
   position: "fixed",
@@ -112,12 +113,37 @@ export function purgeCountRows(counts) {
   return rows;
 }
 
+// What a deletion already waiting for this user means for a new request
+// (the server refuses a second one, 409): a sentence for the dialogs, or
+// null when nothing waits.
+export function waitingDeletionNote(job) {
+  if (!job) return null;
+  if (job.status === "running") return "A deletion of this account's data is running now.";
+  if (job.status !== "scheduled") return null;
+  const on = formatDeletionDate(job.scheduled_for);
+  const byAdmin = job.source === "admin";
+  if (job.delete_account) {
+    return `This account was already deleted by ${byAdmin ? "an admin" : "the user"}. ` +
+      `It is deleted forever on ${on}.` +
+      (byAdmin ? " You can undo it in the Users table until then." : "");
+  }
+  return byAdmin
+    ? `An admin already purged this data. It is deleted forever on ${on}; ` +
+      "until then the user can restore it, and you can undo it in the Users table."
+    : `The user already deleted all their writing. It is deleted forever on ${on}; ` +
+      "until then only they can restore it.";
+}
+
 /**
- * Admin "Purge data" (#268): delete all of one user's data at once. Opens
- * with a dry run, so the admin sees what goes, what stays and whose rows
- * change before anything happens; the purge needs the username typed.
- * Counts only, never content. AI and system accounts are refused by the
- * backend, and the refusal is shown here.
+ * Admin "Purge data" (#268): delete all of one user's writing. It works
+ * like the user's own "Delete all my writing" (Peter, 2026-10-13: "it
+ * should definitely work the same as user doing themselves"): hidden at
+ * once, restorable by the user, undoable by the admin in the Users table,
+ * deleted forever after the grace period. Opens with a dry run, so the
+ * admin sees what goes, what stays and whose rows change before anything
+ * happens; the purge needs the username typed. Counts only, never
+ * content. AI and system accounts are refused by the backend, and the
+ * refusal is shown here.
  */
 function PurgeDataDialog({ user, onClose, onStarted }) {
   const [state, setState] = useState({ loading: true });
@@ -130,7 +156,9 @@ function PurgeDataDialog({ user, onClose, onStarted }) {
     setTyped("");
     setState({ loading: true });
     api.post(`/admin/users/${user.id}/purge_data?dry_run=1`)
-      .then((res) => alive && setState({ counts: res.data.counts, job: res.data.job }))
+      .then((res) => alive && setState({
+        counts: res.data.counts, job: res.data.job, graceDays: res.data.grace_days,
+      }))
       .catch((e) => alive && setState({
         error: e.response?.data?.error || "Could not count this user's data.",
       }));
@@ -146,6 +174,8 @@ function PurgeDataDialog({ user, onClose, onStarted }) {
 
   const matches = typed.trim() === user.username;
   const rows = purgeCountRows(state.counts);
+  // A deletion already waits or runs: the server refuses a second one.
+  const waiting = waitingDeletionNote(state.job);
 
   const purge = async () => {
     if (!matches || busy) return;
@@ -156,7 +186,7 @@ function PurgeDataDialog({ user, onClose, onStarted }) {
       setState((s) => ({ ...s, started: res.data.job }));
       if (onStarted) onStarted(res.data.job);
     } catch (e) {
-      setState((s) => ({ ...s, error: e.response?.data?.error || "The purge did not start." }));
+      setState((s) => ({ ...s, error: e.response?.data?.error || "The purge did not happen." }));
     } finally {
       setBusy(false);
     }
@@ -167,10 +197,15 @@ function PurgeDataDialog({ user, onClose, onStarted }) {
       <div onClick={(e) => e.stopPropagation()} style={cardStyle} role="dialog" aria-modal="true">
         <h2 style={titleStyle}>Purge all data of @{user.username}?</h2>
         <p style={bodyStyle}>
-          Deletes everything this person wrote or recorded, the AI replies
+          Hides everything this person wrote or recorded, the AI replies
           they asked for, their profile, documents, saved references, imports
-          and files, at once (no grace period). The account, its login and
-          settings stay. This cannot be undone.
+          and files at once, for them and for everyone else. It works like
+          their own "Delete all my writing": they see "Writing deleted" and
+          can restore it themselves
+          {state.graceDays ? ` within ${state.graceDays} days` : ""}, and you
+          can undo it in the Users table until then. After that it is
+          deleted forever. The account, its login and settings stay, and so
+          does what they write from now on.
         </p>
         {state.loading && <p style={bodyStyle}>Counting…</p>}
         {state.error && <p style={{ ...bodyStyle, color: "var(--error)" }}>{state.error}</p>}
@@ -179,11 +214,8 @@ function PurgeDataDialog({ user, onClose, onStarted }) {
             Close
           </button>
         )}
-        {state.job && state.job.status === "scheduled" && (
-          <p style={bodyStyle}>
-            The user asked for this deletion; it is due on {new Date(state.job.scheduled_for).toLocaleDateString()}.
-            Purging now brings it forward.
-          </p>
+        {waiting && !state.started && (
+          <p style={{ ...bodyStyle, color: "var(--text-primary)" }}>{waiting}</p>
         )}
         {state.counts && (
           <table style={{ ...bodyStyle, width: "100%", borderCollapse: "collapse" }}>
@@ -203,13 +235,18 @@ function PurgeDataDialog({ user, onClose, onStarted }) {
         {state.started ? (
           <>
             <p style={bodyStyle}>
-              Purge started (job {state.started.id}, {state.started.status}). It runs in the
-              background; the Users table shows when it is done.
+              The writing of @{user.username} is hidden now (job {state.started.id}). It is
+              deleted forever on {formatDeletionDate(state.started.scheduled_for)}. Until
+              then they can restore it, and you can undo it in the Users table.
             </p>
             <button onClick={onClose} style={{ ...buttonBaseStyle, cursor: "pointer", color: "var(--text-secondary)" }}>
               Close
             </button>
           </>
+        ) : state.counts && waiting ? (
+          <button onClick={onClose} style={{ ...buttonBaseStyle, cursor: "pointer", color: "var(--text-secondary)" }}>
+            Close
+          </button>
         ) : state.counts && (
           <>
             <label htmlFor="purge-confirm" style={{ ...bodyStyle, display: "block", marginBottom: "6px" }}>
@@ -239,7 +276,7 @@ function PurgeDataDialog({ user, onClose, onStarted }) {
                   opacity: matches && !busy ? 1 : 0.45,
                 }}
               >
-                {busy ? "Starting…" : "Purge now"}
+                {busy ? "Purging…" : "Purge data"}
               </button>
               <button onClick={onClose} style={{ ...buttonBaseStyle, cursor: "pointer", color: "var(--text-secondary)" }}>
                 Cancel

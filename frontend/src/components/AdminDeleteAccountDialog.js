@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import api from "../api";
-import { purgeCountRows } from "./PurgeDataDialog";
+import { purgeCountRows, waitingDeletionNote } from "./PurgeDataDialog";
+import { formatDeletionDate } from "../utils/dataDeletion";
 
 const overlayStyle = {
   position: "fixed",
@@ -82,12 +83,16 @@ function CountTable({ rows }) {
 }
 
 /**
- * Admin "Delete account" (#269): the account and all its data, at once.
- * Opens with a dry run: the blast radius first (public writing, replies
- * to other people's entries), then what the purge and the identity
- * layer delete. The deletion needs the username typed. Counts only,
- * never content. AI and system accounts and the last admin are refused
- * by the backend, and the refusal is shown here.
+ * Admin "Delete account" (#269): the account and all its data. It works
+ * like the user's own account deletion (Peter, 2026-10-13: "it should
+ * definitely work the same as user doing themselves"): hidden and signed
+ * out at once, restorable by signing in, undoable by the admin in the
+ * Users table, deleted forever after the grace period. Opens with a dry
+ * run: the blast radius first (public writing, replies to other people's
+ * entries), then what the purge and the identity layer delete. The
+ * deletion needs the username typed. Counts only, never content. AI and
+ * system accounts and the last admin are refused by the backend, and the
+ * refusal is shown here.
  */
 function AdminDeleteAccountDialog({ user, onClose, onStarted }) {
   const [state, setState] = useState({ loading: true });
@@ -117,6 +122,12 @@ function AdminDeleteAccountDialog({ user, onClose, onStarted }) {
   const matches = typed.trim() === user.username;
   const dry = state.dry;
   const blast = dry?.blast_radius || {};
+  const job = dry?.job;
+  const graceDays = dry?.grace_days;
+  // An account deletion already waits or a purge runs: the server refuses
+  // a second request. A waiting writing deletion is taken over instead.
+  const refusedNote = job && (job.delete_account || job.status === "running")
+    ? waitingDeletionNote(job) : null;
   const identityRows = IDENTITY_COUNT_LABELS
     .filter(([k]) => dry?.identity?.[k])
     .map(([k, label]) => [k, label, dry.identity[k]]);
@@ -130,7 +141,7 @@ function AdminDeleteAccountDialog({ user, onClose, onStarted }) {
       setState((s) => ({ ...s, started: res.data.job }));
       if (onStarted) onStarted(res.data.job);
     } catch (e) {
-      setState((s) => ({ ...s, error: e.response?.data?.error || "The deletion did not start." }));
+      setState((s) => ({ ...s, error: e.response?.data?.error || "The account was not deleted." }));
     } finally {
       setBusy(false);
     }
@@ -147,11 +158,16 @@ function AdminDeleteAccountDialog({ user, onClose, onStarted }) {
       <div onClick={(e) => e.stopPropagation()} style={cardStyle} role="dialog" aria-modal="true">
         <h2 style={titleStyle}>Delete the account @{user.username}?</h2>
         <p style={bodyStyle}>
-          Deletes the account and everything in it, at once (no grace
-          period): its writing and recordings, the AI replies it asked for,
-          profile, documents, saved references, imports and files, then the
-          login, email, X id and settings. The username stays reserved.
-          Cost rows are kept without the name. This cannot be undone.
+          Deletes the account and everything in it: its writing and
+          recordings, the AI replies it asked for, profile, documents, saved
+          references, imports and files, then the login, email, X id and
+          settings. It works like the user's own account deletion: the
+          account is hidden and signed out at once, and its email address
+          gets a notice saying how to restore it. Signing in
+          {graceDays ? ` within ${graceDays} days` : ""} offers them the
+          restore, and you can undo it in the Users table until then. After
+          that it is deleted forever. The username stays reserved. Cost rows
+          are kept without the name.
         </p>
         {state.loading && <p style={bodyStyle}>Counting…</p>}
         {state.error && <p style={{ ...bodyStyle, color: "var(--error)" }}>{state.error}</p>}
@@ -165,13 +181,15 @@ function AdminDeleteAccountDialog({ user, onClose, onStarted }) {
               {blast.replies_to_others === 1 ? "reply" : "replies"} to other
               people's entries.
             </p>
-            {dry.job && dry.job.status === "scheduled" && (
+            {refusedNote && !state.started && (
+              <p style={{ ...bodyStyle, color: "var(--text-primary)" }}>{refusedNote}</p>
+            )}
+            {job && job.status === "scheduled" && !job.delete_account && (
               <p style={bodyStyle}>
-                {dry.job.delete_account
-                  ? "The user asked to delete this account"
-                  : "The user asked to delete all their writing"}; it is due on{" "}
-                {new Date(dry.job.scheduled_for).toLocaleDateString()}. Deleting now
-                brings it forward.
+                {job.source === "admin" ? "An admin" : "The user"} already deleted
+                all their writing (deleted forever on {formatDeletionDate(job.scheduled_for)}).
+                The account deletion takes it over; undoing the account deletion
+                puts that writing deletion back as it was.
               </p>
             )}
             <CountTable rows={purgeCountRows(dry.counts)} />
@@ -181,12 +199,13 @@ function AdminDeleteAccountDialog({ user, onClose, onStarted }) {
         {state.started ? (
           <>
             <p style={bodyStyle}>
-              Deletion started (job {state.started.id}, {state.started.status}). The
-              account is hidden now; the row leaves the Users table when the job is done.
+              The account @{user.username} is deleted and signed out now (job {state.started.id}).
+              It is deleted forever on {formatDeletionDate(state.started.scheduled_for)}. Until
+              then they can restore it by signing in, and you can undo it in the Users table.
             </p>
             {close}
           </>
-        ) : dry && (
+        ) : dry && refusedNote ? close : dry && (
           <>
             <label htmlFor="delete-account-admin-confirm" style={{ ...bodyStyle, display: "block", marginBottom: "6px" }}>
               Type the username, <strong>{user.username}</strong>, to confirm.
@@ -215,7 +234,7 @@ function AdminDeleteAccountDialog({ user, onClose, onStarted }) {
                   opacity: matches && !busy ? 1 : 0.45,
                 }}
               >
-                {busy ? "Starting…" : "Delete account now"}
+                {busy ? "Deleting…" : "Delete account"}
               </button>
               <button onClick={onClose} style={{ ...buttonBaseStyle, cursor: "pointer", color: "var(--text-secondary)" }}>
                 Keep the account

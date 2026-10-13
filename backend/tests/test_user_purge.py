@@ -405,10 +405,12 @@ def _bob_snapshot(w):
 
 
 def _run_job(source="admin"):
-    """Schedule, claim and run a purge of alice the way the beat does."""
+    """Schedule, claim and run a purge of everything of alice's, due now,
+    the way the beat does (``scope="all"``: the job an erasure that
+    cannot wait gets from a shell; the app's requests hide and wait)."""
     alice = User.query.filter_by(username="alice").one()
     job, _ = up.schedule_purge(alice, requested_by_id=alice.id, source=source,
-                               at=datetime.utcnow())
+                               at=datetime.utcnow(), scope="all")
     tokens = []
     up.dispatch_due_jobs(lambda job_id, token: tokens.append(token))
     assert tokens, "the due job was not claimed"
@@ -715,7 +717,7 @@ def test_a_job_that_keeps_failing_is_marked_failed(world, stubs, monkeypatch,
                         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("bug")))
     alice = world.alice
     job, _ = up.schedule_purge(alice, requested_by_id=alice.id, source="admin",
-                               at=datetime.utcnow())
+                               at=datetime.utcnow(), scope="all")
     for _ in range(up.PURGE_MAX_ATTEMPTS):
         tokens = []
         up.dispatch_due_jobs(lambda j, t: tokens.append(t))
@@ -864,7 +866,7 @@ def test_a_backed_up_queue_does_not_use_up_attempts(world, stubs, caplog):
 def test_a_superseded_runner_stops(world, stubs):
     alice = world.alice
     job, _ = up.schedule_purge(alice, requested_by_id=alice.id, source="admin",
-                               at=datetime.utcnow())
+                               at=datetime.utcnow(), scope="all")
     assert up.claim_job(job.id, "old")
     # The old runner went quiet; the beat claims the job again.
     UserDataPurge.query.filter_by(id=job.id).update(
@@ -879,7 +881,7 @@ def test_a_superseded_runner_stops(world, stubs):
 def test_a_running_job_with_a_fresh_heartbeat_is_not_claimed(world, stubs):
     alice = world.alice
     job, _ = up.schedule_purge(alice, requested_by_id=alice.id, source="admin",
-                               at=datetime.utcnow())
+                               at=datetime.utcnow(), scope="all")
     assert up.claim_job(job.id, "first")
     assert not up.claim_job(job.id, "second")
     assert up.dispatch_due_jobs(lambda j, t: pytest.fail("double claim")) == []
@@ -965,7 +967,7 @@ def test_profile_pipeline_skips_a_user_being_purged(world, stubs):
     eligible = {u.id for u in User.profile_eligible_query()}
     assert world.alice.id in eligible
     job, _ = up.schedule_purge(world.alice, requested_by_id=world.alice.id,
-                               source="admin", at=datetime.utcnow())
+                               source="admin", at=datetime.utcnow(), scope="all")
     assert world.alice.id not in {u.id for u in User.profile_eligible_query()}
     up.claim_job(job.id, "tok")
     assert world.alice.id not in {u.id for u in User.profile_eligible_query()}
@@ -1242,29 +1244,46 @@ def test_admin_dry_run_and_purge(app, world, stubs, monkeypatch):
     assert r.status_code == 202
     job = UserDataPurge.query.one()
     assert job.source == "admin" and job.requested_by_id == world.admin.id
-    assert job.status == "running" and len(stubs.dispatched) == 1
-    assert up.run_purge_job(job.id, stubs.dispatched[0][1]) == "done"
+    # Like the user's own request (Peter, 2026-10-13): hidden now, due
+    # after the grace period, nothing started.
+    assert job.status == "scheduled" and job.scope == "hidden"
+    assert stubs.dispatched == []
+    assert job.scheduled_for > datetime.utcnow() + timedelta(
+        days=up.PURGE_GRACE_DAYS - 1)
+    r = c.get(f"/api/admin/users/{world.alice.id}/purge_data")
+    assert r.get_json()["job"]["undoable"] is True
+    tokens = []
+    up.dispatch_due_jobs(lambda j, t: tokens.append(t),
+                         now=datetime.utcnow() + timedelta(
+                             days=up.PURGE_GRACE_DAYS + 1))
+    assert up.run_purge_job(job.id, tokens[0]) == "done"
     r = c.get(f"/api/admin/users/{world.alice.id}/purge_data")
     assert r.get_json()["job"]["status"] == "done"
     assert r.get_json()["job"]["counts"]["node"] == 6
+    assert r.get_json()["job"]["undoable"] is False
     # The Users table row shows it.
     from backend.routes.admin import _latest_purge_jobs
     assert _latest_purge_jobs()[world.alice.id].status == "done"
 
 
-def test_admin_purge_brings_a_scheduled_request_forward(app, world, stubs,
-                                                        monkeypatch):
+def test_admin_purge_leaves_a_waiting_request_as_it_is(app, world, stubs,
+                                                       monkeypatch):
+    """A second request while one waits changes nothing: the user's own
+    keeps its date and stays theirs (409)."""
     _stub_dispatch(monkeypatch, stubs)
-    up.schedule_purge(world.alice, requested_by_id=world.alice.id, source="self")
+    job, _ = up.schedule_purge(world.alice, requested_by_id=world.alice.id,
+                               source="self")
+    due = job.scheduled_for
     c = _client(app, world.admin)
     r = c.post(f"/api/admin/users/{world.alice.id}/purge_data",
                json={"confirm_username": "alice"})
-    assert r.status_code == 202
-    job = UserDataPurge.query.one()
-    assert job.status == "running" and len(stubs.dispatched) == 1
-    r = c.post(f"/api/admin/users/{world.alice.id}/purge_data",
-               json={"confirm_username": "alice"})
     assert r.status_code == 409
+    assert r.get_json()["code"] == "already_scheduled"
+    assert "already deleted by the user" in r.get_json()["error"]
+    job = UserDataPurge.query.one()
+    assert job.status == "scheduled" and job.source == "self"
+    assert job.scheduled_for == due and job.scope == "hidden"
+    assert stubs.dispatched == []
 
 
 def test_admin_cannot_purge_an_ai_or_system_account(
