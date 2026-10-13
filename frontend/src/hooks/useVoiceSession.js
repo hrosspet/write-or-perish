@@ -445,7 +445,7 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
     llmNodeId ? `/nodes/${llmNodeId}/llm-status` : null,
     { enabled: !!llmNodeId, interval: 1500 }
   );
-  // Node whose failure was already toasted: the effect below re-runs on
+  // Node whose failure was already handled: the effect below re-runs on
   // unrelated dep changes while the status stays 'failed'.
   const failureToastedForNodeRef = useRef(null);
 
@@ -755,13 +755,17 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
         setTtsGenerating(false);
         setPhase('ready');
       });
-    } else if (llmStatus === 'failed') {
+    } else if (llmStatus === 'failed' && llmData && llmData.node_id === llmNodeId) {
+      // Once per node, and only for the node the status is about: this
+      // effect runs again on most renders, and the render that sets the
+      // next reply node still carries the last one's 'failed'. Run again,
+      // it reset a new recording's phase to 'ready' (no stop button), or
+      // took the last reply's failure for the next one's.
+      if (failureToastedForNodeRef.current === llmNodeId) return;
+      failureToastedForNodeRef.current = llmNodeId;
       // The red dot alone didn't say why; the server's error is written
       // for the user (e.g. "break the request into smaller steps").
-      if (failureToastedForNodeRef.current !== llmNodeId) {
-        failureToastedForNodeRef.current = llmNodeId;
-        addToast(llmError || 'Response generation failed', 8000);
-      }
+      addToast(llmError || 'Response generation failed', 8000);
       // Audio of this reply already queued plays to its end (generatingTTS
       // goes off below), and the sound follows it.
       soundReplyFailure(llmNodeId, turnRef.current);

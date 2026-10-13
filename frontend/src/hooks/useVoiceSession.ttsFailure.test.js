@@ -136,6 +136,7 @@ beforeEach(() => {
     tts: { status: 'processing' },
     ttsPost: () => Promise.resolve({ status: 202, data: { status: 'pending' } }),
     voicePost: () => Promise.resolve({ data: { llm_node_id: 42, user_node_id: 41 } }),
+    llm43: { status: 'processing' },
   };
   mockGet.mockImplementation((url) => {
     if (url === '/nodes/42/llm-status') {
@@ -143,6 +144,10 @@ beforeEach(() => {
     }
     if (url === '/nodes/42/tts-status') {
       return Promise.resolve({ data: { node_id: 42, ...server.tts } });
+    }
+    // The next turn's reply.
+    if (url === '/nodes/43/llm-status') {
+      return Promise.resolve({ data: { node_id: 43, ...server.llm43 } });
     }
     return Promise.reject(new Error(`unexpected GET ${url}`));
   });
@@ -374,6 +379,43 @@ test('a reply whose audio and then text fail sounds once', async () => {
   queueEnds(rerender);
   rerender();
   expect(mockPlayErrorSound).toHaveBeenCalledTimes(1);
+});
+
+// The failed-text branch ran on every render while the status stayed
+// 'failed' (review of #504; the first case is also on main before it).
+
+test('recording again after a failed reply text stays recording', async () => {
+  server.llm = { status: 'failed', error: 'The provider failed.' };
+  const { result, rerender } = renderWaiting();
+  await flush();
+  expect(result.current.phase).toBe('ready');
+
+  act(() => result.current.handleStart());
+  rerender();
+  await flush();
+
+  expect(result.current.phase).toBe('recording');
+});
+
+test('the next reply after a failed one sounds only for its own failure', async () => {
+  server.llm = { status: 'failed', error: 'The provider failed.' };
+  const { result } = renderWaiting();
+  await flush();
+  expect(mockPlayErrorSound).toHaveBeenCalledTimes(1);
+
+  // Record again; the server makes reply 43, still being written.
+  act(() => result.current.handleStart());
+  await act(async () => {
+    await mockStreamingOptions.onComplete({ sessionId: 's2', content: 'again', llmNodeId: 43 });
+  });
+  await flush();
+  expect(result.current.phase).toBe('processing');
+  expect(mockPlayErrorSound).toHaveBeenCalledTimes(1);
+
+  server.llm43 = { status: 'failed', error: 'It failed again.' };
+  await nextPoll();
+  expect(mockPlayErrorSound).toHaveBeenCalledTimes(2);
+  expect(result.current.phase).toBe('ready');
 });
 
 test('a cancelled reply stays silent', async () => {
