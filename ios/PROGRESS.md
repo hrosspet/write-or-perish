@@ -109,7 +109,7 @@ ios/Loore/Features/Thread/      ThreadView/ThreadModel/ThreadSheets (+NodeAudioC
                                 BubbleData, BubblePreview, KebabMenu, NodeFooterView), ModelPicker (+ModelCatalog)
 ios/Loore/Features/Write/       NodeFormView/NodeFormModel, DraftAutosaver, PrivacySelector (+SelectField,
                                 FieldLabel, LabeledPillToggle), WritingDialogs, TextModeView (+WriteNewEntrySheet)
-ios/Loore/Features/Proposals/   ProposalParser (ProposalInline.js port), ProposalCard (compact)
+ios/Loore/Features/Proposals/   ProposalParser (ProposalInline.js port), ProposalCard (compact in threads, roomy on Voice)
 ios/Loore/Features/Log/         LogView
 ios/Loore/Features/Search/      SearchView (+SearchSnippet, SearchResult)
 ios/Loore/Features/Voice/       M3: VoiceView (+VoiceVisuals), MiniPlayerView, VoiceSettingsSection,

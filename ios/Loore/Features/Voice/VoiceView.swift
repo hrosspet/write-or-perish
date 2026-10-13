@@ -679,7 +679,7 @@ struct VoiceChapterList: View {
 }
 
 /// The reply's proposal card (web `ProposalInline` with `tool_calls_meta`,
-/// `size="roomy"` on the Voice page): M2's `ProposalCard` (compact) under the
+/// `size="roomy"` on the Voice page): M2's `ProposalCard` (roomy) under the
 /// player when the final reply carries proposal sections.
 struct VoiceProposalSlot: View {
     let content: String?
@@ -691,9 +691,8 @@ struct VoiceProposalSlot: View {
     var body: some View {
         if let content, let nodeId, ProposalParser.hasProposalSections(content) {
             ProposalCard(content: content, nodeId: nodeId, toolCallsMeta: toolCallsMeta,
-                         onContentChange: onContentChange, onApplied: onApplied)
-                .frame(maxWidth: 520)
-                .padding(.top, 8)
+                         roomy: true, onContentChange: onContentChange, onApplied: onApplied)
+                .frame(maxWidth: 620)
         }
     }
 }

@@ -1,13 +1,16 @@
 import SwiftUI
 
 /// The proposal card under an AI reply (web `ProposalInline`, compact size,
-/// map D §6.3–6.5): todo changes with tick / "+", priority order, a GitHub
+/// or `roomy` on the Voice page, map D §6.3–6.5): todo changes with tick / "+", priority order, a GitHub
 /// issue, team feedback, shares. Each has one accept button; there is no reject.
 struct ProposalCard: View {
     let content: String
     let nodeId: Int
     let toolCallsMeta: [ToolCallMeta]?
     var shareOnly = false
+    /// Web `size="roomy"` (Voice page): larger rows, web spacing,
+    /// a centred Apply button. Compact (default) is the thread view.
+    var roomy = false
     /// The proposal's owner (who asked for the reply) accepts it here. Anyone
     /// else sees the proposal without the accept buttons and their status:
     /// the accept endpoints only act on the owner's pending drafts, and
@@ -36,6 +39,9 @@ struct ProposalCard: View {
     @State private var metaSavedIndexes: [Int] = []
     @State private var copiedIndex: Int?
     @State private var addingKey: String?
+    /// The row whose "+" shows. Web: the hovered row (on a phone, the last row
+    /// tapped); only the owner's editable rows react.
+    @State private var selectedKey: String?
     @State private var addText = ""
     @State private var pollTask: Task<Void, Never>?
     @FocusState private var addFocused: Bool
@@ -45,6 +51,15 @@ struct ProposalCard: View {
 
     private var toggleable: Bool {
         onContentChange != nil && applyStatus != "completed" && applyStatus != "started"
+    }
+
+    /// Web `sectionWrapper` margins collapse into the Apply area's margin, so
+    /// the gap above Apply is the larger of the two (40 when a section is above).
+    private var hasNote: Bool { !(parsed.note ?? "").isEmpty }
+
+    private var hasTodoSections: Bool {
+        let p = parsed
+        return p.completed != nil || p.newTasks != nil || p.priority != nil
     }
 
     private func meta(_ name: String) -> ToolCallMeta? { toolCallsMeta?.first { $0.name == name } }
@@ -62,7 +77,9 @@ struct ProposalCard: View {
         if hasTodoUpdate || hasIssue || hasFeedback || hasShare || hasPrefs {
             VStack(alignment: .leading, spacing: 0) {
                 if hasTodo { todoSection(parsed) }
-                if hasTodoUpdate && canAct { applyTodoArea.padding(.top, 8) }
+                if hasTodoUpdate && canAct {
+                    applyTodoArea.padding(.top, roomy ? (hasNote || !hasTodoSections ? 24 : 0) : 8)
+                }
                 if hasIssue, let title = parsed.issueTitle { issueSection(title: title, parsed: parsed) }
                 if hasFeedback, let feedback = parsed.feedback { feedbackSection(feedback, category: parsed.feedbackCategory) }
                 if hasShare && !shares.isEmpty { shareSection(shares) }
@@ -73,7 +90,7 @@ struct ProposalCard: View {
                         .padding(.top, 16)
                 }
             }
-            .padding(.top, 8)
+            .padding(.top, roomy ? 32 : 8)
             .onAppear(perform: readMeta)
             .onChange(of: toolCallsMeta?.count) { _, _ in readMeta() }
             .onDisappear { pollTask?.cancel() }
@@ -126,7 +143,7 @@ struct ProposalCard: View {
     private func todoSection(_ parsed: ProposalParser.Sections) -> some View {
         if parsed.completed != nil || parsed.newTasks != nil {
             VStack(alignment: .leading, spacing: 0) {
-                SectionLabel(text: "Updated from your sharing")
+                SectionLabel(text: "Updated from your sharing", roomy: roomy)
                 ForEach(Array(ProposalParser.parseTodoItems(parsed.completed ?? "").enumerated()), id: \.offset) { _, item in
                     taskRow(item, completed: true)
                 }
@@ -134,51 +151,73 @@ struct ProposalCard: View {
                     taskRow(item, completed: false)
                 }
             }
-            .padding(.bottom, 16)
+            .padding(.bottom, roomy ? 40 : 16)
         }
         if let priority = parsed.priority {
             VStack(alignment: .leading, spacing: 6) {
-                SectionLabel(text: "Suggested priority order")
+                SectionLabel(text: "Suggested priority order", roomy: roomy)
                 ForEach(Array(ProposalParser.parsePriorityItems(priority).enumerated()), id: \.offset) { index, item in
-                    HStack(spacing: 10) {
+                    HStack(spacing: roomy ? 14 : 10) {
                         Text("\(index + 1)")
-                            .font(LooreFont.serif(17.6, .regular))
+                            .font(LooreFont.serif(roomy ? 22.4 : 17.6, .regular))
                             .foregroundStyle(LooreColor.accentDim.opacity(0.6))
-                            .frame(width: 20)
+                            .frame(width: roomy ? 24 : 20)
                         VStack(alignment: .leading, spacing: 2) {
                             Text(item.text)
-                                .font(LooreFont.sans(13.6, .light))
+                                .font(LooreFont.sans(roomy ? 14.72 : 13.6, .light))
                                 .foregroundStyle(LooreColor.textPrimary)
                                 .fixedSize(horizontal: false, vertical: true)
                             if !item.hint.isEmpty {
-                                Text(item.hint).font(LooreFont.sans(11.5, .light)).foregroundStyle(LooreColor.textMuted)
+                                Text(item.hint).font(LooreFont.sans(roomy ? 12 : 11.5, .light)).foregroundStyle(LooreColor.textMuted)
                                     .fixedSize(horizontal: false, vertical: true)
                             }
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
+                        if roomy {
+                            // Web's decorative drag-handle glyph.
+                            Text("⋮⋮").font(.system(size: 14.4)).tracking(2)
+                                .foregroundStyle(LooreColor.textMuted.opacity(0.3))
+                                .accessibilityHidden(true)
+                        }
                     }
-                    .padding(.vertical, 10)
-                    .padding(.horizontal, 12)
-                    .background(LooreColor.bgCard, in: RoundedRectangle(cornerRadius: 6))
-                    .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(LooreColor.border))
+                    .padding(.vertical, roomy ? 14 : 10)
+                    .padding(.horizontal, roomy ? 16 : 12)
+                    .background(LooreColor.bgCard, in: RoundedRectangle(cornerRadius: roomy ? 8 : 6))
+                    .overlay(RoundedRectangle(cornerRadius: roomy ? 8 : 6).strokeBorder(LooreColor.border))
                 }
             }
-            .padding(.bottom, 16)
+            .padding(.bottom, roomy ? 40 : 16)
         }
         if let note = parsed.note, !note.isEmpty {
             (Text("A note: ").foregroundColor(LooreColor.textSecondary) + Text(note))
-                .font(LooreFont.sans(13.1, .light))
+                .font(LooreFont.sans(roomy ? 14.08 : 13.1, .light))
                 .foregroundStyle(LooreColor.textMuted)
                 .lineSpacing(6)
-                .padding(.bottom, 12.8)
+                .padding(.bottom, roomy ? 0 : 12.8)
         }
     }
 
     private func taskRow(_ item: String, completed: Bool) -> some View {
         let key = "\(completed ? "completed" : "new"):\(item)"
+        let selected = toggleable && selectedKey == key
+        let circle: CGFloat = roomy ? 18 : 16
+        let gap: CGFloat = roomy ? 12 : 10
+        let pad: CGFloat = roomy ? 12 : 8
+        // Web line-height 1.5 on 14.72 px = 22.08 px. Outfit's own line is about 19 pt, so
+        // lineSpacing adds the 3.08 between lines and each end of the row gets half of it
+        // (CSS half-leading); the bottom also gets the web's 1 px border.
+        let halfLeading: CGFloat = roomy ? 1.54 : 0
+        let textSize: CGFloat = roomy ? 14.72 : 13.6
+        func startAdding() {
+            addText = ""
+            addingKey = key
+            selectedKey = nil
+            addFocused = true
+        }
         return VStack(alignment: .leading, spacing: 0) {
-            HStack(alignment: .top, spacing: 10) {
+            HStack(alignment: .top, spacing: gap) {
                 Button {
+                    selectedKey = nil
                     if completed {
                         toggle(item, from: "completed", to: "new task", prepend: true)
                     } else {
@@ -190,48 +229,68 @@ struct ProposalCard: View {
                             .strokeBorder(completed ? LooreColor.accentDim : LooreColor.borderHover, lineWidth: 1.5)
                             .background(Circle().fill(completed ? LooreColor.accentDim : .clear))
                         if completed {
-                            Text("✓").font(LooreFont.sans(8.8, .semibold)).foregroundStyle(LooreColor.bgDeep)
+                            Text("✓").font(LooreFont.sans(roomy ? 9.6 : 8.8, .semibold)).foregroundStyle(LooreColor.bgDeep)
                         }
                     }
-                    .frame(width: 16, height: 16)
+                    .frame(width: circle, height: circle)
                     .padding(6)
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .disabled(!toggleable)
                 .padding(-6)
-                .padding(.top, 2)
+                .padding(.top, 2 - halfLeading)
                 .accessibilityLabel(item)
                 .accessibilityHint(toggleable ? (completed ? "Unmark as done" : "Mark as done") : "")
                 .accessibilityValue(completed ? "Done" : "Not done")
                 Text(item)
-                    .font(LooreFont.sans(13.6, .light))
+                    .font(LooreFont.sans(textSize, .light))
                     .foregroundStyle(LooreColor.textSecondary)
                     .strikethrough(completed)
                     .opacity(completed ? 0.4 : 1)
-                    .lineSpacing(3)
+                    .lineSpacing(roomy ? 3.08 : 3)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                if toggleable {
-                    Button {
-                        addText = ""
-                        addingKey = key
-                        addFocused = true
-                    } label: {
-                        Text("+").font(LooreFont.sans(19, .regular)).foregroundStyle(LooreColor.accent).opacity(0.55)
-                            .frame(width: 28, height: 24).contentShape(Rectangle())
+                    .accessibilityActions {
+                        if toggleable { Button("Add an item below", action: startAdding) }
                     }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Add an item below")
+                if toggleable {
+                    // Web: hidden until the row is hovered (touch: tapped), then accent. Only the
+                    // visible one is in the tree. The slot keeps the web's layout footprint
+                    // (glyph + 8 px padding = about 19 pt); the touch area is 28 wide and
+                    // overlaps the text's end by 9 pt.
+                    Group {
+                        if selected {
+                            Button(action: startAdding) {
+                                Text("+").font(LooreFont.sans(19.2, .regular)).foregroundStyle(LooreColor.accent)
+                                    .frame(width: 28, height: 24).contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("Add an item below")
+                            .transition(.opacity)
+                        } else {
+                            Color.clear.frame(width: 28, height: 24)
+                        }
+                    }
+                    .padding(.leading, -9)
                 }
             }
-            .padding(.vertical, 8)
-            .overlay(alignment: .bottom) { HairlineDivider() }
+            .padding(.top, pad + halfLeading)
+            .padding(.bottom, pad + halfLeading + (roomy ? 1 : 0))
+            .contentShape(Rectangle())
+            .onTapGesture {
+                guard toggleable else { return }
+                selectedKey = selectedKey == key ? nil : key
+            }
+            .animation(.easeOut(duration: 0.12), value: selected)
+            .overlay(alignment: .bottom) {
+                Rectangle().fill(roomy ? LooreColor.bgSurface : LooreColor.border).frame(height: 1).accessibilityHidden(true)
+            }
             if addingKey == key {
-                HStack(spacing: 10) {
+                HStack(spacing: gap) {
                     Circle().strokeBorder(LooreColor.borderHover, style: StrokeStyle(lineWidth: 1.5, dash: [3, 2]))
-                        .frame(width: 16, height: 16).opacity(0.5)
+                        .frame(width: circle, height: circle).opacity(0.5)
                     TextField("", text: $addText, prompt: loorePrompt("New item…"))
-                        .font(LooreFont.sans(13.6, .light))
+                        .font(LooreFont.sans(textSize, .light))
                         .foregroundStyle(LooreColor.textPrimary)
                         .padding(.vertical, 8)
                         .padding(.horizontal, 12)
@@ -249,13 +308,14 @@ struct ProposalCard: View {
                             if !focused && addText.jsTrimmed.isEmpty { addingKey = nil }
                         }
                 }
-                .padding(.vertical, 8)
+                .padding(.vertical, pad)
             }
         }
     }
 
     private func toggle(_ item: String, from: String, to: String, prepend: Bool) {
         guard toggleable, let onContentChange else { return }
+        selectedKey = nil
         let updated = ProposalParser.moveProposalItem(content, itemText: item, from: from, to: to, prepend: prepend)
         guard updated != content else { return }
         save(updated, previous: content, onContentChange: onContentChange) { "Couldn't save change — reverted (\($0))" }
@@ -263,6 +323,7 @@ struct ProposalCard: View {
 
     private func insert(after item: String, _ text: String) {
         guard toggleable, let onContentChange else { return }
+        selectedKey = nil
         let updated = MarkdownEdits.insertItemAfter(content, afterItemText: item, newText: text)
         guard updated != content else { return }
         save(updated, previous: content, onContentChange: onContentChange) { "Couldn't add task — reverted (\($0))" }
@@ -286,20 +347,21 @@ struct ProposalCard: View {
         Group {
             switch applyStatus {
             case nil:
-                ProposalButton(title: "Apply changes to my Todo", action: applyTodo)
+                ProposalButton(title: "Apply changes to my Todo", roomy: roomy, action: applyTodo)
             case "started":
-                StatusText(text: "Todo update started…", color: LooreColor.textMuted)
+                StatusText(text: "Todo update started…", color: LooreColor.textMuted, roomy: roomy)
             case "completed":
-                StatusText(text: "Todo updated", color: LooreColor.success)
+                StatusText(text: "Todo updated", color: LooreColor.success, roomy: roomy)
             default:
-                VStack(alignment: .leading, spacing: 8) {
-                    StatusText(text: applyError ?? "Todo update failed", color: LooreColor.accent)
+                VStack(alignment: roomy ? .center : .leading, spacing: 8) {
+                    StatusText(text: applyError ?? "Todo update failed", color: LooreColor.accent, roomy: roomy)
                     if canApplyAgain {
-                        ProposalButton(title: "Apply again", action: applyTodo)
+                        ProposalButton(title: "Apply again", roomy: roomy, action: applyTodo)
                     }
                 }
             }
         }
+        .frame(maxWidth: .infinity, alignment: roomy ? .center : .leading)
     }
 
     /// `POST /api/todo/apply-draft`, then poll `llm-status` every 2 s for the merge.
@@ -358,7 +420,7 @@ struct ProposalCard: View {
 
     private func issueSection(title: String, parsed: ProposalParser.Sections) -> some View {
         VStack(alignment: .leading, spacing: 0) {
-            SectionLabel(text: "GitHub Issue")
+            SectionLabel(text: "GitHub Issue", roomy: roomy)
             ProposalBox {
                 Text(title).font(LooreFont.serif(16, .regular)).foregroundStyle(LooreColor.textPrimary).padding(.bottom, 8)
                 if let description = parsed.issueDescription {
@@ -368,7 +430,7 @@ struct ProposalCard: View {
             }
             if canAct { issueStatusArea }
         }
-        .padding(.top, 12)
+        .padding(.top, roomy ? 32 : 12)
     }
 
     private var issueStatusArea: some View {
@@ -413,14 +475,14 @@ struct ProposalCard: View {
 
     private func feedbackSection(_ feedback: String, category: String?) -> some View {
         VStack(alignment: .leading, spacing: 0) {
-            SectionLabel(text: "Feedback")
+            SectionLabel(text: "Feedback", roomy: roomy)
             ProposalBox {
                 MarkdownView(markdown: feedback, style: .proposal)
                 if let category { CategoryBadge(text: category).padding(.top, 6) }
             }
             if canAct { feedbackStatusArea }
         }
-        .padding(.top, 12)
+        .padding(.top, roomy ? 32 : 12)
     }
 
     private var feedbackStatusArea: some View {
@@ -455,7 +517,7 @@ struct ProposalCard: View {
 
     private func shareSection(_ shares: [ProposalParser.ShareBlock]) -> some View {
         VStack(alignment: .leading, spacing: 0) {
-            SectionLabel(text: shares.count > 1 ? "Shares" : "Share")
+            SectionLabel(text: shares.count > 1 ? "Shares" : "Share", roomy: roomy)
             ForEach(Array(shares.enumerated()), id: \.offset) { index, share in
                 VStack(alignment: .leading, spacing: 0) {
                     ProposalBox {
@@ -488,7 +550,7 @@ struct ProposalCard: View {
                 .padding(.top, index > 0 ? 14 : 0)
             }
         }
-        .padding(.top, 12)
+        .padding(.top, roomy ? 32 : 12)
     }
 
     @ViewBuilder private func shareStatus(_ index: Int) -> some View {
@@ -531,33 +593,37 @@ struct ProposalCard: View {
 
 private struct SectionLabel: View {
     let text: String
+    var roomy = false
 
     var body: some View {
         Text(text.uppercased())
             .font(LooreFont.sans(10.9, .regular))
             .tracking(2)
             .foregroundStyle(LooreColor.accent.opacity(0.6))
-            .padding(.top, 16)
-            .padding(.bottom, 12.8)
+            .padding(.top, roomy ? 0 : 16)
+            .padding(.bottom, roomy ? 19.2 : 12.8)
     }
 }
 
 private struct ProposalButton: View {
     let title: String
+    var roomy = false
     let action: () -> Void
 
     var body: some View {
-        Button(title, action: action)
-            .buttonStyle(LooreButtonStyle(kind: .primary, font: LooreFont.sans(12.8, .regular)))
+        Button(action: action) { Text(title).padding(.horizontal, roomy ? 4 : 0) }
+            .buttonStyle(LooreButtonStyle(kind: .primary, font: LooreFont.sans(roomy ? 13.6 : 12.8, .regular)))
     }
 }
 
 private struct StatusText: View {
     let text: String
     let color: Color
+    var roomy = false
 
     var body: some View {
-        Text(text).font(LooreFont.sans(11.5, .regular)).foregroundStyle(color)
+        Text(text).font(LooreFont.sans(roomy ? 12 : 11.5, roomy ? .light : .regular)).foregroundStyle(color)
+            .multilineTextAlignment(roomy ? .center : .leading)
     }
 }
 

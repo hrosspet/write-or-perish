@@ -72,6 +72,10 @@ export const AudioProvider = ({ children }) => {
     waitingForChunksRef.current = value;
     _setWaitingForChunks(value);
   }, []);
+  // Counts chunked playbacks that reached their end with nothing more
+  // coming. Voice mode waits on it to play the error sound after the part
+  // of a failed reply that did arrive.
+  const [queueFinishedCount, setQueueFinishedCount] = useState(0);
   const audioRef = useRef(null);
   const intervalRef = useRef(null);
   const audioQueueRef = useRef([]);
@@ -353,6 +357,7 @@ export const AudioProvider = ({ children }) => {
         const totalDur = chunkDurationsRef.current.reduce((a, b) => a + b, 0);
         setCurrentTime(chunkDurationsRef.current[chunkIndex] || 0);
         setCumulativeTime(totalDur);
+        setQueueFinishedCount((n) => n + 1);
       }
     };
 
@@ -927,6 +932,7 @@ export const AudioProvider = ({ children }) => {
     generatingTTS,
     setGeneratingTTS,
     waitingForChunks,
+    queueFinishedCount,
     chapterStartTime,
     loadAudio,
     loadAudioQueue,
