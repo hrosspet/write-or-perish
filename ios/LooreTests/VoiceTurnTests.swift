@@ -63,8 +63,16 @@ final class FakeVoiceBackend: VoiceBackend {
         return ttsTrigger[nodeId] ?? .started
     }
 
+    /// Seconds `ttsStatus` takes. The answer still comes when the asking task
+    /// is cancelled meanwhile (as for the untracked foreground check).
+    var ttsStatusDelay: Double = 0
+    var ttsStatusCalls = 0
+    var ttsStatusAnswers = 0
     func ttsStatus(nodeId: Int) async throws -> TTSStatus {
+        ttsStatusCalls += 1
+        if ttsStatusDelay > 0 { try? await Task.sleep(nanoseconds: UInt64(ttsStatusDelay * 1_000_000_000)) }
         guard let s = ttsStatuses[nodeId] else { throw APIError.transport(code: -1, description: "none") }
+        ttsStatusAnswers += 1
         return s
     }
 
@@ -135,7 +143,17 @@ final class FakeRecorder: VoiceRecording {
 final class FakeQueue: VoiceQueue {
     var urls: [String] = []
     var chapters: [(Int, String)] = []
-    var generatingTTS = false
+    /// Set: like `ChunkQueuePlayer`, a queue that ran out finishes once
+    /// nothing more is coming.
+    var onFinished: (() -> Void)?
+    var generatingTTS = false {
+        didSet {
+            if oldValue && !generatingTTS && waitingForChunks, let onFinished {
+                waitingForChunks = false
+                onFinished()
+            }
+        }
+    }
     var isPlaying = true
     var waitingForChunks = false
     var stopped = 0
@@ -214,7 +232,7 @@ final class VoiceTurnTests: XCTestCase {
         turn.aiUsage = { "chat" }
         turn.timings = .init(statusPoll: 0.01, statusGiveUp: 5, llmPoll: 0.01, llmGiveUp: 5, reconcile: 0.05,
                              triggerWatchdog: 0.2, catchUpGrace: 0.05, errorDot: 0.05, tick: 0.01,
-                             longRecording: 59 * 60)
+                             longRecording: 59 * 60, errorSound: 0.05)
     }
 
     private func wait(_ what: String = "", timeout: Double = 2, _ condition: () -> Bool) async {
@@ -866,6 +884,150 @@ final class VoiceTurnTests: XCTestCase {
         try await Task.sleep(nanoseconds: 50_000_000)
         XCTAssertTrue(audio.fakeQueue.urls.isEmpty)
         XCTAssertEqual(turn.state, .idle)
+    }
+
+    // MARK: A reply's audio fails (Peter, 2026-10-13): the error sound says so
+    // to someone who is not looking at the screen.
+
+    private var errorSounds: Int { audio.events.filter { $0 == "sound.error" }.count }
+
+    private func ttsStatus(_ s: String) throws -> TTSStatus {
+        try decode(TTSStatus.self, #"{"node_id":101,"status":"\#(s)","progress":0}"#)
+    }
+
+    private func failTTS(_ nodeId: Int = 101) {
+        backend.push(nodeId, "error", #"{"message":"TTS generation failed"}"#)
+    }
+
+    /// Reply 101 is speaking (one chunk queued and playing) while it is written.
+    private func playFirstChunk() async throws {
+        backend.statuses = [try status("completed", llm: 101)]
+        backend.llmStatuses[101] = [try llm(101, "processing", tts: "processing", streaming: true)]
+        await recordAndStop()
+        await wait("attached") { backend.streams[101] != nil }
+        backend.push(101, "chunk_ready", #"{"chunk_index":0,"audio_url":"/media/h0.mp3","duration":2}"#)
+        await wait("playing") { turn.state == .playing }
+        turn.queueStartedPlaying()
+    }
+
+    private func deactivatedAfterTheSound() -> Bool {
+        guard let sound = audio.events.firstIndex(of: "sound.error"),
+              let off = audio.events.lastIndex(of: "deactivate") else { return false }
+        return off > sound
+    }
+
+    func testTTSFailureBeforeAnyAudioSoundsAtOnce() async throws {
+        turn.timings.errorDot = 5
+        turn.timings.errorSound = 0.3
+        backend.statuses = [try status("completed", llm: 101)]
+        backend.llmStatuses[101] = [try llm(101, "processing", tts: "processing")]
+        await recordAndStop()
+        await wait("attached") { backend.streams[101] != nil }
+        failTTS()
+        await wait("idle") { turn.state == .idle }
+        XCTAssertEqual(errorSounds, 1)
+        XCTAssertTrue(turn.hasError, "the red dot as before")
+        XCTAssertFalse(audio.cueOn)
+        XCTAssertEqual(audio.events.last, "sound.error", "the session stays while the sound plays")
+        await wait("deactivated after the sound") { deactivatedAfterTheSound() }
+    }
+
+    func testRefusedTTSRequestSoundsAtOnce() async throws {
+        backend.statuses = [try status("completed", llm: 101)]
+        backend.llmStatuses[101] = [try llm(101, "completed", tts: nil, content: "Done.")]
+        backend.ttsTriggerError[101] = APIError.server(status: 500, body: nil)
+        await recordAndStop()
+        await wait("idle") { turn.state == .idle }
+        XCTAssertTrue(backend.log.contains("tts 101"))
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(errorSounds, 1)
+    }
+
+    func testTTSFailureAfterSomeAudioSoundsOnceThatAudioHasPlayed() async throws {
+        turn.timings.errorDot = 5
+        try await playFirstChunk()
+        failTTS()
+        await wait("generation over") { !audio.fakeQueue.generatingTTS }
+        XCTAssertEqual(errorSounds, 0, "not over the reply's voice")
+        XCTAssertTrue(turn.hasError, "the red dot as before")
+        XCTAssertEqual(turn.state, .playing)
+        turn.queueFinished()
+        XCTAssertEqual(errorSounds, 1)
+        XCTAssertEqual(turn.state, .done)
+        await wait("deactivated after the sound") { deactivatedAfterTheSound() }
+    }
+
+    func testTTSFailureAfterTheQueueRanOutSoundsAtOnce() async throws {
+        let controller = turn!
+        audio.fakeQueue.onFinished = { [weak controller] in controller?.queueFinished() }
+        try await playFirstChunk()
+        audio.fakeQueue.waitingForChunks = true
+        turn.queueDrained()
+        failTTS()
+        await wait("sounded") { errorSounds == 1 }
+        XCTAssertEqual(turn.state, .done)
+        XCTAssertFalse(audio.cueOn)
+    }
+
+    func testTTSFailureSeenTwiceSoundsOnce() async throws {
+        backend.statuses = [try status("completed", llm: 101)]
+        backend.llmStatuses[101] = [try llm(101, "processing", tts: "processing")]
+        await recordAndStop()
+        await wait("attached") { backend.streams[101] != nil }
+        // A REST check (the app came back to the foreground) is still waiting
+        // for its answer when the stream reports the failure.
+        backend.ttsStatuses[101] = try ttsStatus("failed")
+        backend.ttsStatusDelay = 0.1
+        backend.ttsStatusCalls = 0
+        turn.appDidBecomeActive()
+        await wait("a REST check in flight") { backend.ttsStatusCalls > 0 }
+        failTTS()
+        await wait("idle") { turn.state == .idle }
+        await wait("the REST check answered: failed") { backend.ttsStatusAnswers > 0 }
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(errorSounds, 1)
+    }
+
+    func testCancellingDropsAPendingErrorSound() async throws {
+        try await playFirstChunk()
+        failTTS()
+        await wait("generation over") { !audio.fakeQueue.generatingTTS }
+        turn.cancelProcessing()
+        turn.queueFinished()
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(errorSounds, 0)
+    }
+
+    func testLeavingVoiceDropsAPendingErrorSound() async throws {
+        try await playFirstChunk()
+        failTTS()
+        await wait("generation over") { !audio.fakeQueue.generatingTTS }
+        turn.tearDown()
+        turn.queueFinished()
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(errorSounds, 0)
+    }
+
+    func testANewTurnDropsTheLastTurnsPendingErrorSound() async throws {
+        try await playFirstChunk()
+        failTTS()
+        await wait("generation over") { !audio.fakeQueue.generatingTTS }
+        // Record again while the failed reply is still playing.
+        backend.startResult = .success(StreamingInitResponse(sessionId: "sid-2", draftId: 8, sseURL: nil))
+        backend.statuses = [try status("completed", llm: 102)]
+        backend.llmStatuses[102] = [try llm(102, "processing", tts: "processing", streaming: true)]
+        turn.continueConversation()
+        await wait("recording") { turn.state == .recording }
+        turn.stop()
+        await wait("attached 102") { backend.streams[102] != nil }
+        backend.push(102, "chunk_ready", #"{"chunk_index":0,"audio_url":"/media/j0.mp3","duration":2}"#)
+        backend.push(102, "all_complete", #"{"continuation_node_id":null}"#)
+        await wait("not generating") { turn.state == .playing && !audio.fakeQueue.generatingTTS }
+        turn.queueFinished()
+        XCTAssertEqual(turn.state, .done)
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(errorSounds, 0, "the new reply played whole")
+        XCTAssertEqual(audio.events.last, "deactivate")
     }
 
     // MARK: Recording controls

@@ -89,6 +89,8 @@ final class VoiceTurnController {
         /// with tool rounds and slow TTS chunks must keep the cue, or iOS suspends a
         /// locked app mid-reply. Runaway turns end through the give-up timers above.
         var cueCap: Double = 10 * 60
+        /// The session stays active this long after an error sound starts.
+        var errorSound: Double = ToneSynth.errorSoundLength
     }
 
     // MARK: Dependencies
@@ -114,6 +116,8 @@ final class VoiceTurnController {
         var provisionalChunk: Int?
         var ttsAttemptAt: Date?
         var ttsCompletedSeenAt: Date?
+        /// This node's audio failure was handled (and sounded).
+        var ttsFailed = false
     }
 
     @ObservationIgnored private var generation = 0
@@ -122,6 +126,10 @@ final class VoiceTurnController {
     @ObservationIgnored private var nodes: [Int: NodeTrack] = [:]
     @ObservationIgnored private var receivedChunks: Set<String> = []
     @ObservationIgnored private var turnHasAudio = false
+    /// The generation whose reply's audio failed after part of it was queued:
+    /// the error sound waits until that audio has played (`queueFinished`).
+    /// Any newer generation (cancel, new turn, leaving Voice) drops it.
+    @ObservationIgnored private var errorSoundAfterQueue: Int?
     @ObservationIgnored private var initialResume = false
     @ObservationIgnored private var toastedWarnings: Set<String> = []
     @ObservationIgnored private var failureToasted: Set<Int> = []
@@ -745,7 +753,7 @@ final class VoiceTurnController {
                 return
             }
             closeStream()
-            endTurnWithError(nil, sound: false)
+            handleTTSFailure(nodeId, gen)
         }
     }
 
@@ -906,13 +914,27 @@ final class VoiceTurnController {
         audio.refreshNowPlaying()
     }
 
+    /// The reply's audio failed: the server marked its TTS failed, or refused to
+    /// start it. The error sound says so to someone not looking at the screen
+    /// (Peter, 2026-10-13); with part of the reply queued, it plays after that
+    /// audio, not over it. Once per node: the stream and the reconcile checks
+    /// can both see the same failure.
     private func handleTTSFailure(_ nodeId: Int, _ gen: Int) {
+        guard gen == generation, let track = nodes[nodeId], !track.ttsFailed else { return }
+        nodes[nodeId]?.ttsFailed = true
         log.error("TTS failed for the reply")
         if turnHasAudio {
+            errorSoundAfterQueue = generation
             flagError()
             finishGenerating()
+            // The queue had already run out (and `queueFinished` did not take
+            // the sound): nothing is left to wait for.
+            if errorSoundAfterQueue == generation && state != .playing && state != .draining {
+                errorSoundAfterQueue = nil
+                playErrorSoundThenDeactivate()
+            }
         } else {
-            endTurnWithError(nil, sound: false)
+            endTurnWithError(nil, sound: true)
         }
     }
 
@@ -1011,7 +1033,14 @@ final class VoiceTurnController {
         guard state == .playing || state == .draining else { return }
         state = .done
         cueOff()
-        audio.deactivate()
+        if errorSoundAfterQueue == generation {
+            // The rest of the reply's audio failed: say so now that the part
+            // that came has played.
+            errorSoundAfterQueue = nil
+            playErrorSoundThenDeactivate()
+        } else {
+            audio.deactivate()
+        }
         audio.refreshNowPlaying()
     }
 
@@ -1133,14 +1162,31 @@ final class VoiceTurnController {
 
     private func endTurnWithError(_ message: String?, sound: Bool) {
         if let message { notices.toast(message, duration: 8) }
-        if sound { audio.playErrorSound() }
         [llmTask, sseTask, reconcileTask, tickTask].forEach { $0?.cancel() }
         cueOff()
         audio.queue.generatingTTS = false
         state = .idle
         flagError()
-        audio.deactivate()
+        if sound {
+            playErrorSoundThenDeactivate()
+        } else {
+            audio.deactivate()
+        }
         audio.refreshNowPlaying()
+    }
+
+    /// The error sound, then the session's end. Deactivating the session while
+    /// the sound plays would cut it off, and in the background the app cannot
+    /// activate the session again to play it. A new turn meanwhile keeps the
+    /// session.
+    private func playErrorSoundThenDeactivate() {
+        audio.playErrorSound()
+        let gen = generation
+        Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64((self?.timings.errorSound ?? 0) * 1_000_000_000))
+            guard let self, gen == self.generation else { return }
+            self.audio.deactivate()
+        }
     }
 
     private func flagError() {

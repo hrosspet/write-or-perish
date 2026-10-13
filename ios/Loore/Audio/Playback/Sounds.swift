@@ -63,13 +63,16 @@ enum ToneSynth {
         return wav(samples)
     }
 
+    /// Seconds `errorSound()` lasts.
+    static let errorSoundLength = 0.7
+
     /// Web `playErrorSound`: 660 → 440 → 330 Hz square, gain 0.15.
     static func errorSound() -> Data {
         render([
             Tone(frequency: 660, start: 0, duration: 0.15, gain: 0.15, wave: .square),
             Tone(frequency: 440, start: 0.18, duration: 0.15, gain: 0.15, wave: .square),
             Tone(frequency: 330, start: 0.36, duration: 0.25, gain: 0.15, wave: .square),
-        ], length: 0.7)
+        ], length: errorSoundLength)
     }
 
     /// Web `playInterruptionAlert`: the error motif once, gain 0.25.
