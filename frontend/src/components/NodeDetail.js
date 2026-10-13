@@ -33,10 +33,10 @@ import DeleteConfirmDialog from "./DeleteConfirmDialog";
 // after it (another pass over the day).
 const GLEAN_AGAIN_TITLE = "Another pass over today's tweets, against everything in this thread so far "
   + "— your marks on the earlier picks included.";
-const GLEAN_TITLE = "Loore reads today's Community Archive tweets and shows you the few worth your time, "
-  + "from what you said in this thread.";
-const GLEAN_THREAD_TITLE = "Loore reads today's Community Archive tweets against your latest entry in this thread "
-  + 'and shows you the few worth your time.';
+// Wording: Peter, 2026-10-13. The reflection thread's top-right button
+// uses the same text.
+const GLEAN_TITLE = "Loore reads today's Community Archive tweets and shows you those relevant "
+  + "for this thread.";
 export const GLEAN_MENU_LABEL = 'Glean for this reflection';
 export const GLEANINGS_TITLE = "Today's gleanings";
 
@@ -1342,7 +1342,7 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
   // Not on the Glean entry itself: its action row already has Glean and its picker.
   const topGleanButton = newestOwnEntry && !readActions && (
     <span style={{ display: 'inline-flex', alignItems: 'stretch', width: '160px', height: '32px' }}>
-      <LooreTooltip text={GLEAN_THREAD_TITLE}>
+      <LooreTooltip text={GLEAN_TITLE}>
         <button
           type="button"
           onClick={() => handleReadFromNode(gleanTargetOf(newestOwnEntry))}

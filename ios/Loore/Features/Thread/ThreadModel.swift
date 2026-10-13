@@ -542,7 +542,7 @@ final class ThreadModel {
     // MARK: Glean (#435, #475; the Community Archive read, map D §5.9)
 
     static let gleanAgainTitle = "Another pass over today's tweets, against everything in this thread so far — your marks on the earlier picks included."
-    static let gleanTitle = "Loore reads today's Community Archive tweets and shows you the few worth your time, from what you said in this thread."
+    static let gleanTitle = "Loore reads today's Community Archive tweets and shows you those relevant for this thread."
     static let gleanMenuLabel = "Glean for this reflection"
     static let gleaningsTitle = "Today's gleanings"
 
