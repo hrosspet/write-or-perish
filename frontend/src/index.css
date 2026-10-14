@@ -559,6 +559,43 @@ code {
   border: 0;
 }
 
+/* A gleaning pick's verdicts (PickVerdict, #502, option B): under the
+   card, closing the whole pick. At rest one pair; once the pick has a
+   verdict, a labelled pair per part ("The intro", "The tweet"). The
+   pairs here sit flush: the glyph buttons' own width spaces them. */
+.pick-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0 18px;
+  margin-top: 2px;
+  min-height: 40px;
+  font-family: var(--sans);
+  font-size: 0.8rem;
+  font-weight: 300;
+  color: var(--text-muted);
+  white-space: normal;
+}
+.pick-foot .ref-feedback {
+  margin: 0;
+}
+.pick-part {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+.pick-part-label {
+  color: var(--text-muted);
+}
+.pick-rated-before {
+  font-style: italic;
+}
+.pick-foot .ref-feedback-glyph:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -6px;
+  border-radius: 999px;
+}
+
 /* A saved reference's page (ReferenceDetailPage; option A, Peter
    2026-10-13): the gleaning's tweet card at page size. A full hairline
    border and no accent rail, so a reference never reads as one of the

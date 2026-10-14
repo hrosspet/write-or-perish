@@ -253,3 +253,81 @@ def test_a_pick_label_quotes_the_opening_of_a_long_tweet():
     assert label == ('@bob_b\'s tweet "Mornings are where the week is '
                      'decided, and I keep learning…"')
     assert pick_label(None, "short") == 'an unknown author\'s tweet "short"'
+
+
+# ── The verdicts on the intros (#502) ────────────────────────────────────
+
+def test_glean_again_sees_the_users_verdict_on_an_intro(app, monkeypatch, tmp_path):  # noqa: F811
+    """The user rated Loore's intro to yesterday's pick (the quote-tweet
+    above the card) bad and left the tweet unrated: the next Glean reads
+    that in the closing note, naming the pick as before, and nothing
+    before the note changes (the intro itself is already in the thread)."""
+    state, alice, llm_user, read, gleaning, pick = _gleaned_yesterday(
+        monkeypatch, tmp_path)
+    state["day"] = 2
+    first = _placeholder(llm_user, alice, gleaning.id,
+                         meta=[{"name": READ_FURTHER_MARKER}])
+    call1 = _run(monkeypatch, alice, gleaning, first, _feed("Nothing.", []))
+
+    row = FeedPick.query.filter_by(node_id=gleaning.id).one()
+    row.intro_verdict, row.intro_verdict_at = "bad", datetime.utcnow()
+    _db.session.commit()
+    second = _placeholder(llm_user, alice, gleaning.id,
+                          meta=[{"name": READ_FURTHER_MARKER}])
+    call2 = _run(monkeypatch, alice, gleaning, second, _feed("Nothing.", []))
+
+    texts1, texts2 = _texts(call1), _texts(call2)
+    assert texts1[:-1] == texts2[:-1]
+    assert "quote-tweet introducing it" not in texts1[-1]
+    assert ('@bob_b\'s tweet "slow mornings make the work better" — rated '
+            "your quote-tweet introducing it bad") in texts2[-1]
+    # The verdict only: no row id, no copy of the intro in the note.
+    assert "1126" not in texts2[-1]
+    assert "This is about your mornings." not in texts2[-1]
+
+
+def test_the_marks_note_names_both_verdicts_of_a_pick(app):  # noqa: F811
+    alice = _mk_user("alice", approved=True, plan="alpha")
+    bob = _mk_user("bob", approved=True, plan="alpha")
+    note_fn = _llm_task_mod._reference_marks_note
+    intros = _llm_task_mod._intro_verdicts
+    items = []
+    for ext, fb in (("1", "good"), ("2", None), ("3", None)):
+        it = ExternalItem(user_id=alice.id, source="read_pick",
+                          external_id=ext, author_handle="carol",
+                          feedback=fb)
+        it.set_content("t")
+        _db.session.add(it)
+        items.append(it)
+    reply = Node(user_id=alice.id, human_owner_id=alice.id, node_type="llm",
+                 llm_model="gpt-5")
+    reply.set_content("x")
+    other = Node(user_id=bob.id, human_owner_id=bob.id, node_type="llm",
+                 llm_model="gpt-5")
+    other.set_content("y")
+    _db.session.add_all([reply, other])
+    _db.session.commit()
+    for it, verdict in zip(items, ("good", "bad", None)):
+        _db.session.add(FeedPick(user_id=alice.id, node_id=reply.id,
+                                 external_item_id=it.id, kind="read", rank=1,
+                                 intro_verdict=verdict,
+                                 intro_verdict_at=datetime.utcnow()
+                                 if verdict else None))
+    _db.session.commit()
+
+    got = intros([reply.id], alice.id)
+    assert got == {items[0].id: "good", items[1].id: "bad"}
+    # Another user's gleanings, and replies not rendered, give nothing.
+    assert intros([other.id], alice.id) == {}
+    assert intros([], alice.id) == {}
+
+    labels = {it.id: f"pick {it.external_id}" for it in items}
+    note = note_fn([it.id for it in items], alice.id, labels=labels,
+                   intro_verdicts=got)
+    assert ("pick 1 — rated a good quote, rated your quote-tweet "
+            "introducing it good") in note
+    assert "pick 2 — rated your quote-tweet introducing it bad" in note
+    assert "pick 3" not in note
+    assert "not listed here is unread and unrated" in note
+    # Without intro verdicts the note is as before.
+    assert note_fn([items[1].id], alice.id, labels=labels) is None

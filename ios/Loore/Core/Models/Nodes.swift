@@ -582,6 +582,11 @@ struct ResolvedQuotes: Decodable, Sendable {
         var feedbackShared: Bool?
         var recommendationId: Int?
         var ratedBefore: JSONValue?
+        /// "read" for a gleaning's pick, "quote" for a reference an agentic reply
+        /// quoted (#502): a pick gets its own pair under the card.
+        var recommendationKind: String?
+        /// A gleaning pick's verdict on Loore's intro to the tweet (#502).
+        var introVerdict: String?
 
         enum CodingKeys: String, CodingKey {
             case id, content, source, title, url, feedback
@@ -593,6 +598,8 @@ struct ResolvedQuotes: Decodable, Sendable {
             case feedbackShared = "feedback_shared"
             case recommendationId = "recommendation_id"
             case ratedBefore = "rated_before"
+            case recommendationKind = "recommendation_kind"
+            case introVerdict = "intro_verdict"
         }
 
         init(from decoder: Decoder) throws {
@@ -611,6 +618,8 @@ struct ResolvedQuotes: Decodable, Sendable {
             feedbackShared = c.tolerant(.feedbackShared)
             recommendationId = c.tolerant(.recommendationId)
             ratedBefore = c.tolerant(.ratedBefore)
+            recommendationKind = c.tolerant(.recommendationKind)
+            introVerdict = c.tolerant(.introVerdict)
         }
     }
 

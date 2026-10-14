@@ -1780,6 +1780,17 @@ class FeedPick(db.Model):
     # for it (reference_log). Null on rows from before these columns.
     prior_read = db.Column(db.Boolean, nullable=True)
     prior_verdict = db.Column(db.String(8), nullable=True)
+    # A Read pick's other verdict (#502, Peter 2026-10-14): the user's
+    # judgement of Loore's intro to the tweet (the paragraph above the
+    # card, `why`), apart from the tweet's own verdict, which stays on
+    # ExternalItem.feedback and in ReferenceAction. 'good' | 'bad' | None
+    # (unrated). The value and when only: the intro is written by a model
+    # that sees the user's profile and intentions, so no copy, hash or
+    # excerpt of it goes with the verdict (Peter: "we shouldn't be
+    # tracking the contents of the point"). Goes with the row: hidden by
+    # a waiting "Delete all my writing" and deleted by the purge.
+    intro_verdict = db.Column(db.String(8), nullable=True)
+    intro_verdict_at = db.Column(db.DateTime, nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
     node = db.relationship("Node", backref=db.backref(

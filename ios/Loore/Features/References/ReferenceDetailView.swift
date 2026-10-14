@@ -236,7 +236,11 @@ struct ReferenceDetailView: View {
             }
         }
         let trailing = HStack(spacing: 0) {
-            ReferenceFeedbackControl(itemId: item.id, feedback: item.feedback, size: 18) { verdict, readAt in
+            // A tweet's verdict is named as on its gleaning pick (#502).
+            ReferenceFeedbackControl(itemId: item.id, feedback: item.feedback, size: 18,
+                                     labels: item.kind == .tweet
+                                         ? ReferenceFeedbackControl.tweetLabels
+                                         : ReferenceFeedbackControl.quoteLabels) { verdict, readAt in
                 self.item?.feedback = verdict
                 if let readAt { self.item?.readAt = readAt }
             }

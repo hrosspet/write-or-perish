@@ -16,6 +16,9 @@ import { createPortal } from 'react-dom';
 // that takes a ref (a DOM element such as a button). With `wrap`, hover is
 // taken on a wrapper around it instead: a disabled button gets no hover
 // events in some browsers. The description stays on the child itself.
+// With `describe={false}` there is no description: for an icon button
+// whose aria-label already is the tooltip's text, which a screen reader
+// would otherwise read twice.
 const SHOW_DELAY_MS = 350;
 const GAP_PX = 8;
 const EDGE_PX = 8;
@@ -53,7 +56,7 @@ const visuallyHidden = {
   whiteSpace: 'nowrap',
 };
 
-export default function LooreTooltip({ text, wrap = false, children }) {
+export default function LooreTooltip({ text, wrap = false, describe = true, children }) {
   const tipId = useId();
   const descId = useId();
   const anchorRef = useRef(null);
@@ -131,7 +134,7 @@ export default function LooreTooltip({ text, wrap = false, children }) {
       onClick: chain('onClick', hide),
     };
   };
-  const described = { 'aria-describedby': descId };
+  const described = describe ? { 'aria-describedby': descId } : {};
   const anchor = wrap ? (
     <span ref={anchorRef} style={{ display: 'inline-flex' }} {...handlers()}>
       {cloneElement(child, described)}
@@ -141,7 +144,7 @@ export default function LooreTooltip({ text, wrap = false, children }) {
   return (
     <>
       {anchor}
-      <span id={descId} style={visuallyHidden}>{text}</span>
+      {describe && <span id={descId} style={visuallyHidden}>{text}</span>}
       {open && createPortal(
         <div
           ref={tipRef}

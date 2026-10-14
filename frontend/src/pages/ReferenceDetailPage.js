@@ -9,7 +9,7 @@ import ReferenceEditForm from '../components/ReferenceEditForm';
 import NodeFormModal from '../components/NodeFormModal';
 import RegenerateTtsDialog from '../components/RegenerateTtsDialog';
 import SpeakerIcon from '../components/SpeakerIcon';
-import ReferenceFeedback from '../components/ReferenceFeedback';
+import ReferenceFeedback, { TWEET_LABELS } from '../components/ReferenceFeedback';
 import { useToast } from '../contexts/ToastContext';
 import { formatDate, formatDateTime } from '../utils/date';
 import YouTubeEmbed from '../components/YouTubeEmbed';
@@ -315,6 +315,9 @@ function ReferenceDetailPage() {
               itemId={item.id}
               feedback={item.feedback}
               size={18}
+              // A tweet's verdict is named as on its gleaning pick (#502);
+              // other references keep "Good quote" / "Bad quote".
+              labels={referenceKind(item) === 'tweet' ? TWEET_LABELS : undefined}
               onChange={(fb, data) => setItem((prev) => ({
                 ...prev, feedback: fb, read_at: (data && data.read_at) || prev.read_at,
               }))}

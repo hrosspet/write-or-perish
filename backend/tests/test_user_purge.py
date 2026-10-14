@@ -254,10 +254,11 @@ def world(app, stubs):
     _add(TTSChunk(item_id=w.I1.id, chunk_index=0))
     _add(TTSChunk(node_id=w.LB.id, chunk_index=0))
     _add(TTSChunk(profile_id=w.PB.id, chunk_index=0))
+    # Each with a verdict on Loore's intro to the pick (#502).
     _add(FeedPick(user_id=a.id, node_id=w.L1.id, external_item_id=w.I1.id,
-                  rank=1))
+                  rank=1, intro_verdict="bad", intro_verdict_at=T0))
     _add(FeedPick(user_id=b.id, node_id=w.LB.id, external_item_id=w.IB.id,
-                  rank=1))
+                  rank=1, intro_verdict="good", intro_verdict_at=T0))
     _add(FeedRender(node_id=w.L1.id))
     _add(ReferenceAction(user_id=a.id, item_id=w.I1.id, node_id=w.L1.id,
                          kind="open"))
@@ -546,6 +547,16 @@ def test_all_of_alices_data_is_gone(world, stubs):
     # Credentials and UI state stay for account deletion (#269).
     assert ApiToken.query.filter_by(user_id=a).count() == 1
     assert ChangelogReadState.query.filter_by(user_id=a).count() == 1
+
+
+def test_a_picks_intro_verdict_goes_with_its_row(world, stubs):
+    """#502: the verdict on Loore's intro is a column of the pick row,
+    so the purge deletes it with the row; bob's stays as it was."""
+    _run_job()
+    _db.session.expire_all()
+    assert FeedPick.query.filter_by(user_id=world.alice.id).count() == 0
+    assert FeedPick.query.filter(FeedPick.intro_verdict.isnot(None)).count() == 1
+    assert FeedPick.query.filter_by(user_id=world.bob.id).one().intro_verdict == "good"
 
 
 def test_tombstones_keep_other_users_replies(world, stubs):

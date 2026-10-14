@@ -451,7 +451,8 @@ private struct FocalCard: View {
                     checklist: model.isOwner ? ChecklistActions(toggle: { model.toggleCheckbox($0, checked: $1) },
                                                                 add: { model.insertTask(after: $0, $1) }) : nil,
                     onExternalReadChange: { model.updateExternalRead($0, readAt: $1) },
-                    onExternalFeedbackChange: { model.updateExternalFeedback($0, feedback: $1) })
+                    onExternalFeedbackChange: { model.updateExternalFeedback($0, feedback: $1) },
+                    onExternalIntroVerdictChange: { model.updateExternalIntroVerdict($0, verdict: $1) })
             }
             if showProposal {
                 ProposalCard(content: node.content, nodeId: node.id, toolCallsMeta: node.toolCallsMeta,

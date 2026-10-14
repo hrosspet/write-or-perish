@@ -6,6 +6,7 @@ import { formatDate } from '../utils/date';
 import { useUser } from '../contexts/UserContext';
 import { useToast } from '../contexts/ToastContext';
 import ReferenceFeedback from './ReferenceFeedback';
+import PickVerdict from './PickVerdict';
 
 // Sources whose reference is a tweet: the card names its author.
 const TWEET_SOURCES = ['community_archive', 'read_pick', 'twitter_bookmark', 'twitter_like'];
@@ -67,8 +68,14 @@ const hostOf = (url) => {
  *
  * `backLabel` names the page the reference page links back to (e.g.
  * "Today's gleanings"); the link goes to the node the card is in.
+ *
+ * In a gleaning (the server marks the card a pick of this reply,
+ * `recommendation_kind` 'read', #502) the card's footer has no verdict:
+ * the pick's own pair sits under the card (PickVerdict), judging Loore's
+ * intro above the card and the tweet apart. `onIntroVerdictChange(id,
+ * verdict)` tells the page about the intro's.
  */
-const ExternalQuoteBubble = ({ quote, nodeId, onReadChange, onFeedbackChange, showRecommendationFeedback = false, backLabel }) => {
+const ExternalQuoteBubble = ({ quote, nodeId, onReadChange, onFeedbackChange, onIntroVerdictChange, showRecommendationFeedback = false, backLabel }) => {
   const userCtx = useUser();
   const currentUser = userCtx ? userCtx.user : null;
   const { addToast } = useToast();
@@ -91,6 +98,9 @@ const ExternalQuoteBubble = ({ quote, nodeId, onReadChange, onFeedbackChange, sh
     ? formatDate(quote.posted_at, { relative: false })
     : null;
   const mine = !!currentUser && quote.user_id === currentUser.id;
+  // A gleaning's pick: the verdicts go under the card (#502).
+  const gleaningPick = mine && showRecommendationFeedback && !!nodeId
+    && quote.recommendation_kind === 'read';
 
   const setRead = (want, via) => {
     setMarking(true);
@@ -161,10 +171,10 @@ const ExternalQuoteBubble = ({ quote, nodeId, onReadChange, onFeedbackChange, sh
     </>
   );
 
-  return (
+  const card = (
     <div
       className={`ext-quote-card${mine ? ' ext-quote-card-link' : ''}`}
-      style={bubbleStyle}
+      style={gleaningPick ? pickBubbleStyle : bubbleStyle}
       onClick={mine ? onCardClick : undefined}
       onKeyDown={mine ? onCardKey : undefined}
       tabIndex={mine ? 0 : undefined}
@@ -191,7 +201,7 @@ const ExternalQuoteBubble = ({ quote, nodeId, onReadChange, onFeedbackChange, sh
             {isTweet ? 'Twitter ↗' : 'Open original ↗'}
           </button>
         )}
-        {mine && showRecommendationFeedback && (
+        {mine && showRecommendationFeedback && !gleaningPick && (
           <ReferenceFeedback
             itemId={quote.id}
             feedback={quote.feedback}
@@ -218,13 +228,38 @@ const ExternalQuoteBubble = ({ quote, nodeId, onReadChange, onFeedbackChange, sh
             {readAt ? 'Mark as unread' : 'Mark as read'}
           </button>
         )}
-        {mine && showRecommendationFeedback && quote.rated_before && !quote.feedback && (
+        {mine && showRecommendationFeedback && !gleaningPick
+          && quote.rated_before && !quote.feedback && (
           <span style={ratedBeforeStyle}>
             {`You rated this ${quote.rated_before.feedback} on ${formatDate(quote.rated_before.at, { relative: false })}`}
           </span>
         )}
       </div>
     </div>
+  );
+  if (!gleaningPick) return card;
+  return (
+    <>
+      {card}
+      <PickVerdict
+        nodeId={nodeId}
+        itemId={quote.id}
+        intro={quote.intro_verdict}
+        tweet={quote.feedback}
+        tweetShared={!!quote.feedback_shared}
+        ratedBefore={quote.rated_before}
+        onChange={(data, sent) => {
+          if ('tweet' in sent && onFeedbackChange) onFeedbackChange(quote.id, data.feedback || null);
+          if ('intro' in sent && onIntroVerdictChange) {
+            onIntroVerdictChange(quote.id, data.intro_verdict || null);
+          }
+          if (data.read_at && !readAt) {
+            setReadAt(data.read_at);
+            if (onReadChange) onReadChange(quote.id, data.read_at);
+          }
+        }}
+      />
+    </>
   );
 };
 
@@ -239,6 +274,10 @@ const bubbleStyle = {
   maxWidth: '100%',
   boxSizing: 'border-box',
 };
+
+// In a gleaning the pick's verdicts close it under the card: nothing
+// below the card but them.
+const pickBubbleStyle = { ...bubbleStyle, margin: '10px 0 0' };
 
 const contentStyle = {
   fontSize: '0.95em',

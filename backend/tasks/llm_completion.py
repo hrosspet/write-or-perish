@@ -1512,7 +1512,25 @@ def _action_result_text(tr):
     return f"[{name} failed — {tr.get('error', 'unknown error')}]"
 
 
-def _reference_marks_note(item_ids, user_id, labels=None):
+def _intro_verdicts(reply_ids, user_id):
+    """{item_id: 'good' | 'bad'}: the user's verdicts on Loore's intro to
+    each pick (FeedPick.intro_verdict, #502) of the read replies
+    *reply_ids*, the latest where a tweet was picked twice. Values only:
+    the intros are in the thread already, as the model wrote them."""
+    if not reply_ids:
+        return {}
+    from backend.models import FeedPick
+    rows = (FeedPick.query
+            .filter(FeedPick.node_id.in_(list(reply_ids)),
+                    FeedPick.user_id == user_id,
+                    FeedPick.kind == "read",
+                    FeedPick.intro_verdict.in_(("good", "bad")))
+            .order_by(FeedPick.intro_verdict_at.asc(), FeedPick.id.asc())
+            .all())
+    return {r.external_item_id: r.intro_verdict for r in rows}
+
+
+def _reference_marks_note(item_ids, user_id, labels=None, intro_verdicts=None):
     """The user's own marks on references the assistant quoted earlier in
     this thread, as one bracketed note for the synthetic final user
     message. Assistant turns keep their raw {quote_ext:ID} markers (they
@@ -1526,8 +1544,15 @@ def _reference_marks_note(item_ids, user_id, labels=None):
     pick the opening of the tweet its turn already quotes in full, so
     nothing here adds to what bears on the API key (#325). Returns None
     when nothing is marked.
+
+    *intro_verdicts* ({item_id: 'good' | 'bad'}, _intro_verdicts) are the
+    user's verdicts on the quote-tweet the model wrote above a pick (the
+    gleaning's "intro", #502), so a later Glean can adjust how it writes
+    them (Peter, 2026-10-14). The verdict only: the quote-tweet itself
+    is in the thread above.
     """
     labels = labels or {}
+    intro_verdicts = intro_verdicts or {}
     if not item_ids:
         return None
     seen = []
@@ -1547,6 +1572,9 @@ def _reference_marks_note(item_ids, user_id, labels=None):
             parts.append(f"read {it.read_at.strftime('%Y-%m-%d')}")
         if it.feedback in ("good", "bad"):
             parts.append(f"rated a {it.feedback} quote")
+        if intro_verdicts.get(iid) in ("good", "bad"):
+            parts.append("rated your quote-tweet introducing it "
+                         + intro_verdicts[iid])
         if not parts:
             unmarked += 1
             continue
@@ -4086,6 +4114,9 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 # How the note names a read reply's picks (author and
                 # text, no number; ca_feed.pick_label), by item id.
                 pick_labels = {}
+                # The read replies rendered for the model: the user's
+                # verdicts on their intros go in the note too (#502).
+                rendered_read_ids = []
                 for node in node_chain:
                     author = node.user.username if node.user else "Unknown"
                     is_llm_node = node.node_type == "llm" or (node.llm_model is not None)
@@ -4152,6 +4183,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                                     render_read_reply_for_model(
                                         message_text, user_id))
                                 pick_labels.update(labels)
+                                rendered_read_ids.append(node.id)
                                 licence.note_external(picked)
                         # Tag proposals with node ID for tracking
                         if is_agentic and node.tool_calls_meta:
@@ -4448,7 +4480,9 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 # the read reply, #323), and then they ride with the
                 # agentic notes.
                 reference_marks = _reference_marks_note(
-                    quoted_ext_ids, user_id, labels=pick_labels)
+                    quoted_ext_ids, user_id, labels=pick_labels,
+                    intro_verdicts=_intro_verdicts(rendered_read_ids,
+                                                   user_id))
                 ca_note = None
                 if ca_turn == "read_again":
                     ca_note = CA_READ_AGAIN_TURN

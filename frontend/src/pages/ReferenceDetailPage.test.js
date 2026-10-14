@@ -97,7 +97,9 @@ test('a tweet shows its stored text in the card, with no embed and no toggle', a
   expect(screen.queryByText('Archive tweet')).toBeNull();
 
   expect(screen.getByRole('link', { name: 'Twitter ↗' })).toHaveAttribute('href', tweet.url);
-  expect(screen.getByRole('button', { name: 'Good quote' })).toBeInTheDocument();
+  // A tweet's verdict is named as on its gleaning pick (#502).
+  expect(screen.getByRole('button', { name: 'Good tweet' })).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Bad tweet' })).toBeInTheDocument();
   expect(screen.getByRole('button', { name: 'Mark as unread' })).toBeInTheDocument();
   expect(screen.getByText(/^Shown by Loore 1× · last /)).toBeInTheDocument();
 });
@@ -113,6 +115,8 @@ test('a page shows its source, byline, title once and the text', async () => {
   expect(text).toContain('The first paragraph of the essay.');
   expect(text).not.toContain('On slow evenings');
   expect(screen.getByRole('link', { name: 'Open page ↗' })).toHaveAttribute('href', page.url);
+  // Not a tweet: the verdict keeps its quote labels (#502).
+  expect(screen.getByRole('button', { name: 'Good quote' })).toBeInTheDocument();
   expect(screen.getByText(/Not yet shown by Loore in a conversation/)).toBeInTheDocument();
 });
 

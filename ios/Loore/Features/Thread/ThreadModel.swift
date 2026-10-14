@@ -229,6 +229,14 @@ final class ThreadModel {
         quotes.external[itemId] = copy
     }
 
+    /// A gleaning pick's other verdict, on Loore's intro to it (#502).
+    func updateExternalIntroVerdict(_ itemId: Int, verdict: String?) {
+        guard let item = quotes.external[itemId] ?? nil else { return }
+        var copy = item
+        copy.introVerdict = verdict
+        quotes.external[itemId] = copy
+    }
+
     // MARK: Read reply picks (web NodeDetail `pickIds`, ReadReplyTail)
 
     /// A read reply's picks: its `{quote_ext:N}` markers, in order, once each.

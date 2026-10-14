@@ -1136,6 +1136,10 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
       ? { ...prev, [itemId]: { ...prev[itemId], feedback, feedback_shared: false } }
       : prev
   ));
+  // A gleaning pick's other verdict, on Loore's intro to it (#502).
+  const handleExternalIntroVerdictChange = (itemId, verdict) => setExternalQuotes(prev => (
+    prev[itemId] ? { ...prev, [itemId]: { ...prev[itemId], intro_verdict: verdict } } : prev
+  ));
   const handlePicksMarkedAll = (readAt) => setExternalQuotes(prev => {
     const next = { ...prev };
     Object.entries(readAt).forEach(([itemId, ts]) => {
@@ -1580,6 +1584,7 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
                 nodeId={node.id}
                 onExternalReadChange={handleExternalReadChange}
                 onExternalFeedbackChange={handleExternalFeedbackChange}
+                onExternalIntroVerdictChange={handleExternalIntroVerdictChange}
                 showRecommendationFeedback={isLlmNode}
                 referenceBackLabel={isReadReply ? GLEANINGS_TITLE : undefined}
                 contextArtifacts={node.context_artifacts || null}
@@ -1620,6 +1625,7 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
               nodeId={node.id}
               onExternalReadChange={handleExternalReadChange}
               onExternalFeedbackChange={handleExternalFeedbackChange}
+              onExternalIntroVerdictChange={handleExternalIntroVerdictChange}
               showRecommendationFeedback={isLlmNode}
               referenceBackLabel={isReadReply ? GLEANINGS_TITLE : undefined}
               contextArtifacts={node.context_artifacts || null}

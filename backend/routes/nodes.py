@@ -1217,8 +1217,14 @@ def _recommendation_fields(rec, item, counted):
     (see utils/reference_log), `feedback_shared` says it was given
     elsewhere (a parallel read), and `rated_before` carries the verdict
     the model could already see when it chose, for the "You rated this …"
-    line beside an empty control."""
-    from backend.utils.reference_log import rated_before
+    line beside an empty control.
+
+    Owner only, like the rest (both callers send it to the reply's owner
+    alone). A gleaning's pick (kind 'read') also carries the verdict on
+    Loore's intro to the tweet (`intro_verdict`, #502), and
+    `recommendation_kind` tells the card it is one: the card then shows
+    the pick's own pair under it instead of the tweet's in its footer."""
+    from backend.utils.reference_log import KIND_READ, rated_before
     out = counted.get(rec.id)
     before = rated_before(rec, item)
     return {
@@ -1227,6 +1233,8 @@ def _recommendation_fields(rec, item, counted):
         "rated_before": ({"feedback": before["verdict"],
                           "at": iso_utc(before["at"])} if before else None),
         "recommendation_id": rec.id,
+        "recommendation_kind": rec.kind,
+        "intro_verdict": rec.intro_verdict if rec.kind == KIND_READ else None,
     }
 
 
@@ -1286,6 +1294,69 @@ def mark_feed_picks_read(node_id):
         read_at[row.item.id] = iso_utc(row.item.read_at)
     db.session.commit()
     return jsonify({"node_id": node.id, "read_at": read_at})
+
+
+PICK_VERDICT_VALUES = ("good", "bad")
+
+
+@nodes_bp.route("/<int:node_id>/feed-picks/<int:item_id>/verdict",
+                methods=["POST"])
+@login_required
+def set_pick_verdict(node_id, item_id):
+    """The verdicts on one pick of a gleaning (#502, option B, Peter
+    2026-10-14): on Loore's intro to the tweet and on the tweet itself,
+    each 'good', 'bad' or null (unrated). Body: {"intro": ..., "tweet":
+    ...}; a key left out leaves that part as it is, so the pick-level tap
+    sets both in one request and a part's tap sends only its own.
+
+    The tweet's verdict is the reference's verdict, stored and counted as
+    from POST /external/items/<id>/feedback (ExternalItem.feedback, a
+    ReferenceAction logged against this gleaning, which marks the tweet
+    read). The intro's verdict is the pick row's (FeedPick.intro_verdict):
+    its value and time only, never the intro's text. It does not mark the
+    tweet read: it judges what Loore wrote about the tweet.
+
+    Owner only, on a live gleaning of theirs; 404 for a pick the gleaning
+    does not have (or one hidden by a waiting deletion)."""
+    from backend.models import ExternalItem, FeedPick
+    from backend.routes.external import apply_item_feedback
+    from backend.utils.reference_log import KIND_READ
+    node = _visible_node(node_id)
+    if node is None:
+        return _node_not_found()
+    if (node.human_owner_id or node.user_id) != current_user.id:
+        return jsonify({"error": "Unauthorized"}), 403
+    pick = FeedPick.query.filter_by(
+        node_id=node.id, external_item_id=item_id, kind=KIND_READ,
+        user_id=current_user.id).first()
+    item = (ExternalItem.query.filter_by(id=item_id, user_id=current_user.id)
+            .first() if pick is not None else None)
+    if pick is None or item is None:
+        return jsonify({"error": "not found"}), 404
+    data = request.get_json(silent=True) or {}
+    parts = [k for k in ("intro", "tweet") if k in data]
+    if not parts:
+        return jsonify({"error": "give 'intro' and/or 'tweet'"}), 400
+    for k in parts:
+        if data[k] is not None and data[k] not in PICK_VERDICT_VALUES:
+            return jsonify({
+                "error": f"{k} must be 'good', 'bad' or null"}), 400
+    if "intro" in data:
+        pick.intro_verdict = data["intro"]
+        pick.intro_verdict_at = datetime.utcnow() if data["intro"] else None
+    if "tweet" in data:
+        apply_item_feedback(item, data["tweet"], node_id=node.id)
+    db.session.commit()
+    # The marks as the card shows them: `feedback` is the tweet verdict
+    # that counts for this pick (#352), as resolve-quotes sends it.
+    from backend.utils.reference_log import outcomes
+    answer = {
+        "node_id": node.id,
+        "item_id": item.id,
+        "read_at": iso_utc(item.read_at) if item.read_at else None,
+    }
+    answer.update(_recommendation_fields(pick, item, outcomes([pick])))
+    return jsonify(answer), 200
 
 
 @nodes_bp.route("/<int:node_id>", methods=["GET"])
