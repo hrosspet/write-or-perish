@@ -196,14 +196,14 @@ struct ExternalQuoteBubble: View {
             FlowLayout(spacing: 16, lineSpacing: 4) {
                 if quote.url != nil {
                     Button { openOriginal(quote, mine: mine) } label: {
-                        Text(isTweet ? "Open on X ↗" : "Open original ↗")
+                        Text(isTweet ? "Twitter ↗" : "Open original ↗")
                             .font(LooreFont.sans(12.8, .regular))
                             .foregroundStyle(LooreColor.textMuted)
                             .padding(.vertical, 10)
                             .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
-                    .accessibilityHint(isTweet ? "Opens the tweet on X" : "Opens the original")
+                    .accessibilityHint(isTweet ? "Opens the tweet on Twitter" : "Opens the original")
                     .accessibilityIdentifier("quote.openOriginal")
                 }
                 if mine {

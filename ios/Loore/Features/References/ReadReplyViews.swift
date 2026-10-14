@@ -268,7 +268,7 @@ struct FeedPicksView: View {
                 HStack(spacing: 10) {
                     if let posted = item.postedAt { Text(LooreDateFormat.date(posted, relative: false)) }
                     if let link = item.url, let url = URL(string: link) {
-                        Button("Open on X") {
+                        Button("Twitter ↗") {
                             app.open(.external(url))
                             Task { await model.openedOnX(index) }
                         }

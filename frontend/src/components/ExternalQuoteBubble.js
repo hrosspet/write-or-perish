@@ -32,7 +32,7 @@ const hostOf = (url) => {
  * The card (#435, Peter 2026-10-09): the author's display name when the
  * archive has one, the @handle and the date (no avatar, no "Saved from"
  * line), the text cut at 500 characters with "…", then the actions:
- * "Open on X", the good / bad verdict (ReferenceFeedback) and "Mark as
+ * "Twitter ↗", the good / bad verdict (ReferenceFeedback) and "Mark as
  * read". Tapping the card itself opens the reference's page in Loore
  * (/references/<id>: the full text, the listen button, the verdict);
  * the action buttons never also open it. Only the reference's owner can
@@ -48,7 +48,7 @@ const hostOf = (url) => {
  * step with the bubbles.
  *
  * Opening the post is reading it, and so is judging it: the owner's
- * "Open on X" marks the reference read as the tab opens, a good / bad
+ * "Twitter ↗" marks the reference read as the tab opens, a good / bad
  * verdict marks it read server-side, and "Mark as unread" stays for the
  * ones to come back to. Opening the reference page in Loore is not a
  * read (a skim is not a read).
@@ -184,9 +184,9 @@ const ExternalQuoteBubble = ({ quote, nodeId, onReadChange, onFeedbackChange, sh
             type="button"
             className="ext-quote-open"
             onClick={openOriginal}
-            title={isTweet ? 'Open the tweet on X in a new tab' : 'Open the original in a new tab'}
+            title={isTweet ? 'Open the tweet on Twitter in a new tab' : 'Open the original in a new tab'}
           >
-            {isTweet ? 'Open on X ↗' : 'Open original ↗'}
+            {isTweet ? 'Twitter ↗' : 'Open original ↗'}
           </button>
         )}
         {mine && showRecommendationFeedback && (

@@ -436,7 +436,7 @@ code {
   color: var(--text-muted);
   white-space: normal;
 }
-/* "Open on X": a quiet text button with a tap target a finger can hit. */
+/* "Twitter ↗": a quiet text button with a tap target a finger can hit. */
 .ext-quote-open {
   padding: 10px 0;
   border: 0;

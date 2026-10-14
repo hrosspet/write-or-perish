@@ -49,7 +49,7 @@ beforeEach(() => {
   window.open = jest.fn();
 });
 
-const openOnX = () => screen.getByRole('button', { name: 'Open on X ↗' });
+const openOnX = () => screen.getByRole('button', { name: 'Twitter ↗' });
 
 test('the owner gets a Mark as read toggle that does not open the post', async () => {
   api.post.mockResolvedValue({ data: { id: 42, read_at: '2026-09-13T08:00:00Z' } });
