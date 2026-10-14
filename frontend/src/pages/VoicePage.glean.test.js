@@ -189,20 +189,37 @@ test('a Reflect session has no Glean button at any turn', async () => {
   expect(glean()).toBeNull();
 });
 
-test("the Glean button's tooltip is Loore's, also while it waits for the reply", async () => {
+test('the Glean button on the voice screen has no tooltip, in any state', async () => {
+  // Peter, 2026-10-14. Screen readers still name and describe it.
   renderAt('/voice?glean=1');
   await screen.findByText("What's on your mind?");
   act(() => { mockSessionOptions.onEntrySaved(); });
-  const button = glean();
-  expect(button).toBeDisabled();
-  expect(button).not.toHaveAttribute('title');
-  // The button itself is described, always (#435 review), as by `title`.
-  expect(document.getElementById(button.getAttribute('aria-describedby')))
-    .toHaveTextContent("Glean waits for Loore's reply to your last message");
-  // The wrapper carries the hover: a disabled button gets none.
-  fireEvent.mouseEnter(button.parentElement);
-  const tip = await screen.findByRole('tooltip');
-  expect(tip).toHaveTextContent("Glean waits for Loore's reply to your last message");
+  // Fake timers: a tooltip that opens after a pause would open here.
+  jest.useFakeTimers();
+  try {
+    const hoverShowsNothing = (button) => {
+      expect(button).not.toHaveAttribute('title');
+      fireEvent.mouseEnter(button);
+      fireEvent.mouseEnter(button.parentElement);
+      fireEvent.focus(button);
+      act(() => { jest.advanceTimersByTime(1000); });
+      expect(screen.queryByRole('tooltip')).toBeNull();
+    };
+    // Waiting for the reply.
+    expect(glean()).toBeDisabled();
+    hoverShowsNothing(glean());
+    expect(document.getElementById(glean().getAttribute('aria-describedby')))
+      .toHaveTextContent("Glean waits for Loore's reply to your last message");
+    // Ready.
+    mockThreadParent = 55;
+    act(() => { mockSessionOptions.onLLMComplete(55, 'A reply.'); });
+    expect(glean()).toBeEnabled();
+    hoverShowsNothing(glean());
+    expect(document.getElementById(glean().getAttribute('aria-describedby')))
+      .toHaveTextContent("Find today's tweets worth your time");
+  } finally {
+    jest.useRealTimers();
+  }
 });
 
 test('a user with Glean off gets no Glean button, even from a Glean link', async () => {

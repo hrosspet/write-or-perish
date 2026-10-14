@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useRef, useEffect } from 'react';
+import React, { useState, useCallback, useRef, useEffect, useId } from 'react';
 import { useSearchParams, useNavigate, Link } from 'react-router-dom';
 import { FaPlay, FaPause, FaUndo, FaRedo, FaKeyboard } from 'react-icons/fa';
 import { useVoiceSession } from '../hooks/useVoiceSession';
@@ -6,7 +6,6 @@ import { useAsyncTaskPolling } from '../hooks/useAsyncTaskPolling';
 import { useUser } from '../contexts/UserContext';
 import { useInterruptedRecovery } from '../hooks/useInterruptedRecovery';
 import RecoveryBanner from '../components/RecoveryBanner';
-import LooreTooltip from '../components/LooreTooltip';
 import OfflineBanner from '../components/OfflineBanner';
 import ProposalInline from '../components/ProposalInline';
 import { useToast } from '../contexts/ToastContext';
@@ -437,6 +436,7 @@ function VoiceSession({ recovery, blocked, threadId, onAiUsageRefused, onFinishI
     !resumeId && parentId ? Number(parentId) : null);
   const [gleanStarting, setGleanStarting] = useState(false);
   const [gleanNodeId, setGleanNodeId] = useState(null);
+  const gleanDescId = useId();
   const getThreadParentIdRef = useRef(null);
 
   const {
@@ -531,26 +531,27 @@ function VoiceSession({ recovery, blocked, threadId, onAiUsageRefused, onFinishI
       })
       .finally(() => setGleanStarting(false));
   };
-  // Under the record button, once the thread has a recorded message.
-  // The tooltip takes hover on a wrapper (`wrap`): a disabled button (while
-  // Loore's reply is still coming) gets no hover events in some browsers.
-  // Its text stays the button's own description.
+  // Under the record button, once the thread has a recorded message. No
+  // tooltip on the voice screen (Peter, 2026-10-14): the button is named
+  // by its label, and screen readers still get the description (as the
+  // app's VoiceOver hint), from text that is not shown.
   const gleanButton = gleanMode && hasMessage ? (
-    <LooreTooltip
-      wrap
-      text={gleanAnchor || gleaning ? "Find today's tweets worth your time, from what you have said so far"
-        : "Glean waits for Loore's reply to your last message"}
-    >
+    <>
       <button
         type="button"
         onClick={handleGlean}
         disabled={!gleanReady}
         aria-busy={gleaning}
+        aria-describedby={gleanDescId}
         style={gleanButtonStyle(gleanReady)}
       >
         {gleaning ? (<><Spinner /><span>Gleaning</span></>) : 'Glean'}
       </button>
-    </LooreTooltip>
+      <span id={gleanDescId} className="sr-only">
+        {gleanAnchor || gleaning ? "Find today's tweets worth your time, from what you have said so far"
+          : "Glean waits for Loore's reply to your last message"}
+      </span>
+    </>
   ) : null;
 
   const displayTime = audio.cumulativeTime || 0;
