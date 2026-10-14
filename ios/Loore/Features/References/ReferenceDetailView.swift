@@ -11,6 +11,8 @@ import SwiftUI
 /// text is the tweet. Under the card, how often Loore showed it.
 struct ReferenceDetailView: View {
     let itemId: Int
+    /// The reply whose quote card opened the page: the open mark is logged against it.
+    var fromNode: Int?
 
     @Environment(AppState.self) private var app
     @State private var item: ExternalItem?
@@ -293,12 +295,30 @@ struct ReferenceDetailView: View {
     private func load() async {
         guard item == nil else { return }
         do {
-            item = try await app.api.get(APIPath.externalItem(itemId))
+            var loaded: ExternalItem = try await app.api.get(APIPath.externalItem(itemId))
+            // Opening the page is reading it (Peter, 2026-10-14), as on the web:
+            // once per open (`.task` runs once per appearance), before the card
+            // shows, so it never flashes "Mark as read". A failed mark leaves the
+            // reference as loaded.
+            if let marked = try? await Self.markOpened(itemId: loaded.id, fromNode: fromNode, api: app.api) {
+                loaded.readAt = marked
+                app.signals.post(.referencesChanged)
+            }
+            item = loaded
         } catch let failure as APIError {
             error = failure.isNotFound ? "This reference does not exist or was deleted." : "Error loading reference."
         } catch {
             self.error = "Error loading reference."
         }
+    }
+
+    /// `POST /external/items/<id>/read {via: 'open', node_id?}`: logs the open and
+    /// marks an unread reference read (a read one keeps its date). Returns `read_at`.
+    static func markOpened(itemId: Int, fromNode: Int?, api: APIClient) async throws -> Date? {
+        var body: [String: JSONValue] = ["via": .string("open")]
+        if let fromNode { body["node_id"] = .int(fromNode) }
+        let answer: ReadMarkAnswer = try await api.post(APIPath.externalItemRead(itemId), json: .object(body))
+        return answer.readAt
     }
 
     /// Opening the original is reading it, as on the gleaning card: the open
@@ -308,7 +328,7 @@ struct ReferenceDetailView: View {
         if !marking { setRead(true, via: "open") }
     }
 
-    /// Only the user marks a reference read; opening this page is not a read.
+    /// Only the user marks a reference read (opening this page does, in `load`).
     private func setRead(_ want: Bool, via: String? = nil) {
         guard let current = item else { return }
         marking = true

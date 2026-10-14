@@ -36,7 +36,9 @@ enum AppRoute: Hashable, Sendable {
     /// `/artifacts?create=1`: the new-artifact form.
     case newArtifact
     case references
-    case reference(id: Int)
+    /// `fromNode`: the reply whose quote card opened it; the page logs its
+    /// open mark against that reply (#352). nil from the list or search.
+    case reference(id: Int, fromNode: Int? = nil)
     case prompts
     case prompt(key: String)
     /// `anchor` is the web hash: email, x, model, references, ai-usage, craft.

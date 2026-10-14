@@ -103,7 +103,7 @@ extension AppRoute {
         case .artifacts(let kind): return kind.map { "/artifacts/\($0)" } ?? "/artifacts"
         case .newArtifact: return "/artifacts?create=1"
         case .references: return "/references"
-        case .reference(let id): return "/references/\(id)"
+        case .reference(let id, _): return "/references/\(id)"
         case .prompts: return "/prompts"
         case .prompt(let key): return "/prompts/\(key)"
         case .account(let anchor): return "/account" + (anchor.map { "#\($0)" } ?? "")

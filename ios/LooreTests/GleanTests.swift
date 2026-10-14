@@ -135,6 +135,43 @@ final class GleanRouteTests: XCTestCase {
         XCTAssertEqual(router.selectedTab, .log, "not the More tab, where References live")
         XCTAssertEqual(router.path(for: .log), [.thread(id: 5, awaitLLM: nil), .reference(id: 31)])
     }
+
+    @MainActor
+    func testTheCardPassesItsReplyToTheReferencePage() {
+        let router = Router()
+        router.selectedTab = .log
+        router.paths[.log] = [.thread(id: 5, awaitLLM: nil)]
+        router.push(.reference(id: 31, fromNode: 5))
+        XCTAssertEqual(router.path(for: .log), [.thread(id: 5, awaitLLM: nil), .reference(id: 31, fromNode: 5)])
+        XCTAssertNotEqual(AppRoute.reference(id: 31, fromNode: 5), AppRoute.reference(id: 31))
+        XCTAssertEqual(AppRoute.parse("/references/31", environment: .production), .reference(id: 31))
+    }
+
+    /// Opening the reference page marks it read (Peter, 2026-10-14): the open is
+    /// logged once, against the reply the card was in when there is one.
+    func testOpeningTheReferencePageLogsTheOpenAgainstItsReply() async throws {
+        StubURLProtocol.install { _ in .json(200, #"{"id": 31, "read_at": "2026-10-14T09:00:00Z"}"#) }
+        defer { StubURLProtocol.reset() }
+        let api = makeStubbedClient()
+        let readAt = try await ReferenceDetailView.markOpened(itemId: 31, fromNode: 5, api: api)
+        XCTAssertNotNil(readAt)
+        let request = try XCTUnwrap(StubURLProtocol.requests.first)
+        XCTAssertEqual(request.httpMethod, "POST")
+        XCTAssertEqual(request.url?.path, "/api/external/items/31/read")
+        let sent = try XCTUnwrap(JSONSerialization.jsonObject(with: try XCTUnwrap(request.httpBody)) as? [String: Any])
+        XCTAssertEqual(sent["via"] as? String, "open")
+        XCTAssertEqual(sent["node_id"] as? Int, 5)
+    }
+
+    func testOpeningItFromTheListSendsNoNodeId() async throws {
+        StubURLProtocol.install { _ in .json(200, #"{"id": 31, "read_at": "2026-10-14T09:00:00Z"}"#) }
+        defer { StubURLProtocol.reset() }
+        _ = try await ReferenceDetailView.markOpened(itemId: 31, fromNode: nil, api: makeStubbedClient())
+        let request = try XCTUnwrap(StubURLProtocol.requests.first)
+        let sent = try XCTUnwrap(JSONSerialization.jsonObject(with: try XCTUnwrap(request.httpBody)) as? [String: Any])
+        XCTAssertEqual(sent["via"] as? String, "open")
+        XCTAssertNil(sent["node_id"])
+    }
 }
 
 @MainActor

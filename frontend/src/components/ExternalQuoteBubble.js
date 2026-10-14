@@ -50,8 +50,10 @@ const hostOf = (url) => {
  * Opening the post is reading it, and so is judging it: the owner's
  * "Twitter ↗" marks the reference read as the tab opens, a good / bad
  * verdict marks it read server-side, and "Mark as unread" stays for the
- * ones to come back to. Opening the reference page in Loore is not a
- * read (a skim is not a read).
+ * ones to come back to. Opening the reference page in Loore is a read
+ * too (Peter, 2026-10-14), but the page itself marks it, so the mark
+ * does not race the page's own load: the card only passes the reply's
+ * id in the navigation state.
  *
  * `nodeId` is the reply the bubble is in. Opens, marks and verdicts are
  * logged against it (#352), and for a recommendation the server sends
@@ -120,7 +122,7 @@ const ExternalQuoteBubble = ({ quote, nodeId, onReadChange, onFeedbackChange, sh
   const openReference = () => {
     if (!mine) return;
     const state = nodeId
-      ? { backTo: `/node/${nodeId}`, backLabel: backLabel || 'Back to the thread' }
+      ? { backTo: `/node/${nodeId}`, backLabel: backLabel || 'Back to the thread', nodeId }
       : undefined;
     navigate(`/references/${quote.id}`, { state });
   };

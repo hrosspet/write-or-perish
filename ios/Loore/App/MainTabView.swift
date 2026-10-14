@@ -87,8 +87,8 @@ struct RouteDestination: View {
             WorkspaceView(pinned: route.workspaceDocument)
         case .references:
             ReferencesView()
-        case .reference(let id):
-            ReferenceDetailView(itemId: id)
+        case .reference(let id, let fromNode):
+            ReferenceDetailView(itemId: id, fromNode: fromNode)
         case .prompts:
             PromptsView()
         case .prompt(let key):

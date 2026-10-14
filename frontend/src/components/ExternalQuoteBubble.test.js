@@ -18,7 +18,7 @@ function ReferenceStub() {
   const { id } = useParams();
   const location = useLocation();
   const state = location.state || {};
-  return <div>{`Reference page ${id}${state.backTo ? ` back to ${state.backTo} (${state.backLabel})` : ''}`}</div>;
+  return <div>{`Reference page ${id}${state.backTo ? ` back to ${state.backTo} (${state.backLabel}) node ${state.nodeId}` : ''}`}</div>;
 }
 
 const render = (ui) => rtlRender(
@@ -157,8 +157,8 @@ test('tapping the card opens the reference page in Loore, not the post on X', ()
   render(<ExternalQuoteBubble quote={quote()} nodeId={5} backLabel="Today's gleanings" />);
   fireEvent.click(screen.getByText('Singing was the original psychedelic.'));
   expect(window.open).not.toHaveBeenCalled();
-  expect(api.post).not.toHaveBeenCalled(); // opening the page is not a read
-  expect(screen.getByText("Reference page 42 back to /node/5 (Today's gleanings)")).toBeInTheDocument();
+  expect(api.post).not.toHaveBeenCalled(); // the page marks it, not the card
+  expect(screen.getByText("Reference page 42 back to /node/5 (Today's gleanings) node 5")).toBeInTheDocument();
 });
 
 test('the card opens the reference page from the keyboard too', () => {

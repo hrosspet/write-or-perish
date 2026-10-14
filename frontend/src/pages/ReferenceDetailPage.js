@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
 import { FiFileText, FiMessageSquare, FiPlayCircle } from 'react-icons/fi';
 import api from '../api';
@@ -86,6 +86,8 @@ function ReferenceDetailPage() {
   const location = useLocation();
   const backTo = location.state && location.state.backTo;
   const backLabel = (location.state && location.state.backLabel) || 'Back to the thread';
+  // The reply the card was in: the open mark is logged against it (#352).
+  const fromNodeId = location.state && location.state.nodeId;
   const { addToast } = useToast();
   const [item, setItem] = useState(null);
   const [error, setError] = useState('');
@@ -100,16 +102,38 @@ function ReferenceDetailPage() {
   // edit waits here for the answer.
   const [pendingEdit, setPendingEdit] = useState(null);
 
+  // Opening the page is reading it (Peter, 2026-10-14): once per open,
+  // the page loads the reference and then logs the open
+  // ({via: 'open', node_id}) as "Twitter ↗" does, which marks an unread
+  // one read (a read one keeps its date). The load and the mark are one
+  // promise kept in a ref, so React StrictMode's second effect run
+  // reuses it instead of logging the open twice, and the page shows the
+  // marked state at once. Only the owner can open the page (404 for
+  // anyone else), so there is no one else to exclude. "Mark as unread"
+  // afterwards sticks: nothing marks again until the page is reopened.
+  const opening = useRef({ id: null, promise: null });
   useEffect(() => {
     setItem(null);
     setError('');
-    api.get(`/external/items/${id}`)
-      .then((res) => setItem(res.data))
+    if (opening.current.id !== id) {
+      const promise = api.get(`/external/items/${id}`).then((res) => {
+        const loaded = res.data;
+        const body = { via: 'open', ...(fromNodeId ? { node_id: fromNodeId } : {}) };
+        return Promise.resolve(api.post(`/external/items/${loaded.id}/read`, body))
+          .then((marked) => ({ ...loaded, read_at: marked.data.read_at }))
+          .catch(() => loaded);
+      });
+      opening.current = { id, promise };
+    }
+    opening.current.promise
+      .then((loaded) => setItem(loaded))
       .catch((err) => {
         setError(err.response && err.response.status === 404
           ? 'This reference does not exist or was deleted.'
           : 'Error loading reference.');
       });
+    // fromNodeId is read once per open; a new id is a new open.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
   useEffect(() => {
@@ -132,9 +156,8 @@ function ReferenceDetailPage() {
       .finally(() => setDeleting(false));
   };
 
-  // Only the user marks a reference read. Opening the page is not a
-  // read (a skim is not a read), and the AI surfacing it is tracked
-  // separately as surfaced_count.
+  // Only the user marks a reference read (opening this page does, above).
+  // The AI surfacing it is tracked separately as surfaced_count.
   const setRead = (want, via) => {
     setMarking(true);
     const req = want

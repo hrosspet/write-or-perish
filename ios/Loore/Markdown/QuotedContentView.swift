@@ -119,8 +119,8 @@ struct InlineQuoteBubble: View {
 /// can open that page, so for anyone else the card is not tappable.
 ///
 /// Opening the post is reading it: the owner's "Open on X" marks it read. A
-/// verdict marks it read server-side. Opening the reference page in Loore does
-/// not (a skim is not a read, #352).
+/// verdict marks it read server-side. So does opening the reference page in
+/// Loore (Peter, 2026-10-14), but the page marks it, with this reply's id.
 struct ExternalQuoteBubble: View {
     let quote: ResolvedQuotes.QuotedExternal?
     var loaded = true
@@ -245,7 +245,7 @@ struct ExternalQuoteBubble: View {
 
     /// The reference's page in Loore, pushed over the thread (Back returns to it).
     private func openReference(_ quote: ResolvedQuotes.QuotedExternal) {
-        app.router.push(.reference(id: quote.id))
+        app.router.push(.reference(id: quote.id, fromNode: nodeId))
     }
 
     private func openOriginal(_ quote: ResolvedQuotes.QuotedExternal, mine: Bool) {

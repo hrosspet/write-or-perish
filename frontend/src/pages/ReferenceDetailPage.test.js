@@ -57,10 +57,10 @@ const video = {
   url: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=90',
 };
 
-const show = (item) => {
+const show = (item, state) => {
   api.get.mockResolvedValue({ data: item });
   return render(
-    <MemoryRouter initialEntries={[`/references/${item.id}`]}>
+    <MemoryRouter initialEntries={[{ pathname: `/references/${item.id}`, state }]}>
       <Routes>
         <Route path="/references/:id" element={<ReferenceDetailPage />} />
       </Routes>
@@ -72,6 +72,10 @@ beforeEach(() => {
   api.get.mockReset();
   api.post.mockReset();
   api.delete.mockReset();
+  // Opening the page marks the reference read (Peter, 2026-10-14).
+  api.post.mockImplementation((url) => Promise.resolve({
+    data: { id: Number(url.split('/')[3]), read_at: '2026-10-14T09:00:00Z' },
+  }));
   window.open = jest.fn();
 });
 
@@ -94,7 +98,7 @@ test('a tweet shows its stored text in the card, with no embed and no toggle', a
 
   expect(screen.getByRole('link', { name: 'Twitter ↗' })).toHaveAttribute('href', tweet.url);
   expect(screen.getByRole('button', { name: 'Good quote' })).toBeInTheDocument();
-  expect(screen.getByRole('button', { name: 'Mark as read' })).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Mark as unread' })).toBeInTheDocument();
   expect(screen.getByText(/^Shown by Loore 1× · last /)).toBeInTheDocument();
 });
 
@@ -109,7 +113,7 @@ test('a page shows its source, byline, title once and the text', async () => {
   expect(text).toContain('The first paragraph of the essay.');
   expect(text).not.toContain('On slow evenings');
   expect(screen.getByRole('link', { name: 'Open page ↗' })).toHaveAttribute('href', page.url);
-  expect(screen.getByText('Not yet shown by Loore in a conversation')).toBeInTheDocument();
+  expect(screen.getByText(/Not yet shown by Loore in a conversation/)).toBeInTheDocument();
 });
 
 test('a video keeps its player in the card and its description behind the toggle', async () => {
@@ -126,10 +130,53 @@ test('a video keeps its player in the card and its description behind the toggle
   expect(screen.getByRole('link', { name: 'YouTube ↗' })).toHaveAttribute('href', video.url);
 });
 
-test('the link out logs the open and marks the reference read', async () => {
-  api.post.mockResolvedValue({ data: { id: 42, read_at: '2026-10-13T09:00:00Z' } });
+test('opening the page marks the reference read once, against the reply it was opened from', async () => {
+  show(tweet, { backTo: '/node/5', nodeId: 5 });
+  expect(await screen.findByRole('button', { name: 'Mark as unread' })).toBeInTheDocument();
+  expect(api.post).toHaveBeenCalledTimes(1);
+  expect(api.post).toHaveBeenCalledWith('/external/items/42/read', { via: 'open', node_id: 5 });
+  expect(screen.getByText(/you read it/)).toBeInTheDocument();
+});
+
+test('opened from anywhere else, the mark carries no node id', async () => {
   show(tweet);
-  fireEvent.click(await screen.findByRole('link', { name: 'Twitter ↗' }));
+  expect(await screen.findByRole('button', { name: 'Mark as unread' })).toBeInTheDocument();
+  expect(api.post).toHaveBeenCalledTimes(1);
+  expect(api.post).toHaveBeenCalledWith('/external/items/42/read', { via: 'open' });
+});
+
+test('StrictMode does not log the open twice', async () => {
+  api.get.mockResolvedValue({ data: tweet });
+  render(
+    <React.StrictMode>
+      <MemoryRouter initialEntries={['/references/42']}>
+        <Routes><Route path="/references/:id" element={<ReferenceDetailPage />} /></Routes>
+      </MemoryRouter>
+    </React.StrictMode>,
+  );
+  expect(await screen.findByRole('button', { name: 'Mark as unread' })).toBeInTheDocument();
+  expect(api.post).toHaveBeenCalledTimes(1);
+});
+
+test('a failed open mark still shows the reference, unread', async () => {
+  api.post.mockRejectedValue(new Error('boom'));
+  show(tweet);
+  expect(await screen.findByRole('button', { name: 'Mark as read' })).toBeInTheDocument();
+});
+
+test('Mark as unread after the open mark stays unread', async () => {
+  api.delete.mockResolvedValue({ data: { id: 42, read_at: null } });
+  show(tweet);
+  fireEvent.click(await screen.findByRole('button', { name: 'Mark as unread' }));
+  expect(await screen.findByRole('button', { name: 'Mark as read' })).toBeInTheDocument();
+  expect(api.post).toHaveBeenCalledTimes(1);
+});
+
+test('the link out logs the open and marks the reference read', async () => {
+  show(tweet);
+  await screen.findByRole('button', { name: 'Mark as unread' });
+  api.post.mockClear();
+  fireEvent.click(screen.getByRole('link', { name: 'Twitter ↗' }));
 
   expect(api.post).toHaveBeenCalledWith('/external/items/42/read', { via: 'open' });
   await waitFor(() => expect(screen.getByRole('button', { name: 'Mark as unread' })).toBeInTheDocument());
@@ -139,23 +186,23 @@ test('the link out logs the open and marks the reference read', async () => {
 });
 
 test('Mark as read and Mark as unread toggle the mark', async () => {
-  api.post.mockResolvedValue({ data: { id: 42, read_at: '2026-10-13T09:00:00Z' } });
   api.delete.mockResolvedValue({ data: { id: 42, read_at: null } });
   show(tweet);
 
-  fireEvent.click(await screen.findByRole('button', { name: 'Mark as read' }));
-  expect(api.post).toHaveBeenCalledWith('/external/items/42/read', {});
   fireEvent.click(await screen.findByRole('button', { name: 'Mark as unread' }));
   expect(api.delete).toHaveBeenCalledWith('/external/items/42/read');
-  expect(await screen.findByRole('button', { name: 'Mark as read' })).toBeInTheDocument();
+  fireEvent.click(await screen.findByRole('button', { name: 'Mark as read' }));
+  expect(api.post).toHaveBeenLastCalledWith('/external/items/42/read', {});
+  expect(await screen.findByRole('button', { name: 'Mark as unread' })).toBeInTheDocument();
   expect(window.open).not.toHaveBeenCalled();
 });
 
 test('the kebab keeps Open source, Edit and Delete', async () => {
   show(page);
   fireEvent.click(await screen.findByRole('button', { name: 'More actions' }));
+  api.post.mockClear();
   fireEvent.click(screen.getByText('Open source'));
   expect(window.open).toHaveBeenCalledWith(page.url, '_blank', 'noopener,noreferrer');
-  // Opening it from the menu is not a read mark (as before).
+  // The menu entry logs no further mark (the page open already did).
   expect(api.post).not.toHaveBeenCalled();
 });
