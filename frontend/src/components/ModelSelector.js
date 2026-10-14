@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useId } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useRef, useId } from 'react';
 import { FaChevronDown, FaCheck } from 'react-icons/fa';
 import api from '../api';
 
@@ -86,6 +86,7 @@ const ModelSelector = ({
   const [expanded, setExpanded] = useState(false);
   const [activeId, setActiveId] = useState(null);
   const [dropUp, setDropUp] = useState(false);
+  const [alignRight, setAlignRight] = useState(false);
   const rootRef = useRef(null);
   const triggerRef = useRef(null);
   const listRef = useRef(null);
@@ -163,9 +164,21 @@ const ModelSelector = ({
     closeMenu();
   };
 
+  // A list wider than the room right of the trigger opens leftwards, from
+  // the trigger's right edge (the Glean picker sits at the page's right
+  // edge): spilling past the window widened the page, and the view slid
+  // sideways while the list was open. Measured again when "More models…"
+  // widens it.
+  useLayoutEffect(() => {
+    if (!open || !listRef.current || !rootRef.current) return;
+    const listWidth = listRef.current.getBoundingClientRect().width;
+    const { left } = rootRef.current.getBoundingClientRect();
+    setAlignRight(left + listWidth > document.documentElement.clientWidth);
+  }, [open, expanded]);
+
   // Keys go to the list while it is open.
   useEffect(() => {
-    if (open) listRef.current?.focus();
+    if (open) listRef.current?.focus({ preventScroll: true });
   }, [open]);
 
   useEffect(() => {
@@ -289,8 +302,9 @@ const ModelSelector = ({
           ...styleProp,
         }}
       >
-        <span>{selected ? selected.name : '…'}</span>
-        <FaChevronDown aria-hidden="true" size={10} style={{ color: 'var(--text-muted)' }} />
+        {/* A name wider than a fixed-width trigger ends in "…" and keeps the arrow. */}
+        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{selected ? selected.name : '…'}</span>
+        <FaChevronDown aria-hidden="true" size={10} style={{ color: 'var(--text-muted)', flexShrink: 0 }} />
       </button>
       {open && (
         <div
@@ -304,7 +318,7 @@ const ModelSelector = ({
           style={{
             position: 'absolute',
             [dropUp ? 'bottom' : 'top']: 'calc(100% + 4px)',
-            left: 0,
+            [alignRight ? 'right' : 'left']: 0,
             minWidth: '100%',
             maxHeight: `${MENU_MAX_HEIGHT}px`,
             overflowY: 'auto',

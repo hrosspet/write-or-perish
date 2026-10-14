@@ -1300,7 +1300,7 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
     cursor: 'pointer',
     display: 'inline-flex',
     alignItems: 'center',
-    width: '160px',
+    width: '172px',
     height: '32px',
     boxSizing: 'border-box',
   };
@@ -1337,18 +1337,21 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
   })();
   // Beside the Glean button sits the model picker (Peter, 2026-10-09), the
   // same control and state as in a Glean-card thread; the group is the
-  // other top-right buttons' 160px wide, so it lines up with them.
+  // other top-right buttons' 172px wide, so it lines up with them, and
+  // in their font size. 66px holds "Starting…"; the picker's 106px holds
+  // "GPT-5.6 Luna", the default glean model, and its arrow (a longer
+  // name ends in "…").
   const topGleanBusy = readLoading || llmRequesting || !!llmTaskNodeId || moving;
   // Not on the Glean entry itself: its action row already has Glean and its picker.
   const topGleanButton = newestOwnEntry && !readActions && (
-    <span style={{ display: 'inline-flex', alignItems: 'stretch', width: '160px', height: '32px' }}>
+    <span style={{ display: 'inline-flex', alignItems: 'stretch', width: '172px', height: '32px' }}>
       <LooreTooltip text={GLEAN_TITLE}>
         <button
           type="button"
           onClick={() => handleReadFromNode(gleanTargetOf(newestOwnEntry))}
           disabled={topGleanBusy}
           style={{
-            ...topRightButtonStyle, ...joinedButtonStyle, width: '80px', padding: '0 8px',
+            ...topRightButtonStyle, ...joinedButtonStyle, width: '66px', padding: '0 6px',
           }}
         >
           {readLoading ? 'Starting…' : 'Glean'}
@@ -1360,7 +1363,10 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
         selectedModel={readModel}
         onModelChange={setReadModel}
         disabled={topGleanBusy}
-        style={{ ...joinedPickerStyle, width: '80px', height: '32px', boxSizing: 'border-box' }}
+        style={{
+          ...joinedPickerStyle, width: '106px', height: '32px', boxSizing: 'border-box',
+          padding: '0 8px', gap: '4px', fontSize: topRightButtonStyle.fontSize,
+        }}
       />
     </span>
   );
