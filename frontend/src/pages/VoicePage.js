@@ -431,7 +431,8 @@ function VoiceSession({ recovery, blocked, threadId, onAiUsageRefused, onFinishI
   // first when the server saves the recording.
   const [hasMessage, setHasMessage] = useState(!!threadId);
   // The node a glean starts under: the last finished reply (or the node
-  // the session opened on). Null while a turn's reply is still coming.
+  // the session opened on), or the turn's failed reply. Null while a
+  // turn's reply is still coming.
   const [gleanAnchor, setGleanAnchor] = useState(
     !resumeId && parentId ? Number(parentId) : null);
   const [gleanStarting, setGleanStarting] = useState(false);
@@ -471,6 +472,11 @@ function VoiceSession({ recovery, blocked, threadId, onAiUsageRefused, onFinishI
         }
       }).catch(() => { /* non-fatal */ });
     },
+    // The reply failed: no reply is coming, so Glean stops waiting for it.
+    // The glean starts under the failed reply, which the server turns
+    // into its parent, as for the Glean button under a failed reply in
+    // text mode: it reads the user's message, never the failure.
+    onLLMFailed: (nodeId) => setGleanAnchor(nodeId),
   });
 
   setThreadParentIdRef.current = setThreadParentId;

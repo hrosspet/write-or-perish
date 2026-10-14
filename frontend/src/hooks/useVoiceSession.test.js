@@ -26,8 +26,14 @@ const mockStreaming = {
   isInterrupted: false,
   duration: 0,
 };
+// What the session hands useStreamingTranscription (its onComplete runs
+// when the recording's transcription is final).
+let mockStreamingOptions;
 jest.mock('./useStreamingTranscription', () => ({
-  useStreamingTranscription: () => mockStreaming,
+  useStreamingTranscription: (options) => {
+    mockStreamingOptions = options;
+    return mockStreaming;
+  },
 }));
 jest.mock('./useLongRecordingWarning', () => ({
   useLongRecordingWarning: () => ({ armAlertContext: () => {} }),
@@ -121,10 +127,15 @@ beforeEach(() => {
     llm: { status: 'processing' },
     tts: { status: 'pending' },
     ttsPost: { status: 202, data: { status: 'pending' } },
+    // The next turn's reply.
+    llm43: { status: 'processing' },
   };
   mockGet.mockImplementation((url) => {
     if (url === '/nodes/42/llm-status') {
       return Promise.resolve({ data: { node_id: 42, ...server.llm } });
+    }
+    if (url === '/nodes/43/llm-status') {
+      return Promise.resolve({ data: { node_id: 43, ...server.llm43 } });
     }
     if (url === '/nodes/42/tts-status') {
       return Promise.resolve({ data: { node_id: 42, ...server.tts } });
@@ -218,4 +229,59 @@ test('a reply that failed while the page was away shows the failure on return', 
   expect(mockAddToast).toHaveBeenCalledWith('Break the request into smaller steps.', 8000);
   expect(result.current.phase).toBe('ready');
   expect(result.current.hasError).toBe(true);
+});
+
+// The failed-reply branch ran on every render while the status stayed
+// 'failed' (fixed on main by #504). It also tells the page that no reply
+// is coming (#435: Glean stops waiting), so it must run once, for the node
+// the status is about.
+
+const nextPoll = async () => {
+  act(() => { jest.advanceTimersByTime(1500); });
+  await flush();
+};
+
+const renderWaitingFor = (onLLMFailed) => renderHook(() => useVoiceSession({
+  apiEndpoint: '/voice',
+  ttsTitle: 'Voice',
+  initialLlmNodeId: 42,
+  initialParentId: 41,
+  onLLMFailed,
+}));
+
+test('recording again after a failed reply stays recording', async () => {
+  server.llm = { status: 'failed', error: 'The provider failed.' };
+  const { result, rerender } = renderWaitingFor(jest.fn());
+  await flush();
+  expect(result.current.phase).toBe('ready');
+
+  act(() => result.current.handleStart());
+  rerender();
+  await flush();
+
+  expect(result.current.phase).toBe('recording');
+});
+
+test('the next reply after a failed one is reported failed only for its own failure', async () => {
+  server.llm = { status: 'failed', error: 'The provider failed.' };
+  const onLLMFailed = jest.fn();
+  const { result } = renderWaitingFor(onLLMFailed);
+  await flush();
+  expect(onLLMFailed).toHaveBeenCalledTimes(1);
+  expect(onLLMFailed).toHaveBeenLastCalledWith(42);
+
+  // Record again; the server makes reply 43, still being written.
+  act(() => result.current.handleStart());
+  await act(async () => {
+    await mockStreamingOptions.onComplete({ sessionId: 's2', content: 'again', llmNodeId: 43 });
+  });
+  await flush();
+  expect(result.current.phase).toBe('processing');
+  expect(onLLMFailed).toHaveBeenCalledTimes(1);
+
+  server.llm43 = { status: 'failed', error: 'It failed again.' };
+  await nextPoll();
+  expect(onLLMFailed).toHaveBeenCalledTimes(2);
+  expect(onLLMFailed).toHaveBeenLastCalledWith(43);
+  expect(result.current.phase).toBe('ready');
 });

@@ -91,6 +91,23 @@ test('a reply that fails afterwards leaves the entry counted and Voice ready', a
   expect(onEntrySaved).toHaveBeenCalledTimes(1);
 });
 
+test('a failed reply is reported to the page once, with its node (#435: Glean stops waiting)', async () => {
+  mockPolling = {
+    data: { node_id: 7, content: '' }, status: 'failed', error: 'Provider error',
+  };
+  const onLLMFailed = jest.fn();
+  const { rerender } = renderHook(() => useVoiceSession({
+    apiEndpoint: '/voice', onEntrySaved, onLLMFailed, aiUsage: 'chat',
+  }));
+
+  await finishRecording({ content: 'my first words', llmNodeId: 7 });
+  // The failure effect re-runs on unrelated renders; the page hears once.
+  rerender();
+
+  expect(onLLMFailed).toHaveBeenCalledTimes(1);
+  expect(onLLMFailed).toHaveBeenCalledWith(7);
+});
+
 test('a recording saved without a reply counts as an entry', async () => {
   const { result } = renderSession();
 

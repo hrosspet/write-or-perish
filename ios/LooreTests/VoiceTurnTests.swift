@@ -1336,6 +1336,17 @@ final class VoiceTurnTests: XCTestCase {
         XCTAssertEqual(turn.lockScreenGlean, .ready)
     }
 
+    func testAFailedReplyStopsGleanWaiting() async throws {
+        gleanSession()
+        backend.statuses = [try status("completed", llm: 101)]
+        backend.llmStatuses[101] = [try llm(101, "failed", error: "Provider error")]
+        await recordAndStop()
+        await wait("idle") { turn.state == .idle }
+        XCTAssertEqual(turn.gleanAnchor, 101, "the server starts it from the failed reply's parent")
+        XCTAssertTrue(turn.canGlean)
+        XCTAssertEqual(turn.lockScreenGlean, .ready)
+    }
+
     func testAContinuedGleanThreadOffersGleanAtOnce() {
         gleanSession(parentId: 7)
         XCTAssertTrue(turn.showsGleanButton)

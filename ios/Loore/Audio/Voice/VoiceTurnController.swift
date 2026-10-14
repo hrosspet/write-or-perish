@@ -66,8 +66,8 @@ final class VoiceTurnController {
     /// The thread has a recorded message (a continued thread has its messages).
     private(set) var hasRecordedMessage = false
     /// The node a glean starts under: the last finished reply, else the node the
-    /// session opened on. Nil while a turn's reply is still coming, so the glean
-    /// reads that reply too (web `gleanAnchor`).
+    /// session opened on, or the turn's failed reply. Nil while a turn's reply is
+    /// still coming, so the glean reads that reply too (web `gleanAnchor`).
     private(set) var gleanAnchor: Int?
     private(set) var gleanPhase: GleanPhase = .idle
     /// The last glean finished: the lock screen says so until the next recording.
@@ -772,6 +772,9 @@ final class VoiceTurnController {
                 failureToasted.insert(nodeId)
                 notices.toast(status.error ?? "Response generation failed", duration: 8)
             }
+            // No reply is coming: Glean stops waiting. It starts under the failed
+            // reply, which the server turns into its parent (web `onLLMFailed`).
+            gleanAnchor = nodeId
             replyFailed(nodeId, gen)
             return true
         case .cancelled?:

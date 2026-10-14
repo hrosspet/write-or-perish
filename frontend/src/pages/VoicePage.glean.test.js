@@ -129,6 +129,26 @@ test('a fresh Glean session: no Glean before the first recording, then under the
   expect(mockPoll).toHaveBeenLastCalledWith('/nodes/57/llm-status', expect.objectContaining({ enabled: true }));
 });
 
+test('a failed reply stops Glean waiting: the glean starts under the failed reply', async () => {
+  renderAt('/voice?glean=1');
+  await screen.findByText("What's on your mind?");
+  act(() => { mockSessionOptions.onEntrySaved(); });
+  expect(glean()).toBeDisabled();
+
+  // The reply failed (the provider unreachable, say): no reply is coming,
+  // and the screen is back at the record button.
+  act(() => { mockSessionOptions.onLLMFailed(57); });
+  expect(glean()).toBeEnabled();
+  expect(document.getElementById(glean().getAttribute('aria-describedby')))
+    .toHaveTextContent("Find today's tweets worth your time");
+
+  // The server starts a glean asked for on a failed reply from its
+  // parent: the user's message.
+  mockPost.mockResolvedValue({ data: { prompt_node_id: 58, llm_node_id: 59 } });
+  await act(async () => { fireEvent.click(glean()); });
+  expect(mockPost).toHaveBeenCalledWith('/read/from-node/57', {});
+});
+
 test('when the gleaning is ready the view switches to text mode', async () => {
   renderAt('/voice?parent=42&glean=1');
   await screen.findByText("What's on your mind?");
