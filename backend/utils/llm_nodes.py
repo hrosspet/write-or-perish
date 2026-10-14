@@ -6,8 +6,9 @@ from flask import current_app
 from backend.models import Node, User
 from backend.extensions import db
 from backend.utils.placeholders import (
-    CA_TWEETS_PATTERN, check_ca_tweets_access, check_user_export_plan,
-    validate_ca_tweets_placeholders, validate_user_export_placeholders,
+    CA_TWEETS_PATTERN, check_ca_tweets_access, check_ca_tweets_options,
+    check_user_export_plan, validate_ca_tweets_placeholders,
+    validate_user_export_placeholders,
 )
 from backend.utils.ca_feed import (
     FEED_AI_USAGE, READ_FURTHER_MARKER, READ_PROMPT_KEYS, ca_turn,
@@ -586,6 +587,18 @@ def create_llm_placeholder(parent_node_id, model_id, human_owner_id,
     validate_user_export_placeholders(
         parent_content, user_id=human_owner_id,
     )
+    owner = User.query.get(human_owner_id)
+    # {ca_tweets} in the parent: a glean's own read prompt for a user who
+    # gleans, anything for an admin (#435). Then its options: only admins
+    # may change the window or scope (check_ca_tweets_options), checked
+    # before the admin's range so a non-admin is told the rule that
+    # applies to them. The completion task checks the placeholder it
+    # runs again, wherever in the thread it sits.
+    from backend.utils.glean import is_glean_prompt_node
+    check_ca_tweets_access(
+        parent_content, owner,
+        from_read_prompt=is_glean_prompt_node(parent, owner))
+    check_ca_tweets_options(parent_content, owner)
     validate_ca_tweets_placeholders(
         parent_content, user_id=human_owner_id,
     )
@@ -595,18 +608,11 @@ def create_llm_placeholder(parent_node_id, model_id, human_owner_id,
     # the same rule inside generate_llm_response, where the chain is
     # already decrypted (re-decrypting every ancestor here would add a
     # KMS unwrap per node per turn).
-    owner = User.query.get(human_owner_id)
     check_user_export_plan(
         parent_content,
         unrestricted_allowed=bool(owner and owner.has_unrestricted_export),
         user_id=human_owner_id,
     )
-    # {ca_tweets} in the parent: a glean's own read prompt for a user who
-    # gleans, anything for an admin (#435).
-    from backend.utils.glean import is_glean_prompt_node
-    check_ca_tweets_access(
-        parent_content, owner,
-        from_read_prompt=is_glean_prompt_node(parent, owner))
 
     # The model the reply will actually run on (#355). A read runs only on
     # a read model: the read routes validate the one they are given, and

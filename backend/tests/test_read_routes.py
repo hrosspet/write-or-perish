@@ -2265,6 +2265,83 @@ class TestGleanInSomeoneElsesThread:
         assert Node.query.get(data["llm_node_id"]).parent_id == prompt.id
 
 
+def _glean_prompt_with(user, placeholder):
+    """A read prompt node as a glean attaches it (linked to a version Loore
+    wrote, so is_glean_prompt_node holds), whose placeholder is
+    *placeholder* instead of the shipped one."""
+    from backend.models import NodeContextArtifact, UserPrompt
+    from backend.utils.prompts import load_default_prompt
+    shipped = load_default_prompt("read_thread")
+    assert "{ca_tweets?days=1}" in shipped
+    record = UserPrompt(user_id=user.id, prompt_key="read_thread",
+                        title="Glean", generated_by="default")
+    record.set_content(shipped.replace("{ca_tweets?days=1}", placeholder))
+    _db.session.add(record)
+    _db.session.flush()
+    node = Node(user_id=user.id, human_owner_id=user.id, node_type="user",
+                privacy_level="private", ai_usage="chat",
+                prompt_key="read_thread")
+    _db.session.add(node)
+    _db.session.flush()
+    _db.session.add(NodeContextArtifact(
+        node_id=node.id, artifact_type="prompt", artifact_id=record.id))
+    _db.session.commit()
+    return node
+
+
+class TestCaTweetsOptionsAreAdminOnly:
+    """Only admins may change the window or scope of {ca_tweets} (Peter,
+    2026-10-14). For anyone else every placeholder that is sent is the
+    default, {ca_tweets} or exactly days=1 and/or scope=all: anything else
+    is refused with a 400 before any node exists (and again in the
+    completion task, test_read_context)."""
+
+    @pytest.mark.parametrize("placeholder", [
+        "{ca_tweets?days=2}", "{ca_tweets?days=3}", "{ca_tweets?days=10}",
+        "{ca_tweets?scope=follows}", "{ca_tweets?days=1&scope=follows}",
+        "{ca_tweets?days=1&lang=en}", "{ca_tweets?days=1&days=3}",
+    ])
+    def test_a_non_admins_glean_with_other_options_is_refused(
+            self, app_glean, placeholder):
+        from backend.utils.glean import is_glean_prompt_node
+        client = app_glean.test_client()
+        ana = _glean_user(app_glean, glean_enabled=True)
+        prompt = _glean_prompt_with(ana, placeholder)
+        assert is_glean_prompt_node(prompt, ana) is True
+        before = Node.query.count()
+        _login(client, ana.id)
+        resp = client.post(f"/api/nodes/{prompt.id}/llm",
+                           json={"model": "gpt-6-luna"})
+        assert resp.status_code == 400, resp.get_json()
+        assert resp.get_json()["error"] == (
+            "Only admins may change the window or scope of {ca_tweets}. "
+            "Use {ca_tweets} or {ca_tweets?days=1}.")
+        assert Node.query.count() == before
+
+    @pytest.mark.parametrize("placeholder", [
+        "{ca_tweets}", "{ca_tweets?days=1}", "{ca_tweets?scope=all}",
+        "{ca_tweets?days=1&scope=all}",
+    ])
+    def test_a_non_admins_default_glean_runs(self, app_glean, placeholder):
+        from backend.utils.llm_nodes import create_llm_placeholder
+        ana = _glean_user(app_glean, glean_enabled=True)
+        prompt = _glean_prompt_with(ana, placeholder)
+        node, _ = create_llm_placeholder(prompt.id, "gpt-6-luna", ana.id)
+        assert node.parent_id == prompt.id
+
+    def test_an_admin_keeps_the_window_and_scope(self, app_glean):
+        from backend.utils.llm_nodes import create_llm_placeholder
+        from backend.utils.placeholders import CaTweetsValidationError
+        boss = _make_user("boss", is_admin=True)
+        prompt = _glean_prompt_with(boss, "{ca_tweets?days=3&scope=follows}")
+        node, _ = create_llm_placeholder(prompt.id, "gpt-6-luna", boss.id)
+        assert node.parent_id == prompt.id
+        # The admin's own range still holds.
+        too_long = _glean_prompt_with(boss, "{ca_tweets?days=4}")
+        with pytest.raises(CaTweetsValidationError, match="1..3"):
+            create_llm_placeholder(too_long.id, "gpt-6-luna", boss.id)
+
+
 class TestGleanModelFailsClosed:
     """The read model is the server's choice and fails rather than falls
     back (#435)."""

@@ -72,6 +72,36 @@ class TestPlaceholderParsing:
             app.config["GLEAN_FOR_ALL"] = True
             assert ca_tweets_allowed(other)
 
+    @pytest.mark.parametrize("text", [
+        "{ca_tweets?days=2}", "{ca_tweets?days=3}", "{ca_tweets?days=10}",
+        "{ca_tweets?scope=follows}", "{ca_tweets?days=1&scope=follows}",
+        "{ca_tweets?days=1&lang=en}", "{ca_tweets?day=1}",
+        "{ca_tweets?days=1&days=3}", "{ca_tweets?days=1& days=3}",
+        "{ca_tweets?days}", "{ca_tweets?days=}", "{ca_tweets?days=01}",
+        # Every placeholder in the text, not only the first.
+        "{ca_tweets?days=1} and {ca_tweets?days=3}",
+    ])
+    def test_only_admins_may_change_the_options(self, text):
+        """Peter, 2026-10-14: for a non-admin every {ca_tweets} is the
+        default; an admin keeps the window and scope."""
+        from backend.utils.placeholders import check_ca_tweets_options
+        user = types.SimpleNamespace(id=2, is_admin=False)
+        with pytest.raises(CaTweetsValidationError,
+                           match="Only admins may change the window or scope"):
+            check_ca_tweets_options(text, user)
+        with pytest.raises(CaTweetsValidationError):
+            check_ca_tweets_options(text, None)
+        check_ca_tweets_options(text, types.SimpleNamespace(id=1, is_admin=True))
+
+    @pytest.mark.parametrize("text", [
+        "{ca_tweets}", "{ca_tweets?days=1}", "{ca_tweets?scope=all}",
+        "{ca_tweets?days=1&scope=all}", "{ca_tweets?scope=all&days=1}",
+        "{ca_tweets?days=1& scope=all}", "{ca_tweets?}", "no placeholder", "",
+    ])
+    def test_the_default_options_are_for_everyone(self, text):
+        from backend.utils.placeholders import check_ca_tweets_options
+        check_ca_tweets_options(text, types.SimpleNamespace(id=2, is_admin=False))
+
     def test_unknown_key_is_refused(self):
         with pytest.raises(CaTweetsValidationError) as exc:
             validate_ca_tweets_placeholders("{ca_tweets?day=1}")

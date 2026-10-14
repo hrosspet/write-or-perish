@@ -74,6 +74,7 @@ from backend.utils.placeholders import (
     CA_TWEETS_PATTERN,
     USER_EXPORT_PATTERN,
     ca_tweets_denied_message,
+    check_ca_tweets_options,
     parse_ca_tweets_days,
     parse_ca_tweets_scope,
     UserExportValidationError,
@@ -3395,13 +3396,16 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             # (a day is ~250k tokens against a 1M window).
             ca_node = None
             ca_placeholder_match = None
+            ca_node_text = None
             for node in node_chain:
                 if not _alive(node):
                     continue
-                m = CA_TWEETS_PATTERN.search(node.get_content())
+                node_text = node.get_content()
+                m = CA_TWEETS_PATTERN.search(node_text)
                 if m:
                     ca_node = node
                     ca_placeholder_match = m.group(0)
+                    ca_node_text = node_text
             # Only a read feeds the day in (the first reply under the
             # prompt, or one asked for directly under a read reply); a
             # chat turn about the picks gets a stub where the day was.
@@ -3466,6 +3470,14 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 from backend.utils.glean import read_turn_allowed
                 if not read_turn_allowed(User.query.get(user_id), ca_node):
                     raise ValueError(ca_tweets_denied_message())
+                # Only admins may change the window or scope (Peter,
+                # 2026-10-14): every {ca_tweets} on the prompt must be
+                # the default unless both its owner and the user the
+                # reply is for are admins. Before anything is rendered
+                # or sent.
+                for ca_user in (User.query.get(user_id), User.query.get(
+                        ca_node.human_owner_id or ca_node.user_id)):
+                    check_ca_tweets_options(ca_node_text, ca_user)
                 ca_params = parse_placeholder_params(ca_placeholder_match)
                 ca_days = parse_ca_tweets_days(
                     ca_params, placeholder=ca_placeholder_match)

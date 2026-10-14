@@ -281,6 +281,11 @@ def parse_max_export_tokens(raw, *, user_id=None, placeholder=None,
 #                    dir (following/<username>.json); refused at run
 #                    time when no list is saved.
 #
+# Only admins may change the window or scope (Peter, 2026-10-14): for
+# anyone else every {ca_tweets} must be the default, {ca_tweets} or
+# exactly days=1 and/or scope=all (check_ca_tweets_options). Checked
+# before the reply's node exists and again in the completion task.
+#
 CA_TWEETS_PATTERN = re.compile(r"\{ca_tweets(\?[^}]*)?\}")
 CA_TWEETS_KNOWN_KEYS = frozenset({"days", "scope"})
 CA_TWEETS_DEFAULT_DAYS = 1
@@ -364,6 +369,56 @@ def check_ca_tweets_access(text, user, *, from_read_prompt=False, log=None):
         log.warning("Refused {ca_tweets} for user_id=%s: not allowed",
                     getattr(user, "id", None))
         raise CaTweetsValidationError(ca_tweets_denied_message())
+
+
+def ca_tweets_options_allowed(user):
+    """Whether *user* may run {ca_tweets} with other options than the
+    default (days=1, scope=all): only admins may change the window or
+    scope (Peter, 2026-10-14)."""
+    return user is not None and getattr(user, "is_admin", False) is True
+
+
+def ca_tweets_options_denied_message():
+    return ("Only admins may change the window or scope of {ca_tweets}. "
+            "Use {ca_tweets} or {ca_tweets?days=1}.")
+
+
+# The only values a non-admin's {ca_tweets} may carry.
+CA_TWEETS_DEFAULT_PARAMS = {"days": str(CA_TWEETS_DEFAULT_DAYS),
+                            "scope": "all"}
+
+
+def ca_tweets_is_default(placeholder):
+    """Whether a {ca_tweets...} placeholder is the default: no params, or
+    exactly days=1 and/or scope=all, each once. Any other key, value,
+    repeat or a key without a value is not."""
+    if "?" not in placeholder:
+        return True
+    qs = placeholder.split("?", 1)[1].rstrip("}")
+    for key, values in parse_qs(qs, keep_blank_values=True).items():
+        expected = CA_TWEETS_DEFAULT_PARAMS.get(key.strip())
+        if expected is None or len(values) != 1 \
+                or values[0].strip() != expected:
+            return False
+    return True
+
+
+def check_ca_tweets_options(text, user, *, log=None):
+    """Refuse every {ca_tweets} placeholder in *text* that is not the
+    default (ca_tweets_is_default) unless *user* is an admin: only
+    admins may change the window or scope. Raises
+    CaTweetsValidationError (a 400 at every HTTP call site, a failed
+    reply in the completion task). No-op without the placeholder."""
+    if not text or ca_tweets_options_allowed(user):
+        return
+    for match in CA_TWEETS_PATTERN.finditer(text):
+        placeholder = match.group(0)
+        if not ca_tweets_is_default(placeholder):
+            log = log if log is not None else _default_logger
+            log.warning("Refused {ca_tweets} options for user_id=%s: "
+                        "placeholder=%r", getattr(user, "id", None),
+                        placeholder)
+            raise CaTweetsValidationError(ca_tweets_options_denied_message())
 
 
 def parse_ca_tweets_scope(params, *, placeholder=None):
