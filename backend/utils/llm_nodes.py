@@ -266,10 +266,11 @@ def glean_provider(anchor_node, user, chain=None):
     closest chat reply in the thread that was made FOR this user (their
     own AI reply: human owner == user), else their account model, else
     the server default. Replies made for someone else (another user's AI
-    reply higher up a public thread) never count. Loore never moves a
-    user to another provider on its own, not even for a read (Peter,
-    2026-10-02 and 2026-10-09); the user may pick another provider's
-    model in the Glean picker (glean.may_choose_glean_model)."""
+    reply higher up a public thread) never count. The provider picks
+    which glean setting is the default (GLEAN_MODEL_ANTHROPIC /
+    GLEAN_MODEL_OPENAI); during Glean's testing both are GPT-5.6 Luna
+    (Peter, 2026-10-14). The user may pick another provider's model in
+    the Glean picker (glean.may_choose_glean_model)."""
     from backend.utils.glean import model_provider
     supported = current_app.config.get("SUPPORTED_MODELS", {})
     chain = chain or _Chain(anchor_node)
@@ -296,17 +297,19 @@ def resolve_read_model(anchor_node, chain=None, user=None):
     into the next read. There is no per-user read preference (#355).
 
     With *user* (every glean, #435; also the Glean picker's default) the
-    default stays on the provider of the user's chat model
+    default follows the provider of the user's chat model
     (glean_provider): an earlier read of the user's own in the thread on
     that provider ("predecessor", so "glean again" keeps a model the user
-    picked there), else that provider's glean model
-    (GLEAN_MODEL_ANTHROPIC / GLEAN_MODEL_OPENAI, "provider_default"). A
-    read on another provider, picked by the user, is never the default.
-    Only a user who may choose the model (glean.may_choose_glean_model)
-    gets the predecessor; anyone else always the provider's glean model.
-    Raises GleanModelUnavailable when the provider can't be resolved or
-    has no glean model: never another provider's, never
-    READ_DEFAULT_MODEL. Without a user, READ_DEFAULT_MODEL ("default")."""
+    picked there), else the glean model set for that provider
+    (GLEAN_MODEL_ANTHROPIC / GLEAN_MODEL_OPENAI, "provider_default").
+    During Glean's testing both settings are GPT-5.6 Luna, so an
+    Anthropic user's default is an OpenAI model (Peter, 2026-10-14); the
+    per-provider settings remain for later. Only a user who may choose
+    the model (glean.may_choose_glean_model) gets the predecessor; anyone
+    else always the provider's glean model. Raises GleanModelUnavailable
+    when the provider can't be resolved or has no glean model: never
+    READ_DEFAULT_MODEL in its place. Without a user, READ_DEFAULT_MODEL
+    ("default")."""
     from backend.utils.glean import (
         GleanModelUnavailable, glean_model_for_provider,
         may_choose_glean_model, model_provider,
@@ -478,7 +481,7 @@ def _read_turn_model(parent, owner, model_id, chain):
     who gleans, glean.may_choose_glean_model; any read model, another
     provider's too: the user's own choice); otherwise, or when the named
     model is not a read model, the default, resolve_read_model for the
-    owner — a read model of their own provider."""
+    owner — the glean model set for their provider."""
     from backend.utils.glean import may_choose_glean_model, model_provider
     # The choice holds only for a reply of the owner's own under a node of
     # their own: nobody picks a model for someone else's thread.
@@ -528,7 +531,7 @@ def create_llm_placeholder(parent_node_id, model_id, human_owner_id,
     glean gets READ_LIVE_MARKER, which the pages show as "Gleaning". It
     runs on the read model the owner named when they may choose
     one (an admin or anyone who gleans; another provider's too), else on
-    the default read model of their own provider (_read_turn_model).
+    the glean model set for their provider (_read_turn_model).
 
     *client* ('ios' / 'web', utils/client_platform) is the app the user
     is talking from. It defaults to the current request's; a caller with

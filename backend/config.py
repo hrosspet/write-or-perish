@@ -49,20 +49,20 @@ class Config:
         os.environ.get("GLEAN_USER_IDS", "").replace(" ", "").split(",")
         if x
     }
-    # The read model a glean runs on by default, by the provider of the
-    # user's chat model: Loore never moves a user to another provider on
-    # its own, not even as a fallback (Peter, 2026-10-02), so an
-    # Anthropic user's default is an Anthropic model and an OpenAI
-    # user's an OpenAI one. The user may pick another read model, another
-    # provider's too, in the Glean picker (Peter, 2026-10-09). Settings, so an
-    # evaluation can change them without a code change. Defaults: Haiku
-    # 5.5 for Anthropic (Peter, 2026-10-09), GPT-6 Luna for OpenAI. Each
-    # must be an active "read" model of that provider (checked at boot,
+    # The read model a glean runs on by default, one setting per provider
+    # of the user's chat model (llm_nodes.glean_provider). During Glean's
+    # testing both default to GPT-5.6 Luna, also for Anthropic users: it
+    # is the best model for Glean so far (Peter, 2026-10-14; Haiku 5.5 is
+    # among the models still to be tested). The per-provider settings
+    # stay, so each provider can get its own default again without a code
+    # change. The user may pick another read model, another provider's
+    # too, in the Glean picker (Peter, 2026-10-09). Each must be an
+    # active "read" model, of any provider (checked at boot,
     # validate_default_model).
     GLEAN_MODEL_ANTHROPIC = (os.environ.get("GLEAN_MODEL_ANTHROPIC")
-                             or "claude-haiku-5.5")
+                             or "gpt-5.6-luna")
     GLEAN_MODEL_OPENAI = (os.environ.get("GLEAN_MODEL_OPENAI")
-                          or READ_DEFAULT_MODEL)
+                          or "gpt-5.6-luna")
 
     # --- API spend monitoring (issue #85) ---
     # Monthly Anthropic spend cap in USD. 0 (default) disables the check.

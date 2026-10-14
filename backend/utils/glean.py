@@ -28,10 +28,12 @@ sends a read through the Batch API only when its placeholder carries
 READ_BATCH_MARKER, which only the admin's experiments set (/read/start,
 a batch rerun). Every other read turn is live, whatever else its node
 says (READ_LIVE_MARKER only labels a glean while it runs). By default it runs on the
-glean model of the provider the user's chat model is from
-(GLEAN_MODEL_ANTHROPIC / GLEAN_MODEL_OPENAI): Loore never moves a user to
-another provider on its own. The user may pick another read model in the
-picker beside Glean, another provider's too (may_choose_glean_model).
+glean model set for the provider the user's chat model is from
+(GLEAN_MODEL_ANTHROPIC / GLEAN_MODEL_OPENAI). During Glean's testing both
+are GPT-5.6 Luna, also for Anthropic users (Peter, 2026-10-14); the
+per-provider settings remain for later. The user may pick another read
+model in the picker beside Glean, another provider's too
+(may_choose_glean_model).
 """
 from flask import current_app
 
@@ -67,8 +69,8 @@ def provider_name(provider):
 
 class GleanModelUnavailable(ValueError):
     """No glean model is configured for the user's provider. Never
-    answered with another provider's model (a user's provider is never
-    switched)."""
+    answered with a model Loore picks in its place (READ_DEFAULT_MODEL,
+    another provider's setting)."""
 
     def __init__(self, provider):
         self.provider = provider
@@ -134,9 +136,10 @@ def may_choose_glean_model(user):
     """Whether *user* may name the model a glean runs on: an admin, or
     anyone who gleans (Peter, 2026-10-09: while Glean is tested,
     everyone on it picks from the same models as admins, other
-    providers' included). The choice is the user's; Loore's default
-    never crosses providers (resolve_read_model). Only under the user's
-    own node (llm_nodes._read_turn_model)."""
+    providers' included). The choice is the user's; Loore's default is
+    the glean model set for the provider of the user's chat model
+    (resolve_read_model). Only under the user's own node
+    (llm_nodes._read_turn_model)."""
     if user is None:
         return False
     if getattr(user, "is_admin", False) is True:
@@ -280,13 +283,15 @@ def model_provider(model_id):
 
 def glean_model_for_provider(provider):
     """The configured glean model of *provider* (GLEAN_MODEL_ANTHROPIC /
-    GLEAN_MODEL_OPENAI), when it is a read model of that provider. Raises
-    GleanModelUnavailable otherwise: no other provider's model and no
-    other default is ever used in its place."""
+    GLEAN_MODEL_OPENAI), when it is an active read model. It may be
+    another provider's model: during Glean's testing both settings
+    default to GPT-5.6 Luna (Peter, 2026-10-14). Raises
+    GleanModelUnavailable otherwise: no other default is ever used in
+    its place."""
     key = GLEAN_MODEL_KEYS.get(provider)
     model_id = current_app.config.get(key) if key else None
     cfg = current_app.config.get("SUPPORTED_MODELS", {}).get(model_id) or {}
     if (not model_id or not cfg.get("read") or cfg.get("deprecated")
-            or cfg.get("provider") != provider):
+            or not cfg.get("provider")):
         raise GleanModelUnavailable(provider)
     return model_id

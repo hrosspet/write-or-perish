@@ -1682,8 +1682,9 @@ def get_default_model():
 
 
 def _suggested_read_model(anchor):
-    """The Glean picker's default: a read model of the user's provider
-    (#435); (None, "unavailable") when that provider has no glean model."""
+    """The Glean picker's default: the glean model set for the user's
+    provider (#435; GPT-5.6 Luna for both during testing); (None,
+    "unavailable") when that provider has no glean model."""
     from backend.utils.glean import GleanModelUnavailable
     try:
         return resolve_read_model(anchor, user=current_user)

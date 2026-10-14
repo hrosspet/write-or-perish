@@ -252,7 +252,7 @@ struct VoiceView: View {
                                : "Glean waits for Loore's reply to your last message")
             .accessibilityIdentifier("voice.glean")
             // No model picker here, as on the web (#473): a voice glean runs on the
-            // server's default, a read model of the user's own provider. The
+            // server's default, the glean model set for the user's provider. The
             // picker is in the action row of a Glean-card thread.
         }
     }

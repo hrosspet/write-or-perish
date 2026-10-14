@@ -83,3 +83,33 @@ def test_the_shipped_config_passes():
         "DEFAULT_LLM_MODEL": "claude-opus-4.6",
         "READ_DEFAULT_MODEL": Config.READ_DEFAULT_MODEL,
         "SUPPORTED_MODELS": Config.SUPPORTED_MODELS})
+
+
+def test_a_glean_model_may_be_another_providers_read_model():
+    """Peter, 2026-10-14: GPT-5.6 Luna is Glean's default for both
+    providers while Glean is tested. A setting must still be an active
+    read model."""
+    models = {"claude-opus-4.6": {"provider": "anthropic"},
+              "gpt-5.6-luna": {"provider": "openai", "read": True},
+              "gpt-6-sol": {"provider": "openai"},
+              "gpt-5.5": {"provider": "openai", "read": True,
+                          "deprecated": True}}
+    base = {"DEFAULT_LLM_MODEL": "claude-opus-4.6", "SUPPORTED_MODELS": models}
+    validate_default_model({**base, "GLEAN_MODEL_ANTHROPIC": "gpt-5.6-luna",
+                            "GLEAN_MODEL_OPENAI": "gpt-5.6-luna"})
+    for bad in ("gpt-6-sol", "gpt-5.5", "claude-haiku-5-5"):
+        with pytest.raises(RuntimeError) as e:
+            validate_default_model({**base, "GLEAN_MODEL_ANTHROPIC": bad})
+        assert f"GLEAN_MODEL_ANTHROPIC={bad!r}" in str(e.value)
+
+
+def test_the_shipped_glean_defaults_pass():
+    from backend.config import Config
+    assert (Config.GLEAN_MODEL_ANTHROPIC, Config.GLEAN_MODEL_OPENAI) == (
+        "gpt-5.6-luna", "gpt-5.6-luna")
+    validate_default_model({
+        "DEFAULT_LLM_MODEL": "claude-opus-4.6",
+        "READ_DEFAULT_MODEL": Config.READ_DEFAULT_MODEL,
+        "GLEAN_MODEL_ANTHROPIC": Config.GLEAN_MODEL_ANTHROPIC,
+        "GLEAN_MODEL_OPENAI": Config.GLEAN_MODEL_OPENAI,
+        "SUPPORTED_MODELS": Config.SUPPORTED_MODELS})

@@ -1030,7 +1030,7 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
       .post(`/read/from-node/${targetId}`, {
         // The model picked beside the Glean button (everyone who gleans
         // has the picker, #435); without one the server takes the
-        // default, a read model of the user's own provider.
+        // default, the glean model set for the user's provider.
         model: readModel || undefined,
       })
       .then((response) => {
@@ -1217,7 +1217,7 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
   // button: "Glean for this reflection" is in the entry's menu. Beside
   // the button sits the model picker, for everyone who gleans (Peter,
   // 2026-10-09: the same read models as admins, other providers'
-  // included); its default is a read model of the user's own provider
+  // included); its default is the glean model set for the user's provider
   // (/suggested-model?purpose=read). Directly under a finished gleaning LLM
   // Response is disabled: a reply asked for there is another glean (the
   // task's parent rule), and the way to talk about the picks is a

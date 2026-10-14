@@ -1846,6 +1846,27 @@ class TestGleanIsLiveOnTheUsersProvider:
         data = client.post(f"/api/read/from-node/{entry.id}", json={}).get_json()
         assert Node.query.get(data["llm_node_id"]).llm_model == "claude-sonnet-5.5"
 
+    @pytest.mark.parametrize("account_model", ["claude-opus-4.6", "gpt-6-sol"])
+    def test_the_shipped_default_is_gpt_5_6_luna_for_both_providers(
+            self, app_glean, account_model):
+        """Peter, 2026-10-14: while Glean is tested its default is GPT-5.6
+        Luna, also for Anthropic users; the per-provider settings stay."""
+        from backend.config import Config
+        assert (Config.GLEAN_MODEL_ANTHROPIC, Config.GLEAN_MODEL_OPENAI) == (
+            "gpt-5.6-luna", "gpt-5.6-luna")
+        app_glean.config["SUPPORTED_MODELS"] = {
+            **MODELS_GLEAN,
+            "gpt-5.6-luna": Config.SUPPORTED_MODELS["gpt-5.6-luna"],
+        }
+        app_glean.config["GLEAN_MODEL_ANTHROPIC"] = Config.GLEAN_MODEL_ANTHROPIC
+        app_glean.config["GLEAN_MODEL_OPENAI"] = Config.GLEAN_MODEL_OPENAI
+        client, _, entry = self._entry(app_glean, preferred_model=account_model)
+        resp = client.get(f"/api/nodes/{entry.id}/suggested-model?purpose=read")
+        assert resp.get_json() == {"suggested_model": "gpt-5.6-luna",
+                                   "source": "provider_default"}
+        data = client.post(f"/api/read/from-node/{entry.id}", json={}).get_json()
+        assert Node.query.get(data["llm_node_id"]).llm_model == "gpt-5.6-luna"
+
     @pytest.mark.parametrize("named", ["gpt-6-luna", "claude-sonnet-5.5"])
     def test_a_user_who_gleans_names_the_model(self, app_glean, named):
         """Peter, 2026-10-09: everyone on Glean picks from the same read
@@ -1921,8 +1942,8 @@ class TestGleanIsLiveOnTheUsersProvider:
     def test_the_pickers_default_follows_the_account_models_provider(
             self, app_glean, account_model, expected):
         """The Glean picker's default (and a glean with no model named) is
-        the glean model of the provider the user's own model is from:
-        Loore's default never crosses providers."""
+        the glean model set for the provider the user's own model is
+        from; each provider keeps its own setting."""
         client, _, entry = self._entry(app_glean, preferred_model=account_model)
         resp = client.get(f"/api/nodes/{entry.id}/suggested-model?purpose=read")
         assert resp.get_json() == {"suggested_model": expected,
@@ -2268,10 +2289,16 @@ class TestGleanModelFailsClosed:
         app_glean.config["GLEAN_MODEL_OPENAI"] = None
         with pytest.raises(GleanModelUnavailable):
             resolve_read_model(entry, user=ana)
-        # Configured to another provider's model: refused, not used.
-        app_glean.config["GLEAN_MODEL_OPENAI"] = "claude-haiku-5.5"
+        # Configured to a model that is not a read model: refused, not used.
+        app_glean.config["GLEAN_MODEL_OPENAI"] = "gpt-6-sol"
         with pytest.raises(GleanModelUnavailable):
             resolve_read_model(entry, user=ana)
+        # Another provider's read model is a valid setting (Peter,
+        # 2026-10-14: GPT-5.6 Luna for both providers while Glean is
+        # tested).
+        app_glean.config["GLEAN_MODEL_OPENAI"] = "claude-haiku-5.5"
+        assert resolve_read_model(entry, user=ana) == (
+            "claude-haiku-5.5", "provider_default")
 
     def test_the_default_keeps_the_users_own_earlier_read_of_that_provider(self, app_glean):
         """As the admin picker did before (#435): an earlier read of the

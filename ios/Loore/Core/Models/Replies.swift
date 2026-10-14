@@ -122,7 +122,7 @@ struct GleanStartResponse: Decodable, Equatable, Sendable {
 }
 
 /// A glean (#435) as the clients send it: `POST /api/read/from-node/<id>` with
-/// `{}` (the server's default: a read model of the user's own provider) or
+/// `{}` (the server's default: the glean model set for the user's provider) or
 /// `{"model": "<id>"}` from the picker beside the Glean button.
 enum GleanRequest {
     static func body(model: String?) -> JSONValue {

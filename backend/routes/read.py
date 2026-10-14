@@ -90,11 +90,11 @@ def _resolve_model(anchor_node):
     names, when the user may choose one: an admin, or anyone who gleans
     (Peter, 2026-10-09: everyone on Glean picks from the same read models
     as admins, other providers' included); it must be a read model.
-    Otherwise, or with no model named, the default: a read model of the
-    provider the user's chat model is from (#435: Loore never moves a
-    user to another provider on its own) — the user's earlier read of
-    that provider in the thread, else the provider's glean model
-    (GLEAN_MODEL_*). Never the chat default: a conversation on Opus does
+    Otherwise, or with no model named, the default for the provider the
+    user's chat model is from (#435) — the user's earlier read of that
+    provider in the thread, else the glean model set for the provider
+    (GLEAN_MODEL_*; GPT-5.6 Luna for both during Glean's testing, Peter,
+    2026-10-14). Never the chat default: a conversation on Opus does
     not carry into a read. A model named by a user who may not choose is
     ignored."""
     from backend.utils.glean import GleanModelUnavailable, may_choose_glean_model

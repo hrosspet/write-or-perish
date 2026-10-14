@@ -266,8 +266,8 @@ private struct ThreadContent: View {
     }
 
     /// Glean with its model picker (#435): a Glean-card thread, for everyone who
-    /// gleans (the read models of both providers; the default is a read model of
-    /// the user's own provider, from `suggested-model?purpose=read`).
+    /// gleans (the read models of both providers; the default is the glean model
+    /// set for the user's provider, from `suggested-model?purpose=read`).
     private func readRow(_ node: NodeDetail) -> some View {
         // Another node is loading (NodePrefetch): a second press would start a second glean.
         let busy = model.readLoading || model.llmRequesting || model.llmTaskNodeId != nil || NodePrefetch.shared.isPending
