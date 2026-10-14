@@ -64,6 +64,8 @@ The heuristics above are my reading of Loore. These rules are Petr's answers fro
 - **Ask when the choice matters.** The question is a dialog the user can dismiss. No answer means "we don't know", not "no". (2026-10-06)
 - **Autonomy.** Reversible work goes ahead without asking and is flagged afterwards. Every added heuristic is named. Merging stays Petr's. (2026-10-06)
 - **No AI means no AI.** Nothing marked None reaches a model by any route, and no job runs for an account set to None. The user's own data export is the exception. (2026-10-06)
+- **Glean's default model, while Glean is tested.** Glean runs on GPT-5.6 Luna by default for every user, also for users whose chat model is Anthropic's, because it is the best model for Glean so far. This is an exception to "A user's model is theirs": the picker shows the model, and the user may choose another. The per-provider defaults stay in place, so each provider can get its own default again once more models are tested. (2026-10-14)
+- **A verdict on an intro keeps none of the intro.** Loore's paragraph introducing a gleaned tweet is written by a model that reads the user's profile and intentions. A verdict on it stores only where it was given (the gleaning and the pick) and its value, never a copy, hash or excerpt of the text. (2026-10-14)
 
 ## Coda: where I stand
 
