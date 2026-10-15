@@ -25,6 +25,12 @@ enum APIPath {
     static let termsAccept = "/api/terms/accept"
     static let health = "/api/health"
 
+    // MARK: Account deletion and restore (#269)
+    static let accountDelete = "/api/account/delete"
+    static let accountDeleteConfirm = "/api/account/delete/confirm"
+    static let accountRestore = "/api/account/restore"
+    static let accountRestoreDecline = "/api/account/restore/decline"
+
     // MARK: Updates channel
     static let updates = "/api/updates"
     static func changelog(_ id: String, action: String) -> String {
@@ -144,6 +150,10 @@ enum APIPath {
     static let externalItems = "/api/external/items"
     static func externalItem(_ id: Int) -> String { "/api/external/items/\(id)" }
     static func feedPicksRead(_ id: Int) -> String { "/api/nodes/\(id)/feed-picks/read" }
+    /// A gleaning pick's verdicts, on the intro and the tweet (#502).
+    static func feedPickVerdict(_ nodeId: Int, item itemId: Int) -> String {
+        "/api/nodes/\(nodeId)/feed-picks/\(itemId)/verdict"
+    }
     static let twitterStatus = "/api/external/twitter/status"
     static let twitterSync = "/api/external/twitter/sync"
     static let twitterConnect = "/api/external/twitter/connect"

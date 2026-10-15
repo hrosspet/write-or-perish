@@ -65,11 +65,13 @@ function chapterTitleFromContent(content) {
  * @param {string} options.apiEndpoint - API path to post transcripts to ('/voice')
  * @param {string} options.ttsTitle - Label for the audio player
  * @param {Function} options.onLLMComplete - Called with (nodeId, content) when LLM response is ready
+ * @param {Function} [options.onLLMFailed] - Called with (nodeId) once when the turn's reply failed: no reply is coming for this turn
  * @param {Function} [options.onEntrySaved] - Called once the server has confirmed it saved the user's recording as an entry, whether or not a reply follows (the reply can fail or be skipped)
  * @param {number|null} options.initialLlmNodeId - Resume in processing phase, polling this LLM node
  * @param {number|null} options.initialParentId - Resume in ready phase with thread parent pre-set
+ * @param {string|null} [options.entry] - 'glean' when the session was opened from the Glean card (#435): the thread the first recording starts is marked as a Glean thread
  */
-export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete, initialLlmNodeId = null, initialParentId = null, model = null, aiUsage = 'none', onAiUsageRefused = null, onEntrySaved = null }) {
+export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete, onLLMFailed = null, initialLlmNodeId = null, initialParentId = null, model = null, aiUsage = 'none', onAiUsageRefused = null, onEntrySaved = null, entry = null }) {
   const audio = useAudio();
   const isOnline = useOnlineStatus();
   const [phase, setPhase] = useState(initialLlmNodeId ? 'processing' : 'ready');
@@ -221,6 +223,11 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
   useEffect(() => {
     onLLMCompleteRef.current = onLLMComplete;
   }, [onLLMComplete]);
+  // The turn's reply failed: the page stops waiting for it (#435: Glean).
+  const onLLMFailedRef = useRef(onLLMFailed);
+  useEffect(() => {
+    onLLMFailedRef.current = onLLMFailed;
+  }, [onLLMFailed]);
   // The server refused the turn because AI usage keeps the account or the
   // thread away from AI ('account' | 'thread'): the page explains instead
   // of offering the record button again.
@@ -390,6 +397,8 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
         }
         if (threadParentIdRef.current) {
           payload.parent_id = threadParentIdRef.current;
+        } else if (entry) {
+          payload.entry = entry;
         }
         if (data.sessionId) {
           payload.session_id = data.sessionId;
@@ -766,6 +775,8 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
       // The red dot alone didn't say why; the server's error is written
       // for the user (e.g. "break the request into smaller steps").
       addToast(llmError || 'Response generation failed', 8000);
+      // No reply is coming for this turn: the page stops waiting for one.
+      if (onLLMFailedRef.current) onLLMFailedRef.current(llmNodeId);
       // Audio of this reply already queued plays to its end (generatingTTS
       // goes off below), and the sound follows it.
       soundReplyFailure(llmNodeId, turnRef.current);
@@ -939,6 +950,7 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
     // waiting for the frontend to foreground.
     const extraParams = {};
     if (threadParentIdRef.current) extraParams.parent_id = threadParentIdRef.current;
+    else if (entry) extraParams.entry = entry;
     if (model) extraParams.model = model;
     // Keep silent audio playing until stopStreaming completes — on iOS it's the
     // only thing preventing the OS from suspending JS while the final chunk
@@ -947,7 +959,7 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
       voiceTiming.mark('finalize_acked');
       stopSilentAudio();
     });
-  }, [streaming, stopSilentAudio, audio, model]);
+  }, [streaming, stopSilentAudio, audio, model, entry]);
 
   const handleContinue = useCallback((extraReset) => {
     turnRef.current += 1;
@@ -989,6 +1001,10 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
     url.searchParams.set('parent', String(id));
     window.history.replaceState({}, '', url);
   }, []);
+
+  // The node the next turn hangs under: the last finished reply, else
+  // the thread node the session opened on. A glean (#435) starts there.
+  const getThreadParentId = useCallback(() => threadParentIdRef.current, []);
 
   const handleCancelProcessing = useCallback((extraReset) => {
     // Parent next recording to the user node (not the LLM node).
@@ -1120,5 +1136,6 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
     handleResumeSession,
     handleCancelProcessing,
     setThreadParentId,
+    getThreadParentId,
   };
 }

@@ -820,8 +820,8 @@ Kinds (one per entry and per table row):
 - **Kind:** user-facing text
 - **Situation:** Peter said of the backups sentence "I'd drop it, unless it's necessary". The builder found that the backups outlive the promise unless the sentence says so, and that "deleted for good" is otherwise untrue.
 - **Decision:** kept a plain sentence, "Copies in our backups are erased within 30 days after that.", after checking the backup retention. Predicted that Peter accepts (60 %) and drops it anyway (30 %).
-- **Peter:** no reaction yet.
-- **Score:** not scored: no reaction yet
+- **Peter:** kept the sentence in his own rewrite: "Copies in our backups are erased within another 30 days."
+- **Score:** hit
 - **Source:** Voice review in local Loore 2026-10-09 (Opus 5.5)
 - **Applies to:** #464
 
@@ -830,18 +830,20 @@ Kinds (one per entry and per table row):
 - **Kind:** user-facing text
 - **Situation:** after Peter's correction of the deletion text.
 - **Decision:** rewrote the terms text as deleted, 30 days to recover by signing in, then deleted for good. Predicted that Peter accepts (70 %).
-- **Peter:** no reaction yet.
-- **Score:** not scored: no reaction yet
+- **Peter:** "this sounds like pushing people to recover their account. I'd phrase it like this: … If you change your mind, you can still recover your account within 30 days by signing in; after that it is deleted forever…"
+- **Score:** miss
+- **Why it missed:** followed his earlier wording closely but put the recovery first, so the sentence read as an invitation to come back. He wants the deletion stated first and the recovery offered to someone who changes their mind.
 - **Source:** Voice review in local Loore 2026-10-09 (Opus 5.5)
 - **Applies to:** #464
+- **Rule:** candidate: user-facing text says what happens first and offers the way back second.
 
 ### 2026-10-09 · An AI reply in someone else's public thread uses no profile
 
 - **Kind:** privacy
 - **Situation:** #483: user B asks for an AI reply in user A's public thread. Use B's own profile and notes, or none (as built)?
 - **Decision:** none: B's private context would shape a public reply. Reversible and safe. Decided in the reply to Peter instead of asking; predicted that Peter accepts (75 %).
-- **Peter:** no reaction yet.
-- **Score:** not scored: no reaction yet
+- **Peter:** "i can see some potential further problems, but let's leave it as it is. We'll be thinking more about public discussion on Loore after the Beta release"
+- **Score:** hit
 - **Source:** Voice review in local Loore 2026-10-09 (Opus 5.5)
 - **Applies to:** #483
 
@@ -850,8 +852,8 @@ Kinds (one per entry and per table row):
 - **Kind:** escalation
 - **Situation:** #483: user B asks for an AI reply in user A's public thread. Use B's own profile and notes, or none?
 - **Decision:** decided without asking Peter
-- **Peter:** no reaction yet.
-- **Score:** not scored: no reaction yet
+- **Peter:** "i can see some potential further problems, but let's leave it as it is. We'll be thinking more about public discussion on Loore after the Beta release"
+- **Score:** hit
 - **Source:** Voice review in local Loore 2026-10-09 (Opus 5.5)
 - **Applies to:** #483
 
@@ -896,6 +898,169 @@ Kinds (one per entry and per table row):
 - **Source:** Voice review in local Loore 2026-10-09 (Opus 5.5)
 - **Applies to:** #493, #473
 
+### 2026-10-09 · A dead dashboard endpoint is removed
+
+- **Kind:** release/ops
+- **Situation:** #489 removes the card fields from the dashboard response. Peter asked "Isn't it dead code?" about `GET /api/dashboard/<username>`, which no client calls.
+- **Decision:** removed the endpoint in #489 and in train #495, in the reply to Peter, without asking. Predicted that Peter accepts (85 %).
+- **Peter:** "great"
+- **Score:** hit
+- **Source:** Voice review in local Loore 2026-10-09 (Opus 5.5)
+- **Applies to:** #489, #495
+- **Rule:** Fix the root cause
+
+### 2026-10-09 · The app load no longer decrypts the profile
+
+- **Kind:** product scope
+- **Situation:** #489 stops sending thread cards on app load. The builder listed "app load still decrypts the profile" under "Not in this PR" as a follow-up. Peter asked why the app load needs the profile at all.
+- **Decision:** left the profile decryption on every app load as a follow-up and wrote it down under "Not in this PR".
+- **Peter:** "what do we need the profile for when loading the app? Or by profile you don't mean the user profile artifact, but the user settings? Account settings, to be precise?"
+- **Score:** miss
+- **Why it missed:** a known waste in the same code path was left for later because it was outside the PR's purpose. Once Peter looked at the path, he wanted it gone now, as with the link speech for profiles in #471.
+- **Source:** Voice review in local Loore 2026-10-09 (Opus 5.5)
+- **Applies to:** #489
+- **Rule:** candidate: a small, known waste in the code a PR already changes is fixed in that PR.
+
+### 2026-10-09 · A privacy fix joins the merge train
+
+- **Kind:** process
+- **Situation:** the privacy fix PR #490 (read replies and proposals) was ready while train #486 was being assembled. Add it to the train or merge it on its own?
+- **Decision:** added #490 to train #486 without asking.
+- **Peter:** "ok"
+- **Score:** hit
+- **Source:** Voice review in local Loore 2026-10-09 (Opus 5.5)
+- **Applies to:** #490, #486
+
+### 2026-10-09 · Glean marked ready on unit tests and reviews alone
+
+- **Kind:** testing
+- **Situation:** the Glean PRs #473 and #474 were put on the merge train as ready after code reviews and unit tests. Neither the builders nor the keeper had used the feature in a browser. Peter then tried it locally on train #495.
+- **Decision:** marked #473 and #474 ready on reviews and unit tests, with no browser pass.
+- **Peter:** "overall, this feature seems like untested. Let's remove it from the train so that I can merge the rest."
+- **Score:** miss
+- **Why it missed:** reviews and unit tests passed, which was read as ready. A feature with a new flow needs one person to use it end to end before it is marked ready, and the first use found six problems (the entries below). Peter also took the account deletion PRs off the train; the new train is #497 and #495 is closed.
+- **Source:** Claude Code session 2026-10-09 (Opus 5.5)
+- **Applies to:** #473, #474, #493, #495, #497
+- **Rule:** candidate: a user-facing feature is used in a browser, with screenshots, before it is marked ready.
+
+### 2026-10-09 · Voice Glean ran as a batch job
+
+- **Kind:** UX
+- **Situation:** Peter had decided that Glean runs synchronously and that, after a voice Glean, the screen switches to the text-mode view of the gleaning. In his local test, a voice Glean sat on a spinner and looked like a batch job.
+- **Decision:** shipped voice Glean in #473 as the synchronous flow Peter had decided, and marked it ready without trying it.
+- **Peter:** "gleaning from voice mode keeps me stuck on that same page with the button displaying a spinner wheel. It looks like it started a batch processing job. We agreed the feature should use sync call, instead. And take me directly to the text mode view of the Glean node."
+- **Score:** miss
+- **Why it missed:** the likely cause (unconfirmed on Peter's logs) is an inline refresh of a large Community Archive export before the render, which kept the screen waiting. The local log also showed a duplicate `feed_render` insert for the gleaning node, so a "rerun sync" ended in a rollback toast. No one ran a voice Glean with real data.
+- **Source:** Claude Code session 2026-10-09 (Opus 5.5)
+- **Applies to:** #473, #474
+- **Rule:** Problems show
+
+### 2026-10-09 · Rerun buttons on a Glean that is always synchronous
+
+- **Kind:** UX
+- **Situation:** #473 left "rerun sync" and a batch rerun on a gleaning, although Glean is synchronous only.
+- **Decision:** kept the rerun buttons on the gleaning.
+- **Peter:** "I clicked rerun sync (these buttons shouldn't be there once we have only sync version)"
+- **Score:** miss
+- **Why it missed:** rerun controls were kept for a flow that is only synchronous. The rework removed the buttons and left a rerun API for admins.
+- **Source:** Claude Code session 2026-10-09 (Opus 5.5)
+- **Applies to:** #473, #474
+- **Rule:** Admin tools stay admin tools
+
+### 2026-10-09 · No "Back to Home" under a gleaning
+
+- **Kind:** user-facing text
+- **Situation:** #473 put a "Back to Home" link under a gleaning as a way out of it.
+- **Decision:** added "Back to Home" under a gleaning, on the candidate rule that every screen has a way home.
+- **Peter:** "pls remove the back to home button from the Glean node. There is one in the NavBar, I thought this was just for the mockup, not the real thing"
+- **Score:** miss
+- **Why it missed:** a candidate rule from the builder's own notes ("every screen has a way home") was applied without a check against the screen. Peter had never confirmed the rule, and he took the link for a mockup element.
+- **Source:** Claude Code session 2026-10-09 (Opus 5.5)
+- **Applies to:** #473
+- **Rule:** the candidate "every screen has a way home" is not supported.
+
+### 2026-10-09 · Glean and its picker on the Glean entry too
+
+- **Kind:** UX
+- **Situation:** #473 showed the Glean menu entry on every own entry except system prompts, pending entries and AI None. Threads started from the Glean card begin with a Glean system-prompt node, so they showed neither the button nor the model picker.
+- **Decision:** excluded system prompts from the Glean menu entry and the picker.
+- **Peter:** "when I wanted to generate Gleans with a different model and went one level up to the Glean sys prompt, the Glean | glean model picker button wasn't there which it should!"
+- **Score:** miss
+- **Why it missed:** "not on system prompts" was copied from the other actions. In a Glean thread, the system prompt is the entry the user acts from.
+- **Source:** Claude Code session 2026-10-09 (Opus 5.5)
+- **Applies to:** #473
+- **Rule:** candidate: actions show where the user's flow needs them, even on prompts.
+
+### 2026-10-09 · The Glean tooltip is Loore's own
+
+- **Kind:** UX
+- **Situation:** #473 explained the Glean button with the browser's native `title` tooltip.
+- **Decision:** used the native tooltip.
+- **Peter:** "the tooltip is not in Loore-style … could we do anything about it? At least the same font color."
+- **Score:** miss
+- **Why it missed:** a native `title` was used, and no one looked at it in the browser. The rework added a Loore-styled tooltip (`LooreTooltip`).
+- **Source:** Claude Code session 2026-10-09 (Opus 5.5)
+- **Applies to:** #473
+- **Rule:** Reuse form patterns
+
+### 2026-10-09 · Gleaning from a normal reflection is hard to find
+
+- **Kind:** UX
+- **Situation:** in a Reflect thread, "Glean for this reflection" lived only in the ⋯ menu of an entry.
+- **Decision:** put the action in the ⋯ menu only.
+- **Peter:** "I also started a new text mode thread and I don't know to get a Glean for it. How have we resolved the problem if the user starts normal reflection, but during/after it they realize they would like to get their Gleans for it?"
+- **Score:** miss
+- **Why it missed:** a menu entry was treated as discoverable for a new feature on the home page's second card. The next brief asks Peter where the action should live.
+- **Source:** Claude Code session 2026-10-09 (Opus 5.5)
+- **Applies to:** #473
+- **Rule:** candidate: a new main action is visible without opening a menu.
+
+### 2026-10-09 · A sign-in link lasts 15 minutes, not 2 hours
+
+- **Kind:** process
+- **Situation:** to let Peter test locally, the builder gave him a magic sign-in link and said it works for 2 hours.
+- **Decision:** told Peter the link works for 2 hours without checking the setting.
+- **Peter:** "But the link you gave me was already expired (even though newer than 2hrs)"
+- **Score:** miss
+- **Why it missed:** a number from memory about a different setting. The sign-in token expires after 15 minutes (`MAGIC_LINK_EXPIRY_SECONDS`), and one grep would have shown it.
+- **Source:** Claude Code session 2026-10-09 (Opus 5.5)
+- **Applies to:** #473
+
+### 2026-10-09 · Writing stays visible during the 30 days of a deletion
+
+- **Kind:** data safety
+- **Situation:** #415 "Needs Peter" 1: when a user deletes their writing, does it stay visible for the 30 days (as built) or disappear at once?
+- **Decision:** defaulted to "as built" (the writing stays visible for the 30 days). The item was listed in the PR body but never reached a brief.
+- **Peter:** "a soft-delete of everything immediately + real deletion after 30 days. The Cancel deletion button undoing the soft deletion"
+- **Score:** miss
+- **Why it missed:** the builder's recommendation was "as built". Peter's model of "delete" is that the writing is gone now and can be restored until the 30 days end.
+- **Source:** Claude Code session 2026-10-09 (Opus 5.5)
+- **Applies to:** #415, #464, #482
+- **Rule:** candidate: deletion hides at once and removes for good after the grace period.
+
+### 2026-10-09 · Writing deletion: the PR's Needs-Peter item was never asked
+
+- **Kind:** escalation
+- **Situation:** #415 "Needs Peter" 1: writing visible for the 30 days, or hidden at once.
+- **Decision:** decided without asking Peter
+- **Peter:** "a soft-delete of everything immediately + real deletion after 30 days. The Cancel deletion button undoing the soft deletion"
+- **Score:** miss
+- **Why it missed:** the item was listed as "Needs Peter" in the PR body but never reached a brief, so the default applied silently. Item 2 (the admin purge runs at once and cannot be undone) was left out the same way and goes into the next brief.
+- **Source:** Claude Code session 2026-10-09 (Opus 5.5)
+- **Applies to:** #415, #464
+
+### 2026-10-09 · The writing-deletion text
+
+- **Kind:** user-facing text
+- **Situation:** #415 and #464 needed a sentence for the dialog and the status of a writing deletion.
+- **Decision:** wrote the text for deleting a writing.
+- **Peter:** "You can restore your writings safely within 30 days. After that they are deleted forever."
+- **Score:** miss
+- **Why it missed:** the same pattern as the account text earlier on 2026-10-09: Peter's reframe is one line in the user's words (restore safely, then deleted forever).
+- **Source:** Claude Code session 2026-10-09 (Opus 5.5)
+- **Applies to:** #415, #464, #482
+- **Rule:** candidate: user-facing text says what happens to the user, in the user's words, not in the implementation's.
+
 ### 2026-10-13 · A failed voice reply makes a sound
 
 - **Kind:** UX
@@ -939,6 +1104,424 @@ Kinds (one per entry and per table row):
 - **Source:** Claude Code session 2026-10-13 (Opus 5.5)
 - **Applies to:** #382
 
+### 2026-10-13 · Local Loore moves to train #502, with a browser pass first
+
+- **Kind:** testing
+- **Situation:** Peter asked whether Glean and account deletion were ready for him to test on local Loore, which still ran main. The builder listed how the switched setup would differ from main's (a local mail catcher, the deletion job once a minute, the new columns, real model calls for Glean). Options: switch now and let the builder use both flows in a browser first (about 20 to 30 minutes), switch now and Peter tests at once, or later.
+- **Prediction:** switch now, with the builder's browser pass first (60 %); switch now, and he tests at once (30 %); later (10 %).
+- **Peter:** "yes pls, run it with these differences"
+- **Score:** hit
+- **Source:** Claude Code session 2026-10-13 (Opus 5.5)
+- **Applies to:** #502
+- **Rule:** candidate: a user-facing feature is used in a browser, with screenshots, before it is marked ready.
+
+### 2026-10-13 · The admin purge works like the user's own deletion
+
+- **Kind:** data safety
+- **Situation:** #415 "Needs Peter" 2, left out of the 2026-10-09 brief and asked in the next one: an admin's "Purge data" deleted everything at once and could not be undone. The brief recommended hiding the data at once, deleting it for good after 7 days, and an "Undo" in the admin panel until then. The alternative was to keep it immediate.
+- **Prediction:** accepts the recommendation (55 %); keeps it immediate (30 %); another grace length (15 %).
+- **Peter:** "it should definitely work the same as user doing themselves" · "do we only have 7 days there? I think I asked for a month for keeping the writings soft-deleted, then deleted for good."
+- **Score:** miss: hiding at once with an undo was right, the 7 days were not.
+- **Why it missed:** the brief proposed a separate number for the admin's path instead of reusing the 30 days Peter had already set for the user's own deletion. He wants one deletion flow, whoever starts it. #508 builds it, and also makes the admin's "Delete account" restorable for 30 days.
+- **Source:** Voice review in local Loore 2026-10-13 (Opus 5.5)
+- **Applies to:** #415, #464, #508
+- **Rule:** "Deletion" in `LOORE-ESSENCE.md`; candidate: a deletion an admin starts works like the user's own.
+
+### 2026-10-13 · Writing made during a deletion's 30 days survives
+
+- **Kind:** data safety
+- **Situation:** the #415 rework hides a user's writing at once when they press "Delete all my writing", and deletes it for good after 30 days. What the user writes after pressing it was never hidden, so it stays when the hidden writing is deleted. The 2026-10-09 brief listed this as decided, not as a question.
+- **Decision:** writing, saves and imports made during the 30 days survive the deletion (the #415 builder's choice, told to Peter in the brief). Predicted that Peter accepts (80 %).
+- **Peter:** "great"
+- **Score:** not scored: counted once, as the hit in the #415 row "Writing, saves and imports during the 30 days" under "Decided by the builder"
+- **Source:** Voice review in local Loore 2026-10-13 (Opus 5.5)
+- **Applies to:** #415
+- **Rule:** Peter's soft-delete model (2026-10-09)
+
+### 2026-10-13 · Glean in a reflection: a button in the thread's controls
+
+- **Kind:** UX
+- **Situation:** in a normal Text-mode thread, the only way to glean was "Glean for this reflection" in the ⋯ menu of an entry, which Peter had not found. Options: A, a Glean button in the thread's top-right controls next to Voice Mode, which gleans from the newest entry (recommended); B, a quiet "Glean" link under Loore's latest reply only; C, keep the ⋯ entry and show a one-time hint.
+- **Prediction:** A (50 %); B (30 %); C or other (20 %).
+- **Peter:** "A"
+- **Score:** hit
+- **Source:** Voice review in local Loore 2026-10-13 (Opus 5.5)
+- **Applies to:** #473, #506
+
+### 2026-10-13 · Glean by asking
+
+- **Kind:** product scope
+- **Situation:** in the same answer, Peter added a way to glean that the brief had not offered.
+- **Peter:** "I think we should also add voice controls, ie adding to the agentic prompt. Because the top right buttons - voice mode, gleanings, auto-generate - stay on top, so in a thread that doesn't fit into one screen these won't be visible. If the user asks in text/voice, Loore should be able to append the Glean sys prompt and run a sync call for the default model in one step (multistep)"
+- **Score:** not scored: no prediction or decision by the builder; filed as #505.
+- **Source:** Voice review in local Loore 2026-10-13 (Opus 5.5)
+- **Applies to:** #505
+
+### 2026-10-13 · The iPhone's deletion notice goes in the updates sheet
+
+- **Kind:** UX
+- **Situation:** #500, filed by the builder after the 2026-10-09 review: while a writing deletion waits, the iPhone app shows nothing about it, so a user who deleted their writing on the web sees an empty app. The issue proposed the web's status bar for the app.
+- **Decision:** proposed the web's status bar in the app, with the same texts and "Restore my writing".
+- **Peter:** "what is meant by the Status bar mentioned in the issue? I'd display the info & option to restore in the changelog UI"
+- **Score:** miss
+- **Why it missed:** the web's surface was copied to the app without checking what the app already has for notices. Peter chose the updates (changelog) sheet the app already shows.
+- **Source:** Voice review in local Loore 2026-10-13 (Opus 5.5)
+- **Applies to:** #500
+
+### 2026-10-13 · No model picker beside the reflection thread's Glean button
+
+- **Kind:** UX
+- **Situation:** #506 adds the Glean button to a reflection thread's top-right controls (Peter's option A). On 2026-10-09 Peter had asked for the model picker wherever Glean is offered, and the rework had put it beside the Glean button in every thread.
+- **Decision:** built the button without a picker, "same as the ⋯ entry", which uses the default model.
+- **Peter:** cited in the coordinator's check, from his decisions of 2026-10-09: "we'll need a model picker for everyone, with default selected based on the user's default model's provider" · "the Glean | glean model picker button wasn't there which it should!"
+- **Score:** miss: corrected by the coordinator before the review; the picker was added in #506.
+- **Why it missed:** the new button was compared with the ⋯ menu entry, which has no picker, instead of with the other Glean buttons, which all have one.
+- **Source:** Claude Code session 2026-10-13; the decision is the #506 builder's (Sonnet 5.5)
+- **Applies to:** #506, #473
+- **Rule:** a model picker beside every Glean button (Peter, 2026-10-09)
+
+### 2026-10-13 · The Glean tooltip's wording
+
+- **Kind:** user-facing text
+- **Situation:** the tooltip of the Glean button in a thread, on the web and the iPhone.
+- **Decision:** wrote "Loore reads today's Community Archive tweets and shows you the few worth your time, from what you said in this thread."
+- **Peter:** "the tooltip for the glean button's wording in a thread … needs changing to: (...) and shows you those relevant for this thread."
+- **Score:** miss
+- **Why it missed:** the text described the result as a judgement of value ("the few worth your time"). Peter's wording says only what Loore shows: the tweets relevant for this thread.
+- **Source:** Claude Code session 2026-10-13; the text is #473's (Opus 5.5)
+- **Applies to:** #473, #506
+
+### 2026-10-13 · The gleaning's text was hard to read
+
+- **Kind:** UX
+- **Situation:** Loore's note on each pick in a gleaning was set in Cormorant Garamond at 1.15rem across the full width, about 200 characters a line, as in the mockup of 2026-10-09.
+- **Decision:** set the note in the headings' display font at body size, full width.
+- **Peter:** "The font for the body of the recommendation is hard to read"
+- **Score:** miss
+- **Why it missed:** Peter had approved the mockup as a whole on 2026-10-09; at real length and full width, the display font at body size was hard to read. No one read a full gleaning in the browser before he did.
+- **Source:** Claude Code session 2026-10-13; the design is #473's (Opus 5.5)
+- **Applies to:** #435, #473
+
+### 2026-10-13 · Newsreader for the gleaning's text
+
+- **Kind:** UX
+- **Situation:** the builder put candidate fonts for the gleaning's note side by side on local Loore, without committing. The comparison also offered a shorter line (70 characters); the line stays full width.
+- **Prediction:** EB Garamond or Newsreader (no confidence recorded).
+- **Peter:** "let's go with Newsreader"
+- **Score:** hit
+- **Source:** Claude Code session 2026-10-13 (Opus 5.5)
+- **Applies to:** #473, #502
+
+### 2026-10-13 · Home cards: a Voice | Text switch, on the iPhone too
+
+- **Kind:** UX
+- **Situation:** for a user who gleans, the Reflect and Glean home cards (#474) had two separate buttons each (Voice, Text); the cards were not clickable and did not glow, and Share was stretched across its own row. Peter proposed Voice and Text as a remembered mode selector per card, with the whole card clickable and glowing like the old cards, and asked for advice. The builder advised: yes, with one joined Voice | Text switch, no glow while the pointer is on the switch, the choice remembered per card in the browser, the cards at their old size and Share one card wide and centred; and said that the iPhone app isn't affected.
+- **Prediction:** accepts as advised (70 %); accepts, but with the choice kept across devices as an account setting (15 %); prefers another design (15 %).
+- **Peter:** "in browser yes, Reflect and Glean separately yes, but what do you mean iPhone app unaffected? It should remember its own choices"
+- **Score:** partial: the web design as advised; the iPhone left out.
+- **Why it missed:** the change was treated as web-only because Peter described the web page. He expects the iPhone app to behave the same; #512 built it there.
+- **Source:** Claude Code session 2026-10-13 (Opus 5.5)
+- **Applies to:** #474, #510, #512
+- **Rule:** one behaviour across clients
+
+### 2026-10-13 · The Voice | Text switch as previewed
+
+- **Kind:** UX
+- **Situation:** Peter asked for a quick preview of the switch: one pill with two halves, the chosen half highlighted as the web's Voice and Text buttons are on hover, on cards that start the chosen mode.
+- **Decision:** drew the switch and the cards in a preview page, built afterwards on the web and the iPhone.
+- **Peter:** "I love the preview"
+- **Score:** hit
+- **Source:** Claude Code session 2026-10-13 (Opus 5.5)
+- **Applies to:** #510, #512
+
+### 2026-10-13 · No hint line under the home question
+
+- **Kind:** user-facing text
+- **Situation:** the same preview had a line under the home question: "The switch picks the mode. The card starts it."
+- **Decision:** added that line to explain the switch and the card.
+- **Peter:** "I'd just leave out the "The switch picks the mode. The card starts it.""
+- **Score:** miss
+- **Why it missed:** the line explained how the controls work, the pattern of the texts Peter corrected on 2026-10-09; he wants the controls without an explanation.
+- **Source:** Claude Code session 2026-10-13 (Opus 5.5)
+- **Applies to:** #510, #512
+
+### 2026-10-13 · "Twitter ↗", not "Open on X"
+
+- **Kind:** user-facing text
+- **Situation:** the tweet card, in gleanings and in other replies, has a link to the tweet on X, next to the arrow that marks a link out of Loore. Its label came from the mockup Peter approved on 2026-10-09.
+- **Decision:** labelled the link "Open on X".
+- **Peter:** "One tiny detail, could we change the "Open on X" text to just "Twitter" plus the up/right arrow which is there already now."
+- **Score:** miss
+- **Why it missed:** the label used a verb and X's current name. Peter wants only the name Loore uses elsewhere ("Twitter bookmarks"), with the arrow that already shows the link leaves Loore.
+- **Source:** Claude Code session 2026-10-13; the text is #473's (Opus 5.5)
+- **Applies to:** #473, #502
+
+### 2026-10-13 · The reference page shows the gleaning's card, not X's embed
+
+- **Kind:** UX
+- **Situation:** a tweet's reference page embedded X's widget, which Peter called "very out of style for Loore". He asked for Loore's stored text, consistent with the gleanings and clearly different from the user's own entries, and for three options side by side. A: the gleaning's tweet card at page size (a full border, no accent rail, the text in Newsreader; recommended). B: a cited passage without a card. C: an inset clipping, with Loore's controls outside it.
+- **Prediction:** A (45 %); B (30 %); C (15 %); a mix or another design (10 %).
+- **Peter:** "I like the A. The pick, enlarged."
+- **Score:** hit
+- **Source:** Claude Code session 2026-10-13 (Opus 5.5)
+- **Applies to:** #502
+
+### 2026-10-13 · Option A for every kind of reference
+
+- **Kind:** UX
+- **Situation:** Peter asked whether other kinds of reference, such as saved pages, need the new format too: "If not, that's ok".
+- **Decision:** applied A to every kind of reference (tweets, pages, videos) on the web and the iPhone, with no tweet embed and the YouTube player kept; told Peter instead of asking. Predicted that he accepts (80 %).
+- **Peter:** "Ok. The font color on prod references for Pages is different than user's private node, so it's clearly different. But I'm gonna wait what you build and then review" · on 2026-10-14: "the page type reference looks beautiful, thanks"
+- **Score:** hit
+- **Source:** Claude Code session 2026-10-13 and 2026-10-14 (Opus 5.5)
+- **Applies to:** #502
+
+### 2026-10-13 · Option A for every kind of reference: ask or decide
+
+- **Kind:** escalation
+- **Situation:** Peter asked whether other kinds of reference need the new format too.
+- **Decision:** decided without asking Peter
+- **Peter:** "the page type reference looks beautiful, thanks"
+- **Score:** hit
+- **Source:** Claude Code session 2026-10-13 (Opus 5.5)
+- **Applies to:** #502
+
+### 2026-10-14 · The top-right Glean picker in the controls' font
+
+- **Kind:** UX
+- **Situation:** the model picker beside the top-right Glean button (#506) used the style of the picker in the action row (14 px), larger than the other top-right buttons (0.78rem).
+- **Decision:** copied the action row's picker style for the top-right picker.
+- **Peter:** "The top right Glean model selector's font in a non-glean thread is too big, could you pls make it match the other fonts on the top right buttons?"
+- **Score:** miss
+- **Why it missed:** the style was copied from where the picker already existed instead of matched to the controls it sits with, and the change was checked only in unit tests, not in a browser.
+- **Source:** Claude Code session 2026-10-14; the decision is the #506 builder's (Sonnet 5.5)
+- **Applies to:** #506
+
+### 2026-10-14 · The picker's list stays inside the window
+
+- **Kind:** UX
+- **Situation:** the same picker sits at the right edge of the window. Its list opened to the right, so the model names did not fit and the page moved sideways while the list was open.
+- **Decision:** placed the picker at the right edge with the list opening in its usual direction.
+- **Peter:** "when I click on the model, the drop down model names don't fit and shift the whole view to the left. And when I select, it shifts back to the right. Weird UX. Could you pls fix it?"
+- **Score:** miss
+- **Why it missed:** no one opened the picker in a browser at that position. The list now opens to the left when there is no room on the right, and a long model name ends in an ellipsis.
+- **Source:** Claude Code session 2026-10-14; the decision is the #506 builder's (Sonnet 5.5)
+- **Applies to:** #506
+
+### 2026-10-14 · Glean's default model: GPT-5.6 Luna for every provider while it is tested
+
+- **Kind:** cost
+- **Situation:** Glean's default model followed the provider of the user's chat model: Haiku 5.5 for Anthropic users (Peter, 2026-10-09) and the Read default for OpenAI users, and a default never crossed providers. Peter had tested voice Glean locally.
+- **Peter:** "Glean voice now works great. I'd like to set the default model to luna 5.6, even for claude users for this testing phase. It's just the best model for Glean we have, and by far. We'll be testing more models, especially haiku 5.5. Pls leave the machinery for honoring the provider, just change the default model for both providers to luna 5.6 for now."
+- **Score:** not scored: no prediction or decision by the builder.
+- **Source:** Claude Code session 2026-10-14 (Opus 5.5)
+- **Applies to:** #435, #473, #502
+- **Rule:** Peter's, proposed for `LOORE-ESSENCE.md` as "Glean's default model, while Glean is tested": an exception to "A user's model is theirs" for Glean's default only; the user sees the model in the picker and may choose another. It replaces the default of the entry "The default Glean model for Anthropic users" (2026-10-09).
+
+### 2026-10-14 · Only admins change the window or scope of `{ca_tweets}`
+
+- **Kind:** product scope
+- **Situation:** the Glean prompt uses `{ca_tweets?days=1}`. The placeholder also takes a longer window (`days`, up to 3) and a `scope`. #435's review allowed these options in read prompts without tying them to who runs the prompt. Typing `{ca_tweets}` and editing read prompts were already admin-only (#473), so no other user could reach the options.
+- **Decision:** accepted the options in any read prompt.
+- **Peter:** "I think only admins should be allowed to use a different number than 1. Same with other modifiers for that keyword, if we have some."
+- **Score:** miss
+- **Why it missed:** the options were judged by who can edit a prompt. Peter wants the limit on the options themselves. For anyone but an admin, a `{ca_tweets}` other than the default is now refused before the reply is created and again when it runs, a second check next to the prompt rule.
+- **Source:** Claude Code session 2026-10-14; the decision is #473's review (Opus 5.5)
+- **Applies to:** #435, #473, #502
+- **Rule:** admin tools stay admin tools
+
+### 2026-10-14 · No tooltip on the voice screen's Glean button
+
+- **Kind:** UX
+- **Situation:** on the voice screen, the Glean button under the record button showed Loore's tooltip: what Glean finds, or that Glean waits for Loore's reply.
+- **Decision:** gave the voice screen's Glean button the tooltip, as in threads.
+- **Peter:** "let's hide the tooltip on the glean button in voice mode glean"
+- **Score:** miss
+- **Why it missed:** the tooltip Peter asked to be Loore-styled in threads (2026-10-09) was also put on the voice screen. He wants the voice screen's button without it; screen readers still get the description.
+- **Source:** Claude Code session 2026-10-14; the decision is #473's (Opus 5.5)
+- **Applies to:** #473, #502
+
+### 2026-10-14 · Gleaning from saved references: a question issue
+
+- **Kind:** product scope
+- **Situation:** gleanings pick from the day's Community Archive tweets only.
+- **Peter:** "another thing I'd like you to file an issue for: should we add user's saved references to the set of items the gleanings are selected from?"
+- **Score:** not scored: no prediction or decision by the builder; filed as #515 with the open questions (which references, how many, the cost of decrypting them, opt-in, display).
+- **Source:** Claude Code session 2026-10-14 (Opus 5.5)
+- **Applies to:** #515
+
+### 2026-10-14 · Opening a reference page marks it read
+
+- **Kind:** UX
+- **Situation:** #473 decided that opening a reference page does not count as reading it, by the rule that only a shown Read counts as opened (#405). Peter opened a gleaned tweet's page from the gleaning's card.
+- **Decision:** opening a reference page does not mark it read.
+- **Peter:** "looks like clicking the quote, which takes me to the external reference site on Loore, doesn't mark the gleaning as read. I think it should. Shouldn't it?"
+- **Score:** miss
+- **Why it missed:** a rule for measuring Reads (#405) was applied to the user's read mark on a tweet. For Peter, opening the tweet's page in Loore is reading it.
+- **Source:** Claude Code session 2026-10-14; the decision is #473's (Opus 5.5)
+- **Applies to:** #473, #502
+- **Rule:** candidate: opening a reference's own page counts as reading it.
+
+### 2026-10-14 · Read on open, from anywhere
+
+- **Kind:** UX
+- **Situation:** after that correction, the builder made every open of a reference page by its owner mark it read: from a gleaning, and also from the References list and from search, on the web and the iPhone. Peter was told, then asked whether it should hold from anywhere or only from a gleaning.
+- **Prediction:** keeps "from anywhere" (80 %).
+- **Peter:** "ok, good"
+- **Score:** hit
+- **Source:** Claude Code session 2026-10-14 (Opus 5.5)
+- **Applies to:** #502
+
+### 2026-10-14 · Separate verdicts for the intro and the tweet: two states per part
+
+- **Kind:** UX
+- **Situation:** for each pick, a gleaning shows Loore's paragraph introducing the tweet and the tweet's card, with one ⊕ ⊖ pair on the card. Peter wanted testers to judge the paragraph apart from the tweet and asked for a mockup; he expected four icons per pick to be too many. In the mockup's option B, one pair opens to rate the parts, and narrowing a verdict to one part gave the other part the opposite verdict.
+- **Decision:** designed B with two states per part: a part not rated good was rated bad.
+- **Peter:** "I think I like the UX of B the most, but it's logically wrong. It assumes binary logic - not good means bad. But that's not the case, we have three options: good, no feedback, bad. No feedback is important, because it covers the wide range of gleanings that are just okayish. Neither great, nor terrible. Would it be possible to use the B's UX, but with this three options logic? If not, I'd go with C"
+- **Score:** miss
+- **Why it missed:** a verdict on one part was read as implying the opposite for the other. An untouched pick is neutral (2026-10-01), and that holds for each part.
+- **Source:** Claude Code session 2026-10-14 (Opus 5.5)
+- **Applies to:** #502
+- **Rule:** "Recommend fewer, better" in `LOORE-ESSENCE.md` (an untouched pick is neutral)
+
+### 2026-10-14 · Three states for each part
+
+- **Kind:** UX
+- **Situation:** B reworked: one pair at rest; a tap gives both parts that verdict and opens the pair into two, each part good, unrated or bad; tapping a lit glyph clears it, and when both parts are cleared the pair closes again.
+- **Prediction:** accepts it (65 %); option C (25 %); other (10 %).
+- **Peter:** "B is perfect now, thx!"
+- **Score:** hit
+- **Source:** Claude Code session 2026-10-14 (Opus 5.5)
+- **Applies to:** #502
+
+### 2026-10-14 · A verdict on the intro keeps none of the intro's text
+
+- **Kind:** privacy
+- **Situation:** with B approved, Peter asked what is stored with each verdict. The tweet's verdict is stored with the tweet's id, so it can be counted which tweets were rated good or bad.
+- **Peter:** "for the tweet feedback, we are logging the tweet id as well, right? So we can look which tweets were graded good, and which bad. What's the case with the point? Because the point can contain private info - it's generated by a model which has access to the user's profile and intentions, so we shouldn't be tracking the contents of the point"
+- **Score:** not scored: no prediction or decision by the builder.
+- **Source:** Claude Code session 2026-10-14 (Opus 5.5)
+- **Applies to:** #502
+- **Rule:** Peter's, proposed for `LOORE-ESSENCE.md` as "A verdict on an intro keeps none of the intro": a verdict on the intro stores where it was given (the gleaning and the pick) and its value, never a copy, hash or excerpt of the intro's text.
+
+### 2026-10-14 · "The intro", not "the point"
+
+- **Kind:** user-facing text
+- **Situation:** the opened pair labelled the two parts "The point" and "The tweet".
+- **Decision:** called Loore's paragraph introducing the tweet "the point".
+- **Peter:** "could we call it "the intro" instead of "the point"? I think it will be clearer what it refers to"
+- **Score:** miss
+- **Why it missed:** the name described what the paragraph says. Peter chose a name for its place in the gleaning, before the tweet, which tells the user which part they rate.
+- **Source:** Claude Code session 2026-10-14 (Opus 5.5)
+- **Applies to:** #502
+- **Rule:** candidate: user-facing text says what happens to the user, in the user's words, not in the implementation's.
+
+### 2026-10-14 · The split verdicts go into train #502
+
+- **Kind:** process
+- **Situation:** build the split verdicts into train #502, so that the testers' first gleanings collect both verdicts, or as their own PR after #502? Recommended: in the train.
+- **Prediction:** in the train (60 %); their own PR after #502 (40 %).
+- **Peter:** "yes pls, build it into this train"
+- **Score:** hit
+- **Source:** Claude Code session 2026-10-14 (Opus 5.5)
+- **Applies to:** #502
+
+### 2026-10-14 · The next Glean sees the intro verdicts
+
+- **Kind:** product scope
+- **Situation:** the next Glean in a thread sees the user's verdicts on the earlier tweets. Should it also see the verdicts on the intros? Recommended yes, built unless Peter said no.
+- **Prediction:** yes (70 %); no, or not while models are being compared (30 %).
+- **Peter:** "ok, good"
+- **Score:** hit
+- **Source:** Claude Code session 2026-10-14 (Opus 5.5)
+- **Applies to:** #502
+
+### 2026-10-14 · Glean waits for the deletion review
+
+- **Kind:** release/ops
+- **Situation:** Peter wanted Glean on prod that day, switched off except for one tester, and would review account deletion the next day. Train #502 holds the deletion PRs (#415, #464, #482, #508) with Glean built on top of them, and deletion has no switch, so merging the train ships it live. Options: (A) wait and merge the whole train after the deletion review; (B) split off a Glean-only train that day, with deletion merged on top later; (C) put deletion behind a switch (not recommended: its row-hiding hook runs on every query anyway). Recommended A unless a day mattered.
+- **Prediction:** A (45 %); B (45 %); C (10 %).
+- **Peter:** "ok, let's put off the merge to tomorrow"
+- **Score:** hit
+- **Source:** Claude Code session 2026-10-14 (Opus 5.5)
+- **Applies to:** #502
+
+### 2026-10-15 · The Log shows another user's public reply after the author deletes a public thread
+
+- **Kind:** privacy
+- **Situation:** #516, found by Peter in his local test of #502. When a user deletes a public thread that has a live reply, the Log's rule for deleted roots with a live reply (`backend/routes/log.py`) kept the root's place in the Log, so another user's public reply showed in the deleter's Log. The rule came with soft delete (#121). The builder of the public forum (#229, a8eda698, 2026-07-02) extended it to public roots, a builder choice that was never put to Peter. The Log is meant to hold private entries only.
+- **Decision:** let the rule for deleted roots with a live reply take public roots too.
+- **Peter:** "deletetest's Log doesn't show the public node, because Log is supposed to show only private entries ... hrosspet's public answer under deletetest's public node appears in deletetest's Log. It shouldn't, it's public."
+- **Score:** miss
+- **Why it missed:** a rule written for private threads was widened to public roots when the public forum was built, without checking what the Log is for. The builder could have seen at the time that the Log holds private entries only. Fixed in the train (88cdcd58), and refined in cb4fc3e3 so that the user's own private replies under a deleted public root still show.
+- **Source:** Claude Code session 2026-10-15 (Opus 5.5); the decision is #229's (2026-07-02)
+- **Applies to:** #516, #229, #121, #502
+- **Rule:** the Log shows private entries only
+
+### 2026-10-15 · The #516 fix goes into train #502
+
+- **Kind:** process
+- **Situation:** after Peter found #516, the builder offered two places for the fix: into train #502 now, or a separate PR after the merge.
+- **Prediction:** into the train (60 %); a separate PR after the merge (40 %).
+- **Peter:** "yes pls"
+- **Score:** not scored: his answer approved the fix and did not choose between the two places. The builder put it in the train.
+- **Source:** Claude Code session 2026-10-15 (Opus 5.5)
+- **Applies to:** #516, #502
+
+### 2026-10-15 · Delete all my writing again while a deletion waits
+
+- **Kind:** data safety
+- **Situation:** while the 30 days of a writing deletion run, the "Delete all my writing" button was hidden, so writing made after the first click could not be deleted. Peter asked: "while the 30 day grace period is running for a user, they don't have the option to delete their writings ... Should the deletion period be extended to the user's writing created after the last button click? And should the new 30 day period apply only to the newly deleted nodes, or to all nodes, including the ones deleted earlier? Should the user be able to separately undo different deletions?" The builder recommended: (a) show the button again while a deletion waits, and it hides the newer writing too; (b) one date: everything moves to 30 days after the latest click (precedent: an account deletion that takes over a waiting writing deletion sets one new date); (c) one Restore for everything; (d) not in this train, file an issue.
+- **Prediction:** (b) 55 %; (c) 70 %; (d) 70 %.
+- **Peter:** "I'd like it fixed in this train. Otherwise pls go with your recommendations"
+- **Score:** hit + hit + hit + miss: (a), (b) and (c) as recommended; (d) was not.
+- **Why it missed:** Peter wants a gap he finds while testing a train fixed in that train, not deferred as rare. Built in 1f5ef085; Peter tested it locally: "the delete again works".
+- **Source:** Claude Code session 2026-10-15 (Opus 5.5)
+- **Applies to:** #415, #502
+- **Rule:** candidate: a gap Peter finds while testing a train is fixed in that train unless it is large.
+
+### 2026-10-15 · Poll answers go with "Delete all my writing"
+
+- **Kind:** data safety
+- **Situation:** the #464 builder chose that a writing deletion also deletes the user's poll answers. The builder raised it to Peter as a finding from the 2026-10-13 browser pass.
+- **Decision:** the #464 builder's choice, kept: poll answers are deleted by a writing deletion. Predicted that Peter accepts.
+- **Peter:** "yes to both" (yes meaning keep it)
+- **Score:** hit
+- **Source:** Claude Code session 2026-10-15 (Opus 5.5); the decision is #464's
+- **Applies to:** #464, #502
+
+### 2026-10-15 · The updates popup over the deletion pages
+
+- **Kind:** UX
+- **Situation:** a finding from the builder's browser pass of 2026-10-13: the "While you were away" popup opened over the account-deletion confirmation page and right after a restore. Peter confirmed that he saw it.
+- **Decision:** fixed it in the train without asking, following the same-day preference of the entry "Delete all my writing again while a deletion waits": a page load that starts on the confirmation or restore page doesn't show the popup, and a one-time marker skips it on the reload after either restore (d378a0aa, e5e7bd0d).
+- **Peter:** "yes to both" · on how it would change: "the popup shows on every app relaod if there is anything new from the dev update... how would you like to change it?" The builder explained that the general rule stays (#207: unread items show on every app open until "Got it").
+- **Score:** hit: no objection.
+- **Source:** Claude Code session 2026-10-15 (Opus 5.5)
+- **Applies to:** #207, #502
+
+### 2026-10-15 · The updates popup over the deletion pages: ask or decide
+
+- **Kind:** escalation
+- **Situation:** the popup opened over the account-deletion confirmation page and right after a restore.
+- **Decision:** decided without asking Peter
+- **Peter:** no objection.
+- **Score:** hit
+- **Source:** Claude Code session 2026-10-15 (Opus 5.5)
+- **Applies to:** #502
+
+### 2026-10-15 · A rare case the review found: fix it after all
+
+- **Kind:** data safety
+- **Situation:** the review of the train found that the second "Delete all my writing" button stays hidden when the user's only unhidden writing is an AI reply under an entry they deleted on its own.
+- **Decision:** the coordinator left it (rare; writing anything new shows the button) and told Peter.
+- **Peter:** "pls fix this as well"
+- **Score:** miss
+- **Why it missed:** in a deletion flow Peter wants the button to be right in every case he can see, not just the common one. Fixed in the train by a separate commit. The decision is the coordinator's judgement that Peter corrected, not a reviewer finding.
+- **Source:** Claude Code session 2026-10-15 (Opus 5.5)
+- **Applies to:** #415, #502
+- **Rule:** candidate: a gap Peter finds while testing a train is fixed in that train unless it is large.
+
 ## Decided by the builder
 
 Choices that agents flagged in PRs and that the builder decided because a rule above already covers them (Peter, 2026-10-02: decide what the log supports, raise only real judgement calls). Each is also recorded on its PR, or in the session where Peter asked. The Decided column holds only the builder's part; a rule or decision of Peter's goes in the Rule column. Questions raised to Peter instead are not listed; his answers become entries. Model is the model that wrote the PR (its Co-Authored-By line). Result is "accepted by merge (PR #N, date)" once the PR has merged and Peter didn't correct the choice, "pending" until it merges, and "corrected → entry <title>" when he overrules it; the entry is then scored as a miss.
@@ -979,18 +1562,18 @@ Choices that agents flagged in PRs and that the builder decided because a rule a
 | 2026-10-09 | #473 | cost | Which Glean turns run live | Every read turn, except `/read/start` and the batch rerun | Every added heuristic is named | Opus 5.5 | pending |
 | 2026-10-09 | #473 | UX | What a click on Glean does | Always creates the reply | Latency counts as quality | Opus 5.5 | pending |
 | 2026-10-09 | #473 | user-facing text | The label of the action | Stays "Glean" | Peter named the card (2026-10-09) | Opus 5.5 | pending |
-| 2026-10-09 | #473 | UX | Where the menu entry for Glean shows | On every own entry, not on system prompts, pending entries or AI None | candidate: actions show where they can run | Opus 5.5 | pending |
+| 2026-10-09 | #473 | UX | Where the menu entry for Glean shows | On every own entry, not on system prompts, pending entries or AI None | candidate: actions show where they can run | Opus 5.5 | corrected → entry Glean and its picker on the Glean entry too |
 | 2026-10-09 | #473 | UX | Voice Glean while the reply is still coming | Disabled until the reply lands; opens the thread on finish or failure | Problems show | Opus 5.5 | pending |
 | 2026-10-09 | #473 | release/ops | The Glean route with the switch off | 403 | Dark features stay dark | Opus 5.5 | pending |
 | 2026-10-09 | #473 | product scope | The per-user Glean switch's default | Computed live from six kinds of data (Community Archive, X and others) | Every added heuristic is named | Opus 5.5 | pending |
-| 2026-10-09 | #473 | testing | Opening a reference page | Does not count as a read | Only a shown Read counts as opened (#405) | Opus 5.5 | pending |
+| 2026-10-09 | #473 | testing | Opening a reference page | Does not count as a read | Only a shown Read counts as opened (#405) | Opus 5.5 | corrected → entry Opening a reference page marks it read |
 | 2026-10-09 | #473 | data safety | The name of a quoted author | Filled onto the user's own tweet row | The user's edit wins | Opus 5.5 | pending |
 | 2026-10-09 | #473 | release/ops | The backfill for those names | A script, run by hand | No heavy scripts on the prod VM | Opus 5.5 | pending |
 | 2026-10-09 | #473 | user-facing text | Prompt titles | "Glean" | Peter named the card (2026-10-09) | Opus 5.5 | pending |
 | 2026-10-09 | #473 | release/ops | Environment variable names | `GLEAN_*` | candidate: names follow the product name | Opus 5.5 | pending |
 | 2026-10-09 | #473 | user-facing text | Why a pick appears | "chosen for what you said" | candidate: say what happened in the user's words | Opus 5.5 | pending |
 | 2026-10-09 | #473 | user-facing text | A changelog entry while the feature is dark | None | Dark features stay dark | Opus 5.5 | pending |
-| 2026-10-09 | #473 | user-facing text | A way out of a gleaning | "Back to Home" under it | candidate: every screen has a way home | Opus 5.5 | pending |
+| 2026-10-09 | #473 | user-facing text | A way out of a gleaning | "Back to Home" under it | candidate: every screen has a way home | Opus 5.5 | corrected → entry No "Back to Home" under a gleaning |
 | 2026-10-09 | #473 | privacy | Reads for non-admins | Only through Glean (typed `{ca_tweets}`, read-prompt text, `/read/start` admin-only) | Experiments run on Peter's data; admin tools stay admin tools | Opus 5.5 | pending |
 | 2026-10-09 | #473 | cost | Who picks a non-admin's Glean model | The server always picks; no reuse of an earlier read's model | Cost is Peter's call | Opus 5.5 | corrected → entry A model picker for Glean users |
 | 2026-10-09 | #473 | reliability | A glean when the provider or the setting can't be resolved | Refused | Problems show | Opus 5.5 | pending |
@@ -1001,11 +1584,11 @@ Choices that agents flagged in PRs and that the builder decided because a rule a
 | 2026-10-09 | #415 | data safety | The abandon race in account deletion (review finding) | Fixed in the PR | Fix the root cause | Opus 5.5 | pending |
 | 2026-10-09 | #464 | privacy | Privacy and text findings from the review | Fixed in the PR | Fix the root cause | Opus 5.5 | pending |
 | 2026-10-09 | #464 | privacy | A 300 s public cache for other thread replies, and "taken" / "reserved" usernames | Left as they are | candidate: findings that break no promise are left | Opus 5.5 | pending |
-| 2026-10-09 | #466 | testing | An extra test the review asked for | Left out | candidate: findings that break no promise are left | Opus 5.5 | pending |
-| 2026-10-09 | #467 | UX | An icon finding | Fixed | Fix the root cause | Opus 5.5 | pending |
-| 2026-10-09 | #468 | process | A content hunk in the PR, and a follow-up | Hunk reverted; #470 filed | One PR, one purpose | Opus 5.5 | pending |
-| 2026-10-09 | #469 | reliability | A one-request race | Left; follow-up #477 | candidate: findings that break no promise are left | Opus 5.5 | pending |
-| 2026-10-09 | #472 | reliability | `status_reported` and two lower findings | `status_reported` fixed; the others go to #477 | Fix the root cause | Opus 5.5 | pending |
+| 2026-10-09 | #466 | testing | An extra test the review asked for | Left out | candidate: findings that break no promise are left | Opus 5.5 | accepted by merge (PR #497, 2026-10-09) |
+| 2026-10-09 | #467 | UX | An icon finding | Fixed | Fix the root cause | Opus 5.5 | accepted by merge (PR #497, 2026-10-09) |
+| 2026-10-09 | #468 | process | A content hunk in the PR, and a follow-up | Hunk reverted; #470 filed | One PR, one purpose | Opus 5.5 | accepted by merge (PR #497, 2026-10-09) |
+| 2026-10-09 | #469 | reliability | A one-request race | Left; follow-up #477 | candidate: findings that break no promise are left | Opus 5.5 | accepted by merge (PR #497, 2026-10-09) |
+| 2026-10-09 | #472 | reliability | `status_reported` and two lower findings | `status_reported` fixed; the others go to #477 | Fix the root cause | Opus 5.5 | accepted by merge (PR #497, 2026-10-09) |
 | 2026-10-09 | #415 | privacy | Which X tokens are revoked at deletion | Access and refresh token; an expired access token is skipped | Deletion for every account | Opus 5.5 | pending |
 | 2026-10-09 | #415 | reliability | How the revoke call is sent | `client_id` in the body and Basic auth | Fix the root cause | Opus 5.5 | pending |
 | 2026-10-09 | #415 | reliability | Errors from the revoke call | Logged as an error, as a warning when X already refused; the outcome is not stored | Problems show | Opus 5.5 | pending |
@@ -1016,28 +1599,28 @@ Choices that agents flagged in PRs and that the builder decided because a rule a
 | 2026-10-09 | #464 | privacy | Revoking the X sign-in token (OAuth 1.0a, `oauth/invalidate_token`) | A sibling helper with the same 10 s timeout; revoked when the user's own deletion is scheduled (for email accounts at the link confirmation); the X id must match; an expired token is skipped; a 401 is a warning | Deletion for every account | Opus 5.5 | pending |
 | 2026-10-09 | #464 | privacy | The X sign-in token after the revoke | Dropped from the session whatever the outcome | Deletion for every account | Opus 5.5 | pending |
 | 2026-10-09 | #464 | user-facing text | The X note in the deletion dialog | Two texts (revocable, not revocable); the bookmark text wins when both apply; the different-browser case is covered by the fallback sentence | candidate: user-facing text says what happens | Opus 5.5 | pending |
-| 2026-10-09 | #488 | reliability | What a provider refusal does | The same backoff as a cut-off output (#368); no new retry | Problems show | Sonnet 5.5 | pending |
-| 2026-10-09 | #488 | reliability | A partial text before a refusal | Dropped | Problems show | Sonnet 5.5 | pending |
-| 2026-10-09 | #488 | reliability | A refusal in a digest or a poll draft | Follows the existing empty-result path | Fix the root cause | Sonnet 5.5 | pending |
-| 2026-10-09 | #489 | release/ops | The dashboard card fields | Removed entirely, with no `?cards` flag, because no client reads them | Fix the root cause | Opus 5.5 | pending |
-| 2026-10-09 | #489 | release/ops | The pagination keys of those fields | Removed with them | Fix the root cause | Opus 5.5 | pending |
-| 2026-10-09 | #489 | release/ops | Decrypting the profile on every app load | Left as a follow-up ("Not in this PR") | One PR, one purpose | Opus 5.5 | pending |
-| 2026-10-09 | #491 | data safety | Editing a deleted thread's start node (#480) | The same 410, check and lock as `POST /nodes/` | The user's edit wins | Opus 5.5 | pending |
-| 2026-10-09 | #491 | UX | The order of the 410 and the AI-usage check | 410 first | Problems show | Opus 5.5 | pending |
-| 2026-10-09 | #491 | data safety | Which nodes are checked | Only the start node | candidate: check where the user's words enter | Opus 5.5 | pending |
-| 2026-10-09 | #491 | product scope | Text mode, recording save, streaming draft and save-as-node routes | Left as they are (the user's own words; #480's reasoning for text mode) | One PR, one purpose | Opus 5.5 | pending |
-| 2026-10-09 | #491 | UX | The notice when the node is gone | A toast like LLM Response, the existing 8 s | Reuse form patterns | Opus 5.5 | pending |
-| 2026-10-09 | #492 | reliability | Two todo merges for one user at once | A per-user database advisory lock; waits `TODO_LOCK_WAIT_SECONDS` = 10, then answers 503 `todo_busy` | Every added heuristic is named | Opus 5.5 | pending |
-| 2026-10-09 | #492 | data safety | A merge's edits when the list changed in between | Re-applied to the newest list: exact once, ignoring checkboxes once, else fail with "Apply again" | The user's edit wins | Opus 5.5 | pending |
-| 2026-10-09 | #492 | data safety | A tick the user made during a merge | The user's tick wins over the merge's checkbox | The user's edit wins | Opus 5.5 | pending |
-| 2026-10-09 | #492 | data safety | A whole-list merge when the list changed | Fails | The user's edit wins | Opus 5.5 | pending |
-| 2026-10-09 | #492 | UX | The editor on a version conflict (409) | "Save mine anyway" or "Show the newest list"; the text is kept (Copy, Discard) | The user's edit wins | Opus 5.5 | pending |
-| 2026-10-09 | #492 | data safety | Reverting a todo version | Takes the lock, with no version check | candidate: a revert is the user's explicit choice | Opus 5.5 | pending |
-| 2026-10-09 | #492 | data safety | A save without `base_revision` | Saves as before | Do not break older clients | Opus 5.5 | pending |
-| 2026-10-09 | #492 | reliability | The iPhone on a 409 | Retries once | Every added heuristic is named | Opus 5.5 | pending |
-| 2026-10-09 | #492 | reliability | The running-check of #472 | Uses `human_owner_id` | Fix the root cause | Opus 5.5 | pending |
-| 2026-10-09 | #492 | data safety | Which lines a merge may change (review fix) | Only the same lines as in the list the model saw (look-alike copies counted in order, only if none changed); otherwise nothing is saved and "Apply again" shows | The user's edit wins | Opus 5.5 | pending |
-| 2026-10-09 | #492 | UX | Editor texts kept after a conflict (review fix) | They accumulate until discarded, numbered | The user's edit wins | Opus 5.5 | pending |
+| 2026-10-09 | #488 | reliability | What a provider refusal does | The same backoff as a cut-off output (#368); no new retry | Problems show | Sonnet 5.5 | accepted by merge (PR #497, 2026-10-09) |
+| 2026-10-09 | #488 | reliability | A partial text before a refusal | Dropped | Problems show | Sonnet 5.5 | accepted by merge (PR #497, 2026-10-09) |
+| 2026-10-09 | #488 | reliability | A refusal in a digest or a poll draft | Follows the existing empty-result path | Fix the root cause | Sonnet 5.5 | accepted by merge (PR #497, 2026-10-09) |
+| 2026-10-09 | #489 | release/ops | The dashboard card fields | Removed entirely, with no `?cards` flag, because no client reads them | Fix the root cause | Opus 5.5 | accepted by merge (PR #497, 2026-10-09) |
+| 2026-10-09 | #489 | release/ops | The pagination keys of those fields | Removed with them | Fix the root cause | Opus 5.5 | accepted by merge (PR #497, 2026-10-09) |
+| 2026-10-09 | #489 | release/ops | Decrypting the profile on every app load | Left as a follow-up ("Not in this PR") | One PR, one purpose | Opus 5.5 | corrected → entry The app load no longer decrypts the profile |
+| 2026-10-09 | #491 | data safety | Editing a deleted thread's start node (#480) | The same 410, check and lock as `POST /nodes/` | The user's edit wins | Opus 5.5 | accepted by merge (PR #497, 2026-10-09) |
+| 2026-10-09 | #491 | UX | The order of the 410 and the AI-usage check | 410 first | Problems show | Opus 5.5 | accepted by merge (PR #497, 2026-10-09) |
+| 2026-10-09 | #491 | data safety | Which nodes are checked | Only the start node | candidate: check where the user's words enter | Opus 5.5 | accepted by merge (PR #497, 2026-10-09) |
+| 2026-10-09 | #491 | product scope | Text mode, recording save, streaming draft and save-as-node routes | Left as they are (the user's own words; #480's reasoning for text mode) | One PR, one purpose | Opus 5.5 | accepted by merge (PR #497, 2026-10-09) |
+| 2026-10-09 | #491 | UX | The notice when the node is gone | A toast like LLM Response, the existing 8 s | Reuse form patterns | Opus 5.5 | accepted by merge (PR #497, 2026-10-09) |
+| 2026-10-09 | #492 | reliability | Two todo merges for one user at once | A per-user database advisory lock; waits `TODO_LOCK_WAIT_SECONDS` = 10, then answers 503 `todo_busy` | Every added heuristic is named | Opus 5.5 | accepted by merge (PR #497, 2026-10-09) |
+| 2026-10-09 | #492 | data safety | A merge's edits when the list changed in between | Re-applied to the newest list: exact once, ignoring checkboxes once, else fail with "Apply again" | The user's edit wins | Opus 5.5 | accepted by merge (PR #497, 2026-10-09) |
+| 2026-10-09 | #492 | data safety | A tick the user made during a merge | The user's tick wins over the merge's checkbox | The user's edit wins | Opus 5.5 | accepted by merge (PR #497, 2026-10-09) |
+| 2026-10-09 | #492 | data safety | A whole-list merge when the list changed | Fails | The user's edit wins | Opus 5.5 | accepted by merge (PR #497, 2026-10-09) |
+| 2026-10-09 | #492 | UX | The editor on a version conflict (409) | "Save mine anyway" or "Show the newest list"; the text is kept (Copy, Discard) | The user's edit wins | Opus 5.5 | accepted by merge (PR #497, 2026-10-09) |
+| 2026-10-09 | #492 | data safety | Reverting a todo version | Takes the lock, with no version check | candidate: a revert is the user's explicit choice | Opus 5.5 | accepted by merge (PR #497, 2026-10-09) |
+| 2026-10-09 | #492 | data safety | A save without `base_revision` | Saves as before | Do not break older clients | Opus 5.5 | accepted by merge (PR #497, 2026-10-09) |
+| 2026-10-09 | #492 | reliability | The iPhone on a 409 | Retries once | Every added heuristic is named | Opus 5.5 | accepted by merge (PR #497, 2026-10-09) |
+| 2026-10-09 | #492 | reliability | The running-check of #472 | Uses `human_owner_id` | Fix the root cause | Opus 5.5 | accepted by merge (PR #497, 2026-10-09) |
+| 2026-10-09 | #492 | data safety | Which lines a merge may change (review fix) | Only the same lines as in the list the model saw (look-alike copies counted in order, only if none changed); otherwise nothing is saved and "Apply again" shows | The user's edit wins | Opus 5.5 | accepted by merge (PR #497, 2026-10-09) |
+| 2026-10-09 | #492 | UX | Editor texts kept after a conflict (review fix) | They accumulate until discarded, numbered | The user's edit wins | Opus 5.5 | accepted by merge (PR #497, 2026-10-09) |
 | 2026-10-09 | #493 | UX | Gleaning from the Voice screen | Pushed over it; Back returns and the Live Activity stays | One behaviour across clients | Opus 5.5 | pending |
 | 2026-10-09 | #493 | reliability | A lock-screen glean | Waits for the server's accept, then may suspend; opens at the next launch; a notification on failure | Problems show | Opus 5.5 | pending |
 | 2026-10-09 | #493 | product scope | The admin Read card in the app's home | Removed | Admin tools stay admin tools | Opus 5.5 | pending |
@@ -1047,8 +1630,82 @@ Choices that agents flagged in PRs and that the builder decided because a rule a
 | 2026-10-09 | #493 | reliability | How long a glean may wait (review fix) | Counts only in the foreground; one more status check before giving up | Problems show | Opus 5.5 | pending |
 | 2026-10-09 | #493 | UX | The conversation when a gleaning opens (review fix) | Always moves under the gleaning | One behaviour across clients | Opus 5.5 | pending |
 | 2026-10-09 | #493 | user-facing text | The lock-screen card after accept (review fix) | "Gleaning · Open Loore to read it when it's ready", no buttons | candidate: user-facing text says what happens | Opus 5.5 | pending |
-| 2026-10-13 | #504 | UX | When the error sound plays if part of the failed reply is already queued | After that audio has played; at once if nothing played; once per reply; not for a turn that is no longer current | Peter's Q1 "yes" (2026-10-13) | Opus 5.5 | pending |
-| 2026-10-13 | #504 | UX | Which voice failures get the error sound | Every failure that ended silently, beyond the failed audio asked about: transcription too slow, the reply can't start, the reply's text fails, the app gives up on the reply; AI usage None and a cancelled reply stay silent | Peter's Q1: "so you know it failed without looking" | Opus 5.5 | pending |
+| 2026-10-09 | #415 | data safety | The recent-context batch table that main added after the purge was written | The purge takes the user's items out of it under the collector's lock, and the collector reads a job's items after its claim | The purge leaves nothing of the user's (#268) | Opus 5.5 | pending |
+| 2026-10-09 | #415 | reliability | A purge run that still finds the user's rows, files or batch items at the end | The run fails and is retried, then the job is marked failed; it is never reported done | Problems show | Opus 5.5 | pending |
+| 2026-10-09 | #464 | privacy | What "hidden" covers in an account's grace period | Signed out everywhere, sign-in links and API tokens stop working, public pages, sitemap and Commons answer 404, other members see its public entries as deleted, background jobs skip it | Deletion: hidden at once (Peter, 2026-10-02) | Opus 5.5 | pending |
+| 2026-10-09 | #464 | privacy | How an email account confirms its deletion | A mailed link, accepted only inside the account's own session from a page with both choices; an account without email confirms with the typed username | The #260 email-change pattern; the issue's "email / re-login confirmation" | Opus 5.5 | pending |
+| 2026-10-09 | #464 | UX | A waiting "Delete all my writing" when the account is deleted | Becomes the account deletion, due on the account's date; restoring cancels both; the dialog says so | Show the choices; 30 days of grace for an account | Opus 5.5 | pending |
+| 2026-10-09 | #464 | data safety | Restoring after the deletion has started | Refused; the restore page says it can no longer be undone | Problems show | Opus 5.5 | pending |
+| 2026-10-09 | #464 | privacy | A deleted account's usernames | Current and former handles reserved for 365 days, then forgotten | #253's impersonation reasoning, bounded because a handle can identify a person; every added heuristic is named | Opus 5.5 | pending |
+| 2026-10-09 | #464 | privacy | The account's tombstones in other users' threads after the deletion | Moved to `loore-erased`, the account of the anonymised cost rows | Other users' replies are kept (#415) | Opus 5.5 | pending |
+| 2026-10-09 | #464 | privacy | Emails around an account deletion | The confirmation link, "will be deleted" with how to restore, and "has been deleted" to the address the account had | The issue's confirmation email; an erasure request gets an answer | Opus 5.5 | pending |
+| 2026-10-09 | #464 | data safety | Admin "Purge data" on an account scheduled for deletion | Refused (409) instead of bringing the account deletion forward | Show the choices | Opus 5.5 | pending |
+| 2026-10-09 | #464 | reliability | References to the account left after the identity layer | Counted from the schema; anything left fails the run and the user row stays | Problems show; verify by counting (#268) | Opus 5.5 | pending |
+| 2026-10-09 | #464 | privacy | AI replies stored before replies had a human owner, when their owner deletes the account | The request sets their owner by the purge's rule (the nearest entry above them is the user's), so they are hidden with the account; a restore keeps the owner | Fix the cause, not the symptom; no global backfill | Opus 5.5 | pending |
+| 2026-10-09 | #464 | data safety | Signing in to an account an admin deleted, before the deletion has started | No restore: an admin's deletion has no grace period; only the user's own request can be restored | Deletion: the grace period is for the user's own request; the admin action runs at once (#415) | Opus 5.5 | corrected → entry The admin purge works like the user's own deletion |
+| 2026-10-09 | #490 | privacy | What other viewers of a thread see of the owner's reading | No read-window line at all; the counts all derive from the owner's marks | Fix the root cause | Opus 5.5 | accepted by merge (PR #486, 2026-10-09) |
+| 2026-10-09 | #490 | privacy | Quote read marks | Owner-only on every node | Fix the root cause | Opus 5.5 | accepted by merge (PR #486, 2026-10-09) |
+| 2026-10-09 | #496 | privacy | When the todo merge runs from a proposal | Only on the user's own live AI reply that carries the proposal (`utils/proposals.py`) | Fix the root cause | Opus 5.5 | accepted by merge (PR #486, 2026-10-09) |
+| 2026-10-09 | #496 | privacy | The answer when the thread has other messages, and for AI None | 404 with existing messages; 403 kept for AI None | Fix the root cause | Opus 5.5 | accepted by merge (PR #486, 2026-10-09) |
+| 2026-10-09 | #496 | data safety | The walk over a thread for proposals | Stops at the first pending draft | Fix the root cause | Opus 5.5 | accepted by merge (PR #486, 2026-10-09) |
+| 2026-10-09 | #496 | privacy | Streaming labels | An allowlist (none, Voice, Reflect, Orient) | Fix the root cause | Opus 5.5 | accepted by merge (PR #486, 2026-10-09) |
+| 2026-10-09 | #496 | data safety | Finalizing a draft whose parent was deleted | 410 | The user's edit wins | Opus 5.5 | accepted by merge (PR #486, 2026-10-09) |
+| 2026-10-09 | #496 | release/ops | The clean-up script for earlier data | Dry run by default | No heavy scripts on the prod VM | Opus 5.5 | accepted by merge (PR #486, 2026-10-09) |
+| 2026-10-09 | #415 | data safety | What deleting a writing hides | A global ORM hook hides 12 per-user tables while the deletion waits; `user_data_purge_hidden` records what it hid | Peter's soft-delete model (2026-10-09) | Opus 5.5 | pending |
+| 2026-10-09 | #415 | data safety | Restoring writing | One transaction | The user's edit wins | Opus 5.5 | pending |
+| 2026-10-09 | #415 | data safety | What the purge deletes | Only what the request hid; cost rows go to the request | Cost records are kept in anonymous form (Peter, 2026-10-02) | Opus 5.5 | pending |
+| 2026-10-09 | #415 | data safety | Writing, saves and imports during the 30 days | They survive (reclaim) | Peter's soft-delete model (2026-10-09) | Opus 5.5 | hit: accepted by Peter (2026-10-13), entry "Writing made during a deletion's 30 days survives" |
+| 2026-10-09 | #415 | reliability | Jobs in flight when a deletion is requested | Not stopped; save guards instead | Fix the root cause | Opus 5.5 | pending |
+| 2026-10-09 | #415 | product scope | The X connection, notifications and artifact views | Not hidden | candidate: findings that break no promise are left | Opus 5.5 | pending |
+| 2026-10-09 | #464 | UX | The status bar while writing is hidden | Reuses SpendCapBanner's label and RecoveryBanner's button; no ×; the page reloads after a restore | Reuse form patterns | Opus 5.5 | pending |
+| 2026-10-09 | #415 | data safety | The JSON export during the wait | Leaves out deleted entries | Peter's soft-delete model (2026-10-09) | Opus 5.5 | pending |
+| 2026-10-09 | #482 | data safety | Restoring an account | Brings hidden writing back | Peter's soft-delete model (2026-10-09) | Opus 5.5 | pending |
+| 2026-10-09 | #464 | user-facing text | All texts about deleting writing | Reframed in the user's words (list in the PR) | candidate: user-facing text says what happens | Opus 5.5 | pending |
+| 2026-10-09 | #473 | reliability | The cause of the voice Glean wait | Judged to be an inline refresh of a large Community Archive export before the render, not a batch (unconfirmed on Peter's logs) | Fix the root cause | Opus 5.5 | pending |
+| 2026-10-09 | #473 | reliability | Fixes for it | Refresh in the background; batch only for `_read_batch`; a superseded run stops; the render runs in a savepoint | Fix the root cause | Opus 5.5 | pending |
+| 2026-10-09 | #473 | UX | Rerun of a gleaning | An admin-only API; no buttons | Admin tools stay admin tools | Opus 5.5 | pending |
+| 2026-10-09 | #473 | UX | Glean on the Glean entry | Glean and the picker appear in every thread | One behaviour across clients | Opus 5.5 | pending |
+| 2026-10-09 | #473 | UX | The tooltip | `LooreTooltip`: 350 ms hover, 260 px wide, 8 px offset | Every added heuristic is named | Opus 5.5 | pending |
+| 2026-10-09 | #473 | user-facing text | A gleaning that failed | "This gleaning didn't come through." with the reason and a retry from the parent | candidate: user-facing text says what happened | Opus 5.5 | pending |
+| 2026-10-09 | #473 | user-facing text | The "Read" tag | Now "Glean" | Peter named the card (2026-10-09) | Opus 5.5 | pending |
+| 2026-10-09 | #473 | UX | `{quote_ext}` markers on cards | Hidden | candidate: say what happened in the user's words | Opus 5.5 | pending |
+| 2026-10-13 | #504 | UX | When the error sound plays if part of the failed reply is already queued | After that audio has played; at once if nothing played; once per reply; not for a turn that is no longer current | Peter's Q1 "yes" (2026-10-13) | Opus 5.5 | accepted by merge (PR #504, 2026-10-13) |
+| 2026-10-13 | #504 | UX | Which voice failures get the error sound | Every failure that ended silently, beyond the failed audio asked about: transcription too slow, the reply can't start, the reply's text fails, the app gives up on the reply; AI usage None and a cancelled reply stay silent | Peter's Q1: "so you know it failed without looking" | Opus 5.5 | accepted by merge (PR #504, 2026-10-13) |
+| 2026-10-13 | #500 | UX | The deletion notice in the iPhone's updates sheet | Can't be marked as read: it comes back at each app start while the writing deletion waits, with "Restore my writing" and a button that closes it until the next start | Peter: "in the changelog UI" (2026-10-13); problems show | Opus 5.5 | pending |
+| 2026-10-13 | #505 | process | Where Glean by asking ships | Its own PR after #502, not in the train | One PR, one purpose | Opus 5.5 | pending |
+| 2026-10-13 | #506 | UX | The top-right Glean button when the user has no entry in the thread | Hidden, not disabled; the ⋯ entry is absent then too | Show the choices | Sonnet 5.5 | pending |
+| 2026-10-13 | #506 | UX | Which entry the top-right Glean button gleans from | The user's own newest typed entry in the thread, by `created_at`; Loore's replies, entries kept from AI, deleted entries and system prompts are skipped, as for the ⋯ entry | Peter's option A (2026-10-13) | Sonnet 5.5 | pending |
+| 2026-10-13 | #506 | UX | A model picker beside the top-right Glean button | None, "same as the ⋯ entry" | Voice and the menu entry use the default (#473) | Sonnet 5.5 | corrected → entry No model picker beside the reflection thread's Glean button |
+| 2026-10-13 | #508 | data safety | The admin's "Delete account" | Works like the user's own account deletion too: hidden and signed out at once, restorable for 30 days, with an Undo for the admin | Peter: "the same as user doing themselves" (2026-10-13) | Opus 5.5 | pending |
+| 2026-10-13 | #508 | data safety | Who may undo a waiting deletion | The admin only an admin's request; the user's own request stays theirs to restore | The user's edit wins | Opus 5.5 | pending |
+| 2026-10-13 | #508 | data safety | An admin's request while another deletion waits for that user | Refused (409); the waiting request keeps its date | The user's edit wins; one request per user | Opus 5.5 | pending |
+| 2026-10-13 | #508 | data safety | The user's "Delete all my writing" while an admin's waits | Returns the admin's request with its date; the user can restore it | Peter: "the same as user doing themselves" (2026-10-13) | Opus 5.5 | pending |
+| 2026-10-13 | #508 | data safety | "Delete account" while a writing deletion waits | Takes the writing deletion over; the admin's Undo puts it back with its own requester, due on the later of its own date and the account deletion's (review fix); ids and dates kept in `user_data_purge.replaced` | The user's edit wins; an Undo undoes only what the admin did | Opus 5.5 | pending |
+| 2026-10-13 | #508 | user-facing text | The email after an admin deletes an account | The user's own deletion notice, with the last line "A Loore admin deleted this account. If you did not ask for this, sign in and restore it." | Peter: "the same as user doing themselves" (2026-10-13) | Opus 5.5 | pending |
+| 2026-10-13 | #508 | UX | The admin's Undo | Asks for a browser confirmation first | Reuse form patterns | Opus 5.5 | pending |
+| 2026-10-13 | #508 | privacy | An erasure that cannot wait | No immediate deletion in the app; a job that deletes everything when due can still be made from a flask shell | Autonomy (reversible; nothing removed that a later decision may need) | Opus 5.5 | pending |
+| 2026-10-13 | #509 | reliability | How earlier picks reach the model in a Glean thread | By author and text, with no id; the marks note names a pick by its author and the opening of its text | Peter's definition of Glean again; the model is never handed a multi-digit id to copy | Opus 5.5 | pending |
+| 2026-10-13 | #509 | UX | A `#N` in the model's verdict or quote-tweet | Never made a link, even when it is the number of a pick of this run | Problems show; fix the root cause | Opus 5.5 | pending |
+| 2026-10-13 | #509 | privacy | Stored gleanings with a wrong link | Not rewritten; the model no longer reads the number | Nobody decrypts users' content | Opus 5.5 | pending |
+| 2026-10-13 | #509 | reliability | Which turns the fix covers | Every later turn of a Glean thread, not only Glean again after a refresh: the numbering changes within a day too | Fix the root cause | Opus 5.5 | pending |
+| 2026-10-13 | #509 | reliability | How much of a tweet names an earlier pick in the marks note | 60 characters, cut at a word (`PICK_EXCERPT_CHARS`) | Every added heuristic is named | Opus 5.5 | pending |
+| 2026-10-14 | #502 | UX | Glean on the voice screen after a failed reply (web and iPhone) | Enabled at once and anchored on the failed reply; the server gleans from its parent | A failed reply is never read; Glean starts from its parent (#435 review) | Opus 5.5 | pending |
+| 2026-10-14 | #513, #514 | product scope | Two voice problems found in testing: a recording with no transcribed chunk still gets a reply (#513); after a cancel during "Thinking…", Glean stays disabled (#514) | Filed as issues, not built into train #502 | One PR, one purpose | Opus 5.5 | pending |
+| 2026-10-14 | #502 | provider | Glean threads whose last gleaning of the user's ran on Haiku 5.5, and an Anthropic user's earlier pick of another provider's model (review findings on the new default) | Left as built: such a thread keeps Haiku 5.5 for Glean again, and an earlier pick from another provider doesn't become the default | Peter: "leave the machinery for honoring the provider" (2026-10-14) | Opus 5.5 | pending |
+| 2026-10-14 | #502 | UX | How a verdict tap is sent and shown | One request per tap, carrying the intro, the tweet or both; the glyphs light after the server answers | Problems show | Opus 5.5 | pending |
+| 2026-10-14 | #502 | UX | An intro verdict and the tweet's read mark | An intro verdict alone doesn't mark the tweet read; a tweet verdict still does | candidate: only an action on the tweet marks it read | Opus 5.5 | pending |
+| 2026-10-14 | #502 | user-facing text | The verdict labels on a tweet's reference page | "Good tweet" / "Bad tweet"; other kinds of reference keep "Good quote" / "Bad quote" | Peter's naming, "the intro" and the tweet (2026-10-14) | Opus 5.5 | pending |
+| 2026-10-14 | #502 | UX | "You rated this tweet good on …" | Moved into the pick's foot, next to the verdicts | The verdicts of a pick sit together (Peter's option B, 2026-10-14) | Opus 5.5 | pending |
+| 2026-10-14 | #502 | privacy | What an intro verdict stores | `FeedPick.intro_verdict` and its time, on the pick's row (the gleaning and the tweet); no action log, so no history of changes | A verdict on the intro keeps none of the intro's text (Peter, 2026-10-14) | Opus 5.5 | pending |
+| 2026-10-14 | #502 | product scope | Several intro verdicts on one tweet in a thread's marks note | The latest one wins | The user's edit wins | Opus 5.5 | pending |
+| 2026-10-14 | #502 | UX | The hover labels of the verdict glyphs | `LooreTooltip`, as in threads. The builder cited Peter's voice-screen correction of 2026-10-14, which removed a tooltip, so the citation was wrong; the choice stands under the 2026-10-09 rule | The Glean tooltip is Loore's own (2026-10-09) | Opus 5.5 | pending |
+| 2026-10-14 | #502 | user-facing text | The verdict labels on quotes in agentic replies | Stay "Good quote" / "Bad quote": that verdict judges the quoting | candidate: a label names what is judged | Opus 5.5 | pending |
+| 2026-10-14 | #502 | data safety | An admin rerun of a gleaning and its old intro verdicts | Left as is (an admin-only action) | Admin tools stay admin tools | Opus 5.5 | pending |
+| 2026-10-14 | #502 | testing | Intro verdict counts in `recommendation_report.py` | A follow-up after the review | One PR, one purpose | Opus 5.5 | pending |
+| 2026-10-15 | #502 | UX | The "Delete all my writing" button while a deletion waits | Hidden when nothing new was written since the request (1f5ef085) | The section's existing text covers it | Opus 5.5 | pending |
+| 2026-10-15 | #502 | data safety | An admin's purge waits and the user clicks again | The job becomes the user's own request and the admin's Undo is refused (1f5ef085) | The user's edit wins; only the user restores their own request (#508) | Opus 5.5 | pending |
+| 2026-10-15 | #502 | data safety | `requested_at` of a writing deletion clicked again | Moves to the latest click, so cost rows up to it go with the job (1f5ef085) | One date for everything (Peter, 2026-10-15) | Opus 5.5 | pending |
+| 2026-10-15 | #502 | reliability | `cancel_jobs` checks | Re-checks its conditions inside the update, which also closes an older race between Restore or an admin's Undo and an account deletion's takeover (1f5ef085) | Fix the root cause | Opus 5.5 | pending |
 
 ## Backfilled decisions
 
@@ -1733,3 +2390,6 @@ Builder decisions listed in PRs that merged without Peter correcting them, backf
 | 2026-10-08 | #452 | cost | A Haiku 5.5 Read runs through the Batch API like other Reads | Opus 5.5 | accepted by merge (PR #451, 2026-10-08) |
 | 2026-10-08 | #452 | cost | A Haiku 5.5 Read sends no effort or thinking setting, so it runs at Haiku's default | Opus 5.5 | accepted by merge (PR #451, 2026-10-08) |
 | 2026-10-08 | #452 | cost | Sonnet 5.5's recorded cache-hit price corrected to 0.05× in the same PR | Opus 5.5 | accepted by merge (PR #451, 2026-10-08) |
+| 2026-10-13 | #504 | reliability | iPhone: after any voice error sound, the existing upload and transcription sounds included, the audio session stays active for 0.7 s, the sound's length, before it is deactivated | Opus 5.5 | accepted by merge (PR #504, 2026-10-13) |
+| 2026-10-13 | #504 | UX | iPhone: a reply that fails while part of its audio is playing lets that audio play to the end, then plays the error sound, instead of returning to the record screen at once | Opus 5.5 | accepted by merge (PR #504, 2026-10-13) |
+| 2026-10-13 | #504 | product scope | Web: the TTS stream's `error` event stays unhandled, so the sound for a failed TTS comes with the next status check, up to 7 s later; handling it is a follow-up | Opus 5.5 | accepted by merge (PR #504, 2026-10-13) |

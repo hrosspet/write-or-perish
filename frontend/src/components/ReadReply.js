@@ -13,7 +13,11 @@ import { formatDateTime } from '../utils/date';
  * never reached the model.
  *
  * ReadReplyTail sits under the picks and carries the list's read
- * state, so the reader can clear it in one go. The actions that follow
+ * state, so the reader can clear it in one go.
+ *
+ * ReadCancelledLine sits under a cancelled read's text ("This read was
+ * cancelled.") and says why, for the reply's owner: the server sends
+ * the reason (llm_task_error) to them only. The actions that follow
  * a read — Read further, or a reply about the picks — live in the
  * action row under the node (NodeDetail), not in the card: that row is
  * under every node of the thread, so the actions stay at hand however
@@ -32,6 +36,11 @@ export const ReadWindowLine = ({ window: w }) => {
       {w.excluded > 0 && ` ${count(w.excluded)} you had already read were left out.`}
     </p>
   );
+};
+
+export const ReadCancelledLine = ({ reason }) => {
+  if (!reason || !reason.trim()) return null;
+  return <p className="read-note">{reason}</p>;
 };
 
 export const ReadReplyTail = ({ nodeId, unread, total, loaded = true, onMarkedAll }) => {

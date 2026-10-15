@@ -350,6 +350,50 @@ def test_revoked_account_is_skipped(app):
     assert result["status"] == "revoked"
 
 
+def test_a_sync_queued_before_an_account_deletion_does_not_call_x(
+        app, monkeypatch):
+    """A deleted account in its 30 days (#269): the nightly gate skips it,
+    and a sync already queued before the deletion stops before X."""
+    from datetime import datetime
+    uid = User.query.first().id
+    _mk_account(uid, expired=False)
+    User.query.get(uid).deleted_at = datetime.utcnow()
+    _db.session.commit()
+
+    def no_fetch(*a, **k):
+        raise AssertionError("called X")
+    monkeypatch.setattr(_sync_mod, "x_fetch_bookmark_pages", no_fetch)
+    monkeypatch.setattr(_sync_mod, "x_refresh_access_token", no_fetch)
+    result = _sync_mod.sync_twitter_bookmarks(_FakeSelf(), uid)
+    assert result["status"] == "account_deleted"
+
+
+def test_no_sync_while_the_writing_is_on_hold(app, monkeypatch):
+    """#268: while "Delete all my writing" waits, the sync would bring
+    back the saved references it hid: neither the nightly fan-out nor a
+    queued sync calls X."""
+    from datetime import datetime
+    from backend.models import UserDataPurge
+    user = User.query.first()
+    user.timezone = _tz_at_hour(_sync_mod.NIGHTLY_SYNC_LOCAL_HOUR)
+    _mk_account(user.id)
+    _db.session.add(UserDataPurge(user_id=user.id, source="self",
+                                  scope="hidden", status="scheduled",
+                                  scheduled_for=datetime.utcnow()))
+    _db.session.commit()
+    monkeypatch.setattr(_sync_mod.requests, "get", lambda *a, **k:
+                        pytest.fail("called X"))
+    monkeypatch.setattr(_sync_mod.requests, "post", lambda *a, **k:
+                        pytest.fail("called X"))
+    assert _sync_mod.sync_twitter_bookmarks(_FakeSelf(), user.id) == {
+        "status": "on_hold"}
+    dispatched = []
+    fake_task = MagicMock()
+    fake_task.apply_async = lambda args, countdown: dispatched.append(args)
+    monkeypatch.setattr(_sync_mod, "sync_twitter_bookmarks", fake_task)
+    assert _sync_mod.sync_all_twitter_bookmarks()["dispatched"] == 0
+
+
 def _tweet_row(user_id, external_id, source="twitter_bookmark",
                public_source=None, checked_at=None):
     row = ExternalItem(user_id=user_id, source=source, external_id=external_id,

@@ -120,7 +120,7 @@ const FeedPicks = ({ nodeId, enabled = true }) => {
                     title="Open the tweet in a new tab (marks it read)"
                     onClick={() => markReadOnOpen(idx, item)}
                   >
-                    Open on X
+                    Twitter ↗
                   </a>
                 )}
                 <span className="feed-pick-owner">

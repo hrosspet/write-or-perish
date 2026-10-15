@@ -26,8 +26,10 @@ const extractMarkdownHeader = (content) => {
 /**
  * SpeakerIcon component fetches and plays audio for a node, a profile or
  * a saved reference (itemId). Shows loading spinner, play/pause state.
+ * `buttonStyle` overrides the button's own style (its spacing, where a
+ * row needs a larger tap target).
  */
-const SpeakerIcon = ({ nodeId, profileId, itemId, content, isPublic, aiUsage, onTtsGenerated }) => {
+const SpeakerIcon = ({ nodeId, profileId, itemId, content, isPublic, aiUsage, onTtsGenerated, buttonStyle }) => {
   const { user } = useUser();
   const { loadAudio, loadAudioQueue, updateChapters, appendChunkToQueue, setGeneratingTTS, currentAudio, isPlaying, warmup } = useAudio();
   const [loading, setLoading] = useState(false);
@@ -377,7 +379,7 @@ const SpeakerIcon = ({ nodeId, profileId, itemId, content, isPublic, aiUsage, on
   return (
     <button onClick={handleClick} title={noAiAccess ? 'TTS disabled — No AI access' : isActive ? 'Generating audio...' : 'Play audio'}
         disabled={noAiAccess}
-        style={{ background: 'none', border: 'none', cursor: noAiAccess ? 'not-allowed' : 'pointer', padding: 0, marginLeft: '8px', opacity: noAiAccess ? 0.35 : 1 }}>
+        style={{ background: 'none', border: 'none', cursor: noAiAccess ? 'not-allowed' : 'pointer', padding: 0, marginLeft: '8px', opacity: noAiAccess ? 0.35 : 1, ...buttonStyle }}>
       {isActive ? <FaSpinner className="spin" /> : <FaVolumeUp color={isCurrentlyPlaying ? 'var(--accent)' : 'inherit'} />}
     </button>
   );

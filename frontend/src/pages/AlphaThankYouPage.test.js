@@ -14,7 +14,7 @@ jest.mock('../utils/Fade', () => ({ children }) => <div>{children}</div>);
 jest.mock('../components/PrefillConsentCard', () => () => null);
 
 import React from 'react';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import AlphaThankYouPage from './AlphaThankYouPage';
 
@@ -94,4 +94,55 @@ test('a confirmed address needs nothing more from this page', () => {
   renderPage({ email: 'me@example.com' });
   expect(screen.queryByPlaceholderText('your@email.com')).toBeNull();
   expect(screen.queryByText(/confirmation link/)).toBeNull();
+});
+
+// "Delete my account" (#269): every account can delete itself, and this is
+// the only page a waitlisted account reaches.
+const deletionInfo = {
+  grace_days: 30, username_reserve_days: 365, confirm_by_email: true,
+  link_expires_in: 3600, refusal: null,
+};
+
+const openDeleteDialog = () => {
+  fireEvent.click(screen.getByRole('button', { name: /delete my account…/i }));
+  return screen.getByRole('dialog');
+};
+
+test('a waitlisted email account asks for the deletion link', async () => {
+  mockPost.mockResolvedValue({ data: { status: 'confirm_email', expires_in: 3600 } });
+  renderPage({ email: 'me@example.com', account_deletion: deletionInfo });
+  openDeleteDialog();
+  const confirm = screen.getByRole('button', { name: /email me the confirmation link/i });
+  expect(confirm.disabled).toBe(true);
+  fireEvent.change(screen.getByLabelText(/type your username/i), { target: { value: 'waiting' } });
+  fireEvent.click(confirm);
+  await waitFor(() => expect(
+    screen.getByText(/Check your email: Loore sent a confirmation link to me@example.com/)).toBeTruthy());
+  expect(mockPost).toHaveBeenCalledWith('/account/delete', { confirm: 'waiting' });
+  expect(screen.queryByRole('dialog')).toBeNull();
+});
+
+test('a waitlisted X account is scheduled and goes to the deleted page', async () => {
+  const assign = jest.fn();
+  const saved = window.location;
+  delete window.location;
+  window.location = { assign };
+  try {
+    mockPost.mockResolvedValue({ data: { status: 'scheduled', delete_on: '2026-11-08T12:00:00Z' } });
+    renderPage({ account_deletion: { ...deletionInfo, confirm_by_email: false } });
+    const dialog = openDeleteDialog();
+    fireEvent.change(screen.getByLabelText(/type your username/i), { target: { value: 'waiting' } });
+    const buttons = dialog.querySelectorAll('button');
+    fireEvent.click(buttons[0]);
+    await waitFor(() => expect(assign).toHaveBeenCalledWith(
+      `/account-deleted?on=${encodeURIComponent('2026-11-08T12:00:00Z')}`));
+    expect(mockPost).toHaveBeenCalledWith('/account/delete', { confirm: 'waiting' });
+  } finally {
+    window.location = saved;
+  }
+});
+
+test('without account deletion on the server the page offers none', () => {
+  renderPage();
+  expect(screen.queryByRole('button', { name: /delete my account/i })).toBeNull();
 });

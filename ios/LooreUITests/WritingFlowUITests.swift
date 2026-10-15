@@ -89,7 +89,7 @@ final class WritingFlowUITests: XCTestCase {
             let turnOn = app.buttons["craft.turnOn"]
             if turnOn.waitForExistence(timeout: 3) { turnOn.tap() }
             sleep(2)
-            app.tabBars.buttons["Reflect"].tap()
+            app.tabBars.buttons["Home"].tap()
             sleep(2)
             snapshot("m2w-07-craft-thread")
             let picker = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Model:'")).firstMatch

@@ -25,6 +25,8 @@ from backend.utils.embeddings import (
 )
 from backend.utils.privacy import AI_ALLOWED
 
+from backend.utils.hidden_rows import hidden_ids, on_hold_user_ids
+
 logger = get_task_logger(__name__)
 
 SWEEP_BATCH_SIZE = 100
@@ -65,6 +67,9 @@ def _candidate_nodes(limit):
             Node.content != "",
             Node.ai_usage.in_(AI_ALLOWED),
             User.default_ai_usage.in_(AI_ALLOWED),
+            # Writing on hold for deletion (#268): nothing new is
+            # embedded until a restore or the purge.
+            ~User.id.in_(on_hold_user_ids()),
         )
         .filter(or_(
             NodeEmbedding.id.is_(None),
@@ -113,6 +118,7 @@ def _candidate_external_items(limit):
         .join(User, User.id == ExternalItem.user_id)
         .filter(ExternalItemEmbedding.id.is_(None),
                 User.default_ai_usage.in_(AI_ALLOWED),
+                ~User.id.in_(on_hold_user_ids()),   # #268
                 # A Read pick nobody saved is not a reference (#352).
                 ExternalItem.saved())
         .order_by(ExternalItem.id.desc())
@@ -129,14 +135,17 @@ def sweep_embeddings(limit=SWEEP_BATCH_SIZE):
             logger.warning("Embedding sweep skipped: no OpenAI key")
             return {"status": "skipped", "reason": "no_api_key"}
 
-        # Remove embeddings of deleted / opted-out nodes
+        # Remove embeddings of deleted / opted-out nodes. A node hidden by
+        # a waiting "Delete all my writing" keeps its embedding (#268): a
+        # restore brings it back as it was, without decrypting and
+        # embedding it again; the purge deletes both.
         stale = (
             db.session.query(NodeEmbedding)
             .join(Node, Node.id == NodeEmbedding.node_id)
             .filter(or_(
                 Node.deleted_at.isnot(None),
                 ~Node.ai_usage.in_(AI_ALLOWED),
-            ))
+            ), ~NodeEmbedding.node_id.in_(hidden_ids("node")))
             .all()
         )
         for row in stale:

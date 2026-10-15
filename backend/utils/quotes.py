@@ -92,6 +92,8 @@ def get_ext_quote_data(item_ids: List[int], user_id: int) -> Dict[int, Optional[
             "content": item.get_content(),
             "source": item.source,
             "author_handle": item.author_handle,
+            # The tweet card's byline (#435): display name, then handle.
+            "author_name": item.author_name,
             "title": item.title,
             "url": item.url,
             "posted_at": iso_utc(item.posted_at) if item.posted_at else None,
@@ -121,17 +123,14 @@ def quote_stamp(iso: Optional[str], tz_name: Optional[str] = None) -> Optional[s
 
 
 def resolve_ext_quotes(content: str, user_id: int,
-                       for_llm: bool = False,
-                       marks: bool = True) -> Tuple[str, List[int]]:
+                       for_llm: bool = False) -> Tuple[str, List[int]]:
     """Replace {quote_ext:ID} placeholders with the saved reference's
     content, verbatim from the DB. No recursion — external items don't
     nest. Returns (resolved_content, list_of_resolved_item_ids).
 
-    ``marks=False`` leaves the user's read mark and verdict out of the
-    rendering: for an assistant turn re-sent on later turns, whose bytes
-    must not change as the user marks things (the marks then travel in
-    the note at the end of the prompt, see
-    llm_completion._reference_marks_note)."""
+    A read reply's picks, re-sent to the model on later turns of its
+    thread, resolve through ca_feed.render_read_reply_for_model instead:
+    by author and text, with no id and no marks."""
     if not content:
         return content, []
     item_ids = find_ext_quote_ids(content)
@@ -164,9 +163,9 @@ def resolve_ext_quotes(content: str, user_id: int,
             # how they rated it (the same two facts search previews
             # carry). Absent attributes mean unread / unrated.
             read_attr = (f' read="{d["read_at"][:10]}"'
-                         if marks and d.get("read_at") else "")
+                         if d.get("read_at") else "")
             verdict_attr = (f' verdict="{d["feedback"]}"'
-                            if marks and d.get("feedback") else "")
+                            if d.get("feedback") else "")
             return (
                 f'<quoted_reference id="{item_id}" source="{d["source"]}" '
                 f'author="{author}"{title_attr}{posted_attr}'
@@ -177,9 +176,9 @@ def resolve_ext_quotes(content: str, user_id: int,
         # The same two marks in the human rendering (exports): they are
         # the user's own record of the pick.
         mark_text = ""
-        if marks and d.get("read_at"):
+        if d.get("read_at"):
             mark_text += f' · read {d["read_at"][:10]}'
-        if marks and d.get("feedback"):
+        if d.get("feedback"):
             mark_text += f' · rated a {d["feedback"]} quote'
         return (f'\n--- Saved reference {label}{posted}{mark_text} ---\n'
                 f'{d["content"]}\n--- End reference ---\n')
@@ -212,7 +211,8 @@ def get_quote_data(node_ids: List[int], user_id: int) -> Dict[int, Optional[dict
     """
     from backend.models import Node
     from backend.utils.privacy import (
-        can_user_access_node, can_user_view_tombstone,
+        author_gone, can_user_access_node, can_user_view_tombstone,
+        owner_hidden,
     )
 
     result = {}
@@ -223,15 +223,18 @@ def get_quote_data(node_ids: List[int], user_id: int) -> Dict[int, Optional[dict
             result[node_id] = None
             continue
         # Soft-deleted: emit a tombstone payload iff viewer had pre-deletion
-        # access; otherwise None (renders as "not accessible").
-        if node.deleted_at is not None:
+        # access; otherwise None (renders as "not accessible"). A node whose
+        # author deleted the account (#269) quotes as deleted, without a name.
+        if node.deleted_at is not None or owner_hidden(node):
             if can_user_view_tombstone(node, user_id):
+                gone = author_gone(node)
                 result[node_id] = {
                     "id": node.id,
                     "deleted": True,
                     "content": None,
-                    "username": node.user.username if node.user else "Unknown",
-                    "user_id": node.user_id,
+                    "username": (None if gone else node.user.username
+                                 if node.user else "Unknown"),
+                    "user_id": None if gone else node.user_id,
                     "created_at": iso_utc(node.created_at),
                     "node_type": node.node_type,
                     "ai_usage": node.ai_usage,

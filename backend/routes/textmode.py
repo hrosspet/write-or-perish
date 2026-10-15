@@ -15,7 +15,7 @@ from backend.utils.llm_nodes import (
 from backend.utils.context_artifacts import attach_context_artifacts
 from backend.utils.session_helpers import attach_agentic_prompt_under
 from backend.utils.privacy import (
-    can_user_see_node_or_tombstone, validate_ai_usage,
+    can_user_see_node_or_placeholder, validate_ai_usage,
 )
 
 textmode_bp = Blueprint("textmode", __name__)
@@ -137,6 +137,9 @@ def start_conversation():
     attach_context_artifacts(
         system_node.id, current_user.id, prompt_record=prompt_record,
     )
+    # Started from the Glean card (#435): every turn offers Glean.
+    from backend.utils.glean import stamp_glean_entry
+    stamp_glean_entry(system_node, current_user, data.get("entry"))
 
     # 2. User message node
     from backend.utils.tokens import approximate_token_count
@@ -335,7 +338,11 @@ def get_conversation_from_node(node_id):
     # Cycle-safe: stop if we revisit a node or exceed a sane hop limit.
     # The chain ends below the first ancestor the user cannot see, so the
     # response never carries content that is not theirs to read. A deleted
-    # ancestor they could see before is a placeholder without content.
+    # ancestor they could see before is a placeholder without content, and
+    # so is one hidden with its owner's deleted account (#269): the walk
+    # passes through it as through any placeholder, as the reply context
+    # does (llm_completion._load_node_chain) and as after the purge. The
+    # start node is the user's own, so it is never hidden from them.
     chain = []
     current = node
     visited = set()
@@ -343,7 +350,7 @@ def get_conversation_from_node(node_id):
     for _ in range(MAX_HOPS):
         if current is None or current.id in visited:
             break
-        if not can_user_see_node_or_tombstone(current, current_user.id):
+        if not can_user_see_node_or_placeholder(current, current_user.id):
             break
         visited.add(current.id)
         chain.append(current)

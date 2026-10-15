@@ -1,5 +1,5 @@
 import React from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import NodeForm from '../components/NodeForm';
 import NodeOpeningSpinner from '../components/NodeOpeningSpinner';
 import useNodePrefetch from '../hooks/useNodePrefetch';
@@ -14,6 +14,11 @@ export default function WritePage() {
   const { user, markHasOwnEntries } = useUser();
   const { addToast } = useToast();
   const craftMode = !!user?.craft_mode;
+  // Opened from the Glean card (#435): the new thread is marked as a
+  // Glean thread, so every turn of it offers the Glean button.
+  const [searchParams] = useSearchParams();
+  const glean = searchParams.get('glean') === '1' && !!user?.glean_enabled;
+  const entry = glean ? { entry: 'glean' } : {};
   // The entry's page opens once its node is in, with a spinner here
   // meanwhile, instead of a "Loading node..." page.
   const { pending: openingNode, openNode } = useNodePrefetch();
@@ -56,12 +61,12 @@ export default function WritePage() {
     if (streaming_session_id) {
       const res = await api.post(
         `/drafts/streaming/${streaming_session_id}/save-as-node`,
-        { content, agentic: true, auto_generate: autoGenerate },
+        { content, agentic: true, auto_generate: autoGenerate, ...entry },
       );
       return res.data;
     }
     const res = await api.post('/textmode/start', {
-      content, privacy_level, ai_usage, auto_generate: autoGenerate,
+      content, privacy_level, ai_usage, auto_generate: autoGenerate, ...entry,
     });
     return res.data;
   };
@@ -80,7 +85,7 @@ export default function WritePage() {
     }
     const stored = localStorage.getItem('loore_auto_generate');
     const autoGenerate = stored === null ? true : stored === 'true';
-    return { agentic: true, ...(autoGenerate && { auto_generate: true }) };
+    return { agentic: true, ...(autoGenerate && { auto_generate: true }), ...entry };
   };
 
   const handleSuccess = (data) => {

@@ -313,6 +313,81 @@ def test_token_grants_authenticate_a_confidential_client(monkeypatch):
         ext_content.x_refresh_access_token("cid", "rt", "secret")
 
 
+def test_token_revoke_authenticates_like_the_token_endpoint(monkeypatch):
+    """The purge revokes Loore's stored X tokens (#268): X's revoke
+    endpoint, the client authenticated as on the token endpoint, the
+    token in the form body (never the URL), the caller's timeout."""
+    import requests
+    import backend.utils.external_content as ext_content
+    calls = []
+    answer = {"revoked": True}
+
+    def fake_post(url, **kw):
+        calls.append((url, kw))
+        r = MagicMock()
+        r.json.return_value = answer
+        return r
+    monkeypatch.setattr(ext_content.requests, "post", fake_post)
+
+    assert ext_content.x_revoke_token("tok", "cid", "secret", timeout=7)
+    url, kw = calls[0]
+    assert url == ext_content.X_REVOKE_URL == "https://api.x.com/2/oauth2/revoke"
+    assert kw["data"] == {"token": "tok", "client_id": "cid"}
+    assert kw["auth"] == ("cid", "secret")
+    assert kw["timeout"] == 7
+    assert "tok" not in url
+
+    calls.clear()
+    ext_content.x_revoke_token("tok", "cid")
+    assert calls[0][1]["auth"] is None
+
+    # X answering 200 without confirming is not a revocation.
+    answer["revoked"] = False
+    with pytest.raises(ValueError):
+        ext_content.x_revoke_token("tok", "cid", "secret")
+
+    def failing_post(url, **kw):
+        r = MagicMock()
+        r.raise_for_status.side_effect = requests.HTTPError("HTTP 400")
+        return r
+    monkeypatch.setattr(ext_content.requests, "post", failing_post)
+    with pytest.raises(requests.HTTPError):
+        ext_content.x_revoke_token("tok", "cid", "secret")
+
+
+def test_sign_in_token_invalidation_is_signed_with_oauth1(monkeypatch):
+    """"Sign in with X" is OAuth 1.0a: its token is invalidated at X's
+    oauth/invalidate_token, signed with the app's consumer keys and the
+    token itself (account deletion, Peter 2026-10-09)."""
+    import requests
+    import backend.utils.external_content as ext_content
+    calls = []
+
+    def fake_post(url, **kw):
+        calls.append((url, kw))
+        return MagicMock()
+    monkeypatch.setattr(ext_content.requests, "post", fake_post)
+
+    assert ext_content.x_invalidate_sign_in_token(
+        "utok", "usecret", "ckey", "csecret", timeout=7)
+    url, kw = calls[0]
+    assert url == ext_content.X_INVALIDATE_SIGN_IN_URL
+    assert url == "https://api.x.com/1.1/oauth/invalidate_token"
+    client = kw["auth"].client
+    assert (client.client_key, client.client_secret) == ("ckey", "csecret")
+    assert (client.resource_owner_key, client.resource_owner_secret) == (
+        "utok", "usecret")
+    assert kw["timeout"] == 7 and "data" not in kw and "utok" not in url
+
+    def failing_post(url, **kw):
+        r = MagicMock()
+        r.raise_for_status.side_effect = requests.HTTPError("HTTP 401")
+        return r
+    monkeypatch.setattr(ext_content.requests, "post", failing_post)
+    with pytest.raises(requests.HTTPError):
+        ext_content.x_invalidate_sign_in_token("utok", "usecret", "ck", "cs")
+
+
 def test_ca_fetch_requires_username(app, client):
     assert client.post("/api/external/community-archive/fetch",
                        json={}).status_code == 400

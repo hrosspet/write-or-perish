@@ -127,7 +127,15 @@ def _refuse_empty_truncated(user, response, batch):
 def _save(user, content, input_tokens, output_tokens, total_tokens, batch):
     from backend.extensions import db
     from backend.models import UserArtifact
+    from backend.utils.hidden_rows import writing_on_hold
     cost = _add_cost_log(user, input_tokens, output_tokens, batch)
+    if writing_on_hold(user.id):
+        # "Delete all my writing" hid the writing these intentions were
+        # read from (#268): the cost is logged, nothing saved.
+        db.session.commit()
+        return {"version": None, "cost_usd": round(cost / 1e6, 4),
+                "llm_tokens": total_tokens, "batch": batch,
+                "on_hold": True}
     artifact = UserArtifact(
         user_id=user.id, kind=KIND,
         title=UserArtifact.DEFAULT_KINDS.get(KIND, "Intentions"),
@@ -191,6 +199,9 @@ def _prepare(user_id):
     user = User.query.get(user_id)
     if not user:
         raise RuntimeError(f"User {user_id} not found")
+    from backend.utils.hidden_rows import writing_on_hold
+    if writing_on_hold(user_id):
+        raise RuntimeError("This user's writing is waiting to be deleted.")
     refusal = prefill_refusal(user)
     if refusal:
         # Opted out of AI usage, or declined the tweet seed (#346).

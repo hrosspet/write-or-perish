@@ -101,6 +101,42 @@ def test_owner_reply_context_keeps_the_whole_private_thread(app):  # noqa: F811
         assert text in sent
 
 
+def test_reply_context_shows_a_hidden_accounts_reply_as_deleted(app):  # noqa: F811
+    """#269: bob's public root, alice's public reply and an old AI reply
+    under it (stored before replies had a human owner), then bob's
+    reply. While alice's account is in its grace period, bob's AI reply
+    gets his root and his reply, with a notice in place of each of her
+    nodes and never their text, as after the purge."""
+    from datetime import datetime
+    from backend.utils.account_deletion import _own_legacy_ai_replies
+    alice = _mk_user("alice", approved=True, plan="alpha")
+    bob = _mk_user("bob", approved=True, plan="alpha")
+    llm_user = _mk_user("gpt-5", twitter_id="llm-gpt-5")
+    root = _node(bob, None, "BOB ROOT ENTRY", privacy_level="public")
+    hers = _node(alice, root, "ALICE PUBLIC REPLY", privacy_level="public")
+    legacy = Node(user_id=llm_user.id, human_owner_id=None,
+                  parent_id=hers.id, node_type="llm", llm_model="gpt-5",
+                  privacy_level="public", ai_usage="chat")
+    legacy.set_content("OLD AI REPLY TO ALICE")
+    _db.session.add(legacy)
+    _db.session.flush()
+    mine = _node(bob, legacy, "bob replies", privacy_level="public")
+    llm_node = _placeholder(llm_user, mine, bob)
+    # What the deletion request does to her account (account_deletion).
+    _own_legacy_ai_replies(alice.id)
+    alice.deleted_at = datetime.utcnow()
+    _db.session.commit()
+
+    _ScriptedProvider.reset([_resp("An answer.")])
+    generate_llm_response(_FakeSelf(), mine.id, llm_node.id, "gpt-5",
+                          bob.id)
+
+    sent = _sent_text()
+    assert "BOB ROOT ENTRY" in sent and "bob replies" in sent
+    assert "ALICE" not in sent
+    assert sent.count("deleted by the author") == 2
+
+
 def test_reply_below_a_deleted_entry_sends_a_notice_in_its_place(app):  # noqa: F811
     """An entry deleted on its own (its replies kept) in the middle of a
     thread, then an AI reply below it: the reply runs, and the model gets
@@ -126,6 +162,29 @@ def test_reply_below_a_deleted_entry_sends_a_notice_in_its_place(app):  # noqa: 
     reply = _fresh(llm_node.id)
     assert reply.llm_task_status == "completed"
     assert reply.get_content() == "An answer."
+
+
+def test_reply_context_scrubs_a_deleted_ancestor(app):  # noqa: F811
+    """A soft-deleted entry in the middle of a thread is sent as a notice
+    in the same message format as the others, never its text."""
+    from datetime import datetime
+    alice = _mk_user("alice", approved=True, plan="alpha")
+    llm_user = _mk_user("gpt-5", twitter_id="llm-gpt-5")
+    root = _node(alice, None, "ALICE ROOT ENTRY")
+    gone = _node(alice, root, "DELETED WORDS")
+    gone.deleted_at = datetime.utcnow()
+    latest = _node(alice, gone, "ALICE FOLLOW-UP")
+    llm_node = _placeholder(llm_user, latest, alice)
+
+    _ScriptedProvider.reset([_resp("An answer.")])
+    generate_llm_response(_FakeSelf(), latest.id, llm_node.id, "gpt-5",
+                          alice.id)
+
+    sent = _sent_text()
+    assert "ALICE ROOT ENTRY" in sent and "ALICE FOLLOW-UP" in sent
+    assert "DELETED WORDS" not in sent
+    assert sent.count("deleted by the author") == 1
+    assert _fresh(llm_node.id).get_content() == "An answer."
 
 
 def test_reply_below_a_deleted_ai_reply_keeps_its_turn(app):  # noqa: F811

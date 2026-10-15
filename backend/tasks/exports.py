@@ -416,10 +416,17 @@ def _save_profile(user, model_id, profile_text, response,
     source_rendered_at: when the window this version covers was rendered
     (the continue rule's boundary between unfinished chain and growth)."""
     from backend.utils.privacy import PrivacyLevel
+    from backend.utils.hidden_rows import WritingOnHold, writing_on_hold
 
     total_tokens = response["total_tokens"]
 
     _add_profile_cost_log(user, model_id, response, batch=batch)
+    if writing_on_hold(user.id):
+        # "Delete all my writing" hid the writing this version was built
+        # from while it was being generated (#268): the cost is logged,
+        # the version is not saved.
+        db.session.commit()
+        raise WritingOnHold(f"user {user.id}: writing on hold for deletion")
     # A saved version ends a refusal streak (#368) and whatever error the
     # admin column showed for it.
     if user.profile_seed_error:
@@ -619,6 +626,11 @@ def update_user_profile(self, user_id: int, model_id: str,
     )
 
     with flask_app.app_context():
+        # /export/profile-progress?task_id= answers for this task id to
+        # this user only, whatever the outcome.
+        from backend.utils.task_owner import record_task_owner
+        record_task_owner(self.request.id, user_id, flask_app.config)
+
         user = User.query.get(user_id)
         if not user:
             raise ValueError(f"User {user_id} not found")
@@ -632,6 +644,11 @@ def update_user_profile(self, user_id: int, model_id: str,
             logger.info(
                 "User %s has opted out of AI usage; skipping profile update",
                 user_id)
+            return
+        from backend.utils.hidden_rows import WritingOnHold, writing_on_hold
+        if writing_on_hold(user_id):
+            logger.info("User %s: writing on hold for deletion; skipping "
+                        "profile update", user_id)
             return
         previous_profile_id = ai_readable_base_id(user_id, previous_profile_id)
 
@@ -674,6 +691,10 @@ def update_user_profile(self, user_id: int, model_id: str,
                 notify_profile_ready(user_id)
             return result
 
+        except WritingOnHold:
+            logger.info("User %s: writing put on hold for deletion during "
+                        "the profile update; nothing saved", user_id)
+            return None
         except Exception as e:
             logger.error(
                 f"Profile update error for user {user_id}: {e}",
@@ -1354,6 +1375,11 @@ def maybe_trigger_profile_update(user_id, model_id=None,
     if not account_allows_ai(user):
         logger.info(
             f"Skipping profile update for user {user_id}: opted out of AI usage")
+        return None
+    from backend.utils.hidden_rows import writing_on_hold
+    if writing_on_hold(user_id):
+        logger.info(f"Skipping profile update for user {user_id}: writing "
+                    "on hold for deletion")
         return None
 
     # Check concurrency guard

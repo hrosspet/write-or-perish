@@ -369,6 +369,56 @@ def test_account_opted_out_of_ai_gets_no_digest(app, monkeypatch):
     assert calls == []
 
 
+def _hold_writing(user):
+    """A waiting "Delete all my writing" of *user* (#268)."""
+    from backend.models import UserDataPurge
+    job = UserDataPurge(user_id=user.id, source="self", scope="hidden",
+                        status="scheduled", scheduled_for=datetime.utcnow())
+    _db.session.add(job)
+    _db.session.commit()
+    return job
+
+
+def test_no_digest_while_the_writing_is_on_hold(app, monkeypatch):
+    """#268: while "Delete all my writing" waits, neither the nightly
+    sweep nor a manual rebuild builds a digest, and a batch result that
+    arrives meanwhile is not saved (its cost is logged)."""
+    user = User.query.first()
+    user.timezone = _tz_at_hour(_digest.NIGHTLY_DIGEST_LOCAL_HOUR)
+    _db.session.commit()
+    _mk_item(user.id, "clip")
+    hold = _hold_writing(user)
+    submitted = _stub_batch_submit(monkeypatch)
+    calls = _stub_llm(monkeypatch)
+
+    assert _digest.sweep_external_digests() == {"status": "ok",
+                                                "submitted": 0}
+    assert submitted == []
+    assert _digest.rebuild_external_digest(
+        _FakeSelf(), user.id, force=True) == {"status": "on_hold"}
+    assert calls == []
+    # Restored: the sweep picks the user up again.
+    hold.status = "cancelled"
+    _db.session.commit()
+    _digest.sweep_external_digests()
+    assert len(submitted) == 1
+    ExternalDigestBatchJob.query.delete()
+    hold.status = "scheduled"
+    _db.session.commit()
+
+    corpus_at = datetime.utcnow()
+    job = _pending_job(user, corpus_at, batch_id="batch_held")
+    monkeypatch.setattr(_digest, "batch_check_and_collect", lambda ids, k: (
+        {f"external-digest-{user.id}": {
+            "content": "# Topics\n- from hidden writing", "input_tokens": 10,
+            "output_tokens": 5}}, {}, {}))
+    _digest._collect_digest_batches()
+    assert UserArtifact.latest_for(user.id, _digest.DIGEST_KIND) is None
+    assert APICostLog.query.count() == 1
+    _db.session.expire_all()
+    assert ExternalDigestBatchJob.query.get(job.id).status == "collected"
+
+
 def _pending_job(user, corpus_at, provider_key="anthropic",
                  batch_id="batch_x", submitted_at=None):
     job = ExternalDigestBatchJob(

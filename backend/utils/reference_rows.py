@@ -20,6 +20,9 @@ def find_tweet_row(user_id, tweet_id):
     first (the oldest, when an older import left two), else the Read
     pick's. None when the tweet has no row."""
     from backend.models import ExternalItem, TWEET_SOURCES
+    # A row "Delete all my writing" hid stays hidden here (#268): only the
+    # user's own save or import makes it theirs again, never a Read. No
+    # Read runs while the writing is on hold (save_feed_picks).
     rows = (ExternalItem.query
             .filter(ExternalItem.user_id == user_id,
                     ExternalItem.source.in_(TWEET_SOURCES),

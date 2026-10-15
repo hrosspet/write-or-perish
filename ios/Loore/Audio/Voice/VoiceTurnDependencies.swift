@@ -10,12 +10,17 @@ protocol VoiceBackend: AnyObject {
     func uploadURL(sessionId: String) -> URL
     /// `POST …/finalize`. A 400 "not in recording state" (a retried finalize
     /// whose first answer was lost) must be treated as success by the caller.
-    func finalize(sessionId: String, totalChunks: Int, parentId: Int?, model: String?) async throws
+    /// `entry` "glean": the first recording of a fresh Glean-card session (#435).
+    func finalize(sessionId: String, totalChunks: Int, parentId: Int?, model: String?, entry: String?) async throws
     func sessionStatus(sessionId: String) async throws -> StreamingSessionStatus
     /// Legacy `POST /api/voice` when finalize created no reply node.
     func legacyVoice(content: String, model: String?, aiUsage: String?, parentId: Int?,
-                     sessionId: String?) async throws -> VoiceSessionResponse
+                     sessionId: String?, entry: String?) async throws -> VoiceSessionResponse
     func llmStatus(nodeId: Int) async throws -> LLMStatus
+    /// `POST /api/read/from-node/<id>` with `{}`: a glean under the node, a live
+    /// call on the server's default model (the Voice screen has no picker, as on
+    /// the web; the default is what `suggested-model?purpose=read` names).
+    func startGlean(nodeId: Int) async throws -> GleanStartResponse
     /// `POST /api/nodes/<id>/tts`: `.ready(url)` for 200, `.started` for 202.
     func requestTTS(nodeId: Int) async throws -> TTSTriggerOutcome
     func ttsStatus(nodeId: Int) async throws -> TTSStatus
@@ -115,6 +120,8 @@ enum LocalNotice: String {
     case resumeFailed = "org.loore.voice.resume-failed"
     /// A lock-screen Record that could not start (the reason goes in the body).
     case recordFailed = "org.loore.voice.record-failed"
+    /// A lock-screen Glean that could not start (#475; the reason goes in the body).
+    case gleanFailed = "org.loore.voice.glean-failed"
 
     var title: String {
         switch self {
@@ -122,6 +129,7 @@ enum LocalNotice: String {
         case .longRecording: return "You’ve been recording for 59 minutes"
         case .resumeFailed: return "The recording could not resume"
         case .recordFailed: return "Loore could not start recording"
+        case .gleanFailed: return "Loore could not start the glean"
         }
     }
 
@@ -133,7 +141,7 @@ enum LocalNotice: String {
             return "Consider stopping soon and continuing in a new recording."
         case .resumeFailed:
             return "The microphone did not restart. Open Loore and press Resume; everything up to the pause is saved."
-        case .recordFailed:
+        case .recordFailed, .gleanFailed:
             return "Open Loore and try again."
         }
     }
@@ -166,10 +174,11 @@ final class LiveVoiceBackend: VoiceBackend {
         api().environment.url(path: APIPath.streamingChunk(sessionId))
     }
 
-    func finalize(sessionId: String, totalChunks: Int, parentId: Int?, model: String?) async throws {
+    func finalize(sessionId: String, totalChunks: Int, parentId: Int?, model: String?, entry: String?) async throws {
         var body: [String: JSONValue] = ["total_chunks": .int(totalChunks), "label": .string("Voice")]
         if let parentId { body["parent_id"] = .int(parentId) }
         if let model { body["model"] = .string(model) }
+        if let entry { body["entry"] = .string(entry) }
         var request = APIRequest.json(.post, APIPath.streamingFinalize(sessionId), .object(body))
         request.timeout = 120
         _ = try await api().data(for: request)
@@ -180,17 +189,22 @@ final class LiveVoiceBackend: VoiceBackend {
     }
 
     func legacyVoice(content: String, model: String?, aiUsage: String?, parentId: Int?,
-                     sessionId: String?) async throws -> VoiceSessionResponse {
+                     sessionId: String?, entry: String?) async throws -> VoiceSessionResponse {
         var body: [String: JSONValue] = ["content": .string(content)]
         if let model { body["model"] = .string(model) }
         if let aiUsage { body["ai_usage"] = .string(aiUsage) }
         if let parentId { body["parent_id"] = .int(parentId) }
         if let sessionId { body["session_id"] = .string(sessionId) }
+        if let entry { body["entry"] = .string(entry) }
         return try await api().post(APIPath.voice, json: .object(body))
     }
 
     func llmStatus(nodeId: Int) async throws -> LLMStatus {
         try await api().get(APIPath.llmStatus(nodeId), poll: true)
+    }
+
+    func startGlean(nodeId: Int) async throws -> GleanStartResponse {
+        try await api().post(APIPath.readFromNode(nodeId), json: GleanRequest.body(model: nil))
     }
 
     func requestTTS(nodeId: Int) async throws -> TTSTriggerOutcome {

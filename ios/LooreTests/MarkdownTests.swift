@@ -224,7 +224,7 @@ final class BubblePreviewTests: XCTestCase {
         XCTAssertFalse(BubblePreview.canExpand(content: nil, text: "a\nb\nc\nd"))
         XCTAssertTrue(BubblePreview.canExpand(content: "a\nb\nc\nd", text: "a\nb\nc\nd"))
         XCTAssertFalse(BubblePreview.canExpand(content: "a\nb", text: "a\nb"))
-        XCTAssertEqual(BubblePreview.promptLabel("read_thread"), "Read")
+        XCTAssertEqual(BubblePreview.promptLabel("read_thread"), "Glean")
         XCTAssertEqual(BubblePreview.promptLabel("textmode"), "Textmode")
         XCTAssertEqual(BubblePreview.promptLabel("my_prompt"), "My prompt")
     }

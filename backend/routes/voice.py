@@ -28,6 +28,35 @@ PROMPT_KEY = 'voice'
 # a second prompt node.
 
 
+def _ready_under_gleaning(node, has_prompt, ai_usage):
+    """Voice continuing from a gleaning (#435): the next recording goes
+    under it (under a Voice prompt attached below it when the thread has
+    no agentic prompt yet), and nothing is played: a gleaning is never
+    read aloud."""
+    parent_id = node.id
+    if not has_prompt:
+        prompt_record = get_user_prompt_record(current_user.id, PROMPT_KEY)
+        system_node = Node(
+            user_id=current_user.id,
+            human_owner_id=current_user.id,
+            parent_id=node.id,
+            node_type="user",
+            privacy_level="private",
+            ai_usage=ai_usage,
+        )
+        db.session.add(system_node)
+        db.session.flush()
+        attach_context_artifacts(
+            system_node.id, current_user.id, prompt_record=prompt_record,
+        )
+        db.session.commit()
+        parent_id = system_node.id
+    # llm_node_id stays in the answer: the iPhone app decodes it on every
+    # answer of this route, and opens Voice without playing on "ready".
+    return jsonify({"mode": "ready", "parent_id": parent_id,
+                    "llm_node_id": node.id}), 200
+
+
 @voice_bp.route("/from-node/<int:node_id>", methods=["POST"])
 @login_required
 def create_voice_from_node(node_id):
@@ -66,6 +95,12 @@ def create_voice_from_node(node_id):
 
     has_prompt = ancestors_have_prompt(node, current_user.id, AGENTIC_PROMPT_KEYS)
     is_llm = is_llm_node(node)
+
+    # A gleaning is never read aloud (#435): continuing by voice from one
+    # opens the record button under it instead of playing it first.
+    from backend.utils.glean import is_gleaning
+    if is_llm and is_gleaning(node):
+        return _ready_under_gleaning(node, has_prompt, ai_usage)
 
     if not is_llm:
         # A reply starts here: directly under *node* inside an agentic
@@ -217,6 +252,9 @@ def create_voice_session():
         attach_context_artifacts(
             system_node.id, current_user.id, prompt_record=prompt_record,
         )
+        # Started from the Glean card (#435): every turn offers Glean.
+        from backend.utils.glean import stamp_glean_entry
+        stamp_glean_entry(system_node, current_user, data.get("entry"))
         user_parent_id = system_node.id
 
     from backend.utils.tokens import approximate_token_count

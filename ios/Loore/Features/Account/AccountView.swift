@@ -2,15 +2,17 @@ import SwiftUI
 
 /// Account (web `AccountPage`, map E §6): username, email (verification flow,
 /// pasted confirmation link), X, plan, the settings that save on change,
-/// Voice (M3), the app version and, in Debug builds, the hidden environment
-/// switcher (long-press the version line). `anchor` is the web hash
-/// (`email`, `x`, `model`, `references`, `craft`).
+/// Voice (M3), "Delete my account" (#269), the app version and, in Debug
+/// builds, the hidden environment switcher (long-press the version line).
+/// `anchor` is the web hash (`email`, `x`, `model`, `references`, `craft`,
+/// `delete-account`).
 struct AccountView: View {
     var anchor: String?
 
     @Environment(AppState.self) private var app
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var model: AccountModel?
+    @State private var deleteModel: DeleteAccountModel?
     @State private var showEnvironmentSwitcher = false
     @State private var connectingX = false
     @State private var pastingConfirmation = false
@@ -37,6 +39,11 @@ struct AccountView: View {
                     }
                     VoiceSettingsSection()
                         .padding(.top, 32)
+                    if let deleteModel, deleteModel.isAvailable {
+                        DeleteAccountSection(model: deleteModel)
+                            .padding(.top, 40)
+                            .id("delete-account")
+                    }
                     versionLabel
                         .padding(.top, 32)
                 }
@@ -48,6 +55,7 @@ struct AccountView: View {
             .scrollDismissesKeyboard(.interactively)
             .onAppear {
                 if model == nil { model = AccountModel(app: app) }
+                if deleteModel == nil { deleteModel = DeleteAccountModel(app: app) }
                 if let anchor {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
                         withAnimation(reduceMotion ? nil : .default) { proxy.scrollTo(anchor, anchor: .top) }

@@ -312,6 +312,14 @@ class ItemTTSTask(EntityTTSTask):
     entity_label = "reference"
 
 
+def _hidden_for_deletion(kind, row_id):
+    """A waiting "Delete all my writing" hid this row (#268)."""
+    from backend.models import UserDataPurgeHidden
+    return db.session.query(UserDataPurgeHidden.id).filter(
+        UserDataPurgeHidden.kind == kind,
+        UserDataPurgeHidden.row_id == row_id).first() is not None
+
+
 def _run_entity_tts(task, entity_cls, entity_id, text_of, subdir,
                     chunk_fk_attr, label, audio_storage_root,
                     requesting_user_id):
@@ -323,6 +331,19 @@ def _run_entity_tts(task, entity_cls, entity_id, text_of, subdir,
     logger.info(f"Starting TTS generation task for {label} {entity_id}")
     with flask_app.app_context():
         entity = entity_cls.query.get(entity_id)
+        if not entity and _hidden_for_deletion(entity_cls.__tablename__,
+                                               entity_id):
+            # "Delete all my writing" hid it after the TTS was queued
+            # (#268): nothing is spoken. After a restore it offers its
+            # speaker again, as after any failed TTS.
+            logger.info(f"{label} {entity_id} is hidden for deletion; no TTS")
+            from backend.utils.hidden_rows import including_hidden_rows
+            with including_hidden_rows():
+                hidden = entity_cls.query.get(entity_id)
+                if hidden is not None:
+                    hidden.tts_task_status = 'failed'
+                    db.session.commit()
+            return None
         if not entity:
             raise ValueError(f"{entity_cls.__name__} {entity_id} not found")
 
@@ -588,6 +609,14 @@ def generate_tts_audio(self, node_id: int, audio_storage_root: str,
         node = Node.query.get(node_id)
         if not node:
             raise ValueError(f"Node {node_id} not found")
+        if _hidden_for_deletion("node", node_id):
+            # "Delete all my writing" hid it after the TTS was queued
+            # (#268): nothing is spoken. After a restore the node offers
+            # its speaker again, as after any failed TTS.
+            logger.info("Node %s is hidden for deletion; no TTS", node_id)
+            node.tts_task_status = 'failed'
+            db.session.commit()
+            return {'node_id': node_id, 'status': 'on_hold'}
 
         from backend.utils.spend import user_is_capped
         if user_is_capped(requesting_user_id or node.user_id):

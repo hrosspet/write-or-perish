@@ -391,15 +391,15 @@ Saved external content: web clips (Chrome clipper), X bookmarks, Community Archi
 - **Load:** `GET /api/external/items/<id>` → item + `content`. 404 → "This reference does not exist or was deleted."; other errors → "Error loading reference."; while loading, "Loading...".
 - **Layout:**
   - Heading row: H2 "Reference" and a link "All references".
-  - A focal card: accent left border, kebab in the corner.
-  - Title row: H1 serif 1.5rem (if a title exists) and SpeakerIcon (`itemId`, content `# {title}\n{content}`).
-  - Embed:
-    - **Tweets:** `TweetEmbed` loads `https://platform.twitter.com/widgets.js` and reports `shown`/failure.
-    - **YouTube:** an iframe `https://www.youtube-nocookie.com/embed/<id>?start=…`.
-  - If an embed is shown: a toggle "Show stored text"/"Hide stored text" reveals the stored markdown. Otherwise the stored markdown is the body (`bodyWithoutTitle`).
-  - Footer row: ReferenceFooter plus tags "Read" and the source label.
-  - Bottom rule, left: `Shown by Loore {surfaced_count}× · last {formatDate(last_surfaced_at)}` or "Not yet shown by Loore in a conversation", then ` · you read it {date}` and ` · edited {date}`.
-  - Bottom rule, right: ReferenceFeedback (18 px) and the button **"Mark as read"** (accent fill) or **"Mark as unread"** (outline).
+  - The card (option A, Peter 2026-10-13; `.ref-card` in index.css): a full 1px `--border-hover` border, radius 12, `--bg-card`, no accent rail; the kebab outside on the right (iOS: inside, beside the source line). Every kind of reference uses it.
+  - Source line: a small glyph and `sourceLine(item)` ("Tweet from the Community Archive", "Page from example.com", "Video from YouTube").
+  - Byline: a tweet's display name and @handle (linking to the account) or a page's byline, then `· {yyyy/mm/dd HH:MM}`.
+  - A page's title: H1 serif 1.5rem.
+  - Body: the stored markdown (`bodyWithoutTitle`) in Newsreader 1.12rem / 1.62, max 65ch. No tweet embed: the stored text is the tweet.
+  - **YouTube:** an iframe `https://www.youtube-nocookie.com/embed/<id>?start=…` in the card, the description under "Show stored text"/"Hide stored text".
+  - Action row above a hairline: SpeakerIcon (`itemId`, content `# {title}\n{content}`), the link out (`sourceLinkLabel`: "Twitter ↗", "Open page ↗", "YouTube ↗"; opening it posts `{via: 'open'}` and marks the reference read), then ⊕/⊖ and "Mark as read" on the right.
+  - "Mark as read" is a text button (accent), "Mark as unread" muted. There is no "Read" chip and no source chip.
+  - Under the card: `Shown by Loore {surfaced_count}× · last {formatDate(last_surfaced_at)}` or "Not yet shown by Loore in a conversation", then ` · you read it {date}` and ` · edited {date}`.
 - **Actions (kebab):** "Open source" (if url), "Edit", "Delete".
 - **Read toggle:**
   - `POST /api/external/items/<id>/read` marks it read. It is idempotent and keeps the original `read_at`. Optional body `{node_id, via:'open'}` for logging.
@@ -420,8 +420,8 @@ Saved external content: web clips (Chrome clipper), X bookmarks, Community Archi
   - SSE `GET /api/sse/items/<id>/tts-stream`; polling fallback `GET /api/external/items/<id>/tts-status` → `{status, progress, task_id, item:{id, audio_tts_url?}}`.
   - Chapters: `GET /api/external/items/<id>/tts-chapters` → `{chapters}`.
 - **iOS embeds:**
-  - Tweets: widgets.js in a `WKWebView`, or skip the embed and show the stored text plus an "Open on X" button. The stored text is complete for bookmarks and clips.
-  - YouTube: a `WKWebView` with the nocookie embed URL, or open the YouTube app via `openURL`.
+  - Tweets: no embed (since 2026-10-13, web and iOS): the stored text and a "Twitter ↗" link. The stored text is complete for bookmarks and clips.
+  - YouTube: a `WKWebView` with the nocookie embed URL.
 
 ### 4.3 ReferenceFeedback (`components/ReferenceFeedback.js`)
 - Two outline glyphs, `FiPlusCircle` (aria "Good quote") and `FiMinusCircle` (aria "Bad quote"). The chosen one is accent; the others are muted. Tapping the chosen one again clears it.
@@ -831,7 +831,7 @@ Tabs: **Users**, **Activity**, **Feedback**, **Polls**.
 | Blob download (`<a download>`) | NavBar "Export data" (`/api/export/threads`, .txt) | download to a temp file → `ShareLink` / `UIActivityViewController` / `.fileExporter` |
 | Full-page redirects to OAuth (`/auth/x/connect`, `/api/external/twitter/connect`) relying on the Flask session cookie | Account (Connect X), ExternalImport (Connect X bookmarks) | a `WKWebView` seeded with the session cookie that intercepts the final redirect (`/account?x_login=…`, `/import?x_connect=…`), or keep on the web. `ASWebAuthenticationSession` does not share app cookies. |
 | `window.open(url, '_blank')` | "Open source", "Open on X", author links, external notification links | `SFSafariViewController` or `openURL` (to the X/YouTube apps) |
-| Twitter `widgets.js` embed, YouTube nocookie iframe | ReferenceDetail | a `WKWebView` embed, or the stored text plus an open-in-app button |
+| YouTube nocookie iframe (the tweet embed was removed 2026-10-13) | ReferenceDetail | a `WKWebView` embed |
 | `beforeunload` unsaved-edit guard | ArtifactsPage | a confirmation dialog on navigation; `.interactiveDismissDisabled` |
 | Hover affordances (row "+", kebab on hover) | Todo, Bubble | always-visible controls, swipe actions, context menus. The web already shows the kebab always on `(hover: none)`. |
 | ⌘K, ⌘Enter, Esc | global, forms | `.keyboardShortcut` for hardware keyboards; the on-screen equivalents are buttons |

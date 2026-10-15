@@ -77,8 +77,9 @@ def username_conflict(username: str, exclude_user_id=None) -> Optional[str]:
     ``exclude_user_id``): ``"taken"`` while another account holds it,
     ``"reserved"`` while it is another account's former handle — the old
     public URLs still redirect there (#253), so a second claimant would
-    turn that redirect into an impersonation vector — and None when it is
-    free. An account may take its own former handle back. Case-insensitive,
+    turn that redirect into an impersonation vector — or the handle of an
+    account deleted less than a reservation period ago (#269), and None
+    when it is free. An account may take its own former handle back. Case-insensitive,
     like the uniqueness the app enforces. The one place every path that
     issues a username (rename, signup, whitelist) checks, so none of them
     can hand out a handle another refuses.
@@ -87,7 +88,8 @@ def username_conflict(username: str, exclude_user_id=None) -> Optional[str]:
     # time (keeps the pure helpers above unit-testable in isolation).
     from backend.models import User
     from backend.extensions import db
-    from backend.utils.username_history import former_handle_owner
+    from backend.utils.username_history import (
+        former_handle_owner, released_recently)
 
     query = User.query.filter(db.func.lower(User.username) == username.lower())
     if exclude_user_id is not None:
@@ -96,6 +98,8 @@ def username_conflict(username: str, exclude_user_id=None) -> Optional[str]:
         return "taken"
     former = former_handle_owner(username)
     if former is not None and former.id != exclude_user_id:
+        return "reserved"
+    if released_recently(username):
         return "reserved"
     return None
 

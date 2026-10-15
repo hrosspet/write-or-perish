@@ -36,6 +36,34 @@ class Config:
     # models flagged "read" in SUPPORTED_MODELS (#355).
     READ_DEFAULT_MODEL = "gpt-6-luna"
 
+    # --- Glean (#435): the Community Archive read, for every user ---
+    # Rollout gate, the PROFILE_USE_BATCH / PROFILE_BATCH_USER_IDS
+    # pattern: admins always; everyone when GLEAN_FOR_ALL is on; else the
+    # user ids in GLEAN_USER_IDS (comma-separated). Both default off, so
+    # Glean ships dark. On top of the gate every user has their own
+    # switch in Account settings (User.glean_enabled, utils/glean.py).
+    GLEAN_FOR_ALL = os.environ.get(
+        "GLEAN_FOR_ALL", "false").lower() in ("1", "true", "yes")
+    GLEAN_USER_IDS = {
+        int(x) for x in
+        os.environ.get("GLEAN_USER_IDS", "").replace(" ", "").split(",")
+        if x
+    }
+    # The read model a glean runs on by default, one setting per provider
+    # of the user's chat model (llm_nodes.glean_provider). During Glean's
+    # testing both default to GPT-5.6 Luna, also for Anthropic users: it
+    # is the best model for Glean so far (Peter, 2026-10-14; Haiku 5.5 is
+    # among the models still to be tested). The per-provider settings
+    # stay, so each provider can get its own default again without a code
+    # change. The user may pick another read model, another provider's
+    # too, in the Glean picker (Peter, 2026-10-09). Each must be an
+    # active "read" model, of any provider (checked at boot,
+    # validate_default_model).
+    GLEAN_MODEL_ANTHROPIC = (os.environ.get("GLEAN_MODEL_ANTHROPIC")
+                             or "gpt-5.6-luna")
+    GLEAN_MODEL_OPENAI = (os.environ.get("GLEAN_MODEL_OPENAI")
+                          or "gpt-5.6-luna")
+
     # --- API spend monitoring (issue #85) ---
     # Monthly Anthropic spend cap in USD. 0 (default) disables the check.
     ANTHROPIC_SPEND_LIMIT_USD = float(

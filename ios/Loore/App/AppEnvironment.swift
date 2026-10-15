@@ -119,4 +119,8 @@ enum DefaultsKey {
     static let lastPrivacyLevel = "loore_last_privacy_level"
     static let lastAIUsage = "loore_last_ai_usage"
     static let publicReplyAck = "loore_public_reply_ack"
+    /// The Voice / Text choice of each home card by purpose ("voice" | "text";
+    /// absent = Voice). Each card remembers its own (Peter, 2026-10-13).
+    static let homeReflectMode = "home.reflectMode"
+    static let homeGleanMode = "home.gleanMode"
 }

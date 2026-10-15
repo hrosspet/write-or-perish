@@ -29,8 +29,10 @@ const COMBINED_PATTERN = /(\{quote_ext:\d+\}|\{quote:\d+\}|\{user_(?:profile|tod
  *   showRecommendationFeedback: the node is LLM-authored, so its
  *     external-reference quotes are recommendations and get the good /
  *     bad verdict; a user's own quotes get only the read toggle (#363)
+ *   onExternalIntroVerdictChange: (itemId, verdict) after the verdict on
+ *     a gleaning pick's intro changed (#502)
  */
-const QuotedContent = ({ content, quotes, externalQuotes, contextArtifacts, onQuoteClick, onCheckboxToggle, onAddTask, onExternalReadChange, onExternalFeedbackChange, nodeId, showRecommendationFeedback = false }) => {
+const QuotedContent = ({ content, quotes, externalQuotes, contextArtifacts, onQuoteClick, onCheckboxToggle, onAddTask, onExternalReadChange, onExternalFeedbackChange, onExternalIntroVerdictChange, nodeId, showRecommendationFeedback = false, referenceBackLabel }) => {
   if (!content) {
     return null;
   }
@@ -133,7 +135,9 @@ const QuotedContent = ({ content, quotes, externalQuotes, contextArtifacts, onQu
                 nodeId={nodeId}
                 onReadChange={onExternalReadChange}
                 onFeedbackChange={onExternalFeedbackChange}
+                onIntroVerdictChange={onExternalIntroVerdictChange}
                 showRecommendationFeedback={showRecommendationFeedback}
+                backLabel={referenceBackLabel}
               />
             </div>
           );

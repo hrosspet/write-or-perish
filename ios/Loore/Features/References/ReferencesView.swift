@@ -3,11 +3,13 @@ import SwiftUI
 /// The item helpers of `utils/references.js`, over the app's model.
 extension ExternalItem {
     var sourceLabel: String { ReferenceUtils.sourceLabel(source: source, url: url) }
-    var authorLabel: String? { ReferenceUtils.authorLabel(source: source, handle: authorHandle) }
-    var tweetId: String? { ReferenceUtils.tweetId(source: source, externalId: externalId) }
+    var authorLabel: String? { ReferenceUtils.authorLabel(source: source, handle: authorHandle, name: authorName) }
     var youtubeVideo: ReferenceUtils.YouTubeVideo? { ReferenceUtils.youtubeVideo(source: source, url: url) }
     var bodyWithoutTitle: String { ReferenceUtils.bodyWithoutTitle(title: title, content: content ?? "") }
-    var isTweet: Bool { ["twitter_bookmark", "community_archive", "read_pick"].contains(source) }
+    var isTweet: Bool { ReferenceUtils.tweetSources.contains(source) }
+    var kind: ReferenceUtils.Kind { ReferenceUtils.kind(source: source, url: url) }
+    var sourceLine: String { ReferenceUtils.sourceLine(source: source, url: url) }
+    var sourceLinkLabel: String { ReferenceUtils.sourceLinkLabel(source: source, url: url) }
 
     /// `asCardNode`: the Log card shape (title as thread name, posted or fetched date, no replies).
     var cardData: BubbleData {
@@ -195,8 +197,5 @@ struct ReferenceFooter: View {
     }
 
     /// `new URL(url).hostname` without a leading `www.`.
-    static func host(_ link: String) -> String? {
-        guard let host = URL(string: link)?.host, !host.isEmpty else { return nil }
-        return host.hasPrefix("www.") ? String(host.dropFirst(4)) : host
-    }
+    static func host(_ link: String) -> String? { ReferenceUtils.host(link) }
 }

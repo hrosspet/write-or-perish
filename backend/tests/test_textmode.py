@@ -517,6 +517,45 @@ class TestTextmodeFromNode:
         assert resp.status_code == 404
         assert "DELETED WORDS" not in resp.get_data(as_text=True)
 
+    def test_a_deleted_accounts_reply_is_a_nameless_tombstone(self, app):
+        """#269: bob's public reply in alice's thread, then bob deletes his
+        account (grace period). Alice's text-mode view keeps the whole
+        thread with bob's reply as a deleted placeholder without his name,
+        as the thread view and an AI reply's context show it, and as it
+        will after the purge; it does not end below his reply."""
+        from datetime import datetime
+        client = app.test_client()
+        alice = _make_user("alice")
+        bob = _make_user("bob")
+        _db.session.commit()
+
+        root = _make_node(alice, content="root", privacy_level="public")
+        hers = _make_node(alice, parent_id=root.id, content="alice asks",
+                          privacy_level="public")
+        his = _make_node(bob, parent_id=hers.id, content="BOB HIDDEN WORDS",
+                         privacy_level="public")
+        latest = _make_node(alice, parent_id=his.id, content="alice again",
+                            privacy_level="public")
+        bob.deleted_at = datetime.utcnow()
+        _db.session.commit()
+
+        _login(client, alice.id)
+        resp = client.get(f"/api/textmode/from-node/{latest.id}")
+        assert resp.status_code == 200
+        body = resp.get_data(as_text=True)
+        assert "BOB HIDDEN WORDS" not in body
+        data = resp.get_json()
+        assert data["conversation_id"] == root.id
+        assert [m["id"] for m in data["messages"]] == [
+            hers.id, his.id, latest.id]
+        gone = data["messages"][1]
+        assert gone["deleted"] is True
+        assert gone["content"] is None
+        assert gone["username"] is None
+        assert gone["role"] == "user"
+        assert [m["content"] for m in data["messages"][::2]] == [
+            "alice asks", "alice again"]
+
 
 # ── GET /nodes/<id> ancestor serialization ──────────────────────────────
 

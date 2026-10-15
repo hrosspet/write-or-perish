@@ -1,13 +1,16 @@
 import SwiftUI
 
-/// Reflect (web `HomePage`, route `/`): greeting, "What's on your mind?", and
-/// the mode cards: Voice (M3), Text, Share (flag), Read (admins).
+/// Home (web `HomePage`, route `/`): greeting, "What's on your mind?", and the
+/// cards. A user who gleans (#436) gets two cards by purpose, Reflect and
+/// Glean, each opening the Voice or Text its switch remembers, and Share (flag)
+/// in its own row below; a user without Glean keeps the mode cards: Voice,
+/// Text, Share (flag). The admin-only Read card is gone, as on the web (#474).
 struct HomeView: View {
     @Environment(AppState.self) private var app
     @State private var greeting = LooreDateFormat.greeting()
-    @State private var readStarting = false
 
     var body: some View {
+        let gleans = app.capabilities.gleanEnabled
         ScrollView {
             VStack(spacing: 0) {
                 Spacer(minLength: 24)
@@ -20,16 +23,20 @@ struct HomeView: View {
                     .font(LooreFont.hero)
                     .foregroundStyle(LooreColor.textPrimary)
                     .multilineTextAlignment(.center)
-                    .padding(.bottom, 40)
+                    .padding(.bottom, gleans ? 28 : 40)
                     .looreFadeIn(delay: 0.2, offset: 12)
                     .accessibilityAddTraits(.isHeader)
 
-                ViewThatFits(in: .horizontal) {
-                    HStack(alignment: .top, spacing: 16) { cards }
-                        .frame(minWidth: 640)
-                    VStack(spacing: 16) { cards }
+                if gleans {
+                    purposeCards
+                } else {
+                    ViewThatFits(in: .horizontal) {
+                        HStack(alignment: .top, spacing: 16) { cards }
+                            .frame(minWidth: 640)
+                        VStack(spacing: 16) { cards }
+                    }
+                    .frame(maxWidth: 900)
                 }
-                .frame(maxWidth: 900)
             }
             .padding(.horizontal, LooreSpacing.gutter)
             .padding(.vertical, 40)
@@ -40,6 +47,7 @@ struct HomeView: View {
         .onAppear { greeting = LooreDateFormat.greeting() }
     }
 
+    /// Without Glean: today's mode cards.
     @ViewBuilder private var cards: some View {
         WorkflowCard(title: "Voice", description: "Speak what's present.", delay: 0.4) {
             LooreLogo(size: 42)
@@ -50,50 +58,231 @@ struct HomeView: View {
         WorkflowCard(title: "Text", description: "Type what's on your mind.", delay: 0.52) {
             HomeIcons.text
         } action: {
-            app.open(.textMode)
+            app.open(.textMode())
         }
         .accessibilityIdentifier("home.text")
-        if app.capabilities.shareEnabled {
-            WorkflowCard(title: "Share", description: "Give something outward.", delay: 0.64) {
-                HomeIcons.share
-            } action: {
-                app.open(.share)
-            }
-            .accessibilityIdentifier("home.share")
+        if app.capabilities.shareEnabled { shareCard(delay: 0.64) }
+    }
+
+    /// The Share card, the same with and without Glean (Peter: "Share stays as today").
+    private func shareCard(delay: Double) -> some View {
+        WorkflowCard(title: "Share", description: "Give something outward.", delay: delay) {
+            HomeIcons.share
+        } action: {
+            app.open(.share)
         }
-        if app.capabilities.isAdmin {
-            WorkflowCard(title: "Read", description: readStarting ? "Starting…" : "What's worth your time today.",
-                         delay: 0.76) {
-                HomeIcons.read
-            } action: {
-                startRead()
+        .accessibilityIdentifier("home.share")
+    }
+
+    /// With Glean (#436): Reflect and Glean, side by side where they fit and
+    /// stacked on a phone; Share in its own row below.
+    private var purposeCards: some View {
+        VStack(spacing: 24) {
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .top, spacing: 16) { purposeCardViews }
+                    .frame(minWidth: 520)
+                VStack(spacing: 16) { purposeCardViews }
             }
-            .disabled(readStarting || NodePrefetch.shared.isPending)
-            .accessibilityIdentifier("home.read")
+            .frame(maxWidth: 560)
+            if app.capabilities.shareEnabled {
+                shareCard(delay: 0.54).frame(maxWidth: 560)
+            }
         }
     }
 
-    /// Admin-only Community Archive read (`POST /api/read/start`, billed):
-    /// the click creates the thread and lands on the reply (or the prompt).
-    private func startRead() {
-        guard !readStarting, !NodePrefetch.shared.isPending else { return }
-        readStarting = true
-        let stored = UserDefaults.standard.object(forKey: DefaultsKey.autoGenerate)
-        let autoGenerate = stored == nil ? true : UserDefaults.standard.bool(forKey: DefaultsKey.autoGenerate)
-        Task {
-            do {
-                struct Answer: Decodable { var llm_node_id: Int?; var prompt_node_id: Int? }
-                let answer: Answer = try await app.api.post(APIPath.readStart, json: .object(["auto_generate": .bool(autoGenerate)]))
-                readStarting = false
-                // The read's thread opens once its node is in (NodePrefetch), not on a loading page.
-                if let id = answer.llm_node_id ?? answer.prompt_node_id { NodePrefetch.shared.openThread(id, app: app) }
-            } catch {
-                readStarting = false
-                if SpendCap.isSpendCapError(error) { return }
-                app.toasts.show((error as? APIError)?.userMessage(fallback: "Could not start the read.")
-                                ?? "Could not start the read.", duration: 6)
+    @ViewBuilder private var purposeCardViews: some View {
+        ForEach(Array(HomePurpose.allCases.enumerated()), id: \.element) { index, purpose in
+            PurposeCard(purpose: purpose, delay: 0.3 + Double(index) * 0.12) { mode in
+                app.open(purpose.route(mode))
             }
         }
+    }
+}
+
+/// The home screen's cards by purpose (#436, web `purposeCards`).
+enum HomePurpose: String, CaseIterable, Hashable {
+    case reflect, glean
+
+    /// What the card opens. Stored per card on the device as the raw value.
+    enum Mode: String, CaseIterable {
+        case voice, text
+
+        var title: String { self == .voice ? "Voice" : "Text" }
+        var symbol: String { self == .voice ? "mic" : "text.alignleft" }
+        /// Spoken after the card's title: "Reflect by voice", "Glean in text".
+        var phrase: String { self == .voice ? "by voice" : "in text" }
+    }
+
+    var title: String { self == .reflect ? "Reflect" : "Glean" }
+
+    var line: String {
+        self == .reflect ? "Talk it through with Loore." : "Reflect, and Loore gleans for you."
+    }
+
+    /// Glean opens the same screens as a Glean session: the thread it starts is
+    /// marked, so every turn of it offers Glean (#435).
+    func route(_ mode: Mode) -> AppRoute {
+        let glean = self == .glean
+        switch mode {
+        case .voice: return .voice(parentId: nil, resumeLLMId: nil, glean: glean)
+        case .text: return .textMode(glean: glean)
+        }
+    }
+
+    /// Where the card keeps its Voice / Text choice on the device. Reflect and
+    /// Glean remember separately (Peter, 2026-10-13: "It should remember its own choices").
+    var modeKey: String { self == .reflect ? DefaultsKey.homeReflectMode : DefaultsKey.homeGleanMode }
+
+    /// The card's remembered mode: Voice until the user picks Text.
+    func modeStorage(store: UserDefaults? = nil) -> AppStorage<Mode> {
+        AppStorage(wrappedValue: .voice, modeKey, store: store)
+    }
+
+    /// What VoiceOver says the card opens.
+    func openLabel(_ mode: Mode) -> String { "\(title) \(mode.phrase)" }
+}
+
+/// One purpose card (web `PurposeCard`): serif title, a short rule, the line,
+/// and a Voice / Text switch. The switch only picks the mode, which the card
+/// remembers on the device; the card itself opens it (Peter, 2026-10-13).
+///
+/// The card's tap area is a button behind the content, and the switch sits on
+/// top of it as a sibling (no button inside a button), so a tap on the switch
+/// never presses or opens the card. The press effect covers the whole card,
+/// the switch included, with `CardPressStyle`'s look.
+struct PurposeCard: View {
+    let purpose: HomePurpose
+    var delay: Double = 0
+    let open: (HomePurpose.Mode) -> Void
+    @AppStorage private var mode: HomePurpose.Mode
+    @State private var pressed = false
+
+    init(purpose: HomePurpose, delay: Double = 0, store: UserDefaults? = nil,
+         open: @escaping (HomePurpose.Mode) -> Void) {
+        self.purpose = purpose
+        self.delay = delay
+        self.open = open
+        _mode = purpose.modeStorage(store: store)
+    }
+
+    var body: some View {
+        VStack(spacing: 10) {
+            // A tap on the words reaches the card's button behind them, and
+            // that button speaks for them.
+            Group {
+                Text(purpose.title)
+                    .font(LooreFont.serif(24.8, .regular, relativeTo: .title2))
+                    .foregroundStyle(LooreColor.textPrimary)
+                Rectangle()
+                    .fill(LooreColor.accentGlow)
+                    .frame(width: 32, height: 1)
+                Text(purpose.line)
+                    .font(LooreFont.sans(14.1, .light))
+                    .foregroundStyle(LooreColor.textSecondary)
+                    .lineSpacing(3)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+            HomeModeSwitch(purpose: purpose, selection: $mode)
+                .padding(.top, 8)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(EdgeInsets(top: 35.2, leading: 25.6, bottom: 30.4, trailing: 25.6))
+        .background {
+            Button { open(mode) } label: {
+                RoundedRectangle(cornerRadius: LooreRadius.large)
+                    .fill(LooreColor.bgCard)
+                    .overlay(RoundedRectangle(cornerRadius: LooreRadius.large).strokeBorder(LooreColor.border))
+                    .contentShape(RoundedRectangle(cornerRadius: LooreRadius.large))
+            }
+            .buttonStyle(PressReportingStyle(isPressed: $pressed))
+            .accessibilityLabel(purpose.openLabel(mode))
+            .accessibilityHint(purpose.line)
+            .accessibilityIdentifier("home.\(purpose.rawValue)")
+            .accessibilitySortPriority(1)
+        }
+        .cardPressEffect(pressed)
+        .looreFadeIn(delay: delay, offset: 20)
+        .accessibilityElement(children: .contain)
+    }
+}
+
+/// The purpose card's Voice / Text switch: one capsule split in two halves, the
+/// chosen one outlined in the accent over a faint accent fill (the web's Voice /
+/// Text button on hover), the other muted. A tap selects; it never opens
+/// anything. VoiceOver reads it as a two-option segmented picker.
+struct HomeModeSwitch: View {
+    let purpose: HomePurpose
+    @Binding var selection: HomePurpose.Mode
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var size = CGSize.zero
+
+    /// From the outer edge to the chosen half: the web's 1 px border + 3 px padding.
+    private static let inset: CGFloat = 4
+
+    var body: some View {
+        HStack(spacing: 0) {
+            ForEach(HomePurpose.Mode.allCases, id: \.self) { mode in
+                Button { selection = mode } label: {
+                    HStack(spacing: 7) {
+                        Image(systemName: mode.symbol)
+                            .font(.system(size: 13, weight: .light))
+                        Text(mode.title)
+                    }
+                    .font(LooreFont.sans(14.1, .light))
+                    .padding(.horizontal, 16)
+                    .frame(maxWidth: .infinity, minHeight: 36)
+                    // Each half reaches the outer border, so a tap anywhere on
+                    // the switch picks a mode and none falls through to the card.
+                    .padding(.vertical, Self.inset)
+                    .padding(mode == .voice ? .leading : .trailing, Self.inset)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(HomeModeSegmentStyle(selected: mode == selection))
+            }
+        }
+        // Two equal halves, as wide as the wider label.
+        .fixedSize(horizontal: true, vertical: false)
+        .background {
+            GeometryReader { geo in
+                let half = (geo.size.width - 2 * Self.inset) / 2
+                Capsule()
+                    .fill(LooreColor.accentSubtle)
+                    .overlay(Capsule().strokeBorder(LooreColor.accent))
+                    .frame(width: half, height: max(0, geo.size.height - 2 * Self.inset))
+                    .offset(x: Self.inset + (selection == .text ? half : 0), y: Self.inset)
+                    .animation(reduceMotion ? nil : .easeOut(duration: 0.2), value: selection)
+            }
+        }
+        .background(LooreColor.bgInput, in: Capsule())
+        .overlay(Capsule().strokeBorder(LooreColor.borderHover))
+        .onGeometryChange(for: CGSize.self) { $0.size } action: { size = $0 }
+        .accessibilityRepresentation {
+            Picker("\(purpose.title) mode", selection: $selection) {
+                ForEach(HomePurpose.Mode.allCases, id: \.self) { mode in
+                    Text(mode.title).tag(mode)
+                }
+            }
+            .pickerStyle(.segmented)
+            // At the switch's own size, so each spoken half sits on its drawn half.
+            .frame(width: size.width, height: size.height)
+        }
+        .accessibilityIdentifier("home.\(purpose.rawValue).mode")
+    }
+}
+
+/// A half of `HomeModeSwitch`: accent text when chosen, muted otherwise, and
+/// primary text while a finger is on the other half (the web's hover).
+private struct HomeModeSegmentStyle: ButtonStyle {
+    let selected: Bool
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .foregroundStyle(selected ? LooreColor.accent
+                             : configuration.isPressed ? LooreColor.textPrimary : LooreColor.textMuted)
+            .animation(.easeOut(duration: 0.15), value: selected)
     }
 }
 
@@ -138,31 +327,33 @@ struct WorkflowCard<Icon: View>: View {
 /// A gentle press state for tappable cards (the web's hover lift, for touch).
 struct CardPressStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
+        configuration.label.cardPressEffect(configuration.isPressed)
+    }
+}
+
+extension View {
+    /// `CardPressStyle`'s look, for a card whose press covers more than its button.
+    func cardPressEffect(_ pressed: Bool) -> some View {
+        scaleEffect(pressed ? 0.985 : 1)
+            .brightness(pressed ? 0.02 : 0)
+            .animation(.easeOut(duration: 0.15), value: pressed)
+    }
+}
+
+/// Hands a button's pressed state to its card (`PurposeCard`), which draws the
+/// press with `cardPressEffect`.
+struct PressReportingStyle: ButtonStyle {
+    @Binding var isPressed: Bool
+
+    func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .scaleEffect(configuration.isPressed ? 0.985 : 1)
-            .brightness(configuration.isPressed ? 0.02 : 0)
-            .animation(.easeOut(duration: 0.15), value: configuration.isPressed)
+            .onChange(of: configuration.isPressed) { _, pressed in isPressed = pressed }
     }
 }
 
 /// The Home cards' line icons, from `HomePage.js`.
 enum HomeIcons {
     private static let box = CGSize(width: 42, height: 42)
-
-    /// An open book, one page marked (the web's Read card icon).
-    static var read: some View {
-        ZStack {
-            SVGShape("M6 11 C11 9.5 16 9.8 21 12.5 C26 9.8 31 9.5 36 11 L36 32 C31 30.5 26 30.8 21 33.5 C16 30.8 11 30.5 6 32 Z", viewBox: box)
-                .stroke(LooreColor.accent, style: StrokeStyle(lineWidth: 1.4, lineJoin: .round))
-            SVGShape("M21 12.5 L21 33.5", viewBox: box)
-                .stroke(LooreColor.accent.opacity(0.7), lineWidth: 1.1)
-            SVGShape("M10 16.5 C13 15.8 15.5 16 18 17.2 M10 21 C13 20.3 15.5 20.5 18 21.7 M10 25.5 C13 24.8 15.5 25 18 26.2 M24 16.5 C27 15.8 29.5 16 32 17.2 M24 21 C27 20.3 29.5 20.5 32 21.7", viewBox: box)
-                .stroke(LooreColor.accent.opacity(0.6), style: StrokeStyle(lineWidth: 1, lineCap: .round))
-            Circle().fill(LooreColor.accent).frame(width: 3.2, height: 3.2).position(x: 28, y: 26)
-        }
-        .frame(width: 42, height: 42)
-        .accessibilityHidden(true)
-    }
 
     static var text: some View {
         ZStack {

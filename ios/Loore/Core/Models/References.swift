@@ -8,6 +8,8 @@ struct ExternalItem: Decodable, Identifiable, Equatable, Sendable {
     var source: String
     var externalId: String?
     var authorHandle: String?
+    /// The tweet author's display name when the archive has one (#435).
+    var authorName: String?
     var title: String?
     var preview: String
     var url: String?
@@ -28,6 +30,7 @@ struct ExternalItem: Decodable, Identifiable, Equatable, Sendable {
         case id, source, title, preview, url, feedback, content
         case externalId = "external_id"
         case authorHandle = "author_handle"
+        case authorName = "author_name"
         case postedAt = "posted_at"
         case fetchedAt = "fetched_at"
         case readAt = "read_at"
@@ -67,6 +70,7 @@ struct ExternalItem: Decodable, Identifiable, Equatable, Sendable {
         source = c.tolerant(.source, default: "")
         externalId = c.tolerant(.externalId) ?? c.flexibleInt(.externalId).map(String.init)
         authorHandle = c.tolerant(.authorHandle)
+        authorName = c.tolerant(.authorName)
         title = c.tolerant(.title)
         preview = c.tolerant(.preview, default: "")
         url = c.tolerant(.url)

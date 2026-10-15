@@ -90,13 +90,42 @@ final class ReferenceUtilsTests: XCTestCase {
         XCTAssertEqual(ReferenceUtils.bodyWithoutTitle(title: "T", content: nil), "")
     }
 
-    func testAuthorLabelTweetIdAndCardFields() {
+    // MARK: The reference page's card (option A, 2026-10-13)
+
+    func testKindTellsVideosTweetsAndPagesApart() {
+        XCTAssertEqual(ReferenceUtils.kind(source: "web_clip", url: "https://youtu.be/dQw4w9WgXcQ"), .video)
+        XCTAssertEqual(ReferenceUtils.kind(source: "web_clip", url: "https://www.youtube.com/@channel"), .page)
+        for source in ["community_archive", "read_pick", "twitter_bookmark", "twitter_like"] {
+            XCTAssertEqual(ReferenceUtils.kind(source: source, url: nil), .tweet, source)
+        }
+        XCTAssertEqual(ReferenceUtils.kind(source: "web_clip", url: "https://example.com/post"), .page)
+        XCTAssertEqual(ReferenceUtils.kind(source: "new_source", url: nil), .page)
+    }
+
+    func testSourceLineNamesTheKindAndWhereItCameFrom() {
+        XCTAssertEqual(ReferenceUtils.sourceLine(source: "community_archive", url: nil), "Tweet from the Community Archive")
+        XCTAssertEqual(ReferenceUtils.sourceLine(source: "read_pick", url: nil), "Tweet from the Community Archive")
+        XCTAssertEqual(ReferenceUtils.sourceLine(source: "twitter_bookmark", url: nil), "Tweet from your Twitter bookmarks")
+        XCTAssertEqual(ReferenceUtils.sourceLine(source: "twitter_like", url: nil), "Tweet from your Twitter likes")
+        XCTAssertEqual(ReferenceUtils.sourceLine(source: "web_clip", url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ"),
+                       "Video from YouTube")
+        XCTAssertEqual(ReferenceUtils.sourceLine(source: "web_clip", url: "https://www.example.com/post"),
+                       "Page from example.com")
+        XCTAssertEqual(ReferenceUtils.sourceLine(source: "web_clip", url: nil), "Saved page")
+        XCTAssertEqual(ReferenceUtils.sourceLine(source: "new_source", url: nil), "new_source")
+    }
+
+    func testSourceLinkLabelNamesWhereTheLinkGoes() {
+        XCTAssertEqual(ReferenceUtils.sourceLinkLabel(source: "twitter_bookmark", url: nil), "Twitter ↗")
+        XCTAssertEqual(ReferenceUtils.sourceLinkLabel(source: "web_clip", url: "https://youtu.be/dQw4w9WgXcQ"), "YouTube ↗")
+        XCTAssertEqual(ReferenceUtils.sourceLinkLabel(source: "web_clip", url: "https://example.com/post"), "Open page ↗")
+    }
+
+    func testAuthorLabelAndCardFields() {
         XCTAssertEqual(ReferenceUtils.authorLabel(source: "twitter_bookmark", handle: "peter"), "@peter")
         XCTAssertEqual(ReferenceUtils.authorLabel(source: "web_clip", handle: "The Site"), "The Site")
         XCTAssertNil(ReferenceUtils.authorLabel(source: "twitter_bookmark", handle: ""))
-        XCTAssertEqual(ReferenceUtils.tweetId(source: "read_pick", externalId: "123"), "123")
-        XCTAssertNil(ReferenceUtils.tweetId(source: "web_clip", externalId: "abc"))
-        XCTAssertNil(ReferenceUtils.tweetId(source: "community_archive", externalId: ""))
+        XCTAssertEqual(ReferenceUtils.sourceLabel(source: "twitter_like", url: nil), "Tweet")
         XCTAssertEqual(ReferenceUtils.sourceLabel(source: "community_archive", url: nil), "Archive tweet")
         XCTAssertEqual(ReferenceUtils.sourceLabel(source: "new_source", url: nil), "new_source")
 

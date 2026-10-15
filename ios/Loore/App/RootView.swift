@@ -4,7 +4,9 @@ import SwiftUI
 /// sequence after sign-in (design doc §4.5, map B §3.6):
 /// signed out → sign-in; not approved → waitlist; terms out of date → the
 /// blocking Terms screen over whichever of those is underneath; then the app,
-/// with the Updates sheet once per launch.
+/// with the Updates sheet once per launch. Account deletion (#269) adds the
+/// restore question after a sign-in into a deleted account, and the page
+/// shown after the user's own deletion.
 struct RootView: View {
     @Environment(AppState.self) private var app
 
@@ -43,6 +45,10 @@ struct RootView: View {
             SignInView()
         case .unreachable(let message):
             UnreachableView(message: message)
+        case .restoreOffer:
+            AccountRestoreView()
+        case .accountDeleted(let deleteOn):
+            AccountDeletedView(deleteOn: deleteOn)
         case .signedIn:
             if app.isApproved {
                 MainTabView()

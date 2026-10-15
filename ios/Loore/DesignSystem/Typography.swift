@@ -63,24 +63,48 @@ enum LooreFont {
     /// when created (views rebuild on a size change).
     static func sansOblique(_ size: CGFloat, _ weight: LooreFontFace.SansWeight = .light,
                             relativeTo style: Font.TextStyle = .body) -> Font {
-        let textStyle: UIFont.TextStyle
-        switch style {
-        case .largeTitle: textStyle = .largeTitle
-        case .title: textStyle = .title1
-        case .title2: textStyle = .title2
-        case .title3: textStyle = .title3
-        case .headline: textStyle = .headline
-        case .subheadline: textStyle = .subheadline
-        case .callout: textStyle = .callout
-        case .footnote: textStyle = .footnote
-        case .caption: textStyle = .caption1
-        case .caption2: textStyle = .caption2
-        default: textStyle = .body
-        }
         let slant = CGAffineTransform(a: 1, b: 0, c: 0.21, d: 1, tx: 0, ty: 0)
         let descriptor = UIFontDescriptor(fontAttributes: [.name: LooreFontFace.sansName(weight), .matrix: slant])
         let base = UIFont(descriptor: descriptor, size: size)
-        return Font(UIFontMetrics(forTextStyle: textStyle).scaledFont(for: base))
+        return Font(UIFontMetrics(forTextStyle: uiTextStyle(style)).scaledFont(for: base))
+    }
+
+    /// The reading serif for long stored text, where the web sets Newsreader
+    /// (`--reading-serif`): the app bundles no Newsreader, so this is the
+    /// system's text serif, New York, with real bold and italic faces. Scaled
+    /// for Dynamic Type when created, like `sansOblique`.
+    static func reading(_ size: CGFloat, bold: Bool = false, italic: Bool = false,
+                        relativeTo style: Font.TextStyle = .body) -> Font {
+        Font(UIFontMetrics(forTextStyle: uiTextStyle(style)).scaledFont(for: readingUIFont(size, bold: bold, italic: italic)))
+    }
+
+    static func readingUIFont(_ size: CGFloat, bold: Bool = false, italic: Bool = false) -> UIFont {
+        let system = UIFont.systemFont(ofSize: size, weight: bold ? .bold : .regular)
+        var descriptor = system.fontDescriptor.withDesign(.serif) ?? system.fontDescriptor
+        if italic, let slanted = descriptor.withSymbolicTraits(descriptor.symbolicTraits.union(.traitItalic)) {
+            descriptor = slanted
+        }
+        return UIFont(descriptor: descriptor, size: size)
+    }
+
+    /// The reading serif's own line height as a multiple of its size (for CSS
+    /// line-height conversions; Outfit's is about 1.26).
+    static let readingLineHeight: CGFloat = readingUIFont(100).lineHeight / 100
+
+    private static func uiTextStyle(_ style: Font.TextStyle) -> UIFont.TextStyle {
+        switch style {
+        case .largeTitle: return .largeTitle
+        case .title: return .title1
+        case .title2: return .title2
+        case .title3: return .title3
+        case .headline: return .headline
+        case .subheadline: return .subheadline
+        case .callout: return .callout
+        case .footnote: return .footnote
+        case .caption: return .caption1
+        case .caption2: return .caption2
+        default: return .body
+        }
     }
 
     // Presets (map A §5.2)

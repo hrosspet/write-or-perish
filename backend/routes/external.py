@@ -60,6 +60,8 @@ def _serialize_item(item):
         # hash for web clips.
         "external_id": item.external_id,
         "author_handle": item.author_handle,
+        # The tweet author's display name when the archive has one (#435).
+        "author_name": item.author_name,
         "title": item.title,
         "preview": content[:280] + ("…" if len(content) > 280 else ""),
         "url": item.url,
@@ -359,6 +361,23 @@ def mark_item_read(item_id):
 FEEDBACK_VALUES = ("good", "bad")
 
 
+def apply_item_feedback(item, value, node_id=None):
+    """Give *item* (the user's ExternalItem) the verdict *value* ('good',
+    'bad' or None to clear), logged with the reply it was given in
+    (*node_id*, already checked with reference_log.reply_node_id): which
+    recommendations it counts for is decided in reference_log (#352). A
+    verdict also marks the reference read; clearing one leaves the read
+    mark alone. The tweet half of a gleaning pick's verdict
+    (routes/nodes.py, set_pick_verdict) goes through here too. Adds to
+    the session; the caller commits."""
+    reference_log.record_action(
+        item, reference_log.ACTION_VERDICT, value=value, node_id=node_id)
+    item.feedback = value
+    item.feedback_at = datetime.utcnow() if value else None
+    if value and item.read_at is None:
+        item.read_at = item.feedback_at
+
+
 @external_bp.route("/items/<int:item_id>/feedback", methods=["POST"])
 @login_required
 def set_item_feedback(item_id):
@@ -375,16 +394,10 @@ def set_item_feedback(item_id):
     value = data.get("feedback")
     if value is not None and value not in FEEDBACK_VALUES:
         return jsonify({"error": "feedback must be 'good', 'bad' or null"}), 400
-    # Logged with the reply it was given in (node_id, optional): which
-    # recommendations it counts for is decided in reference_log (#352).
-    reference_log.record_action(
-        item, reference_log.ACTION_VERDICT, value=value,
+    apply_item_feedback(
+        item, value,
         node_id=reference_log.reply_node_id(data.get("node_id"),
                                             current_user.id))
-    item.feedback = value
-    item.feedback_at = datetime.utcnow() if value else None
-    if value and item.read_at is None:
-        item.read_at = item.feedback_at
     db.session.commit()
     return jsonify({
         "id": item.id,
@@ -732,6 +745,10 @@ def clip():
 
     user = g.api_user
     source, external_id, canon = classify_clip(url)
+    # Saving again a reference "Delete all my writing" hid makes it the
+    # user's again (#268) instead of failing on the hidden row.
+    from backend.utils.hidden_rows import reclaim_external_items
+    reclaim_external_items(user.id, [external_id])
 
     def reclip(existing):
         updated = _upgrade_clip(existing, content, title, author, posted_at)

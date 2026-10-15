@@ -10,6 +10,7 @@ batch is never paid for twice. Runs the real task body through the
 test_retrieval_loop harness with the provider's batch calls scripted.
 """
 import json
+import re
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 
@@ -74,8 +75,11 @@ def _batch_resp():
 
 
 def _read_thread(*, submitted=True, key_type="chat", entry_status="submitted"):
-    """read prompt -> reply placeholder, with a live batch entry
-    (submitted, or cancelling: a withdrawal whose outcome is pending)."""
+    """read prompt -> reply placeholder of the admin's batch experiment
+    (/read/start marks it READ_BATCH_MARKER: only such a read goes through
+    the Batch API, #435), with a live batch entry (submitted, or
+    cancelling: a withdrawal whose outcome is pending) unless
+    *submitted* is False (the first run, which submits)."""
     alice = _mk_user("alice", approved=True, plan="alpha", is_admin=True)
     llm_user = _mk_user("gpt-5", twitter_id="llm-gpt-5")
     read = _prompt_node(alice, "read")
@@ -86,6 +90,7 @@ def _read_thread(*, submitted=True, key_type="chat", entry_status="submitted"):
     llm_node.set_content("[LLM response generation pending...]")
     _db.session.add(llm_node)
     _db.session.flush()
+    llm_node.tool_calls_meta = json.dumps([{"name": "_read_batch"}])
     if submitted:
         entry = {
             "name": "_batch", "batch_id": "batch_1",
@@ -98,7 +103,7 @@ def _read_thread(*, submitted=True, key_type="chat", entry_status="submitted"):
         if entry_status == "cancelling":
             entry["cancel_requested_at"] = "2026-09-17T10:00:00"
             entry["cancel_reason"] = "spend_cap"
-        llm_node.tool_calls_meta = json.dumps([entry])
+        llm_node.tool_calls_meta = json.dumps([{"name": "_read_batch"}, entry])
     _db.session.commit()
     return alice, read, llm_node
 
@@ -724,8 +729,11 @@ def test_withdrawn_batch_that_never_ran_is_cancelled_unbilled(app, monkeypatch, 
     node = _reload(llm_node.id)
     assert node.llm_task_status == "cancelled"
     assert node.llm_task_progress == 100
-    assert "nothing was billed" in node.get_content()
-    assert node.llm_task_error == node.get_content()
+    # The text says only that the read was cancelled, for anyone who can
+    # see it; why (the owner's spend cap) is the error, the owner's alone.
+    assert node.get_content() == "This read was cancelled."
+    assert "spend cap" in node.llm_task_error
+    assert "nothing was billed" in node.llm_task_error
     entry = _entry(node)
     assert entry["status"] == "cancelled"
     assert entry["cancel_outcome"] == "not_processed"
@@ -948,7 +956,11 @@ def test_empty_render_still_asks_for_the_feed_shape(app, monkeypatch, tmp_path):
     assert FeedPick.query.filter_by(node_id=node.id).count() == 0
 
 
-def test_pinned_collect_links_citations_in_the_verdict(app, monkeypatch, tmp_path):  # noqa: F811
+def test_pinned_collect_links_no_number_in_the_verdict(app, monkeypatch, tmp_path):  # noqa: F811
+    """A "#N" in the verdict is the model's own words, stored as written:
+    the number belongs to this read's list, and a link made from it once
+    showed the user an unrelated tweet (2026-10-13). Only the picks are
+    fetched; they are the tweets the reply shows."""
     state = {"resp": None}
     _script(monkeypatch, tmp_path,
             collect=lambda: (("completed", state["resp"]) if state["resp"]
@@ -962,10 +974,11 @@ def test_pinned_collect_links_citations_in_the_verdict(app, monkeypatch, tmp_pat
         "picks": [{"n": 2, "qt": "Q", "relevance": 40, "recommend": True}]}))
     result = _run(_Task(), alice, read, llm_node)
     assert result["status"] == "completed"
-    assert fetched == [["111", "222"]]
+    assert fetched == [["222"]]
     content = _reload(llm_node.id).get_content()
-    assert "[#1](https://x.com/alice_w/status/111)" in content
-    assert "[#2](https://x.com/bob_b/status/222)" in content
+    assert content.startswith("Only #1 is worth a look; #2 is the pick.")
+    assert "x.com" not in content
+    assert len(re.findall(r"\{quote_ext:\d+\}", content)) == 1
 
 
 # ── what the Read records for the reports (2026-10-02) ───────────────────
@@ -1259,7 +1272,7 @@ def test_rerun_batch_that_fails_again_logs_its_own_cost(app, monkeypatch, tmp_pa
     # of the batch its run submits.
     node = _reload(llm_node.id)
     meta = json.loads(node.tool_calls_meta)
-    meta[0]["status"] = "cancelled"
+    next(m for m in meta if m["name"] == "_batch")["status"] = "cancelled"
     meta.append({"name": "_batch", "batch_id": "batch_2",
                  "custom_id": f"node-{node.id}", "model": "gpt-5",
                  "provider": "openai", "key_type": "chat",

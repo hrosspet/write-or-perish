@@ -7,7 +7,7 @@ jest.mock('../api', () => ({
 }));
 
 import { renderHook, waitFor, act } from '@testing-library/react';
-import { useSessionUpdates } from './useSessionUpdates';
+import { useSessionUpdates, skipUpdatesOnce, QUIET_FLAG } from './useSessionUpdates';
 
 const READY = { id: 1, approved: true, terms_up_to_date: true };
 const UNREAD = {
@@ -21,6 +21,7 @@ const renderAt = (pathname, user = READY) => renderHook(
 );
 
 beforeEach(() => {
+  window.sessionStorage.clear();
   mockGet.mockReset();
   mockGet.mockResolvedValue({ data: UNREAD });
 });
@@ -73,5 +74,40 @@ test('waits for an approved user with current terms', async () => {
   rerender({ u: { ...READY, terms_up_to_date: false }, path: '/' });
   expect(mockGet).not.toHaveBeenCalled();
   rerender({ u: READY, path: '/' });
+  expect(mockGet).toHaveBeenCalledTimes(1);
+});
+
+test.each(['/confirm-account-deletion', '/account-restore'])(
+  'a session that starts on %s never asks', async (path) => {
+    const { result, rerender } = renderAt(path);
+    rerender({ u: READY, path: '/' });
+    await act(async () => {});
+    expect(mockGet).not.toHaveBeenCalled();
+    expect(result.current[0]).toBeNull();
+  });
+
+test('restore: the full reload onto the landing page stays silent, then asks again', async () => {
+  // On /account-restore nobody is signed in yet.
+  const first = renderAt('/account-restore', null);
+  first.unmount();
+  // window.location.assign: a new session, now signed in, on the next page.
+  const landing = renderAt('/');
+  await act(async () => {});
+  expect(mockGet).not.toHaveBeenCalled();
+  expect(landing.result.current[0]).toBeNull();
+  landing.unmount();
+  // The next visit asks as usual.
+  renderAt('/');
+  expect(mockGet).toHaveBeenCalledTimes(1);
+});
+
+test('skipUpdatesOnce: the next load does not ask, the one after does', async () => {
+  skipUpdatesOnce();
+  const a = renderAt('/');
+  await act(async () => {});
+  expect(mockGet).not.toHaveBeenCalled();
+  expect(window.sessionStorage.getItem(QUIET_FLAG)).toBeNull();
+  a.unmount();
+  renderAt('/');
   expect(mockGet).toHaveBeenCalledTimes(1);
 });

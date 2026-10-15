@@ -188,3 +188,111 @@ def test_read_root_thread_unchanged(app, monkeypatch, tmp_path):  # noqa: F811
     assert "Community Archive, last day" in texts[0]
     assert "[#1] first tweet" in texts[0]
     assert _fresh(llm_node.id).llm_task_status == "completed"
+
+
+# ── Only admins may change the {ca_tweets} options (Peter, 2026-10-14) ──
+
+def _glean_with(owner, placeholder):
+    """The user's sharing -> a read_thread prompt as a glean attaches it (a
+    version Loore wrote) whose placeholder is *placeholder* -> a pending
+    reply for *owner*."""
+    from backend.utils.prompts import load_default_prompt
+    shipped = load_default_prompt("read_thread")
+    assert "{ca_tweets?days=1}" in shipped
+    llm_user = _mk_user("gpt-5", twitter_id="llm-gpt-5")
+    sharing = _user_node(owner, None, "my morning: unsure about pacing")
+    read = _prompt_node(owner, "read_thread", parent_id=sharing.id,
+                        body=shipped.replace("{ca_tweets?days=1}", placeholder))
+    llm_node = Node(user_id=llm_user.id, human_owner_id=owner.id,
+                    parent_id=read.id, node_type="llm", llm_model="gpt-5",
+                    llm_task_status="pending", privacy_level="private",
+                    ai_usage="chat")
+    llm_node.set_content("[LLM response generation pending...]")
+    _db.session.add(llm_node)
+    _db.session.commit()
+    return read, llm_node
+
+
+def _gleaner(flask_app, monkeypatch, name="ana"):
+    """A non-admin who gleans (on the rollout list, switch on)."""
+    ana = _mk_user(name, approved=True, plan="alpha", glean_enabled=True)
+    _db.session.commit()
+    monkeypatch.setitem(flask_app.config, "GLEAN_FOR_ALL", False)
+    monkeypatch.setitem(flask_app.config, "GLEAN_USER_IDS", {ana.id})
+    return ana
+
+
+def _script_read(monkeypatch, tmp_path):
+    _stub_archive(monkeypatch, tmp_path)
+    _CapturingProvider.kwargs = []
+    _CapturingProvider.reset([_resp(_feed_json([
+        {"n": 2, "qt": "This meets your question about pacing.",
+         "relevance": 40, "recommend": True},
+    ]))])
+    monkeypatch.setattr(_llm_task_mod, "LLMProvider", _CapturingProvider)
+
+
+@pytest.mark.parametrize("placeholder", [
+    "{ca_tweets?days=2}", "{ca_tweets?days=3}", "{ca_tweets?scope=follows}",
+    "{ca_tweets?days=1&lang=en}",
+])
+def test_the_task_refuses_a_non_admins_other_options(app, monkeypatch, tmp_path, placeholder):  # noqa: F811
+    """The completion task checks the placeholder it runs, whichever way
+    the reply was asked for: no render, no model call, a failed reply."""
+    _script_read(monkeypatch, tmp_path)
+    ana = _gleaner(app, monkeypatch)
+    read, llm_node = _glean_with(ana, placeholder)
+
+    with pytest.raises(ValueError, match="Only admins may change the window or scope"):
+        generate_llm_response(_FakeSelf(), read.id, llm_node.id, "gpt-5",
+                              ana.id, source_mode=None, ca_live=True)
+
+    assert _CapturingProvider.kwargs == []
+    node = _fresh(llm_node.id)
+    assert node.llm_task_status == "failed"
+    assert "Only admins may change" in node.llm_task_error
+
+
+def test_the_task_runs_a_non_admins_default_glean(app, monkeypatch, tmp_path):  # noqa: F811
+    _script_read(monkeypatch, tmp_path)
+    ana = _gleaner(app, monkeypatch)
+    read, llm_node = _glean_with(ana, "{ca_tweets?days=1&scope=all}")
+
+    generate_llm_response(_FakeSelf(), read.id, llm_node.id, "gpt-5",
+                          ana.id, source_mode=None, ca_live=True)
+
+    assert len(_CapturingProvider.kwargs) == 1
+    assert _fresh(llm_node.id).llm_task_status == "completed"
+
+
+def test_the_task_runs_an_admins_window(app, monkeypatch, tmp_path):  # noqa: F811
+    _script_read(monkeypatch, tmp_path)
+    boss = _mk_user("boss", approved=True, plan="alpha", is_admin=True)
+    _db.session.commit()
+    read, llm_node = _glean_with(boss, "{ca_tweets?days=3}")
+
+    generate_llm_response(_FakeSelf(), read.id, llm_node.id, "gpt-5",
+                          boss.id, source_mode=None, ca_live=True)
+
+    assert len(_CapturingProvider.kwargs) == 1
+    assert _fresh(llm_node.id).llm_task_status == "completed"
+
+
+def test_the_task_checks_the_prompts_owner_too(app, monkeypatch, tmp_path):  # noqa: F811
+    """An admin's reply under a non-admin's prompt runs that prompt's
+    placeholder only as the default. (A read prompt is always private, so
+    this is a backstop: the thread is made public here to reach it.)"""
+    _script_read(monkeypatch, tmp_path)
+    ana = _gleaner(app, monkeypatch)
+    boss = _mk_user("boss", approved=True, plan="alpha", is_admin=True)
+    _db.session.commit()
+    read, llm_node = _glean_with(ana, "{ca_tweets?days=2}")
+    for node in (read.parent, read, llm_node):
+        node.set_privacy_level("public")
+    llm_node.human_owner_id = boss.id
+    _db.session.commit()
+
+    with pytest.raises(ValueError, match="Only admins may change the window or scope"):
+        generate_llm_response(_FakeSelf(), read.id, llm_node.id, "gpt-5",
+                              boss.id, source_mode=None, ca_live=True)
+    assert _CapturingProvider.kwargs == []

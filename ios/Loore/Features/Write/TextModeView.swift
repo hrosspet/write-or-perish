@@ -3,9 +3,17 @@ import SwiftUI
 /// Text mode (`/textmode`, web `WritePage`): "What's on your mind?" and the
 /// writing form. A typed entry starts an agentic thread (`/textmode/start`);
 /// with AI usage off it is saved as a plain entry, with the web's toast.
+/// Opened from the Glean card (`glean`, #435), the new thread is marked as a
+/// Glean thread, so every turn of it offers the Glean button.
 struct TextModeView: View {
+    var glean = false
+
     @Environment(AppState.self) private var app
     @State private var formToken = 0
+
+    /// A Glean session: the card's flag and the user's Glean (a copied link does
+    /// nothing for a user without it).
+    private var gleanEntry: Bool { glean && app.capabilities.gleanEnabled }
 
     var body: some View {
         ScrollView {
@@ -44,12 +52,14 @@ struct TextModeView: View {
         var config = NodeFormConfig(parentId: nil, hidePowerFeatures: !craft, hideAudioUpload: !craft,
                                     placeholder: "Type what's on your mind…")
         config.aiUsageFromGlobalDefault = true
-        config.submitOverride = { [app] submission in try await Self.submit(submission, app: app) }
+        let glean = gleanEntry
+        config.submitOverride = { [app] submission in try await Self.submit(submission, app: app, glean: glean) }
         return config
     }
 
-    /// The page's own submit (web `WritePage.handleSubmit`).
-    static func submit(_ s: NodeFormSubmission, app: AppState) async throws -> NodeFormResult {
+    /// The page's own submit (web `WritePage.handleSubmit`). `glean` sends
+    /// `entry: "glean"` with the entry that starts the thread (typed or dictated).
+    static func submit(_ s: NodeFormSubmission, app: AppState, glean: Bool = false) async throws -> NodeFormResult {
         if !s.aiUsage.allowsAI {
             app.toasts.show("Turning off auto-generate. AI usage on some nodes is turned off.", duration: 8)
             if let sid = s.streamingSessionId {
@@ -67,16 +77,21 @@ struct TextModeView: View {
         let stored = UserDefaults.standard.object(forKey: DefaultsKey.autoGenerate)
         let autoGenerate = stored == nil ? true : UserDefaults.standard.bool(forKey: DefaultsKey.autoGenerate)
         if let sid = s.streamingSessionId {
-            let answer: SaveAsNodeResponse = try await app.api.post(APIPath.streamingSaveAsNode(sid), json: .object([
+            var body: [String: JSONValue] = [
                 "content": .string(s.content), "agentic": .bool(true), "auto_generate": .bool(autoGenerate),
-            ]))
+            ]
+            if glean { body["entry"] = .string("glean") }
+            let answer: SaveAsNodeResponse = try await app.api.post(APIPath.streamingSaveAsNode(sid),
+                                                                    json: .object(body))
             return NodeFormResult(id: answer.id, userNodeId: answer.userNodeId, llmNodeId: answer.llmNodeId,
                                   spendCapped: answer.spendCapped, llmError: answer.llmError)
         }
-        let answer: TextmodeStartResponse = try await app.api.post(APIPath.textmodeStart, json: .object([
+        var body: [String: JSONValue] = [
             "content": .string(s.content), "privacy_level": .string(s.privacy.rawString),
             "ai_usage": .string(s.aiUsage.rawString), "auto_generate": .bool(autoGenerate),
-        ]))
+        ]
+        if glean { body["entry"] = .string("glean") }
+        let answer: TextmodeStartResponse = try await app.api.post(APIPath.textmodeStart, json: .object(body))
         app.signals.post(.nodeCreated(answer.userNodeId))
         return NodeFormResult(id: answer.userNodeId, userNodeId: answer.userNodeId, llmNodeId: answer.llmNodeId,
                               spendCapped: answer.spendCapped, llmError: answer.llmError)

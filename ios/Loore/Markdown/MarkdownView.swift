@@ -16,6 +16,15 @@ struct MarkdownStyle: Equatable {
     /// breaking the line (node content).
     var flowText = false
     var textStyle: Font.TextStyle = .body
+    /// The text face: Outfit, or the reading serif where the web sets
+    /// Newsreader (`--reading-serif`). Headings stay Cormorant either way.
+    var face: Face = .sans
+
+    enum Face: Equatable {
+        case sans
+        /// `LooreFont.reading`; `weight` does not apply.
+        case readingSerif
+    }
 
     /// The focal node card (inherits the page body: Outfit 400, 1rem).
     static let focal = MarkdownStyle()
@@ -37,8 +46,24 @@ struct MarkdownStyle: Equatable {
         return copy
     }
 
-    var baseFont: Font { LooreFont.sans(fontSize, weight, relativeTo: textStyle) }
-    var lineSpacing: CGFloat { max(0, (lineHeight - 1.26) * fontSize) }
+    /// A run's font: Outfit at `weight` (bold → Bold, italic → the synthetic
+    /// oblique), or the reading serif with its own bold and italic faces.
+    func font(size: CGFloat? = nil, bold: Bool = false, italic: Bool = false) -> Font {
+        let size = size ?? fontSize
+        switch face {
+        case .readingSerif:
+            return LooreFont.reading(size, bold: bold, italic: italic, relativeTo: textStyle)
+        case .sans:
+            let runWeight: LooreFontFace.SansWeight = bold ? .bold : weight
+            return italic ? LooreFont.sansOblique(size, runWeight, relativeTo: textStyle)
+                          : LooreFont.sans(size, runWeight, relativeTo: textStyle)
+        }
+    }
+
+    var baseFont: Font { font() }
+    /// The face's own line height as a multiple of its size (Outfit's is about 1.26).
+    private var naturalLineHeight: CGFloat { face == .readingSerif ? LooreFont.readingLineHeight : 1.26 }
+    var lineSpacing: CGFloat { max(0, (lineHeight - naturalLineHeight) * fontSize) }
     var paragraphSpacing: CGFloat { paragraphMargin * fontSize }
 }
 
@@ -390,8 +415,7 @@ struct InlineText: View {
         Text(InlineAttributedBuilder(context: context, softBreakAsSpace: softBreakAsSpace,
                                      baseSize: fontSize ?? style.fontSize, isHeading: isHeading)
                 .build(inlines))
-            .font(font ?? (context.italic ? LooreFont.sansOblique(style.fontSize, style.weight, relativeTo: style.textStyle)
-                                          : style.baseFont))
+            .font(font ?? style.font(italic: context.italic))
             .foregroundStyle(color ?? style.color)
             .lineSpacing(isHeading ? 0 : style.lineSpacing)
             .fixedSize(horizontal: false, vertical: true)
@@ -424,11 +448,7 @@ struct InlineAttributedBuilder {
             let base = LooreFont.serif(baseSize, traits.bold ? .bold : .semibold, relativeTo: .title3)
             return traits.italic ? base.italic() : base
         }
-        let weight: LooreFontFace.SansWeight = traits.bold ? .bold : context.style.weight
-        if traits.italic || context.italic {
-            return LooreFont.sansOblique(baseSize, weight, relativeTo: context.style.textStyle)
-        }
-        return LooreFont.sans(baseSize, weight, relativeTo: context.style.textStyle)
+        return context.style.font(size: baseSize, bold: traits.bold, italic: traits.italic || context.italic)
     }
 
     private func styled(_ text: String, _ traits: Traits, link: URL?) -> AttributedString {

@@ -281,6 +281,11 @@ def parse_max_export_tokens(raw, *, user_id=None, placeholder=None,
 #                    dir (following/<username>.json); refused at run
 #                    time when no list is saved.
 #
+# Only admins may change the window or scope (Peter, 2026-10-14): for
+# anyone else every {ca_tweets} must be the default, {ca_tweets} or
+# exactly days=1 and/or scope=all (check_ca_tweets_options). Checked
+# before the reply's node exists and again in the completion task.
+#
 CA_TWEETS_PATTERN = re.compile(r"\{ca_tweets(\?[^}]*)?\}")
 CA_TWEETS_KNOWN_KEYS = frozenset({"days", "scope"})
 CA_TWEETS_DEFAULT_DAYS = 1
@@ -312,29 +317,108 @@ def parse_ca_tweets_days(params, *, placeholder=None):
 
 
 def ca_tweets_allowed(user):
-    """Who may run {ca_tweets}: admins, while it is a PoC. A day of the
-    archive is a ~$0.02–$0.50 batch request per run with no plan gate
-    behind it, so it must not be reachable from any account that can
-    type the placeholder."""
-    return bool(user is not None and getattr(user, "is_admin", False))
+    """Who may run {ca_tweets} — the Glean rollout gate (#435): admins,
+    every user while GLEAN_FOR_ALL is on, else the users listed in
+    GLEAN_USER_IDS. A day of the archive is a paid request of a few cents
+    per run (live gleans cost twice the batch price), so it must not be
+    reachable from any account outside the gate. The user's own Glean
+    switch (utils/glean.glean_enabled) sits on top of this; this is the
+    one check for the placeholder and the completion task."""
+    if user is None:
+        return False
+    if getattr(user, "is_admin", False):
+        return True
+    from flask import current_app
+    if current_app.config.get("GLEAN_FOR_ALL", False):
+        return True
+    return getattr(user, "id", None) in (
+        current_app.config.get("GLEAN_USER_IDS") or set())
 
 
 def ca_tweets_denied_message():
-    return ("{ca_tweets} (the Community Archive feed) is not available on "
-            "your account yet.")
+    return "Glean is not available on your account yet."
 
 
-def check_ca_tweets_access(text, user, *, log=None):
-    """Refuse {ca_tweets} in `text` for users ca_tweets_allowed() rejects.
-    Raises CaTweetsValidationError (→ 400 + toast at every call site),
-    before any node exists. No-op without the placeholder."""
+def ca_tweets_text_allowed(user, *, from_read_prompt=False):
+    """Who may have {ca_tweets} in a text that is sent: an admin anywhere
+    (the PoC's own experiments: typed into an entry or a saved prompt);
+    anyone else only when it comes from one of the read prompts a glean
+    attaches, and only while they glean (the rollout gate and their own
+    switch, utils/glean.glean_enabled). A typed placeholder would run a
+    read outside Glean: on any days= value, on the chat model, with the
+    switch off (#435 review)."""
+    if user is None:
+        return False
+    if getattr(user, "is_admin", False):
+        return True
+    if not from_read_prompt:
+        return False
+    from backend.utils.glean import glean_enabled
+    return glean_enabled(user)
+
+
+def check_ca_tweets_access(text, user, *, from_read_prompt=False, log=None):
+    """Refuse {ca_tweets} in `text` for users ca_tweets_text_allowed()
+    rejects. *from_read_prompt*: the text is a read prompt a glean
+    attached. Raises CaTweetsValidationError (→ 400 + toast at every call
+    site), before any node exists. No-op without the placeholder."""
     if not text or not CA_TWEETS_PATTERN.search(text):
         return
-    if not ca_tweets_allowed(user):
+    if not ca_tweets_text_allowed(user, from_read_prompt=from_read_prompt):
         log = log if log is not None else _default_logger
         log.warning("Refused {ca_tweets} for user_id=%s: not allowed",
                     getattr(user, "id", None))
         raise CaTweetsValidationError(ca_tweets_denied_message())
+
+
+def ca_tweets_options_allowed(user):
+    """Whether *user* may run {ca_tweets} with other options than the
+    default (days=1, scope=all): only admins may change the window or
+    scope (Peter, 2026-10-14)."""
+    return user is not None and getattr(user, "is_admin", False) is True
+
+
+def ca_tweets_options_denied_message():
+    return ("Only admins may change the window or scope of {ca_tweets}. "
+            "Use {ca_tweets} or {ca_tweets?days=1}.")
+
+
+# The only values a non-admin's {ca_tweets} may carry.
+CA_TWEETS_DEFAULT_PARAMS = {"days": str(CA_TWEETS_DEFAULT_DAYS),
+                            "scope": "all"}
+
+
+def ca_tweets_is_default(placeholder):
+    """Whether a {ca_tweets...} placeholder is the default: no params, or
+    exactly days=1 and/or scope=all, each once. Any other key, value,
+    repeat or a key without a value is not."""
+    if "?" not in placeholder:
+        return True
+    qs = placeholder.split("?", 1)[1].rstrip("}")
+    for key, values in parse_qs(qs, keep_blank_values=True).items():
+        expected = CA_TWEETS_DEFAULT_PARAMS.get(key.strip())
+        if expected is None or len(values) != 1 \
+                or values[0].strip() != expected:
+            return False
+    return True
+
+
+def check_ca_tweets_options(text, user, *, log=None):
+    """Refuse every {ca_tweets} placeholder in *text* that is not the
+    default (ca_tweets_is_default) unless *user* is an admin: only
+    admins may change the window or scope. Raises
+    CaTweetsValidationError (a 400 at every HTTP call site, a failed
+    reply in the completion task). No-op without the placeholder."""
+    if not text or ca_tweets_options_allowed(user):
+        return
+    for match in CA_TWEETS_PATTERN.finditer(text):
+        placeholder = match.group(0)
+        if not ca_tweets_is_default(placeholder):
+            log = log if log is not None else _default_logger
+            log.warning("Refused {ca_tweets} options for user_id=%s: "
+                        "placeholder=%r", getattr(user, "id", None),
+                        placeholder)
+            raise CaTweetsValidationError(ca_tweets_options_denied_message())
 
 
 def parse_ca_tweets_scope(params, *, placeholder=None):
