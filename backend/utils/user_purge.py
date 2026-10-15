@@ -1927,7 +1927,8 @@ def deletion_status(user_id):
 
 def has_unhidden_writing(user_id):
     """True when the user has writing that no waiting deletion hides: a
-    live node they wrote (an AI reply to them needs one above it), a row
+    live node of theirs (an entry, or an AI reply they own: its entry may
+    have been deleted on its own, so the reply can be live alone), a row
     of a per-user table (HIDDEN_ROW_TABLES; the hidden ones are left out
     of every query) or a description they wrote again. Exists checks on ids only, nothing is loaded or
     decrypted. The nodes are selected by the user first, in a
@@ -1937,7 +1938,7 @@ def has_unhidden_writing(user_id):
     from sqlalchemy import exists
     from backend.utils.hidden_rows import description_hidden
     mine = (select(Node.id, Node.deleted_at)
-            .where(Node.user_id == user_id)
+            .where(_owned(user_id, ()))
             .cte("mine")
             .prefix_with("MATERIALIZED", dialect="postgresql"))
     if db.session.execute(select(

@@ -848,6 +848,27 @@ def test_the_account_page_offers_it_again_only_with_something_new(
     assert c.get("/api/account/data").get_json()["new_writing"] is False
 
 
+def test_her_ai_reply_alone_offers_it_again(app, world, stubs):
+    """She deletes an entry with "this entry only" while a deletion
+    waits: the AI reply under it stays live and is hers
+    (human_owner_id), so a second request would hide it."""
+    a = world.alice.id
+    c, _ = _ask(app, world)
+    alice = _db.session.get(User, a)
+    entry = _node(alice, owner=a, text="new entry")
+    reply = _node(world.llm, entry, owner=a, node_type="llm",
+                  text="new reply")
+    entry_id, reply_id = entry.id, reply.id
+    entry.deleted_at = T0
+    _db.session.commit()
+    assert _db.session.get(Node, reply_id).user_id != a
+    assert c.get("/api/account/data").get_json()["new_writing"] is True
+    _ask(app, world)
+    assert _db.session.get(Node, reply_id).deleted_at is not None
+    assert _db.session.get(Node, entry_id).deleted_at is not None
+    assert c.get("/api/account/data").get_json()["new_writing"] is False
+
+
 def test_hidden_rows_stay_out_of_counts_and_relationships(app, world, stubs):
     """A new request (a new session) sees none of them: no row by id, by
     relationship, in a count or on a page of results."""
