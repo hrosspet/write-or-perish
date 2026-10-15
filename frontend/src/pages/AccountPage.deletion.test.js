@@ -203,6 +203,24 @@ describe('asking again while a deletion waits', () => {
     expect(screen.queryByText(/Since your writing was deleted/)).toBeNull();
   });
 
+  test('written since the app load: the page reads the state again on opening and shows the button', async () => {
+    // The user context holds the app load's `new_writing: false`; the page
+    // asks the server once when it opens, and the answer reaches the context.
+    mockGet.mockImplementation((url) => Promise.resolve(
+      url === '/account/data' ? { data: waiting } : { data: {} }));
+    function Harness() {
+      const [user, setUser] = React.useState({
+        ...baseUser, data_deletion: { ...waiting, new_writing: false },
+      });
+      mockUserCtx = { user, setUser };
+      return <AccountPage />;
+    }
+    render(<MemoryRouter><Harness /></MemoryRouter>);
+    expect(screen.queryByRole('button', { name: /delete all my writing…/i })).toBeNull();
+    expect(await screen.findByRole('button', { name: /delete all my writing…/i })).toBeTruthy();
+    expect(mockGet.mock.calls.filter(([url]) => url === '/account/data')).toHaveLength(1);
+  });
+
   test("an admin's waiting purge offers it the same way", () => {
     renderPage({ data_deletion: { ...waiting, source: 'admin' } });
     expect(screen.getByRole('button', { name: /delete all my writing…/i })).toBeTruthy();

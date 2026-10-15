@@ -164,11 +164,30 @@ export default function AccountPage() {
 
   // "Delete all my writing" (#268): the writing is hidden at once and
   // deleted forever after the grace period; until then "Restore my
-  // writing" brings it back. The state comes with the user (/dashboard).
+  // writing" brings it back. The state comes with the user (/dashboard)
+  // and is read again when the page opens.
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [deletionBusy, setDeletionBusy] = useState(false);
   const [deletionMsg, setDeletionMsg] = useState(null);
   const closeDeleteDialog = useCallback(() => setDeleteOpen(false), []);
+
+  // The user is read once per app load, so `new_writing` is stale after
+  // writing in the same session and then opening this page in-app: read
+  // the deletion state again when the page opens (one request, no poll).
+  useEffect(() => {
+    let active = true;
+    (async () => {
+      try {
+        const res = await api.get("/account/data");
+        const status = res?.data;
+        if (!active || !status || typeof status !== "object" || !("status" in status)) return;
+        setUser((prev) => (prev ? { ...prev, data_deletion: status } : prev));
+      } catch (e) {
+        // The state from the app load stays.
+      }
+    })();
+    return () => { active = false; };
+  }, [setUser]);
 
   const scheduleDeletion = async (typed) => {
     // Asked again while a deletion waits: it takes in what was written
