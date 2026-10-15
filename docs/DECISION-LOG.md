@@ -1446,6 +1446,70 @@ Kinds (one per entry and per table row):
 - **Source:** Claude Code session 2026-10-14 (Opus 5.5)
 - **Applies to:** #502
 
+### 2026-10-15 · The Log shows another user's public reply after the author deletes a public thread
+
+- **Kind:** privacy
+- **Situation:** #516, found by Peter in his local test of #502. When a user deletes a public thread that has a live reply, the Log's rule for deleted roots with a live reply (`backend/routes/log.py`) kept the root's place in the Log, so another user's public reply showed in the deleter's Log. The rule came with soft delete (#121). The builder of the public forum (#229, a8eda698, 2026-07-02) extended it to public roots, a builder choice that was never put to Peter. The Log is meant to hold private entries only.
+- **Decision:** let the rule for deleted roots with a live reply take public roots too.
+- **Peter:** "deletetest's Log doesn't show the public node, because Log is supposed to show only private entries ... hrosspet's public answer under deletetest's public node appears in deletetest's Log. It shouldn't, it's public."
+- **Score:** miss
+- **Why it missed:** a rule written for private threads was widened to public roots when the public forum was built, without checking what the Log is for. The builder could have seen at the time that the Log holds private entries only. Fixed in the train (88cdcd58), and refined in cb4fc3e3 so that the user's own private replies under a deleted public root still show.
+- **Source:** Claude Code session 2026-10-15 (Opus 5.5); the decision is #229's (2026-07-02)
+- **Applies to:** #516, #229, #121, #502
+- **Rule:** the Log shows private entries only
+
+### 2026-10-15 · The #516 fix goes into train #502
+
+- **Kind:** process
+- **Situation:** after Peter found #516, the builder offered two places for the fix: into train #502 now, or a separate PR after the merge.
+- **Prediction:** into the train (60 %); a separate PR after the merge (40 %).
+- **Peter:** "yes pls"
+- **Score:** not scored: his answer approved the fix and did not choose between the two places. The builder put it in the train.
+- **Source:** Claude Code session 2026-10-15 (Opus 5.5)
+- **Applies to:** #516, #502
+
+### 2026-10-15 · Delete all my writing again while a deletion waits
+
+- **Kind:** data safety
+- **Situation:** while the 30 days of a writing deletion run, the "Delete all my writing" button was hidden, so writing made after the first click could not be deleted. Peter asked: "while the 30 day grace period is running for a user, they don't have the option to delete their writings ... Should the deletion period be extended to the user's writing created after the last button click? And should the new 30 day period apply only to the newly deleted nodes, or to all nodes, including the ones deleted earlier? Should the user be able to separately undo different deletions?" The builder recommended: (a) show the button again while a deletion waits, and it hides the newer writing too; (b) one date: everything moves to 30 days after the latest click (precedent: an account deletion that takes over a waiting writing deletion sets one new date); (c) one Restore for everything; (d) not in this train, file an issue.
+- **Prediction:** (b) 55 %; (c) 70 %; (d) 70 %.
+- **Peter:** "I'd like it fixed in this train. Otherwise pls go with your recommendations"
+- **Score:** hit + hit + hit + miss: (a), (b) and (c) as recommended; (d) was not.
+- **Why it missed:** Peter wants a gap he finds while testing a train fixed in that train, not deferred as rare. Built in 1f5ef085; Peter tested it locally: "the delete again works".
+- **Source:** Claude Code session 2026-10-15 (Opus 5.5)
+- **Applies to:** #415, #502
+- **Rule:** candidate: a gap Peter finds while testing a train is fixed in that train unless it is large.
+
+### 2026-10-15 · Poll answers go with "Delete all my writing"
+
+- **Kind:** data safety
+- **Situation:** the #464 builder chose that a writing deletion also deletes the user's poll answers. The builder raised it to Peter as a finding from the 2026-10-13 browser pass.
+- **Decision:** the #464 builder's choice, kept: poll answers are deleted by a writing deletion. Predicted that Peter accepts.
+- **Peter:** "yes to both" (yes meaning keep it)
+- **Score:** hit
+- **Source:** Claude Code session 2026-10-15 (Opus 5.5); the decision is #464's
+- **Applies to:** #464, #502
+
+### 2026-10-15 · The updates popup over the deletion pages
+
+- **Kind:** UX
+- **Situation:** a finding from the builder's browser pass of 2026-10-13: the "While you were away" popup opened over the account-deletion confirmation page and right after a restore. Peter confirmed that he saw it.
+- **Decision:** fixed it in the train without asking, following the same-day preference of the entry "Delete all my writing again while a deletion waits": a page load that starts on the confirmation or restore page doesn't show the popup, and a one-time marker skips it on the reload after either restore (d378a0aa, e5e7bd0d).
+- **Peter:** "yes to both" · on how it would change: "the popup shows on every app relaod if there is anything new from the dev update... how would you like to change it?" The builder explained that the general rule stays (#207: unread items show on every app open until "Got it").
+- **Score:** hit: no objection.
+- **Source:** Claude Code session 2026-10-15 (Opus 5.5)
+- **Applies to:** #207, #502
+
+### 2026-10-15 · The updates popup over the deletion pages: ask or decide
+
+- **Kind:** escalation
+- **Situation:** the popup opened over the account-deletion confirmation page and right after a restore.
+- **Decision:** decided without asking Peter
+- **Peter:** no objection.
+- **Score:** hit
+- **Source:** Claude Code session 2026-10-15 (Opus 5.5)
+- **Applies to:** #502
+
 ## Decided by the builder
 
 Choices that agents flagged in PRs and that the builder decided because a rule above already covers them (Peter, 2026-10-02: decide what the log supports, raise only real judgement calls). Each is also recorded on its PR, or in the session where Peter asked. The Decided column holds only the builder's part; a rule or decision of Peter's goes in the Rule column. Questions raised to Peter instead are not listed; his answers become entries. Model is the model that wrote the PR (its Co-Authored-By line). Result is "accepted by merge (PR #N, date)" once the PR has merged and Peter didn't correct the choice, "pending" until it merges, and "corrected → entry <title>" when he overrules it; the entry is then scored as a miss.
@@ -1626,6 +1690,10 @@ Choices that agents flagged in PRs and that the builder decided because a rule a
 | 2026-10-14 | #502 | user-facing text | The verdict labels on quotes in agentic replies | Stay "Good quote" / "Bad quote": that verdict judges the quoting | candidate: a label names what is judged | Opus 5.5 | pending |
 | 2026-10-14 | #502 | data safety | An admin rerun of a gleaning and its old intro verdicts | Left as is (an admin-only action) | Admin tools stay admin tools | Opus 5.5 | pending |
 | 2026-10-14 | #502 | testing | Intro verdict counts in `recommendation_report.py` | A follow-up after the review | One PR, one purpose | Opus 5.5 | pending |
+| 2026-10-15 | #502 | UX | The "Delete all my writing" button while a deletion waits | Hidden when nothing new was written since the request (1f5ef085) | The section's existing text covers it | Opus 5.5 | pending |
+| 2026-10-15 | #502 | data safety | An admin's purge waits and the user clicks again | The job becomes the user's own request and the admin's Undo is refused (1f5ef085) | The user's edit wins; only the user restores their own request (#508) | Opus 5.5 | pending |
+| 2026-10-15 | #502 | data safety | `requested_at` of a writing deletion clicked again | Moves to the latest click, so cost rows up to it go with the job (1f5ef085) | One date for everything (Peter, 2026-10-15) | Opus 5.5 | pending |
+| 2026-10-15 | #502 | reliability | `cancel_jobs` checks | Re-checks its conditions inside the update, which also closes an older race between Restore or an admin's Undo and an account deletion's takeover (1f5ef085) | Fix the root cause | Opus 5.5 | pending |
 
 ## Backfilled decisions
 
