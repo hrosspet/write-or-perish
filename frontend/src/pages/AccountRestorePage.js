@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import api from "../api";
+import { skipUpdatesOnce } from "../hooks/useSessionUpdates";
 import { formatDeletionDate } from "../utils/dataDeletion";
 import {
   choiceRowStyle, choiceStyle, headingStyle, linkStyle, pageStyle, textStyle,
@@ -26,6 +27,7 @@ export default function AccountRestorePage() {
     try {
       const res = await api.post("/account/restore");
       // Signed in now: a full load starts the app with the account.
+      skipUpdatesOnce();
       window.location.assign(res.data.next || "/");
     } catch (e) {
       setState((s) => ({

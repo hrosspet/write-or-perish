@@ -7,7 +7,7 @@ jest.mock('../api', () => ({
 }));
 
 import { renderHook, waitFor, act } from '@testing-library/react';
-import { useSessionUpdates } from './useSessionUpdates';
+import { useSessionUpdates, skipUpdatesOnce, QUIET_FLAG } from './useSessionUpdates';
 
 const READY = { id: 1, approved: true, terms_up_to_date: true };
 const UNREAD = {
@@ -97,6 +97,17 @@ test('restore: the full reload onto the landing page stays silent, then asks aga
   expect(landing.result.current[0]).toBeNull();
   landing.unmount();
   // The next visit asks as usual.
+  renderAt('/');
+  expect(mockGet).toHaveBeenCalledTimes(1);
+});
+
+test('skipUpdatesOnce: the next load does not ask, the one after does', async () => {
+  skipUpdatesOnce();
+  const a = renderAt('/');
+  await act(async () => {});
+  expect(mockGet).not.toHaveBeenCalled();
+  expect(window.sessionStorage.getItem(QUIET_FLAG)).toBeNull();
+  a.unmount();
   renderAt('/');
   expect(mockGet).toHaveBeenCalledTimes(1);
 });

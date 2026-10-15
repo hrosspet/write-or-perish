@@ -1,3 +1,4 @@
+import { skipUpdatesOnce } from "../hooks/useSessionUpdates";
 // "Delete all my writing" (#268): shared helpers for the Account page,
 // its dialog and the status notice.
 import api from "../api";
@@ -56,5 +57,6 @@ export async function reloadUser(setUser) {
 // Load the current page again (after a restore from the status notice,
 // every page's data was fetched while the writing was hidden).
 export function reloadPage() {
+  skipUpdatesOnce();
   window.location.reload();
 }

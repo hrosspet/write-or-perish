@@ -10,7 +10,13 @@ export const WELCOME_PATH = '/welcome';
 // a restore signs in with a full page load, so the next page is a new
 // session and only this flag, kept for the tab, carries the decision over.
 export const QUIET_PATHS = ['/confirm-account-deletion', '/account-restore'];
-export const QUIET_FLAG = 'loore_no_updates_once';
+export const QUIET_FLAG = 'loore.skipUpdatesOnce';
+
+// Call right before a full page load that must not open the modal (a
+// restore reloads the app): the next load skips the ask once and clears it.
+export function skipUpdatesOnce() {
+  try { window.sessionStorage.setItem(QUIET_FLAG, '1'); } catch (e) { /* optional */ }
+}
 
 const storage = (fn) => { try { return fn(window.sessionStorage); } catch (e) { return null; } };
 
