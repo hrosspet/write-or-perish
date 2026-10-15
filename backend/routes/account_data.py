@@ -37,6 +37,12 @@ def request_data_deletion():
     """Hide all the user's writing now and schedule its deletion after
     the grace period.
 
+    While a deletion waits (the user's own or an admin's), asking again
+    adds what the user wrote since to it, and everything is deleted on
+    one date, the grace period after this request (Peter, 2026-10-15).
+    Once the deletion has started, a new request is refused (409): what
+    the user wrote since stays, and they can ask again when it is done.
+
     Body: {"confirm": "<username>"} — the user types their username in
     the dialog; anything else is refused, so no stray request deletes."""
     data = request.get_json(silent=True) or {}
@@ -46,14 +52,21 @@ def request_data_deletion():
                         "code": "confirm_mismatch"}), 400
     try:
         job, created = schedule_purge(
-            current_user, requested_by_id=current_user.id, source="self")
+            current_user, requested_by_id=current_user.id, source="self",
+            extend_waiting=True)
     except PurgeRefused:
         return jsonify({"error": "This account cannot be deleted here.",
                         "code": "purge_refused"}), 403
+    if not created and job.status == "running":
+        return jsonify({"error": "Your earlier writing is being deleted "
+                                 "forever now. What you wrote since then "
+                                 "was not deleted. You can delete it when "
+                                 "this has finished.",
+                        "code": "already_running"}), 409
     if created:
         from backend.utils.user_purge import hidden_counts
-        logger.info("User %s scheduled a data purge (job %s) for %s; "
-                    "hidden now: %s", current_user.id, job.id,
+        logger.info("User %s asked to delete their writing (job %s, due "
+                    "%s); hidden now: %s", current_user.id, job.id,
                     job.scheduled_for, hidden_counts(job.id))
     return jsonify(deletion_status(current_user.id)), 202 if created else 200
 

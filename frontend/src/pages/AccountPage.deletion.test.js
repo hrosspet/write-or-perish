@@ -24,6 +24,8 @@ import React from 'react';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import AccountPage from './AccountPage';
+import DeleteWritingDialog from '../components/DeleteWritingDialog';
+import { formatDeletionDate } from '../utils/dataDeletion';
 
 const baseUser = {
   username: 'alice', email: 'alice@example.com', twitter_login: false,
@@ -149,4 +151,87 @@ test('a deletion in progress cannot be started again', () => {
   expect(screen.getByText(/being deleted forever now/)).toBeTruthy();
   expect(screen.queryByRole('button', { name: /delete all my writing…/i })).toBeNull();
   expect(screen.queryByRole('button', { name: /restore my writing/i })).toBeNull();
+});
+
+// "Delete all my writing" again while a deletion waits (Peter, 2026-10-15):
+// offered below Restore when she has written or saved more since; one new
+// date for everything, shown in the dialog before she confirms; one restore.
+describe('asking again while a deletion waits', () => {
+  const NOW = Date.parse('2026-10-15T12:00:00Z');
+  const waiting = {
+    status: 'scheduled', grace_days: 30, purge_at: '2026-11-05T12:00:00Z',
+    restorable: true, new_writing: true,
+  };
+  let nowSpy;
+  beforeEach(() => { nowSpy = jest.spyOn(Date, 'now').mockReturnValue(NOW); });
+  afterEach(() => nowSpy.mockRestore());
+
+  test('the button comes below Restore and the dialog states the one new date', async () => {
+    const newDate = formatDeletionDate(new Date(NOW + 30 * 24 * 3600 * 1000));
+    const oldDate = formatDeletionDate(waiting.purge_at);
+    mockDelete.mockResolvedValue({ data: {
+      ...waiting, purge_at: '2026-11-14T12:00:00Z', new_writing: false,
+    } });
+    renderPage({ data_deletion: waiting });
+
+    const restore = screen.getByRole('button', { name: 'Restore my writing' });
+    const again = screen.getByRole('button', { name: /delete all my writing…/i });
+    // eslint-disable-next-line no-bitwise
+    expect(restore.compareDocumentPosition(again) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.getByText(/Since your writing was deleted, you have written or saved\s+more\./).textContent)
+      .toMatch(/Then everything is deleted forever on one date,\s+30 days after you ask again, and\s+you can restore all of it until then\./);
+
+    fireEvent.click(again);
+    expect(screen.getByText(/Loore will also delete everything you have written or recorded here since your writing was deleted/)).toBeTruthy();
+    const when = screen.getByText(/The\s+deletion of your earlier writing moves to the same date/).textContent;
+    expect(when).toContain(`everything is then deleted forever on ${newDate}, instead of ${oldDate}.`);
+    expect(when).toMatch(/Until then you can restore all of it safely, on the Account\s+page\. What you write from now on stays\./);
+
+    const confirm = screen.getByRole('button', { name: /^delete all my writing you can restore all of it until/i });
+    expect(confirm.textContent).toContain(`You can restore all of it until ${newDate}.`);
+    fireEvent.change(screen.getByLabelText(/type your username/i), { target: { value: 'alice' } });
+    fireEvent.click(confirm);
+    await waitFor(() => expect(mockDelete).toHaveBeenCalledWith('/account/data', { data: { confirm: 'alice' } }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    expect(screen.getByText(`What you wrote since is deleted too. You can restore all of it until ${formatDeletionDate('2026-11-14T12:00:00Z')}.`)).toBeTruthy();
+  });
+
+  test('nothing written since: no second button', () => {
+    renderPage({ data_deletion: { ...waiting, new_writing: false } });
+    expect(screen.getByRole('button', { name: 'Restore my writing' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /delete all my writing…/i })).toBeNull();
+    expect(screen.queryByText(/Since your writing was deleted/)).toBeNull();
+  });
+
+  test("an admin's waiting purge offers it the same way", () => {
+    renderPage({ data_deletion: { ...waiting, source: 'admin' } });
+    expect(screen.getByRole('button', { name: /delete all my writing…/i })).toBeTruthy();
+  });
+
+  test('if the deletion started meanwhile, the dialog says so and the user is read again', async () => {
+    mockDelete.mockRejectedValue({ response: { status: 409, data: {
+      code: 'already_running',
+      error: 'Your earlier writing is being deleted forever now. What you wrote since then was not deleted. You can delete it when this has finished.',
+    } } });
+    renderPage({ data_deletion: waiting });
+    fireEvent.click(screen.getByRole('button', { name: /delete all my writing…/i }));
+    fireEvent.change(screen.getByLabelText(/type your username/i), { target: { value: 'alice' } });
+    fireEvent.click(screen.getByRole('button', { name: /^delete all my writing you can restore all of it until/i }));
+    await waitFor(() => expect(screen.getByText(/What you wrote since then was not deleted/)).toBeTruthy());
+    expect(screen.getByRole('dialog')).toBeTruthy();
+    expect(mockGet).toHaveBeenCalledWith('/dashboard', { params: { profile: 0 } });
+  });
+
+  test('the dialog leaves out the old date when it is the same day', () => {
+    const same = new Date(NOW + 30 * 24 * 3600 * 1000).toISOString();
+    render(
+      <DeleteWritingDialog
+        open username="alice" graceDays={30} xConnected={false}
+        waitingUntil={same} onConfirm={jest.fn()} onClose={jest.fn()}
+      />,
+    );
+    const when = screen.getByText(/deletion of your earlier writing moves/).textContent;
+    expect(when).not.toMatch(/instead of/);
+    expect(when).toContain(`deleted forever on ${formatDeletionDate(same)}.`);
+  });
 });

@@ -85,8 +85,12 @@ const subStyle = {
  * types their username to confirm; the delete option stays disabled until
  * it matches. onConfirm(typed) returns a promise; a rejection's message
  * is shown.
+ *
+ * waitingUntil: the date of a writing deletion that waits now. Asking
+ * again also deletes what was written since, and everything is deleted on
+ * one new date (Peter, 2026-10-15): the dialog says so, with that date.
  */
-function DeleteWritingDialog({ open, username, graceDays, xConnected, onConfirm, onClose }) {
+function DeleteWritingDialog({ open, username, graceDays, xConnected, waitingUntil, onConfirm, onClose }) {
   const [typed, setTyped] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
@@ -106,6 +110,8 @@ function DeleteWritingDialog({ open, username, graceDays, xConnected, onConfirm,
 
   const days = graceDays || 30;
   const date = formatDeletionDate(new Date(Date.now() + days * 24 * 3600 * 1000));
+  const again = !!waitingUntil;
+  const oldDate = again ? formatDeletionDate(waitingUntil) : "";
   const matches = typed.trim().toLowerCase() === (username || "").toLowerCase();
 
   const confirm = async () => {
@@ -132,7 +138,9 @@ function DeleteWritingDialog({ open, username, graceDays, xConnected, onConfirm,
       >
         <h2 id="delete-writing-title" style={titleStyle}>Delete all your writing?</h2>
         <p style={bodyStyle}>
-          Loore will delete everything you have written or recorded here:
+          {again
+            ? "Loore will also delete everything you have written or recorded here since your writing was deleted: "
+            : "Loore will delete everything you have written or recorded here: "}
           your entries and recordings, the AI's replies to you, your profile,
           intentions, memory and other documents, your todo list, drafts,
           shares, saved references and imports.
@@ -143,12 +151,23 @@ function DeleteWritingDialog({ open, username, graceDays, xConnected, onConfirm,
           replies stay and your entry shows as deleted. Loore keeps a record
           of what your AI use cost, without your name.
         </p>
-        <p style={bodyStyle}>
-          It disappears at once, for you and for everyone else. If you
-          change your mind, you can restore your writing safely within
-          {" "}{days} days, until {date}, on the Account page. After that it
-          is deleted forever. What you write from now on stays.
-        </p>
+        {again ? (
+          <p style={bodyStyle}>
+            It disappears at once, for you and for everyone else. The
+            deletion of your earlier writing moves to the same date:
+            everything is then deleted forever on {date}
+            {oldDate && oldDate !== date ? `, instead of ${oldDate}` : ""}.
+            Until then you can restore all of it safely, on the Account
+            page. What you write from now on stays.
+          </p>
+        ) : (
+          <p style={bodyStyle}>
+            It disappears at once, for you and for everyone else. If you
+            change your mind, you can restore your writing safely within
+            {" "}{days} days, until {date}, on the Account page. After that it
+            is deleted forever. What you write from now on stays.
+          </p>
+        )}
         {xConnected && (
           <p style={bodyStyle}>
             Loore also forgets your X connection for bookmarks and removes
@@ -186,7 +205,9 @@ function DeleteWritingDialog({ open, username, graceDays, xConnected, onConfirm,
             <div style={{ fontWeight: 500 }}>
               {busy ? "Deleting…" : "Delete all my writing"}
             </div>
-            <div style={subStyle}>You can restore it until {date}.</div>
+            <div style={subStyle}>
+              {again ? `You can restore all of it until ${date}.` : `You can restore it until ${date}.`}
+            </div>
           </button>
           <button
             onClick={onClose}

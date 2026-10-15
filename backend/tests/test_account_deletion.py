@@ -991,6 +991,92 @@ def test_a_waiting_writing_deletion_becomes_the_account_deletion(
     assert _db.session.get(Node, world.ids["A2"]).deleted_at is None
 
 
+def _two_batches(world, monkeypatch):
+    """Alice deletes her writing, writes an entry and a todo list, and
+    deletes all her writing again ten days later (Peter, 2026-10-15: one
+    job, one date). Returns (job, the entry's id, the todo's id)."""
+    from backend.models import UserTodo
+    a = world.alice
+    t1 = datetime.utcnow() + timedelta(minutes=1)
+    monkeypatch.setattr(up, "_now", lambda: t1)
+    job, _ = up.schedule_purge(a, requested_by_id=a.id, source="self")
+    n = _node(a, owner=a.id, text="written since")
+    todo = _add(UserTodo(user_id=a.id, content="since", generated_by="user"))
+    _db.session.commit()
+    t2 = t1 + timedelta(days=10)
+    monkeypatch.setattr(up, "_now", lambda: t2)
+    again, extended = up.schedule_purge(a, requested_by_id=a.id,
+                                        source="self", extend_waiting=True)
+    assert extended and again.id == job.id
+    assert again.requested_at == t2
+    assert _db.session.get(Node, n.id).deleted_at == t2
+    monkeypatch.setattr(up, "_now", datetime.utcnow)
+    return again, n.id, todo.id
+
+
+def test_an_account_deletion_takes_over_both_batches_and_restores_both(
+        app, world, stubs, monkeypatch):
+    from backend.models import UserDataPurgeHidden, UserProfile, UserTodo
+    a = world.alice
+    data_job, since_node, since_todo = _two_batches(world, monkeypatch)
+    hidden = UserDataPurgeHidden.query.filter_by(job_id=data_job.id).count()
+    asked, due = data_job.requested_at, data_job.scheduled_for
+
+    job = _schedule(a)
+    assert job.id == data_job.id and job.delete_account
+    assert UserDataPurge.query.count() == 1
+    # What it replaced is the one waiting request, with its new dates.
+    assert job.replaced["requested_at"] == asked.isoformat()
+    assert job.replaced["scheduled_for"] == due.isoformat()
+    assert UserDataPurgeHidden.query.filter_by(job_id=job.id).count() == hidden
+    assert acc.restore_offer(_db.session.get(User, a.id))[
+        "writing_comes_back"] is True
+
+    # Restoring the account brings back both batches.
+    assert acc.restore_account(_db.session.get(User, a.id))
+    _db.session.expire_all()
+    assert _db.session.get(UserDataPurge, job.id).status == "cancelled"
+    assert UserDataPurgeHidden.query.count() == 0
+    assert _db.session.get(Node, world.ids["A2"]).deleted_at is None
+    assert _db.session.get(Node, since_node).deleted_at is None
+    assert UserProfile.query.filter_by(user_id=a.id).count() == 2
+    assert _db.session.get(UserTodo, since_todo) is not None
+
+
+def test_the_admins_undo_of_a_takeover_keeps_both_batches_hidden(
+        app, world, stubs, monkeypatch, mail):
+    """The admin deletes the account after her second request, then
+    presses Undo: her writing deletion comes back with both batches still
+    hidden and hers to restore; she restores both."""
+    from backend.models import UserDataPurgeHidden, UserTodo
+    _dispatcher(monkeypatch, stubs)
+    a = world.alice
+    data_job, since_node, since_todo = _two_batches(world, monkeypatch)
+    hidden = UserDataPurgeHidden.query.filter_by(job_id=data_job.id).count()
+    asked = data_job.requested_at
+
+    job = _admin_delete(app, world)
+    assert job.id == data_job.id
+    r = _client(app, world.admin).post(
+        f"/api/admin/users/{a.id}/undo_deletion", json={"job_id": job.id})
+    assert r.status_code == 200, r.get_json()
+    _db.session.expire_all()
+    job = _db.session.get(UserDataPurge, data_job.id)
+    assert job.status == "scheduled" and not job.delete_account
+    assert job.scope == "hidden" and job.source == "self"
+    assert job.requested_at == asked
+    assert UserDataPurgeHidden.query.filter_by(job_id=job.id).count() == hidden
+    assert _db.session.get(Node, since_node).deleted_at is not None
+    assert UserTodo.query.filter_by(user_id=a.id).count() == 0
+
+    assert up.cancel_purge(a.id, a.id)
+    _db.session.expire_all()
+    assert _db.session.get(Node, since_node).deleted_at is None
+    assert _db.session.get(Node, world.ids["A2"]).deleted_at is None
+    assert _db.session.get(UserTodo, since_todo) is not None
+    assert UserDataPurgeHidden.query.count() == 0
+
+
 def test_an_undo_after_the_writing_deletions_old_date_keeps_it_restorable(
         app, world, stubs, monkeypatch, mail):
     """Her "Delete all my writing" is due 31 Oct; the admin deletes the

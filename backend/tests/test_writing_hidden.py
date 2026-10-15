@@ -462,27 +462,390 @@ def test_an_admin_purge_deletes_for_good_only_after_the_grace_period(
     assert up.deletion_status(a)["status"] == "done"
 
 
-def test_her_request_during_an_admins_purge_changes_nothing(
+def test_her_request_during_an_admins_purge_makes_it_hers(
         app, world, stubs, monkeypatch):
-    """Two requests for the same user never make two jobs: hers while
-    the admin's waits returns the admin's (its date stays), and the
+    """Two requests for the same user never make two jobs. Hers while the
+    admin's waits adds what she wrote since to it (Peter, 2026-10-15) and
+    makes it her own request: the admin's Undo would otherwise bring back
+    writing she asked to delete herself (the user's edit wins). The
     admin's while hers waits is refused (test_user_purge.py)."""
     _stub_dispatch(monkeypatch, stubs)
+    a = world.alice.id
+    t1 = datetime.utcnow() + timedelta(minutes=1)
+    _at(monkeypatch, t1)
     job = _admin_purge(app, world)
+    since = _write_since(world, stubs, "since")
+    t2 = t1 + timedelta(days=10)
+    _at(monkeypatch, t2)
     c = _client(app, world.alice)
     r = c.delete("/api/account/data", json={"confirm": "alice"})
-    assert r.status_code == 200
-    assert r.get_json()["purge_at"] == job["scheduled_for"]
+    assert r.status_code == 202
+    assert r.get_json()["restorable"] is True
     assert UserDataPurge.query.count() == 1
-    assert UserDataPurge.query.one().source == "admin"
-    # A second admin request is refused the same way.
-    r = _client(app, world.admin).post(
-        f"/api/admin/users/{world.alice.id}/purge_data",
-        json={"confirm_username": "alice"})
+    row = UserDataPurge.query.one()
+    assert row.id == job["id"] and row.status == "scheduled"
+    assert row.source == "self" and row.requested_by_id == a
+    assert row.scheduled_for == t2 + timedelta(days=up.PURGE_GRACE_DAYS)
+    assert _db.session.get(Node, since.node).deleted_at == t2
+
+    admin = _client(app, world.admin)
+    r = admin.get(f"/api/admin/users/{a}/purge_data")
+    assert r.get_json()["job"]["undoable"] is False
+    r = admin.post(f"/api/admin/users/{a}/undo_deletion",
+                   json={"job_id": job["id"]})
+    assert r.status_code == 409 and r.get_json()["code"] == "users_own"
+    # A second admin request is refused the same way as before.
+    r = admin.post(f"/api/admin/users/{a}/purge_data",
+                   json={"confirm_username": "alice"})
     assert r.status_code == 409
     assert r.get_json()["code"] == "already_scheduled"
-    assert "already deleted by an admin" in r.get_json()["error"]
+    assert "already deleted by the user" in r.get_json()["error"]
     assert UserDataPurge.query.count() == 1
+
+    # She restores both: what the admin hid and what she added.
+    c = _client(app, world.alice)
+    assert c.post("/api/account/data/restore").status_code == 200
+    _db.session.expire_all()
+    # Every node of hers is live again, apart from the one she deleted.
+    assert {n.id for n in _alice_nodes(world)
+            if n.deleted_at is not None} == {since.gone}
+    assert _db.session.get(Node, since.node).deleted_at is None
+    assert UserProfile.query.filter_by(user_id=a).count() == 2
+    assert UserDataPurgeHidden.query.count() == 0
+
+
+# ── "Delete all my writing" again while it waits (Peter, 2026-10-15) ───
+# One job, one date (the grace period after the latest request), one
+# restore: the second request hides what she wrote since under the same
+# job.
+
+def _at(monkeypatch, when):
+    """The purge code's clock (requests, hides, dates)."""
+    monkeypatch.setattr(up, "_now", lambda: when)
+
+
+class _Since:
+    pass
+
+
+def _write_since(world, stubs, tag):
+    """What alice writes or saves after a request: an entry with its
+    recording and an AI reply, an entry she deleted herself, a todo
+    list, a draft, a new description."""
+    a = world.alice.id
+    alice = _db.session.get(User, a)
+    s = _Since()
+    n = _node(alice, owner=a, text=f"{tag} entry")
+    s.node = n.id
+    s.reply = _node(world.llm, n, owner=a, node_type="llm",
+                    text=f"{tag} reply").id
+    s.gone = _node(alice, owner=a, text=f"{tag} deleted",
+                   deleted_at=T0).id
+    s.todo = _add(UserTodo(user_id=a, content=f"{tag} list",
+                           generated_by="user")).id
+    s.draft = _add(Draft(user_id=a, parent_id=n.id, content=f"{tag} draft",
+                         session_id=f"sess-{tag}")).id
+    reclaim_description(a)
+    alice.description = f"{tag} bio"
+    _db.session.commit()
+    s.file = _file(stubs.audio / f"user/{a}/node/{n.id}/original.webm")
+    return s
+
+
+def _records(job_id):
+    return [(h.kind, h.row_id, h.path) for h in
+            UserDataPurgeHidden.query.filter_by(job_id=job_id)]
+
+
+def test_asking_again_hides_what_she_wrote_since_under_the_same_job(
+        app, world, stubs, monkeypatch):
+    a = world.alice.id
+    t1 = datetime.utcnow() + timedelta(minutes=1)
+    _at(monkeypatch, t1)
+    c, body = _ask(app, world)
+    job = UserDataPurge.query.one()
+    first = _records(job.id)
+    first_nodes = {r for (k, r, _) in first if k == "node"}
+    due1 = t1 + timedelta(days=up.PURGE_GRACE_DAYS)
+    assert job.scheduled_for == due1
+    # Nothing new yet: the Account page offers no second request.
+    assert body["new_writing"] is False
+    assert c.get("/api/account/data").get_json()["new_writing"] is False
+
+    since = _write_since(world, stubs, "since")
+    # An entry the request hid that she brought back by re-importing it.
+    _db.session.get(Node, world.ids["A8"]).deleted_at = None
+    _db.session.commit()
+    state = c.get("/api/account/data").get_json()
+    assert state["new_writing"] is True and state["restorable"] is True
+
+    t2 = t1 + timedelta(days=10)
+    _at(monkeypatch, t2)
+    c, body = _ask(app, world)
+    # One job, one new date: the grace period after the second request.
+    assert UserDataPurge.query.count() == 1
+    job = UserDataPurge.query.one()
+    due2 = t2 + timedelta(days=up.PURGE_GRACE_DAYS)
+    assert job.scheduled_for == due2 and job.requested_at == t2
+    assert job.status == "scheduled" and job.scope == "hidden"
+    assert job.source == "self"
+    assert body["purge_at"] == up.deletion_status(a)["purge_at"]
+    assert body["purge_at"].startswith(due2.isoformat()[:16])
+    assert body["restorable"] is True and body["new_writing"] is False
+
+    # What she wrote since is hidden now; what she deleted herself keeps
+    # its own date and is purged with it; the first batch keeps its date.
+    _db.session.expire_all()
+    assert _db.session.get(Node, since.node).deleted_at == t2
+    assert _db.session.get(Node, since.reply).deleted_at == t2
+    assert _db.session.get(Node, since.gone).deleted_at == T0
+    assert _db.session.get(Node, world.ids["A8"]).deleted_at == t2
+    for nid in first_nodes - {world.ids["A8"]}:
+        assert _db.session.get(Node, nid).deleted_at == t1, nid
+    assert UserTodo.query.filter_by(user_id=a).count() == 0
+    assert Draft.query.filter_by(user_id=a).count() == 0
+    assert shown_description(_db.session.get(User, a)) == ""
+    # Recorded under the same job, nothing twice: the re-imported entry
+    # keeps its one record; the description she wrote again is recorded
+    # again (writing it took the old record out).
+    records = _records(job.id)
+    assert len(records) == len(set(records))
+    assert set(first) <= set(records)
+    assert set(records) - set(first) == {
+        ("node", since.node, None),
+        ("node", since.reply, None),
+        ("node_deleted", since.gone, None),
+        ("user_todo", since.todo, None),
+        ("draft", since.draft, None),
+        ("file", None, f"audio:user/{a}/node/{since.node}"),
+    }
+    assert ("user_description", a, None) in records
+
+    # The old date passes: nothing starts.
+    assert up.dispatch_due_jobs(lambda j, t: pytest.fail("old date"),
+                                now=due1 + timedelta(minutes=1)) == []
+    assert _db.session.get(UserDataPurge, job.id).status == "scheduled"
+
+
+def test_one_restore_brings_back_both(app, world, stubs, monkeypatch):
+    gone_id = _deleted_before(world)
+    before = _alice_snapshot(world)
+    t1 = datetime.utcnow() + timedelta(minutes=1)
+    _at(monkeypatch, t1)
+    _ask(app, world)
+    since = _write_since(world, stubs, "since")
+    _at(monkeypatch, t1 + timedelta(days=10))
+    c, _ = _ask(app, world)
+
+    r = c.post("/api/account/data/restore")
+    assert r.status_code == 200 and r.get_json()["status"] is None
+    after = _alice_snapshot(world)
+    # Every row of the first batch is as it was before the first request
+    # (the user row is checked below: she wrote a new description).
+    ids = {t: {row["id"] for row in rows} for t, rows in before.items()}
+    first_after = {t: [row for row in after[t] if row["id"] in ids[t]]
+                   for t in before if t != "user"}
+    del before["user"]
+    assert _same_as(before, first_after)
+    assert _db.session.get(Node, gone_id).deleted_at == T0
+    # What she wrote since is back too.
+    for nid in (since.node, since.reply):
+        assert _db.session.get(Node, nid).deleted_at is None
+    assert _db.session.get(Node, since.gone).deleted_at == T0
+    assert _db.session.get(UserTodo, since.todo) is not None
+    assert _db.session.get(Draft, since.draft) is not None
+    assert shown_description(_db.session.get(User, world.alice.id)) == \
+        "since bio"
+    assert UserDataPurgeHidden.query.count() == 0
+    assert UserDataPurge.query.one().status == "cancelled"
+    assert writing_on_hold(world.alice.id) is False
+
+
+def test_the_purge_deletes_both_and_keeps_what_came_after_the_second(
+        app, world, stubs, monkeypatch):
+    a = world.alice.id
+    t1 = datetime.utcnow() + timedelta(minutes=1)
+    _at(monkeypatch, t1)
+    _ask(app, world)
+    since = _write_since(world, stubs, "since")
+    cost1 = _add(APICostLog(user_id=a, model_id="m",
+                            request_type="conversation", cost_microdollars=5,
+                            created_at=t1 + timedelta(days=1))).id
+    _db.session.commit()
+    t2 = t1 + timedelta(days=10)
+    _at(monkeypatch, t2)
+    _ask(app, world)
+    job = UserDataPurge.query.one()
+
+    # Written after the second request: it stays.
+    alice = _db.session.get(User, a)
+    later = _node(alice, owner=a, text="after the second")
+    later_id = later.id
+    todo2 = _add(UserTodo(user_id=a, content="newest list",
+                          generated_by="user")).id
+    cost2 = _add(APICostLog(user_id=a, model_id="m",
+                            request_type="conversation", cost_microdollars=6,
+                            created_at=t2 + timedelta(days=1))).id
+    _db.session.commit()
+    later_file = _file(stubs.audio / f"user/{a}/node/{later_id}/original.webm")
+
+    tokens = []
+    due1 = t1 + timedelta(days=up.PURGE_GRACE_DAYS)
+    due2 = t2 + timedelta(days=up.PURGE_GRACE_DAYS)
+    _at(monkeypatch, due2 + timedelta(minutes=1))
+    assert up.dispatch_due_jobs(lambda j, t: tokens.append(t),
+                                now=due1 + timedelta(minutes=1)) == []
+    assert up.dispatch_due_jobs(lambda j, t: tokens.append(t),
+                                now=due2 + timedelta(minutes=1)) == [job.id]
+    assert up.run_purge_job(job.id, tokens[0]) == "done"
+    _db.session.expire_all()
+
+    # Both batches are gone, apart from the entries other people replied
+    # under (empty placeholders).
+    tombstones = {world.ids[k] for k in ("A1", "A4", "A5")}
+    assert {n.id for n in _alice_nodes(world)} == {later_id} | tombstones
+    for nid in (since.node, since.reply, since.gone):
+        assert _db.session.get(Node, nid) is None
+    assert _db.session.get(UserTodo, since.todo) is None
+    assert _db.session.get(Draft, since.draft) is None
+    assert not since.file.exists()
+    assert not any(f.exists() for f in world.files_alice)
+    # What came after the second request stays, live.
+    assert _db.session.get(Node, later_id).deleted_at is None
+    assert [t.id for t in UserTodo.query.filter_by(user_id=a)] == [todo2]
+    assert later_file.exists()
+    assert all(f.exists() for f in world.files_bob)
+    # Cost rows until the second request lose the name; the later stays.
+    erased = User.query.filter_by(username=ERASED_SYSTEM_USERNAME).one()
+    assert _db.session.get(APICostLog, cost1).user_id == erased.id
+    assert [r.id for r in APICostLog.query.filter_by(user_id=a)] == [cost2]
+    assert UserDataPurgeHidden.query.count() == 0
+    assert up.deletion_status(a)["status"] == "done"
+
+
+def test_asking_again_once_the_purge_has_started_is_refused(
+        app, world, stubs):
+    c, _ = _ask(app, world)
+    job = UserDataPurge.query.one()
+    since = _write_since(world, stubs, "since")
+    records = _records(job.id)
+    due = job.scheduled_for
+    assert up.claim_job(job.id, "tok", now=due)
+
+    r = c.delete("/api/account/data", json={"confirm": "alice"})
+    assert r.status_code == 409 and r.get_json()["code"] == "already_running"
+    assert "was not deleted" in r.get_json()["error"]
+    _db.session.expire_all()
+    job = _db.session.get(UserDataPurge, job.id)
+    assert job.status == "running" and job.scheduled_for == due
+    assert _records(job.id) == records
+    assert _db.session.get(Node, since.node).deleted_at is None
+    assert UserTodo.query.filter_by(user_id=world.alice.id).count() == 1
+    assert up.deletion_status(world.alice.id)["new_writing"] is False
+
+
+def test_a_claim_just_before_the_second_request_wins_and_hides_nothing(
+        app, world, stubs, monkeypatch):
+    """The beat claims the job after the request read it and before the
+    request changed it. The request's conditional update finds the job
+    running and hides nothing, so nothing is hidden that the running
+    purge would not delete: what she wrote since stays, live."""
+    c, _ = _ask(app, world)
+    job = UserDataPurge.query.one()
+    since = _write_since(world, stubs, "since")
+    records = _records(job.id)
+    real = up.active_job
+    calls = []
+
+    def read_then_claimed(user_id):
+        found = real(user_id)
+        if not calls:
+            # The beat's claim lands now; the request still holds the
+            # job as it read it (scheduled).
+            UserDataPurge.query.filter_by(id=found.id).update(
+                {"status": "running", "task_id": "beat",
+                 "heartbeat_at": None}, synchronize_session=False)
+        calls.append(user_id)
+        return found
+    monkeypatch.setattr(up, "active_job", read_then_claimed)
+
+    r = c.delete("/api/account/data", json={"confirm": "alice"})
+    assert r.status_code == 409 and r.get_json()["code"] == "already_running"
+    _db.session.expire_all()
+    assert _records(job.id) == records
+    assert _db.session.get(Node, since.node).deleted_at is None
+    assert _db.session.get(UserDataPurge, job.id).scheduled_for == \
+        job.scheduled_for
+
+    # The purge deletes the first batch only.
+    monkeypatch.setattr(up, "active_job", real)
+    tokens = []
+    up.dispatch_due_jobs(lambda j, t: tokens.append(t),
+                         now=job.scheduled_for + timedelta(minutes=1))
+    assert up.run_purge_job(job.id, tokens[0]) == "done"
+    _db.session.expire_all()
+    assert _db.session.get(Node, since.node).deleted_at is None
+    assert _db.session.get(UserTodo, since.todo) is not None
+    assert since.file.exists()
+
+
+def test_a_restore_just_before_the_second_request_makes_it_a_new_one(
+        app, world, stubs, monkeypatch):
+    """She restores in one tab while the other asks again: the restore
+    wins the job, and the request then hides everything as a new one."""
+    c, _ = _ask(app, world)
+    job = UserDataPurge.query.one()
+    since = _write_since(world, stubs, "since")
+    real = up.active_job
+    calls = []
+
+    def read_then_restored(user_id):
+        found = real(user_id)
+        if not calls:
+            up.cancel_jobs(UserDataPurge.id == found.id,
+                           cancelled_by_id=user_id)
+        calls.append(user_id)
+        return found
+    monkeypatch.setattr(up, "active_job", read_then_restored)
+
+    _ask(app, world)
+    _db.session.expire_all()
+    jobs = UserDataPurge.query.order_by(UserDataPurge.id).all()
+    assert [j.status for j in jobs] == ["cancelled", "scheduled"]
+    assert jobs[0].id == job.id
+    assert UserDataPurgeHidden.query.filter_by(job_id=job.id).count() == 0
+    for n in _alice_nodes(world):
+        assert n.deleted_at is not None, n.id
+    assert _db.session.get(Node, since.node).deleted_at is not None
+    assert UserTodo.query.filter_by(user_id=world.alice.id).count() == 0
+
+
+def test_the_account_page_offers_it_again_only_with_something_new(
+        app, world, stubs):
+    a = world.alice.id
+    c, body = _ask(app, world)
+    assert body["new_writing"] is False
+    # A saved reference counts...
+    _add(ExternalItem(user_id=a, source="web_clip", external_id="e-new",
+                      content="clip"))
+    _db.session.commit()
+    assert c.get("/api/account/data").get_json()["new_writing"] is True
+    _ask(app, world)
+    assert c.get("/api/account/data").get_json()["new_writing"] is False
+    # ...and so does a description written again.
+    reclaim_description(a)
+    _db.session.get(User, a).description = "new"
+    _db.session.commit()
+    assert c.get("/api/account/data").get_json()["new_writing"] is True
+    _ask(app, world)
+    assert c.get("/api/account/data").get_json()["new_writing"] is False
+    # An entry she wrote and deleted again herself is nothing to show.
+    _node(_db.session.get(User, a), owner=a, text="x", deleted_at=T0)
+    _db.session.commit()
+    assert c.get("/api/account/data").get_json()["new_writing"] is False
+    # Not offered once there is nothing to restore.
+    assert c.post("/api/account/data/restore").status_code == 200
+    assert c.get("/api/account/data").get_json()["new_writing"] is False
 
 
 def test_hidden_rows_stay_out_of_counts_and_relationships(app, world, stubs):

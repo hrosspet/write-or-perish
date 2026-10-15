@@ -2017,10 +2017,14 @@ class UserDataPurge(db.Model):
     requested_by_id = db.Column(db.Integer, nullable=True)
     status = db.Column(db.String(16), nullable=False, default="scheduled",
                        index=True)
+    # The latest request: the user's "Delete all my writing" while a
+    # writing deletion waits adds to it and moves this and scheduled_for
+    # (Peter, 2026-10-15; user_purge.extend_waiting_purge).
     requested_at = db.Column(db.DateTime, nullable=False,
                              default=datetime.utcnow)
     # When the purge may start: the end of the grace period
-    # (PURGE_GRACE_DAYS), for the user's own request and an admin's alike.
+    # (PURGE_GRACE_DAYS) after the latest request, for the user's own
+    # request and an admin's alike.
     scheduled_for = db.Column(db.DateTime, nullable=False, index=True)
     cancelled_at = db.Column(db.DateTime, nullable=True)
     cancelled_by_id = db.Column(db.Integer, nullable=True)
@@ -2081,11 +2085,12 @@ class ReleasedUsername(db.Model):
 
 
 class UserDataPurgeHidden(db.Model):
-    """What one "Delete all my writing" request hid, the user's own or an
+    """What one "Delete all my writing" job hid, the user's own or an
     admin's "Purge data" (#268; Peter, 2026-10-09: everything is hidden at
     once, "Restore my writing" brings back exactly that, and the purge
     deletes it after the grace period; 2026-10-13: the admin's works the
-    same way).
+    same way). The user's request while the job waits adds what they
+    wrote since under the same job (2026-10-15: one date, one restore).
 
     One row per hidden thing, written in the same transaction as the job:
     * ``kind`` = "node", ``row_id`` = a node of the user's that was live

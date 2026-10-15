@@ -1013,9 +1013,10 @@ def test_user_request_waits_out_the_grace_period(app, world, stubs):
     assert job.source == "self" and job.requested_by_id == world.alice.id
     assert timedelta(days=29, hours=23) < job.scheduled_for - job.requested_at \
         <= timedelta(days=30)
-    # Asking again does not add a second job.
+    # Asking again does not add a second job: it adds to this one
+    # (test_writing_hidden.py, "Delete all my writing" again).
     assert c.delete("/api/account/data",
-                    json={"confirm": "alice"}).status_code == 200
+                    json={"confirm": "alice"}).status_code == 202
     assert UserDataPurge.query.count() == 1
 
     # Nothing happens during the grace period...

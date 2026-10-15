@@ -171,10 +171,24 @@ export default function AccountPage() {
   const closeDeleteDialog = useCallback(() => setDeleteOpen(false), []);
 
   const scheduleDeletion = async (typed) => {
-    const res = await api.delete("/account/data", { data: { confirm: typed } });
+    // Asked again while a deletion waits: it takes in what was written
+    // since, and the page otherwise looks the same apart from the date.
+    const again = writingRestorable(user?.data_deletion);
+    let res;
+    try {
+      res = await api.delete("/account/data", { data: { confirm: typed } });
+    } catch (e) {
+      // Asked again just as the earlier deletion started: the dialog shows
+      // the server's message, and the section the running deletion.
+      if (e?.response?.data?.code === "already_running") reloadUser(setUser);
+      throw e;
+    }
     setUser((prev) => ({ ...prev, data_deletion: res.data }));
     setDeleteOpen(false);
-    setDeletionMsg(null);
+    setDeletionMsg(again && res.data?.purge_at ? {
+      type: "success",
+      text: `What you wrote since is deleted too. You can restore all of it until ${formatDeletionDate(res.data.purge_at)}.`,
+    } : null);
     // The description and has_own_entries change with the writing.
     reloadUser(setUser);
   };
@@ -807,6 +821,7 @@ export default function AccountPage() {
         username={user.username}
         graceDays={user.data_deletion?.grace_days}
         xConnected={!!user.data_deletion?.x_connected}
+        waitingUntil={writingRestorable(user.data_deletion) ? user.data_deletion.purge_at : null}
         onConfirm={scheduleDeletion}
         onClose={closeDeleteDialog}
       />
@@ -917,6 +932,27 @@ function DeleteWritingSection({ id, deletion, busy, msg, onOpen, onRestore, labe
           >
             {busy ? "Restoring…" : "Restore my writing"}
           </button>
+          {/* Written or saved since: "Delete all my writing" again adds it
+              to this deletion, with one new date (Peter, 2026-10-15). */}
+          {deletion.new_writing && (
+            <>
+              <p style={{ ...bodyStyle, marginTop: "1.25rem" }}>
+                Since your writing was deleted, you have written or saved
+                more. It stays, unless you delete all your writing again.
+                Then everything is deleted forever on one date,{" "}
+                {deletion.grace_days || 30} days after you ask again, and
+                you can restore all of it until then.
+              </p>
+              <button
+                type="button"
+                onClick={onOpen}
+                disabled={busy}
+                style={{ ...quietButtonStyle, color: "var(--error)" }}
+              >
+                Delete all my writing…
+              </button>
+            </>
+          )}
         </>
       )}
 

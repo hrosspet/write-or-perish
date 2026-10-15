@@ -14,7 +14,10 @@ doing themselves"):
   user's, also of an admin's request) and ``undo_admin_purge`` (the
   admin's Undo of an admin's request) bring back exactly that, in one
   transaction, and the purge after the grace period deletes exactly that
-  (``Scope``): what the user writes after the request stays.
+  (``Scope``): what the user writes after the request stays. Asking
+  again while it waits (Peter, 2026-10-15) adds what the user wrote since
+  to the same job and moves its date (``extend_waiting_purge``): one
+  date, one restore.
 
 * ``stop_in_flight`` stops what would write the user's data again behind
   the purge: queued Celery tasks are revoked, provider batches that carry
@@ -1365,16 +1368,23 @@ def active_job(user_id):
 
 
 def schedule_purge(user, *, requested_by_id, source, at=None,
-                   scope="hidden"):
+                   scope="hidden", extend_waiting=False):
     """Create the user's purge job, due at *at* (default: after the grace
-    period). Returns (job, created); an active job is returned as it is.
-    Raises PurgeRefused for an AI or system account.
+    period). Returns (job, created); an active job is returned as it is
+    (created False), unless *extend_waiting* adds to it (below). Raises
+    PurgeRefused for an AI or system account.
 
     The request, the user's own ("self") or an admin's ("admin"), hides
     at once everything it will delete (hide_writing), in the same
     transaction as the job: either both are there or neither. The user
     can restore either (cancel_purge); the admin can undo an admin's
     (undo_admin_purge).
+
+    *extend_waiting* (the user's "Delete all my writing" while one waits;
+    Peter, 2026-10-15): a waiting writing deletion, the user's own or an
+    admin's, takes in what the user wrote since (``extend_waiting_purge``)
+    and is returned with created True. A job that has started, an account
+    deletion and a ``scope="all"`` job are returned as they are.
 
     ``scope="all"`` hides nothing and deletes everything of the user's
     when it is due: the app never asks for it (an account deletion makes
@@ -1387,6 +1397,14 @@ def schedule_purge(user, *, requested_by_id, source, at=None,
     # One active job per user: the user row lock serialises two requests.
     db.session.query(User).filter(User.id == user.id).with_for_update().one()
     job = active_job(user.id)
+    if job is not None and extend_waiting and scope == "hidden":
+        if extend_waiting_purge(user, job, requested_by_id=requested_by_id,
+                                source=source, at=at):
+            return job, True
+        # The beat claimed it or the user restored it meanwhile: a started
+        # job is returned as it is; after a restore this is a new request.
+        db.session.expire_all()
+        job = active_job(user.id)
     if job is not None:
         db.session.commit()
         return job, False
@@ -1404,6 +1422,57 @@ def schedule_purge(user, *, requested_by_id, source, at=None,
     if hides:
         _after_hiding(user, job)
     return job, True
+
+
+def extend_waiting_purge(user, job, *, requested_by_id, source, at=None):
+    """Add what the user wrote since to their waiting writing deletion
+    *job* (Peter, 2026-10-15: "Delete all my writing" again while one
+    waits): one job, one date, one restore.
+
+    * The job's date moves to the grace period after this request (never
+      earlier than the date the user was told before), and
+      ``requested_at`` to now, so the cost rows written until now go
+      with it.
+    * What the user wrote since is hidden and recorded under the same job
+      (hide_writing records only what the job has not hidden yet), so
+      "Restore my writing", the purge, an account deletion's takeover and
+      the admin's Undo of that all cover both.
+    * The job becomes the user's own request: an admin's Undo would
+      otherwise bring back writing the user asked to delete themselves
+      (the user's edit wins).
+
+    The job changes by a conditional update on its status, before
+    anything is hidden and in the same transaction, so this and the
+    beat's claim or a restore have one winner: on PostgreSQL the claim
+    waits for the row and then finds the job no longer due; a request
+    that loses hides nothing. Returns True when the job took the request
+    (committed), False when it has started, was restored, or is not a
+    waiting writing deletion (nothing changed, nothing committed).
+    Caller holds the user row lock (schedule_purge)."""
+    if (job.status != "scheduled" or job.scope != "hidden"
+            or job.delete_account):
+        return False
+    now = _now()
+    due = max(job.scheduled_for,
+              at or now + timedelta(days=PURGE_GRACE_DAYS))
+    n = UserDataPurge.query.filter(
+        UserDataPurge.id == job.id,
+        UserDataPurge.status == "scheduled",
+        UserDataPurge.scope == "hidden",
+        UserDataPurge.delete_account.is_(False),
+    ).update({
+        UserDataPurge.requested_at: now,
+        UserDataPurge.scheduled_for: due,
+        UserDataPurge.source: source,
+        UserDataPurge.requested_by_id: requested_by_id,
+    }, synchronize_session=False)
+    if n != 1:
+        return False
+    hide_writing(user, job, now)
+    db.session.commit()
+    db.session.refresh(job)
+    _after_hiding(user, job)
+    return True
 
 
 def _record(job_id, kind, model, *conds):
@@ -1431,25 +1500,45 @@ def hide_writing(user, job, now):
     * the folders and files in the user's storage are recorded, so the
       purge deletes those and not what the user records afterwards.
 
+    Records only what the job has not recorded yet, so a second request
+    while the job waits (extend_waiting_purge) adds what the user wrote
+    since: a node the job hid and the user brought back by re-importing
+    it is hidden again, and nothing is recorded twice.
+
     Runs in the caller's transaction and commits nothing. Ids, paths and
     timestamps only: nothing is decrypted."""
     U = user.id
+    J = job.id
     with including_hidden_rows():
         owned = _owned(U, _legacy_ai_reply_ids(U))
-        _record(job.id, "node", Node, owned, Node.deleted_at.is_(None))
-        _record(job.id, "node_deleted", Node, owned,
-                Node.deleted_at.isnot(None))
-        Node.query.filter(Node.id.in_(hidden_ids("node", job.id))).update(
+        _record(J, "node", Node, owned, Node.deleted_at.is_(None),
+                ~Node.id.in_(hidden_ids("node", J)))
+        _record(J, "node_deleted", Node, owned, Node.deleted_at.isnot(None),
+                ~Node.id.in_(hidden_ids("node", J)),
+                ~Node.id.in_(hidden_ids("node_deleted", J)))
+        Node.query.filter(Node.id.in_(hidden_ids("node", J)),
+                          Node.deleted_at.is_(None)).update(
             {Node.deleted_at: now, Node.updated_at: Node.updated_at},
             synchronize_session=False)
         for model in HIDDEN_ROW_TABLES:
-            _record(job.id, model.__tablename__, model, model.user_id == U)
-        if user.description:
+            kind = model.__tablename__
+            _record(J, kind, model, model.user_id == U,
+                    ~model.id.in_(hidden_ids(kind, J)))
+        if user.description and db.session.query(
+                UserDataPurgeHidden.id).filter(
+                UserDataPurgeHidden.job_id == J,
+                UserDataPurgeHidden.kind == "user_description",
+        ).first() is None:
             db.session.add(UserDataPurgeHidden(
-                job_id=job.id, kind="user_description", row_id=U))
+                job_id=J, kind="user_description", row_id=U))
+        recorded = {p for (p,) in db.session.query(
+            UserDataPurgeHidden.path).filter(
+            UserDataPurgeHidden.job_id == J,
+            UserDataPurgeHidden.kind == "file")}
         for path in paths_at_request(user):
-            db.session.add(UserDataPurgeHidden(
-                job_id=job.id, kind="file", path=path))
+            if path not in recorded:
+                db.session.add(UserDataPurgeHidden(
+                    job_id=J, kind="file", path=path))
         db.session.flush()
 
 
@@ -1560,16 +1649,18 @@ def undo_admin_purge(job_id, admin_id):
 def cancel_jobs(*conds, cancelled_by_id):
     """Cancel the scheduled jobs matching *conds* and restore what each
     hid, in the caller's transaction (nothing commits here). Each job is
-    a conditional update on its status, so a cancel and the beat's claim
-    have one winner, and only a job this call cancelled is restored.
-    Returns the cancelled job ids."""
+    a conditional update on its status and on *conds*, so a cancel and
+    the beat's claim have one winner, and so do an admin's Undo and the
+    user's second "Delete all my writing" (which makes the job the
+    user's) or an account deletion taking the job over. Only a job this
+    call cancelled is restored. Returns the cancelled job ids."""
     now = _now()
     cancelled = []
     for (job_id,) in db.session.query(UserDataPurge.id).filter(
             UserDataPurge.status == "scheduled", *conds).all():
         n = UserDataPurge.query.filter(
             UserDataPurge.id == job_id,
-            UserDataPurge.status == "scheduled",
+            UserDataPurge.status == "scheduled", *conds,
         ).update({UserDataPurge.status: "cancelled",
                   UserDataPurge.cancelled_at: now,
                   UserDataPurge.cancelled_by_id: cancelled_by_id},
@@ -1808,6 +1899,7 @@ def deletion_status(user_id):
            # it back (the user's own request or an admin's, until it
            # starts).
            "restorable": False,
+           "new_writing": False,
            # X is connected for bookmarks: the purge revokes Loore's
            # access at X and deletes the stored connection.
            "x_connected": db.session.query(ExternalAccount.id).filter(
@@ -1816,6 +1908,7 @@ def deletion_status(user_id):
     if job is None:
         return out
     from backend.utils.timefmt import iso_utc
+    restorable = job.status == "scheduled" and job.scope == "hidden"
     out.update({
         "status": job.status,
         "source": job.source,
@@ -1823,6 +1916,37 @@ def deletion_status(user_id):
         "requested_at": iso_utc(job.requested_at),
         "finished_at": iso_utc(job.finished_at),
         "x_connection_removed": bool((job.counts or {}).get("external_account")),
-        "restorable": job.status == "scheduled" and job.scope == "hidden",
+        "restorable": restorable,
+        # The user has written or saved something since the request: the
+        # Account page offers "Delete all my writing…" again, which adds
+        # it to this deletion (extend_waiting_purge).
+        "new_writing": restorable and has_unhidden_writing(user_id),
     })
     return out
+
+
+def has_unhidden_writing(user_id):
+    """True when the user has writing that no waiting deletion hides: a
+    live node they wrote (an AI reply to them needs one above it), a row
+    of a per-user table (HIDDEN_ROW_TABLES; the hidden ones are left out
+    of every query) or a description they wrote again. Exists checks on ids only, nothing is loaded or
+    decrypted. The nodes are selected by the user first, in a
+    materialized CTE, for the reason own_entries.py gives: the planner
+    otherwise expects many live rows and may scan other users' nodes, and
+    while a deletion waits the user has none."""
+    from sqlalchemy import exists
+    from backend.utils.hidden_rows import description_hidden
+    mine = (select(Node.id, Node.deleted_at)
+            .where(Node.user_id == user_id)
+            .cte("mine")
+            .prefix_with("MATERIALIZED", dialect="postgresql"))
+    if db.session.execute(select(
+            exists().where(mine.c.deleted_at.is_(None)))).scalar():
+        return True
+    for model in HIDDEN_ROW_TABLES:
+        if db.session.query(model.id).filter(
+                model.user_id == user_id).first() is not None:
+            return True
+    user = db.session.get(User, user_id)
+    return bool(user is not None and user.description
+                and not description_hidden(user_id))
