@@ -451,7 +451,11 @@ def test_other_members_logs_do_not_show_a_hidden_accounts_reply(
     a7 = _db.session.get(Node, world.ids["A7"])
     a7.privacy_level = "public"
     a7.set_content("alice hidden words")
-    _db.session.get(Node, world.ids["B3"]).deleted_at = datetime.utcnow()
+    b3 = _db.session.get(Node, world.ids["B3"])
+    # Private root: the Log lists a deleted root with live replies only
+    # when it is private (#516).
+    b3.privacy_level = "private"
+    b3.deleted_at = datetime.utcnow()
     _db.session.commit()
     c = _client(app, world.bob)
 

@@ -84,6 +84,7 @@ def get_log():
     deleted_roots = db.session.query(Node.id).filter(
         Node.parent_id.is_(None),
         Node.deleted_at.isnot(None),
+        Node.privacy_level != PrivacyLevel.PUBLIC.value,
         or_(
             Node.user_id == current_user.id,
             Node.human_owner_id == current_user.id,
@@ -114,14 +115,16 @@ def get_log():
                 Node.privacy_level != PrivacyLevel.PUBLIC.value,
             ),
             # §4a Case 2: soft-deleted thread root whose subtree still
-            # has an alive accessible descendant — ANY privacy, incl.
-            # public: a deleted public root leaves the Commons feed, so
-            # the Log is the owner's only entry point to what's still
-            # alive underneath. Pinned non-roots that are soft-deleted
-            # stay hidden — this branch only relaxes the rule for roots.
+            # has an alive accessible descendant — private roots only
+            # (#516): the Log's private-only rule (#228) holds after a
+            # deletion too, so a deleted public thread stays out and
+            # does not echo another user's public reply. Pinned
+            # non-roots that are soft-deleted stay hidden — this branch
+            # only relaxes the rule for roots.
             and_(
                 Node.parent_id.is_(None),
                 Node.deleted_at.isnot(None),
+                Node.privacy_level != PrivacyLevel.PUBLIC.value,
                 Node.id.in_(alive_roots),
             ),
         ),
