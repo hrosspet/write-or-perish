@@ -1510,6 +1510,18 @@ Kinds (one per entry and per table row):
 - **Source:** Claude Code session 2026-10-15 (Opus 5.5)
 - **Applies to:** #502
 
+### 2026-10-15 · A rare case the review found: fix it after all
+
+- **Kind:** data safety
+- **Situation:** the review of the train found that the second "Delete all my writing" button stays hidden when the user's only unhidden writing is an AI reply under an entry they deleted on its own.
+- **Decision:** the coordinator left it (rare; writing anything new shows the button) and told Peter.
+- **Peter:** "pls fix this as well"
+- **Score:** miss
+- **Why it missed:** in a deletion flow Peter wants the button to be right in every case he can see, not just the common one. Fixed in the train by a separate commit. The decision is the coordinator's judgement that Peter corrected, not a reviewer finding.
+- **Source:** Claude Code session 2026-10-15 (Opus 5.5)
+- **Applies to:** #415, #502
+- **Rule:** candidate: a gap Peter finds while testing a train is fixed in that train unless it is large.
+
 ## Decided by the builder
 
 Choices that agents flagged in PRs and that the builder decided because a rule above already covers them (Peter, 2026-10-02: decide what the log supports, raise only real judgement calls). Each is also recorded on its PR, or in the session where Peter asked. The Decided column holds only the builder's part; a rule or decision of Peter's goes in the Rule column. Questions raised to Peter instead are not listed; his answers become entries. Model is the model that wrote the PR (its Co-Authored-By line). Result is "accepted by merge (PR #N, date)" once the PR has merged and Peter didn't correct the choice, "pending" until it merges, and "corrected → entry <title>" when he overrules it; the entry is then scored as a miss.
