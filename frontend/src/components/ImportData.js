@@ -922,8 +922,13 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
             <div style={{ color: "var(--text-secondary)", fontFamily: "var(--sans)", fontWeight: 300 }}>
               <p>These files could not be imported and are left out:</p>
               <ul>
-                {importFiles.errors.map((e) => (
-                  <li key={e.name}>{e.name}: {e.error}</li>
+                {/* One line per message, so many PDFs in one zip don't
+                    repeat the same sentence */}
+                {Object.entries(importFiles.errors.reduce((byMessage, e) => {
+                  (byMessage[e.error] = byMessage[e.error] || []).push(e.name);
+                  return byMessage;
+                }, {})).map(([message, names]) => (
+                  <li key={message}>{names.join(", ")}: {message}</li>
                 ))}
               </ul>
             </div>

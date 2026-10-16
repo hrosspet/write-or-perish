@@ -891,6 +891,19 @@ def test_zip_with_only_a_pdf_names_it(client):
         r.get_json()["error"])
 
 
+def test_zip_of_many_pdfs_says_it_once(client):
+    pdf = _paper()
+    names = [f"p{i}.pdf" for i in range(5)]
+    z = _zip({**{n: pdf for n in names}, "old.doc": b"\xd0\xcf"})
+    r = _analyze(client, "export.zip", z)
+    assert r.status_code == 400
+    error = r.get_json()["error"]
+    assert error.count(pdf_import.MSG_PDF_IN_ZIP) == 1
+    assert error.count(pdf_import.MSG_OLD_DOC) == 1
+    assert "p0.pdf, p1.pdf, p2.pdf and 2 more: " in error
+    assert "old.doc: " in error
+
+
 def test_other_extensions_still_rejected(client):
     r = _analyze(client, "notes.txt", b"hello")
     assert r.status_code == 400

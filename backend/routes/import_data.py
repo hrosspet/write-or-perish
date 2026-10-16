@@ -267,6 +267,22 @@ def _release_deleted_docx_key(file_data, source_key, key_index,
         deleted_keys.discard(source_key)
 
 
+def _errors_summary(errors, max_names=3):
+    """The skipped files of a zip as one clause per distinct message, so a
+    zip of thirty PDFs says "upload each PDF on its own" once, not thirty
+    times: "a.pdf, b.pdf, c.pdf and 27 more: PDFs inside a zip ..."."""
+    by_message = {}
+    for e in errors:
+        by_message.setdefault(e['error'], []).append(e['name'])
+    parts = []
+    for message, names in by_message.items():
+        shown = ", ".join(names[:max_names])
+        if len(names) > max_names:
+            shown += f" and {len(names) - max_names} more"
+        parts.append(f"{shown}: {message}")
+    return " ".join(parts)
+
+
 def _docx_file_entry(filename, content, modified):
     """Analyze-step entry for a converted Word document. source_format
     tells the confirm step to split it into chapter nodes."""
@@ -676,8 +692,8 @@ def analyze_import():
 
         if not files_data:
             if errors:
-                detail = "; ".join(f"{e['name']}: {e['error']}" for e in errors)
-                return jsonify({"error": f"No files could be imported. {detail}"}), 400
+                return jsonify({"error": "No files could be imported. "
+                                         + _errors_summary(errors)}), 400
             return jsonify({"error": "No valid .md or .docx files could be read from the zip archive"}), 400
 
         return jsonify({
