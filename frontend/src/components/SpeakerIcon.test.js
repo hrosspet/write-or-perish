@@ -73,6 +73,17 @@ test('chunks that arrive at once all reach the queue, in order', async () => {
   expect(mockAudio.updateChapters).toHaveBeenCalledWith(5, 'node', chapters);
 });
 
+test('a profile streams with chapters from its own route', async () => {
+  mockAudio.updateChapters.mockClear();
+  const { getByRole } = render(<SpeakerIcon profileId={9} content="# Title" aiUsage="chat" />);
+  await act(async () => { fireEvent.click(getByRole('button')); });
+
+  act(() => { mockSSEOptions.onChunkReady(chunk(0)); });
+  const chapters = [{ title: 'Title', start_time: 0, chunk_index: 0 }];
+  await act(async () => { mockResolveChapters({ status: 200, data: { chapters } }); });
+  expect(mockAudio.updateChapters).toHaveBeenCalledWith(9, 'profile', chapters);
+});
+
 // AI usage 'none': no new speech for an entry, a model's reply or a profile
 // version (the server refuses it as well, speech_allowed).
 test.each([
