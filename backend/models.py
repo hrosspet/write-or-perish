@@ -493,7 +493,7 @@ class Node(db.Model):
     source_key = db.Column(db.String(255), nullable=True, index=True)
     # Where the node came from. NULL = written in Loore (the default and
     # main source, never rendered). Imports stamp the platform:
-    # "twitter" | "chatgpt" | "claude" | "markdown". Deliberately
+    # "twitter" | "chatgpt" | "claude" | "markdown" | "docx". Deliberately
     # platform-only, NOT provenance (own export vs. Loore-fetched public
     # data): dedup runs on source_key and a re-import must match.
     origin = db.Column(db.String(16), nullable=True, index=True)

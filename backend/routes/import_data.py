@@ -3,10 +3,13 @@ from flask_login import login_required, current_user
 from backend.models import Node, User, UserProfile
 from backend.extensions import db
 from backend.utils.privacy import AI_ALLOWED
+from backend.utils import docx_import
 from datetime import datetime, timedelta
 import hashlib
 import zipfile
 import io
+import shutil
+import tempfile
 import json
 
 import_bp = Blueprint("import_bp", __name__)
@@ -235,6 +238,76 @@ def _apply_settings_to_skipped(node_ids, privacy_level, ai_usage):
     return updated
 
 
+def _release_deleted_docx_key(file_data, source_key, key_index,
+                              deleted_keys, on_deleted):
+    """Re-importing a deleted Word document with "restore" is a new import:
+    the dedup key sits on the last node of its chapter chain, so refilling
+    that node would bring back only the last chapter. The deleted tip
+    gives up the key and the document is imported again in full."""
+    if (file_data.get('source_format') == 'docx'
+            and on_deleted == 'restore' and source_key in deleted_keys):
+        old = Node.query.get(key_index.pop(source_key))
+        if old is not None:
+            old.source_key = None
+            db.session.flush()
+        deleted_keys.discard(source_key)
+
+
+def _docx_file_entry(filename, content, modified):
+    """Analyze-step entry for a converted Word document. source_format
+    tells the confirm step to split it into chapter nodes."""
+    return {
+        "name": filename,
+        "filename_without_ext": filename.rsplit('.', 1)[0],
+        "content": content,
+        "size": len(content.encode('utf-8')),
+        "modified_at": modified.isoformat(),
+        "token_count": approximate_token_count(content),
+        "source_format": "docx",
+    }
+
+
+def _file_parts(file_data, filename, content):
+    """Node texts for one analyzed file. Markdown: one text. Word
+    documents whose headings repeat: one text per chapter. The filename
+    heading goes on the first text unless it starts with an H1."""
+    if file_data.get('source_format') == 'docx':
+        parts = docx_import.split_chapters(content)
+    else:
+        parts = [content]
+    if not parts[0].lstrip().startswith('# '):
+        parts[0] = f"# {filename}\n\n{parts[0]}"
+    return parts
+
+
+def _import_file_nodes(file_data, parts, parent_id, source_key, created_at,
+                       privacy_level, ai_usage):
+    """Create the node(s) for one analyzed file: a chain with one entry
+    per part (each part itself splits above the per-node cap). The
+    source_key lands on the last node. Returns (tip_node, nodes_created)."""
+    origin = "docx" if file_data.get('source_format') == 'docx' else "markdown"
+    tip = None
+    created = 0
+    for k, part in enumerate(parts):
+        tip, n = _add_imported_message_nodes(
+            user_id=current_user.id,
+            human_owner_id=current_user.id,
+            parent_id=parent_id if tip is None else tip.id,
+            node_type="user",
+            llm_model=None,
+            node_content=part,
+            privacy_level=privacy_level,
+            ai_usage=ai_usage,
+            source_key=source_key if k == len(parts) - 1 else None,
+            # one second per chapter keeps the chain in order
+            msg_created_at=(created_at + timedelta(seconds=k)
+                            if created_at else None),
+            origin=origin,
+        )
+        created += n
+    return tip, created
+
+
 @import_bp.route("/import/analyze", methods=["POST"])
 @login_required
 def analyze_import():
@@ -272,25 +345,52 @@ def analyze_import():
     if zip_file.filename == '':
         return jsonify({"error": "No file selected"}), 400
 
+    filename_lower = zip_file.filename.lower()
+    if filename_lower.endswith('.docm'):
+        return jsonify({"error": f"{zip_file.filename}: macro-enabled Word "
+                        "files (.docm) are not accepted; save it as .docx "
+                        "and try again"}), 400
+
+    # A single Word document is analyzed from the upload stream directly
+    if filename_lower.endswith('.docx'):
+        try:
+            content, modified = docx_import.convert_docx(zip_file.stream)
+        except docx_import.DocxImportError as e:
+            return jsonify({"error": f"{zip_file.filename}: {e}"}), 400
+        if not content.strip():
+            return jsonify({"error": f"{zip_file.filename}: the document has no text"}), 400
+        entry = _docx_file_entry(
+            zip_file.filename, content, modified or datetime.utcnow())
+        return jsonify({
+            "files": [entry], "total_files": 1,
+            "total_tokens": entry["token_count"],
+            "total_size": entry["size"], "errors": [],
+        }), 200
+
     # Validate it's a zip file
-    if not zip_file.filename.lower().endswith('.zip'):
-        return jsonify({"error": "File must be a .zip file"}), 400
+    if not filename_lower.endswith('.zip'):
+        return jsonify({"error": "File must be a .zip or .docx file"}), 400
 
     try:
         # Read zip file into memory
         zip_bytes = io.BytesIO(zip_file.read())
 
         files_data = []
+        errors = []
+        parse_budget = docx_import.ParseBudget()  # shared by all docx here
         total_tokens = 0
         total_size = 0
 
         with zipfile.ZipFile(zip_bytes, 'r') as zip_ref:
-            # Get list of all .md files in the zip
+            # Get list of all .md / .docx files in the zip (.docm is listed
+            # so that it is reported, not silently ignored)
             md_files = [f for f in zip_ref.namelist()
-                       if f.lower().endswith('.md') and not f.startswith('__MACOSX/')]
+                        if f.lower().endswith(('.md', '.docx', '.docm'))
+                        and not f.startswith('__MACOSX/')
+                        and not f.split('/')[-1].startswith('~$')]
 
             if not md_files:
-                return jsonify({"error": "No .md files found in the zip archive"}), 400
+                return jsonify({"error": "No .md or .docx files found in the zip archive"}), 400
 
             for file_path in md_files:
                 # Get file info
@@ -298,14 +398,6 @@ def analyze_import():
 
                 # Skip directories
                 if zip_info.is_dir():
-                    continue
-
-                # Read file content
-                try:
-                    content = zip_ref.read(file_path).decode('utf-8')
-                except UnicodeDecodeError:
-                    # Skip files that can't be decoded as UTF-8
-                    current_app.logger.warning(f"Skipping {file_path}: not valid UTF-8")
                     continue
 
                 # Extract just the filename from the path
@@ -316,6 +408,38 @@ def analyze_import():
                 # ZipInfo date_time is a tuple: (year, month, day, hour, minute, second)
                 dt_tuple = zip_info.date_time
                 file_datetime = datetime(*dt_tuple)
+
+                if not filename.lower().endswith('.md'):
+                    try:
+                        docx_import.check_extension(filename)
+                        with tempfile.SpooledTemporaryFile(
+                                max_size=docx_import.SPOOL_MAX_MEMORY_BYTES) as tmp:
+                            with zip_ref.open(zip_info) as src:
+                                shutil.copyfileobj(src, tmp)
+                            tmp.seek(0)
+                            content, modified = docx_import.convert_docx(
+                                tmp, parse_budget)
+                    except docx_import.DocxImportError as e:
+                        errors.append({"name": filename, "error": str(e)})
+                        continue
+                    if not content.strip():
+                        errors.append({"name": filename,
+                                       "error": "the document has no text"})
+                        continue
+                    entry = _docx_file_entry(
+                        filename, content, modified or file_datetime)
+                    files_data.append(entry)
+                    total_tokens += entry["token_count"]
+                    total_size += entry["size"]
+                    continue
+
+                # Read file content
+                try:
+                    content = zip_ref.read(file_path).decode('utf-8')
+                except UnicodeDecodeError:
+                    # Skip files that can't be decoded as UTF-8
+                    current_app.logger.warning(f"Skipping {file_path}: not valid UTF-8")
+                    continue
 
                 # Calculate tokens
                 token_count = approximate_token_count(content)
@@ -334,13 +458,17 @@ def analyze_import():
                 total_size += zip_info.file_size
 
         if not files_data:
-            return jsonify({"error": "No valid .md files could be read from the zip archive"}), 400
+            if errors:
+                detail = "; ".join(f"{e['name']}: {e['error']}" for e in errors)
+                return jsonify({"error": f"No files could be imported. {detail}"}), 400
+            return jsonify({"error": "No valid .md or .docx files could be read from the zip archive"}), 400
 
         return jsonify({
             "files": files_data,
             "total_files": len(files_data),
             "total_tokens": total_tokens,
-            "total_size": total_size
+            "total_size": total_size,
+            "errors": errors,
         }), 200
 
     except zipfile.BadZipFile:
@@ -433,13 +561,12 @@ def confirm_import():
                 content = file_data.get('content', '')
 
                 # Add filename as markdown headline only if content doesn't have H1
-                stripped_content = content.lstrip()
-                if not stripped_content.startswith('# '):
-                    node_content = f"# {filename}\n\n{content}"
-                else:
-                    node_content = content
+                parts = _file_parts(file_data, filename, content)
+                node_content = parts[-1]  # the tip: what a restore refills
 
                 source_key = _file_source_key(filename, content)
+                _release_deleted_docx_key(file_data, source_key, key_index,
+                                          deleted_keys, on_deleted)
                 if source_key in key_index:
                     # Chain the next new file onto the existing copy so
                     # partially-skipped imports don't orphan new nodes.
@@ -467,19 +594,9 @@ def confirm_import():
 
                 # Create node(s) — files above the per-node cap split
                 # into a serial chain
-                tip, created_count = _add_imported_message_nodes(
-                    user_id=current_user.id,
-                    human_owner_id=current_user.id,
-                    parent_id=parent_id,
-                    node_type="user",
-                    llm_model=None,
-                    node_content=node_content,
-                    privacy_level=privacy_level,
-                    ai_usage=ai_usage,
-                    source_key=source_key,
-                    msg_created_at=node_created_at,
-                    origin="markdown",
-                )
+                tip, created_count = _import_file_nodes(
+                    file_data, parts, parent_id, source_key,
+                    node_created_at, privacy_level, ai_usage)
 
                 key_index[source_key] = tip.id
                 parent_id = tip.id
@@ -495,13 +612,12 @@ def confirm_import():
                 content = file_data.get('content', '')
 
                 # Add filename as markdown headline only if content doesn't have H1
-                stripped_content = content.lstrip()
-                if not stripped_content.startswith('# '):
-                    node_content = f"# {filename}\n\n{content}"
-                else:
-                    node_content = content
+                parts = _file_parts(file_data, filename, content)
+                node_content = parts[-1]  # the tip: what a restore refills
 
                 source_key = _file_source_key(filename, content)
+                _release_deleted_docx_key(file_data, source_key, key_index,
+                                          deleted_keys, on_deleted)
                 if source_key in key_index:
                     if source_key in deleted_keys and on_deleted == 'restore':
                         _restore_node(key_index[source_key], node_content,
@@ -527,19 +643,9 @@ def confirm_import():
 
                 # Create top-level node (parent_id=None); files above the
                 # per-node cap split into a serial chain under the root
-                _, created_count = _add_imported_message_nodes(
-                    user_id=current_user.id,
-                    human_owner_id=current_user.id,
-                    parent_id=None,
-                    node_type="user",
-                    llm_model=None,
-                    node_content=node_content,
-                    privacy_level=privacy_level,
-                    ai_usage=ai_usage,
-                    source_key=source_key,
-                    msg_created_at=node_created_at,
-                    origin="markdown",
-                )
+                _, created_count = _import_file_nodes(
+                    file_data, parts, None, source_key,
+                    node_created_at, privacy_level, ai_usage)
 
                 nodes_created += created_count
                 threads_created += 1
