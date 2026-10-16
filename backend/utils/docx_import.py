@@ -10,6 +10,7 @@ that has one is rejected.
 """
 import re
 import zipfile
+import zlib
 from datetime import datetime, timezone
 from xml.etree import ElementTree
 
@@ -146,16 +147,17 @@ def modified_date(zf):
     or None when missing or unreadable."""
     try:
         root = ElementTree.fromstring(zf.read("docProps/core.xml"))
-    except (KeyError, ElementTree.ParseError):
+    except (KeyError, ElementTree.ParseError, ValueError, LookupError):
+        # ValueError / LookupError: a declared encoding the parser rejects
         return None
     for el in root.iter("{http://purl.org/dc/terms/}modified"):
         raw = (el.text or "").strip()
         try:
             dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-        except ValueError:
+            if dt.tzinfo is not None:
+                dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+        except (ValueError, OverflowError):
             return None
-        if dt.tzinfo is not None:
-            dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
         return dt
     return None
 
@@ -214,6 +216,11 @@ def convert_docx(fileobj, budget=None):
             modified = modified_date(zf)
     except zipfile.BadZipFile:
         raise DocxImportError("this is not a valid Word document")
+    except (zlib.error, NotImplementedError, RuntimeError):
+        # damaged data, Deflate64 and other unsupported compression, or an
+        # encrypted entry, raised while the zip is validated or read
+        raise DocxImportError(
+            "the file is damaged or uses an unsupported format")
     try:
         fileobj.seek(0)
         result = mammoth.convert_to_html(

@@ -14,6 +14,10 @@ import json
 
 import_bp = Blueprint("import_bp", __name__)
 
+DOCX_UNEXPECTED_ERROR = (
+    "Something went wrong while reading this file. You can try again, or "
+    "save the document again as .docx and upload that copy.")
+
 # Node.provenance values — HOW an imported node reached Loore (the column
 # comment in models.py says what each one vouches for). `origin` names the
 # platform; this names the path, which is what decides whether the text
@@ -357,6 +361,10 @@ def analyze_import():
             content, modified = docx_import.convert_docx(zip_file.stream)
         except docx_import.DocxImportError as e:
             return jsonify({"error": f"{zip_file.filename}: {e}"}), 400
+        except Exception:
+            # Event reaches Sentry; the file name and content are not logged
+            current_app.logger.exception("Unexpected error converting .docx")
+            return jsonify({"error": DOCX_UNEXPECTED_ERROR}), 500
         if not content.strip():
             return jsonify({"error": f"{zip_file.filename}: the document has no text"}), 400
         entry = _docx_file_entry(
@@ -421,6 +429,12 @@ def analyze_import():
                                 tmp, parse_budget)
                     except docx_import.DocxImportError as e:
                         errors.append({"name": filename, "error": str(e)})
+                        continue
+                    except Exception:
+                        current_app.logger.exception(
+                            "Unexpected error converting .docx in zip")
+                        errors.append({"name": filename,
+                                       "error": DOCX_UNEXPECTED_ERROR})
                         continue
                     if not content.strip():
                         errors.append({"name": filename,
