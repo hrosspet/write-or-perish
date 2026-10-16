@@ -218,7 +218,8 @@ def convert_docx(fileobj, budget=None):
         fileobj.seek(0)
         result = mammoth.convert_to_html(
             fileobj,
-            convert_image=mammoth.images.img_element(_image_handler))
+            convert_image=mammoth.images.img_element(_image_handler),
+            include_embedded_style_map=False)
         md = markdownify(_clean_html(result.value), heading_style="ATX",
                          bullets="-")
     except Exception as e:

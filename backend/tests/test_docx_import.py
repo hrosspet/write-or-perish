@@ -406,3 +406,40 @@ def test_reimport_of_deleted_docx_restores_whole_document(client):
     assert live[3].get_content().startswith("# Chapter 3")
     for a, b in zip(live, live[1:]):
         assert b.parent_id == a.id
+
+
+def test_converter_opens_only_checked_parts(monkeypatch):
+    """Guards the checked set: fails if a mammoth upgrade reads another part."""
+    from mammoth import zips
+    ns = ('xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/'
+          '2006/main"')
+    rel = ('<Relationship Id="r{i}" Type="http://schemas.openxmlformats.org/'
+           'officeDocument/2006/relationships/{k}" Target="{k}.xml"/>')
+    rels = ('<?xml version="1.0"?><Relationships xmlns="http://schemas.'
+            'openxmlformats.org/package/2006/relationships">'
+            + "".join(rel.format(i=i, k=k) for i, k in enumerate(
+                ["styles", "numbering", "footnotes", "endnotes", "comments"]))
+            + "</Relationships>")
+    extra = {
+        "word/_rels/document.xml.rels": rels,
+        "word/styles.xml": f"<w:styles {ns}/>",
+        "word/numbering.xml": f"<w:numbering {ns}/>",
+        "word/footnotes.xml": f"<w:footnotes {ns}/>",
+        "word/endnotes.xml": f"<w:endnotes {ns}/>",
+        "word/comments.xml": f"<w:comments {ns}/>",
+        "word/_rels/footnotes.xml.rels": rels,
+        "customXml/item1.xml": "<a/>",
+        "mammoth/style-map": "p => p",
+    }
+    data = _docx([_p("T", "Heading1"), "body"], extra=extra)
+    opened = []
+    orig_open, orig_read = zips._Zip.open, zips._Zip.read_str
+    monkeypatch.setattr(zips._Zip, "open",
+                        lambda self, n: (opened.append(n), orig_open(self, n))[1])
+    monkeypatch.setattr(zips._Zip, "read_str",
+                        lambda self, n: (opened.append(n), orig_read(self, n))[1])
+    docx_import.convert_docx(io.BytesIO(data))
+    with zipfile.ZipFile(io.BytesIO(data)) as zf:
+        checked = docx_import._parsed_part_names(zf)
+    assert "word/footnotes.xml" in opened and "word/comments.xml" in opened
+    assert set(opened) <= checked, set(opened) - checked
