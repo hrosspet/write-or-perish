@@ -324,17 +324,53 @@ TTS_CHUNK_OVERHEAD_SECS = 7.0
 MIN_FIRST_CHUNK_CHARS = 80
 
 _CHAPTER_HEADING_RE = re.compile(r'^(#{1,2})\s+(.+?)\s*$', re.MULTILINE)
+_ANY_HEADING_RE = re.compile(r'^(#{1,6})\s+(.+?)\s*$', re.MULTILINE)
+
+# Heuristic: a heading level only counts as the text's chapter level when
+# it appears at least this many times (a lone heading is a title, not a
+# chapter structure).
+MIN_CHAPTER_HEADINGS = 2
 
 
-def split_sections(text):
-    """Split markdown into chapter sections at h1/h2 headings (#145).
+def _chapter_heading_matches(text, adaptive=True):
+    """Heading matches that start a chapter.
+
+    Normally the h1/h2 headings. When the text has fewer than
+    MIN_CHAPTER_HEADINGS of those (a generated profile uses ### sections
+    under at most one # title), the chapter level is the highest level
+    among h3-h6 that appears at least MIN_CHAPTER_HEADINGS times, and
+    headings of that level or higher are chapters. Texts that already
+    split at h1/h2 are unaffected.
+    """
+    top = list(_CHAPTER_HEADING_RE.finditer(text))
+    if not adaptive or len(top) >= MIN_CHAPTER_HEADINGS:
+        return top
+    all_matches = list(_ANY_HEADING_RE.finditer(text))
+    counts = {}
+    for m in all_matches:
+        counts[len(m.group(1))] = counts.get(len(m.group(1)), 0) + 1
+    for level in range(3, 7):
+        if counts.get(level, 0) >= MIN_CHAPTER_HEADINGS:
+            return [m for m in all_matches if len(m.group(1)) <= level]
+    return top
+
+
+def split_sections(text, adaptive=True):
+    """Split markdown into chapter sections at headings (#145).
 
     Returns [(title_or_None, body)]. Content before the first heading
     becomes a section with title None. Heading lines themselves are NOT
-    part of the body (v0 decision: chapter titles are visual labels, not
-    read aloud). h3+ headings stay inside their section's body.
+    part of the body (the title is spoken separately, see
+    section_aware_chunk_text). Chapters are h1/h2 headings; if the text
+    has fewer than two of those, the most prominent repeated h3-h6 level
+    is used instead (see _chapter_heading_matches). Deeper headings stay
+    inside their section's body.
+
+    adaptive=False keeps h1/h2 only: the streamed-reply planner
+    (tts_stream_text.ChunkPlanner) cuts chapters while the reply is still
+    arriving, so it cannot know whether h1/h2 will turn out to be rare.
     """
-    matches = list(_CHAPTER_HEADING_RE.finditer(text or ""))
+    matches = _chapter_heading_matches(text or "", adaptive)
     if not matches:
         return [(None, (text or "").strip())] if (text or "").strip() else []
 
@@ -349,7 +385,8 @@ def split_sections(text):
     return sections
 
 
-def section_aware_chunk_text(text, first_chunk_gen_secs: float = 3.0):
+def section_aware_chunk_text(text, first_chunk_gen_secs: float = 3.0,
+                             adaptive_level=True):
     """Chunk text for streaming TTS without crossing chapter boundaries.
 
     Returns [(chunk_text, section_title, section_index)]. The adaptive
@@ -364,6 +401,8 @@ def section_aware_chunk_text(text, first_chunk_gen_secs: float = 3.0):
     gives the TTS voice an audible chapter pause. Chapter start_times
     stay exact — the title audio belongs to its own section's first
     chunk.
+
+    adaptive_level=False splits at h1/h2 only (see split_sections).
 
     Sections whose body is empty (e.g. a heading directly followed by
     another heading) are skipped — they'd produce zero-length audio.
@@ -400,7 +439,7 @@ def section_aware_chunk_text(text, first_chunk_gen_secs: float = 3.0):
         emitted_playback_secs[0] += chunk_len * audio_secs_per_char
 
     out = []
-    for section_index, (title, body) in enumerate(split_sections(text)):
+    for section_index, (title, body) in enumerate(split_sections(text, adaptive_level)):
         if title and body:
             spoken = title if title[-1] in '.!?' else f"{title}."
             remaining = f"{spoken}\n\n{body}"
