@@ -1,6 +1,6 @@
 import JSZip from "jszip";
 import {
-  stripDocxMedia, describeAnalyzeError, localFileError, OLD_DOC_MESSAGE,
+  stripDocxMedia, inMemoryCopy, FileReadError, describeAnalyzeError, localFileError, OLD_DOC_MESSAGE,
 } from "./docxUpload";
 
 async function makeDocx(entries, name = "a.docx") {
@@ -30,16 +30,47 @@ test("stripDocxMedia removes word/media and keeps other entries unchanged", asyn
   expect(await zip.file("[Content_Types].xml").async("string")).toBe("<Types/>");
 });
 
-test("stripDocxMedia returns the original when the file cannot be read", async () => {
-  const bad = new File(["not a zip"], "a.docx");
-  expect(await stripDocxMedia(bad)).toBe(bad);
+const bytesOf = (f) =>
+  new Promise((res, rej) => {
+    const r = new FileReader();
+    r.onload = () => res(new Uint8Array(r.result));
+    r.onerror = () => rej(r.error);
+    r.readAsArrayBuffer(f);
+  });
+
+test("stripDocxMedia returns an in-memory copy when the file cannot be read as a zip", async () => {
+  const bad = new File(["not a zip"], "a.docx", { type: "x/y" });
+  const out = await stripDocxMedia(bad);
+  expect(out).not.toBe(bad);
+  expect(out.name).toBe("a.docx");
+  expect(await bytesOf(out)).toEqual(await bytesOf(bad));
 });
 
-test("stripDocxMedia returns the original for zips and docx without media", async () => {
+test("stripDocxMedia returns in-memory copies for zips and docx without media", async () => {
   const zipFile = await makeDocx(entries, "export.zip");
-  expect(await stripDocxMedia(zipFile)).toBe(zipFile);
+  const outZip = await stripDocxMedia(zipFile);
+  expect(outZip).not.toBe(zipFile);
+  expect(await bytesOf(outZip)).toEqual(await bytesOf(zipFile));
   const noMedia = await makeDocx({ "word/document.xml": "<doc/>" });
-  expect(await stripDocxMedia(noMedia)).toBe(noMedia);
+  const outDocx = await stripDocxMedia(noMedia);
+  expect(outDocx).not.toBe(noMedia);
+  expect(await bytesOf(outDocx)).toEqual(await bytesOf(noMedia));
+});
+
+test("stripDocxMedia throws FileReadError when the file cannot be read", async () => {
+  const f = new File(["x"], "a.docx");
+  f.arrayBuffer = () => Promise.reject(new DOMException("gone", "NotReadableError"));
+  await expect(stripDocxMedia(f)).rejects.toBeInstanceOf(FileReadError);
+});
+
+test("inMemoryCopy keeps name, type and bytes in a new File", async () => {
+  const f = new File(["%PDF-1.4"], "p.pdf", { type: "application/pdf" });
+  const out = await inMemoryCopy(f);
+  expect(out).not.toBe(f);
+  expect(out).toBeInstanceOf(File);
+  expect(out.name).toBe("p.pdf");
+  expect(out.type).toBe("application/pdf");
+  expect(await bytesOf(out)).toEqual(await bytesOf(f));
 });
 
 describe("describeAnalyzeError", () => {
