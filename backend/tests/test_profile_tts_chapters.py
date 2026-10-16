@@ -28,7 +28,7 @@ for _mod in ["flask_login", "backend.models", "backend.extensions"]:
 
 @pytest.fixture
 def env():
-    from flask import Flask
+    from flask import Flask, g
     from flask_login import LoginManager
     from backend.extensions import db as _db
     from backend.models import User, UserProfile, TTSChunk
@@ -68,6 +68,8 @@ def env():
         _db.session.commit()
 
         def get(user, path):
+            # Flask-Login caches the first user in g for the open app context
+            g.pop("_login_user", None)
             client = app.test_client()
             if user is not None:
                 with client.session_transaction() as sess:
