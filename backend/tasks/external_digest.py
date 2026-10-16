@@ -28,7 +28,8 @@ from sqlalchemy import func
 from backend.celery_app import celery, flask_app
 from backend.extensions import db
 from backend.models import (
-    APICostLog, ExternalDigestBatchJob, ExternalItem, User, UserArtifact,
+    APICostLog, BYLINE_SOURCES, ExternalDigestBatchJob, ExternalItem, User,
+    UserArtifact,
 )
 from backend.llm_providers import (
     LLMProvider, ProviderAccountError, is_refused)
@@ -162,7 +163,7 @@ def _render_digest_prompt(user_id):
         stamp = (item.posted_at.strftime("%Y-%m-%d")
                  if item.posted_at else "?")
         author = item.author_handle or item.source
-        if item.source != "web_clip":
+        if item.source not in BYLINE_SOURCES:
             author = f"@{author}"
         if item.title:
             snippet = f"{item.title} — {snippet}"[:ITEM_SNIPPET_CHARS]

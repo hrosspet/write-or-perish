@@ -1,5 +1,7 @@
 import JSZip from "jszip";
-import { stripDocxMedia, describeAnalyzeError } from "./docxUpload";
+import {
+  stripDocxMedia, describeAnalyzeError, localFileError, OLD_DOC_MESSAGE,
+} from "./docxUpload";
 
 async function makeDocx(entries, name = "a.docx") {
   const zip = new JSZip();
@@ -61,4 +63,19 @@ describe("describeAnalyzeError", () => {
     expect(describeAnalyzeError(withStatus(500, "<html>"))).toMatch(/Something went wrong while reading/);
     expect(describeAnalyzeError(withStatus(404))).toMatch(/Error analyzing import file/);
   });
+  test("a PDF gets PDF advice where it differs, and the backend text still wins", () => {
+    const pdf = new File(["%PDF"], "Paper.PDF");
+    expect(describeAnalyzeError(withStatus(504), pdf)).toMatch(/Reading this PDF took too long/);
+    expect(describeAnalyzeError(withStatus(500, "<html>"), pdf)).toMatch(/reading this PDF/);
+    expect(describeAnalyzeError(withStatus(500, "<html>"), pdf)).not.toMatch(/\.docx/);
+    expect(describeAnalyzeError({ code: "ECONNABORTED" }, pdf)).toMatch(/with a smaller PDF/);
+    expect(describeAnalyzeError(withStatus(400, { error: "This PDF looks scanned" }), pdf))
+      .toBe("This PDF looks scanned");
+  });
+});
+
+test("localFileError: an old .doc is refused before upload", () => {
+  expect(localFileError(new File(["x"], "Report.DOC"))).toBe(OLD_DOC_MESSAGE);
+  expect(localFileError(new File(["x"], "Report.docx"))).toBeNull();
+  expect(localFileError(new File(["x"], "paper.pdf"))).toBeNull();
 });

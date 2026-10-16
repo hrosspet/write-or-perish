@@ -899,6 +899,7 @@ ORIGIN_LABELS = {
     "claude": "Claude conversations (imported)",
     "markdown": "markdown documents (imported)",
     "docx": "Word documents (imported)",
+    "pdf": "PDF documents (imported)",
     "loore": "written in Loore",
 }
 

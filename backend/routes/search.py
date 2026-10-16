@@ -112,12 +112,14 @@ _EXTERNAL_DATE = func.coalesce(ExternalItem.posted_at, ExternalItem.fetched_at)
 
 def _external_result(item, content, score, snippet=None):
     """One saved reference in search-result shape (kind='external')."""
+    from backend.utils import document_reference
+    title, author, content = document_reference.display(item, content)
     return {
         "id": item.id,
         "kind": "external",
         "source": item.source,
-        "author_handle": item.author_handle,
-        "title": item.title,
+        "author_handle": author,
+        "title": title,
         "external_url": item.url,
         "preview": _preview(content),
         "snippet": snippet,

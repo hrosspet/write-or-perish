@@ -3,9 +3,11 @@ from flask_login import login_required, current_user
 from backend.models import Node, User, UserProfile
 from backend.extensions import db
 from backend.utils.privacy import AI_ALLOWED
-from backend.utils import docx_import
+from backend.utils import docx_import, pdf_import
+from backend.utils.pdf_extract_worker import MAX_CHAPTERS as MAX_PDF_CHAPTERS
 from datetime import datetime, timedelta
 import hashlib
+import hmac
 import sys
 import zipfile
 import zlib
@@ -19,6 +21,11 @@ import_bp = Blueprint("import_bp", __name__)
 DOCX_UNEXPECTED_ERROR = (
     "Something went wrong while reading this file. You can try again, or "
     "save the document again as .docx and upload that copy.")
+
+# Analyzed formats that become one entry per chapter (see _file_parts).
+CHAPTER_FORMATS = ("docx", "pdf")
+# The confirm step's answer to "Whose writing is this?" for a PDF.
+WHOSE_WRITING = ("mine", "someone_else")
 
 # Node.provenance values — HOW an imported node reached Loore (the column
 # comment in models.py says what each one vouches for). `origin` names the
@@ -246,17 +253,34 @@ def _apply_settings_to_skipped(node_ids, privacy_level, ai_usage):
 
 def _release_deleted_docx_key(file_data, source_key, key_index,
                               deleted_keys, on_deleted):
-    """Re-importing a deleted Word document with "restore" is a new import:
-    the dedup key sits on the last node of its chapter chain, so refilling
-    that node would bring back only the last chapter. The deleted tip
-    gives up the key and the document is imported again in full."""
-    if (file_data.get('source_format') == 'docx'
+    """Re-importing a deleted Word document or PDF with "restore" is a new
+    import: the dedup key sits on the last node of its chapter chain, so
+    refilling that node would bring back only the last chapter. The
+    deleted tip gives up the key and the document is imported again in
+    full."""
+    if (file_data.get('source_format') in CHAPTER_FORMATS
             and on_deleted == 'restore' and source_key in deleted_keys):
         old = Node.query.get(key_index.pop(source_key))
         if old is not None:
             old.source_key = None
             db.session.flush()
         deleted_keys.discard(source_key)
+
+
+def _errors_summary(errors, max_names=3):
+    """The skipped files of a zip as one clause per distinct message, so a
+    zip of thirty PDFs says "upload each PDF on its own" once, not thirty
+    times: "a.pdf, b.pdf, c.pdf and 27 more: PDFs inside a zip ..."."""
+    by_message = {}
+    for e in errors:
+        by_message.setdefault(e['error'], []).append(e['name'])
+    parts = []
+    for message, names in by_message.items():
+        shown = ", ".join(names[:max_names])
+        if len(names) > max_names:
+            shown += f" and {len(names) - max_names} more"
+        parts.append(f"{shown}: {message}")
+    return " ".join(parts)
 
 
 def _docx_file_entry(filename, content, modified):
@@ -273,12 +297,174 @@ def _docx_file_entry(filename, content, modified):
     }
 
 
+def _pdf_file_entry(filename, pdf):
+    """Analyze-step entry for an extracted PDF. Own entries are dated by
+    the PDF's modification date, else its creation date, else now; a
+    Reference keeps the creation date (when the document was written),
+    else the modification date. `reference` is what the confirm step
+    saves when the user says it is someone else's writing."""
+    from backend.utils import document_reference
+    from backend.utils.node_split import NODE_CHAR_CAP
+    content = pdf["markdown"]
+    stem = filename.rsplit('.', 1)[0]
+    own_date = pdf["modified"] or pdf["created"] or datetime.utcnow()
+    doc_date = pdf["created"] or pdf["modified"]
+    ref_title = pdf_import.reference_title(pdf["title"], stem)
+    # The same room the save leaves for the text under title and author
+    room = document_reference.body_room(ref_title, pdf["author"],
+                                        NODE_CHAR_CAP)
+    return {
+        "name": filename,
+        "filename_without_ext": stem,
+        "content": content,
+        "size": len(content.encode('utf-8')),
+        "modified_at": own_date.isoformat(),
+        "token_count": approximate_token_count(content),
+        "source_format": "pdf",
+        "pages": pdf["pages"],
+        "chapters": pdf["chapters"],
+        "reference": {
+            "title": ref_title,
+            "author": pdf["author"],
+            "date": doc_date.isoformat() if doc_date else None,
+            # A Reference holds one entry's worth of text, as a clip does
+            "truncated": len(content.strip()) > room,
+            "char_cap": room,
+        },
+    }
+
+
+def _analyze_pdf(upload):
+    """/import/analyze for a single .pdf upload."""
+    try:
+        pdf = pdf_import.extract_pdf(upload.stream)
+    except pdf_import.PdfImportError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception:
+        # Event reaches Sentry; only the exception type is logged
+        current_app.logger.error(
+            "Unexpected error reading PDF: %s",
+            type(sys.exc_info()[1]).__name__)
+        return jsonify({"error": pdf_import.PDF_UNEXPECTED_ERROR}), 500
+    entry = _pdf_file_entry(upload.filename, pdf)
+    return jsonify({
+        "files": [entry], "total_files": 1,
+        "total_tokens": entry["token_count"],
+        "total_size": entry["size"], "errors": [],
+    }), 200
+
+
+def _keyed_digest(purpose, *parts):
+    """HMAC-SHA256 hex (64 chars) of `parts` for the current user, keyed
+    with the app's SECRET_KEY: a stable dedup key for an uploaded
+    document's text that does not stand for the text by itself."""
+    secret = current_app.config.get("SECRET_KEY")
+    if not secret:
+        raise RuntimeError("SECRET_KEY is not set")
+    if isinstance(secret, str):
+        secret = secret.encode("utf-8")
+    msg = "\x00".join([purpose, str(current_user.id), *map(str, parts)])
+    return hmac.new(secret, msg.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def _save_pdf_reference(file_data):
+    """Answer "someone else's": the PDF's text is saved as one Reference
+    (an ExternalItem, like a page saved with the Chrome clipper), not as
+    the user's entries, so it never feeds their profile. Mirrors clip():
+    the text is capped at one entry's worth, it is encrypted at rest, a
+    second save of the same text is a no-op, and a copy hidden by a
+    waiting "Delete all my writing" becomes the user's again. Unlike a
+    clip, the title and author go inside the encrypted text
+    (utils/document_reference), not into the plaintext columns. The
+    periodic sweeps pick it up like any new reference (embedding,
+    digest)."""
+    from sqlalchemy.exc import IntegrityError
+    from backend.models import ExternalItem, SOURCE_DOCUMENT
+    from backend.utils import document_reference
+    from backend.utils.hidden_rows import reclaim_external_items
+    from backend.utils.node_split import NODE_CHAR_CAP
+
+    content = file_data.get('content')
+    if not isinstance(content, str) or not content.strip():
+        return jsonify({"error": "This PDF has no text to save."}), 400
+    content = content.strip()
+    # Keyed by the whole extracted text, so the same PDF is one Reference
+    external_id = _keyed_digest("pdf-reference", content)
+    ref = file_data.get('reference')
+    ref = ref if isinstance(ref, dict) else {}
+    title = (str(ref.get('title') or '').strip()
+             or str(file_data.get('filename_without_ext') or '').strip())
+    author = ref.get('author')
+    # The header and the text together hold one entry's worth
+    room = document_reference.body_room(title, author, NODE_CHAR_CAP)
+    truncated = len(content) > room
+    if truncated:
+        content = content[:room].rstrip()
+    content = document_reference.compose(title, author, content)
+    posted_at = pdf_import.parse_date(ref.get('date'))
+    user_id = current_user.id
+
+    reclaim_external_items(user_id, [external_id], sources=[SOURCE_DOCUMENT])
+
+    def lookup():
+        return ExternalItem.query.filter_by(
+            user_id=user_id, source=SOURCE_DOCUMENT,
+            external_id=external_id).first()
+
+    def already_saved(existing):
+        db.session.commit()  # keeps a reclaim from above
+        return jsonify({
+            "message": "Already saved as a reference",
+            "saved_as": "reference", "reference_id": existing.id,
+            "nodes_created": 0, "thread_count": 0,
+            "profile_update_task_id": None,
+            "created": 0, "skipped": 1, "restored": 0, "updated": 0,
+            "truncated": False,
+        }), 200
+
+    existing = lookup()
+    if existing is not None:
+        return already_saved(existing)
+    item = ExternalItem(
+        user_id=user_id, source=SOURCE_DOCUMENT, external_id=external_id,
+        # Title and author are in the encrypted text; the date is kept
+        # as the reference's date, as for every other source
+        author_handle=None, title=None, url=None, posted_at=posted_at,
+        # An uploaded file may be private: assessed, not vouched public
+        public_source=False,
+    )
+    item.set_content(content)
+    db.session.add(item)
+    try:
+        db.session.commit()
+    except IntegrityError:
+        # A double press of Confirm saved it first
+        db.session.rollback()
+        existing = lookup()
+        if existing is None:
+            raise
+        return already_saved(existing)
+    return jsonify({
+        "message": "Saved as a reference",
+        "saved_as": "reference", "reference_id": item.id,
+        "nodes_created": 0, "thread_count": 0,
+        "profile_update_task_id": None,
+        "created": 1, "skipped": 0, "restored": 0, "updated": 0,
+        "truncated": truncated,
+    }), 201
+
+
 def _file_parts(file_data, filename, content):
     """Node texts for one analyzed file. Markdown: one text. Word
-    documents whose headings repeat: one text per chapter. The filename
-    heading goes on the first text unless it starts with an H1."""
-    if file_data.get('source_format') == 'docx':
+    documents whose headings repeat, and PDFs with a usable outline: one
+    text per chapter. The filename heading goes on the first text unless
+    it starts with an H1. A PDF never gets more entries per chapter than
+    analyze allows (MAX_CHAPTERS); above that it is split by size."""
+    if file_data.get('source_format') in CHAPTER_FORMATS:
         parts = docx_import.split_chapters(content)
+        if (file_data.get('source_format') == 'pdf'
+                and len(parts) > MAX_PDF_CHAPTERS + 1):
+            parts = [content]
     else:
         parts = [content]
     if not parts[0].lstrip().startswith('# '):
@@ -291,7 +477,8 @@ def _import_file_nodes(file_data, parts, parent_id, source_key, created_at,
     """Create the node(s) for one analyzed file: a chain with one entry
     per part (each part itself splits above the per-node cap). The
     source_key lands on the last node. Returns (tip_node, nodes_created)."""
-    origin = "docx" if file_data.get('source_format') == 'docx' else "markdown"
+    source_format = file_data.get('source_format')
+    origin = source_format if source_format in CHAPTER_FORMATS else "markdown"
     tip = None
     created = 0
     for k, part in enumerate(parts):
@@ -356,6 +543,12 @@ def analyze_import():
         return jsonify({"error": f"{zip_file.filename}: macro-enabled Word "
                         "files (.docm) are not accepted; save it as .docx "
                         "and try again"}), 400
+    if filename_lower.endswith('.doc'):
+        return jsonify({"error": pdf_import.MSG_OLD_DOC}), 400
+
+    # A PDF is extracted in a child process (see utils/pdf_import.py)
+    if filename_lower.endswith('.pdf'):
+        return _analyze_pdf(zip_file)
 
     # A single Word document is analyzed from the upload stream directly
     if filename_lower.endswith('.docx'):
@@ -381,7 +574,7 @@ def analyze_import():
 
     # Validate it's a zip file
     if not filename_lower.endswith('.zip'):
-        return jsonify({"error": "File must be a .zip or .docx file"}), 400
+        return jsonify({"error": "File must be a .zip, .docx or .pdf file"}), 400
 
     try:
         # Read zip file into memory
@@ -394,10 +587,12 @@ def analyze_import():
         total_size = 0
 
         with zipfile.ZipFile(zip_bytes, 'r') as zip_ref:
-            # Get list of all .md / .docx files in the zip (.docm is listed
-            # so that it is reported, not silently ignored)
+            # Get list of all .md / .docx files in the zip (.docm, .doc
+            # and .pdf are listed so that they are reported, not silently
+            # ignored)
             md_files = [f for f in zip_ref.namelist()
-                        if f.lower().endswith(('.md', '.docx', '.docm'))
+                        if f.lower().endswith(('.md', '.docx', '.docm',
+                                               '.doc', '.pdf'))
                         and not f.startswith('__MACOSX/')
                         and not f.split('/')[-1].startswith('~$')]
 
@@ -420,6 +615,15 @@ def analyze_import():
                 # ZipInfo date_time is a tuple: (year, month, day, hour, minute, second)
                 dt_tuple = zip_info.date_time
                 file_datetime = datetime(*dt_tuple)
+
+                if filename.lower().endswith('.doc'):
+                    errors.append({"name": filename,
+                                   "error": pdf_import.MSG_OLD_DOC})
+                    continue
+                if filename.lower().endswith('.pdf'):
+                    errors.append({"name": filename,
+                                   "error": pdf_import.MSG_PDF_IN_ZIP})
+                    continue
 
                 if not filename.lower().endswith('.md'):
                     try:
@@ -488,8 +692,8 @@ def analyze_import():
 
         if not files_data:
             if errors:
-                detail = "; ".join(f"{e['name']}: {e['error']}" for e in errors)
-                return jsonify({"error": f"No files could be imported. {detail}"}), 400
+                return jsonify({"error": "No files could be imported. "
+                                         + _errors_summary(errors)}), 400
             return jsonify({"error": "No valid .md or .docx files could be read from the zip archive"}), 400
 
         return jsonify({
@@ -524,8 +728,12 @@ def confirm_import():
                 ...
             ],
             "import_type": "single_thread" | "separate_nodes",
-            "date_ordering": "modified" | "created"
+            "date_ordering": "modified" | "created",
+            "whose_writing": "mine" | "someone_else"   (required for a PDF)
         }
+
+    A PDF that is someone else's writing is saved as a Reference instead
+    of entries (see _save_pdf_reference).
 
     Returns:
         {
@@ -555,6 +763,20 @@ def confirm_import():
     if date_ordering not in ['modified', 'created']:
         return jsonify({"error": "Invalid date_ordering. Must be 'modified' or 'created'"}), 400
 
+    # A PDF may be someone else's writing; the user must say (no default:
+    # a wrong guess would feed another author's text into their profile).
+    if any(isinstance(f, dict) and f.get('source_format') == 'pdf'
+           for f in files):
+        whose_writing = data.get('whose_writing')
+        if whose_writing not in WHOSE_WRITING:
+            return jsonify({"error": "Choose whose writing this is: yours, "
+                            "or someone else's."}), 400
+        if whose_writing == 'someone_else':
+            if len(files) != 1:
+                return jsonify({"error": "Save one PDF at a time as a "
+                                "reference."}), 400
+            return _save_pdf_reference(files[0])
+
     try:
         # Sort files by the selected date ordering
         # For now, we only have modified_at from zip metadata, so we'll use that
@@ -567,14 +789,17 @@ def confirm_import():
         skipped_alive_ids = []
         key_index, deleted_keys = _load_source_key_index(current_user.id)
 
-        def _file_source_key(filename, content):
-            """sha256 of (filename, content) for markdown-zip dedup."""
+        def _file_source_key(filename, content, source_format=None):
+            """sha256 of (filename, content) for markdown-zip dedup; a
+            PDF's key is keyed with the server secret and the user."""
+            if source_format == 'pdf':
+                return _keyed_digest("pdf-entry", filename, content)
             raw = f"{filename}\x00{content}"
             return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
         conflict = _deleted_match_response(
             (_file_source_key(f.get('filename_without_ext', 'Untitled'),
-                              f.get('content', ''))
+                              f.get('content', ''), f.get('source_format'))
              for f in files_sorted),
             deleted_keys, on_deleted,
         )
@@ -593,7 +818,8 @@ def confirm_import():
                 parts = _file_parts(file_data, filename, content)
                 node_content = parts[-1]  # the tip: what a restore refills
 
-                source_key = _file_source_key(filename, content)
+                source_key = _file_source_key(
+                    filename, content, file_data.get('source_format'))
                 _release_deleted_docx_key(file_data, source_key, key_index,
                                           deleted_keys, on_deleted)
                 if source_key in key_index:
@@ -644,7 +870,8 @@ def confirm_import():
                 parts = _file_parts(file_data, filename, content)
                 node_content = parts[-1]  # the tip: what a restore refills
 
-                source_key = _file_source_key(filename, content)
+                source_key = _file_source_key(
+                    filename, content, file_data.get('source_format'))
                 _release_deleted_docx_key(file_data, source_key, key_index,
                                           deleted_keys, on_deleted)
                 if source_key in key_index:

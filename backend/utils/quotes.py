@@ -79,6 +79,7 @@ def get_ext_quote_data(item_ids: List[int], user_id: int) -> Dict[int, Optional[
     there is no cross-user sharing, so access == ownership.
     """
     from backend.models import ExternalItem
+    from backend.utils import document_reference
     from backend.utils.timefmt import iso_utc
 
     result = {}
@@ -87,14 +88,18 @@ def get_ext_quote_data(item_ids: List[int], user_id: int) -> Dict[int, Optional[
         if item is None or item.user_id != user_id:
             result[item_id] = None
             continue
+        # An uploaded document's title and author live in its encrypted
+        # text (utils/document_reference); the card shows them as fields.
+        title, author, content = document_reference.display(
+            item, item.get_content() or "")
         result[item_id] = {
             "id": item.id,
-            "content": item.get_content(),
+            "content": content,
             "source": item.source,
-            "author_handle": item.author_handle,
+            "author_handle": author,
             # The tweet card's byline (#435): display name, then handle.
             "author_name": item.author_name,
-            "title": item.title,
+            "title": title,
             "url": item.url,
             "posted_at": iso_utc(item.posted_at) if item.posted_at else None,
             # The reference's owner and their own read mark: the quote
@@ -148,10 +153,12 @@ def resolve_ext_quotes(content: str, user_id: int,
                 return f"[Quoted reference #{item_id}: inaccessible]"
             return f"[Quoted reference inaccessible: item {item_id}]"
         resolved_ids.append(item_id)
-        # Tweets have @handles; a web clip's author is a byline or the
-        # site's hostname, which an @ would only misrepresent.
+        # Tweets have @handles; a web clip's or an uploaded document's
+        # author is a byline or the site's hostname, which an @ would only
+        # misrepresent.
+        from backend.models import BYLINE_SOURCES
         author = d["author_handle"] or "unknown"
-        if d["source"] != "web_clip":
+        if d["source"] not in BYLINE_SOURCES:
             author = f"@{author}"
         title = d.get("title")
         if for_llm:

@@ -26,7 +26,7 @@ from backend.celery_app import celery, flask_app
 from backend.models import (
     Node, User, UserProfile, UserRecentContext, UserTodo, APICostLog,
     UserArtifact, Draft,
-    NodeContextArtifact, ExternalItem,
+    NodeContextArtifact, ExternalItem, BYLINE_SOURCES,
 )
 from backend.extensions import db
 from backend.llm_providers import (
@@ -1336,8 +1336,9 @@ def _retrieval_injection_text(tr, user_id, with_labels=False, licence=None):
                 surfaced += " · the user rated this a bad quote"
             tag = (f"[{m['label']}] " if with_labels and m.get("label")
                    else f"reference {item.id} · ")
-            author = (f"@{item.author_handle}" if item.author_handle
-                      else item.source)
+            author = item.author_handle or item.source
+            if item.author_handle and item.source not in BYLINE_SOURCES:
+                author = f"@{author}"
             if licence is not None:
                 licence.note_external([item.id], what="reference preview")
             lines.append(
@@ -1583,7 +1584,9 @@ def _reference_marks_note(item_ids, user_id, labels=None, intro_verdicts=None):
         if iid in labels:
             marked.append(f"{labels[iid]} — " + ", ".join(parts))
             continue
-        who = f"@{it.author_handle}" if it.author_handle else it.source
+        who = it.author_handle or it.source
+        if it.author_handle and it.source not in BYLINE_SOURCES:
+            who = f"@{who}"
         marked.append(f"reference {it.id} ({who}) — " + ", ".join(parts))
     if not marked:
         return None
