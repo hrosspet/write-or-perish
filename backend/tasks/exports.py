@@ -898,6 +898,7 @@ ORIGIN_LABELS = {
     "chatgpt": "ChatGPT conversations (imported)",
     "claude": "Claude conversations (imported)",
     "markdown": "markdown documents (imported)",
+    "docx": "Word documents (imported)",
     "loore": "written in Loore",
 }
 

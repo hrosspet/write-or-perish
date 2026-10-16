@@ -747,8 +747,8 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
                   <input type="file" accept=".zip" onChange={handleChatGPTImportFile} style={{ display: "none" }} />
                 </label>
                 <label style={importLabelStyle}>
-                  Import Markdown (e.g. Obsidian)
-                  <input type="file" accept=".zip" onChange={handleImportFile} style={{ display: "none" }} />
+                  Import Markdown or Word (.docx)
+                  <input type="file" accept=".zip,.docx" onChange={handleImportFile} style={{ display: "none" }} />
                 </label>
                 <label style={importLabelStyle}>
                   Import Tweets
@@ -841,12 +841,22 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
         <ModalShell onDismiss={dismissGuard(handleCancelImport)} maxWidth="520px">
           <ModalTitle>Confirm Import</ModalTitle>
           <p style={{ color: "var(--text-secondary)", fontFamily: "var(--sans)", fontWeight: 300 }}>
-            Found <strong style={{ color: "var(--text-primary)" }}>{importFiles.total_files}</strong> .md file{importFiles.total_files !== 1 ? 's' : ''}
+            Found <strong style={{ color: "var(--text-primary)" }}>{importFiles.total_files}</strong> document{importFiles.total_files !== 1 ? 's' : ''}
             ({importFiles.total_size.toLocaleString()} bytes)
           </p>
           <p style={{ color: "var(--text-secondary)", fontFamily: "var(--sans)", fontWeight: 300 }}>
             Estimated tokens: <strong style={{ color: "var(--text-primary)" }}>{importFiles.total_tokens.toLocaleString()}</strong>
           </p>
+          {importFiles.errors && importFiles.errors.length > 0 && (
+            <div style={{ color: "var(--text-secondary)", fontFamily: "var(--sans)", fontWeight: 300 }}>
+              <p>These files could not be imported and are left out:</p>
+              <ul>
+                {importFiles.errors.map((e) => (
+                  <li key={e.name}>{e.name}: {e.error}</li>
+                ))}
+              </ul>
+            </div>
+          )}
 
           <div style={{ marginTop: "15px", marginBottom: "15px" }}>
             <label style={{
