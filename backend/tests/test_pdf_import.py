@@ -59,7 +59,11 @@ def _make_app():
         return User.query.get(int(user_id))
 
     from backend.routes.import_data import import_bp
+    from backend.routes.external import external_bp
+    from backend.routes.search import search_bp
     app.register_blueprint(import_bp, url_prefix="/api")
+    app.register_blueprint(external_bp, url_prefix="/api/external")
+    app.register_blueprint(search_bp, url_prefix="/api")
     return app
 
 
@@ -505,20 +509,109 @@ def test_someone_elses_writing_saved_as_reference(client):
     item = items[0]
     assert body["reference_id"] == item.id
     assert item.source == "document"
-    assert item.title == "A Study of Things"
-    assert item.author_handle == "Jane Doe"
     assert item.posted_at.isoformat() == "2020-01-02T03:04:05"
     assert item.url is None and item.public_source is False
-    assert item.get_content() == f["content"]
+    # Title and author are inside the encrypted text, not in columns
+    assert item.title is None and item.author_handle is None
+    row = _db.session.execute(_db.text(
+        "SELECT title, author_handle, content, external_id "
+        "FROM external_item")).one()
+    assert row.title is None and row.author_handle is None
+    assert row.content.startswith(encryption.ENCRYPTED_PREFIX_V2)
+    for secret in ("quick brown", "A Study of Things", "Jane Doe"):
+        assert secret not in row.content
+    assert item.get_content() == (
+        "# A Study of Things\n\n*By Jane Doe*\n\n" + f["content"])
     assert "## Method" in item.get_content()
-    assert item.content.startswith(encryption.ENCRYPTED_PREFIX_V2)
-    assert "quick brown" not in item.content
 
     # Saving the same PDF again is a no-op
     r = _confirm(client, [f], whose_writing="someone_else")
     assert r.status_code == 200
     assert r.get_json()["skipped"] == 1
     assert ExternalItem.query.count() == 1
+
+
+def test_reference_dedup_key_is_keyed_per_user(client):
+    import hashlib
+    import hmac
+    f = _analyze(client, "p.pdf", _paper()).get_json()["files"][0]
+    _confirm(client, [f], whose_writing="someone_else")
+    item = ExternalItem.query.one()
+    text = f["content"].strip()
+    assert item.external_id != hashlib.sha256(text.encode()).hexdigest()
+
+    def key(user_id):
+        msg = f"pdf-reference\x00{user_id}\x00{text}".encode()
+        return hmac.new(b"test-secret", msg, hashlib.sha256).hexdigest()
+
+    assert item.external_id == key(item.user_id)
+    assert len(item.external_id) == 64
+    assert key(item.user_id + 1) != item.external_id
+
+
+def test_reference_shows_title_and_author_from_its_text(client):
+    f = _analyze(client, "p.pdf", _paper()).get_json()["files"][0]
+    item_id = _confirm(client, [f], whose_writing="someone_else") \
+        .get_json()["reference_id"]
+
+    listed = client.get("/api/external/items").get_json()["items"][0]
+    assert listed["title"] == "A Study of Things"
+    assert listed["author_handle"] == "Jane Doe"
+    assert listed["preview"].startswith("A Study of Things\n\n## Introduction")
+    page = client.get(f"/api/external/items/{item_id}").get_json()
+    assert page["title"] == "A Study of Things"
+    assert page["content"] == f["content"]
+
+    found = client.get("/api/search?scope=external&q=method").get_json()
+    assert found["results"][0]["title"] == "A Study of Things"
+    assert found["results"][0]["author_handle"] == "Jane Doe"
+
+    from backend.utils.quotes import get_ext_quote_data
+    item = ExternalItem.query.get(item_id)
+    quote = get_ext_quote_data([item_id], item.user_id)[item_id]
+    assert quote["title"] == "A Study of Things"
+    assert quote["author_handle"] == "Jane Doe"
+    assert quote["content"] == f["content"]
+
+    # An edit of the title or the text keeps both inside the text
+    r = client.put(f"/api/external/items/{item_id}",
+                   json={"title": "Renamed", "content": "New body."})
+    assert r.status_code == 200
+    assert r.get_json()["title"] == "Renamed"
+    assert r.get_json()["content"] == "New body."
+    item = ExternalItem.query.get(item_id)
+    assert item.title is None and item.author_handle is None
+    assert item.get_content() == "# Renamed\n\n*By Jane Doe*\n\nNew body."
+
+
+def test_document_reference_header_round_trip():
+    from backend.utils import document_reference as dr
+    text = dr.compose("A *Title*\nsplit", "Ann *Lee*", "Body\n\nmore")
+    assert text == "# A *Title* split\n\n*By Ann Lee*\n\nBody\n\nmore"
+    assert dr.split(text) == ("A *Title* split", "Ann Lee", "Body\n\nmore")
+    assert dr.split(dr.compose("T", None, "*By nobody* body")) == (
+        "T", None, "*By nobody* body")
+    assert dr.split("plain text") == (None, None, "plain text")
+
+
+def test_temp_file_removed_after_success_and_timeout(client, monkeypatch,
+                                                     tmp_path):
+    made = []
+    real = pdf_import.tempfile.NamedTemporaryFile
+
+    def recording(*a, **kw):
+        f = real(*a, **kw)
+        made.append(f.name)
+        return f
+
+    monkeypatch.setattr(pdf_import.tempfile, "NamedTemporaryFile", recording)
+    assert _analyze(client, "a.pdf", _pdf([_body("a")])).status_code == 200
+    monkeypatch.setattr(pdf_import, "WORKER_PATH", _script(
+        tmp_path, "import time\ntime.sleep(30)\n"))
+    monkeypatch.setattr(pdf_import, "PDF_WALL_SECONDS", 0.5)
+    assert _analyze(client, "b.pdf", _pdf([_body("b")])).status_code == 400
+    assert len(made) == 2
+    assert not any(os.path.exists(p) for p in made)
 
 
 def test_reference_text_capped_at_one_entry(client):
@@ -531,7 +624,8 @@ def test_reference_text_capped_at_one_entry(client):
     assert r.get_json()["truncated"] is True
     item = ExternalItem.query.one()
     assert len(item.get_content()) <= 100_000
-    assert item.title == "Book"
+    assert item.title is None
+    assert item.get_content().startswith("# Book\n\nword word")
 
 
 def test_reference_title_skips_editor_placeholders():

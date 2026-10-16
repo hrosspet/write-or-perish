@@ -79,6 +79,7 @@ def get_ext_quote_data(item_ids: List[int], user_id: int) -> Dict[int, Optional[
     there is no cross-user sharing, so access == ownership.
     """
     from backend.models import ExternalItem
+    from backend.utils import document_reference
     from backend.utils.timefmt import iso_utc
 
     result = {}
@@ -87,14 +88,18 @@ def get_ext_quote_data(item_ids: List[int], user_id: int) -> Dict[int, Optional[
         if item is None or item.user_id != user_id:
             result[item_id] = None
             continue
+        # An uploaded document's title and author live in its encrypted
+        # text (utils/document_reference); the card shows them as fields.
+        title, author, content = document_reference.display(
+            item, item.get_content() or "")
         result[item_id] = {
             "id": item.id,
-            "content": item.get_content(),
+            "content": content,
             "source": item.source,
-            "author_handle": item.author_handle,
+            "author_handle": author,
             # The tweet card's byline (#435): display name, then handle.
             "author_name": item.author_name,
-            "title": item.title,
+            "title": title,
             "url": item.url,
             "posted_at": iso_utc(item.posted_at) if item.posted_at else None,
             # The reference's owner and their own read mark: the quote

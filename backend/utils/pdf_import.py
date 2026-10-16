@@ -7,8 +7,9 @@ as it likes. The extraction therefore runs in its own Python process
 (pdf_extract_worker.py) with a CPU-time limit and an address-space limit
 it sets on itself before pypdf is loaded, under a wall-clock timeout
 here. The child gets an empty environment (no app secrets) and the
-upload as a temporary file; its stderr is discarded and nothing it
-returns is logged except an exception type name.
+upload as a private temporary file, which is deleted when extract_pdf
+returns or raises (a timeout included); the child's stderr is discarded
+and nothing it returns is logged except an exception type name.
 """
 import json
 import logging

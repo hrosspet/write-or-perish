@@ -1279,7 +1279,10 @@ TWEET_SOURCES = ("twitter_bookmark", "twitter_like", "community_archive",
                  READ_PICK_SOURCE)
 # ExternalItem.source of a document the user uploaded as someone else's
 # writing (a PDF saved as a Reference from the import confirm step). Its
-# external_id is the sha256 hex of the extracted text; it has no URL.
+# external_id is an HMAC-SHA256 hex of the extracted text, keyed with the
+# app secret and the user; it has no URL, and its title and author are
+# kept inside the encrypted content (backend/utils/document_reference),
+# never in the title / author_handle columns.
 SOURCE_DOCUMENT = "document"
 # Sources whose author_handle is a byline (a name, or a site), not an
 # @handle.
@@ -1303,8 +1306,8 @@ class ExternalItem(db.Model):
     # user; SOURCE_DOCUMENT: an uploaded PDF someone else wrote)
     source = db.Column(db.String(32), nullable=False)
     # Stable per-source identifier for dedupe: tweet id, for web clips
-    # the sha256 hex of the canonical URL, for documents the sha256 hex
-    # of the extracted text (exactly 64 chars).
+    # the sha256 hex of the canonical URL, for documents a keyed HMAC of
+    # the extracted text (exactly 64 chars).
     external_id = db.Column(db.String(64), nullable=False)
     author_handle = db.Column(db.String(64), nullable=True)
     # The tweet author's display name (#435), when the Community Archive

@@ -6,6 +6,7 @@ from backend.utils.privacy import AI_ALLOWED
 from backend.utils import docx_import, pdf_import
 from datetime import datetime, timedelta
 import hashlib
+import hmac
 import sys
 import zipfile
 import zlib
@@ -331,17 +332,33 @@ def _analyze_pdf(upload):
     }), 200
 
 
+def _keyed_digest(purpose, *parts):
+    """HMAC-SHA256 hex (64 chars) of `parts` for the current user, keyed
+    with the app's SECRET_KEY: a stable dedup key for an uploaded
+    document's text that does not stand for the text by itself."""
+    secret = current_app.config.get("SECRET_KEY")
+    if not secret:
+        raise RuntimeError("SECRET_KEY is not set")
+    if isinstance(secret, str):
+        secret = secret.encode("utf-8")
+    msg = "\x00".join([purpose, str(current_user.id), *map(str, parts)])
+    return hmac.new(secret, msg.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
 def _save_pdf_reference(file_data):
     """Answer "someone else's": the PDF's text is saved as one Reference
     (an ExternalItem, like a page saved with the Chrome clipper), not as
     the user's entries, so it never feeds their profile. Mirrors clip():
     the text is capped at one entry's worth, it is encrypted at rest, a
     second save of the same text is a no-op, and a copy hidden by a
-    waiting "Delete all my writing" becomes the user's again. The
+    waiting "Delete all my writing" becomes the user's again. Unlike a
+    clip, the title and author go inside the encrypted text
+    (utils/document_reference), not into the plaintext columns. The
     periodic sweeps pick it up like any new reference (embedding,
     digest)."""
     from sqlalchemy.exc import IntegrityError
     from backend.models import ExternalItem, SOURCE_DOCUMENT
+    from backend.utils import document_reference
     from backend.utils.hidden_rows import reclaim_external_items
     from backend.utils.node_split import NODE_CHAR_CAP
 
@@ -350,16 +367,18 @@ def _save_pdf_reference(file_data):
         return jsonify({"error": "This PDF has no text to save."}), 400
     content = content.strip()
     # Keyed by the whole extracted text, so the same PDF is one Reference
-    external_id = hashlib.sha256(content.encode("utf-8")).hexdigest()
-    truncated = len(content) > NODE_CHAR_CAP
-    if truncated:
-        content = content[:NODE_CHAR_CAP].rstrip()
+    external_id = _keyed_digest("pdf-reference", content)
     ref = file_data.get('reference')
     ref = ref if isinstance(ref, dict) else {}
     title = (str(ref.get('title') or '').strip()
              or str(file_data.get('filename_without_ext') or '').strip())
-    title = title[:512] or None
-    author = str(ref.get('author') or '').strip()[:64] or None
+    author = ref.get('author')
+    # The header and the text together hold one entry's worth
+    room = NODE_CHAR_CAP - len(document_reference.compose(title, author, "")) - 2
+    truncated = len(content) > room
+    if truncated:
+        content = content[:room].rstrip()
+    content = document_reference.compose(title, author, content)
     posted_at = pdf_import.parse_date(ref.get('date'))
     user_id = current_user.id
 
@@ -386,7 +405,9 @@ def _save_pdf_reference(file_data):
         return already_saved(existing)
     item = ExternalItem(
         user_id=user_id, source=SOURCE_DOCUMENT, external_id=external_id,
-        author_handle=author, title=title, url=None, posted_at=posted_at,
+        # Title and author are in the encrypted text; the date is kept
+        # as the reference's date, as for every other source
+        author_handle=None, title=None, url=None, posted_at=posted_at,
         # An uploaded file may be private: assessed, not vouched public
         public_source=False,
     )
@@ -742,14 +763,17 @@ def confirm_import():
         skipped_alive_ids = []
         key_index, deleted_keys = _load_source_key_index(current_user.id)
 
-        def _file_source_key(filename, content):
-            """sha256 of (filename, content) for markdown-zip dedup."""
+        def _file_source_key(filename, content, source_format=None):
+            """sha256 of (filename, content) for markdown-zip dedup; a
+            PDF's key is keyed with the server secret and the user."""
+            if source_format == 'pdf':
+                return _keyed_digest("pdf-entry", filename, content)
             raw = f"{filename}\x00{content}"
             return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
         conflict = _deleted_match_response(
             (_file_source_key(f.get('filename_without_ext', 'Untitled'),
-                              f.get('content', ''))
+                              f.get('content', ''), f.get('source_format'))
              for f in files_sorted),
             deleted_keys, on_deleted,
         )
@@ -768,7 +792,8 @@ def confirm_import():
                 parts = _file_parts(file_data, filename, content)
                 node_content = parts[-1]  # the tip: what a restore refills
 
-                source_key = _file_source_key(filename, content)
+                source_key = _file_source_key(
+                    filename, content, file_data.get('source_format'))
                 _release_deleted_docx_key(file_data, source_key, key_index,
                                           deleted_keys, on_deleted)
                 if source_key in key_index:
@@ -819,7 +844,8 @@ def confirm_import():
                 parts = _file_parts(file_data, filename, content)
                 node_content = parts[-1]  # the tip: what a restore refills
 
-                source_key = _file_source_key(filename, content)
+                source_key = _file_source_key(
+                    filename, content, file_data.get('source_format'))
                 _release_deleted_docx_key(file_data, source_key, key_index,
                                           deleted_keys, on_deleted)
                 if source_key in key_index:
