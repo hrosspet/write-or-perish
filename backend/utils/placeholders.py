@@ -1,4 +1,5 @@
-"""Helpers for {user_export} placeholder parsing.
+"""Helpers for {user_export} placeholder parsing, and the one-pass fill
+of a prompt's placeholders (fill_placeholders).
 
 Lives in `utils/` so tests can import it without pulling in the full
 Celery + LLM-providers chain that comes with `backend.tasks.llm_completion`.
@@ -484,3 +485,64 @@ def parse_days(raw, *, user_id=None, placeholder=None, log=None):
         )
         return None
     return parsed
+
+
+def fill_placeholders(text, values, patterns=(), seen=None):
+    """*text* with its placeholders filled in ONE left-to-right pass.
+
+    *values* maps each placeholder, as exact text, to its replacement: a
+    string, or a callable taking the matched text for a value that
+    depends on the occurrence (FirstThen). *patterns* are (compiled
+    regex, callable) pairs for placeholders that take parameters
+    ({ca_tweets?days=1}); each callable gets the matched text. *seen*, a
+    set, collects every key of *values* that matched.
+
+    A filled-in value is never searched again. Filling one placeholder
+    after another rescanned the whole text each time, so a placeholder
+    name inside an earlier value was filled too: the recent raw window
+    carried a copy of an earlier session's prompt, and memory and
+    intentions were filled into that copy as well (#518). Now a memory
+    entry naming {user_intentions} stays as written.
+
+    Values are inserted as they are: re's replacement-template escapes
+    ("\\1", "\\g<0>", a Windows path's "\\U") mean nothing here, as with
+    the str.replace this replaced.
+    """
+    if not values and not patterns:
+        return text
+    alternatives = [re.escape(key)
+                    for key in sorted(values, key=len, reverse=True)]
+    alternatives += [pattern.pattern for pattern, _fill in patterns]
+    combined = re.compile("|".join(alternatives))
+
+    def _replace(match):
+        found = match.group(0)
+        if found in values:
+            if seen is not None:
+                seen.add(found)
+            value = values[found]
+            return value(found) if callable(value) else value
+        for pattern, fill in patterns:
+            if pattern.fullmatch(found):
+                return fill(found)
+        return found
+
+    return combined.sub(_replace, text)
+
+
+class FirstThen:
+    """A placeholder value that depends on the occurrence: *first* for
+    the first one filled, *rest* for every later one, across all the
+    texts it fills (the {user_export} archive goes into a prompt once,
+    #139). Pass it as a value to fill_placeholders."""
+
+    def __init__(self, first, rest):
+        self.first = first
+        self.rest = rest
+        self.used = False
+
+    def __call__(self, _found):
+        if self.used:
+            return self.rest
+        self.used = True
+        return self.first

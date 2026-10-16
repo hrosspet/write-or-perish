@@ -1049,7 +1049,10 @@ def _build_user_export_incremental(
         resolver = ExportQuoteResolver(
             user.id, budget,
             filter_ai_usage=filter_ai_usage,
-            chronological=chronological_order
+            chronological=chronological_order,
+            # A collapsed export emits no preamble, so the budget counts
+            # only the entries it does emit (#518).
+            with_preamble=not collapse_artifacts,
         )
         for node in selected_nodes:
             content = node.get_content()
@@ -1339,7 +1342,9 @@ def build_user_export_content(
                         use `latest_node_created_at` as a resume
                         cursor).
         collapse_artifacts: If True, suppress full artifact preambles
-                           (artifact ID refs are still inlined).
+                           (artifact ID refs are still inlined), and the
+                           max_tokens budget counts only the entries, as
+                           nothing else is emitted.
         include_strategy: Scope topology when `created_after` is None.
                          "authored_threads" (default) or "engaged_threads".
                          Any other value raises ValueError. See module
@@ -1455,11 +1460,14 @@ def build_user_export_content(
         # the render loop's windowed prefetch then finds them cached.
         prefetch_deks(n.content for n in selected_nodes)
 
-        # Create resolver with adjusted token budget
+        # Create resolver with adjusted token budget. A collapsed export
+        # emits no preamble, so the budget counts only the entries it
+        # does emit (#518).
         resolver = ExportQuoteResolver(
             user.id, budget,
             filter_ai_usage=filter_ai_usage,
-            chronological=chronological_order
+            chronological=chronological_order,
+            with_preamble=not collapse_artifacts,
         )
 
         # Add only the pre-selected nodes to the resolver (decrypts here)
