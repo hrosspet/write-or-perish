@@ -6,6 +6,8 @@ import { useUser } from '../contexts/UserContext';
 import { useAudio } from '../contexts/AudioContext';
 import { useAsyncTaskPolling } from '../hooks/useAsyncTaskPolling';
 import { useTTSStreamSSE } from '../hooks/useSSE';
+import { useToast } from '../contexts/ToastContext';
+import { playErrorSound } from '../utils/errorSound';
 
 /**
  * Extracts the first markdown header from content
@@ -31,7 +33,8 @@ const extractMarkdownHeader = (content) => {
  */
 const SpeakerIcon = ({ nodeId, profileId, itemId, content, isPublic, aiUsage, onTtsGenerated, buttonStyle }) => {
   const { user } = useUser();
-  const { loadAudio, loadAudioQueue, updateChapters, appendChunkToQueue, setGeneratingTTS, currentAudio, isPlaying, warmup } = useAudio();
+  const { loadAudio, loadAudioQueue, updateChapters, appendChunkToQueue, setGeneratingTTS, currentAudio, isPlaying, warmup, waitingForChunks, queueFinishedCount } = useAudio();
+  const { addToast } = useToast();
   const [loading, setLoading] = useState(false);
   const [audioSrc, setAudioSrc] = useState(null);
   const [audioChunks, setAudioChunks] = useState(null); // For chunked playback
@@ -150,11 +153,53 @@ const SpeakerIcon = ({ nodeId, profileId, itemId, content, isPublic, aiUsage, on
     if (onTtsGenerated) onTtsGenerated();
   }, [setGeneratingTTS, onTtsGenerated, fetchChapters, updateChapters, id, entityType]);
 
+  // A failed generation is announced as a failed voice reply is (#504):
+  // the error sound, here with a toast, after the audio that did arrive
+  // has played. Holds { finishedCount } while it waits for that audio.
+  const failureAfterQueueRef = useRef(null);
+  const announceTtsFailure = useCallback((partial) => {
+    playErrorSound();
+    addToast(partial
+      ? "Loore couldn't read the rest aloud. Tap the speaker to try again from the start."
+      : "Loore couldn't read this aloud. Tap the speaker to try again.", 6000);
+  }, [addToast]);
+
+  // The server's `error` event: generation failed. Turning the stream off
+  // ends the reconnects (the server refuses a failed entry's stream); the
+  // chunks already queued keep playing.
+  const handleStreamError = useCallback(() => {
+    const partial = sseChunkCountRef.current > 0;
+    setSseActive(false);
+    setGeneratingTTS(false);
+    setLoading(false);
+    sseChunkCountRef.current = 0;
+    const ours = currentAudio && currentAudio.id === id && currentAudio.type === entityType;
+    if (!partial || (ours && waitingForChunks)) {
+      announceTtsFailure(partial);
+    } else if (ours) {
+      failureAfterQueueRef.current = { finishedCount: queueFinishedCount };
+    }
+    // Otherwise other audio has replaced this one: nothing to announce.
+  }, [setGeneratingTTS, currentAudio, id, entityType, waitingForChunks, queueFinishedCount, announceTtsFailure]);
+
+  useEffect(() => {
+    const waiting = failureAfterQueueRef.current;
+    if (!waiting) return;
+    const ours = currentAudio && currentAudio.id === id && currentAudio.type === entityType;
+    if (!ours) {
+      failureAfterQueueRef.current = null;
+    } else if (queueFinishedCount !== waiting.finishedCount) {
+      failureAfterQueueRef.current = null;
+      announceTtsFailure(true);
+    }
+  }, [currentAudio, id, entityType, queueFinishedCount, announceTtsFailure]);
+
   const { disconnect: disconnectSSE } = useTTSStreamSSE(id, {
     enabled: sseActive,
     entityType,
     onChunkReady: handleChunkReady,
     onAllComplete: handleAllComplete,
+    onError: handleStreamError,
   });
 
   // TTS generation polling - fallback when SSE isn't used (profiles, or SSE failure)
@@ -183,6 +228,7 @@ const SpeakerIcon = ({ nodeId, profileId, itemId, content, isPublic, aiUsage, on
     sseChunkCountRef.current = 0;
     chaptersRef.current = [];
     lastSectionRef.current = null;
+    failureAfterQueueRef.current = null;
   }, [nodeId, profileId, itemId, content]);
 
   // Clean up SSE on unmount
@@ -337,7 +383,9 @@ const SpeakerIcon = ({ nodeId, profileId, itemId, content, isPublic, aiUsage, on
           setLoading(false);
           return;
         }
-        // Start async TTS generation
+        // Start async TTS generation (an earlier failure's announcement
+        // no longer applies)
+        failureAfterQueueRef.current = null;
         await api.post(`${baseUrl}/tts`);
 
         // Use SSE for streaming playback (nodes and profiles)

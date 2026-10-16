@@ -14,6 +14,11 @@ jest.mock('../hooks/useAsyncTaskPolling', () => ({
 jest.mock('../contexts/UserContext', () => ({
   useUser: () => ({ user: { voice_mode_enabled: true } }),
 }));
+const mockAddToast = jest.fn();
+jest.mock('../contexts/ToastContext', () => ({
+  useToast: () => ({ addToast: mockAddToast }),
+}));
+jest.mock('../utils/errorSound', () => ({ playErrorSound: jest.fn() }));
 const mockAudio = {
   loadAudio: jest.fn(),
   loadAudioQueue: jest.fn(),
@@ -43,6 +48,7 @@ jest.mock('../api', () => ({
 import React from 'react';
 import { render, fireEvent, act } from '@testing-library/react';
 import SpeakerIcon from './SpeakerIcon';
+import { playErrorSound } from '../utils/errorSound';
 
 const chunk = (i) => ({
   chunk_index: i,
@@ -89,4 +95,53 @@ test('the icon is on for a profile version AI may read', () => {
   const { getByRole } = render(
     <SpeakerIcon profileId={9} content="text" aiUsage="chat" />);
   expect(getByRole('button')).not.toBeDisabled();
+});
+
+// The server's `error` event: generation failed (every attempt at a chunk
+// gave no playable audio). The stream is turned off, so it doesn't
+// reconnect every 3 s, and the spinner stops.
+test('a failed generation stops the stream and the spinner, and says so', async () => {
+  const { getByRole } = render(
+    <SpeakerIcon profileId={9} content="# Title" aiUsage="chat" />);
+  await act(async () => { fireEvent.click(getByRole('button')); });
+  expect(mockSSEOptions.enabled).toBe(true);
+  expect(getByRole('button')).toHaveAttribute('title', 'Generating audio...');
+
+  act(() => { mockSSEOptions.onError({ message: 'TTS generation failed' }); });
+
+  expect(mockSSEOptions.enabled).toBe(false);
+  expect(getByRole('button')).toHaveAttribute('title', 'Play audio');
+  expect(mockAudio.setGeneratingTTS).toHaveBeenLastCalledWith(false);
+  expect(playErrorSound).toHaveBeenCalledTimes(1);
+  expect(mockAddToast).toHaveBeenCalledWith(
+    expect.stringContaining("couldn't read this aloud"), 6000);
+});
+
+test('a failure mid-stream lets the audio that arrived play, then says so', async () => {
+  const { getByRole, rerender } = render(<SpeakerIcon nodeId={5} content="# Title" />);
+  await act(async () => { fireEvent.click(getByRole('button')); });
+  act(() => { mockSSEOptions.onChunkReady(chunk(0)); });
+  // The player now plays this entry's queue.
+  mockAudio.currentAudio = { id: 5, type: 'node' };
+  mockAudio.queueFinishedCount = 0;
+  mockAudio.waitingForChunks = false;
+  rerender(<SpeakerIcon nodeId={5} content="# Title" />);
+
+  act(() => { mockSSEOptions.onError({ message: 'TTS generation failed' }); });
+
+  expect(mockSSEOptions.enabled).toBe(false);
+  expect(getByRole('button')).toHaveAttribute('title', 'Play audio');
+  expect(mockAudio.loadAudioQueue).toHaveBeenCalledTimes(1);
+  expect(playErrorSound).not.toHaveBeenCalled();
+
+  // The queued audio plays to its end: now the failure is announced.
+  mockAudio.queueFinishedCount = 1;
+  rerender(<SpeakerIcon nodeId={5} content="# Title" />);
+  expect(playErrorSound).toHaveBeenCalledTimes(1);
+  expect(mockAddToast).toHaveBeenCalledWith(
+    expect.stringContaining("couldn't read the rest aloud"), 6000);
+
+  mockAudio.currentAudio = null;
+  delete mockAudio.queueFinishedCount;
+  delete mockAudio.waitingForChunks;
 });

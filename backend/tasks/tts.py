@@ -15,6 +15,7 @@ from celery.utils.log import get_task_logger
 from openai import OpenAI
 from pathlib import Path
 from pydub import AudioSegment
+from pydub.exceptions import CouldntDecodeError
 import os
 from datetime import datetime
 
@@ -168,9 +169,17 @@ class TTSCallFailed(Exception):
     """Temporary, #382: every attempt at a TTS call failed."""
 
 
+class TTSBadAudio(Exception):
+    """The call answered, but not with playable audio: an empty body, or
+    one that does not decode as MP3 (e.g. an error message sent with
+    HTTP 200). Resent like a slow call; unlike the slow-call handling it
+    is not temporary, so it stays when #382's workaround goes."""
+
+
 def _stream_speech(client, text, path, mark=None):
-    """One TTS call streamed to *path*. Raises TTSCutOff or TTSSlowCall
-    instead of leaving incomplete audio as the result."""
+    """One TTS call streamed to *path*; returns its decoded audio. Raises
+    TTSCutOff, TTSSlowCall or TTSBadAudio instead of leaving incomplete or
+    unplayable audio as the result."""
     started = _now()
     received = 0
     with client.with_options(max_retries=0).audio.speech \
@@ -179,6 +188,7 @@ def _stream_speech(client, text, path, mark=None):
         timeout=httpx.Timeout(TTS_SLOW_CHECK_SECS, connect=5.0),
     ) as resp:
         request_id = resp.headers.get("x-request-id")
+        content_type = resp.headers.get("content-type")
         try:
             with open(path, "wb") as f:
                 for data in resp.iter_bytes():
@@ -205,8 +215,24 @@ def _stream_speech(client, text, path, mark=None):
     if elapsed >= TTS_CUTOFF_SECS:
         raise TTSCutOff(
             f"request {request_id} ran {elapsed:.0f} s; audio is cut")
+    if received == 0:
+        raise TTSBadAudio(
+            f"request {request_id}: empty body ({content_type})")
     if mark is not None:
         mark("tts_last_byte")
+    return _decode_mp3(path, request_id, received, content_type)
+
+
+def _decode_mp3(path, request_id, received, content_type):
+    """The answer saved at *path* as audio; TTSBadAudio when it isn't MP3.
+    Any other decoder failure (e.g. no ffmpeg) is raised as it is: a
+    resend would fail the same way."""
+    try:
+        return AudioSegment.from_file(str(path), format="mp3")
+    except CouldntDecodeError as e:
+        raise TTSBadAudio(
+            f"request {request_id}: {received} bytes ({content_type}) "
+            f"that do not decode as MP3") from e
 
 
 def synthesize_to_file(client, text, path, section_end=False, mark=None):
@@ -216,17 +242,21 @@ def synthesize_to_file(client, text, path, section_end=False, mark=None):
     *mark(stage)*, when given, is called at the first and the last byte
     of the audio (#371 timing).
 
-    A call that is too slow, ran to OpenAI's cutoff, or failed with an
-    error the SDK would retry is sent again (#382); when every attempt
-    fails, the partial file is removed and TTSCallFailed raised, so the
-    chunk fails rather than playing cut audio. Only slow calls are
-    reported to Sentry: that count tells #382 when OpenAI is fast again."""
+    A call that is too slow, ran to OpenAI's cutoff, failed with an error
+    the SDK would retry (#382), or answered without playable audio (an
+    empty body, or one that doesn't decode as MP3) is sent again, to the
+    same model; when every attempt fails, the file is removed and
+    TTSCallFailed raised, so the chunk fails rather than playing cut or
+    broken audio. Only slow calls are reported to Sentry: that count
+    tells #382 when OpenAI is fast again. The warning for a failed
+    attempt names the request id and the byte count, never the text."""
     attempts = TTS_SLOW_RETRIES + 1
     for attempt in range(1, attempts + 1):
         try:
-            _stream_speech(client, text, path, mark=mark)
+            segment = _stream_speech(client, text, path, mark=mark)
             break
-        except (TTSSlowCall, TTSCutOff) + _TTS_RETRIED_SDK_ERRORS as e:
+        except ((TTSSlowCall, TTSCutOff, TTSBadAudio)
+                + _TTS_RETRIED_SDK_ERRORS) as e:
             if attempt == attempts:
                 Path(path).unlink(missing_ok=True)
                 raise TTSCallFailed(
@@ -241,7 +271,6 @@ def synthesize_to_file(client, text, path, section_end=False, mark=None):
             if slow:
                 sentry_sdk.capture_message("Slow TTS call cancelled",
                                            level="warning")
-    segment = AudioSegment.from_file(str(path), format="mp3")
     if section_end:
         segment = segment + AudioSegment.silent(
             duration=CHAPTER_END_SILENCE_MS)

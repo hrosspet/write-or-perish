@@ -108,6 +108,29 @@ test('the TTS stream replayed after a return delivers each chunk once', () => {
   expect(onChunkReady.mock.calls.map(([data]) => data.chunk_index)).toEqual([0, 1]);
 });
 
+// The server's `error` event (generation failed) reaches onError; a dropped
+// connection, which fires `error` without data, does not.
+test("the TTS stream passes the server's error event to onError", () => {
+  jest.spyOn(console, 'warn').mockImplementation(() => {});
+  const onError = jest.fn();
+  const { rerender } = renderHook(({ enabled }) => useTTSStreamSSE(9, {
+    enabled, entityType: 'profile', onError,
+  }), { initialProps: { enabled: true } });
+  const es = MockEventSource.instances[0];
+  expect(es.url).toBe('/api/sse/profiles/9/tts-stream');
+
+  act(() => es.listeners.error.forEach((fn) => fn({})));
+  expect(onError).not.toHaveBeenCalled();
+  act(() => es.emit('error', { message: 'TTS generation failed' }));
+  expect(onError).toHaveBeenCalledWith({ message: 'TTS generation failed' });
+
+  // The caller then turns the stream off: closed, and no new connection.
+  rerender({ enabled: false });
+  expect(es.closed).toBe(true);
+  expect(MockEventSource.instances).toHaveLength(1);
+  console.warn.mockRestore();
+});
+
 test("a reply's text stream reconnects on return and takes the fresh snapshot", () => {
   const { result } = renderHook(() => useLlmTextStream(7, { enabled: true, initialText: 'Hel' }));
   expect(MockEventSource.instances).toHaveLength(1);
