@@ -570,3 +570,28 @@ def test_zip_with_one_bad_docx_lists_good_file_and_names_bad(client,
     body = _analyze(client, "e.zip", z).get_json()
     assert [f["name"] for f in body["files"]] == ["good.md"]
     assert body["errors"][0]["name"] == "ok.docx"
+
+
+def test_zip_member_read_errors_are_per_file_and_not_logged(client, caplog):
+    z = _zip({"good.md": "hello", "secretname-enc.docx": _docx(["x"]),
+              "secretname-crc.docx": _docx(["y" * 200])})
+    z = _patch_entry(z, "secretname-enc.docx", set_flag=1)
+    z = _patch_entry(z, "secretname-crc.docx", corrupt=True)
+    with caplog.at_level("DEBUG"):
+        body = _analyze(client, "e.zip", z).get_json()
+    assert [f["name"] for f in body["files"]] == ["good.md"]
+    errs = {e["name"]: e["error"] for e in body["errors"]}
+    assert set(errs) == {"secretname-enc.docx", "secretname-crc.docx"}
+    assert all("damaged or password-protected" in e for e in errs.values())
+    assert "secretname" not in caplog.text
+
+
+def test_unexpected_error_log_has_type_only(client, monkeypatch, caplog):
+    def boom(*a, **k):
+        raise KeyError("secretname.docx")
+    monkeypatch.setattr(docx_import, "convert_docx", boom)
+    with caplog.at_level("DEBUG"):
+        _analyze(client, "secretname.docx", _docx(["x"]))
+        _analyze(client, "e.zip", _zip({"secretname.docx": _docx(["x"])}))
+    assert "KeyError" in caplog.text
+    assert "secretname" not in caplog.text

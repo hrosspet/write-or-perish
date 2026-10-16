@@ -272,6 +272,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
     event.target.value = "";
     if (!picked) return;
 
+    setError("");
     setImporting(true);
     setImportStage("preparing");
     setUploadPercent(null);

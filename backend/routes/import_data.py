@@ -6,7 +6,9 @@ from backend.utils.privacy import AI_ALLOWED
 from backend.utils import docx_import
 from datetime import datetime, timedelta
 import hashlib
+import sys
 import zipfile
+import zlib
 import io
 import shutil
 import tempfile
@@ -362,8 +364,10 @@ def analyze_import():
         except docx_import.DocxImportError as e:
             return jsonify({"error": f"{zip_file.filename}: {e}"}), 400
         except Exception:
-            # Event reaches Sentry; the file name and content are not logged
-            current_app.logger.exception("Unexpected error converting .docx")
+            # Event reaches Sentry; only the exception type is logged
+            current_app.logger.error(
+                "Unexpected error converting .docx: %s",
+                type(sys.exc_info()[1]).__name__)
             return jsonify({"error": DOCX_UNEXPECTED_ERROR}), 500
         if not content.strip():
             return jsonify({"error": f"{zip_file.filename}: the document has no text"}), 400
@@ -422,8 +426,17 @@ def analyze_import():
                         docx_import.check_extension(filename)
                         with tempfile.SpooledTemporaryFile(
                                 max_size=docx_import.SPOOL_MAX_MEMORY_BYTES) as tmp:
-                            with zip_ref.open(zip_info) as src:
-                                shutil.copyfileobj(src, tmp)
+                            try:
+                                with zip_ref.open(zip_info) as src:
+                                    shutil.copyfileobj(src, tmp)
+                            except (RuntimeError, zipfile.BadZipFile,
+                                    zlib.error, NotImplementedError):
+                                # encrypted, CRC/data error, unsupported
+                                # compression; zipfile's messages name the
+                                # member, so nothing is logged here
+                                raise docx_import.DocxImportError(
+                                    "the file is damaged or "
+                                    "password-protected")
                             tmp.seek(0)
                             content, modified = docx_import.convert_docx(
                                 tmp, parse_budget)
@@ -431,8 +444,10 @@ def analyze_import():
                         errors.append({"name": filename, "error": str(e)})
                         continue
                     except Exception:
-                        current_app.logger.exception(
-                            "Unexpected error converting .docx in zip")
+                        # type only: exception messages can contain names
+                        current_app.logger.error(
+                            "Unexpected error converting .docx in zip: %s",
+                            type(sys.exc_info()[1]).__name__)
                         errors.append({"name": filename,
                                        "error": DOCX_UNEXPECTED_ERROR})
                         continue
