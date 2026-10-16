@@ -453,7 +453,8 @@ class ExportQuoteResolver:
 
     def __init__(self, user_id: int, max_tokens: int,
                  filter_ai_usage: bool = False,
-                 chronological: bool = False):
+                 chronological: bool = False,
+                 with_preamble: bool = True):
         """
         Initialize the resolver.
 
@@ -464,11 +465,18 @@ class ExportQuoteResolver:
                             being resolved (their content won't be embedded)
             chronological: If True, sort oldest-first (for iterative profile
                           building). Default is newest-first.
+            with_preamble: Whether the export emits the artifacts preamble
+                          (the full text of each referenced system prompt,
+                          profile and todo list). False when the caller
+                          collapses artifacts to reference lines: then the
+                          budget counts only the entries, and the profile
+                          and todo texts are not loaded (#518).
         """
         self.user_id = user_id
         self.max_tokens = max_tokens
         self.filter_ai_usage = filter_ai_usage
         self.chronological = chronological
+        self.with_preamble = with_preamble
         self.entries: List[NodeEntry] = []
         self.included_count: int = 0
         self.included_ids: Set[int] = set()
@@ -559,7 +567,7 @@ class ExportQuoteResolver:
         self.entries.append(entry)
 
         # Cache artifact content for preamble building
-        if artifacts:
+        if artifacts and self.with_preamble:
             for atype, aid in artifacts:
                 key = (atype, aid)
                 if key not in self._artifact_contents:
@@ -629,7 +637,9 @@ class ExportQuoteResolver:
 
         Also accounts for prompt preamble overhead: each unique
         user_prompt_id referenced by included entries adds its full
-        content token cost once.
+        content token cost once. Only when the preamble is emitted
+        (with_preamble): a collapsed export shows a prompt as its
+        reference line, which the entry's base_tokens already count.
         """
         total = 0
         self.included_count = 0
@@ -647,7 +657,7 @@ class ExportQuoteResolver:
             self.included_count = len(self.entries)
 
         # Account for prompt preamble overhead
-        if self._prompt_tokens:
+        if self._prompt_tokens and self.with_preamble:
             while self.included_count > 0:
                 entry_total = sum(
                     e.total_tokens
@@ -826,7 +836,10 @@ class ExportQuoteResolver:
         return "\n".join(lines)
 
     def get_artifacts_preamble(self) -> str:
-        """Build preamble sections for all referenced artifact types."""
+        """Build preamble sections for all referenced artifact types
+        ("" for a resolver built without one)."""
+        if not self.with_preamble:
+            return ""
         sections = []
 
         # Prompts (reuse existing logic)

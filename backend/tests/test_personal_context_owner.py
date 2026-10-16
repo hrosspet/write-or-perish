@@ -365,7 +365,9 @@ def test_the_archive_holds_no_one_elses_pinned_versions(app, threads, kwargs, sh
 
 
 def test_recent_writing_in_my_own_thread_holds_none_of_their_versions(app, threads):  # noqa: F811
-    """{user_recent_raw} in bob's own Text-mode prompt."""
+    """{user_recent_raw} in bob's own Text-mode prompt. The window lists
+    pinned versions as reference lines, not their text (#518): bob's own
+    are listed, alice's are not."""
     alice, bob, system, bob_reply = threads
     own_system = _system_node(bob, BODY + "\n{user_recent_raw}",
                               privacy_level="private")
@@ -375,7 +377,11 @@ def test_recent_writing_in_my_own_thread_holds_none_of_their_versions(app, threa
     _ask(own_entry, bob)
 
     block = _system_block()
-    assert "BOB TODO" in block
+    bob_todo, _ = _todo_and_memory(bob)
+    alice_todo, _ = _todo_and_memory(alice)
+    assert f"[User TODO v1 (ref #{bob_todo.id})]" in block
+    assert f"(ref #{alice_todo.id})" not in block
+    assert "BOB TODO" not in block
     for marker in _markers("ALICE"):
         assert marker not in block, marker
 
