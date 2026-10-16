@@ -327,7 +327,9 @@ def test_parity_with_batch_on_random_replies():
         streamed, stalled = _plan(_project(pieces, proposals=False))
         if stalled:
             continue   # re-anchoring after a stall differs, by design
-        assert streamed == section_aware_chunk_text(speak_links(text))
+        # Streaming cuts chapters at h1/h2 only (it can't see ahead).
+        assert streamed == section_aware_chunk_text(
+            speak_links(text), adaptive_level=False)
         compared += 1
     assert compared > 120
 
