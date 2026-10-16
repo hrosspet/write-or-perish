@@ -315,13 +315,40 @@ def test_strip_page_furniture_variants():
     ]
     out = worker.strip_page_furniture(pages)
     assert out == [[f"{w} one", f"{w} two"] for w in words]
-    # Page numbers alone are dropped at the edges only, in several forms
-    out = worker.strip_page_furniture([
-        ["- 4 -", "text", "iv"], ["12", "text 12", "keep me"]])
-    assert out == [["text"], ["text 12", "keep me"]]
-    # A short document keeps repeated lines (below the page minimum)
+    # Lone numbers that don't follow the page sequence stay, and so does
+    # everything in a short document (below the page minimum)
+    kept = [["- 4 -", "text", "iv"], ["12", "text 12", "keep me"]]
+    assert worker.strip_page_furniture(kept) == kept
     out = worker.strip_page_furniture([["Same", "a"], ["Same", "b"]])
     assert out == [["Same", "a"], ["Same", "b"]]
+
+
+def test_page_numbers_go_only_when_they_follow_the_pages():
+    # Pages 0-5 numbered "- 3 -" ... "- 8 -" at the bottom, roman "iii"
+    # style on top elsewhere; a program's output "42" and a diagram label
+    # "x" and "0" at page edges are content and stay.
+    pages = [[f"body {w} one", f"body {w} two", f"- {i + 3} -"]
+             for i, w in enumerate("abcdef")]
+    pages[2] = ["0", "body c one", ">>> int(speed)", "42", "- 5 -"]
+    pages[4] = ["x", "body e one", "body e two", "- 7 -"]
+    out = worker.strip_page_furniture(pages)
+    assert all(not any(line.startswith("- ") for line in p) for p in out)
+    assert out[2] == ["0", "body c one", ">>> int(speed)", "42"]
+    assert out[4] == ["x", "body e one", "body e two"]
+    assert worker.page_number_value("Page 12 of 30") == 12
+    assert worker.page_number_value("xiv") == 14
+    assert worker.page_number_value("- 9 -") == 9
+    assert worker.page_number_value("42 apples") is None
+    # Roman numbers in the front matter, arabic in the body: each run is
+    # its own sequence
+    pages = ([[f"pre {w}", f"text {w}", r]
+              for w, r in zip("abc", ["i", "ii", "iii"])]
+             + [[f"main {w}", f"text {w}", str(n)]
+                for n, w in enumerate("defghij", 1)])
+    out = worker.strip_page_furniture(pages)
+    # 1..7 follow the pages and go; i..iii are 3 pages of 10 and stay
+    assert [p[-1] for p in out[3:]] == [f"text {w}" for w in "defghij"]
+    assert [p[-1] for p in out[:3]] == ["i", "ii", "iii"]
 
 
 def test_dehyphenation_and_reflow():
@@ -497,7 +524,8 @@ def test_someone_elses_writing_saved_as_reference(client):
     assert f["reference"] == {
         "title": "A Study of Things", "author": "Jane Doe",
         "date": "2020-01-02T03:04:05", "truncated": False,
-        "char_cap": 100_000,
+        # one entry's worth less the title and author kept with the text
+        "char_cap": 100_000 - len("# A Study of Things\n\n*By Jane Doe*\n\n"),
     }
     r = _confirm(client, [f], whose_writing="someone_else")
     assert r.status_code == 201, r.get_json()
@@ -592,6 +620,202 @@ def test_document_reference_header_round_trip():
     assert dr.split(dr.compose("T", None, "*By nobody* body")) == (
         "T", None, "*By nobody* body")
     assert dr.split("plain text") == (None, None, "plain text")
+    # Without a title the byline stays
+    assert dr.compose("", "Ann", "b") == "*By Ann*\n\nb"
+    assert dr.split("*By Ann*\n\nb") == (None, "Ann", "b")
+    assert dr.body_room("T", "Ann", 100) == 100 - len("# T\n\n*By Ann*\n\n")
+    assert dr.body_room("", "", 100) == 100
+
+
+def test_clearing_a_reference_title_keeps_its_author(client):
+    f = _analyze(client, "p.pdf", _paper()).get_json()["files"][0]
+    item_id = _confirm(client, [f], whose_writing="someone_else") \
+        .get_json()["reference_id"]
+    r = client.put(f"/api/external/items/{item_id}", json={"title": ""})
+    assert r.status_code == 200
+    assert r.get_json()["title"] is None
+    assert r.get_json()["author_handle"] == "Jane Doe"
+    r = client.put(f"/api/external/items/{item_id}", json={"title": "Back"})
+    assert r.get_json()["author_handle"] == "Jane Doe"
+    assert ExternalItem.query.get(item_id).get_content().startswith(
+        "# Back\n\n*By Jane Doe*\n\nA Study of Things")
+
+
+def test_confirm_note_and_save_use_the_same_cap(client):
+    # 99,800 characters with a 300-character title and a 100-character
+    # author: over the room the header leaves, under the bare 100k.
+    from backend.routes.import_data import _pdf_file_entry
+    pdf = {"markdown": "word " * 19_960, "pages": 1, "chapters": 0,
+           "title": "T" * 300, "author": "A" * 100,
+           "created": None, "modified": None}
+    entry = _pdf_file_entry("Long.pdf", pdf)
+    assert entry["reference"]["truncated"] is True
+    assert entry["reference"]["char_cap"] < 99_800
+    r = _confirm(client, [entry], whose_writing="someone_else")
+    assert r.get_json()["truncated"] is True
+    assert len(ExternalItem.query.one().get_content()) <= 100_000
+    pdf["markdown"] = "word " * 1_000
+    assert _pdf_file_entry("Short.pdf", pdf)["reference"]["truncated"] is False
+
+
+# --- Size of the result ---------------------------------------------------------
+
+def _outline_pdf(n, title="中" * 200):
+    """2 text pages and n top-level bookmarks sharing one title object,
+    built by hand (fast for large n)."""
+    text = (b"BT /F1 10 Tf 72 700 Td (This is a page with enough plain "
+            b"text to pass the scanned check.) Tj ET")
+    objs = {
+        1: b"<< /Type /Catalog /Pages 2 0 R /Outlines 8 0 R >>",
+        2: b"<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>",
+        5: b"<< /Length %d >>\nstream\n" % len(text) + text + b"\nendstream",
+        7: b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        8: b"<< /Type /Outlines /First 10 0 R /Last %d 0 R /Count %d >>"
+           % (9 + n, n),
+        9: b"<FEFF" + title.encode("utf-16-be").hex().upper().encode() + b">",
+    }
+    objs[6] = objs[5]
+    for num, content in ((3, 5), (4, 6)):
+        objs[num] = (b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+                     b"/Contents %d 0 R /Resources << /Font << /F1 7 0 R >> "
+                     b">> >>" % content)
+    for i in range(n):
+        num = 10 + i
+        links = (b" /Prev %d 0 R" % (num - 1) if i else b"") + (
+            b" /Next %d 0 R" % (num + 1) if i < n - 1 else b"")
+        objs[num] = (b"<< /Title 9 0 R /Parent 8 0 R /Dest [%d 0 R /Fit]%s >>"
+                     % (3 + i % 2, links))
+    buf = bytearray(b"%PDF-1.7\n")
+    offsets = {}
+    for num in range(1, max(objs) + 1):
+        offsets[num] = len(buf)
+        buf += b"%d 0 obj\n" % num + objs[num] + b"\nendobj\n"
+    xref = len(buf)
+    buf += b"xref\n0 %d\n0000000000 65535 f \n" % (max(objs) + 1)
+    for num in range(1, max(objs) + 1):
+        buf += b"%010d 00000 n \n" % offsets[num]
+    buf += (b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n"
+            % (max(objs) + 1, xref))
+    return bytes(buf)
+
+
+def test_huge_outline_is_ignored(client, monkeypatch):
+    monkeypatch.setattr(pdf_import, "PDF_MAX_OUTPUT_BYTES", 64 * 1024)
+    for n in (worker.MAX_CHAPTERS + 1, worker.MAX_OUTLINE_ENTRIES + 1):
+        r = _analyze(client, "o.pdf", _outline_pdf(n))
+        assert r.status_code == 200, r.get_json()
+        f = r.get_json()["files"][0]
+        assert f["chapters"] == 0 and "## " not in f["content"]
+        assert len(f["content"]) < 1000
+    # Under both caps the bookmarks are chapters
+    f = _analyze(client, "o.pdf", _outline_pdf(4, "Part")).get_json()["files"][0]
+    assert f["chapters"] >= 1
+
+
+def test_outline_walk_stops_at_the_cap():
+    from pypdf import PdfReader
+    reader = PdfReader(io.BytesIO(_outline_pdf(30, "T")))
+    assert worker.outline_within_limit(reader, 30) is True
+    assert worker.outline_within_limit(reader, 29) is False
+
+
+def test_chapter_cap():
+    class E:
+        def __init__(self, page):
+            self.title, self.page = f"T{page}", page
+
+    page_of = lambda e: e.page  # noqa: E731
+    n = worker.MAX_CHAPTERS
+    assert len(worker.outline_chapters(
+        [E(i) for i in range(n)], page_of, n + 1)) == n
+    assert worker.outline_chapters(
+        [E(i) for i in range(n + 1)], page_of, n + 1) == []
+
+
+def test_markdown_is_held_to_the_text_cap(client, monkeypatch):
+    # Bookmark titles the pages don't contain become headings: the page
+    # text fits the cap, the Markdown made from it would not.
+    pages = [[f"page {i} has enough plain text to pass the check"]
+             for i in range(40)]
+    outline = [(f"T{i} " + "x" * 190, i, []) for i in range(40)]
+    data = _pdf(pages, outline=outline)
+    monkeypatch.setattr(pdf_import, "PDF_MAX_TEXT_CHARS", 5000)
+    r = _analyze(client, "t.pdf", data)
+    assert r.status_code == 400
+    assert r.get_json()["error"].startswith(
+        "This PDF has more text than Loore imports at once")
+
+
+def test_child_output_is_read_up_to_a_cap(client, monkeypatch, tmp_path):
+    monkeypatch.setattr(pdf_import, "PDF_MAX_OUTPUT_BYTES", 200)
+    r = _analyze(client, "a.pdf", _pdf([_body("a")] * 3))
+    assert r.status_code == 400
+    assert r.get_json()["error"] == pdf_import.MSG_TOO_BIG
+    # A child that never stops writing is stopped at the cap
+    monkeypatch.setattr(pdf_import, "PDF_MAX_OUTPUT_BYTES", 1024 * 1024)
+    monkeypatch.setattr(pdf_import, "WORKER_PATH", _script(tmp_path, (
+        "import sys\nwhile True:\n    sys.stdout.write('x' * 65536)\n")))
+    r = _analyze(client, "flood.pdf", _pdf([_body("a")]))
+    assert r.status_code == 400
+    assert r.get_json()["error"] == pdf_import.MSG_TOO_BIG
+
+
+def test_mine_never_makes_more_entries_than_the_chapter_cap(client):
+    # A confirm request carries its own text; a PDF's is split into at
+    # most MAX_CHAPTERS chapters, else by size.
+    content = "\n\n".join(f"## C{i}\n\ntext {i}"
+                          for i in range(worker.MAX_CHAPTERS + 5))
+    f = {"name": "x.pdf", "filename_without_ext": "x", "content": content,
+         "source_format": "pdf", "modified_at": "2020-01-01T00:00:00"}
+    assert _confirm(client, [f], whose_writing="mine").status_code == 201
+    assert Node.query.count() == 1
+
+
+# --- Chapter starts --------------------------------------------------------------
+
+def test_numbered_headings_match_unnumbered_bookmarks(client):
+    # LaTeX bookmarks leave the section number out: "Introduction" for
+    # the page's "1 Introduction"; two chapters can start on one page.
+    pages = [
+        ["Attention Is All You Need", "1 Introduction"] + _body("intro")
+        + ["2 Background"] + _body("bg"),
+        ["bg continued here."] + ["3 Model Architecture"] + _body("model")
+        + ["3.1 Encoder and Decoder Stacks"] + _body("enc"),
+        ["more encoder text."] + ["A.1 Extra Results"] + _body("extra"),
+    ]
+    outline = [("Introduction", 0, []), ("Background", 0, []),
+               ("Model Architecture", 1, [("Encoder and Decoder Stacks", 1)]),
+               ("Extra Results", 2, [])]
+    f = _analyze(client, "paper.pdf",
+                 _pdf(pages, outline=outline)).get_json()["files"][0]
+    c = f["content"]
+    assert f["chapters"] == 4
+    assert c.startswith("Attention Is All You Need\n\n## Introduction\n\nintro")
+    assert "## Background\n\nbg the quick" in c
+    assert "bg continued here.\n\n## Model Architecture\n\nmodel" in c
+    assert "more encoder text.\n\n## Extra Results\n\nextra" in c
+    for label in ("1 Introduction", "2 Background", "3 Model Architecture",
+                  "A.1 Extra Results"):
+        assert label not in c
+    assert "3.1 Encoder and Decoder Stacks" in c  # a sub-section stays text
+
+
+def test_chapter_without_text_shares_the_next_heading(client):
+    pages = [["Intro"] + _body("a"), ["Part One"], ["Chapter 1"] + _body("c1"),
+             ["Chapter 2"] + _body("c2"), ["Afterword"]]
+    outline = [("Intro", 0, []), ("Part One", 1, []), ("Chapter 1", 2, []),
+               ("Chapter 2", 3, []), ("Afterword", 4, [])]
+    f = _analyze(client, "book.pdf",
+                 _pdf(pages, outline=outline)).get_json()["files"][0]
+    assert f["chapters"] == 3
+    assert "## Part One — Chapter 1\n\nc1 the quick" in f["content"]
+    assert f["content"].endswith("c2 ends here.\n\nAfterword")
+    _confirm(client, [f], whose_writing="mine")
+    nodes = Node.query.order_by(Node.id).all()
+    assert len(nodes) == 3
+    for n in nodes:
+        lines = [x for x in n.get_content().split("\n") if x.strip()]
+        assert len(lines) > 1 and not lines[-1].startswith("#")
 
 
 def test_temp_file_removed_after_success_and_timeout(client, monkeypatch,

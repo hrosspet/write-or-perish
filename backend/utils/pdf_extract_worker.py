@@ -38,10 +38,18 @@ from datetime import datetime, timedelta, timezone
 # checked for running headers, footers and page numbers.
 EDGE_LINES = 2
 # A line (digits ignored) that is at the top, or at the bottom, of at
-# least this share of the pages is a running header or footer ...
+# least this share of the pages is a running header or footer, and a
+# lone number is a page number when (number - page index) is the same on
+# at least this share of the pages ...
 REPEAT_SHARE = 0.5
-# ... and of at least this many pages (so a 2-page PDF keeps its lines).
+# ... and on at least this many pages (so a 2-page PDF keeps its lines).
 REPEAT_MIN_PAGES = 3
+# Outline entries read at most (all levels); a bigger outline is ignored
+# and the text is split by size.
+MAX_OUTLINE_ENTRIES = 5000
+# Chapters at most; with more, the outline is ignored and the text is
+# split by size.
+MAX_CHAPTERS = 200
 # A line is "full" (its paragraph goes on in the next line) when it is at
 # least this share of the document's median line length ...
 FULL_LINE_RATIO = 0.75
@@ -76,10 +84,12 @@ _ROMAN = r"m{0,3}(?:cm|cd|d?c{0,3})(?:xc|xl|l?x{0,3})(?:ix|iv|v?i{0,3})"
 _PAGE_NUMBER_RE = re.compile(
     r"^[\s\-–—|·•]*"
     r"(?:(?:page|p\.)\s*)?"
-    r"(?:\d{1,4}|(?=[ivxlcdm])" + _ROMAN + r")"
+    r"(?P<num>\d{1,4}|(?=[ivxlcdm])" + _ROMAN + r")"
     r"(?:\s*(?:/|of)\s*\d{1,4})?"
     r"[\s\-–—|·•]*$",
     re.IGNORECASE)
+_ROMAN_VALUES = {"i": 1, "v": 5, "x": 10, "l": 50, "c": 100, "d": 500,
+                 "m": 1000}
 _BULLET_RE = re.compile(r"^(?:[•◦▪‣●■–\-*]\s+|\d{1,3}[.)]\s+)")
 _BULLET_GLYPH_RE = re.compile(r"^[•◦▪‣●■]\s+")
 _TITLE_NORM_RE = re.compile(r"[\W_]+", re.UNICODE)
@@ -106,32 +116,58 @@ def is_page_number(line):
     return bool(line.strip()) and bool(_PAGE_NUMBER_RE.match(line))
 
 
+def page_number_value(line):
+    """The number a page-number-only line shows ("12", "- 12 -", "Page 12
+    of 30", "xii"), or None for any other line."""
+    m = _PAGE_NUMBER_RE.match(line) if line.strip() else None
+    if not m or not m.group("num"):
+        return None
+    num = m.group("num").lower()
+    if num.isdigit():
+        return int(num)
+    total = 0
+    for ch, nxt in zip(num, num[1:] + " "):
+        value = _ROMAN_VALUES[ch]
+        total += -value if _ROMAN_VALUES.get(nxt, 0) > value else value
+    return total
+
+
 def strip_page_furniture(pages):
-    """Drop running headers/footers and page-number lines.
+    """Drop running headers/footers and page numbers.
 
     pages: one list of lines per page. Only the EDGE_LINES first and last
-    non-empty lines of a page are candidates. A candidate goes when it is
-    only a page number, or when the same line (digits ignored) sits in
-    the same zone (top or bottom) on at least
-    max(REPEAT_MIN_PAGES, REPEAT_SHARE x pages) pages.
+    non-empty lines of a page are candidates, and with
+    need = max(REPEAT_MIN_PAGES, REPEAT_SHARE x pages):
+    - a line that is only a number goes when it follows the page
+      sequence: its value minus the page index is the same on at least
+      `need` pages (n on one page, n+1 on the next). Any other lone
+      number at an edge (a program's output, a diagram label) stays;
+    - any other line goes when the same line (digits ignored) sits in
+      the same zone (top or bottom) on at least `need` pages.
     """
     need = max(REPEAT_MIN_PAGES, math.ceil(REPEAT_SHARE * len(pages)))
-    top_counts, bottom_counts = Counter(), Counter()
-    for lines in pages:
+    top_counts, bottom_counts, offsets = Counter(), Counter(), Counter()
+    edges = []
+    for p, lines in enumerate(pages):
         top, bottom = _edge_indexes(lines)
-        top_counts.update({_edge_key(lines[i]) for i in top})
-        bottom_counts.update({_edge_key(lines[i]) for i in bottom})
+        numbers = {i: page_number_value(lines[i]) for i in set(top + bottom)}
+        numbers = {i: v - p for i, v in numbers.items() if v is not None}
+        edges.append((top, bottom, numbers))
+        offsets.update(set(numbers.values()))
+        top_counts.update({_edge_key(lines[i]) for i in top
+                           if i not in numbers})
+        bottom_counts.update({_edge_key(lines[i]) for i in bottom
+                              if i not in numbers})
+    sequence = {off for off, n in offsets.items() if n >= need}
     top_repeated = {k for k, n in top_counts.items() if k and n >= need}
     bottom_repeated = {k for k, n in bottom_counts.items() if k and n >= need}
     out = []
-    for lines in pages:
-        top, bottom = _edge_indexes(lines)
-        drop = {i for i in top
-                if _edge_key(lines[i]) in top_repeated
-                or is_page_number(lines[i])}
-        drop |= {i for i in bottom
-                 if _edge_key(lines[i]) in bottom_repeated
-                 or is_page_number(lines[i])}
+    for lines, (top, bottom, numbers) in zip(pages, edges):
+        drop = {i for i, off in numbers.items() if off in sequence}
+        drop |= {i for i in top if i not in numbers
+                 and _edge_key(lines[i]) in top_repeated}
+        drop |= {i for i in bottom if i not in numbers
+                 and _edge_key(lines[i]) in bottom_repeated}
         out.append([line for i, line in enumerate(lines) if i not in drop])
     return out
 
@@ -251,24 +287,84 @@ def outline_chapters(outline, page_of, num_pages):
     chapters.sort(key=lambda c: c[0])  # stable: same-page order kept
     if len(chapters) < 2 or len({p for p, _ in chapters}) < 2:
         return []
+    if len(chapters) > MAX_CHAPTERS:
+        return []
     return chapters
+
+
+def outline_within_limit(reader, limit=None):
+    """True when the outline has at most `limit` entries (all levels).
+    Walks the outline dictionaries without building pypdf's outline, and
+    stops at limit + 1, so a PDF with a huge outline costs little."""
+    limit = MAX_OUTLINE_ENTRIES if limit is None else limit
+    try:
+        outlines = reader.trailer["/Root"].get_object().get("/Outlines")
+        outlines = outlines.get_object() if outlines is not None else None
+    except Exception:
+        return True  # reading the outline will fail and give no chapters
+    if not hasattr(outlines, "raw_get"):
+        return True
+    stack = [outlines.raw_get("/First")] if "/First" in outlines else []
+    seen, count = set(), 0
+    while stack:
+        ref = stack.pop()
+        key = (ref.idnum, ref.generation) if hasattr(ref, "idnum") else id(ref)
+        if key in seen:
+            continue
+        seen.add(key)
+        count += 1
+        if count > limit:
+            return False
+        try:
+            node = ref.get_object()
+        except Exception:
+            continue
+        if hasattr(node, "raw_get"):
+            stack.extend(node.raw_get(k) for k in ("/First", "/Next")
+                         if k in node)
+    return True
+
+
+# A section label before a heading's title: "1", "3.2", "A.1", "IV.",
+# optionally after "Chapter", "Section", "Appendix" or "Part". LaTeX
+# bookmarks usually leave the number out ("Introduction" for the page's
+# "1 Introduction").
+_LABEL = (r"(?:(?i:chapter|section|appendix|part)\s+)?"
+          r"(?:\d{1,3}(?:\.\d{1,3})*|[A-Z](?:\.\d{1,3})*|[IVXLC]{1,6})\.?")
+_LABEL_PREFIX_RE = re.compile(r"^\s*" + _LABEL + r"\s+(?=\S)")
+_LABEL_ONLY_RE = re.compile(r"^\s*" + _LABEL + r"\s*$")
+
+
+def _line_keys(line):
+    """Keys a line can match a title by: the whole line, and the line
+    without a leading section label."""
+    keys = [_title_key(line)]
+    m = _LABEL_PREFIX_RE.match(line)
+    if m:
+        keys.append(_title_key(line[m.end():]))
+    return [k for k in keys if k]
 
 
 def _find_heading(lines, start, end, key):
     """(index, span) of the line(s) in lines[start:end] that spell the
     chapter title (letters and digits compared, case ignored), or None.
-    A title may be broken over two lines."""
+    The line may start with a section label ("1 Introduction" for the
+    title "Introduction"), the title may be broken over two lines, and a
+    label may stand on the line above it ("Chapter 3", then the title)."""
     if not key:
         return None
     for j in range(start, end):
-        a = _title_key(lines[j])
-        if not a:
+        keys = _line_keys(lines[j])
+        if not keys:
             continue
-        if a == key:
+        if key in keys:
             return j, 1
-        if (key.startswith(a) and j + 1 < end
-                and a + _title_key(lines[j + 1]) == key):
-            return j, 2
+        if j + 1 < end:
+            after = _title_key(lines[j + 1])
+            if any(key.startswith(a) and a + after == key for a in keys):
+                return j, 2
+            if after == key and _LABEL_ONLY_RE.match(lines[j]):
+                return j, 2
     return None
 
 
@@ -278,7 +374,10 @@ def build_markdown(page_texts, chapters):
     With chapters, each one starts on its page at the line that spells
     its title (that line is replaced by a "## title" heading), or at the
     top of the page when no line does. Text before the first chapter is
-    its own part, before the first heading.
+    its own part, before the first heading. A chapter with no text of
+    its own (a part's title page, or two bookmarks at one place) shares
+    the next chapter's heading ("Part One — Chapter 1"), so no entry
+    holds only a heading.
     """
     pages = strip_page_furniture([clean_page_text(t) for t in page_texts])
     flat, offsets = [], []
@@ -307,11 +406,20 @@ def build_markdown(page_texts, chapters):
     preamble = reflow(flat[:cuts[0][0]], median)
     if preamble:
         parts.append(preamble)
+    pending, count = [], 0
     for k, (start, skip, title) in enumerate(cuts):
         end = cuts[k + 1][0] if k + 1 < len(cuts) else len(flat)
         body = reflow(flat[start + skip:end], median)
-        parts.append(f"## {title}" + (f"\n\n{body}" if body else ""))
-    return "\n\n".join(parts), len(cuts)
+        if not body:
+            pending.append(title)
+            continue
+        parts.append(f"## {' — '.join(pending + [title])}\n\n{body}")
+        pending, count = [], count + 1
+    if pending:
+        # Chapters at the very end with no text: their titles close the
+        # last part as a line of text.
+        parts.append(_markdown_line(" — ".join(pending)))
+    return "\n\n".join(parts), count
 
 
 # --- Metadata --------------------------------------------------------------
@@ -418,7 +526,11 @@ def _page_texts(reader, num_pages, max_chars):
 
 
 def _outline(reader):
+    """The outline, or [] when it is unreadable or has more than
+    MAX_OUTLINE_ENTRIES entries."""
     try:
+        if not outline_within_limit(reader):
+            return []
         return reader.outline
     except MemoryError:
         raise
@@ -427,9 +539,6 @@ def _outline(reader):
 
 
 def extract(path, max_pages, max_chars):
-    import logging
-    logging.disable(logging.CRITICAL)  # pypdf warns on stderr; not needed
-
     reader, num_pages = _open(path)
     if num_pages > max_pages:
         raise Fail("too_many_pages", pages=num_pages)
@@ -442,6 +551,9 @@ def extract(path, max_pages, max_chars):
     markdown, chapter_count = build_markdown(texts, chapters)
     if not markdown.strip():
         raise Fail("scanned")
+    # Headings add text: the result itself must fit the same cap
+    if len(markdown) > max_chars:
+        raise Fail("too_much_text")
     return {"ok": True, "markdown": markdown, "pages": num_pages,
             "chapters": chapter_count, **read_metadata(reader)}
 
@@ -474,6 +586,8 @@ def main(argv):
             int(a) for a in argv[2:6])
     except (IndexError, ValueError):
         return 2
+    import logging
+    logging.disable(logging.CRITICAL)  # pypdf warns on stderr; not needed
     try:
         set_limits(cpu_seconds, memory_bytes)
     except Exception:
@@ -489,7 +603,9 @@ def main(argv):
             result = {"error": "damaged"}
         except Exception as e:
             result = {"error": "unreadable", "type": type(e).__name__}
-    sys.stdout.buffer.write(json.dumps(result).encode("ascii"))
+    # UTF-8, not \u escapes: at most 4 bytes a character instead of 6-12
+    out = json.dumps(result, ensure_ascii=False).encode("utf-8", "replace")
+    sys.stdout.buffer.write(out)
     sys.stdout.buffer.flush()
     return 0
 

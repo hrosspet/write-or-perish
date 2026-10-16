@@ -26,33 +26,40 @@ def _one_line(text, limit):
 
 
 def compose(title, author, body):
-    """The stored text of a document Reference."""
+    """The stored text of a document Reference. The byline stays when
+    the title is empty."""
     parts = []
     title = _one_line(title, 512)
     author = _one_line(author, 200).replace("*", "")
     if title:
         parts.append(f"# {title}")
-        if author:
-            parts.append(f"*By {author}*")
+    if author:
+        parts.append(f"*By {author}*")
     body = (body or "").strip()
     if body:
         parts.append(body)
     return "\n\n".join(parts)
 
 
+def body_room(title, author, cap):
+    """Characters left for the text under the header in `cap`."""
+    header = compose(title, author, "")
+    return cap - (len(header) + 2 if header else 0)
+
+
 def split(content):
-    """(title, author, body) of a document Reference's text. A byline is
-    read only right under a title heading."""
+    """(title, author, body) of a document Reference's text: an optional
+    title heading, then an optional byline, then the text."""
     text = content or ""
     title = author = None
     m = _TITLE_RE.match(text)
     if m:
         title = m.group(1).strip() or None
         text = text[m.end():]
-        b = _BYLINE_RE.match(text)
-        if b:
-            author = b.group(1).strip() or None
-            text = text[b.end():]
+    b = _BYLINE_RE.match(text)
+    if b:
+        author = b.group(1).strip() or None
+        text = text[b.end():]
     return title, author, text
 
 

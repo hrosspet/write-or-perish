@@ -4,6 +4,7 @@ from backend.models import Node, User, UserProfile
 from backend.extensions import db
 from backend.utils.privacy import AI_ALLOWED
 from backend.utils import docx_import, pdf_import
+from backend.utils.pdf_extract_worker import MAX_CHAPTERS as MAX_PDF_CHAPTERS
 from datetime import datetime, timedelta
 import hashlib
 import hmac
@@ -286,11 +287,16 @@ def _pdf_file_entry(filename, pdf):
     Reference keeps the creation date (when the document was written),
     else the modification date. `reference` is what the confirm step
     saves when the user says it is someone else's writing."""
+    from backend.utils import document_reference
     from backend.utils.node_split import NODE_CHAR_CAP
     content = pdf["markdown"]
     stem = filename.rsplit('.', 1)[0]
     own_date = pdf["modified"] or pdf["created"] or datetime.utcnow()
     doc_date = pdf["created"] or pdf["modified"]
+    ref_title = pdf_import.reference_title(pdf["title"], stem)
+    # The same room the save leaves for the text under title and author
+    room = document_reference.body_room(ref_title, pdf["author"],
+                                        NODE_CHAR_CAP)
     return {
         "name": filename,
         "filename_without_ext": stem,
@@ -302,12 +308,12 @@ def _pdf_file_entry(filename, pdf):
         "pages": pdf["pages"],
         "chapters": pdf["chapters"],
         "reference": {
-            "title": pdf_import.reference_title(pdf["title"], stem),
+            "title": ref_title,
             "author": pdf["author"],
             "date": doc_date.isoformat() if doc_date else None,
             # A Reference holds one entry's worth of text, as a clip does
-            "truncated": len(content) > NODE_CHAR_CAP,
-            "char_cap": NODE_CHAR_CAP,
+            "truncated": len(content.strip()) > room,
+            "char_cap": room,
         },
     }
 
@@ -374,7 +380,7 @@ def _save_pdf_reference(file_data):
              or str(file_data.get('filename_without_ext') or '').strip())
     author = ref.get('author')
     # The header and the text together hold one entry's worth
-    room = NODE_CHAR_CAP - len(document_reference.compose(title, author, "")) - 2
+    room = document_reference.body_room(title, author, NODE_CHAR_CAP)
     truncated = len(content) > room
     if truncated:
         content = content[:room].rstrip()
@@ -436,9 +442,13 @@ def _file_parts(file_data, filename, content):
     """Node texts for one analyzed file. Markdown: one text. Word
     documents whose headings repeat, and PDFs with a usable outline: one
     text per chapter. The filename heading goes on the first text unless
-    it starts with an H1."""
+    it starts with an H1. A PDF never gets more entries per chapter than
+    analyze allows (MAX_CHAPTERS); above that it is split by size."""
     if file_data.get('source_format') in CHAPTER_FORMATS:
         parts = docx_import.split_chapters(content)
+        if (file_data.get('source_format') == 'pdf'
+                and len(parts) > MAX_PDF_CHAPTERS + 1):
+            parts = [content]
     else:
         parts = [content]
     if not parts[0].lstrip().startswith('# '):

@@ -15,11 +15,13 @@ import json
 import logging
 import os
 import re
+import select
 import shutil
 import signal
 import subprocess
 import sys
 import tempfile
+import time
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
@@ -41,10 +43,14 @@ PDF_WALL_SECONDS = 30
 # and a 300-page text PDF fits in 64 MB; the rest is for big files (pypdf
 # reads the file whole), so a large scanned PDF still gets its own message.
 PDF_MEMORY_BYTES = 512 * 1024 * 1024
-# Pages and characters of extracted text. 2M characters is ~1000 dense
-# pages, or 20 entries of the 100k-character node cap.
+# Pages and characters of extracted text (checked on the page text and on
+# the Markdown made from it). 2M characters is ~1000 dense pages, or 20
+# entries of the 100k-character node cap.
 PDF_MAX_PAGES = 1000
 PDF_MAX_TEXT_CHARS = 2_000_000
+# Bytes read from the child's answer at most: 2M characters at up to 4
+# bytes each in UTF-8, plus room for JSON escapes and the metadata.
+PDF_MAX_OUTPUT_BYTES = 10 * 1024 * 1024
 
 MSG_SCANNED = "This PDF looks scanned: it has no text Loore can read."
 MSG_PASSWORD = ("This PDF is password-protected. Remove the password and "
@@ -105,15 +111,42 @@ def _message(data):
 
 
 def _run_worker(path):
+    """Run the child on `path`. Returns (returncode, stdout bytes). Reads
+    at most PDF_MAX_OUTPUT_BYTES and waits at most PDF_WALL_SECONDS in
+    all; past either, the child is killed and PdfImportError raised."""
     cmd = [sys.executable, "-I", WORKER_PATH, path, str(PDF_CPU_SECONDS),
            str(PDF_MEMORY_BYTES), str(PDF_MAX_PAGES), str(PDF_MAX_TEXT_CHARS)]
+    deadline = time.monotonic() + PDF_WALL_SECONDS
+    proc = subprocess.Popen(
+        cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL, env={})
+    chunks, size = [], 0
     try:
-        return subprocess.run(
-            cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL, env={}, timeout=PDF_WALL_SECONDS,
-            check=False)
-    except subprocess.TimeoutExpired:
-        raise PdfImportError(MSG_TOO_SLOW)
+        fd = proc.stdout.fileno()
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not select.select([fd], [], [], remaining)[0]:
+                raise PdfImportError(MSG_TOO_SLOW)
+            try:
+                chunk = os.read(fd, 65536)
+            except BlockingIOError:
+                continue
+            if not chunk:
+                break
+            size += len(chunk)
+            if size > PDF_MAX_OUTPUT_BYTES:
+                raise PdfImportError(MSG_TOO_BIG)
+            chunks.append(chunk)
+        try:
+            proc.wait(timeout=max(0.1, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            raise PdfImportError(MSG_TOO_SLOW)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+        proc.stdout.close()
+    return proc.returncode, b"".join(chunks)
 
 
 def parse_date(value):
@@ -135,24 +168,27 @@ def extract_pdf(fileobj):
     with tempfile.NamedTemporaryFile(suffix=".pdf") as tmp:
         shutil.copyfileobj(fileobj, tmp, 1024 * 1024)
         tmp.flush()
-        proc = _run_worker(tmp.name)
-    if proc.returncode == -signal.SIGXCPU:
+        returncode, stdout = _run_worker(tmp.name)
+    if returncode == -signal.SIGXCPU:
         raise PdfImportError(MSG_TOO_SLOW)
-    if proc.returncode < 0:
+    if returncode < 0:
         # SIGKILL after the CPU grace period, or the child died while
         # allocating (SIGSEGV / SIGABRT under the address-space limit).
         raise PdfImportError(MSG_TOO_BIG)
     try:
-        data = json.loads(proc.stdout) if proc.returncode == 0 else None
+        data = json.loads(stdout) if returncode == 0 else None
     except ValueError:
         data = None
     if not isinstance(data, dict):
-        logger.warning("PDF extraction failed: exit %s", proc.returncode)
+        logger.warning("PDF extraction failed: exit %s", returncode)
         raise PdfImportError(MSG_DAMAGED)
     if not data.get("ok"):
         raise PdfImportError(_message(data))
+    markdown = data.get("markdown") or ""
+    if not isinstance(markdown, str) or len(markdown) > PDF_MAX_TEXT_CHARS:
+        raise PdfImportError(MSG_TOO_MUCH_TEXT.format(limit=PDF_MAX_TEXT_CHARS))
     return {
-        "markdown": data.get("markdown") or "",
+        "markdown": markdown,
         "pages": data.get("pages"),
         "chapters": data.get("chapters") or 0,
         "title": data.get("title"),
