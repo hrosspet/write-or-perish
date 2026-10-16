@@ -7,6 +7,7 @@ at rest exactly like markdown imports.
 
 import io
 import os
+import struct
 import sys
 import zipfile
 from unittest.mock import MagicMock
@@ -443,3 +444,154 @@ def test_converter_opens_only_checked_parts(monkeypatch):
         checked = docx_import._parsed_part_names(zf)
     assert "word/footnotes.xml" in opened and "word/comments.xml" in opened
     assert set(opened) <= checked, set(opened) - checked
+
+
+# --- unusual files must give a specific 400, never a 500 ------------------
+
+def _core(modified, encoding="UTF-8"):
+    return (f'<?xml version="1.0" encoding="{encoding}"?><cp:coreProperties '
+            'xmlns:cp="http://schemas.openxmlformats.org/package/2006/'
+            'metadata/core-properties" xmlns:dcterms="http://purl.org/dc/'
+            f'terms/"><dcterms:modified>{modified}</dcterms:modified>'
+            '</cp:coreProperties>')
+
+
+def _patch_entry(data, name, method=None, set_flag=None, corrupt=False):
+    """Patch the local header and central directory of one zip entry."""
+    data = bytearray(data)
+    with zipfile.ZipFile(io.BytesIO(bytes(data))) as z:
+        info = z.getinfo(name)
+        lh = info.header_offset
+        start = lh + 30 + len(info.filename.encode()) + len(info.extra)
+    if method is not None:
+        struct.pack_into("<H", data, lh + 8, method)
+    if set_flag is not None:
+        flag = struct.unpack_from("<H", data, lh + 6)[0] | set_flag
+        struct.pack_into("<H", data, lh + 6, flag)
+    cd = data.find(b"PK\x01\x02")
+    while cd != -1:
+        nlen = struct.unpack_from("<H", data, cd + 28)[0]
+        if bytes(data[cd + 46:cd + 46 + nlen]) == name.encode():
+            if method is not None:
+                struct.pack_into("<H", data, cd + 10, method)
+            if set_flag is not None:
+                flag = struct.unpack_from("<H", data, cd + 8)[0] | set_flag
+                struct.pack_into("<H", data, cd + 8, flag)
+        cd = data.find(b"PK\x01\x02", cd + 4)
+    if corrupt:
+        for k in range(start + 5, start + 40):
+            data[k] ^= 0xFF
+    return bytes(data)
+
+
+def _docx_with_core(core_xml):
+    """A docx whose docProps/core.xml is exactly core_xml (str or bytes)."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(_docx(["Hello"])), "r") as src, \
+            zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as dst:
+        for info in src.infolist():
+            if info.filename != "docProps/core.xml":
+                dst.writestr(info.filename, src.read(info.filename))
+        dst.writestr("docProps/core.xml", core_xml)
+    return buf.getvalue()
+
+
+def test_core_xml_multibyte_encoding_still_imports(client):
+    data = _docx_with_core(_core("2024-05-01T10:00:00Z", "Shift_JIS"))
+    r = _analyze(client, "a.docx", data)
+    assert r.status_code == 200
+    assert "Hello" in r.get_json()["files"][0]["content"]
+
+
+def test_core_xml_unknown_encoding_still_imports(client):
+    data = _docx_with_core(_core("2024-05-01T10:00:00Z", "x-mac-bogus"))
+    assert _analyze(client, "a.docx", data).status_code == 200
+
+
+def test_out_of_range_modified_date_still_imports(client):
+    data = _docx_with_core(_core("0001-01-01T00:00:00+01:00"))
+    r = _analyze(client, "a.docx", data)
+    assert r.status_code == 200
+    assert docx_import.modified_date(
+        zipfile.ZipFile(io.BytesIO(data))) is None
+
+
+def _damaged_variants():
+    base = _docx([f"line {i}" for i in range(50)])
+    return {
+        "deflate64": _patch_entry(base, "word/document.xml", method=9),
+        "encrypted": _patch_entry(base, "word/document.xml", set_flag=1),
+        "corrupt": _patch_entry(base, "word/document.xml", corrupt=True),
+    }
+
+
+@pytest.mark.parametrize("kind", ["deflate64", "encrypted", "corrupt"])
+def test_damaged_or_unsupported_zip_is_specific_400(client, kind):
+    r = _analyze(client, "a.docx", _damaged_variants()[kind])
+    assert r.status_code == 400
+    assert r.is_json
+    assert "damaged or uses an unsupported format" in r.get_json()["error"]
+    assert "a.docx" in r.get_json()["error"]
+
+
+def test_unexpected_error_is_json_500(client, monkeypatch):
+    def boom(*a, **k):
+        raise KeyError("secret-file-content")
+    monkeypatch.setattr(docx_import, "convert_docx", boom)
+    r = _analyze(client, "a.docx", _docx(["x"]))
+    assert r.status_code == 500
+    assert r.is_json
+    err = r.get_json()["error"]
+    assert "Something went wrong while reading this file" in err
+    assert "secret-file-content" not in err and "a.docx" not in err
+
+
+def test_zip_with_one_bad_docx_lists_good_file_and_names_bad(client,
+                                                             monkeypatch):
+    bad = _damaged_variants()["deflate64"]
+    z = _zip({"good.md": "hello", "bad.docx": bad, "ok.docx": _docx(["Fine"])})
+    body = _analyze(client, "e.zip", z).get_json()
+    assert {f["name"] for f in body["files"]} == {"good.md", "ok.docx"}
+    assert [e["name"] for e in body["errors"]] == ["bad.docx"]
+
+    # an unexpected exception in one docx is also contained per file
+    real = docx_import.convert_docx
+
+    def flaky(fileobj, budget=None):
+        data = fileobj.read()
+        fileobj.seek(0)
+        if b"Fine" in zipfile.ZipFile(io.BytesIO(data)).read(
+                "word/document.xml"):
+            raise KeyError("x")
+        return real(fileobj, budget)
+
+    monkeypatch.setattr(docx_import, "convert_docx", flaky)
+    z = _zip({"good.md": "hello", "ok.docx": _docx(["Fine"])})
+    body = _analyze(client, "e.zip", z).get_json()
+    assert [f["name"] for f in body["files"]] == ["good.md"]
+    assert body["errors"][0]["name"] == "ok.docx"
+
+
+def test_zip_member_read_errors_are_per_file_and_not_logged(client, caplog):
+    z = _zip({"good.md": "hello", "secretname-enc.docx": _docx(["x"]),
+              "secretname-crc.docx": _docx(["y" * 200])})
+    z = _patch_entry(z, "secretname-enc.docx", set_flag=1)
+    z = _patch_entry(z, "secretname-crc.docx", corrupt=True)
+    with caplog.at_level("DEBUG"):
+        body = _analyze(client, "e.zip", z).get_json()
+    assert [f["name"] for f in body["files"]] == ["good.md"]
+    errs = {e["name"]: e["error"] for e in body["errors"]}
+    assert set(errs) == {"secretname-enc.docx", "secretname-crc.docx"}
+    assert all("damaged or password-protected" in e for e in errs.values())
+    assert "secretname" not in caplog.text
+
+
+def test_unexpected_error_log_has_type_only(client, monkeypatch, caplog):
+    def boom(*a, **k):
+        raise KeyError("secretname.docx")
+    monkeypatch.setattr(docx_import, "convert_docx", boom)
+    with caplog.at_level("DEBUG"):
+        _analyze(client, "secretname.docx", _docx(["x"]))
+        _analyze(client, "e.zip", _zip({"secretname.docx": _docx(["x"])}))
+    assert "KeyError" in caplog.text
+    assert "secretname" not in caplog.text

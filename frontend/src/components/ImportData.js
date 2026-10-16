@@ -1,6 +1,11 @@
 import React, { useState, useEffect } from "react";
 import ReactDOM from "react-dom";
 import JSZip from "jszip";
+import {
+  ANALYZE_UPLOAD_TIMEOUT_MS,
+  stripDocxMedia,
+  describeAnalyzeError,
+} from "../utils/docxUpload";
 import { FaSpinner } from "react-icons/fa";
 import api from "../api";
 import PrivacySelector from "./PrivacySelector";
@@ -30,6 +35,8 @@ const cancelBtnStyle = {
 // Coarse stage labels shown while an import is in flight.
 const STAGE_LABELS = {
   extracting: "Extracting…",
+  preparing: "Preparing…",
+  uploading: "Uploading…",
   analyzing: "Analyzing…",
   importing: "Importing…",
 };
@@ -198,6 +205,9 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
   const [importStage, setImportStage] = useState(null);
   // {done, total} while a background import task runs (Twitter)
   const [importProgress, setImportProgress] = useState(null);
+  const [uploadPercent, setUploadPercent] = useState(null);
+  const uploadDetail =
+    importStage === "uploading" && uploadPercent != null ? ` ${uploadPercent} %` : null;
   const [importPrivacy, setImportPrivacy] = useState("private");
   const [importAiUsage, setImportAiUsage] = useState("none");
   const [error, setError] = useState("");
@@ -256,30 +266,47 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [showPicker]);
 
-  const handleImportFile = (event) => {
-    const file = event.target.files[0];
-    if (!file) return;
+  const handleImportFile = async (event) => {
+    const picked = event.target.files[0];
+    // Reset so picking the same file again after an error fires onChange
+    event.target.value = "";
+    if (!picked) return;
+
+    setError("");
+    setImporting(true);
+    setImportStage("preparing");
+    setUploadPercent(null);
+    setShowPicker(false);
+    // The server never reads pictures; leave them out of the upload.
+    const file = await stripDocxMedia(picked);
 
     const formData = new FormData();
     formData.append("zip_file", file);
 
-    setImporting(true);
-    setImportStage("analyzing");
-    setShowPicker(false);
+    setImportStage("uploading");
+    setUploadPercent(0);
     api.post("/import/analyze", formData, {
-      headers: { "Content-Type": "multipart/form-data" }
+      headers: { "Content-Type": "multipart/form-data" },
+      timeout: ANALYZE_UPLOAD_TIMEOUT_MS,
+      onUploadProgress: (e) => {
+        if (!e.total) return;
+        setUploadPercent(Math.min(100, Math.round((e.loaded / e.total) * 100)));
+        if (e.loaded >= e.total) setImportStage("analyzing");
+      },
     })
       .then((response) => {
         setImportFiles(response.data);
         setShowImportDialog(true);
         setImporting(false);
         setImportStage(null);
+        setUploadPercent(null);
       })
       .catch((err) => {
         console.error("Error analyzing import file:", err);
-        setError(err.response?.data?.error || "Error analyzing import file. Please try again.");
+        setError(describeAnalyzeError(err));
         setImporting(false);
         setImportStage(null);
+        setUploadPercent(null);
       });
   };
 
@@ -734,7 +761,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
               // takes a few seconds). The .spin transform keeps animating on
               // the compositor thread even while extraction is busy.
               <div style={{ ...importLabelStyle, opacity: 1, cursor: "default", color: "var(--accent)" }}>
-                <ImportSpinner stage={importStage} fallback="Working…" />
+                <ImportSpinner stage={importStage} fallback="Working…" detail={uploadDetail} />
               </div>
             ) : (
               <>
@@ -786,7 +813,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
                 }}
               >
                 {importing
-                  ? <ImportSpinner stage={importStage} fallback="Analyzing…" />
+                  ? <ImportSpinner stage={importStage} fallback="Analyzing…" detail={uploadDetail} />
                   : (buttonLabel || "Import Data")}
               </button>
             )}
