@@ -1522,6 +1522,134 @@ Kinds (one per entry and per table row):
 - **Applies to:** #415, #502
 - **Rule:** candidate: a gap Peter finds while testing a train is fixed in that train unless it is large.
 
+### 2026-10-16 · Profile chapters on the iPhone too
+
+- **Kind:** product scope
+- **Situation:** #517 gave profile audio chapters in the web player, with a new backend route for a profile's chapter list. The iPhone app skips the chapter request for profiles on purpose, so it would still show none. The fix is one line in the app, and the app already treats a missing chapter list as "no chapters". Asked whether to add that line to #517, recommending yes; without an answer, #517 would stay web-only.
+- **Prediction:** add it (75 %).
+- **Peter:** "oh, I also merged 517. What's up with the iOS line?" · after the simulator run: "520 merged"
+- **Score:** hit: he merged #517 before answering, then asked for the line, which came as its own PR (#520). The place differs from the recommendation only because of the merge order.
+- **Source:** Claude Code session 2026-10-16 (Opus 5.5)
+- **Applies to:** #517, #520
+
+### 2026-10-16 · A TTS answer with no playable audio is resent
+
+- **Kind:** reliability
+- **Situation:** a profile's audio failed on production. One chunk came back from the TTS service with no playable audio, probably an empty answer with status 200. Loore decoded it without a check (unchanged since #9), so the whole job failed at once with no resend, and the speaker icon kept spinning with no message, asking the server again every 3 s. Every kind of Loore audio can fail this way. The resend set chosen in #383 (slow calls, cut-off calls, errors the SDK retries) did not cover it; #383 was built for the failure seen then, slow calls, and no empty answer had been seen in Loore, so no miss is logged against #383.
+- **Decision:** had a builder fix it without asking (#519): an empty or undecodable answer is resent within the existing cap of 3 attempts. When every attempt fails, the speaker icon stops spinning, the audio already made plays to its end, then the #504 error sound plays and a message says that a retry starts from the beginning. Two gaps were left out and offered as issues: chunks billed before a failure get no cost record, and the iPhone app says nothing when TTS fails.
+- **Peter:** "merged 519"
+- **Score:** hit: merged without correction. The builder's own choices inside the PR are rows in "Decided by the builder".
+- **Source:** Claude Code session 2026-10-16 (Opus 5.5)
+- **Applies to:** #519, #383, #504
+- **Rule:** Problems show; fix the cause
+
+### 2026-10-16 · A TTS answer with no playable audio is resent: ask or decide
+
+- **Kind:** escalation
+- **Situation:** a chunk with no playable audio failed a profile's audio job, and the speaker icon kept spinning with no message.
+- **Decision:** decided without asking Peter
+- **Peter:** no objection; "merged 519"
+- **Score:** hit
+- **Source:** Claude Code session 2026-10-16 (Opus 5.5)
+- **Applies to:** #519
+
+### 2026-10-16 · The iOS line checked only by parsing the Swift file
+
+- **Kind:** testing
+- **Situation:** #520 removes the iPhone app's exception that skipped chapters for profiles: 2 lines changed, 8 removed. The builder checked that the changed Swift file parses, did not build the app or run it on a simulator or phone, and offered the PR for merging with that limit stated.
+- **Decision:** a parse check was enough for a change this small.
+- **Peter:** "pls do run it on simulator"
+- **Score:** miss
+- **Why it missed:** judged by the size of the diff. Peter wants an app change run in the app before he merges it, however small. The simulator run then showed the profile's chapters with the PR's build and none with main's, and he merged.
+- **Source:** Claude Code session 2026-10-16 (Opus 5.5)
+- **Applies to:** #520
+- **Rule:** candidate: an iPhone app change is run on the simulator before it is offered for merging
+
+### 2026-10-16 · No separate review for the two-line iOS PR
+
+- **Kind:** process
+- **Situation:** the rule is that a second agent reviews each PR an agent makes. #520 changes 2 lines in the iPhone app.
+- **Decision:** skipped the separate review because the change is so small, and said so.
+- **Peter:** "fine"
+- **Score:** hit
+- **Source:** Claude Code session 2026-10-16 (Opus 5.5)
+- **Applies to:** #520
+
+### 2026-10-16 · Word import: build it now
+
+- **Kind:** product scope
+- **Situation:** Peter asked "how difficult would it be to add an option to import docx documents?" The builder estimated a small job (about 300 lines with tests) on the existing Markdown import path, noted that nobody had asked for it in an issue and that the intent doc doesn't mention it, and asked whether to build it now or file an issue.
+- **Prediction:** build now (55 %); file an issue (45 %).
+- **Peter:** "pls build now"
+- **Score:** hit
+- **Source:** Claude Code session 2026-10-16 (Opus 5.5)
+- **Applies to:** #521
+
+### 2026-10-16 · Word import: the four defaults
+
+- **Kind:** product scope
+- **Situation:** with the build question, the builder asked four choices, each with a recommendation that would be built if Peter said nothing: (1) a 40-page thesis with chapter headings becomes one thread with a node per chapter, not one long node cut every 100,000 characters; (2) .docx files are accepted inside a zip too, mixed with Markdown files (Google Takeout exports Docs as .docx); (3) the node gets the document's "modified" date, as Markdown import does; (4) a paper the user didn't write is imported as their own entry, as Markdown is, with no References option in the first version.
+- **Prediction:** (1) a node per chapter (70 %); (2) zips accepted (60 %); (3) the modified date (70 %); (4) their own entry (60 %).
+- **Peter:** "pls build now" (no answer to the four) · "merged 521 and 522"
+- **Score:** hit + hit + hit + hit: he didn't answer the four, the recommendations were built as the defaults, and he merged #521 without changing them.
+- **Source:** Claude Code session 2026-10-16 (Opus 5.5)
+- **Applies to:** #521
+
+### 2026-10-16 · Profile chapters didn't appear: profiles use ### headings
+
+- **Kind:** testing
+- **Situation:** #517 added a chapter route for profile audio and chapter loading in the web player. The builder's brief asked it to verify that profile audio chunks carry chapter data. It checked that the profile path records section titles, as the node path does, and concluded that audio generation needed no change. But TTS started a new chapter only at `#` and `##` headings, and generated profiles use `###` for their sections, so a whole profile was one section, and one section shows no chapters. The tests wrote audio chunks with section data straight into the database, so cutting a real profile's text into sections was never run.
+- **Decision:** "no change to audio generation was needed: profile chunks already record which section they belong to" (#517).
+- **Peter:** "One thing for the profile chapters TTS: profile uses ###, not ##, so chapters don't register. Or is it only because the TTS is already generated on my profile? So they still don't show up on prod"
+- **Score:** miss
+- **Why it missed:** the check stopped at the data fields and was never run against a real generated profile. The builder could have seen it before #517 merged: the agent that diagnosed the TTS failure that morning reported that the local profiles have a single section (`###` headings only), and the coordinating builder didn't connect it to #517. Fixed in #522 (next entry).
+- **Source:** Claude Code session 2026-10-16 (Opus 5.5); the decision is #517's
+- **Applies to:** #517, #522
+- **Rule:** candidate: a feature for one kind of content is checked on a real example of that content before it is marked ready
+
+### 2026-10-16 · Chapters at the repeated ### level, for all text
+
+- **Kind:** reliability
+- **Situation:** profile chapters didn't appear because TTS split chapters only at `#` and `##`, and generated profiles use `###`. Two ways to fix it: a special case for profiles, or a rule for all text.
+- **Decision:** had a builder fix it without asking (#522): stored TTS picks the chapter level from the text. Text with two or more `#`/`##` headings is split as before, so nothing changes where chapters already worked; otherwise the highest level from `###` to `######` that appears at least twice becomes the chapter level. It applies to nodes and references too, not only profiles. Told Peter that limiting it to profiles would be a small change. Audio made before the fix has to be generated again to get chapters.
+- **Peter:** "merged 521 and 522"
+- **Score:** hit: merged without correction.
+- **Source:** Claude Code session 2026-10-16 (Opus 5.5)
+- **Applies to:** #522, #517
+- **Rule:** Fix the cause, not what is shown
+
+### 2026-10-16 · Chapters at the repeated ### level, for all text: ask or decide
+
+- **Kind:** escalation
+- **Situation:** profile chapters didn't appear because TTS split chapters only at `#` and `##`, and generated profiles use `###`.
+- **Decision:** decided without asking Peter
+- **Peter:** no objection; "merged 521 and 522"
+- **Score:** hit
+- **Source:** Claude Code session 2026-10-16 (Opus 5.5)
+- **Applies to:** #522
+
+### 2026-10-16 · Issue #518: the duplication fix now, the memory cleanup later
+
+- **Kind:** product scope
+- **Situation:** issue #518, filed at Peter's request: the AI keeps adding to the memory artifact and nothing ever shortens it, and the raw window of recent writing in the agentic prompt held copies of earlier sessions' prompts and profiles, with memory and intentions filled into those copies again. The builder asked (A) whether to build the duplication fix now as its own PR, recommending yes. After Peter's production numbers came in, it asked again, together with (B): build the memory cleanup next, with the issue's defaults (a Batch job with each profile update that never removes names, dates or commitments and keeps the user's edits), recommending yes and arguing that the cleanup matters as much as the fix.
+- **Prediction:** (A) yes (80 %); (B) yes (55 %), wants to go through B's open questions first (45 %).
+- **Peter:** "yes, pls, fix the duplication bug which doesn't require product decisions. But leave the other options discussed in the issue for later"
+- **Score:** hit + miss: (A) as recommended, built as #523; (B) and the issue's other options wait.
+- **Why it missed:** Peter separates a fix that needs no product decision from a change that does. The cleanup decides what memory keeps, and the builder's argument about its size didn't move it ahead of that discussion.
+- **Source:** Claude Code session 2026-10-16 (Opus 5.5)
+- **Applies to:** #518, #523
+- **Rule:** candidate: a bug fix that needs no product decision is built now; a change with open product questions waits until Peter has gone through them
+
+### 2026-10-16 · The causes of a thin raw window that #523 leaves go into an issue
+
+- **Kind:** product scope
+- **Situation:** #523 removed the copies from the raw window and one cause of an empty window. Two causes remain: deleted entries still count against the window's 10k-token budget until they are purged, and a session longer than the budget has its first entry outside the window, so it shows nothing. Asked whether to file them as an issue for later, recommending yes. Two offers from #519 were also open: chunks billed before a TTS failure get no cost record (and a retry pays for them again), and the iPhone app says nothing when TTS fails.
+- **Prediction:** file an issue (65 %); add it to #523 (25 %); leave it in the PR's notes (10 %).
+- **Peter:** "523 merged, yes pls file the issues"
+- **Score:** hit. "The issues" was taken to cover the two #519 offers too, which had no prediction.
+- **Source:** Claude Code session 2026-10-16 (Opus 5.5)
+- **Applies to:** #523, #518, #519
+
 ## Decided by the builder
 
 Choices that agents flagged in PRs and that the builder decided because a rule above already covers them (Peter, 2026-10-02: decide what the log supports, raise only real judgement calls). Each is also recorded on its PR, or in the session where Peter asked. The Decided column holds only the builder's part; a rule or decision of Peter's goes in the Rule column. Questions raised to Peter instead are not listed; his answers become entries. Model is the model that wrote the PR (its Co-Authored-By line). Result is "accepted by merge (PR #N, date)" once the PR has merged and Peter didn't correct the choice, "pending" until it merges, and "corrected → entry <title>" when he overrules it; the entry is then scored as a miss.
@@ -1706,6 +1834,11 @@ Choices that agents flagged in PRs and that the builder decided because a rule a
 | 2026-10-15 | #502 | data safety | An admin's purge waits and the user clicks again | The job becomes the user's own request and the admin's Undo is refused (1f5ef085) | The user's edit wins; only the user restores their own request (#508) | Opus 5.5 | pending |
 | 2026-10-15 | #502 | data safety | `requested_at` of a writing deletion clicked again | Moves to the latest click, so cost rows up to it go with the job (1f5ef085) | One date for everything (Peter, 2026-10-15) | Opus 5.5 | pending |
 | 2026-10-15 | #502 | reliability | `cancel_jobs` checks | Re-checks its conditions inside the update, which also closes an older race between Restore or an admin's Undo and an account deletion's takeover (1f5ef085) | Fix the root cause | Opus 5.5 | pending |
+| 2026-10-16 | #519 | reliability | Where a TTS answer with no playable audio is resent, and how often | To the same model and voice, within the existing cap of 3 attempts (`TTS_SLOW_RETRIES`), so at most 2 extra billed calls per chunk | A user's model is theirs; no fallback to `tts-1` (2026-10-13); #382's numbers change only at its weekly check (2026-10-13) | Opus 5.5 | accepted by merge (PR #519, 2026-10-16) |
+| 2026-10-16 | #519 | reliability | Which decode failures are resent | Only an empty or undecodable answer; any other decoder failure (for example, ffmpeg missing) fails at once, since every resend would fail the same way and be billed | Problems show; fix the cause | Opus 5.5 | accepted by merge (PR #519, 2026-10-16) |
+| 2026-10-16 | #519 | UX | How a failed speaker-icon audio job is announced | The #504 error sound, after the audio already queued has played, or at once if nothing played: #504's sound extended from voice mode to the speaker icon | Problems show; #504: so you know it failed without looking | Opus 5.5 | accepted by merge (PR #519, 2026-10-16) |
+| 2026-10-16 | #519 | user-facing text | The message after a failed speaker-icon audio job | The player's existing playback-error toast (6 s), saying that a retry starts from the beginning: "Loore couldn't read the rest aloud. Tap the speaker to try again from the start." | candidate: user-facing text says what happens to the user | Opus 5.5 | accepted by merge (PR #519, 2026-10-16) |
+| 2026-10-16 | #519 | reliability | Reporting resent bad answers | Logged only, not sent to Sentry, so #382's Sentry count stays a count of slow calls; a chunk that fails every attempt still reaches Sentry | #382's weekly check | Opus 5.5 | accepted by merge (PR #519, 2026-10-16) |
 
 ## Backfilled decisions
 
@@ -2393,3 +2526,30 @@ Builder decisions listed in PRs that merged without Peter correcting them, backf
 | 2026-10-13 | #504 | reliability | iPhone: after any voice error sound, the existing upload and transcription sounds included, the audio session stays active for 0.7 s, the sound's length, before it is deactivated | Opus 5.5 | accepted by merge (PR #504, 2026-10-13) |
 | 2026-10-13 | #504 | UX | iPhone: a reply that fails while part of its audio is playing lets that audio play to the end, then plays the error sound, instead of returning to the record screen at once | Opus 5.5 | accepted by merge (PR #504, 2026-10-13) |
 | 2026-10-13 | #504 | product scope | Web: the TTS stream's `error` event stays unhandled, so the sound for a failed TTS comes with the next status check, up to 7 s later; handling it is a follow-up | Opus 5.5 | accepted by merge (PR #504, 2026-10-13) |
+| 2026-10-16 | #517 | privacy | The profile chapter route uses exactly the profile audio route's check: the owner only, 403 for everyone else, admins included, since chapter titles are profile content | Sonnet 5.5 | accepted by merge (PR #517, 2026-10-16) |
+| 2026-10-16 | #521 | privacy | Word imports take the Markdown import's path to storage, so private imports are encrypted at rest; the conversion runs in the request and logs nothing | Sonnet 5.5 | accepted by merge (PR #521, 2026-10-16) |
+| 2026-10-16 | #521 | data safety | Re-importing a deleted Word document with "restore" imports it again in full (the deleted chain gives up its duplicate key); Markdown keeps restoring in place | Sonnet 5.5 | accepted by merge (PR #521, 2026-10-16) |
+| 2026-10-16 | #521 | data safety | A Word document's duplicate key is Markdown's hash of file name and converted text, kept on the chain's last node, so importing it again skips the whole document | Sonnet 5.5 | accepted by merge (PR #521, 2026-10-16) |
+| 2026-10-16 | #521 | UX | Chapter nodes are dated the document's date plus 1 s per chapter, so the thread keeps the chapter order | Sonnet 5.5 | accepted by merge (PR #521, 2026-10-16) |
+| 2026-10-16 | #521 | UX | The file name becomes a top heading on the first node unless the document starts with one, as in Markdown import | Sonnet 5.5 | accepted by merge (PR #521, 2026-10-16) |
+| 2026-10-16 | #521 | UX | Word "Title" paragraphs don't become headings, so a title doesn't count as a chapter; only Word's heading styles do | Sonnet 5.5 | accepted by merge (PR #521, 2026-10-16) |
+| 2026-10-16 | #521 | UX | A Word table without a header row gets its first row as the Markdown header row | Sonnet 5.5 | accepted by merge (PR #521, 2026-10-16) |
+| 2026-10-16 | #521 | UX | Links inside the document (bookmarks, footnote back-references) are dropped; the footnote number stays as text | Sonnet 5.5 | accepted by merge (PR #521, 2026-10-16) |
+| 2026-10-16 | #521 | UX | Word's `~$` lock files in a zip are ignored; a macro-enabled `.docm` is named in the dialog instead of being skipped silently | Sonnet 5.5 | accepted by merge (PR #521, 2026-10-16) |
+| 2026-10-16 | #521 | product scope | Left out of the first version and told to Peter before the build: images (an "[image: alt text]" note, image bytes never read), comments, old .doc, .odt and .pdf; tracked changes come in as accepted | Sonnet 5.5 | accepted by merge (PR #521, 2026-10-16) |
+| 2026-10-16 | #521 | product scope | The iPhone app's file picker doesn't take .docx yet (offered as about 10 more lines) | Sonnet 5.5 | accepted by merge (PR #521, 2026-10-16) |
+| 2026-10-16 | #521 | release/ops | At most 5 MB of the XML the converter parses, counted together over every .docx in one upload, roughly a 300-page document (`MAX_PARSED_XML_BYTES`) | Sonnet 5.5 | accepted by merge (PR #521, 2026-10-16) |
+| 2026-10-16 | #521 | release/ops | At most 200 MB for all parts of a document once unpacked, images included, the same as the upload cap (`MAX_TOTAL_UNCOMPRESSED_BYTES`) | Sonnet 5.5 | accepted by merge (PR #521, 2026-10-16) |
+| 2026-10-16 | #521 | release/ops | A document whose unpacked size is more than 200 times its packed size is rejected, checked only above 5 MB so small files are never rejected for it (`MAX_COMPRESSION_RATIO`, `MIN_BYTES_FOR_RATIO_CHECK`) | Sonnet 5.5 | accepted by merge (PR #521, 2026-10-16) |
+| 2026-10-16 | #521 | release/ops | At most 5,000 entries in a .docx (`MAX_ENTRIES`) | Sonnet 5.5 | accepted by merge (PR #521, 2026-10-16) |
+| 2026-10-16 | #521 | release/ops | A .docx taken from a zip stays in memory up to 8 MB, then moves to a temporary file (`SPOOL_MAX_MEMORY_BYTES`) | Sonnet 5.5 | accepted by merge (PR #521, 2026-10-16) |
+| 2026-10-16 | #521 | release/ops | A DOCTYPE in any part the converter reads rejects the document (Word never writes one) | Sonnet 5.5 | accepted by merge (PR #521, 2026-10-16) |
+| 2026-10-16 | #522 | UX | A heading level counts as chapters only if it appears at least twice, so a lone title or a single `###` doesn't split the text (`MIN_CHAPTER_HEADINGS` = 2) | Sonnet 5.5 | accepted by merge (PR #522, 2026-10-16) |
+| 2026-10-16 | #522 | UX | Voice replies spoken while they are written keep their chapters at `#`/`##` only, because the reply is cut into chunks before its later headings exist; only a failed stream whose audio is made again could differ | Sonnet 5.5 | accepted by merge (PR #522, 2026-10-16) |
+| 2026-10-16 | #522 | UX | Headings inside fenced code are not treated apart: a `###` line in code counts, as `#` lines already did | Sonnet 5.5 | accepted by merge (PR #522, 2026-10-16) |
+| 2026-10-16 | #523 | product scope | The raw window holds about 10k tokens of entries; earlier sessions' prompts and profiles appear as short reference lines and no longer count against the budget | Opus 5.5 | accepted by merge (PR #523, 2026-10-16) |
+| 2026-10-16 | #523 | reliability | The one-pass placeholder fill covers every placeholder the reply's generation fills (`{user_export}`, `{ca_tweets}`, the personal and the guidance placeholders), not only the system prompt's | Opus 5.5 | accepted by merge (PR #523, 2026-10-16) |
+| 2026-10-16 | #523 | cost | The cache pre-warm and the reply share the fill and the guidance values, so both send the same bytes | Opus 5.5 | accepted by merge (PR #523, 2026-10-16) |
+| 2026-10-16 | #523 | data safety | Values are inserted literally, as `str.replace` did, so a backslash sequence in the user's text means nothing | Opus 5.5 | accepted by merge (PR #523, 2026-10-16) |
+| 2026-10-16 | #523 | reliability | Recent context's rebuilds with a budget also stop counting prompt texts they never show, so they fit more entries | Opus 5.5 | accepted by merge (PR #523, 2026-10-16) |
+| 2026-10-16 | #523 | product scope | Exports that show the prompt in full keep it, with their budget unchanged: `{user_export}`, profile generation, intentions detection, poll drafts and the data download | Opus 5.5 | accepted by merge (PR #523, 2026-10-16) |
