@@ -5,6 +5,7 @@ import {
   ANALYZE_UPLOAD_TIMEOUT_MS,
   stripDocxMedia,
   describeAnalyzeError,
+  localFileError,
 } from "../utils/docxUpload";
 import { FaSpinner } from "react-icons/fa";
 import api from "../api";
@@ -210,6 +211,10 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
     importStage === "uploading" && uploadPercent != null ? ` ${uploadPercent} %` : null;
   const [importPrivacy, setImportPrivacy] = useState("private");
   const [importAiUsage, setImportAiUsage] = useState("none");
+  // "Whose writing is this?" for a PDF: null until the user picks
+  // "mine" or "someone_else". No default: a wrong guess would feed
+  // another author's text into the user's profile.
+  const [whoseWriting, setWhoseWriting] = useState(null);
   const [error, setError] = useState("");
 
   const [showTwitterImportDialog, setShowTwitterImportDialog] = useState(false);
@@ -233,6 +238,11 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
   // as a summary after the import finishes; dismissing it reloads the
   // page so the new nodes appear.
   const [importResult, setImportResult] = useState(null);
+
+  // An analyzed PDF (always a single upload) asks whose writing it is.
+  const pdfFile = importFiles?.files?.find((f) => f.source_format === "pdf") || null;
+  const hasPdf = !!pdfFile;
+  const savingReference = hasPdf && whoseWriting === "someone_else";
 
   // Backdrop/Escape dismiss for the confirm-dialog modals: ignored while
   // a request is in flight or while a prompt modal is stacked on top
@@ -272,12 +282,19 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
     event.target.value = "";
     if (!picked) return;
 
+    setShowPicker(false);
+    const localError = localFileError(picked);
+    if (localError) {
+      setError(localError);
+      return;
+    }
     setError("");
+    setWhoseWriting(null);
     setImporting(true);
     setImportStage("preparing");
     setUploadPercent(null);
-    setShowPicker(false);
     // The server never reads pictures; leave them out of the upload.
+    // (A PDF is sent as it is.)
     const file = await stripDocxMedia(picked);
 
     const formData = new FormData();
@@ -303,7 +320,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
       })
       .catch((err) => {
         console.error("Error analyzing import file:", err);
-        setError(describeAnalyzeError(err));
+        setError(describeAnalyzeError(err, picked));
         setImporting(false);
         setImportStage(null);
         setUploadPercent(null);
@@ -312,6 +329,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
 
   const handleConfirmImport = (onDeleted) => {
     if (!importFiles) return;
+    if (hasPdf && !whoseWriting) return;
 
     setImporting(true);
     setImportStage("importing");
@@ -321,6 +339,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
       date_ordering: dateOrdering,
       privacy_level: importPrivacy,
       ai_usage: importAiUsage,
+      ...(hasPdf ? { whose_writing: whoseWriting } : {}),
       ...(onDeleted ? { on_deleted: onDeleted } : {})
     })
       .then((response) => {
@@ -346,6 +365,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
   const handleCancelImport = () => {
     setShowImportDialog(false);
     setImportFiles(null);
+    setWhoseWriting(null);
   };
 
   const handleTwitterImportFile = (event) => {
@@ -625,8 +645,32 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
     <div>
       {error && <div style={{ color: "var(--accent)", marginBottom: "0.8rem", fontSize: "0.88rem" }}>{error}</div>}
 
+      {/* A PDF saved as someone else's writing: a Reference, not entries */}
+      {importResult && importResult.saved_as === "reference" && (
+        <ModalShell onDismiss={() => window.location.reload()}>
+          <ModalTitle>{importResult.created ? "Saved as a Reference" : "Already in your References"}</ModalTitle>
+          <p style={{ fontFamily: "var(--sans)", fontWeight: 300, fontSize: "0.92rem", color: "var(--text-secondary)", margin: "0 0 1.4rem" }}>
+            {importResult.created
+              ? "The PDF is saved in your References. It is searchable, you can listen to it on its page, and it stays out of your profile."
+              : "This PDF was saved as a Reference before; nothing new was added."}
+            {importResult.truncated && " It was longer than a Reference holds, so only its beginning was saved."}
+          </p>
+          <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
+            <button
+              onClick={() => { window.location.href = `/references/${importResult.reference_id}`; }}
+              style={primaryBtnStyle}
+            >
+              Open the Reference
+            </button>
+            <button onClick={() => window.location.reload()} style={cancelBtnStyle}>
+              OK
+            </button>
+          </div>
+        </ModalShell>
+      )}
+
       {/* Post-import summary: what was actually imported vs skipped */}
-      {importResult && (
+      {importResult && importResult.saved_as !== "reference" && (
         <ModalShell onDismiss={() => window.location.reload()}>
           <ModalTitle>Import Finished</ModalTitle>
           <div style={{ display: "flex", gap: "2.4rem", marginBottom: "1.3rem" }}>
@@ -774,8 +818,8 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
                   <input type="file" accept=".zip" onChange={handleChatGPTImportFile} style={{ display: "none" }} />
                 </label>
                 <label style={importLabelStyle}>
-                  Import Markdown or Word (.docx)
-                  <input type="file" accept=".zip,.docx" onChange={handleImportFile} style={{ display: "none" }} />
+                  Import Markdown, Word (.docx) or PDF
+                  <input type="file" accept=".zip,.docx,.doc,.pdf" onChange={handleImportFile} style={{ display: "none" }} />
                 </label>
                 <label style={importLabelStyle}>
                   Import Tweets
@@ -885,6 +929,62 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
             </div>
           )}
 
+          {hasPdf && (
+            <p style={{ color: "var(--text-secondary)", fontFamily: "var(--sans)", fontWeight: 300 }}>
+              {pdfFile.pages} page{pdfFile.pages !== 1 ? "s" : ""}
+              {pdfFile.chapters > 0 ? `, ${pdfFile.chapters} chapters from its bookmarks` : ""}
+            </p>
+          )}
+
+          {hasPdf && (
+            <div role="radiogroup" aria-labelledby="whose-writing-label" style={{ marginTop: "15px", marginBottom: "15px" }}>
+              <div id="whose-writing-label" style={{
+                marginBottom: "10px",
+                fontFamily: "var(--sans)",
+                fontWeight: 400,
+                fontSize: "0.75rem",
+                textTransform: "uppercase",
+                letterSpacing: "0.12em",
+                color: "var(--text-muted)"
+              }}>
+                Whose writing is this?
+              </div>
+              <label style={{ display: "block", marginBottom: "8px", cursor: "pointer", color: "var(--text-secondary)", fontFamily: "var(--sans)", fontWeight: 300 }}>
+                <input
+                  type="radio"
+                  name="whose_writing"
+                  value="mine"
+                  checked={whoseWriting === "mine"}
+                  onChange={(e) => setWhoseWriting(e.target.value)}
+                  style={{ marginRight: "8px" }}
+                />
+                Mine: import it as my own entries
+              </label>
+              <label style={{ display: "block", cursor: "pointer", color: "var(--text-secondary)", fontFamily: "var(--sans)", fontWeight: 300 }}>
+                <input
+                  type="radio"
+                  name="whose_writing"
+                  value="someone_else"
+                  checked={whoseWriting === "someone_else"}
+                  onChange={(e) => setWhoseWriting(e.target.value)}
+                  style={{ marginRight: "8px" }}
+                />
+                Someone else's: save it as a Reference
+              </label>
+              {savingReference && (
+                <p style={{ color: "var(--text-muted)", fontFamily: "var(--sans)", fontWeight: 300, fontSize: "0.85rem", margin: "10px 0 0" }}>
+                  A Reference is searchable and you can listen to it, chapter
+                  by chapter. It isn't your writing, so it stays out of your
+                  profile.
+                  {pdfFile.reference?.truncated && (
+                    ` This PDF is longer than a Reference holds: only the first ${(pdfFile.reference.char_cap || 0).toLocaleString()} characters are saved.`
+                  )}
+                </p>
+              )}
+            </div>
+          )}
+
+          {!savingReference && (<>
           <div style={{ marginTop: "15px", marginBottom: "15px" }}>
             <label style={{
               display: "block",
@@ -961,19 +1061,28 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
             onPrivacyChange={setImportPrivacy}
             onAIUsageChange={setImportAiUsage}
           />
+          </>)}
 
           <div style={{ display: "flex", gap: "10px", marginTop: "15px" }}>
-            <button
-              onClick={() => handleConfirmImport()}
-              disabled={importing}
-              style={{
-                ...primaryBtnStyle,
-                cursor: importing ? "not-allowed" : "pointer",
-                opacity: importing ? 0.6 : 1
-              }}
-            >
-              {importing ? <ImportSpinner stage={importStage} fallback="Importing…" /> : "Confirm Import"}
-            </button>
+            {(() => {
+              // A PDF needs an answer first (no default, see whoseWriting)
+              const confirmDisabled = importing || (hasPdf && !whoseWriting);
+              return (
+                <button
+                  onClick={() => handleConfirmImport()}
+                  disabled={confirmDisabled}
+                  style={{
+                    ...primaryBtnStyle,
+                    cursor: confirmDisabled ? "not-allowed" : "pointer",
+                    opacity: confirmDisabled ? 0.6 : 1
+                  }}
+                >
+                  {importing
+                    ? <ImportSpinner stage={importStage} fallback="Importing…" />
+                    : (savingReference ? "Save as Reference" : "Confirm Import")}
+                </button>
+              );
+            })()}
             <button
               onClick={handleCancelImport}
               disabled={importing}

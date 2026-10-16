@@ -5,6 +5,7 @@
 
 export const SOURCE_LABEL = {
   web_clip: 'Page',
+  document: 'Document',
   twitter_bookmark: 'Tweet',
   twitter_like: 'Tweet',
   community_archive: 'Archive tweet',
@@ -48,6 +49,9 @@ export function sourceLine(item) {
     const host = hostOf(item.url);
     return host ? `Page from ${host}` : 'Saved page';
   }
+  // A PDF the user uploaded as someone else's writing (backend
+  // SOURCE_DOCUMENT): no URL, so nothing to name but the upload.
+  if (item.source === 'document') return 'Document you uploaded';
   // A source this list does not know yet: its label, as the log shows it.
   return sourceLabel(item);
 }
@@ -61,11 +65,15 @@ export function sourceLinkLabel(item) {
   return 'Open page ↗';
 }
 
+// Sources whose author is a byline (a name, or a site), not an @handle
+// (the backend's BYLINE_SOURCES).
+export const BYLINE_SOURCES = ['web_clip', 'document'];
+
 // Tweets carry an @handle, after the display name when the archive has
-// one (#435); a page's author is a byline or the site.
+// one (#435); a page's or a document's author is a byline or the site.
 export function authorLabel(item) {
   if (!item.author_handle) return null;
-  if (item.source === 'web_clip') return item.author_handle;
+  if (BYLINE_SOURCES.includes(item.source)) return item.author_handle;
   return item.author_name
     ? `${item.author_name} @${item.author_handle}`
     : `@${item.author_handle}`;

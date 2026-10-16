@@ -1,5 +1,5 @@
 import {
-  bodyWithoutTitle, referenceKind, sourceLabel, sourceLine, sourceLinkLabel, youtubeVideo,
+  authorLabel, bodyWithoutTitle, referenceKind, sourceLabel, sourceLine, sourceLinkLabel, youtubeVideo,
 } from './references';
 
 const clip = (url) => ({ source: 'web_clip', url });
@@ -62,6 +62,20 @@ describe('sourceLine', () => {
     expect(sourceLine(clip('https://www.example.com/post'))).toBe('Page from example.com');
     expect(sourceLine(clip(null))).toBe('Saved page');
     expect(sourceLine({ source: 'new_source' })).toBe('new_source');
+  });
+  it('names an uploaded document (a PDF saved as someone else\'s writing)', () => {
+    expect(sourceLine({ source: 'document', url: null })).toBe('Document you uploaded');
+    expect(sourceLabel({ source: 'document' })).toBe('Document');
+    expect(referenceKind({ source: 'document' })).toBe('page');
+  });
+});
+
+describe('authorLabel', () => {
+  it('shows a byline as it is and a tweet author with an @', () => {
+    expect(authorLabel({ source: 'document', author_handle: 'Jane Doe' })).toBe('Jane Doe');
+    expect(authorLabel({ source: 'web_clip', author_handle: 'example.com' })).toBe('example.com');
+    expect(authorLabel({ source: 'twitter_bookmark', author_handle: 'visa' })).toBe('@visa');
+    expect(authorLabel({ source: 'document', author_handle: null })).toBeNull();
   });
 });
 

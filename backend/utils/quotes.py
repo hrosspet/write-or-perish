@@ -148,10 +148,12 @@ def resolve_ext_quotes(content: str, user_id: int,
                 return f"[Quoted reference #{item_id}: inaccessible]"
             return f"[Quoted reference inaccessible: item {item_id}]"
         resolved_ids.append(item_id)
-        # Tweets have @handles; a web clip's author is a byline or the
-        # site's hostname, which an @ would only misrepresent.
+        # Tweets have @handles; a web clip's or an uploaded document's
+        # author is a byline or the site's hostname, which an @ would only
+        # misrepresent.
+        from backend.models import BYLINE_SOURCES
         author = d["author_handle"] or "unknown"
-        if d["source"] != "web_clip":
+        if d["source"] not in BYLINE_SOURCES:
             author = f"@{author}"
         title = d.get("title")
         if for_llm:
