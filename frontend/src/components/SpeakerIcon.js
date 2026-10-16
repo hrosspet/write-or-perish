@@ -66,9 +66,7 @@ const SpeakerIcon = ({ nodeId, profileId, itemId, content, isPublic, aiUsage, on
   const fullTitle = header || baseTitle;
 
   // Chapter list for TTS playback (#145) — empty for unstructured text.
-  // Profiles have no chapters route.
   const fetchChapters = useCallback(async () => {
-    if (!isNode && !isItem) return [];
     try {
       const res = await api.get(`${baseUrl}/tts-chapters`, {
         validateStatus: (s) => s === 200 || s === 404,
@@ -77,7 +75,7 @@ const SpeakerIcon = ({ nodeId, profileId, itemId, content, isPublic, aiUsage, on
     } catch (e) {
       return [];
     }
-  }, [baseUrl, isNode, isItem]);
+  }, [baseUrl]);
 
   // SSE streaming for TTS chunks
   const handleChunkReady = useCallback((data) => {
