@@ -6,6 +6,10 @@ export const ANALYZE_UPLOAD_TIMEOUT_MS = 5 * 60 * 1000;
 
 const isDocx = (file) => /\.docx$/i.test(file?.name || "");
 
+// Heuristic: above this size a file is uploaded as picked, because an
+// in-memory copy peaks at about twice the file size and could crash a phone tab.
+export const IN_MEMORY_COPY_MAX_BYTES = 50 * 1024 * 1024;
+
 export const FILE_READ_MESSAGE =
   "Loore couldn't read this file from your phone. If it's in Google Drive or another cloud app, open it there, download it, and pick it from Downloads.";
 
@@ -46,8 +50,10 @@ export async function inMemoryCopy(file) {
 // included, is copied unchanged. When the file is not a .docx, has no
 // media, or JSZip cannot read it (the server then reports its own specific
 // error), the result is an in-memory copy of the original. The file is
-// read once. Throws FileReadError when the browser cannot read it.
+// read once. A file over IN_MEMORY_COPY_MAX_BYTES is returned as it is,
+// unread. Throws FileReadError when the browser cannot read it.
 export async function stripDocxMedia(file) {
+  if (file.size > IN_MEMORY_COPY_MAX_BYTES) return file;
   let bytes;
   try {
     bytes = await readBytes(file);

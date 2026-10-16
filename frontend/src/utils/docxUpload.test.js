@@ -1,6 +1,6 @@
 import JSZip from "jszip";
 import {
-  stripDocxMedia, inMemoryCopy, FileReadError, describeAnalyzeError, localFileError, OLD_DOC_MESSAGE,
+  stripDocxMedia, inMemoryCopy, FileReadError, IN_MEMORY_COPY_MAX_BYTES, describeAnalyzeError, localFileError, OLD_DOC_MESSAGE,
 } from "./docxUpload";
 
 async function makeDocx(entries, name = "a.docx") {
@@ -61,6 +61,14 @@ test("stripDocxMedia throws FileReadError when the file cannot be read", async (
   const f = new File(["x"], "a.docx");
   f.arrayBuffer = () => Promise.reject(new DOMException("gone", "NotReadableError"));
   await expect(stripDocxMedia(f)).rejects.toBeInstanceOf(FileReadError);
+});
+
+test("stripDocxMedia returns a file over the size limit as the same object, unread", async () => {
+  const big = new File(["x"], "big.zip");
+  Object.defineProperty(big, "size", { value: IN_MEMORY_COPY_MAX_BYTES + 1 });
+  big.arrayBuffer = jest.fn();
+  expect(await stripDocxMedia(big)).toBe(big);
+  expect(big.arrayBuffer).not.toHaveBeenCalled();
 });
 
 test("inMemoryCopy keeps name, type and bytes in a new File", async () => {
