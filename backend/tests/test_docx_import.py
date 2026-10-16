@@ -291,7 +291,7 @@ def test_doctype_in_other_part_rejected(client):
 
 
 def test_oversize_document_xml_rejected(client, monkeypatch):
-    monkeypatch.setattr(docx_import, "MAX_DOCUMENT_XML_BYTES", 200)
+    monkeypatch.setattr(docx_import, "MAX_PARSED_XML_BYTES", 200)
     r = _analyze(client, "big.docx", _docx(["x " * 500]))
     assert r.status_code == 400
     assert "too large" in r.get_json()["error"]
@@ -348,3 +348,61 @@ def test_clean_html_image_placeholders_and_anchors():
                                  heading_style="ATX", bullets="-")
     assert "[image: A chart]" in md and "[image]" in md
     assert "<a" not in md and "\u2191" not in md
+
+
+DOC_RELS = ('<?xml version="1.0"?><Relationships xmlns="http://schemas.'
+            'openxmlformats.org/package/2006/relationships"><Relationship '
+            'Id="rId9" Type="http://schemas.openxmlformats.org/officeDocument/'
+            '2006/relationships/{kind}" Target="{target}"/></Relationships>')
+
+
+def _with_related_part(kind, target, xml):
+    return _docx(["x"], extra={
+        "word/_rels/document.xml.rels": DOC_RELS.format(kind=kind, target=target),
+        "word/" + target: xml,
+    })
+
+
+def test_part_reached_only_through_relationships_is_checked(client, monkeypatch):
+    sty = ('<w:styles xmlns:w="http://schemas.openxmlformats.org/'
+           'wordprocessingml/2006/main"/>')
+    ok = _with_related_part("styles", "odd/Name.xml", sty)
+    assert _analyze(client, "ok.docx", ok).status_code == 200
+    bad = _with_related_part("footnotes", "odd/Name.xml",
+                             "<!DOCTYPE f []>" + sty)
+    assert _analyze(client, "bad.docx", bad).status_code == 400
+    monkeypatch.setattr(docx_import, "MAX_PARSED_XML_BYTES", 3000)
+    big = _with_related_part("styles", "odd/Name.xml",
+                             sty + "<!-- " + "a" * 4000 + " -->")
+    r = _analyze(client, "big.docx", big)
+    assert r.status_code == 400 and "big.docx" in r.get_json()["error"]
+
+
+def test_combined_cap_across_docx_in_one_zip(client, monkeypatch):
+    one = _docx(["hello " * 100])
+    with zipfile.ZipFile(io.BytesIO(one)) as z:
+        size = sum(i.file_size for i in z.infolist()
+                   if i.filename.endswith(".xml") or i.filename.endswith(".rels"))
+    monkeypatch.setattr(docx_import, "MAX_PARSED_XML_BYTES", int(size * 1.5))
+    body = _analyze(client, "e.zip", _zip({"a.docx": one, "b.docx": one})).get_json()
+    assert [f["name"] for f in body["files"]] == ["a.docx"]
+    assert [e["name"] for e in body["errors"]] == ["b.docx"]
+    assert _analyze(client, "one.docx", one).status_code == 200
+
+
+def test_reimport_of_deleted_docx_restores_whole_document(client):
+    import datetime
+    f = _analyze(client, "Thesis.docx", _thesis(3)).get_json()["files"][0]
+    _confirm(client, [f])
+    for n in Node.query.all():
+        n.deleted_at = datetime.datetime.utcnow()
+    _db.session.commit()
+    assert _confirm(client, [f]).status_code == 409
+    r = _confirm(client, [f], on_deleted="restore")
+    assert r.status_code == 201
+    live = Node.query.filter(Node.deleted_at.is_(None)).order_by(Node.id).all()
+    assert len(live) == 4
+    assert live[1].get_content().startswith("# Chapter 1")
+    assert live[3].get_content().startswith("# Chapter 3")
+    for a, b in zip(live, live[1:]):
+        assert b.parent_id == a.id

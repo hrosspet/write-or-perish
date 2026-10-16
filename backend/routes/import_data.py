@@ -238,6 +238,21 @@ def _apply_settings_to_skipped(node_ids, privacy_level, ai_usage):
     return updated
 
 
+def _release_deleted_docx_key(file_data, source_key, key_index,
+                              deleted_keys, on_deleted):
+    """Re-importing a deleted Word document with "restore" is a new import:
+    the dedup key sits on the last node of its chapter chain, so refilling
+    that node would bring back only the last chapter. The deleted tip
+    gives up the key and the document is imported again in full."""
+    if (file_data.get('source_format') == 'docx'
+            and on_deleted == 'restore' and source_key in deleted_keys):
+        old = Node.query.get(key_index.pop(source_key))
+        if old is not None:
+            old.source_key = None
+            db.session.flush()
+        deleted_keys.discard(source_key)
+
+
 def _docx_file_entry(filename, content, modified):
     """Analyze-step entry for a converted Word document. source_format
     tells the confirm step to split it into chapter nodes."""
@@ -362,6 +377,7 @@ def analyze_import():
 
         files_data = []
         errors = []
+        parse_budget = docx_import.ParseBudget()  # shared by all docx here
         total_tokens = 0
         total_size = 0
 
@@ -401,7 +417,8 @@ def analyze_import():
                             with zip_ref.open(zip_info) as src:
                                 shutil.copyfileobj(src, tmp)
                             tmp.seek(0)
-                            content, modified = docx_import.convert_docx(tmp)
+                            content, modified = docx_import.convert_docx(
+                                tmp, parse_budget)
                     except docx_import.DocxImportError as e:
                         errors.append({"name": filename, "error": str(e)})
                         continue
@@ -548,6 +565,8 @@ def confirm_import():
                 node_content = parts[-1]  # the tip: what a restore refills
 
                 source_key = _file_source_key(filename, content)
+                _release_deleted_docx_key(file_data, source_key, key_index,
+                                          deleted_keys, on_deleted)
                 if source_key in key_index:
                     # Chain the next new file onto the existing copy so
                     # partially-skipped imports don't orphan new nodes.
@@ -597,6 +616,8 @@ def confirm_import():
                 node_content = parts[-1]  # the tip: what a restore refills
 
                 source_key = _file_source_key(filename, content)
+                _release_deleted_docx_key(file_data, source_key, key_index,
+                                          deleted_keys, on_deleted)
                 if source_key in key_index:
                     if source_key in deleted_keys and on_deleted == 'restore':
                         _restore_node(key_index[source_key], node_content,

@@ -18,8 +18,11 @@ from bs4 import BeautifulSoup
 from markdownify import markdownify
 
 # --- Limits (heuristics: chosen, not measured; listed in the PR) ---------
-# word/document.xml: a 40-page thesis is well under 1 MB of XML.
-MAX_DOCUMENT_XML_BYTES = 10 * 1024 * 1024
+# Combined uncompressed size of the XML parts the converter parses, summed
+# over every .docx in one upload request. The converter needs ~55 MB of
+# memory per MB of XML, so 5 MB is about 300 MB peak, roughly a
+# 300-page document.
+MAX_PARSED_XML_BYTES = 5 * 1024 * 1024
 # Total uncompressed size of all parts (images included).
 MAX_TOTAL_UNCOMPRESSED_BYTES = 200 * 1024 * 1024
 # Overall uncompressed:compressed ratio. Word XML compresses ~10-20x and
@@ -28,8 +31,6 @@ MAX_COMPRESSION_RATIO = 200
 MIN_BYTES_FOR_RATIO_CHECK = 5 * 1024 * 1024
 # Number of zip entries (a real document has a few dozen).
 MAX_ENTRIES = 5000
-# Largest non-document XML part scanned for a DOCTYPE.
-MAX_XML_PART_BYTES = 50 * 1024 * 1024
 # A .docx taken out of a zip is spooled to a temp file; this many bytes
 # stay in memory before it spills to disk.
 SPOOL_MAX_MEMORY_BYTES = 8 * 1024 * 1024
@@ -49,7 +50,68 @@ def check_extension(filename):
     return lower.endswith(".docx")
 
 
-def _validate(zf):
+class ParseBudget:
+    """Bytes of parsed XML still allowed in one upload request."""
+
+    def __init__(self, limit=None):
+        self.remaining = MAX_PARSED_XML_BYTES if limit is None else limit
+
+
+def _parsed_part_names(zf):
+    """Names of the zip entries the converter will parse, resolved with
+    the converter's own functions (package relationships, then the main
+    document's relationships). Each relationships part is checked before
+    the converter reads it. Raises DocxImportError on anything that
+    cannot be resolved."""
+    from mammoth import docx as mdocx
+    from mammoth.zips import open_zip
+
+    names = set()
+    names_in_zip = set(zf.namelist())
+
+    def check(name):
+        if name in names_in_zip:
+            names.add(name)
+            _check_no_doctype(zf, name)
+
+    check("[Content_Types].xml")
+    check("_rels/.rels")
+    mz = open_zip(zf.fp, "r")
+    try:
+        main = mdocx._find_document_filename(
+            mz, mdocx._read_relationships(mz, "_rels/.rels"))
+    except Exception:
+        raise DocxImportError("this is not a Word document")
+    rels = mdocx._find_relationships_path_for(main)
+    check(rels)
+    try:
+        paths = mdocx._find_part_paths(mz)
+    except Exception:
+        raise DocxImportError("this is not a Word document")
+    for part in (paths.main_document, paths.styles, paths.numbering,
+                 paths.footnotes, paths.endnotes, paths.comments):
+        check(part)
+        check(mdocx._find_relationships_path_for(part))
+    check("docProps/core.xml")  # read for the document date
+    if main not in names:
+        raise DocxImportError("this is not a Word document")
+    return names
+
+
+def _check_no_doctype(zf, name):
+    """Reject an XML part with a DOCTYPE (Word never writes one). The size
+    is bounded by the budget check that runs before any part is read."""
+    info = zf.getinfo(name)
+    if info.file_size > MAX_PARSED_XML_BYTES:
+        raise DocxImportError("the document text is too large to import")
+    with zf.open(info) as part:
+        data = part.read(info.file_size + 1)
+    # UTF-16 parts have NUL bytes between characters
+    if b"<!doctype" in data.lower().replace(b"\x00", b""):
+        raise DocxImportError("the document contains unsupported markup")
+
+
+def _validate(zf, budget):
     infos = zf.infolist()
     if len(infos) > MAX_ENTRIES:
         raise DocxImportError("the document has too many parts")
@@ -60,22 +122,23 @@ def _validate(zf):
     if (total > MIN_BYTES_FOR_RATIO_CHECK
             and total > MAX_COMPRESSION_RATIO * max(compressed, 1)):
         raise DocxImportError("the document is compressed abnormally")
-    try:
-        doc_info = zf.getinfo("word/document.xml")
-    except KeyError:
-        raise DocxImportError("this is not a Word document")
-    if doc_info.file_size > MAX_DOCUMENT_XML_BYTES:
-        raise DocxImportError("the document text is too large to import")
-    for info in infos:
-        low = info.filename.lower()
-        if not (low.endswith(".xml") or low.endswith(".rels")):
-            continue
-        if info.file_size > MAX_XML_PART_BYTES:
-            raise DocxImportError("the document has an oversized part")
-        with zf.open(info) as part:
-            data = part.read(MAX_XML_PART_BYTES + 1)
-        if b"<!doctype" in data.lower().replace(b"\x00", b""):
-            raise DocxImportError("the document contains unsupported markup")
+    # Size first (declared sizes only, nothing read), then content checks.
+    # The relationships parts are read to resolve the rest, so they are
+    # size-limited before that.
+    for name in ("[Content_Types].xml", "_rels/.rels"):
+        try:
+            if zf.getinfo(name).file_size > MAX_PARSED_XML_BYTES:
+                raise DocxImportError("the document text is too large to import")
+        except KeyError:
+            pass
+    names = _parsed_part_names(zf)
+    size = sum(zf.getinfo(n).file_size for n in names)
+    if size > budget.remaining:
+        raise DocxImportError(
+            "too much text to import in one go (limit "
+            f"{MAX_PARSED_XML_BYTES // (1024 * 1024)} MB of document XML "
+            "per upload); upload fewer or smaller documents at a time")
+    budget.remaining -= size
 
 
 def modified_date(zf):
@@ -138,7 +201,7 @@ class _Seekable:
         return True
 
 
-def convert_docx(fileobj):
+def convert_docx(fileobj, budget=None):
     """Convert a seekable binary .docx stream.
 
     Returns (markdown, modified_datetime_or_None). Raises DocxImportError.
@@ -147,7 +210,7 @@ def convert_docx(fileobj):
         fileobj = _Seekable(fileobj)
     try:
         with zipfile.ZipFile(fileobj) as zf:
-            _validate(zf)
+            _validate(zf, budget or ParseBudget())
             modified = modified_date(zf)
     except zipfile.BadZipFile:
         raise DocxImportError("this is not a valid Word document")
