@@ -38,12 +38,6 @@ enum ListenTarget: Hashable, Sendable {
         }
     }
 
-    /// Profiles have no `/tts-chapters`.
-    var hasChapters: Bool {
-        if case .profile = self { return false }
-        return true
-    }
-
     /// "Node 12" / "Reference 12" / "Profile 12" when the content has no heading.
     var fallbackTitle: String {
         switch self {
@@ -200,9 +194,9 @@ extension AudioCenter {
         }
     }
 
-    /// `GET …/tts-chapters` (nodes and saved references; empty unless > 1 section).
+    /// `GET …/tts-chapters` (nodes, saved references and profiles; empty unless > 1 section).
     private func fetchChapters(_ target: ListenTarget, singleFile: Bool) async -> [QueueChapter] {
-        guard target.hasChapters, let api = appState?.api,
+        guard let api = appState?.api,
               let answer: TTSChaptersResponse = try? await api.get("\(target.base)/tts-chapters") else { return [] }
         return answer.chapters.map {
             QueueChapter(title: $0.title, chunkIndex: singleFile ? nil : $0.chunkIndex, startTime: $0.startTime)
