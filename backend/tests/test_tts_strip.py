@@ -29,6 +29,7 @@ _GLUE = {
     "celery.utils.log": MagicMock(),
     "openai": MagicMock(),
     "pydub": MagicMock(),
+    "pydub.exceptions": MagicMock(),
     "backend.celery_app": MagicMock(),
 }
 _saved = {k: sys.modules.get(k) for k in _GLUE}

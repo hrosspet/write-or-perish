@@ -443,6 +443,9 @@ export function useDraftTranscriptionSSE(sessionId, options = {}) {
  * @param {string} options.entityType - 'node' (default), 'profile' or 'item' (saved reference)
  * @param {Function} options.onChunkReady - Called when an audio chunk is ready
  * @param {Function} options.onAllComplete - Called when all chunks are done
+ * @param {Function} options.onError - Called when the server reports that
+ *   generation failed (its `error` event). The server has closed the
+ *   stream and refuses a new one, so the caller turns `enabled` off.
  * @param {boolean} options.reconnectOnReturn - Reconnect when the user
  *   returns to the page (see useSSE). The stream sends every chunk again
  *   on connect; onChunkReady still gets each chunk index once.
@@ -453,6 +456,7 @@ export function useTTSStreamSSE(entityId, options = {}) {
     entityType = 'node',
     onChunkReady = null,
     onAllComplete = null,
+    onError = null,
     reconnectOnReturn = false,
   } = options;
 
@@ -463,11 +467,13 @@ export function useTTSStreamSSE(entityId, options = {}) {
   // Store callback refs to ensure handlers always call latest callbacks
   const onChunkReadyRef = useRef(onChunkReady);
   const onAllCompleteRef = useRef(onAllComplete);
+  const onErrorRef = useRef(onError);
 
   useEffect(() => {
     onChunkReadyRef.current = onChunkReady;
     onAllCompleteRef.current = onAllComplete;
-  }, [onChunkReady, onAllComplete]);
+    onErrorRef.current = onError;
+  }, [onChunkReady, onAllComplete, onError]);
 
   // Use REACT_APP_BACKEND_URL for SSE since EventSource doesn't go through CRA proxy
   const backendUrl = process.env.REACT_APP_BACKEND_URL || '';
@@ -522,6 +528,14 @@ export function useTTSStreamSSE(entityId, options = {}) {
       setFinalUrl(data.tts_url);
       if (onAllCompleteRef.current) {
         onAllCompleteRef.current(data);
+      }
+    },
+    // The server's `error` event: generation failed, or the entry is gone.
+    // A dropped connection fires `error` too, without data; useSSE skips
+    // those.
+    error: (data) => {
+      if (onErrorRef.current) {
+        onErrorRef.current(data);
       }
     },
     heartbeat: () => {
