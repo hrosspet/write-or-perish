@@ -6,20 +6,67 @@ export const ANALYZE_UPLOAD_TIMEOUT_MS = 5 * 60 * 1000;
 
 const isDocx = (file) => /\.docx$/i.test(file?.name || "");
 
+// Heuristic: above this size a file is uploaded as picked, because an
+// in-memory copy peaks at about twice the file size and could crash a phone tab.
+export const IN_MEMORY_COPY_MAX_BYTES = 50 * 1024 * 1024;
+
+export const FILE_READ_MESSAGE =
+  "Loore couldn't read this file from your phone. If it's in Google Drive or another cloud app, open it there, download it, and pick it from Downloads.";
+
+// Thrown when the browser cannot read the picked file (for example a file
+// backed by a cloud app on Android). No request is made in that case.
+export class FileReadError extends Error {
+  constructor(cause) {
+    super(FILE_READ_MESSAGE);
+    this.name = "FileReadError";
+    this.cause = cause;
+  }
+}
+
+// Blob.arrayBuffer() where it exists; FileReader for older browsers.
+const readBytes = (file) =>
+  typeof file.arrayBuffer === "function"
+    ? file.arrayBuffer()
+    : new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = () => reject(reader.error);
+        reader.readAsArrayBuffer(file);
+      });
+
+const copyOf = (file, bytes) =>
+  new File([bytes], file.name, { type: file.type });
+
+// A File whose bytes are in memory. On Android Chrome a File picked from a
+// cloud app (a Drive content URI) is read again at upload time and that
+// second read can fail, so uploads send this copy instead of the original.
+export async function inMemoryCopy(file) {
+  return copyOf(file, await readBytes(file));
+}
+
 // Rebuild a .docx without its word/media/* entries (pictures). The server
 // never reads image bytes (it writes a placeholder per image), so sending
 // them only makes the upload slow. Every other entry, relationships
-// included, is copied unchanged. Returns the original file when it is not
-// a .docx, has no media, or JSZip cannot read it (the server then reports
-// its own specific error).
+// included, is copied unchanged. When the file is not a .docx, has no
+// media, or JSZip cannot read it (the server then reports its own specific
+// error), the result is an in-memory copy of the original. The file is
+// read once. A file over IN_MEMORY_COPY_MAX_BYTES is returned as it is,
+// unread. Throws FileReadError when the browser cannot read it.
 export async function stripDocxMedia(file) {
-  if (!isDocx(file)) return file;
+  if (file.size > IN_MEMORY_COPY_MAX_BYTES) return file;
+  let bytes;
   try {
-    const zip = await JSZip.loadAsync(file);
+    bytes = await readBytes(file);
+  } catch (err) {
+    throw new FileReadError(err);
+  }
+  if (!isDocx(file)) return copyOf(file, bytes);
+  try {
+    const zip = await JSZip.loadAsync(bytes);
     const media = Object.keys(zip.files).filter(
       (name) => name.startsWith("word/media/") && !zip.files[name].dir
     );
-    if (media.length === 0) return file;
+    if (media.length === 0) return copyOf(file, bytes);
     zip.remove("word/media"); // the folder entry and everything in it
     const blob = await zip.generateAsync({
       type: "blob",
@@ -27,7 +74,7 @@ export async function stripDocxMedia(file) {
     });
     return new File([blob], file.name, { type: file.type });
   } catch {
-    return file;
+    return copyOf(file, bytes);
   }
 }
 

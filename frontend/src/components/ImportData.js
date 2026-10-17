@@ -4,6 +4,8 @@ import JSZip from "jszip";
 import {
   ANALYZE_UPLOAD_TIMEOUT_MS,
   stripDocxMedia,
+  FileReadError,
+  FILE_READ_MESSAGE,
   describeAnalyzeError,
   localFileError,
 } from "../utils/docxUpload";
@@ -294,8 +296,19 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
     setImportStage("preparing");
     setUploadPercent(null);
     // The server never reads pictures; leave them out of the upload.
-    // (A PDF is sent as it is.)
-    const file = await stripDocxMedia(picked);
+    // Always upload an in-memory copy (a PDF or zip too): a file picked from
+    // a cloud app on Android can fail when it is read again during upload.
+    let file;
+    try {
+      file = await stripDocxMedia(picked);
+    } catch (err) {
+      console.error("Could not read the picked file:", err);
+      setError(err instanceof FileReadError ? err.message : FILE_READ_MESSAGE);
+      setImporting(false);
+      setImportStage(null);
+      setUploadPercent(null);
+      return;
+    }
 
     const formData = new FormData();
     formData.append("zip_file", file);
