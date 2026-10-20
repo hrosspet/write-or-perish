@@ -218,6 +218,9 @@ def test_node_privacy_only_edit_preserves_tts(app, alice):
 # ── Profile: regenerate flag clears TTS; absence preserves it ────────────
 
 def test_profile_edit_with_regenerate_flag_clears_tts(app, alice):
+    """A profile edit is a new version (#183): with "regenerate", the new
+    version starts without audio. The edited version's text did not
+    change, so it keeps its audio."""
     profile = _make_profile_with_tts(alice, content="original profile")
     client = app.test_client()
     _login(client, alice)
@@ -228,13 +231,18 @@ def test_profile_edit_with_regenerate_flag_clears_tts(app, alice):
     )
     assert resp.status_code == 200
 
+    new_id = resp.get_json()["profile"]["id"]
+    assert new_id != profile.id
+    assert UserProfile.query.get(new_id).audio_tts_url is None
+    assert TTSChunk.query.filter_by(profile_id=new_id).count() == 0
     refreshed = UserProfile.query.get(profile.id)
-    assert refreshed.audio_tts_url is None
-    assert TTSChunk.query.filter_by(profile_id=profile.id).count() == 0
+    assert refreshed.get_content() == "original profile"
+    assert refreshed.audio_tts_url == "data/audio/profile_1/tts.mp3"
 
 
 def test_profile_content_edit_without_flag_preserves_tts(app, alice):
-    # User chose "keep existing audio" on a profile edit.
+    # User chose "keep existing audio" on a profile edit: the new version
+    # (#183) plays the same files, and the edited version keeps them.
     profile = _make_profile_with_tts(alice, content="original profile")
     client = app.test_client()
     _login(client, alice)
@@ -244,6 +252,10 @@ def test_profile_content_edit_without_flag_preserves_tts(app, alice):
     )
     assert resp.status_code == 200
 
+    new_id = resp.get_json()["profile"]["id"]
+    assert UserProfile.query.get(new_id).audio_tts_url == \
+        "data/audio/profile_1/tts.mp3"
+    assert TTSChunk.query.filter_by(profile_id=new_id).count() == 1
     refreshed = UserProfile.query.get(profile.id)
     assert refreshed.audio_tts_url == "data/audio/profile_1/tts.mp3"
     assert TTSChunk.query.filter_by(profile_id=profile.id).count() == 1

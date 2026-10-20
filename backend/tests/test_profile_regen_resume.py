@@ -275,9 +275,9 @@ def _seed_null_cutoff_user(username, node_tokens):
 
 
 def test_null_cutoff_low_data_does_not_trigger(app, monkeypatch):
-    """A hand-written (null-cutoff) profile with <80k tokens of data must NOT
-    force-trigger an update — the heartbeat now measures the real data instead
-    of sentinelling a null cutoff straight to the threshold."""
+    """A hand-written (null-cutoff) first profile on an account below the
+    ladder's first step (5k units) triggers nothing. It follows the ladder
+    like any first profile (voice review, 2026-10-20, #183)."""
     import backend.tasks.exports as exports
     import backend.tasks.profile_batch as pb
     monkeypatch.setattr(pb, "use_batch_for_user", lambda *a, **k: False)
@@ -294,8 +294,8 @@ def test_null_cutoff_low_data_does_not_trigger(app, monkeypatch):
 
 
 def test_null_cutoff_high_data_still_triggers(app, monkeypatch):
-    """A hand-written (null-cutoff) profile WITH >=80k tokens still triggers, so
-    the base eventually gets folded into a data-grounded profile."""
+    """A hand-written (null-cutoff) first profile on an account past the
+    ladder's step triggers the ladder's from-scratch build (#183, S1)."""
     import backend.tasks.exports as exports
     import backend.tasks.profile_batch as pb
     monkeypatch.setattr(pb, "use_batch_for_user", lambda *a, **k: False)
@@ -309,3 +309,4 @@ def test_null_cutoff_high_data_still_triggers(app, monkeypatch):
     exports.maybe_trigger_incremental_profile_update(user)
     assert "yes" in called              # crossed threshold -> triggered
     assert called["yes"][0][0] == user.id
+    assert called["yes"][1] == {"force_full_regen": True}

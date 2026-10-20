@@ -323,6 +323,14 @@ def test_batch_chunk_label_comes_from_the_pending_item(client, user):
     assert body["progress"] == 25
 
 
+def test_batch_merge_step(client, user):
+    """#183: a rebuild's merge of the user's own version is shown as such."""
+    _pending_job(user, {"kind": "merge", "chunk_num": 3})
+    body = client.get("/api/export/profile-progress").get_json()
+    assert body["running"] is True
+    assert body["message"] == "Merging your own version"
+
+
 def test_batch_integration_step(client, user):
     v1 = _version(user, "iterative", cutoff=datetime(2026, 1, 1))
     v2 = _version(user, "iterative", parent=v1, cutoff=datetime(2026, 3, 1))
