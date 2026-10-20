@@ -627,12 +627,10 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
         console.error("Error analyzing ChatGPT import:", err);
         const status = err.response?.status;
         const data = err.response?.data;
-        const backendMsg = data?.error || data?.details;
+        const backendMsg = data?.error;
         let msg;
         if (backendMsg) {
-          msg = data?.details && data?.error
-            ? `${data.error}: ${data.details}`
-            : backendMsg;
+          msg = backendMsg;
         } else if (status === 413) {
           msg = "conversations.json is too large to upload. Please contact support.";
         } else if (status) {

@@ -673,7 +673,7 @@ def analyze_import():
                     content = zip_ref.read(file_path).decode('utf-8')
                 except UnicodeDecodeError:
                     # Skip files that can't be decoded as UTF-8
-                    current_app.logger.warning(f"Skipping {file_path}: not valid UTF-8")
+                    current_app.logger.warning("Skipping a zip entry: not valid UTF-8")
                     continue
 
                 # Calculate tokens
@@ -709,8 +709,10 @@ def analyze_import():
     except zipfile.BadZipFile:
         return jsonify({"error": "Invalid zip file"}), 400
     except Exception as e:
-        current_app.logger.error(f"Error analyzing import: {str(e)}")
-        return jsonify({"error": "Failed to analyze zip file", "details": str(e)}), 500
+        # Event reaches Sentry; only the exception type is logged
+        current_app.logger.error(
+            "Error analyzing import: %s", type(e).__name__)
+        return jsonify({"error": "Failed to analyze zip file"}), 500
 
 
 @import_bp.route("/import/confirm", methods=["POST"])
@@ -945,7 +947,7 @@ def confirm_import():
                             user_obj, earliest_ts, total_imported_tokens))
             except Exception as e:
                 current_app.logger.warning(
-                    f"Auto-trigger profile update failed: {e}"
+                    "Auto-trigger profile update failed: %s", type(e).__name__
                 )
 
         return jsonify({
@@ -961,8 +963,9 @@ def confirm_import():
 
     except Exception as e:
         db.session.rollback()
-        current_app.logger.error(f"Error confirming import: {str(e)}")
-        return jsonify({"error": "Failed to import files", "details": str(e)}), 500
+        current_app.logger.error(
+            "Error confirming import: %s", type(e).__name__)
+        return jsonify({"error": "Failed to import files"}), 500
 
 
 @import_bp.route("/import/twitter/analyze", methods=["POST"])
@@ -1003,7 +1006,8 @@ def analyze_twitter_import():
     try:
         token, path = ta.stash_new(current_user.id)
     except OSError as e:
-        current_app.logger.error(f"Twitter import stash failed: {e}")
+        current_app.logger.error(
+            "Twitter import stash failed: %s", type(e).__name__)
         return jsonify({"error": "Could not store the archive for import"}), 500
 
     try:
@@ -1018,11 +1022,10 @@ def analyze_twitter_import():
     except Exception as e:
         ta.stash_delete(path)
         current_app.logger.error(
-            f"Error analyzing Twitter import: {str(e)}"
+            "Error analyzing Twitter import: %s", type(e).__name__
         )
         return jsonify({
-            "error": "Failed to analyze Twitter export",
-            "details": str(e)
+            "error": "Failed to analyze Twitter export"
         }), 500
 
     summary["import_token"] = token
@@ -1343,23 +1346,20 @@ def analyze_claude_import():
             "total_size": total_size
         }), 200
 
-    except UnicodeDecodeError as e:
+    except UnicodeDecodeError:
         return jsonify({
-            "error": "conversations.json is not valid UTF-8",
-            "details": str(e)
+            "error": "conversations.json is not valid UTF-8 text"
         }), 400
-    except json.JSONDecodeError as e:
+    except json.JSONDecodeError:
         return jsonify({
-            "error": "Failed to parse conversations JSON",
-            "details": str(e)
+            "error": "conversations.json is not valid JSON"
         }), 400
     except Exception as e:
         current_app.logger.error(
-            f"Error analyzing Claude import: {str(e)}"
+            "Error analyzing Claude import: %s", type(e).__name__
         )
         return jsonify({
-            "error": "Failed to analyze Claude export",
-            "details": str(e)
+            "error": "Failed to analyze Claude export"
         }), 500
 
 
@@ -1555,7 +1555,7 @@ def confirm_claude_import():
                             user_obj, earliest_ts, total_imported_tokens))
             except Exception as e:
                 current_app.logger.warning(
-                    f"Auto-trigger profile update failed: {e}"
+                    "Auto-trigger profile update failed: %s", type(e).__name__
                 )
 
         return jsonify({
@@ -1572,11 +1572,10 @@ def confirm_claude_import():
     except Exception as e:
         db.session.rollback()
         current_app.logger.error(
-            f"Error confirming Claude import: {str(e)}"
+            "Error confirming Claude import: %s", type(e).__name__
         )
         return jsonify({
-            "error": "Failed to import Claude conversations",
-            "details": str(e)
+            "error": "Failed to import Claude conversations"
         }), 500
 
 
@@ -1744,7 +1743,7 @@ def _maybe_update_profile_after_import(user_id, earliest_ts, imported_tokens):
             user_obj, earliest_ts, imported_tokens)
     except Exception as e:
         current_app.logger.warning(
-            f"Auto-trigger profile update failed: {e}"
+            "Auto-trigger profile update failed: %s", type(e).__name__
         )
     return None
 
@@ -2152,23 +2151,20 @@ def analyze_chatgpt_import():
             "notices": notices,
         }), 200
 
-    except UnicodeDecodeError as e:
+    except UnicodeDecodeError:
         return jsonify({
-            "error": "conversations.json is not valid UTF-8",
-            "details": str(e)
+            "error": "conversations.json is not valid UTF-8 text"
         }), 400
-    except json.JSONDecodeError as e:
+    except json.JSONDecodeError:
         return jsonify({
-            "error": "Failed to parse conversations JSON",
-            "details": str(e)
+            "error": "conversations.json is not valid JSON"
         }), 400
     except Exception as e:
         current_app.logger.error(
-            f"Error analyzing ChatGPT import: {str(e)}"
+            "Error analyzing ChatGPT import: %s", type(e).__name__
         )
         return jsonify({
-            "error": "Failed to analyze ChatGPT export",
-            "details": str(e)
+            "error": "Failed to analyze ChatGPT export"
         }), 500
 
 
@@ -2365,7 +2361,7 @@ def confirm_chatgpt_import():
                             user_obj, earliest_ts, total_imported_tokens))
             except Exception as e:
                 current_app.logger.warning(
-                    f"Auto-trigger profile update failed: {e}"
+                    "Auto-trigger profile update failed: %s", type(e).__name__
                 )
 
         return jsonify({
@@ -2382,9 +2378,8 @@ def confirm_chatgpt_import():
     except Exception as e:
         db.session.rollback()
         current_app.logger.error(
-            f"Error confirming ChatGPT import: {str(e)}"
+            "Error confirming ChatGPT import: %s", type(e).__name__
         )
         return jsonify({
-            "error": "Failed to import ChatGPT conversations",
-            "details": str(e)
+            "error": "Failed to import ChatGPT conversations"
         }), 500

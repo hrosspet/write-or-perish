@@ -443,8 +443,8 @@ class TestAnalyzeChatgptImport:
         )
         assert resp.status_code == 400
         body = resp.get_json()
-        assert "parse" in body["error"].lower()
-        assert "details" in body
+        assert "not valid json" in body["error"].lower()
+        assert "details" not in body
 
     def test_empty_array_returns_400(self, app):
         client = app.test_client()
