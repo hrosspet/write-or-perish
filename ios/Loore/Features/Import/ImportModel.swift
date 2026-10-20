@@ -68,6 +68,8 @@ struct ImportAnalysis {
     var totalTokens: Int { int("total_tokens") }
     var totalConversations: Int { int("total_conversations") }
     var totalMessages: Int { int("total_messages") }
+    /// Server-written lines about parts of the export that were not imported.
+    var notices: [String] { (raw["notices"] as? [String]) ?? [] }
     var importToken: String? { raw["import_token"] as? String }
     var totalTweets: Int { int("total_tweets") }
     var originalCount: Int { int("original_count") }
@@ -205,16 +207,16 @@ final class ImportModel {
         }
         defer { try? FileManager.default.removeItem(at: directory) }
 
-        var source = url
+        var parts: [(filename: String, source: URL)] = [(url.lastPathComponent, url)]
         var field = "zip_file"
-        var filename = url.lastPathComponent
         var mime = "application/zip"
         if kind == .claude || kind == .chatgpt {
             stage = .extracting
             do {
-                source = try await Task.detached(priority: .userInitiated) {
-                    try ImportFiles.extractConversations(from: url, into: directory)
+                let extracted = try await Task.detached(priority: .userInitiated) {
+                    try ImportFiles.extractConversations(from: url, into: directory, includeExtras: kind == .chatgpt)
                 }.value
+                parts = extracted.map { ($0.lastPathComponent, $0) }
             } catch let failure as ImportFiles.Failure {
                 fail(ImportFiles.message(failure, kind: kind))
                 return
@@ -223,18 +225,18 @@ final class ImportModel {
                 return
             }
             field = "conversations_file"
-            filename = "conversations.json"
             mime = "application/json"
         }
-        if ImportFiles.fileSize(source) > ImportFiles.uploadLimit {
+        // The limit applies to the whole request: all shards together.
+        if parts.reduce(0, { $0 + ImportFiles.fileSize($1.source) }) > ImportFiles.uploadLimit {
             fail(ImportFiles.message(.tooLarge, kind: kind))
             return
         }
         stage = .analyzing
         do {
-            let (fieldValue, fileName, mimeType, src) = (field, filename, mime, source)
+            let (fieldValue, mimeType, uploadParts) = (field, mime, parts)
             let body = try await Task.detached(priority: .userInitiated) {
-                try ImportFiles.multipartBody(field: fieldValue, filename: fileName, mimeType: mimeType, source: src,
+                try ImportFiles.multipartBody(field: fieldValue, mimeType: mimeType, parts: uploadParts,
                                               into: directory)
             }.value
             var request = APIRequest(.post, kind.analyzePath)
