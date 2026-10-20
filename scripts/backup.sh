@@ -5,8 +5,10 @@
 #   1. pg_dump (custom format, compressed) streamed straight to the destination.
 #      No local temp file, so the prod disk never fills up.
 #   2. Media directory (voice recordings; KMS-encrypted .enc files) synced to
-#      the destination. Additive only — nothing is ever deleted there.
-#      In-flight recording drafts (drafts/) are skipped: they are transient.
+#      media/<period>/ at the destination, one folder per 14-day period (see
+#      MEDIA_PERIOD_DAYS below). Additive only — nothing is ever deleted or
+#      overwritten there. In-flight recording drafts (drafts/) are skipped:
+#      they are transient.
 #   3. On success, pings BACKUP_HEARTBEAT_URL (optional) so a dead-man's-switch
 #      monitor can alert when backups silently stop running.
 #
@@ -38,6 +40,22 @@ DEST="${BACKUP_BUCKET%/}"
 STAMP="$(date -u +'%Y%m%dT%H%M%SZ')"
 DUMP_NAME="$(hostname -s)-${STAMP}.dump"
 
+# Media goes into one folder per 14-day period, named after the period's
+# first day (UTC), e.g. media/2026-10-22/. The first run of a period uploads
+# a full copy; later runs add only new files. So every object in the current
+# folder is less than 14 days old, well inside the bucket's 28-day lifecycle
+# delete, and the previous folder is kept until 28 days after its upload.
+# A single additive folder would not work: the lifecycle deletes each copy
+# on day 28 and only the next night's run uploads it again, so the media
+# would have no copy for up to a day every 28 days.
+# Must stay at most half the lifecycle age (configs/gcs-backup-lifecycle.json).
+MEDIA_PERIOD_DAYS=14
+EPOCH_DAY=$(( $(date -u +%s) / 86400 ))
+PERIOD_START=$(( (EPOCH_DAY - EPOCH_DAY % MEDIA_PERIOD_DAYS) * 86400 ))
+PERIOD="$(date -u -d "@${PERIOD_START}" +%Y-%m-%d 2>/dev/null \
+  || date -u -r "${PERIOD_START}" +%Y-%m-%d)"   # GNU date || BSD date
+MEDIA_DEST="${DEST}/media/${PERIOD}"
+
 case "$DEST" in
   gs://*) MODE=gcs ;;
   *)      MODE=local ;;
@@ -67,17 +85,21 @@ fi
 log "database dump done (${SIZE} bytes)"
 
 # --- 2. media --------------------------------------------------------------
+# --no-clobber: a file that changed after its upload this period (a TTS file
+# regenerated after an edit) is skipped, not overwritten. The bucket refuses
+# overwrites under retention, which would fail the whole run; the new version
+# lands with the next period's full copy.
 if [ -d "$AUDIO_DIR" ]; then
-  log "syncing media ${AUDIO_DIR} → ${DEST}/media (additive; drafts/ excluded)"
+  log "syncing media ${AUDIO_DIR} → ${MEDIA_DEST} (additive; drafts/ excluded)"
   if [ "$MODE" = gcs ]; then
-    gcloud storage rsync --quiet --recursive --exclude='^drafts/.*' "$AUDIO_DIR" "${DEST}/media"
+    gcloud storage rsync --quiet --recursive --no-clobber --exclude='^drafts/.*' "$AUDIO_DIR" "$MEDIA_DEST"
   else
-    mkdir -p "${DEST}/media"
+    mkdir -p "$MEDIA_DEST"
     if command -v rsync >/dev/null; then
-      rsync -a --exclude='/drafts/' "${AUDIO_DIR}/" "${DEST}/media/"
+      rsync -a --ignore-existing --exclude='/drafts/' "${AUDIO_DIR}/" "${MEDIA_DEST}/"
     else
       (cd "$AUDIO_DIR" && find . -path './drafts' -prune -o -type f -print0 \
-        | xargs -0 -I{} sh -c 'mkdir -p "$1/$(dirname "$2")" && cp -p "$2" "$1/$2"' _ "${DEST}/media" {})
+        | xargs -0 -I{} sh -c '[ -e "$1/$2" ] || { mkdir -p "$1/$(dirname "$2")" && cp -p "$2" "$1/$2"; }' _ "$MEDIA_DEST" {})
     fi
   fi
   log "media sync done"

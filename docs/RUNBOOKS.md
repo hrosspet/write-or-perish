@@ -80,21 +80,50 @@ Nightly and automated, in two layers:
 | layer | what | where | retention |
 |---|---|---|---|
 | GCP disk snapshot schedule `default-schedule-1` | whole VM disk, crash-consistent | same GCP project as the VM | 14 days |
-| `write-or-perish-backup.timer` → `scripts/backup.sh` | `pg_dump` (custom format) + media directory | `BACKUP_BUCKET` in GCS, locked retention | 30 days, **undeletable** |
+| `write-or-perish-backup.timer` → `scripts/backup.sh` | `pg_dump` (custom format) + media directory | `BACKUP_BUCKET` in GCS, locked retention | 28 days, **undeletable** |
 
 The snapshot is the fast whole-VM restore. The bucket is the durable,
-portable one: a *locked* retention policy means nobody can delete or
-overwrite a backup for 30 days — not the project owner, not a compromised VM.
+portable one: once its retention policy is *locked*, nobody can delete or
+overwrite a backup for 28 days — not the project owner, not a compromised VM.
+
+**Why 28 days.** The terms say that after an account is deleted for good,
+"Copies in our backups are erased within another 30 days"
+(`frontend/src/components/TermsModal.js`,
+`ios/Loore/Features/Onboarding/TermsText.swift`; the deletion email in
+`backend/utils/email.py` says the same). The lifecycle rule deletes each
+object at age 28, but Cloud Storage runs lifecycle actions asynchronously,
+so a deletion can happen some time after the object reaches that age (in
+practice within about a day; Google gives no bound). 28 leaves that margin
+inside the 30 days. The retention period and
+the lifecycle age are both 28: a lifecycle rule never deletes an object
+before it has fulfilled the retention policy, so the two don't race.
+Soft delete is off on the bucket. With Google's default 7-day soft delete, a
+deleted object would stay restorable, and billed, for 7 more days: about 36
+days in total.
 
 ### What is (and isn't) in the bucket
 
 - `db/<host>-<UTC stamp>.dump` — one full logical dump per night
-  (`pg_dump --format=custom --no-owner --no-privileges`, compressed).
-- `media/…` — voice recordings from `AUDIO_STORAGE_PATH`, synced additively.
-  In-flight recording drafts (`drafts/`) are skipped; they are transient.
+  (`pg_dump --format=custom --no-owner --no-privileges`, compressed), so
+  about 28 dumps at any time.
+- `media/<period start>/…` — voice recordings and TTS audio from
+  `AUDIO_STORAGE_PATH`, one folder per 14-day period, named after the
+  period's first day (UTC). The first run of a period uploads a full copy
+  (all the media, so that night's run takes longer); later runs in the
+  period add new files only. The newest folder holds every file that
+  existed at the last run; the folder before it stays until the lifecycle
+  deletes it, about 14 days into the current period. In-flight recording
+  drafts (`drafts/`) are skipped; they are transient.
 - **Not included:** `.env.production` (secrets), `logs/`, the frontend build.
   Keep your own copy of `.env.production` somewhere safe — a restore is
   useless without it.
+
+Why one folder per period: with a single additive `media/` folder, the
+lifecycle rule would delete every media copy on day 28 and only the next
+night's run would upload it again, so for up to a day every 28 days the
+bucket would hold no copy of the recordings. Every object in the current
+period's folder is less than 14 days old, so none of them has reached the
+28-day delete.
 
 **Encryption.** Node content and audio are KMS envelope-encrypted *before*
 they reach the database or disk, so the dumps and media copies are
@@ -103,9 +132,11 @@ ciphertext. They are only readable together with the KMS key named by
 **the KMS key and its old versions must never be destroyed** — that would
 kill every backup at once. Rotate, don't destroy.
 
-**Deleted data persists in backups for up to 31 days** (30-day lock, and the
-lifecycle rule deletes each object on day 31). Deletion promises in the terms
-and in the account-deletion feature must state this window.
+**Deleted data stays in the backups for up to about 29 days.** The last dump
+and media copy made before a deletion are deleted at age 28, plus the
+lifecycle's lag. That is inside the 30 days the terms promise. Every other
+copy of a dump or of the media (the restore test, the off-Google copy) must
+be gone by day 28 too.
 
 ### Checking that it runs
 
@@ -114,6 +145,7 @@ systemctl list-timers write-or-perish-backup.timer     # next / last run
 systemctl status write-or-perish-backup.service        # result of the last run
 journalctl -u write-or-perish-backup.service -n 50     # its log
 gcloud storage ls -l gs://BUCKET/db/ | tail -5          # dumps landing?
+gcloud storage ls gs://BUCKET/media/                    # one folder per 14-day period
 sudo systemctl start write-or-perish-backup.service    # run one now
 ```
 
@@ -124,27 +156,48 @@ so the monitor alerts when backups stop.
 
 ### One-time setup
 
-1. **Bucket** — same region as the VM (transfer inside a region is free),
-   30-day retention, lifecycle deletes on day 31, no public access:
+Locking the retention policy is irreversible, so it is the last step: after
+a nightly run and a test restore have worked. Until then a setup mistake can
+still be corrected.
+
+1. **VM access scope** — ✅ done on 2026-10-20 for `loore-prod-a`. Any new
+   prod VM (for example after the planned VM move) needs the same scope.
+   Access scopes cap what the attached service account can do regardless of
+   IAM, and without a storage scope the VM cannot write to the bucket.
+   Adding a scope needs a stop/start (about two minutes of downtime; the
+   static IP is reserved and survives). For a new VM, use its name and zone:
+
+   ```bash
+   PROJECT=$(gcloud config get-value project)
+   SA=loore-kms-sa@$PROJECT.iam.gserviceaccount.com
+   gcloud compute instances stop loore-prod-a --zone us-central1-a
+   gcloud compute instances set-service-account loore-prod-a --zone us-central1-a \
+     --service-account "$SA" \
+     --scopes https://www.googleapis.com/auth/cloudkms,https://www.googleapis.com/auth/devstorage.read_write
+   gcloud compute instances start loore-prod-a --zone us-central1-a
+   ```
+
+2. **Bucket** — same region as the VM (transfer inside a region is free),
+   28-day retention (not locked yet), soft delete off, lifecycle deletes at
+   age 28, no public access:
 
    ```bash
    PROJECT=$(gcloud config get-value project)
    BUCKET=gs://loore-prod-backups     # bucket names are global — adjust if taken
    gcloud storage buckets create "$BUCKET" --location=us-central1 \
      --uniform-bucket-level-access --public-access-prevention \
-     --retention-period=30d
+     --retention-period=28d --soft-delete-duration=0
    gcloud storage buckets update "$BUCKET" --lifecycle-file=configs/gcs-backup-lifecycle.json
+   gcloud storage buckets describe "$BUCKET" \
+     --format="default(retention_policy,soft_delete_policy,lifecycle_config)"
    ```
 
-   Then lock it. **Locking is irreversible**: the period can later be raised,
-   never lowered or removed, and the bucket cannot be deleted while it holds
-   objects under retention.
+   The describe must show a retention period of `2419200` seconds (28 days),
+   not locked; a soft delete retention of `0`; and one `Delete` rule at age
+   28. If soft delete still shows 7 days, run
+   `gcloud storage buckets update --clear-soft-delete "$BUCKET"`.
 
-   ```bash
-   gcloud storage buckets update "$BUCKET" --lock-retention-period
-   ```
-
-2. **IAM** — the VM's service account may create and list objects, never
+3. **IAM** — the VM's service account may create and list objects, never
    delete them:
 
    ```bash
@@ -153,19 +206,6 @@ so the monitor alerts when backups stop.
      --member="serviceAccount:$SA" --role=roles/storage.objectCreator
    gcloud storage buckets add-iam-policy-binding "$BUCKET" \
      --member="serviceAccount:$SA" --role=roles/storage.objectViewer
-   ```
-
-3. **VM access scope** — access scopes cap what the attached service account
-   can do regardless of IAM, and the VM currently has only `cloudkms`.
-   Adding a storage scope needs a stop/start (about two minutes of downtime;
-   the static IP is reserved and survives):
-
-   ```bash
-   gcloud compute instances stop loore-prod-a --zone us-central1-a
-   gcloud compute instances set-service-account loore-prod-a --zone us-central1-a \
-     --service-account "$SA" \
-     --scopes https://www.googleapis.com/auth/cloudkms,https://www.googleapis.com/auth/devstorage.read_write
-   gcloud compute instances start loore-prod-a --zone us-central1-a
    ```
 
 4. **On the VM** — install the gcloud CLI if `gcloud --version` fails
@@ -180,10 +220,33 @@ so the monitor alerts when backups stop.
 
 5. **Deploy** (push to `main`, or run `./deploy.sh`). It installs the unit
    and timer and arms the timer only when `BACKUP_BUCKET` is set. Then run
-   one by hand and check the journal and the bucket listing.
+   one by hand (`sudo systemctl start write-or-perish-backup.service`) and
+   check the journal and the bucket listing (see "Checking that it runs").
+
+6. **First nightly run** — the next day after 08:30 UTC, check that the timer
+   ran it by itself: `systemctl list-timers write-or-perish-backup.timer`
+   shows a last run, `systemctl status write-or-perish-backup.service` shows
+   success, and `db/` holds a second dump.
+
+7. **Test restore** — run "Restore test" below. It must pass.
+
+8. **Lock the retention policy.** **Irreversible**: the period can later be
+   raised, never lowered or removed, and the bucket cannot be deleted while
+   it holds objects under retention.
+
+   ```bash
+   gcloud storage buckets update "$BUCKET" --lock-retention-period
+   gcloud storage buckets describe "$BUCKET" --format="default(retention_policy)"   # isLocked: true
+   ```
+
+   Before this step a mistake can be undone:
+   `gcloud storage buckets update "$BUCKET" --clear-retention-period` removes
+   the policy, after which the objects (`gcloud storage rm "$BUCKET/**"`) and
+   the bucket can be deleted, and setup can restart at step 2.
 
 Dry run without GCS: point `BACKUP_BUCKET` at a local directory and run
-`bash scripts/backup.sh`. The script does a plain filesystem copy.
+`bash scripts/backup.sh`. The script does a plain filesystem copy with the
+same layout.
 
 ### Restore
 
@@ -195,47 +258,93 @@ createdb writeorperish_restored
 pg_restore --no-owner --no-privileges -d writeorperish_restored /tmp/restore.dump
 ```
 
-Media — back onto disk, wherever `AUDIO_STORAGE_PATH` points:
+Media — back onto disk, wherever `AUDIO_STORAGE_PATH` points. The newest
+`media/<period start>/` folder holds every file that existed at the last run.
+Restore the folder before it first, then the newest one, so that a newest
+folder whose first run did not finish is completed from the older one:
 
 ```bash
-gcloud storage rsync --recursive gs://BUCKET/media "$AUDIO_STORAGE_PATH"
+gcloud storage ls gs://BUCKET/media/        # oldest first
+gcloud storage rsync --recursive gs://BUCKET/media/<second newest> "$AUDIO_STORAGE_PATH"
+gcloud storage rsync --recursive gs://BUCKET/media/<newest> "$AUDIO_STORAGE_PATH"
 ```
+
+The media folders are additive, so they also hold files deleted after their
+upload, including recordings of accounts deleted for good. After restoring
+media, delete the folders under `user/`, `nodes/`, `chunks/` and `streaming/`
+whose user id is not in the restored database.
 
 Both need the same `GCP_KMS_KEY_NAME` and a service account with the KMS
 role, otherwise every node is unreadable ciphertext.
 
-### Restore test — do it quarterly
+### Restore test — before the lock, then quarterly
 
-Pull the latest dump into the local Docker Postgres. This proves the dump
-format and the commands above; content stays ciphertext throughout.
+Run it on your own machine, not on the prod VM (its disk and memory are
+small). It restores the newest dump into a scratch database in the local
+Docker Postgres and compares row counts with prod. Content stays ciphertext
+throughout.
 
 ```bash
 gcloud storage cp "$(gcloud storage ls gs://BUCKET/db/ | tail -1)" /tmp/restore.dump
 docker compose cp /tmp/restore.dump db:/tmp/restore.dump
 docker compose exec db bash -c '
   createdb -U "$POSTGRES_USER" restore_test &&
-  pg_restore --no-owner --no-privileges -U "$POSTGRES_USER" -d restore_test /tmp/restore.dump &&
-  psql -U "$POSTGRES_USER" -d restore_test -c "select count(*) from node" &&
-  dropdb -U "$POSTGRES_USER" restore_test'
+  pg_restore --no-owner --no-privileges --exit-on-error -U "$POSTGRES_USER" -d restore_test /tmp/restore.dump &&
+  psql -U "$POSTGRES_USER" -d restore_test -c "select count(*) as nodes from node" -c "select count(*) as users from \"user\""'
+```
+
+It passes when `pg_restore` finishes without an error and the two counts
+match prod's (`flask shell` on the VM: `Node.query.count()`,
+`User.query.count()`), or are a little lower because of rows added since the
+dump. If `pg_restore` stops with "unsupported version … in file header",
+the local Postgres is older than prod's: run the test in a `postgres` image
+of prod's major version.
+
+Media — on the VM, from the project directory, compare the number of files
+with the number of objects in the newest period folder (the bucket can hold
+more: files deleted since the period began; or fewer: files added since the
+last run):
+
+```bash
+find "${AUDIO_STORAGE_PATH:-data/audio}" -type f -not -path '*/drafts/*' | wc -l
+gcloud storage ls "$(gcloud storage ls gs://BUCKET/media/ | tail -1)**" | wc -l
+```
+
+Then delete the local copies; the deletion promise covers them too:
+
+```bash
+docker compose exec db bash -c 'dropdb -U "$POSTGRES_USER" restore_test && rm /tmp/restore.dump'
+rm /tmp/restore.dump
 ```
 
 ### Off-Google copy
 
 Disk, snapshots and bucket all live under one Google account and one billing
 account. A billing failure or account loss takes them together. Once a week,
-copy the latest dump (and occasionally `media/`) to a disk you own:
+copy the latest dump to a disk you own. The deletion promise in the terms
+covers this copy too, so delete old copies in the same step:
 
 ```bash
 gcloud storage cp "$(gcloud storage ls gs://BUCKET/db/ | tail -1)" ~/loore-backups/
+find ~/loore-backups -name '*.dump' -mtime +20 -delete   # copied weekly, each one is gone by day 28
 ```
+
+A copy of the media follows the same rule: copy the newest
+`media/<period start>/` folder into a new local folder and delete that folder
+within 28 days.
 
 ### Known limits
 
 - Nightly dump + crash-consistent snapshot means up to 24 hours of data loss
   in the worst case. WAL archiving is the next step if that stops being
   acceptable.
-- The media sync never overwrites: a file that changed after it was backed up
-  stays at its first version. Audio is immutable after upload, so this is
-  theoretical.
-- A deletion request cannot be honoured inside backups for 31 days. That is
-  the documented window, not a bug.
+- The media sync never overwrites (the bucket refuses overwrites under
+  retention). A file that changed after its upload in the current period,
+  such as a TTS file regenerated after an edit, keeps its first version in
+  that period's folder; the new version arrives with the next period's full
+  copy, within 14 days.
+- A media restore also brings back files deleted after their upload; see
+  "Restore" for the cleanup.
+- A deletion request cannot be honoured inside backups for up to about 29
+  days (28 plus the lifecycle's lag). That is the documented window, inside
+  the 30 days the terms promise, not a bug.

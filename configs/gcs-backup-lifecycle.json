@@ -2,7 +2,7 @@
   "rule": [
     {
       "action": {"type": "Delete"},
-      "condition": {"age": 31}
+      "condition": {"age": 28}
     }
   ]
 }
