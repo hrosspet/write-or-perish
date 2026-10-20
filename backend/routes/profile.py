@@ -305,6 +305,8 @@ def create_profile():
     try:
         db.session.add(profile)
         db.session.flush()
+        if newest is not None and profile.ai_usage in AI_ALLOWED:
+            _carry_recent_context(newest, profile)
         _user_saved_a_version()
         db.session.commit()
 
@@ -368,6 +370,8 @@ def _save_edit_as_new_version(profile, new_content, data, keep_audio=False):
         db.session.flush()
         if keep_audio:
             _copy_audio(profile, new_profile)
+        if new_profile.ai_usage in AI_ALLOWED:
+            _carry_recent_context(profile, new_profile)
         _user_saved_a_version()
         db.session.commit()
     except Exception as e:
@@ -385,6 +389,29 @@ def _save_edit_as_new_version(profile, new_content, data, keep_audio=False):
             "ai_usage": new_profile.ai_usage
         }
     }), 200
+
+
+def _carry_recent_context(source, target):
+    """A version the user saves on top of ``source`` keeps ``source``'s
+    recent-context summary (#183). Chat replies look the summary up by the
+    newest profile's id, so without a copy they had none until the summary
+    job wrote a new one (10 to 20 minutes), and that job spent a model call
+    on writing the summary already covered. The copy covers the same
+    writing: same cutoff and save time, the text copied as stored (not
+    decrypted), no model call."""
+    from backend.models import UserRecentContext
+    summary = (UserRecentContext.query
+               .filter_by(user_id=source.user_id, profile_id=source.id)
+               .order_by(UserRecentContext.created_at.desc()).first())
+    if summary is None:
+        return
+    db.session.add(UserRecentContext(
+        user_id=summary.user_id, content=summary.content,
+        generated_by=summary.generated_by, tokens_used=0,
+        created_at=summary.created_at,
+        source_data_cutoff=summary.source_data_cutoff,
+        source_tokens_covered=summary.source_tokens_covered,
+        profile_id=target.id, ai_usage=summary.ai_usage))
 
 
 def _user_saved_a_version():

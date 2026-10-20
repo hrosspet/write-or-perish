@@ -273,6 +273,36 @@ def test_first_profile_written_from_scratch_has_no_parent(app, alice):  # noqa: 
     assert not new.source_tokens_used
 
 
+def test_an_edit_keeps_the_recent_context_summary(app, alice):  # noqa: F811
+    """Review finding 3: chat replies look the recent-context summary up by
+    the newest profile's id. The edit copies the edited version's summary
+    to the new version (same text, cutoff and save time, no model call), so
+    replies keep it right after the edit."""
+    from backend.models import UserRecentContext
+    from backend.utils.context_artifacts import _resolve_latest_artifact
+    generated = _generated(alice)
+    summary = UserRecentContext(
+        user_id=alice.id, generated_by="gpt-5.5", tokens_used=300,
+        created_at=datetime(2026, 5, 10),
+        source_data_cutoff=datetime(2026, 5, 9), source_tokens_covered=4000,
+        profile_id=generated.id, ai_usage="chat")
+    summary.set_content("WHAT THE USER WROTE THIS WEEK")
+    _db.session.add(summary)
+    _db.session.commit()
+    assert _resolve_latest_artifact("recent_context", alice.id) == summary.id
+
+    new_id = _edit(app, alice, generated, "### SURFACE MAP\nMY EDIT")
+
+    copy = UserRecentContext.query.filter_by(profile_id=new_id).one()
+    assert copy.get_content() == "WHAT THE USER WROTE THIS WEEK"
+    assert copy.source_data_cutoff == summary.source_data_cutoff
+    assert copy.created_at == summary.created_at
+    assert copy.source_tokens_covered == 4000
+    assert copy.tokens_used == 0
+    assert _resolve_latest_artifact("recent_context", alice.id) == copy.id
+    assert UserRecentContext.query.get(summary.id).profile_id == generated.id
+
+
 def test_saving_a_version_ends_a_pending_rebuild_merge(app, alice):  # noqa: F811
     """A rebuild merges the user's version the old chain carried
     (#183, option 2). A version the user saves meanwhile wins: the pending
