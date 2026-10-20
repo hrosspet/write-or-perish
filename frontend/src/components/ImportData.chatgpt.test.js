@@ -35,7 +35,7 @@ function pick(label, file) {
 
 beforeEach(() => mockPost.mockReset());
 
-test('a sharded ChatGPT export uploads the shards in order and nothing else', async () => {
+test('a sharded ChatGPT export uploads the shards in order, then the sectioned file, and not the shared links', async () => {
   mockPost.mockReturnValue(new Promise(() => {}));
   const file = await zipFile({
     'sectioned_conversations.json': '[]',
@@ -47,8 +47,10 @@ test('a sharded ChatGPT export uploads the shards in order and nothing else', as
   await waitFor(() => expect(mockPost).toHaveBeenCalledTimes(1));
   expect(mockPost.mock.calls[0][0]).toBe('/import/chatgpt/analyze');
   const parts = mockPost.mock.calls[0][1].getAll('conversations_file');
-  expect(parts.map((p) => p.name)).toEqual(['conversations-000.json', 'conversations-001.json']);
-  expect(await Promise.all(parts.map(textOf))).toEqual(['[{"id":"a"}]', '[{"id":"b"}]']);
+  expect(parts.map((p) => p.name)).toEqual([
+    'conversations-000.json', 'conversations-001.json', 'sectioned_conversations.json',
+  ]);
+  expect(await Promise.all(parts.map(textOf))).toEqual(['[{"id":"a"}]', '[{"id":"b"}]', '[]']);
 });
 
 test('a Claude export with one conversations.json sends one part', async () => {
@@ -63,4 +65,44 @@ test('a Claude export with one conversations.json sends one part', async () => {
   const parts = mockPost.mock.calls[0][1].getAll('conversations_file');
   expect(parts.map((p) => p.name)).toEqual(['conversations.json']);
   expect(await textOf(parts[0])).toBe('[{"uuid":"c"}]');
+});
+
+test('a ChatGPT export also sends the sectioned and group-chat files as their own parts', async () => {
+  mockPost.mockReturnValue(new Promise(() => {}));
+  const file = await zipFile({
+    'sectioned_conversations.json': '[]',
+    'group_chats.json': '{"chats":[]}',
+    'shared_conversations.json': '[{"id":"share"}]',
+    'conversations-000.json': '[{"id":"a"}]',
+  });
+  pick(/Import ChatGPT/, file);
+  await waitFor(() => expect(mockPost).toHaveBeenCalledTimes(1));
+  const parts = mockPost.mock.calls[0][1].getAll('conversations_file');
+  expect(parts.map((p) => p.name)).toEqual([
+    'conversations-000.json', 'group_chats.json', 'sectioned_conversations.json',
+  ]);
+});
+
+test('a Claude import does not send the ChatGPT extra files', async () => {
+  mockPost.mockReturnValue(new Promise(() => {}));
+  const file = await zipFile({
+    'conversations.json': '[{"uuid":"c"}]',
+    'group_chats.json': '{"chats":[]}',
+  });
+  pick(/Import Claude/, file);
+  await waitFor(() => expect(mockPost).toHaveBeenCalledTimes(1));
+  const parts = mockPost.mock.calls[0][1].getAll('conversations_file');
+  expect(parts.map((p) => p.name)).toEqual(['conversations.json']);
+});
+
+test('notices from the server are shown in the ChatGPT confirm dialog', async () => {
+  mockPost.mockResolvedValue({
+    data: {
+      conversations: [], total_conversations: 3, total_messages: 9, total_tokens: 100,
+      notices: ["Group chats aren't imported yet (2 in your export)."],
+    },
+  });
+  const file = await zipFile({ 'conversations-000.json': '[{"id":"a"}]' });
+  pick(/Import ChatGPT/, file);
+  expect(await screen.findByText("Group chats aren't imported yet (2 in your export).")).toBeTruthy();
 });

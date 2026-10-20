@@ -146,6 +146,9 @@ function ModalTitle({ children }) {
 // browser, so the full (potentially multi-GB) export with images/audio
 // never has to traverse the network. Returns a list of {blob, name}, one per
 // file to upload; the server concatenates them in this order.
+// With `includeExtras` (ChatGPT only), "sectioned_conversations.json" and
+// "group_chats.json" are also returned, after the conversation files, as
+// their own parts; the server tells parts apart by name.
 //
 // Entry matching is intentionally flexible:
 //   1. Prefer every file entry whose basename is exactly "conversations.json"
@@ -158,8 +161,9 @@ function ModalTitle({ children }) {
 // Throws an Error with a `.userMessage` if no suitable entry is found or
 // the zip cannot be read.
 const CONVERSATION_FILE_RE = /(^|\/)conversations(-\d+)?\.json$/;
+const EXTRA_FILE_RE = /(^|\/)(sectioned_conversations|group_chats)\.json$/;
 
-async function extractConversationFiles(file) {
+async function extractConversationFiles(file, { includeExtras = false } = {}) {
   let zip;
   try {
     zip = await JSZip.loadAsync(file);
@@ -175,6 +179,13 @@ async function extractConversationFiles(file) {
     .filter((f) => CONVERSATION_FILE_RE.test(f.name))
     .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
   if (named.length) {
+    if (includeExtras) {
+      named.push(
+        ...entries
+          .filter((f) => EXTRA_FILE_RE.test(f.name))
+          .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+      );
+    }
     return Promise.all(
       named.map(async (f) => ({
         blob: await f.async("blob"),
@@ -586,7 +597,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
 
     let conversationFiles;
     try {
-      conversationFiles = await extractConversationFiles(file);
+      conversationFiles = await extractConversationFiles(file, { includeExtras: true });
     } catch (err) {
       console.error("Error reading ChatGPT export zip:", err);
       setError(
@@ -1196,6 +1207,11 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
           <p style={{ color: "var(--text-muted)", fontFamily: "var(--sans)", fontWeight: 300, fontSize: "0.85rem" }}>
             Each conversation will be imported as a separate thread.
           </p>
+          {(chatGPTImportData.notices || []).map((notice, i) => (
+            <p key={i} style={{ color: "var(--text-secondary)", fontFamily: "var(--sans)", fontWeight: 300, fontSize: "0.9rem" }}>
+              {notice}
+            </p>
+          ))}
 
           <PrivacySelector
             privacyLevel={importPrivacy}

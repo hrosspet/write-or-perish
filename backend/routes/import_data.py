@@ -7,6 +7,7 @@ from backend.utils import docx_import, pdf_import
 from backend.utils.pdf_extract_worker import MAX_CHAPTERS as MAX_PDF_CHAPTERS
 from datetime import datetime, timedelta
 import hashlib
+import os
 import hmac
 import sys
 import zipfile
@@ -1053,6 +1054,129 @@ def _load_conversation_files(conv_files, source_label):
     return raw_conversations
 
 
+def _plural(n, one, many):
+    return one if n == 1 else many
+
+
+def _report_unreadable_chatgpt_items(problems):
+    """One Sentry warning per request for unreadable ChatGPT export
+    items. Counts and key names only: never a value, title or id from
+    the export. A fixed message and fingerprint group the events into
+    one issue; a no-op when Sentry is not initialised."""
+    try:
+        import sentry_sdk
+        with sentry_sdk.new_scope() as scope:
+            scope.fingerprint = ["chatgpt-import-unreadable-items"]
+            scope.set_context("chatgpt_import", {"files": problems})
+            sentry_sdk.capture_message(
+                "ChatGPT import: unreadable export items",
+                level="warning")
+    except Exception:  # reporting must not break the import
+        current_app.logger.exception(
+            "Sentry report of unreadable ChatGPT items failed")
+
+
+def _load_chatgpt_parts(conv_files):
+    """
+    Parse the uploaded ChatGPT parts (told apart by basename) into
+    (conversations, notices).
+
+    - group_chats.json is not imported; its chats are counted for a notice.
+    - Every other part: each dict item with a dict "mapping" is a
+      conversation (so a conversation-shaped item in
+      sectioned_conversations.json imports like the rest); any other item,
+      or a top level that is not a list, is counted as unreadable.
+    - Conversations repeated across parts are kept once (by "id", else
+      "conversation_id"; first one wins).
+
+    Logs counts only, never content. Raises UnicodeDecodeError /
+    json.JSONDecodeError for the caller to report.
+    """
+    conversations = []
+    seen_ids = set()
+    unreadable = 0
+    group_chats = 0
+    size_bytes = 0
+    problems = []
+    for conv_file in conv_files:
+        name = os.path.basename(conv_file.filename or '')
+        data = conv_file.read()
+        size_bytes += len(data)
+        parsed = json.loads(data.decode('utf-8'))
+
+        if name == 'group_chats.json':
+            chats = parsed.get('chats') if isinstance(parsed, dict) else None
+            n = len(chats) if isinstance(chats, list) else 0
+            group_chats += n
+            if n or not isinstance(chats, list):
+                current_app.logger.warning(
+                    "ChatGPT import: file=%s group_chats=%d top_level=%s",
+                    name, n, type(parsed).__name__)
+            continue
+
+        if not isinstance(parsed, list):
+            unreadable += 1
+            current_app.logger.warning(
+                "ChatGPT import: file=%s top_level=%s unreadable=1",
+                name, type(parsed).__name__)
+            problems.append({
+                "file": name, "top_level": type(parsed).__name__,
+                "items": None, "unreadable": 1,
+                "first_unreadable_keys": (
+                    sorted(str(k)[:40] for k in parsed)[:20]
+                    if isinstance(parsed, dict) else None),
+            })
+            continue
+
+        part_unreadable = 0
+        first_keys = None
+        for item in parsed:
+            if not (isinstance(item, dict)
+                    and isinstance(item.get('mapping'), dict)):
+                if part_unreadable == 0:
+                    first_keys = (sorted(str(k)[:40] for k in item)[:20]
+                                  if isinstance(item, dict)
+                                  else type(item).__name__)
+                part_unreadable += 1
+                continue
+            conv_id = item.get('id') or item.get('conversation_id')
+            if conv_id is not None:
+                if conv_id in seen_ids:
+                    continue
+                seen_ids.add(conv_id)
+            conversations.append(item)
+        unreadable += part_unreadable
+        if part_unreadable:
+            current_app.logger.warning(
+                "ChatGPT import: file=%s items=%d unreadable=%d "
+                "top_level=list", name, len(parsed), part_unreadable)
+            problems.append({
+                "file": name, "top_level": "list", "items": len(parsed),
+                "unreadable": part_unreadable,
+                "first_unreadable_keys": first_keys,
+            })
+
+    if problems:
+        _report_unreadable_chatgpt_items(problems)
+
+    current_app.logger.info(
+        "ChatGPT import: size_bytes=%d files=%d user_id=%s",
+        size_bytes, len(conv_files), getattr(current_user, 'id', None))
+
+    notices = []
+    if unreadable:
+        notices.append(
+            f"{unreadable} {_plural(unreadable, 'item', 'items')} in your "
+            f"export {_plural(unreadable, 'is', 'are')} in a format Loore "
+            f"can't read yet, so {_plural(unreadable, 'it', 'they')} "
+            f"won't be imported.")
+    if group_chats:
+        notices.append(
+            f"Group chats aren't imported yet ({group_chats} in your "
+            f"export).")
+    return conversations, notices
+
+
 @import_bp.route("/import/claude/analyze", methods=["POST"])
 @login_required
 def analyze_claude_import():
@@ -1810,6 +1934,20 @@ def _chatgpt_thread_ids(mapping, current_node=None):
     return path
 
 
+def _chatgpt_part_text(part):
+    """Text of one message part: string parts, and the transcript of a
+    voice-mode turn (an "audio_transcription" dict part), as plain text.
+    Other dict parts (images, audio pointers) give ''. To mark spoken
+    turns, change the transcription return value here."""
+    if isinstance(part, str):
+        return part
+    if (isinstance(part, dict)
+            and part.get('content_type') == 'audio_transcription'
+            and isinstance(part.get('text'), str)):
+        return part['text']
+    return ''
+
+
 def _linearize_chatgpt_messages(mapping, current_node=None):
     """
     Walk the ChatGPT conversation graph along its main thread (see
@@ -1827,7 +1965,8 @@ def _linearize_chatgpt_messages(mapping, current_node=None):
             if role in ('user', 'assistant'):
                 parts = msg.get('content', {}).get('parts', [])
                 text = '\n'.join(
-                    str(p) for p in parts if isinstance(p, str)
+                    _chatgpt_part_text(p) for p in parts
+                    if _chatgpt_part_text(p)
                 ).strip()
                 if text:
                     create_time = msg.get('create_time')
@@ -1894,7 +2033,7 @@ def analyze_chatgpt_import():
         return jsonify({"error": "No file selected"}), 400
 
     try:
-        raw_conversations = _load_conversation_files(conv_files, "ChatGPT")
+        raw_conversations, notices = _load_chatgpt_parts(conv_files)
 
         conversations = []
         total_messages = 0
@@ -1944,10 +2083,10 @@ def analyze_chatgpt_import():
             total_tokens += conv_token_count
 
         if not conversations:
-            return jsonify({
-                "error": "No conversations with messages found in the "
-                         "export."
-            }), 400
+            error = "No conversations with messages found in the export."
+            if notices:
+                error = " ".join([error] + notices)
+            return jsonify({"error": error, "notices": notices}), 400
 
         return jsonify({
             "conversations": conversations,
@@ -1955,6 +2094,7 @@ def analyze_chatgpt_import():
             "total_messages": total_messages,
             "total_tokens": total_tokens,
             "total_size": total_size,
+            "notices": notices,
         }), 200
 
     except UnicodeDecodeError as e:

@@ -311,7 +311,8 @@ class TestLinearizeChatgptMessages:
         assert self._linearize()(mapping) == []
 
     def test_non_string_parts_are_dropped(self):
-        # Multimodal exports can include dict parts; we keep only strings.
+        # Multimodal exports can include dict parts; we keep strings and
+        # voice-mode transcriptions, and drop images and audio pointers.
         mapping = {
             "root": {"parent": None, "children": ["u1"], "message": None},
             "u1": {
@@ -321,7 +322,11 @@ class TestLinearizeChatgptMessages:
                     "author": {"role": "user"},
                     "content": {
                         "parts": [
-                            {"content_type": "image_asset_pointer"},
+                            {"content_type": "image_asset_pointer",
+                             "text": "not text"},
+                            {"content_type": "audio_asset_pointer"},
+                            {"content_type": "audio_transcription",
+                             "text": "spoken words"},
                             "caption text",
                         ]
                     },
@@ -331,7 +336,7 @@ class TestLinearizeChatgptMessages:
         }
         msgs = self._linearize()(mapping)
         assert len(msgs) == 1
-        assert msgs[0]["text"] == "caption text"
+        assert msgs[0]["text"] == "spoken words\ncaption text"
 
     def test_invalid_create_time_falls_back_to_empty(self):
         mapping = {
@@ -542,6 +547,171 @@ class TestAnalyzeChatgptImport:
         body = resp.get_json()
         assert [c["name"] for c in body["conversations"]] == ["A", "B"]
         assert body["total_messages"] == 4
+
+    def _analyze_parts(self, app, parts):
+        client = app.test_client()
+        alice = _make_user("alice")
+        _db.session.commit()
+        _login(client, alice.id)
+        data = {
+            "conversations_file": [
+                (io.BytesIO(json.dumps(content).encode("utf-8")), name)
+                for name, content in parts
+            ],
+        }
+        return client.post(
+            "/api/import/chatgpt/analyze",
+            data=data,
+            content_type="multipart/form-data",
+        )
+
+    def test_conversation_shaped_item_in_sectioned_file_is_imported(self, app):
+        resp = self._analyze_parts(app, [
+            ("conversations-000.json",
+             [_conv(title="A", mapping=_simple_mapping())]),
+            ("sectioned_conversations.json",
+             [_conv(title="S", mapping=_simple_mapping())]),
+        ])
+        assert resp.status_code == 200
+        body = resp.get_json()
+        assert [c["name"] for c in body["conversations"]] == ["A", "S"]
+        assert body["notices"] == []
+
+    def test_empty_sectioned_file_gives_no_notice(self, app):
+        resp = self._analyze_parts(app, [
+            ("conversations-000.json",
+             [_conv(title="A", mapping=_simple_mapping())]),
+            ("sectioned_conversations.json", []),
+        ])
+        assert resp.status_code == 200
+        assert resp.get_json()["notices"] == []
+
+    def test_duplicate_id_across_shards_is_counted_once(self, app):
+        first = dict(_conv(title="first", mapping=_simple_mapping()), id="c1")
+        again = dict(_conv(title="again", mapping=_simple_mapping()), id="c1")
+        by_conv_id = dict(_conv(title="x", mapping=_simple_mapping()),
+                          conversation_id="c2")
+        by_conv_id_again = dict(_conv(title="y", mapping=_simple_mapping()),
+                                conversation_id="c2")
+        resp = self._analyze_parts(app, [
+            ("conversations-000.json", [first, by_conv_id]),
+            ("conversations-001.json", [again, by_conv_id_again]),
+        ])
+        body = resp.get_json()
+        assert [c["name"] for c in body["conversations"]] == ["first", "x"]
+        assert body["total_messages"] == 4
+
+    def test_unreadable_item_gives_notice(self, app):
+        resp = self._analyze_parts(app, [
+            ("conversations-000.json",
+             [_conv(title="A", mapping=_simple_mapping())]),
+            ("sectioned_conversations.json", [{"sections": []}, "text"]),
+        ])
+        assert resp.status_code == 200
+        assert resp.get_json()["notices"] == [
+            "2 items in your export are in a format Loore can't read yet, "
+            "so they won't be imported."]
+
+    def test_single_unreadable_item_is_singular(self, app):
+        resp = self._analyze_parts(app, [
+            ("conversations-000.json",
+             [_conv(title="A", mapping=_simple_mapping()), 5]),
+        ])
+        assert resp.get_json()["notices"] == [
+            "1 item in your export is in a format Loore can't read yet, "
+            "so it won't be imported."]
+
+    def test_dict_top_level_gives_notice_not_500(self, app):
+        resp = self._analyze_parts(app, [
+            ("conversations-000.json",
+             [_conv(title="A", mapping=_simple_mapping())]),
+            ("sectioned_conversations.json", {"sections": []}),
+        ])
+        assert resp.status_code == 200
+        assert len(resp.get_json()["notices"]) == 1
+
+    def test_group_chats_are_counted_not_imported(self, app):
+        resp = self._analyze_parts(app, [
+            ("conversations-000.json",
+             [_conv(title="A", mapping=_simple_mapping())]),
+            ("group_chats.json", {"chats": [{"id": "g1", "messages": []}]}),
+        ])
+        assert resp.status_code == 200
+        body = resp.get_json()
+        assert body["total_conversations"] == 1
+        assert body["notices"] == [
+            "Group chats aren't imported yet (1 in your export)."]
+
+    def test_unreadable_items_send_one_counts_only_sentry_event(self, app):
+        from unittest.mock import patch
+        secret = "SECRET-TITLE-VALUE"
+        with patch("sentry_sdk.capture_message") as capture:
+            resp = self._analyze_parts(app, [
+                ("conversations-000.json",
+                 [_conv(title="A", mapping=_simple_mapping())]),
+                ("sectioned_conversations.json",
+                 [{"title": secret, "id": secret}, {"b": 1}]),
+                ("odd.json", {"title": secret}),
+            ])
+        assert resp.status_code == 200
+        assert capture.call_count == 1
+        args, kwargs = capture.call_args
+        assert args == ("ChatGPT import: unreadable export items",)
+        assert kwargs == {"level": "warning"}
+
+    def test_sentry_event_context_holds_counts_and_key_names_only(self, app):
+        from unittest.mock import patch, MagicMock
+        secret = "SECRET-TITLE-VALUE"
+        scope = MagicMock()
+        scope_cm = MagicMock()
+        scope_cm.__enter__.return_value = scope
+        with patch("sentry_sdk.capture_message"), \
+                patch("sentry_sdk.new_scope", return_value=scope_cm):
+            self._analyze_parts(app, [
+                ("sectioned_conversations.json",
+                 [{"title": secret, "id": secret}, "x"]),
+            ])
+        name, ctx = scope.set_context.call_args[0]
+        assert name == "chatgpt_import"
+        assert ctx == {"files": [{
+            "file": "sectioned_conversations.json", "top_level": "list",
+            "items": 2, "unreadable": 2,
+            "first_unreadable_keys": ["id", "title"],
+        }]}
+        assert secret not in repr(ctx)
+        assert scope.fingerprint == ["chatgpt-import-unreadable-items"]
+
+    def test_clean_export_and_group_chats_send_no_sentry_event(self, app):
+        from unittest.mock import patch
+        with patch("sentry_sdk.capture_message") as capture:
+            resp = self._analyze_parts(app, [
+                ("conversations-000.json",
+                 [_conv(title="A", mapping=_simple_mapping())]),
+                ("sectioned_conversations.json", []),
+                ("group_chats.json", {"chats": [{"id": "g1"}]}),
+            ])
+        assert resp.status_code == 200
+        capture.assert_not_called()
+
+    def test_empty_group_chats_gives_no_notice(self, app):
+        resp = self._analyze_parts(app, [
+            ("conversations-000.json",
+             [_conv(title="A", mapping=_simple_mapping())]),
+            ("group_chats.json", {"chats": []}),
+        ])
+        assert resp.get_json()["notices"] == []
+
+    def test_only_group_chats_error_includes_notice(self, app):
+        resp = self._analyze_parts(app, [
+            ("conversations-000.json", []),
+            ("group_chats.json",
+             {"chats": [{"id": "g1"}, {"id": "g2"}]}),
+        ])
+        assert resp.status_code == 400
+        body = resp.get_json()
+        assert "Group chats aren't imported yet (2 in your export)." \
+            in body["error"]
+        assert body["notices"]
 
     def test_requires_login(self, app):
         client = app.test_client()

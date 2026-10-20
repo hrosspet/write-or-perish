@@ -684,6 +684,22 @@ final class ImportTests: StubbedAppTestCase {
         XCTAssertTrue(text.hasPrefix("--\(boundary)\r\nContent-Disposition: form-data; name=\"conversations_file\"; filename=\"conversations.json\"\r\nContent-Type: application/json\r\n\r\n[1,2]\r\n--\(boundary)--\r\n"))
     }
 
+    func testExtrasAreIncludedOnlyWhenAsked() throws {
+        let url = try zip("e.zip", ["conversations-000.json": "[{\"a\":1}]", "sectioned_conversations.json": "[]",
+                                    "group_chats.json": "{\"chats\":[]}", "shared_conversations.json": "[{\"s\":1}]"])
+        let plain = try ImportFiles.extractConversations(from: url, into: dir)
+        XCTAssertEqual(plain.map(\.lastPathComponent), ["conversations-000.json"])
+        let withExtras = try ImportFiles.extractConversations(from: url, into: dir, includeExtras: true)
+        XCTAssertEqual(withExtras.map(\.lastPathComponent),
+                       ["conversations-000.json", "group_chats.json", "sectioned_conversations.json"])
+    }
+
+    func testAnalysisNoticesAreRead() {
+        let analysis = ImportAnalysis(kind: .chatgpt, raw: ["notices": ["Group chats aren't imported yet (2 in your export)."]])
+        XCTAssertEqual(analysis.notices, ["Group chats aren't imported yet (2 in your export)."])
+        XCTAssertEqual(ImportAnalysis(kind: .chatgpt, raw: [:]).notices, [])
+    }
+
     func testMultipartBodyWritesOnePartPerShard() throws {
         let a = dir.appendingPathComponent("a.json"), b = dir.appendingPathComponent("b.json")
         try Data("[1]".utf8).write(to: a)

@@ -43,9 +43,12 @@ enum ImportFiles {
     /// `conversations.json` or a numbered shard `conversations-<digits>.json`
     /// (ChatGPT splits its export this way), sorted by name, each streamed to
     /// `directory/<basename>`. Names such as `sectioned_conversations.json`
-    /// do not match. Otherwise the largest `.json` whose top level is an
+    /// do not match. With `includeExtras` (ChatGPT only),
+    /// `sectioned_conversations.json` and `group_chats.json` follow as their
+    /// own files; the server tells parts apart by name. Otherwise the largest `.json` whose top level is an
     /// array, streamed to `directory/conversations.json`.
-    static func extractConversations(from zipURL: URL, into directory: URL) throws -> [URL] {
+    static func extractConversations(from zipURL: URL, into directory: URL,
+                                     includeExtras: Bool = false) throws -> [URL] {
         let archive: Archive
         do {
             archive = try Archive(url: zipURL, accessMode: .read)
@@ -61,7 +64,11 @@ enum ImportFiles {
             .sorted { $0.name < $1.name }
         if !named.isEmpty {
             var urls: [URL] = []
-            for item in named {
+            let extras = !includeExtras ? [] : files
+                .map { (entry: $0, name: ($0.path as NSString).lastPathComponent) }
+                .filter { $0.name.range(of: #"^(sectioned_conversations|group_chats)\.json$"#, options: .regularExpression) != nil }
+                .sorted { $0.name < $1.name }
+            for item in named + extras {
                 let url = directory.appendingPathComponent(item.name)
                 try extract(item.entry, from: archive, to: url)
                 urls.append(url)

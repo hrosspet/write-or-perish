@@ -68,6 +68,8 @@ struct ImportAnalysis {
     var totalTokens: Int { int("total_tokens") }
     var totalConversations: Int { int("total_conversations") }
     var totalMessages: Int { int("total_messages") }
+    /// Server-written lines about parts of the export that were not imported.
+    var notices: [String] { (raw["notices"] as? [String]) ?? [] }
     var importToken: String? { raw["import_token"] as? String }
     var totalTweets: Int { int("total_tweets") }
     var originalCount: Int { int("original_count") }
@@ -212,7 +214,7 @@ final class ImportModel {
             stage = .extracting
             do {
                 let extracted = try await Task.detached(priority: .userInitiated) {
-                    try ImportFiles.extractConversations(from: url, into: directory)
+                    try ImportFiles.extractConversations(from: url, into: directory, includeExtras: kind == .chatgpt)
                 }.value
                 parts = extracted.map { ($0.lastPathComponent, $0) }
             } catch let failure as ImportFiles.Failure {

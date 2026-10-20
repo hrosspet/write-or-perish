@@ -216,6 +216,7 @@ private struct ConfirmImportDialog: View {
                      + bold(analysis.totalMessages) + Text(" messages"))
                 line(Text("Estimated tokens: ") + bold(analysis.totalTokens))
                 line(Text("Each conversation will be imported as a separate thread."))
+                ForEach(analysis.notices, id: \.self) { line(Text($0)) }
             case .twitter:
                 line(Text("Found ") + bold(analysis.totalTweets)
                      + Text(" tweets (\(analysis.originalCount) original, \(analysis.replyCount) replies)"))
