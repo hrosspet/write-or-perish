@@ -1650,6 +1650,447 @@ Kinds (one per entry and per table row):
 - **Source:** Claude Code session 2026-10-16 (Opus 5.5)
 - **Applies to:** #523, #518, #519
 
+### 2026-10-16 · A tester's Word import failed with a generic error: fixed without asking
+
+- **Kind:** reliability
+- **Situation:** after #521 shipped, a tester on Android got "Error analyzing import file" for a Word document. The likely causes: the upload hit the shared 60 s client timeout (the document had photos, and the server never reads image bytes), or the connection dropped. A few unusual files also made the server answer with an HTML 500, and the same file couldn't be picked again after an error.
+- **Decision:** had a builder fix it without asking, before the cause was confirmed (#528): pictures are stripped in the browser before upload, the upload gets its own timeout and progress, each kind of failure gets its own message, and unusual files get a readable error instead of a 500. Predicted that Peter accepts (80 %); "wait for the logs first" (15 %).
+- **Peter:** no objection; merged #528 unchanged.
+- **Score:** hit. The PR's own choices are rows in "Accepted by merge".
+- **Source:** Claude Code session 2026-10-16 (Opus 5.5)
+- **Applies to:** #528, #521
+- **Rule:** Problems show; fix the cause
+
+### 2026-10-16 · A tester's Word import failed with a generic error: ask or decide
+
+- **Kind:** escalation
+- **Situation:** a tester's Word import ended in a generic error, with several likely causes and none confirmed.
+- **Decision:** decided without asking Peter
+- **Peter:** no objection; merged #528 unchanged.
+- **Score:** hit
+- **Source:** Claude Code session 2026-10-16 (Opus 5.5)
+- **Applies to:** #528
+
+### 2026-10-16 · PDF import: build it now
+
+- **Kind:** product scope
+- **Situation:** a tester asked for .doc and PDF import, and Peter asked how hard it would be. The builder estimated PDF as a medium-small job (a pure-Python parser; layout partly lost; chapters from the PDF's bookmarks; no text in scanned PDFs) and old .doc as not worth it (a heavy converter for an untrusted binary format), and asked whether to build PDF import now.
+- **Prediction:** build now (60 %).
+- **Peter:** "I like your 4 recommendations, pls build it"
+- **Score:** hit
+- **Source:** Claude Code session 2026-10-16 (Opus 5.5)
+- **Applies to:** #529
+
+### 2026-10-16 · PDF import: whose writing, old .doc files, scanned PDFs
+
+- **Kind:** product scope
+- **Situation:** with the build question, three choices, each with a recommendation: (1) for a PDF, the confirm step asks whose writing it is, and "someone else's" saves it as a Reference instead of the user's entries; (2) an old .doc file gets a clear "save it as .docx" message, with no conversion; (3) no text recognition for scanned PDFs in the first version.
+- **Prediction:** (1) the choice in the confirm step (55 %; own entries only 25 %, References only 20 %); (2) the message (75 %); (3) no text recognition (80 %).
+- **Peter:** "I like your 4 recommendations, pls build it"
+- **Score:** hit + hit + hit
+- **Source:** Claude Code session 2026-10-16 (Opus 5.5)
+- **Applies to:** #529
+
+### 2026-10-16 · A PDF saved as a Reference keeps its first 100,000 characters
+
+- **Kind:** product scope
+- **Situation:** #529's builder asked under Needs Peter: a 300-page book someone else wrote, saved as a Reference, keeps only its first 100,000 characters (about 40 pages), as a clipped page does, and the confirm step says so. It recommended keeping the cap. Peter asked whether this is the limit nodes have. It is the same constant, but the user's own entries are split into a chain, while References are cut. The builder then re-asked with a new recommendation: merge #529 as it is, then save a long PDF as several References in a follow-up.
+- **Prediction:** first, keep the cap (60 %). Re-asked: the follow-up that splits it (55 %); split inside #529 (30 %); keep the cut (15 %).
+- **Peter:** "we already have some char limit for nodes. Is it the same?" · "No, cutting off references after 100k chars is ok"
+- **Score:** hit + miss: the first prediction, keep the cap, was right; the re-asked recommendation was not.
+- **Why it missed:** his factual question was read as a wish for References to work like entries. It was only a question.
+- **Source:** Claude Code session 2026-10-16 (Opus 5.5)
+- **Applies to:** #529
+
+### 2026-10-16 · Word files picked from Google Drive: #528 shipped only a message
+
+- **Kind:** reliability
+- **Situation:** the tester retried the Word document straight from Google Drive on Android and got "The file didn't reach Loore…". It matches a known Chrome-on-Android failure: a file from a cloud app is read again when it is uploaded, and that second read fails. Since #528 the browser read the file anyway (to strip pictures), but it uploaded the original when there were no pictures, so the upload read it from Drive again. The investigation for #528 had already named this failure for Drive files.
+- **Decision:** in #528, answered the Drive case with a message (download the file first), not with a fix.
+- **Peter:** none on the decision; the tester's second report showed the gap.
+- **Score:** miss
+- **Why it missed:** the cause was known when #528 was built, and only the message shipped. Uploading the copy the browser had already read was a small change in the same code. Fixed in #530 (next entry).
+- **Source:** Claude Code session 2026-10-16 (Opus 5.5); the decision is #528's
+- **Applies to:** #528, #530
+- **Rule:** Fix the cause, not what is shown
+
+### 2026-10-16 · Upload the copy the browser has read
+
+- **Kind:** reliability
+- **Situation:** files picked from Google Drive on Android didn't reach Loore (previous entry).
+- **Decision:** had a builder fix it without asking (#530): the Markdown, Word and PDF upload always sends an in-memory copy of the file instead of the original. Predicted that Peter accepts (85 %).
+- **Peter:** no objection; merged #530 unchanged (2026-10-17).
+- **Score:** hit. The PR's choices are rows in "Accepted by merge".
+- **Source:** Claude Code session 2026-10-16 (Opus 5.5)
+- **Applies to:** #530
+- **Rule:** Fix the cause, not what is shown
+
+### 2026-10-16 · Upload the copy the browser has read: ask or decide
+
+- **Kind:** escalation
+- **Situation:** files picked from Google Drive on Android didn't reach Loore.
+- **Decision:** decided without asking Peter
+- **Peter:** no objection; merged #530 unchanged.
+- **Score:** hit
+- **Source:** Claude Code session 2026-10-16 (Opus 5.5)
+- **Applies to:** #530
+
+### 2026-10-17 · Raw error text in import responses: fixed, not filed
+
+- **Kind:** privacy
+- **Situation:** while building #529, the builder found that the import confirm step's error handler logged the exception's text and returned it to the browser; a database error's text can quote the values being saved. It offered an issue. Fixed by #531 (merged 2026-10-20), and for the other routes by #540 in the merge train.
+- **Peter:** "530 merged, could you pls fix the issue?"
+- **Score:** not scored: no prediction was written before the offer.
+- **Source:** Claude Code session 2026-10-17 (Opus 5.5)
+- **Applies to:** #531, #529
+
+### 2026-10-20 · A ChatGPT conversation comes in along the branch the user kept
+
+- **Kind:** data safety
+- **Situation:** ChatGPT changed its export: the conversations are split over several files, a new empty file matched the name the clients looked for, and the tree's nodes no longer list their children. A tester's import found no conversations. The builder fixed it without asking (#532), and walking the tree without its children needed a choice of branch.
+- **Decision:** the imported thread is the path to the message the user last saw in ChatGPT (`current_node`), not the first reply at each step. On a real export the kept path was never shorter than the first-reply path (7 against 26, 6 against 16, 2 against 8 messages), because after an edited message the first reply is the abandoned original. Predicted that Peter accepts (85 %).
+- **Peter:** no objection; merged #532 unchanged.
+- **Score:** hit
+- **Source:** Claude Code session 2026-10-20 (Opus 5.5)
+- **Applies to:** #532
+
+### 2026-10-20 · The new ChatGPT export format: ask or decide
+
+- **Kind:** escalation
+- **Situation:** a tester's import of the new ChatGPT export found no conversations.
+- **Decision:** decided without asking Peter
+- **Peter:** no objection; merged #532 unchanged.
+- **Score:** hit
+- **Source:** Claude Code session 2026-10-20 (Opus 5.5)
+- **Applies to:** #532
+
+### 2026-10-20 · Group chats in a ChatGPT export are skipped for now
+
+- **Kind:** product scope
+- **Situation:** some ChatGPT exports have a group-chats file, with other members' messages in it. Asked whether to import it, recommending not now, with a notice saying how many group chats were skipped.
+- **Prediction:** not now, with the notice (55 %); import the user's own and ChatGPT's messages (30 %); import everything (15 %).
+- **Peter:** "skip group chats for now, but create an issue - they will become more important once we start focusing on the public forum side of loore"
+- **Score:** hit. Filed #533.
+- **Source:** Claude Code session 2026-10-20 (Opus 5.5)
+- **Applies to:** #532, #533
+
+### 2026-10-20 · Unreadable items in a ChatGPT export: counted, shown, and sent to Sentry
+
+- **Kind:** reliability
+- **Situation:** the new export can hold items of unknown shape. Added to #532 without asking: a conversation repeated across files is kept once, a conversation-shaped item is imported from any file, and anything else is counted, named in a notice in the confirm dialog, and logged on the server as counts.
+- **Decision:** as above. Predicted that Peter accepts (80 %).
+- **Peter:** "could we point it at sentry? logs won't notify us, sentry will"
+- **Score:** partial: the dedup, the imports and the notice stayed as built; the log line became a Sentry warning with counts and key names only.
+- **Why it missed:** a log line was taken for reporting. Nothing reads the logs unless something sends them there, and a change in an export's format has to reach someone who can fix it.
+- **Source:** Claude Code session 2026-10-20 (Opus 5.5)
+- **Applies to:** #532
+- **Rule:** Problems show
+
+### 2026-10-20 · ChatGPT voice-mode turns come in as plain text
+
+- **Kind:** UX
+- **Situation:** the importer used to drop what the user said in ChatGPT's voice mode. #532 imports it, decided without asking, since a silent drop hides a problem. The question was whether those turns get a note saying they were spoken in voice mode; recommended plain text.
+- **Prediction:** plain text (55 %); a note (45 %).
+- **Peter:** "good"
+- **Score:** hit
+- **Source:** voice review in local Loore 2026-10-20 (Opus 5.5)
+- **Applies to:** #532
+
+### 2026-10-20 · Alchemy mode's pull request stays open
+
+- **Kind:** product scope
+- **Situation:** PR #227 (Alchemy mode, behind a flag) was 363 commits behind main, with 11 conflicts and 4 open decisions, one of them a safety-critical readiness checklist. Recommended closing it, keeping the branch, and filing an issue with the four decisions.
+- **Prediction:** close and file an issue (60 %); keep it open (30 %); close without an issue (10 %).
+- **Peter:** "keep Alchemy mode open, but it doesn't go into Beta"
+- **Score:** miss
+- **Why it missed:** the cost of a stale branch (rebasing, age) was weighed above keeping a planned feature in view. A stale PR of a feature Peter still plans is not clutter to him.
+- **Source:** voice review in local Loore 2026-10-20 (Opus 5.5)
+- **Applies to:** #227
+
+### 2026-10-20 · The first-login walkthrough: undecided
+
+- **Kind:** product scope
+- **Situation:** PR #203 (a first-login walkthrough) was 417 commits behind, with about 34 conflicts, and its text describes the product of June; #391 and #436 cover a newcomer's first minutes. Recommended closing it, keeping the branch, and keeping issue #147 open.
+- **Prediction:** close (75 %); keep it (25 %).
+- **Peter:** "I haven't seen it back then… we might need some kind of walkthrough for Beta. Not sure yet"
+- **Score:** not scored: no decision yet. At his request, the walkthrough went into the Beta section of the issue board.
+- **Source:** voice review in local Loore 2026-10-20 (Opus 5.5)
+- **Applies to:** #203, #147
+
+### 2026-10-20 · A profile edit is a new version, kept until new writing contradicts it
+
+- **Kind:** product scope
+- **Situation:** #414 keeps a user's edits to their profile through later AI updates. Two questions: what an update does when the user's words disagree with their entries (an invented example: "I exercise every morning", while the entries show skipped mornings), and how long an edit is protected (as built: in every later version until the next edit, so lines can go stale). Recommended keeping the user's words and adding the entries' observation, marked as coming from the entries; and keeping the words until entries written after the edit show they no longer hold, then changing the line and saying so.
+- **Prediction:** keep the words and add a marked observation (60 %); keep the words until later entries contradict them, then say so (55 %).
+- **Peter:** "user edits simply creating a new version of profile, which will have the previous version linked as a predecessor… next ai update… keep it, but if new data contradict it, it will drop it. This will require no prompt change vs current prod, we just need to make sure the wiring works"
+- **Score:** 2 × miss
+- **Why it missed:** both answers added instructions to the prompt. The version chain already hands the next update the user's text, and the current update already keeps what holds and drops what new writing contradicts. Peter wants that wiring checked, not new rules.
+- **Source:** voice review in local Loore 2026-10-20 (Opus 5.5)
+- **Applies to:** #414
+- **Rule:** candidate: before adding a prompt rule, check what the pipeline already gives the model
+
+### 2026-10-20 · Each profile edit is its own version
+
+- **Kind:** data safety
+- **Situation:** as built, #414 kept the first edit's date when the user edited the same profile version twice, and Peter asked why. Recommended that each edit makes a new version, dated by that edit.
+- **Prediction:** yes (80 %).
+- **Peter:** "yes pls"
+- **Score:** hit
+- **Source:** voice review in local Loore 2026-10-20 (Opus 5.5)
+- **Applies to:** #414
+
+### 2026-10-20 · Facts a user adds to the profile count
+
+- **Kind:** product scope
+- **Situation:** one of #414's smaller choices, stated as the default unless Peter objected: facts a user adds to their profile are taken as true by later updates.
+- **Decision:** that default.
+- **Peter:** "good"
+- **Score:** hit
+- **Source:** voice review in local Loore 2026-10-20 (Opus 5.5)
+- **Applies to:** #414
+
+### 2026-10-20 · Facts a user adds: "something the user said"
+
+- **Kind:** product scope
+- **Situation:** a later reply described that choice as: facts a user adds count as true, and the model draws conclusions from them.
+- **Decision:** that description of how an update treats the user's version.
+- **Peter:** "this is imprecise… it should be visible that the version was created by the user… count as something the user said / corrected… no special treatment… doesn't the integration job send the author of the profile version to the model? It should."
+- **Score:** partial: the choice he accepted stands; the description of it was wrong.
+- **Why it missed:** the mechanism was described as a rule about truth for the model. For Peter, an update sees which versions the user wrote and treats them as what the user said, with no special handling.
+- **Source:** voice review in local Loore 2026-10-20 (Opus 5.5)
+- **Applies to:** #414
+
+### 2026-10-20 · A hand-written first profile follows the update schedule
+
+- **Kind:** product scope
+- **Situation:** another of #414's smaller choices, stated as a mechanism: a profile the user writes before any AI profile exists waits for "the full amount" of writing before its first AI update. Peter asked what the full amount is. It was a single 80k-token threshold for this case, where new accounts otherwise get updates at 5k, 10k, 15k, 25k, 50k and 90k tokens.
+- **Peter:** "what is the full amount… the schedule for new/little-data accounts should be respected"
+- **Score:** not scored: no prediction was written. The 80k-only exception goes.
+- **Source:** voice review in local Loore 2026-10-20 (Opus 5.5)
+- **Applies to:** #414
+
+### 2026-10-20 · A rebuilt profile merges the user's edit at its date
+
+- **Kind:** product scope
+- **Situation:** a full rebuild (for example after an import of writing older than the first profile) makes a new chain of versions, and a user's edit in the old chain has to reach it. Three options: insert the edit at its date; merge it at its date, with one extra integration call; or add it once at the end. Recommended the merge at its date.
+- **Prediction:** merge at the edit's date (55 %); insert (25 %); add at the end (20 %).
+- **Peter:** "yes pls, that's the right way to treat it"
+- **Score:** hit
+- **Source:** voice review in local Loore 2026-10-20 (Opus 5.5)
+- **Applies to:** #414
+
+### 2026-10-20 · Backups: a 28-day retention, locked
+
+- **Kind:** data safety
+- **Situation:** #278 (nightly backups) keeps copies for 28 days, so that every copy is gone within the 30 days the terms promise (entry "Backups must be gone by day 30", 2026-10-09). Asked whether to lock the retention. A locked retention can't be shortened, and nobody can delete a copy younger than 28 days. Recommended locking it, but only after the first nightly run and a test restore have worked.
+- **Prediction:** that (60 %); no lock, deletion by age only (25 %); another period (15 %).
+- **Peter:** "yes"
+- **Score:** hit
+- **Source:** voice review in local Loore 2026-10-20 (Opus 5.5)
+- **Applies to:** #278
+
+### 2026-10-20 · Backups: the server restart now
+
+- **Kind:** release/ops
+- **Situation:** the production server needed a stop and start of about two minutes before it could write backups. Asked: soon, at a quiet hour, or later together with other server work. Recommended soon.
+- **Prediction:** soon (60 %); later (40 %).
+- **Peter:** "yes, we can do it eg. now"
+- **Score:** hit. Peter did it the same day.
+- **Source:** voice review in local Loore 2026-10-20 (Opus 5.5)
+- **Applies to:** #278
+
+### 2026-10-20 · Error text: every route in one pull request, now
+
+- **Kind:** privacy
+- **Situation:** #531 removed exception text from the import routes' responses and logs. About 40 similar places in 13 other route files, and unhandled exceptions, could still put a database error's text, which quotes the values being saved, into a response, a log line or Sentry. Asked whether to fix them all in one PR now, file an issue, or leave them. The trade-off: database errors in Sentry lose the values that help debugging. Fixed by #540 in the merge train.
+- **Prediction:** fix them now (55 %); file an issue (30 %); leave them (15 %).
+- **Peter:** "yes pls" (to "fix them all in one pull request now")
+- **Score:** hit
+- **Source:** voice review in local Loore 2026-10-20 (Opus 5.5); first asked in a Claude Code session 2026-10-17
+- **Applies to:** #540, #531
+
+### 2026-10-20 · No Google Drive button while the picker works
+
+- **Kind:** product scope
+- **Situation:** Peter asked how hard direct upload from Google Drive would be. #530 covers picking a Drive file in the phone's file picker. A real "Import from Google Drive" button (Google's picker and sign-in, Google Docs exported as Word) is about 1–2 days plus Google's brand verification. Recommended waiting to see whether #530 is enough.
+- **Prediction:** wait (65 %); build the button now (35 %).
+- **Peter:** "yes, if the fix works, we won't implement anything more"
+- **Score:** hit
+- **Source:** voice review in local Loore 2026-10-20 (Opus 5.5); first asked in a Claude Code session 2026-10-16
+- **Applies to:** #530
+
+### 2026-10-20 · A brief's example named a field no screen has
+
+- **Kind:** process
+- **Situation:** the re-asked error-text question gave as its example "A user changes the description on their Account page". The Account page has had no description field since the profile was unified; the server still accepted a `description`, and no screen sent one. The example came from the agent that drafted the brief.
+- **Decision:** posted the scenario without checking that the screen it names exists.
+- **Peter:** pointed out that the field doesn't exist (his words were not recorded).
+- **Score:** miss
+- **Why it missed:** an agent's scenario was passed on as fact. Before a brief names a screen, check the screen. Filed #538 for the leftover field and re-asked with a correct example.
+- **Source:** voice review in local Loore 2026-10-20 (Opus 5.5)
+- **Applies to:** #538, #540
+
+### 2026-10-20 · "Nothing shows it": the old description was still on public pages
+
+- **Kind:** process
+- **Situation:** a reply about #538 said that nothing shows the old profile description. The agent working on #538 then found it on the public profile page (the line under the name, the page's description for search engines and link previews) and on the profile's share card, and in three API responses.
+- **Decision:** stated, from a search of the web app's code, that nothing shows the description, without checking the pages the server renders.
+- **Peter:** none on the claim; the reply was corrected in place, and his answer quoted its first version.
+- **Score:** miss
+- **Why it missed:** server-rendered pages and API responses were left out of the search. A claim that something is unused needs a check of every place that can render it.
+- **Source:** voice review in local Loore 2026-10-20 (Opus 5.5)
+- **Applies to:** #538, #539
+
+### 2026-10-20 · The old profile descriptions are deleted
+
+- **Kind:** data safety
+- **Situation:** after that find, asked what to do with the leftover description: (A) stop accepting edits; (B) A, and the public page and share card stop showing it; (C) delete the stored descriptions after a read-only count on prod; (D) bring back an edit field. Recommended B now, and C after the count.
+- **Prediction:** B (55 %); D (20 %); C now (15 %); A (10 %).
+- **Peter:** "yes" (to "Issue 538 asks whether to remove the stored descriptions")
+- **Score:** miss
+- **Why it missed:** hiding was preferred because it can be undone. Peter chose removing the field and its stored values over hiding them. Built as #539 in the merge train, after the count on prod.
+- **Source:** voice review in local Loore 2026-10-20 (Opus 5.5); the options were put in a Claude Code session the same day
+- **Applies to:** #538, #539
+
+### 2026-10-20 · Guards for the profile rebuild after a huge import
+
+- **Kind:** cost
+- **Situation:** a tester's very large ChatGPT import (millions of tokens) would start an automatic full profile rebuild, estimated at $60–110 through the Batch API, and the batch path didn't apply the spending cap. Three guards were proposed: (a) above a size threshold, the automatic rebuild waits for Peter's approval, with the threshold at 1M imported tokens; (b) only the user's own messages from ChatGPT and Claude imports count toward the profile, not the assistant's replies; (c) the batch path applies the per-user monthly spending cap too.
+- **Prediction:** (a) yes, at 1M (60 %), a cost dialog for the user (20 %), no guard (20 %); (b) the user's messages only (55 %); (c) yes (70 %).
+- **Peter:** on (c): "definitely" · on (a): "not sure… strain on my attention, and latency on user's side… I'd rather go with other solutions… 1M is way too little… at least 3M… could be tiered by subscription levels" · on (b): "works pretty well… we were unintentionally building profiles only from user messages… but misses half of the conversation"
+- **Score:** miss + hit: (a) missed and (c) was right; (b) is undecided and not scored. (c) is built in #543.
+- **Why it missed:** the threshold was sized from the incident, not from how much writing real accounts hold, and an approval step costs Peter's attention and makes the user wait.
+- **Source:** Claude Code session 2026-10-20 (Opus 5.5)
+- **Applies to:** #543, #542
+- **Rule:** candidate: limits on large imports follow subscription levels, not an approval step
+
+### 2026-10-20 · Images in clipped pages: a longer-term decision
+
+- **Kind:** product scope
+- **Situation:** a clipped Substack page showed stray brackets around an image placeholder. The brackets were a clipper bug, fixed as one (#537). Outside images are placeholders by design (#441, #444): viewing a page never contacts an outside server, and a model's reply can't send data out through an image address. Asked whether to copy a clipped page's images into Loore's own storage when it is saved (resized, with guards on what the server may fetch, and a backfill of existing References), so that they show inline. Recommended yes.
+- **Prediction:** copy at save (65 %); keep the placeholders and fix only the brackets (20 %); load the images from their source, at once or on a tap (15 %).
+- **Peter:** "pls, file an issue for saving the images on the prod server. It needs a longer term decision."
+- **Score:** miss. Filed #536; the placeholders stay for now.
+- **Why it missed:** only the gain for the reader was weighed. Storing outside images on Loore's server is a lasting commitment (storage cost, the deletion promise, backups), and Peter defers commitments of that kind that the Beta doesn't need.
+- **Source:** Claude Code session 2026-10-20 (Opus 5.5)
+- **Applies to:** #536, #537
+
+### 2026-10-20 · Profile versions are integrated in fixed groups
+
+- **Kind:** product scope
+- **Situation:** a full rebuild from a very large import makes about 140 profile versions, and integrating that many at once is untested. Peter proposed integrating every 10 consecutive versions, then the results in turn. The builder agreed and added refinements: dates visible at every level; fixed groups, so a later update re-merges only the newest group; a frontier model for the merges and a small model for the chunks; and a test of flat against grouped integration. Asked whether to add the design to #545.
+- **Prediction:** yes, with the refinements (60 %); fixed groups of 10 only (25 %); other (15 %).
+- **Peter:** "yes, this is the assumption" (on fixed groups, with only the newest re-merged)
+- **Score:** hit: on the fixed groups. The model split and the test are the next two entries.
+- **Source:** voice review in local Loore 2026-10-20 (Opus 5.5)
+- **Applies to:** #545
+
+### 2026-10-20 · Reading between the lines happens in every chunk
+
+- **Kind:** cost
+- **Situation:** the refinements above put a small model on the chunk steps and a frontier model on the merges, on the claim that chunks collect facts and the merges read between the lines.
+- **Decision:** that claim, and the model split built on it.
+- **Peter:** "reading between the lines happens within each chunk & profile version… Shadow map and light map are both based on vibes and indirect implications"
+- **Score:** miss
+- **Why it missed:** a finding from September (small models extract intentions well) was applied to profiles without checking how a profile is built. The shadow and light maps are inferred in every chunk.
+- **Source:** voice review in local Loore 2026-10-20 (Opus 5.5)
+- **Applies to:** #545
+
+### 2026-10-20 · The flat baseline already runs in prod
+
+- **Kind:** testing
+- **Situation:** the refinements above included a test run of flat integration against grouped integration.
+- **Decision:** proposed a flat run as the baseline.
+- **Peter:** "not needed, already in prod"
+- **Score:** partial: the comparison stands; its flat side is prod's current integration and needs no new run.
+- **Source:** voice review in local Loore 2026-10-20 (Opus 5.5)
+- **Applies to:** #545
+
+### 2026-10-20 · No weighted view of the profile
+
+- **Kind:** product scope
+- **Situation:** Peter designed an experiment: a standalone profile for each chunk, integrated in units of equal size, with the weekly writing fitted in. The builder proposed merging only pieces of equal size, like a binary counter, and two ways to show the profile in between: (1) one weighted combine call for each new piece (recommended), or (2) layered sections; and testing fan-in 2 against 10.
+- **Prediction:** (1) 55 %, (2) 30 %, other 15 %; test both fan-ins (60 %).
+- **Peter:** "no way to weigh vibes". He also rejected the layered view, required weekly updates, and said that merging in pairs doesn't remove the delay.
+- **Score:** miss: the fan-in question became moot and is not scored.
+- **Why it missed:** a profile's registers were treated as quantities that can be averaged by weight. What a chunk implies can't be weighed.
+- **Source:** voice review in local Loore 2026-10-20 (Opus 5.5)
+- **Applies to:** #545
+
+### 2026-10-20 · The versions in prod's integration have about the same coverage
+
+- **Kind:** product scope
+- **Situation:** in the comparison of integration schemes, the builder described prod's flat integration as a final merge that mixes versions of very different coverage.
+- **Decision:** that description.
+- **Peter:** "every P_i has ~same coverage; the problem is too many Ps"
+- **Score:** miss
+- **Why it missed:** prod's integration was described without checking it. Each version covers about one chunk of writing; the problem is their number.
+- **Source:** voice review in local Loore 2026-10-20 (Opus 5.5)
+- **Applies to:** #545
+
+### 2026-10-20 · The default model, passed on without a check
+
+- **Kind:** process
+- **Situation:** a reply estimating the integration's cost gave the default model as Opus 4.6.
+- **Decision:** passed on a subagent's "default", read from the code's fallback, without checking the production setting.
+- **Peter:** "our default is Opus 5.5"
+- **Score:** miss
+- **Why it missed:** the code's fallback value was taken for what production runs. Both replies that named it were corrected.
+- **Source:** voice review in local Loore 2026-10-20 (Opus 5.5)
+- **Applies to:** #545
+
+### 2026-10-20 · One export's share of user text, presented as typical
+
+- **Kind:** process
+- **Situation:** the same reply estimated how much of a ChatGPT import is the user's own text, from one export, and presented it as typical.
+- **Decision:** that generalisation.
+- **Peter:** "my chatgpt export is very non-representative… heavy users will have very different proportions"
+- **Score:** miss
+- **Why it missed:** one sample was taken for all users. The reply was corrected: the user-only figures are the optimistic end.
+- **Source:** voice review in local Loore 2026-10-20 (Opus 5.5)
+- **Applies to:** #545, #542
+
+### 2026-10-20 · Each import logs its user and assistant token counts
+
+- **Kind:** testing
+- **Situation:** to learn the real split between user and assistant text, offered as a default that the import's analyze step logs, per import, the number of user and assistant messages and tokens (counts only, never text).
+- **Decision:** that default.
+- **Peter:** "good idea"
+- **Score:** hit. Built into #542.
+- **Source:** Claude Code session 2026-10-20 (Opus 5.5)
+- **Applies to:** #542
+
+### 2026-10-20 · Glean is not "Read"
+
+- **Kind:** user-facing text
+- **Situation:** a reply to Peter still called Glean "Read", its old name, and its models "read-only".
+- **Decision:** used the old name.
+- **Peter:** asked to stop calling Glean "Read", and said "read-only" was confusing (his words were not recorded).
+- **Score:** miss
+- **Why it missed:** the code's names (read models, the read routes) were carried into a reply after the feature was renamed. Use the feature's current name.
+- **Source:** voice review in local Loore 2026-10-20 (Opus 5.5)
+- **Applies to:** #545
+
+### 2026-10-20 · Large ChatGPT and Claude imports run in the background
+
+- **Kind:** reliability
+- **Situation:** a tester's very large ChatGPT import timed out at the confirm step after 60 s, while the server went on creating entries for an hour or more in one transaction. The error was drawn behind the dialog, and pressing Confirm again started the import again.
+- **Decision:** had a builder fix it without asking (#542): confirming starts a background job that commits in chunks, can resume where it stopped and reports its progress, with one encryption key per chunk instead of one key call per entry. Predicted that Peter accepts (85 %).
+- **Peter:** no objection; merged #542 unchanged.
+- **Score:** hit. The PR's choices are rows in "Accepted by merge".
+- **Source:** Claude Code session 2026-10-20 (Opus 5.5)
+- **Applies to:** #542
+
+### 2026-10-20 · Large ChatGPT and Claude imports run in the background: ask or decide
+
+- **Kind:** escalation
+- **Situation:** a very large ChatGPT import timed out at the confirm step and couldn't be confirmed.
+- **Decision:** decided without asking Peter
+- **Peter:** no objection; merged #542 unchanged.
+- **Score:** hit
+- **Source:** Claude Code session 2026-10-20 (Opus 5.5)
+- **Applies to:** #542
+
 ## Decided by the builder
 
 Choices that agents flagged in PRs and that the builder decided because a rule above already covers them (Peter, 2026-10-02: decide what the log supports, raise only real judgement calls). Each is also recorded on its PR, or in the session where Peter asked. The Decided column holds only the builder's part; a rule or decision of Peter's goes in the Rule column. Questions raised to Peter instead are not listed; his answers become entries. Model is the model that wrote the PR (its Co-Authored-By line). Result is "accepted by merge (PR #N, date)" once the PR has merged and Peter didn't correct the choice, "pending" until it merges, and "corrected → entry <title>" when he overrules it; the entry is then scored as a miss.
@@ -1839,6 +2280,49 @@ Choices that agents flagged in PRs and that the builder decided because a rule a
 | 2026-10-16 | #519 | UX | How a failed speaker-icon audio job is announced | The #504 error sound, after the audio already queued has played, or at once if nothing played: #504's sound extended from voice mode to the speaker icon | Problems show; #504: so you know it failed without looking | Opus 5.5 | accepted by merge (PR #519, 2026-10-16) |
 | 2026-10-16 | #519 | user-facing text | The message after a failed speaker-icon audio job | The player's existing playback-error toast (6 s), saying that a retry starts from the beginning: "Loore couldn't read the rest aloud. Tap the speaker to try again from the start." | candidate: user-facing text says what happens to the user | Opus 5.5 | accepted by merge (PR #519, 2026-10-16) |
 | 2026-10-16 | #519 | reliability | Reporting resent bad answers | Logged only, not sent to Sentry, so #382's Sentry count stays a count of slow calls; a chunk that fails every attempt still reaches Sentry | #382's weekly check | Opus 5.5 | accepted by merge (PR #519, 2026-10-16) |
+| 2026-10-20 | #535 | UX | Where the speaker sits on a reference page | At the right edge of the author and date line; the thread view has no icon on its byline line to follow | Peter: "end of this line" (2026-10-20) | Sonnet 5.5 | pending |
+| 2026-10-20 | #535 | UX | The reference page's footer | Stays, with the verdict buttons and the read toggle | Reuse what exists | Sonnet 5.5 | pending |
+| 2026-10-20 | #535 | user-facing text | The open link of a reference with no title (tweets, videos) | Keeps main's label for its kind, "Twitter ↗" or "YouTube ↗", in the title's place; moved from the builder's Needs Peter by the coordinator | Existing behaviour decides | Opus 5.5 | pending |
+| 2026-10-20 | #535 | UX | The iPhone's ↗ after a title | An inline link on the title's last word, so its tap area is the glyph (about 24 pt), with a VoiceOver "Open page" action; checked on a device with the next TestFlight build; moved from the builder's Needs Peter by the coordinator | No low-risk alternative | Opus 5.5 | pending |
+| 2026-10-20 | #535 | UX | Sizes in the reference header | The speaker's and the ↗'s tap padding are cancelled by negative margins, so the line keeps its height; 8 px / 8 pt gaps in the byline row | Every added heuristic is named | Sonnet 5.5 | pending |
+| 2026-10-20 | #537 | UX | Stray brackets around images in clipped pages | Fixed as a bug without asking, in the clipper and for clips already saved | Fix the root cause | Opus 5.5 | pending |
+| 2026-10-20 | #537 | privacy | Clips already saved with the broken shape | Repaired when shown (web and iPhone), not rewritten on the server | Nobody decrypts users' content | Sonnet 5.5 | pending |
+| 2026-10-20 | #537 | UX | Where the repair applies | All Markdown, not only References: the pattern is narrow, never intended, and exports from Substack or Medium can have it | Fix the root cause | Sonnet 5.5 | pending |
+| 2026-10-20 | #537 | UX | The clipper's new rule | Line breaks in the text of every link become a space, not only in links around images | Fix the root cause | Sonnet 5.5 | pending |
+| 2026-10-20 | #537 | UX | What the repair matches | One image alone between the brackets, and link addresses without parentheses or spaces; code blocks and inline code are skipped; anything else is left as it is | Every added heuristic is named | Sonnet 5.5 | pending |
+| 2026-10-20 | #539 | data safety | Records of a hidden description left by a "Delete all my writing" that waits at deploy time | Left in place: nothing reads them, and they go when their deletion ends | No hand-written migrations (CLAUDE.md) | Opus 5.5 | pending |
+| 2026-10-20 | #539 | reliability | An older app build that still sends a description | The save ignores it without an error; the other fields in the request still apply | Older clients keep working | Opus 5.5 | pending |
+| 2026-10-20 | #539 | user-facing text | The public page and share card of an account that had a description | The default lines every other account already gets | Reuse what exists | Opus 5.5 | pending |
+| 2026-10-20 | #539 | data safety | Old account dumps that carry a description | Still load; the key is skipped and the dump format stays 2 | Users' data stays intact | Opus 5.5 | pending |
+| 2026-10-20 | #539 | UX | The restore page's "writing comes back" when an account's only hidden record was a leftover description | Left as is (it needs a waiting deletion that hid nothing else) | candidate: findings that break no promise are left; compare the entry "A rare case the review found: fix it after all" | Opus 5.5 | pending |
+| 2026-10-20 | #540 | privacy | Exceptions raised with a message written for the user | Keep it in the response; their log lines name the type only | Each case checked, not removed wholesale (Peter's brief, 2026-10-20) | Opus 5.5 | pending |
+| 2026-10-20 | #540 | reliability | Profile and dashboard saves that failed without a log line | Now logged, so they reach Sentry | Problems show | Opus 5.5 | pending |
+| 2026-10-20 | #540 | privacy | Errors shown to admins (Community Archive and X lookups) | Name the exception type, not its text | Admins see no more user content than anyone else | Opus 5.5 | pending |
+| 2026-10-20 | #540 | privacy | Job states others can see (a failed TTS job's status, a refused batch cancel) | Record the exception type only | No user content reaches Sentry (#422) | Opus 5.5 | pending |
+| 2026-10-20 | #540 | user-facing text | Errors whose text was of no use to the user (a GitHub issue, a media file, a recording's storage) | Fixed texts, e.g. "Couldn't create the GitHub issue. Please try again later." | candidate: user-facing text says what happens to the user | Opus 5.5 | pending |
+| 2026-10-20 | #540 | privacy | Tracebacks in the server logs and in Sentry, the #528/#531 import lines included | Keep the frames and value-free codes (SQLSTATE, constraint, table, column, HTTP status); each exception's message becomes "[message removed]". This replaces #528's and #531's type-only line with no stack | What failed and where, not the values (Peter's brief, 2026-10-20) | Opus 5.5 | pending |
+| 2026-10-20 | #540 | privacy | Python's own messages (AttributeError, NameError) | Removed too: one rule for every exception | No user content reaches Sentry (#422) | Opus 5.5 | pending |
+| 2026-10-20 | #540 | privacy | Database error text in Sentry messages and breadcrumbs | The quoted values (DETAIL, CONTEXT and LINE blocks, unconvertible values, parameters) are stripped; the SQL statement stays, with placeholders; a part that can't be cleaned is dropped | No user content reaches Sentry (#422) | Opus 5.5 | pending |
+| 2026-10-20 | #540 | release/ops | Limits of the clean-up | Exception text under 4 characters isn't searched for in log messages (`MIN_MATCH_LENGTH`); codes are kept only when they look like identifiers (up to 64 characters); text is cut at 16,384 characters before the patterns run (`MAX_SCRUB_CHARS`) | Every added heuristic is named | Opus 5.5 | pending |
+| 2026-10-20 | #543 | cost | How the batch profile path applies the spending cap | The same rule as elsewhere: the same flag, monthly sum, per-user limit, admin email and reset at the month's start | Peter: "definitely" (2026-10-20) | Opus 5.5 | pending |
+| 2026-10-20 | #543 | cost | When the cap is checked in a batch rebuild | Right after each step, before the next is sent, also when the global limit is 0 and the user has a limit of their own | Peter: "definitely" (2026-10-20); fix the root cause | Opus 5.5 | pending |
+| 2026-10-20 | #543 | product scope | A pre-filled account, not yet activated, stopped at the cap | Resumes from its saved version when the cap lifts; a deactivated account stays paused | Deactivation is the admin's pause | Opus 5.5 | pending |
+| 2026-10-20 | #543 | cost | A step already sent when the cap is reached | Collected, saved, and its cost recorded, not cancelled (the provider bills it anyway) | Every billed call records its cost | Opus 5.5 | pending |
+| 2026-10-20 | #543 | cost | A cap stop and the full-price fallback | A cap stop is not a failed attempt, so a capped user never falls through to the full-price path | Precedent: an account refusal is not an attempt (#406) | Opus 5.5 | pending |
+| 2026-10-20 | #543 | UX | The admin's "pre-fill complete" email when a chain stops at the cap | Not sent; it comes when the chain finishes | Say what happened | Opus 5.5 | pending |
+| 2026-10-20 | #543 | user-facing text | Telling the user that a rebuild paused at the cap | No new text: the existing spend-cap banner shows on their next paid action | candidate: no new user-facing text without Peter | Opus 5.5 | pending |
+| 2026-10-20 | #547 | product scope | The unused JSON export endpoint (`GET /api/export`) | Removed; an outside caller now gets a 404; the thread and profile exports stay | Dead endpoints go (entry "A dead dashboard endpoint is removed", 2026-10-09) | Sonnet 5.5 | pending |
+| 2026-10-20 | #278 | privacy | Soft delete on the backup storage | Off, so a deleted copy isn't kept 7 more days (about 36 in all) | The terms promise erasure within 30 days | Opus 5.5 | pending |
+| 2026-10-20 | #278 | data safety | Media copies | One folder per 14-day period: a period's first run copies everything and later runs add new files, so no period's copy reaches the 28-day delete all at once, and the previous folder is a fallback | Fix the root cause; every added heuristic is named | Opus 5.5 | pending |
+| 2026-10-20 | #278 | reliability | Files regenerated under the same name (read-aloud audio) | Never overwritten in the backup; the new version arrives with the next period's full copy, within 14 days | Fix the root cause | Opus 5.5 | pending |
+| 2026-10-20 | #278 | release/ops | Where the restore test runs | On Peter's machine, not on the production server; the downloaded dump is deleted afterwards | No heavy scripts on the production server | Opus 5.5 | pending |
+| 2026-10-20 | #278 | privacy | Other copies (the restore test's dump, an off-site copy) | Follow the 28-day limit too: deleted after the test, or pruned with weekly copies | The terms promise erasure within 30 days | Opus 5.5 | pending |
+| 2026-10-20 | #278 | privacy | Media after a restore | Folders of users not in the restored database are deleted, so a restore doesn't bring back recordings of deleted accounts | Deletion (Peter, 2026-10-02) | Opus 5.5 | pending |
+| 2026-10-20 | #278 | release/ops | The deletion age and the retention period | Equal, 28 and 28: a deletion by age waits for the retention to end, so the two don't race | Every added heuristic is named | Opus 5.5 | pending |
+| 2026-10-20 | #278 | reliability | A missed run and a failed media copy | A missed nightly run alerts after a 6-hour grace; a failed media copy is retried once, then the run fails and alerts | Problems show; stop after two failures, loudly | Opus 5.5 | pending |
+| 2026-09-01 | #278 | release/ops | The hour of the nightly backup | During the US night, apart from the other scheduled backup | Reversible work goes ahead | Fable 5.1 | pending |
+| 2026-09-01 | #278 | data safety | Recording chunks still in flight | Left out of the backup, as transient | Reversible work goes ahead | Fable 5.1 | pending |
+| 2026-09-01 | #278 | release/ops | The database dump | Restores under another database role (no owner or privileges in the dump) | Reversible work goes ahead | Fable 5.1 | pending |
 
 ## Backfilled decisions
 
@@ -2553,3 +3037,52 @@ Builder decisions listed in PRs that merged without Peter correcting them, backf
 | 2026-10-16 | #523 | data safety | Values are inserted literally, as `str.replace` did, so a backslash sequence in the user's text means nothing | Opus 5.5 | accepted by merge (PR #523, 2026-10-16) |
 | 2026-10-16 | #523 | reliability | Recent context's rebuilds with a budget also stop counting prompt texts they never show, so they fit more entries | Opus 5.5 | accepted by merge (PR #523, 2026-10-16) |
 | 2026-10-16 | #523 | product scope | Exports that show the prompt in full keep it, with their budget unchanged: `{user_export}`, profile generation, intentions detection, poll drafts and the data download | Opus 5.5 | accepted by merge (PR #523, 2026-10-16) |
+| 2026-10-16 | #528 | reliability | A single Word document is rebuilt in the browser without its pictures before upload, since the server never reads image bytes; if the browser can't read it, the original is uploaded and the server's specific error shows | Sonnet 5.5 | accepted by merge (PR #528, 2026-10-16) |
+| 2026-10-16 | #528 | reliability | A document date that can't be read falls back to the upload date, and named zip errors become "the file is damaged or uses an unsupported format" instead of a 500 | Sonnet 5.5 | accepted by merge (PR #528, 2026-10-16) |
+| 2026-10-16 | #528 | privacy | An unexpected failure answers with a readable JSON error and logs the exception type only, with no file name or text, so it still reaches Sentry | Sonnet 5.5 | accepted by merge (PR #528, 2026-10-16) |
+| 2026-10-16 | #528 | UX | In a zip, a document that fails is named in the errors and the others import | Sonnet 5.5 | accepted by merge (PR #528, 2026-10-16) |
+| 2026-10-16 | #528 | UX | The Word upload gets its own 5-minute timeout and an "Uploading… 42 %" line (`ANALYZE_UPLOAD_TIMEOUT_MS`); the shared 60 s default is unchanged | Sonnet 5.5 | accepted by merge (PR #528, 2026-10-16) |
+| 2026-10-16 | #528 | user-facing text | Each kind of failure (timeout, no response, too large, server errors) gets its own message, and the server's own error text wins when there is one | Sonnet 5.5 | accepted by merge (PR #528, 2026-10-16) |
+| 2026-10-16 | #528 | UX | The file input is reset, so the same file can be picked again after an error | Sonnet 5.5 | accepted by merge (PR #528, 2026-10-16) |
+| 2026-10-16 | #529 | UX | "Whose writing is this?" has no default answer; Confirm stays disabled until the user picks one | Opus 5.5 | accepted by merge (PR #529, 2026-10-16) |
+| 2026-10-16 | #529 | privacy | A PDF of someone else's writing becomes a Reference, never entries, so it never feeds the profile and stays under the Reference licence rules | Opus 5.5 | accepted by merge (PR #529, 2026-10-16) |
+| 2026-10-16 | #529 | privacy | An uploaded document's Reference is stored as not a public source, and its title and author are kept inside the encrypted text, not in plain columns | Opus 5.5 | accepted by merge (PR #529, 2026-10-16) |
+| 2026-10-16 | #529 | privacy | An uploaded PDF's duplicate key is a hash keyed with the app's secret and the user, not a plain hash of the text | Opus 5.5 | accepted by merge (PR #529, 2026-10-16) |
+| 2026-10-16 | #529 | data safety | Saving the same PDF again changes nothing, so a Reference the user edited is never replaced; a copy hidden by a waiting "Delete all my writing" becomes the user's again | Opus 5.5 | accepted by merge (PR #529, 2026-10-16) |
+| 2026-10-16 | #529 | product scope | Saving a document as a Reference doesn't depend on the Account's "External references" switch, which only decides whether the AI searches References | Opus 5.5 | accepted by merge (PR #529, 2026-10-16) |
+| 2026-10-16 | #529 | UX | A document's author is shown without "@"; as a side effect, the model's search previews also drop the "@" before web-clip bylines | Opus 5.5 | accepted by merge (PR #529, 2026-10-16) |
+| 2026-10-16 | #529 | privacy | PDF text is extracted in a child process with no app environment and with resource limits; only exception types and exit codes are logged, and the temporary file is deleted, also after a timeout | Opus 5.5 | accepted by merge (PR #529, 2026-10-16) |
+| 2026-10-16 | #529 | data safety | Re-importing a deleted PDF with "restore" imports it again in full, as for Word | Opus 5.5 | accepted by merge (PR #529, 2026-10-16) |
+| 2026-10-16 | #529 | UX | PDF chapters get `##` headings, so the file name stays the thread's top heading | Opus 5.5 | accepted by merge (PR #529, 2026-10-16) |
+| 2026-10-16 | #529 | user-facing text | No changelog entry for PDF import, as for #521 and #528 | Opus 5.5 | accepted by merge (PR #529, 2026-10-16) |
+| 2026-10-16 | #529 | product scope | The iPhone app is left for a small follow-up: it shows the new source by its raw name and may put "@" before its byline | Opus 5.5 | accepted by merge (PR #529, 2026-10-16) |
+| 2026-10-16 | #529 | release/ops | Extraction limits: 20 s CPU, 30 s wall clock, 512 MB, 1,000 pages, 2,000,000 characters, 10 MB read from the child (`PDF_*`) | Opus 5.5 | accepted by merge (PR #529, 2026-10-16) |
+| 2026-10-16 | #529 | UX | A running header or footer is a line among a page's first or last 2 that repeats on at least half the pages and at least 3; a lone number at a page edge goes only when it follows the page sequence | Opus 5.5 | accepted by merge (PR #529, 2026-10-16) |
+| 2026-10-16 | #529 | UX | Chapters come from the PDF's outline when it has at least 2 entries on 2 pages (at most 5,000 entries and 200 chapters); a chapter starts at the line that spells its title, also after a section number, else at the top of its page; a chapter with no text shares the next one's heading | Opus 5.5 | accepted by merge (PR #529, 2026-10-16) |
+| 2026-10-16 | #529 | UX | A line at least 75 % of the median line length and 40 characters long continues its paragraph; a hyphen at a line end is dropped before a lower-case letter | Opus 5.5 | accepted by merge (PR #529, 2026-10-16) |
+| 2026-10-16 | #529 | UX | A PDF with fewer than 25 non-space characters per page on average counts as scanned and gets the "scanned" message | Opus 5.5 | accepted by merge (PR #529, 2026-10-16) |
+| 2026-10-16 | #529 | UX | Editor placeholder titles ("Microsoft Word - …", "untitled", a title ending in a file extension) give way to the file name; dates before 1900 or in the future are ignored | Opus 5.5 | accepted by merge (PR #529, 2026-10-16) |
+| 2026-10-16 | #529 | process | A last small commit (files skipped for the same reason listed once) was pushed to #529 by the coordinator without a separate review | Opus 5.5 | accepted by merge (PR #529, 2026-10-16) |
+| 2026-10-17 | #530 | product scope | The Twitter, Claude and ChatGPT importers keep their uploads: their archives can be hundreds of MB, and the chat ones already send a copy built in memory | Opus 5.5 | accepted by merge (PR #530, 2026-10-17) |
+| 2026-10-17 | #530 | user-facing text | A file the browser can't read gets "Loore couldn't read this file from your phone. If it's in Google Drive or another cloud app, open it there, download it, and pick it from Downloads." and no request is sent | Opus 5.5 | accepted by merge (PR #530, 2026-10-17) |
+| 2026-10-17 | #530 | reliability | A file above 50 MB is uploaded as picked, not copied, since a copy needs about twice its size in memory (`IN_MEMORY_COPY_MAX_BYTES`) | Sonnet 5.5 | accepted by merge (PR #530, 2026-10-17) |
+| 2026-10-20 | #531 | privacy | Import logs carry the exception type only, and the zip entry's name is dropped from the "not valid UTF-8" warning | Sonnet 5.5 | accepted by merge (PR #531, 2026-10-20) |
+| 2026-10-20 | #531 | privacy | Sentry as in #528: the type-only error line is the event, with no stack trace | Sonnet 5.5 | accepted by merge (PR #531, 2026-10-20) |
+| 2026-10-20 | #531 | user-facing text | A file that isn't valid UTF-8 or JSON gets a message saying so instead of the exception's text; messages written for the user (Word and Twitter archive errors) still pass through | Sonnet 5.5 | accepted by merge (PR #531, 2026-10-20) |
+| 2026-10-20 | #532 | reliability | The export's files are sent as separate parts and joined on the server, so the client never rewrites the JSON and older app builds that send one file still work | Opus 5.5 | accepted by merge (PR #532, 2026-10-20) |
+| 2026-10-20 | #532 | product scope | ChatGPT voice-mode turns are imported, where the importer used to drop them | Opus 5.5 | accepted by merge (PR #532, 2026-10-20) |
+| 2026-10-20 | #532 | privacy | The Sentry warning for unreadable items holds counts, a fixed label for the file, the top-level type and key names from an allowlist, never values; group chats are not sent | Sonnet 5.5 | accepted by merge (PR #532, 2026-10-20) |
+| 2026-10-20 | #532 | reliability | A malformed conversation counts as unreadable and the rest still import, instead of a 500 | Sonnet 5.5 | accepted by merge (PR #532, 2026-10-20) |
+| 2026-10-20 | #532 | user-facing text | The notices "{n} item(s) in your export are in a format Loore can't read yet, so they won't be imported." and "Group chats aren't imported yet ({n} in your export)." (offered with two alternatives each, merged as drafted) | Sonnet 5.5 | accepted by merge (PR #532, 2026-10-20) |
+| 2026-10-20 | #542 | release/ops | The background import's lock and state are files beside its stash, not a new table, so no migration | Opus 5.5 | accepted by merge (PR #542, 2026-10-20) |
+| 2026-10-20 | #542 | privacy | The stash between analyze and confirm holds the conversations encrypted, with only counts in its header | Opus 5.5 | accepted by merge (PR #542, 2026-10-20) |
+| 2026-10-20 | #542 | privacy | One encryption data key per committed chunk of 500 messages, not one per job, which bounds how many entries share a key | Opus 5.5 | accepted by merge (PR #542, 2026-10-20) |
+| 2026-10-20 | #542 | data safety | Commits fall on conversation boundaries, so a resumed job restarts at a whole conversation | Opus 5.5 | accepted by merge (PR #542, 2026-10-20) |
+| 2026-10-20 | #542 | UX | One running chat import per user: confirming the same import again follows the running job; a different export is refused with "Another import is still running. Wait until it finishes, then try again." | Opus 5.5 | accepted by merge (PR #542, 2026-10-20) |
+| 2026-10-20 | #542 | product scope | No path for old clients: a confirm without a token gets "This import needs the latest version of Loore…" | Opus 5.5 | accepted by merge (PR #542, 2026-10-20) |
+| 2026-10-20 | #542 | data safety | A failed job keeps its stash for 24 h, so pressing Confirm again continues where it stopped | Opus 5.5 | accepted by merge (PR #542, 2026-10-20) |
+| 2026-10-20 | #542 | UX | Errors show inside the confirm dialog for all four importers, and a second press of Confirm is ignored | Opus 5.5 | accepted by merge (PR #542, 2026-10-20) |
+| 2026-10-20 | #542 | release/ops | An hourly job removes expired chat and Twitter stashes | Opus 5.5 | accepted by merge (PR #542, 2026-10-20) |
+| 2026-10-20 | #542 | user-facing text | No changelog entry: a fix, not an announcement | Opus 5.5 | accepted by merge (PR #542, 2026-10-20) |
+| 2026-10-20 | #542 | release/ops | 500 messages per commit; a stash expires after 24 h; a lock untouched for 30 min no longer counts; at most 5 resumes after the 55-minute time limit (`CONVERSATION_BATCH_SIZE`, `STASH_TTL_SECONDS`, `LOCK_STALE_SECONDS`, `MAX_TIME_LIMIT_RESUMES`) | Opus 5.5 | accepted by merge (PR #542, 2026-10-20) |
+| 2026-10-20 | #542 | UX | The export's upload gets a 10-minute timeout with progress; the dialog polls every 1.5 s and gives up after 5 failed polls in a row; the iPhone's 10-minute stall limit covers chat imports too | Opus 5.5 | accepted by merge (PR #542, 2026-10-20) |
