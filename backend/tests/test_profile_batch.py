@@ -1904,6 +1904,7 @@ def test_seed_skips_a_capped_users_rebuild_until_the_cap_resets(
     assert u.profile_needs_full_regen is True     # the rebuild still waits
     assert u.profile_batch_pending is False
     assert (u.profile_batch_attempts or 0) == 0   # not a failed attempt
+    assert u.profile_cap_held is True
 
     # Next month: the stored block is stale and this month's spend is 0.
     APICostLog.query.filter_by(user_id=u.id).update(
@@ -1914,6 +1915,7 @@ def test_seed_skips_a_capped_users_rebuild_until_the_cap_resets(
     (reqs,) = submitted
     (req,) = next(iter(reqs.values()))
     assert req["custom_id"] == f"profile_{u.id}_0_chunk"
+    assert User.query.get(u.id).profile_cap_held is False
     block_email.assert_not_called()
 
 
@@ -1970,6 +1972,7 @@ def test_rebuild_stops_after_the_step_that_crosses_the_cap(app, monkeypatch):
     assert ProfileBatchJob.query.filter_by(status="pending").count() == 0
     assert u.profile_batch_pending is False
     assert u.profile_batch_attempts == 0
+    assert u.profile_cap_held is True
     assert prefill_sent == []
 
     assert pb._seed_profile_batches(users=[u]) == 0
@@ -2031,6 +2034,56 @@ def test_cap_check_costs_no_query_for_an_uncapped_user(app, monkeypatch):
         assert any("sum" in s.lower() for s in statements)
     finally:
         event.remove(db.engine, "before_cursor_execute", count)
+
+
+@pytest.mark.parametrize("lift", ["next_month", "admin_raises_limit"])
+def test_inactive_prefill_stopped_at_the_cap_resumes_from_its_tip(
+        app, monkeypatch, lift):
+    """A pre-filled account not yet activated is outside the hourly
+    cohort (profile_eligible_query needs approved): its build started
+    from an immediate seed. Stopped at the cap, it is resumed by the
+    hourly seeder once the cap lifts, from the saved version, not from
+    scratch. A deactivated account in the same state stays paused."""
+    from backend.utils.spend import current_month, reconcile_user_spend_block
+    _cap_harness(app, monkeypatch, limit=1.0)
+    u = _user(profile_force_batch=True, prefilled_handle="alice_x")
+    u.approved = False
+    paused = _user(profile_force_batch=True, profile_cap_held=True,
+                   deactivated_at=datetime.utcnow())
+    paused.approved = False
+    _prev_profile(paused, datetime(2026, 5, 1), gen_type="iterative")
+    db.session.commit()
+    _spent(u, 0.999999)
+    prev, job, submit = _mid_rebuild(monkeypatch, u)
+
+    pb._poll_profile_batches()
+    tip = UserProfile.query.filter_by(
+        user_id=u.id, parent_profile_id=prev.id).one()
+    assert User.query.get(u.id).profile_cap_held is True
+    submit.assert_not_called()
+
+    assert pb._seed_profile_batches() == 0     # hourly pass, still capped
+    submit.assert_not_called()
+
+    u = User.query.get(u.id)
+    if lift == "next_month":
+        APICostLog.query.filter_by(user_id=u.id).update(
+            {"created_at": _last_month()})
+        u.spend_blocked_month = current_month(_last_month())
+    else:
+        u.monthly_spend_limit_usd = 100.0
+        assert reconcile_user_spend_block(u, app.config)["blocked"] is False
+    db.session.commit()
+
+    assert pb._seed_profile_batches() == 1     # hourly pass
+    (req,) = submit.call_args.args[0]["anthropic"]
+    assert req["custom_id"] == f"profile_{u.id}_{tip.id}_chunk"
+    resumed = ProfileBatchJob.query.filter_by(batch_id="b-next").one()
+    assert resumed.items[0]["prev_profile_id"] == tip.id
+    u = User.query.get(u.id)
+    assert u.profile_batch_pending is True
+    assert u.profile_cap_held is False
+    assert User.query.get(paused.id).profile_batch_pending is False
 
 
 def test_step_in_flight_for_an_already_capped_user_is_collected(

@@ -812,6 +812,7 @@ PIPELINE_FLAG_RESETS = {
     "profile_needs_full_regen": False,
     "profile_batch_attempts": 0,
     "profile_force_batch": False,
+    "profile_cap_held": False,
     "profile_generation_task_id": None,
     "profile_generation_task_dispatched_at": None,
     "profile_seed_error": None,

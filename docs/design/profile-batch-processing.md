@@ -216,8 +216,12 @@ dispatches runs 15 s later. So a user whose step crossed the cap is blocked
 (the admin is emailed once) and gets no next step. A step already submitted
 is collected, saved and its cost logged. The stop is not a failed attempt,
 so the user never falls back to the full-price sync path. The chain stays
-where it stopped, and the seeder continues it once the block lifts at the
-start of the next month or when the admin raises the user's limit.
+where it stopped, and `User.profile_cap_held` marks it. The hourly seeder
+continues it from the saved version once the block lifts, at the start of
+the next month or when the admin raises the user's limit. That includes a
+pre-filled account not yet activated, which the seeder's eligible cohort
+leaves out (its build started from an immediate seed). A deactivated
+account stays paused.
 
 ## Failure modes & retry policy
 
