@@ -2,9 +2,11 @@
 
 Covers:
 - _linearize_chatgpt_messages: graph traversal, role filtering, empty/branching
-  cases, create_time parsing.
+  cases, current_node and parent-only (no 'children') graphs, create_time
+  parsing.
 - POST /api/import/chatgpt/analyze: request shape validation, JSON parse errors,
-  empty-conversations case, happy path with realistic mapping graph.
+  empty-conversations case, happy path with realistic mapping graph, sharded
+  exports uploaded as several parts.
 """
 
 import io
@@ -223,6 +225,40 @@ class TestLinearizeChatgptMessages:
             },
         }
         msgs = self._linearize()(mapping)
+        assert [m["text"] for m in msgs] == ["q", "first branch"]
+
+    def _parent_only_branching(self):
+        # Export format since Oct 2026: nodes carry 'parent' but no
+        # 'children'. u1 was answered twice; the user kept a_second.
+        def node(parent, role, text):
+            return {
+                "parent": parent,
+                "message": {
+                    "author": {"role": role},
+                    "content": {"content_type": "text", "parts": [text]},
+                    "create_time": None,
+                },
+            }
+        return {
+            "root": {"parent": None, "message": None},
+            "u1": node("root", "user", "q"),
+            "a_first": node("u1", "assistant", "first branch"),
+            "a_second": node("u1", "assistant", "second branch"),
+            "u2": node("a_second", "user", "follow-up"),
+        }
+
+    def test_current_node_selects_the_kept_branch(self):
+        msgs = self._linearize()(self._parent_only_branching(), "u2")
+        assert [m["text"] for m in msgs] == [
+            "q", "second branch", "follow-up"]
+        assert [m["mapping_id"] for m in msgs] == ["u1", "a_second", "u2"]
+
+    def test_parent_only_without_current_node_follows_first_child(self):
+        msgs = self._linearize()(self._parent_only_branching())
+        assert [m["text"] for m in msgs] == ["q", "first branch"]
+
+    def test_unknown_current_node_falls_back_to_first_child(self):
+        msgs = self._linearize()(self._parent_only_branching(), "gone")
         assert [m["text"] for m in msgs] == ["q", "first branch"]
 
     def test_skips_non_user_assistant_roles(self):
@@ -471,6 +507,41 @@ class TestAnalyzeChatgptImport:
         assert body["total_messages"] == 4
         names = [c["name"] for c in body["conversations"]]
         assert names == ["A", "B"]
+
+    def test_sharded_export_parts_are_merged(self, app):
+        # Exports since Oct 2026 split conversations.json into
+        # conversations-000.json, -001, ...; the client sends one part
+        # per shard, in order.
+        client = app.test_client()
+        alice = _make_user("alice")
+        _db.session.commit()
+        _login(client, alice.id)
+
+        parent_only = {
+            node_id: {k: v for k, v in entry.items() if k != "children"}
+            for node_id, entry in _simple_mapping().items()
+        }
+        shards = [
+            [dict(_conv(title="A", mapping=parent_only), current_node="a1")],
+            [],
+            [dict(_conv(title="B", mapping=parent_only), current_node="a1")],
+        ]
+        data = {
+            "conversations_file": [
+                (io.BytesIO(json.dumps(shard).encode("utf-8")),
+                 f"conversations-{i:03d}.json")
+                for i, shard in enumerate(shards)
+            ],
+        }
+        resp = client.post(
+            "/api/import/chatgpt/analyze",
+            data=data,
+            content_type="multipart/form-data",
+        )
+        assert resp.status_code == 200
+        body = resp.get_json()
+        assert [c["name"] for c in body["conversations"]] == ["A", "B"]
+        assert body["total_messages"] == 4
 
     def test_requires_login(self, app):
         client = app.test_client()

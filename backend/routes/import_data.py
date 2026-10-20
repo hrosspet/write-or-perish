@@ -1027,6 +1027,32 @@ def analyze_twitter_import():
     return jsonify(summary), 200
 
 
+def _load_conversation_files(conv_files, source_label):
+    """
+    Parse the uploaded conversation file(s) into one list, in upload
+    order. A sharded export arrives as one part per shard, each holding
+    a JSON array.
+
+    Raises UnicodeDecodeError / json.JSONDecodeError for the caller to
+    report.
+    """
+    raw_conversations = []
+    size_bytes = 0
+    for conv_file in conv_files:
+        conversations_bytes = conv_file.read()
+        size_bytes += len(conversations_bytes)
+        raw_conversations.extend(
+            json.loads(conversations_bytes.decode('utf-8')))
+    current_app.logger.info(
+        "%s import: size_bytes=%d files=%d user_id=%s",
+        source_label,
+        size_bytes,
+        len(conv_files),
+        getattr(current_user, 'id', None),
+    )
+    return raw_conversations
+
+
 @import_bp.route("/import/claude/analyze", methods=["POST"])
 @login_required
 def analyze_claude_import():
@@ -1068,21 +1094,13 @@ def analyze_claude_import():
     if 'conversations_file' not in request.files:
         return jsonify({"error": "No conversations_file provided"}), 400
 
-    conv_file = request.files['conversations_file']
+    conv_files = request.files.getlist('conversations_file')
 
-    if conv_file.filename == '':
+    if any(f.filename == '' for f in conv_files):
         return jsonify({"error": "No file selected"}), 400
 
     try:
-        conversations_bytes = conv_file.read()
-        current_app.logger.info(
-            "Claude import: size_bytes=%d user_id=%s",
-            len(conversations_bytes),
-            getattr(current_user, 'id', None),
-        )
-        conversations_json = conversations_bytes.decode('utf-8')
-
-        raw_conversations = json.loads(conversations_json)
+        raw_conversations = _load_conversation_files(conv_files, "Claude")
 
         conversations = []
         total_messages = 0
@@ -1738,12 +1756,25 @@ def import_status(task_id):
                     "error": None}), 200
 
 
-def _linearize_chatgpt_messages(mapping):
+def _chatgpt_thread_ids(mapping, current_node=None):
     """
-    Walk the ChatGPT conversation graph from root to leaf
-    following the first child at each step (main thread).
-    Returns a list of message dicts with text, role, created_at, model.
+    Node ids of a ChatGPT conversation's main thread, root first.
+
+    The main thread is the path from the root to ``current_node``: the
+    branch the user last saw in ChatGPT, which after an edited message
+    or a regenerated reply is not the first child. Without a usable
+    current_node, walk from the root following the first child.
     """
+    if current_node in mapping:
+        path = []
+        visited = set()
+        node_id = current_node
+        while node_id in mapping and node_id not in visited:
+            visited.add(node_id)
+            path.append(node_id)
+            node_id = mapping[node_id].get('parent')
+        return path[::-1]
+
     # Find the root node (no parent)
     root_id = None
     for node_id, entry in mapping.items():
@@ -1754,7 +1785,14 @@ def _linearize_chatgpt_messages(mapping):
     if not root_id:
         return []
 
-    messages = []
+    # Exports since Oct 2026 drop each node's 'children' list; derive
+    # it from the parent pointers, in mapping order.
+    derived_children = {}
+    for node_id, entry in mapping.items():
+        if entry.get('parent'):
+            derived_children.setdefault(entry['parent'], []).append(node_id)
+
+    path = []
     current = root_id
     visited = set()
 
@@ -1763,6 +1801,25 @@ def _linearize_chatgpt_messages(mapping):
         entry = mapping.get(current)
         if not entry:
             break
+        path.append(current)
+        children = entry.get('children')
+        if children is None:
+            children = derived_children.get(current, [])
+        current = children[0] if children else None
+
+    return path
+
+
+def _linearize_chatgpt_messages(mapping, current_node=None):
+    """
+    Walk the ChatGPT conversation graph along its main thread (see
+    _chatgpt_thread_ids).
+    Returns a list of message dicts with text, role, created_at, model.
+    """
+    messages = []
+
+    for current in _chatgpt_thread_ids(mapping, current_node):
+        entry = mapping[current]
 
         msg = entry.get('message')
         if msg:
@@ -1800,9 +1857,6 @@ def _linearize_chatgpt_messages(mapping):
                         "mapping_id": current,
                     })
 
-        children = entry.get('children', [])
-        current = children[0] if children else None
-
     return messages
 
 
@@ -1818,7 +1872,9 @@ def analyze_chatgpt_import():
 
     Expects:
         - multipart/form-data with 'conversations_file' field containing
-          the conversations.json extracted from a ChatGPT data export
+          the conversations.json extracted from a ChatGPT data export;
+          exports since Oct 2026 split it into conversations-000.json,
+          conversations-001.json, ..., sent as one part each
 
     Returns:
         {
@@ -1832,21 +1888,13 @@ def analyze_chatgpt_import():
     if 'conversations_file' not in request.files:
         return jsonify({"error": "No conversations_file provided"}), 400
 
-    conv_file = request.files['conversations_file']
+    conv_files = request.files.getlist('conversations_file')
 
-    if conv_file.filename == '':
+    if any(f.filename == '' for f in conv_files):
         return jsonify({"error": "No file selected"}), 400
 
     try:
-        conversations_bytes = conv_file.read()
-        current_app.logger.info(
-            "ChatGPT import: size_bytes=%d user_id=%s",
-            len(conversations_bytes),
-            getattr(current_user, 'id', None),
-        )
-        conversations_json = conversations_bytes.decode('utf-8')
-
-        raw_conversations = json.loads(conversations_json)
+        raw_conversations = _load_conversation_files(conv_files, "ChatGPT")
 
         conversations = []
         total_messages = 0
@@ -1858,7 +1906,8 @@ def analyze_chatgpt_import():
             if not mapping:
                 continue
 
-            messages = _linearize_chatgpt_messages(mapping)
+            messages = _linearize_chatgpt_messages(
+                mapping, conv.get('current_node'))
 
             if not messages:
                 continue
