@@ -29,7 +29,7 @@ Contents
 - **Trailing slashes.** Routes declared as `"/"` under a prefix (e.g. `GET /api/dashboard/`, `POST /api/nodes/`, `GET/POST/DELETE /api/drafts/`) are canonical with the slash; the slashless form gets a `308` to the slash form. This applies to `/api/dashboard/`, `/api/nodes/` (POST), `/api/drafts/` (GET/POST/DELETE), `/api/todo/` (GET/PATCH/PUT), `/api/artifacts/` (GET), `/api/profile/` (POST), `/api/prompts/` (GET), `/api/voice/` (POST). URLSession follows 308 keeping method and body, but call the canonical form to save a round trip. The opposite case: `GET /api/updates` has no slash and `/api/updates/` is a 404.
 - **Request headers the web app sends.** `X-Timezone: <IANA tz>` on every request (a hint used for LLM time grounding; the authoritative value is persisted with `PATCH /api/dashboard/timezone`). Status polls add `Cache-Control: no-cache`. JSON bodies use `Content-Type: application/json`.
 - **Limits.** nginx `client_max_body_size 200M` on `/api/` and server-wide; nginx `proxy_read_timeout 60s` on `/api/` (long work must go through Celery + polling); `/api/sse/` has buffering off and a 7200 s read timeout.
-- **Error body convention.** Errors are JSON `{"error": "<human text or code>"}`, sometimes with `"message"`, `"code"` or `"details"`. Codes the web app branches on are listed per endpoint in §2 and collected in §6.4.
+- **Error body convention.** Errors are JSON `{"error": "<human text or code>"}`, sometimes with `"message"` or `"code"`. No response carries an exception's text (no `"details"`; 2026-10-20). Codes the web app branches on are listed per endpoint in §2 and collected in §6.4.
 
 ## 1. `frontend/src/api.js` and environment configuration
 
@@ -308,7 +308,7 @@ Notes: the whole subtree is returned (no depth limit, no pagination); children a
   - `delete_orphaned_prompt` — also tombstone the system-prompt root if nothing else stays alive under it (re-checked under a row lock).
 - Response 200: `{ scheduled: Int (nodes tombstoned), grace_days: Int (SOFT_DELETE_GRACE_DAYS), orphaned_prompt_deleted: Int | null (root id if taken), deleted_pinned_ids: [Int] }`.
 - Side effects: soft delete (`deleted_at` set; purge after grace days by a Celery beat task). Any published Share of this node is marked revoked. Public cache invalidated.
-- Errors: 403 `{"error":"Not authorized"}`; 404 `{"error":"Not found or not authorized"}` (race); 404 (HTML) missing; 500 `{"error":"Error deleting node","details":String}`.
+- Errors: 403 `{"error":"Not authorized"}`; 404 `{"error":"Not found or not authorized"}` (race); 404 (HTML) missing; 500 `{"error":"Error deleting node"}`.
 - Frontend: toasts "Deleted N nodes"; Log removes every card whose thread root is the target or whose id is in `deleted_pinned_ids`; NodeDetail navigates to the nearest alive ancestor, else to `/log` (or `/commons` for a public root).
 
 ##### `GET /api/nodes/<int:node_id>/children`  (unused by web)
@@ -756,7 +756,7 @@ A recording is a Draft row with a `session_id` (UUID string). Audio is uploaded 
   - `400 {"error":"Streaming session is not active"}` (status not recording/finalizing).
   - `400 {"error":"Missing chunk file"}`, `{"error":"Missing chunk_index"}`, `{"error":"Invalid chunk_index"}`, `{"error":"Unsupported audio mime: <family>"}`.
   - `400 {"error":"Chunk mime 'x' does not match session mime 'y'","code":"mime_mismatch"}`.
-  - `400 {"error":"Could not parse init segment from first chunk","detail":string,"code":"init_parse_failed"}` (chunk 0 only). The web client treats `code=="init_parse_failed"` as fatal: no retry, recorder stopped, session state `error`, message "Your audio recording could not be processed…".
+  - `400 {"error":"Could not parse init segment from first chunk","detail":string,"code":"init_parse_failed"}` (chunk 0 only; `detail` is the stream parser's own message, or "the server could not store the recording"). The web client treats `code=="init_parse_failed"` as fatal: no retry, recorder stopped, session state `error`, message "Your audio recording could not be processed…".
   - 5xx on KMS/disk failure (retried by the client).
 - Client retry policy (web): up to 5 attempts, backoff 2 s, 4 s, 8 s, 16 s; chunks still failing go to a queue re-sent on the browser `online` event. Uploads run concurrently (each chunk its own promise); the server accepts any arrival order.
 - Audio format contract (important for a native recorder):
@@ -1232,7 +1232,7 @@ LatestProfile = {                      // newest UserProfile row (including pipe
   - 400 username messages: `"Username cannot be empty."`, `"Username must be 64 characters or fewer."`, `"Username may only contain letters, numbers, and underscores."`, `"That username is reserved."`, `"That username is already taken."`
   - 400 `"Model not offered: <id>"`, `"Invalid privacy level: <v>"`, `"Invalid AI usage value: <v>"`, `"Invalid prefill_consent value: <v>"`
   - 409 `"Your profile changed in another request. Reload and try again."` (unique-constraint race)
-  - 500 `{"error": "Failed to update profile.", "details": string}`
+  - 500 `{"error": "Failed to update profile."}`
 - Frontend handling: username errors are shown inline from `error`; other toggles fail silently; PrefillConsentCard shows a generic retry message.
 
 ##### `PATCH /api/dashboard/timezone`
@@ -1241,7 +1241,7 @@ LatestProfile = {                      // newest UserProfile row (including pipe
 - Called from: contexts/UserContext.js, right after `GET /api/dashboard` when the device timezone differs from `user.timezone`.
 - Request: `{"timezone": "Europe/Prague"}` (IANA name; `"UTC"` always valid).
 - Response 200: `{"timezone": string}`
-- Errors: 400 `{"error": "Invalid timezone."}`; 500 `{"error": "Failed to update timezone.", "details": string}`.
+- Errors: 400 `{"error": "Invalid timezone."}`; 500 `{"error": "Failed to update timezone."}`.
 - Notes: native equivalent is `TimeZone.current.identifier`. Used to stamp local times into LLM context.
 
 ##### `POST /api/dashboard/email`
@@ -1342,7 +1342,7 @@ Profile = the AI-generated (or user-edited) Markdown portrait of the user, appen
 - Called from: pages/ProfilePage.js (save when no profile exists yet). The web app posts to `/profile` and follows the 308.
 - Request: `{"content": string, "privacy_level"?: "private"|"circles"|"public"}` (default private). `ai_usage` is taken from the account default and cannot be set.
 - Response 201: `{"message": "Profile created successfully", "profile": {"id", "content", "generated_by": "user", "tokens_used": 0, "created_at", "privacy_level", "ai_usage"}}`
-- Errors: 400 `"Content is required"`, `"Content cannot be empty"`, `"Invalid privacy_level: <v>"`; 500 `{"error": "Failed to create profile", "details"}`.
+- Errors: 400 `"Content is required"`, `"Content cannot be empty"`, `"Invalid privacy_level: <v>"`; 500 `{"error": "Failed to create profile"}`.
 
 ##### `PUT /api/profile/<int:profile_id>`
 - Backend: routes/profile.py:update_profile
@@ -1350,7 +1350,7 @@ Profile = the AI-generated (or user-edited) Markdown portrait of the user, appen
 - Request: `{"content": string, "privacy_level"?: string, "regenerate_tts"?: true}`. The web app asks "keep or regenerate audio?" when `latest_profile.has_tts` is true and the text changed; `regenerate_tts: true` clears the stored TTS.
 - Response 200: `{"message": "Profile updated successfully", "profile": {"id", "content", "generated_by", "tokens_used", "created_at", "privacy_level", "ai_usage"}}`.
 - Special case: if the account's `default_ai_usage` is `"none"` and the edited row is AI-readable, the edit is saved as a NEW version (different `id`) instead of in place. The client should use the returned `profile.id`.
-- Errors: 404; 403 `Unauthorized`; 400 `"Content is required"`, `"Content cannot be empty"`, `"Invalid privacy_level: <v>"`; 500 with `details`.
+- Errors: 404; 403 `Unauthorized`; 400 `"Content is required"`, `"Content cannot be empty"`, `"Invalid privacy_level: <v>"`; 500 `{"error": "Failed to update profile"}`.
 
 ##### `GET /api/profile/<int:profile_id>/audio`
 - Backend: routes/profile.py:get_audio
@@ -1722,7 +1722,7 @@ Conventions that hold for every route in this section:
 - "login" means `@login_required`. Unauthenticated calls to any `/api/...` path get `401 {"error": "Unauthorized"}` (JSON, not a redirect; see `backend/__init__.py` unauthorized handler).
 - Logged-in but unapproved users get `403 {"error": "Your account is not approved. Please wait for approval."}` from the global `before_request` gate on every route here (none of these paths are exempt).
 - nginx (configs/nginx.txt): `client_max_body_size 200M`; `/api/` has `proxy_read_timeout 60s`. Uploads above 200 MB get an nginx 413 (HTML body, not JSON); the ChatGPT import UI special-cases 413.
-- Error bodies are `{"error": string}` unless stated; some 500s add `"details": string` (the Python exception text).
+- Error bodies are `{"error": string}` unless stated; no response carries the Python exception text.
 
 ---
 
@@ -1749,7 +1749,7 @@ Shared confirm response counters (Markdown, Claude, ChatGPT confirm, and the Twi
   "total_files": int, "total_tokens": int, "total_size": int
 }
 ```
-- Errors: 400 `No zip_file provided` / `No file selected` / `File must be a .zip file` / `No .md files found in the zip archive` / `No valid .md files could be read from the zip archive` / `Invalid zip file`; 500 `{"error": "Failed to analyze zip file", "details"}`.
+- Errors: 400 `No zip_file provided` / `No file selected` / `File must be a .zip file` / `No .md files found in the zip archive` / `No valid .md files could be read from the zip archive` / `Invalid zip file`; 500 `{"error": "Failed to analyze zip file"}`.
 - Notes: file upload. Response carries full file text, so it grows with the archive.
 
 ##### `POST /api/import/confirm`
@@ -1766,7 +1766,7 @@ Shared confirm response counters (Markdown, Claude, ChatGPT confirm, and the Twi
   "on_deleted"?: "restore" | "skip" }
 ```
 - Response 201: `{ "message": "Import successful", "nodes_created": int, "thread_count": int, "profile_update_task_id": str|null, "created": int, "skipped": int, "restored": int, "updated": int }`
-- Errors: 400 `No data provided` / `No files provided` / invalid `import_type` / invalid `date_ordering`; 409 `deleted_content_matches`; 500 `{"error": "Failed to import files", "details"}`.
+- Errors: 400 `No data provided` / `No files provided` / invalid `import_type` / invalid `date_ordering`; 409 `deleted_content_matches`; 500 `{"error": "Failed to import files"}`.
 - Notes: synchronous. A file whose content does not start with `# ` gets `# <filename>\n\n` prepended. `single_thread` chains files as a reply chain; `separate_nodes` makes one root per file.
 
 ##### `POST /api/import/twitter/analyze`
@@ -1775,7 +1775,7 @@ Shared confirm response counters (Markdown, Claude, ChatGPT confirm, and the Twi
 - Called from: ImportData.js (Twitter archive picker)
 - Request: `multipart/form-data`, field `zip_file` (`.zip`, the X data export).
 - Response 200: `{ "import_token": str, "total_tweets": int, "original_count": int, "reply_count": int, "skipped_retweets": int, "total_tokens": int, "original_tokens": int, "total_size": int }`
-- Errors: 400 `No zip_file provided` / `No file selected` / `File must be a .zip file` / archive-format message from `TwitterArchiveError`; 500 `Could not store the archive for import` or `{"error": "Failed to analyze Twitter export", "details"}`.
+- Errors: 400 `No zip_file provided` / `No file selected` / `File must be a .zip file` / archive-format message from `TwitterArchiveError`; 500 `Could not store the archive for import` or `{"error": "Failed to analyze Twitter export"}`.
 - Notes: tweets are stashed server-side per user; only counts return.
 
 ##### `POST /api/import/twitter/confirm`
@@ -1814,7 +1814,7 @@ Shared confirm response counters (Markdown, Claude, ChatGPT confirm, and the Twi
   "total_conversations": int, "total_messages": int, "total_tokens": int, "total_size": int }
 ```
 - Notes: the analyzed conversations (`{name, created_at, messages: [{text, sender, created_at, token_count, uuid}], message_count, token_count}`, oldest first) stay on the server, encrypted (backend/utils/conversation_stash.py, 24 h TTL); the token names them.
-- Errors: 400 `No conversations_file provided` / `No file selected` / no conversations with messages / `{"error": "conversations.json is not valid UTF-8", "details"}` / `{"error": "Failed to parse conversations JSON", "details"}`; 500 `{"error": "Failed to analyze Claude export", "details"}`.
+- Errors: 400 `No conversations_file provided` / `No file selected` / no conversations with messages / `{"error": "conversations.json is not valid UTF-8 text"}` / `{"error": "conversations.json is not valid JSON"}`; 500 `{"error": "Failed to analyze Claude export"}`.
 
 ##### `POST /api/import/claude/confirm`
 - Backend: routes/import_data.py:confirm_claude_import
@@ -1836,7 +1836,7 @@ Shared confirm response counters (Markdown, Claude, ChatGPT confirm, and the Twi
   "total_conversations": int, "total_messages": int, "total_tokens": int, "total_size": int }
 ```
 - Notes: the analyzed conversations (`{name, created_at /* naive ISO or "" */, default_model, messages: [{text, role, created_at, model, mapping_id, token_count}], message_count, token_count}`, oldest first) stay on the server, encrypted; the token names them.
-- Errors: same set as Claude analyze, with `Failed to analyze ChatGPT export`. Frontend special-cases HTTP 413 ("conversations.json is too large to upload") and shows `error: details` when both are present.
+- Errors: same set as Claude analyze, with `Failed to analyze ChatGPT export`. Frontend special-cases HTTP 413 ("conversations.json is too large to upload") and otherwise shows `error`.
 
 ##### `POST /api/import/chatgpt/confirm`
 - Backend: routes/import_data.py:confirm_chatgpt_import
