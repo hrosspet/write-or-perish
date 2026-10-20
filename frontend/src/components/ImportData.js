@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import ReactDOM from "react-dom";
 import JSZip from "jszip";
 import {
@@ -48,6 +48,44 @@ function importErr(userMessage) {
   const e = new Error(userMessage);
   e.userMessage = userMessage;
   return e;
+}
+
+// The ChatGPT/Claude analyze request uploads the export's conversation
+// files (often 100 MB or more), so it gets a longer timeout than the 60 s
+// default. HEURISTIC: 10 minutes covers 100 MB at about 1.4 Mbit/s up.
+const CONVERSATIONS_UPLOAD_TIMEOUT_MS = 10 * 60 * 1000;
+
+// Background imports (Twitter, ChatGPT, Claude) are polled every
+// POLL_INTERVAL_MS. HEURISTIC: polling gives up after POLL_MAX_FAILURES
+// failed polls in a row (a phone briefly offline should not lose the import).
+const POLL_INTERVAL_MS = 1500;
+const POLL_MAX_FAILURES = 5;
+
+const LOST_TWITTER_MESSAGE =
+  "Lost track of the import — reload the page to check whether it finished.";
+// A second confirm of a ChatGPT/Claude import answers with the running job,
+// so the user can pick it up again from the same dialog.
+const LOST_CONVERSATIONS_MESSAGE =
+  "Lost track of the import. It may still be running: press Confirm Import to follow it again, or check your Log in a few minutes.";
+
+// An error shown inside a confirm dialog: the dialog covers the page, so an
+// error rendered on the page behind it is never seen.
+function ModalError({ message }) {
+  if (!message) return null;
+  return (
+    <div
+      role="alert"
+      style={{
+        color: "var(--accent)",
+        fontFamily: "var(--sans)",
+        fontWeight: 300,
+        fontSize: "0.88rem",
+        margin: "12px 0 0",
+      }}
+    >
+      {message}
+    </div>
+  );
 }
 
 // A spinning icon + stage label, shown inside import buttons while an
@@ -234,8 +272,12 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
   const [dateOrdering, setDateOrdering] = useState("modified");
   const [importing, setImporting] = useState(false);
   const [importStage, setImportStage] = useState(null);
-  // {done, total} while a background import task runs (Twitter)
+  // {done, total} while a background import task runs (Twitter: tweets;
+  // ChatGPT/Claude: messages)
   const [importProgress, setImportProgress] = useState(null);
+  // Set from the first Confirm press until the import ends, so a second
+  // press (before React re-renders the disabled button) starts nothing.
+  const confirmInFlight = useRef(false);
   const [uploadPercent, setUploadPercent] = useState(null);
   const uploadDetail =
     importStage === "uploading" && uploadPercent != null ? ` ${uploadPercent} %` : null;
@@ -371,9 +413,12 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
   const handleConfirmImport = (onDeleted) => {
     if (!importFiles) return;
     if (hasPdf && !whoseWriting) return;
+    if (confirmInFlight.current) return;
+    confirmInFlight.current = true;
 
     setImporting(true);
     setImportStage("importing");
+    setError("");
     api.post("/import/confirm", {
       files: importFiles.files,
       import_type: importType,
@@ -384,6 +429,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
       ...(onDeleted ? { on_deleted: onDeleted } : {})
     })
       .then((response) => {
+        confirmInFlight.current = false;
         setShowImportDialog(false);
         setImportFiles(null);
         setImporting(false);
@@ -395,6 +441,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
         setImportResult(response.data);
       })
       .catch((err) => {
+        confirmInFlight.current = false;
         if (handleDeletedConflict(err, handleConfirmImport)) return;
         console.error("Error importing data:", err);
         setError(err.response?.data?.error || "Error importing data. Please try again.");
@@ -407,6 +454,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
     setShowImportDialog(false);
     setImportFiles(null);
     setWhoseWriting(null);
+    setError("");
   };
 
   const handleTwitterImportFile = (event) => {
@@ -416,6 +464,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
     const formData = new FormData();
     formData.append("zip_file", file);
 
+    setError("");
     setImporting(true);
     setImportStage("analyzing");
     setShowPicker(false);
@@ -438,16 +487,22 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
     event.target.value = "";
   };
 
-  const handleConfirmTwitterImport = (onDeleted) => {
-    if (!twitterImportData) return;
-
+  // A background import (Twitter, ChatGPT, Claude): the confirm request only
+  // queues a Celery task (node creation for a large archive takes minutes);
+  // progress and the result come from polling /import/status until it
+  // completes. `retry` re-runs the confirm after the restore-or-skip prompt;
+  // `onFinished` closes the confirm dialog.
+  const runBackgroundImport = ({ path, body, retry, onFinished, fallbackError, lostMessage }) => {
+    if (confirmInFlight.current) return;
+    confirmInFlight.current = true;
     setImporting(true);
     setImportStage("importing");
     setImportProgress(null);
+    setError("");
 
     const finishWith = (result) => {
-      setShowTwitterImportDialog(false);
-      setTwitterImportData(null);
+      confirmInFlight.current = false;
+      onFinished();
       setImporting(false);
       setImportStage(null);
       setImportProgress(null);
@@ -458,51 +513,73 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
       setImportResult(result);
     };
     const failWith = (message) => {
-      setError(message || "Error importing Twitter data. Please try again.");
+      confirmInFlight.current = false;
+      setError(message || fallbackError);
       setImporting(false);
       setImportStage(null);
       setImportProgress(null);
     };
 
-    // The confirm request only queues a Celery task (node creation for a
-    // large archive takes minutes); progress and the result come from
-    // polling /import/status until it completes.
+    let failedPolls = 0;
     const poll = (taskId) => {
       api.get(`/import/status/${taskId}`)
         .then(({ data }) => {
+          failedPolls = 0;
           if (data.status === "completed") return finishWith(data.result || {});
           if (data.status === "failed") return failWith(data.error);
           if (data.status === "running") setImportProgress({ done: data.done, total: data.total });
-          setTimeout(() => poll(taskId), 1500);
+          setTimeout(() => poll(taskId), POLL_INTERVAL_MS);
         })
         .catch((err) => {
-          console.error("Error polling Twitter import status:", err);
-          failWith("Lost track of the import — reload the page to check whether it finished.");
+          failedPolls += 1;
+          if (failedPolls < POLL_MAX_FAILURES) {
+            setTimeout(() => poll(taskId), POLL_INTERVAL_MS * failedPolls);
+            return;
+          }
+          console.error("Error polling import status:", err);
+          failWith(lostMessage);
         });
     };
 
-    api.post("/import/twitter/confirm", {
-      import_token: twitterImportData.import_token,
-      import_type: importType,
-      include_replies: includeReplies,
-      privacy_level: importPrivacy,
-      ai_usage: importAiUsage,
-      ...(onDeleted ? { on_deleted: onDeleted } : {})
-    })
+    api.post(path, body)
       .then((response) => {
         setImportProgress({ done: 0, total: response.data.total });
         poll(response.data.task_id);
       })
       .catch((err) => {
-        if (handleDeletedConflict(err, handleConfirmTwitterImport)) return;
-        console.error("Error importing Twitter data:", err);
+        confirmInFlight.current = false;
+        if (handleDeletedConflict(err, retry)) return;
+        console.error("Error confirming import:", err);
         failWith(err.response?.data?.error);
       });
+  };
+
+  const handleConfirmTwitterImport = (onDeleted) => {
+    if (!twitterImportData) return;
+    runBackgroundImport({
+      path: "/import/twitter/confirm",
+      body: {
+        import_token: twitterImportData.import_token,
+        import_type: importType,
+        include_replies: includeReplies,
+        privacy_level: importPrivacy,
+        ai_usage: importAiUsage,
+        ...(onDeleted ? { on_deleted: onDeleted } : {})
+      },
+      retry: handleConfirmTwitterImport,
+      onFinished: () => {
+        setShowTwitterImportDialog(false);
+        setTwitterImportData(null);
+      },
+      fallbackError: "Error importing Twitter data. Please try again.",
+      lostMessage: LOST_TWITTER_MESSAGE,
+    });
   };
 
   const handleCancelTwitterImport = () => {
     setShowTwitterImportDialog(false);
     setTwitterImportData(null);
+    setError("");
   };
 
   const handleClaudeImportFile = async (event) => {
@@ -510,6 +587,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
     event.target.value = "";
     if (!file) return;
 
+    setError("");
     setImporting(true);
     setImportStage("extracting");
     setShowPicker(false);
@@ -532,58 +610,74 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
     const formData = new FormData();
     conversationFiles.forEach((f) => formData.append("conversations_file", f.blob, f.name));
 
-    setImportStage("analyzing");
-    api.post("/import/claude/analyze", formData, {
-      headers: { "Content-Type": "multipart/form-data" }
-    })
+    setImportStage("uploading");
+    setUploadPercent(0);
+    api.post("/import/claude/analyze", formData, conversationUploadConfig())
       .then((response) => {
         setClaudeImportData(response.data);
         setShowClaudeImportDialog(true);
         setImporting(false);
         setImportStage(null);
+        setUploadPercent(null);
       })
       .catch((err) => {
         console.error("Error analyzing Claude import:", err);
-        setError(err.response?.data?.error || "Error analyzing Claude export. Please try again.");
+        setError(err.response?.data?.error || conversationUploadError(err, "Claude"));
         setImporting(false);
         setImportStage(null);
+        setUploadPercent(null);
       });
   };
 
+  // The analyzed conversations stay on the server; confirm sends the token
+  // and the job runs in the background.
   const handleConfirmClaudeImport = (onDeleted) => {
     if (!claudeImportData) return;
-
-    setImporting(true);
-    setImportStage("importing");
-    api.post("/import/claude/confirm", {
-      conversations: claudeImportData.conversations,
-      privacy_level: importPrivacy,
-      ai_usage: importAiUsage,
-      ...(onDeleted ? { on_deleted: onDeleted } : {})
-    })
-      .then((response) => {
+    runBackgroundImport({
+      path: "/import/claude/confirm",
+      body: {
+        import_token: claudeImportData.import_token,
+        privacy_level: importPrivacy,
+        ai_usage: importAiUsage,
+        ...(onDeleted ? { on_deleted: onDeleted } : {})
+      },
+      retry: handleConfirmClaudeImport,
+      onFinished: () => {
         setShowClaudeImportDialog(false);
         setClaudeImportData(null);
-        setImporting(false);
-        setImportStage(null);
-        setError("");
-        if (response.data.profile_update_task_id && onProfileUpdateStarted) {
-          onProfileUpdateStarted(response.data.profile_update_task_id);
-        }
-        setImportResult(response.data);
-      })
-      .catch((err) => {
-        if (handleDeletedConflict(err, handleConfirmClaudeImport)) return;
-        console.error("Error importing Claude data:", err);
-        setError(err.response?.data?.error || "Error importing Claude data. Please try again.");
-        setImporting(false);
-        setImportStage(null);
-      });
+      },
+      fallbackError: "Error importing Claude data. Please try again.",
+      lostMessage: LOST_CONVERSATIONS_MESSAGE,
+    });
   };
 
   const handleCancelClaudeImport = () => {
     setShowClaudeImportDialog(false);
     setClaudeImportData(null);
+    setError("");
+  };
+
+  // Upload settings for the ChatGPT/Claude analyze request: a long timeout
+  // and the upload percentage on the button.
+  const conversationUploadConfig = () => ({
+    headers: { "Content-Type": "multipart/form-data" },
+    timeout: CONVERSATIONS_UPLOAD_TIMEOUT_MS,
+    onUploadProgress: (e) => {
+      if (!e.total) return;
+      setUploadPercent(Math.min(100, Math.round((e.loaded / e.total) * 100)));
+      if (e.loaded >= e.total) setImportStage("analyzing");
+    },
+  });
+
+  // A failed ChatGPT/Claude analyze request without a message from the server.
+  const conversationUploadError = (err, platform) => {
+    const status = err.response?.status;
+    if (!err.response && (err.code === "ECONNABORTED" || err.code === "ETIMEDOUT")) {
+      return "The upload took too long and was stopped. Large exports on a slow connection can do this. Try again on Wi-Fi.";
+    }
+    if (status === 413) return "conversations.json is too large to upload. Please contact support.";
+    if (status) return `Error analyzing ${platform} export (HTTP ${status}). Please try again.`;
+    return `Error analyzing ${platform} export. The request did not reach the server — check your connection.`;
   };
 
   const handleChatGPTImportFile = async (event) => {
@@ -591,6 +685,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
     event.target.value = "";
     if (!file) return;
 
+    setError("");
     setImporting(true);
     setImportStage("extracting");
     setShowPicker(false);
@@ -613,76 +708,66 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
     const formData = new FormData();
     conversationFiles.forEach((f) => formData.append("conversations_file", f.blob, f.name));
 
-    setImportStage("analyzing");
-    api.post("/import/chatgpt/analyze", formData, {
-      headers: { "Content-Type": "multipart/form-data" }
-    })
+    setImportStage("uploading");
+    setUploadPercent(0);
+    api.post("/import/chatgpt/analyze", formData, conversationUploadConfig())
       .then((response) => {
         setChatGPTImportData(response.data);
         setShowChatGPTImportDialog(true);
         setImporting(false);
         setImportStage(null);
+        setUploadPercent(null);
       })
       .catch((err) => {
         console.error("Error analyzing ChatGPT import:", err);
-        const status = err.response?.status;
-        const data = err.response?.data;
-        const backendMsg = data?.error;
-        let msg;
-        if (backendMsg) {
-          msg = backendMsg;
-        } else if (status === 413) {
-          msg = "conversations.json is too large to upload. Please contact support.";
-        } else if (status) {
-          msg = `Error analyzing ChatGPT export (HTTP ${status}). Please try again.`;
-        } else {
-          msg = "Error analyzing ChatGPT export. The request did not reach the server — check your connection.";
-        }
-        setError(msg);
+        setError(err.response?.data?.error || conversationUploadError(err, "ChatGPT"));
         setImporting(false);
         setImportStage(null);
+        setUploadPercent(null);
       });
   };
 
+  // The analyzed conversations stay on the server; confirm sends the token
+  // and the job runs in the background.
   const handleConfirmChatGPTImport = (onDeleted) => {
     if (!chatGPTImportData) return;
-
-    setImporting(true);
-    setImportStage("importing");
-    api.post("/import/chatgpt/confirm", {
-      conversations: chatGPTImportData.conversations,
-      privacy_level: importPrivacy,
-      ai_usage: importAiUsage,
-      ...(onDeleted ? { on_deleted: onDeleted } : {})
-    })
-      .then((response) => {
+    runBackgroundImport({
+      path: "/import/chatgpt/confirm",
+      body: {
+        import_token: chatGPTImportData.import_token,
+        privacy_level: importPrivacy,
+        ai_usage: importAiUsage,
+        ...(onDeleted ? { on_deleted: onDeleted } : {})
+      },
+      retry: handleConfirmChatGPTImport,
+      onFinished: () => {
         setShowChatGPTImportDialog(false);
         setChatGPTImportData(null);
-        setImporting(false);
-        setImportStage(null);
-        setError("");
-        if (response.data.profile_update_task_id && onProfileUpdateStarted) {
-          onProfileUpdateStarted(response.data.profile_update_task_id);
-        }
-        setImportResult(response.data);
-      })
-      .catch((err) => {
-        if (handleDeletedConflict(err, handleConfirmChatGPTImport)) return;
-        console.error("Error importing ChatGPT data:", err);
-        setError(err.response?.data?.error || "Error importing ChatGPT data. Please try again.");
-        setImporting(false);
-        setImportStage(null);
-      });
+      },
+      fallbackError: "Error importing ChatGPT data. Please try again.",
+      lostMessage: LOST_CONVERSATIONS_MESSAGE,
+    });
   };
 
   const handleCancelChatGPTImport = () => {
     setShowChatGPTImportDialog(false);
     setChatGPTImportData(null);
+    setError("");
   };
+
+  // "Importing… 1,200 of 43,186 messages" while a ChatGPT/Claude job runs.
+  const messageProgress = importProgress && importProgress.total
+    ? `${(importProgress.done || 0).toLocaleString()} of ${importProgress.total.toLocaleString()} messages`
+    : null;
+
+  // While a confirm dialog is open, its errors show inside it (ModalError):
+  // the dialog covers the page, so the page's error line would be hidden.
+  const confirmDialogOpen = showImportDialog || showTwitterImportDialog
+    || showClaudeImportDialog || showChatGPTImportDialog;
 
   return (
     <div>
-      {error && <div style={{ color: "var(--accent)", marginBottom: "0.8rem", fontSize: "0.88rem" }}>{error}</div>}
+      {error && !confirmDialogOpen && <div style={{ color: "var(--accent)", marginBottom: "0.8rem", fontSize: "0.88rem" }}>{error}</div>}
 
       {/* A PDF saved as someone else's writing: a Reference, not entries */}
       {importResult && importResult.saved_as === "reference" && (
@@ -1107,6 +1192,8 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
           />
           </>)}
 
+          <ModalError message={error} />
+
           <div style={{ display: "flex", gap: "10px", marginTop: "15px" }}>
             {(() => {
               // A PDF needs an answer first (no default, see whoseWriting)
@@ -1164,6 +1251,8 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
             onAIUsageChange={setImportAiUsage}
           />
 
+          <ModalError message={error} />
+
           <div style={{ display: "flex", gap: "10px", marginTop: "15px" }}>
             <button
               onClick={() => handleConfirmClaudeImport()}
@@ -1174,7 +1263,9 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
                 opacity: importing ? 0.6 : 1
               }}
             >
-              {importing ? <ImportSpinner stage={importStage} fallback="Importing…" /> : "Confirm Import"}
+              {importing
+                ? <ImportSpinner stage={importStage} fallback="Importing…" detail={messageProgress} />
+                : "Confirm Import"}
             </button>
             <button
               onClick={handleCancelClaudeImport}
@@ -1218,6 +1309,8 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
             onAIUsageChange={setImportAiUsage}
           />
 
+          <ModalError message={error} />
+
           <div style={{ display: "flex", gap: "10px", marginTop: "15px" }}>
             <button
               onClick={() => handleConfirmChatGPTImport()}
@@ -1228,7 +1321,9 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
                 opacity: importing ? 0.6 : 1
               }}
             >
-              {importing ? <ImportSpinner stage={importStage} fallback="Importing…" /> : "Confirm Import"}
+              {importing
+                ? <ImportSpinner stage={importStage} fallback="Importing…" detail={messageProgress} />
+                : "Confirm Import"}
             </button>
             <button
               onClick={handleCancelChatGPTImport}
@@ -1321,6 +1416,8 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
             onPrivacyChange={setImportPrivacy}
             onAIUsageChange={setImportAiUsage}
           />
+
+          <ModalError message={error} />
 
           <div style={{ display: "flex", gap: "10px", marginTop: "15px" }}>
             <button
