@@ -637,14 +637,25 @@ final class ImportTests: StubbedAppTestCase {
     func testTheNamedConversationsFileWins() throws {
         let url = try zip("a.zip", ["export/conversations.json": "[{\"a\":1}]", "export/big.json": "[" + String(repeating: "1,", count: 500) + "1]"])
         let out = try ImportFiles.extractConversations(from: url, into: dir)
-        XCTAssertEqual(try String(contentsOf: out, encoding: .utf8), "[{\"a\":1}]")
+        XCTAssertEqual(out.count, 1)
+        XCTAssertEqual(try String(contentsOf: out[0], encoding: .utf8), "[{\"a\":1}]")
+    }
+
+    func testShardedExportYieldsTheShardsInOrder() throws {
+        let url = try zip("s.zip", ["sectioned_conversations.json": "[]", "shared_conversations.json": "[{\"s\":1}]",
+                                    "__MACOSX/._conversations.json": "junk",
+                                    "conversations-001.json": "[{\"b\":2}]", "conversations-000.json": "[{\"a\":1}]"])
+        let out = try ImportFiles.extractConversations(from: url, into: dir)
+        XCTAssertEqual(out.map(\.lastPathComponent), ["conversations-000.json", "conversations-001.json"])
+        XCTAssertEqual(try out.map { try String(contentsOf: $0, encoding: .utf8) }, ["[{\"a\":1}]", "[{\"b\":2}]"])
     }
 
     func testOtherwiseTheLargestJSONArray() throws {
         let url = try zip("b.zip", ["x/settings.json": "{\"big\":\"" + String(repeating: "z", count: 900) + "\"}",
                                     "x/chats.json": "[ {\"t\":1} ]\n", "x/small.json": "[]"])
         let out = try ImportFiles.extractConversations(from: url, into: dir)
-        XCTAssertEqual(try String(contentsOf: out, encoding: .utf8), "[ {\"t\":1} ]\n")
+        XCTAssertEqual(out.count, 1)
+        XCTAssertEqual(try String(contentsOf: out[0], encoding: .utf8), "[ {\"t\":1} ]\n")
     }
 
     func testZipErrorsUseTheWebsWords() throws {
@@ -671,6 +682,19 @@ final class ImportTests: StubbedAppTestCase {
         let text = try String(contentsOf: body.url, encoding: .utf8)
         let boundary = body.contentType.components(separatedBy: "boundary=").last!
         XCTAssertTrue(text.hasPrefix("--\(boundary)\r\nContent-Disposition: form-data; name=\"conversations_file\"; filename=\"conversations.json\"\r\nContent-Type: application/json\r\n\r\n[1,2]\r\n--\(boundary)--\r\n"))
+    }
+
+    func testMultipartBodyWritesOnePartPerShard() throws {
+        let a = dir.appendingPathComponent("a.json"), b = dir.appendingPathComponent("b.json")
+        try Data("[1]".utf8).write(to: a)
+        try Data("[2]".utf8).write(to: b)
+        let body = try ImportFiles.multipartBody(field: "conversations_file", mimeType: "application/json",
+                                                 parts: [("conversations-000.json", a), ("conversations-001.json", b)], into: dir)
+        let text = try String(contentsOf: body.url, encoding: .utf8)
+        let boundary = body.contentType.components(separatedBy: "boundary=").last!
+        let head = "Content-Disposition: form-data; name=\"conversations_file\"; filename="
+        XCTAssertEqual(text, "--\(boundary)\r\n\(head)\"conversations-000.json\"\r\nContent-Type: application/json\r\n\r\n[1]\r\n"
+                       + "--\(boundary)\r\n\(head)\"conversations-001.json\"\r\nContent-Type: application/json\r\n\r\n[2]\r\n--\(boundary)--\r\n")
     }
 
     func testConfirmBodiesPerImporter() {

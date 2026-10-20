@@ -142,17 +142,24 @@ function ModalTitle({ children }) {
   );
 }
 
-// Extract the conversations.json blob from a Claude/ChatGPT export zip in
-// the browser, so the full (potentially multi-GB) export with images/audio
-// never has to traverse the network.
+// Extract the conversation files from a Claude/ChatGPT export zip in the
+// browser, so the full (potentially multi-GB) export with images/audio
+// never has to traverse the network. Returns a list of {blob, name}, one per
+// file to upload; the server concatenates them in this order.
 //
 // Entry matching is intentionally flexible:
-//   1. Prefer a file entry whose name ends with "conversations.json".
+//   1. Prefer every file entry whose basename is exactly "conversations.json"
+//      or a numbered shard "conversations-<digits>.json" (ChatGPT exports
+//      are split this way), sorted by name. Other names such as
+//      "sectioned_conversations.json" or "shared_conversations.json" and
+//      macOS "__MACOSX/._conversations.json" files do not match.
 //   2. Otherwise fall back to the largest .json entry whose parsed
 //      top-level value is an array (the export's conversation list).
 // Throws an Error with a `.userMessage` if no suitable entry is found or
 // the zip cannot be read.
-async function extractConversationsBlob(file) {
+const CONVERSATION_FILE_RE = /(^|\/)conversations(-\d+)?\.json$/;
+
+async function extractConversationFiles(file) {
   let zip;
   try {
     zip = await JSZip.loadAsync(file);
@@ -164,9 +171,16 @@ async function extractConversationsBlob(file) {
 
   const entries = Object.values(zip.files).filter((f) => !f.dir);
 
-  const named = entries.find((f) => f.name.endsWith("conversations.json"));
-  if (named) {
-    return named.async("blob");
+  const named = entries
+    .filter((f) => CONVERSATION_FILE_RE.test(f.name))
+    .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  if (named.length) {
+    return Promise.all(
+      named.map(async (f) => ({
+        blob: await f.async("blob"),
+        name: f.name.split("/").pop(),
+      }))
+    );
   }
 
   // Fallback: among .json entries, pick the largest whose top-level
@@ -185,7 +199,10 @@ async function extractConversationsBlob(file) {
       const text = await entry.async("string");
       const parsed = JSON.parse(text);
       if (Array.isArray(parsed)) {
-        return new Blob([text], { type: "application/json" });
+        return [{
+          blob: new Blob([text], { type: "application/json" }),
+          name: "conversations.json",
+        }];
       }
     } catch {
       // Not valid JSON or not an array — keep looking.
@@ -486,9 +503,9 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
     setImportStage("extracting");
     setShowPicker(false);
 
-    let conversationsBlob;
+    let conversationFiles;
     try {
-      conversationsBlob = await extractConversationsBlob(file);
+      conversationFiles = await extractConversationFiles(file);
     } catch (err) {
       console.error("Error reading Claude export zip:", err);
       setError(
@@ -502,7 +519,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
     }
 
     const formData = new FormData();
-    formData.append("conversations_file", conversationsBlob, "conversations.json");
+    conversationFiles.forEach((f) => formData.append("conversations_file", f.blob, f.name));
 
     setImportStage("analyzing");
     api.post("/import/claude/analyze", formData, {
@@ -567,9 +584,9 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
     setImportStage("extracting");
     setShowPicker(false);
 
-    let conversationsBlob;
+    let conversationFiles;
     try {
-      conversationsBlob = await extractConversationsBlob(file);
+      conversationFiles = await extractConversationFiles(file);
     } catch (err) {
       console.error("Error reading ChatGPT export zip:", err);
       setError(
@@ -583,7 +600,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
     }
 
     const formData = new FormData();
-    formData.append("conversations_file", conversationsBlob, "conversations.json");
+    conversationFiles.forEach((f) => formData.append("conversations_file", f.blob, f.name));
 
     setImportStage("analyzing");
     api.post("/import/chatgpt/analyze", formData, {

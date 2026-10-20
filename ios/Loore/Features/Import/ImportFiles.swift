@@ -39,10 +39,13 @@ enum ImportFiles {
         ((try? FileManager.default.attributesOfItem(atPath: url.path)[.size]) as? NSNumber)?.int64Value ?? 0
     }
 
-    /// The web's `extractConversationsBlob`: the entry ending in
-    /// `conversations.json`, else the largest `.json` whose top level is an
-    /// array. Streams that one entry to `directory/conversations.json`.
-    static func extractConversations(from zipURL: URL, into directory: URL) throws -> URL {
+    /// The web's `extractConversationFiles`: every entry whose basename is
+    /// `conversations.json` or a numbered shard `conversations-<digits>.json`
+    /// (ChatGPT splits its export this way), sorted by name, each streamed to
+    /// `directory/<basename>`. Names such as `sectioned_conversations.json`
+    /// do not match. Otherwise the largest `.json` whose top level is an
+    /// array, streamed to `directory/conversations.json`.
+    static func extractConversations(from zipURL: URL, into directory: URL) throws -> [URL] {
         let archive: Archive
         do {
             archive = try Archive(url: zipURL, accessMode: .read)
@@ -52,9 +55,18 @@ enum ImportFiles {
         let files = archive.filter { $0.type == .file }
         if files.isEmpty && fileSize(zipURL) > 0 && !looksLikeZip(zipURL) { throw Failure.unreadableZip }
         let target = directory.appendingPathComponent("conversations.json")
-        if let named = files.first(where: { $0.path.hasSuffix("conversations.json") }) {
-            try extract(named, from: archive, to: target)
-            return target
+        let named = files
+            .map { (entry: $0, name: ($0.path as NSString).lastPathComponent) }
+            .filter { $0.name.range(of: #"^conversations(-\d+)?\.json$"#, options: .regularExpression) != nil }
+            .sorted { $0.name < $1.name }
+        if !named.isEmpty {
+            var urls: [URL] = []
+            for item in named {
+                let url = directory.appendingPathComponent(item.name)
+                try extract(item.entry, from: archive, to: url)
+                urls.append(url)
+            }
+            return urls
         }
         let candidates = files.filter { $0.path.lowercased().hasSuffix(".json") }
             .sorted { $0.uncompressedSize > $1.uncompressedSize }
@@ -65,7 +77,7 @@ enum ImportFiles {
             if topLevelIsArray(candidate) {
                 try? FileManager.default.removeItem(at: target)
                 try FileManager.default.moveItem(at: candidate, to: target)
-                return target
+                return [target]
             }
         }
         throw Failure.noConversations
@@ -106,17 +118,28 @@ enum ImportFiles {
     /// to `directory/body.multipart`; returns the body file and its content type.
     static func multipartBody(field: String, filename: String, mimeType: String, source: URL,
                               into directory: URL) throws -> (url: URL, contentType: String) {
+        try multipartBody(field: field, mimeType: mimeType, parts: [(filename, source)], into: directory)
+    }
+
+    /// Like the single-file variant, with one file part per `(filename, source)`
+    /// under the same field, in the given order (the server concatenates
+    /// them).
+    static func multipartBody(field: String, mimeType: String, parts: [(filename: String, source: URL)],
+                              into directory: URL) throws -> (url: URL, contentType: String) {
         let boundary = "LooreBoundary-\(UUID().uuidString)"
         let bodyURL = directory.appendingPathComponent("body.multipart")
         FileManager.default.createFile(atPath: bodyURL.path, contents: nil)
         let out = try FileHandle(forWritingTo: bodyURL)
         defer { try? out.close() }
-        let safeName = filename.replacingOccurrences(of: "\"", with: "")
-        try out.write(contentsOf: Data("--\(boundary)\r\nContent-Disposition: form-data; name=\"\(field)\"; filename=\"\(safeName)\"\r\nContent-Type: \(mimeType)\r\n\r\n".utf8))
-        let input = try FileHandle(forReadingFrom: source)
-        defer { try? input.close() }
-        while let chunk = try input.read(upToCount: chunkSize), !chunk.isEmpty {
-            try out.write(contentsOf: chunk)
+        for (index, part) in parts.enumerated() {
+            let safeName = part.filename.replacingOccurrences(of: "\"", with: "")
+            let lead = index == 0 ? "" : "\r\n"
+            try out.write(contentsOf: Data("\(lead)--\(boundary)\r\nContent-Disposition: form-data; name=\"\(field)\"; filename=\"\(safeName)\"\r\nContent-Type: \(mimeType)\r\n\r\n".utf8))
+            let input = try FileHandle(forReadingFrom: part.source)
+            defer { try? input.close() }
+            while let chunk = try input.read(upToCount: chunkSize), !chunk.isEmpty {
+                try out.write(contentsOf: chunk)
+            }
         }
         try out.write(contentsOf: Data("\r\n--\(boundary)--\r\n".utf8))
         return (bodyURL, "multipart/form-data; boundary=\(boundary)")
