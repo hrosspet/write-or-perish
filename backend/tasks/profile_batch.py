@@ -985,11 +985,14 @@ def _poll_profile_batches():
                 next_built.append(nxt)   # stays pending; re-submitted below
             else:
                 user.profile_batch_pending = False
-                if item.get("kind") == "chunk" and user_is_capped(user):
+                if (item.get("kind") in ("chunk", "merge")
+                        and user_is_capped(user)):
                     # Stopped by the spend cap, not finished: no
                     # "pre-fill complete" email for a chain that resumes
                     # when the cap lifts (the hold marks it for the
                     # hourly seeder, also for a not-yet-activated account).
+                    # A rebuild's merge step (#183) goes on to the next
+                    # step as a chunk does.
                     user.profile_cap_held = True
                     logger.warning(f"User {user.id}: profile chain stopped "
                                    f"at the spend cap after this step")
