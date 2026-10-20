@@ -1,5 +1,6 @@
 from flask import Flask, request, jsonify, redirect, url_for, current_app
 from dotenv import load_dotenv
+import logging
 import os
 
 # Load environment variables - check for .env.production first, then fall back to .env
@@ -18,6 +19,9 @@ else:
 
 from backend.config import Config
 from backend.extensions import db
+from backend.utils.error_privacy import (
+    install_traceback_filter, scrub_sentry_breadcrumb, scrub_sentry_event,
+)
 from flask_migrate import Migrate
 from flask_login import LoginManager, current_user
 from backend.models import User  # noqa: F401 - registers every model (migrations)
@@ -183,18 +187,35 @@ def create_app():
                 apply_fingerprint(event, exc, rec)
             except Exception:  # never lose an event over grouping
                 pass
-            return event
+            # Last, after the checks above have read the raw text: the
+            # event keeps each exception's type and stack frames, not its
+            # message, and no database values (Peter, 2026-10-20).
+            return scrub_sentry_event(event, hint)
 
         sentry_sdk.init(
             dsn=sentry_dsn,
             environment=os.environ.get("SENTRY_ENVIRONMENT", "production"),
             before_send=_before_send,
+            before_breadcrumb=scrub_sentry_breadcrumb,
             **SENTRY_PRIVACY_OPTIONS,
         )
 
     app = Flask(__name__)
     app.config.from_object(Config)
     validate_default_model(app.config)
+
+    # Tracebacks in the server log keep each exception's type and frames,
+    # not its message: Flask's own line for an unhandled exception (logged
+    # on the app's logger), and logger.exception in any backend.* module
+    # (in the web app they reach Flask's default handler, or Python's
+    # last-resort handler before Flask has attached its own). The logger
+    # is looked up by name, not through app.logger: creating that here
+    # would attach Flask's handler in Celery workers as well, before
+    # Celery sets up logging, so their lines would also go out through it.
+    from flask.logging import default_handler
+    install_traceback_filter(
+        logging.getLogger(app.name),
+        [h for h in (default_handler, logging.lastResort) if h is not None])
 
     # Fix for running behind nginx reverse proxy - handles X-Forwarded-* headers
     app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
