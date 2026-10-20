@@ -664,6 +664,21 @@ def _descends_from(profile, ancestor_id):
     return False
 
 
+def settled_pending_merge(user, base):
+    """The pending merge to run on ``base``, or None. A base that already
+    descends from the pending version (it was rebuilt on it, or the run
+    that recorded it stopped before its first step) holds it: the pending
+    merge is dropped without a call, so a version is never merged with
+    itself. The caller commits."""
+    pending = pending_merge_version(user) if base is not None else None
+    if pending is not None and _descends_from(base, pending.id):
+        user.profile_pending_merge_id = None
+        logger.info("User %s: version %s already holds the user's version "
+                    "%s; no merge", user.id, base.id, pending.id)
+        return None
+    return pending
+
+
 def merge_date(version):
     """The date the new chain merges the user's version at: the end of the
     writing it covers (its cutoff), or, for a profile written by hand that
@@ -704,7 +719,10 @@ def build_merge_messages(user_id, base, version):
 def save_merge(user, model_id, response, base, version, batch=False):
     """Save the merge as the chain's next version: the rebuilt version is
     its parent and it carries that version's coverage, so the rebuild goes
-    on from it as from the version it merged. Clears the pending merge."""
+    on from it as from the version it merged. Clears the pending merge,
+    unless the merge was saved as 'none' (the account was switched while
+    the call ran): such a version is never a base, so the merge runs again
+    once the account allows AI."""
     merged = _save_profile(
         user, model_id, response["content"], response,
         source_tokens_used=base.source_tokens_used,
@@ -714,7 +732,8 @@ def save_merge(user, model_id, response, base, version, batch=False):
         source_origin_stats=base.source_origin_stats,
         source_rendered_at=base.source_rendered_at,
         merged_profile_id=version.id)
-    if user.profile_pending_merge_id == version.id:
+    if (user.profile_pending_merge_id == version.id
+            and merged.ai_usage in AI_ALLOWED):
         user.profile_pending_merge_id = None
         db.session.commit()
     logger.info("User %s: merged the user's version %s into the rebuilt "
@@ -747,6 +766,18 @@ def _before_step(self, user, model_id, base_id, api_keys, job):
     return _merge_if_due(self, user, model_id, base_id, api_keys)
 
 
+def _after_step_call(user, model_id, base_id, response, job):
+    """After a chunk's call. A from-scratch first chunk (no base) plans the
+    merge again: a version the user saved during the call cleared the
+    pending merge in the route and is now the update base, so the newest
+    version of the user's is the one the new chain merges (#183). A chunk
+    with a base checks that it is still the base (``_discard_if_base_moved``)."""
+    if base_id is None:
+        plan_user_version_merge(user, profile_update_base(user.id))
+        return
+    _discard_if_base_moved(user, model_id, base_id, response, job)
+
+
 def _discard_if_base_moved(user, model_id, base_id, response, job):
     """After a step's call: when the base moved meanwhile, log the cost,
     save nothing and raise ProfileBaseMoved."""
@@ -759,10 +790,10 @@ def _merge_if_due(self, user, model_id, base_id, api_keys, run_ends=False):
     """The sync loop's merge step (#183), when one is pending and due on
     the chain's version ``base_id`` (``merge_due``; always when the run
     ends). Returns (text, saved version), or None."""
-    pending = pending_merge_version(user) if base_id is not None else None
+    base = UserProfile.query.get(base_id) if base_id is not None else None
+    pending = settled_pending_merge(user, base)
     if pending is None:
         return None
-    base = UserProfile.query.get(base_id)
     if not run_ends and not merge_due(
             user, base, pending,
             more_to_read=should_continue_chain(user, base)):
@@ -799,6 +830,35 @@ def retip_profile_chain(user_id, version):
         "User %d: profile chain re-tipped at version %d (cutoff=%s)",
         user_id, version.id, version.source_data_cutoff)
     return copy
+
+
+def _retip_lineage(tip):
+    """The versions an import can re-tip at, tip first: the tip's parents
+    as far as the chain goes (``_collect_iterative_chain``), and on through
+    an integration the user edited or reverted to, down to the chunks it
+    merged. An edit of an integration is a new version whose parent is the
+    integration (#183); stopping there turned every import older than the
+    edit's cutoff into a full rebuild. Integrations themselves are never a
+    re-tip point."""
+    lineage = []
+    seen = set()
+    current = tip
+    while current is not None and current.id not in seen:
+        seen.add(current.id)
+        if current.generation_type == "integration":
+            child = lineage[-1] if lineage else None
+            if child is None or not (child.generated_by == "user"
+                                     or child.generation_type == "revert"):
+                break
+        elif current.generation_type in (
+                "iterative", "update", "initial", "revert"):
+            lineage.append(current)
+        else:
+            break
+        if current.parent_profile_id is None:
+            break
+        current = UserProfile.query.get(current.parent_profile_id)
+    return lineage
 
 
 def revert_profile_for_import(user_id, earliest_imported_created_at):
@@ -841,7 +901,7 @@ def revert_profile_for_import(user_id, earliest_imported_created_at):
     # ever had: provisional-ladder builds and older from-scratch rebuilds
     # stay in the table unchained, and re-tipping at one of those would
     # continue the chain from a base the pipeline already discarded.
-    chain = list(reversed(_collect_iterative_chain(tip.id)))   # tip first
+    chain = _retip_lineage(tip)   # tip first
     valid = next(
         (p for p in chain
          if p.source_data_cutoff
@@ -1529,9 +1589,10 @@ def _chunked_profile_loop(self, user, model_id, update_template,
         refuse_truncated_profile(
             user, model_id, response, f"chunk {chunk_num}")
         # The same check after the call: a version saved while this chunk
-        # was generated stays the newest, and the next run builds on it.
-        _discard_if_base_moved(user, model_id, current_profile_id, response,
-                               f"chunk {chunk_num}")
+        # was generated stays the newest, and the next run builds on it; a
+        # from-scratch first chunk plans the merge of it instead.
+        _after_step_call(user, model_id, current_profile_id, response,
+                         f"chunk {chunk_num}")
 
         observed = record_token_ratio(
             user, model_id, chunk_units, response.get("input_tokens"))
@@ -1833,6 +1894,11 @@ def maybe_trigger_incremental_profile_update(user, ignore_backoff=False):
             f"User {user.id}: {total} units >= {threshold} — "
             f"{'first' if latest_profile is None else 'next provisional'} "
             f"build from scratch")
+        # As the batch seeder does: if the build stops before its first
+        # chunk is saved, the next run is from scratch again (chunk 1
+        # clears the flag), not an update on the provisional base.
+        user.profile_needs_full_regen = True
+        db.session.commit()
         return maybe_trigger_profile_update(user.id, force_full_regen=True)
 
     if latest_profile:

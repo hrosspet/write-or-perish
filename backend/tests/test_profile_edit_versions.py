@@ -314,3 +314,39 @@ def test_saving_a_version_ends_a_pending_rebuild_merge(app, alice):  # noqa: F81
     _edit(app, alice, generated, "### SURFACE MAP\nMY NEWER EDIT")
 
     assert _db.session.get(type(alice), alice.id).profile_pending_merge_id is None
+
+
+def test_a_new_profile_or_a_revert_also_ends_a_pending_merge(app, alice):  # noqa: F811
+    generated = _generated(alice)
+    alice.profile_pending_merge_id = generated.id
+    _db.session.commit()
+    client = app.test_client()
+    _login(client, alice)
+    assert client.post("/profile/", json={"content": "NEW"}).status_code == 201
+    assert _db.session.get(type(alice), alice.id).profile_pending_merge_id is None
+
+    user = _db.session.get(type(alice), alice.id)
+    user.profile_pending_merge_id = generated.id
+    _db.session.commit()
+    assert client.post(f"/profile/revert/{generated.id}").status_code == 200
+    assert _db.session.get(type(alice), alice.id).profile_pending_merge_id is None
+
+
+def test_a_none_edit_keeps_a_pending_merge(app, alice):  # noqa: F811
+    """Review finding 4: an edit saved while the account is 'none' is a
+    'none' version, never a base, so the pending merge of the user's older
+    version is kept and runs once the account allows AI again."""
+    generated = _generated(alice)
+    own = UserProfile(user_id=alice.id, generated_by="user", tokens_used=0,
+                      ai_usage="chat", created_at=datetime(2026, 5, 4))
+    own.set_content("MY OLDER EDIT")
+    _db.session.add(own)
+    _db.session.commit()
+    alice.profile_pending_merge_id = own.id
+    alice.default_ai_usage = "none"
+    _db.session.commit()
+
+    new_id = _edit(app, alice, generated, "### SURFACE MAP\nWRITTEN UNDER NONE")
+
+    assert UserProfile.query.get(new_id).ai_usage == "none"
+    assert _db.session.get(type(alice), alice.id).profile_pending_merge_id == own.id

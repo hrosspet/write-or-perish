@@ -2096,6 +2096,82 @@ def test_183_batch_main_era_hand_written_profile_is_merged(app, monkeypatch):
     assert "BUILT, WITH MY WORDS" in newest.get_content()
 
 
+def test_183_batch_edit_while_the_first_chunk_is_in_the_batch_is_merged(
+        app, monkeypatch):
+    """Review finding 1, batch path: the user saves a newer edit while a
+    from-scratch chunk 1 is in the batch; the route drops the pending merge
+    of the older edit. Collecting chunk 1 plans the merge again, so the
+    newer edit is merged at its date."""
+    _wide_window(app)
+    u = _user()
+    tip = _prev_profile(u, MAY183, source_tokens=100_000, gen_type="iterative")
+    tip.created_at = datetime.utcnow() - timedelta(days=3)
+    integration = _prev_profile(u, MAY183, source_tokens=100_000,
+                                gen_type="integration")
+    integration.parent_profile_id = tip.id
+    integration.created_at = datetime.utcnow() - timedelta(days=2)
+    db.session.commit()
+    first = _user_edit(u, integration, "FIRST EDIT")
+    first.created_at = datetime.utcnow() - timedelta(days=1)
+    u.profile_needs_full_regen = True
+    db.session.commit()
+    y2019, spring = datetime(2019, 12, 1), datetime(2026, 5, 15)
+    _windows183(monkeypatch, {None: 180_000, y2019: 90_000, spring: 0}, {
+        None: _chunk("2019 ARCHIVE", latest=y2019),
+        y2019: _chunk("SPRING WRITING", latest=spring)})
+    monkeypatch.setattr(pb._exports, "should_continue_chain",
+                        lambda user, profile: True)
+    req = pb._build_next_profile_request(u)
+    db.session.commit()
+    assert User.query.get(u.id).profile_pending_merge_id == first.id
+
+    second = _user_edit(u, first, "SECOND EDIT")
+    u.profile_pending_merge_id = None             # what the route does
+    db.session.commit()
+    steps = _run_steps(u, monkeypatch, req, {
+        "chunk": "REBUILT", "merge": "MERGED", "integration": "FINAL"})
+
+    assert [s["meta"]["kind"] for s in steps] == [
+        "chunk", "chunk", "merge", "integration"]
+    assert steps[2]["meta"]["merged_profile_id"] == second.id
+    assert _texts183(steps[2])[1].endswith("SECOND EDIT")
+
+
+def test_183_batch_merge_collected_after_none_keeps_the_pending_merge(
+        app, monkeypatch):
+    """Review finding 4, batch path: the merge result is collected after
+    the account was set to 'none'. It is saved 'none' and the pending merge
+    is kept, so the merge runs once the account allows AI again."""
+    u = _user()
+    base = _prev_profile(u, JUN183, gen_type="iterative")
+    base.created_at = datetime.utcnow() - timedelta(hours=1)
+    own = UserProfile(user_id=u.id, generated_by="user", tokens_used=0,
+                      ai_usage="chat",
+                      created_at=datetime.utcnow() - timedelta(days=2))
+    own.set_content("MY EDIT")
+    db.session.add(own)
+    db.session.flush()
+    u.profile_pending_merge_id = own.id
+    u.default_ai_usage = "none"
+    db.session.commit()
+    item = {"custom_id": f"profile_{u.id}_{base.id}_merge", "user_id": u.id,
+            "kind": "merge", "prev_profile_id": base.id,
+            "merged_profile_id": own.id, "model_id": "test-model",
+            "chunk_num": 2}
+
+    nxt = pb._apply_result(u, item, {"content": "MERGED", "input_tokens": 10,
+                                     "output_tokens": 5},
+                           datetime.utcnow() - timedelta(seconds=5))
+
+    assert nxt is None
+    assert UserProfile.query.filter_by(merged_profile_id=own.id).one(
+        ).ai_usage == "none"
+    assert User.query.get(u.id).profile_pending_merge_id == own.id
+    u.default_ai_usage = "chat"
+    db.session.commit()
+    assert pb._exports.pending_merge_version(u).id == own.id
+
+
 def test_183_batch_merge_after_an_edit_saves_nothing(app, monkeypatch):
     u = _user()
     base = _prev_profile(u, JUN183, gen_type="iterative")

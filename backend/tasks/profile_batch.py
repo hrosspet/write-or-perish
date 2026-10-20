@@ -250,7 +250,7 @@ def _build_next_profile_request(user, allow_chunk=True, chunk_num=1):
     if prev is None and _exports.plan_user_version_merge(
             user, _exports.profile_update_base(user.id)) is not None:
         db.session.commit()
-    pending = _exports.pending_merge_version(user) if prev is not None else None
+    pending = _exports.settled_pending_merge(user, prev)
     if pending is not None and _exports.merge_due(
             user, prev, pending, more_to_read=(
                 allow_chunk and _exports.should_continue_chain(user, prev))):
@@ -476,6 +476,13 @@ def _apply_result(user, item, result, submitted_at):
             user.profile_batch_attempts = 0
             return None
         else:
+            if item["prev_profile_id"] is None:
+                # A from-scratch first chunk: a version the user saved while
+                # it was in the batch cleared the pending merge and is now
+                # the update base; plan the merge of the newest version of
+                # the user's again (#183).
+                _exports.plan_user_version_merge(
+                    user, _exports.profile_update_base(user.id))
             # Cumulative coverage in stored units. An item submitted before
             # the planner carries no unit count and accumulates the billed
             # input tokens it was built with (the legacy figure).

@@ -111,7 +111,7 @@ def revert_profile(version_id):
     # Copy the encrypted content directly (no decrypt/re-encrypt round).
     new_profile.content = old.content
     db.session.add(new_profile)
-    _user_saved_a_version()
+    _user_saved_a_version(new_profile)
     db.session.commit()
 
     return jsonify({
@@ -307,7 +307,7 @@ def create_profile():
         db.session.flush()
         if newest is not None and profile.ai_usage in AI_ALLOWED:
             _carry_recent_context(newest, profile)
-        _user_saved_a_version()
+        _user_saved_a_version(profile)
         db.session.commit()
 
         return jsonify({
@@ -372,7 +372,7 @@ def _save_edit_as_new_version(profile, new_content, data, keep_audio=False):
             _copy_audio(profile, new_profile)
         if new_profile.ai_usage in AI_ALLOWED:
             _carry_recent_context(profile, new_profile)
-        _user_saved_a_version()
+        _user_saved_a_version(new_profile)
         db.session.commit()
     except Exception as e:
         db.session.rollback()
@@ -414,11 +414,14 @@ def _carry_recent_context(source, target):
         profile_id=target.id, ai_usage=summary.ai_usage))
 
 
-def _user_saved_a_version():
+def _user_saved_a_version(version):
     """A version the user saves (an edit, a new profile, a revert) ends a
     rebuild's pending merge of an older version of theirs (#183): the newest
-    version the user saved wins, and the next run builds on it."""
-    current_user.profile_pending_merge_id = None
+    version the user saved wins, and the next run builds on it. A version
+    marked 'none' is never a base, so it ends nothing: the pending merge
+    still runs once the account allows AI."""
+    if version.ai_usage in AI_ALLOWED:
+        current_user.profile_pending_merge_id = None
 
 
 def _copy_audio(source, target):
