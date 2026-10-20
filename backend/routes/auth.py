@@ -265,6 +265,11 @@ def login():
             _drop_x_token()
             return refused
         user = _create_x_user(twitter_id, username)
+    if user.deleted_at is not None:
+        # A deleted account in its grace period (#269): no sign-in; the
+        # browser is asked whether to restore it.
+        from backend.routes.account_deletion import offer_restore
+        return redirect(offer_restore(user, session.pop('next_url', None)))
     # Handles change on X; keep the one the Account page shows current
     # (an unchanged value writes nothing).
     user.twitter_handle = username
@@ -352,6 +357,13 @@ def magic_link_verify():
         # prefetch doesn't consume it before the user clicks)
         if user.magic_link_token_hash != token_h:
             return redirect(f"{frontend_url}/login?error=link_already_used")
+        if user.deleted_at is not None:
+            # A deleted account in its grace period (#269): no sign-in;
+            # the browser is asked whether to restore it.
+            from backend.routes.account_deletion import offer_restore
+            return redirect(offer_restore(
+                user, next_url if next_url and is_safe_redirect_url(next_url)
+                else None))
     else:
         refused = _confirm_email_flow_redirect(next_url)
         if refused is not None:

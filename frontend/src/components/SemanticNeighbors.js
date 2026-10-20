@@ -10,8 +10,9 @@ import { formatDate } from '../utils/date';
 // thread; lets us feel out what semantic retrieval surfaces from any point in
 // the archive without going through the agentic flow. Renders nothing for
 // non-admins, or when the node isn't embedded yet (e.g. ai_usage='none', or
-// the sweep hasn't reached it).
-export default function SemanticNeighbors({ nodeId }) {
+// the sweep hasn't reached it). `openNode` is the thread page's (NodeDetail):
+// the node is fetched before its page opens.
+export default function SemanticNeighbors({ nodeId, openNode }) {
   const { user } = useUser();
   const isAdmin = !!(user && user.is_admin);
   const [neighbors, setNeighbors] = useState([]);
@@ -44,11 +45,11 @@ export default function SemanticNeighbors({ nodeId }) {
 
   // cmd/ctrl-click opens the node in a new tab (matches Cmd+K search results);
   // a plain click navigates in place.
-  const openNode = (e, id) => {
+  const openNeighbor = (e, id) => {
     if (e.metaKey || e.ctrlKey) {
       window.open(`/node/${id}`, '_blank', 'noopener');
     } else {
-      navigate(`/node/${id}`);
+      openNode(id, () => navigate(`/node/${id}`));
     }
   };
 
@@ -86,7 +87,7 @@ export default function SemanticNeighbors({ nodeId }) {
       {neighbors.map((n) => (
         <button
           key={n.id}
-          onClick={(e) => openNode(e, n.id)}
+          onClick={(e) => openNeighbor(e, n.id)}
           style={{
             textAlign: 'left',
             background: 'var(--bg-card)',

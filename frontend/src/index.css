@@ -43,6 +43,7 @@
   /* Fonts */
   --serif: 'Cormorant Garamond', Georgia, 'Times New Roman', serif;
   --sans: 'Outfit', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --reading-serif: 'Newsreader', Georgia, 'Times New Roman', serif;
 }
 
 /* Light mode — warm parchment palette */
@@ -275,11 +276,189 @@ code {
   opacity: 1;
 }
 
+/* The home page of a user who gleans (#436; Peter, 2026-10-13). The
+   Reflect and Glean cards are about as wide as the Voice / Text cards
+   (280 px, 20 px apart); Share sits below them, one card wide and
+   centered (its wrapper is a flex box, so the card fills it). At 620 px
+   and narrower the cards stack at the full column width. */
+.home-mode-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 280px));
+  justify-content: center;
+  gap: 28px 20px;
+  width: 100%;
+}
+.home-mode-grid-share {
+  grid-column: 1 / -1;
+  justify-self: center;
+  width: min(280px, calc((100% - 20px) / 2));
+  display: flex;
+}
+@media (max-width: 620px) {
+  .home-mode-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .home-mode-grid-share {
+    width: 100%;
+  }
+}
+
+/* The button laid over a whole Reflect / Glean card: the card's start.
+   The card itself draws the hover glow. */
+.home-mode-card-start {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  padding: 0;
+  border: none;
+  border-radius: 12px;
+  background: transparent;
+  cursor: pointer;
+}
+.home-mode-card-start:hover,
+.home-mode-card-start:active {
+  background: transparent;
+}
+.home-mode-card-start:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+/* Voice | Text on those cards: one pill split in two. The chosen half
+   looks like the old Voice / Text buttons on hover (accent outline and
+   text, a faint accent fill): a thumb that slides between the halves.
+   The switch sits above the card's start button. */
+.home-mode-switch {
+  position: relative;
+  z-index: 2;
+  display: inline-grid;
+  grid-template-columns: 1fr 1fr;
+  padding: 3px;
+  border: 1px solid var(--border-hover);
+  border-radius: 999px;
+  background: var(--bg-input);
+  cursor: default;
+}
+.home-mode-switch-thumb {
+  position: absolute;
+  top: 3px;
+  bottom: 3px;
+  left: 3px;
+  width: calc(50% - 3px);
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  background: var(--accent-subtle);
+  pointer-events: none;
+  transition: transform 0.2s ease;
+}
+.home-mode-switch[data-mode="text"] .home-mode-switch-thumb {
+  transform: translateX(100%);
+}
+.home-mode-switch-option {
+  position: relative;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-height: 34px;
+  padding: 6px 16px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-muted);
+  font-family: var(--sans);
+  font-size: 0.88rem;
+  font-weight: 300;
+  cursor: pointer;
+  transition: color 0.15s ease;
+}
+.home-mode-switch-option:hover,
+.home-mode-switch-option:active {
+  background: transparent;
+  color: var(--text-primary);
+}
+.home-mode-switch-option[aria-checked="true"],
+.home-mode-switch-option[aria-checked="true"]:hover {
+  color: var(--accent);
+}
+.home-mode-switch-option:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .home-mode-switch-thumb {
+    transition: none;
+  }
+}
+
+/* The quoted reference / tweet card (ExternalQuoteBubble, #435): byline,
+   text, then one row of actions. For the reference's owner the card
+   itself opens the reference page in Loore; the actions do only their
+   own thing. */
+.ext-quote-card-link {
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+.ext-quote-card-link:hover {
+  background: var(--bg-card-hover, var(--bg-card)) !important;
+  border-color: var(--border-hover) !important;
+}
+.ext-quote-card-link:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.ext-quote-byline {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 8px;
+  font-family: var(--sans);
+  font-size: 0.86rem;
+  white-space: normal;
+}
+.ext-quote-name {
+  font-weight: 500;
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+.ext-quote-handle,
+.ext-quote-date {
+  color: var(--text-muted);
+}
+.ext-quote-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 16px;
+  font-family: var(--sans);
+  font-size: 0.8em;
+  color: var(--text-muted);
+  white-space: normal;
+}
+/* "Twitter ↗": a quiet text button with a tap target a finger can hit. */
+.ext-quote-open {
+  padding: 10px 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  font-family: var(--sans);
+  font-size: inherit;
+  font-weight: 400;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.ext-quote-open:hover,
+.ext-quote-open:focus-visible {
+  background: none;
+  border: 0;
+  color: var(--accent);
+}
+
 /* "Mark as read" inside a quoted reference (ExternalQuoteBubble). A text
-   link in the footer rather than a button: the quote itself is the click
-   target that opens the original post, so the toggle must read as a small
-   aside, not compete with it. Hover/focus underline the label; the global
-   button hover fill is switched off here. */
+   link in the actions row rather than a filled button, so the row reads
+   as small asides under the text. Hover/focus underline the label; the
+   global button hover fill is switched off here. */
 .ext-quote-read-toggle {
   padding: 0;
   border: 0;
@@ -378,6 +557,223 @@ code {
 .ref-feedback-glyph:disabled:hover {
   background: none;
   border: 0;
+}
+
+/* A gleaning pick's verdicts (PickVerdict, #502, option B): under the
+   card, closing the whole pick. At rest one pair; once the pick has a
+   verdict, a labelled pair per part ("The intro", "The tweet"). The
+   pairs here sit flush: the glyph buttons' own width spaces them. */
+.pick-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0 18px;
+  margin-top: 2px;
+  min-height: 40px;
+  font-family: var(--sans);
+  font-size: 0.8rem;
+  font-weight: 300;
+  color: var(--text-muted);
+  white-space: normal;
+}
+.pick-foot .ref-feedback {
+  margin: 0;
+}
+.pick-part {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+.pick-part-label {
+  color: var(--text-muted);
+}
+.pick-rated-before {
+  font-style: italic;
+}
+.pick-foot .ref-feedback-glyph:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -6px;
+  border-radius: 999px;
+}
+
+/* A saved reference's page (ReferenceDetailPage; option A, Peter
+   2026-10-13): the gleaning's tweet card at page size. A full hairline
+   border and no accent rail, so a reference never reads as one of the
+   user's own entries. Top to bottom: the source in a plain sentence, the
+   byline, a page's title, the text in Newsreader, then one row of
+   actions above a hairline. */
+.ref-card {
+  box-sizing: border-box;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 18px 20px 8px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-hover);
+  border-radius: 12px;
+}
+.ref-card-source {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--sans);
+  font-size: 0.78rem;
+  font-weight: 300;
+  color: var(--text-muted);
+}
+.ref-card-source svg {
+  flex: none;
+  width: 13px;
+  height: 13px;
+}
+.ref-card-byline {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 6px;
+  min-width: 0;
+  font-family: var(--sans);
+  font-size: 0.85rem;
+  font-weight: 300;
+}
+.ref-card-name {
+  color: var(--text-primary);
+  font-weight: 400;
+  overflow-wrap: anywhere;
+}
+.ref-card-handle,
+.ref-card-date {
+  color: var(--text-muted);
+}
+/* A tweet's name and handle open the account on X. */
+.ref-card-author {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 6px;
+  min-width: 0;
+  color: inherit;
+}
+.ref-card-author:hover .ref-card-handle,
+.ref-card-author:focus-visible .ref-card-handle {
+  color: var(--text-secondary);
+}
+.ref-card-title {
+  margin: 0;
+  font-family: var(--serif);
+  font-weight: 400;
+  font-size: 1.5rem;
+  line-height: 1.3;
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+.ref-card-text {
+  max-width: 65ch;
+  font-family: var(--reading-serif);
+  font-size: 1.12rem;
+  font-weight: 400;
+  line-height: 1.62;
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+/* A video's description sits under the player, behind this toggle. */
+.ref-card-stored-toggle {
+  align-self: flex-start;
+  padding: 4px 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  font-family: var(--sans);
+  font-size: 0.8rem;
+  font-weight: 300;
+  color: var(--text-muted);
+}
+.ref-card-stored-toggle:hover,
+.ref-card-stored-toggle:focus-visible,
+.ref-card-stored-toggle:active {
+  background: none;
+  border: 0;
+  color: var(--text-secondary);
+}
+.ref-card-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0 10px;
+  padding-top: 4px;
+  border-top: 1px solid var(--border);
+  font-family: var(--sans);
+}
+/* Listen: SpeakerIcon renders nothing for a user without voice mode. */
+.ref-card-listen {
+  display: inline-flex;
+  align-items: center;
+  font-size: 1rem;
+  color: var(--text-muted);
+}
+.ref-card-listen:empty {
+  display: none;
+}
+.ref-card-out {
+  padding: 10px 0;
+  font-size: 0.78rem;
+  font-weight: 300;
+  text-decoration: none;
+}
+.ref-card-out,
+.ref-card-out:link,
+.ref-card-out:visited {
+  color: var(--text-muted);
+}
+.ref-card-out:hover,
+.ref-card-out:focus-visible {
+  color: var(--text-primary);
+}
+.ref-card-spacer {
+  flex: 1;
+}
+/* Mark as read: a text button, amber while unread, muted once read. */
+.ref-card-read {
+  padding: 10px 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  font-family: var(--sans);
+  font-size: 0.8rem;
+  font-weight: 400;
+  color: var(--accent);
+  text-decoration: underline;
+  text-decoration-color: transparent;
+  text-underline-offset: 3px;
+  transition: color 0.15s ease, text-decoration-color 0.15s ease;
+}
+.ref-card-read[data-read="true"] {
+  color: var(--text-muted);
+}
+.ref-card-read:hover,
+.ref-card-read:focus-visible {
+  background: none;
+  border: 0;
+  color: var(--accent-hover);
+  text-decoration-color: currentColor;
+}
+.ref-card-read[data-read="true"]:hover,
+.ref-card-read[data-read="true"]:focus-visible {
+  color: var(--text-secondary);
+}
+.ref-card-read:active,
+.ref-card-read:disabled:hover {
+  background: none;
+  border: 0;
+}
+/* Under the card: how often Loore showed it, and the user's own marks. */
+.ref-card-shown {
+  margin: 10px 0 0;
+  font-family: var(--sans);
+  font-size: 0.78rem;
+  font-weight: 300;
+  color: var(--text-muted);
 }
 
 /* Community Archive feed picks (FeedPicks): one run of tweets under the
@@ -525,6 +921,16 @@ code {
   line-height: 1.5;
   color: var(--text-muted);
 }
+/* Under a cancelled read's text: why it was cancelled, for its owner.
+   The window line's voice. */
+.read-note {
+  margin: 0.6rem 0 0;
+  font-family: var(--sans);
+  font-size: 0.8rem;
+  font-weight: 300;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
 /* The tail under the picks: a hairline separates the model's reply from
    what the reader can do next. */
 /* A read reply is a run of picks: the model's line on why, then the
@@ -533,6 +939,74 @@ code {
    instead of an essay with quotes in it. */
 .read-reply-body .ext-quote-slot {
   margin-bottom: 28px;
+}
+/* Loore's note on each pick comes first and is set larger than the
+   tweet under it (#435 mockup). Newsreader, a text serif: Cormorant
+   Garamond was hard to read at this size (Peter, 2026-10-13). */
+.read-reply-body .loore-md > p {
+  font-family: var(--reading-serif);
+  font-size: 1.07rem;
+  line-height: 1.6;
+  color: var(--text-primary);
+}
+.read-reply-body .ext-quote-slot .loore-md > p {
+  font-family: inherit;
+  font-size: inherit;
+  line-height: inherit;
+}
+/* The head of a gleaning: "Today's gleanings" and one line under it. */
+.gleanings-head {
+  margin: 0 0 1rem;
+}
+.gleanings-title {
+  font-family: var(--serif);
+  font-weight: 400;
+  font-size: 1.7rem;
+  line-height: 1.2;
+  margin: 0;
+  color: var(--text-primary);
+}
+.gleanings-sub {
+  margin: 4px 0 0;
+  font-family: var(--sans);
+  font-size: 0.85rem;
+  font-weight: 300;
+  color: var(--text-muted);
+}
+/* An empty day is a real result: said plainly, in the middle. */
+.gleanings-empty {
+  text-align: center;
+  padding: 1.2rem 0.5rem 1.4rem;
+}
+.gleanings-empty-big {
+  font-family: var(--serif);
+  font-size: 1.6rem;
+  margin: 0 0 6px;
+  color: var(--text-primary);
+}
+.gleanings-empty-small {
+  margin: 0;
+  font-family: var(--sans);
+  font-size: 0.88rem;
+  font-weight: 300;
+  color: var(--text-muted);
+}
+/* A gleaning that failed (#435): what happened and where to try again. */
+.gleaning-failed {
+  padding: 0.4rem 0 0.6rem;
+}
+.gleaning-failed-big {
+  font-family: var(--serif);
+  font-size: 1.3rem;
+  margin: 0 0 6px;
+  color: var(--text-primary);
+}
+.gleaning-failed-small {
+  margin: 0 0 4px;
+  font-family: var(--sans);
+  font-size: 0.88rem;
+  font-weight: 300;
+  color: var(--text-muted);
 }
 .read-reply-body .ext-quote-slot:last-child {
   margin-bottom: 0;

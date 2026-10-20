@@ -533,6 +533,115 @@ class TestVoiceFromNodeAgenticAncestryBridge:
         assert self._count_prompt_ancestors(llm_node.id) == 1
 
 
+# ── Tests: a deleted node (#480) ───────────────────────────────────────
+
+class TestVoiceFromDeletedNode:
+    """A page opened before its node was deleted can still ask to start
+    Voice there. The answer is POST /nodes/'s 410 for a deleted parent,
+    and nothing is written or sent to a model."""
+
+    @pytest.fixture
+    def llm_task(self, monkeypatch):
+        """The reply task, mocked here so a call is counted (and never
+        reaches a provider) whatever another test module left in
+        sys.modules."""
+        module = MagicMock()
+        module.generate_llm_response.delay.return_value = MagicMock(
+            id="fake-task-id")
+        monkeypatch.setitem(
+            sys.modules, "backend.tasks.llm_completion", module)
+        return module.generate_llm_response
+
+    @staticmethod
+    def _delete(node):
+        from datetime import datetime
+        node.deleted_at = datetime.utcnow()
+
+    def _start(self, app, user, node):
+        client = app.test_client()
+        _login(client, user.id)
+        before = (Node.query.count(), NodeContextArtifact.query.count())
+        resp = client.post(f"/api/voice/from-node/{node.id}",
+                           json={"model": "gpt-5"})
+        after = (Node.query.count(), NodeContextArtifact.query.count())
+        return resp, before, after
+
+    def _assert_refused(self, resp, before, after, llm_task):
+        assert resp.status_code == 410, resp.get_json()
+        assert resp.get_json() == {"error": "Parent node has been deleted"}
+        assert after == before          # no prompt node, no reply
+        llm_task.delay.assert_not_called()
+
+    def test_deleted_entry_in_a_plain_thread(self, app, llm_task):
+        """Was 202 with a Voice prompt and a billed reply under it."""
+        alice = _make_user("alice")
+        entry = _make_node(alice, content="gone")
+        _make_node(alice, parent_id=entry.id, content="kept reply")
+        self._delete(entry)
+        _db.session.commit()
+        self._assert_refused(*self._start(app, alice, entry), llm_task)
+
+    def test_deleted_entry_in_an_agentic_thread(self, app, llm_task):
+        """Was a 500 (the placeholder's own deleted-parent error)."""
+        alice = _make_user("alice")
+        prompt = _make_prompt_node(alice, "voice")
+        entry = _make_node(alice, parent_id=prompt.id, content="gone")
+        self._delete(entry)
+        _db.session.commit()
+        self._assert_refused(*self._start(app, alice, entry), llm_task)
+
+    def test_deleted_ai_reply_in_an_agentic_thread(self, app, llm_task):
+        """Was 200 pointing the Voice screen at the deleted reply."""
+        alice = _make_user("alice")
+        gpt = _make_user("gpt-5", twitter_id="llm-gpt-5")
+        prompt = _make_prompt_node(alice, "voice")
+        entry = _make_node(alice, parent_id=prompt.id, content="said")
+        reply = _make_node(gpt, parent_id=entry.id, content="gone",
+                           node_type="llm", llm_model="gpt-5",
+                           human_owner=alice)
+        self._delete(reply)
+        _db.session.commit()
+        self._assert_refused(*self._start(app, alice, reply), llm_task)
+
+    def test_deleted_ai_reply_without_a_prompt(self, app, llm_task):
+        """Was 200 with a Voice prompt attached under the deleted reply."""
+        alice = _make_user("alice")
+        gpt = _make_user("gpt-5", twitter_id="llm-gpt-5")
+        entry = _make_node(alice, content="said")
+        reply = _make_node(gpt, parent_id=entry.id, content="gone",
+                           node_type="llm", llm_model="gpt-5",
+                           human_owner=alice)
+        self._delete(reply)
+        _db.session.commit()
+        self._assert_refused(*self._start(app, alice, reply), llm_task)
+
+    def test_deleted_before_ai_usage(self, app, llm_task):
+        """A deleted node in a thread kept away from AI gets the 410, not
+        the 403 that would open the Voice screen on the deleted node."""
+        alice = _make_user("alice")
+        entry = _make_node(alice, content="gone", ai_usage="none")
+        self._delete(entry)
+        _db.session.commit()
+        self._assert_refused(*self._start(app, alice, entry), llm_task)
+
+    def test_live_entry_below_a_deleted_one_still_starts(self, app,
+                                                         llm_task):
+        """Only the node Voice starts from is checked: a thread with a
+        deleted entry higher up goes on as before."""
+        alice = _make_user("alice")
+        prompt = _make_prompt_node(alice, "voice")
+        gone = _make_node(alice, parent_id=prompt.id, content="gone")
+        entry = _make_node(alice, parent_id=gone.id, content="here")
+        self._delete(gone)
+        _db.session.commit()
+        resp, before, after = self._start(app, alice, entry)
+        assert resp.status_code == 202, resp.get_json()
+        reply = Node.query.get(resp.get_json()["llm_node_id"])
+        assert reply.parent_id == entry.id
+        assert after[0] == before[0] + 1
+        llm_task.delay.assert_called_once()
+
+
 # ── Tests: voice turn timing (#371 step 0) ─────────────────────────────
 
 class TestVoiceTiming:

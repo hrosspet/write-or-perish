@@ -4,12 +4,15 @@ import api from '../api';
 import { formatDate } from '../utils/date';
 import { useUser } from '../contexts/UserContext';
 import { authorLabel, sourceLabel } from '../utils/references';
+import { highlightRuns } from '../utils/searchHighlight';
 
 // Two surfaces share this modal: the Log (scope 'archive', the default —
 // the user's own entries, with saved references merged into semantic
 // results) and the References page (scope 'external' — saved references
 // only, in both modes).
-function SearchModal({ onClose, scope = 'archive' }) {
+// `onOpenNode(id)` opens a result's thread once its node is in (App's
+// useNodePrefetch: the modal closes, the page under it shows the spinner).
+function SearchModal({ onClose, onOpenNode, scope = 'archive' }) {
   const { user } = useUser();
   const externalOnly = scope === 'external';
   const isAdmin = !!(user && user.is_admin);
@@ -134,7 +137,8 @@ function SearchModal({ onClose, scope = 'archive' }) {
       window.open(`/node/${id}`, '_blank');
     } else {
       onClose();
-      navigate(`/node/${id}`);
+      if (onOpenNode) onOpenNode(id);
+      else navigate(`/node/${id}`);
     }
   };
 
@@ -413,8 +417,11 @@ function SearchModal({ onClose, scope = 'archive' }) {
                   WebkitLineClamp: 2,
                   WebkitBoxOrient: 'vertical',
                 }}
-                dangerouslySetInnerHTML={{ __html: r.snippet || r.preview }}
-              />
+              >
+                {highlightRuns(r.snippet || r.preview).map((run, i) => (run.marked
+                  ? <mark key={i}>{run.text}</mark>
+                  : <React.Fragment key={i}>{run.text}</React.Fragment>))}
+              </div>
             </div>
           ))}
 

@@ -3,6 +3,8 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { useInRouterContext, useNavigate } from 'react-router-dom';
 import { parseNodeLink, fetchNodeTitle, cachedNodeTitle } from '../utils/nodeLinks';
+import { classifyImageSource } from '../utils/markdownImages';
+import CopyButton from './CopyButton';
 
 /**
  * The app never renders raw HTML (no rehype-raw), so anything the markdown
@@ -322,6 +324,55 @@ function MarkdownListItem({ node, children: liChildren, ...props }) {
   );
 }
 
+// True inside a link's text. An image placeholder there must not be a second
+// link (an <a> cannot contain an <a>), so it is plain text and a click
+// follows the outer link.
+const InsideLinkContext = React.createContext(false);
+
+const imagePlaceholderStyle = {
+  display: 'inline-block',
+  maxWidth: '100%',
+  padding: '1px 8px',
+  border: '1px solid var(--border)',
+  borderRadius: '6px',
+  color: 'var(--text-muted)',
+  fontSize: '0.9em',
+  fontStyle: 'normal',
+  textDecoration: 'none',
+  overflowWrap: 'anywhere',
+};
+
+/**
+ * A markdown image (#441). Loore's own media loads as before. Any other image
+ * shows as "Image from <host>: <alt>" and opens in a new tab only when
+ * clicked, so showing a node never contacts an outside server by itself.
+ */
+function MarkdownImage({ node, src, alt, ...props }) {
+  const insideLink = React.useContext(InsideLinkContext);
+  const source = classifyImageSource(src);
+  if (source.kind === 'own') {
+    return <img alt={alt || ''} style={{ maxWidth: '100%', height: 'auto' }} {...props} src={src} />;
+  }
+  if (source.kind === 'none') {
+    return alt ? <span style={{ color: 'var(--text-muted)' }}>{alt}</span> : null;
+  }
+  const label = alt ? `Image from ${source.host}: ${alt}` : `Image from ${source.host}`;
+  if (insideLink) {
+    return <span className="loore-image-placeholder" style={imagePlaceholderStyle}>{label}</span>;
+  }
+  return (
+    <a
+      href={source.url}
+      className="loore-image-placeholder"
+      style={imagePlaceholderStyle}
+      target="_blank"
+      rel="noopener noreferrer"
+      title="Opens the image in a new tab"
+      onClick={(e) => e.stopPropagation()}
+    >{label}</a>
+  );
+}
+
 function MarkdownLink({ node, children, href, ...props }) {
   const { onInternalLinkClick, inRouter } = React.useContext(MarkdownContext);
   const nodeId = href ? parseNodeLink(href) : null;
@@ -347,7 +398,7 @@ function MarkdownLink({ node, children, href, ...props }) {
           onInternalLinkClick(href);
         }}
         {...props}
-      >{children}</a>
+      ><InsideLinkContext.Provider value>{children}</InsideLinkContext.Provider></a>
     );
   }
   return (
@@ -358,9 +409,54 @@ function MarkdownLink({ node, children, href, ...props }) {
       rel="noopener noreferrer"
       onClick={(e) => e.stopPropagation()}
       {...props}
-    >{children}</a>
+    ><InsideLinkContext.Provider value>{children}</InsideLinkContext.Provider></a>
   );
 }
+
+/** Plain text of a React node tree (code children can be nested elements). */
+function nodeText(node) {
+  if (node == null || typeof node === 'boolean') return '';
+  if (typeof node === 'string' || typeof node === 'number') return String(node);
+  if (Array.isArray(node)) return node.map(nodeText).join('');
+  return nodeText(node.props && node.props.children);
+}
+
+/**
+ * Fenced code block with a copy button at its top right. The button sits on a
+ * wrapper outside the scrolling <pre>, so it stays visible on long or
+ * horizontally scrolling blocks; it has a card-colored backdrop so it never
+ * leaves text half hidden beneath it. Copies the text as shown (the parser's
+ * single trailing newline is dropped). Inline code never goes through here.
+ */
+export const CodeBlock = ({ node, children, ...props }) => {
+  const text = nodeText(children).replace(/\n$/, '');
+  return (
+    <div style={{ position: 'relative', margin: '0.75em 0' }}>
+      <pre
+        style={{
+          background: 'var(--bg-card)',
+          border: '1px solid var(--border)',
+          borderRadius: '6px',
+          padding: '0.75em 1em',
+          margin: 0,
+          overflowX: 'auto',
+          fontSize: '0.9em',
+        }}
+        {...props}
+      >
+        {children}
+      </pre>
+      <CopyButton
+        text={text}
+        title="Copy code"
+        style={{
+          position: 'absolute', top: '6px', right: '6px',
+          background: 'var(--bg-card)', borderRadius: '4px',
+        }}
+      />
+    </div>
+  );
+};
 
 const REMARK_PLUGINS = [remarkGfm, remarkHtmlAsCode];
 
@@ -446,9 +542,7 @@ const MarkdownBody = ({ children, style, paragraphMargin = '0.5em 0', flowText =
     del: ({ node, ...props }) => (
       <del style={{ textDecoration: 'line-through', color: 'var(--text-muted)' }} {...props} />
     ),
-    img: ({ node, alt, ...props }) => (
-      <img alt={alt || ''} style={{ maxWidth: '100%', height: 'auto' }} {...props} />
-    ),
+    img: MarkdownImage,
     ul: ({ node, ...props }) => {
       const isTaskList = (props.className || '').split(/\s+/).includes('contains-task-list');
       // Task lists are styled via the `.loore-md ul.contains-task-list` rules in
@@ -465,20 +559,7 @@ const MarkdownBody = ({ children, style, paragraphMargin = '0.5em 0', flowText =
     hr: ({ node, ...props }) => (
       <hr style={{ border: 'none', borderTop: '1px solid var(--border)', margin: '20px 0' }} {...props} />
     ),
-    pre: ({ node, ...props }) => (
-      <pre
-        style={{
-          background: 'var(--bg-card)',
-          border: '1px solid var(--border)',
-          borderRadius: '6px',
-          padding: '0.75em 1em',
-          margin: '0.75em 0',
-          overflowX: 'auto',
-          fontSize: '0.9em',
-        }}
-        {...props}
-      />
-    ),
+    pre: CodeBlock,
     code: ({ node, inline, className, children, ...props }) =>
       inline ? (
         <code style={{ whiteSpace: 'pre-wrap', overflowWrap: 'break-word', fontSize: '0.9em' }} {...props}>

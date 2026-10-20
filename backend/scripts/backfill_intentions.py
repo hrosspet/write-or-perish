@@ -80,6 +80,7 @@ from backend.utils.llm_batch import (  # noqa: E402
 )
 from backend.llm_providers import (  # noqa: E402
     LLMProvider, PromptTooLongError, fit_by_count, is_empty_truncated,
+    is_refused,
     EmptyTruncatedOutputError,
 )
 from backend.utils.refusal_backoff import REFUSED_REF  # noqa: E402
@@ -186,7 +187,9 @@ def _refuse_empty_truncated(user, model_id, response, batch):
     limit before any text writes its cost row (the call was billed, marked
     refused), saves no artifact version and raises
     EmptyTruncatedOutputError, which the callers report as a failed user."""
-    if not is_empty_truncated(response):
+    # A model refusal (#470), empty or partial, is refused the same way.
+    refused = is_refused(response)
+    if not (refused or is_empty_truncated(response)):
         return
     in_t = response.get("input_tokens", 0)
     out_t = response.get("output_tokens", 0)
@@ -197,10 +200,13 @@ def _refuse_empty_truncated(user, model_id, response, batch):
             model_id, in_t, out_t, batch=batch),
     ))
     db.session.commit()
-    print(f"  ✗ user {user.id}: output cut off before any text "
-          f"(output_tokens={out_t}); nothing saved")
+    print(f"  ✗ user {user.id}: "
+          + (f"refused by the model ({model_id})" if refused
+             else "output cut off before any text")
+          + f" (output_tokens={out_t}); nothing saved")
     raise EmptyTruncatedOutputError(
-        f"intentions backfill for user {user.id}", model_id, out_t)
+        f"intentions backfill for user {user.id}", model_id, out_t,
+        refused=refused)
 
 
 # ── Synchronous path (default) ─────────────────────────────────────────────

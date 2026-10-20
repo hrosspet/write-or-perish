@@ -33,9 +33,17 @@ celery.conf.update(
             'task': 'backend.tasks.exports.check_pending_profile_updates',
             'schedule': 3600.0,  # every hour
         },
+        # Submits each due user's recent context as a provider batch
+        # (#380, ~50% cheaper); the collector below saves the results.
         'check-recent-context-updates': {
             'task': 'backend.tasks.recent_context.check_pending_recent_context_updates',
             'schedule': 600.0,  # every 10 minutes
+        },
+        # Until a user's batch is collected, prompts read their previous
+        # summary, so collect promptly. No-op when nothing is pending.
+        'collect-recent-context-batches': {
+            'task': 'backend.tasks.recent_context.collect_recent_context_batches',
+            'schedule': 60.0,  # batches typically finish in 1-5 min
         },
         'cleanup-deleted-nodes': {
             'task': 'backend.tasks.node_cleanup.cleanup_deleted_nodes',
@@ -119,6 +127,14 @@ celery.conf.update(
             'task': 'backend.tasks.external_sync.verify_public_source_sweep',
             'schedule': 3600.0,  # hourly; the task itself gates on 05:00 UTC
         },
+        # User data purge (#268): starts a purge when the user's 30-day
+        # grace period ends (at once for an admin purge) and resumes one
+        # whose runner died. One indexed query on a small table when
+        # nothing is due.
+        'process-user-data-purges': {
+            'task': 'backend.tasks.user_purge.process_user_data_purges',
+            'schedule': 60.0,  # every minute
+        },
     },
 )
 
@@ -148,3 +164,4 @@ from backend.tasks import external_sync  # noqa: F401
 from backend.tasks import external_digest  # noqa: F401
 from backend.tasks import imports  # noqa: F401
 from backend.tasks import intentions  # noqa: F401
+from backend.tasks import user_purge  # noqa: F401

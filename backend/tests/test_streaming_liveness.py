@@ -16,6 +16,9 @@ Covers:
 - transcribe-remaining refuses a live session.
 - stamp_session_alive leaves updated_at alone and, for the SSE stream,
   never revives a released session.
+- GET, POST and DELETE /drafts/ agree on the input draft: typing never
+  goes into a finished voice turn or a recording, and a send deletes
+  every input draft of the context (iPhone Text mode).
 """
 
 import os
@@ -49,7 +52,7 @@ for _mod in ["flask_login", "backend.models", "backend.extensions"]:
 import flask_login as _real_flask_login          # noqa: E402
 from backend.extensions import db as _db         # noqa: E402
 from backend.models import (                     # noqa: E402
-    User, Draft, NodeTranscriptChunk,
+    User, Draft, Node, NodeTranscriptChunk,
 )
 import backend.models as _real_backend_models    # noqa: E402
 
@@ -482,6 +485,180 @@ class TestSecondTabTextDraft:
         assert client.delete("/api/drafts/").status_code == 200
         _db.session.expire_all()
         assert Draft.query.get(done.id) is None
+
+
+def _finished_voice_turn(user):
+    """A voice turn the server chain saved as a node: the row lingers
+    until an SSE all_complete deletes it. The iPhone app polls /status
+    instead, so it stays until the next streaming/init."""
+    reply = Node(user_id=user.id, human_owner_id=user.id, node_type="llm",
+                 llm_model="claude-test", privacy_level="private",
+                 ai_usage="chat", token_count=1)
+    reply.set_content("reply")
+    _db.session.add(reply)
+    _db.session.flush()
+    d = _make_session(user, heartbeat_age=None, status="completed")
+    d.llm_node_id = reply.id
+    _db.session.commit()
+    return d
+
+
+class TestFinishedVoiceTurnIsNotTheInputDraft:
+    """iPhone Text mode: the entry just sent came back as the draft.
+    Autosave and the delete after a send each picked "the" draft of the
+    context with no ordering, finished voice turns included, so the
+    delete took a voice turn's row and left the typed draft behind."""
+
+    def test_sent_entry_does_not_come_back(self, app):
+        client, alice = _setup(app)
+        voice = _finished_voice_turn(alice)
+        typed = Draft(user_id=alice.id)
+        typed.set_content("first words")
+        _db.session.add(typed)
+        _db.session.commit()
+
+        assert client.get("/api/drafts/").get_json()["id"] == typed.id
+        saved = client.post("/api/drafts/", json={"content": "the entry"})
+        assert saved.get_json()["id"] == typed.id
+
+        assert client.delete("/api/drafts/").status_code == 200
+        assert client.get("/api/drafts/").status_code == 404
+        _db.session.expire_all()
+        # The voice turn's row is left for its all_complete or the cleanup.
+        assert Draft.query.get(voice.id).get_content() == "words so far"
+
+    def test_typing_never_goes_into_a_finished_voice_turn(self, app):
+        client, alice = _setup(app)
+        voice = _finished_voice_turn(alice)
+
+        saved = client.post("/api/drafts/", json={"content": "typed"})
+        assert saved.get_json()["id"] != voice.id
+        restored = client.get("/api/drafts/").get_json()
+        assert restored["id"] == saved.get_json()["id"]
+        assert restored["content"] == "typed"
+
+    def test_typing_never_goes_into_a_left_behind_recording(self, app):
+        client, alice = _setup(app)
+        stale = _make_session(alice, heartbeat_age=STALE)
+
+        saved = client.post("/api/drafts/", json={"content": "typed"})
+        assert saved.get_json()["id"] != stale.id
+        _db.session.expire_all()
+        assert Draft.query.get(stale.id).get_content() == "words so far"
+
+        # The send removes the typed draft; the recording is still there
+        # to recover.
+        assert client.delete("/api/drafts/").status_code == 200
+        restored = client.get("/api/drafts/").get_json()
+        assert restored["session_id"] == stale.session_id
+
+    def test_delete_removes_every_input_draft_of_the_context(self, app):
+        client, alice = _setup(app)
+        older = Draft(user_id=alice.id,
+                      updated_at=datetime.utcnow() - timedelta(hours=1))
+        older.set_content("older")
+        newer = Draft(user_id=alice.id)
+        newer.set_content("newer")
+        elsewhere = Draft(user_id=alice.id, parent_id=42)
+        elsewhere.set_content("a reply elsewhere")
+        _db.session.add_all([older, newer, elsewhere])
+        _db.session.commit()
+
+        assert client.get("/api/drafts/").get_json()["id"] == newer.id
+        assert client.delete("/api/drafts/").status_code == 200
+        assert client.get("/api/drafts/").status_code == 404
+        _db.session.expire_all()
+        assert Draft.query.get(elsewhere.id) is not None
+
+    def test_a_voice_turn_being_finalized_is_left_alone(self, app):
+        # PR #425 review: no reply node yet, so not a finished turn either.
+        client, alice = _setup(app)
+        turn = _make_session(alice, heartbeat_age=None, status="finalizing")
+
+        saved = client.post("/api/drafts/", json={"content": "typed"})
+        assert saved.get_json()["id"] != turn.id
+        assert client.delete("/api/drafts/").status_code == 200
+        _db.session.expire_all()
+        kept = Draft.query.get(turn.id)
+        assert kept is not None
+        assert kept.get_content() == "words so far"
+
+
+class TestDeadSession:
+    """Peter, 2026-10-06: a Voice recording left on the iPhone before its
+    first chunk stayed in 'recording' with no chunks. Text mode loaded it,
+    autosave wrote into it, and neither Send nor Discard could delete it,
+    so the text came back on every device. Prod had 15 such rows.
+
+    Hidden from the form, never deleted: a phone offline before chunk 0
+    was stored uploads it later (PR #427 review)."""
+
+    def test_form_does_not_load_a_dead_session(self, app):
+        client, alice = _setup(app)
+        _make_session(alice, heartbeat_age=STALE, chunk_statuses=())
+
+        assert client.get("/api/drafts/").status_code == 404
+
+    def test_text_left_in_a_dead_session_no_longer_comes_back(self, app):
+        # The state on prod: an earlier autosave wrote into the row.
+        client, alice = _setup(app)
+        dead = _make_session(alice, heartbeat_age=STALE, chunk_statuses=())
+
+        assert client.get("/api/drafts/").status_code == 404
+        assert client.delete("/api/drafts/").status_code == 404
+        _db.session.expire_all()
+        assert Draft.query.get(dead.id) is not None
+
+    def test_typed_then_sent_next_to_a_dead_session(self, app):
+        client, alice = _setup(app)
+        dead = _make_session(alice, heartbeat_age=STALE, chunk_statuses=())
+
+        saved = client.post("/api/drafts/", json={"content": "the entry"})
+        assert saved.get_json()["id"] != dead.id
+        assert client.get("/api/drafts/").get_json()["id"] == saved.get_json()["id"]
+        assert client.delete("/api/drafts/").status_code == 200
+        assert client.get("/api/drafts/").status_code == 404
+        _db.session.expire_all()
+        assert Draft.query.get(dead.id).get_content() == "words so far"
+
+    def test_a_late_first_chunk_still_lands(self, app, monkeypatch):
+        # The phone lost its connection before chunk 0 was stored; meanwhile
+        # the same context sends and discards, and a recording starts.
+        client, alice = _setup(app)
+        offline = _make_session(alice, heartbeat_age=STALE, chunk_statuses=())
+        _chunk_dir(alice, offline)
+        client.post("/api/drafts/", json={"content": "typed on the Mac"})
+        client.delete("/api/drafts/")
+        from backend.routes import drafts as drafts_module
+        drafts_module._cleanup_stale_drafts(alice.id)
+        # The test bytes are not a real init segment.
+        monkeypatch.setattr(drafts_module, "persist_init_segment", lambda *a, **k: None)
+
+        assert _post_chunk(client, offline, 0).status_code == 202
+        _db.session.expire_all()
+        assert Draft.query.get(offline.id) is not None
+        assert NodeTranscriptChunk.query.filter_by(
+            session_id=offline.session_id, chunk_index=0).count() == 1
+
+    def test_a_recording_just_started_elsewhere_is_not_dead(self, app):
+        # Live (stamped at init), no chunk yet: another device recording.
+        client, alice = _setup(app)
+        live = _make_session(alice, heartbeat_age=LIVE, chunk_statuses=())
+        client.post("/api/drafts/", json={"content": "typed"})
+
+        assert client.delete("/api/drafts/").status_code == 200
+        _db.session.expire_all()
+        assert Draft.query.get(live.id) is not None
+
+    def test_a_left_behind_recording_with_audio_is_not_dead(self, app):
+        client, alice = _setup(app)
+        stale = _make_session(alice, heartbeat_age=STALE,
+                              chunk_statuses=("stored",))
+
+        assert client.get("/api/drafts/").get_json()["session_id"] == stale.session_id
+        ids = [e["session_id"] for e in
+               client.get("/api/drafts/interrupted").get_json()]
+        assert ids == [stale.session_id]
 
 
 class TestChunkAfterRelease:

@@ -116,9 +116,14 @@ def cleanup_deleted_nodes():
         # Needs-action filter: content not yet wiped, OR no children
         # (purge-eligible). Excludes long-stable tombstones from per-day
         # re-scan.
+        # A node a "Delete all my writing" hid (#268) is the purge's: it
+        # comes back whole on a restore, or the purge deletes it with
+        # everything else the request hid.
+        from backend.utils.hidden_rows import hidden_ids
         candidates = (
             Node.query
             .filter(Node.deleted_at <= cutoff)
+            .filter(~Node.id.in_(hidden_ids("node")))
             .filter(or_(
                 Node.content.isnot(None),
                 ~has_any_child,

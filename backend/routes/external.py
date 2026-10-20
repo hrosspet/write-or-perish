@@ -21,13 +21,15 @@ from flask import (
     Blueprint, current_app, g, jsonify, redirect, request, session,
 )
 from flask_login import current_user, login_required
+from sqlalchemy.exc import IntegrityError
 
 from backend.extensions import db
 from backend.models import (
     ApiToken, ExternalAccount, ExternalItem, ExternalItemEmbedding,
-    FeedPick, READ_PICK_SOURCE, TTSChunk, TWEET_SOURCES, UserNotification,
+    FeedPick, READ_PICK_SOURCE, SOURCE_DOCUMENT, TTSChunk, TWEET_SOURCES,
+    UserNotification,
 )
-from backend.utils import reference_log
+from backend.utils import document_reference, reference_log
 from backend.utils.reference_rows import save_pick_row
 from backend.utils.api_tokens import (
     SCOPE_EXTERNAL_WRITE, generate_api_token, token_or_login_required,
@@ -50,16 +52,22 @@ X_AUTHORIZE_URL = "https://twitter.com/i/oauth2/authorize"
 X_SCOPES = "tweet.read users.read bookmark.read offline.access"
 
 
-def _serialize_item(item):
-    content = item.get_content() or ""
-    return {
+def _serialize_item(item, with_content=False):
+    """A reference for its owner. An uploaded document's title and author
+    are read from its encrypted text (see utils/document_reference), and
+    its `content` is the text under that header."""
+    title, author, content = document_reference.display(
+        item, item.get_content() or "")
+    data = {
         "id": item.id,
         "source": item.source,
         # Tweet id for tweets (the reference page embeds by it); the URL
         # hash for web clips.
         "external_id": item.external_id,
-        "author_handle": item.author_handle,
-        "title": item.title,
+        "author_handle": author,
+        # The tweet author's display name when the archive has one (#435).
+        "author_name": item.author_name,
+        "title": title,
         "preview": content[:280] + ("…" if len(content) > 280 else ""),
         "url": item.url,
         "posted_at": iso_utc(item.posted_at) if item.posted_at else None,
@@ -75,6 +83,9 @@ def _serialize_item(item):
         "last_surfaced_at": (iso_utc(item.last_surfaced_at)
                              if item.last_surfaced_at else None),
     }
+    if with_content:
+        data["content"] = content
+    return data
 
 
 @external_bp.route("/items", methods=["GET"])
@@ -123,9 +134,7 @@ def get_item(item_id):
         id=item_id, user_id=current_user.id).first()
     if item is None:
         return jsonify({"error": "not found"}), 404
-    data = _serialize_item(item)
-    data["content"] = item.get_content() or ""
-    return jsonify(data), 200
+    return jsonify(_serialize_item(item, with_content=True)), 200
 
 
 @external_bp.route("/items/<int:item_id>", methods=["PUT"])
@@ -137,7 +146,8 @@ def update_item(item_id):
     within the per-entry cap (rejected, not truncated: an edit has a UI
     to negotiate in). A changed text drops the stale embedding so the
     nightly sweep re-embeds it, and stamps edited_at so a later re-clip
-    keeps the user's copy (see _upgrade_clip).
+    keeps the user's copy (see _upgrade_clip). An uploaded document's
+    title stays in its encrypted text (utils/document_reference).
     """
     from backend.utils.node_split import NODE_CHAR_CAP
     item = ExternalItem.query.filter_by(
@@ -148,7 +158,9 @@ def update_item(item_id):
     if "title" not in data and "content" not in data:
         return jsonify({"error": "title or content is required"}), 400
 
-    changed = False
+    is_document = item.source == SOURCE_DOCUMENT
+    stored = item.get_content() or ""
+    title, author, body = document_reference.display(item, stored)
     if "content" in data:
         content = data.get("content")
         if not isinstance(content, str) or not content.strip():
@@ -159,30 +171,31 @@ def update_item(item_id):
                           f"per-entry limit."),
                 "char_cap": NODE_CHAR_CAP,
             }), 422
-        content = content.strip()
-        if content != (item.get_content() or ""):
-            item.set_content(content)
-            ExternalItemEmbedding.query.filter_by(item_id=item.id).delete()
-            # Generated speech of the old text is stale. As with nodes
-            # (#66) the editor asks keep-or-regenerate and sends
-            # regenerate_tts=true only for the latter.
-            if data.get("regenerate_tts"):
-                clear_tts_artifacts(item)
-            changed = True
+        body = content.strip()
     if "title" in data:
-        title = (data.get("title") or "")
-        if not isinstance(title, str):
+        new_title = (data.get("title") or "")
+        if not isinstance(new_title, str):
             return jsonify({"error": "title must be a string"}), 400
-        title = title.strip()[:MAX_TITLE_CHARS] or None
-        if title != item.title:
-            item.title = title
-            changed = True
+        title = new_title.strip()[:MAX_TITLE_CHARS] or None
+
+    changed = False
+    text = document_reference.compose(title, author, body) if is_document else body
+    if text != stored:
+        item.set_content(text)
+        ExternalItemEmbedding.query.filter_by(item_id=item.id).delete()
+        # Generated speech of the old text is stale. As with nodes
+        # (#66) the editor asks keep-or-regenerate and sends
+        # regenerate_tts=true only for the latter.
+        if data.get("regenerate_tts"):
+            clear_tts_artifacts(item)
+        changed = True
+    if not is_document and title != item.title:
+        item.title = title
+        changed = True
     if changed:
         item.edited_at = datetime.utcnow()
         db.session.commit()
-    out = _serialize_item(item)
-    out["content"] = item.get_content() or ""
-    return jsonify(out), 200
+    return jsonify(_serialize_item(item, with_content=True)), 200
 
 
 @external_bp.route("/items/<int:item_id>", methods=["DELETE"])
@@ -358,6 +371,23 @@ def mark_item_read(item_id):
 FEEDBACK_VALUES = ("good", "bad")
 
 
+def apply_item_feedback(item, value, node_id=None):
+    """Give *item* (the user's ExternalItem) the verdict *value* ('good',
+    'bad' or None to clear), logged with the reply it was given in
+    (*node_id*, already checked with reference_log.reply_node_id): which
+    recommendations it counts for is decided in reference_log (#352). A
+    verdict also marks the reference read; clearing one leaves the read
+    mark alone. The tweet half of a gleaning pick's verdict
+    (routes/nodes.py, set_pick_verdict) goes through here too. Adds to
+    the session; the caller commits."""
+    reference_log.record_action(
+        item, reference_log.ACTION_VERDICT, value=value, node_id=node_id)
+    item.feedback = value
+    item.feedback_at = datetime.utcnow() if value else None
+    if value and item.read_at is None:
+        item.read_at = item.feedback_at
+
+
 @external_bp.route("/items/<int:item_id>/feedback", methods=["POST"])
 @login_required
 def set_item_feedback(item_id):
@@ -374,16 +404,10 @@ def set_item_feedback(item_id):
     value = data.get("feedback")
     if value is not None and value not in FEEDBACK_VALUES:
         return jsonify({"error": "feedback must be 'good', 'bad' or null"}), 400
-    # Logged with the reply it was given in (node_id, optional): which
-    # recommendations it counts for is decided in reference_log (#352).
-    reference_log.record_action(
-        item, reference_log.ACTION_VERDICT, value=value,
+    apply_item_feedback(
+        item, value,
         node_id=reference_log.reply_node_id(data.get("node_id"),
                                             current_user.id))
-    item.feedback = value
-    item.feedback_at = datetime.utcnow() if value else None
-    if value and item.read_at is None:
-        item.read_at = item.feedback_at
     db.session.commit()
     return jsonify({
         "id": item.id,
@@ -702,9 +726,9 @@ def clip():
 
     Body: {url, content, title?, author?, posted_at?, author_protected?}.
     The URL decides the source (see backend.utils.web_clip). Re-clipping a known URL is
-    a 200 so the extension can be pressed twice safely: a no-op when the
-    stored text is at least as long, otherwise the stored text is
-    replaced. The X bookmark sync stores the API's truncated `text` for
+    a 200 so the extension can be pressed twice safely, also when the
+    two presses overlap: a no-op when the stored text is at least as
+    long, otherwise the stored text is replaced. The X bookmark sync stores the API's truncated `text` for
     long posts; the extension reads the full rendered post, and the
     reference should hold the fuller of the two.
     """
@@ -731,9 +755,12 @@ def clip():
 
     user = g.api_user
     source, external_id, canon = classify_clip(url)
-    existing = ExternalItem.query.filter_by(
-        user_id=user.id, source=source, external_id=external_id).first()
-    if existing is not None:
+    # Saving again a reference "Delete all my writing" hid makes it the
+    # user's again (#268) instead of failing on the hidden row.
+    from backend.utils.hidden_rows import reclaim_external_items
+    reclaim_external_items(user.id, [external_id])
+
+    def reclip(existing):
         updated = _upgrade_clip(existing, content, title, author, posted_at)
         locked = author_protected and existing.public_source is not False
         if locked:
@@ -747,6 +774,14 @@ def clip():
             "source": source, "title": existing.title,
             "truncated": truncated if updated else False,
         }), 200
+
+    def lookup():
+        return ExternalItem.query.filter_by(
+            user_id=user.id, source=source, external_id=external_id).first()
+
+    existing = lookup()
+    if existing is not None:
+        return reclip(existing)
 
     if source in TWEET_SOURCES:
         # A tweet a Read picked becomes the saved reference in place, so
@@ -777,7 +812,17 @@ def clip():
     )
     item.set_content(content)
     db.session.add(item)
-    db.session.commit()
+    try:
+        db.session.commit()
+    except IntegrityError:
+        # A second press of the clip key raced this request past the
+        # lookup above and saved the page first: answer as a re-clip
+        # instead of a 500 for a page that is in fact saved.
+        db.session.rollback()
+        existing = lookup()
+        if existing is None:
+            raise
+        return reclip(existing)
     return jsonify({
         "created": True, "id": item.id, "source": source,
         "title": title, "truncated": truncated,

@@ -31,8 +31,14 @@ import { useToast } from '../contexts/ToastContext';
  *             which decides which recommendations it counts for (#352)
  *   shared:   the shown verdict was given in another reply (a parallel
  *             Read); the glyphs say so on hover
+ *   labels:   {good, bad}, the glyphs' names (default "Good quote" / "Bad
+ *             quote"); a tweet's page says "Good tweet" / "Bad tweet", as
+ *             a gleaning pick's tweet part does (#502)
  */
-const ReferenceFeedback = ({ itemId, feedback, size = 16, onChange, nodeId, shared = false }) => {
+export const QUOTE_LABELS = { good: 'Good quote', bad: 'Bad quote' };
+export const TWEET_LABELS = { good: 'Good tweet', bad: 'Bad tweet' };
+
+const ReferenceFeedback = ({ itemId, feedback, size = 16, onChange, nodeId, shared = false, labels = QUOTE_LABELS }) => {
   const { addToast } = useToast();
   const [value, setValue] = useState(feedback || null);
   const [saving, setSaving] = useState(false);
@@ -77,8 +83,8 @@ const ReferenceFeedback = ({ itemId, feedback, size = 16, onChange, nodeId, shar
 
   return (
     <span className="ref-feedback" style={{ '--ref-feedback-icon': `${size}px` }}>
-      {glyph('good', 'Good quote', FiPlusCircle)}
-      {glyph('bad', 'Bad quote', FiMinusCircle)}
+      {glyph('good', labels.good, FiPlusCircle)}
+      {glyph('bad', labels.bad, FiMinusCircle)}
     </span>
   );
 };

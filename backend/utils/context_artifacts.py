@@ -4,7 +4,7 @@ import re
 from backend.extensions import db
 from backend.models import (
     Node, NodeContextArtifact, UserProfile, UserRecentContext, UserTodo,
-    UserArtifact,
+    UserArtifact, UserPrompt,
 )
 from backend.utils.privacy import AI_ALLOWED
 
@@ -25,6 +25,22 @@ PLACEHOLDER_TO_ARTIFACT = {
 _PLACEHOLDER_RE = re.compile(
     r'\{(' + '|'.join(PLACEHOLDER_TO_ARTIFACT.keys()) + r')\}'
 )
+
+# The artifact rows a NodeContextArtifact.artifact_type points at.
+_ROW_MODELS = {
+    'prompt': UserPrompt,
+    'profile': UserProfile,
+    'todo': UserTodo,
+    'recent_context': UserRecentContext,
+    'user_artifact': UserArtifact,
+}
+
+
+def pinned_row(artifact_type, artifact_id):
+    """The artifact version a pin of *artifact_type* points at, or None.
+    Each has a ``user_id``: whose version it is."""
+    model = _ROW_MODELS.get(artifact_type)
+    return model.query.get(artifact_id) if model is not None else None
 
 
 def attach_context_artifacts(node_id, user_id, prompt_record=None):

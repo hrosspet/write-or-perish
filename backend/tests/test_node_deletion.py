@@ -633,9 +633,8 @@ def test_log_surfaces_deleted_root_with_alive_descendants(app, alice, bob):
     app.register_blueprint(log_bp, url_prefix="/api")
 
     root = _make_node(alice, content="root body")
-    # bob's reply is alive and visible to alice via human_owner /
-    # owner check. Force public so accessible_nodes_filter passes.
-    root.privacy_level = "public"
+    # The root is private (a deleted public root stays out of the Log,
+    # #516). bob's reply is public so accessible_nodes_filter passes.
     bob_reply = _make_node(bob, parent=root, content="bob reply")
     bob_reply.privacy_level = "public"
     root.deleted_at = datetime.utcnow()
@@ -657,6 +656,63 @@ def test_log_surfaces_deleted_root_with_alive_descendants(app, alice, bob):
     assert cards[0]["id"] == bob_reply.id
     assert cards[0]["preview"] == "bob reply"
     assert cards[0]["username"] == "bob"
+
+
+def test_log_hides_deleted_public_root_with_alive_public_reply(app, alice, bob):
+    """#516: the Log lists private writing only. A deleted PUBLIC root
+    stays out even when another user's public reply is still alive.
+    """
+    from backend.routes.log import log_bp
+    app.register_blueprint(log_bp, url_prefix="/api")
+
+    root = _make_node(alice, content="root body")
+    root.privacy_level = "public"
+    bob_reply = _make_node(bob, parent=root, content="bob reply")
+    bob_reply.privacy_level = "public"
+    root.deleted_at = datetime.utcnow()
+    _db.session.commit()
+
+    client = app.test_client()
+    _login(client, alice)
+    r = client.get("/api/log")
+    assert r.status_code == 200
+    assert [c for c in r.json["nodes"] if c["thread_root_id"] == root.id] == []
+    assert [c for c in r.json["nodes"] if c["id"] == bob_reply.id] == []
+
+
+def test_log_lists_deleted_public_root_with_own_private_reply(app, alice, bob):
+    """A root published "this only" keeps the user's replies under it
+    private. Deleting that public root alone leaves them reachable from
+    the Log, and the card shows the user's own reply, not another
+    user's newer public reply (#516 keeps that one out)."""
+    from backend.routes.log import log_bp
+    app.register_blueprint(log_bp, url_prefix="/api")
+
+    root = _make_node(alice, content="root body")
+    root.privacy_level = "public"
+    own_reply = _make_node(alice, parent=root, content="my private reply")
+    bob_reply = _make_node(bob, parent=root, content="bob reply")
+    bob_reply.privacy_level = "public"
+    root.deleted_at = datetime.utcnow()
+    _db.session.commit()
+
+    client = app.test_client()
+    _login(client, alice)
+    r = client.get("/api/log")
+    assert r.status_code == 200
+    cards = [c for c in r.json["nodes"] if c["thread_root_id"] == root.id]
+    assert len(cards) == 1
+    assert cards[0]["id"] == own_reply.id
+    assert cards[0]["newest_node_id"] == own_reply.id
+    assert cards[0]["preview"] == "my private reply"
+    assert cards[0]["username"] == "alice"
+    assert [c for c in r.json["nodes"] if c["id"] == bob_reply.id] == []
+
+    # The user's own PUBLIC reply does not count: it is public writing.
+    own_reply.privacy_level = "public"
+    _db.session.commit()
+    r = client.get("/api/log")
+    assert [c for c in r.json["nodes"] if c["thread_root_id"] == root.id] == []
 
 
 # ── 22. recent-context token counter excludes soft-deleted ─────────────

@@ -27,6 +27,14 @@ sentry-sdk[flask]>=2.0.0
 # Server-side markdown for the public pages (escape=True: raw HTML in
 # user content is escaped, matching react-markdown's behavior)
 mistune>=3.0.0,<4
+# Word (.docx) import (backend/utils/docx_import.py): docx -> HTML -> Markdown.
+# Pure Python. mammoth's own Markdown output is deprecated and not used.
+mammoth==1.13.0
+markdownify==1.2.3
+# PDF import (backend/utils/pdf_extract_worker.py, run in a child process).
+# BSD, pure Python, no system packages. AES-encrypted PDFs use the
+# cryptography package above.
+pypdf==6.19.0
 # Per-article og:image social cards (backend/utils/og_image.py)
 Pillow>=10.0.0
 # Community Archive parquet snapshot reads (admin pre-fill of large accounts)

@@ -46,7 +46,8 @@ export function spendCapResetDate(now = new Date()) {
 }
 
 export function spendCapToastMessage(action, now = new Date()) {
-  const what = action === 'upload' ? 'upload audio' : 'start a new recording';
+  const what = action === 'upload' ? 'upload audio'
+    : action === 'glean' ? 'glean' : 'start a new recording';
   return `You've reached your monthly usage limit, so you can't ${what} `
     + `until it resets on ${spendCapResetDate(now)}.`;
 }

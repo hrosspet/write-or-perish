@@ -18,6 +18,19 @@ export function stripInlineMarkdown(text) {
     .replace(/(?<![_\w])_([^_\n]+?)_(?!\w)/g, '$1');    // _italic_
 }
 
+const CHECKBOX_LINE = /^(\s*)- \[([ xX])\]\s+(.+)/;
+
+/**
+ * Whether `content` has a checkbox line that toggleCheckbox would match for
+ * `itemText` (same key: the label with inline markdown stripped).
+ */
+export function hasCheckboxItem(content, itemText) {
+  return (content || '').split('\n').some((line) => {
+    const itemMatch = line.match(CHECKBOX_LINE);
+    return !!itemMatch && stripInlineMarkdown(itemMatch[3]).trim() === itemText;
+  });
+}
+
 /**
  * Toggle a checkbox in raw markdown content.
  * Finds the line matching `- [ ] itemText` or `- [x] itemText` and flips it.
@@ -25,7 +38,7 @@ export function stripInlineMarkdown(text) {
 export function toggleCheckbox(content, itemText, currentChecked) {
   const lines = content.split('\n');
   const newLines = lines.map(line => {
-    const itemMatch = line.match(/^(\s*)- \[([ xX])\]\s+(.+)/);
+    const itemMatch = line.match(CHECKBOX_LINE);
     if (itemMatch && stripInlineMarkdown(itemMatch[3]).trim() === itemText) {
       const indent = itemMatch[1];
       return currentChecked

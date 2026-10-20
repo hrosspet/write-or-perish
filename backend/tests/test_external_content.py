@@ -313,6 +313,81 @@ def test_token_grants_authenticate_a_confidential_client(monkeypatch):
         ext_content.x_refresh_access_token("cid", "rt", "secret")
 
 
+def test_token_revoke_authenticates_like_the_token_endpoint(monkeypatch):
+    """The purge revokes Loore's stored X tokens (#268): X's revoke
+    endpoint, the client authenticated as on the token endpoint, the
+    token in the form body (never the URL), the caller's timeout."""
+    import requests
+    import backend.utils.external_content as ext_content
+    calls = []
+    answer = {"revoked": True}
+
+    def fake_post(url, **kw):
+        calls.append((url, kw))
+        r = MagicMock()
+        r.json.return_value = answer
+        return r
+    monkeypatch.setattr(ext_content.requests, "post", fake_post)
+
+    assert ext_content.x_revoke_token("tok", "cid", "secret", timeout=7)
+    url, kw = calls[0]
+    assert url == ext_content.X_REVOKE_URL == "https://api.x.com/2/oauth2/revoke"
+    assert kw["data"] == {"token": "tok", "client_id": "cid"}
+    assert kw["auth"] == ("cid", "secret")
+    assert kw["timeout"] == 7
+    assert "tok" not in url
+
+    calls.clear()
+    ext_content.x_revoke_token("tok", "cid")
+    assert calls[0][1]["auth"] is None
+
+    # X answering 200 without confirming is not a revocation.
+    answer["revoked"] = False
+    with pytest.raises(ValueError):
+        ext_content.x_revoke_token("tok", "cid", "secret")
+
+    def failing_post(url, **kw):
+        r = MagicMock()
+        r.raise_for_status.side_effect = requests.HTTPError("HTTP 400")
+        return r
+    monkeypatch.setattr(ext_content.requests, "post", failing_post)
+    with pytest.raises(requests.HTTPError):
+        ext_content.x_revoke_token("tok", "cid", "secret")
+
+
+def test_sign_in_token_invalidation_is_signed_with_oauth1(monkeypatch):
+    """"Sign in with X" is OAuth 1.0a: its token is invalidated at X's
+    oauth/invalidate_token, signed with the app's consumer keys and the
+    token itself (account deletion, Peter 2026-10-09)."""
+    import requests
+    import backend.utils.external_content as ext_content
+    calls = []
+
+    def fake_post(url, **kw):
+        calls.append((url, kw))
+        return MagicMock()
+    monkeypatch.setattr(ext_content.requests, "post", fake_post)
+
+    assert ext_content.x_invalidate_sign_in_token(
+        "utok", "usecret", "ckey", "csecret", timeout=7)
+    url, kw = calls[0]
+    assert url == ext_content.X_INVALIDATE_SIGN_IN_URL
+    assert url == "https://api.x.com/1.1/oauth/invalidate_token"
+    client = kw["auth"].client
+    assert (client.client_key, client.client_secret) == ("ckey", "csecret")
+    assert (client.resource_owner_key, client.resource_owner_secret) == (
+        "utok", "usecret")
+    assert kw["timeout"] == 7 and "data" not in kw and "utok" not in url
+
+    def failing_post(url, **kw):
+        r = MagicMock()
+        r.raise_for_status.side_effect = requests.HTTPError("HTTP 401")
+        return r
+    monkeypatch.setattr(ext_content.requests, "post", failing_post)
+    with pytest.raises(requests.HTTPError):
+        ext_content.x_invalidate_sign_in_token("utok", "usecret", "ck", "cs")
+
+
 def test_ca_fetch_requires_username(app, client):
     assert client.post("/api/external/community-archive/fetch",
                        json={}).status_code == 400
@@ -409,6 +484,36 @@ def test_clip_session_creates_then_dedupes(app, client):
     listed = client.get("/api/external/items").get_json()
     assert listed["counts"] == {"web_clip": 1}
     assert listed["items"][0]["title"] == "A post"
+
+
+def test_clip_overlapping_presses_answer_as_a_reclip(app, client, monkeypatch):
+    # Two presses of the clip key: the other press saves the page after
+    # this request's lookup found nothing, so this request's insert hits
+    # the unique key. It must answer as a re-clip, not a 500.
+    url = "https://example.com/paper.pdf"
+    real_set_content = ExternalItem.set_content
+    other = {}
+
+    def set_content_after_the_other_press(self, text):
+        if self.id is None and not other:
+            winner = ExternalItem(
+                user_id=self.user_id, source=self.source,
+                external_id=self.external_id, url=url)
+            real_set_content(winner, text)
+            _db.session.add(winner)
+            _db.session.commit()
+            other["id"] = winner.id
+        real_set_content(self, text)
+
+    monkeypatch.setattr(ExternalItem, "set_content",
+                        set_content_after_the_other_press)
+    res = client.post("/api/external/clip", json={
+        "url": url, "title": "A paper", "content": "PDF: [A paper](x)"})
+    assert res.status_code == 200
+    body = res.get_json()
+    assert body["created"] is False and body["id"] == other["id"]
+    with app.app_context():
+        assert ExternalItem.query.filter_by(source="web_clip").count() == 1
 
 
 def test_clip_upgrades_stored_text_when_longer(app, client):

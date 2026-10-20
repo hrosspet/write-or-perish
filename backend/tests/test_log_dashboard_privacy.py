@@ -1,7 +1,7 @@
-"""Integration tests for privacy filtering on the Log, public dashboard, and node detail.
+"""Integration tests for privacy filtering on the Log and node detail.
 
-Tests that private nodes are excluded from list endpoints (Log, public dashboard)
-and that the node detail endpoint returns 403 for unauthorized access.
+Tests that private nodes are excluded from the Log and that the node
+detail endpoint returns 403 for unauthorized access.
 
 These tests build a minimal Flask app to avoid conflicts with module-level
 flask_login mocks in other test files (e.g. test_auth.py).
@@ -198,47 +198,6 @@ class TestLogPrivacy:
         assert len(resp.json["nodes"]) == 1
         assert "total" not in resp.json
         assert resp.json["has_more"] is False and resp.json["next_cursor"] is None
-
-
-# ── Public Dashboard ─────────────────────────────────────────────────────
-
-class TestPublicDashboardPrivacy:
-    """GET /api/dashboard/<username> should only show public nodes to other users."""
-
-    def test_hides_private_nodes_from_other_users(self, app, data):
-        client = app.test_client()
-        _login(client, data["alice_id"])
-
-        resp = client.get("/api/dashboard/bob")
-        assert resp.status_code == 200
-        previews = [n["preview"] for n in resp.json["nodes"]]
-
-        assert "Bob public post" in previews
-        assert "Bob private post" not in previews
-
-    def test_owner_sees_all_own_nodes(self, app, data):
-        client = app.test_client()
-        _login(client, data["bob_id"])
-
-        resp = client.get("/api/dashboard/bob")
-        previews = [n["preview"] for n in resp.json["nodes"]]
-
-        assert "Bob public post" in previews
-        assert "Bob private post" in previews
-
-    def test_total_count_excludes_private_for_others(self, app, data):
-        client = app.test_client()
-        _login(client, data["alice_id"])
-
-        resp = client.get("/api/dashboard/bob")
-        assert resp.json["total_nodes"] == 1  # only Bob's public node
-
-    def test_total_count_includes_all_for_owner(self, app, data):
-        client = app.test_client()
-        _login(client, data["bob_id"])
-
-        resp = client.get("/api/dashboard/bob")
-        assert resp.json["total_nodes"] == 2  # both of Bob's nodes
 
 
 # ── Node Detail ──────────────────────────────────────────────────────────

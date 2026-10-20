@@ -1,21 +1,23 @@
 import React from 'react';
 
 /**
- * The video player for a saved YouTube reference, the way TweetEmbed
- * shows the real tweet. The stored text (title + description, with the
- * chapter list) stays the searchable copy and what the AI reads; this
- * is for the reader, who wants to watch.
+ * The video player for a saved YouTube reference, inside the reference
+ * page's card. The stored text (title + description, with the chapter
+ * list) stays the searchable copy and what the AI reads; this is for
+ * the reader, who wants to watch. It is the only third-party embed in
+ * Loore: a tweet's page shows the stored text, not X's widget (Peter,
+ * 2026-10-13).
  *
  * Privacy: opening a YouTube reference loads an iframe from
  * youtube-nocookie.com, so Google learns the viewer's IP and which
  * video was opened, but sets no tracking cookie until the viewer
- * presses play. Like the tweet embed, this happens only on a reference
- * page the user opened; the References log shows the stored text.
+ * presses play. This happens only on a reference page the user opened;
+ * the References log shows the stored text.
  *
- * Unlike X's widget, an iframe cannot tell us the video is gone (a
- * cross-origin frame fires no error), so there is no 'unavailable'
- * state: YouTube renders its own "video unavailable" card and the
- * stored text sits under the toggle.
+ * An iframe cannot tell us the video is gone (a cross-origin frame
+ * fires no error), so there is no 'unavailable' state: YouTube renders
+ * its own "video unavailable" card and the stored text sits under the
+ * toggle.
  */
 function YouTubeEmbed({ videoId, start }) {
   if (!videoId) return null;

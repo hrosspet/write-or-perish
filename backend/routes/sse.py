@@ -329,18 +329,22 @@ def llm_stream(node_id):
       it isn't an extension of what was sent: the model call restarted)
     - delta: {"text"} — text appended since the last event
     - done: {"status", "continuation_node_id", "error"} — the node is no
-      longer being generated; the final content comes from the node
+      longer being generated; the final content comes from the node.
+      "error" is null for anyone but the reply's owner
     - heartbeat: keep-alive
 
     Polls the node's streaming_content (written by the task about twice a
     second); the text is decrypted here, one DEK per generation.
     """
     node = db.session.get(Node, node_id)
-    from backend.utils.privacy import can_user_access_node
+    from backend.utils.privacy import can_user_access_node, is_node_owner
     if node is None or not can_user_access_node(node, current_user.id):
         return _not_found("Node")
 
     app = current_app._get_current_object()
+    # The done event's error text goes to the reply's owner only, as on
+    # llm-status; anyone else gets the status without it.
+    viewer_id = current_user.id
 
     def generate():
         sent = None
@@ -362,7 +366,9 @@ def llm_stream(node_id):
                     yield format_sse_message({
                         "status": current.llm_task_status,
                         "continuation_node_id": current.continuation_node_id,
-                        "error": current.llm_task_error,
+                        "error": (current.llm_task_error
+                                  if is_node_owner(current, viewer_id)
+                                  else None),
                     }, event="done")
                     break
                 events, sent = text_stream_events(

@@ -1,10 +1,14 @@
 Now apply the changes you just described to the user's full todo list.
 
 Rules:
+- Only the New Tasks and Completed sections of your update change the list. Its other sections (Priority Order, Note, Issue Title and the like) are not added to it
 - Items you identified as completed that were on the todo list: change `- [ ]` to `- [x]`
 - Items you identified as completed that were NOT on the todo list: add them as `- [x]` in an appropriate section
 - New tasks you identified: add them as `- [ ]` in an appropriate section
+- Only items your update lists as completed become `- [x]`. A new task is always `- [ ]`, also when the todo list is empty
+- Tick a parent task only when your update says the parent itself is done. Ticking some of its sub-items doesn't tick the parent; a task whose sub-items are still open stays `- [ ]`
 - Keep ALL existing items not mentioned in your update — do not remove anything
 - Preserve the original structure, sections, and formatting
+- Keep the wording of existing items exactly as it is. Add each new item word for word as your update writes it, including links
 - The todo uses `## Group Name` headers for categorization. When the proposal groups items under bold headers (e.g. **Development**) or other grouping indicators, convert those to `## headers` matching the existing todo structure. Create new `## sections` if the group doesn't exist yet
-- Return ONLY the complete updated todo list — no commentary
+- When your update names a section for a new item (e.g. "under Today"), put the item in that `## section`, and create the section if it doesn't exist yet

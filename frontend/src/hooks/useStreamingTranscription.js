@@ -5,40 +5,11 @@ import { useToast } from '../contexts/ToastContext';
 import api from '../api';
 import { isSpendCapError, spendCapToastMessage } from '../utils/spendCap';
 import { isAiUsageRefusedError, aiUsageRefusalScope } from '../utils/aiUsage';
+import { onPageReturn } from '../utils/pageReturn';
+import { playErrorSound } from '../utils/errorSound';
 
 /**
- * Play an error sound using the Web Audio API.
- * Uses two descending tones to create an unmistakable "error" alert.
- */
-function playErrorSound() {
-  try {
-    const ctx = new (window.AudioContext || window.webkitAudioContext)();
-    const playTone = (freq, startTime, duration) => {
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-      osc.connect(gain);
-      gain.connect(ctx.destination);
-      osc.frequency.value = freq;
-      osc.type = 'square';
-      gain.gain.setValueAtTime(0.15, startTime);
-      gain.gain.exponentialRampToValueAtTime(0.01, startTime + duration);
-      osc.start(startTime);
-      osc.stop(startTime + duration);
-    };
-    const now = ctx.currentTime;
-    playTone(660, now, 0.15);
-    playTone(440, now + 0.18, 0.15);
-    playTone(330, now + 0.36, 0.25);
-    // Close context after sounds finish
-    setTimeout(() => ctx.close(), 1000);
-  } catch (e) {
-    // Audio not available - silently ignore
-    console.warn('[StreamingTranscription] Could not play error sound:', e);
-  }
-}
-
-/**
- * Play an urgent mic-interruption alert: the descending error motif twice,
+ * Play an urgent mic-interruption alert: the descending error motif once,
  * louder — the recording just auto-paused because the OS took the mic
  * (phone call, lock screen), so the user needs to notice within seconds,
  * not 20 minutes later (#245). Best-effort: during an actual call the OS
@@ -63,12 +34,10 @@ function playInterruptionAlert() {
       osc.stop(startTime + duration);
     };
     const now = ctx.currentTime;
-    [0, 0.9].forEach((offset) => {
-      playTone(660, now + offset, 0.15);
-      playTone(440, now + offset + 0.18, 0.15);
-      playTone(330, now + offset + 0.36, 0.25);
-    });
-    setTimeout(() => ctx.close(), 2200);
+    playTone(660, now, 0.15);
+    playTone(440, now + 0.18, 0.15);
+    playTone(330, now + 0.36, 0.25);
+    setTimeout(() => ctx.close(), 1000);
   } catch (e) {
     console.warn('[StreamingTranscription] Could not play interruption alert:', e);
   }
@@ -537,14 +506,26 @@ export function useStreamingTranscription(options = {}) {
 
     let pollTimer = null;
     let cancelled = false;
+    // One status check at a time, and onComplete at most once per finalize.
+    // One return to the page can fire two events (a back/forward-cache
+    // restore fires visibilitychange and then pageshow), and the 5 s timer
+    // can overlap a return. clearTimeout does not stop a request already in
+    // flight, so without these flags two answers that both say 'completed'
+    // would both call onComplete (in Voice mode: two POST /voice, two user
+    // nodes, two billed replies). The flags belong to this effect run, so the
+    // next recording's finalize starts with both cleared.
+    let inFlight = false;
+    let done = false;
 
     const checkStatus = async () => {
-      if (cancelled || !sessionIdRef.current) return;
+      if (cancelled || done || inFlight || !sessionIdRef.current) return;
+      inFlight = true;
       try {
         const res = await api.get(`/drafts/streaming/${sessionIdRef.current}/status`);
         if (cancelled) return;
         if (res.data.streaming_status === 'completed' && res.data.content) {
           console.log('[StreamingTranscription] Polling recovery: transcription already complete');
+          done = true;
           disconnectSSE();
           setSessionState('complete');
           setTranscript(res.data.content);
@@ -561,6 +542,8 @@ export function useStreamingTranscription(options = {}) {
         }
       } catch (err) {
         console.error('[StreamingTranscription] Polling status check failed:', err);
+      } finally {
+        inFlight = false;
       }
       // Not completed yet — schedule another check
       if (!cancelled) {
@@ -568,15 +551,14 @@ export function useStreamingTranscription(options = {}) {
       }
     };
 
-    // On foreground, poll immediately (iOS resumes JS but SSE is dead)
-    const handleVisibilityChange = () => {
-      if (document.visibilityState !== 'visible') return;
+    // On a return to the page (shown again, restored from the
+    // back/forward cache, back online), poll immediately (iOS resumes JS
+    // but SSE is dead)
+    const stopListening = onPageReturn(() => {
       // Clear any pending delayed poll and check immediately
       if (pollTimer) clearTimeout(pollTimer);
       checkStatus();
-    };
-
-    document.addEventListener('visibilitychange', handleVisibilityChange);
+    });
 
     // Start first poll after a short delay (give SSE a chance to deliver first)
     pollTimer = setTimeout(checkStatus, 5000);
@@ -584,7 +566,7 @@ export function useStreamingTranscription(options = {}) {
     return () => {
       cancelled = true;
       if (pollTimer) clearTimeout(pollTimer);
-      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      stopListening();
     };
   }, [sessionState, disconnectSSE]);
 
@@ -850,6 +832,8 @@ export function useStreamingTranscription(options = {}) {
       // Include workflow params for server-side LLM + TTS chain
       if (extraParams?.parent_id) finalizePayload.parent_id = extraParams.parent_id;
       if (extraParams?.model) finalizePayload.model = extraParams.model;
+      // A fresh Voice thread started from the Glean card (#435).
+      if (extraParams?.entry) finalizePayload.entry = extraParams.entry;
       await api.post(`/drafts/streaming/${sessionIdRef.current}/finalize`,
         finalizePayload, {
         timeout: 120000, // 2 minutes for finalize (just queues the task)

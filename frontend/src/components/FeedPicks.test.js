@@ -28,7 +28,7 @@ test('Open on X marks the pick read; Mark as unread stays to undo it', async () 
   api.post.mockResolvedValue({ data: { id: 5, read_at: '2026-09-21T13:00:00Z' } });
   render(<FeedPicks nodeId={9} />);
 
-  fireEvent.click(await screen.findByRole('link', { name: 'Open on X' }));
+  fireEvent.click(await screen.findByRole('link', { name: 'Twitter ↗' }));
   expect(api.post).toHaveBeenCalledWith('/external/items/5/read', { node_id: 9, via: 'open' });
   await waitFor(() => expect(screen.getByRole('button', { name: 'Mark as unread' })).toBeInTheDocument());
   expect(screen.getByText('All read.')).toBeInTheDocument();
@@ -39,7 +39,7 @@ test('opening an already-read pick logs the open and keeps the mark', async () =
   api.post.mockResolvedValue({ data: { id: 5, read_at: '2026-09-12T20:00:00Z' } });
   render(<FeedPicks nodeId={9} />);
 
-  fireEvent.click(await screen.findByRole('link', { name: 'Open on X' }));
+  fireEvent.click(await screen.findByRole('link', { name: 'Twitter ↗' }));
   expect(api.post).toHaveBeenCalledWith('/external/items/5/read', { node_id: 9, via: 'open' });
   await waitFor(() => expect(screen.getByText('All read.')).toBeInTheDocument());
 });

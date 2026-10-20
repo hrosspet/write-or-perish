@@ -5,6 +5,7 @@ from functools import wraps
 from flask import Blueprint, request, jsonify, abort, current_app
 from flask_login import login_required, current_user
 from sqlalchemy.exc import IntegrityError
+from backend.utils.hidden_rows import shown_description
 from backend.models import User, APICostLog
 from backend.extensions import db
 from backend.utils.timefmt import iso_utc
@@ -209,6 +210,7 @@ def list_users():
     profile_status = _profile_status_map()
     intentions_status = _intentions_status_map()
     profile_backoff = _profile_backoff_map()
+    purge_jobs = _latest_purge_jobs()
 
     # Aggregate total (all-time) spending per user in a single query
     spending_rows = db.session.query(
@@ -259,13 +261,15 @@ def list_users():
             "id": user.id,
             "twitter_id": user.twitter_id,
             "username": user.username,
-            "description": user.description,
+            "description": shown_description(user),
             "created_at": iso_utc(user.created_at),
             "accepted_terms_at": iso_utc(user.accepted_terms_at),
             "approved": user.approved,
             "email": user.email,
             "plan": user.plan,
             "deactivated_at": iso_utc(user.deactivated_at),
+            # Account deleted and in its grace period (#269): hidden.
+            "deleted_at": iso_utc(user.deleted_at),
             "total_spending_usd": total_microdollars / 1_000_000,
             "current_month_spending_usd": month_microdollars / 1_000_000,
             # Prompt-cache hit-rate over conversation turns since
@@ -292,6 +296,9 @@ def list_users():
             # {state: "waiting"|"stopped", refusals, until} or null. The
             # Build profile button asks before overriding it.
             "profile_backoff": profile_backoff.get(user.id),
+            # Latest data purge (#268), scheduled, running, done or
+            # failed; null when there was none.
+            "data_purge": _purge_job_json(purge_jobs.get(user.id)),
             "profile": profile_status.get(user.id) or {
                 "versions": 0,
                 "last_generation_type": None,
@@ -439,6 +446,225 @@ def cancel_intentions_route(user_id):
     if not result["cancelled"]:
         return jsonify({**result, "message": "No intentions batch is in flight."}), 200
     return jsonify(result), 200
+
+
+def _purge_job_json(job):
+    if job is None:
+        return None
+    return {
+        "id": job.id,
+        "status": job.status,
+        "source": job.source,
+        # "hidden": the user's own request, which hid the writing at once
+        # and deletes what it hid; "all": everything of the user's.
+        "scope": job.scope,
+        "requested_at": iso_utc(job.requested_at),
+        "scheduled_for": iso_utc(job.scheduled_for),
+        "started_at": iso_utc(job.started_at),
+        "finished_at": iso_utc(job.finished_at),
+        "attempts": job.attempts or 0,
+        "counts": job.counts,
+        "error": job.error,
+        # An account deletion (#269), not only a data purge.
+        "delete_account": bool(job.delete_account),
+        # An admin's request still waiting out its grace period: the
+        # Users row offers Undo (Peter, 2026-10-13). The user's own
+        # request is theirs to restore.
+        "undoable": job.status == "scheduled" and job.source == "admin",
+    }
+
+
+def _latest_purge_jobs():
+    """{user_id: latest non-cancelled purge job} for the Users table."""
+    from backend.models import UserDataPurge
+    latest = db.session.query(func.max(UserDataPurge.id)).filter(
+        UserDataPurge.status != "cancelled").group_by(UserDataPurge.user_id)
+    return {j.user_id: j for j in UserDataPurge.query.filter(
+        UserDataPurge.id.in_(latest)).all()}
+
+
+@admin_bp.route("/users/<int:user_id>/purge_data", methods=["GET"])
+@login_required
+@admin_required
+def purge_data_status(user_id):
+    """The user's latest purge job (status, counts, error)."""
+    from backend.models import UserDataPurge
+    job = UserDataPurge.query.filter_by(user_id=user_id).order_by(
+        UserDataPurge.id.desc()).first()
+    return jsonify({"job": _purge_job_json(job)}), 200
+
+
+@admin_bp.route("/users/<int:user_id>/purge_data", methods=["POST"])
+@login_required
+@admin_required
+def purge_data_route(user_id):
+    """Delete all of a user's writing (#268): mistaken pre-fills, opt-outs,
+    erasure requests. The account itself stays.
+
+    It works exactly like the user's own "Delete all my writing" (Peter,
+    2026-10-13: "it should definitely work the same as user doing
+    themselves"): everything is hidden at once, the user sees the
+    "Writing deleted" status bar and can restore it, the admin can undo
+    it (``undo_deletion``), and it is deleted for good after the same
+    grace period (PURGE_GRACE_DAYS).
+
+    ``?dry_run=1`` returns what the purge would delete, change and keep,
+    per table, and changes nothing. Otherwise the body must carry
+    ``{"confirm_username": "<the user's username>"}``; the job row
+    records who asked. Counts only, never content. AI and system
+    accounts are refused (409), and so is a second request while one
+    waits or runs (409): the user's own request keeps its date."""
+    from backend.utils import user_purge
+    user = User.query.get_or_404(user_id)
+    reason = user_purge.purge_refusal(user)
+    if reason:
+        return jsonify({"error": f"Refused ({reason}): AI and system "
+                                 "accounts are never purged.",
+                        "code": "purge_refused", "reason": reason}), 409
+
+    if request.args.get("dry_run") in ("1", "true"):
+        counts = user_purge.purge_user_content(user.id, dry_run=True)
+        return jsonify({"dry_run": True, "username": user.username,
+                        "counts": counts,
+                        "grace_days": user_purge.PURGE_GRACE_DAYS,
+                        "job": _purge_job_json(user_purge.active_job(user.id))}), 200
+
+    data = request.get_json(silent=True) or {}
+    if (data.get("confirm_username") or "").strip() != user.username:
+        return jsonify({"error": "Type the username to confirm.",
+                        "code": "confirm_mismatch"}), 400
+
+    job, created = user_purge.schedule_purge(
+        user, requested_by_id=current_user.id, source="admin")
+    if not created and job.delete_account:
+        # The account itself is being deleted (#269): bringing that job
+        # forward would delete the account, not only its data.
+        return jsonify({"error": "This account is scheduled for deletion. "
+                                 "Use Delete account to delete it now.",
+                        "code": "account_deletion_scheduled",
+                        "job": _purge_job_json(job)}), 409
+    if not created:
+        if job.status == "running":
+            return jsonify({"error": "A purge of this account is already "
+                                     "running.", "code": "already_running",
+                            "job": _purge_job_json(job)}), 409
+        # A request is already waiting (the user's own or an admin's): its
+        # writing is hidden and its date stays. A second request would
+        # change nothing the admin can see now.
+        who = "an admin" if job.source == "admin" else "the user"
+        return jsonify({"error": f"The writing was already deleted by {who}. "
+                                 "It is deleted forever on "
+                                 f"{job.scheduled_for:%Y-%m-%d}.",
+                        "code": "already_scheduled",
+                        "job": _purge_job_json(job)}), 409
+    logger.warning("Admin %s deleted the writing of user %s (job %s, "
+                   "restorable until %s)", current_user.id, user.id, job.id,
+                   job.scheduled_for)
+    return jsonify({"job": _purge_job_json(job)}), 202
+
+
+@admin_bp.route("/users/<int:user_id>/delete_account", methods=["POST"])
+@login_required
+@admin_required
+def delete_account_route(user_id):
+    """Delete an account (#269): its data (the #268 purge) and then the
+    account itself. Opt-outs, erasure requests, mistaken whitelists and
+    pre-fills.
+
+    It works like the user's own account deletion (Peter, 2026-10-13:
+    "it should definitely work the same as user doing themselves"): the
+    account is hidden at once and deleted for good after the same grace
+    period; signing in until then offers the user a restore, and the
+    admin can undo it (``undo_deletion``). The account's address gets
+    the same notice as after the user's own request.
+
+    ``?dry_run=1`` returns the purge's counts, the identity layer's and
+    the blast radius (public writing, replies in other people's threads),
+    and changes nothing. Otherwise the body must carry
+    ``{"confirm_username": "<the user's username>"}``. Counts only, never
+    content. AI and system accounts (409), the last admin (409) and an
+    account whose deletion already waits (409) are refused."""
+    from backend.utils import account_deletion, user_purge
+    user = User.query.get_or_404(user_id)
+    if user.id == current_user.id:
+        # An admin's own account goes through the Account page, with its
+        # confirmation and grace period, like everyone's.
+        return jsonify({"error": "Delete your own account on the Account "
+                                 "page.", "code": "own_account"}), 409
+    refusal = account_deletion.deletion_refusal(user)
+    if refusal:
+        code, message = refusal
+        return jsonify({"error": message, "code": code}), 409
+
+    if request.args.get("dry_run") in ("1", "true"):
+        dry = account_deletion.count_account_data(user.id)
+        return jsonify({"dry_run": True, "username": user.username,
+                        "has_email": bool(user.email),
+                        "grace_days": account_deletion.ACCOUNT_DELETION_GRACE_DAYS,
+                        "job": _purge_job_json(user_purge.active_job(user.id)),
+                        **dry}), 200
+
+    data = request.get_json(silent=True) or {}
+    if (data.get("confirm_username") or "").strip() != user.username:
+        return jsonify({"error": "Type the username to confirm.",
+                        "code": "confirm_mismatch"}), 400
+    try:
+        job = account_deletion.schedule_account_deletion(
+            user, requested_by_id=current_user.id, source="admin")
+    except account_deletion.AccountDeletionRefused as e:
+        return jsonify({"error": e.message, "code": e.code,
+                        "job": _purge_job_json(
+                            user_purge.active_job(user.id))}), 409
+    logger.warning("Admin %s deleted account %s (job %s, restorable until "
+                   "%s)", current_user.id, user_id, job.id, job.scheduled_for)
+    if user.email:
+        from backend.utils.email import send_account_deletion_scheduled_email
+        send_account_deletion_scheduled_email(
+            user.email, user.username,
+            account_deletion.format_day(job.scheduled_for), by_admin=True)
+    return jsonify({"job": _purge_job_json(job)}), 202
+
+
+@admin_bp.route("/users/<int:user_id>/undo_deletion", methods=["POST"])
+@login_required
+@admin_required
+def undo_deletion_route(user_id):
+    """Undo an admin's waiting "Purge data" or "Delete account" (Peter,
+    2026-10-13): what it hid shows again, as after the user's own
+    restore. Body: ``{"job_id": <the job the Users row showed>}``, so a
+    stale page cannot undo another request. The user's own request is
+    theirs to restore (409), and a job that has started can no longer be
+    undone (409)."""
+    from backend.utils import account_deletion, user_purge
+    job = user_purge.active_job(user_id)
+    data = request.get_json(silent=True) or {}
+    if job is None or (data.get("job_id") is not None
+                       and data.get("job_id") != job.id):
+        return jsonify({"error": "There is nothing to undo. Reload the "
+                                 "Users table.", "code": "not_scheduled"}), 404
+    if job.status != "scheduled":
+        return jsonify({"error": "The deletion has started and can no longer "
+                                 "be undone.", "code": "already_running",
+                        "job": _purge_job_json(job)}), 409
+    if job.source != "admin":
+        return jsonify({"error": "The user asked for this deletion. Only "
+                                 "they can restore it.", "code": "users_own",
+                        "job": _purge_job_json(job)}), 409
+    if job.delete_account:
+        done = account_deletion.undo_admin_deletion(job.id, current_user.id)
+    else:
+        done = user_purge.undo_admin_purge(job.id, current_user.id)
+    if not done:
+        db.session.expire_all()
+        return jsonify({"error": "The deletion changed meanwhile (it started, "
+                                 "or the user restored it). Reload the Users "
+                                 "table.", "code": "changed",
+                        "job": _purge_job_json(
+                            user_purge.active_job(user_id))}), 409
+    logger.warning("Admin %s undid deletion job %s of user %s",
+                   current_user.id, job.id, user_id)
+    latest = _latest_purge_jobs().get(user_id)
+    return jsonify({"job": _purge_job_json(latest)}), 200
 
 
 @admin_bp.route("/users/<int:user_id>/toggle_spam", methods=["POST"])
@@ -965,6 +1191,13 @@ def create_poll():
     supported = current_app.config.get("SUPPORTED_MODELS", {})
     if model_id not in supported:
         return jsonify({"error": f"Unsupported model: {model_id}"}), 400
+    # A poll drafts answers the way a reply does: only a chat model, the
+    # rule every chat picker and reply route applies (is_chat_model).
+    from backend.utils.llm_nodes import is_chat_model
+    if not is_chat_model(model_id):
+        why = ("deprecated" if supported[model_id].get("deprecated")
+               else "for Read only")
+        return jsonify({"error": f"{model_id} is {why}"}), 400
     data_source = data.get("data_source") or "derived"
     if data_source not in Poll.DATA_SOURCES:
         return jsonify({"error": f"Invalid data_source. Allowed: "

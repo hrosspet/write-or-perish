@@ -8,8 +8,10 @@ rename; ``former_handle_owner`` is the reservation the username-issuing
 paths check. Handles are matched case-insensitively throughout, like the
 uniqueness ``validate_username`` enforces.
 """
+from datetime import datetime
+
 from backend.extensions import db
-from backend.models import Node, User, UsernameHistory
+from backend.models import Node, ReleasedUsername, User, UsernameHistory
 
 
 def _key(username):
@@ -22,6 +24,16 @@ def former_handle_owner(username):
     take back and nobody else's to claim."""
     row = UsernameHistory.query.filter_by(old_username=_key(username)).first()
     return row.user if row else None
+
+
+def released_recently(username):
+    """True while *username* is held back after its account was deleted
+    (#269, ReleasedUsername): nobody may take a deleted account's handle,
+    current or former, until its reservation ends."""
+    return ReleasedUsername.query.filter(
+        ReleasedUsername.username == _key(username),
+        ReleasedUsername.reserved_until > datetime.utcnow(),
+    ).first() is not None
 
 
 def resolve_public_handle(username):
@@ -52,7 +64,10 @@ def resolve_public_handle(username):
     if user is None:
         user = former_handle_owner(username)
         moved = "former" if user is not None else False
-    if user is None or not user.public_sharing_enabled:
+    # A deleted account in its grace period (#269) is hidden: 404 like a
+    # handle nobody holds.
+    if (user is None or not user.public_sharing_enabled
+            or user.deleted_at is not None):
         return None, False
     return user, moved
 

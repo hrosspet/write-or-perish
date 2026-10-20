@@ -6,7 +6,8 @@ import httpx
 import pytest
 
 from backend.tests.test_retrieval_loop import (  # noqa: F401 (fixture)
-    _FakeSelf, _build_chain, _db, _fresh, _llm_task_mod, _resp, app)
+    _FakeSelf, _build_chain, _db, _fresh, _llm_task_mod, _resp, app,
+    real_providers)
 from backend.models import APICostLog, Draft, TTSChunk
 from backend.utils import llm_stream, tts_stream
 from backend.utils.llm_stream import CUT_OFF_NOTE
@@ -122,6 +123,23 @@ def test_failure_after_text_completes_as_cut_off(live):
     # The call never completed: no usage to log.
     assert APICostLog.query.filter_by(
         request_type="conversation").count() == 0
+
+
+def test_account_failure_after_text_says_why_not_ask_again(
+        live, real_providers):  # noqa: F811
+    # Asking again won't get the rest of a reply cut off for an account
+    # reason (#369): the note (also spoken in voice) gives the user's
+    # message instead.
+    alice, _, user_node, llm_node = _build_chain("textmode")
+    err = real_providers.ProviderAccountError("Anthropic", "usage_cap", "m")
+    _LiveProvider.reset([(["Half a rep", err], None)])
+    _run(user_node, llm_node, alice)
+    node = _fresh(llm_node.id)
+    assert node.llm_task_status == "completed"
+    assert node.get_content() == (
+        "Half a rep\n\n*(The reply was cut off here. AI replies are "
+        "temporarily unavailable. This is a problem on Loore's side, not "
+        "yours, and it has been reported.)*")
 
 
 def test_non_provider_error_after_text_still_fails(live):

@@ -66,11 +66,12 @@ jest.mock('../contexts/ToastContext', () => ({
 }));
 
 const mockPost = jest.fn();
+const mockGet = jest.fn();
 jest.mock('../api', () => ({
   __esModule: true,
   default: {
     post: (...args) => mockPost(...args),
-    get: () => new Promise(() => {}),
+    get: (...args) => mockGet(...args),
   },
 }));
 
@@ -90,6 +91,9 @@ beforeEach(() => {
   mockStopRecording.mockClear();
   mockSse.resets = 0;
   mockPost.mockReset();
+  // A status check that never answers, unless a test says otherwise.
+  mockGet.mockReset();
+  mockGet.mockImplementation(() => new Promise(() => {}));
   mockPost.mockImplementation((url) => {
     if (url === '/drafts/streaming/init') {
       return Promise.resolve({ data: { draft_id: 7, session_id: 's1' } });
@@ -255,5 +259,222 @@ describe('releasing the session when the tab leaves (#320)', () => {
     act(() => { window.dispatchEvent(new Event('pagehide')); });
 
     expect(mockPost).toHaveBeenCalledWith('/drafts/streaming/s1/release');
+  });
+});
+
+// #374: while finalizing (stop pressed, transcript not back yet) the hook
+// polls the status endpoint, because iOS can kill the SSE stream without an
+// error event. A return to the page checks at once. One return can fire
+// several events and the 5 s timer can overlap it, so only one check runs at
+// a time and onComplete runs once per recording.
+describe('finalizing poll on a return to the page (#374)', () => {
+  let visibility = 'visible';
+  beforeAll(() => {
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      get: () => visibility,
+    });
+  });
+
+  const statusUrl = '/drafts/streaming/s1/status';
+  const statusCalls = () => mockGet.mock.calls.filter(([u]) => u === statusUrl);
+
+  const becomeVisible = () => {
+    visibility = 'visible';
+    document.dispatchEvent(new Event('visibilitychange'));
+  };
+  const pageShow = (persisted) => {
+    const event = new Event('pageshow');
+    Object.defineProperty(event, 'persisted', { value: persisted });
+    window.dispatchEvent(event);
+  };
+  const goOnline = () => window.dispatchEvent(new Event('online'));
+
+  // The status endpoint's answer, held back until the test releases it.
+  const deferredAnswer = () => {
+    let resolve;
+    const promise = new Promise((res) => { resolve = res; });
+    return { promise, resolve };
+  };
+  const completedAnswer = (content = 'whole thought') => ({
+    data: { streaming_status: 'completed', content, llm_node_id: 42 },
+  });
+  const processingAnswer = () => ({ data: { streaming_status: 'finalizing' } });
+
+  // Let the awaited api.get callbacks run.
+  const settle = async () => {
+    await act(async () => {
+      for (let i = 0; i < 5; i += 1) await Promise.resolve();
+    });
+  };
+
+  async function startFinalizing(options = {}) {
+    const hook = await startRecording(options);
+    await act(async () => { await hook.result.current.stopStreaming(); });
+    expect(hook.result.current.sessionState).toBe('finalizing');
+    return hook;
+  }
+
+  beforeEach(() => {
+    visibility = 'visible';
+    jest.spyOn(console, 'log').mockImplementation(() => {});
+    jest.spyOn(console, 'error').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    jest.useRealTimers();
+    console.log.mockRestore();
+    console.error.mockRestore();
+  });
+
+  test('being shown again, a cache restore and going online each check at once', async () => {
+    mockGet.mockImplementation(() => Promise.resolve(processingAnswer()));
+    await startFinalizing();
+    // Nothing yet: the first timed check is 5 s away.
+    expect(statusCalls()).toHaveLength(0);
+
+    act(() => becomeVisible());
+    await settle();
+    expect(statusCalls()).toHaveLength(1);
+
+    act(() => pageShow(true));
+    await settle();
+    expect(statusCalls()).toHaveLength(2);
+
+    act(() => goOnline());
+    await settle();
+    expect(statusCalls()).toHaveLength(3);
+  });
+
+  test("a first load's pageshow and a hidden visibilitychange do not check", async () => {
+    await startFinalizing();
+
+    act(() => pageShow(false));
+    act(() => {
+      visibility = 'hidden';
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    await settle();
+
+    expect(statusCalls()).toHaveLength(0);
+  });
+
+  test('a completed answer on return completes the recording', async () => {
+    const onComplete = jest.fn();
+    mockGet.mockImplementation(() => Promise.resolve(completedAnswer()));
+    const { result } = await startFinalizing({ onComplete });
+
+    act(() => pageShow(true));
+    await settle();
+
+    expect(onComplete).toHaveBeenCalledTimes(1);
+    expect(onComplete.mock.calls[0][0]).toMatchObject({
+      sessionId: 's1', content: 'whole thought', llmNodeId: 42,
+    });
+    expect(result.current.sessionState).toBe('complete');
+  });
+
+  test('two events from one return run one check and call onComplete once', async () => {
+    const onComplete = jest.fn();
+    const answer = deferredAnswer();
+    mockGet.mockImplementation(() => answer.promise);
+    const { result } = await startFinalizing({ onComplete });
+
+    // A back/forward-cache restore: visibilitychange, then pageshow.
+    act(() => becomeVisible());
+    act(() => pageShow(true));
+    expect(statusCalls()).toHaveLength(1);
+
+    await act(async () => { answer.resolve(completedAnswer()); });
+    await settle();
+
+    expect(statusCalls()).toHaveLength(1);
+    expect(onComplete).toHaveBeenCalledTimes(1);
+    expect(result.current.sessionState).toBe('complete');
+  });
+
+  test('onComplete runs once even when later events land before the re-render', async () => {
+    const onComplete = jest.fn();
+    mockGet.mockImplementation(() => Promise.resolve(completedAnswer()));
+    await startFinalizing({ onComplete });
+
+    // All events and answers inside one act: the effect's cleanup
+    // (cancelled = true) cannot run between them.
+    await act(async () => {
+      becomeVisible();
+      pageShow(true);
+      goOnline();
+      for (let i = 0; i < 5; i += 1) await Promise.resolve();
+    });
+
+    expect(onComplete).toHaveBeenCalledTimes(1);
+  });
+
+  test("a return while the 5 s timer's check is in flight does not start a second one", async () => {
+    jest.useFakeTimers();
+    const onComplete = jest.fn();
+    const answer = deferredAnswer();
+    mockGet.mockImplementation(() => answer.promise);
+    await startFinalizing({ onComplete });
+
+    act(() => { jest.advanceTimersByTime(5000); });
+    expect(statusCalls()).toHaveLength(1);
+
+    act(() => goOnline());
+    expect(statusCalls()).toHaveLength(1);
+
+    await act(async () => { answer.resolve(completedAnswer()); });
+    await settle();
+    expect(onComplete).toHaveBeenCalledTimes(1);
+
+    // Finished: the timer is not re-armed.
+    act(() => { jest.advanceTimersByTime(20000); });
+    expect(statusCalls()).toHaveLength(1);
+  });
+
+  test('a check that fails or is not completed does not block the next one', async () => {
+    jest.useFakeTimers();
+    const onComplete = jest.fn();
+    await startFinalizing({ onComplete });
+
+    mockGet.mockImplementationOnce(() => Promise.reject(new Error('network')));
+    act(() => goOnline());
+    await settle();
+    expect(statusCalls()).toHaveLength(1);
+
+    mockGet.mockImplementationOnce(() => Promise.resolve(processingAnswer()));
+    act(() => goOnline());
+    await settle();
+    expect(statusCalls()).toHaveLength(2);
+
+    // The 5 s timer was re-armed after the last unfinished check.
+    mockGet.mockImplementationOnce(() => Promise.resolve(completedAnswer()));
+    await act(async () => { jest.advanceTimersByTime(5000); });
+    await settle();
+    expect(statusCalls()).toHaveLength(3);
+    expect(onComplete).toHaveBeenCalledTimes(1);
+  });
+
+  test('the next recording completes again: the guards start cleared', async () => {
+    const onComplete = jest.fn();
+    mockGet.mockImplementation(() => Promise.resolve(completedAnswer('first')));
+    const { result } = await startFinalizing({ onComplete });
+    act(() => pageShow(true));
+    await settle();
+    expect(onComplete).toHaveBeenCalledTimes(1);
+    expect(result.current.sessionState).toBe('complete');
+
+    mockGet.mockImplementation(() => Promise.resolve(completedAnswer('second')));
+    await act(async () => { await result.current.startStreaming(); });
+    await act(async () => { await result.current.stopStreaming(); });
+    expect(result.current.sessionState).toBe('finalizing');
+
+    act(() => becomeVisible());
+    act(() => pageShow(true));
+    await settle();
+
+    expect(onComplete).toHaveBeenCalledTimes(2);
+    expect(onComplete.mock.calls[1][0].content).toBe('second');
+    expect(result.current.sessionState).toBe('complete');
   });
 });

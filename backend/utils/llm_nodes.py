@@ -6,14 +6,16 @@ from flask import current_app
 from backend.models import Node, User
 from backend.extensions import db
 from backend.utils.placeholders import (
-    CA_TWEETS_PATTERN, check_ca_tweets_access, check_user_export_plan,
-    validate_ca_tweets_placeholders, validate_user_export_placeholders,
+    CA_TWEETS_PATTERN, check_ca_tweets_access, check_ca_tweets_options,
+    check_user_export_plan, validate_ca_tweets_placeholders,
+    validate_user_export_placeholders,
 )
 from backend.utils.ca_feed import (
     FEED_AI_USAGE, READ_FURTHER_MARKER, READ_PROMPT_KEYS, ca_turn,
     read_reply_ids,
 )
 from backend.utils.privacy import AI_ALLOWED
+from backend.utils.client_platform import CLIENT_MARKER, request_client
 
 
 _MAX_ANCESTRY_HOPS = 1000
@@ -64,6 +66,39 @@ def ai_usage_refused_response(exc=None):
                     "scope": exc.scope}), 403
 
 
+# ── A read-only model never answers a chat turn (Peter, 2026-10-02) ──────
+# A model with "chat": False runs reads only. A reply that is not a read
+# and was asked for on one is refused, not moved to the chat default: the
+# chat default can be another provider, and "Changing providers is however
+# never acceptable", not even as a fallback (Peter, 2026-10-02).
+READ_ONLY_MODEL_CODE = "model_read_only"
+
+
+class ReadOnlyModelRefused(Exception):
+    """A reply that is not a read was asked for on a read-only model.
+    HTTP callers answer 400 ``{"error", "code": "model_read_only",
+    "model"}`` (read_only_model_response; backend/__init__.py registers
+    the same answer for any route that lets it escape). Raised before
+    anything is written."""
+
+    code = READ_ONLY_MODEL_CODE
+
+    def __init__(self, model_id):
+        cfg = current_app.config.get("SUPPORTED_MODELS", {}).get(model_id) or {}
+        self.model_id = model_id
+        self.model_name = cfg.get("display_name") or model_id
+        self.message = (f"{self.model_name} is only for Read. Choose another "
+                        "model for replies.")
+        super().__init__(self.message)
+
+
+def read_only_model_response(exc):
+    """The 400 answer for a reply refused on a read-only model."""
+    from flask import jsonify
+    return jsonify({"error": exc.message, "code": exc.code,
+                    "model": exc.model_id}), 400
+
+
 def is_active_model(model_id):
     """A SUPPORTED_MODELS key that is not deprecated."""
     cfg = current_app.config.get("SUPPORTED_MODELS", {}).get(model_id)
@@ -76,13 +111,24 @@ def is_read_model(model_id):
     return cfg is not None and not cfg.get("deprecated") and bool(cfg.get("read"))
 
 
+def is_chat_model(model_id):
+    """An active model that anything other than a read may run on: a
+    reply, a Voice / Text mode turn, the account preference and the
+    background work it drives. ``"chat": False`` makes a model read only
+    (Peter, 2026-10-02); absent means True."""
+    if not is_active_model(model_id):
+        return False
+    cfg = current_app.config["SUPPORTED_MODELS"][model_id]
+    return bool(cfg.get("chat", True))
+
+
 def effective_preferred_model(user):
-    """The user's saved model while it is still offered, else None. A
-    preference for a model deprecated since has no effect anywhere: the
-    reply routes, the background tasks and the Account page all fall back
-    to DEFAULT_LLM_MODEL (#355)."""
+    """The user's saved model while it is still offered for chat, else
+    None. A preference for a model deprecated since, or read only, has no
+    effect anywhere: the reply routes, the background tasks and the
+    Account page all fall back to DEFAULT_LLM_MODEL (#355)."""
     pref = getattr(user, "preferred_model", None) if user is not None else None
-    return pref if pref and is_active_model(pref) else None
+    return pref if pref and is_chat_model(pref) else None
 
 
 def default_model_for(user):
@@ -154,13 +200,20 @@ class _Chain:
         """The nearest node a reply for *user_id* would send to the model
         whose ai_usage keeps AI out, else None. The walk is the completion
         task's (_load_node_chain): up from the node while *user_id* can
-        see it or its tombstone. A deleted node is passed over: the task
-        sends a notice in its place, never its text."""
-        from backend.utils.privacy import can_user_see_node_or_tombstone
-        for n in self.nodes:
-            if not can_user_see_node_or_tombstone(n, user_id):
+        see it or its placeholder. A deleted node, or one hidden with its
+        owner's deleted account (#269), is passed over: the task sends a
+        notice in its place, never its text."""
+        from backend.utils.privacy import (
+            can_user_see_node_or_placeholder, can_user_see_node_or_tombstone,
+            shown_as_deleted,
+        )
+        for i, n in enumerate(self.nodes):
+            seen = (can_user_see_node_or_tombstone if i == 0
+                    else can_user_see_node_or_placeholder)
+            if not seen(n, user_id):
                 return None
-            if n.deleted_at is None and n.ai_usage not in AI_ALLOWED:
+            if (not shown_as_deleted(n, user_id)
+                    and n.ai_usage not in AI_ALLOWED):
                 return n
         return None
 
@@ -179,12 +232,13 @@ def resolve_chat_model(parent_node, user, chain=None):
       1. ("predecessor") the closest ancestor LLM reply's ``llm_model``,
          skipping reads: a read runs on a read model (Luna), and that
          must not become the default for the conversation around it.
-      2. ("user_preference") ``user.preferred_model`` (active).
+      2. ("user_preference") ``user.preferred_model`` (active, chat).
       3. ("default") ``DEFAULT_LLM_MODEL`` from the Flask config / env.
 
-    If the closest non-read LLM ancestor is recognized but no longer
-    usable (deprecated, or the historical ``gpt-4.5-preview`` legacy id),
-    the walk stops there and falls through to ``user.preferred_model``.
+    If the closest non-read LLM ancestor is recognized but not usable for
+    chat (deprecated, read only, or the historical ``gpt-4.5-preview``
+    legacy id), the walk stops there and falls through to
+    ``user.preferred_model``.
     Walking past it to find an even older active model would silently
     override the user's current account preference. Truly-unknown
     ancestors keep walking — they're typically placeholder rows from data
@@ -195,7 +249,7 @@ def resolve_chat_model(parent_node, user, chain=None):
     for node in chain.llm_replies():
         if node.id in chain.reads:
             continue
-        if is_active_model(node.llm_model):
+        if is_chat_model(node.llm_model):
             return node.llm_model, "predecessor"
         if node.llm_model in supported or node.llm_model == "gpt-4.5-preview":
             break
@@ -207,21 +261,84 @@ def resolve_chat_model(parent_node, user, chain=None):
             "default")
 
 
-def resolve_read_model(anchor_node, chain=None):
+def glean_provider(anchor_node, user, chain=None):
+    """The provider of a glean's DEFAULT model under *anchor_node* for
+    *user*: the provider of the user's own conversation there — the
+    closest chat reply in the thread that was made FOR this user (their
+    own AI reply: human owner == user), else their account model, else
+    the server default. Replies made for someone else (another user's AI
+    reply higher up a public thread) never count. The provider picks
+    which glean setting is the default (GLEAN_MODEL_ANTHROPIC /
+    GLEAN_MODEL_OPENAI); during Glean's testing both are GPT-5.6 Luna
+    (Peter, 2026-10-14). The user may pick another provider's model in
+    the Glean picker (glean.may_choose_glean_model)."""
+    from backend.utils.glean import model_provider
+    supported = current_app.config.get("SUPPORTED_MODELS", {})
+    chain = chain or _Chain(anchor_node)
+    user_id = getattr(user, "id", None)
+    for node in chain.llm_replies():
+        if node.id in chain.reads or user_id is None:
+            continue
+        if (node.human_owner_id or node.user_id) != user_id:
+            continue
+        if is_chat_model(node.llm_model):
+            return model_provider(node.llm_model)
+        if node.llm_model in supported:
+            break  # the user's own reply on a model no longer offered
+    return model_provider(
+        effective_preferred_model(user)
+        or current_app.config.get("DEFAULT_LLM_MODEL", "claude-opus-4.6"))
+
+
+def resolve_read_model(anchor_node, chain=None, user=None):
     """The model for a read under *anchor_node* (None for a fresh thread)
     when the request named none: the closest earlier read's model while it
-    is still a read model ("predecessor"), else READ_DEFAULT_MODEL
-    ("default"). Chat replies in between are skipped, so a conversation
-    held on Opus never carries into the next read. There is no per-user
-    read preference yet (#355)."""
+    is still a read model ("predecessor"), else the default. Chat replies
+    in between are skipped, so a conversation held on Opus never carries
+    into the next read. There is no per-user read preference (#355).
+
+    With *user* (every glean, #435; also the Glean picker's default) the
+    default follows the provider of the user's chat model
+    (glean_provider): an earlier read of the user's own in the thread on
+    that provider ("predecessor", so "glean again" keeps a model the user
+    picked there), else the glean model set for that provider
+    (GLEAN_MODEL_ANTHROPIC / GLEAN_MODEL_OPENAI, "provider_default").
+    During Glean's testing both settings are GPT-5.6 Luna, so an
+    Anthropic user's default is an OpenAI model (Peter, 2026-10-14); the
+    per-provider settings remain for later. Only a user who may choose
+    the model (glean.may_choose_glean_model) gets the predecessor; anyone
+    else always the provider's glean model. Raises GleanModelUnavailable
+    when the provider can't be resolved or has no glean model: never
+    READ_DEFAULT_MODEL in its place. Without a user, READ_DEFAULT_MODEL
+    ("default")."""
+    from backend.utils.glean import (
+        GleanModelUnavailable, glean_model_for_provider,
+        may_choose_glean_model, model_provider,
+    )
     chain = chain or _Chain(anchor_node)
-    for node in chain.llm_replies():
-        if node.id not in chain.reads:
-            continue
-        if is_read_model(node.llm_model):
-            return node.llm_model, "predecessor"
-        break
-    return current_app.config["READ_DEFAULT_MODEL"], "default"
+    if user is None:
+        for node in chain.llm_replies():
+            if node.id not in chain.reads:
+                continue
+            if is_read_model(node.llm_model):
+                return node.llm_model, "predecessor"
+            break
+        return current_app.config["READ_DEFAULT_MODEL"], "default"
+    provider = glean_provider(anchor_node, user, chain=chain)
+    if not provider:
+        raise GleanModelUnavailable(provider)
+    if may_choose_glean_model(user):
+        for node in chain.llm_replies():
+            # The user's own earlier read only: a read made for someone
+            # else higher up a public thread is not their choice.
+            if (node.id not in chain.reads
+                    or (node.human_owner_id or node.user_id) != user.id):
+                continue
+            if (is_read_model(node.llm_model)
+                    and model_provider(node.llm_model) == provider):
+                return node.llm_model, "predecessor"
+            break
+    return glean_model_for_provider(provider), "provider_default"
 
 
 def pick_model_for_generation(parent_node, user):
@@ -254,6 +371,25 @@ def reply_read_turn(parent, meta=None, parent_content=None, chain=None):
                     for m in (meta or ()))
     return ca_turn(list(reversed(chain.nodes)), ca_node, chain.nodes[0],
                    chain.rendered, requested=requested)
+
+
+def read_only_model_refusal(model_id, parent_node=None, new_entry=False):
+    """Why a reply may not run on *model_id* (a ReadOnlyModelRefused), or
+    None: the check create_llm_placeholder makes, for the routes that
+    write the user's entry before they ask for the placeholder, so they
+    can refuse before anything is written. *parent_node* is where the
+    route writes (None: a new thread). With *new_entry* the reply answers
+    a new entry the route adds under *parent_node*: still a read while no
+    read reply has answered the prompt, a chat turn after one. A model
+    that is not active at all is left to create_llm_placeholder."""
+    if is_chat_model(model_id) or not is_active_model(model_id):
+        return None
+    turn = reply_read_turn(parent_node)
+    if new_entry and turn == "read_again":
+        turn = "chat"
+    if turn in ("read", "read_again"):
+        return None
+    return ReadOnlyModelRefused(model_id)
 
 
 def reply_ai_usage(parent_node, user, chain=None, parent_content=None):
@@ -340,16 +476,69 @@ def voice_turn_refusal(user, parent_node=None, ai_usage=None):
     return None
 
 
+def _read_turn_model(parent, owner, model_id, chain):
+    """The model a read turn under *parent* runs on (#435): the read model
+    the request named, when the owner may choose it (an admin or anyone
+    who gleans, glean.may_choose_glean_model; any read model, another
+    provider's too: the user's own choice); otherwise, or when the named
+    model is not a read model, the default, resolve_read_model for the
+    owner — the glean model set for their provider."""
+    from backend.utils.glean import may_choose_glean_model, model_provider
+    # The choice holds only for a reply of the owner's own under a node of
+    # their own: nobody picks a model for someone else's thread.
+    owns_parent = owner is not None and (
+        (parent.human_owner_id or parent.user_id) == owner.id)
+    if (owns_parent and is_read_model(model_id)
+            and may_choose_glean_model(owner)):
+        return model_id
+    new_model_id = resolve_read_model(parent, chain=chain, user=owner)[0]
+    if new_model_id != model_id:
+        current_app.logger.info(
+            "Reply under node %s is a read: model %s -> %s (provider %s)",
+            parent.id, model_id, new_model_id, model_provider(new_model_id))
+    return new_model_id
+
+
+def _with_read_marker(meta, is_read_turn, live):
+    """*meta* as a list, with the read turn's marker added: READ_LIVE_MARKER
+    for a glean (always a live call, #435), READ_BATCH_MARKER for the
+    admin's batch experiments (*live* False). Nothing for a reply that
+    is not a read."""
+    from backend.utils.glean import READ_BATCH_MARKER, READ_LIVE_MARKER
+    meta = list(meta or [])
+    if not is_read_turn:
+        return meta
+    marker = READ_LIVE_MARKER if live else READ_BATCH_MARKER
+    if not any(isinstance(m, dict) and m.get("name") == marker for m in meta):
+        meta.append({"name": marker})
+    return meta
+
+
 def create_llm_placeholder(parent_node_id, model_id, human_owner_id,
                            privacy_level="private", ai_usage="chat",
                            placeholder_text="[LLM response generation pending...]",
-                           enqueue=True, source_mode=None, meta=None):
+                           enqueue=True, source_mode=None, meta=None,
+                           client=None, read_live=True):
     """Create an LLM placeholder node, optionally enqueue generation task.
 
     Returns (llm_node, task_id) -- task_id is None if enqueue=False.
     *meta* seeds the node's tool_calls_meta (a list of entries) in the
     same commit that creates it, so a marker the task reads (the read
     thread's "_read", routes/read.py) is there before the task can start.
+
+    A reply that is a read (a glean, #435) is a live call: the task sends
+    a read through the Batch API only when *read_live* is False (the
+    admin's /read/start experiments), which marks it READ_BATCH_MARKER; a
+    glean gets READ_LIVE_MARKER, which the pages show as "Gleaning". It
+    runs on the read model the owner named when they may choose
+    one (an admin or anyone who gleans; another provider's too), else on
+    the glean model set for their provider (_read_turn_model).
+
+    *client* ('ios' / 'web', utils/client_platform) is the app the user
+    is talking from. It defaults to the current request's; a caller with
+    no request (the Voice finalize task) passes the one its request
+    recorded. A known client is stamped on the node (CLIENT_MARKER): a
+    GitHub issue the turn files gets it as its platform label.
 
     Raises UserExportValidationError if the parent node's content
     contains a {user_export} placeholder with unrecognized param keys.
@@ -359,6 +548,9 @@ def create_llm_placeholder(parent_node_id, model_id, human_owner_id,
     Raises AIUsageRefused, also before any write, when a node the reply
     would send to the model, or the reply's own *ai_usage*, is not
     AI-readable (reply_refusal).
+
+    Raises ReadOnlyModelRefused, also before any write, when a reply that
+    is not a read asks for a read-only model ("chat": False).
     """
     # Spend-cap guard: a blocked user must never get an LLM placeholder node
     # (and never incur generation spend). Raised before any DB write so no
@@ -395,6 +587,18 @@ def create_llm_placeholder(parent_node_id, model_id, human_owner_id,
     validate_user_export_placeholders(
         parent_content, user_id=human_owner_id,
     )
+    owner = User.query.get(human_owner_id)
+    # {ca_tweets} in the parent: a glean's own read prompt for a user who
+    # gleans, anything for an admin (#435). Then its options: only admins
+    # may change the window or scope (check_ca_tweets_options), checked
+    # before the admin's range so a non-admin is told the rule that
+    # applies to them. The completion task checks the placeholder it
+    # runs again, wherever in the thread it sits.
+    from backend.utils.glean import is_glean_prompt_node
+    check_ca_tweets_access(
+        parent_content, owner,
+        from_read_prompt=is_glean_prompt_node(parent, owner))
+    check_ca_tweets_options(parent_content, owner)
     validate_ca_tweets_placeholders(
         parent_content, user_id=human_owner_id,
     )
@@ -404,13 +608,11 @@ def create_llm_placeholder(parent_node_id, model_id, human_owner_id,
     # the same rule inside generate_llm_response, where the chain is
     # already decrypted (re-decrypting every ancestor here would add a
     # KMS unwrap per node per turn).
-    owner = User.query.get(human_owner_id)
     check_user_export_plan(
         parent_content,
         unrestricted_allowed=bool(owner and owner.has_unrestricted_export),
         user_id=human_owner_id,
     )
-    check_ca_tweets_access(parent_content, owner)
 
     # The model the reply will actually run on (#355). A read runs only on
     # a read model: the read routes validate the one they are given, and
@@ -418,17 +620,23 @@ def create_llm_placeholder(parent_node_id, model_id, human_owner_id,
     # read prompt or read reply from a picker that offers every model, an
     # auto-generated reply under a note typed below the prompt) by the
     # task's own rule (ca_feed.ca_turn). Any other reply never runs on a
-    # deprecated model: one sent explicitly (a preference saved before the
-    # deprecation, an old tab) is replaced by the chat default.
+    # deprecated or read-only model. A read-only one (an old tab, a client
+    # whose picker does not filter on "chat", a direct call) is refused
+    # with ReadOnlyModelRefused, before any write: moving the reply to the
+    # chat default could move it to another provider, which is never
+    # acceptable (Peter, 2026-10-02). A deprecated one (a preference saved
+    # before the deprecation) is still replaced by the chat default (#355).
+    # This is the one place that knows the turn, so the routes that only
+    # check that the model exists stay right for a read turn they carry;
+    # routes that write the user's entry first ask read_only_model_refusal
+    # before writing.
     turn = reply_read_turn(parent, meta, parent_content, chain=chain)
-    if turn in ("read", "read_again"):
-        if not is_read_model(model_id):
-            new_model_id = resolve_read_model(parent, chain=chain)[0]
-            current_app.logger.info(
-                "Reply under node %s is a read: model %s -> %s",
-                parent.id, model_id, new_model_id)
-            model_id = new_model_id
-    elif not is_active_model(model_id):
+    is_read_turn = turn in ("read", "read_again")
+    if is_read_turn:
+        model_id = _read_turn_model(parent, owner, model_id, chain)
+    elif is_active_model(model_id) and not is_chat_model(model_id):
+        raise ReadOnlyModelRefused(model_id)
+    elif not is_chat_model(model_id):
         new_model_id = resolve_chat_model(parent, owner, chain=chain)[0]
         current_app.logger.info(
             "Reply under node %s: model %s is not offered -> %s",
@@ -464,8 +672,12 @@ def create_llm_placeholder(parent_node_id, model_id, human_owner_id,
         token_count=approximate_token_count(placeholder_text),
     )
     llm_node.set_content(placeholder_text)
+    meta = _with_read_marker(meta, is_read_turn, read_live)
+    client = client or request_client()
+    if client:
+        meta.append({"name": CLIENT_MARKER, "client": client})
     if meta:
-        llm_node.tool_calls_meta = json.dumps(list(meta))
+        llm_node.tool_calls_meta = json.dumps(meta)
     db.session.add(llm_node)
     db.session.commit()
 

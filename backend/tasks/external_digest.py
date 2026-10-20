@@ -20,7 +20,7 @@ beat collector saves the results — see sweep_external_digests /
 collect_external_digest_batches. The synchronous rebuild_external_digest
 task stays as the direct path (a future "rebuild now" button).
 """
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from celery.utils.log import get_task_logger
 from sqlalchemy import func
@@ -28,17 +28,23 @@ from sqlalchemy import func
 from backend.celery_app import celery, flask_app
 from backend.extensions import db
 from backend.models import (
-    APICostLog, ExternalDigestBatchJob, ExternalItem, User, UserArtifact,
+    APICostLog, BYLINE_SOURCES, ExternalDigestBatchJob, ExternalItem, User,
+    UserArtifact,
 )
-from backend.llm_providers import LLMProvider
+from backend.llm_providers import (
+    LLMProvider, ProviderAccountError, is_refused)
 from backend.utils.api_keys import get_api_keys_for_usage
 from backend.utils.cost import llm_cost_log_fields
+from backend.utils import refusal_backoff
 from backend.utils.refusal_backoff import REFUSED_REF
 from backend.utils.privacy import account_allows_ai
 from backend.utils.llm_batch import (
-    apply_batch_key_override, batch_check_and_collect, batch_submit,
+    BATCH_JOB_MAX_AGE, apply_batch_key_override, batch_check_and_collect,
+    batch_submit,
 )
 from backend.utils.timefmt import user_local_hour
+
+from backend.utils.hidden_rows import writing_on_hold
 
 logger = get_task_logger(__name__)
 
@@ -57,13 +63,9 @@ NIGHTLY_DIGEST_LOCAL_HOUR = 4
 # Output cap for a digest request. Real digests run ~2k tokens; this is
 # headroom, matching the direct path's provider default.
 DIGEST_MAX_TOKENS = 10000
-# Backstop for a batch we can no longer READ (lost batch id, revoked
-# key): once it is older than this, the job is marked abandoned so its
-# users, still stale, are resubmitted by the next sweep. A slow batch
-# never needs this — both providers end a batch themselves at 24h
-# (OpenAI `expired`, Anthropic `ended` with expired items) and the
-# collector treats that as ended. So: the 24h window plus polling slack.
-BATCH_JOB_MAX_AGE = timedelta(hours=25)
+# BATCH_JOB_MAX_AGE (utils/llm_batch, 25h = the providers' 24h window plus
+# polling slack): a batch we can no longer read is abandoned after it, so
+# its users, still stale, are resubmitted by the next sweep.
 
 # Corpus caps for the digest prompt. Most recent items first; each item
 # rendered compactly. ~1500 items x ~300 chars ≈ 450k chars worst case,
@@ -161,7 +163,7 @@ def _render_digest_prompt(user_id):
         stamp = (item.posted_at.strftime("%Y-%m-%d")
                  if item.posted_at else "?")
         author = item.author_handle or item.source
-        if item.source != "web_clip":
+        if item.source not in BYLINE_SOURCES:
             author = f"@{author}"
         if item.title:
             snippet = f"{item.title} — {snippet}"[:ITEM_SNIPPET_CHARS]
@@ -194,14 +196,25 @@ def _log_empty_digest_cost(user_id, model_id, response, batch):
         user_id=user_id,
         model_id=model_id,
         request_type="external_digest",
-        request_ref=(REFUSED_REF if response.get("truncated") else None),
+        request_ref=(REFUSED_REF if (response.get("truncated")
+                                      or is_refused(response)) else None),
         **llm_cost_log_fields(model_id, response, batch=batch),
     ))
     logger.warning(
-        "External digest for user %s came back empty (model %s, "
+        "External digest for user %s not saved (model %s, refused=%s, "
         "truncated=%s, output_tokens=%s); nothing saved", user_id,
-        model_id, bool(response.get("truncated")),
+        model_id, is_refused(response), bool(response.get("truncated")),
         response.get("output_tokens"))
+    if is_refused(response) or response.get("truncated"):
+        # Second refusal in a row: the sweep stops submitting this user
+        # until a digest is saved (#470); report it.
+        db.session.flush()
+        n, until, stopped = refusal_backoff.digest_backoff_state(user_id)
+        if stopped:
+            refusal_backoff.report_stop(
+                user_id, "external digest", n, model_id, "external_digest",
+                cause=(refusal_backoff.REFUSED_CAUSE if is_refused(response)
+                       else refusal_backoff.CUT_OFF_CAUSE), until=until)
 
 
 def _save_digest(user, model_id, digest_text, response, corpus_at, batch):
@@ -221,6 +234,12 @@ def _save_digest(user, model_id, digest_text, response, corpus_at, batch):
         request_type="external_digest",
         **fields,
     ))
+    if writing_on_hold(user.id):
+        # "Delete all my writing" hid the references this digest reads
+        # while it was built (#268): the cost is logged, nothing saved.
+        logger.info("External digest for user %s not saved: writing on "
+                    "hold for deletion", user.id)
+        return None
     previous = UserArtifact.latest_for(user.id, DIGEST_KIND)
     artifact = UserArtifact(
         user_id=user.id,
@@ -352,6 +371,12 @@ def sweep_external_digests():
             user for user in User.query.filter(User.id.in_(stale_ids)).all()
             if user_local_hour(user) == NIGHTLY_DIGEST_LOCAL_HOUR
             and account_allows_ai(user)   # #346
+            and user.deleted_at is None   # hidden: account deleted (#269)
+            # Writing hidden for deletion, or being deleted (#268).
+            and not writing_on_hold(user.id)
+            # After a refused or cut-off digest: wait an hour, then one
+            # more try, then stop until a digest is saved (#368/#470).
+            and not refusal_backoff.digest_in_backoff(user.id)
         ]
         if not due:
             return {"status": "ok", "submitted": 0}
@@ -401,8 +426,12 @@ def _collect_digest_batches():
         for item in job.items:
             result = results.get(item["custom_id"])
             digest_text = ((result or {}).get("content") or "").strip()
+            if result and is_refused(result):
+                # The model refused (#470): its text is no digest.
+                digest_text = ""
             if result and not digest_text:
-                # Billed, but empty: record the cost, save nothing.
+                # Billed, but empty or refused: record the cost, save
+                # nothing.
                 _log_empty_digest_cost(
                     item["user_id"], item["model_id"], result, batch=True)
             user = User.query.get(item["user_id"]) if digest_text else None
@@ -449,6 +478,8 @@ def rebuild_external_digest(self, user_id, force=False):
             return {"status": "no_user"}
         if not account_allows_ai(user):   # #346
             return {"status": "ai_opt_out"}
+        if writing_on_hold(user_id):   # "Delete all my writing" (#268)
+            return {"status": "on_hold"}
         if not force and not digest_is_stale(user_id):
             return {"status": "not_stale"}
 
@@ -471,9 +502,15 @@ def rebuild_external_digest(self, user_id, force=False):
             logger.warning(
                 "External digest generation failed for user %s: %s",
                 user_id, exc)
+            # An account failure (#369) lasts until someone fixes the
+            # account: no retry; it is already reported.
+            if isinstance(exc, ProviderAccountError):
+                raise
             raise self.retry(exc=exc)
 
         digest_text = (response.get("content") or "").strip()
+        if is_refused(response):
+            digest_text = ""   # the model refused (#470): no digest
         if not digest_text:
             _log_empty_digest_cost(user_id, model_id, response, batch=False)
             db.session.commit()
@@ -482,6 +519,8 @@ def rebuild_external_digest(self, user_id, force=False):
         artifact = _save_digest(
             user, model_id, digest_text, response, corpus_at, batch=False)
         db.session.commit()
+        if artifact is None:
+            return {"status": "on_hold"}
         logger.info(
             "External digest rebuilt for user %s (%d items, model %s)",
             user_id, total, model_id)

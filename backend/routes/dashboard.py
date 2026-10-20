@@ -3,7 +3,8 @@ from datetime import datetime, timedelta, timezone
 from flask import Blueprint, jsonify, request, current_app
 from flask_login import login_required, current_user
 from sqlalchemy.exc import IntegrityError
-from backend.models import Node, User, UserProfile
+from backend.utils.hidden_rows import reclaim_description, shown_description
+from backend.models import User, UserProfile
 from backend.extensions import db
 from backend.utils.email import (
     is_valid_email, send_email_change_email, send_email_changed_notice,
@@ -14,14 +15,15 @@ from backend.utils.magic_link import (
     verify_email_change_token, hash_token,
 )
 from backend.utils.timefmt import iso_utc, is_valid_timezone
-from backend.utils.privacy import (
-    accessible_nodes_filter, VALID_PRIVACY_LEVELS, VALID_AI_USAGE,
-)
-from backend.utils.thread_tree import visible_child_counts
+from backend.utils.privacy import VALID_PRIVACY_LEVELS, VALID_AI_USAGE
 from backend.routes.terms import CURRENT_TERMS_VERSION
 from backend.utils.reserved_usernames import validate_username
 from backend.utils.spend import user_is_capped
-from backend.utils.llm_nodes import effective_preferred_model, is_active_model
+from backend.utils.llm_nodes import effective_preferred_model, is_chat_model
+from backend.utils.own_entries import has_own_entries
+from backend.utils.user_purge import deletion_status
+from backend.utils.account_deletion import account_deletion_info
+from backend.utils.glean import glean_user_fields
 
 logger = logging.getLogger(__name__)
 dashboard_bp = Blueprint("dashboard_bp", __name__)
@@ -62,184 +64,93 @@ def get_latest_profile(user):
     return None
 
 
-def _serialize_node_for_list(node, viewer_id=None, child_counts=None):
-    """Serialize a node for dashboard list views (Log has its own).
-
-    *viewer_id*: when another user is looking (the public dashboard), a
-    system prompt root's card shows its first child only if that child is
-    accessible to the viewer. *child_counts* (from visible_child_counts)
-    then gives the card's child_count, so it counts only children the
-    viewer can see; without it every child row counts."""
-    # If this is a system prompt root, skip to the first child
-    display_node = node
-    prompt_key = None
-    if node.is_system_prompt:
-        prompt_key = node.get_prompt_key()
-        children = Node.query.filter(Node.parent_id == node.id)
-        if viewer_id is not None:
-            children = children.filter(accessible_nodes_filter(Node, viewer_id))
-        first_child = children.order_by(Node.created_at.asc()).first()
-        if first_child:
-            display_node = first_child
-
-    content = display_node.get_content()
-    preview = content[:200] + ("..." if len(content) > 200 else "")
-
-    # Determine human owner username for LLM nodes
-    human_owner_username = None
-    if display_node.node_type == "llm" and display_node.human_owner_id:
-        human_owner = User.query.get(display_node.human_owner_id)
-        if human_owner:
-            human_owner_username = human_owner.username
-
+def _serialize_current_user():
+    """The signed-in user as the client holds it. GET /dashboard/ and
+    PUT /dashboard/user both answer with this: the client replaces its
+    whole user with either reply, so a field only one of them carried
+    would vanish from the page after the other (the Account page lost
+    its deletion state after any settings change)."""
+    voice_mode_enabled = current_user.has_voice_mode
     return {
-        "id": display_node.id,
-        "preview": preview,
-        "node_type": display_node.node_type,
-        "child_count": (len(node.children) if child_counts is None
-                        else child_counts.get(node.id, 0)),
-        "created_at": iso_utc(display_node.created_at),
-        "pinned_at": iso_utc(node.pinned_at),
-        "username": node.user.username if node.user else "Unknown",
-        "human_owner_username": human_owner_username,
-        "llm_model": display_node.llm_model,
-        "origin": display_node.origin,
-        "has_original_audio": bool(display_node.audio_original_url or display_node.streaming_transcription),
-        "prompt_key": prompt_key,
+        "id": current_user.id,
+        "username": current_user.username,
+        "description": shown_description(current_user),
+        "accepted_terms_at": iso_utc(current_user.accepted_terms_at),
+        "terms_up_to_date": _terms_up_to_date(current_user),
+        "approved": current_user.approved,
+        "email": current_user.email,
+        "is_admin": current_user.is_admin,
+        "plan": current_user.plan,
+        "voice_mode_enabled": voice_mode_enabled,
+        "craft_mode": current_user.craft_mode,
+        "preferred_model": effective_preferred_model(current_user),
+        "profile_generation_task_id": current_user.profile_generation_task_id,
+        # Batch-pipeline builds set no task id (#258); the watcher starts
+        # polling /export/profile-progress on either flag.
+        "profile_batch_pending": bool(current_user.profile_batch_pending),
+        "default_privacy_level": current_user.default_privacy_level,
+        "default_ai_usage": current_user.default_ai_usage,
+        "twitter_login": bool(current_user.twitter_id),
+        "twitter_handle": current_user.twitter_handle,
+        "pending_email": current_user.pending_email,
+        "pending_email_expired": _pending_email_expired(current_user),
+        "prefill_consent": current_user.prefill_consent,
+        "prefilled_handle": current_user.prefilled_handle,
+        # False until the user has written an entry in Loore (imports
+        # and LLM replies don't count): the homepage, Voice and Text
+        # screens ask the welcome question until then (#391).
+        "has_own_entries": has_own_entries(current_user.id),
+        "timezone": current_user.timezone or "UTC",
+        # Lets the client block cost actions (e.g. starting a long voice
+        # recording) up front instead of after the fact (issue #85).
+        "spend_blocked": user_is_capped(current_user),
+        # Public side (#228): enabled = deployed (env) AND the user's
+        # own opt-in — every frontend surface keys off this. available
+        # = deployed only; it decides whether Account shows the toggle.
+        "share_v1_enabled": bool(
+            current_app.config.get("SHARE_V1", False)
+            and current_user.public_sharing_enabled),
+        "share_v1_available": bool(
+            current_app.config.get("SHARE_V1", False)),
+        "public_sharing_enabled": bool(
+            current_user.public_sharing_enabled),
+        # Saved external references (#208/#329): available = the env
+        # killswitch is on (decides whether Account shows the toggle);
+        # enabled = the user's own opt-in. Own-archive search is on for
+        # everyone under the same killswitch and has no toggle.
+        "external_content_available": bool(
+            current_app.config.get("SEMANTIC_SEARCH_AGENTIC", True)),
+        "external_content_enabled": bool(
+            current_user.external_content_enabled),
+        # Glean (#435): available = inside the rollout gate (Account
+        # shows the switch); enabled = the switch's effective value,
+        # which every Glean card and button keys off.
+        **glean_user_fields(current_user),
+        # "Delete all my writing" (#268): a scheduled deletion shows
+        # its date and a way to cancel on every page.
+        "data_deletion": deletion_status(current_user.id),
+        # "Delete my account" (#269): the numbers the Account page
+        # states, and why the account cannot be deleted, if it can't.
+        "account_deletion": account_deletion_info(current_user),
     }
 
 
-# Dashboard endpoint: only return top-level nodes (nodes with no parent)
+# The signed-in user's own dashboard: who they are, and their newest profile
+# version. Both clients call it on every app load (web UserContext, iPhone
+# AppState) and read only `user`: they send ?profile=0, which leaves out
+# `latest_profile`, so an app load decrypts nothing. The Profile page calls
+# without it and reads `latest_profile` (older iPhone builds call without it
+# everywhere, so the profile stays the default). It lists no thread cards:
+# no client showed them, and each card's preview was one decryption per call
+# (#481). The Log (GET /api/log) lists the threads.
 @dashboard_bp.route("/", methods=["GET"])
 @login_required
 def get_dashboard():
-    page = request.args.get("page", 1, type=int)
-    per_page = request.args.get("per_page", 20, type=int)
-    per_page = min(per_page, 100)
-
-    # Pinned nodes for this user (separate from pagination)
-    pinned_nodes = Node.query.filter(
-        Node.pinned_by == current_user.id,
-        Node.pinned_at.isnot(None)
-    ).order_by(Node.pinned_at.desc()).all()
-    pinned_list = [_serialize_node_for_list(n) for n in pinned_nodes]
-
-    query = Node.query.filter_by(user_id=current_user.id, parent_id=None).order_by(Node.created_at.desc())
-    pagination = query.paginate(page=page, per_page=per_page, error_out=False)
-
-    nodes_list = [_serialize_node_for_list(node) for node in pagination.items]
-    # Determine if Voice Mode is enabled for this user (admin or paid plan)
-    voice_mode_enabled = current_user.has_voice_mode
     dashboard = {
-        "user": {
-            "id": current_user.id,
-            "username": current_user.username,
-            "description": current_user.description,
-            "accepted_terms_at": iso_utc(current_user.accepted_terms_at),
-            "terms_up_to_date": _terms_up_to_date(current_user),
-            "approved": current_user.approved,
-            "email": current_user.email,
-            "is_admin": current_user.is_admin,
-            "plan": current_user.plan,
-            "voice_mode_enabled": voice_mode_enabled,
-            "craft_mode": current_user.craft_mode,
-            "preferred_model": effective_preferred_model(current_user),
-            "profile_generation_task_id": current_user.profile_generation_task_id,
-            # Batch-pipeline builds set no task id (#258); the watcher starts
-            # polling /export/profile-progress on either flag.
-            "profile_batch_pending": bool(current_user.profile_batch_pending),
-            "default_privacy_level": current_user.default_privacy_level,
-            "default_ai_usage": current_user.default_ai_usage,
-            "twitter_login": bool(current_user.twitter_id),
-            "twitter_handle": current_user.twitter_handle,
-            "pending_email": current_user.pending_email,
-            "pending_email_expired": _pending_email_expired(current_user),
-            "prefill_consent": current_user.prefill_consent,
-            "prefilled_handle": current_user.prefilled_handle,
-            "timezone": current_user.timezone or "UTC",
-            # Lets the client block cost actions (e.g. starting a long voice
-            # recording) up front instead of after the fact (issue #85).
-            "spend_blocked": user_is_capped(current_user),
-            # Public side (#228): enabled = deployed (env) AND the user's
-            # own opt-in — every frontend surface keys off this. available
-            # = deployed only; it decides whether Account shows the toggle.
-            "share_v1_enabled": bool(
-                current_app.config.get("SHARE_V1", False)
-                and current_user.public_sharing_enabled),
-            "share_v1_available": bool(
-                current_app.config.get("SHARE_V1", False)),
-            "public_sharing_enabled": bool(
-                current_user.public_sharing_enabled),
-            # Saved external references (#208/#329): available = the env
-            # killswitch is on (decides whether Account shows the toggle);
-            # enabled = the user's own opt-in. Own-archive search is on for
-            # everyone under the same killswitch and has no toggle.
-            "external_content_available": bool(
-                current_app.config.get("SEMANTIC_SEARCH_AGENTIC", True)),
-            "external_content_enabled": bool(
-                current_user.external_content_enabled),
-        },
-        "pinned_nodes": pinned_list,
-        "nodes": nodes_list,
-        "has_more": pagination.has_next,
-        "page": page,
-        "total_nodes": pagination.total,
-        "latest_profile": get_latest_profile(current_user)
+        "user": _serialize_current_user(),
     }
-    return jsonify(dashboard), 200
-
-
-# Public view of any user's dashboard; no private stats provided.
-@dashboard_bp.route("/<string:username>", methods=["GET"])
-@login_required
-def get_public_dashboard(username):
-    # Lookup the user by their (unique) handle (username).
-    user = User.query.filter_by(username=username).first_or_404()
-
-    page = request.args.get("page", 1, type=int)
-    per_page = request.args.get("per_page", 20, type=int)
-    per_page = min(per_page, 100)
-
-    # Pinned nodes for this user (filtered by accessibility)
-    pinned_nodes = Node.query.filter(
-        Node.pinned_by == user.id,
-        Node.pinned_at.isnot(None),
-        accessible_nodes_filter(Node, current_user.id)
-    ).order_by(Node.pinned_at.desc()).all()
-    pinned_counts = visible_child_counts(
-        [n.id for n in pinned_nodes], current_user.id)
-    pinned_list = [_serialize_node_for_list(n, current_user.id,
-                                            pinned_counts)
-                   for n in pinned_nodes]
-
-    query = Node.query.filter(
-        Node.user_id == user.id,
-        Node.parent_id.is_(None),
-        accessible_nodes_filter(Node, current_user.id)
-    ).order_by(Node.created_at.desc())
-    pagination = query.paginate(page=page, per_page=per_page, error_out=False)
-
-    counts = visible_child_counts(
-        [n.id for n in pagination.items], current_user.id)
-    nodes_list = [_serialize_node_for_list(node, current_user.id, counts)
-                  for node in pagination.items]
-
-    dashboard = {
-        "user": {
-            "id": user.id,
-            "username": user.username,
-            "description": user.description
-        },
-        "pinned_nodes": pinned_list,
-        "nodes": nodes_list,
-        "has_more": pagination.has_next,
-        "page": page,
-        "total_nodes": pagination.total,
-        # The AI-written profile is private to its owner: no public page
-        # shows it, and other users get null here.
-        "latest_profile": (get_latest_profile(user)
-                           if user.id == current_user.id else None),
-    }
+    if request.args.get("profile") != "0":
+        dashboard["latest_profile"] = get_latest_profile(current_user)
     return jsonify(dashboard), 200
 
 
@@ -509,7 +420,11 @@ def update_user():
         current_user.username = new_username
 
     if new_description is not None:
-        current_user.description = new_description
+        if new_description != shown_description(current_user):
+            # A description written while "Delete all my writing" hides
+            # the old one is the user's and stays after the purge (#268).
+            reclaim_description(current_user.id)
+            current_user.description = new_description
 
     if "craft_mode" in data:
         current_user.craft_mode = bool(data["craft_mode"])
@@ -525,9 +440,16 @@ def update_user():
         current_user.external_content_enabled = bool(
             data["external_content_enabled"])
 
+    # The user's own Glean switch (#435): an explicit choice, which wins
+    # over the default from their X / Community Archive data.
+    if "glean_enabled" in data:
+        current_user.glean_enabled = bool(data["glean_enabled"])
+
     if "preferred_model" in data:
         model_id = data["preferred_model"]
-        if model_id and not is_active_model(model_id):
+        # The default model drives replies and background work: never a
+        # deprecated or read-only one.
+        if model_id and not is_chat_model(model_id):
             return jsonify({"error": f"Model not offered: {model_id}"}), 400
         current_user.preferred_model = model_id
 
@@ -570,47 +492,9 @@ def update_user():
             from backend.utils.public_cache import invalidate_for_user
             invalidate_for_user(current_user, former_handle=renamed_from)
         # Include voice mode feature flag and user plan in the response
-        voice_mode_enabled = current_user.has_voice_mode
         return jsonify({
             "message": "Profile updated successfully.",
-            "user": {
-                "id": current_user.id,
-                "username": current_user.username,
-                "description": current_user.description,
-                "email": current_user.email,
-                "approved": current_user.approved,
-                "accepted_terms_at": iso_utc(current_user.accepted_terms_at),
-                "terms_up_to_date": _terms_up_to_date(current_user),
-                "is_admin": current_user.is_admin,
-                "plan": current_user.plan,
-                "voice_mode_enabled": voice_mode_enabled,
-                "craft_mode": current_user.craft_mode,
-                "preferred_model": effective_preferred_model(current_user),
-                "profile_generation_task_id": current_user.profile_generation_task_id,
-                "profile_batch_pending": bool(current_user.profile_batch_pending),
-                "default_privacy_level": current_user.default_privacy_level,
-                "default_ai_usage": current_user.default_ai_usage,
-                "twitter_login": bool(current_user.twitter_id),
-                "twitter_handle": current_user.twitter_handle,
-                "pending_email": current_user.pending_email,
-                "pending_email_expired": _pending_email_expired(current_user),
-                "prefill_consent": current_user.prefill_consent,
-                "prefilled_handle": current_user.prefilled_handle,
-                "spend_blocked": user_is_capped(current_user),
-                "share_v1_enabled": bool(
-                    current_app.config.get("SHARE_V1", False)
-                    and current_user.public_sharing_enabled),
-                "share_v1_available": bool(
-                    current_app.config.get("SHARE_V1", False)),
-                "public_sharing_enabled": bool(
-                    current_user.public_sharing_enabled),
-                "external_content_available": bool(
-                    current_app.config.get(
-                        "SEMANTIC_SEARCH_AGENTIC", True)),
-                "external_content_enabled": bool(
-                    current_user.external_content_enabled),
-                "timezone": current_user.timezone or "UTC",
-            }
+            "user": _serialize_current_user(),
         }), 200
     except IntegrityError:
         # Two submissions of the same rename racing (username_history's

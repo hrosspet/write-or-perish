@@ -883,8 +883,9 @@ class TestExportPromptResolver:
         assert "reflective writing coach" in preamble
         assert "ref #42" in preamble
 
+    @patch.object(ExportQuoteResolver, '_artifact_is_own', return_value=True)
     @patch.object(ExportQuoteResolver, '_load_artifact_content', return_value="mocked")
-    def test_artifacts_tracked_in_referenced(self, _mock_load):
+    def test_artifacts_tracked_in_referenced(self, _mock_load, _mock_own):
         """Artifact tuples are tracked in referenced_artifacts after resolve."""
         resolver = ExportQuoteResolver(user_id=1, max_tokens=500)
 
@@ -904,8 +905,9 @@ class TestExportPromptResolver:
         assert 7 in resolver.referenced_artifacts["profile"]
         assert 3 in resolver.referenced_artifacts["todo"]
 
+    @patch.object(ExportQuoteResolver, '_artifact_is_own', return_value=True)
     @patch.object(ExportQuoteResolver, '_load_artifact_content', return_value="mocked")
-    def test_artifacts_not_referenced_when_truncated(self, _mock_load):
+    def test_artifacts_not_referenced_when_truncated(self, _mock_load, _mock_own):
         """Artifacts from truncated nodes are not in referenced_artifacts."""
         resolver = ExportQuoteResolver(user_id=1, max_tokens=30)
 
@@ -925,3 +927,31 @@ class TestExportPromptResolver:
 
         assert 42 not in resolver.referenced_artifacts.get("prompt", set())
         assert 7 not in resolver.referenced_artifacts.get("profile", set())
+
+    @patch.object(ExportQuoteResolver, '_load_artifact_content', return_value="mocked")
+    def test_another_users_pinned_versions_are_not_referenced(self, _mock_load):
+        """A node by another author pins that author's versions; the
+        export of user 1 references only user 1's own."""
+        resolver = ExportQuoteResolver(user_id=1, max_tokens=500)
+        owners = {("profile", 7): 2, ("todo", 3): 2, ("todo", 4): 1}
+        resolver._artifact_is_own = (
+            lambda atype, aid: owners[(atype, aid)] == resolver.user_id)
+
+        now = datetime.utcnow()
+        resolver.add_node(
+            1, now, "",
+            user_prompt_id=42,
+            prompt_content="Prompt content",
+            prompt_label="Reflect v1",
+            artifacts=[("prompt", 42), ("profile", 7), ("todo", 3)],
+        )
+        resolver.add_node(2, now - timedelta(hours=1), "User text",
+                          artifacts=[("todo", 4)])
+
+        resolver.resolve()
+
+        assert 42 in resolver.referenced_artifacts["prompt"]
+        assert resolver.referenced_artifacts["profile"] == set()
+        assert resolver.referenced_artifacts["todo"] == {4}
+        assert "mocked" in resolver.get_artifacts_preamble()
+        assert ("profile", 7) not in resolver._artifact_contents

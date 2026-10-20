@@ -51,6 +51,44 @@ def test_split_sections_heading_line_not_in_body():
     assert sections == [("Title", "Body here")]
 
 
+# ── adaptive chapter level (#517 follow-up) ──────────────────────────────
+
+def test_split_sections_h3_only_text_chapters_at_h3():
+    text = "### One\nAlpha body\n### Two\nBeta body"
+    assert split_sections(text) == [("One", "Alpha body"), ("Two", "Beta body")]
+
+
+def test_split_sections_h1_title_plus_h3_sections():
+    text = "# Profile\n### One\nAlpha\n### Two\nBeta"
+    sections = split_sections(text)
+    assert [t for t, _ in sections] == ["Profile", "One", "Two"]
+    assert sections[0][1] == ""
+    chunks = section_aware_chunk_text(text)
+    assert [t for _c, t, _i in chunks] == ["One", "Two"]
+
+
+def test_split_sections_two_h2_ignore_h3_subsections():
+    text = "## A\nx\n### sub1\ny\n### sub2\nz\n## B\nw"
+    sections = split_sections(text)
+    assert [t for t, _ in sections] == ["A", "B"]
+    assert "### sub1" in sections[0][1]
+
+
+def test_split_sections_single_h3_is_one_section():
+    text = "### Only\nbody"
+    assert split_sections(text) == [(None, text)]
+
+
+def test_split_sections_h4_used_when_no_repeated_h3():
+    text = "### Lone\na\n#### P\nb\n#### Q\nc"
+    assert [t for t, _ in split_sections(text)] == ["Lone", "P", "Q"]
+
+
+def test_split_sections_adaptive_off_keeps_h1_h2_only():
+    text = "### One\nAlpha\n### Two\nBeta"
+    assert split_sections(text, adaptive=False) == [(None, text)]
+
+
 # ── section_aware_chunk_text ─────────────────────────────────────────────
 
 def test_chunks_never_cross_sections():

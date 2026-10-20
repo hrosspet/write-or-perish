@@ -1,10 +1,12 @@
-"""Slow and cut-off OpenAI TTS calls (#382).
+"""Slow, cut-off and unplayable OpenAI TTS answers (#382).
 
 Since 2026-09-27 some gpt-4o-mini-tts calls stream audio far slower than
 realtime, and a call that reaches 300 s ends with HTTP 200 and the audio
 cut mid-word. ``synthesize_to_file`` must never return such audio as
 complete: a slow call is cancelled and resent, a call that ran to the
-cutoff is resent, and when every attempt fails the chunk fails.
+cutoff is resent, and when every attempt fails the chunk fails. The same
+holds for an answer without playable audio (an empty body, or one that
+is not MP3): on 2026-10-16 such an answer failed a profile's TTS at once.
 
 Imports the real tts module against stub glue (celery / pydub /
 backend.celery_app), then restores it, including the ``backend.tasks.tts``
@@ -13,6 +15,7 @@ as test_tts_strip.py. openai is the real package: the code under test
 catches its exception classes.
 """
 import os
+import shutil
 import sys
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -25,7 +28,10 @@ os.environ.setdefault("SECRET_KEY", "test-secret")
 os.environ.setdefault("ENCRYPTION_DISABLED", "true")
 
 # Imported before the stubs, so it keeps the real pydub for later tests.
+# The real pydub.exceptions stays in sys.modules while pydub is stubbed,
+# so the tts module catches the real CouldntDecodeError.
 import backend.utils.audio_processing  # noqa: E402,F401
+from pydub import AudioSegment as RealAudioSegment  # noqa: E402
 
 # celery.Task must be a real base class so `class TTSTask(Task)` imports.
 _celery_stub = MagicMock()
@@ -73,8 +79,9 @@ class FakeClock:
 
 class FakeResponse:
     """A streamed TTS response. *script* is a list of (seconds after the
-    call started, seconds of audio delivered then); an exception in place
-    of the audio is raised at that time instead."""
+    call started, seconds of audio delivered then); bytes in place of the
+    seconds are delivered as they are, and an exception is raised at that
+    time instead."""
 
     def __init__(self, clock, script, request_id):
         self.headers = {"x-request-id": request_id}
@@ -95,7 +102,8 @@ class FakeResponse:
             if isinstance(audio, Exception):
                 raise audio
             self.delivered += 1
-            yield b"\0" * int(audio * SEC)
+            yield (audio if isinstance(audio, bytes)
+                   else b"\0" * int(audio * SEC))
 
 
 class FakeClient:
@@ -249,3 +257,94 @@ def test_every_attempt_slow_fails_and_removes_the_partial_file(env, tmp_path):
     assert not path.exists()
     assert env.sentry.capture_message.call_count == 2
     assert ("tts_last_byte",) not in [c.args for c in mark.call_args_list]
+
+
+# ── Answers without playable audio ─────────────────────────────────────
+
+requires_ffmpeg = pytest.mark.skipif(
+    shutil.which("ffmpeg") is None, reason="decoding needs ffmpeg")
+
+EMPTY = []    # HTTP 200 with no body
+NOT_MP3 = [(1, b'{"error": {"message": "The server had an error"}}')]
+
+
+def _warnings(logger):
+    return [" ".join(str(a) for a in c.args)
+            for c in logger.warning.call_args_list]
+
+
+@pytest.fixture
+def real_audio(env, monkeypatch):
+    """Decode with the real pydub and ffmpeg."""
+    monkeypatch.setattr(tts, "AudioSegment", RealAudioSegment)
+
+
+@pytest.fixture(scope="module")
+def mp3_bytes(tmp_path_factory):
+    path = tmp_path_factory.mktemp("mp3") / "one_second.mp3"
+    RealAudioSegment.silent(duration=1000).export(str(path), format="mp3")
+    return path.read_bytes()
+
+
+def test_empty_answer_is_resent_to_the_same_model(env, tmp_path):
+    client = FakeClient(env.clock, EMPTY, FAST)
+    path = tmp_path / "tts_chunk_3.mp3"
+    mark = MagicMock()
+
+    tts.synthesize_to_file(client, "Some text.", path, mark=mark)
+
+    assert len(client.calls) == 2
+    assert client.calls[1] == client.calls[0]   # same text, model, voice
+    assert path.stat().st_size == 60 * SEC
+    env.sentry.capture_message.assert_not_called()   # not a slow call
+    (warning,) = _warnings(env.logger)
+    assert "req-1" in warning and "empty body" in warning
+    assert "Some text." not in warning
+    # No byte arrived, so no last byte is marked for the empty answer.
+    assert [c.args for c in mark.call_args_list] == [
+        ("tts_first_byte",), ("tts_last_byte",)]
+
+
+@requires_ffmpeg
+def test_answer_that_is_not_mp3_is_resent(env, real_audio, mp3_bytes,
+                                          tmp_path):
+    client = FakeClient(env.clock, NOT_MP3, [(1, mp3_bytes)])
+    path = tmp_path / "tts_chunk_3.mp3"
+
+    segment = tts.synthesize_to_file(client, "Some text.", path)
+
+    assert len(client.calls) == 2
+    assert abs(len(segment) - 1000) < 100
+    assert path.read_bytes() == mp3_bytes
+    (warning,) = _warnings(env.logger)
+    assert "req-1" in warning
+    assert f"{len(NOT_MP3[0][1])} bytes" in warning
+    assert "Some text." not in warning
+
+
+@requires_ffmpeg
+def test_every_answer_unplayable_fails_and_removes_the_file(
+        env, real_audio, tmp_path):
+    client = FakeClient(env.clock, NOT_MP3, EMPTY, NOT_MP3)
+    path = tmp_path / "tts_chunk_3.mp3"
+
+    with pytest.raises(tts.TTSCallFailed, match="failed after 3 attempts"):
+        tts.synthesize_to_file(client, "Some text.", path,
+                               section_end=True)
+
+    assert len(client.calls) == 3   # the existing cap, no extra attempt
+    assert not path.exists()
+    env.sentry.capture_message.assert_not_called()
+
+
+def test_a_broken_decoder_is_not_resent(env, tmp_path):
+    # Only the answer's fault is resent: a decoder that can't run (no
+    # ffmpeg on the box) would fail every resend too, each one billed.
+    tts.AudioSegment.from_file.side_effect = FileNotFoundError("ffmpeg")
+    client = FakeClient(env.clock, FAST, FAST)
+    path = tmp_path / "tts_chunk_3.mp3"
+
+    with pytest.raises(FileNotFoundError):
+        tts.synthesize_to_file(client, "Some text.", path)
+
+    assert len(client.calls) == 1

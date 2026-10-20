@@ -1,4 +1,6 @@
-import { bodyWithoutTitle, sourceLabel, youtubeVideo } from './references';
+import {
+  authorLabel, bodyWithoutTitle, referenceKind, sourceLabel, sourceLine, sourceLinkLabel, youtubeVideo,
+} from './references';
 
 const clip = (url) => ({ source: 'web_clip', url });
 
@@ -34,6 +36,54 @@ describe('sourceLabel', () => {
     expect(sourceLabel(clip('https://www.youtube.com/watch?v=dQw4w9WgXcQ'))).toBe('Video');
     expect(sourceLabel(clip('https://example.com/post'))).toBe('Page');
     expect(sourceLabel({ source: 'twitter_bookmark' })).toBe('Tweet');
+    expect(sourceLabel({ source: 'twitter_like' })).toBe('Tweet');
+  });
+});
+
+describe('referenceKind', () => {
+  it('tells videos, tweets and pages apart', () => {
+    expect(referenceKind(clip('https://youtu.be/dQw4w9WgXcQ'))).toBe('video');
+    expect(referenceKind(clip('https://www.youtube.com/@channel'))).toBe('page');
+    ['community_archive', 'read_pick', 'twitter_bookmark', 'twitter_like'].forEach((source) => {
+      expect(referenceKind({ source })).toBe('tweet');
+    });
+    expect(referenceKind(clip('https://example.com/post'))).toBe('page');
+    expect(referenceKind({ source: 'new_source' })).toBe('page');
+  });
+});
+
+describe('sourceLine', () => {
+  it('names the kind and where it came from in a plain sentence', () => {
+    expect(sourceLine({ source: 'community_archive' })).toBe('Tweet from the Community Archive');
+    expect(sourceLine({ source: 'read_pick' })).toBe('Tweet from the Community Archive');
+    expect(sourceLine({ source: 'twitter_bookmark' })).toBe('Tweet from your Twitter bookmarks');
+    expect(sourceLine({ source: 'twitter_like' })).toBe('Tweet from your Twitter likes');
+    expect(sourceLine(clip('https://www.youtube.com/watch?v=dQw4w9WgXcQ'))).toBe('Video from YouTube');
+    expect(sourceLine(clip('https://www.example.com/post'))).toBe('Page from example.com');
+    expect(sourceLine(clip(null))).toBe('Saved page');
+    expect(sourceLine({ source: 'new_source' })).toBe('new_source');
+  });
+  it('names an uploaded document (a PDF saved as someone else\'s writing)', () => {
+    expect(sourceLine({ source: 'document', url: null })).toBe('Document you uploaded');
+    expect(sourceLabel({ source: 'document' })).toBe('Document');
+    expect(referenceKind({ source: 'document' })).toBe('page');
+  });
+});
+
+describe('authorLabel', () => {
+  it('shows a byline as it is and a tweet author with an @', () => {
+    expect(authorLabel({ source: 'document', author_handle: 'Jane Doe' })).toBe('Jane Doe');
+    expect(authorLabel({ source: 'web_clip', author_handle: 'example.com' })).toBe('example.com');
+    expect(authorLabel({ source: 'twitter_bookmark', author_handle: 'visa' })).toBe('@visa');
+    expect(authorLabel({ source: 'document', author_handle: null })).toBeNull();
+  });
+});
+
+describe('sourceLinkLabel', () => {
+  it('names where the link out goes', () => {
+    expect(sourceLinkLabel({ source: 'twitter_bookmark' })).toBe('Twitter ↗');
+    expect(sourceLinkLabel(clip('https://youtu.be/dQw4w9WgXcQ'))).toBe('YouTube ↗');
+    expect(sourceLinkLabel(clip('https://example.com/post'))).toBe('Open page ↗');
   });
 });
 

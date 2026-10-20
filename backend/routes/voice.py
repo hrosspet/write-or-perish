@@ -7,7 +7,8 @@ from backend.extensions import db
 from backend.utils.prompts import get_user_prompt_record
 from backend.utils.llm_nodes import (
     ai_usage_refused_response, create_llm_placeholder,
-    pick_model_for_generation, reply_ai_usage, voice_turn_refusal,
+    pick_model_for_generation, read_only_model_refusal,
+    read_only_model_response, reply_ai_usage, voice_turn_refusal,
 )
 from backend.utils.placeholders import UserExportValidationError
 from backend.utils.audio_storage import is_storage_id
@@ -27,18 +28,56 @@ PROMPT_KEY = 'voice'
 # a second prompt node.
 
 
+def _ready_under_gleaning(node, has_prompt, ai_usage):
+    """Voice continuing from a gleaning (#435): the next recording goes
+    under it (under a Voice prompt attached below it when the thread has
+    no agentic prompt yet), and nothing is played: a gleaning is never
+    read aloud."""
+    parent_id = node.id
+    if not has_prompt:
+        prompt_record = get_user_prompt_record(current_user.id, PROMPT_KEY)
+        system_node = Node(
+            user_id=current_user.id,
+            human_owner_id=current_user.id,
+            parent_id=node.id,
+            node_type="user",
+            privacy_level="private",
+            ai_usage=ai_usage,
+        )
+        db.session.add(system_node)
+        db.session.flush()
+        attach_context_artifacts(
+            system_node.id, current_user.id, prompt_record=prompt_record,
+        )
+        db.session.commit()
+        parent_id = system_node.id
+    # llm_node_id stays in the answer: the iPhone app decodes it on every
+    # answer of this route, and opens Voice without playing on "ready".
+    return jsonify({"mode": "ready", "parent_id": parent_id,
+                    "llm_node_id": node.id}), 200
+
+
 @voice_bp.route("/from-node/<int:node_id>", methods=["POST"])
 @login_required
 def create_voice_from_node(node_id):
     """Start or resume a voice session from an existing node's thread.
     A thread that keeps AI out gets 403 ``code: ai_usage_none`` and
     nothing is created: the clients then open the Voice screen on it,
-    which explains instead of recording."""
+    which explains instead of recording.
+    A deleted node (a page opened before the delete) gets the 410 that
+    POST /nodes/ gives for a deleted parent, before any prompt node or
+    reply is created (#480). The check locks the row as POST /nodes/
+    does, so a delete that arrives meanwhile waits until this request's
+    nodes are written."""
     node = Node.query.get(node_id)
     if not node:
         return jsonify({"error": "Node not found"}), 404
     if node.human_owner_id != current_user.id:
         return jsonify({"error": "Unauthorized"}), 403
+    from backend.utils.node_deletion import assert_parent_alive
+    err = assert_parent_alive(node.id)
+    if err is not None:
+        return err
     refused = voice_turn_refusal(current_user, node)
     if refused is not None:
         return ai_usage_refused_response(refused)
@@ -56,6 +95,21 @@ def create_voice_from_node(node_id):
 
     has_prompt = ancestors_have_prompt(node, current_user.id, AGENTIC_PROMPT_KEYS)
     is_llm = is_llm_node(node)
+
+    # A gleaning is never read aloud (#435): continuing by voice from one
+    # opens the record button under it instead of playing it first.
+    from backend.utils.glean import is_gleaning
+    if is_llm and is_gleaning(node):
+        return _ready_under_gleaning(node, has_prompt, ai_usage)
+
+    if not is_llm:
+        # A reply starts here: directly under *node* inside an agentic
+        # thread, else under the Voice prompt added below it. A read-only
+        # model is refused before anything is written.
+        refused = read_only_model_refusal(
+            model_id, node, new_entry=not has_prompt)
+        if refused is not None:
+            return read_only_model_response(refused)
 
     if has_prompt and not is_llm:
         llm_node = create_llm_placeholder_node(
@@ -177,6 +231,11 @@ def create_voice_session():
         current_user, parent_node, None if parent_node else ai_usage)
     if refused is not None:
         return ai_usage_refused_response(refused)
+    # Nor on a read-only model outside a read: refused before the turn is
+    # written or its audio moved, never swapped for another model.
+    refused = read_only_model_refusal(model_id, parent_node, new_entry=True)
+    if refused is not None:
+        return read_only_model_response(refused)
 
     if not parent_id:
         prompt_record = get_user_prompt_record(current_user.id, PROMPT_KEY)
@@ -193,6 +252,9 @@ def create_voice_session():
         attach_context_artifacts(
             system_node.id, current_user.id, prompt_record=prompt_record,
         )
+        # Started from the Glean card (#435): every turn offers Glean.
+        from backend.utils.glean import stamp_glean_entry
+        stamp_glean_entry(system_node, current_user, data.get("entry"))
         user_parent_id = system_node.id
 
     from backend.utils.tokens import approximate_token_count

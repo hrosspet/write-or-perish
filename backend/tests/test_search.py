@@ -391,3 +391,115 @@ class TestExternalScope:
         _login(client, data["alice_id"])
         resp = client.get("/api/search?q=solstice")
         assert [r["id"] for r in resp.json["results"]] == [data["dec_node_id"]]
+
+
+# A harmless marker: an inert element whose only purpose is to show
+# whether markup in stored text reaches the response as markup.
+PROBE = '<i data-loore-probe="1">probe</i>'
+PROBE_ESCAPED = '&lt;i data-loore-probe=&quot;1&quot;&gt;probe&lt;/i&gt;'
+
+
+class TestResultsAreEscaped:
+    """Search results show stored text as text.
+
+    Both clients render `snippet` and `preview` as markup (the web as
+    HTML, iOS by parsing the <mark> runs), so every character of stored
+    text is escaped and the only tags are the <mark>s added around
+    matches after escaping. Tweets and clipped pages carry text an
+    outside party wrote; it must never reach the page as HTML.
+    """
+
+    def _node(self, user_id, content, created_at=datetime(2026, 2, 1)):
+        node = Node(user_id=user_id, human_owner_id=user_id,
+                    content=content, privacy_level="private",
+                    node_type="user", created_at=created_at)
+        _db.session.add(node)
+        _db.session.commit()
+        return node.id
+
+    def _get(self, app, user_id, url):
+        client = app.test_client()
+        _login(client, user_id)
+        resp = client.get(url)
+        assert resp.status_code == 200
+        return resp.json["results"]
+
+    def test_keyword_snippet_and_preview_escape_markup(self, app, data):
+        self._node(data["alice_id"], f"Notes {PROBE} on equinox & tides")
+        [r] = self._get(app, data["alice_id"], "/api/search?q=equinox")
+        assert "<i" not in r["snippet"]
+        assert r["snippet"] == (
+            f"Notes {PROBE_ESCAPED} on <mark>equinox</mark> &amp; tides")
+        assert r["preview"] == f"Notes {PROBE_ESCAPED} on equinox &amp; tides"
+
+    def test_preview_escaped_without_keyword(self, app, data):
+        self._node(data["alice_id"], f"{PROBE} dated only",
+                   created_at=datetime(2026, 3, 3))
+        [r] = self._get(app, data["alice_id"],
+                        "/api/search?from=2026-03-01&to=2026-03-31")
+        assert r["snippet"] is None
+        assert r["preview"] == f"{PROBE_ESCAPED} dated only"
+
+    def test_reference_snippet_and_preview_escaped(self, app, data):
+        clip = ExternalItem(
+            user_id=data["alice_id"], source="web_clip", external_id="c" * 64,
+            title="A clipped page", fetched_at=datetime(2026, 1, 10))
+        clip.set_content(f"Clipped text {PROBE} about equinox")
+        _db.session.add(clip)
+        _db.session.commit()
+        [r] = self._get(app, data["alice_id"],
+                        "/api/search?q=equinox&scope=external")
+        assert r["snippet"] == (
+            f"Clipped text {PROBE_ESCAPED} about <mark>equinox</mark>")
+        assert r["preview"] == f"Clipped text {PROBE_ESCAPED} about equinox"
+        # Title-only match: the snippet is the opening text, escaped.
+        [r] = self._get(app, data["alice_id"],
+                        "/api/search?q=clipped%20page&scope=external")
+        assert r["snippet"] == f"Clipped text {PROBE_ESCAPED} about equinox"
+
+    def test_term_inside_html_like_string(self, app, data):
+        self._node(data["alice_id"], '<span title="equinox">x</span>')
+        [r] = self._get(app, data["alice_id"], "/api/search?q=equinox")
+        assert r["snippet"] == (
+            '&lt;span title=&quot;<mark>equinox</mark>&quot;&gt;'
+            'x&lt;/span&gt;')
+
+    def test_query_that_looks_like_markup(self, app, data):
+        self._node(data["alice_id"], "if a <b> c then d")
+        [r] = self._get(app, data["alice_id"], "/api/search?q=%3Cb%3E")
+        assert r["snippet"] == "if a <mark>&lt;b&gt;</mark> c then d"
+
+    def test_highlight_added_after_escaping(self, app, data):
+        # Literal entity text in a note: the match on "amp" is inside the
+        # stored "&amp;", so escaping must come first and the mark must
+        # wrap the stored characters, not the escaped ones.
+        self._node(data["alice_id"], "fish &amp; chips")
+        [r] = self._get(app, data["alice_id"], "/api/search?q=amp")
+        assert r["snippet"] == "fish &amp;<mark>amp</mark>; chips"
+
+    def test_unicode_diacritics_and_emoji(self, app, data):
+        self._node(data["alice_id"], "Štědrá večer 🎄 <štědrá> den")
+        [r] = self._get(app, data["alice_id"], "/api/search?q=stedra")
+        assert r["snippet"] == (
+            "<mark>Štědrá</mark> večer 🎄 &lt;<mark>štědrá</mark>&gt; den")
+
+
+class TestSnippetHelper:
+    """`_snippet` on its own: windows and truncation stay escaped."""
+
+    def test_window_cut_never_splits_an_entity(self, app):
+        from backend.routes.search import _snippet
+        text = "&" * 100 + " equinox " + "<" * 100
+        out = _snippet(text, "equinox", context_chars=10)
+        assert out == ("..." + "&amp;" * 9 + " <mark>equinox</mark> "
+                       + "&lt;" * 9 + "...")
+
+    def test_no_match_returns_escaped_opening(self, app):
+        from backend.routes.search import _snippet
+        text = "a" * 199 + "<b>"
+        assert _snippet(text, "zzz") == "a" * 199 + "&lt;..."
+
+    def test_keyword_of_only_combining_marks_returns(self, app):
+        # Folds to "": used to loop forever appending empty <mark>s.
+        from backend.routes.search import _snippet
+        assert _snippet("café <b>", "́") == "café &lt;b&gt;"

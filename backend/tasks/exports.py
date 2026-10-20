@@ -11,7 +11,8 @@ from backend.models import User, UserProfile, APICostLog
 from backend.extensions import db
 from backend.llm_providers import (
     LLMProvider, PromptTooLongError, DEFAULT_MAX_OUTPUT_TOKENS,
-    model_input_cap, is_empty_truncated, EmptyTruncatedOutputError)
+    model_input_cap, is_empty_truncated, is_refused,
+    EmptyTruncatedOutputError)
 
 from backend.utils.tokens import (
     approximate_token_count, reduce_export_tokens, format_date_metadata,
@@ -575,6 +576,16 @@ def integration_due(user, latest_profile):
     return len(chain) >= 2
 
 
+def _log_profile_failure(user_id, exc):
+    """ProfileGenerationTask.on_failure's error line. It has no exc_info, so
+    Sentry can't tell an account failure (#369) from the message alone:
+    log_extra tags it with the cause's fingerprint, grouping it with the
+    task failure."""
+    from backend.utils.provider_alerts import log_extra
+    logger.error(f"Profile generation failed for user {user_id}: {exc}",
+                 extra=log_extra(exc))
+
+
 class ProfileGenerationTask(Task):
     """Custom task class with error handling."""
 
@@ -582,7 +593,7 @@ class ProfileGenerationTask(Task):
         """Called when task fails."""
         user_id = args[0] if args else None
         if user_id:
-            logger.error(f"Profile generation failed for user {user_id}: {exc}")
+            _log_profile_failure(user_id, exc)
 
 
 def _load_prompt(name, user_id=None):
@@ -676,10 +687,17 @@ def _save_profile(user, model_id, profile_text, response,
     source_rendered_at: when the window this version covers was rendered
     (the continue rule's boundary between unfinished chain and growth)."""
     from backend.utils.privacy import PrivacyLevel
+    from backend.utils.hidden_rows import WritingOnHold, writing_on_hold
 
     total_tokens = response["total_tokens"]
 
     _add_profile_cost_log(user, model_id, response, batch=batch)
+    if writing_on_hold(user.id):
+        # "Delete all my writing" hid the writing this version was built
+        # from while it was being generated (#268): the cost is logged,
+        # the version is not saved.
+        db.session.commit()
+        raise WritingOnHold(f"user {user.id}: writing on hold for deletion")
     # A saved version ends a refusal streak (#368) and whatever error the
     # admin column showed for it.
     if user.profile_seed_error:
@@ -733,34 +751,40 @@ def refuse_truncated_profile(user, model_id, response, job, batch=False):
     stays the tip, and the next run resumes from it once the backoff
     (utils/refusal_backoff.py) allows: one more try after an hour, then
     the job stops for this user."""
-    if not response.get("truncated"):
+    refused = is_refused(response)
+    if not (response.get("truncated") or refused):
         return
+    # A model refusal (#470) is handled the same way: its text, empty or
+    # partial, is never a profile.
     _add_profile_cost_log(user, model_id, response, batch=batch,
                           refused=True)
     db.session.commit()
     empty = is_empty_truncated(response)
+    what = "refused by the model" if refused else "output cut off"
     n, until, stopped = refusal_backoff.profile_backoff_state(user.id)
     if stopped:
         # Second refusal in a row: no more automatic runs for this user.
         # Shown in the admin Profile column (seed_error); the next saved
         # version clears it.
         user.profile_seed_error = (
-            f"Stopped: output cut off {n} times in a row "
+            f"Stopped: {what} {n} times in a row "
             f"({job}); runs again after an import, a saved version "
             f"or Build profile")[:255]
         db.session.commit()
         refusal_backoff.report_stop(
             user.id, f"profile {job}", n, model_id,
-            "profile_batch" if batch else "profile")
+            "profile_batch" if batch else "profile",
+            cause=(refusal_backoff.REFUSED_CAUSE if refused
+                   else refusal_backoff.CUT_OFF_CAUSE))
     else:
         logger.warning(
-            "Truncated profile output for user %s (%s, model %s, empty=%s, "
-            "output_tokens=%s): no version saved, the previous one stays; "
-            "refusal %d, next try after %s", user.id, job, model_id, empty,
-            response.get("output_tokens"), n, until)
+            "Profile output not saved for user %s (%s, model %s, %s, "
+            "empty=%s, output_tokens=%s): no version saved, the previous "
+            "one stays; refusal %d, next try after %s", user.id, job,
+            model_id, what, empty, response.get("output_tokens"), n, until)
     raise EmptyTruncatedOutputError(
         f"profile {job} for user {user.id}", model_id,
-        response.get("output_tokens"), empty=empty)
+        response.get("output_tokens"), empty=empty, refused=refused)
 
 
 def retip_profile_chain(user_id, version):
@@ -873,6 +897,11 @@ def update_user_profile(self, user_id: int, model_id: str,
     )
 
     with flask_app.app_context():
+        # /export/profile-progress?task_id= answers for this task id to
+        # this user only, whatever the outcome.
+        from backend.utils.task_owner import record_task_owner
+        record_task_owner(self.request.id, user_id, flask_app.config)
+
         user = User.query.get(user_id)
         if not user:
             raise ValueError(f"User {user_id} not found")
@@ -886,6 +915,11 @@ def update_user_profile(self, user_id: int, model_id: str,
             logger.info(
                 "User %s has opted out of AI usage; skipping profile update",
                 user_id)
+            return
+        from backend.utils.hidden_rows import WritingOnHold, writing_on_hold
+        if writing_on_hold(user_id):
+            logger.info("User %s: writing on hold for deletion; skipping "
+                        "profile update", user_id)
             return
         previous_profile_id = ai_readable_base_id(user_id, previous_profile_id)
 
@@ -928,6 +962,10 @@ def update_user_profile(self, user_id: int, model_id: str,
                 notify_profile_ready(user_id)
             return result
 
+        except WritingOnHold:
+            logger.info("User %s: writing put on hold for deletion during "
+                        "the profile update; nothing saved", user_id)
+            return None
         except Exception as e:
             logger.error(
                 f"Profile update error for user {user_id}: {e}",
@@ -1132,6 +1170,8 @@ ORIGIN_LABELS = {
     "chatgpt": "ChatGPT conversations (imported)",
     "claude": "Claude conversations (imported)",
     "markdown": "markdown documents (imported)",
+    "docx": "Word documents (imported)",
+    "pdf": "PDF documents (imported)",
     "loore": "written in Loore",
 }
 
@@ -1644,6 +1684,11 @@ def maybe_trigger_profile_update(user_id, model_id=None,
     if not account_allows_ai(user):
         logger.info(
             f"Skipping profile update for user {user_id}: opted out of AI usage")
+        return None
+    from backend.utils.hidden_rows import writing_on_hold
+    if writing_on_hold(user_id):
+        logger.info(f"Skipping profile update for user {user_id}: writing "
+                    "on hold for deletion")
         return None
 
     # Check concurrency guard

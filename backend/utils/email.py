@@ -227,6 +227,90 @@ def send_x_connected_notice(to_email, handle):
           best_effort=True)
 
 
+def send_account_deletion_link_email(to_email, username, confirm_url,
+                                     expires_in_seconds, grace_days):
+    """The link that confirms an account deletion (#269). It works only
+    inside a signed-in session of the account, from a page with both
+    choices, so opening it deletes nothing."""
+    lifetime = _duration_words(expires_in_seconds)
+    text_body = (
+        "Confirm the deletion of your Loore account\n\n"
+        f"You asked to delete the Loore account @{username}. Open the link "
+        f"below to confirm:\n{confirm_url}\n\n"
+        "Once you confirm, the account is deleted and you are signed out. "
+        "If you change your mind, you can still restore it by signing in "
+        f"within {grace_days} days; after that it is deleted forever, "
+        "with everything in it.\n\n"
+        f"This link expires in {lifetime}. If you did not ask for this, "
+        "ignore this email and nothing changes."
+    )
+    html_body = _card(
+        "Confirm the deletion of your account",
+        [f"You asked to delete the Loore account <strong style=\"color: #ede8dd;\">@{escape(username)}</strong>.",
+         "Once you confirm, the account is deleted and you are signed out. "
+         "If you change your mind, you can still restore it by signing in "
+         f"within {grace_days} days; after that it is deleted forever, "
+         "with everything in it."],
+        "Review and confirm", confirm_url,
+        (f"This link expires in {lifetime}.",
+         "If you did not ask for this, ignore this email and nothing changes."))
+    _send(to_email, "Confirm the deletion of your Loore account", text_body,
+          html_body, "Account deletion link sent",
+          "Failed to send the account deletion link")
+
+
+def send_account_deletion_scheduled_email(to_email, username, delete_on,
+                                          by_admin=False):
+    """The deletion is scheduled (#269): when, and how to undo it.
+    Best-effort: the deletion already happened from the user's side.
+    *by_admin*: a Loore admin deleted the account; the user can restore
+    it the same way (Peter, 2026-10-13), and the last line says who did
+    it instead of "If you did not do this"."""
+    footnote = (
+        "A Loore admin deleted this account. If you did not ask for this, "
+        "sign in and restore it." if by_admin else
+        "If you did not do this, sign in and restore the account right away.")
+    text_body = (
+        "Your Loore account is deleted\n\n"
+        f"The account @{username} is deleted. If you change your mind, "
+        f"you can still restore it until {delete_on}: sign in to Loore and "
+        "choose Restore. After that it is deleted forever, with everything in it.\n\n"
+        f"{footnote}"
+    )
+    html_body = _card(
+        "Your account is deleted",
+        [f"The account <strong style=\"color: #ede8dd;\">@{escape(username)}</strong> "
+         f"is deleted. If you change your mind, you can still restore it until "
+         f"{escape(delete_on)}: sign in to Loore and choose Restore.",
+         "After that it is deleted forever, with everything in it."],
+        footnotes=(footnote,))
+    _send(to_email, "Your Loore account is deleted", text_body,
+          html_body, "Account deletion scheduled notice sent",
+          "Failed to send the account deletion scheduled notice",
+          best_effort=True)
+
+
+def send_account_deleted_email(to_email):
+    """The account and its data are gone (#269). The address is not kept
+    after this mail. Best-effort."""
+    text_body = (
+        "Your Loore account is deleted forever\n\n"
+        "Your account and everything in it are deleted forever. Loore "
+        "keeps only a record of what your AI use cost, without your "
+        "name.\n\n"
+        "Copies in our backups are erased within 30 days."
+    )
+    html_body = _card(
+        "Your account is deleted forever",
+        ["Your account and everything in it are deleted forever. Loore "
+         "keeps only a record of what your AI use cost, without your name."],
+        footnotes=("Copies in our backups are erased within 30 days.",))
+    _send(to_email, "Your Loore account is deleted forever", text_body,
+          html_body, "Account deleted notice sent",
+          "Failed to send the account deleted notice",
+          best_effort=True)
+
+
 def send_welcome_email(to_email, magic_link_url):
     text_body = (
         "Welcome to Loore\n\n"
@@ -268,6 +352,68 @@ def send_spend_alert_email(to_email, provider, spend_usd, limit_usd, threshold):
           text_body, html_body,
           f"Spend alert email sent to {to_email} ({percent}%)",
           f"Failed to send spend alert email to {to_email}")
+
+
+def send_provider_account_alert_email(to_email, provider, kind, model,
+                                      detail, window_seconds,
+                                      key_role="unknown", environment=None,
+                                      user_message=None):
+    """Alert the admin that calls to a model provider fail for an account
+    reason — a spend limit, billing, the API key, a model id — which
+    waiting won't fix (#369, #360). Sent once per cause per
+    ``window_seconds`` (backend/utils/provider_alerts.py).
+
+    *environment* ("prod", "staging", "local") goes in the subject, since
+    staging sends to the same inbox. *key_role* says which configured key
+    failed (chat, train, batch, legacy) by its role and setting names;
+    no part of the key itself is in the email. *user_message* is what
+    users read instead of the provider's error."""
+    from backend.llm_providers import ACCOUNT_FAILURE_KINDS, account_error_class
+    from backend.utils.api_keys import api_key_role_settings
+    what = ACCOUNT_FAILURE_KINDS.get(kind, kind)
+    window = _duration_words(window_seconds)
+    user_message = user_message or account_error_class(kind).USER_MESSAGE
+    settings = api_key_role_settings(provider, key_role)
+    key_text = (f"{key_role} ({', '.join(settings)})" if settings
+                else key_role)
+    fields = [
+        ("Deployment", environment),
+        ("Provider", provider),
+        ("Cause", f"{what} ({kind})"),
+        ("API key", key_text),
+        ("Model", model),
+        ("HTTP status", detail.get("status")),
+        ("Error type", detail.get("type")),
+        ("Error code", detail.get("code")),
+        ("Provider's message", detail.get("message")),
+        ("Request id", detail.get("request_id")),
+    ]
+    fields = [(label, value) for label, value in fields if value]
+    text_body = (
+        f"Model provider account failure\n\n"
+        f"Calls to {provider} are failing: {what}. Retrying won't help; "
+        f"these calls keep failing until it is fixed. Users see "
+        f"\"{user_message}\"\n\n"
+        + "".join(f"{label}: {value}\n" for label, value in fields)
+        + f"\nFurther failures with the same cause are not emailed for "
+        f"{window}. Sentry groups them in one issue.\n"
+    )
+    html_body = _card(
+        f"{escape(str(provider))} calls are failing",
+        [f"Cause: <strong style=\"color: #ede8dd;\">{escape(what)}</strong>. "
+         f"Retrying won't help; these calls keep failing until it is fixed. "
+         f"Users see &ldquo;{escape(user_message)}&rdquo;",
+         "<br>".join(f"{escape(label)}: {escape(str(value))}"
+                     for label, value in fields)],
+        footnotes=(f"Further failures with the same cause are not emailed "
+                   f"for {window}. Sentry groups them in one issue.",))
+    prefix = f"[{environment}] " if environment else ""
+    _send(to_email,
+          f"{prefix}Loore: {provider} calls are failing ({kind})",
+          text_body, html_body,
+          f"Provider account alert sent to {to_email} ({provider} {kind} "
+          f"{key_role})",
+          f"Failed to send provider account alert to {to_email}")
 
 
 def send_user_spend_block_email(to_email, username, spend_usd, limit_usd):

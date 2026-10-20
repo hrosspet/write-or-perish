@@ -274,17 +274,18 @@ export default function ExternalImport() {
       <p style={helpStyle}>
         Content you've saved elsewhere, made searchable next to your own
         writing (Cmd+K → Semantic).
-        {(counts.community_archive || counts.twitter_bookmark || counts.web_clip) ? (
+        {(counts.community_archive || counts.twitter_bookmark || counts.web_clip || counts.document) ? (
           <> Imported so far:{' '}
             {[
               counts.community_archive && `${counts.community_archive} archive tweets`,
               counts.twitter_bookmark && `${counts.twitter_bookmark} bookmarks`,
               counts.web_clip && `${counts.web_clip} clipped pages`,
+              counts.document && `${counts.document} uploaded documents`,
             ].filter(Boolean).join(' · ')}.
           </>
         ) : null}
       </p>
-      {(counts.community_archive || counts.twitter_bookmark || counts.web_clip) ? (
+      {(counts.community_archive || counts.twitter_bookmark || counts.web_clip || counts.document) ? (
         <Link to="/references" style={{ textDecoration: 'none' }}>
           <button style={{ ...ghostButtonStyle, marginBottom: '16px' }}>
             View references

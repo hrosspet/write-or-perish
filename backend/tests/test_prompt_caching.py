@@ -150,9 +150,64 @@ def test_cost_opus_5_5_from_real_config():
                     batch=True) == 12_000_000
 
 
+def test_cost_sonnet_5_5_from_real_config():
+    # The real config entry against the Anthropic pricing page, verified
+    # 2026-10-02 (cache hits 2026-10-08): $2 in / $10 out, cache hits
+    # $0.10 (0.05x), 5m writes $2.50 (1.25x), batch $1 / $5, no
+    # long-context surcharge.
+    from backend.config import Config
+    app = Flask(__name__)
+    app.config["SUPPORTED_MODELS"] = {
+        "claude-sonnet-5.5": Config.SUPPORTED_MODELS["claude-sonnet-5.5"]}
+    with app.app_context():
+        def cost(*a, **kw):
+            return calculate_llm_cost_microdollars("claude-sonnet-5.5", *a, **kw)
+        assert cost(1_000_000, 0) == 2_000_000
+        assert cost(0, 1_000_000) == 10_000_000
+        assert cost(0, 0, cache_read_tokens=1_000_000) == 100_000
+        assert cost(0, 0, cache_write_tokens=1_000_000) == 2_500_000
+        assert cost(1_000_000, 1_000_000, batch=True) == 6_000_000
+        assert cost(0, 0, cache_read_tokens=1_000_000, batch=True) == 50_000
+        # Flat across the 1M window: 900k input costs 900k x $2.
+        assert cost(900_000, 0) == 1_800_000
+
+
+def test_cost_haiku_5_5_from_real_config():
+    # The real config entry against the Anthropic pricing page, verified
+    # 2026-10-08. Prompts up to 100,000 tokens: $0.10 in / $0.50 out,
+    # cache hits $0.01, 5m writes $0.125. Over 100,000: $0.50 / $2.50,
+    # hits $0.05, writes $0.625 for the whole request. Batch half.
+    from backend.config import Config
+    app = Flask(__name__)
+    app.config["SUPPORTED_MODELS"] = {
+        "claude-haiku-5.5": Config.SUPPORTED_MODELS["claude-haiku-5.5"]}
+    with app.app_context():
+        def cost(*a, **kw):
+            return calculate_llm_cost_microdollars("claude-haiku-5.5", *a, **kw)
+        # 90k input, 2k output: the base tier.
+        assert cost(90_000, 2_000) == 9_000 + 1_000
+        assert cost(90_000, 2_000, batch=True) == 5_000
+        assert cost(0, 0, cache_read_tokens=50_000) == 500
+        assert cost(0, 0, cache_write_tokens=50_000) == 6_250
+        # The tier is "over 100,000": exactly 100k is still the base tier.
+        assert cost(100_000, 0) == 10_000
+        assert cost(100_002, 0) == 50_001
+        # 270k input (a day of Community Archive tweets), 3k output: input
+        # and output both at 5x. A Read runs in batch: $0.07125.
+        assert cost(270_000, 3_000) == 135_000 + 7_500
+        assert cost(270_000, 3_000, batch=True) == 71_250
+        # Cache reads and writes count toward the 100k and are 5x too.
+        assert cost(90_000, 0, cache_read_tokens=20_000) == 45_000 + 1_000
+        assert cost(0, 0, cache_read_tokens=200_000) == 10_000
+        assert cost(0, 0, cache_write_tokens=200_000) == 125_000
+
+
 @pytest.mark.parametrize("model_id, page", [
     # $/MTok (input, cached input, cache writes, output) from the OpenAI
-    # pricing page, verified 2026-09-23: short context, then >272k input.
+    # pricing page, verified 2026-09-23 (gpt-6.1-sol 2026-10-02): short
+    # context, then >272k input.
+    ("gpt-6.1-sol", {"short": (2.00, 0.10, 2.50, 10.00),
+                     "long": (4.00, 0.20, 5.00, 15.00)}),
     ("gpt-6-sol", {"short": (2.00, 0.20, 2.50, 10.00),
                    "long": (4.00, 0.40, 5.00, 15.00)}),
     ("gpt-6-luna", {"short": (0.10, 0.01, 0.125, 0.50),
@@ -174,6 +229,8 @@ def test_cost_gpt_6_from_real_config(model_id, page):
         assert cost(n, 0, cached_input_tokens=n) == round(cached * n)
         assert cost(n, 0, cache_write_subset_tokens=n) == round(write * n)
         assert cost(0, 1_000_000) == round(out * 1_000_000)
+        # Batch halves the cached rate too (gpt-6.1-sol: $0.05).
+        assert cost(n, 0, cached_input_tokens=n, batch=True) == round(cached * n / 2)
         n = 1_000_000  # over the 272k tier: the whole request reprices
         inp, cached, write, out = page["long"]
         assert cost(n, 0) == round(inp * n)

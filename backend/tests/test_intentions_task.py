@@ -182,6 +182,30 @@ def test_empty_truncated_output_saves_no_version(app, wired, monkeypatch):  # no
         request_ref=REFUSED_REF).count() == 2
 
 
+@pytest.mark.parametrize("text", ["", "# Endorsed\n- I can't"])
+def test_refused_output_saves_no_version(app, wired, monkeypatch, text):  # noqa: F811
+    """#470: a model refusal, empty or partial, saves no version, raises
+    and marks the cost row refused. A normal result still saves."""
+    from backend.llm_providers import EmptyTruncatedOutputError
+    from backend.utils.refusal_backoff import REFUSED_REF
+    u = _make_user("refused_int")
+    _db.session.commit()
+    item = {"custom_id": f"int-u{u.id}", "user_id": u.id, "kind": "intentions",
+            "budget": 1_000_000, "resubmitted": False}
+    with pytest.raises(EmptyTruncatedOutputError) as ei:
+        it.apply_intentions_item(u, item, {
+            "content": text, "refused": True, "truncated": False,
+            "input_tokens": 100_000, "output_tokens": 20})
+    assert ei.value.refused is True
+    assert UserArtifact.query.filter_by(user_id=u.id, kind="intentions").count() == 0
+    assert APICostLog.query.filter_by(
+        user_id=u.id).one().request_ref == REFUSED_REF
+    saved = it.apply_intentions_item(u, item, {
+        "content": "# Endorsed\n- fine", "refused": False,
+        "input_tokens": 100_000, "output_tokens": 20})
+    assert saved["version"] == 1
+
+
 def test_partial_cut_off_output_still_saves(app, wired):  # noqa: F811
     """A cut-off run that has some text counts as success (#368)."""
     u = _make_user("partial_int")

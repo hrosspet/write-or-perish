@@ -21,9 +21,12 @@ The reply node's text is the whole rendered feed: the verdict, then each
 quote-tweet followed by a {quote_ext:ID} marker for the tweet it quotes.
 Everything the thread page shows is therefore in the node content, which
 is what later turns (a second read under the same thread), exports and
-search see; the marker resolves to the reference with the user's marks on
-it (quotes.resolve_ext_quotes), so the next read knows what was already
-surfaced, read and rated.
+search see. For the model a later turn resolves each marker to the tweet
+by its author and text, with no number (render_read_reply_for_model), and
+the user's marks on it come in a note of their own, so the next read knows
+what was already surfaced, read and rated. The numbers of a read's list
+belong to that read alone: the next one, a day later or after the reader
+marked something read, numbers its tweets afresh.
 
 Turns of a read thread (2026-09-19, after the second feedback round):
 the day of tweets is fed to the model only for a READ — the reply that
@@ -41,6 +44,7 @@ later resolves its numbers against what was actually sent.
 """
 import json
 import logging
+import re
 from datetime import datetime
 
 log = logging.getLogger(__name__)
@@ -57,12 +61,14 @@ CA_TWEETS_CHAT_STUB = (
 # anywhere in a read thread, or a reply asked for directly under a read
 # reply). It replaces the generic "[continue]".
 CA_READ_AGAIN_TURN = (
-    "Read further: go through the day again against everything above — "
-    "your earlier picks, my marks on them, and whatever I have written "
-    "since. Tweets I have read are out of the list; an unread earlier "
-    "pick is yours to repeat if it still stands. Beyond that, find what "
-    "else is worth my time. Answer in the same shape, a verdict and the "
-    "picks.")
+    "Read further: go through today's tweets again against everything "
+    "above — your earlier picks, my marks on them, and whatever I have "
+    "written since. Your earlier picks are quoted above by author and "
+    "text; they carry no numbers, as the numbers belong to today's list "
+    "alone. Tweets I have read are out of that list; an unread earlier "
+    "pick is yours to repeat if it still stands and is in today's list, "
+    "by its number there. Beyond that, find what else is worth my time. "
+    "Answer in the same shape, a verdict and the picks.")
 
 # tool_calls_meta entry name on a placeholder the Read button created
 # inside a read thread: the task reads it as "this turn is a read", not
@@ -92,7 +98,9 @@ FEED_SCHEMA = {
             "type": "string",
             "description": "One short paragraph: is there anything here "
                            "worth the reader's time today, and why or why "
-                           "not.",
+                           "not. Name a tweet by its author, never by "
+                           "its number: the reader never sees the "
+                           "numbers.",
         },
         "picks": {
             "type": "array",
@@ -292,11 +300,22 @@ def record_feed_render(node, stats, refs, days=1, scope="all"):
     """Pin what this reply's render sent the model (see FeedRender). Adds
     to the session (or updates the reply's existing row on a rerun); the
     caller's next commit lands it, before any batch is submitted."""
+    from sqlalchemy.exc import IntegrityError
     from backend.extensions import db
     from backend.models import FeedRender
     row = FeedRender.query.filter_by(node_id=node.id).first()
     if row is None:
-        row = FeedRender(node_id=node.id)
+        # One row per reply (a unique node_id). Two runs of the same reply
+        # that render at the same time (a rerun started while the first
+        # waited) must not fail on it: the row is inserted in a
+        # savepoint, and when the other run's row landed first this one
+        # updates that row instead (#435: Peter's double render).
+        try:
+            with db.session.begin_nested():
+                db.session.add(FeedRender(node_id=node.id))
+        except IntegrityError:
+            pass
+        row = FeedRender.query.filter_by(node_id=node.id).first()
     row.export_id = stats.get("export_id")
     row.days = int(days)
     row.scope = scope or "all"
@@ -306,9 +325,42 @@ def record_feed_render(node, stats, refs, days=1, scope="all"):
     row.account_count = int(stats.get("accounts") or 0)
     row.excluded_count = int(stats.get("excluded") or 0)
     row.set_tweet_ids(refs[n]["tweet_id"] for n in sorted(refs))
+    # A rerun's collect counts its own drops.
+    row.dropped_picks = 0
     row.created_at = datetime.utcnow()
     db.session.add(row)
     return row
+
+
+def mark_read_reply_opened(node, user_id):
+    """Record that the reply's owner opened a finished Read reply:
+    FeedRender.opened_at, the first time only. Called where the reply's
+    text is served to a page the owner is looking at: GET /nodes/<id> of
+    the reply, and llm-status when it returns the finished reply to a
+    thread page left open while the batch ran, but only for a poll the
+    page marked visible (?visible=1): the page keeps polling in a
+    background tab, which is not an open. Only the reply's human owner
+    counts; another user or an admin
+    who can see the node does not, and neither does a reply still being
+    generated. One UPDATE matched only while opened_at is null, no
+    content read; a node with no FeedRender row matches nothing. Commits
+    when it set the time, so callers run it after their last read of
+    the session's objects. Returns whether it did."""
+    from backend.extensions import db
+    from backend.models import FeedRender
+    if (node is None or user_id is None
+            or not (node.node_type == "llm" or node.llm_model)
+            or node.llm_task_status != "completed"
+            or node.human_owner_id != user_id):
+        return False
+    updated = (FeedRender.query
+               .filter(FeedRender.node_id == node.id,
+                       FeedRender.opened_at.is_(None))
+               .update({FeedRender.opened_at: datetime.utcnow()},
+                       synchronize_session=False))
+    if updated:
+        db.session.commit()
+    return bool(updated)
 
 
 def read_window_fields(row):
@@ -349,23 +401,30 @@ def pick_numbers(text):
     return numbers
 
 
+def count_dropped_picks(reply_text, refs):
+    """How many of the model's picks Loore could not show: each cited
+    number once, whose tweet is not in *refs* (the render's refs, the ones
+    that resolved). A number outside the render and a tweet the snapshot no
+    longer holds both count, as parse_feed_reply drops both. A number
+    cited only in the verdict is no pick. Shared by the batch collect
+    (refs_from_render) and the admin's live rerun (_collect_feed_reply), so
+    FeedRender.dropped_picks means the same on both."""
+    return len(set(pick_numbers(reply_text)) - set(refs))
+
+
 def refs_from_render(row, reply_text, snapshot_dir):
     """The refs a pinned reply's picks need, without re-rendering the day:
     each cited number maps to the tweet id the model saw under it
     (FeedRender.tweet_id_for), and those few tweets are fetched by id
     from the snapshot — the current one; ids are stable across exports.
-    A tweet the snapshot no longer holds drops its pick (parse_feed_reply
-    logs it as an unknown number)."""
-    from backend.utils.community_archive import (
-        CA_CITATION_RE, fetch_tweets_by_id)
+    A tweet the snapshot no longer holds drops its pick, and so does a
+    number outside the render (parse_feed_reply logs both as unknown
+    numbers). How many of the model's picks were dropped either way is
+    recorded on the render (FeedRender.dropped_picks), each number once;
+    a number cited only in the verdict is not a pick and not counted, and
+    not fetched: the verdict's words are stored as written, unlinked."""
+    from backend.utils.community_archive import fetch_tweets_by_id
     numbers = pick_numbers(reply_text)
-    # Numbers cited in the verdict prose too, so expand_ca_citations can
-    # link them (they need no pick row, just the tweet behind them).
-    try:
-        verdict = (json.loads(reply_text) or {}).get("verdict") or ""
-    except (TypeError, ValueError, AttributeError):
-        verdict = ""
-    numbers += [int(m.group(1)) for m in CA_CITATION_RE.finditer(verdict)]
     wanted = {}
     for n in numbers:
         tweet_id = row.tweet_id_for(n)
@@ -380,6 +439,7 @@ def refs_from_render(row, reply_text, snapshot_dir):
                         "snapshot; dropping it", n, tweet_id)
             continue
         refs[n] = ref
+    row.dropped_picks = count_dropped_picks(reply_text, refs)
     return refs
 
 
@@ -414,11 +474,13 @@ def refresh_snapshot_for_read(snapshot_dir, log=log):
     """Bring the cached archive up to the latest nightly export (the
     Community Archive exports around 07:00 UTC) so "the last day" is the
     last day and not the day the snapshot was last fetched. Called by
-    the read before it renders and by the beat sweep. Only maintains a
-    snapshot that exists; a failed refresh is logged and the read goes
-    on with the cached export (its reply shows the window it covered
-    either way). Returns the export id in place, or None when nothing
-    was checked."""
+    the background refresh (the beat sweep, and the one a read queues,
+    request_snapshot_refresh), never by a read itself: a read never waits
+    for the download. Only maintains a snapshot that exists; a failed
+    refresh is logged and reads go on with the cached export (a reply
+    shows the window it covered either way). While another refresh is
+    downloading, this one returns at once (ca.refresh_snapshot). Returns
+    the export id in place, or None when nothing was checked."""
     from backend.utils import community_archive as ca
     if not ca.snapshot_export_id(snapshot_dir):
         return None
@@ -434,6 +496,69 @@ def refresh_snapshot_for_read(snapshot_dir, log=log):
         return None
     if refreshed:
         log.info("Community Archive snapshot refreshed to %s", export_id)
+    return export_id
+
+
+# The reason a read gives when no archive export is cached yet (#435
+# review): plain words the user can act on, never the exception's text
+# (it names a server path).
+ARCHIVE_NOT_READY_TEXT = ("Glean is getting today's tweets ready. Try again "
+                          "in a few minutes.")
+
+
+class ArchiveNotReady(Exception):
+    """No Community Archive export is cached for a read. Its text is the
+    user's reason line (ARCHIVE_NOT_READY_TEXT)."""
+
+    def __init__(self):
+        super().__init__(ARCHIVE_NOT_READY_TEXT)
+
+
+def request_snapshot_refresh(snapshot_dir, log=log, first_copy=False):
+    """Queue the archive refresh in the background (the beat sweep's task,
+    imports.refresh_community_archive_snapshot) and return at once. A
+    read calls this instead of refreshing inline: a glean is a live call
+    the user waits for (#435), and a new nightly export is a ~900 MB
+    download, minutes on a slow link. The read goes on with the cached
+    export (its reply shows the window it covered); the next read gets
+    the new one. With no export cached, only *first_copy* (a read that
+    found none) queues one, as the first fetch; the beat sweep never
+    fetches a first copy. Best effort: a queue that can't be reached is
+    logged, the read goes on (or fails with its own reason)."""
+    from backend.utils import community_archive as ca
+    if not ca.snapshot_export_id(snapshot_dir) and not first_copy:
+        return False
+    try:
+        from backend.tasks.imports import refresh_community_archive_snapshot
+        if first_copy:
+            refresh_community_archive_snapshot.apply_async(
+                kwargs={"first_copy": True}, retry=False)
+        else:
+            refresh_community_archive_snapshot.apply_async(retry=False)
+    except Exception as e:  # noqa: BLE001 - the read proceeds on the cache
+        log.warning("Could not queue the Community Archive refresh: %s", e)
+        return False
+    return True
+
+
+def fetch_first_snapshot(snapshot_dir, log=log):
+    """Fetch the archive's first copy when none is cached (the background
+    task a read queues when it found none, #435 review). Returns the
+    export id in place, or None. A download already running elsewhere is
+    not waited for; a failure is logged (the next read asks again)."""
+    from backend.utils import community_archive as ca
+    current = ca.snapshot_export_id(snapshot_dir)
+    if current:
+        return current
+    try:
+        export_id = ca.ensure_snapshot(snapshot_dir, wait=False)
+    except ca.SnapshotBusy:
+        log.info("Community Archive first fetch: another download runs")
+        return None
+    except Exception as e:  # noqa: BLE001 - the next read asks again
+        log.warning("Community Archive first fetch failed: %s", e)
+        return None
+    log.info("Community Archive snapshot fetched: %s", export_id)
     return export_id
 
 
@@ -499,6 +624,11 @@ def save_feed_picks(user_id, node, picks, picked_by=None):
     the model could know of the reader's marks then. Adds to the session;
     the caller commits. Returns the FeedPick rows in rank order.
 
+    Refused (WritingOnHold) while the reader's "Delete all my writing"
+    waits or runs (#268): a pick would save tweets and marks the user
+    asked to delete. The Read paths drop such a result before they get
+    here (llm_completion); this is the last guard.
+
     Surfacing history is not bumped here: the rendered reply quotes each
     tweet with {quote_ext:ID}, and the finalize path records a surfacing
     for every reference a reply quotes, the same as for any other turn."""
@@ -506,6 +636,9 @@ def save_feed_picks(user_id, node, picks, picked_by=None):
     from backend.models import ExternalItem, FeedPick, READ_PICK_SOURCE
     from backend.utils.reference_log import KIND_READ, stamp_prior
     from backend.utils.reference_rows import find_tweet_row
+    from backend.utils.hidden_rows import WritingOnHold, writing_on_hold
+    if writing_on_hold(user_id):
+        raise WritingOnHold(f"user {user_id}: writing on hold for deletion")
 
     # Idempotent per reply: a redelivered collect (or a retry that re-ran
     # inline) must not insert the picks twice.
@@ -530,6 +663,7 @@ def save_feed_picks(user_id, node, picks, picked_by=None):
                 user_id=user_id, source=READ_PICK_SOURCE,
                 external_id=str(ref["tweet_id"]),
                 author_handle=ref["username"],
+                author_name=ref.get("display_name"),
                 url=tweet_url(ref["username"], ref["tweet_id"]),
                 posted_at=ref.get("posted_at"),
                 public_source=True,  # rendered from the public archive
@@ -537,6 +671,10 @@ def save_feed_picks(user_id, node, picks, picked_by=None):
             item.set_content(ref.get("text") or "")
             db.session.add(item)
             db.session.flush()
+        elif not item.author_name and ref.get("display_name"):
+            # The tweet card's byline (#435): the user's own row of the
+            # tweet (a bookmark, an import) gets the name it lacked.
+            item.author_name = ref["display_name"]
         row = FeedPick(
             user_id=user_id, node_id=node.id, external_item_id=item.id,
             kind=KIND_READ, rank=pick["rank"], relevance=pick["relevance"],
@@ -550,13 +688,128 @@ def save_feed_picks(user_id, node, picks, picked_by=None):
     return rows
 
 
+def fill_pick_author_names(snapshot_dir, user_id=None, apply=False):
+    """The one-time fill of display names for picks saved before
+    ExternalItem.author_name existed (#435): every tweet row a Glean picked
+    (a FeedPick of kind 'read') that has a handle and no name gets the
+    name the snapshot's profiles.parquet has for that handle. Reads and
+    writes metadata only (handles and public display names); no content
+    is decrypted. Returns (rows without a name, rows filled). Writes only
+    with *apply*; the caller commits."""
+    from backend.extensions import db
+    from backend.models import ExternalItem, FeedPick, TWEET_SOURCES
+    from backend.utils.community_archive import fetch_display_names
+    from backend.utils.reference_log import KIND_READ
+    picked = (db.session.query(FeedPick.external_item_id)
+              .filter(FeedPick.kind == KIND_READ))
+    query = ExternalItem.query.filter(
+        ExternalItem.id.in_(picked),
+        ExternalItem.source.in_(TWEET_SOURCES),
+        ExternalItem.author_name.is_(None),
+        ExternalItem.author_handle.isnot(None))
+    if user_id:
+        query = query.filter(ExternalItem.user_id == user_id)
+    rows = query.all()
+    names = fetch_display_names(
+        snapshot_dir, {r.author_handle for r in rows}) if rows else {}
+    filled = 0
+    for row in rows:
+        name = names.get((row.author_handle or "").lower())
+        if name:
+            filled += 1
+            if apply:
+                row.author_name = name
+    return len(rows), filled
+
+
+# How much of a tweet's text names an earlier pick in the marks note
+# (pick_label): enough to tell two picks of one author apart.
+PICK_EXCERPT_CHARS = 60
+
+# A citation link an earlier read wrote into its verdict, before verdict
+# numbers stopped being linked (2026-10-13): "[#12](https://x.com/u/status/1)".
+_STALE_CITATION_RE = re.compile(
+    r"\[#\d{1,6}\]\(https://x\.com/([^/\s)]+)/status/[^\s)]+\)")
+
+
+def _excerpt(text, limit=PICK_EXCERPT_CHARS):
+    """The opening of *text* on one line, cut at a word boundary."""
+    flat = " ".join((text or "").split())
+    if len(flat) <= limit:
+        return flat
+    cut = flat[:limit].rsplit(" ", 1)[0] or flat[:limit]
+    return cut + "…"
+
+
+def pick_label(handle, text):
+    """How the marks note names an earlier pick: its author and the
+    opening of its text, never a number (see render_read_reply_for_model)."""
+    who = f"@{handle}" if handle else "an unknown author"
+    return f'{who}\'s tweet "{_excerpt(text)}"'
+
+
+def render_read_reply_for_model(text, user_id):
+    """An earlier read reply as the model reads it on a later turn of the
+    thread (Glean again, a new read, a chat about the picks). Each pick's
+    {quote_ext:ID} marker becomes the tweet itself, by its author and text:
+
+        <picked_tweet author="@bob" posted_at="2026-10-12">
+        the tweet's text
+        </picked_tweet>
+
+    with no number of any kind. The marker's id is a row id, and the
+    model read it as a number of the day's list: after the archive
+    refreshed, a Glean again told the user that the earlier picks
+    "numbered 1126 through 1131" did not match today's tweets (#435,
+    2026-10-13). A citation link an older verdict carries
+    ("[#12](https://x.com/bob/status/…)") becomes "@bob's tweet": its
+    number belonged to that read's list, not to today's.
+
+    No marks here: the rendering is re-sent on every later turn and must
+    stay byte-identical as the user marks things; the marks travel in the
+    note at the end of the prompt (llm_completion._reference_marks_note),
+    which names each pick with pick_label. Owner-only, like every
+    {quote_ext} resolution. Returns (text, resolved_item_ids, labels),
+    labels being {item_id: pick_label}."""
+    from backend.utils.quotes import (
+        EXT_QUOTE_PLACEHOLDER_PATTERN, find_ext_quote_ids, get_ext_quote_data)
+    if not text:
+        return text, [], {}
+    text = _STALE_CITATION_RE.sub(lambda m: f"@{m.group(1)}'s tweet", text)
+    item_ids = find_ext_quote_ids(text)
+    if not item_ids:
+        return text, [], {}
+    data = get_ext_quote_data(item_ids, user_id)
+    resolved, labels = [], {}
+
+    def replace(match):
+        item_id = int(match.group(1))
+        d = data.get(item_id)
+        if d is None:
+            return "[A tweet picked here earlier is no longer available.]"
+        resolved.append(item_id)
+        handle = d.get("author_handle")
+        labels[item_id] = pick_label(handle, d.get("content"))
+        author = f"@{handle}" if handle else "unknown"
+        posted = (f' posted_at="{d["posted_at"][:10]}"'
+                  if d.get("posted_at") else "")
+        return (f'<picked_tweet author="{author}"{posted}>\n'
+                f'{d.get("content") or ""}\n</picked_tweet>')
+
+    text = re.sub(EXT_QUOTE_PLACEHOLDER_PATTERN, replace, text)
+    return text, resolved, labels
+
+
 def render_feed_reply(verdict, entries):
     """The reply node's text: the verdict, then each pick as the model's
     quote-tweet followed by the {quote_ext:ID} marker of the tweet it
     quotes. ``entries`` is [(qt_text, external_item_id)] in rank order.
     The marker is what the thread page renders as the quoted tweet (with
     the reference's own read mark and good/bad verdict) and what a later
-    turn resolves to the tweet plus the user's marks on it."""
+    turn resolves to the tweet (render_read_reply_for_model), the user's
+    marks on it travelling in a note of their own. The model's own words
+    are stored as written: a "#12" in them is not linked to a tweet, as
+    the number belongs to this read's list alone."""
     verdict = verdict or "Nothing here would change what you do next."
     parts = [verdict]
     for qt, item_id in entries:

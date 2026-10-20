@@ -1,8 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useUser } from '../contexts/UserContext';
-import { useToast } from '../contexts/ToastContext';
-import api from '../api';
+import { entryQuestion } from '../utils/entryPrompt';
 
 function useOnScreen(ref, threshold = 0.1) {
   const [isVisible, setIsVisible] = useState(false);
@@ -56,11 +55,12 @@ const cards = [
   },
 ];
 
-function WorkflowCard({ card, delay }) {
+// How a home card appears and lifts: it fades up once it is on screen,
+// then follows the pointer (shared by the Voice / Text cards and the
+// Reflect / Glean cards, so the two look and move the same).
+function useCardReveal(delay) {
   const ref = useRef(null);
   const isVisible = useOnScreen(ref);
-  const navigate = useNavigate();
-  const [hovered, setHovered] = useState(false);
   const [hasAnimated, setHasAnimated] = useState(false);
 
   useEffect(() => {
@@ -70,13 +70,52 @@ function WorkflowCard({ card, delay }) {
     }
   }, [isVisible, hasAnimated, delay]);
 
-  const disabled = card.disabled || card.busy;
-  // A card either opens a page (`path`) or starts something itself
-  // (`onSelect`, e.g. Read fires the request and lands on the reply).
+  return { ref, isVisible, hasAnimated };
+}
+
+function cardSurfaceStyle({ isVisible, hasAnimated, hovered, delay, disabled = false }) {
+  return {
+    flex: "1 1 200px",
+    background: "var(--bg-card)",
+    border: `1px solid ${hovered ? 'var(--border-hover)' : 'var(--border)'}`,
+    borderRadius: "12px",
+    padding: "2.2rem 1.8rem 2rem",
+    cursor: disabled ? "default" : "pointer",
+    position: "relative",
+    transform: isVisible
+      ? `translateY(${hovered ? '-3px' : '0'})`
+      : 'translateY(20px)',
+    opacity: isVisible ? (disabled ? 0.4 : 1) : 0,
+    transition: hasAnimated
+      ? 'all 0.4s cubic-bezier(0.22, 1, 0.36, 1)'
+      : `opacity 0.5s ease ${delay}ms, transform 0.5s ease ${delay}ms`,
+    boxShadow: hovered ? '0 12px 48px rgba(0,0,0,0.35), 0 0 40px var(--accent-glow)' : 'none',
+    pointerEvents: disabled ? 'none' : 'auto',
+  };
+}
+
+// Accent top line, lit while the card is hovered.
+const AccentLine = ({ hovered }) => (
+  <div style={{
+    position: "absolute",
+    top: 0,
+    left: 0,
+    right: 0,
+    height: "1px",
+    background: "linear-gradient(90deg, transparent, var(--accent), transparent)",
+    opacity: hovered ? 0.5 : 0,
+    transition: "opacity 0.4s ease",
+  }} />
+);
+
+function WorkflowCard({ card, delay }) {
+  const { ref, isVisible, hasAnimated } = useCardReveal(delay);
+  const navigate = useNavigate();
+  const [hovered, setHovered] = useState(false);
+
+  const disabled = !!card.disabled;
   const select = () => {
-    if (disabled) return;
-    if (card.onSelect) card.onSelect();
-    else navigate(card.path);
+    if (!disabled) navigate(card.path);
   };
 
   return (
@@ -85,36 +124,9 @@ function WorkflowCard({ card, delay }) {
       onClick={select}
       onMouseEnter={() => !disabled && setHovered(true)}
       onMouseLeave={() => !disabled && setHovered(false)}
-      style={{
-        flex: "1 1 200px",
-        background: "var(--bg-card)",
-        border: `1px solid ${hovered ? 'var(--border-hover)' : 'var(--border)'}`,
-        borderRadius: "12px",
-        padding: "2.2rem 1.8rem 2rem",
-        cursor: disabled ? "default" : "pointer",
-        position: "relative",
-        transform: isVisible
-          ? `translateY(${hovered ? '-3px' : '0'})`
-          : 'translateY(20px)',
-        opacity: isVisible ? (disabled ? 0.4 : 1) : 0,
-        transition: hasAnimated
-          ? 'all 0.4s cubic-bezier(0.22, 1, 0.36, 1)'
-          : `opacity 0.5s ease ${delay}ms, transform 0.5s ease ${delay}ms`,
-        boxShadow: hovered ? '0 12px 48px rgba(0,0,0,0.35), 0 0 40px var(--accent-glow)' : 'none',
-        pointerEvents: disabled ? 'none' : 'auto',
-      }}
+      style={cardSurfaceStyle({ isVisible, hasAnimated, hovered, delay, disabled })}
     >
-      {/* Accent top line */}
-      <div style={{
-        position: "absolute",
-        top: 0,
-        left: 0,
-        right: 0,
-        height: "1px",
-        background: "linear-gradient(90deg, transparent, var(--accent), transparent)",
-        opacity: hovered ? 0.5 : 0,
-        transition: "opacity 0.4s ease",
-      }} />
+      <AccentLine hovered={hovered} />
 
       <div style={{
         width: "48px", height: "48px", marginBottom: "1.5rem",
@@ -181,39 +193,193 @@ const shareCard = {
   ),
 };
 
-// Community Archive read (admin-only while the placeholder behind it is):
-// what the archive holds that is worth this person's time today. Like
-// Text mode, the click creates the thread: the 'read' prompt as the
-// root and the reply under it, on the user's preferred model. There is
-// nothing to type, so the card fires the request itself.
-const readCard = {
-  key: "read",
-  title: "Read",
-  description: "What's worth your time today.",
-  icon: (
-    <svg width="42" height="42" viewBox="0 0 42 42" fill="none">
-      {/* An open book, one page marked: the read is a small marked place
-          in a large corpus, not a stack of cards. */}
-      <path d="M6 11 C11 9.5 16 9.8 21 12.5 C26 9.8 31 9.5 36 11 L36 32 C31 30.5 26 30.8 21 33.5 C16 30.8 11 30.5 6 32 Z"
-            stroke="var(--accent)" strokeWidth="1.4" fill="none" strokeLinejoin="round"/>
-      <path d="M21 12.5 L21 33.5" stroke="var(--accent)" strokeWidth="1.1" opacity="0.7"/>
-      <path d="M10 16.5 C13 15.8 15.5 16 18 17.2 M10 21 C13 20.3 15.5 20.5 18 21.7 M10 25.5 C13 24.8 15.5 25 18 26.2"
-            stroke="var(--accent)" strokeWidth="1" strokeLinecap="round" opacity="0.6"/>
-      <path d="M24 16.5 C27 15.8 29.5 16 32 17.2 M24 21 C27 20.3 29.5 20.5 32 21.7"
-            stroke="var(--accent)" strokeWidth="1" strokeLinecap="round" opacity="0.6"/>
-      <circle cx="28" cy="26" r="1.6" fill="var(--accent)"/>
-    </svg>
-  ),
-};
-
 // At most three cards to a row. Four or more split into two rows of the
 // same count; an odd count puts Voice and Text alone on the first row
-// and the rest below. (Seven or more would overflow the second row;
-// there are four cards today, five at most in sight.)
+// and the rest below. (Seven or more would overflow the second row.)
 function cardRows(list) {
   if (list.length <= 3) return [list];
   const first = list.length % 2 === 0 ? list.length / 2 : 2;
   return [list.slice(0, first), list.slice(first)];
+}
+
+// ── Cards by purpose (#436, Peter 2026-10-09) ─────────────────────────────
+// For a user who gleans, the home page offers two purposes: Reflect (talk
+// it through with Loore) and Glean (reflect, and Loore finds today's
+// tweets worth your time). Share stays as a third card when it is on. A
+// user without Glean keeps the Voice / Text cards.
+//
+// Each card has the size and the hover glow of those cards, and the whole
+// card starts it (Peter, 2026-10-13). Voice / Text is a switch on the card
+// that only chooses how: Voice by default, remembered in this browser for
+// each card separately.
+
+const MicIcon = () => (
+  <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor"
+       strokeWidth="1.3" aria-hidden="true">
+    <rect x="5.5" y="1.5" width="5" height="8.5" rx="2.5" />
+    <path d="M3 7.5a5 5 0 0 0 10 0M8 12.5v2" />
+  </svg>
+);
+
+const LinesIcon = () => (
+  <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor"
+       strokeWidth="1.3" aria-hidden="true">
+    <path d="M2.5 3.5h11M2.5 7.5h11M2.5 11.5h7" />
+  </svg>
+);
+
+const MODES = [
+  { key: 'voice', label: 'Voice', how: 'by voice', icon: <MicIcon /> },
+  { key: 'text', label: 'Text', how: 'in text', icon: <LinesIcon /> },
+];
+
+export const purposeCards = [
+  {
+    key: 'reflect',
+    title: 'Reflect',
+    line: 'Talk it through with Loore.',
+    storageKey: 'loore.home.reflectMode',
+    paths: { voice: '/voice', text: '/textmode' },
+  },
+  {
+    key: 'glean',
+    title: 'Glean',
+    line: 'Reflect, and Loore gleans for you.',
+    storageKey: 'loore.home.gleanMode',
+    // The session marks its thread as started here, so every turn of it
+    // offers Glean (#435).
+    paths: { voice: '/voice?glean=1', text: '/textmode?glean=1' },
+  },
+];
+
+// A card's chosen mode lives in this browser only. Storage can be
+// missing or refuse (a private window); then the card is on Voice.
+function readMode(storageKey) {
+  try {
+    return localStorage.getItem(storageKey) === 'text' ? 'text' : 'voice';
+  } catch {
+    return 'voice';
+  }
+}
+
+function saveMode(storageKey, mode) {
+  try {
+    localStorage.setItem(storageKey, mode);
+  } catch {
+    // Not remembered: the next visit starts on Voice again.
+  }
+}
+
+// Voice | Text: one pill split in two, a radio group. The chosen half is
+// outlined in the accent (a thumb that slides between the halves).
+// Choosing a half never starts the card; the arrow keys move between the
+// halves.
+function ModeSwitch({ title, mode, onChange }) {
+  const optionRefs = useRef({});
+  const onKeyDown = (e) => {
+    if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(e.key)) return;
+    e.preventDefault();
+    const next = mode === 'voice' ? 'text' : 'voice';
+    onChange(next);
+    optionRefs.current[next]?.focus();
+  };
+  return (
+    <div
+      role="radiogroup"
+      aria-label={`${title}: voice or text`}
+      className="home-mode-switch"
+      data-mode={mode}
+      onKeyDown={onKeyDown}
+    >
+      <span className="home-mode-switch-thumb" aria-hidden="true" />
+      {MODES.map((m) => {
+        const checked = m.key === mode;
+        return (
+          <button
+            key={m.key}
+            ref={(el) => { optionRefs.current[m.key] = el; }}
+            type="button"
+            role="radio"
+            aria-checked={checked}
+            tabIndex={checked ? 0 : -1}
+            className="home-mode-switch-option"
+            onClick={() => onChange(m.key)}
+          >
+            {m.icon}
+            {m.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+// The whole card is one button laid over it, so a keyboard or a screen
+// reader meets a single "Reflect by voice" first and the switch after
+// it; the switch sits above that button. The switch is the button's
+// sibling, not its child, so a click on the switch never reaches the
+// button, and moving the pointer from the button onto the switch turns
+// the glow off: the card glows only where a click starts something. The
+// glow and the lift are the Voice / Text cards' (cardSurfaceStyle).
+function ModeCard({ card, delay }) {
+  const { ref, isVisible, hasAnimated } = useCardReveal(delay);
+  const navigate = useNavigate();
+  const [hovered, setHovered] = useState(false);
+  const [mode, setMode] = useState(() => readMode(card.storageKey));
+  const chosen = MODES.find((m) => m.key === mode);
+  const titleId = `home-card-${card.key}-title`;
+  const lineId = `home-card-${card.key}-line`;
+
+  const choose = (next) => {
+    setMode(next);
+    saveMode(card.storageKey, next);
+  };
+
+  return (
+    <div
+      ref={ref}
+      role="group"
+      aria-labelledby={titleId}
+      style={{
+        ...cardSurfaceStyle({ isVisible, hasAnimated, hovered, delay }),
+        padding: "2.2rem 1.6rem 1.9rem",
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        gap: "10px",
+        minWidth: 0,
+        textAlign: "center",
+      }}
+    >
+      <button
+        type="button"
+        className="home-mode-card-start"
+        aria-label={`${card.title} ${chosen.how}`}
+        aria-describedby={lineId}
+        onClick={() => navigate(card.paths[mode])}
+        onMouseEnter={() => setHovered(true)}
+        onMouseLeave={() => setHovered(false)}
+      />
+      <AccentLine hovered={hovered} />
+
+      <h3 id={titleId} style={{
+        fontFamily: "var(--serif)", fontWeight: 400, fontSize: "1.55rem",
+        color: "var(--text-primary)", margin: 0,
+      }}>
+        {card.title}
+      </h3>
+      <div aria-hidden="true" style={{ width: "32px", height: "1px", background: "var(--accent-glow)" }} />
+      <p id={lineId} style={{
+        fontFamily: "var(--sans)", fontWeight: 300, fontSize: "0.88rem",
+        color: "var(--text-secondary)", lineHeight: 1.45, margin: 0, maxWidth: "40ch",
+      }}>
+        {card.line}
+      </p>
+      <div style={{ marginTop: "8px" }}>
+        <ModeSwitch title={card.title} mode={mode} onChange={choose} />
+      </div>
+    </div>
+  );
 }
 
 export default function HomePage() {
@@ -222,37 +388,17 @@ export default function HomePage() {
   const greetingVisible = useOnScreen(greetingRef);
   const questionVisible = useOnScreen(questionRef);
   const { user } = useUser();
-  const { addToast } = useToast();
-  const navigate = useNavigate();
-  const [readStarting, setReadStarting] = useState(false);
 
-  const startRead = async () => {
-    setReadStarting(true);
-    try {
-      // Same preference Text mode honours (`loore_auto_generate`, default
-      // on). Off: only the root prompt node is created and we land on it,
-      // where the model picker and LLM Response wait for the user.
-      const stored = localStorage.getItem('loore_auto_generate');
-      const autoGenerate = stored === null ? true : stored === 'true';
-      const res = await api.post('/read/start', { auto_generate: autoGenerate });
-      navigate(`/node/${res.data.llm_node_id || res.data.prompt_node_id}`);
-    } catch (err) {
-      setReadStarting(false);
-      if (err?.response?.status === 402) return;
-      addToast(err?.response?.data?.error || 'Could not start the read.', 6000);
-    }
-  };
-
-  const displayCards = [
-    ...cards,
-    ...(user?.share_v1_enabled ? [shareCard] : []),
-    ...(user?.is_admin ? [{
-      ...readCard,
-      onSelect: startRead,
-      busy: readStarting,
-      description: readStarting ? 'Starting…' : readCard.description,
-    }] : []),
-  ];
+  // Glean (#435 gate and the user's own switch): the cards by purpose.
+  // Without it, today's home page. The admin-only Read card that started
+  // a read with no reflection is gone; /read/start stays for experiments.
+  // Share stays exactly as today for everyone (Peter): the same card, on
+  // its own row under the purpose cards, at their width.
+  const gleans = !!user?.glean_enabled;
+  const shares = !!user?.share_v1_enabled;
+  const displayCards = gleans
+    ? purposeCards
+    : [...cards, ...(shares ? [shareCard] : [])];
 
   return (
     <div style={{
@@ -287,16 +433,31 @@ export default function HomePage() {
           fontSize: "clamp(1.8rem, 4.5vw, 2.8rem)",
           fontWeight: 300,
           color: "var(--text-primary)",
-          margin: "0 0 48px 0",
+          margin: gleans ? "0 0 32px 0" : "0 0 48px 0",
+          maxWidth: "760px",
+          textAlign: "center",
           opacity: questionVisible ? 1 : 0,
           transform: questionVisible ? 'translateY(0)' : 'translateY(10px)',
           transition: "all 0.5s ease 200ms",
         }}
       >
-        What's on your mind?
+        {entryQuestion(user)}
       </h1>
 
-      {cardRows(displayCards).map((row, r) => (
+      {gleans ? (
+        // Two columns as wide as the Voice / Text cards, Share below them
+        // one card wide and centered; one column on a phone (index.css).
+        <div className="home-mode-grid">
+          {displayCards.map((card, i) => (
+            <ModeCard key={card.key} card={card} delay={400 + i * 120} />
+          ))}
+          {shares && (
+            <div className="home-mode-grid-share">
+              <WorkflowCard card={shareCard} delay={400 + 2 * 120} />
+            </div>
+          )}
+        </div>
+      ) : cardRows(displayCards).map((row, r) => (
         <div key={r} style={{
           display: "flex",
           gap: "1.5rem",

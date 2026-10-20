@@ -23,7 +23,7 @@ UNINFORMATIVE_PREFIXES = ("/api/dashboard", "/api/notifications", "/api/ready",
 # else in api_cost_log is automation (profile/batch/embedding/summaries,
 # pre-fill, bookmarks, polls, cache warming).
 USER_REQUEST_TYPES = ("conversation", "transcription", "tts", "embedding_query")
-IMPORT_ORIGINS = ("twitter", "chatgpt", "claude", "markdown")
+IMPORT_ORIGINS = ("twitter", "chatgpt", "claude", "markdown", "docx", "pdf")
 
 
 def touch_last_seen(user, path, now=None):

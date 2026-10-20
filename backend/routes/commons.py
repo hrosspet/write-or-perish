@@ -32,7 +32,8 @@ def _enabled():
 
 def _public_alive(query):
     """Filter to nodes the open web may see: public, living, AND with an
-    author who currently has public sharing switched on. Toggling
+    author who currently has public sharing switched on and has not
+    deleted the account (#269: hidden for the grace period). Toggling
     public_sharing_enabled off takes every piece (and reply) down
     immediately — respecting a takedown beats URL stability."""
     owner = aliased(User)
@@ -43,6 +44,7 @@ def _public_alive(query):
         Node.privacy_level == PrivacyLevel.PUBLIC.value,
         Node.deleted_at.is_(None),
         owner.public_sharing_enabled.is_(True),
+        owner.deleted_at.is_(None),
     )
 
 
@@ -53,7 +55,8 @@ def _publicly_visible(node):
         return False
     owner_id = node.human_owner_id or node.user_id
     owner = User.query.get(owner_id) if owner_id else None
-    return bool(owner and owner.public_sharing_enabled)
+    return bool(owner and owner.public_sharing_enabled
+                and owner.deleted_at is None)
 
 
 def _author_name(node):

@@ -17,6 +17,7 @@ from backend.models import (
     ChangelogReadState, UserNotification, Poll, PollResponse,
 )
 from backend.utils.changelog import parse_changelog, unread_sections_for
+from backend.utils.own_entries import has_own_entries
 from backend.utils.profile_versions import current_profile_version
 from backend.utils.timefmt import iso_utc
 
@@ -71,7 +72,14 @@ def _profile_meta(user):
 
 
 def _pending_polls_for(user):
-    """Active polls the user hasn't resolved (sent or declined)."""
+    """Active polls the user hasn't resolved (sent or declined).
+
+    None until the user has written an entry in Loore (#392). Before
+    that the question means little, and "Draft with AI" has nothing of
+    theirs to draw on. Imports don't count: the same condition as the
+    welcome question (#391)."""
+    if not has_own_entries(user.id):
+        return []
     responses = {
         r.poll_id: r
         for r in PollResponse.query.filter_by(user_id=user.id).all()
@@ -200,6 +208,10 @@ def _get_active_poll(poll_id):
 
 
 def _get_or_create_response(poll):
+    # An answer "Delete all my writing" hid is replaced by the new one
+    # (#268): the poll's unique key would refuse a second row.
+    from backend.utils.hidden_rows import drop_hidden_poll_response
+    drop_hidden_poll_response(poll.id, current_user.id)
     resp = PollResponse.query.filter_by(
         poll_id=poll.id, user_id=current_user.id).first()
     if resp is None:

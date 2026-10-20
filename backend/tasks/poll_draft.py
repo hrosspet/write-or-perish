@@ -27,7 +27,7 @@ from backend.models import (
 from backend.utils.api_keys import get_api_keys_for_usage
 from backend.utils.privacy import AI_ALLOWED, account_allows_ai
 from backend.utils.cost import llm_cost_log_fields
-from backend.llm_providers import is_empty_truncated
+from backend.llm_providers import is_empty_truncated, is_refused
 from backend.utils.llm_batch import (
     batch_submit, batch_check_and_collect, apply_batch_key_override,
 )
@@ -147,9 +147,25 @@ def _fail_response(resp):
         db.session.commit()
 
 
+def _hidden_for_deletion(response_id):
+    """A waiting "Delete all my writing" hid this answer (#268). Asked of
+    the records, not of a lookup, so an answer already loaded in this
+    session counts too."""
+    from backend.models import UserDataPurgeHidden
+    return db.session.query(UserDataPurgeHidden.id).filter(
+        UserDataPurgeHidden.kind == "poll_response",
+        UserDataPurgeHidden.row_id == response_id).first() is not None
+
+
 def _submit_poll_draft(response_id, task_id=None):
     """Core of submit (plain function so tests can call it without the
     Celery machinery)."""
+    if _hidden_for_deletion(response_id):
+        # Hidden by "Delete all my writing" after the click (#268): no
+        # draft is asked for; a restore makes the answer answerable.
+        logger.info("Poll draft %s skipped: hidden for deletion",
+                    response_id)
+        return
     resp = PollResponse.query.get(response_id)
     if resp is None or resp.status != "drafting":
         logger.info("Poll draft %s skipped (gone or not drafting)",
@@ -200,8 +216,32 @@ def submit_poll_draft(self, response_id: int):
 def _save_draft_result(item, result):
     """Save one collected batch result to its PollResponse and log the
     cost to the polls system account."""
+    from backend.utils.hidden_rows import including_hidden_rows
     from backend.utils.system_accounts import get_poll_system_user
 
+    def log_cost():
+        # Cache-aware for either provider: the poll's model is admin-chosen
+        # and may be an OpenAI one (#286).
+        db.session.add(APICostLog(
+            user_id=get_poll_system_user().id, model_id=item["model_id"],
+            request_type="poll_draft",
+            request_ref=f"poll:{item['poll_id']}",
+            **llm_cost_log_fields(item["model_id"], result, batch=True),
+        ))
+
+    if _hidden_for_deletion(item["response_id"]):
+        # "Delete all my writing" hid the answer while its draft was in
+        # the batch (#268): the provider billed it, so the cost row is
+        # written, and nothing is saved. A restore finds the answer where
+        # the user can write it or ask for a draft again.
+        log_cost()
+        with including_hidden_rows():
+            hidden = PollResponse.query.get(item["response_id"])
+            if hidden is not None and hidden.status == "drafting":
+                hidden.status = "draft_failed"
+        logger.info("Draft result for response %s dropped: hidden for "
+                    "deletion", item["response_id"])
+        return
     resp = PollResponse.query.get(item["response_id"])
     if resp is None or resp.status != "drafting":
         logger.info("Draft result for response %s dropped (status %s)",
@@ -209,21 +249,16 @@ def _save_draft_result(item, result):
                     resp.status if resp else "gone")
         return
 
-    system_user = get_poll_system_user()
-    # Cache-aware for either provider: the poll's model is admin-chosen
-    # and may be an OpenAI one (#286).
-    db.session.add(APICostLog(
-        user_id=system_user.id, model_id=item["model_id"],
-        request_type="poll_draft",
-        request_ref=f"poll:{item['poll_id']}",
-        **llm_cost_log_fields(item["model_id"], result, batch=True),
-    ))
-    if is_empty_truncated(result):
-        # Cut off before any text (#368): no empty draft; the response
+    log_cost()
+    refused = is_refused(result)
+    if refused or is_empty_truncated(result):
+        # Cut off before any text (#368), or refused by the model (#470;
+        # empty or partial): no empty or apologetic draft; the response
         # fails like a missing item and the user writes their own.
         logger.warning(
-            "Poll draft for response %s cut off before any text (model %s, "
+            "Poll draft for response %s not saved: %s (model %s, "
             "output_tokens=%s); marking it failed", resp.id,
+            "refused by the model" if refused else "cut off before any text",
             item["model_id"], result.get("output_tokens"))
         _fail_response(resp)
         return

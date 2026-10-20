@@ -674,6 +674,34 @@ def test_poll_failed_item_bumps_attempts_and_clears_pending(app, monkeypatch):
         parent_profile_id=prev.id).first() is None
 
 
+def test_poll_saves_nothing_for_a_user_whose_writing_is_on_hold(app, monkeypatch):
+    """#268: "Delete all my writing" hid the writing after the request went
+    out: the result is dropped (no profile, no failed attempt), and the
+    immediate seed builds nothing for the user meanwhile."""
+    from backend.models import UserDataPurge
+    u = _user()
+    prev = _prev_profile(u, datetime(2026, 5, 1))
+    job, item = _chunk_job(u, prev)
+    db.session.add(UserDataPurge(user_id=u.id, source="self", scope="hidden",
+                                 status="scheduled",
+                                 scheduled_for=datetime.utcnow()))
+    db.session.commit()
+    monkeypatch.setattr(pb, "batch_check_and_collect",
+                        lambda bids, keys: ({item["custom_id"]: {
+                            "content": "a profile", "input_tokens": 1,
+                            "output_tokens": 1}}, {}, {}))
+    monkeypatch.setattr(pb, "batch_submit", MagicMock(return_value={}))
+
+    pb._poll_profile_batches()
+
+    u2 = User.query.get(u.id)
+    assert u2.profile_batch_pending is False
+    assert (u2.profile_batch_attempts or 0) == 0
+    assert UserProfile.query.filter_by(
+        parent_profile_id=prev.id).first() is None
+    assert pb._seed_profile_batches(users=[u2], ignore_backoff=True) == 0
+
+
 def test_poll_apply_exception_bumps_attempts_and_clears_pending(app, monkeypatch):
     """A result that raises while being applied counts as a failed attempt,
     so retries stay bounded and the progress endpoint's batch_step_failed
@@ -905,6 +933,76 @@ def test_seed_reports_submitted_not_built(app, monkeypatch):
     assert pb._seed_profile_batches(users=[u]) == 0
     assert User.query.get(u.id).profile_batch_pending is False
     assert User.query.get(u.id).profile_batch_attempts == 1
+
+
+def test_profile_failure_log_line_is_grouped_with_an_account_failure(app, monkeypatch):
+    """ProfileGenerationTask.on_failure logs without exc_info. For an
+    account failure the line carries the cause's fingerprint (log_extra),
+    which the Sentry hook applies; any other failure's line doesn't."""
+    import logging
+    import backend.llm_providers as lp
+    from backend.utils import provider_alerts
+    records = []
+
+    class _Keep(logging.Handler):
+        def emit(self, record):
+            records.append(record)
+    log = logging.getLogger("test.profile_failure")
+    log.addHandler(_Keep())
+    monkeypatch.setattr(pb._exports, "logger", log)
+
+    err = lp.ProviderAccountError("Anthropic", "spend_limit", "claude-x", "chat")
+    pb._exports._log_profile_failure(7, err)
+    pb._exports._log_profile_failure(8, ValueError("bad export"))
+
+    tagged, plain = records
+    assert "user 7" in tagged.getMessage()
+    assert provider_alerts.apply_fingerprint({}, None, tagged)["fingerprint"] == [
+        "provider-account-failure", "anthropic", "spend_limit", "chat"]
+    assert "fingerprint" not in provider_alerts.apply_fingerprint({}, None, plain)
+
+
+def test_submit_refused_for_an_account_reason_is_not_a_batch_attempt(app, monkeypatch):
+    """A spend limit or a revoked key refuses the submit (#369), whatever
+    the requests. Counting it would move an unpinned batch user to the
+    full-price synchronous path after three hourly seeds of an outage, and
+    keep them there after the account is fixed (#406 review, minor 2).
+    So it is not counted: the user is re-seeded each cycle and stays on
+    the Batch path."""
+    from backend.utils.llm_batch import SubmittedBatches
+    u = _user(profile_needs_full_regen=True,
+              profile_batch_attempts=pb.MAX_BATCH_ATTEMPTS - 1)
+    app.config["PROFILE_USE_BATCH"] = True
+    db.session.commit()
+    _remaining(monkeypatch, 90000)
+    monkeypatch.setattr(pb._exports, "build_user_export_content",
+                        MagicMock(return_value=_chunk("DATA")))
+    monkeypatch.setattr(pb._exports, "_load_prompt", lambda *a, **k: "G {user_export}")
+    submits = []
+
+    def refused(reqs, keys, kind):
+        submits.append(reqs)
+        out = SubmittedBatches()
+        out.account_refused.update(reqs)  # "anthropic"
+        return out
+    monkeypatch.setattr(pb, "batch_submit", refused)
+
+    for _ in range(pb.MAX_BATCH_ATTEMPTS + 1):
+        assert pb._seed_profile_batches(users=[u]) == 0
+    assert len(submits) == pb.MAX_BATCH_ATTEMPTS + 1  # re-seeded every time
+    user = User.query.get(u.id)
+    assert user.profile_batch_pending is False
+    assert user.profile_batch_attempts == pb.MAX_BATCH_ATTEMPTS - 1
+    # Still below the cap: exports' sync last resort leaves this user to
+    # the batch pipeline.
+    assert pb.use_batch_for_user(user, app.config)
+    assert user.profile_batch_attempts < pb.MAX_BATCH_ATTEMPTS
+
+    # Once the account is fixed the next seed goes through.
+    monkeypatch.setattr(pb, "batch_submit", lambda reqs, keys, kind: (
+        {k: f"b-{k}" for k in reqs}))
+    assert pb._seed_profile_batches(users=[u]) == 1
+    assert User.query.get(u.id).profile_batch_pending is True
 
 
 def test_force_batch_user_never_exhausts_to_sync(app, monkeypatch):
@@ -1522,6 +1620,53 @@ def test_apply_result_refuses_partial_truncated_chunk(app, monkeypatch):
     assert log.request_ref == REFUSED_REF
 
 
+@pytest.mark.parametrize("text", ["", "I can't help with"])
+def test_poll_refused_chunk_saves_nothing_and_counts_attempt(
+        app, monkeypatch, text):
+    """#470: a model refusal (no text, or partial text) is not a profile.
+    Nothing is saved, the old tip stays, the attempt counts as failed and
+    the cost row is marked refused for the backoff."""
+    from backend.utils.refusal_backoff import REFUSED_REF
+    u = _user()
+    prev = _prev_profile(u, datetime(2026, 5, 1))
+    job, item = _chunk_job(u, prev)
+    monkeypatch.setattr(pb, "batch_check_and_collect", lambda bids, keys: (
+        {item["custom_id"]: {"content": text, "refused": True,
+                             "truncated": False,
+                             "input_tokens": 2000, "output_tokens": 20}},
+        {}, {}))
+    submit = MagicMock(return_value={})
+    monkeypatch.setattr(pb, "batch_submit", submit)
+
+    pb._poll_profile_batches()
+
+    assert UserProfile.query.filter_by(user_id=u.id).all() == [prev]
+    assert pb._exports.profile_update_base(u.id).id == prev.id
+    u2 = User.query.get(u.id)
+    assert u2.profile_batch_attempts == 1
+    assert u2.profile_batch_pending is False
+    submit.assert_not_called()
+    assert APICostLog.query.filter_by(
+        user_id=u.id).one().request_ref == REFUSED_REF
+
+
+def test_poll_refused_integration_saves_nothing(app, monkeypatch):
+    u = _user()
+    tip = _prev_profile(u, datetime(2026, 6, 1))
+    job, item = _integration_job(u, tip)
+    monkeypatch.setattr(pb, "batch_check_and_collect", lambda bids, keys: (
+        {item["custom_id"]: {"content": "Sorry, no.", "refused": True,
+                             "input_tokens": 100, "output_tokens": 5}},
+        {}, {}))
+    monkeypatch.setattr(pb, "batch_submit", MagicMock(return_value={}))
+
+    pb._poll_profile_batches()
+
+    assert UserProfile.query.filter_by(
+        user_id=u.id, generation_type="integration").count() == 0
+    assert User.query.get(u.id).profile_batch_attempts == 1
+
+
 def _refusal(user, ago, request_type="profile_batch"):
     from backend.utils.refusal_backoff import REFUSED_REF
     db.session.add(APICostLog(
@@ -1846,3 +1991,22 @@ def test_183_edit_of_an_integration_leaves_the_seed_gates_as_they_were(app):
     e = edit(u, integration)
     assert e.source_rendered_at == tip.created_at
     assert pb._should_seed(u) is False
+
+
+def test_profile_refusal_stop_is_reported_as_refused(app, monkeypatch):
+    """#470: the second refusal stops the job and the report says
+    "refused by the model", not "output cut off"."""
+    from backend.llm_providers import EmptyTruncatedOutputError
+    from backend.utils import refusal_backoff
+    stops = []
+    monkeypatch.setattr(refusal_backoff, "report_stop",
+                        lambda *a, **k: stops.append(k))
+    u = _user()
+    db.session.commit()
+    resp = {"content": "", "refused": True, "input_tokens": 1,
+            "output_tokens": 1, "total_tokens": 2}
+    for _ in range(2):
+        with pytest.raises(EmptyTruncatedOutputError):
+            pb._exports.refuse_truncated_profile(
+                u, "test-model", resp, "chunk", batch=True)
+    assert stops[-1]["cause"] == "refused by the model"

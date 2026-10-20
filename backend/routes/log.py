@@ -43,6 +43,16 @@ def _preload_context_artifacts(nodes):
 _SORT_KEY = func.coalesce(Node.pinned_at, Node.created_at)
 
 
+def _own_private(walk, node, user_id):
+    """A `subtree_walk` row that is `user_id`'s own writing (author or
+    human owner) and not public; `node` is a Node alias joined on the
+    row's id, for its privacy level."""
+    return and_(
+        or_(walk.c.user_id == user_id, walk.c.human_owner_id == user_id),
+        node.privacy_level != PrivacyLevel.PUBLIC.value,
+    )
+
+
 def _cursor_of(node):
     return f"{(node.pinned_at or node.created_at).isoformat()}|{node.id}"
 
@@ -81,6 +91,12 @@ def get_log():
     # importer they are the whole corpus — yields the roots with at
     # least one alive accessible node underneath. The seeds are deleted,
     # so depth-0 rows never pass the alive filter.
+    #
+    # A deleted PUBLIC root counts only the user's own non-public
+    # writing underneath: the Log lists private writing (#228), so
+    # another user's public reply keeps the thread out (#516), while the
+    # user's private replies under a root published "this only" stay
+    # reachable.
     deleted_roots = db.session.query(Node.id).filter(
         Node.parent_id.is_(None),
         Node.deleted_at.isnot(None),
@@ -92,9 +108,19 @@ def get_log():
     deleted_walk = subtree_walk(
         deleted_roots, current_user.id, name="deleted_root_walk",
     )
+    walk_root = db.aliased(Node, flat=True)
+    walk_node = db.aliased(Node, flat=True)
     alive_roots = (
         db.session.query(deleted_walk.c.root_id)
-        .filter(deleted_walk.c.deleted_at.is_(None))
+        .join(walk_root, walk_root.id == deleted_walk.c.root_id)
+        .join(walk_node, walk_node.id == deleted_walk.c.id)
+        .filter(
+            deleted_walk.c.deleted_at.is_(None),
+            or_(
+                walk_root.privacy_level != PrivacyLevel.PUBLIC.value,
+                _own_private(deleted_walk, walk_node, current_user.id),
+            ),
+        )
         .distinct()
     )
 
@@ -114,10 +140,9 @@ def get_log():
                 Node.privacy_level != PrivacyLevel.PUBLIC.value,
             ),
             # §4a Case 2: soft-deleted thread root whose subtree still
-            # has an alive accessible descendant — ANY privacy, incl.
-            # public: a deleted public root leaves the Commons feed, so
-            # the Log is the owner's only entry point to what's still
-            # alive underneath. Pinned non-roots that are soft-deleted
+            # has an alive accessible descendant; for a public root, one
+            # of the user's own non-public descendants (#516, see
+            # `alive_roots`). Pinned non-roots that are soft-deleted
             # stay hidden — this branch only relaxes the rule for roots.
             and_(
                 Node.parent_id.is_(None),
@@ -212,7 +237,16 @@ def get_log():
     # under deleted ancestors is still reachable; the `deleted_at IS
     # NULL` filter here is what keeps deleted nodes out. Do not drop that
     # filter as redundant.
+    #
+    # Under a deleted public root only the user's own non-public nodes
+    # are picked, the same rule that listed the root: the card shows the
+    # user's private reply, never another user's public one.
     root_ids = [n.id for n in items]
+    deleted_public_root_ids = [
+        n.id for n in items
+        if n.parent_id is None and n.deleted_at is not None
+        and n.privacy_level == PrivacyLevel.PUBLIC.value
+    ]
     newest_map = {}
     first_alive_map = {}
     if root_ids:
@@ -231,7 +265,14 @@ def get_log():
                     walk.c.depth.asc(), walk.c.created_at.asc(), walk.c.id.asc(),
                 ),
             ).label("rn_first"),
-        ).filter(walk.c.deleted_at.is_(None)).subquery()
+        ).filter(walk.c.deleted_at.is_(None))
+        if deleted_public_root_ids:
+            shown_node = db.aliased(Node, flat=True)
+            ranked = ranked.join(shown_node, shown_node.id == walk.c.id).filter(or_(
+                walk.c.root_id.notin_(deleted_public_root_ids),
+                _own_private(walk, shown_node, current_user.id),
+            ))
+        ranked = ranked.subquery()
         for root_id, node_id, rn_newest, rn_first in db.session.query(
             ranked.c.root_id, ranked.c.id, ranked.c.rn_newest, ranked.c.rn_first,
         ).filter(or_(ranked.c.rn_newest == 1, ranked.c.rn_first == 1)).all():

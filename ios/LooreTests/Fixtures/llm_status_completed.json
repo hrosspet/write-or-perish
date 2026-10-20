@@ -1,0 +1,18 @@
+{
+  "content": "A tarn is a small, round mountain lake that fills the hollow of a cirque after the glacier melts, usually held in place by the cirque's raised rock lip.",
+  "continuation_node_id": null,
+  "error": null,
+  "node_id": 201088,
+  "progress": 100,
+  "status": "completed",
+  "task_info": null,
+  "tool_calls_meta": [
+    {
+      "name": "_mode",
+      "source_mode": "textmode"
+    }
+  ],
+  "tts_streaming": false,
+  "tts_task_status": null,
+  "warnings": []
+}

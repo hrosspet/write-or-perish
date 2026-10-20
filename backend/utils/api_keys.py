@@ -76,6 +76,40 @@ def get_api_keys_for_usage(config, key_type: str) -> dict:
     }
 
 
+# The settings that can hold each provider's API key, by role: chat and
+# train (get_api_keys_for_usage), OpenAI's batch-only key
+# (llm_batch.apply_batch_key_override) and the legacy single key the
+# others fall back to.
+API_KEY_SETTINGS = {
+    "anthropic": (("chat", "ANTHROPIC_API_KEY_CHAT"),
+                  ("train", "ANTHROPIC_API_KEY_TRAIN"),
+                  ("legacy", "ANTHROPIC_API_KEY")),
+    "openai": (("chat", "OPENAI_API_KEY_CHAT"),
+               ("train", "OPENAI_API_KEY_TRAIN"),
+               ("batch", "OPENAI_API_KEY_BATCH"),
+               ("legacy", "OPENAI_API_KEY")),
+}
+
+
+def api_key_role(config, provider, api_key) -> str:
+    """Which configured key *api_key* is, named by its role: "chat",
+    "train", "batch" or "legacy"; roles joined with "/" when the same key
+    is set in several settings (e.g. "chat/legacy"); "unknown" when it is
+    none of them. For the admin alert of an account failure (#369): it
+    says which key to fix without any part of the key itself."""
+    settings = API_KEY_SETTINGS.get((provider or "").lower(), ())
+    roles = [role for role, name in settings
+             if api_key and config.get(name) == api_key]
+    return "/".join(roles) or "unknown"
+
+
+def api_key_role_settings(provider, role) -> list:
+    """The setting names behind a role from api_key_role (several for a
+    joined role), e.g. ["ANTHROPIC_API_KEY_CHAT"]; [] for "unknown"."""
+    names = dict(API_KEY_SETTINGS.get((provider or "").lower(), ()))
+    return [names[r] for r in (role or "").split("/") if r in names]
+
+
 def get_openai_chat_key(config) -> str:
     """
     Get the OpenAI API key for chat/audio operations.

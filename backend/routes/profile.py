@@ -158,6 +158,25 @@ def get_audio(profile_id):
     return jsonify({"error": "No audio found for this profile"}), 404
 
 
+@profile_bp.route("/<int:profile_id>/tts-chapters", methods=["GET"])
+@login_required
+def get_tts_chapters(profile_id):
+    """Chapter list for a profile's TTS, built from its TTSChunk rows
+    exactly as for nodes and references (#145). Chapter titles are
+    profile text, so the access check is the audio route's: the owner
+    only."""
+    profile = UserProfile.query.get_or_404(profile_id)
+
+    if profile.user_id != current_user.id:
+        return jsonify({"error": "Unauthorized"}), 403
+
+    from backend.models import TTSChunk
+    from backend.utils.audio_processing import tts_chapters
+    chunks = TTSChunk.query.filter_by(profile_id=profile_id).order_by(
+        TTSChunk.chunk_index).all()
+    return jsonify({"chapters": tts_chapters(chunks)}), 200
+
+
 @profile_bp.route("/<int:profile_id>/tts", methods=["POST"])
 @login_required
 @require_spend_headroom

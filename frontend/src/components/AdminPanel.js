@@ -1,7 +1,10 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import XLookupConfirmDialog from "./XLookupConfirmDialog";
+import PurgeDataDialog from "./PurgeDataDialog";
+import AdminDeleteAccountDialog from "./AdminDeleteAccountDialog";
 import ProfileBuildConfirmDialog from "./ProfileBuildConfirmDialog";
 import AdminRefusalDialog, { REFUSAL_TITLES } from "./AdminRefusalDialog";
+import { offeredModels } from "./ModelSelector";
 import { FaTimesCircle, FaFilter, FaCaretDown, FaCaretUp, FaEye, FaEyeSlash } from "react-icons/fa";
 import api from "../api";
 import { formatDate, formatDateTime } from "../utils/date";
@@ -137,8 +140,9 @@ function AdminPolls() {
     // "default" option that resolves invisibly at creation time.
     Promise.all([
       fetchPolls(),
+      // A poll drafts answers like a reply does: chat models only.
       api.get("/nodes/models")
-        .then((res) => res.data.models || [])
+        .then((res) => offeredModels(res.data.models || [], "chat"))
         .catch(() => []),
     ]).then(([defaultModelId, fetchedModels]) => {
       setModels(fetchedModels);
@@ -528,6 +532,43 @@ const smallActionStyle = {
   borderRadius: "4px",
 };
 
+// The Users-row line for a user's latest data purge (#268) or account
+// deletion (#269). An admin's request waits out the same grace period as
+// the user's own (Peter, 2026-10-13), so the line says who asked.
+export function purgeLabel(job) {
+  if (!job) return "";
+  const who = job.source === "admin" ? "an admin" : "the user";
+  if (job.delete_account) {
+    switch (job.status) {
+      case "scheduled":
+        return `Account deleted by ${who}, hidden until ${formatDate(job.scheduled_for)}`;
+      case "running":
+        return "Deleting account…";
+      case "failed":
+        return `Account deletion failed: ${job.error || "unknown error"}`;
+      default:
+        return `Account deletion: ${job.status}`;
+    }
+  }
+  switch (job.status) {
+    case "scheduled":
+      // "Delete all my writing" and the admin's "Purge data" hide the
+      // writing at once (#268, Peter 2026-10-09 and 2026-10-13) and
+      // delete it on the date.
+      return job.scope === "hidden"
+        ? `Writing hidden by ${who}, deleted on ${formatDate(job.scheduled_for)}`
+        : `Data purge due ${formatDate(job.scheduled_for)}`;
+    case "running":
+      return "Purging data…";
+    case "done":
+      return `Data purged ${formatDate(job.finished_at)} (${job.source})`;
+    case "failed":
+      return `Data purge failed: ${job.error || "unknown error"}`;
+    default:
+      return `Data purge: ${job.status}`;
+  }
+}
+
 function AdminPanel() {
   const [activeTab, setActiveTab] = useState("users");
   const [users, setUsers] = useState([]);
@@ -546,6 +587,14 @@ function AdminPanel() {
   // Build profile on a user held by the refusal backoff (#368): the
   // confirmation dialog's user, or null.
   const [buildAsk, setBuildAsk] = useState(null);
+  // "Purge data" (#268): the user row whose dry run / confirmation is
+  // open, or null.
+  const [purgeAsk, setPurgeAsk] = useState(null);
+  const closePurge = useCallback(() => setPurgeAsk(null), []);
+  // "Delete account" (#269): the user row whose dry run / confirmation
+  // is open, or null.
+  const [deleteAsk, setDeleteAsk] = useState(null);
+  const closeDelete = useCallback(() => setDeleteAsk(null), []);
   // A pre-fill / intentions / profile build the backend refused for this
   // account (#346): { code, message, username }. Shown as a dialog.
   const [refusal, setRefusal] = useState(null);
@@ -761,6 +810,25 @@ function AdminPanel() {
       if (showRefusal(err, userId)) return;
       console.error(err);
       setError("Error queueing profile build.");
+    }
+  };
+
+  // Undo an admin's waiting "Purge data" or "Delete account" (Peter,
+  // 2026-10-13): what it hid shows again. The job id guards against a
+  // stale row undoing another request.
+  const undoDeletion = async (u) => {
+    const job = u.data_purge;
+    if (!job || !job.undoable) return;
+    const question = job.delete_account
+      ? `Undo the deletion of the account @${u.username}? The account is shown again and can sign in.`
+      : `Undo the purge of @${u.username}? Their writing shows again at once.`;
+    if (!window.confirm(question)) return;
+    try {
+      await api.post(`/admin/users/${u.id}/undo_deletion`, { job_id: job.id });
+      fetchUsers();
+    } catch (err) {
+      setError(err.response?.data?.error || "Could not undo the deletion.");
+      fetchUsers();
     }
   };
 
@@ -1123,6 +1191,8 @@ function AdminPanel() {
         }}
       />
       <AdminRefusalDialog refusal={refusal} onClose={() => setRefusal(null)} />
+      <PurgeDataDialog user={purgeAsk} onClose={closePurge} onStarted={() => fetchUsers()} />
+      <AdminDeleteAccountDialog user={deleteAsk} onClose={closeDelete} onStarted={() => fetchUsers()} />
 
       {error && <div style={{ color: "var(--error)" }}>{error}</div>}
       <table style={{ width: "100%", borderCollapse: "collapse", color: "var(--text-primary)" }}>
@@ -1297,10 +1367,10 @@ function AdminPanel() {
                   <div
                     style={{ color: u.profile_backoff.state === "stopped" ? "var(--error)" : "var(--warning)" }}
                     title={u.profile_backoff.state === "stopped"
-                      ? "The model's output was cut off twice in a row, so the profile job is stopped for this user: the hourly seeder skips it. An import that triggers a rebuild, a saved version, or Build profile (after confirming) starts it again."
-                      : `The model's output was cut off once; the next automatic try is after ${formatDateTime(u.profile_backoff.until)}. A second cut-off stops the profile job.`}
+                      ? "The model's output was cut off or refused twice in a row, so the profile job is stopped for this user: the hourly seeder skips it. An import that triggers a rebuild, a saved version, or Build profile (after confirming) starts it again."
+                      : `The model's output was cut off or refused once; the next automatic try is after ${formatDateTime(u.profile_backoff.until)}. A second one stops the profile job.`}
                   >
-                    {u.profile_backoff.state === "stopped" ? "⛔ stopped: output cut off" : "⏸ retry after cut-off"}
+                    {u.profile_backoff.state === "stopped" ? "⛔ stopped: output cut off or refused" : "⏸ retry after cut-off or refusal"}
                   </div>
                 )}
                 {u.intentions && u.intentions.state === "generating" && (
@@ -1428,7 +1498,42 @@ function AdminPanel() {
                   style={u.spam ? { color: "var(--error)" } : undefined}
                 >
                   {u.spam ? "Not spam" : "Spam"}
+                </button>{" "}
+                <button
+                  onClick={() => setPurgeAsk(u)}
+                  disabled={u.data_purge?.status === "running"}
+                  title={'Hide all of this user\'s writing now and delete it after the grace period, like their own "Delete all my writing" (dry run first). The account stays.'}
+                  style={{ color: "var(--error)" }}
+                >
+                  Purge data
+                </button>{" "}
+                <button
+                  onClick={() => setDeleteAsk(u)}
+                  disabled={u.data_purge?.status === "running"}
+                  title="Delete this account and all its data, like the user's own account deletion: hidden now, deleted after the grace period (dry run first)."
+                  style={{ color: "var(--error)" }}
+                >
+                  Delete account
                 </button>
+                {u.data_purge && (
+                  <div style={{ marginTop: "4px", fontSize: "0.85em", color: u.data_purge.status === "failed" ? "var(--error)" : "var(--text-secondary)" }}>
+                    {purgeLabel(u.data_purge)}
+                    {u.data_purge.undoable && (
+                      <>
+                        {" "}
+                        <button
+                          onClick={() => undoDeletion(u)}
+                          style={smallActionStyle}
+                          title={u.data_purge.delete_account
+                            ? "Show the account again, as the user's own restore does"
+                            : "Show the writing again, as the user's own restore does"}
+                        >
+                          Undo
+                        </button>
+                      </>
+                    )}
+                  </div>
+                )}
                 {(intentLabel(intent[u.id])) && (
                   <div style={{ marginTop: "4px", fontSize: "0.85em", color: intent[u.id]?.status === "failed" || (intent[u.id]?.error && !intent[u.id]?.status) ? "var(--error)" : "var(--text-secondary)" }}>
                     {intentLabel(intent[u.id])}

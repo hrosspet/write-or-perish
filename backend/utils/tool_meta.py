@@ -40,6 +40,39 @@ def get_tool_meta_entry(node, tool_name):
     return None
 
 
+# The fields of a tool_calls_meta entry that anyone who can see an AI
+# reply gets: which action it was and whether it worked. Every other field
+# (a search query, a saved reference's link and author, an artifact's kind
+# and title, the ids of entries, references, artifacts, todos, drafts and
+# shares, errors, apply state, batch details) belongs to the reply's owner.
+SHARED_TOOL_FIELDS = ("name", "status")
+
+
+def tool_calls_meta_for(node, viewer_id):
+    """*node*'s tool_calls_meta as *viewer_id* may see it: a list (empty
+    when nothing is left), or None when the column is empty or unreadable.
+
+    The reply's owner (the user who asked for it, else the node's author:
+    the owner the access checks use) gets every entry in full. Anyone
+    else, admins included, gets each entry's SHARED_TOOL_FIELDS only.
+    Nobody gets the app marker (utils/client_platform)."""
+    from backend.utils.client_platform import without_client_marker
+    if not node.tool_calls_meta:
+        return None
+    try:
+        meta = json.loads(node.tool_calls_meta)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(meta, list):
+        return None
+    meta = without_client_marker(meta)
+    if viewer_id is not None \
+            and (node.human_owner_id or node.user_id) == viewer_id:
+        return meta
+    return [{k: m[k] for k in SHARED_TOOL_FIELDS if k in m}
+            for m in meta if isinstance(m, dict)]
+
+
 def parse_github_issue(content):
     """Parse ### Issue Title, ### Description, ### Category from LLM text."""
     result = {}

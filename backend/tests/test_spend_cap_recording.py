@@ -283,7 +283,7 @@ def st(monkeypatch, tmp_path):
     monkeypatch.setattr(module, "get_openai_chat_key", lambda cfg: "key")
     monkeypatch.setattr(
         module, "concat_fragmented_media",
-        lambda paths, init_segment_path=None, output_suffix=None: str(
+        lambda paths, init_segment_path=None, output_suffix=None, report=None: str(
             _write(tmp_path / f"merged{output_suffix}", b"merged")))
     fake_openai = MagicMock()
     fake_openai.return_value.audio.transcriptions.create.return_value = (

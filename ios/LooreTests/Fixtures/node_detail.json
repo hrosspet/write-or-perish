@@ -1,0 +1,170 @@
+{
+  "ai_usage": "chat",
+  "ancestors": [
+    {
+      "ai_usage": "chat",
+      "child_count": 1,
+      "content": "Loore is a personal AI platform where users build a growing body of text — their \"lore\" — through journaling, voice notes, and importing their existing writing. Everything the user shares contributes … [trimmed for the fixture]",
+      "context_artifacts": {
+        "external_content_guidance": {
+          "content": "## Archive search\n\nYou can search the user's own archive — their past entries and your past replies — by meaning, with the semantic_search tool. Use it when they explicitly ask (\"have I written about … [trimmed for the fixture]"
+        },
+        "prompt": {
+          "id": 23,
+          "prompt_key": "textmode",
+          "title": "Text Mode",
+          "version_number": 3
+        },
+        "recent_raw": {
+          "covers_end": "2026-09-28",
+          "covers_start": "2026-09-09",
+          "source_tokens": 7751
+        },
+        "share_guidance": {
+          "content": "## Proposing shares\n\nWhen the user expresses something worth giving outward — a need they want help with, an offering, an insight or learning, an open exploration, or an intention they want to be publ … [trimmed for the fixture]"
+        }
+      },
+      "created_at": "2026-09-28T20:51:49.879384Z",
+      "id": 201083,
+      "is_system_prompt": true,
+      "llm_model": null,
+      "node_type": "user",
+      "parent_user_id": null,
+      "preview": "Loore is a personal AI platform where users build a growing body of text — their \"lore\" — through journaling, voice notes, and importing their existing writing. Everything the user shares contributes ...",
+      "privacy_level": "private",
+      "prompt_key": "textmode",
+      "prompt_title": "Text Mode",
+      "prompt_version_number": 3,
+      "user_id": 5,
+      "user_prompt_id": 23,
+      "username": "seowriter"
+    }
+  ],
+  "child_count": 2,
+  "children": [
+    {
+      "ai_usage": "chat",
+      "child_count": 1,
+      "children": [
+        {
+          "ai_usage": "chat",
+          "child_count": 1,
+          "children": [
+            {
+              "ai_usage": "chat",
+              "child_count": 0,
+              "children": [],
+              "content": "A tarn is a small, round mountain lake that fills the hollow of a cirque after the glacier melts, usually held in place by the cirque's raised rock lip.",
+              "context_artifacts": null,
+              "created_at": "2026-09-28T20:53:21.514455Z",
+              "descendant_count": 0,
+              "has_tts": false,
+              "id": 201088,
+              "is_system_prompt": false,
+              "llm_model": "claude-opus-5.5",
+              "node_type": "llm",
+              "origin": null,
+              "parent_user_id": 5,
+              "privacy_level": "private",
+              "prompt_key": null,
+              "prompt_title": null,
+              "prompt_version_number": null,
+              "updated_at": "2026-09-28T20:53:25.074826Z",
+              "user_id": 30,
+              "user_prompt_id": null,
+              "username": "claude-opus-5.5"
+            }
+          ],
+          "content": "And a tarn, in one sentence?",
+          "context_artifacts": null,
+          "created_at": "2026-09-28T20:53:21.471434Z",
+          "descendant_count": 1,
+          "has_tts": false,
+          "id": 201087,
+          "is_system_prompt": false,
+          "llm_model": null,
+          "node_type": "user",
+          "origin": null,
+          "parent_user_id": 5,
+          "privacy_level": "private",
+          "prompt_key": null,
+          "prompt_title": null,
+          "prompt_version_number": null,
+          "updated_at": "2026-09-28T20:53:21.471436Z",
+          "user_id": 5,
+          "user_prompt_id": null,
+          "username": "seowriter"
+        }
+      ],
+      "content": "# What Is a Cirque?\n\nA **cirque** is a steep-sided, bowl-shaped hollow that a glacier carves high on a mountainside, usually at the head of a glacial valley. Rock walls surround it on three sides and … [trimmed for the fixture]",
+      "context_artifacts": null,
+      "created_at": "2026-09-28T20:52:36.948257Z",
+      "descendant_count": 2,
+      "has_tts": false,
+      "id": 201086,
+      "is_system_prompt": false,
+      "llm_model": "claude-opus-5.5",
+      "node_type": "llm",
+      "origin": null,
+      "parent_user_id": 5,
+      "privacy_level": "private",
+      "prompt_key": null,
+      "prompt_title": null,
+      "prompt_version_number": null,
+      "updated_at": "2026-09-28T20:52:45.189055Z",
+      "user_id": 30,
+      "user_prompt_id": null,
+      "username": "claude-opus-5.5"
+    },
+    {
+      "ai_usage": "chat",
+      "child_count": 0,
+      "children": [],
+      "content": "# What Is a Cirque?\n\nA **cirque** is a bowl-shaped hollow that a glacier carves into a mountainside. You usually find one at the head of a glacial valley, where the ice first builds up. It has steep r … [trimmed for the fixture]",
+      "context_artifacts": null,
+      "created_at": "2026-09-28T20:51:49.897602Z",
+      "descendant_count": 0,
+      "has_tts": false,
+      "id": 201085,
+      "is_system_prompt": false,
+      "llm_model": "claude-opus-5.5",
+      "node_type": "llm",
+      "origin": null,
+      "parent_user_id": 5,
+      "privacy_level": "private",
+      "prompt_key": null,
+      "prompt_title": null,
+      "prompt_version_number": null,
+      "updated_at": "2026-09-28T20:51:57.247672Z",
+      "user_id": 30,
+      "user_prompt_id": null,
+      "username": "claude-opus-5.5"
+    }
+  ],
+  "content": "In about 200 words, what is a cirque? Don't look anything up.",
+  "context_artifacts": null,
+  "created_at": "2026-09-28T20:51:49.888528Z",
+  "has_original_audio": false,
+  "has_tts": false,
+  "id": 201084,
+  "in_read_thread": false,
+  "is_system_prompt": false,
+  "llm_model": null,
+  "llm_task_status": null,
+  "node_type": "user",
+  "origin": null,
+  "parent_user_id": 5,
+  "permalink": null,
+  "pinned_at": null,
+  "privacy_level": "private",
+  "prompt_key": null,
+  "prompt_title": null,
+  "prompt_version_number": null,
+  "read_reply_above": false,
+  "updated_at": "2026-09-28T20:51:49.888529Z",
+  "user": {
+    "id": 5,
+    "username": "seowriter"
+  },
+  "user_prompt_id": null
+}

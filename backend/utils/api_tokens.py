@@ -55,7 +55,8 @@ def resolve_api_token(plaintext, scope):
     # The session path enforces approval in a before_request hook that
     # only sees flask-login users; the bearer path must enforce it here.
     user = row.user
-    if user is None or not user.approved or user.deactivated_at is not None:
+    if (user is None or not user.approved or user.deactivated_at is not None
+            or user.deleted_at is not None):   # a deleted account (#269)
         return None
     now = datetime.utcnow()
     if (row.last_used_at is None

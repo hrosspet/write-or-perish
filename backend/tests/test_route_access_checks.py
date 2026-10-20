@@ -669,35 +669,11 @@ class TestRemovedRoutes:
         assert resp.status_code == 404
         assert resp.data != b"audio-bytes"
 
-
-# ── /api/dashboard/<username> ────────────────────────────────────────────
-
-class TestPublicDashboard:
-
-    def test_profile_is_returned_only_to_its_owner(self, app, data):
-        resp = _call(app, data.bob, "GET", "/api/dashboard/alice")
-        assert resp.status_code == 200
-        assert resp.get_json()["latest_profile"] is None
-        assert "ALICE PROFILE TEXT" not in resp.get_data(as_text=True)
-
-        resp = _call(app, data.alice, "GET", "/api/dashboard/alice")
-        assert resp.get_json()["latest_profile"]["content"] == \
-            "ALICE PROFILE TEXT"
-        # The clients turn the speaker icon off for a 'none' version.
-        assert resp.get_json()["latest_profile"]["ai_usage"] == "chat"
-
-    def test_session_card_does_not_preview_a_private_first_message(
-            self, app, data):
-        root = _node(data.alice, "(system)", privacy_level="public",
-                     prompt_key="textmode")
-        _node(data.alice, "ALICE PRIVATE FIRST MESSAGE", parent=root)
-
-        resp = _call(app, data.bob, "GET", "/api/dashboard/alice")
-        assert resp.status_code == 200
-        assert "ALICE PRIVATE FIRST MESSAGE" not in resp.get_data(as_text=True)
-
-        resp = _call(app, data.alice, "GET", "/api/dashboard/alice")
-        assert "ALICE PRIVATE FIRST MESSAGE" in resp.get_data(as_text=True)
+    def test_dashboard_of_a_username_is_gone(self, app, data):
+        for viewer in (data.alice, data.bob):
+            resp = _call(app, viewer, "GET", "/api/dashboard/alice")
+            assert resp.status_code == 404
+            assert "ALICE" not in resp.get_data(as_text=True)
 
 
 # ── Creating nodes under a client-supplied parent ────────────────────────

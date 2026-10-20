@@ -226,6 +226,41 @@ def test_rebuild_stamps_the_corpus_state_not_the_finish_time(
     assert _digest.digest_is_stale(uid) is True
 
 
+def test_rebuild_does_not_retry_an_account_failure(app, monkeypatch):
+    """A rebuild refused for an account reason (#369) is not re-queued:
+    it fails the same way until someone fixes the account, and the
+    provider module has already alerted the admin. Any other failure is
+    still retried."""
+    class AccountError(RuntimeError):
+        pass
+
+    monkeypatch.setattr(_digest, "ProviderAccountError", AccountError)
+    uid = User.query.first().id
+    _mk_item(uid, "a")
+    retried = []
+
+    class _RecordingSelf(_FakeSelf):
+        def retry(self, exc=None, **kwargs):
+            retried.append(exc)
+            raise exc
+
+    def refuse(model_id, messages, api_keys, **kwargs):
+        raise AccountError("AI replies are temporarily unavailable.")
+    monkeypatch.setattr(_digest.LLMProvider, "get_completion",
+                        staticmethod(refuse))
+    with pytest.raises(AccountError):
+        _digest.rebuild_external_digest(_RecordingSelf(), uid)
+    assert retried == []
+
+    def overloaded(model_id, messages, api_keys, **kwargs):
+        raise RuntimeError("overloaded")
+    monkeypatch.setattr(_digest.LLMProvider, "get_completion",
+                        staticmethod(overloaded))
+    with pytest.raises(RuntimeError):
+        _digest.rebuild_external_digest(_RecordingSelf(), uid)
+    assert len(retried) == 1
+
+
 def _stub_batch_submit(monkeypatch, batch_id="batch_1"):
     """batch_submit stand-in: records what was submitted and answers with
     one batch id per provider key, the way llm_batch keys them."""
@@ -332,6 +367,56 @@ def test_account_opted_out_of_ai_gets_no_digest(app, monkeypatch):
     assert _digest.rebuild_external_digest(
         _FakeSelf(), user.id, force=True) == {"status": "ai_opt_out"}
     assert calls == []
+
+
+def _hold_writing(user):
+    """A waiting "Delete all my writing" of *user* (#268)."""
+    from backend.models import UserDataPurge
+    job = UserDataPurge(user_id=user.id, source="self", scope="hidden",
+                        status="scheduled", scheduled_for=datetime.utcnow())
+    _db.session.add(job)
+    _db.session.commit()
+    return job
+
+
+def test_no_digest_while_the_writing_is_on_hold(app, monkeypatch):
+    """#268: while "Delete all my writing" waits, neither the nightly
+    sweep nor a manual rebuild builds a digest, and a batch result that
+    arrives meanwhile is not saved (its cost is logged)."""
+    user = User.query.first()
+    user.timezone = _tz_at_hour(_digest.NIGHTLY_DIGEST_LOCAL_HOUR)
+    _db.session.commit()
+    _mk_item(user.id, "clip")
+    hold = _hold_writing(user)
+    submitted = _stub_batch_submit(monkeypatch)
+    calls = _stub_llm(monkeypatch)
+
+    assert _digest.sweep_external_digests() == {"status": "ok",
+                                                "submitted": 0}
+    assert submitted == []
+    assert _digest.rebuild_external_digest(
+        _FakeSelf(), user.id, force=True) == {"status": "on_hold"}
+    assert calls == []
+    # Restored: the sweep picks the user up again.
+    hold.status = "cancelled"
+    _db.session.commit()
+    _digest.sweep_external_digests()
+    assert len(submitted) == 1
+    ExternalDigestBatchJob.query.delete()
+    hold.status = "scheduled"
+    _db.session.commit()
+
+    corpus_at = datetime.utcnow()
+    job = _pending_job(user, corpus_at, batch_id="batch_held")
+    monkeypatch.setattr(_digest, "batch_check_and_collect", lambda ids, k: (
+        {f"external-digest-{user.id}": {
+            "content": "# Topics\n- from hidden writing", "input_tokens": 10,
+            "output_tokens": 5}}, {}, {}))
+    _digest._collect_digest_batches()
+    assert UserArtifact.latest_for(user.id, _digest.DIGEST_KIND) is None
+    assert APICostLog.query.count() == 1
+    _db.session.expire_all()
+    assert ExternalDigestBatchJob.query.get(job.id).status == "collected"
 
 
 def _pending_job(user, corpus_at, provider_key="anthropic",
@@ -510,3 +595,82 @@ def test_collector_logs_the_cost_of_an_empty_batch_result(app, monkeypatch):
     assert log.request_type == "external_digest"
     assert log.request_ref is None          # empty, but not cut off
     assert log.cost_microdollars == 3750    # batch price
+
+
+@pytest.mark.parametrize("text", ["", "I can't write this digest"])
+def test_collector_does_not_save_a_refused_batch_result(
+        app, monkeypatch, text):
+    """#470: a refusal (no text or partial text) is billed and marked
+    refused, and no digest version is saved."""
+    from backend.utils.refusal_backoff import REFUSED_REF
+    user = User.query.first()
+    _mk_item(user.id, "a")
+    _pending_job(user, datetime.utcnow())
+    monkeypatch.setattr(
+        _digest, "batch_check_and_collect",
+        lambda ids, keys: ({f"external-digest-{user.id}": {
+            "content": text, "refused": True, "input_tokens": 1000,
+            "output_tokens": 20}}, {}, {}))
+
+    _digest._collect_digest_batches()
+    _db.session.rollback()
+    assert UserArtifact.latest_for(user.id, _digest.DIGEST_KIND) is None
+    assert APICostLog.query.one().request_ref == REFUSED_REF
+
+
+def test_direct_rebuild_does_not_save_a_refused_digest(app, monkeypatch):
+    uid = User.query.first().id
+    _mk_item(uid, "a")
+    monkeypatch.setattr(
+        _digest.LLMProvider, "get_completion",
+        staticmethod(lambda *a, **k: {
+            "content": "I can't", "refused": True, "input_tokens": 1000,
+            "output_tokens": 5}))
+    assert _digest.rebuild_external_digest(
+        _FakeSelf(), uid) == {"status": "empty_response"}
+    assert UserArtifact.latest_for(uid, _digest.DIGEST_KIND) is None
+
+
+def test_refused_digest_backs_off_and_is_not_billed_every_night(
+        app, monkeypatch):
+    """#470: repeated sweeps after a refusal do not resubmit or bill
+    again until the backoff allows it: one try after an hour, then a stop
+    (reported) until a digest is saved."""
+    from backend.utils import refusal_backoff
+    user = User.query.first()
+    user.timezone = _tz_at_hour(_digest.NIGHTLY_DIGEST_LOCAL_HOUR)
+    _db.session.commit()
+    _mk_item(user.id, "a")
+    submitted = _stub_batch_submit(monkeypatch)
+    stops = []
+    monkeypatch.setattr(refusal_backoff, "report_stop",
+                        lambda *a, **k: stops.append((a, k)))
+
+    def refuse_round():
+        res = _digest.sweep_external_digests()
+        monkeypatch.setattr(
+            _digest, "batch_check_and_collect",
+            lambda ids, keys: ({f"external-digest-{user.id}": {
+                "content": "I can't", "refused": True,
+                "input_tokens": 1000, "output_tokens": 5}}, {}, {}))
+        _digest._collect_digest_batches()
+        return res["submitted"]
+
+    assert refuse_round() == 1                   # first try, refused
+    assert _digest.sweep_external_digests()["submitted"] == 0   # waiting
+    assert len(submitted) == 1 and APICostLog.query.count() == 1
+    assert stops == []
+
+    APICostLog.query.update({"created_at": datetime.utcnow()
+                             - timedelta(hours=1, minutes=1)})
+    _db.session.commit()
+    assert refuse_round() == 1                   # the one more try
+    assert len(stops) == 1                       # second refusal: stopped
+    assert stops[0][1]["cause"] == refusal_backoff.REFUSED_CAUSE
+
+    APICostLog.query.update({"created_at": datetime.utcnow()
+                             - timedelta(days=2)})
+    _db.session.commit()
+    for _ in range(3):
+        assert _digest.sweep_external_digests()["submitted"] == 0
+    assert len(submitted) == 2 and APICostLog.query.count() == 2

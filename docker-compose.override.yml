@@ -41,8 +41,17 @@ services:
       - ./backend:/app/backend
       - media_data:/app/data
 
-  # Celery Beat with auto-reload on code changes
+  # Celery Beat with auto-reload on code changes. OFF by default in dev:
+  # beat runs every periodic job (profile updates, recent-context
+  # summaries, embedding sweeps, digests, CA snapshot refresh, ...), and
+  # local dev has real API keys, so those jobs bill and rewrite local
+  # data while you work. The worker still runs, so jobs you trigger
+  # (replies, transcription, TTS) work. To run beat, set
+  # COMPOSE_PROFILES=beat in .env, or `docker compose --profile beat up`.
+  # To fire one job, `.delay()` it from `make shell` -> flask shell.
   celery-beat:
+    profiles:
+      - beat
     build:
       context: ./backend
       dockerfile: Dockerfile.dev

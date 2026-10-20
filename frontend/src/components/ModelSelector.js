@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useId } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useRef, useId } from 'react';
 import { FaChevronDown, FaCheck } from 'react-icons/fa';
 import api from '../api';
 
@@ -11,33 +11,43 @@ const PROVIDERS = [
 ];
 
 /**
+ * The models a picker of this purpose may offer: the read models for
+ * 'read', the chat models otherwise. A read-only model (`chat: false`)
+ * is in the Read picker only. A missing `chat` counts as true.
+ */
+export const offeredModels = (models, purpose) => models.filter(
+  (m) => (purpose === 'read' ? m.read : m.chat !== false),
+);
+
+/**
  * The options a picker shows (#355).
  *
  * purpose 'read': only the models a read runs on.
  * purpose 'chat', collapsed: the featured models plus the selected one
  *   (first, when it is not featured), then "More models…".
- * purpose 'chat', expanded: every active model, grouped by provider.
+ * purpose 'chat', expanded: every active chat model, grouped by provider.
  *
  * `models` comes from /nodes/models: active only, newest first within
  * each provider.
  */
 export const pickerOptions = (models, selectedId, purpose, expanded) => {
+  const offered = offeredModels(models, purpose);
   if (purpose === 'read') {
-    return { kind: 'flat', models: models.filter((m) => m.read) };
+    return { kind: 'flat', models: offered };
   }
   if (expanded) {
     return {
       kind: 'grouped',
       groups: PROVIDERS
-        .map((p) => ({ ...p, models: models.filter((m) => m.provider === p.id) }))
+        .map((p) => ({ ...p, models: offered.filter((m) => m.provider === p.id) }))
         .filter((g) => g.models.length > 0),
     };
   }
-  const byProvider = PROVIDERS.flatMap((p) => models.filter((m) => m.provider === p.id));
+  const byProvider = PROVIDERS.flatMap((p) => offered.filter((m) => m.provider === p.id));
   const featured = byProvider.filter((m) => m.featured);
-  const selected = models.find((m) => m.id === selectedId);
+  const selected = offered.find((m) => m.id === selectedId);
   const short = selected && !selected.featured ? [selected, ...featured] : featured;
-  return { kind: 'flat', models: short, more: short.length < models.length };
+  return { kind: 'flat', models: short, more: short.length < offered.length };
 };
 
 const optionModels = (options) => (
@@ -62,7 +72,8 @@ const MENU_MAX_HEIGHT = 320;
  * chat reply otherwise), else the account preference / server default.
  * A thread predecessor overrides whatever was selected; otherwise the
  * default only fills an empty selection or replaces one this picker
- * cannot offer (a deprecated preference, a chat model in the Read picker).
+ * cannot offer (a deprecated preference, a chat model in the Read picker,
+ * a read-only model in a chat picker).
  */
 const ModelSelector = ({
   nodeId, selectedModel, onModelChange, purpose = 'chat', disabled = false,
@@ -75,6 +86,7 @@ const ModelSelector = ({
   const [expanded, setExpanded] = useState(false);
   const [activeId, setActiveId] = useState(null);
   const [dropUp, setDropUp] = useState(false);
+  const [alignRight, setAlignRight] = useState(false);
   const rootRef = useRef(null);
   const triggerRef = useRef(null);
   const listRef = useRef(null);
@@ -106,8 +118,7 @@ const ModelSelector = ({
     const key = `${nodeId}:${purpose}`;
     if (appliedFor.current === key) return;
     appliedFor.current = key;
-    const offered = models.filter((m) => purpose !== 'read' || m.read);
-    const selectable = offered.some((m) => m.id === selectedModel);
+    const selectable = offeredModels(models, purpose).some((m) => m.id === selectedModel);
     if (suggestion.source === 'predecessor' || !selectable) {
       if (suggestion.suggested_model !== selectedModel) {
         onModelChange(suggestion.suggested_model);
@@ -120,7 +131,7 @@ const ModelSelector = ({
   const rows = optionModels(options);
   const navIds = [...rows.map((m) => m.id), ...(options.more ? [MORE] : [])];
   const selected = (models || []).find((m) => m.id === selectedModel);
-  const label = purpose === 'read' ? 'Model for Read' : 'Model';
+  const label = purpose === 'read' ? 'Model for Glean' : 'Model';
 
   const closeMenu = (refocus = true) => {
     setOpen(false);
@@ -153,9 +164,21 @@ const ModelSelector = ({
     closeMenu();
   };
 
+  // A list wider than the room right of the trigger opens leftwards, from
+  // the trigger's right edge (the Glean picker sits at the page's right
+  // edge): spilling past the window widened the page, and the view slid
+  // sideways while the list was open. Measured again when "More models…"
+  // widens it.
+  useLayoutEffect(() => {
+    if (!open || !listRef.current || !rootRef.current) return;
+    const listWidth = listRef.current.getBoundingClientRect().width;
+    const { left } = rootRef.current.getBoundingClientRect();
+    setAlignRight(left + listWidth > document.documentElement.clientWidth);
+  }, [open, expanded]);
+
   // Keys go to the list while it is open.
   useEffect(() => {
-    if (open) listRef.current?.focus();
+    if (open) listRef.current?.focus({ preventScroll: true });
   }, [open]);
 
   useEffect(() => {
@@ -279,8 +302,9 @@ const ModelSelector = ({
           ...styleProp,
         }}
       >
-        <span>{selected ? selected.name : '…'}</span>
-        <FaChevronDown aria-hidden="true" size={10} style={{ color: 'var(--text-muted)' }} />
+        {/* A name wider than a fixed-width trigger ends in "…" and keeps the arrow. */}
+        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{selected ? selected.name : '…'}</span>
+        <FaChevronDown aria-hidden="true" size={10} style={{ color: 'var(--text-muted)', flexShrink: 0 }} />
       </button>
       {open && (
         <div
@@ -294,7 +318,7 @@ const ModelSelector = ({
           style={{
             position: 'absolute',
             [dropUp ? 'bottom' : 'top']: 'calc(100% + 4px)',
-            left: 0,
+            [alignRight ? 'right' : 'left']: 0,
             minWidth: '100%',
             maxHeight: `${MENU_MAX_HEIGHT}px`,
             overflowY: 'auto',

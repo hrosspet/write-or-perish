@@ -143,7 +143,7 @@ def test_every_retrieval_pull_reports_to_the_licence(app):  # noqa: F811
 
     def after(tr):
         lic = PayloadLicence("train")
-        assert inject(tr, licence=lic) is not None
+        assert inject(tr, alice.id, licence=lic) is not None
         return lic.key_type
 
     assert after({"name": "read_artifact", "artifact_id": train_art.id,
@@ -166,7 +166,7 @@ def test_every_retrieval_pull_reports_to_the_licence(app):  # noqa: F811
     assert after({"name": "semantic_search", "query": "q", "matches": [],
                   "ext_matches": [{"item_id": ref.id, "score": 0.9}]}) == "chat"
     # No licence: the text still renders (callers that only display it).
-    assert inject({"name": "read_todo", "todo_id": todo.id}) is not None
+    assert inject({"name": "read_todo", "todo_id": todo.id}, alice.id) is not None
 
 
 # ── leg 1: {quote_ext:ID} ────────────────────────────────────────────────
