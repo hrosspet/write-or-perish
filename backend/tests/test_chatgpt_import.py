@@ -6,7 +6,11 @@ Covers:
   parsing.
 - POST /api/import/chatgpt/analyze: request shape validation, JSON parse errors,
   empty-conversations case, happy path with realistic mapping graph, sharded
-  exports uploaded as several parts.
+  exports uploaded as several parts. The analyzed conversations go to the
+  server-side stash (read back with _stashed), not into the response.
+- POST /api/import/chatgpt/confirm: dedup, deleted content, settings
+  update. The background job runs inline (the app fixture), so the
+  confirm helper returns the job's result.
 """
 
 import io
@@ -64,7 +68,9 @@ def _make_app():
 
 
 @pytest.fixture
-def app():
+def app(tmp_path, monkeypatch):
+    from backend.utils import twitter_archive
+    monkeypatch.setattr(twitter_archive, "STASH_ROOT", tmp_path / "imports")
     _affected = lambda k: (  # noqa: E731
         k == "flask_login"
         or k.startswith("backend.routes")
@@ -78,6 +84,7 @@ def app():
         del sys.modules[_k]
 
     app = _make_app()
+    _run_import_jobs_inline(app, monkeypatch)
     with app.app_context():
         _db.create_all()
         yield app
@@ -89,6 +96,41 @@ def app():
             del sys.modules[k]
     for k, mod in saved.items():
         sys.modules[k] = mod
+
+
+def _run_import_jobs_inline(app, monkeypatch):
+    """The confirm step queues the import job in Celery; here it runs
+    inside the confirm request, and its results are kept on the app."""
+    from backend.routes import import_data
+    app.import_results = []
+
+    def run_inline(user_id, token, task_id, options):
+        app.import_results.append(import_data.run_conversation_import(
+            user_id, token, task_id, options))
+
+    monkeypatch.setattr(import_data, "_dispatch_conversation_import",
+                        run_inline)
+
+
+class _JobResponse:
+    """A confirm response whose JSON is the inline job's result when the
+    confirm started one (what /import/status reports when it completes),
+    else the response's own JSON (a 400 or 409)."""
+
+    def __init__(self, resp, result):
+        self.status_code = resp.status_code
+        self._json = result if resp.status_code == 202 else resp.get_json()
+
+    def get_json(self):
+        return self._json
+
+
+def _stashed(body):
+    """The conversations the analyze step stashed for its token."""
+    from backend.utils import conversation_stash as cs
+    from backend.utils import twitter_archive as ta
+    [path] = list(ta.STASH_ROOT.glob("*/" + body["import_token"] + ".conv"))
+    return [conv for _, conv in cs.iter_conversations(path)]
 
 
 def _login(client, user_id):
@@ -130,14 +172,26 @@ def _post_conversations(client, raw_conversations):
 
 
 def _confirm_conversations(client, conversations, **extra):
-    """POST analyzed conversations to the ChatGPT confirm endpoint."""
-    body = {"conversations": conversations}
+    """Stash analyzed conversations as the analyze step does, then POST
+    the token to the ChatGPT confirm endpoint. The job runs inline;
+    the response's JSON is its result (see _JobResponse)."""
+    from flask import current_app
+    from backend.routes.import_data import _stash_conversations
+    with client.session_transaction() as sess:
+        user_id = int(sess["_user_id"])
+    token = _stash_conversations(
+        user_id, "chatgpt", conversations,
+        sum(len(c["messages"]) for c in conversations))
+    body = {"import_token": token}
     body.update(extra)
-    return client.post(
+    results = current_app.import_results
+    before = len(results)
+    resp = client.post(
         "/api/import/chatgpt/confirm",
         data=json.dumps(body),
         content_type="application/json",
     )
+    return _JobResponse(resp, results[-1] if len(results) > before else None)
 
 
 # ── _linearize_chatgpt_messages ──────────────────────────────────────────
@@ -485,7 +539,8 @@ class TestAnalyzeChatgptImport:
         assert body["total_messages"] == 2
         assert body["total_tokens"] > 0
         assert body["total_size"] > 0
-        conv = body["conversations"][0]
+        assert "conversations" not in body  # stays on the server
+        conv = _stashed(body)[0]
         assert conv["name"] == "First chat"
         assert conv["default_model"] == "gpt-4o"
         assert conv["message_count"] == 2
@@ -510,7 +565,7 @@ class TestAnalyzeChatgptImport:
         body = resp.get_json()
         assert body["total_conversations"] == 2
         assert body["total_messages"] == 4
-        names = [c["name"] for c in body["conversations"]]
+        names = [c["name"] for c in _stashed(body)]
         assert names == ["A", "B"]
 
     def test_sharded_export_parts_are_merged(self, app):
@@ -545,7 +600,7 @@ class TestAnalyzeChatgptImport:
         )
         assert resp.status_code == 200
         body = resp.get_json()
-        assert [c["name"] for c in body["conversations"]] == ["A", "B"]
+        assert [c["name"] for c in _stashed(body)] == ["A", "B"]
         assert body["total_messages"] == 4
 
     def _analyze_parts(self, app, parts):
@@ -574,7 +629,7 @@ class TestAnalyzeChatgptImport:
         ])
         assert resp.status_code == 200
         body = resp.get_json()
-        assert [c["name"] for c in body["conversations"]] == ["A", "S"]
+        assert [c["name"] for c in _stashed(body)] == ["A", "S"]
         assert body["notices"] == []
 
     def test_empty_sectioned_file_gives_no_notice(self, app):
@@ -598,7 +653,7 @@ class TestAnalyzeChatgptImport:
             ("conversations-001.json", [again, by_conv_id_again]),
         ])
         body = resp.get_json()
-        assert [c["name"] for c in body["conversations"]] == ["first", "x"]
+        assert [c["name"] for c in _stashed(body)] == ["first", "x"]
         assert body["total_messages"] == 4
 
     def test_unreadable_item_gives_notice(self, app):
@@ -708,8 +763,8 @@ class TestAnalyzeChatgptImport:
         body = resp.get_json()
         # Non-string current_node / id / parent count as absent: those
         # conversations import (or yield nothing) instead of failing.
-        assert body["conversations"][0]["name"] == "good"
-        assert [c["name"] for c in body["conversations"]][:3] == [
+        assert _stashed(body)[0]["name"] == "good"
+        assert [c["name"] for c in _stashed(body)][:3] == [
             "good", "b1", "b2"]
         assert body["notices"] == []
 
@@ -721,7 +776,7 @@ class TestAnalyzeChatgptImport:
         ])
         assert resp.status_code == 200
         body = resp.get_json()
-        assert [c["name"] for c in body["conversations"]] == ["good"]
+        assert [c["name"] for c in _stashed(body)] == ["good"]
         assert body["notices"] == [
             "1 item in your export is in a format Loore can't read yet, "
             "so it won't be imported."]
@@ -837,7 +892,7 @@ class TestConfirmChatgptImportDedup:
 
         # First import: both messages become nodes.
         r1 = _confirm_conversations(client, convs)
-        assert r1.status_code == 201
+        assert r1.status_code == 202
         b1 = r1.get_json()
         assert b1["created"] == 2
         assert b1["skipped"] == 0
@@ -850,7 +905,7 @@ class TestConfirmChatgptImportDedup:
 
         # Re-import the identical archive: zero new nodes.
         r2 = _confirm_conversations(client, convs)
-        assert r2.status_code == 201
+        assert r2.status_code == 202
         b2 = r2.get_json()
         assert b2["created"] == 0
         assert b2["skipped"] == 2
@@ -864,7 +919,7 @@ class TestConfirmChatgptImportDedup:
 
         first = [_analyzed_conv()]
         r1 = _confirm_conversations(client, first)
-        assert r1.status_code == 201
+        assert r1.status_code == 202
         assert r1.get_json()["created"] == 2
         assert self._count_nodes(alice.id) == 2
 
@@ -895,7 +950,7 @@ class TestConfirmChatgptImportDedup:
         ]
         second = [_analyzed_conv(messages=extended_messages)]
         r2 = _confirm_conversations(client, second)
-        assert r2.status_code == 201
+        assert r2.status_code == 202
         b2 = r2.get_json()
         assert b2["created"] == 1
         assert b2["skipped"] == 2
@@ -962,7 +1017,7 @@ class TestConfirmChatgptImportDedup:
 
         convs = [_analyzed_conv(), _analyzed_conv()]
         r = _confirm_conversations(client, convs)
-        assert r.status_code == 201
+        assert r.status_code == 202
         b = r.get_json()
         assert b["created"] == 2
         assert b["skipped"] == 2
@@ -1093,7 +1148,7 @@ class TestConfirmImportDeletedContent:
         _login(client, alice.id)
 
         convs = [_analyzed_conv()]
-        assert _confirm_conversations(client, convs).status_code == 201
+        assert _confirm_conversations(client, convs).status_code == 202
         self._soft_delete_all(alice.id)
 
         r = _confirm_conversations(client, convs)
@@ -1119,7 +1174,7 @@ class TestConfirmImportDeletedContent:
         self._soft_delete_all(alice.id)
 
         r = _confirm_conversations(client, convs, on_deleted="skip")
-        assert r.status_code == 201
+        assert r.status_code == 202
         body = r.get_json()
         assert body["created"] == 0
         assert body["skipped"] == 2
@@ -1150,7 +1205,7 @@ class TestConfirmImportDeletedContent:
         _db.session.commit()
 
         r = _confirm_conversations(client, convs, on_deleted="restore")
-        assert r.status_code == 201
+        assert r.status_code == 202
         body = r.get_json()
         assert body["created"] == 0
         assert body["skipped"] == 0
@@ -1195,7 +1250,7 @@ class TestConfirmImportDeletedContent:
             },
         ])
         r = _confirm_conversations(client, [extended], on_deleted="restore")
-        assert r.status_code == 201
+        assert r.status_code == 202
         body = r.get_json()
         assert body["created"] == 1
         assert body["restored"] == 2
@@ -1270,7 +1325,7 @@ class TestConfirmImportSettingsUpdate:
         r2 = _confirm_conversations(
             client, convs, privacy_level="public", ai_usage="chat"
         )
-        assert r2.status_code == 201
+        assert r2.status_code == 202
         b2 = r2.get_json()
         assert b2["created"] == 0
         assert b2["updated"] == 2

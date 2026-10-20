@@ -1810,22 +1810,20 @@ Shared confirm response counters (Markdown, Claude, ChatGPT confirm, and the Twi
 - Request: `multipart/form-data`, field `conversations_file` (the `conversations.json` blob the client extracted from the Claude export zip, filename `conversations.json`).
 - Response 200:
 ```
-{ "conversations": [ { "name": str, "created_at": str,
-                       "messages": [ { "text": str, "sender": "human"|"assistant",
-                                       "created_at": str, "token_count": int, "uuid": str } ],
-                       "message_count": int, "token_count": int } ],
+{ "import_token": str,
   "total_conversations": int, "total_messages": int, "total_tokens": int, "total_size": int }
 ```
+- Notes: the analyzed conversations (`{name, created_at, messages: [{text, sender, created_at, token_count, uuid}], message_count, token_count}`, oldest first) stay on the server, encrypted (backend/utils/conversation_stash.py, 24 h TTL); the token names them.
 - Errors: 400 `No conversations_file provided` / `No file selected` / no conversations with messages / `{"error": "conversations.json is not valid UTF-8", "details"}` / `{"error": "Failed to parse conversations JSON", "details"}`; 500 `{"error": "Failed to analyze Claude export", "details"}`.
 
 ##### `POST /api/import/claude/confirm`
 - Backend: routes/import_data.py:confirm_claude_import
 - Auth: login
 - Called from: ImportData.js
-- Request JSON: `{ "conversations": [...as returned by analyze...], "privacy_level": str (default "private"), "ai_usage": str (default "none"), "on_deleted"?: "restore"|"skip" }`
-- Response 201: same shape as `/api/import/confirm`.
-- Errors: 400 `No data provided` / `No conversations provided`; 409 `deleted_content_matches`; 500 `{"error": "Failed to import Claude conversations", "details"}`.
-- Notes: synchronous; one thread per conversation, assistant messages become `llm` nodes.
+- Request JSON: `{ "import_token": str, "privacy_level": str (default "private"), "ai_usage": str (default "none"), "on_deleted"?: "restore"|"skip" }`
+- Response 202: `{ "task_id": str, "status": "queued", "total": int /* messages */ }`; while this import's job runs, a second confirm answers `{ "task_id", "status": "running", "total", "already_running": true }`.
+- Errors: 400 `No data provided` / `Import data expired — please upload the export again.` / no `import_token` (a client from before 2026-10-20: "This import needs the latest version of Loore…"); 409 `deleted_content_matches`; 409 `{"error": "Another import is still running…", "code": "import_running", "task_id"}` (another export's job runs); 500 `Could not start the import. Please try again.`
+- Notes: async (2026-10-20). Celery task `backend.tasks.chat_imports.import_conversations`; poll `GET /api/import/status/<task_id>` (`done`/`total` count messages; `result` as `/api/import/confirm`, plus `total`). One thread per conversation, assistant messages become `llm` nodes. One running conversation import per user.
 
 ##### `POST /api/import/chatgpt/analyze`
 - Backend: routes/import_data.py:analyze_chatgpt_import
@@ -1834,20 +1832,18 @@ Shared confirm response counters (Markdown, Claude, ChatGPT confirm, and the Twi
 - Request: `multipart/form-data`, field `conversations_file` (client-extracted `conversations.json`).
 - Response 200:
 ```
-{ "conversations": [ { "name": str, "created_at": str /* naive ISO or "" */, "default_model": str,
-                       "messages": [ { "text": str, "role": str, "created_at": str, "model": str|null,
-                                       "mapping_id": str, "token_count": int } ],
-                       "message_count": int, "token_count": int } ],
+{ "import_token": str, "notices": [str],
   "total_conversations": int, "total_messages": int, "total_tokens": int, "total_size": int }
 ```
+- Notes: the analyzed conversations (`{name, created_at /* naive ISO or "" */, default_model, messages: [{text, role, created_at, model, mapping_id, token_count}], message_count, token_count}`, oldest first) stay on the server, encrypted; the token names them.
 - Errors: same set as Claude analyze, with `Failed to analyze ChatGPT export`. Frontend special-cases HTTP 413 ("conversations.json is too large to upload") and shows `error: details` when both are present.
 
 ##### `POST /api/import/chatgpt/confirm`
 - Backend: routes/import_data.py:confirm_chatgpt_import
 - Auth: login
 - Called from: ImportData.js `handleConfirmChatGPTImport`
-- Request JSON: `{ "conversations": [...from analyze...], "privacy_level", "ai_usage", "on_deleted"? }`
-- Response 201: same shape as `/api/import/confirm`.
+- Request JSON: `{ "import_token": str, "privacy_level", "ai_usage", "on_deleted"? }`
+- Response 202: as Claude confirm (background job, poll `/api/import/status/<task_id>`).
 - Errors: as Claude confirm.
 
 ---

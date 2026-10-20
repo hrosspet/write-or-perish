@@ -127,7 +127,8 @@ def _add_imported_message_nodes(user_id, human_owner_id, parent_id,
                                 node_type, llm_model, node_content,
                                 privacy_level, ai_usage, source_key,
                                 msg_created_at, origin,
-                                provenance=PROVENANCE_ARCHIVE_UPLOAD):
+                                provenance=PROVENANCE_ARCHIVE_UPLOAD,
+                                dek=None):
     """Create the node(s) for one imported message, splitting content
     above NODE_CHAR_CAP into a serial parent→child chain.
 
@@ -138,6 +139,9 @@ def _add_imported_message_nodes(user_id, human_owner_id, parent_id,
 
     Every caller today reads an export the user uploaded, hence the
     default provenance; a future Loore-fetched path must say what it is.
+
+    *dek*: the import's shared data key (see Node.set_content), or None
+    for one KMS call per node.
 
     Returns (tip_node, nodes_created_count).
     """
@@ -163,7 +167,7 @@ def _add_imported_message_nodes(user_id, human_owner_id, parent_id,
         # Never pass content= to Node(): that writes the raw column and
         # bypasses KMS envelope encryption (#256). set_content() is the
         # only sanctioned way to store text.
-        n.set_content(seg)
+        n.set_content(seg, dek=dek)
         if msg_created_at:
             n.created_at = msg_created_at + timedelta(milliseconds=j)
         db.session.add(n)
@@ -193,7 +197,7 @@ def _deleted_match_response(keys, deleted_keys, on_deleted):
 
 
 def _restore_node(node_id, content, privacy_level, ai_usage,
-                  token_count=None, *, provenance):
+                  token_count=None, *, provenance, dek=None):
     """Un-delete a soft-deleted imported node in place.
 
     Refills content from the archive — this also recovers tombstones
@@ -209,8 +213,9 @@ def _restore_node(node_id, content, privacy_level, ai_usage,
     if provenance not in PROVENANCES:
         raise ValueError(f"Unknown provenance {provenance!r}")
     node = Node.query.get(node_id)
-    node.set_privacy_level(privacy_level)  # before set_content: decides encryption
-    node.set_content(content)
+    # before set_content: decides encryption
+    node.set_privacy_level(privacy_level, dek=dek)
+    node.set_content(content, dek=dek)
     node.token_count = (
         token_count if token_count is not None
         else approximate_token_count(content)
@@ -220,7 +225,7 @@ def _restore_node(node_id, content, privacy_level, ai_usage,
     node.deleted_at = None
 
 
-def _apply_settings_to_skipped(node_ids, privacy_level, ai_usage):
+def _apply_settings_to_skipped(node_ids, privacy_level, ai_usage, dek=None):
     """Apply this import's privacy/ai_usage to already-imported nodes.
 
     Re-importing an archive is also how users change their mind about
@@ -246,7 +251,7 @@ def _apply_settings_to_skipped(node_ids, privacy_level, ai_usage):
                 Node.ai_usage != ai_usage,
             ),
         ).all():
-            node.set_privacy_level(privacy_level)
+            node.set_privacy_level(privacy_level, dek=dek)
             node.ai_usage = ai_usage
             updated += 1
         db.session.flush()
@@ -1038,8 +1043,9 @@ def _load_conversation_files(conv_files, source_label):
     order. A sharded export arrives as one part per shard, each holding
     a JSON array.
 
-    Raises UnicodeDecodeError / json.JSONDecodeError for the caller to
-    report.
+    Returns (conversations, size_bytes); the analyze step logs the size
+    with its counts. Raises UnicodeDecodeError / json.JSONDecodeError for
+    the caller to report.
     """
     raw_conversations = []
     size_bytes = 0
@@ -1048,14 +1054,36 @@ def _load_conversation_files(conv_files, source_label):
         size_bytes += len(conversations_bytes)
         raw_conversations.extend(
             json.loads(conversations_bytes.decode('utf-8')))
+    return raw_conversations, size_bytes
+
+
+def _role_counts(source, conversations):
+    """Messages and tokens (approximate_token_count, the unit of
+    total_tokens) by who wrote them: the user, or the assistant (an
+    `llm` node on import). Counts only, for the logs and the stash
+    header (Peter, 2026-10-20: learn the real split from real imports)."""
+    role_field = _CONVERSATION_SOURCES[source]["role_field"]
+    counts = {"user_msgs": 0, "assistant_msgs": 0,
+              "user_tokens": 0, "assistant_tokens": 0}
+    for conv in conversations:
+        for msg in conv.get('messages', []):
+            who = ("assistant" if msg.get(role_field) == 'assistant'
+                   else "user")
+            counts[f"{who}_msgs"] += 1
+            counts[f"{who}_tokens"] += msg.get(
+                'token_count', approximate_token_count(msg.get('text', '')))
+    return counts
+
+
+def _log_analyzed_import(label, size_bytes, n_files, conversations, roles):
+    """The analyze step's one log line: sizes and counts, never content
+    or titles."""
     current_app.logger.info(
-        "%s import: size_bytes=%d files=%d user_id=%s",
-        source_label,
-        size_bytes,
-        len(conv_files),
-        getattr(current_user, 'id', None),
-    )
-    return raw_conversations
+        "%s import: size_bytes=%d files=%d conversations=%d user_msgs=%d "
+        "assistant_msgs=%d user_tokens=%d assistant_tokens=%d user_id=%s",
+        label, size_bytes, n_files, len(conversations), roles["user_msgs"],
+        roles["assistant_msgs"], roles["user_tokens"],
+        roles["assistant_tokens"], getattr(current_user, 'id', None))
 
 
 def _plural(n, one, many):
@@ -1131,7 +1159,8 @@ def _load_chatgpt_parts(conv_files):
     - Conversations repeated across parts are kept once (by "id", else
       "conversation_id"; first one wins).
 
-    Logs counts only, never content. Raises UnicodeDecodeError /
+    Also returns the uploaded size (the analyze step logs it). Logs
+    counts only, never content. Raises UnicodeDecodeError /
     json.JSONDecodeError for the caller to report.
     """
     conversations = []  # (conversation, linearized messages) pairs
@@ -1218,10 +1247,6 @@ def _load_chatgpt_parts(conv_files):
     if problems:
         _report_unreadable_chatgpt_items(problems)
 
-    current_app.logger.info(
-        "ChatGPT import: size_bytes=%d files=%d user_id=%s",
-        size_bytes, len(conv_files), getattr(current_user, 'id', None))
-
     notices = []
     if unreadable:
         notices.append(
@@ -1233,7 +1258,7 @@ def _load_chatgpt_parts(conv_files):
         notices.append(
             f"Group chats aren't imported yet ({group_chats} in your "
             f"export).")
-    return conversations, notices
+    return conversations, notices, size_bytes
 
 
 @import_bp.route("/import/claude/analyze", methods=["POST"])
@@ -1250,24 +1275,16 @@ def analyze_claude_import():
         - multipart/form-data with 'conversations_file' field containing
           the conversations.json extracted from a Claude data export
 
+    The analyzed conversations stay on the server, encrypted
+    (utils/conversation_stash.py); the confirm step names them by
+    ``import_token``. Each stashed conversation is
+    {"name", "created_at", "messages": [{"text", "sender",
+    "created_at", "uuid", "token_count"}], "message_count",
+    "token_count"}.
+
     Returns:
         {
-            "conversations": [
-                {
-                    "name": "...",
-                    "created_at": "...",
-                    "messages": [
-                        {
-                            "text": "...",
-                            "sender": "human" | "assistant",
-                            "created_at": "...",
-                            "uuid": "..."
-                        }
-                    ],
-                    "message_count": N,
-                    "token_count": N
-                }
-            ],
+            "import_token": "...",
             "total_conversations": N,
             "total_messages": N,
             "total_tokens": N,
@@ -1283,7 +1300,8 @@ def analyze_claude_import():
         return jsonify({"error": "No file selected"}), 400
 
     try:
-        raw_conversations = _load_conversation_files(conv_files, "Claude")
+        raw_conversations, size_bytes = _load_conversation_files(
+            conv_files, "Claude")
 
         conversations = []
         total_messages = 0
@@ -1332,14 +1350,22 @@ def analyze_claude_import():
 
             total_messages += len(messages)
 
+        roles = _role_counts("claude", conversations)
+        _log_analyzed_import("Claude", size_bytes, len(conv_files),
+                             conversations, roles)
         if not conversations:
             return jsonify({
                 "error": "No conversations with messages found in the "
                          "export."
             }), 400
 
+        del raw_conversations  # the raw export; only the analysis is kept
+        token = _stash_conversations(
+            current_user.id, "claude", conversations, total_messages,
+            roles=roles)
+
         return jsonify({
-            "conversations": conversations,
+            "import_token": token,
             "total_conversations": len(conversations),
             "total_messages": total_messages,
             "total_tokens": total_tokens,
@@ -1366,217 +1392,20 @@ def analyze_claude_import():
 @import_bp.route("/import/claude/confirm", methods=["POST"])
 @login_required
 def confirm_claude_import():
-    """
-    Create nodes from analyzed Claude conversation data.
-    Each conversation becomes a separate thread with messages chained
-    sequentially.
+    """Start importing an analyzed Claude export in the background.
 
     Request body:
         {
-            "conversations": [...],
+            "import_token": "...",            # from /import/claude/analyze
             "privacy_level": "private",
-            "ai_usage": "none"
+            "ai_usage": "none",
+            "on_deleted": "restore" | "skip"  # after a 409
         }
 
-    Returns:
-        {
-            "message": "Import successful",
-            "nodes_created": N,
-            "thread_count": N
-        }
+    Returns 202 {"task_id": "...", "status": "queued", "total": N}; poll
+    GET /import/status/<task_id>. See _confirm_conversation_import.
     """
-    data = request.get_json()
-
-    if not data:
-        return jsonify({"error": "No data provided"}), 400
-
-    conversations = data.get('conversations', [])
-    privacy_level = data.get('privacy_level', 'private')
-    ai_usage = data.get('ai_usage', 'none')
-
-    if not conversations:
-        return jsonify({"error": "No conversations provided"}), 400
-
-    on_deleted = data.get('on_deleted')
-
-    try:
-        key_index, deleted_keys = _load_source_key_index(current_user.id)
-        conflict = _deleted_match_response(
-            (_claude_msg_key(m)
-             for conv in conversations
-             for m in conv.get('messages', [])
-             if m.get('text')),
-            deleted_keys, on_deleted,
-        )
-        if conflict:
-            return conflict
-
-        # Get or create the synthetic user for claude-web nodes
-        llm_user = User.query.filter_by(username="claude-web").first()
-        if not llm_user:
-            llm_user = User(
-                twitter_id="llm-claude-web", username="claude-web"
-            )
-            db.session.add(llm_user)
-            db.session.flush()
-
-        nodes_created = 0
-        nodes_skipped = 0
-        nodes_restored = 0
-        thread_count = 0
-        skipped_alive_ids = []
-
-        # Sort conversations by created_at ascending
-        conversations_sorted = sorted(
-            conversations,
-            key=lambda c: c.get('created_at', '')
-        )
-
-        for conv in conversations_sorted:
-            messages = conv.get('messages', [])
-            conv_name = conv.get('name', '')
-
-            if not messages:
-                continue
-
-            parent_id = None
-            conv_started_new_thread = False
-
-            for i, msg in enumerate(messages):
-                text = msg.get('text', '')
-                sender = msg.get('sender', 'human')
-
-                if not text:
-                    continue
-
-                # Prepend conversation name as H1 to first message
-                if i == 0 and conv_name:
-                    node_content = f"# {conv_name}\n\n{text}"
-                else:
-                    node_content = text
-
-                is_assistant = sender == 'assistant'
-
-                source_key = _claude_msg_key(msg)
-                if source_key in key_index:
-                    # Chain the next new message onto the existing copy
-                    # so overlap re-imports extend the original thread.
-                    if (source_key in deleted_keys
-                            and on_deleted == 'restore'):
-                        _restore_node(key_index[source_key], node_content,
-                                      privacy_level, ai_usage,
-                                      provenance=PROVENANCE_ARCHIVE_UPLOAD)
-                        deleted_keys.discard(source_key)
-                        nodes_restored += 1
-                    else:
-                        nodes_skipped += 1
-                        if source_key not in deleted_keys:
-                            skipped_alive_ids.append(key_index[source_key])
-                    parent_id = key_index[source_key]
-                    continue
-
-                # Parse original timestamp from Claude export
-                msg_created_at = None
-                raw_ts = msg.get('created_at', '')
-                if raw_ts:
-                    try:
-                        raw_ts = raw_ts.replace('Z', '+00:00')
-                        msg_created_at = datetime.fromisoformat(
-                            raw_ts
-                        ).replace(tzinfo=None)
-                    except (ValueError, TypeError):
-                        pass
-
-                # A node created without a parent starts a new thread;
-                # nodes chained onto an existing copy extend an old one.
-                if parent_id is None:
-                    conv_started_new_thread = True
-
-                tip, created_count = _add_imported_message_nodes(
-                    user_id=(
-                        llm_user.id if is_assistant else current_user.id
-                    ),
-                    human_owner_id=current_user.id,
-                    parent_id=parent_id,
-                    node_type="llm" if is_assistant else "user",
-                    llm_model="claude-web" if is_assistant else None,
-                    node_content=node_content,
-                    privacy_level=privacy_level,
-                    ai_usage=ai_usage,
-                    source_key=source_key,
-                    msg_created_at=msg_created_at,
-                    origin="claude",
-                )
-
-                key_index[source_key] = tip.id
-                parent_id = tip.id
-                nodes_created += created_count
-
-            if conv_started_new_thread:
-                thread_count += 1
-
-        nodes_updated = _apply_settings_to_skipped(
-            skipped_alive_ids, privacy_level, ai_usage
-        )
-        nodes_skipped -= nodes_updated
-
-        db.session.commit()
-
-        # Determine if imported data predates the current profile cutoff
-        profile_update_task_id = None
-        if ai_usage in AI_ALLOWED:
-            try:
-                user_obj = User.query.get(current_user.id)
-                if (user_obj and (user_obj.plan or "free")
-                        in User.VOICE_MODE_PLANS):
-                    earliest_ts = None
-                    for conv in conversations_sorted:
-                        for msg in conv.get('messages', []):
-                            raw_ts = msg.get('created_at', '')
-                            if raw_ts:
-                                try:
-                                    raw_ts = raw_ts.replace('Z', '+00:00')
-                                    ts = datetime.fromisoformat(
-                                        raw_ts
-                                    ).replace(tzinfo=None)
-                                    if earliest_ts is None or ts < earliest_ts:
-                                        earliest_ts = ts
-                                except (ValueError, TypeError):
-                                    pass
-
-                    total_imported_tokens = sum(
-                        approximate_token_count(msg.get('text', ''))
-                        for conv in conversations_sorted
-                        for msg in conv.get('messages', [])
-                        if msg.get('text')
-                    )
-                    profile_update_task_id = (
-                        _hand_off_profile_update_after_import(
-                            user_obj, earliest_ts, total_imported_tokens))
-            except Exception as e:
-                current_app.logger.warning(
-                    "Auto-trigger profile update failed: %s", type(e).__name__
-                )
-
-        return jsonify({
-            "message": "Import successful",
-            "nodes_created": nodes_created,
-            "thread_count": thread_count,
-            "profile_update_task_id": profile_update_task_id,
-            "created": nodes_created,
-            "skipped": nodes_skipped,
-            "restored": nodes_restored,
-            "updated": nodes_updated,
-        }), 201
-
-    except Exception as e:
-        db.session.rollback()
-        current_app.logger.error(
-            "Error confirming Claude import: %s", type(e).__name__
-        )
-        return jsonify({
-            "error": "Failed to import Claude conversations"
-        }), 500
+    return _confirm_conversation_import("claude")
 
 
 def _parse_tweet_ts(raw_ts):
@@ -2079,13 +1908,21 @@ def analyze_chatgpt_import():
           exports since Oct 2026 split it into conversations-000.json,
           conversations-001.json, ..., sent as one part each
 
+    The analyzed conversations stay on the server, encrypted
+    (utils/conversation_stash.py); the confirm step names them by
+    ``import_token``. Each stashed conversation is {"name",
+    "created_at", "default_model", "messages": [{"text", "role",
+    "created_at", "model", "mapping_id", "token_count"}],
+    "message_count", "token_count"}.
+
     Returns:
         {
-            "conversations": [...],
+            "import_token": "...",
             "total_conversations": N,
             "total_messages": N,
             "total_tokens": N,
-            "total_size": N
+            "total_size": N,
+            "notices": [...]
         }
     """
     if 'conversations_file' not in request.files:
@@ -2097,7 +1934,8 @@ def analyze_chatgpt_import():
         return jsonify({"error": "No file selected"}), 400
 
     try:
-        raw_conversations, notices = _load_chatgpt_parts(conv_files)
+        raw_conversations, notices, size_bytes = _load_chatgpt_parts(
+            conv_files)
 
         conversations = []
         total_messages = 0
@@ -2136,14 +1974,22 @@ def analyze_chatgpt_import():
             total_messages += len(messages)
             total_tokens += conv_token_count
 
+        roles = _role_counts("chatgpt", conversations)
+        _log_analyzed_import("ChatGPT", size_bytes, len(conv_files),
+                             conversations, roles)
         if not conversations:
             error = "No conversations with messages found in the export."
             if notices:
                 error = " ".join([error] + notices)
             return jsonify({"error": error, "notices": notices}), 400
 
+        del raw_conversations  # the raw export; only the analysis is kept
+        token = _stash_conversations(
+            current_user.id, "chatgpt", conversations, total_messages,
+            roles=roles)
+
         return jsonify({
-            "conversations": conversations,
+            "import_token": token,
             "total_conversations": len(conversations),
             "total_messages": total_messages,
             "total_tokens": total_tokens,
@@ -2171,215 +2017,543 @@ def analyze_chatgpt_import():
 @import_bp.route("/import/chatgpt/confirm", methods=["POST"])
 @login_required
 def confirm_chatgpt_import():
-    """
-    Create nodes from analyzed ChatGPT conversation data.
-    Each conversation becomes a separate thread with messages chained
-    sequentially.
+    """Start importing an analyzed ChatGPT export in the background.
 
     Request body:
         {
-            "conversations": [...],
+            "import_token": "...",            # from /import/chatgpt/analyze
             "privacy_level": "private",
-            "ai_usage": "none"
+            "ai_usage": "none",
+            "on_deleted": "restore" | "skip"  # after a 409
         }
 
-    Returns:
-        {
-            "message": "Import successful",
-            "nodes_created": N,
-            "thread_count": N
-        }
+    Returns 202 {"task_id": "...", "status": "queued", "total": N}; poll
+    GET /import/status/<task_id>. See _confirm_conversation_import.
     """
-    data = request.get_json()
+    return _confirm_conversation_import("chatgpt")
 
+
+# ── ChatGPT / Claude: background import from the server-side stash ────────
+#
+# Analyze stashes the analyzed conversations (utils/conversation_stash.py)
+# and returns a token; confirm checks the token and starts the Celery task
+# backend.tasks.chat_imports.import_conversations, which runs
+# run_conversation_import. The client polls /import/status/<task_id>, as
+# for a Twitter import.
+
+# HEURISTIC: messages per commit (same size as the Twitter import's
+# chunks). Every message with text counts: a new node (each part of a
+# split one), a skip, a restore. A commit happens at the first
+# conversation boundary after this many, so a resumed run starts at a
+# whole conversation, and a re-import that only skips or changes
+# settings is checkpointed too. Each committed chunk gets a fresh data
+# key: one KMS call per chunk.
+CONVERSATION_BATCH_SIZE = 500
+# HEURISTIC: the job reports progress at most this often (seconds).
+CONVERSATION_PROGRESS_INTERVAL = 1.0
+
+IMPORT_EXPIRED_MESSAGE = (
+    "Import data expired — please upload the export again.")
+IMPORT_OUTDATED_CLIENT_MESSAGE = (
+    "This import needs the latest version of Loore. Reload the page (or "
+    "update the app) and upload the export again.")
+IMPORT_RUNNING_MESSAGE = (
+    "Another import is still running. Wait until it finishes, then try "
+    "again.")
+IMPORT_SUPERSEDED_MESSAGE = (
+    "This import was started again and continues there. Check your Log in "
+    "a few minutes.")
+
+
+def _parse_chatgpt_ts(raw_ts):
+    return datetime.fromisoformat(raw_ts)
+
+
+def _parse_claude_ts(raw_ts):
+    return datetime.fromisoformat(
+        raw_ts.replace('Z', '+00:00')).replace(tzinfo=None)
+
+
+# What differs between the two chat importers; everything else is shared.
+_CONVERSATION_SOURCES = {
+    "chatgpt": {
+        "llm_username": "chatgpt",
+        "llm_twitter_id": "llm-chatgpt",
+        "role_field": "role",
+        "default_role": "user",
+        "msg_key": _chatgpt_msg_key,
+        "parse_ts": _parse_chatgpt_ts,
+        "origin": "chatgpt",
+        # The model slug of the reply, else the platform name.
+        "llm_model": lambda msg: msg.get('model', '') or "chatgpt",
+    },
+    "claude": {
+        "llm_username": "claude-web",
+        "llm_twitter_id": "llm-claude-web",
+        "role_field": "sender",
+        "default_role": "human",
+        "msg_key": _claude_msg_key,
+        "parse_ts": _parse_claude_ts,
+        "origin": "claude",
+        "llm_model": lambda msg: "claude-web",
+    },
+}
+
+
+def _stash_conversations(user_id, source, conversations, total_messages,
+                         roles=None):
+    """Sort analyzed conversations into import order (oldest first, as
+    the confirm step always did) and stash them, with the per-role
+    counts (_role_counts) in the header; returns the token."""
+    from backend.utils import conversation_stash as cs
+    conversations = sorted(conversations,
+                           key=lambda c: c.get('created_at', ''))
+    msg_key = _CONVERSATION_SOURCES[source]["msg_key"]
+    keys = [msg_key(m) for conv in conversations
+            for m in conv.get('messages', []) if m.get('text')]
+    if roles is None:
+        roles = _role_counts(source, conversations)
+    return cs.write_stash(user_id, source, conversations, keys,
+                          total_messages, roles=roles)
+
+
+def _load_deleted_source_keys(user_id):
+    """The source keys of this user's soft-deleted imported nodes (the
+    deleted half of _load_source_key_index, for the confirm check)."""
+    rows = db.session.query(Node.source_key).filter(
+        Node.human_owner_id == user_id,
+        Node.source_key.isnot(None),
+        Node.deleted_at.isnot(None),
+    )
+    return {key for (key,) in rows}
+
+
+def _dispatch_conversation_import(user_id, token, task_id, options):
+    """Queue the import task under *task_id* (tests run it inline)."""
+    from backend.tasks.chat_imports import import_conversations
+    import_conversations.apply_async(
+        args=(user_id, token, options), task_id=task_id)
+
+
+def _running_import_response(lock, token, total):
+    """A confirm while this user's conversation import runs: the same
+    import answers with the running job's id (a second press, a retry
+    after a lost connection); a different one is refused."""
+    if lock.get("token") == token:
+        return jsonify({
+            "task_id": lock["task_id"], "status": "running",
+            "total": total, "already_running": True,
+        }), 202
+    return jsonify({
+        "error": IMPORT_RUNNING_MESSAGE, "code": "import_running",
+        "task_id": lock["task_id"],
+    }), 409
+
+
+def _confirm_conversation_import(source):
+    """Confirm for the ChatGPT and Claude importers.
+
+    Checks the stash token, allows one running conversation import per
+    user (a second confirm of the same import gets the running job's
+    id), asks about previously deleted content (409, as before), then
+    queues the job. Returns 202 {"task_id", "status", "total"}, where
+    total counts messages.
+    """
+    import uuid
+    from backend.utils import conversation_stash as cs
+    from backend.utils.task_owner import record_task_owner
+
+    data = request.get_json(silent=True)
     if not data:
         return jsonify({"error": "No data provided"}), 400
 
-    conversations = data.get('conversations', [])
+    token = data.get('import_token')
+    if not token:
+        # A page or app from before the background import posts the
+        # conversations themselves.
+        return jsonify({"error": IMPORT_OUTDATED_CLIENT_MESSAGE}), 400
+
     privacy_level = data.get('privacy_level', 'private')
     ai_usage = data.get('ai_usage', 'none')
-
-    if not conversations:
-        return jsonify({"error": "No conversations provided"}), 400
-
     on_deleted = data.get('on_deleted')
 
+    path = cs.stash_path(current_user.id, token)
     try:
-        key_index, deleted_keys = _load_source_key_index(current_user.id)
+        header = cs.read_header(path) if path and cs.is_fresh(path) else None
+    except (OSError, cs.StashError):
+        header = None
+    if header is None or header.get("source") != source:
+        return jsonify({"error": IMPORT_EXPIRED_MESSAGE}), 400
+    total = header.get("messages", 0)
+
+    running = cs.running_job(current_user.id)
+    if running:
+        return _running_import_response(running, token, total)
+
+    try:
         conflict = _deleted_match_response(
-            (_chatgpt_msg_key(m)
-             for conv in conversations
-             for m in conv.get('messages', [])
-             if m.get('text')),
-            deleted_keys, on_deleted,
+            cs.read_keys(path), _load_deleted_source_keys(current_user.id),
+            on_deleted,
         )
-        if conflict:
-            return conflict
+    except (OSError, cs.StashError):
+        return jsonify({"error": IMPORT_EXPIRED_MESSAGE}), 400
+    if conflict:
+        return conflict
 
-        # Get or create the synthetic user for chatgpt nodes
-        llm_user = User.query.filter_by(username="chatgpt").first()
-        if not llm_user:
-            llm_user = User(
-                twitter_id="llm-chatgpt", username="chatgpt"
-            )
-            db.session.add(llm_user)
-            db.session.flush()
+    task_id = str(uuid.uuid4())
+    acquired, holder = cs.acquire_lock(current_user.id, task_id, token, source)
+    if not acquired:
+        if holder:  # another confirm got there first
+            return _running_import_response(holder, token, total)
+        return jsonify({"error": IMPORT_RUNNING_MESSAGE}), 409
+    options = {
+        "privacy_level": privacy_level,
+        "ai_usage": ai_usage,
+        "on_deleted": on_deleted,
+    }
+    try:
+        _dispatch_conversation_import(current_user.id, token, task_id, options)
+    except Exception as e:
+        cs.release_lock(current_user.id, task_id)
+        current_app.logger.error(
+            "Could not queue the %s import: %s", source, type(e).__name__)
+        return jsonify({
+            "error": "Could not start the import. Please try again."
+        }), 500
+    # /import/status answers for this task id to this user only.
+    record_task_owner(task_id, current_user.id, current_app.config)
+    return jsonify({"task_id": task_id, "status": "queued",
+                    "total": total}), 202
 
-        nodes_created = 0
-        nodes_skipped = 0
-        nodes_restored = 0
-        thread_count = 0
+
+class _ChunkDataKey:
+    """One data key (encryption.new_dek) per committed chunk of nodes:
+    one KMS call per chunk instead of one per node. Made on first use,
+    so a public import, or a chunk of only skipped messages, makes
+    none."""
+    _UNSET = object()
+
+    def __init__(self, privacy_level):
+        self._public = privacy_level == "public"
+        self._dek = self._UNSET
+
+    def get(self):
+        if self._public:
+            return None
+        if self._dek is self._UNSET:
+            from backend.utils.encryption import new_dek
+            self._dek = new_dek()  # None while encryption is off
+        return self._dek
+
+    def rotate(self):
+        self._dek = self._UNSET
+
+
+def _new_conversation_state(options):
+    return {
+        "options": options,
+        "next_conv": 0,   # stash index of the next conversation to import
+        "done": 0,        # messages processed (the progress count)
+        "created": 0,
+        "skipped": 0,     # includes the updated ones until the result
+        "restored": 0,
+        "updated": 0,
+        "thread_count": 0,
+        # For the profile hand-off, over every message of the import.
+        "earliest_ts": None,
+        "imported_tokens": 0,
+    }
+
+
+def create_conversation_nodes(user_id, source, conversations, privacy_level,
+                              ai_usage, on_deleted, *, state=None,
+                              batch_size=CONVERSATION_BATCH_SIZE,
+                              on_commit=None, on_progress=None,
+                              progress_interval=CONVERSATION_PROGRESS_INTERVAL):
+    """Create the nodes of analyzed ChatGPT or Claude conversations: each
+    conversation one thread, its messages chained in order. Runs in the
+    background job (run_conversation_import); ``conversations`` yields
+    (stash index, conversation) in import order.
+
+    The rules are the confirm step's from before the background import:
+    dedup on the per-message source key (a re-import skips what exists
+    and chains new messages onto the existing copy), restore or skip
+    soft-deleted matches per ``on_deleted``, and give already-imported
+    nodes this import's privacy/AI-usage settings (``updated``).
+
+    Commits at the first conversation boundary after ``batch_size``
+    processed messages (new nodes, skips, restores) and then calls
+    ``on_commit(state)``: ``state`` holds the next
+    conversation and the counts so far, so a run that stops later can
+    be continued from it. Calls ``on_progress(messages_done)`` at most
+    every ``progress_interval`` seconds. Returns the final state.
+    """
+    import time
+    spec = _CONVERSATION_SOURCES[source]
+    state = dict(state) if state else _new_conversation_state(None)
+    earliest_ts = (datetime.fromisoformat(state["earliest_ts"])
+                   if state.get("earliest_ts") else None)
+
+    key_index, deleted_keys = _load_source_key_index(user_id)
+
+    # Get or create the synthetic user for the assistant's nodes
+    llm_user = User.query.filter_by(username=spec["llm_username"]).first()
+    if not llm_user:
+        llm_user = User(
+            twitter_id=spec["llm_twitter_id"], username=spec["llm_username"]
+        )
+        db.session.add(llm_user)
+        db.session.flush()
+
+    data_key = _ChunkDataKey(privacy_level)
+    skipped_alive_ids = []
+    since_commit = 0
+    last_progress = time.monotonic()
+
+    def commit():
+        nonlocal skipped_alive_ids
+        state["updated"] += _apply_settings_to_skipped(
+            skipped_alive_ids, privacy_level, ai_usage,
+            dek=data_key.get() if skipped_alive_ids else None)
         skipped_alive_ids = []
+        state["earliest_ts"] = (earliest_ts.isoformat()
+                                if earliest_ts else None)
+        db.session.commit()
+        data_key.rotate()
+        if on_commit:
+            on_commit(state)
 
-        # Sort conversations by created_at ascending
-        conversations_sorted = sorted(
-            conversations,
-            key=lambda c: c.get('created_at', '')
-        )
+    for index, conv in conversations:
+        messages = conv.get('messages', [])
+        conv_name = conv.get('name', '')
 
-        for conv in conversations_sorted:
-            messages = conv.get('messages', [])
-            conv_name = conv.get('name', '')
+        # The profile hand-off reads every message of the import, the
+        # skipped ones too (as the confirm step did).
+        for msg in messages:
+            raw_ts = msg.get('created_at', '')
+            if raw_ts:
+                try:
+                    ts = spec["parse_ts"](raw_ts)
+                    if earliest_ts is None or ts < earliest_ts:
+                        earliest_ts = ts
+                except (ValueError, TypeError, AttributeError):
+                    pass
+            if msg.get('text'):
+                state["imported_tokens"] += approximate_token_count(
+                    msg.get('text', ''))
 
-            if not messages:
+        parent_id = None
+        conv_started_new_thread = False
+
+        for i, msg in enumerate(messages):
+            text = msg.get('text', '')
+            role = msg.get(spec["role_field"], spec["default_role"])
+
+            if not text:
                 continue
 
-            parent_id = None
-            conv_started_new_thread = False
+            # Prepend conversation name as H1 to first message
+            if i == 0 and conv_name:
+                node_content = f"# {conv_name}\n\n{text}"
+            else:
+                node_content = text
 
-            for i, msg in enumerate(messages):
-                text = msg.get('text', '')
-                role = msg.get('role', 'user')
+            is_assistant = role == 'assistant'
 
-                if not text:
-                    continue
-
-                # Prepend conversation name as H1 to first message
-                if i == 0 and conv_name:
-                    node_content = f"# {conv_name}\n\n{text}"
+            source_key = spec["msg_key"](msg)
+            if source_key in key_index:
+                # Chain the next new message onto the existing copy
+                # so overlap re-imports extend the original thread.
+                if (source_key in deleted_keys
+                        and on_deleted == 'restore'):
+                    _restore_node(key_index[source_key], node_content,
+                                  privacy_level, ai_usage,
+                                  provenance=PROVENANCE_ARCHIVE_UPLOAD,
+                                  dek=data_key.get())
+                    deleted_keys.discard(source_key)
+                    state["restored"] += 1
                 else:
-                    node_content = text
+                    state["skipped"] += 1
+                    if source_key not in deleted_keys:
+                        skipped_alive_ids.append(key_index[source_key])
+                parent_id = key_index[source_key]
+                since_commit += 1  # a skip or restore is work to checkpoint
+                continue
 
-                is_assistant = role == 'assistant'
+            # Parse original timestamp from the export
+            msg_created_at = None
+            raw_ts = msg.get('created_at', '')
+            if raw_ts:
+                try:
+                    msg_created_at = spec["parse_ts"](raw_ts)
+                except (ValueError, TypeError, AttributeError):
+                    pass
 
-                source_key = _chatgpt_msg_key(msg)
-                if source_key in key_index:
-                    # Chain the next new message onto the existing copy
-                    # so overlap re-imports extend the original thread.
-                    if (source_key in deleted_keys
-                            and on_deleted == 'restore'):
-                        _restore_node(key_index[source_key], node_content,
-                                      privacy_level, ai_usage,
-                                      provenance=PROVENANCE_ARCHIVE_UPLOAD)
-                        deleted_keys.discard(source_key)
-                        nodes_restored += 1
-                    else:
-                        nodes_skipped += 1
-                        if source_key not in deleted_keys:
-                            skipped_alive_ids.append(key_index[source_key])
-                    parent_id = key_index[source_key]
-                    continue
+            # A node created without a parent starts a new thread;
+            # nodes chained onto an existing copy extend an old one.
+            if parent_id is None:
+                conv_started_new_thread = True
 
-                # Parse original timestamp
-                msg_created_at = None
-                raw_ts = msg.get('created_at', '')
-                if raw_ts:
-                    try:
-                        msg_created_at = datetime.fromisoformat(
-                            raw_ts
-                        )
-                    except (ValueError, TypeError):
-                        pass
+            tip, created_count = _add_imported_message_nodes(
+                user_id=llm_user.id if is_assistant else user_id,
+                human_owner_id=user_id,
+                parent_id=parent_id,
+                node_type="llm" if is_assistant else "user",
+                llm_model=spec["llm_model"](msg) if is_assistant else None,
+                node_content=node_content,
+                privacy_level=privacy_level,
+                ai_usage=ai_usage,
+                source_key=source_key,
+                msg_created_at=msg_created_at,
+                origin=spec["origin"],
+                dek=data_key.get(),
+            )
 
-                # Get model slug for assistant messages
-                model_slug = msg.get('model', '') if is_assistant else None
+            key_index[source_key] = tip.id
+            parent_id = tip.id
+            state["created"] += created_count
+            since_commit += created_count
 
-                # A node created without a parent starts a new thread;
-                # nodes chained onto an existing copy extend an old one.
-                if parent_id is None:
-                    conv_started_new_thread = True
+        if conv_started_new_thread:
+            state["thread_count"] += 1
+        state["done"] += len(messages)
+        state["next_conv"] = index + 1
 
-                tip, created_count = _add_imported_message_nodes(
-                    user_id=(
-                        llm_user.id if is_assistant else current_user.id
-                    ),
-                    human_owner_id=current_user.id,
-                    parent_id=parent_id,
-                    node_type="llm" if is_assistant else "user",
-                    llm_model=model_slug or (
-                        "chatgpt" if is_assistant else None
-                    ),
-                    node_content=node_content,
-                    privacy_level=privacy_level,
-                    ai_usage=ai_usage,
-                    source_key=source_key,
-                    msg_created_at=msg_created_at,
-                    origin="chatgpt",
-                )
+        if since_commit >= batch_size:
+            commit()
+            since_commit = 0
+        if on_progress and (time.monotonic() - last_progress
+                            >= progress_interval):
+            last_progress = time.monotonic()
+            on_progress(state["done"])
 
-                key_index[source_key] = tip.id
-                parent_id = tip.id
-                nodes_created += created_count
+    commit()
+    if on_progress:
+        on_progress(state["done"])
+    return state
 
-            if conv_started_new_thread:
-                thread_count += 1
 
-        nodes_updated = _apply_settings_to_skipped(
-            skipped_alive_ids, privacy_level, ai_usage
+def run_conversation_import(user_id, token, task_id, options, *,
+                            on_progress=None, resumable=(),
+                            batch_size=CONVERSATION_BATCH_SIZE):
+    """The background ChatGPT/Claude import job: import the stash named
+    by *token* for *user_id* with the confirm's *options*
+    (privacy_level, ai_usage, on_deleted). Celery runs it
+    (backend/tasks/chat_imports.py); tests call it directly.
+
+    Resumable: the job state (utils/conversation_stash) records the next
+    conversation and the counts after every commit, so a later run of
+    the same import (the task run again after a deploy or a time limit,
+    or the user confirming again after a failure) continues where the
+    last commit left off; dedup keys skip anything a run created after
+    its last saved state. A run with other settings than the saved
+    state starts from the first conversation: dedup skips what exists
+    and gives it the new settings, as any re-import does.
+
+    *on_progress(done, total)* reports messages. Exceptions in
+    *resumable* leave the lock in place (the task runs again); any
+    other releases it and keeps the stash for a resume. On success the
+    profile hand-off runs once (same rules as the confirm step had),
+    the stash is deleted, and the result is returned (and kept in the
+    state, so a repeated run of a finished job returns it again).
+
+    The whole run holds the import's run guard: a second run of the
+    same import at the same time raises conversation_stash.RunInProgress
+    before it reads or changes anything (the task turns it into Ignore).
+    """
+    from backend.utils import conversation_stash as cs
+
+    with cs.run_guard(user_id, token):
+        return _run_conversation_import(
+            user_id, token, task_id, options, on_progress=on_progress,
+            resumable=resumable, batch_size=batch_size)
+
+
+def _run_conversation_import(user_id, token, task_id, options, *,
+                             on_progress, resumable, batch_size):
+    """run_conversation_import, inside the run guard."""
+    from backend.utils import conversation_stash as cs
+    from backend.utils.task_owner import UserFacingTaskError
+
+    state = cs.read_state(user_id, token)
+    if state and state.get("finished"):
+        return dict(state["result"])
+
+    path = cs.stash_path(user_id, token)
+    if path is None or not path.exists():
+        cs.release_lock(user_id, task_id)
+        raise UserFacingTaskError(IMPORT_EXPIRED_MESSAGE)
+    header = cs.read_header(path)
+    source = header["source"]
+    total = header.get("messages", 0)
+
+    if not cs.claim_lock(user_id, task_id, token, source):
+        # This run waited in the queue until its lock went stale, and a
+        # new confirm started the import again: that run does the work.
+        raise UserFacingTaskError(IMPORT_SUPERSEDED_MESSAGE)
+    cs.touch(path)
+
+    if not state or state.get("options") != options:
+        state = _new_conversation_state(options)
+
+    def save(st):
+        cs.write_state(user_id, token, dict(st, task_id=task_id))
+        cs.touch(path)
+        cs.heartbeat(user_id, task_id)
+
+    def progress(done):
+        cs.heartbeat(user_id, task_id)
+        if on_progress:
+            on_progress(done, total)
+
+    progress(state["done"])
+    try:
+        state = create_conversation_nodes(
+            user_id, source,
+            cs.iter_conversations(path, start=state["next_conv"]),
+            options.get("privacy_level", "private"),
+            options.get("ai_usage", "none"),
+            options.get("on_deleted"),
+            state=state, batch_size=batch_size,
+            on_commit=save, on_progress=progress,
         )
-        nodes_skipped -= nodes_updated
-
-        db.session.commit()
-
-        # Determine if imported data predates the current profile cutoff
-        profile_update_task_id = None
-        if ai_usage in AI_ALLOWED:
-            try:
-                user_obj = User.query.get(current_user.id)
-                if (user_obj and (user_obj.plan or "free")
-                        in User.VOICE_MODE_PLANS):
-                    earliest_ts = None
-                    for conv in conversations_sorted:
-                        for msg in conv.get('messages', []):
-                            raw_ts = msg.get('created_at', '')
-                            if raw_ts:
-                                try:
-                                    ts = datetime.fromisoformat(raw_ts)
-                                    if earliest_ts is None or ts < earliest_ts:
-                                        earliest_ts = ts
-                                except (ValueError, TypeError):
-                                    pass
-
-                    total_imported_tokens = sum(
-                        approximate_token_count(msg.get('text', ''))
-                        for conv in conversations_sorted
-                        for msg in conv.get('messages', [])
-                        if msg.get('text')
-                    )
-                    profile_update_task_id = (
-                        _hand_off_profile_update_after_import(
-                            user_obj, earliest_ts, total_imported_tokens))
-            except Exception as e:
-                current_app.logger.warning(
-                    "Auto-trigger profile update failed: %s", type(e).__name__
-                )
-
-        return jsonify({
-            "message": "Import successful",
-            "nodes_created": nodes_created,
-            "thread_count": thread_count,
-            "profile_update_task_id": profile_update_task_id,
-            "created": nodes_created,
-            "skipped": nodes_skipped,
-            "restored": nodes_restored,
-            "updated": nodes_updated,
-        }), 201
-
-    except Exception as e:
+    except resumable:
         db.session.rollback()
-        current_app.logger.error(
-            "Error confirming ChatGPT import: %s", type(e).__name__
-        )
-        return jsonify({
-            "error": "Failed to import ChatGPT conversations"
-        }), 500
+        raise
+    except Exception:
+        db.session.rollback()
+        cs.release_lock(user_id, task_id)
+        raise
+
+    profile_update_task_id = None
+    if options.get("ai_usage", "none") in AI_ALLOWED:
+        earliest_ts = (datetime.fromisoformat(state["earliest_ts"])
+                       if state.get("earliest_ts") else None)
+        profile_update_task_id = _maybe_update_profile_after_import(
+            user_id, earliest_ts, state["imported_tokens"])
+
+    result = {
+        "message": "Import successful",
+        "nodes_created": state["created"],
+        "thread_count": state["thread_count"],
+        "profile_update_task_id": profile_update_task_id,
+        "created": state["created"],
+        "skipped": state["skipped"] - state["updated"],
+        "restored": state["restored"],
+        "updated": state["updated"],
+        "total": total,
+    }
+    roles = header.get("roles") or {}
+    current_app.logger.info(
+        "%s import job done: user_msgs=%s assistant_msgs=%s user_tokens=%s "
+        "assistant_tokens=%s created=%d skipped=%d restored=%d updated=%d "
+        "user_id=%s", "ChatGPT" if source == "chatgpt" else "Claude",
+        roles.get("user_msgs"), roles.get("assistant_msgs"),
+        roles.get("user_tokens"), roles.get("assistant_tokens"),
+        result["created"], result["skipped"], result["restored"],
+        result["updated"], user_id)
+    cs.write_state(user_id, token,
+                   {"finished": True, "result": result, "task_id": task_id})
+    cs.delete_stash(user_id, token)
+    cs.release_lock(user_id, task_id)
+    return dict(result)

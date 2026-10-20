@@ -4,7 +4,8 @@ import logging
 from sqlalchemy import event, or_
 from backend.extensions import db
 from backend.utils.encryption import (
-    encrypt_content, decrypt_content, is_encrypted, is_encryption_enabled)
+    encrypt_content, decrypt_content, encrypt_with_dek, is_encrypted,
+    is_encryption_enabled)
 
 logger = logging.getLogger(__name__)
 
@@ -607,21 +608,28 @@ class Node(db.Model):
 
     # ----- Content ---------------------------------------------------------
 
-    def set_content(self, plaintext: str):
+    def set_content(self, plaintext: str, dek=None):
         """Store content: plaintext for PUBLIC nodes, KMS-envelope
         encrypted otherwise (#257). Public content is public — encrypting
         it only adds a KMS call per write and per profile/context read.
         Set privacy_level BEFORE calling this (constructor kwarg or
-        set_privacy_level)."""
+        set_privacy_level).
+
+        *dek*: a data key from encryption.new_dek() shared by a bulk
+        writer (an import), so many nodes cost one KMS call instead of
+        one each. Same ENC:v2 envelope; decrypt_content reads it."""
         if self.privacy_level == "public":
             self.content = plaintext
+        elif dek is not None:
+            self.content = encrypt_with_dek(plaintext, dek)
         else:
             self.content = encrypt_content(plaintext)
 
-    def set_privacy_level(self, level: str):
+    def set_privacy_level(self, level: str, dek=None):
         """The one sanctioned way to change privacy_level: moves the
         stored content across the encryption boundary with it —
-        leaving public encrypts, becoming public decrypts."""
+        leaving public encrypts, becoming public decrypts. *dek* as in
+        set_content."""
         self.privacy_level = level
         if not self.content:
             return
@@ -629,7 +637,9 @@ class Node(db.Model):
             if is_encrypted(self.content):
                 self.content = decrypt_content(self.content)
         elif not is_encrypted(self.content):
-            self.content = encrypt_content(self.content)
+            self.content = (encrypt_with_dek(self.content, dek)
+                            if dek is not None
+                            else encrypt_content(self.content))
 
     def get_content(self) -> str:
         """Get decrypted content. Resolves from linked UserPrompt if set."""
