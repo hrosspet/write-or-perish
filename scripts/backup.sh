@@ -3,14 +3,17 @@
 #
 # What it does
 #   1. pg_dump (custom format, compressed) streamed straight to the destination.
-#      No local temp file, so the prod disk never fills up.
-#   2. Media directory (voice recordings; KMS-encrypted .enc files) synced to
+#      No local temp file, so the prod disk never fills up. Only when pg_dump
+#      and the upload both succeed is a marker db/<dump>.ok written next to it;
+#      a dump without its marker is incomplete and must never be restored.
+#   2. Media directory (voice recordings and TTS audio) synced to
 #      media/<period>/ at the destination, one folder per 14-day period (see
 #      MEDIA_PERIOD_DAYS below). Additive only — nothing is ever deleted or
-#      overwritten there. In-flight recording drafts (drafts/) are skipped:
-#      they are transient.
-#   3. On success, pings BACKUP_HEARTBEAT_URL (optional) so a dead-man's-switch
-#      monitor can alert when backups silently stop running.
+#      overwritten there. Transient files are skipped (see MEDIA_EXCLUDE_*).
+#      Runs even when the dump failed.
+#   3. When both succeeded, pings BACKUP_HEARTBEAT_URL so a dead-man's-switch
+#      monitor alerts when backups stop. A failure exits non-zero, and the
+#      unit's OnFailure= handler (scripts/backup-alert.sh) reports it.
 #
 # Destination (BACKUP_BUCKET)
 #   gs://bucket-name  Google Cloud Storage, authenticated as the VM's attached
@@ -21,8 +24,10 @@
 # Environment (loaded from .env.production by the systemd unit)
 #   DATABASE_URL          required
 #   BACKUP_BUCKET         required (gs://… or a directory)
+#   BACKUP_HEARTBEAT_URL  required on prod (docs/RUNBOOKS.md → one-time setup)
 #   AUDIO_STORAGE_PATH    optional, default data/audio (relative to cwd)
-#   BACKUP_HEARTBEAT_URL  optional
+#   GCP_KMS_KEY_NAME, ENCRYPTION_DISABLED  read to know whether audio is
+#                         encrypted at rest (see MEDIA_EXCLUDE_PLAINTEXT)
 #
 # Exits non-zero on any failure so systemd marks the unit failed and it shows
 # up in `systemctl --failed` and the journal. Runbook: docs/RUNBOOKS.md.
@@ -56,6 +61,38 @@ PERIOD="$(date -u -d "@${PERIOD_START}" +%Y-%m-%d 2>/dev/null \
   || date -u -r "${PERIOD_START}" +%Y-%m-%d)"   # GNU date || BSD date
 MEDIA_DEST="${DEST}/media/${PERIOD}"
 
+# What the media sync skips. gcloud matches each --exclude regex with
+# Python's re.match against the path relative to AUDIO_DIR.
+# - Transient folders, removed when the recording or upload they belong to
+#   finishes: drafts/ (voice-mode drafts), chunks/ (chunked uploads being
+#   assembled, stored unencrypted), streaming/ (live recording chunks,
+#   batched into nodes/ at the end).
+# - With encryption on, every file that is not *.enc. All audio writers
+#   (recordings, uploads, TTS, batches) call encrypt_file(), which writes
+#   X.enc and then deletes X, whatever the node's privacy; so a plain file is
+#   one about to be replaced, being assembled, or an ffmpeg temp file. The
+#   .legacy_backup rollback copies of backend/scripts/backfill_legacy_chunks.py
+#   are skipped too (they are never served).
+# Encryption is on under the rule of is_encryption_enabled() in
+# backend/utils/encryption.py: GCP_KMS_KEY_NAME set, ENCRYPTION_DISABLED not
+# true/1/yes. With it off, every stored file is plain and is backed up.
+MEDIA_EXCLUDE_TRANSIENT='^(drafts|chunks|streaming)/.*'
+MEDIA_EXCLUDE_PLAINTEXT='.*(?<!\.enc)$'
+ENC_ONLY=false
+if [ -n "${GCP_KMS_KEY_NAME:-}" ]; then
+  case "$(printf '%s' "${ENCRYPTION_DISABLED:-}" | tr '[:upper:]' '[:lower:]')" in
+    true|1|yes) ;;
+    *) ENC_ONLY=true ;;
+  esac
+fi
+if [ "$ENC_ONLY" = true ]; then
+  MEDIA_EXCLUDE="${MEDIA_EXCLUDE_TRANSIENT}|${MEDIA_EXCLUDE_PLAINTEXT}"
+  NAME_GLOB='*.enc'      # the same rule for the local copy below
+else
+  MEDIA_EXCLUDE="$MEDIA_EXCLUDE_TRANSIENT"
+  NAME_GLOB='*'
+fi
+
 case "$DEST" in
   gs://*) MODE=gcs ;;
   *)      MODE=local ;;
@@ -66,46 +103,89 @@ if [ "$MODE" = gcs ]; then
   command -v gcloud >/dev/null || die "gcloud not found — install google-cloud-cli (docs/RUNBOOKS.md → Backups → one-time setup)"
 fi
 
+FAILED=""
+
 # --- 1. database -----------------------------------------------------------
 # --no-owner/--no-privileges: restores cleanly into a DB owned by a different
 # role (local restore test, a rebuilt VM, the lab).
+# If pg_dump dies midway, gcloud still completes the upload of what it got,
+# and under retention that truncated object can't be deleted. pipefail makes
+# the function fail, so no .ok marker is written for it.
+dump_database() {
+  if [ "$MODE" = gcs ]; then
+    pg_dump --format=custom --no-owner --no-privileges "$DATABASE_URL" \
+      | gcloud storage cp --quiet - "${DEST}/db/${DUMP_NAME}" || return 1
+    SIZE="$(gcloud storage objects describe "${DEST}/db/${DUMP_NAME}" --format='value(size)')" || return 1
+    printf '%s\n' "$SIZE" | gcloud storage cp --quiet - "${DEST}/db/${DUMP_NAME}.ok" || return 1
+  else
+    mkdir -p "${DEST}/db" || return 1
+    pg_dump --format=custom --no-owner --no-privileges "$DATABASE_URL" \
+      > "${DEST}/db/${DUMP_NAME}" || return 1
+    SIZE="$(wc -c < "${DEST}/db/${DUMP_NAME}" | tr -d ' ')" || return 1
+    printf '%s\n' "$SIZE" > "${DEST}/db/${DUMP_NAME}.ok" || return 1
+  fi
+}
+
 log "dumping database → ${DEST}/db/${DUMP_NAME}"
-if [ "$MODE" = gcs ]; then
-  # pipefail keeps pg_dump's exit status; a failed upload never leaves a
-  # partial object because GCS object uploads are atomic.
-  pg_dump --format=custom --no-owner --no-privileges "$DATABASE_URL" \
-    | gcloud storage cp --quiet - "${DEST}/db/${DUMP_NAME}"
-  SIZE="$(gcloud storage objects describe "${DEST}/db/${DUMP_NAME}" --format='value(size)' 2>/dev/null || echo '?')"
+if dump_database; then
+  log "database dump done (${SIZE} bytes, marker ${DUMP_NAME}.ok)"
 else
-  mkdir -p "${DEST}/db"
-  pg_dump --format=custom --no-owner --no-privileges "$DATABASE_URL" \
-    > "${DEST}/db/${DUMP_NAME}"
-  SIZE="$(wc -c < "${DEST}/db/${DUMP_NAME}" | tr -d ' ')"
+  log "ERROR: database dump failed — ${DUMP_NAME} has no .ok marker; never restore it" >&2
+  FAILED="${FAILED} database"
 fi
-log "database dump done (${SIZE} bytes)"
 
 # --- 2. media --------------------------------------------------------------
 # --no-clobber: a file that changed after its upload this period (a TTS file
 # regenerated after an edit) is skipped, not overwritten. The bucket refuses
 # overwrites under retention, which would fail the whole run; the new version
 # lands with the next period's full copy.
-if [ -d "$AUDIO_DIR" ]; then
-  log "syncing media ${AUDIO_DIR} → ${MEDIA_DEST} (additive; drafts/ excluded)"
+sync_media() {
   if [ "$MODE" = gcs ]; then
-    gcloud storage rsync --quiet --recursive --no-clobber --exclude='^drafts/.*' "$AUDIO_DIR" "$MEDIA_DEST"
+    gcloud storage rsync --quiet --recursive --no-clobber \
+      --exclude="$MEDIA_EXCLUDE" "$AUDIO_DIR" "$MEDIA_DEST" || return 1
   else
-    mkdir -p "$MEDIA_DEST"
+    mkdir -p "$MEDIA_DEST" || return 1
     if command -v rsync >/dev/null; then
-      rsync -a --ignore-existing --exclude='/drafts/' "${AUDIO_DIR}/" "${MEDIA_DEST}/"
+      rsync -a --ignore-existing --exclude=/drafts/ --exclude=/chunks/ --exclude=/streaming/ \
+        --include='*/' --include="$NAME_GLOB" --exclude='*' \
+        "${AUDIO_DIR}/" "${MEDIA_DEST}/" || return 1
     else
-      (cd "$AUDIO_DIR" && find . -path './drafts' -prune -o -type f -print0 \
-        | xargs -0 -I{} sh -c '[ -e "$1/$2" ] || { mkdir -p "$1/$(dirname "$2")" && cp -p "$2" "$1/$2"; }' _ "$MEDIA_DEST" {})
+      (cd "$AUDIO_DIR" \
+        && find . \( -path ./drafts -o -path ./chunks -o -path ./streaming \) -prune \
+             -o -type f -name "$NAME_GLOB" -print0 \
+        | xargs -0 -I{} sh -c '[ -e "$1/$2" ] || { mkdir -p "$1/$(dirname "$2")" && cp -p "$2" "$1/$2"; }' _ "$MEDIA_DEST" {}) \
+        || return 1
     fi
   fi
-  log "media sync done"
+}
+
+SKIPPED="drafts/, chunks/, streaming/"
+if [ "$ENC_ONLY" = true ]; then
+  SKIPPED="${SKIPPED}, files not ending in .enc"
+fi
+
+if [ -d "$AUDIO_DIR" ]; then
+  log "syncing media ${AUDIO_DIR} → ${MEDIA_DEST} (additive; skipping ${SKIPPED})"
+  if sync_media; then
+    log "media sync done"
+  else
+    # The directory is live: a file deleted between the listing and its
+    # upload (a purge, a finished recording) aborts gcloud's rsync. A second
+    # run lists again without it, and --no-clobber skips what the first run
+    # uploaded.
+    log "WARNING: media sync failed; retrying once (a file may have vanished mid-run)"
+    if sync_media; then
+      log "media sync done (second attempt)"
+    else
+      log "ERROR: media sync failed twice" >&2
+      FAILED="${FAILED} media"
+    fi
+  fi
 else
   log "media dir ${AUDIO_DIR} does not exist — skipping media"
 fi
+
+[ -z "$FAILED" ] || die "failed:${FAILED} — no heartbeat sent"
 
 # --- 3. heartbeat ----------------------------------------------------------
 if [ -n "${BACKUP_HEARTBEAT_URL:-}" ]; then
@@ -114,6 +194,8 @@ if [ -n "${BACKUP_HEARTBEAT_URL:-}" ]; then
   else
     log "WARNING: heartbeat ping failed (backup itself succeeded)"
   fi
+else
+  log "WARNING: BACKUP_HEARTBEAT_URL is not set — nothing will notice if backups stop"
 fi
 
 log "OK"

@@ -238,10 +238,14 @@ BACKUP_SERVICE_SOURCE="$PROJECT_DIR/write-or-perish-backup.service"
 BACKUP_SERVICE_TARGET="/etc/systemd/system/write-or-perish-backup.service"
 BACKUP_TIMER_SOURCE="$PROJECT_DIR/write-or-perish-backup.timer"
 BACKUP_TIMER_TARGET="/etc/systemd/system/write-or-perish-backup.timer"
+# OnFailure= handler of the backup service (scripts/backup-alert.sh)
+BACKUP_ALERT_SOURCE="$PROJECT_DIR/write-or-perish-backup-alert.service"
+BACKUP_ALERT_TARGET="/etc/systemd/system/write-or-perish-backup-alert.service"
 
-if [ -f "$BACKUP_SERVICE_SOURCE" ] && [ -f "$BACKUP_TIMER_SOURCE" ]; then
+if [ -f "$BACKUP_SERVICE_SOURCE" ] && [ -f "$BACKUP_TIMER_SOURCE" ] && [ -f "$BACKUP_ALERT_SOURCE" ]; then
     BACKUP_UNITS_CHANGED=false
-    for pair in "$BACKUP_SERVICE_SOURCE:$BACKUP_SERVICE_TARGET" "$BACKUP_TIMER_SOURCE:$BACKUP_TIMER_TARGET"; do
+    for pair in "$BACKUP_SERVICE_SOURCE:$BACKUP_SERVICE_TARGET" "$BACKUP_TIMER_SOURCE:$BACKUP_TIMER_TARGET" \
+                "$BACKUP_ALERT_SOURCE:$BACKUP_ALERT_TARGET"; do
         src="${pair%%:*}"
         dst="${pair##*:}"
         if ! sudo diff -q "$src" "$dst" >/dev/null 2>&1; then
@@ -261,6 +265,8 @@ if [ -f "$BACKUP_SERVICE_SOURCE" ] && [ -f "$BACKUP_TIMER_SOURCE" ]; then
     if grep -qE '^BACKUP_BUCKET=.+' "$PROJECT_DIR/.env.production" 2>/dev/null; then
         sudo systemctl enable --now write-or-perish-backup.timer || warn "Failed to enable backup timer"
         log "Backup timer enabled; next run: $(systemctl show write-or-perish-backup.timer -p NextElapseUSecRealtime --value 2>/dev/null || echo unknown)"
+        grep -qE '^BACKUP_HEARTBEAT_URL=.+' "$PROJECT_DIR/.env.production" 2>/dev/null \
+            || warn "BACKUP_HEARTBEAT_URL not set in .env.production — nothing will notice if backups stop (docs/RUNBOOKS.md → Backups and restore)"
     else
         warn "BACKUP_BUCKET not set in .env.production — nightly backups are NOT enabled (docs/RUNBOOKS.md → Backups and restore)"
     fi

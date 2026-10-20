@@ -2,6 +2,9 @@
 Description=Write or Perish nightly backup (pg_dump + media → BACKUP_BUCKET)
 After=network-online.target postgresql.service
 Wants=network-online.target
+# A failed run (or one killed by OOM or a timeout) is reported in the
+# journal, to the heartbeat monitor and to Sentry: scripts/backup-alert.sh.
+OnFailure=write-or-perish-backup-alert.service
 
 [Service]
 Type=oneshot
