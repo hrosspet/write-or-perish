@@ -1977,6 +1977,62 @@ def test_rebuild_stops_after_the_step_that_crosses_the_cap(app, monkeypatch):
     block_email.assert_called_once()          # not re-sent
 
 
+def test_own_limit_stops_the_rebuild_while_the_global_cap_is_off(
+        app, monkeypatch):
+    """Global limit 0 (the default). The admin sets one user's limit to
+    $50 while they have spent $10, so they are not blocked. When a later
+    chunk takes them over $50, the step is saved and its cost logged, the
+    user is blocked and no next chunk is submitted, although no cost row
+    schedules a check while the global limit is 0."""
+    from backend.utils.spend import current_month, reconcile_user_spend_block
+    block_email = _cap_harness(app, monkeypatch, limit=0)
+    u = _user(profile_force_batch=True)
+    db.session.commit()
+    _spent(u, 10.0)
+    u.monthly_spend_limit_usd = 50.0
+    assert reconcile_user_spend_block(u, app.config)["blocked"] is False
+    db.session.commit()
+    _spent(u, 39.999999)                      # the rebuild's earlier chunks
+    prev, job, submit = _mid_rebuild(monkeypatch, u)
+
+    pb._poll_profile_batches()
+
+    assert UserProfile.query.filter_by(
+        user_id=u.id, parent_profile_id=prev.id).count() == 1
+    assert APICostLog.query.filter_by(
+        user_id=u.id, request_type="profile_batch").count() == 1
+    u = User.query.get(u.id)
+    assert u.spend_blocked_month == current_month()
+    block_email.assert_called_once()
+    submit.assert_not_called()
+    assert u.profile_batch_pending is False
+
+
+def test_cap_check_costs_no_query_for_an_uncapped_user(app, monkeypatch):
+    """The builder runs the check before every step. For a user with no
+    limit (global 0, no own limit) it must not query: the user is already
+    loaded. With an own limit it sums the month's spend."""
+    from sqlalchemy import event
+    _cap_harness(app, monkeypatch, limit=0)
+    u = _user(profile_force_batch=True)
+    db.session.commit()
+    u.default_ai_usage   # loaded, as account_allows_ai leaves it in the builder
+    statements = []
+
+    def count(conn, cursor, statement, *a):
+        statements.append(statement)
+
+    event.listen(db.engine, "before_cursor_execute", count)
+    try:
+        assert pb._spend_capped(u) is False
+        assert statements == []
+        u.monthly_spend_limit_usd = 50.0
+        assert pb._spend_capped(u) is False
+        assert any("sum" in s.lower() for s in statements)
+    finally:
+        event.remove(db.engine, "before_cursor_execute", count)
+
+
 def test_step_in_flight_for_an_already_capped_user_is_collected(
         app, monkeypatch):
     """Blocked while a step was queued (by a reply, say): the provider

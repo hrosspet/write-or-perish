@@ -118,17 +118,16 @@ def _spend_capped(user):
     One difference in timing: every cost row dispatches the check that sets
     the block 15 s later (ENFORCE_CAP_DELAY_SECONDS), but the poller builds
     the next step right after it saves this step's cost. So the check runs
-    here first, under the same condition the cost row uses (the global
-    limit is set), and a user whose step just crossed the cap gets no next
-    step. With PER_USER_MONTHLY_LIMIT_USD = 0 only the stored flag is read,
-    as on the synchronous path."""
+    here first, and a user whose step just crossed the cap gets no next
+    step. It runs whatever the global limit: enforce_user_spend_cap
+    resolves the user's effective limit (their own limit from the admin
+    Users tab wins), so a user with their own limit is stopped even while
+    PER_USER_MONTHLY_LIMIT_USD is 0. For an uncapped user it returns before
+    any query (the user is already loaded in the session)."""
     from backend.utils.spend import enforce_user_spend_cap, user_is_capped
     if user_is_capped(user):
         return True
-    config = current_app.config
-    if (config.get("PER_USER_MONTHLY_LIMIT_USD") or 0) <= 0:
-        return False
-    enforce_user_spend_cap(user.id, config)
+    enforce_user_spend_cap(user.id, current_app.config)
     return user_is_capped(user)
 
 
