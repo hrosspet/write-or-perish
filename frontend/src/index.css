@@ -627,7 +627,14 @@ code {
   width: 13px;
   height: 13px;
 }
+.ref-card-byline-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
 .ref-card-byline {
+  flex: 1 1 auto;
   display: flex;
   flex-wrap: wrap;
   align-items: baseline;
@@ -668,6 +675,38 @@ code {
   color: var(--text-primary);
   overflow-wrap: anywhere;
 }
+/* The link to the original after the title: the icon is joined to the last
+   word (no-wrap), so it never sits alone on a line. Its tap target is
+   padded to ~40 px; vertical padding on an inline box does not change the
+   line height, and the negative right margin gives back the horizontal
+   padding. */
+.ref-card-title-tail {
+  white-space: nowrap;
+}
+.ref-card-title-link {
+  display: inline-block;
+  padding: 10px 8px;
+  margin: -10px -8px -10px 0;
+  vertical-align: middle;
+  line-height: 0;
+  font-size: 1.1rem;
+}
+.ref-card-title-link,
+.ref-card-title-link:link,
+.ref-card-title-link:visited {
+  color: var(--text-muted);
+}
+.ref-card-title-link:hover,
+.ref-card-title-link:focus-visible {
+  color: var(--text-primary);
+}
+.ref-card-title-link svg {
+  width: 1em;
+  height: 1em;
+}
+.ref-card-out-titleless {
+  align-self: flex-start;
+}
 .ref-card-text {
   max-width: 65ch;
   font-family: var(--reading-serif);
@@ -705,8 +744,13 @@ code {
   border-top: 1px solid var(--border);
   font-family: var(--sans);
 }
-/* Listen: SpeakerIcon renders nothing for a user without voice mode. */
+/* Listen, last on the byline line: SpeakerIcon renders nothing for a
+   user without voice mode. The negative margins give back the button's
+   tap-target padding (10px 8px) so the line keeps its height and the
+   glyph sits on the card's content edge. */
 .ref-card-listen {
+  flex: none;
+  margin: -10px -8px -10px 0;
   display: inline-flex;
   align-items: center;
   font-size: 1rem;

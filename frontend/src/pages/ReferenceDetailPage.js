@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
-import { FiFileText, FiMessageSquare, FiPlayCircle } from 'react-icons/fi';
+import { FiArrowUpRight, FiFileText, FiMessageSquare, FiPlayCircle } from 'react-icons/fi';
 import api from '../api';
 import MarkdownBody from '../components/MarkdownBody';
 import BubbleKebabMenu from '../components/BubbleKebabMenu';
@@ -9,6 +9,7 @@ import ReferenceEditForm from '../components/ReferenceEditForm';
 import NodeFormModal from '../components/NodeFormModal';
 import RegenerateTtsDialog from '../components/RegenerateTtsDialog';
 import SpeakerIcon from '../components/SpeakerIcon';
+import { useUser } from '../contexts/UserContext';
 import ReferenceFeedback, { TWEET_LABELS } from '../components/ReferenceFeedback';
 import { useToast } from '../contexts/ToastContext';
 import { formatDate, formatDateTime } from '../utils/date';
@@ -32,16 +33,19 @@ const SOURCE_GLYPH = {
   page: FiFileText,
 };
 
-// The SpeakerIcon button in the action row: a larger tap target, its
-// icon in line with the card's left edge.
-const listenButtonStyle = { padding: '10px 8px', marginLeft: '-8px' };
+// The SpeakerIcon button at the end of the byline: a larger tap target
+// than the glyph (10 px above and below, 8 px each side). The wrapper's
+// negative margins (.ref-card-listen) take the padding back out of the
+// layout, so the byline keeps its height and the glyph its right-edge
+// position.
+const listenButtonStyle = { padding: '10px 8px', marginLeft: 0 };
 
 /**
  * Who wrote it and when, under the source line: a tweet's display name
  * and @handle (opening the account), a page's or video's byline, then
  * the date. The site is already named in the source line.
  */
-function Byline({ item }) {
+function Byline({ item, listen }) {
   const when = formatDateTime(item.posted_at || item.fetched_at);
   let author = null;
   if (referenceKind(item) === 'tweet' && item.author_handle) {
@@ -60,12 +64,38 @@ function Byline({ item }) {
   } else if (item.author_name || item.author_handle) {
     author = <span className="ref-card-name">{item.author_name || item.author_handle}</span>;
   }
-  if (!author && !when) return null;
+  if (!author && !when && !listen) return null;
   return (
-    <div className="ref-card-byline" data-testid="reference-byline">
-      {author}
-      {when && <span className="ref-card-date">{author ? `· ${when}` : when}</span>}
+    <div className="ref-card-byline-row" data-testid="reference-byline">
+      <div className="ref-card-byline">
+        {author}
+        {when && <span className="ref-card-date">{author ? `· ${when}` : when}</span>}
+      </div>
+      {listen && <span className="ref-card-listen">{listen}</span>}
     </div>
+  );
+}
+
+/**
+ * The title with the link to the original as an icon after it. The icon
+ * is joined to the title's last word in a no-wrap span, so a long title
+ * never leaves it alone on a line. The heading is named by the title
+ * (aria-label), not by the link inside it.
+ */
+function TitleWithLink({ title, link }) {
+  if (!link) return <h1 className="ref-card-title">{title}</h1>;
+  const { iconName, ...anchor } = link;
+  const cut = title.search(/\S+\s*$/);
+  return (
+    <h1 className="ref-card-title" aria-label={title}>
+      {title.slice(0, cut)}
+      <span className="ref-card-title-tail">
+        {title.slice(cut)}
+        <a className="ref-card-title-link" aria-label={iconName} {...anchor}>
+          <FiArrowUpRight aria-hidden="true" strokeWidth={1.6} />
+        </a>
+      </span>
+    </h1>
   );
 }
 
@@ -81,6 +111,10 @@ function Byline({ item }) {
  */
 function ReferenceDetailPage() {
   const { id } = useParams();
+  // SpeakerIcon renders nothing without voice mode; the byline row then
+  // must not exist for a reference with no author and no date either.
+  const userCtx = useUser();
+  const canListen = !!(userCtx && userCtx.user && userCtx.user.voice_mode_enabled);
   const navigate = useNavigate();
   // Opened from a card in a thread (a gleaning, #435): the link back to it.
   const location = useLocation();
@@ -176,6 +210,19 @@ function ReferenceDetailPage() {
     if (!marking) setRead(true, 'open');
   };
 
+  // The link to the original: by the title (an icon after it) or, with no
+  // title, as text in the title's place. Nothing when there is no URL.
+  const linkLabel = item ? sourceLinkLabel(item) : '';
+  const linkName = linkLabel.replace(/\s*↗$/, '');
+  const originalLink = item && item.url ? {
+    href: item.url,
+    target: '_blank',
+    rel: 'noopener noreferrer',
+    onClick: openedOriginal,
+    iconName: linkName === 'Open page' ? 'Open page' : `Open on ${linkName}`,
+  } : null;
+
+  const { iconName: _unused, ...anchor } = originalLink || {};
   const saveEdit = ({ title, content }, regenerateTts) => {
     const textChanged = content.trim() !== (item.content || '').trim();
     if (item.has_tts && textChanged && regenerateTts === undefined) {
@@ -261,8 +308,26 @@ function ReferenceDetailPage() {
           <Glyph aria-hidden="true" strokeWidth={1.6} />
           {sourceLine(item)}
         </span>
-        <Byline item={item} />
-        {item.title && <h1 className="ref-card-title">{item.title}</h1>}
+        <Byline
+          item={item}
+          listen={canListen && (
+            <SpeakerIcon
+              itemId={item.id}
+              content={item.title ? `# ${item.title}\n${item.content || ''}` : item.content}
+              isPublic={false}
+              buttonStyle={listenButtonStyle}
+              onTtsGenerated={() => setItem((prev) => (prev ? { ...prev, has_tts: true } : prev))}
+            />
+          )}
+        />
+        {item.title ? (
+          <TitleWithLink title={item.title} link={originalLink} />
+        ) : originalLink && (
+          // No title: the link stands where the title would be.
+          <a className="ref-card-out ref-card-out-titleless" {...anchor}>
+            {linkLabel}
+          </a>
+        )}
         {video && <YouTubeEmbed videoId={video.id} start={video.start} />}
         {video ? (
           // A video's stored text is its description (with the chapter
@@ -288,26 +353,6 @@ function ReferenceDetailPage() {
           </div>
         )}
         <div className="ref-card-foot">
-          <span className="ref-card-listen">
-            <SpeakerIcon
-              itemId={item.id}
-              content={item.title ? `# ${item.title}\n${item.content || ''}` : item.content}
-              isPublic={false}
-              buttonStyle={listenButtonStyle}
-              onTtsGenerated={() => setItem((prev) => (prev ? { ...prev, has_tts: true } : prev))}
-            />
-          </span>
-          {item.url && (
-            <a
-              className="ref-card-out"
-              href={item.url}
-              target="_blank"
-              rel="noopener noreferrer"
-              onClick={openedOriginal}
-            >
-              {sourceLinkLabel(item)}
-            </a>
-          )}
           <span className="ref-card-spacer" />
           {/* No gap: ReferenceFeedback spaces itself from the button. */}
           <span style={{ display: 'inline-flex', alignItems: 'center' }}>
