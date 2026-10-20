@@ -535,6 +535,35 @@ def test_set_content_with_a_shared_key_matches_the_normal_envelope(kms):
         encryption.wrapped_dek_of(encryption.encrypt_with_dek("x", dek))
 
 
+def test_a_settings_only_reimport_is_chunked_too(app, kms, monkeypatch):
+    """Skips count toward the commit boundary: a re-import that only
+    changes settings is checkpointed every ~500 messages and gets a
+    data key per chunk, like a first import."""
+    from backend.routes.import_data import run_conversation_import
+    alice = _make_user("alice")
+    _db.session.commit()
+    public = dict(OPTIONS, privacy_level="public")
+    run_conversation_import(alice.id, _stash(alice.id, _analyzed(30, 40)),
+                            "t1", public)  # 1200 messages, no keys
+    token = _stash(alice.id, _analyzed(30, 40))
+    saves = []
+    real_write = cs.write_state
+    monkeypatch.setattr(cs, "write_state", lambda uid, tok, st: (
+        saves.append(dict(st)), real_write(uid, tok, st)))
+    wraps = kms["encrypt"]
+    result = run_conversation_import(alice.id, token, "t2", OPTIONS)
+    assert result["created"] == 0 and result["updated"] == 1200
+    checkpoints = [st for st in saves if not st.get("finished")]
+    assert len(checkpoints) > 1
+    assert checkpoints[0]["next_conv"] < 30 and checkpoints[0]["updated"] > 0
+    raws = [c for (c,) in _db.session.query(Node.content).filter(
+        Node.human_owner_id == alice.id)]
+    assert all(r.startswith(encryption.ENCRYPTED_PREFIX_V2) for r in raws)
+    keys = {encryption.wrapped_dek_of(r) for r in raws}
+    assert len(keys) > 1
+    assert kms["encrypt"] - wraps == len(keys) <= 3
+
+
 def test_a_public_import_makes_no_data_key(app, kms):
     from backend.routes.import_data import run_conversation_import
     alice = _make_user("alice")

@@ -2011,10 +2011,13 @@ def confirm_chatgpt_import():
 # run_conversation_import. The client polls /import/status/<task_id>, as
 # for a Twitter import.
 
-# HEURISTIC: nodes per commit (same as the Twitter import). A commit
-# happens at the first conversation boundary after this many new nodes,
-# so a resumed run starts at a whole conversation. Each committed chunk
-# also gets a fresh data key: one KMS call per chunk.
+# HEURISTIC: messages per commit (same size as the Twitter import's
+# chunks). Every message with text counts: a new node (each part of a
+# split one), a skip, a restore. A commit happens at the first
+# conversation boundary after this many, so a resumed run starts at a
+# whole conversation, and a re-import that only skips or changes
+# settings is checkpointed too. Each committed chunk gets a fresh data
+# key: one KMS call per chunk.
 CONVERSATION_BATCH_SIZE = 500
 # HEURISTIC: the job reports progress at most this often (seconds).
 CONVERSATION_PROGRESS_INTERVAL = 1.0
@@ -2244,8 +2247,9 @@ def create_conversation_nodes(user_id, source, conversations, privacy_level,
     soft-deleted matches per ``on_deleted``, and give already-imported
     nodes this import's privacy/AI-usage settings (``updated``).
 
-    Commits at the first conversation boundary after ``batch_size`` new
-    nodes and then calls ``on_commit(state)``: ``state`` holds the next
+    Commits at the first conversation boundary after ``batch_size``
+    processed messages (new nodes, skips, restores) and then calls
+    ``on_commit(state)``: ``state`` holds the next
     conversation and the counts so far, so a run that stops later can
     be continued from it. Calls ``on_progress(messages_done)`` at most
     every ``progress_interval`` seconds. Returns the final state.
@@ -2339,6 +2343,7 @@ def create_conversation_nodes(user_id, source, conversations, privacy_level,
                     if source_key not in deleted_keys:
                         skipped_alive_ids.append(key_index[source_key])
                 parent_id = key_index[source_key]
+                since_commit += 1  # a skip or restore is work to checkpoint
                 continue
 
             # Parse original timestamp from the export
