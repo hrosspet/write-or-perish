@@ -29,8 +29,13 @@ from sqlalchemy import func, or_
 from backend.celery_app import celery, flask_app
 from backend.extensions import db
 from backend.models import User, UserProfile, Node, ProfileBatchJob
-from backend.llm_providers import DEFAULT_MAX_OUTPUT_TOKENS
+from backend.llm_providers import (
+    DEFAULT_MAX_OUTPUT_TOKENS, model_input_cap, EmptyTruncatedOutputError)
+from backend.utils.chunk_plan import (
+    UPDATE_THRESHOLD_UNITS, next_window_budget, max_units_for_cap)
 from backend.utils.api_keys import get_api_keys_for_usage
+from backend.utils.privacy import account_allows_ai
+from backend.utils import refusal_backoff
 from backend.utils.llm_batch import (
     batch_submit, batch_check_and_collect, apply_batch_key_override)
 # Module reference, not `from ... import names`: exports imports
@@ -41,10 +46,11 @@ from backend.utils.llm_batch import (
 # ImportError; attribute access at call time is fine.
 from backend.tasks import exports as _exports
 
+from backend.utils.hidden_rows import writing_on_hold
 logger = get_task_logger(__name__)
 
-# Mirror maybe_trigger_incremental_profile_update's gates (exports.py).
-THRESHOLD_TOKENS = 80000
+# Mirror maybe_trigger_incremental_profile_update's gates (exports.py);
+# the volume threshold is UPDATE_THRESHOLD_UNITS (backend/utils/chunk_plan).
 MIN_INACTIVITY = timedelta(minutes=30)
 MIN_INTERVAL = timedelta(hours=1)
 
@@ -102,8 +108,8 @@ def batch_pipeline_lock():
                 pass
 
 def _model_for(user):
-    return (user.preferred_model
-            or current_app.config.get("DEFAULT_LLM_MODEL", "claude-opus-5"))
+    from backend.utils.llm_nodes import default_model_for
+    return default_model_for(user)
 
 
 def _provider_and_model(model_id):
@@ -134,24 +140,22 @@ def _new_token_count(user, cutoff):
     return q.scalar()
 
 
-def _remaining_token_count(user, cutoff):
-    """Stored tokens the chunk builder still has ahead of it: nodes CREATED
-    after the cutoff, in the profile's anchor scope. Not _new_token_count —
-    that keys on updated_at (organic "new activity"), and imported tweets
-    all carry the import time there, so a pre-filled corpus reads as
-    entirely unprocessed forever."""
-    return db.session.query(func.coalesce(func.sum(Node.token_count), 0)).filter(
-        or_(Node.user_id == user.id, Node.human_owner_id == user.id),
-        Node.ai_usage.in_(['chat', 'train']),
-        Node.deleted_at.is_(None),
-        Node.created_at > cutoff,
-    ).scalar() or 0
-
-
-def _should_seed(user):
+def _should_seed(user, ignore_backoff=False):
     """Whether the user has crossed the trigger gates right now. Mirrors
     maybe_trigger_incremental_profile_update (inactivity, interval, tokens)
-    without dispatching."""
+    without dispatching.
+
+    ignore_backoff: skip the refusal backoff (wait and stop) — only for a
+    seed an import dispatches (the import is new input) or the admin
+    "Build profile" button sends after the admin confirmed the override
+    (voice review, 2026-10-01)."""
+    # The refusal backoff outranks every gate, the regen flag included: a
+    # refused chunk leaves them all open, and a pinned (force-batch)
+    # account is never stopped by MAX_BATCH_ATTEMPTS (#368). This also
+    # holds the admin "Build profile" button, which seeds through here,
+    # unless the admin confirmed the override (force).
+    if not ignore_backoff and refusal_backoff.profile_in_backoff(user.id):
+        return False
     # A pending full rebuild overrides the volume/interval gates: the
     # rebuild was explicitly requested (regen button, failure recovery,
     # repair script) and the gates measure "new tokens since cutoff" —
@@ -162,41 +166,66 @@ def _should_seed(user):
                  .order_by(Node.created_at.desc()).first())
     if last_node and (datetime.utcnow() - last_node.created_at) < MIN_INACTIVITY:
         return False
-    latest = _latest_non_integration_profile(user.id)
-    # Pinned (pre-filled) accounts: a chain with at least one more full
-    # minimum chunk beyond its cutoff is a rebuild in progress and must
-    # continue regardless of the interval / 80k-new-token gates — those
-    # measure organic growth, and a pre-filled corpus never grows. Without
-    # this, a chunk lost to a worker restart (2026-08-27, MarvinKeilbach)
-    # stalls the account forever. A tail smaller than a minimum chunk is
-    # NOT chased: it waits for more data like everyone else's (uneven
-    # chunks distort the iterative update more than an unused tail).
-    if (user.profile_force_batch and latest is not None
-            and latest.source_data_cutoff is not None):
-        _, min_chunk = _exports.chunk_budget_for(user, _model_for(user))
-        if _remaining_token_count(user, latest.source_data_cutoff) >= min_chunk:
-            return True
-    if latest:
-        if (datetime.utcnow() - latest.created_at) < MIN_INTERVAL:
-            return False
-        # Null cutoff (e.g. a user-written profile): nothing has been folded in
-        # yet, so all eligible data counts as new — measure it instead of
-        # force-seeding (mirrors maybe_trigger_incremental_profile_update).
-        cutoff = latest.source_data_cutoff
-        new_tokens = _new_token_count(user, cutoff)
-    else:
-        new_tokens = _new_token_count(user, None)
-    return new_tokens >= THRESHOLD_TOKENS
+    # The base the next step builds on: the newest AI-readable version
+    # (a version marked 'none' is skipped, #346).
+    latest = _exports.profile_update_base(user.id)
+    # An unfinished chain — data beyond the cutoff that is OLDER than the
+    # version (a pre-fill or import still being folded in, a chunk lost to
+    # a worker restart: 2026-08-27, MarvinKeilbach) — continues regardless
+    # of the interval / volume gates, which measure organic growth. The
+    # continue rule of docs/design/chunk-planner.md: it replaces the
+    # pinned-account special case and never leaves a tail unread.
+    if latest is not None and _exports.should_continue_chain(user, latest):
+        return True
+    # A finished chain whose integration was refused (or lost): the seeder
+    # builds the integration alone (_seed_profile_batches passes
+    # allow_chunk=False, #368).
+    if _exports.integration_due(user, latest):
+        return True
+    if latest and (datetime.utcnow() - latest.created_at) < MIN_INTERVAL:
+        return False
+    if latest is None or _exports.profile_is_provisional(latest):
+        # No profile, or a provisional one: the ladder (5k, 10k, 15k, 25k,
+        # 50k, then T) decides, and the build is from scratch — the one
+        # side effect of this gate is the regen flag, which the request
+        # builder honours and clears once chunk 1 commits. The earlier
+        # provisional versions stay as history, unchained.
+        due, _total, _threshold = _exports.provisional_build_due(user, latest)
+        if due:
+            user.profile_needs_full_regen = True
+            db.session.commit()
+        return due
+    # Null cutoff (e.g. a user-written profile): nothing has been folded in
+    # yet, so all eligible data counts as new — measure it instead of
+    # force-seeding (mirrors maybe_trigger_incremental_profile_update).
+    new_tokens = _new_token_count(user, latest.source_data_cutoff)
+    return new_tokens >= UPDATE_THRESHOLD_UNITS
 
 
-def _build_next_profile_request(user):
+def _build_next_profile_request(user, allow_chunk=True, chunk_num=1):
     """Build the request for the user's CURRENT step, or None if there's
     nothing to do. Mirrors the 'what's next' decision of
     _do_initial_generation / _do_incremental_update / _chunked_profile_loop /
     _do_integration, but produces a batch request instead of calling the LLM.
 
+    allow_chunk=False skips straight to the integration decision: the
+    poller passes it after a saved chunk when only data newer than that
+    chunk's render remains (organic growth waits for the seeding gates).
+
+    chunk_num is this step's ordinal within the run (1 from the seeder;
+    the poller passes the applied chunk's number + 1). It is recorded in
+    the item meta with the planned total so the progress endpoint can
+    label the in-flight step without re-running the plan (#258). A run
+    re-seeded after a failed step starts the count over.
+
     Returns {"provider", "request", "meta"} or None.
     """
+    # Checked here, not only by the seeder: this builder also advances a
+    # chain after each collected step, and the account setting may have
+    # changed since the chain started (#346).
+    if not account_allows_ai(user):
+        logger.info(f"User {user.id}: opted out of AI usage; no profile step")
+        return None
     model_id = _model_for(user)
     provider, api_model = _provider_and_model(model_id)
 
@@ -205,118 +234,102 @@ def _build_next_profile_request(user):
     # The flag is cleared once the from-scratch chunk 1 commits
     # (_apply_result), so subsequent chunks chain normally.
     prev = (None if user.profile_needs_full_regen
-            else _latest_non_integration_profile(user.id))
+            else _exports.profile_update_base(user.id))
     prev_id = prev.id if prev else None
     cutoff = prev.source_data_cutoff if prev else None
     cumulative = (prev.source_tokens_used or 0) if prev else 0
 
-    # engaged_threads: profiles read the user's full conversational
-    # scope — own threads AND replies in other users' threads (#110).
-    # This also routes from-scratch builds (cutoff=None) through the
-    # incremental machinery, which renders budget windows correctly via
-    # entry-point preambles; the legacy authored_threads path silently
-    # returned None whenever no thread *root* fit the budget window.
-    budget, min_chunk = _exports.chunk_budget_for(user, model_id)
-    chunk = _exports.build_user_export_content(
-        user, max_tokens=budget, filter_ai_usage=True,
-        created_after=cutoff, chronological_order=True, return_metadata=True,
-        include_strategy="engaged_threads")
+    # The remainder after the cutoff, summed in the export window's own
+    # scope, is planned into equal chunks (docs/design/chunk-planner.md):
+    # the chunk COUNT is rounded, so a remainder of any size is covered
+    # with no leftover tail, and the model's real-token cap only ever
+    # raises the count. Nothing is deferred to "the next update cycle" —
+    # a pre-filled corpus never gets one. The export reads the engaged
+    # scope — own threads AND replies in other users' threads (#110) —
+    # and from-scratch builds (cutoff=None) go through the same
+    # incremental machinery.
+    remaining = _exports.count_remaining_units(user.id, cutoff) if allow_chunk else 0
+    if remaining > 0:
+        cfg = current_app.config["SUPPORTED_MODELS"].get(model_id) or {}
+        input_cap = model_input_cap(cfg, DEFAULT_MAX_OUTPUT_TOKENS)
+        rho = _exports.tokens_per_unit(user, model_id)
+        k, size, budget = next_window_budget(
+            remaining, max_units=max_units_for_cap(input_cap, rho))
+        logger.info(
+            f"User {user.id}: batch chunk plan — {remaining} units remain "
+            f"after {cutoff}: {k} chunk(s) of {size:.0f}, window budget "
+            f"{budget} (cap {input_cap} tokens at {rho:.2f} tokens/unit)")
+        is_first_initial = prev is None
 
-    have_chunk = bool(chunk and chunk.get("content"))
-    is_first_initial = prev is None
-    # Tail-aware threshold: defer only a genuine corpus tail. A chunk
-    # can re-measure below MIN_CHUNK_TOKENS while being a full budget
-    # window (rendered chars/4 vs stored token_count unit mismatch);
-    # if data remains beyond it, process it anyway.
-    big_enough = have_chunk and (
-        is_first_initial
-        or chunk["token_count"] >= min_chunk
-        or _exports._has_more_source_after(user, chunk["latest_node_created_at"]))
-
-    if big_enough:
         def _prompt_for(chunk):
             if is_first_initial:
                 gen_template = _exports._load_prompt(
                     "profile_generation.txt", user_id=user.id)
                 return gen_template.replace(
-                    "{user_export}",
-                    _exports.chunk_content_for_prompt(chunk)), "iterative"
+                    "{user_export}", _exports.chunk_content_for_prompt(chunk))
             return _exports.build_chunk_prompt(
                 _exports.build_update_template(user.id), prev.get_content(),
-                cumulative, chunk, prev.source_origin_stats), "update"
+                cumulative, chunk, prev.source_origin_stats)
 
-        prompt, generation_type = _prompt_for(chunk)
-
-        # Pre-submit sizing check (shared fit_by_count): count the prompt
-        # (free/exact on Anthropic, tiktoken estimate on OpenAI) and
-        # shrink the chunk BEFORE submitting, instead of burning a batch
-        # attempt on an overflow rejection and retrying at the same wrong
-        # budget. The count can only bind when the calibration ratio is
-        # badly off (typically chunk 1 of a hot-tokenizer model on a
-        # 200k-window); a None count, an empty rebuild, or non-convergence
-        # falls through to the existing failed-item/attempts machinery.
-        from backend.llm_providers import fit_by_count, PromptTooLongError
-        cfg = current_app.config["SUPPORTED_MODELS"].get(model_id) or {}
-        limit = (cfg.get("context_window", 200_000)
-                 - DEFAULT_MAX_OUTPUT_TOKENS)
-
-        def _msgs(text):
-            return [{"role": "user", "content": [
-                {"type": "text", "text": text}]}]
-
-        def _built_at(b):
-            c = _exports.build_user_export_content(
-                user, max_tokens=b, filter_ai_usage=True,
-                created_after=cutoff, chronological_order=True,
-                return_metadata=True, include_strategy="engaged_threads")
-            if not c or not c.get("content"):
-                return None
-            p, g = _prompt_for(c)
-            return _msgs(p), c, p, g
-
-        try:
-            fitted, _budget, _real = fit_by_count(
-                model_id, get_api_keys_for_usage(current_app.config, "chat"),
-                limit, budget, _built_at, max_rounds=3, min_budget=5000,
-                first_built=(_msgs(prompt), chunk, prompt, generation_type))
-            if fitted is not None:
-                _m, chunk, prompt, generation_type = fitted
-        except PromptTooLongError:
-            logger.warning(
-                "User %s: chunk still over the context limit after sizing "
-                "rounds — submitting; the failed-item machinery handles "
-                "the overflow", user.id)
-
-        latest_ts = chunk["latest_node_created_at"]
-        # NB: Anthropic requires custom_id to match ^[a-zA-Z0-9_-]{1,64}$ —
-        # no colons. Underscore-delimited, parsed nowhere (routing is by exact
-        # match against the stored items), so the format is free to change.
-        cid = f"profile_{user.id}_{prev_id or 0}_chunk"
-        return {
-            "provider": provider,
-            "request": {
-                "custom_id": cid, "model_id": model_id,
-                "api_model": api_model,
-                "messages": [{"role": "user", "content": [
-                    {"type": "text", "text": prompt}]}],
-                "max_tokens": DEFAULT_MAX_OUTPUT_TOKENS,
-            },
-            "meta": {
-                "custom_id": cid, "user_id": user.id, "kind": "chunk",
-                "prev_profile_id": prev_id,
-                "generation_type": generation_type,
-                "prev_cumulative": cumulative,
-                "origin_stats": _exports.merge_origin_stats(
-                    prev.source_origin_stats if prev else None,
-                    chunk.get("origin_stats")),
-                "source_data_cutoff": (
-                    latest_ts.isoformat() if latest_ts else None),
-                "model_id": model_id,
-                # chars/4 of the prompt: calibrates the next chunk's budget
-                # against the provider-reported input_tokens (_apply_result).
-                "prompt_tokens_est": _exports.approximate_token_count(prompt),
-            },
-        }
+        # Pre-submit sizing (shared build_fitted_chunk): count the prompt
+        # and shrink the window BEFORE submitting, instead of burning a
+        # batch attempt on an overflow rejection. A window still over the
+        # cap after the sizing rounds is submitted; the failed-item /
+        # attempts machinery handles the overflow.
+        rendered_at = datetime.utcnow()
+        fitted = _exports.build_fitted_chunk(
+            user, model_id, get_api_keys_for_usage(current_app.config, "chat"),
+            input_cap, cutoff, budget, remaining, _prompt_for)
+        if fitted is not None:
+            chunk, prompt = fitted
+            if not is_first_initial:
+                generation_type = "update"
+            elif k == 1:
+                generation_type = "initial"   # the whole corpus in one chunk
+            else:
+                generation_type = "iterative"
+            latest_ts = chunk["latest_node_created_at"]
+            # NB: Anthropic requires custom_id to match ^[a-zA-Z0-9_-]{1,64}$ —
+            # no colons. Underscore-delimited, parsed nowhere (routing is by
+            # exact match against the stored items), so the format is free to
+            # change.
+            cid = f"profile_{user.id}_{prev_id or 0}_chunk"
+            return {
+                "provider": provider,
+                "request": {
+                    "custom_id": cid, "model_id": model_id,
+                    "api_model": api_model,
+                    "messages": [{"role": "user", "content": [
+                        {"type": "text", "text": prompt}]}],
+                    "max_tokens": DEFAULT_MAX_OUTPUT_TOKENS,
+                },
+                "meta": {
+                    "custom_id": cid, "user_id": user.id, "kind": "chunk",
+                    "prev_profile_id": prev_id,
+                    "generation_type": generation_type,
+                    "prev_cumulative": cumulative,
+                    "origin_stats": _exports.merge_origin_stats(
+                        prev.source_origin_stats if prev else None,
+                        chunk.get("origin_stats")),
+                    "source_data_cutoff": (
+                        latest_ts.isoformat() if latest_ts else None),
+                    # When the window was rendered: the saved version's
+                    # continue-rule boundary (data written after it is
+                    # organic growth).
+                    "rendered_at": rendered_at.isoformat(),
+                    "model_id": model_id,
+                    # Stored units of the window: advances the profile's
+                    # cumulative figure and, against the provider-reported
+                    # input_tokens, calibrates the user's tokens-per-unit
+                    # ratio for the next cap check (_apply_result).
+                    "chunk_units": chunk["unit_count"],
+                    # Progress label only (GET /export/profile-progress):
+                    # "Chunk n of ~N", N = chunks done before this one
+                    # plus the plan for the remainder.
+                    "chunk_num": chunk_num,
+                    "chunk_total": chunk_num - 1 + k,
+                },
+            }
 
     # No (full-size) new data → integrate the chain if there are ≥2 versions
     # and we haven't already integrated this tip.
@@ -351,10 +364,14 @@ def _build_next_profile_request(user):
 
 
 def _response_from_result(result):
-    inp = result.get("input_tokens", 0)
-    out = result.get("output_tokens", 0)
-    return {"content": result["content"], "input_tokens": inp,
-            "output_tokens": out, "total_tokens": inp + out}
+    """A collected batch result in the shape _save_profile expects. Every
+    counter the collector reported (cache reads/writes, batch flag) is
+    kept so the profile_batch cost row is priced cache-aware (#286);
+    only total_tokens is derived here."""
+    inp = result.get("input_tokens", 0) or 0
+    out = result.get("output_tokens", 0) or 0
+    return {**result, "input_tokens": inp, "output_tokens": out,
+            "total_tokens": inp + out}
 
 
 def _apply_result(user, item, result, submitted_at):
@@ -369,6 +386,13 @@ def _apply_result(user, item, result, submitted_at):
     deterministic chunk-1 cutoff), and matching those historic rows
     discarded every result and re-submitted chunk 1 forever."""
     response = _response_from_result(result)
+    # A cut-off result (empty or partial) saves nothing and raises (#368):
+    # the poller counts a failed attempt, and the re-seed — after the
+    # refusal backoff in _should_seed — builds on the last good version
+    # instead of an empty or incomplete chain tip.
+    _exports.refuse_truncated_profile(
+        user, item["model_id"], response,
+        f"batch {item.get('kind', 'chunk')}", batch=True)
     cutoff = (datetime.fromisoformat(item["source_data_cutoff"])
               if item.get("source_data_cutoff") else None)
 
@@ -387,13 +411,23 @@ def _apply_result(user, item, result, submitted_at):
             user.profile_batch_attempts = 0
             return None
         else:
-            cumulative = item["prev_cumulative"] + response["input_tokens"]
+            # Cumulative coverage in stored units. An item submitted before
+            # the planner carries no unit count and accumulates the billed
+            # input tokens it was built with (the legacy figure).
+            units = item.get("chunk_units")
+            cumulative = item["prev_cumulative"] + (
+                units if units else response["input_tokens"])
             profile = _exports._save_profile(
                 user, item["model_id"], response["content"], response,
                 source_tokens_used=cumulative, source_data_cutoff=cutoff,
                 generation_type=item["generation_type"],
                 parent_profile_id=item["prev_profile_id"], batch=True,
-                source_origin_stats=item.get("origin_stats"))
+                source_origin_stats=item.get("origin_stats"),
+                # An item submitted before render times were recorded was
+                # rendered right before its submission.
+                source_rendered_at=(
+                    datetime.fromisoformat(item["rendered_at"])
+                    if item.get("rendered_at") else submitted_at))
             # mirror PR #181: a from-scratch full regen is no longer needed
             # once its first chunk is committed. Only a from-scratch chunk
             # (prev_profile_id None) satisfies the flag — a flag set while
@@ -404,15 +438,19 @@ def _apply_result(user, item, result, submitted_at):
                 user.profile_needs_full_regen = False
             logger.info(
                 f"User {user.id}: saved batch chunk profile {profile.id}")
-        if item.get("prompt_tokens_est"):
+        if item.get("chunk_units"):
             observed = _exports.record_token_ratio(
-                user, item["model_id"], item["prompt_tokens_est"],
+                user, item["model_id"], item["chunk_units"],
                 response.get("input_tokens"))
             if observed is not None:
-                logger.info(f"User {user.id}: batch chunk tokenizer "
-                            f"calibration actual/estimated={observed}")
+                logger.info(f"User {user.id}: batch chunk calibration "
+                            f"{observed} billed tokens per unit")
         user.profile_batch_attempts = 0
-        return _build_next_profile_request(user)
+        # Next step: another chunk only over data that existed when this
+        # chunk's window was rendered; growth since waits for the gates.
+        return _build_next_profile_request(
+            user, allow_chunk=_exports.should_continue_chain(user, profile),
+            chunk_num=(item.get("chunk_num") or 0) + 1)
 
     # integration (parent_profile_id is the chain tip, unique per run,
     # but scope by submission time anyway for consistency)
@@ -440,7 +478,12 @@ def _submit_requests(built, keys):
     persist a ProfileBatchJob per returned batch id, and set guards.
 
     `built` items are not in flight until their batch id comes back; a failed
-    submission clears the guard so the user is re-seeded next cycle."""
+    submission clears the guard so the user is re-seeded next cycle. It also
+    counts a batch attempt (MAX_BATCH_ATTEMPTS, then the synchronous
+    full-price path), except when the provider refused the submit for an
+    account reason (#369): a spend limit or a revoked key says nothing about
+    the requests, and an outage spanning three hourly seeds would otherwise
+    move every unpinned batch user to the full-price path for good."""
     # Invariant: ONE in-flight step per user. Drop duplicate custom_ids
     # (OpenAI rejects the whole batch) and extra steps for the same user
     # (they'd race each other on the chain); keep the first built.
@@ -465,19 +508,27 @@ def _submit_requests(built, keys):
         key = _provider_key(b["provider"], b["request"]["api_model"])
         items_by_key.setdefault(key, []).append(b["meta"])
 
+    # Provider keys refused for an account reason (llm_batch.SubmittedBatches;
+    # a plain dict from a stand-in has none).
+    account_refused = getattr(batch_ids, "account_refused", None) or set()
     now = datetime.utcnow()
     submitted = 0
     for provider_key, items in items_by_key.items():
         batch_id = batch_ids.get(provider_key)
         if not batch_id:
+            refused = provider_key in account_refused
             logger.warning(
                 f"Batch submit failed for {provider_key}; "
-                f"{len(items)} item(s) not in flight")
+                f"{len(items)} item(s) not in flight"
+                + ("; refused for an account reason (reported), "
+                   "not counted as a batch attempt" if refused else ""))
             for item in items:
                 u = User.query.get(item["user_id"])
                 if u:
                     u.profile_batch_pending = False
-                    u.profile_batch_attempts = (u.profile_batch_attempts or 0) + 1
+                    if not refused:
+                        u.profile_batch_attempts = (
+                            (u.profile_batch_attempts or 0) + 1)
             db.session.commit()
             continue
         db.session.add(ProfileBatchJob(
@@ -552,10 +603,11 @@ def seed_profile_batches():
                 _seed_profile_batches()
 
 
-def _seed_profile_batches(users=None):
+def _seed_profile_batches(users=None, ignore_backoff=False):
     """Impl — runs inside an active app context (testable directly).
     ``users`` restricts the cohort (immediate seed for one user); the
-    default is every profile-eligible user."""
+    default is every profile-eligible user. ``ignore_backoff`` is for an
+    import's seed and a confirmed admin override only (see _should_seed)."""
     config = current_app.config
     if config.get("PROFILE_UPDATES_PAUSED"):
         logger.info("PROFILE_UPDATES_PAUSED — skipping batch seeder")
@@ -568,6 +620,15 @@ def _seed_profile_batches(users=None):
     for user in users:
         if user.profile_batch_pending:
             continue
+        # The immediate seed passes users in directly: one whose writing
+        # is on hold for deletion (#268) gets nothing built.
+        if writing_on_hold(user.id):
+            continue
+        # profile_eligible_query already excludes opted-out accounts, but
+        # the immediate seed (admin Build profile, pre-fill, import
+        # hand-off) passes users in directly (#346).
+        if not account_allows_ai(user):
+            continue
         if not use_batch_for_user(user, config):
             continue
         if ((user.profile_batch_attempts or 0) >= MAX_BATCH_ATTEMPTS
@@ -575,21 +636,34 @@ def _seed_profile_batches(users=None):
             continue  # exhausted → synchronous last-resort handles it
         # (force-batch users keep retrying here every cycle instead:
         # they must never fall back to the full-price sync path)
-        if not _should_seed(user):
+        if not _should_seed(user, ignore_backoff=ignore_backoff):
             continue
         try:
-            req = _build_next_profile_request(user)
+            # An integration retry builds only the integration, never a
+            # chunk over organic growth since the chain's last render.
+            req = _build_next_profile_request(
+                user, allow_chunk=not _exports.integration_due(
+                    user, _exports.profile_update_base(user.id)))
         except Exception as e:
-            logger.warning(
+            # Recorded on the row (admin Profile column) and logged at
+            # ERROR so Sentry sees it: a build failure never reaches the
+            # provider, so nothing else counts or reports it.
+            db.session.rollback()  # the builder may have left the session failed
+            user.profile_seed_error = f"{type(e).__name__}: {e}"[:255]
+            db.session.commit()
+            logger.error(
                 f"Build batch request failed for user {user.id}: {e}")
             continue
+        if user.profile_seed_error:
+            user.profile_seed_error = None
+            db.session.commit()
         if req:
             built.append(req)
     return _submit_requests(built, keys)
 
 
 @celery.task(bind=True, max_retries=20, default_retry_delay=30)
-def seed_profile_batch_for_user(self, user_id):
+def seed_profile_batch_for_user(self, user_id, ignore_backoff=False):
     """Immediate seed for one user (admin pre-fill): same gates as the
     hourly seeder, without waiting for it. Returns the number actually
     put in flight (0 when the provider rejected the submit).
@@ -599,9 +673,13 @@ def seed_profile_batch_for_user(self, user_id):
     give up silently "for the hourly seeder", but that seeder skips
     unapproved accounts, so a pre-filled Inactive user whose immediate
     seed lost the lock never got a profile at all (2026-08-28, four
-    accounts)."""
+    accounts).
+
+    ignore_backoff: the seed an import dispatches, or the admin "Build
+    profile" button after the admin confirmed the override, skips the
+    refusal backoff (_should_seed). Everything else respects it."""
     with flask_app.app_context():
-        n = _seed_profile_batch_for_user_impl(user_id)
+        n = _seed_profile_batch_for_user_impl(user_id, ignore_backoff)
         if n is None:
             logger.info(f"User {user_id}: immediate seed deferred (pass in "
                         f"progress); retry {self.request.retries + 1}")
@@ -609,7 +687,7 @@ def seed_profile_batch_for_user(self, user_id):
         return n
 
 
-def _seed_profile_batch_for_user_impl(user_id):
+def _seed_profile_batch_for_user_impl(user_id, ignore_backoff=False):
     """Impl — runs inside an active app context. None = lock held (caller
     retries); otherwise the number of requests put in flight."""
     user = User.query.get(user_id)
@@ -618,7 +696,7 @@ def _seed_profile_batch_for_user_impl(user_id):
     with batch_pipeline_lock() as ok:
         if not ok:
             return None
-        n = _seed_profile_batches(users=[user])
+        n = _seed_profile_batches(users=[user], ignore_backoff=ignore_backoff)
     logger.info(f"User {user_id}: immediate batch seed → {n} request(s)")
     return n
 
@@ -651,10 +729,25 @@ def _poll_profile_batches():
             continue
         if job.provider_key in still_pending:
             continue  # not ended yet
+        # An admin "Cancel batch" may have landed while the provider call
+        # above was in flight: re-read the row, and never collect (or
+        # overflow-resubmit) a job that is no longer pending.
+        db.session.refresh(job)
+        if job.status != "pending":
+            continue
 
         for item in job.items:
             user = User.query.get(item["user_id"])
             if not user:
+                continue
+            if writing_on_hold(user.id):
+                # "Delete all my writing" hid this user's writing after the
+                # request went out (#268): nothing is saved from it.
+                logger.info(f"Batch result for user {user.id} dropped: "
+                            "their writing is on hold for deletion")
+                if item.get("kind") != "intentions":
+                    user.profile_batch_pending = False
+                    db.session.commit()
                 continue
             result = results.get(item["custom_id"])
             if item.get("kind") == "intentions":
@@ -666,6 +759,14 @@ def _poll_profile_batches():
                         intentions_mod.handle_failed_intentions_item(user, item, job, keys)
                     else:
                         intentions_mod.apply_intentions_item(user, item, result)
+                except EmptyTruncatedOutputError as e:
+                    # Refused (cut off before any text, #368): the cost row
+                    # is written and nothing saved. Shown as "failed" in the
+                    # admin column, not as the older version "complete".
+                    db.session.rollback()
+                    intentions_mod.mark_intentions_item_gave_up(item, job)
+                    logger.warning(f"Intentions result refused for user "
+                                   f"{user.id}: {e}")
                 except Exception as e:
                     logger.error(f"Apply intentions result failed for user "
                                  f"{user.id}: {e}", exc_info=True)
@@ -686,6 +787,11 @@ def _poll_profile_batches():
                 logger.error(
                     f"Apply batch result failed for user {user.id}: {e}",
                     exc_info=True)
+                # Counts as a failed attempt like a provider-side error:
+                # the step produced nothing, retries stay bounded, and
+                # the progress endpoint reports the chain as failed.
+                user.profile_batch_attempts = (
+                    user.profile_batch_attempts or 0) + 1
                 user.profile_batch_pending = False
                 db.session.commit()
                 continue

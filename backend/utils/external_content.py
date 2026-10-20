@@ -29,7 +29,27 @@ CA_PAGE_SIZE = 500
 CA_TIMEOUT = 20
 
 X_API_BASE = "https://api.twitter.com/2"
-X_BOOKMARKS_PAGE_SIZE = 100
+# X bills bookmark reads per RETURNED POST (#271), so the page size is
+# not a request-count lever any more: it is the cost of the last page —
+# the one the sync fetches only to learn it holds nothing new. Pages
+# start small and double while every page is all-new; the first page
+# that reaches known bookmarks freezes the size (the caller sends
+# grow=False), because the next page is most likely the closing one.
+# So a quiet night costs the first page, and a night with N new
+# bookmarks costs at most N + 2·min(N + 10, 100) posts: the all-new
+# pages (≤ N), the page that crosses into known bookmarks and the
+# closing page of the same size, each ≤ N + 10 because the all-new
+# pages before it sum to that size minus 10. E.g. 1 new = 20 posts,
+# 11 new = 50, 31 new = 110, 71 new = 230; a full 800 first import
+# stays 800 (max_items caps the last request), and so does a first
+# import resumed after an interrupted one, which reads to the end.
+# A sync resumed after an interrupted one on an account that has
+# finished a sync before has the same ceiling, with N = the bookmarks
+# saved since that finished sync; "known" then means saved at or
+# before it (#310). Heuristic: the 10 is a floor on what a nightly
+# check can cost (10 posts = $0.05), nothing more precise.
+X_BOOKMARKS_FIRST_PAGE_SIZE = 10
+X_BOOKMARKS_PAGE_SIZE = 100  # X's max_results cap for the endpoint
 
 
 def _ca_headers():
@@ -80,6 +100,8 @@ def normalize_ca_tweet(row, username):
         "url": f"https://twitter.com/{username}/status/{tweet_id}",
         "posted_at": _parse_tweet_dt(
             row.get("created_at") or row.get("created at")),
+        # The archive is an opt-in public corpus: public by construction.
+        "public_source": True,
     }
 
 
@@ -127,6 +149,12 @@ def normalize_x_bookmark(tweet, authors_by_id):
         return None
     author = authors_by_id.get(tweet.get("author_id"), {})
     handle = author.get("username")
+    # A bookmark is public only if its author's account is not protected
+    # (a follower can bookmark a protected tweet). X says so per author
+    # in the `includes.users` expansion; an author X did not return, or a
+    # user object without the field, leaves the answer unknown.
+    protected = author.get("protected")
+    public_source = (not protected) if isinstance(protected, bool) else None
     return {
         "external_id": str(tweet_id),
         "author_handle": handle,
@@ -134,27 +162,43 @@ def normalize_x_bookmark(tweet, authors_by_id):
         "url": (f"https://twitter.com/{handle}/status/{tweet_id}"
                 if handle else f"https://twitter.com/i/status/{tweet_id}"),
         "posted_at": _parse_tweet_dt(tweet.get("created_at")),
+        "public_source": public_source,
     }
 
 
 def x_fetch_bookmark_pages(access_token, x_user_id, max_items=800):
-    """Fetch the user's X bookmarks (newest-bookmarked first) as PAGES of
-    normalized items, so the caller can stop paginating — each page is a
-    paid API request — once a page yields nothing new.
+    """Fetch the user's X bookmarks (newest-bookmarked first) as PAGES,
+    yielding ``(items, posts_returned)`` per request: the normalized
+    items, and how many posts X returned for that request — what the
+    cost ledger counts (#271). X bills each post once per UTC day, so a
+    second manual sync the same day is logged in full though X may bill
+    less. The two numbers differ only when a tweet fails to normalize
+    (no id/text); max_items never makes them differ because the last
+    request asks X for exactly the remainder. Empty pages are yielded
+    too (cost 0), so the caller can stop paginating once a page yields
+    nothing new.
+
+    Page sizes start at X_BOOKMARKS_FIRST_PAGE_SIZE and double up to
+    X_BOOKMARKS_PAGE_SIZE (see the constants for why). A caller driving
+    the generator with ``send(False)`` keeps the next page the SAME size
+    instead of doubling it — the sync does that once a page has reached
+    already-imported bookmarks, so the closing page stays cheap. Plain
+    iteration (``send(None)``) always doubles.
 
     X API v2: GET /2/users/:id/bookmarks — OAuth2 user context with
     bookmark.read; max 800 most recent per X's own cap.
     """
     headers = {"Authorization": f"Bearer {access_token}"}
     params = {
-        "max_results": X_BOOKMARKS_PAGE_SIZE,
         "tweet.fields": "created_at,author_id",
         "expansions": "author_id",
-        "user.fields": "username",
+        "user.fields": "username,protected",
     }
     fetched = 0
     next_token = None
+    page_size = X_BOOKMARKS_FIRST_PAGE_SIZE
     while fetched < max_items:
+        params["max_results"] = min(page_size, max_items - fetched)
         if next_token:
             params["pagination_token"] = next_token
         resp = requests.get(
@@ -171,37 +215,144 @@ def x_fetch_bookmark_pages(access_token, x_user_id, max_items=800):
             item = normalize_x_bookmark(tweet, authors_by_id)
             if item is not None:
                 page.append(item)
-                fetched += 1
-                if fetched >= max_items:
-                    break
-        # Empty pages are yielded too: every yield corresponds to exactly
-        # one paid API request, so the caller can meter cost by counting.
-        yield page
+        fetched += len(tweets)
+        grow = yield page, len(tweets)
         next_token = (payload.get("meta") or {}).get("next_token")
         if not next_token:
             break
+        if grow is not False:
+            page_size = min(page_size * 2, X_BOOKMARKS_PAGE_SIZE)
 
 
-def x_fetch_bookmarks(access_token, x_user_id, max_items=800):
-    """Flat-iteration wrapper over x_fetch_bookmark_pages."""
-    for page in x_fetch_bookmark_pages(
-            access_token, x_user_id, max_items=max_items):
-        yield from page
+# X's oEmbed endpoint (publish.twitter.com 301s here): the free, keyless
+# way to ask whether a tweet is publicly embeddable. Not the paid API —
+# no credits, no rate-limit headers, no documented quota.
+X_OEMBED_URL = "https://publish.x.com/oembed"
 
 
-def x_refresh_access_token(client_id, refresh_token):
-    """OAuth2 refresh-token grant for X (PKCE public client).
+def x_tweet_public_status(tweet_id, timeout=10):
+    """Is this tweet public, according to X itself?
+
+    Returns ``(verdict, http_status)``: verdict True when X serves the
+    embed (200 — a public tweet), False when X refuses it (403 = protected
+    account, "Sorry, you are not authorized to see this status."; 404 =
+    deleted, suspended or never existed — nothing public to point at
+    either way; all three probed live 2026-09-21), None when
+    there is no answer (throttled, server error, network) so the caller
+    can leave the row unknown and stop for now. The request carries the
+    tweet id and ``dnt=1``; nothing about the user who saved it.
+    """
+    try:
+        resp = requests.get(X_OEMBED_URL, params={
+            "url": f"https://twitter.com/i/status/{tweet_id}",
+            "omit_script": "1", "dnt": "1",
+        }, timeout=timeout)
+    except requests.RequestException:
+        return None, None
+    if resp.status_code == 200:
+        return True, 200
+    if resp.status_code in (403, 404):
+        return False, resp.status_code
+    return None, resp.status_code
+
+
+X_TOKEN_URL = "https://api.twitter.com/2/oauth2/token"
+# OAuth 2.0 token revocation (docs.x.com, "OAuth 2.0 Authorization Code
+# Flow with PKCE": POST /2/oauth2/revoke, form-encoded ``token``, the
+# client authenticated as on the token endpoint).
+X_REVOKE_URL = "https://api.x.com/2/oauth2/revoke"
+
+
+def _x_client_post(url, data, client_id, client_secret=None, timeout=30):
+    """POST to one of X's OAuth2 client endpoints (token, revoke),
+    authenticating the client the way the app's registration requires.
+
+    An app registered WITH a secret is a confidential client, and X then
+    demands HTTP Basic auth on every call — the refresh grant included.
+    A confidential client that sends only a body ``client_id`` gets
+    401 invalid_client. Every call goes through this one function so the
+    calls cannot drift apart again: for months only the code exchange
+    sent Basic auth, so every nightly refresh 401'd and the sync parked
+    the account as revoked (#313)."""
+    auth = (client_id, client_secret) if client_secret else None
+    return requests.post(
+        url,
+        data=dict(data, client_id=client_id),
+        auth=auth,
+        timeout=timeout,
+    )
+
+
+def x_token_request(grant, client_id, client_secret=None):
+    """POST one OAuth2 grant to X's token endpoint.
 
     Returns the token-endpoint JSON ({access_token, refresh_token, ...}).
     """
-    resp = requests.post(
-        "https://api.twitter.com/2/oauth2/token",
-        data={
-            "grant_type": "refresh_token",
-            "refresh_token": refresh_token,
-            "client_id": client_id,
-        },
-        timeout=30,
-    )
+    resp = _x_client_post(X_TOKEN_URL, grant, client_id, client_secret)
     resp.raise_for_status()
     return resp.json()
+
+
+def x_revoke_token(token, client_id, client_secret=None, timeout=30):
+    """Revoke one OAuth2 token (access or refresh) at X, so X stops
+    listing Loore as an app with access through it.
+
+    Returns True when X confirms. Raises ``requests.RequestException``
+    (HTTP error, timeout, no connection) or ValueError (X answered 200
+    but did not confirm). The token goes in the form body only, never in
+    a URL, so an exception's text never carries it."""
+    resp = _x_client_post(X_REVOKE_URL, {"token": token}, client_id,
+                          client_secret, timeout=timeout)
+    resp.raise_for_status()
+    try:
+        body = resp.json()
+    except ValueError:
+        body = None
+    if isinstance(body, dict) and body.get("revoked") is False:
+        raise ValueError("X answered revoked=false")
+    return True
+
+
+# "Sign in with X" is OAuth 1.0a (flask-dance's twitter blueprint), so its
+# user access token is invalidated here, not at the OAuth 2.0 revoke
+# endpoint above (docs.x.com, "POST oauth/invalidate_token": user context
+# with the access token to invalidate).
+X_INVALIDATE_SIGN_IN_URL = "https://api.x.com/1.1/oauth/invalidate_token"
+
+
+def x_invalidate_sign_in_token(oauth_token, oauth_token_secret,
+                               consumer_key, consumer_secret, timeout=30):
+    """Invalidate one OAuth 1.0a user access token at X, so X stops listing
+    Loore as an app the user signed in with.
+
+    The request is signed with the app's consumer keys and the token
+    itself. Returns True when X accepts it. Raises
+    ``requests.RequestException`` (HTTP error, timeout, no connection);
+    X answers 401 for a token that is already invalid. The token travels
+    only in the signed Authorization header, never in a URL."""
+    from requests_oauthlib import OAuth1
+    auth = OAuth1(consumer_key, client_secret=consumer_secret,
+                  resource_owner_key=oauth_token,
+                  resource_owner_secret=oauth_token_secret)
+    resp = requests.post(X_INVALIDATE_SIGN_IN_URL, auth=auth, timeout=timeout)
+    resp.raise_for_status()
+    return True
+
+
+def x_exchange_code(client_id, code, redirect_uri, code_verifier,
+                    client_secret=None):
+    """OAuth2 authorization-code grant (PKCE) — the connect callback."""
+    return x_token_request({
+        "grant_type": "authorization_code",
+        "code": code,
+        "redirect_uri": redirect_uri,
+        "code_verifier": code_verifier,
+    }, client_id, client_secret)
+
+
+def x_refresh_access_token(client_id, refresh_token, client_secret=None):
+    """OAuth2 refresh-token grant — the nightly sync's token renewal."""
+    return x_token_request({
+        "grant_type": "refresh_token",
+        "refresh_token": refresh_token,
+    }, client_id, client_secret)

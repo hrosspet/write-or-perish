@@ -13,7 +13,7 @@ python-dotenv>=1.0.0
 # >=1.99.2 for prompt_cache_key (#189); 2.44 is what dev runs against
 openai>=2.44.0,<3
 tiktoken>=0.8
-anthropic>=0.72.0
+anthropic>=0.77.0
 pydub>=0.25.1
 Werkzeug>=2.2.0
 gunicorn==23.0.0
@@ -27,7 +27,19 @@ sentry-sdk[flask]>=2.0.0
 # Server-side markdown for the public pages (escape=True: raw HTML in
 # user content is escaped, matching react-markdown's behavior)
 mistune>=3.0.0,<4
+# Word (.docx) import (backend/utils/docx_import.py): docx -> HTML -> Markdown.
+# Pure Python. mammoth's own Markdown output is deprecated and not used.
+mammoth==1.13.0
+markdownify==1.2.3
+# PDF import (backend/utils/pdf_extract_worker.py, run in a child process).
+# BSD, pure Python, no system packages. AES-encrypted PDFs use the
+# cryptography package above.
+pypdf==6.19.0
 # Per-article og:image social cards (backend/utils/og_image.py)
 Pillow>=10.0.0
 # Community Archive parquet snapshot reads (admin pre-fill of large accounts)
 duckdb>=1.0
+# Chunked cosine scan for semantic search (backend/utils/embeddings.py):
+# bounds a 62k-node archive to ~0.2 s / ~40 MB peak instead of ~8.6 s / 382 MB.
+# <3 keeps the Python 3.9 line (numpy 2.1+ needs 3.10).
+numpy>=1.26,<3

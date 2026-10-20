@@ -6,21 +6,27 @@ and can be played as soon as it's ready, without waiting for all chunks.
 """
 import json
 import re
+import time
+import httpx
+import openai
+import sentry_sdk
 from celery import Task
 from celery.utils.log import get_task_logger
 from openai import OpenAI
 from pathlib import Path
 from pydub import AudioSegment
+from pydub.exceptions import CouldntDecodeError
 import os
 from datetime import datetime
 
 from backend.celery_app import celery, flask_app
-from backend.models import Node, UserProfile, TTSChunk, APICostLog
+from backend.models import Node, UserProfile, ExternalItem, TTSChunk, APICostLog
 from backend.extensions import db
 from backend.utils.audio_processing import section_aware_chunk_text
 from backend.utils.api_keys import get_openai_chat_key
 from backend.utils.encryption import encrypt_file
 from backend.utils.cost import calculate_audio_cost_microdollars
+from backend.utils.spoken_links import speak_links
 
 logger = get_task_logger(__name__)
 
@@ -33,6 +39,20 @@ def _strip_quote_markers(text):
     # Collapse the whitespace the removal leaves behind.
     text = re.sub(r' {2,}', ' ', text)
     return re.sub(r'[ \t]+\n', '\n', text).strip()
+
+
+_SHARE_BLOCK_RE = re.compile(
+    r'^:::share(?:[ \t]+\w+)?[ \t]*\r?\n.*?(?:^:::[ \t]*$\n?|\Z)',
+    flags=re.MULTILINE | re.DOTALL | re.IGNORECASE)
+
+
+def _strip_share_blocks(text):
+    """Drop fenced :::share blocks: the shareable piece is shown as a card,
+    never spoken; the surrounding prose already introduces it. Applies to
+    every reply, not only ones with a todo/issue/feedback proposal (#367:
+    a reply whose only proposal was a share used to be read out fence and
+    all)."""
+    return _SHARE_BLOCK_RE.sub('', text).strip()
 
 
 def _strip_heading_sections(text):
@@ -51,9 +71,7 @@ def _strip_heading_sections(text):
     """
     # Drop fenced :::share blocks first — the shareable piece is shown
     # visually, not spoken; the surrounding prose already introduces it.
-    text = re.sub(
-        r'^:::share(?:[ \t]+\w+)?[ \t]*\r?\n.*?(?:^:::[ \t]*$\n?|\Z)',
-        '', text, flags=re.MULTILINE | re.DOTALL | re.IGNORECASE).strip()
+    text = _strip_share_blocks(text)
 
     # Extract intro text before the first ### heading
     first_heading = re.search(r'^###\s+', text, flags=re.MULTILINE)
@@ -81,11 +99,198 @@ def _strip_heading_sections(text):
     return text.strip()
 
 
+_PROPOSAL_TOOLS = {'propose_todo', 'propose_github_issue', 'propose_feedback'}
+
+
+def _node_spoken_text(content, tool_calls_meta=None):
+    """The text TTS speaks for a node: quote markers and share blocks
+    removed; for a Voice tool-use reply with a proposal card, only its
+    prose (``_strip_heading_sections``: otherwise the heading words get
+    read aloud); then links spoken as their text and addresses short
+    (#461). The stored text is unchanged. A streamed reply's TTS does the
+    same in tts_stream_text.SpokenTextProjector."""
+    text = _strip_share_blocks(_strip_quote_markers(content or ""))
+    if text and tool_calls_meta:
+        try:
+            tool_names = {m.get('name') for m in json.loads(tool_calls_meta)}
+        except (json.JSONDecodeError, TypeError):
+            tool_names = set()
+        if tool_names & _PROPOSAL_TOOLS:
+            text = _strip_heading_sections(text)
+    return speak_links(text).strip()
+
+
 # Silence appended to a chapter's final audio chunk (#145 v3): the
 # audible breath between a chapter's last sentence and the next spoken
 # title. Belongs to the ENDING chapter so chapter start_times (computed
 # from per-chunk durations) stay exact.
 CHAPTER_END_SILENCE_MS = 900
+
+TTS_MODEL = "gpt-4o-mini-tts"
+TTS_VOICE = "alloy"
+
+# OpenAI's TTS MP3 is 128 kbps CBR: bytes received = seconds of audio
+# received (measured on prod and local chunk files).
+TTS_MP3_BYTES_PER_SEC = 16000
+
+# A call still streaming at this point has hit OpenAI's cutoff: since
+# 2026-09-27 slow calls end at 300 s with HTTP 200 and the audio cut
+# mid-word. Such audio is never stored as if complete.
+TTS_CUTOFF_SECS = 290
+
+# Temporary, #382: while OpenAI is slow, a call that is still running
+# after TTS_SLOW_CHECK_SECS and has delivered less audio than time
+# elapsed (normal calls deliver 3-7x realtime, slow ones 0.08-0.33x), or
+# that sends nothing for TTS_SLOW_CHECK_SECS, is cancelled and the same
+# text sent again, up to TTS_SLOW_RETRIES more times.
+TTS_SLOW_CHECK_SECS = 30
+TTS_SLOW_MIN_REALTIME = 1.0
+TTS_SLOW_RETRIES = 2
+
+# Temporary, #382: the SDK's own retries are off for the TTS call, so
+# each attempt is one request timed from its start; the loop in
+# synthesize_to_file resends what the SDK would have retried.
+_TTS_RETRIED_SDK_ERRORS = (openai.APIConnectionError,  # incl. timeouts
+                           openai.InternalServerError,
+                           openai.RateLimitError)
+
+_now = time.monotonic
+
+
+class TTSCutOff(Exception):
+    """The call ran to OpenAI's cutoff, so its audio is incomplete."""
+
+
+class TTSSlowCall(Exception):
+    """Temporary, #382: the call was cancelled for being too slow."""
+
+
+class TTSCallFailed(Exception):
+    """Temporary, #382: every attempt at a TTS call failed."""
+
+
+class TTSBadAudio(Exception):
+    """The call answered, but not with playable audio: an empty body, or
+    one that does not decode as MP3 (e.g. an error message sent with
+    HTTP 200). Resent like a slow call; unlike the slow-call handling it
+    is not temporary, so it stays when #382's workaround goes."""
+
+
+def _stream_speech(client, text, path, mark=None):
+    """One TTS call streamed to *path*; returns its decoded audio. Raises
+    TTSCutOff, TTSSlowCall or TTSBadAudio instead of leaving incomplete or
+    unplayable audio as the result."""
+    started = _now()
+    received = 0
+    with client.with_options(max_retries=0).audio.speech \
+            .with_streaming_response.create(
+        model=TTS_MODEL, input=text, voice=TTS_VOICE,
+        timeout=httpx.Timeout(TTS_SLOW_CHECK_SECS, connect=5.0),
+    ) as resp:
+        request_id = resp.headers.get("x-request-id")
+        content_type = resp.headers.get("content-type")
+        try:
+            with open(path, "wb") as f:
+                for data in resp.iter_bytes():
+                    if mark is not None and received == 0:
+                        mark("tts_first_byte")
+                    f.write(data)
+                    received += len(data)
+                    elapsed = _now() - started
+                    if (elapsed >= TTS_SLOW_CHECK_SECS
+                            and received / TTS_MP3_BYTES_PER_SEC
+                            < elapsed * TTS_SLOW_MIN_REALTIME):
+                        raise TTSSlowCall(
+                            f"request {request_id}: "
+                            f"{received / TTS_MP3_BYTES_PER_SEC:.1f} s of "
+                            f"audio in {elapsed:.0f} s")
+        except httpx.TimeoutException:
+            raise TTSSlowCall(
+                f"request {request_id}: nothing received for "
+                f"{TTS_SLOW_CHECK_SECS} s")
+    elapsed = _now() - started
+    logger.info("TTS call %s: %s chars, %.1f s of audio in %.1f s",
+                request_id, len(text), received / TTS_MP3_BYTES_PER_SEC,
+                elapsed)
+    if elapsed >= TTS_CUTOFF_SECS:
+        raise TTSCutOff(
+            f"request {request_id} ran {elapsed:.0f} s; audio is cut")
+    if received == 0:
+        raise TTSBadAudio(
+            f"request {request_id}: empty body ({content_type})")
+    if mark is not None:
+        mark("tts_last_byte")
+    return _decode_mp3(path, request_id, received, content_type)
+
+
+def _decode_mp3(path, request_id, received, content_type):
+    """The answer saved at *path* as audio; TTSBadAudio when it isn't MP3.
+    Any other decoder failure (e.g. no ffmpeg) is raised as it is: a
+    resend would fail the same way."""
+    try:
+        return AudioSegment.from_file(str(path), format="mp3")
+    except CouldntDecodeError as e:
+        raise TTSBadAudio(
+            f"request {request_id}: {received} bytes ({content_type}) "
+            f"that do not decode as MP3") from e
+
+
+def synthesize_to_file(client, text, path, section_end=False, mark=None):
+    """One TTS call written to *path* as MP3. Returns the AudioSegment; a
+    chunk that closes a chapter gets the chapter-end silence, re-exported
+    so chunked playback (which streams the file directly) has it too.
+    *mark(stage)*, when given, is called at the first and the last byte
+    of the audio (#371 timing).
+
+    A call that is too slow, ran to OpenAI's cutoff, failed with an error
+    the SDK would retry (#382), or answered without playable audio (an
+    empty body, or one that doesn't decode as MP3) is sent again, to the
+    same model; when every attempt fails, the file is removed and
+    TTSCallFailed raised, so the chunk fails rather than playing cut or
+    broken audio. Only slow calls are reported to Sentry: that count
+    tells #382 when OpenAI is fast again. The warning for a failed
+    attempt names the request id and the byte count, never the text."""
+    attempts = TTS_SLOW_RETRIES + 1
+    for attempt in range(1, attempts + 1):
+        try:
+            segment = _stream_speech(client, text, path, mark=mark)
+            break
+        except ((TTSSlowCall, TTSCutOff, TTSBadAudio)
+                + _TTS_RETRIED_SDK_ERRORS) as e:
+            if attempt == attempts:
+                Path(path).unlink(missing_ok=True)
+                raise TTSCallFailed(
+                    f"TTS call failed after {attempts} attempts; "
+                    f"last: {e!r}") from e
+            slow = isinstance(
+                e, (TTSSlowCall, TTSCutOff, openai.APITimeoutError))
+            logger.warning("%s (attempt %s of %s, %s chars): %r",
+                           "Slow TTS call cancelled" if slow
+                           else "TTS call failed, resending",
+                           attempt, attempts, len(text), e)
+            if slow:
+                sentry_sdk.capture_message("Slow TTS call cancelled",
+                                           level="warning")
+    if section_end:
+        segment = segment + AudioSegment.silent(
+            duration=CHAPTER_END_SILENCE_MS)
+        segment.export(str(path), format="mp3")
+    return segment
+
+
+def log_tts_cost(user_id, total_duration):
+    """Add (not commit) the APICostLog row for *total_duration* seconds of
+    generated audio."""
+    if total_duration <= 0:
+        return
+    db.session.add(APICostLog(
+        user_id=user_id,
+        model_id=TTS_MODEL,
+        request_type="tts",
+        audio_duration_seconds=total_duration,
+        cost_microdollars=calculate_audio_cost_microdollars(
+            TTS_MODEL, total_duration),
+    ))
 
 # Audio storage root path (matches the one in routes/nodes.py)
 import pathlib
@@ -107,19 +312,127 @@ class TTSTask(Task):
                     logger.error(f"TTS generation failed for node {node_id}: {exc}")
 
 
-class ProfileTTSTask(Task):
-    """Custom task class with error handling for UserProfiles."""
+class EntityTTSTask(Task):
+    """Task base for entities other than nodes: marks the row failed when
+    the task dies. Subclasses name the model."""
+    entity_cls = None
+    entity_label = "entity"
 
     def on_failure(self, exc, task_id, args, kwargs, einfo):
-        """Called when task fails."""
-        profile_id = args[0] if args else None
-        if profile_id:
+        entity_id = args[0] if args else None
+        if entity_id:
             with flask_app.app_context():
-                profile = UserProfile.query.get(profile_id)
-                if profile:
-                    profile.tts_task_status = 'failed'
+                entity = self.entity_cls.query.get(entity_id)
+                if entity:
+                    entity.tts_task_status = 'failed'
                     db.session.commit()
-                    logger.error(f"TTS generation failed for profile {profile_id}: {exc}")
+                    logger.error(
+                        f"TTS generation failed for {self.entity_label} "
+                        f"{entity_id}: {exc}")
+
+
+class ProfileTTSTask(EntityTTSTask):
+    entity_cls = UserProfile
+    entity_label = "profile"
+
+
+class ItemTTSTask(EntityTTSTask):
+    entity_cls = ExternalItem
+    entity_label = "reference"
+
+
+def _hidden_for_deletion(kind, row_id):
+    """A waiting "Delete all my writing" hid this row (#268)."""
+    from backend.models import UserDataPurgeHidden
+    return db.session.query(UserDataPurgeHidden.id).filter(
+        UserDataPurgeHidden.kind == kind,
+        UserDataPurgeHidden.row_id == row_id).first() is not None
+
+
+def _run_entity_tts(task, entity_cls, entity_id, text_of, subdir,
+                    chunk_fk_attr, label, audio_storage_root,
+                    requesting_user_id):
+    """The whole TTS task for an entity that has no original recording
+    (profiles, saved references): spend gate, status bookkeeping, the
+    shared chunk generator, and failure marking. ``text_of(entity)``
+    returns the text to speak; ``subdir(entity)`` the path under
+    ``user/<uid>/``."""
+    logger.info(f"Starting TTS generation task for {label} {entity_id}")
+    with flask_app.app_context():
+        entity = entity_cls.query.get(entity_id)
+        if not entity and _hidden_for_deletion(entity_cls.__tablename__,
+                                               entity_id):
+            # "Delete all my writing" hid it after the TTS was queued
+            # (#268): nothing is spoken. After a restore it offers its
+            # speaker again, as after any failed TTS.
+            logger.info(f"{label} {entity_id} is hidden for deletion; no TTS")
+            from backend.utils.hidden_rows import including_hidden_rows
+            with including_hidden_rows():
+                hidden = entity_cls.query.get(entity_id)
+                if hidden is not None:
+                    hidden.tts_task_status = 'failed'
+                    db.session.commit()
+            return None
+        if not entity:
+            raise ValueError(f"{entity_cls.__name__} {entity_id} not found")
+
+        from backend.utils.spend import user_is_capped
+        if user_is_capped(requesting_user_id or entity.user_id):
+            logger.warning(
+                "User %s is spend-capped; skipping %s TTS",
+                requesting_user_id or entity.user_id, label)
+            entity.tts_task_status = 'failed'
+            db.session.commit()
+            return
+
+        # Checked when the job runs, as for nodes (a saved reference has
+        # no ai_usage and always passes).
+        from backend.utils.privacy import speech_allowed
+        if not entity.audio_tts_url and not speech_allowed(entity):
+            logger.info("%s %s: ai_usage is none; no speech", label, entity_id)
+            entity.tts_task_status = 'failed'
+            db.session.commit()
+            return {'status': 'refused'}
+
+        entity.tts_task_status = 'processing'
+        entity.tts_task_progress = 10
+        db.session.commit()
+
+        try:
+            if entity.audio_tts_url:
+                logger.info(f"TTS already available for {label} {entity_id}")
+                entity.tts_task_status = 'completed'
+                entity.tts_task_progress = 100
+                db.session.commit()
+                return {'status': 'completed', 'tts_url': entity.audio_tts_url}
+
+            # Links spoken as their text, addresses short (#461): the same
+            # step as for nodes. The stored text is unchanged.
+            text = speak_links(text_of(entity) or "").strip()
+            if not text:
+                raise ValueError("No content to generate TTS for")
+
+            target_dir = (Path(audio_storage_root)
+                          / f"user/{entity.user_id}/{subdir(entity)}")
+            url = _generate_tts_chunks(
+                task, entity, text, target_dir, audio_storage_root,
+                chunk_fk_attr, f"{label} {entity_id}",
+                requesting_user_id=requesting_user_id)
+
+            entity.audio_tts_url = url
+            entity.tts_task_status = 'completed'
+            entity.tts_task_progress = 100
+            db.session.commit()
+            logger.info(f"TTS generation successful for {label} {entity_id}")
+            return {'status': 'completed', 'tts_url': url}
+
+        except Exception as e:
+            logger.error(
+                f"TTS generation error for {label} {entity_id}: {e}",
+                exc_info=True)
+            entity.tts_task_status = 'failed'
+            db.session.commit()
+            raise
 
 
 def _generate_tts_chunks(task, entity, text, target_dir, audio_storage_root,
@@ -189,8 +502,10 @@ def _generate_tts_chunks(task, entity, text, target_dir, audio_storage_root,
     }
 
     # Create TTSChunk records for streaming playback (with chapter
-    # metadata, #145)
+    # metadata, #145). Rows left by an earlier run that failed (a streamed
+    # voice reply's TTS, #367) would collide on the chunk index.
     chunk_fk = {chunk_fk_attr: entity.id}
+    TTSChunk.query.filter_by(**chunk_fk).delete(synchronize_session=False)
     created_chunks = []
     for i, (_chunk, section_title, section_index) in enumerate(chunk_specs):
         tts_chunk = TTSChunk(
@@ -220,12 +535,7 @@ def _generate_tts_chunks(task, entity, text, target_dir, audio_storage_root,
         entity.tts_task_progress = 40
         db.session.commit()
 
-        with client.audio.speech.with_streaming_response.create(
-            model="gpt-4o-mini-tts", input=chunks[0], voice="alloy"
-        ) as resp:
-            resp.stream_to_file(final_path)
-
-        segment = AudioSegment.from_file(str(final_path), format="mp3")
+        segment = synthesize_to_file(client, chunks[0], final_path)
         chunk_duration = len(segment) / 1000.0
         encrypt_file(str(final_path))
 
@@ -265,18 +575,9 @@ def _generate_tts_chunks(task, entity, text, target_dir, audio_storage_root,
 
             part_path = target_dir / f"tts_chunk_{i}.mp3"
 
-            with client.audio.speech.with_streaming_response.create(
-                model="gpt-4o-mini-tts", input=chunk, voice="alloy"
-            ) as resp:
-                resp.stream_to_file(part_path)
-
-            segment = AudioSegment.from_file(str(part_path), format="mp3")
-            if i in section_end_indices:
-                segment = segment + AudioSegment.silent(
-                    duration=CHAPTER_END_SILENCE_MS)
-                # Re-export so live chunked playback (which streams this
-                # file directly) carries the chapter pause as well.
-                segment.export(str(part_path), format="mp3")
+            segment = synthesize_to_file(
+                client, chunk, part_path,
+                section_end=i in section_end_indices)
             chunk_duration = len(segment) / 1000.0
             audio_parts.append((i, segment, part_path))
 
@@ -307,18 +608,7 @@ def _generate_tts_chunks(task, entity, text, target_dir, audio_storage_root,
     for tc in TTSChunk.query.filter_by(**chunk_fk).all():
         if tc.duration:
             total_duration += tc.duration
-    if total_duration > 0:
-        tts_cost = calculate_audio_cost_microdollars(
-            "gpt-4o-mini-tts", total_duration
-        )
-        cost_log = APICostLog(
-            user_id=requesting_user_id or entity.user_id,
-            model_id="gpt-4o-mini-tts",
-            request_type="tts",
-            audio_duration_seconds=total_duration,
-            cost_microdollars=tts_cost,
-        )
-        db.session.add(cost_log)
+    log_tts_cost(requesting_user_id or entity.user_id, total_duration)
 
     # Finalize
     task.update_state(
@@ -348,6 +638,14 @@ def generate_tts_audio(self, node_id: int, audio_storage_root: str,
         node = Node.query.get(node_id)
         if not node:
             raise ValueError(f"Node {node_id} not found")
+        if _hidden_for_deletion("node", node_id):
+            # "Delete all my writing" hid it after the TTS was queued
+            # (#268): nothing is spoken. After a restore the node offers
+            # its speaker again, as after any failed TTS.
+            logger.info("Node %s is hidden for deletion; no TTS", node_id)
+            node.tts_task_status = 'failed'
+            db.session.commit()
+            return {'node_id': node_id, 'status': 'on_hold'}
 
         from backend.utils.spend import user_is_capped
         if user_is_capped(requesting_user_id or node.user_id):
@@ -357,6 +655,15 @@ def generate_tts_audio(self, node_id: int, audio_storage_root: str,
             node.tts_task_status = 'failed'
             db.session.commit()
             return
+
+        # Checked when the job runs: the node's ai_usage may have changed
+        # since it was queued, and not every caller goes through the route.
+        from backend.utils.privacy import speech_allowed
+        if not node.audio_tts_url and not speech_allowed(node):
+            logger.info("Node %s: ai_usage is none; no speech", node_id)
+            node.tts_task_status = 'failed'
+            db.session.commit()
+            return {'node_id': node_id, 'status': 'refused'}
 
         node.tts_task_status = 'processing'
         node.tts_task_progress = 10
@@ -377,9 +684,9 @@ def generate_tts_audio(self, node_id: int, audio_storage_root: str,
                     'tts_url': node.audio_tts_url
                 }
 
-            text = _strip_quote_markers(node.get_content() or "")
+            text = _node_spoken_text(node.get_content(), node.tool_calls_meta)
             if not text:
-                logger.info(f"No text content for node {node_id}, skipping TTS")
+                logger.info(f"No text to speak for node {node_id}, skipping TTS")
                 node.tts_task_status = 'completed'
                 node.tts_task_progress = 100
                 db.session.commit()
@@ -389,32 +696,6 @@ def generate_tts_audio(self, node_id: int, audio_storage_root: str,
                     'tts_url': None,
                     'skipped': True,
                 }
-
-            # For Voice tool-use responses: strip the structured ### sections
-            # (shown visually in the proposal card) so TTS speaks only the prose
-            # — intro, ### Note, and trailing commentary. Applies to every
-            # proposal type that renders a card (todo / issue / feedback);
-            # otherwise the heading words get read aloud.
-            if node.tool_calls_meta:
-                try:
-                    _meta = json.loads(node.tool_calls_meta)
-                    _tool_names = {m.get('name') for m in _meta}
-                except (json.JSONDecodeError, TypeError):
-                    _tool_names = set()
-                if _tool_names & {'propose_todo', 'propose_github_issue',
-                                  'propose_feedback'}:
-                    text = _strip_heading_sections(text)
-                if not text.strip():
-                    logger.debug(f"No conversational text after stripping sections for node {node_id}, skipping TTS")
-                    node.tts_task_status = 'completed'
-                    node.tts_task_progress = 100
-                    db.session.commit()
-                    return {
-                        'node_id': node_id,
-                        'status': 'completed',
-                        'tts_url': None,
-                        'skipped': True,
-                    }
 
             target_dir = (
                 Path(audio_storage_root)
@@ -454,82 +735,34 @@ def generate_tts_audio(self, node_id: int, audio_storage_root: str,
 def generate_tts_audio_for_profile(self, profile_id: int,
                                    audio_storage_root: str,
                                    requesting_user_id: int = None):
-    """
-    Asynchronously generate TTS audio for a user profile.
+    """Asynchronously generate TTS audio for a user profile."""
+    result = _run_entity_tts(
+        self, UserProfile, profile_id,
+        text_of=lambda p: p.get_content() or "",
+        subdir=lambda p: f"profile/{p.id}",
+        chunk_fk_attr='profile_id', label="profile",
+        audio_storage_root=audio_storage_root,
+        requesting_user_id=requesting_user_id)
+    return {'profile_id': profile_id, **result} if result else None
 
-    Args:
-        profile_id: Database ID of the user profile
-        audio_storage_root: Root directory for audio storage
-        requesting_user_id: ID of the user who requested TTS (for cost attribution)
-    """
-    logger.info(f"Starting TTS generation task for profile {profile_id}")
 
-    with flask_app.app_context():
-        profile = UserProfile.query.get(profile_id)
-        if not profile:
-            raise ValueError(f"UserProfile {profile_id} not found")
+@celery.task(base=ItemTTSTask, bind=True)
+def generate_tts_audio_for_item(self, item_id: int, audio_storage_root: str,
+                                requesting_user_id: int = None):
+    """Generate TTS for a saved reference (#232), read as title then text."""
+    def text_of(item):
+        text = (item.get_content() or "").strip()
+        title = (item.title or "").strip()
+        if title and not text.lower().startswith(title.lower()):
+            # Speak the title first unless the text already opens with it
+            # (Readability keeps it as the first heading).
+            text = f"# {title}\n\n{text}"
+        return text
 
-        from backend.utils.spend import user_is_capped
-        if user_is_capped(requesting_user_id or profile.user_id):
-            logger.warning(
-                "User %s is spend-capped; skipping profile TTS",
-                requesting_user_id or profile.user_id)
-            profile.tts_task_status = 'failed'
-            db.session.commit()
-            return
-
-        profile.tts_task_status = 'processing'
-        profile.tts_task_progress = 10
-        db.session.commit()
-
-        try:
-            if profile.audio_tts_url:
-                logger.info(
-                    f"TTS already available for profile {profile_id}"
-                )
-                profile.tts_task_status = 'completed'
-                profile.tts_task_progress = 100
-                db.session.commit()
-                return {
-                    'profile_id': profile_id,
-                    'status': 'completed',
-                    'tts_url': profile.audio_tts_url
-                }
-
-            text = profile.get_content() or ""
-            if not text:
-                raise ValueError("No content to generate TTS for")
-
-            target_dir = (
-                Path(audio_storage_root)
-                / f"user/{profile.user_id}/profile/{profile.id}"
-            )
-
-            url = _generate_tts_chunks(
-                self, profile, text, target_dir, audio_storage_root,
-                'profile_id', f"profile {profile_id}",
-                requesting_user_id=requesting_user_id
-            )
-
-            profile.audio_tts_url = url
-            profile.tts_task_status = 'completed'
-            profile.tts_task_progress = 100
-            db.session.commit()
-
-            logger.info(
-                f"TTS generation successful for profile {profile_id}"
-            )
-            return {
-                'profile_id': profile_id,
-                'status': 'completed',
-                'tts_url': url
-            }
-
-        except Exception as e:
-            logger.error(
-                f"TTS generation error for profile {profile_id}: {e}",
-                exc_info=True
-            )
-            profile.tts_task_status = 'failed'
-            db.session.commit()
-            raise
+    result = _run_entity_tts(
+        self, ExternalItem, item_id, text_of=text_of,
+        subdir=lambda i: f"item/{i.id}",
+        chunk_fk_attr='item_id', label="reference",
+        audio_storage_root=audio_storage_root,
+        requesting_user_id=requesting_user_id)
+    return {'item_id': item_id, **result} if result else None

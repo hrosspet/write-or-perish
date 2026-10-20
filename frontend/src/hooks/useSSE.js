@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import { onPageReturn } from '../utils/pageReturn';
 
 /**
  * useSSE hook for subscribing to Server-Sent Events.
@@ -12,6 +13,10 @@ import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
  * @param {Function} options.onMessage - Callback for generic messages
  * @param {Object} options.eventHandlers - Map of event names to handlers
  * @param {number} options.reconnectDelay - Delay between reconnection attempts (default: 3000ms)
+ * @param {boolean} options.reconnectOnReturn - Open a fresh connection each
+ *   time the user returns to the page (default: false). Only for a stream
+ *   that sends what the page already has again on connect, and whose
+ *   handlers skip what they have seen.
  */
 export function useSSE(url, options = {}) {
   const {
@@ -19,6 +24,7 @@ export function useSSE(url, options = {}) {
     onMessage = null,
     eventHandlers = {},
     reconnectDelay = 3000,
+    reconnectOnReturn = false,
   } = options;
 
   const [isConnected, setIsConnected] = useState(false);
@@ -132,6 +138,18 @@ export function useSSE(url, options = {}) {
       disconnect();
     };
   }, [enabled, url, connect, disconnect]);
+
+  // The user is back on the page (#374): replace the connection. iOS can
+  // leave a suspended page's EventSource dead without an error event, so
+  // neither the browser's own retry nor the onerror reconnect above runs,
+  // and the page would wait on a stream that never speaks again. A live
+  // connection replaced this way costs one reconnect.
+  useEffect(() => {
+    if (!reconnectOnReturn || !enabled || !url) return undefined;
+    return onPageReturn(() => {
+      if (connectRef.current) connectRef.current();
+    });
+  }, [reconnectOnReturn, enabled, url]);
 
   return {
     isConnected,
@@ -422,9 +440,15 @@ export function useDraftTranscriptionSSE(sessionId, options = {}) {
  * @param {number} entityId - Node or Profile ID to subscribe to
  * @param {Object} options
  * @param {boolean} options.enabled - Whether to connect
- * @param {string} options.entityType - 'node' (default) or 'profile'
+ * @param {string} options.entityType - 'node' (default), 'profile' or 'item' (saved reference)
  * @param {Function} options.onChunkReady - Called when an audio chunk is ready
  * @param {Function} options.onAllComplete - Called when all chunks are done
+ * @param {Function} options.onError - Called when the server reports that
+ *   generation failed (its `error` event). The server has closed the
+ *   stream and refuses a new one, so the caller turns `enabled` off.
+ * @param {boolean} options.reconnectOnReturn - Reconnect when the user
+ *   returns to the page (see useSSE). The stream sends every chunk again
+ *   on connect; onChunkReady still gets each chunk index once.
  */
 export function useTTSStreamSSE(entityId, options = {}) {
   const {
@@ -432,6 +456,8 @@ export function useTTSStreamSSE(entityId, options = {}) {
     entityType = 'node',
     onChunkReady = null,
     onAllComplete = null,
+    onError = null,
+    reconnectOnReturn = false,
   } = options;
 
   const [audioChunks, setAudioChunks] = useState([]); // Array of { index, url, duration }
@@ -441,17 +467,21 @@ export function useTTSStreamSSE(entityId, options = {}) {
   // Store callback refs to ensure handlers always call latest callbacks
   const onChunkReadyRef = useRef(onChunkReady);
   const onAllCompleteRef = useRef(onAllComplete);
+  const onErrorRef = useRef(onError);
 
   useEffect(() => {
     onChunkReadyRef.current = onChunkReady;
     onAllCompleteRef.current = onAllComplete;
-  }, [onChunkReady, onAllComplete]);
+    onErrorRef.current = onError;
+  }, [onChunkReady, onAllComplete, onError]);
 
   // Use REACT_APP_BACKEND_URL for SSE since EventSource doesn't go through CRA proxy
   const backendUrl = process.env.REACT_APP_BACKEND_URL || '';
   const ssePathSegment = entityType === 'profile'
     ? `profiles/${entityId}`
-    : `nodes/${entityId}`;
+    : entityType === 'item'
+      ? `items/${entityId}`
+      : `nodes/${entityId}`;
   const url = entityId ? `${backendUrl}/api/sse/${ssePathSegment}/tts-stream` : null;
 
   // Debug: log SSE URL changes
@@ -500,6 +530,14 @@ export function useTTSStreamSSE(entityId, options = {}) {
         onAllCompleteRef.current(data);
       }
     },
+    // The server's `error` event: generation failed, or the entry is gone.
+    // A dropped connection fires `error` too, without data; useSSE skips
+    // those.
+    error: (data) => {
+      if (onErrorRef.current) {
+        onErrorRef.current(data);
+      }
+    },
     heartbeat: () => {
       // Keep-alive, no action needed
     },
@@ -508,6 +546,7 @@ export function useTTSStreamSSE(entityId, options = {}) {
   const { isConnected, error, connect, disconnect } = useSSE(url, {
     enabled,
     eventHandlers,
+    reconnectOnReturn,
   });
 
   // Get ordered list of audio URLs for queue playback
@@ -539,4 +578,50 @@ export function useTTSStreamSSE(entityId, options = {}) {
     disconnect,
     reset,
   };
+}
+
+/**
+ * useLlmTextStream - an LLM reply's text while it is generated (#367).
+ *
+ * Subscribes to /api/sse/nodes/<id>/llm-stream: a snapshot (the whole
+ * text so far) on connect and whenever the model call restarted, deltas
+ * as text is appended, and done once the node stops generating (the final
+ * content then comes from the node / llm-status, not from here).
+ *
+ * @param {number|null} nodeId - the pending LLM node
+ * @param {Object} options
+ * @param {boolean} options.enabled - whether to connect
+ * @param {string} options.initialText - text already known (the node
+ *   fetch carries streaming_content), shown until the first event
+ * @returns {{ text: string, done: object|null }}
+ */
+export function useLlmTextStream(nodeId, { enabled = false, initialText = '' } = {}) {
+  const [text, setText] = useState(initialText || '');
+  const [done, setDone] = useState(null);
+
+  // A different node starts from its own text.
+  useEffect(() => {
+    setText(initialText || '');
+    setDone(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [nodeId]);
+
+  const backendUrl = process.env.REACT_APP_BACKEND_URL || '';
+  const url = nodeId ? `${backendUrl}/api/sse/nodes/${nodeId}/llm-stream` : null;
+
+  const eventHandlers = useMemo(() => ({
+    snapshot: (data) => setText(data.text || ''),
+    delta: (data) => setText(prev => prev + (data.text || '')),
+    done: (data) => setDone(data || {}),
+    heartbeat: () => {},
+  }), []);
+
+  // Stop listening once the node is done: the server closes the stream,
+  // and EventSource would otherwise reconnect just to hear "done" again.
+  // A return to the page reconnects (#374): the stream opens with a
+  // snapshot of the whole text, so a connection that died while the page
+  // was away loses nothing.
+  useSSE(url, { enabled: enabled && !done, eventHandlers, reconnectOnReturn: true });
+
+  return { text, done };
 }

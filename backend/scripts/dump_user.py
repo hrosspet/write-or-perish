@@ -144,6 +144,7 @@ def _run(username, out_path, include_private=False):
                 "content": (n.content if not is_encrypted(n.content)
                             else decrypt_content(n.content)),
                 "prompt": _prompt_ref(n),
+                "prompt_key": n.prompt_key,
                 "token_count": n.token_count,
                 "distributed_tokens": n.distributed_tokens,
                 "privacy_level": n.privacy_level,

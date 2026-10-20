@@ -4,8 +4,12 @@
 - X bookmarks: OAuth2 PKCE connect + sync (env-gated by X_CLIENT_ID
   until pay-per-use credits are configured) and a JSON import fallback
 - Listing imported references
+- Web clips from the Chrome clipper (#232): one POST per page, bearer
+  token or session auth; personal API tokens are managed here too
 """
 import base64
+import os
+import pathlib
 import hashlib
 import json
 import re
@@ -14,32 +18,74 @@ from datetime import datetime, timedelta
 
 import requests
 from flask import (
-    Blueprint, current_app, jsonify, redirect, request, session,
+    Blueprint, current_app, g, jsonify, redirect, request, session,
 )
 from flask_login import current_user, login_required
+from sqlalchemy.exc import IntegrityError
 
 from backend.extensions import db
-from backend.models import ExternalAccount, ExternalItem
+from backend.models import (
+    ApiToken, ExternalAccount, ExternalItem, ExternalItemEmbedding,
+    FeedPick, READ_PICK_SOURCE, SOURCE_DOCUMENT, TTSChunk, TWEET_SOURCES,
+    UserNotification,
+)
+from backend.utils import document_reference, reference_log
+from backend.utils.reference_rows import save_pick_row
+from backend.utils.api_tokens import (
+    SCOPE_EXTERNAL_WRITE, generate_api_token, token_or_login_required,
+)
+from backend.utils.magic_link import hash_token
 from backend.utils.timefmt import iso_utc
+from backend.utils.web_clip import SOURCE_WEB_CLIP, classify_clip
+from backend.utils.spend import require_spend_headroom
+from backend.utils.api_keys import get_openai_chat_key
+from backend.utils.audio_storage import clear_tts_artifacts
+from backend.utils.external_content import x_exchange_code
+
+# Same root as the nodes blueprint and the TTS task.
+AUDIO_STORAGE_ROOT = pathlib.Path(
+    os.environ.get("AUDIO_STORAGE_PATH", "data/audio")).resolve()
 
 external_bp = Blueprint("external_bp", __name__)
 
 X_AUTHORIZE_URL = "https://twitter.com/i/oauth2/authorize"
-X_TOKEN_URL = "https://api.twitter.com/2/oauth2/token"
 X_SCOPES = "tweet.read users.read bookmark.read offline.access"
 
 
-def _serialize_item(item):
-    content = item.get_content() or ""
-    return {
+def _serialize_item(item, with_content=False):
+    """A reference for its owner. An uploaded document's title and author
+    are read from its encrypted text (see utils/document_reference), and
+    its `content` is the text under that header."""
+    title, author, content = document_reference.display(
+        item, item.get_content() or "")
+    data = {
         "id": item.id,
         "source": item.source,
-        "author_handle": item.author_handle,
+        # Tweet id for tweets (the reference page embeds by it); the URL
+        # hash for web clips.
+        "external_id": item.external_id,
+        "author_handle": author,
+        # The tweet author's display name when the archive has one (#435).
+        "author_name": item.author_name,
+        "title": title,
         "preview": content[:280] + ("…" if len(content) > 280 else ""),
         "url": item.url,
         "posted_at": iso_utc(item.posted_at) if item.posted_at else None,
         "fetched_at": iso_utc(item.fetched_at),
+        # The user's own mark (see ExternalItem.read_at) and the AI's
+        # surfacing history — two different things, shown side by side.
+        "read_at": iso_utc(item.read_at) if item.read_at else None,
+        "feedback": item.feedback,
+        "feedback_at": iso_utc(item.feedback_at) if item.feedback_at else None,
+        "edited_at": iso_utc(item.edited_at) if item.edited_at else None,
+        "has_tts": bool(item.audio_tts_url),
+        "surfaced_count": item.surfaced_count or 0,
+        "last_surfaced_at": (iso_utc(item.last_surfaced_at)
+                             if item.last_surfaced_at else None),
     }
+    if with_content:
+        data["content"] = content
+    return data
 
 
 @external_bp.route("/items", methods=["GET"])
@@ -49,24 +95,325 @@ def list_items():
     page = request.args.get("page", 1, type=int)
     per_page = min(request.args.get("per_page", 50, type=int), 200)
 
-    query = ExternalItem.query.filter_by(user_id=current_user.id)
+    # Saved references only: a tweet a Read picked that the user did not
+    # save is not one (#352).
+    query = ExternalItem.query.filter(
+        ExternalItem.user_id == current_user.id, ExternalItem.saved())
     if source:
         query = query.filter_by(source=source)
     total = query.count()
-    items = query.order_by(
-        ExternalItem.posted_at.desc().nullslast(),
-        ExternalItem.id.desc(),
-    ).offset((page - 1) * per_page).limit(per_page).all()
+    if request.args.get("sort") == "saved":
+        # Most recently saved first — the references list on the Import
+        # page, where "did my clip land?" is the question.
+        order = (ExternalItem.id.desc(),)
+    else:
+        order = (ExternalItem.posted_at.desc().nullslast(),
+                 ExternalItem.id.desc())
+    items = query.order_by(*order).offset(
+        (page - 1) * per_page).limit(per_page).all()
 
     counts = dict(
         db.session.query(ExternalItem.source, db.func.count())
-        .filter_by(user_id=current_user.id)
+        .filter(ExternalItem.user_id == current_user.id,
+                ExternalItem.saved())
         .group_by(ExternalItem.source).all()
     )
     return jsonify({
         "items": [_serialize_item(i) for i in items],
         "total": total,
+        "has_more": page * per_page < total,
         "counts": counts,
+    }), 200
+
+
+@external_bp.route("/items/<int:item_id>", methods=["GET"])
+@login_required
+def get_item(item_id):
+    """One reference with its full stored text (Markdown for clips)."""
+    item = ExternalItem.query.filter_by(
+        id=item_id, user_id=current_user.id).first()
+    if item is None:
+        return jsonify({"error": "not found"}), 404
+    return jsonify(_serialize_item(item, with_content=True)), 200
+
+
+@external_bp.route("/items/<int:item_id>", methods=["PUT"])
+@login_required
+def update_item(item_id):
+    """Edit a reference's title and/or text by hand, as a node is edited.
+
+    Body: {title?, content?, regenerate_tts?}. Content, when given, must be non-empty and
+    within the per-entry cap (rejected, not truncated: an edit has a UI
+    to negotiate in). A changed text drops the stale embedding so the
+    nightly sweep re-embeds it, and stamps edited_at so a later re-clip
+    keeps the user's copy (see _upgrade_clip). An uploaded document's
+    title stays in its encrypted text (utils/document_reference).
+    """
+    from backend.utils.node_split import NODE_CHAR_CAP
+    item = ExternalItem.query.filter_by(
+        id=item_id, user_id=current_user.id).first()
+    if item is None:
+        return jsonify({"error": "not found"}), 404
+    data = request.get_json(silent=True) or {}
+    if "title" not in data and "content" not in data:
+        return jsonify({"error": "title or content is required"}), 400
+
+    is_document = item.source == SOURCE_DOCUMENT
+    stored = item.get_content() or ""
+    title, author, body = document_reference.display(item, stored)
+    if "content" in data:
+        content = data.get("content")
+        if not isinstance(content, str) or not content.strip():
+            return jsonify({"error": "content cannot be empty"}), 400
+        if len(content) > NODE_CHAR_CAP:
+            return jsonify({
+                "error": (f"Content exceeds the {NODE_CHAR_CAP:,}-character "
+                          f"per-entry limit."),
+                "char_cap": NODE_CHAR_CAP,
+            }), 422
+        body = content.strip()
+    if "title" in data:
+        new_title = (data.get("title") or "")
+        if not isinstance(new_title, str):
+            return jsonify({"error": "title must be a string"}), 400
+        title = new_title.strip()[:MAX_TITLE_CHARS] or None
+
+    changed = False
+    text = document_reference.compose(title, author, body) if is_document else body
+    if text != stored:
+        item.set_content(text)
+        ExternalItemEmbedding.query.filter_by(item_id=item.id).delete()
+        # Generated speech of the old text is stale. As with nodes
+        # (#66) the editor asks keep-or-regenerate and sends
+        # regenerate_tts=true only for the latter.
+        if data.get("regenerate_tts"):
+            clear_tts_artifacts(item)
+        changed = True
+    if not is_document and title != item.title:
+        item.title = title
+        changed = True
+    if changed:
+        item.edited_at = datetime.utcnow()
+        db.session.commit()
+    return jsonify(_serialize_item(item, with_content=True)), 200
+
+
+@external_bp.route("/items/<int:item_id>", methods=["DELETE"])
+@login_required
+def delete_item(item_id):
+    """Remove a reference. Its embedding goes with it (explicitly, since
+    SQLite tests don't enforce the FK cascade). A {quote_ext} marker that
+    pointed at it renders as inaccessible, like a deleted node's quote.
+
+    A tweet that a Read picked stays as the Read pick (#352): the row
+    goes back to READ_PICK_SOURCE, out of the references, and the Read
+    reply keeps quoting it with its marks and the pick's record."""
+    item = ExternalItem.query.filter_by(
+        id=item_id, user_id=current_user.id).first()
+    if item is None:
+        return jsonify({"error": "not found"}), 404
+    ExternalItemEmbedding.query.filter_by(item_id=item.id).delete()
+    was_picked = item.is_saved and db.session.query(FeedPick.id).filter_by(
+        external_item_id=item.id, kind=reference_log.KIND_READ).first()
+    if was_picked and ExternalItem.query.filter_by(
+            user_id=item.user_id, source=READ_PICK_SOURCE,
+            external_id=item.external_id).first() is None:
+        item.source = READ_PICK_SOURCE
+        db.session.commit()
+        return jsonify({"deleted": True, "id": item_id,
+                        "kept_as_pick": True}), 200
+    TTSChunk.query.filter_by(item_id=item.id).delete()
+    db.session.delete(item)
+    db.session.commit()
+    return jsonify({"deleted": True, "id": item_id}), 200
+
+
+# ── Reference TTS (same contract as /nodes/<id> and /profile/<id>) ──────
+
+def _owned_item_or_404(item_id):
+    return ExternalItem.query.filter_by(
+        id=item_id, user_id=current_user.id).first()
+
+
+@external_bp.route("/items/<int:item_id>/audio", methods=["GET"])
+@login_required
+def get_item_audio(item_id):
+    """Generated speech for a reference, if any (SpeakerIcon's first
+    call). A reference never has an original recording."""
+    item = _owned_item_or_404(item_id)
+    if item is None:
+        return jsonify({"error": "not found"}), 404
+    if item.audio_tts_url:
+        return jsonify({"tts_url": item.audio_tts_url}), 200
+    if item.tts_task_status in ("pending", "processing"):
+        return jsonify({
+            "status": "generating",
+            "progress": item.tts_task_progress or 0,
+            "task_id": item.tts_task_id,
+        }), 202
+    return jsonify({"error": "No audio for this reference"}), 404
+
+
+@external_bp.route("/items/<int:item_id>/tts", methods=["POST"])
+@login_required
+@require_spend_headroom
+def generate_item_tts(item_id):
+    """Queue TTS generation for a reference; 200 when it already exists."""
+    item = _owned_item_or_404(item_id)
+    if item is None:
+        return jsonify({"error": "not found"}), 404
+    if item.audio_tts_url:
+        return jsonify({"message": "TTS already available",
+                        "tts_url": item.audio_tts_url}), 200
+    if item.tts_task_status in ("pending", "processing"):
+        return jsonify({"message": "TTS generation already in progress",
+                        "task_id": item.tts_task_id,
+                        "status": item.tts_task_status}), 202
+    if not get_openai_chat_key(current_app.config):
+        return jsonify({"error": "TTS not configured (missing API key)"}), 500
+
+    from backend.tasks.tts import generate_tts_audio_for_item
+    item.tts_task_status = "pending"
+    item.tts_task_progress = 0
+    db.session.commit()
+    task = generate_tts_audio_for_item.delay(
+        item.id, str(AUDIO_STORAGE_ROOT), requesting_user_id=current_user.id)
+    item.tts_task_id = task.id
+    db.session.commit()
+    return jsonify({"message": "TTS generation started",
+                    "task_id": task.id, "status": "pending"}), 202
+
+
+@external_bp.route("/items/<int:item_id>/tts-status", methods=["GET"])
+@login_required
+def get_item_tts_status(item_id):
+    """Polling fallback for the SSE stream."""
+    item = _owned_item_or_404(item_id)
+    if item is None:
+        return jsonify({"error": "not found"}), 404
+    if item.tts_task_id:
+        try:
+            from backend.celery_app import celery
+            task = celery.AsyncResult(item.tts_task_id)
+            if task.state == "SUCCESS" and item.tts_task_status != "completed":
+                item.tts_task_status = "completed"
+                db.session.commit()
+            elif task.state in ("FAILURE", "REVOKED") and item.tts_task_status != "failed":
+                item.tts_task_status = "failed"
+                db.session.commit()
+        except Exception as e:  # Celery unreachable: answer from the DB
+            current_app.logger.warning(f"Failed to check Celery task status: {e}")
+    data = {
+        "status": item.tts_task_status,
+        "progress": item.tts_task_progress or 0,
+        "task_id": item.tts_task_id,
+        "item": {"id": item.id},
+    }
+    if item.tts_task_status == "completed":
+        data["item"]["audio_tts_url"] = item.audio_tts_url
+    response = jsonify(data)
+    response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    return response
+
+
+@external_bp.route("/items/<int:item_id>/tts-chapters", methods=["GET"])
+@login_required
+def get_item_tts_chapters(item_id):
+    """Chapter list for a reference's TTS, built from its TTSChunk rows
+    exactly as for nodes (#145)."""
+    item = _owned_item_or_404(item_id)
+    if item is None:
+        return jsonify({"error": "not found"}), 404
+    from backend.utils.audio_processing import tts_chapters
+    chunks = TTSChunk.query.filter_by(item_id=item_id).order_by(
+        TTSChunk.chunk_index).all()
+    return jsonify({"chapters": tts_chapters(chunks)}), 200
+
+
+@external_bp.route("/items/<int:item_id>/read", methods=["POST", "DELETE"])
+@login_required
+def mark_item_read(item_id):
+    """POST marks the reference read (idempotent: an already-read item
+    keeps its original read_at); DELETE clears the mark.
+
+    Body (optional): {node_id, via}. node_id is the reply the reference
+    was shown in, via "open" says the mark came from opening the post.
+    Each call is logged for the recommendation record (#352): an open
+    always, a read or unread mark when it changes the state."""
+    item = ExternalItem.query.filter_by(
+        id=item_id, user_id=current_user.id).first()
+    if item is None:
+        return jsonify({"error": "not found"}), 404
+    data = request.get_json(silent=True) or {}
+    node_id = reference_log.reply_node_id(data.get("node_id"),
+                                          current_user.id)
+    if request.method == "POST":
+        if data.get("via") == "open":
+            reference_log.record_action(
+                item, reference_log.ACTION_OPEN, node_id=node_id)
+        elif item.read_at is None:
+            reference_log.record_action(
+                item, reference_log.ACTION_READ, node_id=node_id)
+        if item.read_at is None:
+            item.read_at = datetime.utcnow()
+    else:
+        if item.read_at is not None:
+            reference_log.record_action(
+                item, reference_log.ACTION_UNREAD, node_id=node_id)
+        item.read_at = None
+    db.session.commit()
+    return jsonify({
+        "id": item.id,
+        "read_at": iso_utc(item.read_at) if item.read_at else None,
+    }), 200
+
+
+FEEDBACK_VALUES = ("good", "bad")
+
+
+def apply_item_feedback(item, value, node_id=None):
+    """Give *item* (the user's ExternalItem) the verdict *value* ('good',
+    'bad' or None to clear), logged with the reply it was given in
+    (*node_id*, already checked with reference_log.reply_node_id): which
+    recommendations it counts for is decided in reference_log (#352). A
+    verdict also marks the reference read; clearing one leaves the read
+    mark alone. The tweet half of a gleaning pick's verdict
+    (routes/nodes.py, set_pick_verdict) goes through here too. Adds to
+    the session; the caller commits."""
+    reference_log.record_action(
+        item, reference_log.ACTION_VERDICT, value=value, node_id=node_id)
+    item.feedback = value
+    item.feedback_at = datetime.utcnow() if value else None
+    if value and item.read_at is None:
+        item.read_at = item.feedback_at
+
+
+@external_bp.route("/items/<int:item_id>/feedback", methods=["POST"])
+@login_required
+def set_item_feedback(item_id):
+    """Record the user's verdict on Loore surfacing this reference:
+    {"feedback": "good" | "bad" | null}. Null clears it. A verdict also
+    marks the reference read (you judged it, you saw it); an already-read
+    item keeps its read_at, and clearing the verdict leaves the read mark
+    alone. The response carries read_at so the page can follow."""
+    item = ExternalItem.query.filter_by(
+        id=item_id, user_id=current_user.id).first()
+    if item is None:
+        return jsonify({"error": "not found"}), 404
+    data = request.get_json(silent=True) or {}
+    value = data.get("feedback")
+    if value is not None and value not in FEEDBACK_VALUES:
+        return jsonify({"error": "feedback must be 'good', 'bad' or null"}), 400
+    apply_item_feedback(
+        item, value,
+        node_id=reference_log.reply_node_id(data.get("node_id"),
+                                            current_user.id))
+    db.session.commit()
+    return jsonify({
+        "id": item.id,
+        "feedback": item.feedback,
+        "feedback_at": iso_utc(item.feedback_at) if item.feedback_at else None,
+        "read_at": iso_utc(item.read_at) if item.read_at else None,
     }), 200
 
 
@@ -181,9 +528,6 @@ def import_bookmarks_json():
     items = [n for n in (_normalize(e) for e in payload) if n]
     created, skipped = _upsert_items(
         current_user.id, "twitter_bookmark", items)
-    if created:
-        from backend.tasks.external_digest import rebuild_external_digest
-        rebuild_external_digest.delay(current_user.id)
     return jsonify({
         "created": created, "skipped": skipped,
         "unrecognized": len(payload) - len(items),
@@ -217,6 +561,8 @@ def twitter_status():
         "handle": account.handle if account else None,
         "last_synced_at": (iso_utc(account.last_synced_at)
                            if account and account.last_synced_at else None),
+        "last_sync_created": (account.last_sync_created
+                              if account else None),
     }), 200
 
 
@@ -256,22 +602,14 @@ def twitter_callback():
             or not request.args.get("code")):
         return redirect(_frontend_url("/import?x_connect=failed"))
 
-    data = {
-        "grant_type": "authorization_code",
-        "code": request.args["code"],
-        "redirect_uri": current_app.config["X_REDIRECT_URI"],
-        "client_id": current_app.config["X_CLIENT_ID"],
-        "code_verifier": stash["verifier"],
-    }
-    auth = None
-    if current_app.config.get("X_CLIENT_SECRET"):
-        auth = (current_app.config["X_CLIENT_ID"],
-                current_app.config["X_CLIENT_SECRET"])
     try:
-        token_resp = requests.post(
-            X_TOKEN_URL, data=data, auth=auth, timeout=30)
-        token_resp.raise_for_status()
-        tokens = token_resp.json()
+        tokens = x_exchange_code(
+            current_app.config["X_CLIENT_ID"],
+            request.args["code"],
+            current_app.config["X_REDIRECT_URI"],
+            stash["verifier"],
+            current_app.config.get("X_CLIENT_SECRET"),
+        )
 
         me = requests.get(
             "https://api.twitter.com/2/users/me",
@@ -300,15 +638,23 @@ def twitter_callback():
     account.external_user_id = me_data.get("id")
     account.handle = me_data.get("username")
     account.revoked_at = None  # fresh consent supersedes any revocation
+    # The "X disconnected" notice is answered by reconnecting — don't keep
+    # showing it in the updates window after the user already fixed it.
+    for notice in UserNotification.query.filter_by(
+            user_id=current_user.id, type="x_disconnected",
+            status="unread").all():
+        notice.status = "read"
+        notice.read_at = datetime.utcnow()
     from backend.models import APICostLog
-    from backend.utils.cost import X_REQUEST_COST_MICRODOLLARS
+    from backend.utils.cost import X_USER_READ_COST_MICRODOLLARS
     db.session.add(APICostLog(
         user_id=current_user.id,
         model_id="x-api/users-me",
         request_type="x_oauth_connect",
         input_tokens=0,
         output_tokens=0,
-        cost_microdollars=X_REQUEST_COST_MICRODOLLARS,
+        # /users/me is one user read ($0.010 pay-per-use, #271).
+        cost_microdollars=X_USER_READ_COST_MICRODOLLARS,
     ))
     db.session.commit()
     return redirect(_frontend_url("/import?x_connect=ok"))
@@ -324,3 +670,242 @@ def twitter_sync():
     from backend.tasks.external_sync import sync_twitter_bookmarks
     task = sync_twitter_bookmarks.delay(current_user.id)
     return jsonify({"task_id": task.id, "status": "pending"}), 202
+
+
+# ── Web clips (Chrome clipper, #232) ─────────────────────────────────────
+
+# Same bound as an authored entry: a clip is one node's worth of text at
+# most. The extension truncates before sending; the server truncates
+# again rather than rejecting, because a one-keypress clip has no UI in
+# which to negotiate.
+MAX_TOKENS_PER_USER = 10  # active tokens; a sanity bound, not a plan limit
+MAX_TITLE_CHARS = 512
+
+
+def _parse_posted_at(value):
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(
+            str(value).replace("Z", "+00:00")).replace(tzinfo=None)
+    except (ValueError, TypeError):
+        return None
+
+
+def _upgrade_clip(item, content, title, author, posted_at):
+    """Replace a known reference's text with a strictly longer capture.
+
+    Longer, not merely different: a re-clip whose extraction came back
+    short (a collapsed thread, a paywall interstitial) must not clobber
+    a good copy. Metadata is only filled in where it was missing. The
+    stale embedding is dropped so the nightly sweep re-embeds the new
+    text. Returns True when anything changed (one decrypt of the stored
+    text — a single user-initiated item, not a corpus loop).
+    """
+    if item.edited_at is not None:
+        # The user rewrote this one by hand; their copy stands.
+        return False
+    if len(content) <= len(item.get_content() or ""):
+        return False
+    item.set_content(content)
+    item.fetched_at = datetime.utcnow()
+    if title and not item.title:
+        item.title = title
+    if author and not item.author_handle:
+        item.author_handle = author
+    if posted_at and not item.posted_at:
+        item.posted_at = posted_at
+    ExternalItemEmbedding.query.filter_by(item_id=item.id).delete()
+    return True
+
+
+@external_bp.route("/clip", methods=["POST"])
+@token_or_login_required(SCOPE_EXTERNAL_WRITE)
+def clip():
+    """Save one web page (or tweet) as an external item.
+
+    Body: {url, content, title?, author?, posted_at?, author_protected?}.
+    The URL decides the source (see backend.utils.web_clip). Re-clipping a known URL is
+    a 200 so the extension can be pressed twice safely, also when the
+    two presses overlap: a no-op when the stored text is at least as
+    long, otherwise the stored text is replaced. The X bookmark sync stores the API's truncated `text` for
+    long posts; the extension reads the full rendered post, and the
+    reference should hold the fuller of the two.
+    """
+    from backend.utils.node_split import NODE_CHAR_CAP
+    data = request.get_json(silent=True) or {}
+    url = (data.get("url") or "").strip()
+    content = data.get("content")
+    if not url or not url.lower().startswith(("http://", "https://")):
+        return jsonify({"error": "url is required"}), 400
+    if not isinstance(content, str) or not content.strip():
+        return jsonify({"error": "content is required"}), 400
+
+    truncated = len(content) > NODE_CHAR_CAP
+    if truncated:
+        content = content[:NODE_CHAR_CAP]
+    content = content.strip()
+    title = (data.get("title") or "").strip()[:MAX_TITLE_CHARS] or None
+    author = (data.get("author") or "").strip().lstrip("@")[:64] or None
+    posted_at = _parse_posted_at(data.get("posted_at"))
+    # The extension reports a protected-account lock it SAW next to the
+    # tweet's author (`author_protected: true`) and nothing otherwise, so
+    # absence means unknown, never public; the nightly sweep asks X.
+    author_protected = data.get("author_protected") is True
+
+    user = g.api_user
+    source, external_id, canon = classify_clip(url)
+    # Saving again a reference "Delete all my writing" hid makes it the
+    # user's again (#268) instead of failing on the hidden row.
+    from backend.utils.hidden_rows import reclaim_external_items
+    reclaim_external_items(user.id, [external_id])
+
+    def reclip(existing):
+        updated = _upgrade_clip(existing, content, title, author, posted_at)
+        locked = author_protected and existing.public_source is not False
+        if locked:
+            # Learned late, or the account went protected since the sync
+            # vouched for it: private wins, whichever came first.
+            existing.public_source = False
+        if updated or locked:
+            db.session.commit()
+        return jsonify({
+            "created": False, "updated": updated, "id": existing.id,
+            "source": source, "title": existing.title,
+            "truncated": truncated if updated else False,
+        }), 200
+
+    def lookup():
+        return ExternalItem.query.filter_by(
+            user_id=user.id, source=source, external_id=external_id).first()
+
+    existing = lookup()
+    if existing is not None:
+        return reclip(existing)
+
+    if source in TWEET_SOURCES:
+        # A tweet a Read picked becomes the saved reference in place, so
+        # the read mark and verdict given on the pick stay with it (#352).
+        pick_row = ExternalItem.query.filter_by(
+            user_id=user.id, source=READ_PICK_SOURCE,
+            external_id=external_id).first()
+        if pick_row is not None:
+            save_pick_row(pick_row, source)
+            _upgrade_clip(pick_row, content, title, author, posted_at)
+            if author_protected:
+                pick_row.public_source = False
+            db.session.commit()
+            return jsonify({
+                "created": True, "id": pick_row.id, "source": source,
+                "title": pick_row.title, "truncated": truncated,
+            }), 201
+
+    item = ExternalItem(
+        user_id=user.id, source=source, external_id=external_id,
+        author_handle=author, title=title, url=canon,
+        posted_at=posted_at,
+        # A page is whatever tab was open (private pages included):
+        # assessed, not vouched. A tweet is not public when its author
+        # wore a lock; otherwise unknown until the nightly sweep asks X.
+        public_source=(False if source == SOURCE_WEB_CLIP or author_protected
+                       else None),
+    )
+    item.set_content(content)
+    db.session.add(item)
+    try:
+        db.session.commit()
+    except IntegrityError:
+        # A second press of the clip key raced this request past the
+        # lookup above and saved the page first: answer as a re-clip
+        # instead of a 500 for a page that is in fact saved.
+        db.session.rollback()
+        existing = lookup()
+        if existing is None:
+            raise
+        return reclip(existing)
+    return jsonify({
+        "created": True, "id": item.id, "source": source,
+        "title": title, "truncated": truncated,
+    }), 201
+
+
+@external_bp.route("/clip/status", methods=["GET"])
+@token_or_login_required(SCOPE_EXTERNAL_WRITE)
+def clip_status():
+    """Connection check for the extension's options page."""
+    user = g.api_user
+    counts = dict(
+        db.session.query(ExternalItem.source, db.func.count())
+        .filter(ExternalItem.user_id == user.id, ExternalItem.saved())
+        .group_by(ExternalItem.source).all()
+    )
+    return jsonify({
+        "ok": True, "username": user.username, "counts": counts,
+        "token_name": g.api_token.name if g.api_token else None,
+    }), 200
+
+
+# ── Personal API tokens ──────────────────────────────────────────────────
+
+def _clipper_available(user):
+    """The clipper rides the per-user external-content opt-in (Account
+    page, shipped off — the #229 easter-egg pattern): no point minting
+    tokens for references Loore would never search."""
+    return bool(user.external_content_enabled)
+
+
+def _serialize_token(t):
+    return {
+        "id": t.id, "name": t.name, "prefix": t.prefix, "scope": t.scope,
+        "created_at": iso_utc(t.created_at) if t.created_at else None,
+        "last_used_at": iso_utc(t.last_used_at) if t.last_used_at else None,
+    }
+
+
+@external_bp.route("/tokens", methods=["GET"])
+@login_required
+def list_tokens():
+    rows = ApiToken.query.filter_by(
+        user_id=current_user.id, revoked_at=None
+    ).order_by(ApiToken.created_at.desc()).all()
+    return jsonify({"tokens": [_serialize_token(t) for t in rows]}), 200
+
+
+@external_bp.route("/tokens", methods=["POST"])
+@login_required
+def create_token():
+    """Mint a token. The plaintext is returned ONCE, in this response."""
+    if not _clipper_available(current_user):
+        return jsonify({"error": (
+            "Turn on external content under Account first.")}), 403
+    data = request.get_json(silent=True) or {}
+    name = (data.get("name") or "Chrome clipper").strip()[:64]
+    active = ApiToken.query.filter_by(
+        user_id=current_user.id, revoked_at=None).count()
+    if active >= MAX_TOKENS_PER_USER:
+        return jsonify({"error": (
+            f"You already have {MAX_TOKENS_PER_USER} active tokens; "
+            "revoke one first.")}), 400
+    plaintext, prefix = generate_api_token()
+    row = ApiToken(
+        user_id=current_user.id, name=name, prefix=prefix,
+        token_hash=hash_token(plaintext), scope=SCOPE_EXTERNAL_WRITE,
+    )
+    db.session.add(row)
+    db.session.commit()
+    payload = _serialize_token(row)
+    payload["token"] = plaintext
+    return jsonify(payload), 201
+
+
+@external_bp.route("/tokens/<int:token_id>", methods=["DELETE"])
+@login_required
+def revoke_token(token_id):
+    row = ApiToken.query.filter_by(
+        id=token_id, user_id=current_user.id).first()
+    if row is None:
+        return jsonify({"error": "not found"}), 404
+    if row.revoked_at is None:
+        row.revoked_at = datetime.utcnow()
+        db.session.commit()
+    return jsonify({"revoked": True, "id": row.id}), 200

@@ -19,7 +19,8 @@ os.environ.setdefault("ENCRYPTION_DISABLED", "true")
 from backend.extensions import db as _db  # noqa: E402
 from backend.models import (  # noqa: E402
     User, UserNotification, Poll, PollResponse, ChangelogReadState,
-    PollDraftBatchJob, APICostLog, UserProfile,
+    PollDraftBatchJob, APICostLog, UserProfile, UserRecentContext,
+    UserArtifact, Node,
 )
 import backend.utils.changelog as changelog_mod  # noqa: E402
 from backend.utils.changelog import (  # noqa: E402
@@ -355,7 +356,27 @@ def _stub_poll_draft_task(monkeypatch):
     return stub
 
 
+def _write_entry(user, **kwargs):
+    """An entry the user wrote in Loore; kwargs make it an import, an LLM
+    node, etc."""
+    fields = dict(user_id=user.id, human_owner_id=user.id,
+                  node_type="user", privacy_level="private",
+                  ai_usage="chat")
+    fields.update(kwargs)
+    node = Node(**fields)
+    node.set_content("an entry")
+    _db.session.add(node)
+    _db.session.commit()
+    return node
+
+
 class TestPolls:
+    @pytest.fixture(autouse=True)
+    def _tester_has_written(self, app):
+        # Polls wait for the user's first entry (#392); these tests are
+        # about the poll flow itself.
+        _write_entry(User.query.filter_by(username="tester").first())
+
     def _poll(self):
         poll = Poll(question="What's missing in Loore?")
         _db.session.add(poll)
@@ -462,6 +483,57 @@ class TestPolls:
         _db.session.refresh(resp)
         assert resp.status == "sent"
         assert resp.generated_by == "claude-opus-4.6"
+
+
+class TestPollsWaitForFirstEntry:
+    """#392: no polls until the user has written an entry in Loore. A
+    freshly activated user lands on /welcome; developer polls on top of it
+    came before they had written anything."""
+
+    def _poll(self):
+        poll = Poll(question="What's one thing you wish Loore did?")
+        _db.session.add(poll)
+        _db.session.commit()
+        return poll
+
+    def _tester(self):
+        return User.query.filter_by(username="tester").first()
+
+    def test_newcomer_gets_no_polls(self, app, client):
+        from backend.routes.updates import _pending_polls_for
+        self._poll()
+        assert _pending_polls_for(self._tester()) == []
+        assert client.get("/api/updates").get_json()["polls"] == []
+
+    def test_imports_llm_and_prompt_nodes_dont_count(self, app, client):
+        self._poll()
+        tester = self._tester()
+        llm = User(username="llm-test-model", twitter_id="llm-test-model")
+        _db.session.add(llm)
+        _db.session.commit()
+        _write_entry(tester, origin="twitter", source_key="twitter:1")
+        _write_entry(tester, origin="markdown", source_key="a" * 64)
+        _write_entry(llm, human_owner_id=tester.id, node_type="llm",
+                     llm_model="test-model")
+        _write_entry(tester, prompt_key="voice")
+        assert client.get("/api/updates").get_json()["polls"] == []
+
+    def test_first_entry_brings_the_polls(self, app, client):
+        poll = self._poll()
+        assert client.get("/api/updates").get_json()["polls"] == []
+        _write_entry(self._tester())
+        polls = client.get("/api/updates").get_json()["polls"]
+        assert [p["id"] for p in polls] == [poll.id]
+
+    def test_changelog_and_notifications_still_shown(self, app, client):
+        # Only polls wait; the modal itself is kept off /welcome by the
+        # frontend.
+        self._poll()
+        notify_user(self._tester().id, "fix_ready", "A fix is live")
+        data = client.get("/api/updates").get_json()
+        assert data["polls"] == []
+        assert len(data["notifications"]) == 1
+        assert data["changelog"]
 
 
 class TestAdminPolls:
@@ -624,6 +696,47 @@ class TestDraftBatchPipeline:
         assert "RECENT RAW WRITING" in (
             captured["anthropic"][0]["messages"][1]["content"])
 
+    def test_submit_skips_account_opted_out_of_ai(self, pipeline,
+                                                  monkeypatch):
+        """#346: the opt-in route checks the account; the submit re-checks
+        because the setting can change while the task is queued."""
+        submit = MagicMock()
+        monkeypatch.setattr(pipeline, "batch_submit", submit)
+        poll, resp = _make_drafting_response()
+        resp.user.default_ai_usage = "none"
+        _db.session.commit()
+        pipeline._submit_poll_draft(resp.id)
+        assert resp.status == "draft_failed"
+        submit.assert_not_called()
+
+    def test_derived_context_skips_rows_marked_none(self, pipeline):
+        """#346: each row is checked; a 'none' row is skipped and the
+        newest AI-readable one before it is used (the profile-update and
+        recent-context rule). With none left, the section is left out."""
+        poll, resp = _make_drafting_response(with_profile=False)
+        uid = resp.user_id
+        older = UserProfile(user_id=uid, generated_by="m", tokens_used=0,
+                            created_at=datetime(2026, 1, 1))
+        older.set_content("OLDER PROFILE")
+        newest = UserProfile(user_id=uid, generated_by="user", tokens_used=0,
+                             ai_usage="none", created_at=datetime(2026, 2, 1))
+        newest.set_content("SECRET PROFILE")
+        recent = UserRecentContext(user_id=uid, generated_by="m",
+                                   tokens_used=0)
+        recent.set_content("RECENT OK")
+        intentions = UserArtifact(user_id=uid, kind="intentions",
+                                  title="Intentions", generated_by="m",
+                                  tokens_used=0, ai_usage="none")
+        intentions.set_content("SECRET INTENTIONS")
+        _db.session.add_all([older, newest, recent, intentions])
+        _db.session.commit()
+
+        context = pipeline._derived_context(resp.user)
+        assert "OLDER PROFILE" in context and "RECENT OK" in context
+        assert "SECRET PROFILE" not in context
+        assert "SECRET INTENTIONS" not in context
+        assert "## Intentions" not in context
+
     def test_submit_without_context_fails_soft(self, pipeline,
                                                monkeypatch):
         submit = MagicMock()
@@ -656,12 +769,14 @@ class TestDraftBatchPipeline:
             }}, {}, {}))
         cost_calls = {}
 
-        def fake_cost(model_id, inp, out, batch=False):
-            cost_calls.update(model=model_id, batch=batch)
-            return 4242
+        def fake_fields(model_id, response, batch=None):
+            cost_calls.update(model=model_id, batch=batch,
+                              response=response)
+            return {"input_tokens": 100, "output_tokens": 50,
+                    "cache_read_tokens": 0, "cache_write_tokens": 0,
+                    "cost_microdollars": 4242}
 
-        monkeypatch.setattr(
-            pipeline, "calculate_llm_cost_microdollars", fake_cost)
+        monkeypatch.setattr(pipeline, "llm_cost_log_fields", fake_fields)
 
         pipeline._collect_poll_draft_batches()
 
@@ -677,7 +792,12 @@ class TestDraftBatchPipeline:
         assert log.request_type == "poll_draft"
         assert log.request_ref == f"poll:{poll.id}"   # traceable to poll
         assert log.cost_microdollars == 4242
-        assert cost_calls == {"model": "test-model", "batch": True}
+        # The whole result dict reaches the cost helper, so an OpenAI poll
+        # model's cache counters are priced (#286).
+        assert cost_calls == {"model": "test-model", "batch": True,
+                              "response": {"content": " A drafted answer. ",
+                                           "input_tokens": 100,
+                                           "output_tokens": 50}}
         # System account can't log in / never gets profile-generated
         assert system_user.approved is False
         assert system_user.plan == "free"
@@ -702,6 +822,44 @@ class TestDraftBatchPipeline:
         pipeline._collect_poll_draft_batches()
         assert job.status == "collected"
         assert resp.status == "draft_failed"
+
+    def test_collect_empty_cut_off_draft_fails_response(self, pipeline,
+                                                        monkeypatch):
+        """#368: a draft cut off at the output limit before any text is
+        not saved as an empty draft; the response fails (the user can
+        retry or write their own) and the billed call is still logged."""
+        poll, resp = _make_drafting_response()
+        job = self._pending_job(poll, resp)
+        monkeypatch.setattr(
+            pipeline, "batch_check_and_collect",
+            lambda ids, keys: ({f"poll-draft-{resp.id}": {
+                "content": "", "truncated": True,
+                "input_tokens": 100, "output_tokens": 32000,
+            }}, {}, {}))
+        pipeline._collect_poll_draft_batches()
+        assert resp.status == "draft_failed"
+        assert resp.generated_by is None
+        assert job.status == "collected"
+        assert APICostLog.query.one().request_type == "poll_draft"
+
+    @pytest.mark.parametrize("text", ["", "I can't draft this"])
+    def test_collect_refused_draft_fails_response(self, pipeline,
+                                                  monkeypatch, text):
+        """#470: a model refusal (no text or partial text) is not saved as
+        the draft; the response fails and the billed call is logged."""
+        poll, resp = _make_drafting_response()
+        job = self._pending_job(poll, resp)
+        monkeypatch.setattr(
+            pipeline, "batch_check_and_collect",
+            lambda ids, keys: ({f"poll-draft-{resp.id}": {
+                "content": text, "refused": True,
+                "input_tokens": 100, "output_tokens": 10,
+            }}, {}, {}))
+        pipeline._collect_poll_draft_batches()
+        assert resp.status == "draft_failed"
+        assert resp.generated_by is None
+        assert job.status == "collected"
+        assert APICostLog.query.one().request_type == "poll_draft"
 
     def test_system_account_is_idempotent(self, app):
         first = get_poll_system_user()

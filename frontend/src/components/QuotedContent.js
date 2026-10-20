@@ -24,8 +24,15 @@ const COMBINED_PATTERN = /(\{quote_ext:\d+\}|\{quote:\d+\}|\{user_(?:profile|tod
  *   quotes: Object mapping quote IDs to quote data (or null if not accessible)
  *   contextArtifacts: Object with "profile" and/or "todo" keys containing artifact data
  *   onQuoteClick: Callback when a quote is clicked (receives quote ID)
+ *   nodeId: the node the content belongs to; external-reference bubbles
+ *     log what the reader does with them against it (#352)
+ *   showRecommendationFeedback: the node is LLM-authored, so its
+ *     external-reference quotes are recommendations and get the good /
+ *     bad verdict; a user's own quotes get only the read toggle (#363)
+ *   onExternalIntroVerdictChange: (itemId, verdict) after the verdict on
+ *     a gleaning pick's intro changed (#502)
  */
-const QuotedContent = ({ content, quotes, externalQuotes, contextArtifacts, onQuoteClick, onCheckboxToggle, onAddTask }) => {
+const QuotedContent = ({ content, quotes, externalQuotes, contextArtifacts, onQuoteClick, onCheckboxToggle, onAddTask, onExternalReadChange, onExternalFeedbackChange, onExternalIntroVerdictChange, nodeId, showRecommendationFeedback = false, referenceBackLabel }) => {
   if (!content) {
     return null;
   }
@@ -119,11 +126,20 @@ const QuotedContent = ({ content, quotes, externalQuotes, contextArtifacts, onQu
           );
         } else if (segment.type === 'external_quote') {
           const quoteData = externalQuotes ? externalQuotes[segment.quoteId] : null;
+          // The slot lets a page space quotes as units (a read reply's
+          // picks, .read-reply-body) without touching the bubble.
           return (
-            <ExternalQuoteBubble
-              key={index}
-              quote={quoteData}
-            />
+            <div key={index} className="ext-quote-slot">
+              <ExternalQuoteBubble
+                quote={quoteData}
+                nodeId={nodeId}
+                onReadChange={onExternalReadChange}
+                onFeedbackChange={onExternalFeedbackChange}
+                onIntroVerdictChange={onExternalIntroVerdictChange}
+                showRecommendationFeedback={showRecommendationFeedback}
+                backLabel={referenceBackLabel}
+              />
+            </div>
           );
         } else if (segment.type === 'artifact') {
           const artifact = contextArtifacts

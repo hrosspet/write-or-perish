@@ -4,6 +4,12 @@ Celery tasks for streaming audio transcription.
 These tasks handle real-time transcription of audio chunks as they're
 recorded, enabling the user to see transcript text appear in their
 draft while still recording.
+
+No task here checks the monthly spend cap (#341). A recording that has
+started is transcribed to the end, even when the cap flips mid-recording
+(the block flag is set out of band, ENFORCE_CAP_DELAY_SECONDS after any
+cost row, including this module's own transcription rows). The cap blocks
+starting a recording (the streaming init endpoints) and the LLM reply.
 """
 from celery import Task
 from celery.utils.log import get_task_logger
@@ -11,17 +17,21 @@ from openai import OpenAI
 import pathlib
 import os
 import shutil
-from datetime import datetime
+import time
+from datetime import datetime, timezone
 
 from backend.celery_app import celery, flask_app
 from backend.models import Node, NodeTranscriptChunk, Draft, APICostLog
 from backend.extensions import db
 from backend.utils.audio_processing import compress_audio_if_needed, get_audio_duration
-from backend.utils.audio_storage import move_draft_audio_to_node_dir
+from backend.utils.audio_storage import (
+    move_session_audio_to_node, storage_path,
+)
 from backend.utils.webm_utils import concat_fragmented_media
 from backend.utils.api_keys import get_openai_chat_key
 from backend.utils.encryption import decrypt_file_to_temp
 from backend.utils.cost import calculate_audio_cost_microdollars
+from backend.utils import voice_timing
 
 logger = get_task_logger(__name__)
 
@@ -30,6 +40,46 @@ logger = get_task_logger(__name__)
 # while recording), so the prefix is cold at generation — warm it. Tied to
 # the provider TTL; tune together.
 PREWARM_ONGOING_MIN_SECONDS = 300
+
+# How often finalize_draft_streaming checks whether the last chunks are
+# transcribed. The voice reply can't start before that wait ends.
+# INTRODUCED CONSTANT (#371): it was 2 s, which cost ~1 s per voice turn
+# on average (measured 0.5-1.7 s); one status query per poll is cheap.
+FINALIZE_POLL_SECS = 0.25
+
+# Toast text when a Voice recording finishes after the user hit the monthly
+# spend cap (#341): the entry is saved, the reply is skipped.
+VOICE_REPLY_SKIPPED_SPEND_CAP = (
+    "Your recording is saved. Loore didn't reply because you've reached "
+    "your monthly usage limit, which resets at the start of next month."
+)
+# The same when AI usage keeps the recording, or the thread it continues,
+# away from AI (streaming init refuses such a recording; this covers a
+# setting changed while it was recorded).
+VOICE_REPLY_SKIPPED_AI_USAGE = (
+    "Your recording is saved. Loore didn't reply because AI usage is set "
+    "to None."
+)
+# The same when the turn asked for a read-only model: the reply is not
+# moved to another model (Peter, 2026-10-02), so there is none.
+VOICE_REPLY_SKIPPED_READ_ONLY = (
+    "Your recording is saved. Loore didn't reply because {model} is only "
+    "for Read. Choose another model for replies."
+)
+
+
+def _voice_reply_refusal(user_id, parent_id, draft):
+    """Why a finished Voice recording gets no reply (an AIUsageRefused),
+    or None: the rule streaming init applied when it started
+    (llm_nodes.voice_turn_refusal), asked again now that it has ended."""
+    from backend.models import User
+    from backend.utils.llm_nodes import voice_turn_refusal
+    user = User.query.get(user_id)
+    if user is None:
+        return None
+    parent = Node.query.get(parent_id) if parent_id else None
+    return voice_turn_refusal(
+        user, parent, None if parent else (draft.ai_usage or "none"))
 
 
 def _find_thread_system_node(parent_id):
@@ -84,14 +134,6 @@ def transcribe_chunk(self, node_id: int, chunk_index: int, chunk_path: str):
     logger.info(f"Starting chunk transcription for node {node_id}, chunk {chunk_index}")
 
     with flask_app.app_context():
-        from backend.utils.spend import user_is_capped
-        _node = Node.query.get(node_id)
-        if _node and user_is_capped(_node.user_id):
-            logger.warning(
-                "User %s is spend-capped; skipping chunk transcription",
-                _node.user_id)
-            return
-
         # Get the transcript chunk record
         chunk_record = NodeTranscriptChunk.query.filter_by(
             node_id=node_id,
@@ -337,7 +379,8 @@ def finalize_streaming(self, node_id: int, session_id: str, total_chunks: int):
         audio_storage_root = pathlib.Path(
             os.environ.get("AUDIO_STORAGE_PATH", "data/audio")
         ).resolve()
-        chunk_dir = audio_storage_root / f"streaming/{node.user_id}/{session_id}"
+        chunk_dir = storage_path(
+            audio_storage_root, "streaming", node.user_id, session_id)
 
         if chunk_dir.exists():
             try:
@@ -403,14 +446,6 @@ def transcribe_draft_chunk(self, session_id: str, chunk_index: int, chunk_path: 
     logger.info(f"Starting draft chunk transcription for session {session_id}, chunk {chunk_index}")
 
     with flask_app.app_context():
-        from backend.utils.spend import user_is_capped
-        _draft = Draft.query.filter_by(session_id=session_id).first()
-        if _draft and user_is_capped(_draft.user_id):
-            logger.warning(
-                "User %s is spend-capped; skipping draft chunk transcription",
-                _draft.user_id)
-            return
-
         # Get the transcript chunk record
         chunk_record = NodeTranscriptChunk.query.filter_by(
             session_id=session_id,
@@ -612,13 +647,6 @@ def transcribe_chunk_batch(self, session_id: str, chunk_indices: list):
                 'status': 'draft_deleted',
             }
 
-        from backend.utils.spend import user_is_capped
-        if user_is_capped(draft.user_id):
-            logger.warning(
-                "User %s is spend-capped; skipping batch transcription",
-                draft.user_id)
-            return
-
         # Family-only mime drives the on-disk extension. Defensive None
         # handling in case a row was inserted before the default backfill;
         # falling back to .webm preserves the pre-MP4 behavior.
@@ -628,7 +656,8 @@ def transcribe_chunk_batch(self, session_id: str, chunk_indices: list):
             else ".webm"
         )
 
-        chunk_dir = audio_storage_root / f"drafts/{draft.user_id}/{session_id}"
+        chunk_dir = storage_path(
+            audio_storage_root, "drafts", draft.user_id, draft.session_id)
 
         # Collect and decrypt chunk files (keyed by index — sub-batch
         # partitioning below needs per-chunk paths, #124)
@@ -740,13 +769,20 @@ def transcribe_chunk_batch(self, session_id: str, chunk_indices: list):
 
             transcripts = []
             batch_duration_sec = 0.0
+            # Sub-batches whose merged file holds less audio than their
+            # chunks: those chunks are kept (renamed, see below).
+            short_subbatches = set()
             for sub_indices in sub_batches:
+                merge_report = {}
                 merged_path = concat_fragmented_media(
                     [paths_by_idx[i] for i in sub_indices],
                     init_segment_path=_resolve_init(sub_indices),
                     output_suffix=ext,
+                    report=merge_report,
                 )
                 merged_by_subbatch.append((sub_indices, merged_path))
+                if merge_report.get('holds_all_audio') is False:
+                    short_subbatches.add(sub_indices[0])
 
                 # Compress if needed (no-op for compressed WebM/MP4)
                 merge_input_path = pathlib.Path(merged_path)
@@ -837,7 +873,18 @@ def transcribe_chunk_batch(self, session_id: str, chunk_indices: list):
                 shutil.move(sub_merged, str(batch_dest))
                 encrypt_file(str(batch_dest))
 
-                # Delete individual encrypted chunk files in the sub-batch
+                # Delete individual encrypted chunk files in the sub-batch,
+                # unless the merged file holds less audio than they do:
+                # then they are kept as unmerged_chunk_*, which playback
+                # does not list (list_streaming_audio_files), so the batch
+                # file still plays and the audio can be recovered.
+                keep = sub_indices[0] in short_subbatches
+                if keep:
+                    logger.error(
+                        f"Session {session_id}: merged chunks "
+                        f"{sub_indices} hold less audio than the chunks; "
+                        "keeping the chunks as unmerged_chunk_*"
+                    )
                 for idx in sub_indices:
                     for chunk_name in [
                         f"chunk_{idx:04d}{ext}.enc",
@@ -846,10 +893,13 @@ def transcribe_chunk_batch(self, session_id: str, chunk_indices: list):
                         p = chunk_dir / chunk_name
                         if p.exists():
                             try:
-                                p.unlink()
+                                if keep:
+                                    p.rename(chunk_dir / f"unmerged_{chunk_name}")
+                                else:
+                                    p.unlink()
                             except Exception as e:
                                 logger.warning(
-                                    f"Failed to delete {p}: {e}"
+                                    f"Failed to remove {p}: {e}"
                                 )
 
             db.session.commit()
@@ -965,7 +1015,8 @@ class DraftFinalizationTask(Task):
 @celery.task(base=DraftFinalizationTask, bind=True)
 def finalize_draft_streaming(self, session_id: str, total_chunks: int,
                              label: str = None, user_id: int = None,
-                             parent_id: int = None, model: str = None):
+                             parent_id: int = None, model: str = None,
+                             client: str = None, entry: str = None):
     """
     Finalize streaming transcription for a draft.
 
@@ -985,13 +1036,23 @@ def finalize_draft_streaming(self, session_id: str, total_chunks: int,
         user_id: ID of the user (for server-side LLM chain)
         parent_id: Thread parent node ID (for server-side LLM chain)
         model: LLM model ID (for server-side LLM chain)
+        client: 'ios' / 'web' — the app the finalize request came from
+            (utils/client_platform), stamped on the reply placeholder.
+        entry: "glean" when a fresh Voice session was started from the
+            Glean card (#435): the new thread's root is stamped so every
+            turn offers Glean (utils/glean.stamp_glean_entry).
     """
     logger.info(f"Finalizing draft streaming for session {session_id}, {total_chunks} chunks")
+    # #371: where a voice turn's wait goes; marked under the reply node
+    # once it exists (_start_server_side_llm_chain).
+    timing = {"finalize_start": time.time()}
 
     with flask_app.app_context():
         draft = Draft.query.filter_by(session_id=session_id).first()
         if not draft:
             raise ValueError(f"Draft not found for session {session_id}")
+        # Read now: the draft may be discarded while the chunks transcribe.
+        recording_started = draft.created_at
 
         # #187: pre-warm the Anthropic prompt cache while the trailing
         # chunks transcribe. Fresh Voice threads only (for an ongoing
@@ -999,8 +1060,27 @@ def finalize_draft_streaming(self, session_id: str, total_chunks: int,
         # system node is created early — here instead of in the chain
         # start — so the warm renders against real pinned artifacts and
         # the cached bytes (#192) are exactly what generation reuses.
+        # A capped user gets no reply (_start_server_side_llm_chain skips
+        # it), so warming the cache for it would be a paid write for nothing.
+        # Nor for a recording that gets no reply because AI usage keeps it
+        # (or its thread) away from AI: the warm would send it to a model.
+        # Nor on a model that is not a chat model (read only, deprecated):
+        # a chat turn never runs on it (a read-only one is refused, a
+        # deprecated one replaced), so the transcript would go to a model
+        # that writes no reply, possibly at another provider. A read never
+        # uses the warm (it goes through the Batch API).
+        from backend.utils.spend import user_is_capped
+        from backend.utils.llm_nodes import is_chat_model
+        from backend.utils.prompt_cache import new_prewarm_token
         cache_split_offset = None
-        if user_id and model and label == 'Voice':
+        # The reply waits for the warm sent here to finish before its
+        # first model call (prompt_cache.wait_for_prewarm); None = no warm
+        # was sent, and the reply starts without waiting.
+        prewarm_token = None
+        if (user_id and model and label == 'Voice'
+                and is_chat_model(model)
+                and not user_is_capped(user_id)
+                and _voice_reply_refusal(user_id, parent_id, draft) is None):
             try:
                 model_cfg = flask_app.config["SUPPORTED_MODELS"].get(model)
                 is_anthropic = bool(
@@ -1015,12 +1095,14 @@ def finalize_draft_streaming(self, session_id: str, total_chunks: int,
                     transcript_so_far = draft.get_content() or ""
                     if len(transcript_so_far) >= 500:
                         parent_id = _create_system_node_early(
-                            user_id, label.lower(), draft)
+                            user_id, label.lower(), draft, entry=entry)
                         cache_split_offset = len(transcript_so_far)
+                        prewarm_token = new_prewarm_token()
                         prewarm_anthropic_cache.delay(
                             parent_id, user_id, model, transcript_so_far,
                             (draft.created_at
                              or datetime.utcnow()).isoformat(),
+                            done_token=prewarm_token,
                         )
                 elif is_anthropic and parent_id is not None:
                     # Ongoing thread + long recording: the prior turn's cache
@@ -1037,13 +1119,16 @@ def finalize_draft_streaming(self, session_id: str, total_chunks: int,
                     if recording_secs > PREWARM_ONGOING_MIN_SECONDS:
                         sys_node = _find_thread_system_node(parent_id)
                         if sys_node is not None:
+                            prewarm_token = new_prewarm_token()
                             prewarm_anthropic_cache.delay(
-                                sys_node.id, user_id, model)
+                                sys_node.id, user_id, model,
+                                done_token=prewarm_token)
             except Exception:
                 logger.warning(
                     "Cache pre-warm setup failed; continuing without it",
                     exc_info=True)
                 cache_split_offset = None
+                prewarm_token = None
 
         # Trigger transcription of any remaining stored chunks (< 20, so
         # they didn't hit the batch threshold during recording). This is a
@@ -1071,10 +1156,10 @@ def finalize_draft_streaming(self, session_id: str, total_chunks: int,
             db.session.commit()
 
         # Wait for all chunks to complete (with timeout)
-        import time
         max_wait_seconds = 600  # 10 minutes max wait
-        poll_interval = 2  # seconds
+        waited_since = time.monotonic()
         elapsed = 0
+        last_counts = None
 
         while elapsed < max_wait_seconds:
             # Check chunk statuses
@@ -1083,30 +1168,52 @@ def finalize_draft_streaming(self, session_id: str, total_chunks: int,
             failed = [c for c in chunks if c.status == 'failed']
             pending = [c for c in chunks if c.status in ['pending', 'processing', 'stored']]
 
-            logger.info(
-                f"Session {session_id}: {len(completed)} completed, "
-                f"{len(failed)} failed, {len(pending)} pending of {total_chunks}"
-            )
+            counts = (len(completed), len(failed), len(pending))
+            if counts != last_counts:
+                last_counts = counts
+                logger.info(
+                    f"Session {session_id}: {len(completed)} completed, "
+                    f"{len(failed)} failed, {len(pending)} pending of {total_chunks}"
+                )
 
             # All chunks processed (either completed or failed)
             if len(completed) + len(failed) >= total_chunks:
                 break
+            if (not chunks and total_chunks and not Draft.query.filter_by(
+                    session_id=session_id).count()):
+                # The session was discarded (the draft and its chunk rows
+                # are gone): nothing will complete, and the re-fetch below
+                # skips it.
+                break
 
-            time.sleep(poll_interval)
-            elapsed += poll_interval
+            time.sleep(FINALIZE_POLL_SECS)
+            elapsed = time.monotonic() - waited_since
 
             # Refresh the session to get updated data
             db.session.expire_all()
 
+        timing["transcribed"] = time.time()
+        done_at = [c.completed_at for c in chunks if c.completed_at]
+        if done_at:
+            # When the last chunk was actually done (the loop polls).
+            timing["last_chunk_done"] = max(done_at).replace(
+                tzinfo=timezone.utc).timestamp()
+        if recording_started:
+            timing["recording_secs"] = round(
+                timing["finalize_start"]
+                - recording_started.replace(tzinfo=timezone.utc).timestamp(),
+                1)
+        timing["chunks"] = total_chunks
+
         # Log whether we exited by completion or timeout
         if elapsed >= max_wait_seconds:
             logger.warning(
-                f"Session {session_id}: TIMED OUT after {elapsed}s waiting for chunks. "
+                f"Session {session_id}: TIMED OUT after {elapsed:.0f}s waiting for chunks. "
                 f"Expected {total_chunks}, got {len(completed)} completed + {len(failed)} failed"
             )
         else:
             logger.info(
-                f"Session {session_id}: All chunks processed in {elapsed}s"
+                f"Session {session_id}: All chunks processed in {elapsed:.1f}s"
             )
 
         # The draft instance was expired by db.session.expire_all() in the
@@ -1185,6 +1292,10 @@ def finalize_draft_streaming(self, session_id: str, total_chunks: int,
                     draft, session_id, full_transcript,
                     user_id, parent_id, model, label,
                     cache_split_offset=cache_split_offset,
+                    prewarm_token=prewarm_token,
+                    timing=timing,
+                    client=client,
+                    entry=entry,
                 )
             except Exception as e:
                 logger.error(
@@ -1213,7 +1324,16 @@ def finalize_draft_streaming(self, session_id: str, total_chunks: int,
         }
 
 
-def _create_system_node_early(user_id, prompt_key, draft):
+def _stamp_glean_entry(system_node, user_id, entry):
+    """A fresh Voice thread started from the Glean card (#435)."""
+    if entry is None:
+        return
+    from backend.models import User
+    from backend.utils.glean import stamp_glean_entry
+    stamp_glean_entry(system_node, User.query.get(user_id), entry)
+
+
+def _create_system_node_early(user_id, prompt_key, draft, entry=None):
     """Create the thread's system node at finalize START (#187) so the
     cache pre-warm renders against real pinned artifacts. Returns its id.
 
@@ -1238,13 +1358,29 @@ def _create_system_node_early(user_id, prompt_key, draft):
     attach_context_artifacts(
         system_node.id, user_id, prompt_record=prompt_record,
     )
+    _stamp_glean_entry(system_node, user_id, entry)
     db.session.commit()
     return system_node.id
 
 
+def _skip_voice_reply(draft, user_node, message):
+    """End a Voice turn without a reply: the entry stays, with *message*
+    recorded on it, and the draft is marked completed (audio + transcript
+    are real and belong to the user) with no llm_node_id. The
+    streaming_warning travels through SSE all_complete to the voice
+    clients, which show it as a toast."""
+    from backend.utils.task_warnings import record_task_warning
+    record_task_warning(user_node, message)
+    draft.streaming_status = 'completed'
+    draft.streaming_warning = message
+    db.session.commit()
+
+
 def _start_server_side_llm_chain(draft, session_id, transcript,
                                  user_id, parent_id, model, label,
-                                 cache_split_offset=None):
+                                 cache_split_offset=None, timing=None,
+                                 client=None, prewarm_token=None,
+                                 entry=None):
     """
     Create nodes and kick off LLM + TTS generation server-side.
 
@@ -1252,27 +1388,44 @@ def _start_server_side_llm_chain(draft, session_id, transcript,
     1. If no parent_id → create system node (with workflow prompt)
     2. Create user node with transcript
     3. Move streaming audio to user node (without deleting draft)
-    4. Create LLM placeholder node (enqueue=False)
+    4. Create LLM placeholder node (enqueue=False), stamped with the
+       *client* the finalize request came from
     5. Set draft.llm_node_id AND draft.streaming_status='completed'
        in one commit so the SSE all_complete event includes llm_node_id
     6. Enqueue generate_llm_response — it dispatches TTS per node at each
        node's own finalization (interim steps included), so interim audio
-       is playable while the continuation call is still generating
+       is playable while the continuation call is still generating.
+       *prewarm_token* names the cache pre-warm finalize sent; the reply
+       waits for it before its first model call (#187).
+
+    A recording that gets no reply because AI usage keeps it, or the
+    thread it continues, away from AI (_voice_reply_refusal) is saved as
+    an entry like any other (under the thread, or on its own without a
+    system prompt) and the draft carries a warning instead of a reply:
+    no recording is lost, and nothing is sent to a model.
     """
-    from backend.models import Node, NodeTranscriptChunk
+    from backend.models import Node, User
     from backend.utils.prompts import get_user_prompt_record
-    from backend.utils.llm_nodes import create_llm_placeholder
+    from backend.utils.llm_nodes import (
+        AIUsageRefused, ReadOnlyModelRefused, create_llm_placeholder,
+        reply_ai_usage,
+    )
     from backend.utils.context_artifacts import attach_context_artifacts
     from backend.tasks.llm_completion import generate_llm_response
 
     prompt_key = label.lower()  # 'voice'
+    refused = _voice_reply_refusal(user_id, parent_id, draft)
 
     if parent_id:
-        # Inherit ai_usage from parent node in the thread
+        # Inherit ai_usage from the thread, looking through a read (#362)
         parent_node = Node.query.get(parent_id)
-        ai_usage = (parent_node.ai_usage if parent_node
-                    else draft.ai_usage) or "none"
+        ai_usage = (reply_ai_usage(parent_node, User.query.get(user_id))
+                    if parent_node else draft.ai_usage) or "none"
         user_parent_id = parent_id
+    elif refused is not None:
+        # No reply will come, so no Voice prompt either: an entry of its own.
+        ai_usage = draft.ai_usage or "none"
+        user_parent_id = None
     else:
         # New thread — create system node with workflow prompt
         prompt_record = get_user_prompt_record(user_id, prompt_key)
@@ -1291,6 +1444,7 @@ def _start_server_side_llm_chain(draft, session_id, transcript,
         attach_context_artifacts(
             system_node.id, user_id, prompt_record=prompt_record,
         )
+        _stamp_glean_entry(system_node, user_id, entry)
         user_parent_id = system_node.id
 
     # User node with transcript
@@ -1321,22 +1475,23 @@ def _start_server_side_llm_chain(draft, session_id, transcript,
     _split_parts = split_node_into_chain(user_node)
     tip_node = _split_parts[-1] if _split_parts else user_node
 
-    # Move streaming audio to user node — inline version of
-    # attach_streaming_audio_to_node that does NOT delete the draft
+    # Move streaming audio and transcript-chunk rows to the user node.
+    # Unlike attach_streaming_audio_to_node this does NOT delete the draft
     # (we still need it for the SSE all_complete event).
     audio_storage_root = pathlib.Path(
         os.environ.get("AUDIO_STORAGE_PATH", "data/audio")
     ).resolve()
-    draft_audio_dir = audio_storage_root / f"drafts/{user_id}/{session_id}"
-
-    node_audio_dir = audio_storage_root / f"nodes/{user_id}/{user_node.id}"
-    move_draft_audio_to_node_dir(draft_audio_dir, node_audio_dir, logger)
-
-    # Point transcript-chunk rows at the node
-    NodeTranscriptChunk.query.filter_by(
-        session_id=session_id,
-    ).update({"node_id": user_node.id})
+    move_session_audio_to_node(
+        draft, user_node, logger, root=audio_storage_root)
     user_node.streaming_transcription = True
+
+    if refused is not None:
+        logger.info(
+            "Voice recording saved without a reply: AI usage keeps it away "
+            "from AI (session_id=%s user_id=%s node=%s)",
+            session_id, user_id, user_node.id)
+        _skip_voice_reply(draft, user_node, VOICE_REPLY_SKIPPED_AI_USAGE)
+        return
 
     # LLM placeholder (don't enqueue yet — we'll chain it).
     # If the transcript contains a misconfigured {user_export}
@@ -1347,28 +1502,39 @@ def _start_server_side_llm_chain(draft, session_id, transcript,
     # ParentDeletedError handled the same way: if user_node got
     # soft-deleted between voice-record finalization and now, abort
     # cleanly without an orphan LLM placeholder.
+    # SpendCapExceeded the same way (#341): the recording is transcribed
+    # in full even when the monthly cap flipped during it; only the reply
+    # is skipped. Without this the generic handler in the caller committed
+    # the nodes with no warning, and the voice frontend's fallback POST
+    # then tried to save the same transcript again.
+    # AIUsageRefused the same way: AI usage changed after the check above.
+    # ReadOnlyModelRefused the same way: the client sent a read-only model
+    # (an app whose picker does not filter on "chat"); the recording is
+    # kept and the reply is not moved to another model.
     from backend.utils.placeholders import UserExportValidationError
     from backend.utils.node_deletion import ParentDeletedError
-    from backend.utils.task_warnings import record_task_warning
+    from backend.utils.spend import SpendCapExceeded
     try:
         llm_node, _ = create_llm_placeholder(
             tip_node.id, model, user_id, enqueue=False,
-            ai_usage=ai_usage,
+            ai_usage=ai_usage, client=client,
         )
-    except (UserExportValidationError, ParentDeletedError) as e:
+    except (UserExportValidationError, ParentDeletedError,
+            SpendCapExceeded, AIUsageRefused, ReadOnlyModelRefused) as e:
+        if isinstance(e, SpendCapExceeded):
+            message = VOICE_REPLY_SKIPPED_SPEND_CAP
+        elif isinstance(e, AIUsageRefused):
+            message = VOICE_REPLY_SKIPPED_AI_USAGE
+        elif isinstance(e, ReadOnlyModelRefused):
+            message = VOICE_REPLY_SKIPPED_READ_ONLY.format(model=e.model_name)
+        else:
+            message = str(e)
         logger.warning(
             "Voice transcription aborted LLM dispatch: %s "
             "(session_id=%s user_id=%s)",
-            e, session_id, user_id,
+            message, session_id, user_id,
         )
-        record_task_warning(user_node, str(e))
-        # Mark draft as completed (audio + transcript are real and
-        # belong to the user) but with no llm_node_id. The
-        # streaming_warning travels through SSE all_complete to the
-        # voice frontend, which surfaces it as a toast.
-        draft.streaming_status = 'completed'
-        draft.streaming_warning = str(e)
-        db.session.commit()
+        _skip_voice_reply(draft, user_node, message)
         return
 
     # Mark TTS as pending now so the frontend's POST /tts endpoint
@@ -1383,12 +1549,29 @@ def _start_server_side_llm_chain(draft, session_id, transcript,
     draft.streaming_status = 'completed'
     db.session.commit()
 
+    if timing:
+        # #371: the finalize task's marks, under the reply node.
+        facts = {k: timing[k] for k in ("recording_secs", "chunks")
+                 if k in timing}
+        for stage in ("finalize_start", "last_chunk_done", "transcribed"):
+            if stage in timing:
+                voice_timing.mark(llm_node.id, stage, t=timing[stage],
+                                  **(facts if stage == "transcribed" else {}))
+        voice_timing.mark(llm_node.id, "llm_enqueued")
+
     # LLM generation; TTS is dispatched inside the task at each node's own
     # finalization (source_mode='voice'), interim steps included.
+    # The placeholder may have switched the model (a read runs on a read
+    # model, a deprecated one is replaced): run what the node says. A
+    # reply on another model than the warmed one can't read the warm, so
+    # it doesn't wait for it.
+    if llm_node.llm_model != model:
+        prewarm_token = None
     generate_llm_response.si(
-        tip_node.id, llm_node.id, model, user_id,
+        tip_node.id, llm_node.id, llm_node.llm_model, user_id,
         source_mode='voice',
         cache_split_offset=cache_split_offset,
+        prewarm_token=prewarm_token,
     ).apply_async()
 
     logger.info(

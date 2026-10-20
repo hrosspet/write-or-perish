@@ -10,6 +10,7 @@ Follows the real-app + sqlite pattern from test_audio_access.py.
 
 import os
 import sys
+from datetime import datetime, timedelta
 from unittest.mock import MagicMock
 
 # ── Environment ──────────────────────────────────────────────────────────
@@ -184,6 +185,37 @@ class TestCacheHitRate:
         rows = {u["id"]: u for u in client.get("/api/admin/users").get_json()["users"]}
         assert abs(rows[admin.id]["cache_hit_rate"] - 7_808 / 7_993) < 1e-9
 
+    def test_turns_before_caching_launch_are_excluded(self, app, users):
+        """The window starts at PROMPT_CACHE_SINCE (2026-06-25): earlier
+        turns could not have been served from cache, so counting them
+        only drags the rate down. Here they would halve 90% to 45%."""
+        from datetime import timedelta
+        from backend.routes.admin import PROMPT_CACHE_SINCE
+        admin = users["renamed_admin"]
+        with app.app_context():
+            _db.session.add_all([
+                APICostLog(user_id=admin.id, model_id="claude-opus-4.6",
+                           request_type="conversation", input_tokens=1_000_000,
+                           cache_read_tokens=0, cache_write_tokens=0,
+                           cost_microdollars=1,
+                           created_at=PROMPT_CACHE_SINCE - timedelta(seconds=1)),
+                APICostLog(user_id=admin.id, model_id="claude-opus-4.6",
+                           request_type="conversation", input_tokens=1_000_000,
+                           cache_read_tokens=900_000, cache_write_tokens=100_000,
+                           cost_microdollars=1,
+                           created_at=PROMPT_CACHE_SINCE),
+            ])
+            _db.session.commit()
+
+        client = app.test_client()
+        _login(client, admin.id)
+        payload = client.get("/api/admin/users").get_json()
+        rows = {u["id"]: u for u in payload["users"]}
+
+        assert rows[admin.id]["cache_hit_rate"] == 0.9
+        assert rows[admin.id]["cache_input_tokens"] == 1_000_000
+        assert payload["cache_since"].startswith("2026-06-25T15:00:00")
+
 
 class TestProfileStatus:
     """Admin list shows whether a profile chain is at rest (one version, or
@@ -201,8 +233,8 @@ class TestProfileStatus:
         return p
 
     def test_stuck_chain_is_not_complete(self, app, users, monkeypatch):
-        """Latest version is a root chunk but data remains beyond its
-        cutoff and nothing is in flight → chunk 2 failed → not ✓."""
+        """Latest version is a root chunk but data older than it remains
+        beyond its cutoff and nothing is in flight → chunk 2 failed → not ✓."""
         from datetime import datetime
         adm = users["renamed_admin"]
         stuck = User(username="stuck", approved=True, profile_batch_attempts=1)
@@ -210,14 +242,14 @@ class TestProfileStatus:
         p = self._profile(stuck, "iterative")
         p.source_data_cutoff = datetime(2026, 1, 1)
         _db.session.commit()
-        import backend.tasks.profile_batch as pbm
-        monkeypatch.setattr(pbm, "_remaining_token_count", lambda u, ts: 85000)
+        import backend.tasks.exports as exm
+        monkeypatch.setattr(exm, "should_continue_chain", lambda u, p: True)
         client = app.test_client()
         _login(client, adm.id)
         row = {u["username"]: u for u in client.get("/api/admin/users").json["users"]}["stuck"]
         assert row["profile"]["state"] == "generating"
         assert row["profile"]["incomplete"] is True and row["profile"]["batch_attempts"] == 1
-        monkeypatch.setattr(pbm, "_remaining_token_count", lambda u, ts: 30000)  # waiting tail
+        monkeypatch.setattr(exm, "should_continue_chain", lambda u, p: False)  # nothing older unread
         row = {u["username"]: u for u in client.get("/api/admin/users").json["users"]}["stuck"]
         assert row["profile"]["state"] == "complete" and row["profile"]["incomplete"] is False
 
@@ -245,7 +277,12 @@ class TestProfileStatus:
         waiting1 = User(username="waiting1", approved=False, profile_force_batch=True,
                         profile_needs_full_regen=True)
         active_regen = User(username="active_regen", approved=True, profile_needs_full_regen=True)
-        _db.session.add_all([waiting0, waiting1, active_regen]); _db.session.flush()
+        # Same flags as waiting0, but the immediate seed DID run and could
+        # not build the request: not a wait on activation.
+        seed_fail = User(username="seed_fail", approved=False, profile_force_batch=True,
+                         profile_needs_full_regen=True,
+                         profile_seed_error="ValueError: Unsupported model: claude-opus-4-6")
+        _db.session.add_all([waiting0, waiting1, active_regen, seed_fail]); _db.session.flush()
         self._profile(waiting1, "iterative")
         _db.session.commit()
 
@@ -254,7 +291,8 @@ class TestProfileStatus:
         rows = {u["username"]: u for u in client.get("/api/admin/users").json["users"]}
         assert rows["fresh"]["profile"] == {
             "versions": 0, "last_generation_type": None,
-            "last_created_at": None, "state": "none", "waiting": None}
+            "last_created_at": None, "state": "none", "waiting": None,
+            "seed_error": None}
         assert rows["one"]["profile"]["state"] == "complete"
         assert rows["one"]["profile"]["versions"] == 1
         assert rows["one"]["prefilled_handle"] == "corbindreams"
@@ -272,6 +310,10 @@ class TestProfileStatus:
         assert rows["waiting1"]["profile"]["incomplete"] is False
         assert rows["active_regen"]["profile"]["waiting"] is None
         assert rows["pending"]["profile"]["waiting"] is None
+        assert rows["waiting0"]["profile"]["seed_error"] is None
+        assert rows["seed_fail"]["profile"]["state"] == "generating"
+        assert rows["seed_fail"]["profile"]["waiting"] is None
+        assert rows["seed_fail"]["profile"]["seed_error"] == "ValueError: Unsupported model: claude-opus-4-6"
 
     def test_intentions_column_state(self, app, users):
         from datetime import datetime
@@ -316,6 +358,35 @@ class TestProfileStatus:
         assert rows["donei"]["intentions"]["last_created_at"] is not None
         assert rows["neither"]["intentions"] is None
 
+    def test_refused_intentions_run_shows_failed_not_complete(self, app, users):
+        """#368: a run whose output was cut off before any text (sync or
+        batch) writes a refused cost row and no artifact; the column shows
+        "failed" until a newer version is saved."""
+        from backend.models import UserArtifact
+        from backend.utils.refusal_backoff import REFUSED_REF
+        admin = users["renamed_admin"]
+        now = datetime.utcnow()
+        u = User(username="refusedi", approved=True)
+        _db.session.add(u); _db.session.commit()
+        a = UserArtifact(user_id=u.id, kind="intentions", title="Intentions",
+                         generated_by="m", tokens_used=1,
+                         created_at=now - timedelta(days=1))
+        a.set_content("old"); _db.session.add(a)
+        _db.session.add(APICostLog(
+            user_id=u.id, model_id="m", request_type="intentions_infer",
+            request_ref=REFUSED_REF, input_tokens=1, output_tokens=1,
+            cost_microdollars=0, created_at=now - timedelta(minutes=5)))
+        _db.session.commit()
+        client = app.test_client()
+        _login(client, admin.id)
+        rows = {r["username"]: r for r in client.get("/api/admin/users").json["users"]}
+        assert rows["refusedi"]["intentions"]["state"] == "failed"
+        b = UserArtifact(user_id=u.id, kind="intentions", title="Intentions",
+                         generated_by="m", tokens_used=1)
+        b.set_content("new"); _db.session.add(b); _db.session.commit()
+        rows = {r["username"]: r for r in client.get("/api/admin/users").json["users"]}
+        assert rows["refusedi"]["intentions"]["state"] == "complete"
+
 
 class TestBuildProfile:
     def test_force_build_sets_flags_and_seeds(self, app, users, monkeypatch):
@@ -338,6 +409,67 @@ class TestBuildProfile:
         r = client.post(f"/api/admin/users/{small.id}/build_profile")
         assert r.status_code == 200 and r.json["queued"] is False
         assert delay.call_count == 1
+
+    def test_force_flag_skips_the_refusal_backoff(self, app, users, monkeypatch):
+        """#368: without the flag the seed respects the backoff (today's
+        behaviour); with {"force": true} — sent after the admin confirms
+        the dialog — the seed runs with ignore_backoff."""
+        from unittest.mock import MagicMock
+        from backend.tasks import profile_batch as pb
+        admin = users["renamed_admin"]
+        held = User(username="held", approved=True)
+        _db.session.add(held); _db.session.commit()
+        delay = MagicMock()
+        monkeypatch.setattr(pb.seed_profile_batch_for_user, "delay", delay)
+        client = app.test_client()
+        _login(client, admin.id)
+        r = client.post(f"/api/admin/users/{held.id}/build_profile")
+        assert r.status_code == 202 and r.json["force"] is False
+        delay.assert_called_once_with(held.id)
+        delay.reset_mock()
+        r = client.post(f"/api/admin/users/{held.id}/build_profile",
+                        json={"force": True})
+        assert r.status_code == 202 and r.json["force"] is True
+        delay.assert_called_once_with(held.id, ignore_backoff=True)
+
+    def test_users_payload_reports_the_profile_backoff(self, app, users):
+        """profile_backoff: null when not held, "waiting" (with until)
+        after one refusal in the last hour, "stopped" after two; a saved
+        version newer than the refusals ends it."""
+        from backend.models import UserProfile
+        from backend.utils.refusal_backoff import REFUSED_REF
+        admin = users["renamed_admin"]
+        now = datetime.utcnow()
+        waiting = User(username="waiting", approved=True)
+        stopped = User(username="stoppedu", approved=True)
+        cleared = User(username="cleared", approved=True)
+        old = User(username="oldone", approved=True)
+        _db.session.add_all([waiting, stopped, cleared, old]); _db.session.commit()
+
+        def refusal(u, ago):
+            _db.session.add(APICostLog(
+                user_id=u.id, model_id="m", request_type="profile_batch",
+                request_ref=REFUSED_REF, input_tokens=1, output_tokens=1,
+                cost_microdollars=0, created_at=now - ago))
+        refusal(waiting, timedelta(minutes=10))
+        refusal(stopped, timedelta(days=3))
+        refusal(stopped, timedelta(days=2))
+        refusal(cleared, timedelta(days=3))
+        refusal(cleared, timedelta(days=2))
+        refusal(old, timedelta(hours=2))   # one refusal, wait over
+        p = UserProfile(user_id=cleared.id, generated_by="m", tokens_used=0,
+                        generation_type="update", created_at=now - timedelta(days=1))
+        p.set_content("x")
+        _db.session.add(p); _db.session.commit()
+        client = app.test_client()
+        _login(client, admin.id)
+        rows = {u["username"]: u for u in client.get("/api/admin/users").json["users"]}
+        assert rows["waiting"]["profile_backoff"]["state"] == "waiting"
+        assert rows["waiting"]["profile_backoff"]["until"] is not None
+        assert rows["stoppedu"]["profile_backoff"] == {
+            "state": "stopped", "refusals": 2, "until": None}
+        assert rows["cleared"]["profile_backoff"] is None
+        assert rows["oldone"]["profile_backoff"] is None
 
 
 class TestPrefillCheck:
@@ -373,7 +505,39 @@ class TestPrefillCheck:
             "archived_live": 6100})
         assert client.get("/api/admin/prefill/check?handle=big").json["import_source"] == "rest"
         assert r.json["already_imported"] == 1
-        assert r.json["profile_threshold_tokens"] == 10000
+        assert r.json["profile_threshold_tokens"] == 5000  # first ladder step
         monkeypatch.setattr(ca, "coverage_summary", lambda h, snapshot_dir=None: None)
         assert client.get("/api/admin/prefill/check?handle=nobody").status_code == 404
         assert client.get("/api/admin/prefill/check").status_code == 400
+
+
+class TestVoiceTimingAdmin:
+    """#371: every user's voice-turn timings, for the admin only."""
+
+    def test_all_users_turns_and_medians(self, app, users, monkeypatch):
+        from backend.tests.test_voice_timing import FakeRedis
+        from backend.utils import voice_timing
+        fake = FakeRedis()
+        monkeypatch.setattr(voice_timing, "_redis", lambda: fake)
+        admin, other = users["renamed_admin"], users["impostor"]
+        for user, node_id, wait in ((admin, 11, 10.0), (other, 12, 20.0),
+                                    (other, 13, 30.0)):
+            voice_timing.mark(node_id, "rec_stop", t=100.0)
+            voice_timing.mark(node_id, "chunk_ready", t=100.0 + wait)
+            voice_timing.remember_turn(user.id, node_id)
+
+        client = app.test_client()
+        _login(client, admin.id)
+        data = client.get("/api/admin/voice-timing").get_json()
+        assert [t["node_id"] for t in data["turns"]] == [13, 12, 11]
+        assert data["median"]["ready"] == 20.0
+        assert [(u["username"], u["turns"], u["median"]["ready"])
+                for u in data["users"]] == [("hrosspet", 2, 25.0),
+                                            ("explore", 1, 10.0)]
+
+        from flask import g
+        g.pop("_login_user", None)   # the fixture's app context caches it
+        other_client = app.test_client()
+        _login(other_client, other.id)
+        assert other_client.get(
+            "/api/admin/voice-timing").status_code == 403

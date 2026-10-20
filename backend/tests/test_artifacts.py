@@ -35,7 +35,7 @@ for _mod in ["flask_login", "backend.models", "backend.extensions"]:
 from backend.extensions import db as _db  # noqa: E402
 from backend.models import (  # noqa: E402
     User, Node, NodeContextArtifact, UserArtifact, UserFeedback, UserTodo,
-    UserAIPreferences, Draft,
+    Draft,
 )
 
 # ── Import the real llm_completion against stub glue ─────────────────────
@@ -223,6 +223,57 @@ def test_version_ownership_enforced(app, client):
         f"/api/artifacts/versions/{foreign_id}").status_code == 403
 
 
+def test_patch_edits_own_unpinned_version_in_place(app, client):
+    client.put("/api/artifacts/dev-map", json={"content": "- [ ] a"})
+    r = client.patch("/api/artifacts/dev-map", json={"content": "- [x] a"})
+    assert r.status_code == 200
+    assert r.get_json()["artifact"]["version_number"] == 1
+    got = client.get("/api/artifacts/dev-map").get_json()["artifact"]
+    assert got["content"] == "- [x] a"
+
+
+def test_patch_over_ai_version_creates_user_version(app, client):
+    with app.app_context():
+        uid = User.query.first().id
+        _mk_artifact(uid, "dev-map", "- [ ] a", title="Dev Map",
+                     description="Ideas")
+    r = client.patch("/api/artifacts/dev-map", json={"content": "- [x] a"})
+    art = r.get_json()["artifact"]
+    assert art["version_number"] == 2
+    assert art["generated_by"] == "user"
+    assert art["title"] == "Dev Map"
+    assert art["description"] == "Ideas"
+    # The next click edits the new user version in place.
+    r = client.patch("/api/artifacts/dev-map", json={"content": "- [ ] a"})
+    assert r.get_json()["artifact"]["version_number"] == 2
+
+
+def test_patch_over_pinned_version_creates_new_version(app, client):
+    client.put("/api/artifacts/dev-map", json={"content": "- [ ] a"})
+    with app.app_context():
+        uid = User.query.first().id
+        pinned = UserArtifact.latest_for(uid, "dev-map")
+        node = Node(user_id=uid, node_type="user")
+        node.set_content("session")
+        _db.session.add(node)
+        _db.session.flush()
+        _db.session.add(NodeContextArtifact(
+            node_id=node.id, artifact_type="user_artifact",
+            artifact_id=pinned.id))
+        _db.session.commit()
+        pinned_id = pinned.id
+    r = client.patch("/api/artifacts/dev-map", json={"content": "- [x] a"})
+    assert r.get_json()["artifact"]["version_number"] == 2
+    # The pinned version keeps the content the session saw.
+    old = client.get(f"/api/artifacts/versions/{pinned_id}").get_json()
+    assert old["artifact"]["content"] == "- [ ] a"
+
+
+def test_patch_missing_artifact_404(app, client):
+    assert client.patch(
+        "/api/artifacts/nope", json={"content": "x"}).status_code == 404
+
+
 # ── Tool executor ────────────────────────────────────────────────────────
 
 def _run_tool(app, name, inp, uid):
@@ -391,7 +442,7 @@ def test_scan_statuses_delivers_todo_content(app):
         node = _node_with_meta(uid, [
             {"name": "read_todo", "status": "success", "todo_id": todo.id},
         ])
-        notes, to_mark = _scan_proposal_statuses([node])
+        notes, to_mark = _scan_proposal_statuses([node], uid)
         joined = "\n".join(notes)
         assert "the actual tasks" in joined
         assert "current todo list" in joined
@@ -399,7 +450,7 @@ def test_scan_statuses_delivers_todo_content(app):
 
         _mark_status_reported(to_mark)
         _db.session.commit()
-        notes2, to_mark2 = _scan_proposal_statuses([node])
+        notes2, to_mark2 = _scan_proposal_statuses([node], uid)
         assert notes2 == []
 
 
@@ -444,7 +495,7 @@ def test_semantic_search_tool_returns_refs_and_reresolves(app, monkeypatch):
         # The raw snippet text must NOT be persisted in tool meta.
         assert "RAW_SNIPPET" not in json.dumps(r)
         # Injection re-resolves the actual node content fresh.
-        text = _retrieval_injection_text(r)
+        text = _retrieval_injection_text(r, uid)
         assert "leaving my job" in text
         assert "career change" in text
 
@@ -467,7 +518,7 @@ def test_semantic_search_injection_skips_opted_out_node(app, monkeypatch):
         _db.session.commit()
         r = {"name": "semantic_search", "status": "success", "query": "x",
              "matches": [{"node_id": node.id, "score": 0.9}]}
-        assert _retrieval_injection_text(r) is None
+        assert _retrieval_injection_text(r, uid) is None
 
 
 # ── Feedback propose → confirm flow ──────────────────────────────────────
@@ -477,8 +528,13 @@ FEEDBACK_TEXT = (
 )
 
 
-def _mk_llm_node(uid, content):
+def _mk_llm_node(uid, content, proposes=None):
+    """An AI reply of *uid*'s; *proposes* names the propose_* entry the
+    completion task writes on a proposal."""
     node = Node(user_id=uid, node_type="llm", llm_model="test-model")
+    if proposes:
+        node.tool_calls_meta = json.dumps(
+            [{"name": proposes, "status": "success"}])
     node.set_content(content)
     _db.session.add(node)
     _db.session.commit()
@@ -508,7 +564,8 @@ def test_auto_create_drafts_creates_feedback_draft(app):
 def test_apply_feedback_tool_submits(app):
     with app.app_context():
         uid = User.query.first().id
-        origin = _mk_llm_node(uid, FEEDBACK_TEXT)
+        origin = _mk_llm_node(uid, FEEDBACK_TEXT,
+                              proposes="propose_feedback")
         draft = Draft(user_id=uid, parent_id=origin.id,
                       label="feedback_pending")
         draft.set_content("")
@@ -527,6 +584,88 @@ def test_apply_feedback_tool_submits(app):
         assert Draft.query.filter_by(id=draft.id).first() is None
 
 
+# apply_todo_changes: the merge sends the todo list to a model, so it does
+# not start where AI may not read the list (#396 review). The proposal stays
+# pending and the model gets the message to pass on.
+
+def _pending_todo_proposal(uid):
+    proposal = Node(user_id=uid, node_type="llm", llm_model="test-model",
+                    ai_usage="chat", tool_calls_meta=json.dumps(
+                        [{"name": "propose_todo", "status": "success"}]))
+    proposal.set_content("### New Tasks\n- buy milk")
+    _db.session.add(proposal)
+    _db.session.flush()
+    draft = Draft(user_id=uid, parent_id=proposal.id, label="todo_pending")
+    draft.set_content("")
+    _db.session.add(draft)
+    _db.session.commit()
+    return proposal, draft
+
+
+def _stub_merge_start(monkeypatch):
+    import backend.routes.todo as todo_routes
+    started = []
+    monkeypatch.setattr(todo_routes, "_start_todo_merge",
+                        lambda *a, **k: started.append(a) or "task-1")
+    return todo_routes, started
+
+
+def test_apply_todo_changes_refused_for_a_none_todo_list(app, monkeypatch):
+    with app.app_context():
+        uid = User.query.first().id
+        _mk_todo(uid, "- SECRET TASK", ai_usage="none")
+        proposal, draft = _pending_todo_proposal(uid)
+        todo_routes, started = _stub_merge_start(monkeypatch)
+
+        r = _execute_tool_calls(
+            [{"name": "apply_todo_changes", "input": {}}], proposal,
+            [proposal], uid)[0]
+
+        assert r["status"] == "error"
+        assert r["error"] == todo_routes.TODO_MERGE_REFUSED_MESSAGE
+        assert "SECRET" not in r["error"]
+        assert started == []
+        assert Draft.query.get(draft.id) is not None
+
+
+def test_apply_todo_changes_starts_the_merge_for_a_chat_todo_list(
+        app, monkeypatch):
+    with app.app_context():
+        uid = User.query.first().id
+        _mk_todo(uid, "- a task", ai_usage="chat")
+        proposal, _ = _pending_todo_proposal(uid)
+        _, started = _stub_merge_start(monkeypatch)
+
+        r = _execute_tool_calls(
+            [{"name": "apply_todo_changes", "input": {}}], proposal,
+            [proposal], uid)[0]
+
+        assert r["status"] == "success"
+        assert r["apply_task_id"] == "task-1"
+        assert len(started) == 1
+
+
+def test_apply_todo_changes_when_another_request_started_the_merge(
+        app, monkeypatch):
+    """Two confirmations of one proposal start one merge (#434): the
+    second start finds its draft already claimed."""
+    with app.app_context():
+        uid = User.query.first().id
+        _mk_todo(uid, "- a task", ai_usage="chat")
+        proposal, _ = _pending_todo_proposal(uid)
+        import backend.routes.todo as todo_routes
+        monkeypatch.setattr(todo_routes, "_start_todo_merge",
+                            lambda *a, **k: None)
+
+        r = _execute_tool_calls(
+            [{"name": "apply_todo_changes", "input": {}}], proposal,
+            [proposal], uid)[0]
+
+        assert r["status"] == "error"
+        assert r["error"] == todo_routes.TODO_MERGE_RUNNING_MESSAGE
+        assert "apply_task_id" not in r
+
+
 def test_apply_feedback_without_pending_draft_errors(app):
     with app.app_context():
         uid = User.query.first().id
@@ -540,7 +679,8 @@ def test_apply_feedback_without_pending_draft_errors(app):
 def test_feedback_submit_route(app, client):
     with app.app_context():
         uid = User.query.first().id
-        origin = _mk_llm_node(uid, FEEDBACK_TEXT)
+        origin = _mk_llm_node(uid, FEEDBACK_TEXT,
+                              proposes="propose_feedback")
         draft = Draft(user_id=uid, parent_id=origin.id,
                       label="feedback_pending")
         draft.set_content("")
@@ -575,7 +715,8 @@ def test_composing_reply_under_proposal_does_not_clobber_draft(app, client):
     only because it never composes a reply)."""
     with app.app_context():
         uid = User.query.first().id
-        proposal = _mk_llm_node(uid, FEEDBACK_TEXT)
+        proposal = _mk_llm_node(uid, FEEDBACK_TEXT,
+                                proposes="propose_feedback")
         fb = Draft(user_id=uid, parent_id=proposal.id,
                    label="feedback_pending")
         fb.set_content("")
@@ -660,7 +801,7 @@ def test_scan_statuses_reports_artifact_tools_once(app):
             {"name": "propose_feedback", "status": "success",
              "apply_status": "completed"},
         ])
-        notes, to_mark = _scan_proposal_statuses([node])
+        notes, to_mark = _scan_proposal_statuses([node], uid)
         joined = "\n".join(notes)
         assert "Artifact 'memory' was updated." in joined
         assert "the actual books" in joined  # read_artifact content delivery
@@ -669,9 +810,108 @@ def test_scan_statuses_reports_artifact_tools_once(app):
 
         _mark_status_reported(to_mark)
         _db.session.commit()
-        notes2, to_mark2 = _scan_proposal_statuses([node])
+        notes2, to_mark2 = _scan_proposal_statuses([node], uid)
         assert notes2 == []
         assert to_mark2 == []
+
+
+def test_scan_statuses_reports_artifact_failure(app):
+    """A failed update_artifact that never got a same-turn result round
+    (single-shot / budget-exhausted) must be reported, not swallowed —
+    silence reads as success to the model."""
+    with app.app_context():
+        uid = User.query.first().id
+        node = _node_with_meta(uid, [
+            {"name": "update_artifact", "status": "error",
+             "kind": "memory", "error": "Anchor text not found"},
+        ])
+        notes, to_mark = _scan_proposal_statuses([node], uid)
+        assert notes == ["[update_artifact failed — Anchor text not found]"]
+        assert len(to_mark) == 1
+
+        _mark_status_reported(to_mark)
+        _db.session.commit()
+        notes2, _ = _scan_proposal_statuses([node], uid)
+        assert notes2 == []
+
+
+# ── A thread two people reply in ─────────────────────────────────────────
+
+def _reply_for(owner, meta):
+    """An LLM reply made for *owner*, as the task writes one: authored by
+    the model's account, the human owner on human_owner_id."""
+    llm = User.query.filter_by(username="model-account").first()
+    if llm is None:
+        llm = User(username="model-account")
+        _db.session.add(llm)
+        _db.session.commit()
+    node = Node(user_id=llm.id, human_owner_id=owner.id, node_type="llm",
+                llm_model="test-model")
+    node.set_content("resp")
+    node.tool_calls_meta = json.dumps(meta)
+    _db.session.add(node)
+    _db.session.commit()
+    return node
+
+
+def _second_user():
+    bob = User(username="bob")
+    _db.session.add(bob)
+    _db.session.commit()
+    return bob
+
+
+def _apply_status(node):
+    return json.loads(Node.query.get(node.id).tool_calls_meta)[0][
+        "apply_status"]
+
+
+def test_new_proposal_supersedes_only_the_replying_users_own(app):
+    """A new todo proposal for bob replaces bob's pending one; alice's
+    pending proposal in the same thread keeps its status."""
+    with app.app_context():
+        alice, bob = User.query.first(), _second_user()
+        pending = [{"name": "propose_todo", "status": "success",
+                    "apply_status": "pending_approval"}]
+        alices = _reply_for(alice, pending)
+        bobs_earlier = _reply_for(bob, pending)
+        bobs_new = _reply_for(bob, [])
+
+        results = _auto_create_drafts(
+            "### New Tasks\n- call the bank", bobs_new,
+            [alices, bobs_earlier, bobs_new], bob.id)
+        _db.session.commit()
+        _db.session.expire_all()
+
+        assert [r["name"] for r in results] == ["propose_todo"]
+        assert _apply_status(bobs_earlier) == "superseded"
+        assert _apply_status(alices) == "pending_approval"
+
+
+def test_scan_statuses_reads_only_the_replying_users_replies(app):
+    """Bob's reply under alice's carries forward only bob's own pending
+    results. Alice's retrieval waiting for her next turn stays hers and
+    is not marked reported, so her next turn still gets it."""
+    with app.app_context():
+        alice, bob = User.query.first(), _second_user()
+        todo = _mk_todo(alice.id, "alice's own tasks")
+        alices = _reply_for(alice, [
+            {"name": "read_todo", "status": "success", "todo_id": todo.id},
+        ])
+        bobs = _reply_for(bob, [
+            {"name": "update_artifact", "status": "success",
+             "kind": "memory", "created": False},
+        ])
+
+        notes, to_mark = _scan_proposal_statuses([alices, bobs], bob.id)
+        assert notes == ["[Artifact 'memory' was updated.]"]
+        assert [(n.id, name) for n, name in to_mark] == [
+            (bobs.id, "update_artifact")]
+
+        _mark_status_reported(to_mark)
+        _db.session.commit()
+        notes, _ = _scan_proposal_statuses([alices, bobs], alice.id)
+        assert any("alice's own tasks" in n for n in notes)
 
 
 # ── Pinning ──────────────────────────────────────────────────────────────
@@ -741,7 +981,7 @@ def test_inline_kinds_surface_in_node_display(app):
         attach_context_artifacts(node.id, uid)
         _db.session.commit()
 
-        fields = _context_artifact_fields(node)
+        fields = _context_artifact_fields(node, uid)
         for kind in UserArtifact.INLINE_KINDS:
             assert kind in fields, f"{kind} missing from display fields"
             assert fields[kind]["content"] == f"{kind}-body"
@@ -772,16 +1012,16 @@ def test_share_guidance_display_mirrors_llm_substitution(app):
 
         app.config["SHARE_V1"] = True
         user.public_sharing_enabled = False
-        fields = _context_artifact_fields(node)
+        fields = _context_artifact_fields(node, user.id)
         assert fields["share_guidance"]["content"] == ""
 
         user.public_sharing_enabled = True
-        fields = _context_artifact_fields(node)
+        fields = _context_artifact_fields(node, user.id)
         assert fields["share_guidance"]["content"] == SHARE_GUIDANCE_TEXT
 
         # Killswitch off → same as user-disabled
         app.config["SHARE_V1"] = False
-        fields = _context_artifact_fields(node)
+        fields = _context_artifact_fields(node, user.id)
         assert fields["share_guidance"]["content"] == ""
 
 
@@ -872,87 +1112,15 @@ def test_index_excludes_ai_preferences(app):
 
 
 def test_ai_preferences_content_reads_artifact_only(app):
-    """get_user_ai_preferences_content reads the folded UserArtifact only —
-    the legacy UserAIPreferences fallback was dropped (the table goes in
-    #219), so a bare legacy row is no longer surfaced."""
+    """get_user_ai_preferences_content reads the folded UserArtifact only
+    (the legacy UserAIPreferences table was dropped in #219)."""
     with app.app_context():
         uid = User.query.first().id
-        # A legacy UserAIPreferences row is NOT a fallback anymore.
-        legacy = UserAIPreferences(user_id=uid, generated_by="test")
-        legacy.set_content("legacy prefs")
-        _db.session.add(legacy)
-        _db.session.commit()
         assert get_user_ai_preferences_content(uid) is None
-
         # The UserArtifact is the source of truth.
         _mk_artifact(uid, "ai_preferences", "folded prefs",
                      title="AI Interaction Preferences")
         assert get_user_ai_preferences_content(uid) == "folded prefs"
-
-
-def test_backfill_ai_preferences_script(app):
-    """The standalone backfill (expand-contract, #219) copies each
-    UserAIPreferences version into an ai_preferences UserArtifact (preserving
-    order + content) AND repoints the legacy node pins to user_artifact so
-    the legacy code paths become removable. Non-destructive + idempotent."""
-    import importlib.util
-    from datetime import datetime, timedelta
-
-    path = os.path.join(os.path.dirname(os.path.dirname(__file__)),
-                        "scripts", "backfill_ai_preferences_artifacts.py")
-    spec = importlib.util.spec_from_file_location("_bf_aiprefs", path)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-
-    with app.app_context():
-        uid = User.query.first().id
-        base = datetime(2026, 1, 1)
-        prefs = []
-        for i, text in enumerate(["v1 prefs", "v2 prefs"]):
-            p = UserAIPreferences(user_id=uid, generated_by="test",
-                                  created_at=base + timedelta(days=i))
-            p.set_content(text)
-            _db.session.add(p)
-            prefs.append(p)
-        _db.session.flush()
-        # An old-style system node pinning the v2 prefs via the legacy type.
-        node = Node(user_id=uid, node_type="system")
-        node.set_content("{user_ai_preferences}")
-        _db.session.add(node)
-        _db.session.flush()
-        pin = NodeContextArtifact(
-            node_id=node.id, artifact_type="ai_preferences",
-            artifact_id=prefs[1].id)
-        v2_created_at = prefs[1].created_at
-        _db.session.add(pin)
-        _db.session.commit()
-
-        # Dry run touches nothing (reports rows + the legacy-pin count).
-        assert mod.run_backfill(execute=False) == (1, 2, 1)
-        assert UserArtifact.query.filter_by(
-            user_id=uid, kind="ai_preferences").count() == 0
-        assert pin.artifact_type == "ai_preferences"
-
-        # Execute: both versions copied (order preserved) + pin repointed.
-        assert mod.run_backfill(execute=True) == (1, 2, 1)
-        arts = UserArtifact.query.filter_by(
-            user_id=uid, kind="ai_preferences").order_by(
-            UserArtifact.created_at.asc()).all()
-        assert [a.get_content() for a in arts] == ["v1 prefs", "v2 prefs"]
-        # The pin now points at the backfilled v2 artifact (matched by
-        # created_at), as a user_artifact.
-        v2_art = UserArtifact.query.filter_by(
-            user_id=uid, kind="ai_preferences",
-            created_at=v2_created_at).first()
-        assert pin.artifact_type == "user_artifact"
-        assert pin.artifact_id == v2_art.id
-        # Non-destructive: the legacy rows are untouched.
-        assert UserAIPreferences.query.filter_by(user_id=uid).count() == 2
-
-        # Idempotent: re-running migrates nobody and finds no legacy pins.
-        assert mod.run_backfill(execute=True) == (0, 0, 0)
-        assert UserArtifact.query.filter_by(
-            user_id=uid, kind="ai_preferences").count() == 2
 
 
 def test_intentions_ambient_not_in_index(app):
@@ -1034,3 +1202,83 @@ def test_revert_enforces_ownership_and_kind(app, client):
     # Right row, wrong kind in the URL.
     assert client.post(
         f"/api/artifacts/memory/revert/{mine_id}").status_code == 400
+
+
+# ── ai_usage follows the owner's default (#326) ─────────────────────────
+
+@pytest.mark.parametrize("default", ["train", "chat", "none"])
+def test_put_stamps_the_owners_default(app, client, default):
+    """Every artifact writer stamps the owner's default_ai_usage, like
+    the todo list and the profile — no longer a hardcoded 'chat'."""
+    user = User.query.first()
+    user.default_ai_usage = default
+    _db.session.commit()
+    r = client.put("/api/artifacts/memory", json={"content": "a fact"})
+    assert r.status_code == 200
+    assert r.get_json()["artifact"]["ai_usage"] == default
+    assert UserArtifact.latest_for(user.id, "memory").ai_usage == default
+    # A kind with no row yet shows what a first write would be stamped.
+    listed = {a["kind"]: a for a in
+              client.get("/api/artifacts/").get_json()["artifacts"]}
+    assert listed["scratchpad"]["ai_usage"] == default
+
+
+@pytest.mark.parametrize("default, thread, expected", [
+    ("train", "train", "train"),
+    ("train", "chat", "chat"),    # a Chat thread's content stays chat
+    ("chat", "train", "chat"),
+    ("chat", "chat", "chat"),
+    # A 'none' default in a thread set to Chat: the memory must stay
+    # readable next turn, so not 'none'.
+    ("none", "chat", "chat"),
+])
+def test_update_artifact_tool_stamps_train_only_in_a_train_thread_of_a_train_owner(
+        app, default, thread, expected):
+    """The model writes the artifact from this conversation: 'train' only
+    when the owner's default and the thread's own setting both are (#326
+    review)."""
+    with app.app_context():
+        user = User.query.first()
+        user.default_ai_usage = default
+        node = Node(user_id=user.id, node_type="user", ai_usage=thread)
+        node.set_content("tell me something")
+        _db.session.add(node)
+        _db.session.commit()
+        llm_node = MagicMock()
+        llm_node.llm_model = "test-model"
+        r = _execute_tool_calls(
+            [{"name": "update_artifact",
+              "input": {"kind": "memory", "updated_content": "fact"}}],
+            llm_node, [node], user.id)[0]
+        assert r["status"] == "success"
+        assert UserArtifact.latest_for(user.id, "memory").ai_usage == expected
+
+
+def test_switching_the_account_to_train_changes_no_existing_artifact(
+        app, client):
+    """Decision 3 (Peter, 2026-10-01): a switch to Train restamps nothing
+    (the Account handler only sets default_ai_usage). A version written
+    afterwards takes the new setting; a revert copies the version it
+    reproduces."""
+    user = User.query.first()
+    user.default_ai_usage = "chat"
+    _db.session.commit()
+    assert client.put("/api/artifacts/memory",
+                      json={"content": "old"}).status_code == 200
+    old = UserArtifact.latest_for(user.id, "memory")
+    old_id = old.id
+    assert old.ai_usage == "chat"
+
+    user.default_ai_usage = "train"             # PUT /api/dashboard/user
+    _db.session.commit()
+    assert UserArtifact.query.get(old_id).ai_usage == "chat"
+
+    assert client.put("/api/artifacts/memory",
+                      json={"content": "new"}).status_code == 200
+    new = UserArtifact.latest_for(user.id, "memory")
+    assert new.id != old_id and new.ai_usage == "train"
+    assert UserArtifact.query.get(old_id).ai_usage == "chat"
+
+    assert client.post(
+        f"/api/artifacts/memory/revert/{old_id}").status_code in (200, 201)
+    assert UserArtifact.latest_for(user.id, "memory").ai_usage == "chat"

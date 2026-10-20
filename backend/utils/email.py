@@ -1,29 +1,96 @@
+import re
 import smtplib
 import logging
+from html import escape
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from flask import current_app
 
 logger = logging.getLogger(__name__)
 
+# The one definition of "an address we accept", for sign-in and for the
+# email change alike. The length is the width of User.email: a longer
+# address passes the pattern and then fails the insert.
+EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+EMAIL_MAX_LENGTH = 128
 
-def send_magic_link_email(to_email, magic_link_url):
+
+def is_valid_email(address):
+    return bool(address) and len(address) <= EMAIL_MAX_LENGTH \
+        and bool(EMAIL_RE.match(address))
+
+
+def _deliver(to_email, subject, text_body, html_body):
+    """Send one multipart mail through the configured SMTP relay."""
     config = current_app.config
     sender = config.get("MAIL_DEFAULT_SENDER", "login@loore.org")
-
     msg = MIMEMultipart("alternative")
-    msg["Subject"] = "Your Loore sign-in link"
+    msg["Subject"] = subject
     msg["From"] = sender
     msg["To"] = to_email
+    msg.attach(MIMEText(text_body, "plain"))
+    msg.attach(MIMEText(html_body, "html"))
+    server = config.get("MAIL_SERVER", "localhost")
+    port = config.get("MAIL_PORT", 587)
+    use_tls = config.get("MAIL_USE_TLS", True)
+    username = config.get("MAIL_USERNAME")
+    password = config.get("MAIL_PASSWORD")
+    timeout = config.get("MAIL_TIMEOUT_SECONDS", 10)
+    with smtplib.SMTP(server, port, timeout=timeout) as smtp:
+        if use_tls:
+            smtp.starttls()
+        if username and password:
+            smtp.login(username, password)
+        smtp.sendmail(sender, to_email, msg.as_string())
 
-    text_body = (
-        "Sign in to Loore\n\n"
-        f"Click the link below to sign in:\n{magic_link_url}\n\n"
-        "This link expires in 15 minutes and can only be used once.\n\n"
-        "If you didn't request this, you can safely ignore this email."
-    )
 
-    html_body = f"""\
+def _send(to_email, subject, text_body, html_body, sent_log, failed_log,
+          best_effort=False):
+    """_deliver plus the sender's log lines. ``best_effort`` mails (admin
+    heads-ups, notices about something that already happened) never raise."""
+    try:
+        _deliver(to_email, subject, text_body, html_body)
+        logger.info(sent_log)
+    except Exception:
+        logger.exception(failed_log)
+        if not best_effort:
+            raise
+
+
+_P_STYLE = "font-size: 15px; font-weight: 300; color: #a89f91; margin: 0 0 {gap} 0; line-height: 1.6;"
+_NOTE_STYLES = (
+    "color: #736b5f; font-size: 13px; font-weight: 300; margin: 0 0 6px 0; line-height: 1.5;",
+    "color: #736b5f; font-size: 12px; font-weight: 300; margin: 0; line-height: 1.5;",
+)
+
+
+def _card(heading, paragraphs, button_label=None, button_url=None, footnotes=()):
+    """The dark Loore mail card every mail uses. ``heading``, ``paragraphs``
+    and ``footnotes`` are HTML: escape anything a user typed."""
+    # The wider gap below the last paragraph is room for the button.
+    body = "".join(
+        f'\n    <p style="{_P_STYLE.format(gap="28px" if button_url and i == len(paragraphs) - 1 else "8px")}">'
+        f"\n      {p}\n    </p>"
+        for i, p in enumerate(paragraphs))
+    button = ""
+    if button_url:
+        button = f"""
+    <a href="{button_url}"
+       style="display: inline-block; padding: 12px 32px; background: transparent; color: #c4956a;
+              text-decoration: none; border-radius: 6px; border: 1px solid #c4956a;
+              font-family: 'Outfit', -apple-system, sans-serif; font-size: 14px; font-weight: 400;
+              letter-spacing: 0.04em;">
+      {button_label}
+    </a>"""
+    footer = ""
+    if footnotes:
+        notes = "".join(
+            f'\n      <p style="{_NOTE_STYLES[min(i, 1)]}">\n        {n}\n      </p>'
+            for i, n in enumerate(footnotes))
+        footer = f"""
+    <div style="border-top: 1px solid #302c27; margin-top: 36px; padding-top: 20px;">{notes}
+    </div>"""
+    return f"""\
 <html>
 <body style="font-family: 'Outfit', -apple-system, sans-serif; background: #0e0d0b; color: #ede8dd; padding: 40px 20px; margin: 0;">
   <div style="max-width: 460px; margin: 0 auto; background: #181714; border-radius: 10px; border: 1px solid #302c27; padding: 48px 40px;">
@@ -31,136 +98,241 @@ def send_magic_link_email(to_email, magic_link_url):
       Loore
     </div>
     <h2 style="font-family: 'Cormorant Garamond', Georgia, 'Times New Roman', serif; font-weight: 300; font-size: 28px; color: #ede8dd; margin: 0 0 12px 0;">
-      Sign in
-    </h2>
-    <p style="font-size: 15px; font-weight: 300; color: #a89f91; margin: 0 0 28px 0; line-height: 1.6;">
-      Click the button below to continue to your account.
-    </p>
-    <a href="{magic_link_url}"
-       style="display: inline-block; padding: 12px 32px; background: transparent; color: #c4956a;
-              text-decoration: none; border-radius: 6px; border: 1px solid #c4956a;
-              font-family: 'Outfit', -apple-system, sans-serif; font-size: 14px; font-weight: 400;
-              letter-spacing: 0.04em;">
-      Sign in to Loore
-    </a>
-    <div style="border-top: 1px solid #302c27; margin-top: 36px; padding-top: 20px;">
-      <p style="color: #736b5f; font-size: 13px; font-weight: 300; margin: 0 0 6px 0; line-height: 1.5;">
-        This link expires in 15 minutes and can only be used once.
-      </p>
-      <p style="color: #736b5f; font-size: 12px; font-weight: 300; margin: 0; line-height: 1.5;">
-        If you didn't request this, you can safely ignore this email.
-      </p>
-    </div>
+      {heading}
+    </h2>{body}{button}{footer}
   </div>
 </body>
 </html>"""
 
-    msg.attach(MIMEText(text_body, "plain"))
-    msg.attach(MIMEText(html_body, "html"))
 
-    server = config.get("MAIL_SERVER", "localhost")
-    port = config.get("MAIL_PORT", 587)
-    use_tls = config.get("MAIL_USE_TLS", True)
-    username = config.get("MAIL_USERNAME")
-    password = config.get("MAIL_PASSWORD")
+def _duration_words(seconds):
+    """900 -> "15 minutes", 86400 -> "24 hours": the mail states the
+    configured lifetime instead of repeating a number that can drift."""
+    seconds = int(seconds)
+    for unit, size in (("hour", 3600), ("minute", 60)):
+        if seconds >= size and seconds % size == 0:
+            n = seconds // size
+            return f"{n} {unit}{'' if n == 1 else 's'}"
+    return f"{seconds} seconds"
 
-    try:
-        with smtplib.SMTP(server, port) as smtp:
-            if use_tls:
-                smtp.starttls()
-            if username and password:
-                smtp.login(username, password)
-            smtp.sendmail(sender, to_email, msg.as_string())
-        logger.info(f"Magic link email sent to {to_email}")
-    except Exception:
-        logger.exception(f"Failed to send magic link email to {to_email}")
-        raise
+
+def send_magic_link_email(to_email, magic_link_url):
+    lifetime = _duration_words(
+        current_app.config.get("MAGIC_LINK_EXPIRY_SECONDS", 900))
+    text_body = (
+        "Sign in to Loore\n\n"
+        f"Click the link below to sign in:\n{magic_link_url}\n\n"
+        f"This link expires in {lifetime} and can only be used once.\n\n"
+        "If you didn't request this, you can safely ignore this email."
+    )
+    html_body = _card(
+        "Sign in",
+        ["Click the button below to continue to your account."],
+        "Sign in to Loore", magic_link_url,
+        (f"This link expires in {lifetime} and can only be used once.",
+         "If you didn't request this, you can safely ignore this email."))
+    _send(to_email, "Your Loore sign-in link", text_body, html_body,
+          f"Magic link email sent to {to_email}",
+          f"Failed to send magic link email to {to_email}")
+
+
+def send_email_change_email(to_email, confirm_url, expires_in_seconds):
+    """Confirmation link for binding *to_email* to an account (#260). The
+    address becomes the account's email only when the link is confirmed
+    from inside that account (POST /api/dashboard/email/confirm)."""
+    lifetime = _duration_words(expires_in_seconds)
+    text_body = (
+        "Confirm your email for Loore\n\n"
+        "Someone asked to use this address for their Loore account. "
+        f"Open the link below to confirm it:\n{confirm_url}\n\n"
+        f"This link expires in {lifetime}.\n\n"
+        "If this wasn't you, ignore this email and nothing changes."
+    )
+    html_body = _card(
+        "Confirm your email",
+        ["Someone asked to use this address for their Loore account. "
+         "Confirm it to make it your sign-in email."],
+        "Confirm this address", confirm_url,
+        (f"This link expires in {lifetime}.",
+         "If this wasn't you, ignore this email and nothing changes."))
+    _send(to_email, "Confirm your email for Loore", text_body, html_body,
+          "Email-change confirmation sent",
+          "Failed to send email-change confirmation")
+
+
+def send_email_in_use_notice(to_email):
+    """Sent INSTEAD of the confirmation link when the requested address
+    already signs in to another account (#260). The requester gets the same
+    response either way, so the endpoint cannot be used to find out which
+    addresses have accounts; only whoever reads this inbox learns why no
+    link came."""
+    text_body = (
+        "This address already signs in to Loore\n\n"
+        "Someone asked to use this address for a Loore account, but it "
+        "already signs in to another one. Nothing has changed.\n\n"
+        "If this was you: sign in with this address to reach the account it "
+        "belongs to, or use a different address for the other account.\n\n"
+        "If it wasn't you, you can ignore this email."
+    )
+    html_body = _card(
+        "This address is already in use",
+        ["Someone asked to use this address for a Loore account, but it "
+         "already signs in to another one. Nothing has changed."],
+        footnotes=(
+            "If this was you: sign in with this address to reach the account "
+            "it belongs to, or use a different address for the other account.",
+            "If it wasn't you, you can ignore this email."))
+    _send(to_email, "This address already signs in to Loore", text_body,
+          html_body,
+          "Email-in-use notice sent",
+          "Failed to send email-in-use notice")
+
+
+def send_email_changed_notice(old_email, new_email):
+    """Tell the previous address that the account moved to a new one, so a
+    hijacked session cannot silently re-home the account (#260). The change
+    itself already happened; the notice is best-effort."""
+    text_body = (
+        "Your Loore sign-in email changed\n\n"
+        f"The email for your Loore account is now {new_email}. "
+        "This address no longer signs you in.\n\n"
+        "If you did not do this, reply to this email right away."
+    )
+    html_body = _card(
+        "Your sign-in email changed",
+        [f"The email for your Loore account is now <strong style=\"color: #ede8dd;\">{escape(new_email)}</strong>. "
+         "This address no longer signs you in."],
+        footnotes=("If you did not do this, reply to this email right away.",))
+    _send(old_email, "Your Loore sign-in email changed", text_body, html_body,
+          "Email-changed notice sent to the previous address",
+          "Failed to send email-changed notice",
+          best_effort=True)
+
+
+def send_x_connected_notice(to_email, handle):
+    """Tell the account's address that an X account can now sign in to it
+    (Connect X, #311). Best-effort, like the email-changed notice."""
+    text_body = (
+        "X is now connected to your Loore account\n\n"
+        f"The X account @{handle} can now sign in to your Loore account.\n\n"
+        "If you did not do this, reply to this email right away."
+    )
+    html_body = _card(
+        "X is now connected to your account",
+        [f"The X account <strong style=\"color: #ede8dd;\">@{escape(handle)}</strong> "
+         "can now sign in to your Loore account."],
+        footnotes=("If you did not do this, reply to this email right away.",))
+    _send(to_email, "X is now connected to your Loore account", text_body,
+          html_body, "X-connected notice sent", "Failed to send X-connected notice",
+          best_effort=True)
+
+
+def send_account_deletion_link_email(to_email, username, confirm_url,
+                                     expires_in_seconds, grace_days):
+    """The link that confirms an account deletion (#269). It works only
+    inside a signed-in session of the account, from a page with both
+    choices, so opening it deletes nothing."""
+    lifetime = _duration_words(expires_in_seconds)
+    text_body = (
+        "Confirm the deletion of your Loore account\n\n"
+        f"You asked to delete the Loore account @{username}. Open the link "
+        f"below to confirm:\n{confirm_url}\n\n"
+        "Once you confirm, the account is deleted and you are signed out. "
+        "If you change your mind, you can still restore it by signing in "
+        f"within {grace_days} days; after that it is deleted forever, "
+        "with everything in it.\n\n"
+        f"This link expires in {lifetime}. If you did not ask for this, "
+        "ignore this email and nothing changes."
+    )
+    html_body = _card(
+        "Confirm the deletion of your account",
+        [f"You asked to delete the Loore account <strong style=\"color: #ede8dd;\">@{escape(username)}</strong>.",
+         "Once you confirm, the account is deleted and you are signed out. "
+         "If you change your mind, you can still restore it by signing in "
+         f"within {grace_days} days; after that it is deleted forever, "
+         "with everything in it."],
+        "Review and confirm", confirm_url,
+        (f"This link expires in {lifetime}.",
+         "If you did not ask for this, ignore this email and nothing changes."))
+    _send(to_email, "Confirm the deletion of your Loore account", text_body,
+          html_body, "Account deletion link sent",
+          "Failed to send the account deletion link")
+
+
+def send_account_deletion_scheduled_email(to_email, username, delete_on,
+                                          by_admin=False):
+    """The deletion is scheduled (#269): when, and how to undo it.
+    Best-effort: the deletion already happened from the user's side.
+    *by_admin*: a Loore admin deleted the account; the user can restore
+    it the same way (Peter, 2026-10-13), and the last line says who did
+    it instead of "If you did not do this"."""
+    footnote = (
+        "A Loore admin deleted this account. If you did not ask for this, "
+        "sign in and restore it." if by_admin else
+        "If you did not do this, sign in and restore the account right away.")
+    text_body = (
+        "Your Loore account is deleted\n\n"
+        f"The account @{username} is deleted. If you change your mind, "
+        f"you can still restore it until {delete_on}: sign in to Loore and "
+        "choose Restore. After that it is deleted forever, with everything in it.\n\n"
+        f"{footnote}"
+    )
+    html_body = _card(
+        "Your account is deleted",
+        [f"The account <strong style=\"color: #ede8dd;\">@{escape(username)}</strong> "
+         f"is deleted. If you change your mind, you can still restore it until "
+         f"{escape(delete_on)}: sign in to Loore and choose Restore.",
+         "After that it is deleted forever, with everything in it."],
+        footnotes=(footnote,))
+    _send(to_email, "Your Loore account is deleted", text_body,
+          html_body, "Account deletion scheduled notice sent",
+          "Failed to send the account deletion scheduled notice",
+          best_effort=True)
+
+
+def send_account_deleted_email(to_email):
+    """The account and its data are gone (#269). The address is not kept
+    after this mail. Best-effort."""
+    text_body = (
+        "Your Loore account is deleted forever\n\n"
+        "Your account and everything in it are deleted forever. Loore "
+        "keeps only a record of what your AI use cost, without your "
+        "name.\n\n"
+        "Copies in our backups are erased within 30 days."
+    )
+    html_body = _card(
+        "Your account is deleted forever",
+        ["Your account and everything in it are deleted forever. Loore "
+         "keeps only a record of what your AI use cost, without your name."],
+        footnotes=("Copies in our backups are erased within 30 days.",))
+    _send(to_email, "Your Loore account is deleted forever", text_body,
+          html_body, "Account deleted notice sent",
+          "Failed to send the account deleted notice",
+          best_effort=True)
 
 
 def send_welcome_email(to_email, magic_link_url):
-    config = current_app.config
-    sender = config.get("MAIL_DEFAULT_SENDER", "login@loore.org")
-
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = "Welcome to Loore"
-    msg["From"] = sender
-    msg["To"] = to_email
-
     text_body = (
         "Welcome to Loore\n\n"
         "Your account has been approved! You're one of the first people here.\n\n"
         f"Click the link below to get started:\n{magic_link_url}\n\n"
         "This link can only be used once."
     )
-
-    html_body = f"""\
-<html>
-<body style="font-family: 'Outfit', -apple-system, sans-serif; background: #0e0d0b; color: #ede8dd; padding: 40px 20px; margin: 0;">
-  <div style="max-width: 460px; margin: 0 auto; background: #181714; border-radius: 10px; border: 1px solid #302c27; padding: 48px 40px;">
-    <div style="font-family: 'Cormorant Garamond', Georgia, 'Times New Roman', serif; font-size: 14px; font-weight: 300; text-transform: uppercase; letter-spacing: 0.3em; color: #736b5f; margin-bottom: 32px;">
-      Loore
-    </div>
-    <h2 style="font-family: 'Cormorant Garamond', Georgia, 'Times New Roman', serif; font-weight: 300; font-size: 28px; color: #ede8dd; margin: 0 0 12px 0;">
-      Welcome to <em style="color: #c4956a;">Loore</em>.
-    </h2>
-    <p style="font-size: 15px; font-weight: 300; color: #a89f91; margin: 0 0 8px 0; line-height: 1.6;">
-      Your account has been approved. You're one of the first people here.
-    </p>
-    <p style="font-size: 15px; font-weight: 300; color: #a89f91; margin: 0 0 28px 0; line-height: 1.6;">
-      Click below to begin.
-    </p>
-    <a href="{magic_link_url}"
-       style="display: inline-block; padding: 12px 32px; background: transparent; color: #c4956a;
-              text-decoration: none; border-radius: 6px; border: 1px solid #c4956a;
-              font-family: 'Outfit', -apple-system, sans-serif; font-size: 14px; font-weight: 400;
-              letter-spacing: 0.04em;">
-      Enter Loore
-    </a>
-    <div style="border-top: 1px solid #302c27; margin-top: 36px; padding-top: 20px;">
-      <p style="color: #736b5f; font-size: 13px; font-weight: 300; margin: 0 0 6px 0; line-height: 1.5;">
-        This link can only be used once.
-      </p>
-    </div>
-  </div>
-</body>
-</html>"""
-
-    msg.attach(MIMEText(text_body, "plain"))
-    msg.attach(MIMEText(html_body, "html"))
-
-    server = config.get("MAIL_SERVER", "localhost")
-    port = config.get("MAIL_PORT", 587)
-    use_tls = config.get("MAIL_USE_TLS", True)
-    username = config.get("MAIL_USERNAME")
-    password = config.get("MAIL_PASSWORD")
-
-    try:
-        with smtplib.SMTP(server, port) as smtp:
-            if use_tls:
-                smtp.starttls()
-            if username and password:
-                smtp.login(username, password)
-            smtp.sendmail(sender, to_email, msg.as_string())
-        logger.info(f"Welcome email sent to {to_email}")
-    except Exception:
-        logger.exception(f"Failed to send welcome email to {to_email}")
-        raise
+    html_body = _card(
+        'Welcome to <em style="color: #c4956a;">Loore</em>.',
+        ["Your account has been approved. You're one of the first people here.",
+         "Click below to begin."],
+        "Enter Loore", magic_link_url,
+        ("This link can only be used once.",))
+    _send(to_email, "Welcome to Loore", text_body, html_body,
+          f"Welcome email sent to {to_email}",
+          f"Failed to send welcome email to {to_email}")
 
 
 def send_spend_alert_email(to_email, provider, spend_usd, limit_usd, threshold):
     """Alert the admin that month-to-date API spend crossed a threshold
     of the configured limit (issue #85)."""
-    config = current_app.config
-    sender = config.get("MAIL_DEFAULT_SENDER", "login@loore.org")
     percent = int(round(threshold * 100))
-
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = (
-        f"Loore spend alert: {provider} at {percent}% of monthly limit"
-    )
-    msg["From"] = sender
-    msg["To"] = to_email
-
     text_body = (
         f"API spend alert\n\n"
         f"Provider: {provider}\n"
@@ -169,66 +341,84 @@ def send_spend_alert_email(to_email, provider, spend_usd, limit_usd, threshold):
         f"Threshold crossed: {percent}%\n\n"
         f"Review usage in the admin dashboard: https://loore.org/admin\n"
     )
+    html_body = _card(
+        f"Spend alert: {percent}%",
+        [f'<strong style="color: #ede8dd;">{escape(str(provider))}</strong> month-to-date spend is\n'
+         f'      <strong style="color: #c4956a;">${spend_usd:,.2f}</strong>\n'
+         f'      of the <strong style="color: #ede8dd;">${limit_usd:,.2f}</strong> monthly limit.'],
+        "Open admin dashboard", "https://loore.org/admin")
+    _send(to_email,
+          f"Loore spend alert: {provider} at {percent}% of monthly limit",
+          text_body, html_body,
+          f"Spend alert email sent to {to_email} ({percent}%)",
+          f"Failed to send spend alert email to {to_email}")
 
-    html_body = f"""\
-<html>
-<body style="font-family: 'Outfit', -apple-system, sans-serif; background: #0e0d0b; color: #ede8dd; padding: 40px 20px; margin: 0;">
-  <div style="max-width: 460px; margin: 0 auto; background: #181714; border-radius: 10px; border: 1px solid #302c27; padding: 48px 40px;">
-    <div style="font-family: 'Cormorant Garamond', Georgia, 'Times New Roman', serif; font-size: 14px; font-weight: 300; text-transform: uppercase; letter-spacing: 0.3em; color: #736b5f; margin-bottom: 32px;">
-      Loore
-    </div>
-    <h2 style="font-family: 'Cormorant Garamond', Georgia, 'Times New Roman', serif; font-weight: 300; font-size: 28px; color: #ede8dd; margin: 0 0 12px 0;">
-      Spend alert: {percent}%
-    </h2>
-    <p style="font-size: 15px; font-weight: 300; color: #a89f91; margin: 0 0 8px 0; line-height: 1.6;">
-      <strong style="color: #ede8dd;">{provider}</strong> month-to-date spend is
-      <strong style="color: #c4956a;">${spend_usd:,.2f}</strong>
-      of the <strong style="color: #ede8dd;">${limit_usd:,.2f}</strong> monthly limit.
-    </p>
-    <a href="https://loore.org/admin"
-       style="display: inline-block; margin-top: 20px; padding: 12px 32px; background: transparent; color: #c4956a;
-              text-decoration: none; border-radius: 6px; border: 1px solid #c4956a;
-              font-family: 'Outfit', -apple-system, sans-serif; font-size: 14px; font-weight: 400;
-              letter-spacing: 0.04em;">
-      Open admin dashboard
-    </a>
-  </div>
-</body>
-</html>"""
 
-    msg.attach(MIMEText(text_body, "plain"))
-    msg.attach(MIMEText(html_body, "html"))
+def send_provider_account_alert_email(to_email, provider, kind, model,
+                                      detail, window_seconds,
+                                      key_role="unknown", environment=None,
+                                      user_message=None):
+    """Alert the admin that calls to a model provider fail for an account
+    reason — a spend limit, billing, the API key, a model id — which
+    waiting won't fix (#369, #360). Sent once per cause per
+    ``window_seconds`` (backend/utils/provider_alerts.py).
 
-    server = config.get("MAIL_SERVER", "localhost")
-    port = config.get("MAIL_PORT", 587)
-    use_tls = config.get("MAIL_USE_TLS", True)
-    username = config.get("MAIL_USERNAME")
-    password = config.get("MAIL_PASSWORD")
-
-    try:
-        with smtplib.SMTP(server, port) as smtp:
-            if use_tls:
-                smtp.starttls()
-            if username and password:
-                smtp.login(username, password)
-            smtp.sendmail(sender, to_email, msg.as_string())
-        logger.info(f"Spend alert email sent to {to_email} ({percent}%)")
-    except Exception:
-        logger.exception(f"Failed to send spend alert email to {to_email}")
-        raise
+    *environment* ("prod", "staging", "local") goes in the subject, since
+    staging sends to the same inbox. *key_role* says which configured key
+    failed (chat, train, batch, legacy) by its role and setting names;
+    no part of the key itself is in the email. *user_message* is what
+    users read instead of the provider's error."""
+    from backend.llm_providers import ACCOUNT_FAILURE_KINDS, account_error_class
+    from backend.utils.api_keys import api_key_role_settings
+    what = ACCOUNT_FAILURE_KINDS.get(kind, kind)
+    window = _duration_words(window_seconds)
+    user_message = user_message or account_error_class(kind).USER_MESSAGE
+    settings = api_key_role_settings(provider, key_role)
+    key_text = (f"{key_role} ({', '.join(settings)})" if settings
+                else key_role)
+    fields = [
+        ("Deployment", environment),
+        ("Provider", provider),
+        ("Cause", f"{what} ({kind})"),
+        ("API key", key_text),
+        ("Model", model),
+        ("HTTP status", detail.get("status")),
+        ("Error type", detail.get("type")),
+        ("Error code", detail.get("code")),
+        ("Provider's message", detail.get("message")),
+        ("Request id", detail.get("request_id")),
+    ]
+    fields = [(label, value) for label, value in fields if value]
+    text_body = (
+        f"Model provider account failure\n\n"
+        f"Calls to {provider} are failing: {what}. Retrying won't help; "
+        f"these calls keep failing until it is fixed. Users see "
+        f"\"{user_message}\"\n\n"
+        + "".join(f"{label}: {value}\n" for label, value in fields)
+        + f"\nFurther failures with the same cause are not emailed for "
+        f"{window}. Sentry groups them in one issue.\n"
+    )
+    html_body = _card(
+        f"{escape(str(provider))} calls are failing",
+        [f"Cause: <strong style=\"color: #ede8dd;\">{escape(what)}</strong>. "
+         f"Retrying won't help; these calls keep failing until it is fixed. "
+         f"Users see &ldquo;{escape(user_message)}&rdquo;",
+         "<br>".join(f"{escape(label)}: {escape(str(value))}"
+                     for label, value in fields)],
+        footnotes=(f"Further failures with the same cause are not emailed "
+                   f"for {window}. Sentry groups them in one issue.",))
+    prefix = f"[{environment}] " if environment else ""
+    _send(to_email,
+          f"{prefix}Loore: {provider} calls are failing ({kind})",
+          text_body, html_body,
+          f"Provider account alert sent to {to_email} ({provider} {kind} "
+          f"{key_role})",
+          f"Failed to send provider account alert to {to_email}")
 
 
 def send_user_spend_block_email(to_email, username, spend_usd, limit_usd):
     """Alert the admin that a single user hit their monthly spend cap and has
     been hard-blocked until month rollover (issue #85 follow-up)."""
-    config = current_app.config
-    sender = config.get("MAIL_DEFAULT_SENDER", "login@loore.org")
-
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = f"Loore: user {username} hit the ${limit_usd:,.0f} monthly cap"
-    msg["From"] = sender
-    msg["To"] = to_email
-
     text_body = (
         f"Per-user spend cap reached\n\n"
         f"User: {username}\n"
@@ -238,120 +428,39 @@ def send_user_spend_block_email(to_email, username, spend_usd, limit_usd):
         f"month rolls over.\n"
         f"Review usage in the admin dashboard: https://loore.org/admin\n"
     )
-
-    html_body = f"""\
-<html>
-<body style="font-family: 'Outfit', -apple-system, sans-serif; background: #0e0d0b; color: #ede8dd; padding: 40px 20px; margin: 0;">
-  <div style="max-width: 460px; margin: 0 auto; background: #181714; border-radius: 10px; border: 1px solid #302c27; padding: 48px 40px;">
-    <div style="font-family: 'Cormorant Garamond', Georgia, 'Times New Roman', serif; font-size: 14px; font-weight: 300; text-transform: uppercase; letter-spacing: 0.3em; color: #736b5f; margin-bottom: 32px;">
-      Loore
-    </div>
-    <h2 style="font-family: 'Cormorant Garamond', Georgia, 'Times New Roman', serif; font-weight: 300; font-size: 28px; color: #ede8dd; margin: 0 0 12px 0;">
-      User hit monthly cap
-    </h2>
-    <p style="font-size: 15px; font-weight: 300; color: #a89f91; margin: 0 0 8px 0; line-height: 1.6;">
-      <strong style="color: #ede8dd;">{username}</strong> reached
-      <strong style="color: #c4956a;">${spend_usd:,.2f}</strong>
-      of the <strong style="color: #ede8dd;">${limit_usd:,.2f}</strong> monthly cap
-      and is now hard-blocked until the month rolls over.
-    </p>
-    <a href="https://loore.org/admin"
-       style="display: inline-block; margin-top: 20px; padding: 12px 32px; background: transparent; color: #c4956a;
-              text-decoration: none; border-radius: 6px; border: 1px solid #c4956a;
-              font-family: 'Outfit', -apple-system, sans-serif; font-size: 14px; font-weight: 400;
-              letter-spacing: 0.04em;">
-      Open admin dashboard
-    </a>
-  </div>
-</body>
-</html>"""
-
-    msg.attach(MIMEText(text_body, "plain"))
-    msg.attach(MIMEText(html_body, "html"))
-
-    server = config.get("MAIL_SERVER", "localhost")
-    port = config.get("MAIL_PORT", 587)
-    use_tls = config.get("MAIL_USE_TLS", True)
-    username_smtp = config.get("MAIL_USERNAME")
-    password = config.get("MAIL_PASSWORD")
-
-    try:
-        with smtplib.SMTP(server, port) as smtp:
-            if use_tls:
-                smtp.starttls()
-            if username_smtp and password:
-                smtp.login(username_smtp, password)
-            smtp.sendmail(sender, to_email, msg.as_string())
-        logger.info(f"Spend block email sent to {to_email} (user {username})")
-    except Exception:
-        logger.exception(f"Failed to send spend block email to {to_email}")
-        raise
+    html_body = _card(
+        "User hit monthly cap",
+        [f'<strong style="color: #ede8dd;">{escape(str(username))}</strong> reached\n'
+         f'      <strong style="color: #c4956a;">${spend_usd:,.2f}</strong>\n'
+         f'      of the <strong style="color: #ede8dd;">${limit_usd:,.2f}</strong> monthly cap\n'
+         f'      and is now hard-blocked until the month rolls over.'],
+        "Open admin dashboard", "https://loore.org/admin")
+    _send(to_email,
+          f"Loore: user {username} hit the ${limit_usd:,.0f} monthly cap",
+          text_body, html_body,
+          f"Spend block email sent to {to_email} (user {username})",
+          f"Failed to send spend block email to {to_email}")
 
 
 def send_admin_signup_notification(username, user_email):
-    config = current_app.config
-    sender = config.get("MAIL_DEFAULT_SENDER", "login@loore.org")
     admin_email = "signup@loore.org"
     admin_url = "https://loore.org/admin"
-
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = f"New signup: {username}"
-    msg["From"] = sender
-    msg["To"] = admin_email
-
     text_body = (
         f"New signup on Loore\n\n"
         f"Username: {username}\n"
         f"Email: {user_email or 'not provided'}\n\n"
         f"Review and approve in the admin dashboard:\n{admin_url}\n"
     )
-
-    html_body = f"""\
-<html>
-<body style="font-family: 'Outfit', -apple-system, sans-serif; background: #0e0d0b; color: #ede8dd; padding: 40px 20px; margin: 0;">
-  <div style="max-width: 460px; margin: 0 auto; background: #181714; border-radius: 10px; border: 1px solid #302c27; padding: 48px 40px;">
-    <div style="font-family: 'Cormorant Garamond', Georgia, 'Times New Roman', serif; font-size: 14px; font-weight: 300; text-transform: uppercase; letter-spacing: 0.3em; color: #736b5f; margin-bottom: 32px;">
-      Loore
-    </div>
-    <h2 style="font-family: 'Cormorant Garamond', Georgia, 'Times New Roman', serif; font-weight: 300; font-size: 28px; color: #ede8dd; margin: 0 0 12px 0;">
-      New signup
-    </h2>
-    <p style="font-size: 15px; font-weight: 300; color: #a89f91; margin: 0 0 8px 0; line-height: 1.6;">
-      <strong style="color: #ede8dd;">{username}</strong> just accepted the terms.
-    </p>
-    <p style="font-size: 15px; font-weight: 300; color: #a89f91; margin: 0 0 28px 0; line-height: 1.6;">
-      Email: {user_email or '<em>not provided</em>'}
-    </p>
-    <a href="{admin_url}"
-       style="display: inline-block; padding: 12px 32px; background: transparent; color: #c4956a;
-              text-decoration: none; border-radius: 6px; border: 1px solid #c4956a;
-              font-family: 'Outfit', -apple-system, sans-serif; font-size: 14px; font-weight: 400;
-              letter-spacing: 0.04em;">
-      Open admin dashboard
-    </a>
-  </div>
-</body>
-</html>"""
-
-    msg.attach(MIMEText(text_body, "plain"))
-    msg.attach(MIMEText(html_body, "html"))
-
-    server = config.get("MAIL_SERVER", "localhost")
-    port = config.get("MAIL_PORT", 587)
-    use_tls = config.get("MAIL_USE_TLS", True)
-    username_smtp = config.get("MAIL_USERNAME")
-    password = config.get("MAIL_PASSWORD")
-
-    try:
-        with smtplib.SMTP(server, port) as smtp:
-            if use_tls:
-                smtp.starttls()
-            if username_smtp and password:
-                smtp.login(username_smtp, password)
-            smtp.sendmail(sender, admin_email, msg.as_string())
-        logger.info(f"Admin signup notification sent for user {username}")
-    except Exception:
-        logger.exception(f"Failed to send admin signup notification for user {username}")
+    shown_email = escape(user_email) if user_email else "<em>not provided</em>"
+    html_body = _card(
+        "New signup",
+        [f'<strong style="color: #ede8dd;">{escape(str(username))}</strong> just accepted the terms.',
+         f"Email: {shown_email}"],
+        "Open admin dashboard", admin_url)
+    _send(admin_email, f"New signup: {username}", text_body, html_body,
+          f"Admin signup notification sent for user {username}",
+          f"Failed to send admin signup notification for user {username}",
+          best_effort=True)
 
 
 def send_admin_prefill_complete_notification(username, handle, versions,
@@ -360,18 +469,10 @@ def send_admin_prefill_complete_notification(username, handle, versions,
     finished (single chunk, or chunks + integration) — the whole build, not
     just the first version. Sent once per account; routine updates of
     active users never trigger it (see profile_batch._notify_prefill_complete)."""
-    config = current_app.config
-    sender = config.get("MAIL_DEFAULT_SENDER", "login@loore.org")
     admin_email = "signup@loore.org"
     admin_url = "https://loore.org/admin"
     status = "Active" if approved else "Inactive — not yet activated"
     tokens = f"{source_tokens:,}" if source_tokens else "?"
-
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = f"Pre-fill profile ready: {username}"
-    msg["From"] = sender
-    msg["To"] = admin_email
-
     text_body = (
         f"Pre-fill profile ready on Loore\n\n"
         f"Username: {username}\n"
@@ -380,54 +481,15 @@ def send_admin_prefill_complete_notification(username, handle, versions,
         f"Account: {status}\n\n"
         f"Admin dashboard:\n{admin_url}\n"
     )
-
-    html_body = f"""\
-<html>
-<body style="font-family: 'Outfit', -apple-system, sans-serif; background: #0e0d0b; color: #ede8dd; padding: 40px 20px; margin: 0;">
-  <div style="max-width: 460px; margin: 0 auto; background: #181714; border-radius: 10px; border: 1px solid #302c27; padding: 48px 40px;">
-    <div style="font-family: 'Cormorant Garamond', Georgia, 'Times New Roman', serif; font-size: 14px; font-weight: 300; text-transform: uppercase; letter-spacing: 0.3em; color: #736b5f; margin-bottom: 32px;">
-      Loore
-    </div>
-    <h2 style="font-family: 'Cormorant Garamond', Georgia, 'Times New Roman', serif; font-weight: 300; font-size: 28px; color: #ede8dd; margin: 0 0 12px 0;">
-      Pre-fill profile ready
-    </h2>
-    <p style="font-size: 15px; font-weight: 300; color: #a89f91; margin: 0 0 8px 0; line-height: 1.6;">
-      <strong style="color: #ede8dd;">{username}</strong>'s initial profile chain finished
-      (seeded from <strong style="color: #ede8dd;">@{handle}</strong>).
-    </p>
-    <p style="font-size: 15px; font-weight: 300; color: #a89f91; margin: 0 0 8px 0; line-height: 1.6;">
-      {versions} version(s) &middot; {tokens} source tokens
-    </p>
-    <p style="font-size: 15px; font-weight: 300; color: #a89f91; margin: 0 0 28px 0; line-height: 1.6;">
-      Account: {status}
-    </p>
-    <a href="{admin_url}"
-       style="display: inline-block; padding: 12px 32px; background: transparent; color: #c4956a;
-              text-decoration: none; border-radius: 6px; border: 1px solid #c4956a;
-              font-family: 'Outfit', -apple-system, sans-serif; font-size: 14px; font-weight: 400;
-              letter-spacing: 0.04em;">
-      Open admin dashboard
-    </a>
-  </div>
-</body>
-</html>"""
-
-    msg.attach(MIMEText(text_body, "plain"))
-    msg.attach(MIMEText(html_body, "html"))
-
-    server = config.get("MAIL_SERVER", "localhost")
-    port = config.get("MAIL_PORT", 587)
-    use_tls = config.get("MAIL_USE_TLS", True)
-    username_smtp = config.get("MAIL_USERNAME")
-    password = config.get("MAIL_PASSWORD")
-
-    try:
-        with smtplib.SMTP(server, port) as smtp:
-            if use_tls:
-                smtp.starttls()
-            if username_smtp and password:
-                smtp.login(username_smtp, password)
-            smtp.sendmail(sender, admin_email, msg.as_string())
-        logger.info(f"Admin pre-fill-complete notification sent for user {username}")
-    except Exception:
-        logger.exception(f"Failed to send admin pre-fill-complete notification for user {username}")
+    html_body = _card(
+        "Pre-fill profile ready",
+        [f'<strong style="color: #ede8dd;">{escape(str(username))}</strong>\'s initial profile chain finished\n'
+         f'      (seeded from <strong style="color: #ede8dd;">@{escape(str(handle))}</strong>).',
+         f"{versions} version(s) &middot; {tokens} source tokens",
+         f"Account: {status}"],
+        "Open admin dashboard", admin_url)
+    _send(admin_email, f"Pre-fill profile ready: {username}", text_body,
+          html_body,
+          f"Admin pre-fill-complete notification sent for user {username}",
+          f"Failed to send admin pre-fill-complete notification for user {username}",
+          best_effort=True)

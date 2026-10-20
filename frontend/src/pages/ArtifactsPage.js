@@ -8,6 +8,7 @@ import VersionHistoryDrawer from '../components/VersionHistoryDrawer';
 import useSubmitShortcut from '../hooks/useSubmitShortcut';
 import useEscapeKey from '../hooks/useEscapeKey';
 import { compareArtifacts } from '../utils/artifactKinds';
+import { useCheckboxToggle, useTaskInsert } from '../utils/markdown';
 import { formatDate } from '../utils/date';
 
 const KIND_BLURBS = {
@@ -105,14 +106,42 @@ export default function ArtifactsPage() {
   }, [searchParams]);
 
   // Version count for the active artifact's header badge (only when it has
-  // content). Refetched on kind switch and after a save (artifacts reload).
+  // content). Refetched on kind switch and whenever the current version row
+  // changes (a save, a revert, or a checklist click that started a new
+  // version) — not on every content change, so ticking boxes doesn't
+  // refetch the version list each click.
+  const activeRow = artifacts.find((x) => x.kind === activeKind);
+  const activeVersionId = activeRow && activeRow.created_at ? activeRow.id : null;
   useEffect(() => {
-    const a = artifacts.find((x) => x.kind === activeKind);
-    if (!a || !a.created_at) { setVersionNumber(null); return; }
+    if (activeVersionId == null) { setVersionNumber(null); return; }
     api.get(`/artifacts/${activeKind}/versions`)
       .then((res) => setVersionNumber(res.data.versions.length))
       .catch(() => setVersionNumber(null));
-  }, [activeKind, artifacts]);
+  }, [activeKind, activeVersionId]);
+
+  // Clickable checklists and the hover "+" in the rendered artifact, as on
+  // a node. PATCH edits the user's own latest version in place, or starts
+  // a new version when the AI wrote the latest one or a session pinned it;
+  // the response's row metadata replaces ours either way (content stays
+  // the optimistic local copy, so a slow response can't undo a later click).
+  const getArtifactContent = useCallback(
+    () => artifacts.find((a) => a.kind === activeKind)?.content,
+    [artifacts, activeKind],
+  );
+  const setArtifactContent = useCallback((content) => {
+    setArtifacts((prev) => prev.map((a) => (a.kind === activeKind ? { ...a, content } : a)));
+  }, [activeKind]);
+  const saveArtifactContent = useCallback(
+    (content) => api.patch(`/artifacts/${activeKind}`, { content }).then((res) => {
+      const saved = res.data.artifact;
+      setArtifacts((prev) => prev.map((a) => (a.kind === saved.kind
+        ? { ...a, id: saved.id, generated_by: saved.generated_by, created_at: saved.created_at }
+        : a)));
+    }),
+    [activeKind],
+  );
+  const handleCheckboxToggle = useCheckboxToggle(getArtifactContent, setArtifactContent, saveArtifactContent);
+  const handleTaskInsert = useTaskInsert(getArtifactContent, setArtifactContent, saveArtifactContent);
 
   // Surface a kind that has no row yet (not a default, not created) as an
   // empty, editable artifact so deep links never land on a blank page.
@@ -409,7 +438,14 @@ export default function ArtifactsPage() {
           }}>
             {active.kind === 'intentions'
               ? <IntentionsView content={active.content} />
-              : <MarkdownBody>{active.content}</MarkdownBody>}
+              : (
+                <MarkdownBody
+                  onCheckboxToggle={active.created_at ? handleCheckboxToggle : undefined}
+                  onAddTask={active.created_at ? handleTaskInsert : undefined}
+                >
+                  {active.content}
+                </MarkdownBody>
+              )}
           </div>
         ) : (
           <div style={{ textAlign: 'center', padding: '40px 0' }}>

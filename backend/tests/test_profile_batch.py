@@ -34,6 +34,7 @@ for _mod in ["backend.models", "backend.extensions"]:
 from backend.extensions import db  # noqa: E402
 from backend.models import (  # noqa: E402
     User, UserProfile, ProfileBatchJob, APICostLog, Node)
+from backend.utils.chunk_plan import FINAL_CHUNK_OVERASK_UNITS  # noqa: E402
 
 # backend.tasks.profile_batch is imported lazily in the `app` fixture: an
 # eager import at collection time trips over cross-file celery-mock ordering
@@ -87,15 +88,35 @@ def _user(**kw):
     return u
 
 
-def _prev_profile(user, cutoff, source_tokens=1000, gen_type="update"):
+def _prev_profile(user, cutoff, source_tokens=1000, gen_type="update",
+                  rendered_at=None):
     p = UserProfile(
         user_id=user.id, generated_by="test-model", tokens_used=0,
         generation_type=gen_type, source_tokens_used=source_tokens,
-        source_data_cutoff=cutoff)
+        source_data_cutoff=cutoff, source_rendered_at=rendered_at)
     p.set_content("PREVIOUS PROFILE")
     db.session.add(p)
     db.session.flush()
     return p
+
+
+def _chunk(content="NEW DATA", units=90000, latest=datetime(2026, 6, 1), **extra):
+    """An export-builder result the planner can consume: `unit_count` is
+    the window's stored units, `token_count` the rendered chars/4."""
+    return {"content": content, "token_count": units, "unit_count": units,
+            "latest_node_created_at": latest, **extra}
+
+
+def _remaining(monkeypatch, units):
+    """Pin the planner's remainder (the sum over the window's scope)."""
+    monkeypatch.setattr(pb._exports, "count_remaining_units",
+                        lambda uid, cutoff=None: units)
+
+
+def _wide_window(app):
+    """A model config whose real-token cap never binds the plan."""
+    app.config["SUPPORTED_MODELS"] = {
+        "test-model": {**MODELS["test-model"], "context_window": 1_000_000}}
 
 
 # ── gate ────────────────────────────────────────────────────────────────
@@ -117,9 +138,9 @@ def test_build_next_request_chunk(app, monkeypatch):
     u = _user()
     prev = _prev_profile(u, datetime(2026, 5, 1))
     db.session.commit()
-    monkeypatch.setattr(pb._exports, "build_user_export_content", MagicMock(
-        return_value={"content": "NEW DATA", "token_count": 90000,
-                      "latest_node_created_at": datetime(2026, 6, 1)}))
+    _remaining(monkeypatch, 90000)
+    monkeypatch.setattr(pb._exports, "build_user_export_content",
+                        MagicMock(return_value=_chunk()))
     monkeypatch.setattr(pb._exports, "build_update_template", lambda uid: (
         "T {existing_profile}|{new_data}|{source_tokens_past}"
         "|{source_tokens_new}|{ratio_percent}"))
@@ -131,26 +152,29 @@ def test_build_next_request_chunk(app, monkeypatch):
     assert req["meta"]["generation_type"] == "update"
     assert req["meta"]["prev_profile_id"] == prev.id
     assert req["meta"]["prev_cumulative"] == 1000
+    assert req["meta"]["chunk_units"] == 90000
     assert req["meta"]["source_data_cutoff"] == "2026-06-01T00:00:00"
     text = req["request"]["messages"][0]["content"][0]["text"]
     assert "NEW DATA" in text and "PREVIOUS PROFILE" in text
+    # Proportionality in units on both sides: 1,000 covered, 90,000 new.
+    assert text.endswith("|1000|90000|98.9")
     # Regression: Anthropic rejects custom_id with colons (must match pattern)
     assert CUSTOM_ID_RE.match(req["request"]["custom_id"])
 
 
 def test_build_next_request_shrinks_oversized_chunk_before_submit(app, monkeypatch):
-    """Pre-submit sizing: an over-limit token count shrinks the chunk
-    budget and rebuilds BEFORE submitting, instead of burning a batch
-    attempt on the provider's overflow rejection."""
+    """Pre-submit sizing: an over-limit token count shrinks the window
+    and rebuilds BEFORE submitting, instead of burning a batch attempt
+    on the provider's overflow rejection."""
     u = _user()
     _prev_profile(u, datetime(2026, 5, 1))
     db.session.commit()
+    _remaining(monkeypatch, 90000)
     budgets = []
 
     def export(user, max_tokens=None, **kw):
         budgets.append(max_tokens)
-        return {"content": f"DATA[{max_tokens}]", "token_count": 90000,
-                "latest_node_created_at": datetime(2026, 6, 1)}
+        return _chunk(f"DATA[{max_tokens}]")
 
     monkeypatch.setattr(pb._exports, "build_user_export_content", export)
     monkeypatch.setattr(pb._exports, "build_update_template", lambda uid: (
@@ -176,9 +200,8 @@ def test_build_next_request_uses_engaged_scope(app, monkeypatch):
     u = _user()
     _prev_profile(u, datetime(2026, 5, 1))
     db.session.commit()
-    export = MagicMock(
-        return_value={"content": "DATA", "token_count": 90000,
-                      "latest_node_created_at": datetime(2026, 6, 1)})
+    _remaining(monkeypatch, 90000)
+    export = MagicMock(return_value=_chunk("DATA"))
     monkeypatch.setattr(pb._exports, "build_user_export_content", export)
     monkeypatch.setattr(pb._exports, "build_update_template", lambda uid: (
         "T {existing_profile}|{new_data}|{source_tokens_past}"
@@ -189,44 +212,47 @@ def test_build_next_request_uses_engaged_scope(app, monkeypatch):
     assert export.call_args.kwargs["include_strategy"] == "engaged_threads"
 
 
-def test_build_next_request_small_chunk_mid_corpus_still_chunks(
+def test_build_next_request_small_remainder_is_chunked_not_deferred(
         app, monkeypatch):
-    """A chunk that re-measures below MIN_CHUNK_TOKENS but has data
-    remaining beyond it is a full budget window, not a tail — it must
-    be processed, not deferred (the unit-mismatch starvation that froze
-    a regen at a months-old cutoff with ~320k stored tokens left)."""
+    """No minimum chunk any more: whatever remains after the cutoff is
+    planned and processed. The old deferral of a sub-minimum tail to "the
+    next update cycle" is what left pre-filled profiles ending months
+    before their newest tweets (design note 2026-09-03)."""
     u = _user()
     _prev_profile(u, datetime(2026, 5, 1))
     db.session.commit()
-    monkeypatch.setattr(pb._exports, "build_user_export_content", MagicMock(
-        return_value={"content": "SMALL RENDER", "token_count": 50000,
-                      "latest_node_created_at": datetime(2026, 6, 1)}))
+    _remaining(monkeypatch, 5000)
+    export = MagicMock(return_value=_chunk("TINY TAIL", units=5000))
+    monkeypatch.setattr(pb._exports, "build_user_export_content", export)
     monkeypatch.setattr(pb._exports, "build_update_template", lambda uid: (
         "T {existing_profile}|{new_data}|{source_tokens_past}"
         "|{source_tokens_new}|{ratio_percent}"))
-    monkeypatch.setattr(pb._exports, "_has_more_source_after", lambda u, ts: True)
 
     req = pb._build_next_profile_request(u)
 
     assert req is not None and req["meta"]["kind"] == "chunk"
+    # One planned chunk over-asks so the window takes everything.
+    assert export.call_args.kwargs["max_tokens"] == 5000 + FINAL_CHUNK_OVERASK_UNITS
 
 
-def test_build_next_request_small_tail_defers(app, monkeypatch):
-    """A genuinely small tail (nothing beyond it) is deferred to the
-    next update cycle — the threshold's original purpose."""
+def test_build_next_request_plans_equal_windows_over_the_remainder(
+        app, monkeypatch):
+    """350k units after the cutoff plan into 4 chunks of 87.5k (the COUNT
+    is rounded, not the size), so the window is asked at 87,500 units."""
+    _wide_window(app)
     u = _user()
     _prev_profile(u, datetime(2026, 5, 1))
     db.session.commit()
-    monkeypatch.setattr(pb._exports, "build_user_export_content", MagicMock(
-        return_value={"content": "TINY TAIL", "token_count": 5000,
-                      "latest_node_created_at": datetime(2026, 6, 1)}))
-    monkeypatch.setattr(pb._exports, "_has_more_source_after", lambda u, ts: False)
-    monkeypatch.setattr(pb._exports, "build_integration_messages",
-                        lambda uid, pid: (None, None))
+    _remaining(monkeypatch, 350_000)
+    export = MagicMock(return_value=_chunk(units=87_500))
+    monkeypatch.setattr(pb._exports, "build_user_export_content", export)
+    monkeypatch.setattr(pb._exports, "build_update_template",
+                        lambda uid: "T {new_data}")
 
     req = pb._build_next_profile_request(u)
 
-    assert req is None  # not a chunk; single-version chain → no integration
+    assert export.call_args.kwargs["max_tokens"] == 87_500
+    assert req["meta"]["chunk_units"] == 87_500
 
 
 def test_build_next_request_none_when_no_data(app, monkeypatch):
@@ -299,9 +325,8 @@ def test_build_next_request_full_regen_starts_from_scratch(app, monkeypatch):
     _prev_profile(u, datetime(2026, 5, 1))
     u.profile_needs_full_regen = True
     db.session.commit()
-    export = MagicMock(
-        return_value={"content": "ALL DATA", "token_count": 90000,
-                      "latest_node_created_at": datetime(2026, 6, 1)})
+    _remaining(monkeypatch, 300_000)   # plans into several chunks
+    export = MagicMock(return_value=_chunk("ALL DATA"))
     monkeypatch.setattr(pb._exports, "build_user_export_content", export)
     monkeypatch.setattr(pb._exports, "_load_prompt",
                         lambda *a, **k: "GEN {user_export}")
@@ -315,6 +340,47 @@ def test_build_next_request_full_regen_starts_from_scratch(app, monkeypatch):
     assert req["meta"]["prev_cumulative"] == 0
     text = req["request"]["messages"][0]["content"][0]["text"]
     assert "ALL DATA" in text and "PREVIOUS PROFILE" not in text
+
+
+def test_build_next_request_records_chunk_ordinal_and_planned_total(app, monkeypatch):
+    """The item meta carries "chunk n of ~N" for the progress endpoint
+    (#258): n is the caller's ordinal (1 from the seeder), N = n - 1 plus
+    the plan for the remainder — computed once, at submit time."""
+    _wide_window(app)
+    u = _user()
+    db.session.commit()
+    _remaining(monkeypatch, 300_000)   # plans into 3 chunks
+    monkeypatch.setattr(pb._exports, "build_user_export_content",
+                        MagicMock(return_value=_chunk("ALL DATA")))
+    monkeypatch.setattr(pb._exports, "_load_prompt",
+                        lambda *a, **k: "GEN {user_export}")
+
+    req = pb._build_next_profile_request(u)
+    assert (req["meta"]["chunk_num"], req["meta"]["chunk_total"]) == (1, 3)
+
+    # Mid-run: the poller passes the applied chunk's number + 1; the
+    # remainder now plans into 2, so the total stays at 3.
+    _remaining(monkeypatch, 180_000)
+    req = pb._build_next_profile_request(u, chunk_num=2)
+    assert (req["meta"]["chunk_num"], req["meta"]["chunk_total"]) == (2, 3)
+
+
+def test_build_next_request_single_chunk_from_scratch_is_initial(app, monkeypatch):
+    """A from-scratch corpus that plans into ONE chunk is saved as
+    "initial" — the whole corpus in one call — not as an iterative root."""
+    _wide_window(app)
+    u = _user()
+    db.session.commit()
+    _remaining(monkeypatch, 60_000)
+    monkeypatch.setattr(pb._exports, "build_user_export_content",
+                        MagicMock(return_value=_chunk("ALL", units=60_000)))
+    monkeypatch.setattr(pb._exports, "_load_prompt",
+                        lambda *a, **k: "GEN {user_export}")
+
+    req = pb._build_next_profile_request(u)
+
+    assert req["meta"]["generation_type"] == "initial"
+    assert req["meta"]["prev_profile_id"] is None
 
 
 def test_poll_clears_flag_only_for_from_scratch_chunk(app, monkeypatch):
@@ -608,6 +674,58 @@ def test_poll_failed_item_bumps_attempts_and_clears_pending(app, monkeypatch):
         parent_profile_id=prev.id).first() is None
 
 
+def test_poll_saves_nothing_for_a_user_whose_writing_is_on_hold(app, monkeypatch):
+    """#268: "Delete all my writing" hid the writing after the request went
+    out: the result is dropped (no profile, no failed attempt), and the
+    immediate seed builds nothing for the user meanwhile."""
+    from backend.models import UserDataPurge
+    u = _user()
+    prev = _prev_profile(u, datetime(2026, 5, 1))
+    job, item = _chunk_job(u, prev)
+    db.session.add(UserDataPurge(user_id=u.id, source="self", scope="hidden",
+                                 status="scheduled",
+                                 scheduled_for=datetime.utcnow()))
+    db.session.commit()
+    monkeypatch.setattr(pb, "batch_check_and_collect",
+                        lambda bids, keys: ({item["custom_id"]: {
+                            "content": "a profile", "input_tokens": 1,
+                            "output_tokens": 1}}, {}, {}))
+    monkeypatch.setattr(pb, "batch_submit", MagicMock(return_value={}))
+
+    pb._poll_profile_batches()
+
+    u2 = User.query.get(u.id)
+    assert u2.profile_batch_pending is False
+    assert (u2.profile_batch_attempts or 0) == 0
+    assert UserProfile.query.filter_by(
+        parent_profile_id=prev.id).first() is None
+    assert pb._seed_profile_batches(users=[u2], ignore_backoff=True) == 0
+
+
+def test_poll_apply_exception_bumps_attempts_and_clears_pending(app, monkeypatch):
+    """A result that raises while being applied counts as a failed attempt,
+    so retries stay bounded and the progress endpoint's batch_step_failed
+    reports the chain as failed rather than finished."""
+    u = _user()
+    prev = _prev_profile(u, datetime(2026, 5, 1))
+    job, item = _chunk_job(u, prev)
+
+    monkeypatch.setattr(pb, "batch_check_and_collect",
+                        lambda bids, keys: ({item["custom_id"]: "text"}, {}, {}))
+    monkeypatch.setattr(pb, "batch_submit", MagicMock(return_value={}))
+
+    def boom(*a, **k):
+        raise RuntimeError("apply blew up")
+    monkeypatch.setattr(pb, "_apply_result", boom)
+
+    pb._poll_profile_batches()
+
+    u2 = User.query.get(u.id)
+    assert u2.profile_batch_attempts == 1
+    assert u2.profile_batch_pending is False
+    assert ProfileBatchJob.query.get(job.id).status == "collected"
+
+
 def test_poll_leaves_pending_job_untouched(app, monkeypatch):
     u = _user()
     prev = _prev_profile(u, datetime(2026, 5, 1))
@@ -683,77 +801,114 @@ def test_use_batch_for_user_force_flag(app):
         u, {"PROFILE_USE_BATCH": False, "PROFILE_BATCH_USER_IDS": set()})
 
 
-def test_chunk_budget_scales_with_multiplier_and_calibration(app):
+def test_tokens_per_unit_prior_by_family_then_measured(app):
     ex = pb._exports
     u = _user()
     app.config["SUPPORTED_MODELS"] = {
-        **MODELS, "dense-model": {**MODELS["test-model"], "token_multiplier": 2.0}}
-    # Older tokenizer: chars/4 stands as-is.
-    assert ex.chunk_budget_for(u, "test-model") == (
-        ex.CHUNK_BUDGET, ex.MIN_CHUNK_TOKENS)
-    # New-generation tokenizer: chars/2 → half the stored-token budget,
-    # and the min-chunk threshold shrinks with it.
-    assert ex.chunk_budget_for(u, "dense-model") == (
-        ex.CHUNK_BUDGET // 2, ex.MIN_CHUNK_TOKENS // 2)
-    # In-loop calibration: the last chunk came in 1.6x over the multiplied
-    # estimate → next budget shrinks by that residual.
-    ratio = ex.record_token_ratio(u, "dense-model", 10000, 32000)
-    assert ratio == 1.6
-    assert ex.chunk_budget_for(u, "dense-model")[0] == int(ex.CHUNK_BUDGET / 3.2)
-    assert ex.effective_chars_per_token(u, "dense-model") == 1.25
-    # Clamped to [1, 5] chars/token so one odd chunk can't collapse or
-    # explode the budget.
-    ex.record_token_ratio(u, "dense-model", 10000, 200000)
-    assert ex.effective_chars_per_token(u, "dense-model") == ex.CHARS_PER_TOKEN_MIN
-    assert ex.chunk_budget_for(u, "dense-model")[0] == ex.CHUNK_BUDGET // 4
-    ex.record_token_ratio(u, "test-model", 10000, 1000)
-    assert ex.effective_chars_per_token(u, "test-model") == ex.CHARS_PER_TOKEN_MAX
-    # No signal → no change.
-    assert ex.record_token_ratio(u, "dense-model", 0, 5) is None
-
-
-def test_build_next_request_uses_scaled_budget_and_records_estimate(
-        app, monkeypatch):
-    u = _user()
-    app.config["SUPPORTED_MODELS"] = {
-        "test-model": {**MODELS["test-model"], "token_multiplier": 2.0}}
+        **MODELS,
+        "old-model": {**MODELS["test-model"], "tokenizer_family": "claude_old"},
+        "gpt-model": {"provider": "openai", "api_model": "gpt-x"}}
     db.session.commit()
-    export = MagicMock(return_value={
-        "content": "NEW DATA", "token_count": 45000,
-        "latest_node_created_at": datetime(2026, 6, 1)})
+    # No config family: Anthropic defaults to the (denser) new family,
+    # OpenAI to o200k. No writing yet → the "threads" prior row.
+    assert ex.tokenizer_family("test-model") == "claude_new"
+    assert ex.tokenizer_family("gpt-model") == "o200k"
+    prior = ex.TOKENS_PER_UNIT_PRIOR["threads"]
+    assert ex.tokens_per_unit(u, "test-model") == prior["claude_new"]
+    assert ex.tokens_per_unit(u, "old-model") == prior["claude_old"]
+    # A measured chunk: 16,000 billed tokens over 10,000 units → 1.6 per
+    # unit, tagged with the family it was measured on.
+    assert ex.record_token_ratio(u, "test-model", 10_000, 16_000) == 1.6
+    assert u.profile_token_ratio_family == "claude_new"
+    assert ex.tokens_per_unit(u, "test-model") == 1.6
+    # Other families do not inherit the measurement.
+    assert ex.tokens_per_unit(u, "old-model") == prior["claude_old"]
+    assert ex.tokens_per_unit(u, "gpt-model") == prior["o200k"]
+    # Sanity bounds and no-signal cases.
+    assert ex.record_token_ratio(u, "test-model", 10_000, 10_000_000) == ex.TOKENS_PER_UNIT_MAX
+    assert ex.record_token_ratio(u, "test-model", 10_000, 1) == ex.TOKENS_PER_UNIT_MIN
+    assert ex.record_token_ratio(u, "test-model", 0, 5) is None
+    assert ex.record_token_ratio(u, "test-model", 10_000, None) is None
+
+
+def test_content_class_picks_the_tweet_prior_for_imported_corpora(app):
+    ex = pb._exports
+    u = _user()
+    for origin, tokens in (("twitter", 700), (None, 300)):
+        n = Node(user_id=u.id, human_owner_id=u.id, node_type="user",
+                 ai_usage="chat", token_count=tokens, origin=origin)
+        n.set_content("x")
+        db.session.add(n)
+    db.session.commit()
+    assert ex.content_class(u) == "tweets"
+    assert ex.tokens_per_unit(u, "test-model") == ex.TOKENS_PER_UNIT_PRIOR["tweets"]["claude_new"]
+
+
+def test_build_next_request_cap_only_raises_the_chunk_count(app, monkeypatch):
+    """A measured 4 tokens per unit on a 200k window (168k input after the
+    32k output reserve) caps a window near 40k units: 350k units plan into
+    9 equal chunks of 38,888 instead of 4 of 87,500 — the cap splits the
+    whole remainder evenly (#259)."""
+    u = _user()
+    u.profile_token_ratio, u.profile_token_ratio_family = 4.0, "claude_new"
+    db.session.commit()
+    _remaining(monkeypatch, 350_000)
+    export = MagicMock(return_value=_chunk(units=38_888))
     monkeypatch.setattr(pb._exports, "build_user_export_content", export)
     monkeypatch.setattr(pb._exports, "_load_prompt",
                         lambda *a, **k: "GEN {user_export}")
 
     req = pb._build_next_profile_request(u)
 
-    assert export.call_args.kwargs["max_tokens"] == pb._exports.CHUNK_BUDGET // 2
-    assert req["meta"]["prompt_tokens_est"] > 0
+    assert export.call_args.kwargs["max_tokens"] == 38_888
+    assert req["meta"]["chunk_units"] == 38_888
 
 
-def test_apply_result_calibrates_from_actual_tokens(app, monkeypatch):
+def test_apply_result_records_units_and_calibrates(app, monkeypatch):
     u = _user()
     db.session.commit()
     monkeypatch.setattr(pb._exports, "build_user_export_content",
                         MagicMock(return_value=None))
     item = {"custom_id": "x", "user_id": u.id, "kind": "chunk",
             "prev_profile_id": None, "generation_type": "iterative",
-            "prev_cumulative": 0, "origin_stats": None,
+            "prev_cumulative": 500, "origin_stats": None,
+            "source_data_cutoff": "2026-06-01T00:00:00",
+            "model_id": "test-model", "chunk_units": 1000}
+    result = {"content": "PROFILE", "input_tokens": 3200,
+              "output_tokens": 10, "total_tokens": 3210}
+    pb._apply_result(u, item, result, datetime.utcnow() - timedelta(minutes=1))
+    assert (u.profile_token_ratio, u.profile_token_ratio_family) == (3.2, "claude_new")
+    saved = UserProfile.query.filter_by(user_id=u.id).one()
+    assert saved.source_tokens_used == 500 + 1000   # units covered, not billed tokens
+
+
+def test_apply_result_legacy_item_without_units(app, monkeypatch):
+    """An item submitted before the planner carries no chunk_units: it
+    accumulates the billed tokens it was built with (the legacy figure)
+    and leaves the calibration alone."""
+    u = _user()
+    db.session.commit()
+    monkeypatch.setattr(pb._exports, "build_user_export_content",
+                        MagicMock(return_value=None))
+    item = {"custom_id": "x", "user_id": u.id, "kind": "chunk",
+            "prev_profile_id": None, "generation_type": "iterative",
+            "prev_cumulative": 500, "origin_stats": None,
             "source_data_cutoff": "2026-06-01T00:00:00",
             "model_id": "test-model", "prompt_tokens_est": 1000}
     result = {"content": "PROFILE", "input_tokens": 3200,
               "output_tokens": 10, "total_tokens": 3210}
     pb._apply_result(u, item, result, datetime.utcnow() - timedelta(minutes=1))
-    assert u.profile_token_ratio == 3.2
+    assert u.profile_token_ratio is None
+    assert UserProfile.query.filter_by(user_id=u.id).one().source_tokens_used == 500 + 3200
 
 
 def test_seed_single_user_submits_immediately(app, monkeypatch):
     u = _user(profile_force_batch=True, profile_needs_full_regen=True)
     other = _user(profile_force_batch=True, profile_needs_full_regen=True)
     db.session.commit()
-    monkeypatch.setattr(pb._exports, "build_user_export_content", MagicMock(
-        return_value={"content": "DATA", "token_count": 90000,
-                      "latest_node_created_at": datetime(2026, 6, 1)}))
+    _remaining(monkeypatch, 90000)
+    monkeypatch.setattr(pb._exports, "build_user_export_content",
+                        MagicMock(return_value=_chunk("DATA")))
     monkeypatch.setattr(pb._exports, "_load_prompt", lambda *a, **k: "G {user_export}")
     submitted = []
     monkeypatch.setattr(pb, "batch_submit", lambda reqs, keys, kind: (
@@ -770,14 +925,84 @@ def test_seed_single_user_submits_immediately(app, monkeypatch):
 def test_seed_reports_submitted_not_built(app, monkeypatch):
     u = _user(profile_force_batch=True, profile_needs_full_regen=True)
     db.session.commit()
-    monkeypatch.setattr(pb._exports, "build_user_export_content", MagicMock(
-        return_value={"content": "DATA", "token_count": 90000,
-                      "latest_node_created_at": datetime(2026, 6, 1)}))
+    _remaining(monkeypatch, 90000)
+    monkeypatch.setattr(pb._exports, "build_user_export_content",
+                        MagicMock(return_value=_chunk("DATA")))
     monkeypatch.setattr(pb._exports, "_load_prompt", lambda *a, **k: "G {user_export}")
     monkeypatch.setattr(pb, "batch_submit", lambda reqs, keys, kind: {})  # provider rejected
     assert pb._seed_profile_batches(users=[u]) == 0
     assert User.query.get(u.id).profile_batch_pending is False
     assert User.query.get(u.id).profile_batch_attempts == 1
+
+
+def test_profile_failure_log_line_is_grouped_with_an_account_failure(app, monkeypatch):
+    """ProfileGenerationTask.on_failure logs without exc_info. For an
+    account failure the line carries the cause's fingerprint (log_extra),
+    which the Sentry hook applies; any other failure's line doesn't."""
+    import logging
+    import backend.llm_providers as lp
+    from backend.utils import provider_alerts
+    records = []
+
+    class _Keep(logging.Handler):
+        def emit(self, record):
+            records.append(record)
+    log = logging.getLogger("test.profile_failure")
+    log.addHandler(_Keep())
+    monkeypatch.setattr(pb._exports, "logger", log)
+
+    err = lp.ProviderAccountError("Anthropic", "spend_limit", "claude-x", "chat")
+    pb._exports._log_profile_failure(7, err)
+    pb._exports._log_profile_failure(8, ValueError("bad export"))
+
+    tagged, plain = records
+    assert "user 7" in tagged.getMessage()
+    assert provider_alerts.apply_fingerprint({}, None, tagged)["fingerprint"] == [
+        "provider-account-failure", "anthropic", "spend_limit", "chat"]
+    assert "fingerprint" not in provider_alerts.apply_fingerprint({}, None, plain)
+
+
+def test_submit_refused_for_an_account_reason_is_not_a_batch_attempt(app, monkeypatch):
+    """A spend limit or a revoked key refuses the submit (#369), whatever
+    the requests. Counting it would move an unpinned batch user to the
+    full-price synchronous path after three hourly seeds of an outage, and
+    keep them there after the account is fixed (#406 review, minor 2).
+    So it is not counted: the user is re-seeded each cycle and stays on
+    the Batch path."""
+    from backend.utils.llm_batch import SubmittedBatches
+    u = _user(profile_needs_full_regen=True,
+              profile_batch_attempts=pb.MAX_BATCH_ATTEMPTS - 1)
+    app.config["PROFILE_USE_BATCH"] = True
+    db.session.commit()
+    _remaining(monkeypatch, 90000)
+    monkeypatch.setattr(pb._exports, "build_user_export_content",
+                        MagicMock(return_value=_chunk("DATA")))
+    monkeypatch.setattr(pb._exports, "_load_prompt", lambda *a, **k: "G {user_export}")
+    submits = []
+
+    def refused(reqs, keys, kind):
+        submits.append(reqs)
+        out = SubmittedBatches()
+        out.account_refused.update(reqs)  # "anthropic"
+        return out
+    monkeypatch.setattr(pb, "batch_submit", refused)
+
+    for _ in range(pb.MAX_BATCH_ATTEMPTS + 1):
+        assert pb._seed_profile_batches(users=[u]) == 0
+    assert len(submits) == pb.MAX_BATCH_ATTEMPTS + 1  # re-seeded every time
+    user = User.query.get(u.id)
+    assert user.profile_batch_pending is False
+    assert user.profile_batch_attempts == pb.MAX_BATCH_ATTEMPTS - 1
+    # Still below the cap: exports' sync last resort leaves this user to
+    # the batch pipeline.
+    assert pb.use_batch_for_user(user, app.config)
+    assert user.profile_batch_attempts < pb.MAX_BATCH_ATTEMPTS
+
+    # Once the account is fixed the next seed goes through.
+    monkeypatch.setattr(pb, "batch_submit", lambda reqs, keys, kind: (
+        {k: f"b-{k}" for k in reqs}))
+    assert pb._seed_profile_batches(users=[u]) == 1
+    assert User.query.get(u.id).profile_batch_pending is True
 
 
 def test_force_batch_user_never_exhausts_to_sync(app, monkeypatch):
@@ -789,9 +1014,9 @@ def test_force_batch_user_never_exhausts_to_sync(app, monkeypatch):
                   profile_batch_attempts=pb.MAX_BATCH_ATTEMPTS + 2)
     app.config["PROFILE_USE_BATCH"] = True
     db.session.commit()
-    monkeypatch.setattr(pb._exports, "build_user_export_content", MagicMock(
-        return_value={"content": "DATA", "token_count": 90000,
-                      "latest_node_created_at": datetime(2026, 6, 1)}))
+    _remaining(monkeypatch, 90000)
+    monkeypatch.setattr(pb._exports, "build_user_export_content",
+                        MagicMock(return_value=_chunk("DATA")))
     monkeypatch.setattr(pb._exports, "_load_prompt", lambda *a, **k: "G {user_export}")
     submitted = []
     monkeypatch.setattr(pb, "batch_submit", lambda reqs, keys, kind: (
@@ -825,16 +1050,17 @@ def test_apply_duplicate_item_does_not_advance_chain(app, monkeypatch):
     been saved, must NOT return the next step again."""
     u = _user()
     db.session.commit()
+    _remaining(monkeypatch, 90000)
+    monkeypatch.setattr(pb._exports, "should_continue_chain", lambda user, p: True)
     monkeypatch.setattr(pb._exports, "build_user_export_content", MagicMock(
-        return_value={"content": "MORE", "token_count": 90000,
-                      "latest_node_created_at": datetime(2026, 7, 1)}))
+        return_value=_chunk("MORE", latest=datetime(2026, 7, 1))))
     monkeypatch.setattr(pb._exports, "build_update_template", lambda uid: (
         "T {existing_profile}|{new_data}|{source_tokens_past}|{source_tokens_new}|{ratio_percent}"))
     item = {"custom_id": "x", "user_id": u.id, "kind": "chunk",
             "prev_profile_id": None, "generation_type": "iterative",
             "prev_cumulative": 0, "origin_stats": None,
             "source_data_cutoff": "2026-06-01T00:00:00", "model_id": "test-model",
-            "prompt_tokens_est": 100}
+            "chunk_units": 100}
     result = {"content": "P1", "input_tokens": 100, "output_tokens": 5, "total_tokens": 105}
     submitted_at = datetime.utcnow() - timedelta(minutes=1)
     first = pb._apply_result(u, item, result, submitted_at)
@@ -843,6 +1069,59 @@ def test_apply_duplicate_item_does_not_advance_chain(app, monkeypatch):
     twin = pb._apply_result(u, item, result, submitted_at)
     assert twin is None
     assert UserProfile.query.filter_by(user_id=u.id).count() == 1
+
+
+def test_apply_result_chunks_again_only_over_data_that_existed_at_the_render(
+        app, monkeypatch):
+    """After a saved chunk the poller goes on to another chunk only if
+    unread data existed when that chunk's window was rendered; a node
+    written during the batch turnaround is organic growth, so the chain
+    integrates (or ends) and the node waits for the seeding gates."""
+    monkeypatch.setattr(pb._exports, "build_integration_messages",
+                        lambda uid, pid: (None, None))
+    rendered = datetime.utcnow() - timedelta(hours=2)
+    result = {"content": "P", "input_tokens": 100, "output_tokens": 5, "total_tokens": 105}
+
+    def run(user, node_at):
+        node = _seed_node(user, 500)
+        node.created_at = node_at
+        db.session.commit()
+        item = {"custom_id": "x", "user_id": user.id, "kind": "chunk",
+                "prev_profile_id": None, "generation_type": "iterative",
+                "prev_cumulative": 0, "origin_stats": None,
+                "source_data_cutoff": (rendered - timedelta(days=1)).isoformat(),
+                "rendered_at": rendered.isoformat(),
+                "model_id": "test-model", "chunk_units": 1000,
+                "chunk_num": 2, "chunk_total": 3}
+        monkeypatch.setattr(pb._exports, "build_user_export_content",
+                            MagicMock(return_value=_chunk("MORE", units=500)))
+        nxt = pb._apply_result(user, item, result, rendered)
+        saved = UserProfile.query.filter_by(user_id=user.id).one()
+        assert saved.source_rendered_at == rendered
+        return nxt
+
+    # Written during the turnaround (after the render): no next chunk;
+    # a one-version chain has nothing to integrate either.
+    assert run(_user(), rendered + timedelta(minutes=10)) is None
+    # Existed before the render: the chain goes on.
+    nxt = run(_user(), rendered - timedelta(minutes=10))
+    assert nxt is not None and nxt["meta"]["kind"] == "chunk"
+    assert nxt["meta"]["rendered_at"] is not None
+    # The next step carries the applied chunk's ordinal + 1 (#258 label).
+    assert nxt["meta"]["chunk_num"] == 3
+
+
+def test_build_next_request_without_chunks_goes_to_integration(app, monkeypatch):
+    u = _user()
+    root = _prev_profile(u, datetime(2026, 4, 1), gen_type="iterative")
+    tip = _prev_profile(u, datetime(2026, 5, 1))
+    tip.parent_profile_id = root.id
+    db.session.commit()
+    _remaining(monkeypatch, 90000)          # data remains...
+    monkeypatch.setattr(pb._exports, "build_integration_messages", lambda uid, pid: (
+        [{"role": "user", "content": [{"type": "text", "text": "INTEG"}]}], [root, tip]))
+    req = pb._build_next_profile_request(u, allow_chunk=False)   # ...but is growth
+    assert req["meta"]["kind"] == "integration"
 
 
 def test_batch_lock_skips_when_held(app, monkeypatch):
@@ -885,7 +1164,7 @@ def test_immediate_seed_defers_when_lock_held(app, monkeypatch):
 
     monkeypatch.setattr(pb, "batch_pipeline_lock", lambda: Held())
     seeded = []
-    monkeypatch.setattr(pb, "_seed_profile_batches", lambda users=None: seeded.append([x.id for x in users]) or 1)
+    monkeypatch.setattr(pb, "_seed_profile_batches", lambda users=None, ignore_backoff=False: seeded.append([x.id for x in users]) or 1)
     assert pb._seed_profile_batch_for_user_impl(u.id) is None
     assert seeded == []
     monkeypatch.setattr(pb, "batch_pipeline_lock", lambda: Free())
@@ -894,51 +1173,638 @@ def test_immediate_seed_defers_when_lock_held(app, monkeypatch):
     assert pb._seed_profile_batch_for_user_impl(10 ** 9) == 0  # unknown user: no retry loop
 
 
-def test_pinned_account_resumes_when_a_full_chunk_remains(app, monkeypatch):
-    """A pre-filled account whose chunk 2 was lost (worker restart): root
-    chunk saved, >= a minimum chunk of data beyond its cutoff, nothing in
-    flight, inside MIN_INTERVAL → seeded again. A tail smaller than a
-    minimum chunk waits for more data (chunks are never made uneven)."""
-    u = _user(profile_force_batch=True)
-    prev = _prev_profile(u, datetime(2026, 5, 1), source_tokens=70000, gen_type="iterative")
-    prev.created_at = datetime.utcnow()  # inside MIN_INTERVAL
-    db.session.commit()
-    monkeypatch.setattr(pb, "_remaining_token_count", lambda user, cutoff: 85000)
-    assert pb._should_seed(u) is True
-    monkeypatch.setattr(pb, "_remaining_token_count", lambda user, cutoff: 30000)  # small tail
-    assert pb._should_seed(u) is False
-    # An organic (unpinned) user with a full chunk remaining is still gated
-    # by MIN_INTERVAL.
-    v = _user()
-    pv = _prev_profile(v, datetime(2026, 5, 1), source_tokens=70000, gen_type="iterative")
-    pv.created_at = datetime.utcnow()
-    db.session.commit()
-    monkeypatch.setattr(pb, "_new_token_count", lambda user, cutoff: 85000)
-    assert pb._should_seed(v) is False
+def test_unfinished_chain_seeds_regardless_of_interval_and_volume(app):
+    """The continue rule: data beyond the cutoff that is OLDER than the
+    latest version (a pre-fill or import being folded in, a chunk lost to
+    a worker restart) seeds the next chunk even inside MIN_INTERVAL and
+    far below the 80k gate — for pinned and organic accounts alike. Data
+    NEWER than the version is organic growth and waits for the gates."""
+    now = datetime.utcnow()
+    for pinned in (True, False):
+        u = _user(profile_force_batch=pinned)
+        prev = _prev_profile(u, datetime(2026, 5, 1), gen_type="iterative",
+                             rendered_at=now - timedelta(minutes=45))
+        prev.created_at = now - timedelta(minutes=40)   # inside MIN_INTERVAL
+        db.session.commit()
+        assert pb._should_seed(u) is False               # nothing beyond the cutoff
+        node = _seed_node(u, 3000)
+        node.created_at = now - timedelta(minutes=50)    # after the cutoff, before the version
+        db.session.commit()
+        assert pb._should_seed(u) is True                # 3k units, 40 min old: continues anyway
+        node.created_at = now - timedelta(minutes=35)    # after the version: organic growth
+        db.session.commit()
+        assert pb._should_seed(u) is False               # inside MIN_INTERVAL, below 80k
 
 
-def test_small_tail_is_deferred_even_for_pinned_accounts(app, monkeypatch):
+def test_small_tail_is_chunked_for_pinned_accounts(app, monkeypatch):
+    """The unread tail behind "reads as 2025": a pinned account's 6k-unit
+    remainder gets its own chunk instead of waiting for data that never
+    comes."""
     u = _user(profile_force_batch=True)
     _prev_profile(u, datetime(2026, 5, 1), source_tokens=70000, gen_type="iterative")
     db.session.commit()
-    monkeypatch.setattr(pb._exports, "_has_more_source_after", lambda user, ts: False)
+    _remaining(monkeypatch, 6000)
     monkeypatch.setattr(pb._exports, "build_user_export_content", MagicMock(
-        return_value={"content": "TAIL", "token_count": 6000,
-                      "latest_node_created_at": datetime(2026, 6, 1)}))
-    assert pb._build_next_profile_request(u) is None  # 1 version → no integration either
+        return_value=_chunk("TAIL", units=6000)))
+    monkeypatch.setattr(pb._exports, "build_update_template",
+                        lambda uid: "T {new_data}")
+    req = pb._build_next_profile_request(u)
+    assert req is not None and req["meta"]["kind"] == "chunk"
+    assert req["meta"]["chunk_units"] == 6000
 
 
-def test_remaining_token_count_uses_created_at_not_updated_at(app):
+def test_should_continue_chain_uses_created_at_not_updated_at(app):
     """Imported tweets have updated_at = import time but created_at = tweet
-    date; the remaining-data measure must follow the chunk cutoff (created_at)."""
+    date; the continue rule keys on created_at on both sides — against
+    the cutoff and against the version."""
     u = _user()
     db.session.flush()
     for day, tokens in ((1, 100), (10, 200), (20, 400)):
         n = Node(user_id=u.id, human_owner_id=u.id, privacy_level="private",
-                 ai_usage="chat", token_count=tokens, created_at=datetime(2026, 1, day))
+                 ai_usage="chat", token_count=tokens,
+                 created_at=datetime(2026, 1, day), updated_at=datetime(2026, 3, 1))
         n.set_content("x")
         db.session.add(n)
     db.session.commit()
-    assert pb._remaining_token_count(u, datetime(2026, 1, 5)) == 600
-    assert pb._remaining_token_count(u, datetime(2026, 1, 15)) == 400
-    assert pb._remaining_token_count(u, datetime(2026, 1, 25)) == 0
+
+    def version(cutoff, created):
+        p = _prev_profile(u, cutoff, rendered_at=created)
+        p.created_at = created
+        db.session.flush()
+        return p
+
+    rule = pb._exports.should_continue_chain
+    assert rule(u, version(datetime(2026, 1, 5), datetime(2026, 1, 25))) is True
+    assert rule(u, version(datetime(2026, 1, 25), datetime(2026, 1, 26))) is False  # nothing beyond the cutoff
+    assert rule(u, version(datetime(2026, 1, 15), datetime(2026, 1, 18))) is False  # Jan 20 is newer than the version
+    assert rule(u, version(None, datetime(2026, 1, 25))) is False               # no cutoff: nothing to continue
+
+
+def test_legacy_versions_continue_only_on_pinned_accounts(app):
+    """A version saved before render times existed: an organic account's
+    leftover waits for its next gate-triggered update (no catch-up burst
+    on deploy); a pinned account continues from the save time, as the old
+    special case did."""
+    now = datetime.utcnow()
+    for pinned, expected in ((False, False), (True, True)):
+        u = _user(profile_force_batch=pinned)
+        prev = _prev_profile(u, datetime(2026, 5, 1), gen_type="iterative")   # no render time
+        prev.created_at = now - timedelta(hours=2)
+        node = _seed_node(u, 3000)
+        node.created_at = now - timedelta(hours=3)                            # beyond the cutoff, before the save
+        db.session.commit()
+        assert pb._exports.should_continue_chain(u, prev) is expected
+
+
+def test_apply_result_legacy_item_takes_its_submission_time_as_render_time(app, monkeypatch):
+    """A chunk in flight across the deploy carries no rendered_at; it was
+    rendered right before submission, so the saved version gets the
+    job's submitted_at and a pre-fill chain in progress keeps going."""
+    u = _user(profile_force_batch=True)
+    db.session.commit()
+    submitted = datetime.utcnow() - timedelta(hours=1)
+    monkeypatch.setattr(pb._exports, "build_user_export_content", MagicMock(return_value=None))
+    item = {"custom_id": "x", "user_id": u.id, "kind": "chunk",
+            "prev_profile_id": None, "generation_type": "iterative",
+            "prev_cumulative": 0, "origin_stats": None,
+            "source_data_cutoff": "2026-06-01T00:00:00", "model_id": "test-model",
+            "prompt_tokens_est": 1000}
+    result = {"content": "P", "input_tokens": 100, "output_tokens": 5, "total_tokens": 105}
+    pb._apply_result(u, item, result, submitted)
+    assert UserProfile.query.filter_by(user_id=u.id).one().source_rendered_at == submitted
+
+
+
+def test_provisional_first_build_is_rebuilt_from_scratch_at_the_organic_gate(app):
+    """A generated profile covering under a full chunk of data (an early
+    signup's first build) is provisional: when the organic gate trips, the
+    seeder requests a from-scratch build instead of an update. Not on the
+    continue rule (a chain in progress), not for a user-written base, not
+    for a profile that already covers a full chunk."""
+    ex = pb._exports
+    now = datetime.utcnow()
+
+    def account(source_tokens, generated_by="test-model", pinned=False):
+        u = _user(profile_force_batch=pinned)
+        tip = _prev_profile(u, datetime(2026, 5, 1), source_tokens=source_tokens,
+                            gen_type="iterative", rendered_at=now - timedelta(days=2))
+        tip.generated_by = generated_by
+        tip.created_at = now - timedelta(days=2)
+        db.session.commit()
+        return u, tip
+
+    def organic(user, units):
+        """Written after the tip's render: growth, not an unfinished chain."""
+        n = _seed_node(user, units)
+        n.created_at = now - timedelta(days=1)
+        db.session.commit()
+
+    # 10k-unit profile + 85k organic units → seed AND flag a rebuild.
+    u, tip = account(10_000)
+    organic(u, 85_000)
+    assert ex.profile_is_provisional(tip) is True
+    assert pb._should_seed(u) is True
+    assert User.query.get(u.id).profile_needs_full_regen is True
+
+    # A full-chunk profile is a base worth updating.
+    v, tipv = account(90_000)
+    organic(v, 85_000)
+    assert ex.profile_is_provisional(tipv) is False
+    assert pb._should_seed(v) is True
+    assert User.query.get(v.id).profile_needs_full_regen is False
+
+    # The user's own words are never provisional.
+    w, tipw = account(0, generated_by="user")
+    organic(w, 85_000)
+    assert ex.profile_is_provisional(tipw) is False
+    assert pb._should_seed(w) is True
+    assert User.query.get(w.id).profile_needs_full_regen is False
+
+    # A chain in progress (data older than the render) continues; the
+    # provisional tip is not a reason to start over.
+    x, tipx = account(10_000, pinned=True)
+    older = _seed_node(x, 3_000)
+    older.created_at = now - timedelta(days=3)
+    db.session.commit()
+    assert pb._should_seed(x) is True
+    assert User.query.get(x.id).profile_needs_full_regen is False
+
+
+def test_provisional_ladder_drives_first_builds_and_rebuilds(app):
+    """No profile, or a provisional one: the seeder fires a from-scratch
+    build each time the account's total units cross the next ladder step
+    (5k, 10k, 15k, 25k, 50k, then T); between steps nothing happens."""
+    ex = pb._exports
+    now = datetime.utcnow()
+
+    def write(user, units):
+        n = _seed_node(user, units)
+        n.created_at = now - timedelta(days=1)
+        db.session.commit()
+
+    # A new signup: nothing at 4k, the first build at 5k.
+    u = _user()
+    db.session.commit()
+    write(u, 4_000)
+    assert pb._should_seed(u) is False
+    write(u, 1_000)
+    assert pb._should_seed(u) is True
+    assert User.query.get(u.id).profile_needs_full_regen is True
+    assert ex.provisional_build_due(u, None) == (True, 5_000, 5_000)
+
+    # A provisional profile covering 7k: the next step is 10k.
+    v = _user()
+    tip = _prev_profile(v, datetime(2026, 5, 1), source_tokens=7_000,
+                        gen_type="initial", rendered_at=now - timedelta(days=2))
+    tip.created_at = now - timedelta(days=2)
+    write(v, 9_000)
+    assert pb._should_seed(v) is False
+    assert ex.provisional_build_due(v, tip) == (False, 9_000, 10_000)
+    write(v, 1_000)
+    assert pb._should_seed(v) is True
+    assert User.query.get(v.id).profile_needs_full_regen is True   # from scratch, unchained
+
+    # Covering 60k: the next build is the first full one at T.
+    w = _user()
+    tipw = _prev_profile(w, datetime(2026, 5, 1), source_tokens=60_000,
+                         gen_type="initial", rendered_at=now - timedelta(days=2))
+    tipw.created_at = now - timedelta(days=2)
+    write(w, 89_000)
+    assert pb._should_seed(w) is False
+    write(w, 1_000)
+    assert pb._should_seed(w) is True
+
+
+def test_seed_build_failure_is_recorded_on_the_user_and_cleared_on_success(app, monkeypatch):
+    """A request-build failure never reaches the provider, so nothing
+    counted it: the admin panel showed the account as waiting on
+    activation while prod's LLM_NAME was a typo for five days
+    (2026-09-15). The seeder now records the exception on the row (and
+    logs at ERROR for Sentry), and clears it once a request builds."""
+    u = _user(profile_force_batch=True, profile_needs_full_regen=True)
+    u.approved = False
+    db.session.commit()
+    _remaining(monkeypatch, 90000)
+    monkeypatch.setattr(pb._exports, "build_user_export_content",
+                        MagicMock(return_value=_chunk("DATA")))
+    monkeypatch.setattr(pb._exports, "_load_prompt", lambda *a, **k: "G {user_export}")
+    monkeypatch.setattr(pb, "batch_submit", lambda reqs, keys, kind: {k: f"b-{k}" for k in reqs})
+    # The incident's shape: LLM_NAME set to the API id, not a config key.
+    # (An unknown preferred_model no longer fails: it is ignored in favour
+    # of LLM_NAME, llm_nodes.default_model_for.)
+    u.preferred_model = None
+    db.session.commit()
+    monkeypatch.setitem(app.config, "DEFAULT_LLM_MODEL", "claude-opus-4-6")
+
+    assert pb._seed_profile_batches(users=[u]) == 0
+    fresh = User.query.get(u.id)
+    assert fresh.profile_seed_error == "ValueError: Unsupported model: claude-opus-4-6"
+    assert fresh.profile_batch_pending is False
+    assert fresh.profile_batch_attempts == 0  # not a provider failure
+    assert fresh.profile_needs_full_regen is True  # the request stands
+
+    monkeypatch.setitem(app.config, "DEFAULT_LLM_MODEL", "test-model")
+    assert pb._seed_profile_batches(users=[fresh]) == 1
+    fresh = User.query.get(u.id)
+    assert fresh.profile_seed_error is None
+    assert fresh.profile_batch_pending is True
+
+
+# ── #346: account setting and per-row ai_usage ─────────────────────────────
+
+def test_seed_skips_account_opted_out_of_ai(app, monkeypatch):
+    """The immediate seed (admin Build profile, pre-fill, import hand-off)
+    passes users in directly, bypassing profile_eligible_query."""
+    u = _user(profile_force_batch=True, profile_needs_full_regen=True,
+              default_ai_usage="none")
+    db.session.commit()
+    _remaining(monkeypatch, 90000)
+    export = MagicMock(return_value=_chunk("DATA"))
+    monkeypatch.setattr(pb._exports, "build_user_export_content", export)
+    submit = MagicMock(return_value={})
+    monkeypatch.setattr(pb, "batch_submit", submit)
+
+    assert pb._seed_profile_batches(users=[u]) == 0
+    export.assert_not_called()
+    submit.assert_not_called()
+
+
+def test_next_step_not_built_after_account_opts_out(app, monkeypatch):
+    """The poller advances a chain through the same builder: a chain
+    started while AI was allowed stops once the account is set to none."""
+    u = _user(default_ai_usage="none")
+    _prev_profile(u, datetime(2026, 5, 1))
+    db.session.commit()
+    _remaining(monkeypatch, 90000)
+    export = MagicMock(return_value=_chunk())
+    monkeypatch.setattr(pb._exports, "build_user_export_content", export)
+
+    assert pb._build_next_profile_request(u) is None
+    export.assert_not_called()
+
+
+def test_only_version_none_means_build_from_writing(app, monkeypatch):
+    """A profile written by hand while the account was 'none' stays
+    'none' after the account switches back. With no AI-readable version
+    to fall back to, the next build starts from the writing."""
+    u = _user()
+    hand = _prev_profile(u, None, source_tokens=0, gen_type="initial")
+    hand.ai_usage = "none"
+    hand.generated_by = "user"
+    db.session.commit()
+    _remaining(monkeypatch, 90000)
+    monkeypatch.setattr(pb._exports, "build_user_export_content",
+                        MagicMock(return_value=_chunk()))
+    monkeypatch.setattr(pb._exports, "_load_prompt",
+                        lambda *a, **k: "G {user_export}")
+
+    req = pb._build_next_profile_request(u)
+
+    assert req["meta"]["prev_profile_id"] is None
+    assert req["meta"]["generation_type"] in ("initial", "iterative")
+    text = req["request"]["messages"][0]["content"][0]["text"]
+    assert "PREVIOUS PROFILE" not in text and "NEW DATA" in text
+    assert pb._exports.profile_update_base(u.id) is None
+
+
+def test_sync_trigger_skips_account_opted_out_of_ai(app, monkeypatch):
+    u = _user(default_ai_usage="none")
+    db.session.commit()
+    dispatch = MagicMock()
+    monkeypatch.setattr(pb._exports, "update_user_profile", dispatch)
+
+    assert pb._exports.maybe_trigger_profile_update(u.id) is None
+    assert pb._exports.maybe_trigger_incremental_profile_update(u) is None
+    dispatch.delay.assert_not_called()
+
+
+def test_none_tip_falls_back_to_newest_readable_version(app, monkeypatch):
+    """A 'none' tip (hand-written under 'none', or a batch step collected
+    after the switch) is skipped: the chain continues from the version
+    before it instead of rebuilding the whole account."""
+    u = _user()
+    ok = _prev_profile(u, datetime(2026, 5, 1))
+    tip = _prev_profile(u, datetime(2026, 5, 2))
+    tip.ai_usage = "none"
+    tip.set_content("SECRET TIP")
+    db.session.commit()
+    _remaining(monkeypatch, 90000)
+    monkeypatch.setattr(pb._exports, "build_user_export_content",
+                        MagicMock(return_value=_chunk()))
+    monkeypatch.setattr(pb._exports, "build_update_template", lambda uid: (
+        "T {existing_profile}|{new_data}|{source_tokens_past}"
+        "|{source_tokens_new}|{ratio_percent}"))
+
+    assert pb._exports.profile_update_base(u.id).id == ok.id
+    req = pb._build_next_profile_request(u)
+
+    assert req["meta"]["generation_type"] == "update"
+    assert req["meta"]["prev_profile_id"] == ok.id
+    text = req["request"]["messages"][0]["content"][0]["text"]
+    assert "PREVIOUS PROFILE" in text and "SECRET TIP" not in text
+
+
+def test_sync_task_rechecks_base_when_it_runs(app):
+    u = _user()
+    ok = _prev_profile(u, datetime(2026, 5, 1))
+    blocked = _prev_profile(u, datetime(2026, 5, 2))
+    blocked.ai_usage = "none"
+    db.session.commit()
+
+    assert pb._exports.ai_readable_base_id(u.id, ok.id) == ok.id
+    # Marked 'none' after dispatch: the newest readable version instead.
+    assert pb._exports.ai_readable_base_id(u.id, blocked.id) == ok.id
+    assert pb._exports.ai_readable_base_id(u.id, None) is None
+    ok.ai_usage = "none"
+    db.session.commit()
+    assert pb._exports.ai_readable_base_id(u.id, blocked.id) is None
+
+
+def test_integration_leaves_out_none_versions(app, monkeypatch):
+    monkeypatch.setattr(pb._exports, "_load_prompt",
+                        lambda *a, **k: "INTEGRATE {N_MONTHS}")
+    u = _user()
+    root = _prev_profile(u, datetime(2026, 3, 1), gen_type="iterative")
+    mid = _prev_profile(u, datetime(2026, 4, 1))
+    mid.parent_profile_id = root.id
+    mid.ai_usage = "none"
+    mid.set_content("SECRET MIDDLE VERSION")
+    tip = _prev_profile(u, datetime(2026, 5, 1))
+    tip.parent_profile_id = mid.id
+    db.session.commit()
+
+    messages, chain = pb._exports.build_integration_messages(u.id, tip.id)
+    assert [p.id for p in chain] == [root.id, tip.id]
+    assert all("SECRET MIDDLE VERSION" not in m["content"][0]["text"]
+               for m in messages)
+
+    # Fewer than two AI-readable versions: nothing to integrate.
+    tip.ai_usage = "none"
+    db.session.commit()
+    assert pb._exports.build_integration_messages(u.id, tip.id) == (None, None)
+
+
+# ── #368: an empty result cut off at the output limit ────────────────────
+
+def test_poll_empty_truncated_chunk_saves_nothing_and_counts_attempt(
+        app, monkeypatch):
+    """A chunk cut off before any text must not become the chain tip (the
+    base the next chunk builds on). Nothing is saved, no next step is
+    submitted, the attempt counts as failed, the cost row is kept."""
+    u = _user()
+    prev = _prev_profile(u, datetime(2026, 5, 1))
+    job, item = _chunk_job(u, prev)
+    monkeypatch.setattr(pb, "batch_check_and_collect", lambda bids, keys: (
+        {item["custom_id"]: {"content": "", "truncated": True,
+                             "input_tokens": 2000, "output_tokens": 32000}},
+        {}, {}))
+    submit = MagicMock(return_value={})
+    monkeypatch.setattr(pb, "batch_submit", submit)
+
+    pb._poll_profile_batches()
+
+    assert UserProfile.query.filter_by(user_id=u.id).all() == [prev]
+    assert pb._exports.profile_update_base(u.id).id == prev.id
+    u2 = User.query.get(u.id)
+    assert u2.profile_batch_attempts == 1
+    assert u2.profile_batch_pending is False
+    submit.assert_not_called()
+    assert ProfileBatchJob.query.get(job.id).status == "collected"
+    log = APICostLog.query.filter_by(user_id=u.id).one()
+    assert log.request_type == "profile_batch"
+    assert log.output_tokens == 32000
+
+
+def test_poll_empty_truncated_integration_saves_nothing(app, monkeypatch):
+    u = _user()
+    tip = _prev_profile(u, datetime(2026, 6, 1))
+    job, item = _integration_job(u, tip)
+    monkeypatch.setattr(pb, "batch_check_and_collect", lambda bids, keys: (
+        {item["custom_id"]: {"content": "  \n", "truncated": True,
+                             "input_tokens": 100, "output_tokens": 32000}},
+        {}, {}))
+    monkeypatch.setattr(pb, "batch_submit", MagicMock(return_value={}))
+    import backend.utils.notifications as notif
+    notify = MagicMock()
+    monkeypatch.setattr(notif, "notify_profile_ready", notify)
+
+    pb._poll_profile_batches()
+
+    assert UserProfile.query.filter_by(
+        user_id=u.id, generation_type="integration").count() == 0
+    assert User.query.get(u.id).profile_batch_attempts == 1
+    notify.assert_not_called()
+    assert APICostLog.query.filter_by(user_id=u.id).count() == 1
+
+
+def test_apply_result_refuses_partial_truncated_chunk(app, monkeypatch):
+    """A cut-off chunk WITH text is refused too: a profile stopped at the
+    output limit is incomplete, and it would become the next base."""
+    from backend.llm_providers import EmptyTruncatedOutputError
+    from backend.utils.refusal_backoff import REFUSED_REF
+    u = _user()
+    db.session.commit()
+    item = {"custom_id": "x", "user_id": u.id, "kind": "chunk",
+            "prev_profile_id": None, "generation_type": "iterative",
+            "prev_cumulative": 0, "origin_stats": None,
+            "source_data_cutoff": "2026-06-01T00:00:00",
+            "model_id": "test-model", "chunk_units": 1000}
+    result = {"content": "PARTIAL PROFILE", "truncated": True,
+              "input_tokens": 3000, "output_tokens": 32000}
+    with pytest.raises(EmptyTruncatedOutputError):
+        pb._apply_result(u, item, result,
+                         datetime.utcnow() - timedelta(minutes=1))
+    db.session.rollback()   # only what was committed counts
+    assert UserProfile.query.filter_by(user_id=u.id).count() == 0
+    log = APICostLog.query.filter_by(user_id=u.id).one()
+    assert log.request_ref == REFUSED_REF
+
+
+@pytest.mark.parametrize("text", ["", "I can't help with"])
+def test_poll_refused_chunk_saves_nothing_and_counts_attempt(
+        app, monkeypatch, text):
+    """#470: a model refusal (no text, or partial text) is not a profile.
+    Nothing is saved, the old tip stays, the attempt counts as failed and
+    the cost row is marked refused for the backoff."""
+    from backend.utils.refusal_backoff import REFUSED_REF
+    u = _user()
+    prev = _prev_profile(u, datetime(2026, 5, 1))
+    job, item = _chunk_job(u, prev)
+    monkeypatch.setattr(pb, "batch_check_and_collect", lambda bids, keys: (
+        {item["custom_id"]: {"content": text, "refused": True,
+                             "truncated": False,
+                             "input_tokens": 2000, "output_tokens": 20}},
+        {}, {}))
+    submit = MagicMock(return_value={})
+    monkeypatch.setattr(pb, "batch_submit", submit)
+
+    pb._poll_profile_batches()
+
+    assert UserProfile.query.filter_by(user_id=u.id).all() == [prev]
+    assert pb._exports.profile_update_base(u.id).id == prev.id
+    u2 = User.query.get(u.id)
+    assert u2.profile_batch_attempts == 1
+    assert u2.profile_batch_pending is False
+    submit.assert_not_called()
+    assert APICostLog.query.filter_by(
+        user_id=u.id).one().request_ref == REFUSED_REF
+
+
+def test_poll_refused_integration_saves_nothing(app, monkeypatch):
+    u = _user()
+    tip = _prev_profile(u, datetime(2026, 6, 1))
+    job, item = _integration_job(u, tip)
+    monkeypatch.setattr(pb, "batch_check_and_collect", lambda bids, keys: (
+        {item["custom_id"]: {"content": "Sorry, no.", "refused": True,
+                             "input_tokens": 100, "output_tokens": 5}},
+        {}, {}))
+    monkeypatch.setattr(pb, "batch_submit", MagicMock(return_value={}))
+
+    pb._poll_profile_batches()
+
+    assert UserProfile.query.filter_by(
+        user_id=u.id, generation_type="integration").count() == 0
+    assert User.query.get(u.id).profile_batch_attempts == 1
+
+
+def _refusal(user, ago, request_type="profile_batch"):
+    from backend.utils.refusal_backoff import REFUSED_REF
+    db.session.add(APICostLog(
+        user_id=user.id, model_id="test-model", request_type=request_type,
+        request_ref=REFUSED_REF, input_tokens=1, output_tokens=1,
+        cost_microdollars=0, created_at=datetime.utcnow() - ago))
+    db.session.commit()
+
+
+def test_should_seed_backs_off_after_a_refusal_even_with_regen_flag(app):
+    """#368: a refused chunk leaves every gate open (here the regen flag
+    of a from-scratch build). The backoff holds the seeder for 1 h after
+    the first refusal, then lets it through."""
+    u = _user(profile_needs_full_regen=True)
+    db.session.commit()
+    assert pb._should_seed(u) is True
+    _refusal(u, timedelta(minutes=30))
+    assert pb._should_seed(u) is False
+    # The same refusal, older than the 1 h wait: seeding resumes.
+    APICostLog.query.filter_by(user_id=u.id).update(
+        {"created_at": datetime.utcnow() - timedelta(hours=1, minutes=1)})
+    db.session.commit()
+    assert pb._should_seed(u) is True
+
+
+def test_pinned_account_stops_after_two_refusals(app, monkeypatch):
+    """A force-batch account is never stopped by MAX_BATCH_ATTEMPTS; the
+    refusal backoff stops it: after the second refusal in a row the
+    seeder never seeds it again, however long ago that was. An import's
+    seed (ignore_backoff) still runs it."""
+    u = _user(profile_force_batch=True, profile_needs_full_regen=True,
+              profile_batch_attempts=pb.MAX_BATCH_ATTEMPTS + 5)
+    app.config["PROFILE_USE_BATCH"] = True
+    db.session.commit()
+    _remaining(monkeypatch, 90000)
+    monkeypatch.setattr(pb._exports, "build_user_export_content",
+                        MagicMock(return_value=_chunk("DATA")))
+    monkeypatch.setattr(pb._exports, "_load_prompt",
+                        lambda *a, **k: "G {user_export}")
+    submitted = []
+    monkeypatch.setattr(pb, "batch_submit", lambda reqs, keys, kind: (
+        submitted.append(reqs) or {k: f"b-{k}" for k in reqs}))
+    for days in (30, 29):
+        _refusal(u, timedelta(days=days))
+    assert pb._seed_profile_batches(users=[u]) == 0
+    assert submitted == []
+    # The import hand-off skips the stop.
+    assert pb._seed_profile_batches(users=[u], ignore_backoff=True) == 1
+
+
+def test_saved_version_ends_the_refusal_streak(app):
+    """Only refusals newer than the newest saved version count."""
+    u = _user(profile_needs_full_regen=True)
+    db.session.commit()
+    for minutes in (50, 40, 30):
+        _refusal(u, timedelta(minutes=minutes))
+    assert pb._should_seed(u) is False
+    _prev_profile(u, datetime(2026, 6, 1))   # created now, after them
+    db.session.commit()
+    assert pb._should_seed(u) is True
+
+
+def test_should_seed_ignore_backoff_only_skips_the_backoff(app):
+    """ignore_backoff (import hand-off, admin force) skips the wait and the
+    stop, not the other gates: an account with nothing to build stays
+    unseeded."""
+    u = _user()
+    db.session.commit()
+    _refusal(u, timedelta(minutes=30))
+    _refusal(u, timedelta(minutes=20))
+    assert pb._should_seed(u) is False
+    assert pb._should_seed(u, ignore_backoff=True) is False   # no data
+    u.profile_needs_full_regen = True
+    db.session.commit()
+    assert pb._should_seed(u) is False
+    assert pb._should_seed(u, ignore_backoff=True) is True
+
+
+def test_seeder_builds_the_integration_alone_after_a_refused_one(
+        app, monkeypatch):
+    """#368: the run's integration was refused, so the chain tip is a chunk
+    with no integration on top. After the 1 h wait the seeder submits the
+    integration alone — not a chunk over the organic growth since the
+    render — and after a second refusal it stops."""
+    u = _user()
+    app.config["PROFILE_USE_BATCH"] = True
+    db.session.commit()
+    root = UserProfile(user_id=u.id, generated_by="test-model", tokens_used=0,
+                       generation_type="iterative", source_tokens_used=200000,
+                       source_data_cutoff=datetime(2026, 1, 1),
+                       created_at=datetime.utcnow() - timedelta(days=1))
+    root.set_content("ROOT")
+    db.session.add(root)
+    db.session.commit()
+    tip = UserProfile(user_id=u.id, generated_by="test-model", tokens_used=0,
+                      generation_type="iterative", source_tokens_used=400000,
+                      source_data_cutoff=datetime(2026, 6, 1),
+                      parent_profile_id=root.id,
+                      created_at=datetime.utcnow() - timedelta(hours=3))
+    tip.set_content("TIP")
+    db.session.add(tip)
+    db.session.commit()
+    # Organic growth after the tip's cutoff exists; it must not be chunked.
+    _remaining(monkeypatch, 5000)
+    submitted = []
+    monkeypatch.setattr(pb, "batch_submit", lambda reqs, keys, kind: (
+        submitted.append(reqs) or {k: f"b-{k}" for k in reqs}))
+
+    _refusal(u, timedelta(minutes=30))
+    assert pb._seed_profile_batches(users=[u]) == 0
+
+    APICostLog.query.filter_by(user_id=u.id).update(
+        {"created_at": datetime.utcnow() - timedelta(hours=2)})
+    db.session.commit()
+    assert pb._seed_profile_batches(users=[u]) == 1
+    (reqs,) = submitted
+    (req,) = next(iter(reqs.values()))
+    assert req["custom_id"] == f"profile_{u.id}_{tip.id}_integration"
+
+    u.profile_batch_pending = False
+    _refusal(u, timedelta(minutes=1))
+    assert pb._should_seed(u) is False
+
+
+def test_profile_refusal_stop_is_reported_as_refused(app, monkeypatch):
+    """#470: the second refusal stops the job and the report says
+    "refused by the model", not "output cut off"."""
+    from backend.llm_providers import EmptyTruncatedOutputError
+    from backend.utils import refusal_backoff
+    stops = []
+    monkeypatch.setattr(refusal_backoff, "report_stop",
+                        lambda *a, **k: stops.append(k))
+    u = _user()
+    db.session.commit()
+    resp = {"content": "", "refused": True, "input_tokens": 1,
+            "output_tokens": 1, "total_tokens": 2}
+    for _ in range(2):
+        with pytest.raises(EmptyTruncatedOutputError):
+            pb._exports.refuse_truncated_profile(
+                u, "test-model", resp, "chunk", batch=True)
+    assert stops[-1]["cause"] == "refused by the model"

@@ -28,6 +28,10 @@ export function useDraft(options = {}) {
   const pendingContentRef = useRef(null);
   const debounceTimerRef = useRef(null);
   const autoSaveTimerRef = useRef(null);
+  // Promise of the autosave request currently on the wire (null if none)
+  const inFlightSaveRef = useRef(null);
+  // True from the start of deleteDraft until its DELETE has completed
+  const deletingRef = useRef(false);
 
   // Build query params for API calls
   const buildParams = useCallback(() => {
@@ -75,33 +79,44 @@ export function useDraft(options = {}) {
     };
   }, [buildParams]);
 
-  // Save draft to server
-  const saveDraftToServer = useCallback(async (content) => {
-    if (isSaving) return;
+  // Save draft to server. The in-flight request's promise is kept in a ref
+  // so deleteDraft can wait for it: a save that reaches the server after the
+  // DELETE would recreate the draft with the text that was just sent.
+  const saveDraftToServer = useCallback((content) => {
+    // One save at a time, and none while a delete is waiting to go out.
+    if (inFlightSaveRef.current || deletingRef.current) return inFlightSaveRef.current;
 
     setIsSaving(true);
-    try {
-      const response = await api.post('/drafts/', {
-        content,
-        node_id: nodeId,
-        parent_id: parentId
-      });
-      // Only update draft state on initial load, not on every save
-      // This prevents unnecessary re-renders that cause cursor jumping
-      // setDraft(response.data);
+    const request = (async () => {
+      try {
+        const response = await api.post('/drafts/', {
+          content,
+          node_id: nodeId,
+          parent_id: parentId
+        });
+        // Only update draft state on initial load, not on every save
+        // This prevents unnecessary re-renders that cause cursor jumping
+        // setDraft(response.data);
 
-      // Parse server timestamp as UTC (append Z if missing)
-      const timestamp = response.data.updated_at;
-      const utcTimestamp = timestamp.endsWith('Z') ? timestamp : timestamp + 'Z';
-      setLastSaved(new Date(utcTimestamp));
-      pendingContentRef.current = null;
-    } catch (err) {
-      console.error('Error saving draft:', err);
-      // Don't clear pending content on error - will retry on next auto-save
-    } finally {
-      setIsSaving(false);
-    }
-  }, [nodeId, parentId, isSaving]);
+        // Parse server timestamp as UTC (append Z if missing)
+        const timestamp = response.data.updated_at;
+        const utcTimestamp = timestamp.endsWith('Z') ? timestamp : timestamp + 'Z';
+        setLastSaved(new Date(utcTimestamp));
+        // Keep newer text typed while this request was in flight
+        if (pendingContentRef.current === content) {
+          pendingContentRef.current = null;
+        }
+      } catch (err) {
+        console.error('Error saving draft:', err);
+        // Don't clear pending content on error - will retry on next auto-save
+      } finally {
+        inFlightSaveRef.current = null;
+        setIsSaving(false);
+      }
+    })();
+    inFlightSaveRef.current = request;
+    return request;
+  }, [nodeId, parentId]);
 
   // Debounced save function (called when user types)
   const saveDraft = useCallback((content) => {
@@ -124,7 +139,7 @@ export function useDraft(options = {}) {
   // Set up auto-save interval
   useEffect(() => {
     autoSaveTimerRef.current = setInterval(() => {
-      if (pendingContentRef.current !== null && !isSaving) {
+      if (pendingContentRef.current !== null) {
         saveDraftToServer(pendingContentRef.current);
       }
     }, autoSaveInterval);
@@ -134,10 +149,12 @@ export function useDraft(options = {}) {
         clearInterval(autoSaveTimerRef.current);
       }
     };
-  }, [autoSaveInterval, isSaving, saveDraftToServer]);
+  }, [autoSaveInterval, saveDraftToServer]);
 
   // Delete draft from server
   const deleteDraft = useCallback(async () => {
+    // Block new autosaves first, so none can start while we wait below
+    deletingRef.current = true;
     // Clear any pending saves
     pendingContentRef.current = null;
     if (debounceTimerRef.current) {
@@ -145,6 +162,12 @@ export function useDraft(options = {}) {
     }
 
     try {
+      // Wait for a save already on the wire; the DELETE must reach the
+      // server after it. The save never rejects, so a failed save does not
+      // skip the DELETE.
+      if (inFlightSaveRef.current) {
+        await inFlightSaveRef.current;
+      }
       const params = buildParams();
       await api.delete(`/drafts/?${params}`);
       setDraft(null);
@@ -156,6 +179,8 @@ export function useDraft(options = {}) {
       // Even on error, clear local state
       setDraft(null);
       setLastSaved(null);
+    } finally {
+      deletingRef.current = false;
     }
   }, [buildParams]);
 

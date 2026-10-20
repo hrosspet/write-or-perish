@@ -1,13 +1,16 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Routes, Route, Navigate, useNavigate, useParams } from 'react-router-dom';
+import { Routes, Route, Navigate, useNavigate, useParams, useLocation } from 'react-router-dom';
 import LandingPage from "./components/LandingPage";
-import Feed from "./components/Feed";
+import Log from "./components/Log";
 import NavBar from "./components/NavBar";
 import NodeFormModal from "./components/NodeFormModal";
 import SpendCapBanner from "./components/SpendCapBanner";
+import DataDeletionBanner from "./components/DataDeletionBanner";
 import TermsModal from "./components/TermsModal";
 import AdminPanel from "./components/AdminPanel";
 import NodeDetailWrapper from "./components/NodeDetailWrapper";
+import NodeOpeningSpinner from "./components/NodeOpeningSpinner";
+import useNodePrefetch from "./hooks/useNodePrefetch";
 import LoginPage from "./components/LoginPage";
 import ProtectedRoute from "./components/ProtectedRoute";
 import VisionPage from "./pages/VisionPage";
@@ -17,12 +20,17 @@ import AlphaThankYouPage from "./pages/AlphaThankYouPage";
 import WelcomePage from "./pages/WelcomePage";
 import HomePage from "./pages/HomePage";
 import VoicePage from "./pages/VoicePage";
-import ConversePage from "./pages/ConversePage";
 import WritePage from "./pages/WritePage";
 import ProfilePage from "./pages/ProfilePage";
 import TodoPage from "./pages/TodoPage";
 import ImportPage from "./pages/ImportPage";
+import ReferencesPage from "./pages/ReferencesPage";
+import ReferenceDetailPage from "./pages/ReferenceDetailPage";
 import AccountPage from "./pages/AccountPage";
+import ConfirmEmailPage from "./pages/ConfirmEmailPage";
+import ConfirmAccountDeletionPage from "./pages/ConfirmAccountDeletionPage";
+import AccountDeletedPage from "./pages/AccountDeletedPage";
+import AccountRestorePage from "./pages/AccountRestorePage";
 import ArtifactsPage from "./pages/ArtifactsPage";
 import SharePage from "./pages/SharePage";
 import PublicSharePage from "./pages/PublicSharePage";
@@ -36,6 +44,7 @@ import SearchModal from "./components/SearchModal";
 import api from "./api";
 import { useUser } from "./contexts/UserContext";
 import { AudioProvider } from "./contexts/AudioContext";
+import { useSessionUpdates } from "./hooks/useSessionUpdates";
 
 // /u/:username/:slug — human-readable permalink (#228). Resolves the slug
 // to a node id; logged-out visitors keep the pretty URL and get the public
@@ -49,7 +58,16 @@ function PermalinkRoute({ username, slug }) {
     setNodeId(null);
     setFailed(false);
     api.get(`/commons/permalink/${username}/${slug}`)
-      .then((res) => { if (!cancelled) setNodeId(res.data.node_id); })
+      .then((res) => {
+        if (cancelled) return;
+        // A former handle, or the current one in another case (#253):
+        // keep the page, show the canonical URL (query and anchor kept).
+        if (res.data.canonical && window.location.pathname === `/@${username}/${slug}`) {
+          window.history.replaceState(
+            null, '', res.data.canonical + window.location.search + window.location.hash);
+        }
+        setNodeId(res.data.node_id);
+      })
       .catch(() => { if (!cancelled) setFailed(true); });
     return () => { cancelled = true; };
   }, [username, slug]);
@@ -100,12 +118,27 @@ function RootRoute() {
 function App() {
   const [showNewEntry, setShowNewEntry] = useState(false);
   const [showSearch, setShowSearch] = useState(false);
+  // 'archive' (the Log) or 'external' (the References page) — set when
+  // the modal opens so ⌘K searches whatever the page in front of you lists.
+  const [searchScope, setSearchScope] = useState('archive');
   const nodeFormRef = useRef(null);
   const [showTerms, setShowTerms] = useState(false);
-  const [updates, setUpdates] = useState(null);
-  const updatesFetched = useRef(false);
-  const { user, setUser } = useUser();
+  const { user, setUser, markHasOwnEntries } = useUser();
   const navigate = useNavigate();
+  // A thread opened from a modal (a new entry, a search result): the modal
+  // closes, and the thread opens once its node is in, with a spinner over
+  // the current page meanwhile; moving elsewhere first drops it.
+  const { pending: openingNode, openNode, cancel: cancelOpenNode } = useNodePrefetch();
+  const { pathname } = useLocation();
+  useEffect(() => { cancelOpenNode(); }, [pathname, cancelOpenNode]);
+  // The node already on screen just navigates: its fetched data would wait
+  // unused and be shown, out of date, on a later visit.
+  const openThread = (id, url = `/node/${id}`) => (
+    pathname === `/node/${id}` ? navigate(url) : openNode(id, () => navigate(url)));
+  // Dev-update channel (#207): asked once per session; anything unread
+  // opens the updates modal. Never for a session that starts on /welcome
+  // (#392).
+  const [updates, clearUpdates] = useSessionUpdates(user, pathname);
 
   // When the user info is loaded, check if they have accepted the terms.
   useEffect(() => {
@@ -119,26 +152,18 @@ function App() {
     }
   }, [user]);
 
-  // Dev-update channel (#207): once per session, after terms are settled,
-  // ask what's unread. Anything there opens the updates modal; nothing
-  // unread means nothing is shown.
-  useEffect(() => {
-    if (!user || !user.approved || !user.terms_up_to_date) return;
-    if (updatesFetched.current) return;
-    updatesFetched.current = true;
-    api.get("/updates").then((res) => {
-      const d = res.data || {};
-      const count = (d.changelog?.length || 0) +
-        (d.notifications?.length || 0) + (d.polls?.length || 0);
-      if (count > 0) setUpdates(d);
-    }).catch(() => {});
-  }, [user]);
+  const openSearch = (scope) => {
+    setSearchScope(scope);
+    setShowSearch(true);
+  };
 
   // Cmd+K / Ctrl+K to open search
   useEffect(() => {
     const handleSearchShortcut = (e) => {
       if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
         e.preventDefault();
+        setSearchScope(window.location.pathname.startsWith('/references')
+          ? 'external' : 'archive');
         setShowSearch((prev) => !prev);
       }
     };
@@ -152,6 +177,7 @@ function App() {
         <NavBar onNewEntryClick={() => setShowNewEntry(true)} />
         <SpendCapBanner />
         <div style={{ paddingTop: "60px" }}>
+        <DataDeletionBanner />
         {showNewEntry && (
           <NodeFormModal
             title="Write New Entry"
@@ -162,17 +188,21 @@ function App() {
               allowAgenticPrompt: true,
               onSuccess: (data) => {
                 setShowNewEntry(false);
+                markHasOwnEntries();
                 // When the entry went through /textmode/start, data
                 // carries `awaitLlm` so NodeDetail picks up the pending
                 // LLM response on the highlighted node.
                 const suffix = data.awaitLlm ? `?awaitLlm=${data.awaitLlm}` : '';
-                navigate(`/node/${data.id}${suffix}`);
+                openThread(data.id, `/node/${data.id}${suffix}`);
               },
             }}
           />
       )}
+      {openingNode && <NodeOpeningSpinner />}
 
-      {showSearch && <SearchModal onClose={() => setShowSearch(false)} />}
+      {showSearch && (
+        <SearchModal scope={searchScope} onClose={() => setShowSearch(false)} onOpenNode={openThread} />
+      )}
 
       {/* Render the Terms Modal if the user hasn't accepted the terms yet */}
       {showTerms && (
@@ -189,7 +219,7 @@ function App() {
       )}
 
       {updates && !showTerms && (
-        <UpdatesModal data={updates} onClose={() => setUpdates(null)} />
+        <UpdatesModal data={updates} onClose={clearUpdates} />
       )}
 
         <ProfileGenerationWatcher />
@@ -203,17 +233,23 @@ function App() {
           <Route path="/how-to" element={<HowToPage />} />
           {/* Alpha thank you - public (for unapproved users) */}
           <Route path="/alpha-thank-you" element={<AlphaThankYouPage />} />
+          {/* Confirms a new sign-in email (#260). Not ProtectedRoute: waitlisted
+              (unapproved) signups confirm theirs here, and it asks for sign-in itself. */}
+          <Route path="/confirm-email" element={<ConfirmEmailPage />} />
+          {/* Account deletion (#269): signed-out pages, like /confirm-email. */}
+          <Route path="/confirm-account-deletion" element={<ConfirmAccountDeletionPage />} />
+          <Route path="/account-deleted" element={<AccountDeletedPage />} />
+          <Route path="/account-restore" element={<AccountRestorePage />} />
           {/* Welcome - protected (for newly approved users) */}
-          <Route path="/welcome" element={<ProtectedRoute><WelcomePage onNewEntryClick={() => setShowNewEntry(true)} /></ProtectedRoute>} />
+          <Route path="/welcome" element={<ProtectedRoute><WelcomePage /></ProtectedRoute>} />
           {/* Workflow routes */}
           <Route path="/voice" element={<ProtectedRoute><VoicePage /></ProtectedRoute>} />
-          <Route path="/converse" element={<ProtectedRoute><ConversePage /></ProtectedRoute>} />
           <Route path="/textmode" element={<ProtectedRoute><WritePage /></ProtectedRoute>} />
           {/* Profile and Todo */}
           <Route path="/profile" element={<ProtectedRoute><ProfilePage /></ProtectedRoute>} />
           <Route path="/todo" element={<ProtectedRoute><TodoPage /></ProtectedRoute>} />
           {/* Log (renamed from feed) */}
-          <Route path="/log" element={<ProtectedRoute><Feed onSearchClick={() => setShowSearch(true)} /></ProtectedRoute>} />
+          <Route path="/log" element={<ProtectedRoute><Log onSearchClick={() => openSearch('archive')} /></ProtectedRoute>} />
           {/* Backward compatibility redirects */}
           <Route path="/feed" element={<Navigate to="/log" replace />} />
           <Route path="/dashboard" element={<Navigate to="/profile" replace />} />
@@ -222,6 +258,8 @@ function App() {
           <Route path="/prompts" element={<ProtectedRoute><PromptsPage /></ProtectedRoute>} />
           <Route path="/prompts/:promptKey" element={<ProtectedRoute><PromptDetailPage /></ProtectedRoute>} />
           <Route path="/import" element={<ProtectedRoute><ImportPage /></ProtectedRoute>} />
+          <Route path="/references" element={<ProtectedRoute><ReferencesPage onSearchClick={() => openSearch('external')} /></ProtectedRoute>} />
+          <Route path="/references/:id" element={<ProtectedRoute><ReferenceDetailPage /></ProtectedRoute>} />
           {/* AI preferences folded into the artifact model (#158 Slice 5);
               keep the old path working as a redirect. */}
           <Route path="/ai-preferences" element={<Navigate to="/artifacts/ai_preferences" replace />} />

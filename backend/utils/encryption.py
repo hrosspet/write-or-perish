@@ -12,6 +12,7 @@ Format: ENC:v2:<base64-wrapped-dek>:<base64(nonce + ciphertext + tag)>
 Legacy format (v1) is still supported for decryption only.
 """
 import base64
+import binascii
 import logging
 import os
 import re
@@ -33,7 +34,11 @@ NONCE_SIZE = 12
 
 # In-memory LRU cache for unwrapped DEKs: wrapped_dek_b64 -> dek_bytes
 # Avoids repeated KMS calls for the same wrapped DEK.
-_DEK_CACHE_MAX = 4096
+# Sized so a whole budgeted export / profile chunk (5–7k nodes of short
+# imported posts at 100k tokens) stays cached between the export's quote
+# pre-pass and its render; at 4096 those chunks were unwrapped twice.
+# ~150 bytes per entry → ~10 MB when full. FIFO, not true LRU.
+_DEK_CACHE_MAX = 65536
 _dek_cache = {}
 _dek_cache_order = []
 _dek_cache_lock = threading.Lock()
@@ -184,6 +189,87 @@ def _unwrap_dek(wrapped_dek: bytes) -> bytes:
     return dek
 
 
+# ---------------------------------------------------------------------------
+# Batched DEK unwrapping
+#
+# One KMS decrypt is ~80 ms from the prod VM whatever the transport (measured
+# 2026-09-02: REST and gRPC both 60–120 ms, while a raw HTTPS request to the
+# same endpoint is 22 ms — the latency is inside KMS). A cold thread open
+# paid that per node, in sequence. The calls are pure waiting, so N of them
+# in flight cost about one: 8 unwraps went 672 ms → 115 ms on the 2-vCPU VM.
+#
+# The executor is created lazily, after gunicorn has forked. Under the gevent
+# worker its "threads" are greenlets on the request loop (the REST client
+# goes through `requests`, which gevent makes cooperative); in Celery they
+# are real threads parked on sockets. Either way no CPU is involved.
+#
+# INTRODUCED CONSTANT: 8 in flight per process. Not tuned beyond the
+# measurement above; KMS quota is 60k ops/min, so there is headroom to
+# raise it if deep subtrees still feel slow.
+# ---------------------------------------------------------------------------
+DEK_PREFETCH_CONCURRENCY = 8
+_unwrap_pool = None
+_unwrap_pool_lock = threading.Lock()
+
+
+def _get_unwrap_pool():
+    global _unwrap_pool
+    if _unwrap_pool is None:
+        with _unwrap_pool_lock:
+            if _unwrap_pool is None:
+                from concurrent.futures import ThreadPoolExecutor
+                _unwrap_pool = ThreadPoolExecutor(
+                    max_workers=DEK_PREFETCH_CONCURRENCY,
+                    thread_name_prefix="dek-unwrap",
+                )
+    return _unwrap_pool
+
+
+def wrapped_dek_of(ciphertext):
+    """The KMS-wrapped DEK inside a v2 envelope, or None for anything
+    else (plaintext, v1 direct-KMS blobs, None, malformed)."""
+    if not isinstance(ciphertext, str) or not ciphertext.startswith(ENCRYPTED_PREFIX_V2):
+        return None
+    wrapped_b64 = ciphertext[len(ENCRYPTED_PREFIX_V2):].split(":", 1)[0]
+    try:
+        return base64.b64decode(wrapped_b64, validate=True) or None
+    except (ValueError, binascii.Error):
+        return None
+
+
+def _unwrap_quietly(wrapped_dek):
+    """Best-effort unwrap for the prefetch pool: a failure here is
+    swallowed so the serial decrypt that follows raises (and logs) the
+    way it always has, instead of the prefetch changing error behaviour."""
+    try:
+        _unwrap_dek(wrapped_dek)
+    except Exception as e:  # noqa: BLE001 — deliberately best-effort
+        logger.debug("DEK prefetch failed (serial path will retry): %s", str(e)[:120])
+
+
+def prefetch_deks(ciphertexts):
+    """Unwrap, concurrently, every DEK among *ciphertexts* that is not in
+    the cache yet, so the decrypt_content() calls that follow are cache
+    hits. Duplicates collapse (many rows share a DEK only if they were
+    encrypted together, but the check is free). Returns the number of KMS
+    calls issued."""
+    if not is_encryption_enabled():
+        return 0
+    missing = {}
+    for ciphertext in ciphertexts:
+        wrapped = wrapped_dek_of(ciphertext)
+        if wrapped is None:
+            continue
+        key = base64.b64encode(wrapped).decode("ascii")
+        if key not in missing and _cache_get(key) is None:
+            missing[key] = wrapped
+    if not missing:
+        return 0
+    # list() waits for every unwrap; failures were swallowed per item.
+    list(_get_unwrap_pool().map(_unwrap_quietly, missing.values()))
+    return len(missing)
+
+
 def is_encrypted(value) -> bool:
     """True when *value* carries a v1/v2 encryption envelope."""
     return bool(value) and isinstance(value, str) and value.startswith(
@@ -232,6 +318,34 @@ def encrypt_content(plaintext: str) -> str:
         import logging
         logging.getLogger(__name__).error(f"Encryption failed: {e}")
         raise
+
+
+def new_dek():
+    """A fresh DEK and its KMS-wrapped form, for a writer that encrypts
+    many versions of one text (a reply's partial text while it streams,
+    #367): one KMS wrap for the whole run instead of one per write.
+    Returns None when encryption is disabled. The DEK is put in the
+    unwrap cache, so this process decrypts its own writes without KMS."""
+    if not is_encryption_enabled():
+        return None
+    dek = os.urandom(DEK_SIZE)
+    wrapped_b64 = base64.b64encode(_wrap_dek(dek)).decode("ascii")
+    _cache_put(wrapped_b64, dek)
+    return dek, wrapped_b64
+
+
+def encrypt_with_dek(plaintext: str, dek_pair) -> str:
+    """Encrypt *plaintext* with a DEK from new_dek(), in the same v2
+    envelope decrypt_content() reads. A fresh nonce per call, so reusing
+    the DEK across writes is safe. With no DEK (encryption disabled)
+    returns the plaintext."""
+    if not plaintext or dek_pair is None:
+        return plaintext
+    dek, wrapped_b64 = dek_pair
+    nonce = os.urandom(NONCE_SIZE)
+    ciphertext = AESGCM(dek).encrypt(nonce, plaintext.encode("utf-8"), None)
+    payload_b64 = base64.b64encode(nonce + ciphertext).decode("ascii")
+    return f"{ENCRYPTED_PREFIX_V2}{wrapped_b64}:{payload_b64}"
 
 
 def decrypt_content(ciphertext: str) -> str:
@@ -351,6 +465,27 @@ def encrypt_file(filepath: str) -> str:
     except Exception as e:
         import logging
         logging.getLogger(__name__).error(f"File encryption failed: {e}")
+        raise
+
+
+def encrypt_file_atomically(src, dest) -> str:
+    """Encrypt *src*, a file only this caller writes, and move the result
+    onto *dest* (``dest + '.enc'`` when encryption is on). Two writers of
+    the same *dest* (a chunk uploaded twice at once, #371) then never
+    read, encrypt or delete each other's half-written file; the last move
+    wins. *src* is gone afterwards either way. Returns the final path."""
+    src, dest = str(src), str(dest)
+    try:
+        out = encrypt_file(src)
+        final = dest + ('.enc' if out.endswith('.enc') else '')
+        os.replace(out, final)
+        return final
+    except Exception:
+        for leftover in (src, src + '.enc'):
+            try:
+                os.remove(leftover)
+            except OSError:
+                pass
         raise
 
 

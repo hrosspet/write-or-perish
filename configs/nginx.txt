@@ -10,7 +10,9 @@ server {
    # Allow large file uploads (200MB) - server-wide setting
    client_max_body_size 200M;
 
-   # Proxy media requests through Flask for decryption of .enc files
+   # Proxy media requests through Flask, which checks who may fetch each
+   # file, decrypts .enc files and sets Cache-Control (private for files
+   # only signed-in users may fetch). Do not add a Cache-Control header here.
    location /media/ {
      proxy_pass http://127.0.0.1:8000;
      proxy_set_header Host $host;
@@ -18,7 +20,6 @@ server {
      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
      proxy_set_header X-Forwarded-Proto $scheme;
      proxy_buffering off;
-     add_header Cache-Control "max-age=86400, public";
    }
 
    location / {

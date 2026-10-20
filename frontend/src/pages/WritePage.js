@@ -1,31 +1,53 @@
 import React from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import NodeForm from '../components/NodeForm';
+import NodeOpeningSpinner from '../components/NodeOpeningSpinner';
+import useNodePrefetch from '../hooks/useNodePrefetch';
 import { useUser } from '../contexts/UserContext';
 import { useToast } from '../contexts/ToastContext';
 import { isAiAllowed } from '../utils/aiUsage';
 import api from '../api';
+import { entryQuestion } from '../utils/entryPrompt';
 
 export default function WritePage() {
   const navigate = useNavigate();
-  const { user } = useUser();
+  const { user, markHasOwnEntries } = useUser();
   const { addToast } = useToast();
   const craftMode = !!user?.craft_mode;
+  // Opened from the Glean card (#435): the new thread is marked as a
+  // Glean thread, so every turn of it offers the Glean button.
+  const [searchParams] = useSearchParams();
+  const glean = searchParams.get('glean') === '1' && !!user?.glean_enabled;
+  const entry = glean ? { entry: 'glean' } : {};
+  // The entry's page opens once its node is in, with a spinner here
+  // meanwhile, instead of a "Loading node..." page.
+  const { pending: openingNode, openNode } = useNodePrefetch();
+  const openAt = (id, url) => openNode(id, () => navigate(url));
 
-  const handleSubmit = async ({ content, privacy_level, ai_usage }) => {
+  // Text mode is agentic: every entry that starts here gets the textmode
+  // system prompt and honours the auto-generate preference — typed
+  // (`/textmode/start`) and recorded alike. A recorded entry arrives with
+  // `streaming_session_id`: its transcript and audio live in a streaming
+  // draft, so it is saved through save-as-node with the same two
+  // decisions (`agentic`, `auto_generate`) instead of the bare node it
+  // used to become.
+  const handleSubmit = async ({
+    content, privacy_level, ai_usage, streaming_session_id,
+  }) => {
     // Auto-generate requires AI-allowed ai_usage. Craft-mode users who
     // switch ai_usage to 'none' (or anything outside AI_ALLOWED) get a
-    // graceful fallback to a plain entry (POST /nodes/) instead of the
-    // agentic /textmode/start flow — no LLM fires, the note is saved,
-    // user lands on the new node.
+    // graceful fallback to a plain entry instead of the agentic flow —
+    // no LLM fires, the note is saved, user lands on the new node.
     if (!isAiAllowed(ai_usage)) {
       addToast(
         'Turning off auto-generate. AI usage on some nodes is turned off.',
         8000,
       );
-      const res = await api.post('/nodes/', {
-        content, privacy_level, ai_usage,
-      });
+      const res = streaming_session_id
+        ? await api.post(`/drafts/streaming/${streaming_session_id}/save-as-node`, {
+          content,
+        })
+        : await api.post('/nodes/', { content, privacy_level, ai_usage });
       return { id: res.data.id };
     }
     // Respect the user's auto-generate preference from the very first
@@ -33,32 +55,57 @@ export default function WritePage() {
     // inline toggle and NodeForm's craft-mode toggle, so there's one
     // "auto-generate after submit" preference across the app. Default
     // true on a fresh install (matches the backend default). When off,
-    // /textmode/start creates the thread without firing an LLM reply.
+    // the thread is created without firing an LLM reply.
     const stored = localStorage.getItem('loore_auto_generate');
     const autoGenerate = stored === null ? true : stored === 'true';
+    if (streaming_session_id) {
+      const res = await api.post(
+        `/drafts/streaming/${streaming_session_id}/save-as-node`,
+        { content, agentic: true, auto_generate: autoGenerate, ...entry },
+      );
+      return res.data;
+    }
     const res = await api.post('/textmode/start', {
-      content, privacy_level, ai_usage, auto_generate: autoGenerate,
+      content, privacy_level, ai_usage, auto_generate: autoGenerate, ...entry,
     });
     return res.data;
   };
 
+  // An uploaded audio file skips handleSubmit (NodeForm uploads it and
+  // polls the transcription), so the form asks for the same two decisions
+  // here and sends them with the upload (#342). Same fallback as above
+  // when AI usage is off.
+  const uploadReplyOptions = ({ ai_usage }) => {
+    if (!isAiAllowed(ai_usage)) {
+      addToast(
+        'Turning off auto-generate. AI usage on some nodes is turned off.',
+        8000,
+      );
+      return {};
+    }
+    const stored = localStorage.getItem('loore_auto_generate');
+    const autoGenerate = stored === null ? true : stored === 'true';
+    return { agentic: true, ...(autoGenerate && { auto_generate: true }), ...entry };
+  };
+
   const handleSuccess = (data) => {
+    // Every path here (typed, recorded, uploaded) saved an entry.
+    markHasOwnEntries();
     const llmNodeId = data?.llm_node_id;
     if (llmNodeId && data?.user_node_id) {
-      // Land on the user's entry so it gets its own URL/history step;
-      // NodeDetail picks up the pending LLM response via ?awaitLlm and
-      // navigates to it on completion.
-      navigate(`/node/${data.user_node_id}?awaitLlm=${llmNodeId}`);
+      // Through the user's entry so it gets its own URL/history step;
+      // NodeDetail takes ?awaitLlm on to the pending LLM response.
+      openAt(data.user_node_id, `/node/${data.user_node_id}?awaitLlm=${llmNodeId}`);
     } else if (llmNodeId) {
-      navigate(`/node/${llmNodeId}?awaitLlm=${llmNodeId}`);
+      openAt(llmNodeId, `/node/${llmNodeId}?awaitLlm=${llmNodeId}`);
     } else if (data?.user_node_id) {
       // Auto-generate off (#134): no LLM reply was created — land on the
       // user's own entry. /textmode/start returns user_node_id (not id).
-      navigate(`/node/${data.user_node_id}`);
+      openAt(data.user_node_id, `/node/${data.user_node_id}`);
     } else if (data?.id) {
       // Fallback path (ai_usage not chat/train) — navigate to the plain
       // entry without the awaitLlm query param.
-      navigate(`/node/${data.id}`);
+      openAt(data.id, `/node/${data.id}`);
     }
   };
 
@@ -78,9 +125,10 @@ export default function WritePage() {
         fontWeight: 300,
         color: 'var(--text-primary)',
         margin: '0 0 32px 0',
+        maxWidth: '760px',
         textAlign: 'center',
       }}>
-        What's on your mind?
+        {entryQuestion(user)}
       </h1>
 
       <div style={{ width: '1170px', maxWidth: '90vw' }}>
@@ -91,9 +139,11 @@ export default function WritePage() {
           aiUsageFromGlobalDefault
           placeholder="Type what's on your mind…"
           onSubmitOverride={handleSubmit}
+          uploadReplyOptions={uploadReplyOptions}
           onSuccess={handleSuccess}
         />
       </div>
+      {openingNode && <NodeOpeningSpinner />}
     </div>
   );
 }

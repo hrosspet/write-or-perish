@@ -52,27 +52,20 @@ export default function ProfilePage() {
   const [versionContent, setVersionContent] = useState(null);
   const [previousVersionContent, setPreviousVersionContent] = useState(null);
 
-  // Profile generation progress — read from localStorage or backend user
-  const [generationTaskId, setGenerationTaskId] = useState(
-    () => localStorage.getItem('loore_profile_task_id')
-  );
+  // Profile generation in progress — either pipeline (#258): the backend
+  // user payload says so on load, the watcher's events afterwards.
+  const [generating, setGenerating] = useState(false);
   const [failMessage, setFailMessage] = useState('');
 
-  // Pick up task ID from backend if localStorage doesn't have it (cross-browser)
   useEffect(() => {
-    if (!generationTaskId && user && user.profile_generation_task_id) {
-      const backendTaskId = user.profile_generation_task_id;
-      localStorage.setItem('loore_profile_task_id', backendTaskId);
-      setGenerationTaskId(backendTaskId);
+    if (user?.profile_generation_task_id || user?.profile_batch_pending) {
+      setGenerating(true);
     }
-  }, [user, generationTaskId]);
+  }, [user]);
 
-  // Listen for generation started from NavBar (handles already-mounted case)
+  // Listen for generation started from the UI (handles already-mounted case)
   useEffect(() => {
-    const handler = (e) => {
-      const taskId = e.detail?.taskId;
-      if (taskId) setGenerationTaskId(taskId);
-    };
+    const handler = () => setGenerating(true);
     window.addEventListener('loore_profile_started', handler);
     return () => window.removeEventListener('loore_profile_started', handler);
   }, []);
@@ -97,17 +90,35 @@ export default function ProfilePage() {
     }
   }, []);
 
+  // Id of the version on screen, for the chunk-landed check below without
+  // re-subscribing on every profile change.
+  const shownProfileIdRef = useRef(null);
+  useEffect(() => {
+    shownProfileIdRef.current = profile?.id ?? null;
+  }, [profile]);
+
   useEffect(() => {
     const onProgress = (e) => {
-      setGenProgress(e.detail?.progress || 0);
-      setGenData(e.detail?.message ? { message: e.detail.message } : null);
-      if (e.detail?.status === 'failed') {
-        setFailMessage('Generation failed');
+      const d = e.detail || {};
+      if (d.running) {
+        setGenerating(true);
+        setGenProgress(d.progress || 0);
+        setGenData(d.message ? { message: d.message, source: d.source } : null);
+        // A chunked build saves a version per chunk; show each as it lands.
+        if (d.latestProfileId && d.latestProfileId !== shownProfileIdRef.current) {
+          fetchProfile();
+        }
+        return;
+      }
+      if (d.status === 'failed' || d.status === 'stalled') {
+        setFailMessage(d.status === 'failed'
+          ? 'Generation failed'
+          : 'Generation stopped before finishing');
         setTimeout(() => setFailMessage(''), 5000);
       }
     };
     const onDone = () => {
-      setGenerationTaskId(null);
+      setGenerating(false);
       setGenProgress(0);
       setGenData(null);
       fetchProfile();
@@ -280,16 +291,20 @@ export default function ProfilePage() {
         )}
 
         {/* Generation progress indicator */}
-        {(generationTaskId || failMessage) && (
+        {(generating || failMessage) && (
           <span style={{
             fontFamily: 'var(--sans)',
             fontSize: '0.85rem',
             fontWeight: 300,
             color: failMessage ? 'var(--text-muted)' : 'var(--accent)',
-            animation: generationTaskId ? 'pulse 2s ease-in-out infinite' : 'none',
+            animation: generating ? 'pulse 2s ease-in-out infinite' : 'none',
           }}>
             {failMessage || (genData?.message
-              ? `${genData.message} \u00b7 ${genProgress || 0}%`
+              // A batch step has no within-step percentage; its label
+              // already reads "Chunk n of ~N".
+              ? (genData.source === 'batch'
+                ? genData.message
+                : `${genData.message} \u00b7 ${genProgress || 0}%`)
               : 'Starting generation...')}
           </span>
         )}

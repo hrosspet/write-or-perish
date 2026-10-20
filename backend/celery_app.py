@@ -33,13 +33,36 @@ celery.conf.update(
             'task': 'backend.tasks.exports.check_pending_profile_updates',
             'schedule': 3600.0,  # every hour
         },
+        # Submits each due user's recent context as a provider batch
+        # (#380, ~50% cheaper); the collector below saves the results.
         'check-recent-context-updates': {
             'task': 'backend.tasks.recent_context.check_pending_recent_context_updates',
             'schedule': 600.0,  # every 10 minutes
         },
+        # Until a user's batch is collected, prompts read their previous
+        # summary, so collect promptly. No-op when nothing is pending.
+        'collect-recent-context-batches': {
+            'task': 'backend.tasks.recent_context.collect_recent_context_batches',
+            'schedule': 60.0,  # batches typically finish in 1-5 min
+        },
         'cleanup-deleted-nodes': {
             'task': 'backend.tasks.node_cleanup.cleanup_deleted_nodes',
             'schedule': 86400.0,  # daily
+        },
+        # Backstop for the {ca_tweets} batch poll: a hard worker kill loses
+        # the scheduled retry; this re-dispatches nodes whose poll
+        # heartbeat stopped (see llm_completion.resume_stuck_feed_batches).
+        'resume-stuck-feed-batches': {
+            'task': 'backend.tasks.llm_completion.resume_stuck_feed_batches',
+            'schedule': 600.0,  # every 10 minutes
+        },
+        # Keep the cached Community Archive export current for reads (the
+        # archive exports nightly ~07:00 UTC). One manifest GET per run;
+        # the ~900 MB download only when the export changed, and only
+        # where a snapshot already exists.
+        'refresh-community-archive-snapshot': {
+            'task': 'backend.tasks.imports.refresh_community_archive_snapshot',
+            'schedule': 1800.0,  # every 30 minutes
         },
         # Semantic-search embedding sweep (issue #155).
         'sweep-embeddings': {
@@ -75,6 +98,43 @@ celery.conf.update(
             'task': 'backend.tasks.external_sync.sync_all_twitter_bookmarks',
             'schedule': 3600.0,  # hourly; the task itself gates on local 3am
         },
+        # Nightly external-references digest rebuild: an HOURLY gate that
+        # dispatches a user at local ~4am (an hour after the bookmark sync
+        # above) and only when their saved references changed since the
+        # last rebuild. The digest is ONE LLM call over the whole corpus,
+        # so it must never ride individual saves.
+        'sweep-external-digests': {
+            'task': 'backend.tasks.external_digest.sweep_external_digests',
+            'schedule': 3600.0,  # hourly; the task itself gates on local 4am
+        },
+        # The sweep submits digests as a provider batch (~50% cheaper);
+        # this collects finished batches. Nobody waits on a digest, so a
+        # slow poll is fine. No-op when nothing is pending.
+        'collect-external-digest-batches': {
+            'task': 'backend.tasks.external_digest.collect_external_digest_batches',
+            'schedule': 600.0,  # every 10 min
+        },
+        # Nightly publicness check for saved tweets nobody has vouched
+        # for (#295 step 0): JSON-imported bookmarks, tweets clipped
+        # without a visible lock, bookmarks synced before the sync asked
+        # X about the author. An HOURLY gate like the two above — a
+        # daily interval starts its countdown over on every deploy,
+        # which deletes the beat schedule file (deploy.sh) — that runs
+        # the sweep at 05:00 UTC, bounded per run (see the task's
+        # constants). X's free oEmbed endpoint: no API credits, nothing
+        # waits on it.
+        'verify-public-source-nightly': {
+            'task': 'backend.tasks.external_sync.verify_public_source_sweep',
+            'schedule': 3600.0,  # hourly; the task itself gates on 05:00 UTC
+        },
+        # User data purge (#268): starts a purge when the user's 30-day
+        # grace period ends (at once for an admin purge) and resumes one
+        # whose runner died. One indexed query on a small table when
+        # nothing is due.
+        'process-user-data-purges': {
+            'task': 'backend.tasks.user_purge.process_user_data_purges',
+            'schedule': 60.0,  # every minute
+        },
     },
 )
 
@@ -104,3 +164,4 @@ from backend.tasks import external_sync  # noqa: F401
 from backend.tasks import external_digest  # noqa: F401
 from backend.tasks import imports  # noqa: F401
 from backend.tasks import intentions  # noqa: F401
+from backend.tasks import user_purge  # noqa: F401

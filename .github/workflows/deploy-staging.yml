@@ -161,12 +161,15 @@ jobs:
             echo "Running flask init-db..."
             docker compose -p wop-staging exec -T backend flask init-db < /dev/null
 
+            # X login finds an account by its X id only (never the handle,
+            # see _create_x_user), so the admin row carries @hrosspet's X id
+            # too; without it "Sign in with X" made a fresh unapproved account.
             echo "Seeding admin user..."
             docker compose -p wop-staging exec -T db \
               psql -U staging -d writeorperish_staging \
-              -c "INSERT INTO \"user\" (username, email, approved, is_admin, craft_mode, plan, created_at, profile_needs_full_regen)
-                  VALUES ('hrosspet', NULLIF('$STAGING_ADMIN_EMAIL', ''), true, true, false, 'alpha', NOW(), false)
-                  ON CONFLICT (username) DO UPDATE SET email = NULLIF('$STAGING_ADMIN_EMAIL', ''), approved = true, is_admin = true;" < /dev/null
+              -c "INSERT INTO \"user\" (username, email, twitter_id, twitter_handle, approved, is_admin, craft_mode, plan, created_at, profile_needs_full_regen)
+                  VALUES ('hrosspet', NULLIF('$STAGING_ADMIN_EMAIL', ''), '867637180545601537', 'hrosspet', true, true, false, 'alpha', NOW(), false)
+                  ON CONFLICT (username) DO UPDATE SET email = NULLIF('$STAGING_ADMIN_EMAIL', ''), twitter_id = EXCLUDED.twitter_id, twitter_handle = EXCLUDED.twitter_handle, approved = true, is_admin = true;" < /dev/null
             echo "Database setup complete."
 
             # Sync the staging host-nginx config (same diff → test →

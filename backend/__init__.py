@@ -20,18 +20,140 @@ from backend.config import Config
 from backend.extensions import db
 from flask_migrate import Migrate
 from flask_login import LoginManager, current_user
-from backend.models import User
+from backend.models import User  # noqa: F401 - registers every model (migrations)
 from backend.oauth import init_twitter_blueprint
 from flask_cors import CORS
 from werkzeug.middleware.proxy_fix import ProxyFix
+
+
+def validate_default_model(config):
+    """Refuse to boot on an ``LLM_NAME`` that is not an active (non-
+    deprecated) chat (not ``"chat": False``) SUPPORTED_MODELS key, or on
+    a READ_DEFAULT_MODEL that is not an active read model.
+
+    The keys are the dotted display ids (``claude-opus-4.6``); the API ids
+    use dashes (``claude-opus-4-6``). Setting the API id in the env file
+    does not fail anywhere visible: every reply route 400s for users with
+    no preferred model, and every periodic task (profile seeder, recent
+    context, digest) logs a per-user warning and skips — prod ran that way
+    for five days on 2026-09-10..15 and once before in May. A boot failure
+    turns the typo into a red deploy instead."""
+    model_id = config.get("DEFAULT_LLM_MODEL")
+    supported = config.get("SUPPORTED_MODELS") or {}
+    if model_id in supported:
+        # A deprecated default is in no picker and never inherited, so
+        # every user without a preference would start on a model the UI
+        # cannot show, and the periodic tasks would keep running on it
+        # (#355). A read-only model is in no chat picker either, and the
+        # default runs every reply and background job (2026-10-02).
+        chat_models = ', '.join(
+            k for k, v in supported.items()
+            if 'provider' in v and not v.get('deprecated')
+            and v.get('chat', True))
+        if supported[model_id].get("deprecated"):
+            raise RuntimeError(
+                f"LLM_NAME={model_id!r} is deprecated. Active chat "
+                f"models: {chat_models}")
+        if not supported[model_id].get("chat", True):
+            raise RuntimeError(
+                f"LLM_NAME={model_id!r} is read only (\"chat\": False). "
+                f"Active chat models: {chat_models}")
+        read_default = config.get("READ_DEFAULT_MODEL")
+        read_cfg = supported.get(read_default) or {}
+        if read_default and (not read_cfg.get("read")
+                             or read_cfg.get("deprecated")):
+            raise RuntimeError(
+                f"READ_DEFAULT_MODEL={read_default!r} is not an active "
+                f"model flagged 'read'.")
+        # Each provider's default glean model (#435). It may be another
+        # provider's model: during Glean's testing both default to
+        # GPT-5.6 Luna (Peter, 2026-10-14). A typo here would refuse
+        # every glean of that provider's users: a red deploy instead.
+        for key in ("GLEAN_MODEL_ANTHROPIC", "GLEAN_MODEL_OPENAI"):
+            glean_model = config.get(key)
+            cfg = supported.get(glean_model) or {}
+            if glean_model and (not cfg.get("read") or cfg.get("deprecated")
+                                or not cfg.get("provider")):
+                raise RuntimeError(
+                    f"{key}={glean_model!r} is not an active model "
+                    f"flagged 'read'.")
+        return
+    hint = ""
+    dotted = (model_id or "").replace("-", ".")
+    for key in supported:
+        if key.replace("-", ".") == dotted:
+            hint = f" (did you mean {key!r}?)"
+            break
+    raise RuntimeError(
+        f"LLM_NAME={model_id!r} is not a SUPPORTED_MODELS key{hint}. "
+        f"Known keys: {', '.join(sorted(supported))}")
+
+
+# What Sentry may receive. send_default_pii=False only drops cookies, IPs
+# and user ids: the SDK still attaches each stack frame's local variables
+# and request bodies up to 10 KB, and both can hold decrypted user content
+# (an entry being saved, a todo list being merged). Nobody outside the
+# user's own session reads their content, so neither is sent.
+SENTRY_PRIVACY_OPTIONS = {
+    "send_default_pii": False,
+    "include_local_variables": False,
+    "max_request_body_size": "never",
+    "traces_sample_rate": 0.0,   # errors only, no perf tracing
+}
+
+
+def _without_query(url):
+    return url.split("?", 1)[0].split("#", 1)[0]
+
+
+def _drop_query_strings(event):
+    """Query strings can carry user input (the search box sends its words
+    as ?q=), and send_default_pii=False does not remove them: the SDK
+    sends the request's query string, the Referer header carries the
+    query of the page that made the call, and outgoing-HTTP breadcrumbs
+    keep each call's query in `http.query`. All are removed; the paths
+    stay, so the route is still identifiable. (Access-log lines, which
+    hold whole request lines, are kept out by ignore_logger in
+    create_app.)"""
+    request_info = event.get("request")
+    if isinstance(request_info, dict):
+        request_info.pop("query_string", None)
+        if isinstance(request_info.get("url"), str):
+            request_info["url"] = _without_query(request_info["url"])
+        headers = request_info.get("headers")
+        if isinstance(headers, dict):
+            for name, value in list(headers.items()):
+                if name.lower() == "referer" and isinstance(value, str):
+                    headers[name] = _without_query(value)
+    breadcrumbs = event.get("breadcrumbs")
+    if isinstance(breadcrumbs, dict):
+        for crumb in breadcrumbs.get("values") or ():
+            data = crumb.get("data") if isinstance(crumb, dict) else None
+            if isinstance(data, dict):
+                data.pop("http.query", None)
+                data.pop("http.fragment", None)
+                if isinstance(data.get("url"), str):
+                    data["url"] = _without_query(data["url"])
+    return event
+
 
 def create_app():
     # Error monitoring (roadmap Phase 0). No-op unless SENTRY_DSN is set.
     sentry_dsn = os.environ.get("SENTRY_DSN")
     if sentry_dsn:
         import sentry_sdk
+        from sentry_sdk.integrations.logging import ignore_logger
+
+        # Access-log lines hold each request's full request line and
+        # Referer, query strings included. Logged at INFO they become
+        # breadcrumbs, and an event captured outside the request scope
+        # (gunicorn's own "Error handling request" when a streamed
+        # response fails) carries them. Sentry ignores these loggers.
+        ignore_logger("gunicorn.access")
+        ignore_logger("werkzeug")
 
         def _before_send(event, hint):
+            _drop_query_strings(event)
             # Drop known, expected noise. Match against BOTH the exception text
             # and the log-record message so it's caught regardless of which
             # Sentry path captured it (OpenAI integration, logging, or the
@@ -47,25 +169,32 @@ def create_app():
             #    char cap — a handled, transient condition.
             if "maximum input length" in text:
                 return None
-            # 2) Every service restart (i.e. every deploy) SIGTERMs the Celery
-            #    worker's pool children — graceful shutdown. Billiard logs it,
-            #    and an in-flight task raises WorkerLostError("…signal 15
-            #    (SIGTERM)…"). Expected lifecycle noise. SIGKILL (signal 9:
-            #    OOM / crash) is a different string and still reports.
-            if "signal 15 (SIGTERM)" in text:
-                return None
+            # A WorkerLostError("…signal 15 (SIGTERM)…") used to follow every
+            # deploy and was dropped here as noise. Since #312 a restart lets
+            # running tasks finish; a pool process gets SIGTERM only when a
+            # task outlives the 90 s drain (scripts/celery-graceful-stop.sh),
+            # and that task is lost, so it reports.
+            # 2) A call refused for an account reason (#369): every event
+            #    about it — task failures, logged exceptions, log lines
+            #    tagged with provider_alerts.log_extra — groups into one
+            #    issue per cause, whatever the call site.
+            try:
+                from backend.utils.provider_alerts import apply_fingerprint
+                apply_fingerprint(event, exc, rec)
+            except Exception:  # never lose an event over grouping
+                pass
             return event
 
         sentry_sdk.init(
             dsn=sentry_dsn,
             environment=os.environ.get("SENTRY_ENVIRONMENT", "production"),
-            send_default_pii=False,   # never attach user content/PII
-            traces_sample_rate=0.0,   # errors only, no perf tracing
             before_send=_before_send,
+            **SENTRY_PRIVACY_OPTIONS,
         )
 
     app = Flask(__name__)
     app.config.from_object(Config)
+    validate_default_model(app.config)
 
     # Fix for running behind nginx reverse proxy - handles X-Forwarded-* headers
     app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
@@ -87,15 +216,20 @@ def create_app():
 
     @login_manager.user_loader
     def load_user(user_id):
-        return User.query.get(int(user_id))
+        # A deleted account in its grace period (#269) loads as nobody:
+        # every session and remember cookie stops working at once.
+        from backend.utils.account_deletion import session_user
+        return session_user(user_id)
 
     # --------------------------------------------------------------------
     # BLOCK UNAPPROVED USERS
     #
     # If the user is logged in but not approved:
     #   - Allow access to /auth, /static, and /favicon.ico.
-    #   - Exempt GET requests to /api/dashboard (for retrieving current user info)
-    #     and PUT requests to /api/dashboard/user (for updating user info, e.g. email).
+    #   - Exempt GET requests to /api/dashboard (for retrieving current user info),
+    #     PUT requests to /api/dashboard/user (for updating user info) and the
+    #     email flow under /api/dashboard/email (a waitlisted signup leaves
+    #     their address before approval).
     #   - For other API requests, return a 403 JSON error.
     #   - For other (HTML) requests, redirect to "/" with the query flag ?alpha=1.
     @app.before_request
@@ -127,10 +261,31 @@ def create_app():
 
         # Exempt endpoints that the frontend needs:
         # Allow GET requests to /api/dashboard to fetch current user info.
-        # Allow PUT requests to /api/dashboard/user to update the profile (and email).
+        # Allow PUT requests to /api/dashboard/user to update the profile.
+        # Allow the email flow (#260): request, confirm, cancel, remove. A
+        # waitlisted signup leaves their address on the thank-you page, and
+        # Activate & Welcome refuses an account without one. PUT
+        # /api/dashboard/user no longer takes an email.
+        email_path = request.path.rstrip("/")
         if (request.method == "GET" and request.path.startswith("/api/dashboard")) or \
            (request.method == "PUT" and request.path.startswith("/api/dashboard/user")) or \
+           (request.method in ("POST", "DELETE")
+                and (email_path == "/api/dashboard/email"
+                     or email_path.startswith("/api/dashboard/email/"))) or \
            request.path.startswith("/api/terms"):
+            return
+
+        # Deleting the account (#269) is open to every account, waitlisted
+        # ones included (Deletion rule; App Store 5.1.1(v)): the request,
+        # the emailed link's confirmation, and the restore question. The
+        # restore routes act on the offer in the session, not on the
+        # signed-in account, so another waitlisted account signed in in the
+        # same browser must not block them either.
+        account_path = request.path.rstrip("/")
+        if (request.method == "POST" and account_path in (
+                "/api/account/delete", "/api/account/delete/confirm",
+                "/api/account/restore", "/api/account/restore/decline")) or \
+           (request.method == "GET" and account_path == "/api/account/restore"):
             return
 
         # For API calls, check if the request expects JSON.
@@ -155,14 +310,22 @@ def create_app():
     from backend.routes.dashboard import dashboard_bp
     app.register_blueprint(dashboard_bp, url_prefix="/api/dashboard")
 
+    # "Delete all my writing" (#268).
+    from backend.routes.account_data import account_data_bp
+    app.register_blueprint(account_data_bp, url_prefix="/api/account")
+
+    # Account deletion and restore (#269).
+    from backend.routes.account_deletion import account_deletion_bp
+    app.register_blueprint(account_deletion_bp, url_prefix="/api/account")
+
     from backend.routes.export_data import export_bp
     app.register_blueprint(export_bp, url_prefix="/api")
 
     from backend.routes.import_data import import_bp
     app.register_blueprint(import_bp, url_prefix="/api")
 
-    from backend.routes.feed import feed_bp
-    app.register_blueprint(feed_bp, url_prefix="/api")
+    from backend.routes.log import log_bp
+    app.register_blueprint(log_bp, url_prefix="/api")
 
     from backend.routes.search import search_bp
     app.register_blueprint(search_bp, url_prefix="/api")
@@ -187,6 +350,9 @@ def create_app():
 
     from backend.routes.voice import voice_bp
     app.register_blueprint(voice_bp, url_prefix="/api/voice")
+
+    from backend.routes.read import read_bp
+    app.register_blueprint(read_bp, url_prefix="/api/read")
 
     from backend.routes.github_issues import github_bp
     app.register_blueprint(github_bp, url_prefix="/api/github")
@@ -257,6 +423,31 @@ def create_app():
                 "alpha. It resets at the start of next month."
             ),
         }), 402
+
+    # A reply (or a Voice turn) where AI may not read: create_llm_placeholder
+    # raises AIUsageRefused before any write. Routes answer it themselves
+    # where they keep the user's entry; any that lets it escape gets the
+    # same 403 {"error", "code": "ai_usage_none", "scope"}.
+    from backend.utils.llm_nodes import AIUsageRefused
+
+    @app.errorhandler(AIUsageRefused)
+    def _handle_ai_usage_refused(exc):
+        from backend.utils.llm_nodes import ai_usage_refused_response
+        return ai_usage_refused_response(exc)
+
+    # A reply that is not a read, asked for on a read-only model:
+    # create_llm_placeholder raises ReadOnlyModelRefused before any write
+    # (the reply is never moved to another model, 2026-10-02). Routes that
+    # let it escape get 400 {"error", "code": "model_read_only", "model"},
+    # and whatever they flushed before the call is not kept.
+    from backend.utils.llm_nodes import ReadOnlyModelRefused
+
+    @app.errorhandler(ReadOnlyModelRefused)
+    def _handle_read_only_model(exc):
+        from backend.extensions import db
+        from backend.utils.llm_nodes import read_only_model_response
+        db.session.rollback()
+        return read_only_model_response(exc)
 
     # --------------------------------------------------------------------
     # Health checks – liveness/readiness for monitoring (no auth).

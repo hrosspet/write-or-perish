@@ -11,12 +11,15 @@ Consent model, structurally enforced:
 """
 from flask import Blueprint, jsonify, request, current_app
 from flask_login import login_required, current_user
-from backend.models import Node, Draft, ShareDraft, User
+from backend.models import Node, ShareDraft
 from backend.extensions import db
 from backend.utils.share import save_share_drafts_from_node
 from backend.utils.tool_meta import update_tool_meta, get_tool_meta_entry
 from backend.utils.timefmt import iso_utc
-from backend.utils.privacy import PrivacyLevel, AIUsage
+from backend.utils.slugs import permalink_for
+from backend.utils.privacy import (
+    AIUsage, PrivacyLevel, can_user_access_node)
+from backend.utils.proposals import find_own_pending_proposal
 from datetime import datetime
 
 share_bp = Blueprint("share", __name__)
@@ -33,13 +36,14 @@ def _share_enabled_for_me():
 
 
 def _permalink(share):
-    """/@<username>/<slug> when published with a slug, else None."""
+    """/@<username>/<slug> while the published node is public, else None.
+
+    #263: PUT /nodes/<id> to private leaves the ShareDraft `published`, so
+    the card must not advertise an address the resolver 404s on.
+    """
     if not share.public_node_id:
         return None
-    node = Node.query.get(share.public_node_id)
-    if node is None or not node.public_slug:
-        return None
-    return f"/@{share.user.username}/{node.public_slug}"
+    return permalink_for(Node.query.get(share.public_node_id))
 
 
 def _serialize(share):
@@ -263,7 +267,8 @@ def save_proposal():
 
     Two origins are accepted:
     - LLM proposal nodes, located via the pending share_pending Draft the
-      completion task created (walking the ancestor chain).
+      completion task created (walking the ancestor chain): only the
+      user's own live proposal (utils/proposals).
     - The user's OWN nodes carrying :::share blocks they wrote or pasted
       themselves — no pending draft exists there, so the node itself is
       parsed directly (owner-only).
@@ -290,33 +295,20 @@ def save_proposal():
             return jsonify({"error": "Invalid share_index"}), 400
 
     node = Node.query.get(node_id)
-    if not node:
+    if not node or not can_user_access_node(node, current_user.id):
         return jsonify({"error": "Node not found"}), 404
 
-    # Find the pending draft by walking the ancestor chain.
-    draft = None
-    current_node = node
-    visited = set()
-    while current_node and current_node.id not in visited:
-        visited.add(current_node.id)
-        draft = Draft.query.filter_by(
-            user_id=current_user.id,
-            parent_id=current_node.id,
-            label='share_pending',
-        ).first()
-        if draft:
-            break
-        current_node = current_node.parent
-
-    if draft:
-        origin_node = Node.query.get(draft.parent_id)
-        if not origin_node:
-            return jsonify({"error": "Origin node not found"}), 404
-    elif node.node_type != "llm" and node.user_id == current_user.id:
-        # Self-authored share blocks — parse the addressed node directly.
-        origin_node = node
-    else:
-        return jsonify({"error": "No pending share found"}), 404
+    # The pending proposal at or above the node, walking up its ancestors:
+    # only the user's own live proposal (utils/proposals).
+    draft, origin_node = find_own_pending_proposal(
+        node, current_user.id, 'share_pending')
+    if draft is None:
+        if node.node_type != "llm" and node.user_id == current_user.id:
+            # Self-authored share blocks — parse the addressed node
+            # directly.
+            origin_node = node
+        else:
+            return jsonify({"error": "No pending share found"}), 404
 
     entry = get_tool_meta_entry(origin_node, "propose_share")
     already = set((entry or {}).get("saved_indexes") or [])
@@ -362,10 +354,13 @@ def public_shares(username):
     item immediately) and 404s entirely while the flag is off."""
     if not _share_enabled():
         return jsonify({"error": "Not found"}), 404
-    user = User.query.filter_by(username=username).first()
+    from backend.utils.username_history import resolve_public_handle
     # Opting out of public sharing takes the whole page down immediately —
-    # indistinguishable from a user that doesn't exist.
-    if not user or not user.public_sharing_enabled:
+    # indistinguishable from a user that doesn't exist. A former handle
+    # (#253) resolves to its owner the same way, so in-app links to /@old
+    # keep working like the server-rendered pages' 301s.
+    user, moved = resolve_public_handle(username)
+    if not user:
         return jsonify({"error": "Not found"}), 404
     # ALL the user's living public roots — shares are enriched with their
     # type/publish date; direct-created public roots (craft path) appear
@@ -376,6 +371,12 @@ def public_shares(username):
         Node.privacy_level == "public",
         (Node.human_owner_id == user.id) | (Node.user_id == user.id),
     ).all()
+    if moved == "former" and not nodes:
+        # A former handle only ever leads to a page that renders (the
+        # server-rendered profile 404s without public roots): an empty
+        # page under the new handle would confirm the rename for nothing.
+        # Another case of the current handle answers like the handle.
+        return jsonify({"error": "Not found"}), 404
     share_by_node = {
         s.public_node_id: s
         for s in ShareDraft.query.filter_by(
@@ -399,14 +400,14 @@ def public_shares(username):
             "content": content[:600] + ("…" if len(content) > 600 else ""),
             "share_type": share.share_type if share else None,
             "public_node_id": node.id,
-            "permalink": (f"/@{user.username}/{node.public_slug}"
-                          if node.public_slug else None),
+            "permalink": permalink_for(node),
             "pinned": node.pinned_at is not None,
             "published_at": iso_utc(
                 share.published_at if share and share.published_at
                 else node.created_at),
         })
-    return jsonify({
-        "username": user.username,
-        "shares": items,
-    }), 200
+    body = {"username": user.username, "shares": items}
+    if moved:
+        # The SPA swaps the address bar to the canonical URL (#253).
+        body["canonical"] = f"/@{user.username}"
+    return jsonify(body), 200

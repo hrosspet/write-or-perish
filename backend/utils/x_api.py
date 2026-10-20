@@ -14,6 +14,7 @@ stdlib only.
 """
 import base64
 import json
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -33,7 +34,15 @@ _bearer_cache = {}
 
 
 class XApiError(Exception):
-    """User-facing problem (bad credentials, unknown handle, rate limit)."""
+    """User-facing problem (bad credentials, unknown handle, rate limit).
+
+    ``sent`` says whether the billable request reached X before the error
+    (a timeout or an HTTP error on the read itself, as opposed to a failed
+    token fetch): callers log the read's cost when it did."""
+
+    def __init__(self, message, sent=False):
+        super().__init__(message)
+        self.sent = sent
 
 
 def estimate_cost(posts, user_reads=1):
@@ -52,7 +61,7 @@ def fetchable(tweet_count, requested=None):
     return n
 
 
-def _bearer(key, secret):
+def _bearer(key, secret, timeout=None):
     if not key or not secret:
         raise XApiError("X API credentials are not configured (TWITTER_API_KEY / TWITTER_API_SECRET).")
     if key in _bearer_cache:
@@ -63,7 +72,7 @@ def _bearer(key, secret):
         headers={"Authorization": f"Basic {basic}",
                  "Content-Type": "application/x-www-form-urlencoded"})
     try:
-        with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+        with urllib.request.urlopen(req, timeout=timeout or TIMEOUT) as resp:
             token = json.load(resp)["access_token"]
     except urllib.error.HTTPError as e:
         raise XApiError(f"X API auth failed ({e.code}).") from e
@@ -71,29 +80,42 @@ def _bearer(key, secret):
     return token
 
 
-def _get(path, params, creds):
+def _get(path, params, creds, timeout=None):
+    started = time.monotonic()
+    token = _bearer(*creds, timeout=timeout)  # fails before any billable read
+    if timeout:
+        # One budget for the token fetch and the read together, so the call
+        # as a whole respects it (each urlopen timeout is per socket
+        # operation, so this is the bound that matters).
+        timeout -= time.monotonic() - started
+        if timeout <= 0:
+            raise XApiError("X API request timed out before the read was sent.")
     query = urllib.parse.urlencode(params)
     req = urllib.request.Request(
         f"{API_BASE}{path}?{query}",
-        headers={"Authorization": f"Bearer {_bearer(*creds)}"})
+        headers={"Authorization": f"Bearer {token}"})
     try:
-        with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+        with urllib.request.urlopen(req, timeout=timeout or TIMEOUT) as resp:
             return json.load(resp)
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", "replace")[:300]
         if e.code == 429:
-            raise XApiError("X API rate limit hit — try again later.") from e
-        raise XApiError(f"X API {e.code}: {body}") from e
+            raise XApiError("X API rate limit hit — try again later.", sent=True) from e
+        raise XApiError(f"X API {e.code}: {body}", sent=True) from e
+    except (urllib.error.URLError, OSError) as e:  # incl. socket timeouts
+        raise XApiError(f"X API request failed: {e}", sent=True) from e
 
 
-def lookup_user(handle, creds):
+def lookup_user(handle, creds, timeout=None):
     """{id, username, name, tweet_count, protected} or None if no such user.
-    One billable user read."""
+    One billable user read. ``timeout`` (seconds) overrides the module
+    default for callers answering an HTTP request."""
     handle = (handle or "").strip().lstrip("@")
     if not handle:
         return None
     data = _get(f"/2/users/by/username/{urllib.parse.quote(handle)}",
-                {"user.fields": "public_metrics,protected"}, creds)
+                {"user.fields": "public_metrics,protected"}, creds,
+                **({"timeout": timeout} if timeout else {}))
     d = data.get("data")
     if not d:
         return None

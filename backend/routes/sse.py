@@ -10,10 +10,26 @@ from flask import Blueprint, Response, request, jsonify, current_app
 from flask_login import login_required, current_user
 from backend.models import Node, UserProfile, NodeTranscriptChunk, TTSChunk, Draft
 from backend.extensions import db
+from backend.utils.streaming_session import stamp_session_alive
 import json
 import time
 
 sse_bp = Blueprint("sse_bp", __name__)
+
+# TTS statuses a tts-stream is served for. A completed entity's stream
+# replays its chunks from last_chunk on, then all_complete: a client that
+# reconnects after the TTS finished (its stream was cut, or it closed it
+# as stalled a moment before the last chunk arrived) gets the rest of the
+# audio and the end of the stream, which a JSON answer can't give an
+# EventSource.
+STREAMABLE_TTS_STATUSES = ('pending', 'processing', 'completed')
+
+
+def _not_found(what):
+    """The answer for an object the current user may not open, the same
+    as for one that does not exist. Admins get no exception: they open
+    only what any other user could."""
+    return jsonify({"error": f"{what} not found"}), 404
 
 
 def format_sse_message(data, event=None):
@@ -40,11 +56,9 @@ def transcription_stream(node_id):
     Query params:
     - last_chunk: Index of the last chunk the client has received
     """
-    node = Node.query.get_or_404(node_id)
-
-    # Check ownership
-    if node.user_id != current_user.id and not getattr(current_user, "is_admin", False):
-        return jsonify({"error": "Unauthorized"}), 403
+    node = db.session.get(Node, node_id)
+    if node is None or node.user_id != current_user.id:
+        return _not_found("Node")
 
     # Check if streaming transcription is enabled for this node
     if not node.streaming_transcription:
@@ -159,7 +173,9 @@ def _tts_stream_generator(app, entity_cls, entity_id, chunk_fk_attr,
     last_sent_chunk = last_chunk
     heartbeat_interval = 15  # seconds
     last_heartbeat = time.time()
-    max_idle_time = 600  # 10 minutes max connection time
+    # A voice reply spoken while it is written (#367) opens this stream
+    # before the model has finished thinking, so allow for that.
+    max_idle_time = 1800
     start_time = time.time()
     chunk_filter = {chunk_fk_attr: entity_id}
 
@@ -199,10 +215,20 @@ def _tts_stream_generator(app, entity_cls, entity_id, chunk_fk_attr,
                 last_sent_chunk = chunk.chunk_index
 
             if entity.tts_task_status == 'completed':
-                yield format_sse_message({
+                done = {
                     "message": "TTS generation complete",
                     "tts_url": entity.audio_tts_url
-                }, event="all_complete")
+                }
+                if isinstance(entity, Node):
+                    # A voice turn's next node (#158 chain): the browser
+                    # moves on without waiting for the llm-status poll;
+                    # the text's start labels the node's chapter, which
+                    # a reply spoken while written (#367) couldn't have
+                    # when its first chunk played.
+                    done["continuation_node_id"] = \
+                        entity.continuation_node_id
+                    done["preview"] = (entity.get_content() or "")[:200]
+                yield format_sse_message(done, event="all_complete")
                 break
 
             if entity.tts_task_status == 'failed':
@@ -260,15 +286,13 @@ def tts_stream(node_id):
     Query params:
     - last_chunk: Index of the last chunk the client has received
     """
-    node = Node.query.get_or_404(node_id)
+    node = db.session.get(Node, node_id)
+    from backend.utils.privacy import can_user_access_node
+    if node is None or (node.user_id != current_user.id
+                        and not can_user_access_node(node, current_user.id)):
+        return _not_found("Node")
 
-    # Check ownership or voice mode access
-    if node.user_id != current_user.id and not getattr(current_user, "is_admin", False):
-        from backend.utils.privacy import can_user_access_node
-        if not can_user_access_node(node, current_user.id):
-            return jsonify({"error": "Unauthorized"}), 403
-
-    if node.tts_task_status not in ['pending', 'processing']:
+    if node.tts_task_status not in STREAMABLE_TTS_STATUSES:
         if node.audio_tts_url:
             return jsonify({
                 "status": "completed",
@@ -279,6 +303,93 @@ def tts_stream(node_id):
     last_chunk = request.args.get('last_chunk', -1, type=int)
     app = current_app._get_current_object()
     return _tts_stream_response(app, Node, node_id, 'node_id', 'Node', last_chunk)
+
+
+def text_stream_events(sent, text):
+    """The llm-stream events that bring a client holding *sent* (None
+    before the first event) up to *text*, and what it then holds: a delta
+    when *text* extends it, else a snapshot (the call restarted and the
+    text was rewritten)."""
+    if sent is None or not text.startswith(sent):
+        return ([("snapshot", {"text": text})] if (text or sent) else []), \
+            text
+    if len(text) > len(sent):
+        return [("delta", {"text": text[len(sent):]})], text
+    return [], sent
+
+
+@sse_bp.route("/nodes/<int:node_id>/llm-stream")
+@login_required
+def llm_stream(node_id):
+    """
+    SSE stream of an LLM reply's text while it is generated (#367).
+
+    Events:
+    - snapshot: {"text"} — the whole text so far (on connect, and whenever
+      it isn't an extension of what was sent: the model call restarted)
+    - delta: {"text"} — text appended since the last event
+    - done: {"status", "continuation_node_id", "error"} — the node is no
+      longer being generated; the final content comes from the node.
+      "error" is null for anyone but the reply's owner
+    - heartbeat: keep-alive
+
+    Polls the node's streaming_content (written by the task about twice a
+    second); the text is decrypted here, one DEK per generation.
+    """
+    node = db.session.get(Node, node_id)
+    from backend.utils.privacy import can_user_access_node, is_node_owner
+    if node is None or not can_user_access_node(node, current_user.id):
+        return _not_found("Node")
+
+    app = current_app._get_current_object()
+    # The done event's error text goes to the reply's owner only, as on
+    # llm-status; anyone else gets the status without it.
+    viewer_id = current_user.id
+
+    def generate():
+        sent = None
+        heartbeat_interval = 15
+        last_heartbeat = time.time()
+        start_time = time.time()
+        while True:
+            if time.time() - start_time > 1800:
+                yield format_sse_message(
+                    {"message": "Connection timeout"}, event="close")
+                break
+            with app.app_context():
+                current = db.session.get(Node, node_id)
+                if current is None or current.deleted_at is not None:
+                    yield format_sse_message(
+                        {"error": "Node not found"}, event="error")
+                    break
+                if current.llm_task_status not in ('pending', 'processing'):
+                    yield format_sse_message({
+                        "status": current.llm_task_status,
+                        "continuation_node_id": current.continuation_node_id,
+                        "error": (current.llm_task_error
+                                  if is_node_owner(current, viewer_id)
+                                  else None),
+                    }, event="done")
+                    break
+                events, sent = text_stream_events(
+                    sent, current.get_streaming_content())
+                for event, data in events:
+                    yield format_sse_message(data, event=event)
+                if time.time() - last_heartbeat > heartbeat_interval:
+                    yield format_sse_message(
+                        {"timestamp": time.time()}, event="heartbeat")
+                    last_heartbeat = time.time()
+            time.sleep(0.5)
+
+    return Response(
+        generate(),
+        mimetype='text/event-stream',
+        headers={
+            'Cache-Control': 'no-cache',
+            'Connection': 'keep-alive',
+            'X-Accel-Buffering': 'no'
+        }
+    )
 
 
 @sse_bp.route("/profiles/<int:profile_id>/tts-stream")
@@ -296,12 +407,11 @@ def profile_tts_stream(profile_id):
     Query params:
     - last_chunk: Index of the last chunk the client has received
     """
-    profile = UserProfile.query.get_or_404(profile_id)
+    profile = db.session.get(UserProfile, profile_id)
+    if profile is None or profile.user_id != current_user.id:
+        return _not_found("Profile")
 
-    if profile.user_id != current_user.id and not getattr(current_user, "is_admin", False):
-        return jsonify({"error": "Unauthorized"}), 403
-
-    if profile.tts_task_status not in ['pending', 'processing']:
+    if profile.tts_task_status not in STREAMABLE_TTS_STATUSES:
         if profile.audio_tts_url:
             return jsonify({
                 "status": "completed",
@@ -336,16 +446,18 @@ def draft_transcription_stream(session_id):
     - last_chunk: Index of the last chunk the client has received
     """
     draft = Draft.query.filter_by(session_id=session_id).first()
-
-    if not draft:
-        return jsonify({"error": "Streaming session not found"}), 404
-
-    # Check ownership
-    if draft.user_id != current_user.id and not getattr(current_user, "is_admin", False):
-        return jsonify({"error": "Unauthorized"}), 403
+    if draft is None or draft.user_id != current_user.id:
+        return _not_found("Streaming session")
 
     # Get the last chunk index the client has seen
     last_chunk = request.args.get('last_chunk', -1, type=int)
+
+    # Only the tab recording the session opens this stream, so a
+    # (re)connect is a sign of life — also for a resumed session whose
+    # previous tab released it (#320).
+    if draft.streaming_status == 'recording':
+        stamp_session_alive(session_id)
+        db.session.commit()
 
     # Capture app reference for use in generator (needed for app context)
     app = current_app._get_current_object()
@@ -413,16 +525,21 @@ def draft_transcription_stream(session_id):
                         "content": current_draft.get_content(),
                         "draft_id": current_draft.id,
                     }
-                    if current_draft.llm_node_id:
-                        complete_data["llm_node_id"] = current_draft.llm_node_id
-                        # Node already exists — draft only lingered for this event.
-                        db.session.delete(current_draft)
-                        db.session.commit()
                     if current_draft.streaming_warning:
                         # Carry user-facing warning to the frontend so it
                         # can render a toast even when no LLM follow-up
-                        # was dispatched (e.g. misconfigured placeholder).
+                        # was dispatched (e.g. misconfigured placeholder,
+                        # spend cap). The transcript was saved as a node.
                         complete_data["warning"] = current_draft.streaming_warning
+                    if current_draft.llm_node_id:
+                        complete_data["llm_node_id"] = current_draft.llm_node_id
+                    if (current_draft.llm_node_id
+                            or current_draft.streaming_warning):
+                        # Node already exists — draft only lingered for this
+                        # event. Left behind, a warning draft would come
+                        # back as a restorable draft and save twice (#341).
+                        db.session.delete(current_draft)
+                        db.session.commit()
                     yield format_sse_message(complete_data, event="all_complete")
                     break
 
@@ -442,6 +559,15 @@ def draft_transcription_stream(session_id):
                         "status": current_draft.streaming_status
                     }, event="heartbeat")
                     last_heartbeat = time.time()
+                    # The open stream is the recording tab's sign of
+                    # life, paused recordings included (#320). Stamped
+                    # after the yield, so a failed write ends the stream
+                    # before it stamps; and only while the stamp is set,
+                    # so a stream that has not yet noticed its tab left
+                    # cannot revive a session the tab released.
+                    if current_draft.streaming_status == 'recording':
+                        stamp_session_alive(session_id, only_if_unreleased=True)
+                        db.session.commit()
 
             # Sleep briefly before checking again (outside app context)
             time.sleep(1)
@@ -455,3 +581,25 @@ def draft_transcription_stream(session_id):
             'X-Accel-Buffering': 'no'  # Disable nginx buffering
         }
     )
+
+
+@sse_bp.route("/items/<int:item_id>/tts-stream")
+@login_required
+def item_tts_stream(item_id):
+    """SSE TTS chunk stream for a saved reference (same events as nodes)."""
+    from backend.models import ExternalItem
+    item = ExternalItem.query.filter_by(
+        id=item_id, user_id=current_user.id).first()
+    if item is None:
+        return jsonify({"error": "not found"}), 404
+
+    if item.tts_task_status not in STREAMABLE_TTS_STATUSES:
+        if item.audio_tts_url:
+            return jsonify({"status": "completed",
+                            "tts_url": item.audio_tts_url}), 200
+        return jsonify({"error": "TTS not in progress for this reference"}), 400
+
+    last_chunk = request.args.get('last_chunk', -1, type=int)
+    app = current_app._get_current_object()
+    return _tts_stream_response(app, ExternalItem, item_id, 'item_id',
+                                'Reference', last_chunk)

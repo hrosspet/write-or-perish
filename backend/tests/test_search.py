@@ -1,6 +1,6 @@
 """Tests for the search endpoint.
 
-Follows the same pattern as test_feed_dashboard_privacy.py:
+Follows the same pattern as test_log_dashboard_privacy.py:
 ENCRYPTION_DISABLED=true, sqlite in-memory, minimal Flask app.
 """
 
@@ -36,7 +36,7 @@ for _mod in ["flask_login", "backend.models", "backend.extensions"]:
 
 import flask_login as _real_flask_login  # noqa: E402
 from backend.extensions import db as _db  # noqa: E402
-from backend.models import User, Node  # noqa: E402
+from backend.models import User, Node, ExternalItem  # noqa: E402
 import backend.models as _real_backend_models  # noqa: E402
 
 
@@ -318,3 +318,188 @@ class TestSearch:
         ids = [r["id"] for r in resp.json["results"]]
         assert data["bob_llm_id"] not in ids
         assert data["bob_node_id"] not in ids
+
+
+class TestExternalScope:
+    """scope=external: keyword search over saved references, not nodes."""
+
+    @pytest.fixture
+    def refs(self, app, data):
+        clip = ExternalItem(
+            user_id=data["alice_id"], source="web_clip", external_id="a" * 64,
+            title="Winter gardening guide", url="https://example.com/g",
+            fetched_at=datetime(2026, 1, 10),
+        )
+        clip.set_content("How to keep tomatoes alive through the cold.")
+        tweet = ExternalItem(
+            user_id=data["alice_id"], source="twitter_bookmark",
+            external_id="123", author_handle="gardener",
+            posted_at=datetime(2025, 12, 5), fetched_at=datetime(2026, 1, 12),
+        )
+        tweet.set_content("Solstice thoughts: štědrá zima")
+        bobs = ExternalItem(
+            user_id=data["bob_id"], source="web_clip", external_id="b" * 64,
+            title="Bob's solstice page", fetched_at=datetime(2026, 1, 11),
+        )
+        bobs.set_content("solstice solstice solstice")
+        _db.session.add_all([clip, tweet, bobs])
+        _db.session.commit()
+        return dict(clip_id=clip.id, tweet_id=tweet.id, bobs_id=bobs.id)
+
+    def test_matches_references_not_nodes(self, app, data, refs):
+        client = app.test_client()
+        _login(client, data["alice_id"])
+        resp = client.get("/api/search?q=solstice&scope=external")
+        assert resp.status_code == 200
+        assert resp.json["scope"] == "external"
+        # The archive has a "solstice" node; only the reference comes back.
+        assert [r["id"] for r in resp.json["results"]] == [refs["tweet_id"]]
+        r = resp.json["results"][0]
+        assert r["kind"] == "external"
+        assert r["source"] == "twitter_bookmark"
+        assert r["author_handle"] == "gardener"
+        assert "<mark>" in r["snippet"]
+
+    def test_title_matches_and_diacritics_fold(self, app, data, refs):
+        client = app.test_client()
+        _login(client, data["alice_id"])
+        # "gardening" appears only in the clip's title.
+        resp = client.get("/api/search?q=gardening&scope=external")
+        assert [r["id"] for r in resp.json["results"]] == [refs["clip_id"]]
+        assert resp.json["results"][0]["title"] == "Winter gardening guide"
+        resp = client.get("/api/search?q=stedra&scope=external")
+        assert [r["id"] for r in resp.json["results"]] == [refs["tweet_id"]]
+
+    def test_other_users_references_hidden(self, app, data, refs):
+        client = app.test_client()
+        _login(client, data["bob_id"])
+        resp = client.get("/api/search?q=solstice&scope=external")
+        assert [r["id"] for r in resp.json["results"]] == [refs["bobs_id"]]
+
+    def test_date_range_uses_posted_then_saved(self, app, data, refs):
+        client = app.test_client()
+        _login(client, data["alice_id"])
+        # Tweet posted 2025-12-05 (saved 2026-01-12); clip saved 2026-01-10.
+        resp = client.get("/api/search?scope=external&from=2026-01-01")
+        assert [r["id"] for r in resp.json["results"]] == [refs["clip_id"]]
+        resp = client.get("/api/search?scope=external&to=2025-12-31")
+        assert [r["id"] for r in resp.json["results"]] == [refs["tweet_id"]]
+        assert resp.json["results"][0]["created_at"].startswith("2025-12-05")
+
+    def test_archive_scope_unchanged(self, app, data, refs):
+        client = app.test_client()
+        _login(client, data["alice_id"])
+        resp = client.get("/api/search?q=solstice")
+        assert [r["id"] for r in resp.json["results"]] == [data["dec_node_id"]]
+
+
+# A harmless marker: an inert element whose only purpose is to show
+# whether markup in stored text reaches the response as markup.
+PROBE = '<i data-loore-probe="1">probe</i>'
+PROBE_ESCAPED = '&lt;i data-loore-probe=&quot;1&quot;&gt;probe&lt;/i&gt;'
+
+
+class TestResultsAreEscaped:
+    """Search results show stored text as text.
+
+    Both clients render `snippet` and `preview` as markup (the web as
+    HTML, iOS by parsing the <mark> runs), so every character of stored
+    text is escaped and the only tags are the <mark>s added around
+    matches after escaping. Tweets and clipped pages carry text an
+    outside party wrote; it must never reach the page as HTML.
+    """
+
+    def _node(self, user_id, content, created_at=datetime(2026, 2, 1)):
+        node = Node(user_id=user_id, human_owner_id=user_id,
+                    content=content, privacy_level="private",
+                    node_type="user", created_at=created_at)
+        _db.session.add(node)
+        _db.session.commit()
+        return node.id
+
+    def _get(self, app, user_id, url):
+        client = app.test_client()
+        _login(client, user_id)
+        resp = client.get(url)
+        assert resp.status_code == 200
+        return resp.json["results"]
+
+    def test_keyword_snippet_and_preview_escape_markup(self, app, data):
+        self._node(data["alice_id"], f"Notes {PROBE} on equinox & tides")
+        [r] = self._get(app, data["alice_id"], "/api/search?q=equinox")
+        assert "<i" not in r["snippet"]
+        assert r["snippet"] == (
+            f"Notes {PROBE_ESCAPED} on <mark>equinox</mark> &amp; tides")
+        assert r["preview"] == f"Notes {PROBE_ESCAPED} on equinox &amp; tides"
+
+    def test_preview_escaped_without_keyword(self, app, data):
+        self._node(data["alice_id"], f"{PROBE} dated only",
+                   created_at=datetime(2026, 3, 3))
+        [r] = self._get(app, data["alice_id"],
+                        "/api/search?from=2026-03-01&to=2026-03-31")
+        assert r["snippet"] is None
+        assert r["preview"] == f"{PROBE_ESCAPED} dated only"
+
+    def test_reference_snippet_and_preview_escaped(self, app, data):
+        clip = ExternalItem(
+            user_id=data["alice_id"], source="web_clip", external_id="c" * 64,
+            title="A clipped page", fetched_at=datetime(2026, 1, 10))
+        clip.set_content(f"Clipped text {PROBE} about equinox")
+        _db.session.add(clip)
+        _db.session.commit()
+        [r] = self._get(app, data["alice_id"],
+                        "/api/search?q=equinox&scope=external")
+        assert r["snippet"] == (
+            f"Clipped text {PROBE_ESCAPED} about <mark>equinox</mark>")
+        assert r["preview"] == f"Clipped text {PROBE_ESCAPED} about equinox"
+        # Title-only match: the snippet is the opening text, escaped.
+        [r] = self._get(app, data["alice_id"],
+                        "/api/search?q=clipped%20page&scope=external")
+        assert r["snippet"] == f"Clipped text {PROBE_ESCAPED} about equinox"
+
+    def test_term_inside_html_like_string(self, app, data):
+        self._node(data["alice_id"], '<span title="equinox">x</span>')
+        [r] = self._get(app, data["alice_id"], "/api/search?q=equinox")
+        assert r["snippet"] == (
+            '&lt;span title=&quot;<mark>equinox</mark>&quot;&gt;'
+            'x&lt;/span&gt;')
+
+    def test_query_that_looks_like_markup(self, app, data):
+        self._node(data["alice_id"], "if a <b> c then d")
+        [r] = self._get(app, data["alice_id"], "/api/search?q=%3Cb%3E")
+        assert r["snippet"] == "if a <mark>&lt;b&gt;</mark> c then d"
+
+    def test_highlight_added_after_escaping(self, app, data):
+        # Literal entity text in a note: the match on "amp" is inside the
+        # stored "&amp;", so escaping must come first and the mark must
+        # wrap the stored characters, not the escaped ones.
+        self._node(data["alice_id"], "fish &amp; chips")
+        [r] = self._get(app, data["alice_id"], "/api/search?q=amp")
+        assert r["snippet"] == "fish &amp;<mark>amp</mark>; chips"
+
+    def test_unicode_diacritics_and_emoji(self, app, data):
+        self._node(data["alice_id"], "Štědrá večer 🎄 <štědrá> den")
+        [r] = self._get(app, data["alice_id"], "/api/search?q=stedra")
+        assert r["snippet"] == (
+            "<mark>Štědrá</mark> večer 🎄 &lt;<mark>štědrá</mark>&gt; den")
+
+
+class TestSnippetHelper:
+    """`_snippet` on its own: windows and truncation stay escaped."""
+
+    def test_window_cut_never_splits_an_entity(self, app):
+        from backend.routes.search import _snippet
+        text = "&" * 100 + " equinox " + "<" * 100
+        out = _snippet(text, "equinox", context_chars=10)
+        assert out == ("..." + "&amp;" * 9 + " <mark>equinox</mark> "
+                       + "&lt;" * 9 + "...")
+
+    def test_no_match_returns_escaped_opening(self, app):
+        from backend.routes.search import _snippet
+        text = "a" * 199 + "<b>"
+        assert _snippet(text, "zzz") == "a" * 199 + "&lt;..."
+
+    def test_keyword_of_only_combining_marks_returns(self, app):
+        # Folds to "": used to loop forever appending empty <mark>s.
+        from backend.routes.search import _snippet
+        assert _snippet("café <b>", "́") == "café &lt;b&gt;"

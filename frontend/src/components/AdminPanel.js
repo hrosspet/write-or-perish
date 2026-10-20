@@ -1,6 +1,13 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useCallback } from "react";
+import XLookupConfirmDialog from "./XLookupConfirmDialog";
+import PurgeDataDialog from "./PurgeDataDialog";
+import AdminDeleteAccountDialog from "./AdminDeleteAccountDialog";
+import ProfileBuildConfirmDialog from "./ProfileBuildConfirmDialog";
+import AdminRefusalDialog, { REFUSAL_TITLES } from "./AdminRefusalDialog";
+import { offeredModels } from "./ModelSelector";
 import { FaTimesCircle, FaFilter, FaCaretDown, FaCaretUp, FaEye, FaEyeSlash } from "react-icons/fa";
 import api from "../api";
+import { formatDate, formatDateTime } from "../utils/date";
 
 // Small header toggle that hides rows with $0 in its column.
 function ZeroFilterToggle({ active, onToggle, label }) {
@@ -133,8 +140,9 @@ function AdminPolls() {
     // "default" option that resolves invisibly at creation time.
     Promise.all([
       fetchPolls(),
+      // A poll drafts answers like a reply does: chat models only.
       api.get("/nodes/models")
-        .then((res) => res.data.models || [])
+        .then((res) => offeredModels(res.data.models || [], "chat"))
         .catch(() => []),
     ]).then(([defaultModelId, fetchedModels]) => {
       setModels(fetchedModels);
@@ -293,6 +301,10 @@ const relTime = (iso) => {
 const pathArea = (p) => {
   if (!p) return null;
   const seg = p.replace(/^\/api\//, "").split("/")[0];
+  // `/api/feed` became `/api/log` (#298). Stored paths from before the
+  // rename, and the writes still coming from tabs opened before it,
+  // are the same area.
+  if (seg === "feed") return "log";
   return seg || null;
 };
 
@@ -356,7 +368,7 @@ function AdminActivity() {
             <thead>
               <tr>
                 <th style={th}>user</th>
-                <th style={th} title="Seeded from X API / Community Archive; ✗ = declined tweet seed">seed</th>
+                <th style={th} title="Seeded from X API / Community Archive; ✓ = opted in to tweet seed, ✗ = declined">seed</th>
                 <th style={th} title="Activation (approved) — everything on this tab counts from here">activated</th>
                 <th style={th} title="Last authenticated request (5-min resolution) and the area they were in">last seen</th>
                 <th style={th} title={`One cell per day (oldest → newest). Filled = wrote or asked that day; · = voice. Grey = before activation.`}>{data.days.length}d</th>
@@ -380,6 +392,7 @@ function AdminActivity() {
                   <td style={cell}>{u.username}</td>
                   <td style={cell}>
                     {u.seeded === "x" ? "X" : u.seeded === "ca" ? "CA" : "—"}
+                    {u.prefill_consent === "yes" && <span title="opted in to tweet seed" style={{ color: "var(--success)" }}> ✓</span>}
                     {u.prefill_consent === "no" && <span title="declined tweet seed" style={{ color: "var(--text-muted)" }}> ✗</span>}
                   </td>
                   <td style={cell} title={u.activated_at || ""}>{relTime(u.activated_at) || "—"}</td>
@@ -489,7 +502,7 @@ function AdminFeedback() {
               <strong>{f.username || `user ${f.user_id}`}</strong>
               <span style={{ color: "var(--text-muted)", fontSize: "0.8rem" }}>
                 {f.category} · {f.source} ·{" "}
-                {f.created_at ? new Date(f.created_at).toLocaleDateString() : ""}
+                {formatDate(f.created_at, { relative: false })}
               </span>
               <span style={{ flex: 1 }} />
               <select
@@ -512,13 +525,87 @@ function AdminFeedback() {
   );
 }
 
+// Compact secondary action inside a status cell (in-flight intentions line).
+const smallActionStyle = {
+  padding: "2px 8px",
+  fontSize: "0.85em",
+  borderRadius: "4px",
+};
+
+// The Users-row line for a user's latest data purge (#268) or account
+// deletion (#269). An admin's request waits out the same grace period as
+// the user's own (Peter, 2026-10-13), so the line says who asked.
+export function purgeLabel(job) {
+  if (!job) return "";
+  const who = job.source === "admin" ? "an admin" : "the user";
+  if (job.delete_account) {
+    switch (job.status) {
+      case "scheduled":
+        return `Account deleted by ${who}, hidden until ${formatDate(job.scheduled_for)}`;
+      case "running":
+        return "Deleting account…";
+      case "failed":
+        return `Account deletion failed: ${job.error || "unknown error"}`;
+      default:
+        return `Account deletion: ${job.status}`;
+    }
+  }
+  switch (job.status) {
+    case "scheduled":
+      // "Delete all my writing" and the admin's "Purge data" hide the
+      // writing at once (#268, Peter 2026-10-09 and 2026-10-13) and
+      // delete it on the date.
+      return job.scope === "hidden"
+        ? `Writing hidden by ${who}, deleted on ${formatDate(job.scheduled_for)}`
+        : `Data purge due ${formatDate(job.scheduled_for)}`;
+    case "running":
+      return "Purging data…";
+    case "done":
+      return `Data purged ${formatDate(job.finished_at)} (${job.source})`;
+    case "failed":
+      return `Data purge failed: ${job.error || "unknown error"}`;
+    default:
+      return `Data purge: ${job.status}`;
+  }
+}
+
 function AdminPanel() {
   const [activeTab, setActiveTab] = useState("users");
   const [users, setUsers] = useState([]);
   const [allowedPlans, setAllowedPlans] = useState([]);
+  // Start of the cache hit-rate window (ISO, from the backend) — the
+  // column only counts turns since prompt caching launched.
+  const [cacheSince, setCacheSince] = useState(null);
   const [error, setError] = useState("");
   const [newHandle, setNewHandle] = useState("");
   const [newHandleError, setNewHandleError] = useState("");
+  const [newHandleNotice, setNewHandleNotice] = useState("");
+  const [whitelisting, setWhitelisting] = useState(false);
+  // Set when the archive did not have the handle: the dialog offering the
+  // paid X lookup for that one whitelist.
+  const [xLookupAsk, setXLookupAsk] = useState(null);
+  // Build profile on a user held by the refusal backoff (#368): the
+  // confirmation dialog's user, or null.
+  const [buildAsk, setBuildAsk] = useState(null);
+  // "Purge data" (#268): the user row whose dry run / confirmation is
+  // open, or null.
+  const [purgeAsk, setPurgeAsk] = useState(null);
+  const closePurge = useCallback(() => setPurgeAsk(null), []);
+  // "Delete account" (#269): the user row whose dry run / confirmation
+  // is open, or null.
+  const [deleteAsk, setDeleteAsk] = useState(null);
+  const closeDelete = useCallback(() => setDeleteAsk(null), []);
+  // A pre-fill / intentions / profile build the backend refused for this
+  // account (#346): { code, message, username }. Shown as a dialog.
+  const [refusal, setRefusal] = useState(null);
+  // True when err is such a refusal (and the dialog now shows it).
+  const showRefusal = (err, userId) => {
+    const data = err.response?.data;
+    if (!data || !REFUSAL_TITLES[data.code]) return false;
+    const u = users.find((x) => x.id === userId);
+    setRefusal({ code: data.code, message: data.error, username: u?.username });
+    return true;
+  };
   // Per-user spend-limit input values, keyed by user id (controlled inputs).
   const [limitEdits, setLimitEdits] = useState({});
   // Column filters: hide rows with $0 in Spent / This Month (independent).
@@ -539,6 +626,10 @@ function AdminPanel() {
     }
   };
 
+  // "2026-06-25" from the ISO timestamp; the fallback only shows before
+  // the first /admin/users response lands.
+  const cacheSinceLabel = cacheSince ? cacheSince.slice(0, 10) : "caching launched";
+
   const fetchUsers = async () => {
     try {
       const response = await api.get("/admin/users");
@@ -552,6 +643,9 @@ function AdminPanel() {
       setLimitEdits(edits);
       if (response.data.allowed_plans) {
         setAllowedPlans(response.data.allowed_plans);
+      }
+      if (response.data.cache_since) {
+        setCacheSince(response.data.cache_since);
       }
     } catch (err) {
       console.error(err);
@@ -579,12 +673,61 @@ function AdminPanel() {
   const patchIntent = (userId, patch) =>
     setIntent((prev) => ({ ...prev, [userId]: { ...(prev[userId] || {}), ...patch } }));
 
-  const inferIntentions = async (userId) => {
+  // mode: "batch" (default, ~50% cheaper, hours) | "sync" (full price, minutes).
+  // cancelPending: cancel the user's in-flight batch first, then start.
+  const inferIntentions = async (userId, mode = "batch", cancelPending = false) => {
     try {
-      const res = await api.post(`/admin/users/${userId}/infer_intentions`);
-      patchIntent(userId, { taskId: res.data.task_id, status: "queued", error: null, result: null });
+      const res = await api.post(`/admin/users/${userId}/infer_intentions`, {
+        mode, cancel_pending: cancelPending,
+      });
+      patchIntent(userId, {
+        taskId: res.data.task_id, mode, status: "queued", error: null, result: null,
+        cancelled: res.data.cancelled || 0,
+        cancelErrors: res.data.errors || [],
+      });
+      if (res.data.cancelled) refreshStatuses();
     } catch (err) {
+      if (showRefusal(err, userId)) return;
       patchIntent(userId, { error: err.response?.data?.error || "Error starting intentions run." });
+    }
+  };
+
+  const cancelIntentions = async (userId) => {
+    try {
+      const res = await api.post(`/admin/users/${userId}/cancel_intentions`);
+      patchIntent(userId, {
+        taskId: null, status: null, result: null, mode: null,
+        error: res.data.cancelled ? null : res.data.message,
+        cancelled: res.data.cancelled || 0,
+        cancelErrors: res.data.errors || [],
+      });
+      refreshStatuses();
+    } catch (err) {
+      patchIntent(userId, { error: err.response?.data?.error || "Error cancelling the batch." });
+    }
+  };
+
+  // Re-read only the pipeline state of each row (profile chain, intentions,
+  // batch flags) so the Profile column moves on its own while something is
+  // in flight — without resetting the spend-limit inputs the way fetchUsers does.
+  const refreshStatuses = async () => {
+    try {
+      const response = await api.get("/admin/users");
+      const byId = {};
+      response.data.users.forEach((u) => { byId[u.id] = u; });
+      setUsers((prev) => prev.map((u) => {
+        const fresh = byId[u.id];
+        if (!fresh) return u;
+        return {
+          ...u,
+          profile: fresh.profile,
+          intentions: fresh.intentions,
+          profile_batch_pending: fresh.profile_batch_pending,
+          profile_force_batch: fresh.profile_force_batch,
+        };
+      }));
+    } catch (err) {
+      console.error(err);
     }
   };
 
@@ -598,6 +741,9 @@ function AdminPanel() {
         try {
           const res = await api.get(`/admin/prefill/status/${p.taskId}`);
           patchIntent(Number(userId), res.data);
+          // The row's persistent state (⏳ / ✓ in the Profile column) comes
+          // from the users list — pull it as soon as the task settles.
+          if (res.data.status === "completed" || res.data.status === "failed") refreshStatuses();
         } catch (err) {
           patchIntent(Number(userId), { status: "failed", error: "Status check failed." });
         }
@@ -607,28 +753,82 @@ function AdminPanel() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [intent]);
 
-  const intentLabel = (p) => {
-    if (!p) return null;
-    if (p.error && !p.status) return p.error;
-    if (p.status === "queued") return "Intentions: queued…";
-    if (p.status === "running") return `Intentions: ${p.stage || "running"}…`;
-    if (p.status === "failed") return `Intentions failed: ${p.error}`;
-    if (p.status === "completed") {
-      const r = p.result || {};
-      if (r.stage === "batch submitted") return "Intentions: batch submitted — progress shows in the Profile column";
-      return `Intentions v${r.version} saved (${r.model_id}, ${(r.llm_tokens || 0).toLocaleString()} tokens, $${(r.cost_usd || 0).toFixed(2)})`;
-    }
-    return null;
+  // Live Profile column: while any row has a batch in flight, re-read the
+  // pipeline state every 30 s (the poller collects batches on a ~60 s beat)
+  // and tick the clock the elapsed labels are computed from.
+  const [now, setNow] = useState(() => Date.now());
+  const anyInFlight = users.some(
+    (u) => u.intentions?.state === "generating" || u.profile?.state === "generating"
+  );
+  useEffect(() => {
+    if (!anyInFlight) return undefined;
+    const timer = setInterval(() => {
+      setNow(Date.now());
+      refreshStatuses();
+    }, 30000);
+    return () => clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [anyInFlight]);
+
+  const elapsedLabel = (iso) => {
+    if (!iso) return null;
+    const mins = Math.max(0, Math.round((now - new Date(iso).getTime()) / 60000));
+    if (mins < 1) return "just now";
+    if (mins < 60) return `${mins} min`;
+    const h = Math.floor(mins / 60);
+    const m = mins % 60;
+    return m ? `${h} h ${m} min` : `${h} h`;
   };
 
-  const buildProfile = async (userId) => {
+  const intentLabel = (p) => {
+    if (!p) return null;
+    const cancelNote = p.cancelled
+      ? `Batch cancelled${p.cancelErrors?.length ? ` (provider said: ${p.cancelErrors.join("; ")})` : ""}`
+      : null;
+    const kind = p.mode === "sync" ? "Intentions (now)" : "Intentions";
+    let main = null;
+    if (p.error && !p.status) main = p.error;
+    else if (p.status === "queued") main = `${kind}: queued…`;
+    else if (p.status === "running") main = `${kind}: ${p.stage || "running"}…`;
+    else if (p.status === "failed") main = `${kind} failed: ${p.error}`;
+    else if (p.status === "completed") {
+      const r = p.result || {};
+      if (r.stage === "batch submitted") main = "Intentions: batch submitted — the Profile column follows it from here";
+      else main = `Intentions v${r.version} saved${r.mode === "sync" ? " now" : ""} (${r.model_id}, ${(r.llm_tokens || 0).toLocaleString()} tokens, $${(r.cost_usd || 0).toFixed(2)})`;
+    }
+    if (!main && !cancelNote) return null;
+    return [cancelNote, main].filter(Boolean).join(" · ");
+  };
+
+  const buildProfile = async (userId, force = false) => {
     try {
-      const res = await api.post(`/admin/users/${userId}/build_profile`);
+      const res = await api.post(`/admin/users/${userId}/build_profile`,
+        force ? { force: true } : undefined);
       if (!res.data.queued) setError(res.data.message);
       fetchUsers();
     } catch (err) {
+      if (showRefusal(err, userId)) return;
       console.error(err);
       setError("Error queueing profile build.");
+    }
+  };
+
+  // Undo an admin's waiting "Purge data" or "Delete account" (Peter,
+  // 2026-10-13): what it hid shows again. The job id guards against a
+  // stale row undoing another request.
+  const undoDeletion = async (u) => {
+    const job = u.data_purge;
+    if (!job || !job.undoable) return;
+    const question = job.delete_account
+      ? `Undo the deletion of the account @${u.username}? The account is shown again and can sign in.`
+      : `Undo the purge of @${u.username}? Their writing shows again at once.`;
+    if (!window.confirm(question)) return;
+    try {
+      await api.post(`/admin/users/${u.id}/undo_deletion`, { job_id: job.id });
+      fetchUsers();
+    } catch (err) {
+      setError(err.response?.data?.error || "Could not undo the deletion.");
+      fetchUsers();
     }
   };
 
@@ -768,7 +968,7 @@ function AdminPanel() {
     if (c.replies != null) parts.push(`${n(c.replies)} replies`);
     if (c.originals != null) parts.push(`${n(c.originals)} originals`);
     if (c.est_tokens != null) {
-      const below = c.est_tokens < (c.profile_threshold_tokens || 10000);
+      const below = c.est_tokens < (c.profile_threshold_tokens || 5000);
       parts.push(`~${n(c.est_tokens)} tokens${below ? " — below profile threshold" : ""}`);
     }
     parts.push(`account reports ${n(c.account_num_tweets)}`);
@@ -793,6 +993,7 @@ function AdminPanel() {
         });
       patchPrefill(userId, { taskId: res.data.task_id, status: "queued", error: null, result: null });
     } catch (err) {
+      if (showRefusal(err, userId)) return;
       patchPrefill(userId, { error: err.response?.data?.error || "Error starting pre-fill." });
     }
   };
@@ -832,6 +1033,15 @@ function AdminPanel() {
     }
     if (p.status === "completed") {
       const r = p.result || {};
+      // The seeder's own verdict on the account after the import (not a
+      // token comparison done here): queued, or under the next ladder step.
+      const queuedNote = r.profile_batch_queued
+        ? " — batch profile queued"
+        : ` — not queued: under the ${r.profile_threshold_tokens ? r.profile_threshold_tokens.toLocaleString() + "-token" : "next"} profile step`;
+      // Whether the account got the handle's X id (the owner's X login finds
+      // it by that id), or why not — shown for both pre-fill sources, so a
+      // refused or changed stamp is seen before the account is approved.
+      const idNote = r.x_id_stamped ? `; X id ${r.x_id} attached` : r.x_id_note ? `; ${r.x_id_note}` : "";
       if (r.source === "x-api") {
         return `${r.partial ? "PARTIAL" : "Done"}: ${(r.created || 0).toLocaleString()} nodes from ${(r.fetched || 0).toLocaleString()} posts via X` +
           `${r.partial ? ` (stopped: ${r.fetch_error})` : ""}` +
@@ -839,7 +1049,7 @@ function AdminPanel() {
           `${r.retweets_skipped ? `, ${r.retweets_skipped.toLocaleString()} retweets skipped` : ""}` +
           `${r.skipped ? `, ${r.skipped} already imported` : ""}` +
           `${r.imported_tokens != null ? `, ~${r.imported_tokens.toLocaleString()} tokens` : ""}` +
-          `${r.profile_batch_queued ? " — batch profile queued" : " — below profile threshold"}`;
+          queuedNote + idNote;
       }
       const archived = r.archived != null ? ` of ${r.archived.toLocaleString()} archived` : "";
       const rts = r.retweets_skipped ? `, ${r.retweets_skipped.toLocaleString()} retweets skipped` : "";
@@ -850,26 +1060,54 @@ function AdminPanel() {
         `${r.source === "parquet" ? " (snapshot)" : ""}${rts}${reported}` +
         `${r.skipped ? `, ${r.skipped} already imported` : ""}` +
         `${r.imported_tokens != null ? `, ~${r.imported_tokens.toLocaleString()} tokens` : ""}` +
-        `${r.profile_batch_queued ? " — batch profile queued" : " — below profile threshold"}`;
+        queuedNote + idNote;
     }
     if (p.status === "failed") return `Failed: ${p.error}`;
     return null;
   };
 
-  const handleWhitelistUser = async () => {
-    if (!newHandle.trim()) {
-      setNewHandleError("Handle is required.");
-      return;
-    }
+  const submitWhitelist = async (handle, xLookup) => {
+    if (whitelisting) return; // one request at a time: a double click must not whitelist twice
+    setWhitelisting(true);
     try {
-      await api.post("/admin/whitelist", { handle: newHandle });
+      const res = await api.post("/admin/whitelist", { handle, x_lookup: xLookup });
+      const u = res.data?.user || {};
+      const m = res.data?.matched || {};
+      const source = {
+        "community-archive": "Community Archive",
+        "x-api": "X API (paid lookup)",
+      }[res.data?.source] || res.data?.source;
+      const who = m.display_name ? `@${m.username} “${m.display_name}”` : `@${m.username}`;
       setNewHandle("");
       setNewHandleError("");
+      setNewHandleNotice(
+        `Whitelisted @${u.username} as ${who}, X id ${u.twitter_id} (${source}); unapproved until you approve them.`
+      );
       fetchUsers();
     } catch (err) {
       console.error(err);
-      setNewHandleError(err.response?.data?.error || "Error whitelisting user.");
+      setNewHandleNotice("");
+      const data = err.response?.data || {};
+      // The archive does not have the handle (or could not be asked): the
+      // only other source of its X id is a paid X read — ask, don't assume.
+      if (!xLookup && (data.reason === "not-in-archive" || data.reason === "archive-error")) {
+        setNewHandleError("");
+        setXLookupAsk({ handle, message: data.error, costUsd: data.x_lookup_cost_usd });
+      } else {
+        setNewHandleError(data.error || "Error whitelisting user.");
+      }
+    } finally {
+      setWhitelisting(false);
     }
+  };
+
+  const handleWhitelistUser = () => {
+    const handle = newHandle.trim().replace(/^@/, "");
+    if (!handle) {
+      setNewHandleError("Handle is required.");
+      return;
+    }
+    submitWhitelist(handle, false);
   };
 
   let displayedUsers = users
@@ -923,9 +1161,38 @@ function AdminPanel() {
           placeholder="Enter user handle"
           style={{ padding: "8px", marginRight: "10px" }}
         />
-        <button onClick={handleWhitelistUser}>Whitelist User</button>
+        <button onClick={handleWhitelistUser} disabled={whitelisting}>
+          {whitelisting ? "Whitelisting…" : "Whitelist User"}
+        </button>
         {newHandleError && <div style={{ color: "var(--error)" }}>{newHandleError}</div>}
+        {newHandleNotice && <div style={{ color: "var(--text-secondary)" }}>{newHandleNotice}</div>}
       </div>
+      <XLookupConfirmDialog
+        open={!!xLookupAsk}
+        handle={xLookupAsk?.handle}
+        message={xLookupAsk?.message}
+        costUsd={xLookupAsk?.costUsd}
+        onClose={() => setXLookupAsk(null)}
+        onConfirm={() => {
+          const ask = xLookupAsk;
+          setXLookupAsk(null);
+          submitWhitelist(ask.handle, true);
+        }}
+      />
+      <ProfileBuildConfirmDialog
+        open={!!buildAsk}
+        username={buildAsk?.username}
+        backoff={buildAsk?.profile_backoff}
+        onClose={() => setBuildAsk(null)}
+        onConfirm={() => {
+          const ask = buildAsk;
+          setBuildAsk(null);
+          buildProfile(ask.id, true);
+        }}
+      />
+      <AdminRefusalDialog refusal={refusal} onClose={() => setRefusal(null)} />
+      <PurgeDataDialog user={purgeAsk} onClose={closePurge} onStarted={() => fetchUsers()} />
+      <AdminDeleteAccountDialog user={deleteAsk} onClose={closeDelete} onStarted={() => fetchUsers()} />
 
       {error && <div style={{ color: "var(--error)" }}>{error}</div>}
       <table style={{ width: "100%", borderCollapse: "collapse", color: "var(--text-primary)" }}>
@@ -986,7 +1253,7 @@ function AdminPanel() {
             </th>
             <th
               style={{ border: "1px solid var(--border)", padding: "8px", width: "85px", whiteSpace: "nowrap" }}
-              title="Prompt-cache hit-rate over conversation turns (all-time): input tokens served from cache ÷ total prompt input. Covers both Anthropic and OpenAI caching."
+              title={`Prompt-cache hit-rate over conversation turns since ${cacheSinceLabel} (when prompt caching launched): input tokens served from cache ÷ total prompt input. Covers both Anthropic and OpenAI caching.`}
             >
               Cache
             </th>
@@ -1060,7 +1327,7 @@ function AdminPanel() {
                 style={{ border: "1px solid var(--border)", padding: "8px", width: "150px", whiteSpace: "nowrap", fontSize: "0.9em" }}
                 title={
                   u.profile?.last_created_at
-                    ? `Latest version: ${u.profile.last_generation_type} at ${new Date(u.profile.last_created_at).toLocaleString()}`
+                    ? `Latest version: ${u.profile.last_generation_type} at ${formatDateTime(u.profile.last_created_at)}`
                     : "No profile yet"
                 }
               >
@@ -1069,15 +1336,23 @@ function AdminPanel() {
                     ✓ profile v{u.profile.versions}
                   </span>
                 )}
-                {u.profile?.state === "generating" && u.profile.waiting === "inactive" && (
+                {u.profile?.state === "generating" && u.profile.seed_error && (
+                  <span
+                    style={{ color: "var(--error)" }}
+                    title={`The seeder reached this account but could not build its batch request: ${u.profile.seed_error}. Fix the cause, then Build profile (an Inactive account is not retried by the hourly seeder).`}
+                  >
+                    ✗ seed failed{u.profile.versions ? ` (${u.profile.versions} so far)` : ""}
+                  </span>
+                )}
+                {u.profile?.state === "generating" && !u.profile.seed_error && u.profile.waiting === "inactive" && (
                   <span
                     style={{ color: "var(--text-muted)" }}
-                    title="A profile build is requested but the account is Inactive: the hourly seeder only walks approved accounts, so nothing will happen until you Activate it"
+                    title="A profile build is requested, nothing is in flight, and the account is Inactive: the hourly seeder only walks approved accounts. Activate it, or Build profile, which seeds immediately regardless of status."
                   >
                     ⏸ waiting: inactive{u.profile.versions ? ` (${u.profile.versions} so far)` : ""}
                   </span>
                 )}
-                {u.profile?.state === "generating" && u.profile.waiting !== "inactive" && (
+                {u.profile?.state === "generating" && !u.profile.seed_error && u.profile.waiting !== "inactive" && (
                   <span
                     style={{ color: u.profile.incomplete || u.profile.batch_attempts ? "var(--error)" : "var(--warning)" }}
                     title={u.profile.incomplete ? "Data remains after the latest version's cutoff and no batch job is in flight — the last chunk failed; the hourly seeder retries" : undefined}
@@ -1088,14 +1363,48 @@ function AdminPanel() {
                 {(!u.profile || u.profile.state === "none") && (
                   <span style={{ color: "var(--text-muted)" }}>—</span>
                 )}
-                {u.intentions && (
-                  <div style={{ color: u.intentions.state === "generating" ? "var(--warning)" : u.intentions.state === "failed" ? "var(--error)" : "var(--text-muted)" }}
-                       title={u.intentions.state === "failed" ? "The last intentions run gave up (batch failed twice) — check the worker log, then re-click Infer intentions" : u.intentions.last_created_at ? `latest intentions version ${u.intentions.last_created_at}` : "intentions batch in flight (persisted; survives restarts)"}>
-                    {u.intentions.state === "generating"
-                      ? <>⏳ intentions{u.intentions.versions ? ` (${u.intentions.versions} so far)` : ""}</>
-                      : u.intentions.state === "failed"
-                        ? <>✗ intentions failed</>
-                        : <>✓ intentions v{u.intentions.versions}</>}
+                {u.profile_backoff && (
+                  <div
+                    style={{ color: u.profile_backoff.state === "stopped" ? "var(--error)" : "var(--warning)" }}
+                    title={u.profile_backoff.state === "stopped"
+                      ? "The model's output was cut off or refused twice in a row, so the profile job is stopped for this user: the hourly seeder skips it. An import that triggers a rebuild, a saved version, or Build profile (after confirming) starts it again."
+                      : `The model's output was cut off or refused once; the next automatic try is after ${formatDateTime(u.profile_backoff.until)}. A second one stops the profile job.`}
+                  >
+                    {u.profile_backoff.state === "stopped" ? "⛔ stopped: output cut off or refused" : "⏸ retry after cut-off or refusal"}
+                  </div>
+                )}
+                {u.intentions && u.intentions.state === "generating" && (
+                  <div style={{ color: "var(--warning)" }}
+                       title={`Intentions batch ${u.intentions.batch?.batch_id || ""} submitted ${u.intentions.batch?.submitted_at || ""} — persisted, survives restarts; the poller collects it on a ~60 s beat, the provider's SLA is 24 h`}>
+                    ⏳ intentions batch{u.intentions.batch?.resubmitted ? " (resubmitted)" : ""}
+                    {u.intentions.batch?.submitted_at ? ` · ${elapsedLabel(u.intentions.batch.submitted_at)}` : ""}
+                    {u.intentions.versions ? ` · v${u.intentions.versions} so far` : ""}
+                    <div style={{ display: "flex", gap: "4px", marginTop: "3px" }}>
+                      <button
+                        onClick={() => cancelIntentions(u.id)}
+                        disabled={["queued", "running"].includes(intent[u.id]?.status)}
+                        style={smallActionStyle}
+                        title="Cancel the in-flight batch (provider-side, best effort — an item already being processed may still bill) and forget it here"
+                      >
+                        Cancel batch
+                      </button>
+                      <button
+                        onClick={() => inferIntentions(u.id, "sync", true)}
+                        disabled={["queued", "running"].includes(intent[u.id]?.status)}
+                        style={{ ...smallActionStyle, color: "var(--accent)", borderColor: "var(--accent)" }}
+                        title="Cancel the in-flight batch, then run the same inference synchronously: full price instead of the batch discount, saved within minutes"
+                      >
+                        Cancel, run now
+                      </button>
+                    </div>
+                  </div>
+                )}
+                {u.intentions && u.intentions.state !== "generating" && (
+                  <div style={{ color: u.intentions.state === "failed" ? "var(--error)" : "var(--text-muted)" }}
+                       title={u.intentions.state === "failed" ? "The last intentions run gave up (batch failed twice, or the output was cut off before any text) — check the worker log, then re-run (batch or now)" : u.intentions.last_created_at ? `latest intentions version ${u.intentions.last_created_at}` : undefined}>
+                    {u.intentions.state === "failed"
+                      ? <>✗ intentions failed</>
+                      : <>✓ intentions v{u.intentions.versions}</>}
                   </div>
                 )}
                 {u.prefilled_handle && (
@@ -1106,7 +1415,7 @@ function AdminPanel() {
                 {u.prefill_consent && (
                   <div
                     style={{ color: u.prefill_consent === "yes" ? "var(--success)" : "var(--text-muted)", fontSize: "0.85em" }}
-                    title={u.prefill_consent_at ? `answered ${new Date(u.prefill_consent_at).toLocaleString()}` : undefined}
+                    title={u.prefill_consent_at ? `answered ${formatDateTime(u.prefill_consent_at)}` : undefined}
                   >
                     {u.prefill_consent === "yes" ? "✓ opted in to tweet seed" : "✗ declined tweet seed"}
                   </div>
@@ -1116,8 +1425,8 @@ function AdminPanel() {
                 style={{ border: "1px solid var(--border)", padding: "8px", width: "85px", whiteSpace: "nowrap" }}
                 title={
                   u.cache_hit_rate == null
-                    ? "No conversation prompt input yet"
-                    : `${(u.cache_served_tokens || 0).toLocaleString()} of ${(u.cache_input_tokens || 0).toLocaleString()} prompt-input tokens served from cache`
+                    ? `No conversation prompt input since ${cacheSinceLabel}`
+                    : `${(u.cache_served_tokens || 0).toLocaleString()} of ${(u.cache_input_tokens || 0).toLocaleString()} prompt-input tokens served from cache since ${cacheSinceLabel}`
                 }
               >
                 {u.cache_hit_rate == null
@@ -1155,26 +1464,76 @@ function AdminPanel() {
                   Pre-fill from X
                 </button>{" "}
                 <button
-                  onClick={() => buildProfile(u.id)}
+                  onClick={() => (u.profile_backoff ? setBuildAsk(u) : buildProfile(u.id))}
                   disabled={u.profile_batch_pending}
                   title="Force a from-scratch batch profile build now, ignoring the token gate (for small corpora you want profiled anyway)"
                 >
                   Build profile
                 </button>{" "}
-                <button
-                  onClick={() => inferIntentions(u.id)}
-                  disabled={["queued", "running"].includes(intent[u.id]?.status)}
-                  title="Generate the Intentions artifact from this account's public tweets (public fork of the intentions prompt; whole corpus, oldest data trimmed until it fits the context)"
-                >
-                  Infer intentions
-                </button>{" "}
+                <span style={{ display: "inline-flex", verticalAlign: "middle" }}>
+                  <button
+                    onClick={() => inferIntentions(u.id, "batch")}
+                    disabled={["queued", "running"].includes(intent[u.id]?.status) || u.intentions?.state === "generating"}
+                    style={{ borderTopRightRadius: 0, borderBottomRightRadius: 0 }}
+                    title={u.intentions?.state === "generating"
+                      ? "A batch is already in flight — cancel it in the Profile column first"
+                      : "Generate the Intentions artifact from this account's public tweets via the Batch API: ~50% cheaper, but it can sit for hours (24 h SLA). Progress shows in the Profile column."}
+                  >
+                    Infer intentions
+                  </button>
+                  <button
+                    onClick={() => inferIntentions(u.id, "sync")}
+                    disabled={["queued", "running"].includes(intent[u.id]?.status) || u.intentions?.state === "generating"}
+                    style={{ borderTopLeftRadius: 0, borderBottomLeftRadius: 0, borderLeft: 0, color: "var(--accent)" }}
+                    title={u.intentions?.state === "generating"
+                      ? "A batch is already in flight — use “Cancel, run now” in the Profile column"
+                      : "Same inference, run synchronously right now: full price instead of the batch discount, saved within minutes. For when the person is waiting."}
+                  >
+                    Run now
+                  </button>
+                </span>{" "}
                 <button
                   onClick={() => toggleSpam(u.id)}
                   title={u.spam ? "Unmark as spam" : "Mark as spam (hides the row behind the eye toggle; does not deactivate)"}
                   style={u.spam ? { color: "var(--error)" } : undefined}
                 >
                   {u.spam ? "Not spam" : "Spam"}
+                </button>{" "}
+                <button
+                  onClick={() => setPurgeAsk(u)}
+                  disabled={u.data_purge?.status === "running"}
+                  title={'Hide all of this user\'s writing now and delete it after the grace period, like their own "Delete all my writing" (dry run first). The account stays.'}
+                  style={{ color: "var(--error)" }}
+                >
+                  Purge data
+                </button>{" "}
+                <button
+                  onClick={() => setDeleteAsk(u)}
+                  disabled={u.data_purge?.status === "running"}
+                  title="Delete this account and all its data, like the user's own account deletion: hidden now, deleted after the grace period (dry run first)."
+                  style={{ color: "var(--error)" }}
+                >
+                  Delete account
                 </button>
+                {u.data_purge && (
+                  <div style={{ marginTop: "4px", fontSize: "0.85em", color: u.data_purge.status === "failed" ? "var(--error)" : "var(--text-secondary)" }}>
+                    {purgeLabel(u.data_purge)}
+                    {u.data_purge.undoable && (
+                      <>
+                        {" "}
+                        <button
+                          onClick={() => undoDeletion(u)}
+                          style={smallActionStyle}
+                          title={u.data_purge.delete_account
+                            ? "Show the account again, as the user's own restore does"
+                            : "Show the writing again, as the user's own restore does"}
+                        >
+                          Undo
+                        </button>
+                      </>
+                    )}
+                  </div>
+                )}
                 {(intentLabel(intent[u.id])) && (
                   <div style={{ marginTop: "4px", fontSize: "0.85em", color: intent[u.id]?.status === "failed" || (intent[u.id]?.error && !intent[u.id]?.status) ? "var(--error)" : "var(--text-secondary)" }}>
                     {intentLabel(intent[u.id])}
@@ -1224,7 +1583,7 @@ function AdminPanel() {
                     <button
                       onClick={() => startPrefill(u.id)}
                       disabled={["queued", "running"].includes(prefill[u.id].status) || (prefill[u.id].source === "x" && prefill[u.id].check?.protected)}
-                      style={prefill[u.id].check && prefill[u.id].check.est_tokens != null && prefill[u.id].check.est_tokens < (prefill[u.id].check.profile_threshold_tokens || 10000) ? { opacity: 0.6 } : undefined}
+                      style={prefill[u.id].check && prefill[u.id].check.est_tokens != null && prefill[u.id].check.est_tokens < (prefill[u.id].check.profile_threshold_tokens || 5000) ? { opacity: 0.6 } : undefined}
                     >
                       Start
                     </button>

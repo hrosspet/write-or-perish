@@ -4,6 +4,24 @@ import NodeFooter from './NodeFooter';
 import MarkdownBody from './MarkdownBody';
 import BubbleKebabMenu from './BubbleKebabMenu';
 
+/**
+ * Split preview/content text into the card's title (first line, leading
+ * "# " stripped) and body (the rest). `isHeading` says whether that first
+ * line was a markdown heading. Shared with the Log's rename dialog so its
+ * placeholder shows exactly the title the card would fall back to.
+ */
+export function splitPreview(text) {
+  const raw = text || "";
+  const isHeading = /^#\s+/.test(raw);
+  const displayText = raw.replace(/^#\s+/, '');
+  const firstNewline = displayText.indexOf('\n');
+  return {
+    title: firstNewline > 0 ? displayText.substring(0, firstNewline) : displayText,
+    body: firstNewline > 0 ? displayText.substring(firstNewline + 1).trim() : '',
+    isHeading,
+  };
+}
+
 const tombstoneStyle = {
   fontFamily: 'var(--sans)',
   fontSize: '0.95rem',
@@ -12,12 +30,33 @@ const tombstoneStyle = {
   marginBottom: '0.6rem',
 };
 
+// The tag a prompt-rooted node wears. Keys are identifiers ("read_thread");
+// the tag is a word. Both read prompts are one thing to the user: Glean
+// (#435, the name Peter gave the read).
+const PROMPT_LABELS = {
+  read: 'Glean',
+  read_thread: 'Glean',
+};
+export const stripQuoteMarkers = (text) => (text || '')
+  .replace(/[ \t]*\{quote(?:_ext)?:\d+\}[ \t]*/g, ' ')
+  .replace(/ +\n/g, '\n')
+  .replace(/\n{3,}/g, '\n\n')
+  .trim();
+
+const promptLabel = (key) => PROMPT_LABELS[key]
+  || (key.charAt(0).toUpperCase() + key.slice(1)).replace(/_/g, ' ');
+
 const Bubble = ({
   node,
   onClick,
   isHighlighted = false,
   leftAlign = false,
   actions = null,
+  // References (#232) reuse the card but are not nodes: `footer`
+  // replaces NodeFooter (no username link, no reply count) and `tag`
+  // fills the tag slot (Pinned / prompt / Voice Note) with a source label.
+  footer = null,
+  tag = null,
 }) => {
   // Detect voice notes via backend-provided has_original_audio flag
   const isVoiceNote = !!node.has_original_audio;
@@ -50,16 +89,23 @@ const Bubble = ({
 
   useEffect(() => cancelHoverHide, []);
 
-  // Use full content if available; otherwise use preview.
-  const text = node.content || node.preview || "";
+  // Use full content if available; otherwise use preview. Quote markers
+  // ({quote:12}, {quote_ext:34}) become cards on the node's own page; in
+  // a card they would read as raw markup, so they are left out (a
+  // gleaning's picks above a "Glean again" are all markers, #435).
+  const text = stripQuoteMarkers(node.content || node.preview || "");
 
-  // Strip leading "# " from title for cleaner display
-  const displayText = text.replace(/^#\s+/, '');
+  // Extract title (first line, "# " stripped) and body (rest)
+  const { title, body, isHeading } = splitPreview(text);
 
-  // Extract title (first line) and body (rest)
-  const firstNewline = displayText.indexOf('\n');
-  const title = firstNewline > 0 ? displayText.substring(0, firstNewline) : displayText;
-  const body = firstNewline > 0 ? displayText.substring(firstNewline + 1).trim() : '';
+  // A user-given thread name (Log cards; the Log serializes it from the
+  // thread root) takes the title slot. The entry's own first line is
+  // skipped only when it was a markdown heading — the name replaces that
+  // title. Plain text has no title to replace, so all of it stays as the
+  // body.
+  const threadName = (node.thread_name || "").trim();
+  const heading = threadName || title;
+  const previewBody = threadName && !isHeading ? text.trim() : body;
 
   // Only offer expand when there's full content AND the collapsed preview
   // actually hides something: title past 120 chars, body past 250 chars,
@@ -160,7 +206,7 @@ const Bubble = ({
           lineHeight: 1.7,
           marginBottom: "0.6rem",
         }}>
-          <MarkdownBody>{node.content}</MarkdownBody>
+          <MarkdownBody>{stripQuoteMarkers(node.content)}</MarkdownBody>
         </div>
       ) : (
         <>
@@ -168,12 +214,12 @@ const Bubble = ({
             fontFamily: "var(--sans)",
             fontSize: "1rem",
             color: "var(--text-primary)",
-            marginBottom: body ? "0.6rem" : "0",
+            marginBottom: previewBody ? "0.6rem" : "0",
             fontWeight: 400,
           }}>
-            {title.length > 120 ? title.substring(0, 120) + "..." : title}
+            {heading.length > 120 ? heading.substring(0, 120) + "..." : heading}
           </div>
-          {body && (
+          {previewBody && (
             <div style={{
               fontFamily: "var(--sans)",
               fontSize: "0.92rem",
@@ -185,7 +231,7 @@ const Bubble = ({
               WebkitLineClamp: 2,
               WebkitBoxOrient: "vertical",
             }}>
-              {body.length > 250 ? body.substring(0, 250) + "..." : body}
+              {previewBody.length > 250 ? previewBody.substring(0, 250) + "..." : previewBody}
             </div>
           )}
         </>
@@ -199,22 +245,33 @@ const Bubble = ({
           alignItems: "center",
           justifyContent: "space-between",
         }}>
-          <NodeFooter
-            username={node.username}
-            createdAt={node.created_at}
-            childrenCount={childrenCount}
-            humanOwnerUsername={node.human_owner_username}
-            llmModel={node.llm_model}
-            origin={node.origin}
-            publicPage={node.privacy_level === 'public'}
-            onReplyClick={
-              !isPlaceholder && Array.isArray(actions)
-                ? (actions.find((a) => a.kind === 'reply') || {}).action || null
-                : null
-            }
-          />
+          {footer || (
+            <NodeFooter
+              username={node.username}
+              createdAt={node.created_at}
+              childrenCount={childrenCount}
+              humanOwnerUsername={node.human_owner_username}
+              llmModel={node.llm_model}
+              origin={node.origin}
+              publicPage={node.privacy_level === 'public'}
+              onReplyClick={
+                !isPlaceholder && Array.isArray(actions)
+                  ? (actions.find((a) => a.kind === 'reply') || {}).action || null
+                  : null
+              }
+            />
+          )}
           {!isPlaceholder && (
             <div style={{ display: "flex", alignItems: "center" }}>
+              {tag && (
+                <span style={{
+                  ...tagStyle,
+                  color: "var(--accent-dim)",
+                  backgroundColor: "var(--accent-subtle)",
+                }}>
+                  {tag}
+                </span>
+              )}
               {isPinned && (
                 <span style={{
                   ...tagStyle,
@@ -230,7 +287,7 @@ const Bubble = ({
                   color: "var(--accent-dim)",
                   backgroundColor: "var(--accent-subtle)",
                 }}>
-                  {promptKey.charAt(0).toUpperCase() + promptKey.slice(1)}
+                  {promptLabel(promptKey)}
                 </span>
               ) : isVoiceNote ? (
                 <span style={{

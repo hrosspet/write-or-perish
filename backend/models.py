@@ -11,6 +11,16 @@ logger = logging.getLogger(__name__)
 class User(db.Model, UserMixin):
     id = db.Column(db.Integer, primary_key=True)
     twitter_id = db.Column(db.String(64), unique=True, nullable=True)
+    # The X handle seen at the last X sign-in or Connect X (#311), shown on
+    # the Account page so the user can tell which X account is connected.
+    # Display only: handles are re-registrable, so nothing may look an
+    # account up by it. Null for X accounts that have not signed in since.
+    twitter_handle = db.Column(db.String(64), nullable=True)
+    # Set when the X login was attached by Connect X (#311), null when the
+    # account came from X sign-up (or has no X). Public pages name the X
+    # account (JSON-LD sameAs) only for X sign-ups, whose username came
+    # from the handle anyway; connecting X to sign in publishes nothing.
+    x_connected_at = db.Column(db.DateTime, nullable=True)
     username = db.Column(db.String(64), unique=True, nullable=False)
     # A short description that the user may set (max 128 characters)
     description = db.Column(db.String(128), nullable=True, default="")
@@ -22,7 +32,27 @@ class User(db.Model, UserMixin):
     email = db.Column(db.String(128), nullable=True, unique=True)
     magic_link_token_hash = db.Column(db.String(128), nullable=True)
     magic_link_expires_at = db.Column(db.DateTime, nullable=True)
+    # An address the user asked to bind but has not yet confirmed from the
+    # link sent to it (#260). Never a login identity until it moves into
+    # `email` on confirmation. The link's token has its own hash/expiry
+    # columns: sharing the sign-in link's pair let an unauthenticated
+    # /auth/magic-link/send cancel a pending change, and a change request
+    # kill an outstanding sign-in or 30-day welcome link.
+    pending_email = db.Column(db.String(128), nullable=True)
+    email_change_token_hash = db.Column(db.String(128), nullable=True)
+    email_change_expires_at = db.Column(db.DateTime, nullable=True)
     deactivated_at = db.Column(db.DateTime, nullable=True)
+    # Account deletion (#269). Set when the deletion is scheduled: from
+    # then on the account is hidden (it cannot sign in, its public pages
+    # answer 404, other members no longer see its public writing, no
+    # background job runs for it) until the purge deletes the row at the
+    # end of the grace period. Signing in before then offers a restore,
+    # which clears it. Null for a live account.
+    deleted_at = db.Column(db.DateTime, nullable=True)
+    # The link that confirms an email user's deletion request (#269):
+    # only its hash, like the sign-in and email-change links.
+    account_deletion_token_hash = db.Column(db.String(128), nullable=True)
+    account_deletion_expires_at = db.Column(db.DateTime, nullable=True)
     
     # Relationship to text nodes (explicit foreign_keys needed because Node has
     # multiple FKs pointing to User: user_id and pinned_by)
@@ -42,15 +72,25 @@ class User(db.Model, UserMixin):
         db.Boolean, nullable=False, default=False,
         server_default=db.text("false"))
 
-    # Per-user opt-in to agentic archive search + external references
-    # (#208 quote-as-response): the semantic_search tool, quoting, and the
-    # saved-references digest. Ships as an Account easter-egg toggle,
+    # Per-user opt-in to SAVED EXTERNAL REFERENCES in agentic search
+    # (#208 quote-as-response): whether semantic_search also returns
+    # imported tweets / bookmarks / clipped pages, the references guidance
+    # paragraph, and the Chrome clipper. Own-archive search is on for
+    # everyone (#329) and is not gated here. Ships as an Account toggle,
     # default OFF (same activation pattern as public_sharing_enabled).
     # SEMANTIC_SEARCH_AGENTIC (env) remains only as an emergency
     # killswitch, defaulting true.
     external_content_enabled = db.Column(
         db.Boolean, nullable=False, default=False,
         server_default=db.text("false"))
+
+    # The user's own Glean switch (#435, Account settings), on top of the
+    # rollout gate (GLEAN_FOR_ALL / GLEAN_USER_IDS). NULL = the user has
+    # not chosen: on for an account with Community Archive or X data
+    # (arrived with it, or connected X later), off otherwise
+    # (utils/glean.glean_default_on). True / False = their explicit
+    # choice, which wins over the default.
+    glean_enabled = db.Column(db.Boolean, nullable=True)
 
     # Craft mode toggle — shows power-user features in the nav overflow menu
     craft_mode = db.Column(db.Boolean, default=False, nullable=False)
@@ -105,21 +145,31 @@ class User(db.Model, UserMixin):
     # (one step at a time — chunks are sequential).
     profile_batch_pending = db.Column(
         db.Boolean, nullable=False, default=False, server_default="false")
-    # Consecutive batch failures for the current step (bounds retries).
+    # Consecutive batch failures for the current step (bounds retries):
+    # provider-side errors and results that raised while being applied.
     profile_batch_attempts = db.Column(
         db.Integer, nullable=False, default=0, server_default="0")
+    # Why the seeder's last attempt to BUILD this user's next batch request
+    # raised (exception text), cleared once a request builds. Distinct from
+    # profile_batch_attempts, which counts provider-side failures of a
+    # submitted step: a build failure never reaches the provider, so
+    # without this the admin panel showed it as "waiting" (2026-09-15,
+    # a mistyped LLM_NAME failed every seed for five days unseen).
+    profile_seed_error = db.Column(db.String(255), nullable=True)
     # Pin this user to the Batch profile pipeline regardless of the global
     # switch / canary list. Set by admin pre-fills (Community Archive):
     # a bootstrapped corpus must never hit the synchronous (full-price) path.
     profile_force_batch = db.Column(
         db.Boolean, nullable=False, default=False,
         server_default=db.text("false"))
-    # Observed tokenizer calibration for profile chunks: actual model input
-    # tokens / our estimate (chars/4 × the model's token_multiplier) on the
-    # last chunk call. Null until the first chunk lands. Used to shrink or
-    # grow the next chunk's budget so chunks land near CHUNK_BUDGET real
-    # tokens (and below long-context pricing tiers).
+    # Measured billed input tokens per stored content unit (Node.token_count)
+    # on the user's last profile chunk, tagged with the tokenizer family it
+    # was measured on (backend/tasks/exports.TOKENIZER_FAMILIES). The chunk
+    # planner reads it only for the real-token cap check; chunk balance is
+    # in units and never depends on it. Null until the first chunk lands;
+    # a ratio without a family (or on another family) counts as unmeasured.
     profile_token_ratio = db.Column(db.Float, nullable=True)
+    profile_token_ratio_family = db.Column(db.String(16), nullable=True)
     # Community Archive handle this account was pre-filled from (admin
     # cold-start bootstrap); null for organically-grown accounts.
     prefilled_handle = db.Column(db.String(64), nullable=True)
@@ -158,6 +208,18 @@ class User(db.Model, UserMixin):
             return True
         return (self.plan or "free") in self.VOICE_MODE_PLANS
 
+    # Plans that may run {user_export} with no token budget (the full
+    # archive on every reply). Others must cap it — see
+    # backend/utils/placeholders.py check_user_export_plan.
+    UNRESTRICTED_EXPORT_PLANS = {"pro"}
+
+    @property
+    def has_unrestricted_export(self):
+        """Whether this user may run an uncapped {user_export}."""
+        if self.is_admin:
+            return True
+        return (self.plan or "free") in self.UNRESTRICTED_EXPORT_PLANS
+
     def get_id(self):
         return str(self.id)
 
@@ -192,6 +254,15 @@ class User(db.Model, UserMixin):
           still KEEPS email / magic-link humans (``twitter_id`` NULL), who
           never author LLM nodes.
 
+        * An account with a data purge waiting or running (#268) is left
+          out: "Delete all my writing" hides the writing at once, and no
+          scheduled job may build a profile or summary from it while it
+          can still be restored or is being deleted. The account is
+          eligible again after a restore or once the purge is done.
+
+        * A deleted account in its grace period (#269) is left out: it
+          is hidden, and nothing runs for it unless it is restored.
+
         Shared helper (not an inline filter) so the profile and
         recent-context tasks can't drift apart again.
         """
@@ -199,12 +270,57 @@ class User(db.Model, UserMixin):
         llm_authors = db.session.query(Node.user_id).filter(
             Node.node_type == "llm", Node.user_id.isnot(None)
         ).distinct()
+        purging = db.session.query(UserDataPurge.user_id).filter(
+            UserDataPurge.status.in_(UserDataPurge.ACTIVE_STATUSES))
         return cls.query.filter(
             cls.approved.is_(True),
             cls.plan.in_(list(cls.VOICE_MODE_PLANS)),
             cls.default_ai_usage.in_(list(AI_ALLOWED)),
             ~cls.id.in_(llm_authors),
+            ~cls.id.in_(purging),
+            cls.deleted_at.is_(None),
         )
+
+
+class UsernameHistory(db.Model):
+    """A handle an account published under and then renamed away from
+    (#253).
+
+    Public permalinks are /@<username>/<slug>; slugs are immutable but the
+    handle is user-editable, so a rename would break every shared and
+    indexed URL. A row is written on rename — only when the account has
+    public writing (a living public root, what /@<handle> renders): a
+    handle with nothing published under it reserves nothing. The sharing
+    toggle does not matter here: it can be paused around a rename, and
+    the old URLs were out there all the same — the redirect just stays
+    silent while sharing is off. The public pages, the permalink API and the public
+    profile API resolve a former handle to its owner and redirect to the
+    current one, but only where the target page renders: an account that
+    went private since answers 404, like a handle nobody ever held, so
+    the redirect never names a private account's new handle. A former
+    handle stays reserved for as long as its row exists — every path that
+    hands out a username (rename, signup, whitelist) refuses it to anyone
+    but its owner, since another account claiming it would turn the
+    redirect into an impersonation vector. Renaming back to a former
+    handle removes its row (it is live again, not a redirect).
+    """
+    __tablename__ = "username_history"
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False,
+                        index=True)
+    # Stored lowercased: handles are unique case-insensitively (see
+    # validate_username) and every lookup is an equality on this column,
+    # so the plain unique index serves it. One redirect per former
+    # handle, whoever held it; the constraint is the backstop for two
+    # submissions of the same rename racing past record_rename.
+    old_username = db.Column(db.String(64), nullable=False, unique=True,
+                             index=True)
+    changed_at = db.Column(db.DateTime, nullable=False,
+                           default=datetime.utcnow)
+
+    user = db.relationship("User", backref=db.backref(
+        "former_usernames", cascade="all, delete-orphan"))
 
 
 class ProfileBatchJob(db.Model):
@@ -329,6 +445,30 @@ class Node(db.Model):
     # Tool call metadata for LLM nodes (JSON list of tool call logs)
     tool_calls_meta = db.Column(db.Text, nullable=True)
 
+    # The reply's text so far while an LLM node is being generated (#367),
+    # for display only. `content` stays final-only, so embeddings, exports,
+    # context building and the scrubs never see partial text. Encrypted
+    # like `content` (one DEK per generation); written without bumping
+    # updated_at; cleared in the same commit that sets the final content.
+    streaming_content = db.Column(db.Text, nullable=True)
+
+    # Session kind of an agentic thread root: the UserPrompt.prompt_key
+    # ('voice' / 'textmode') the prompt was attached under. Stamped by
+    # attach_context_artifacts and KEPT when a per-thread prompt edit
+    # detaches the prompt reference (nodes.py detach_prompt). Agentic
+    # detection (tools, proposal parsing, mode notes) reads this via
+    # get_prompt_key() — before this column it read only the linked prompt,
+    # so detaching silently turned the thread non-agentic and the model
+    # wrote its tool calls as prose. None on ordinary nodes.
+    prompt_key = db.Column(db.String(64), nullable=True)
+
+    # Which home card started this thread, on its ROOT node only: "glean"
+    # for a Voice / Text session started from the Glean card (#435), whose
+    # every turn then offers the Glean button; NULL for everything else
+    # (the Reflect card, older threads), which offer "Glean for this
+    # reflection" in the entry's menu instead (utils/glean.py).
+    started_from = db.Column(db.String(16), nullable=True)
+
     # Within-turn retrieval chaining (#158): when a text-mode LLM node makes
     # a retrieval tool call, it is finalized as an interim node and a
     # continuation node is created to hold the answer. This self-FK links the
@@ -339,7 +479,7 @@ class Node(db.Model):
         index=True
     )
 
-    # Pin-to-profile: surfaces any node on Dashboard & Feed
+    # Pin-to-profile: surfaces any node on the Profile page & Log
     pinned_at = db.Column(db.DateTime, nullable=True)
     pinned_by = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=True)
 
@@ -353,10 +493,24 @@ class Node(db.Model):
     source_key = db.Column(db.String(255), nullable=True, index=True)
     # Where the node came from. NULL = written in Loore (the default and
     # main source, never rendered). Imports stamp the platform:
-    # "twitter" | "chatgpt" | "claude" | "markdown". Deliberately
+    # "twitter" | "chatgpt" | "claude" | "markdown" | "docx" | "pdf". Deliberately
     # platform-only, NOT provenance (own export vs. Loore-fetched public
     # data): dedup runs on source_key and a re-import must match.
     origin = db.Column(db.String(16), nullable=True, index=True)
+    # HOW an imported node reached Loore — the provenance that `origin`
+    # deliberately leaves out. Recorded so the open decision on public-
+    # sourced content (#295: should a public tweet be public on Loore?)
+    # can be applied later without guessing which rows it covers:
+    #   "archive_upload" — the user uploaded their own export (Twitter zip,
+    #                      ChatGPT/Claude/markdown). May hold a protected
+    #                      account's tweets, so NOT vouched public.
+    #   "prefill_ca"     — Loore fetched it from the Community Archive:
+    #                      public by construction.
+    #   "prefill_x"      — Loore fetched it via the X API; the pre-fill
+    #                      refuses protected accounts, so public at fetch.
+    # NULL = written in Loore, or imported before this column existed.
+    # Never part of dedup: source_key alone decides a re-import match.
+    provenance = db.Column(db.String(16), nullable=True)
 
     # DB-level backstop against concurrent imports racing past the
     # application dedup check. NULL source_key rows are exempt (both
@@ -380,8 +534,24 @@ class Node(db.Model):
 
     @property
     def is_system_prompt(self):
-        """True when this node carries a prompt artifact."""
-        return self.has_artifact("prompt")
+        """True when this node is an agentic session's system prompt: it
+        links a UserPrompt version, or carries the prompt_key stamp left
+        behind when a per-thread edit detached that link. Display code
+        (Log cards, the mode badge, search exclusion) keys off
+        this; use has_artifact("prompt") when the question is whether the
+        content still resolves from a linked version."""
+        return self.get_prompt_key() is not None
+
+    def get_prompt_key(self):
+        """The prompt key this node was started under, or None.
+
+        The stamped column first (survives a detached reference); else the
+        linked prompt's key, for roots attached before the column existed.
+        """
+        if self.prompt_key:
+            return self.prompt_key
+        prompt = self.get_artifact("prompt")
+        return prompt.prompt_key if prompt is not None else None
 
     def get_artifact_row(self, artifact_type):
         """Return the NodeContextArtifact row for *artifact_type*, or None."""
@@ -467,6 +637,12 @@ class Node(db.Model):
             return ""
         return decrypt_content(self.content)
 
+    def get_streaming_content(self) -> str:
+        """The reply's partial text while it is generated (#367), or ""."""
+        if not self.streaming_content:
+            return ""
+        return decrypt_content(self.streaming_content)
+
 @event.listens_for(Node, "before_insert")
 @event.listens_for(Node, "before_update")
 def _enforce_node_content_encryption(mapper, connection, node):
@@ -519,6 +695,51 @@ class NodeContextArtifact(db.Model):
             name='uq_node_artifact_type_id',
         ),
     )
+
+
+class Thread(db.Model):
+    """Thread-level metadata, keyed by the thread's ROOT node (a thread is
+    its root). Today that is the user-given name the Log card shows in
+    place of the entry's own first-line title.
+
+    Kept off the node table on purpose: a name belongs to the thread, not
+    to a node, and a node column would carry it on every row while leaving
+    "root only" to the routes. This table makes the ownership explicit and
+    gives later thread metadata (tags, archive state, …) a home without
+    widening the hot node table.
+
+    A row exists only while the thread has a name — clearing the name
+    deletes the row. The name is user-authored text, so it is KMS-envelope
+    encrypted like content; the Log batches its DEK unwrap with the page's
+    preview DEKs (one extra unwrap per NAMED thread on a Log page).
+    """
+    __tablename__ = "thread"
+    root_node_id = db.Column(
+        db.Integer, db.ForeignKey("node.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    # Encrypted (see set_name / get_name). Plaintext length is capped by
+    # the route (THREAD_NAME_MAX_LEN), not the column.
+    name = db.Column(db.Text, nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # ORM delete of the root removes the row (one SELECT per purged root
+    # — no passive_deletes, so it also holds where FK enforcement is off,
+    # e.g. sqlite tests); the DB cascade covers bulk deletes that bypass
+    # the ORM (the user data purge deletes the rows explicitly as well).
+    root = db.relationship(
+        "Node",
+        backref=db.backref(
+            "thread", uselist=False, cascade="all, delete-orphan",
+        ),
+    )
+
+    def set_name(self, plaintext: str):
+        self.name = encrypt_content(plaintext)
+
+    def get_name(self) -> str:
+        return decrypt_content(self.name)
 
 
 class NodeVersion(db.Model):
@@ -592,6 +813,14 @@ class Draft(db.Model):
     # condition can use it.
     streaming_warning = db.Column(db.Text, nullable=True)
 
+    # Last sign of life from the tab recording this session: chunk
+    # uploads and the transcription SSE heartbeat stamp it; the tab's
+    # release (on pagehide, unmount or cancel) clears it. A 'recording'
+    # session stamped recently is live, and no other view may complete
+    # or recover it (#320).
+    # See backend/utils/streaming_session.py.
+    streaming_heartbeat_at = db.Column(db.DateTime, nullable=True)
+
     # Relationships
     user = db.relationship("User", backref="drafts")
     node = db.relationship("Node", foreign_keys=[node_id])
@@ -630,6 +859,13 @@ class UserProfile(db.Model):
     source_tokens_used = db.Column(db.Integer, nullable=True, default=0)
     # Timestamp cursor: created_at of last included Node
     source_data_cutoff = db.Column(db.DateTime, nullable=True)
+    # When the window this version covers was rendered. The continue rule
+    # (backend/tasks/exports.should_continue_chain) treats unread data that
+    # existed at that moment as an unfinished chain and data written after
+    # it as organic growth, so writing during a version's own generation
+    # never produces a stray small chunk. Null on versions saved before the
+    # column existed (the rule falls back to created_at) and on integrations.
+    source_rendered_at = db.Column(db.DateTime, nullable=True)
     # Cumulative {origin: {"nodes": n, "tokens": t}} over every chunk
     # that fed this profile (NULL origin keyed "loore"). Lets an update
     # tell the model the base was e.g. 100% public tweets while the new
@@ -718,26 +954,6 @@ class UserTodo(db.Model):
         return decrypt_content(self.content)
 
 
-class UserAIPreferences(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
-    content = db.Column(db.Text, nullable=False)
-    generated_by = db.Column(db.String(64), nullable=False)
-    tokens_used = db.Column(db.Integer, nullable=False, default=0)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    privacy_level = db.Column(db.String(16), nullable=False, default="private")
-    # AI preferences are used as context in LLM calls — must be AI-readable
-    ai_usage = db.Column(db.String(16), nullable=False, default="chat")
-
-    user = db.relationship("User", backref="ai_preferences")
-
-    def set_content(self, plaintext):
-        self.content = encrypt_content(plaintext)
-
-    def get_content(self):
-        return decrypt_content(self.content)
-
-
 class ArtifactView(db.Model):
     """One row per artifact open in the UI (admin Activity monitoring —
     e.g. "did they check their intentions?"). Written by
@@ -754,7 +970,7 @@ class UserArtifact(db.Model):
     """Generic named user artifact (issue #158): "memory", "scratchpad",
     and user/LLM-created artifacts.
 
-    Append-only versioning like UserAIPreferences — each update inserts a
+    Append-only versioning — each update inserts a
     new row; the latest row per (user_id, kind) is current. Content is
     encrypted at rest and included in data exports as a default Loore
     artifact.
@@ -992,9 +1208,38 @@ class APICostLog(db.Model):
     cache_write_tokens = db.Column(db.Integer, nullable=True, default=0)
     # What specifically caused this cost, when request_type alone is too
     # coarse — e.g. "poll:3" for a poll-draft (#207). Null for legacy rows.
-    request_ref = db.Column(db.String(64), nullable=True)
+    # Conversation rows carry "node:<id>" of the LLM node the call wrote
+    # (#348); the cache-diagnostics baseline is looked up by it.
+    request_ref = db.Column(db.String(64), nullable=True, index=True)
     audio_duration_seconds = db.Column(db.Float, nullable=True)
     cost_microdollars = db.Column(db.Integer, nullable=False)
+    # OpenAI Prompt Cache Diagnostics (#348), conversation calls only; all
+    # NULL on Anthropic rows and on rows from before the feature.
+    # provider_response_id: OpenAI's response id, the baseline the next
+    #   call on this thread compares itself to.
+    # cache_diag_type: cache_hit / cache_miss / comparison_response_not_found
+    #   / unavailable; NULL = no baseline was sent.
+    # cache_diag_reason: the first miss cause OpenAI classified (tools_changed,
+    #   input_changed, ...), only on cache_miss.
+    # cache_diag_reusable_tokens / cache_diag_missed_tokens: OpenAI's
+    #   estimates of the baseline's reusable prefix and how much of it this
+    #   call did not reuse. Billing stays on cache_read/write_tokens.
+    # cache_diag_baseline: which call was the baseline — "tool_round" (the
+    #   previous round of the same turn) or "prev_turn" (the last OpenAI
+    #   call on this node's ancestor path).
+    # cache_diag_gap_s: seconds since the baseline call; a miss after the
+    #   30-min cache lifetime is expiry, not a prefix change.
+    # system_prefix_hash: short sha256 of the system prompt text, on every
+    #   conversation row. Two consecutive calls with different hashes mean
+    #   the system prompt drifted; equal hashes point at the messages.
+    provider_response_id = db.Column(db.String(128), nullable=True)
+    cache_diag_type = db.Column(db.String(40), nullable=True)
+    cache_diag_reason = db.Column(db.String(40), nullable=True)
+    cache_diag_reusable_tokens = db.Column(db.Integer, nullable=True)
+    cache_diag_missed_tokens = db.Column(db.Integer, nullable=True)
+    cache_diag_baseline = db.Column(db.String(16), nullable=True)
+    cache_diag_gap_s = db.Column(db.Integer, nullable=True)
+    system_prefix_hash = db.Column(db.String(16), nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow, index=True)
 
     user = db.relationship("User", backref="api_cost_logs")
@@ -1021,6 +1266,29 @@ class SpendAlert(db.Model):
     )
 
 
+# ExternalItem.source of a tweet a Read picked that the user has not
+# saved (#352). The row exists so the pick has somewhere to keep the
+# user's read mark and verdict; it is not a reference, so the references
+# list, the digest, the embedding sweep and reference search skip it.
+# Saving the tweet (clip, bookmark sync, import) turns this row into a
+# saved reference in place, so a tweet has one row and one set of marks.
+READ_PICK_SOURCE = "read_pick"
+# Sources whose external_id is a tweet id: the rows of one tweet are
+# found across these.
+TWEET_SOURCES = ("twitter_bookmark", "twitter_like", "community_archive",
+                 READ_PICK_SOURCE)
+# ExternalItem.source of a document the user uploaded as someone else's
+# writing (a PDF saved as a Reference from the import confirm step). Its
+# external_id is an HMAC-SHA256 hex of the extracted text, keyed with the
+# app secret and the user; it has no URL, and its title and author are
+# kept inside the encrypted content (backend/utils/document_reference),
+# never in the title / author_handle columns.
+SOURCE_DOCUMENT = "document"
+# Sources whose author_handle is a byline (a name, or a site), not an
+# @handle.
+BYLINE_SOURCES = ("web_clip", SOURCE_DOCUMENT)
+
+
 class ExternalItem(db.Model):
     """External content imported into Loore (#155 component 2 / Download).
 
@@ -1033,15 +1301,35 @@ class ExternalItem(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey("user.id"),
                         nullable=False, index=True)
-    # 'community_archive' | 'twitter_bookmark'
+    # 'community_archive' | 'twitter_bookmark' | 'web_clip' | 'read_pick'
+    # | 'document' (READ_PICK_SOURCE: picked by a Read, not saved by the
+    # user; SOURCE_DOCUMENT: an uploaded PDF someone else wrote)
     source = db.Column(db.String(32), nullable=False)
-    # Stable per-source identifier (tweet id) for dedupe
+    # Stable per-source identifier for dedupe: tweet id, for web clips
+    # the sha256 hex of the canonical URL, for documents a keyed HMAC of
+    # the extracted text (exactly 64 chars).
     external_id = db.Column(db.String(64), nullable=False)
     author_handle = db.Column(db.String(64), nullable=True)
+    # The tweet author's display name (#435), when the Community Archive
+    # has one: written when a Glean pick is saved (ca_feed.save_feed_picks)
+    # and filled once for older picks (scripts/backfill_pick_author_names).
+    # Public profile data, plaintext like the handle. NULL = unknown.
+    author_name = db.Column(db.String(128), nullable=True)
+    # Page/article title for web clips (tweets have none). Plaintext:
+    # a title is what the list and the quote card show before the user
+    # opens anything, and it carries no more than the stored URL does.
+    title = db.Column(db.String(512), nullable=True)
     content = db.Column(db.Text, nullable=False)
     url = db.Column(db.String(512), nullable=True)
     posted_at = db.Column(db.DateTime, nullable=True)
     fetched_at = db.Column(db.DateTime, default=datetime.utcnow)
+    # When this row became a saved reference of its current source: on
+    # insert, or when a Read pick's row is saved (save_pick_row). Unlike
+    # fetched_at, a re-clip that replaces the stored text does not move
+    # it. The X bookmark sync reads it to tell bookmarks stored before
+    # its last completed run from ones stored since (#310). NULL on rows
+    # from before the column existed; readers fall back to fetched_at.
+    saved_at = db.Column(db.DateTime, nullable=True, default=datetime.utcnow)
     # Surfacing history (quote-as-response). Tracked EAGERLY at emission
     # time — content is encrypted at rest, so "which items were quoted"
     # cannot be derived from node content after the fact. Served to the
@@ -1050,6 +1338,47 @@ class ExternalItem(db.Model):
     surfaced_count = db.Column(db.Integer, nullable=False, default=0,
                                server_default="0")
     last_surfaced_at = db.Column(db.DateTime, nullable=True)
+    # Set only by the user's own "Mark as read" — never by opening the
+    # page (a skim is not a read) and never by the AI surfacing it (that
+    # is surfaced_count above). Null = unread.
+    read_at = db.Column(db.DateTime, nullable=True)
+    # The user's verdict on Loore having surfaced this reference:
+    # 'good' (good quote) | 'bad' (bad quote) | null. Set only
+    # by the user, from the quote bubble or the reference page; shown to
+    # the model as metadata on search previews so it makes more good
+    # picks and fewer bad ones. Together with surfaced_count and read_at this is the
+    # recommendation record: shown, read, hit or miss.
+    feedback = db.Column(db.String(8), nullable=True)
+    feedback_at = db.Column(db.DateTime, nullable=True)
+    # Set when the user edits the title or text by hand. An edited
+    # reference is the user's copy: a later re-clip or sync must not
+    # replace its text, however much longer the fresh capture is.
+    edited_at = db.Column(db.DateTime, nullable=True)
+    # Does the SOURCE itself vouch that this text is public? Recorded at
+    # write time because it cannot be recovered later (#295: a shared
+    # plaintext reference tier would admit rows by this flag).
+    #   True  — vouched public by source: a Community Archive tweet, an
+    #           X bookmark whose author is not protected.
+    #   False — assessed and not vouched: a web clip (the clipper saves
+    #           whatever tab is active, private pages included).
+    #   NULL  — unknown: rows from before this column, JSON-imported
+    #           bookmarks, a clipped tweet without a visible lock, an
+    #           author X did not return.
+    # False and NULL are both treated as private. Unknown TWEETS are
+    # resolved by the nightly verify_public_source_sweep against X's free
+    # oEmbed endpoint (served = public, refused = protected or gone);
+    # False says there is nothing to verify against.
+    public_source = db.Column(db.Boolean, nullable=True)
+    # When the sweep last asked X about this row — set on every attempt,
+    # answered or not, so unanswered rows queue behind never-asked ones.
+    public_source_checked_at = db.Column(db.DateTime, nullable=True)
+    # Generated speech, the same shape as Node / UserProfile so the TTS
+    # task, SSE stream and SpeakerIcon treat a reference as one more
+    # entity. Nothing here is ever an original recording.
+    audio_tts_url = db.Column(db.String, nullable=True)
+    tts_task_id = db.Column(db.String(255), nullable=True)
+    tts_task_status = db.Column(db.String(20), nullable=True)
+    tts_task_progress = db.Column(db.Integer, default=0)
 
     user = db.relationship("User", backref="external_items")
 
@@ -1063,6 +1392,17 @@ class ExternalItem(db.Model):
 
     def get_content(self):
         return decrypt_content(self.content)
+
+    @property
+    def is_saved(self):
+        """A reference the user saved, as opposed to a Read pick they
+        have not (READ_PICK_SOURCE)."""
+        return self.source != READ_PICK_SOURCE
+
+    @classmethod
+    def saved(cls):
+        """Filter clause for the user's saved references (#352)."""
+        return cls.source != READ_PICK_SOURCE
 
 
 class ExternalAccount(db.Model):
@@ -1086,6 +1426,18 @@ class ExternalAccount(db.Model):
     # refresh-token family died). Nightly sync skips revoked accounts; the
     # import page shows a reconnect state; a successful reconnect clears it.
     revoked_at = db.Column(db.DateTime, nullable=True)
+    # How many items the last successful sync created. The import page
+    # reports THIS after a manual sync — diffing item counts around a
+    # background task raced its per-page commits and under-reported.
+    last_sync_created = db.Column(db.Integer, nullable=True)
+    # True while a sync that has stored bookmarks has not run to its end
+    # (a 429, a 5xx, a worker killed by a deploy); NULL otherwise. The
+    # next sync then does not stop at the first known page, which would
+    # leave the unread part missing for good (#310): it reads on until
+    # a page holds only bookmarks saved at or before last_synced_at (or
+    # to the end, when no sync has finished yet). Committed together
+    # with the first stored page, so a killed worker leaves it set too.
+    sync_incomplete = db.Column(db.Boolean, nullable=True)
 
     user = db.relationship("User", backref="external_accounts")
 
@@ -1104,6 +1456,38 @@ class ExternalAccount(db.Model):
 
     def get_refresh_token(self):
         return decrypt_content(self.refresh_token) if self.refresh_token else None
+
+
+class ApiToken(db.Model):
+    """A personal API token for first-party clients that can't ride the
+    browser session (the Chrome clipper, #232).
+
+    Only the sha256 of the token is stored — the plaintext is shown once
+    at creation, like a magic link. ``prefix`` is the first characters
+    after the ``loore_`` marker so the user can tell tokens apart in the
+    list. ``scope`` bounds what the token may do; today the only scope is
+    ``external:write`` (add saved references), which deliberately cannot
+    read a single node.
+    """
+    __tablename__ = "api_token"
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"),
+                        nullable=False, index=True)
+    name = db.Column(db.String(64), nullable=False)
+    token_hash = db.Column(db.String(64), nullable=False, unique=True)
+    prefix = db.Column(db.String(12), nullable=False)
+    scope = db.Column(db.String(64), nullable=False,
+                      default="external:write",
+                      server_default="external:write")
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    last_used_at = db.Column(db.DateTime, nullable=True)
+    revoked_at = db.Column(db.DateTime, nullable=True)
+
+    user = db.relationship("User", backref="api_tokens")
+
+    @property
+    def active(self):
+        return self.revoked_at is None
 
 
 class ExternalItemEmbedding(db.Model):
@@ -1173,6 +1557,7 @@ class TTSChunk(db.Model):
     # Which node or profile this TTS chunk belongs to (one must be set)
     node_id = db.Column(db.Integer, db.ForeignKey("node.id"), nullable=True)
     profile_id = db.Column(db.Integer, db.ForeignKey("user_profile.id"), nullable=True)
+    item_id = db.Column(db.Integer, db.ForeignKey("external_item.id"), nullable=True)
     # Zero-based index of the chunk
     chunk_index = db.Column(db.Integer, nullable=False)
     # Chapter metadata (#145): which markdown section this chunk belongs
@@ -1191,11 +1576,13 @@ class TTSChunk(db.Model):
     # Relationships
     node = db.relationship("Node", backref="tts_chunks")
     profile = db.relationship("UserProfile", backref="tts_chunks")
+    item = db.relationship("ExternalItem", backref="tts_chunks")
 
     # Unique constraints: one chunk per index per node/profile
     __table_args__ = (
         db.UniqueConstraint('node_id', 'chunk_index', name='uq_node_tts_chunk_index'),
         db.UniqueConstraint('profile_id', 'chunk_index', name='uq_profile_tts_chunk_index'),
+        db.UniqueConstraint('item_id', 'chunk_index', name='uq_item_tts_chunk_index'),
     )
 
 
@@ -1354,3 +1741,411 @@ class PollDraftBatchJob(db.Model):
     submitted_at = db.Column(
         db.DateTime, nullable=False, default=datetime.utcnow)
     collected_at = db.Column(db.DateTime, nullable=True)
+
+
+class FeedPick(db.Model):
+    """One reference Loore put in front of the user in a reply: a tweet
+    a Community Archive read named (kind 'read', PoC 2026-09-13), or a
+    saved reference an agentic reply quoted (kind 'quote', #352). The
+    reference itself is an ExternalItem, which carries the user's current
+    read mark and verdict; this row records what the MODEL did — which
+    model, its rank, for a read its relevance estimate and whether it
+    recommended the tweet, and what it could know about the tweet when it
+    chose — so recommendations can be judged against what the user did
+    (ReferenceAction; see backend/utils/reference_log.py). Written for
+    every pick and quote, whatever the user does with it afterwards. One
+    row per (reply node, item)."""
+    __tablename__ = "feed_pick"
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"),
+                        nullable=False, index=True)
+    node_id = db.Column(db.Integer, db.ForeignKey("node.id"),
+                        nullable=False, index=True)
+    external_item_id = db.Column(db.Integer, db.ForeignKey("external_item.id"),
+                                 nullable=False, index=True)
+    # 'read' (a Read pick) | 'quote' (quoted by an agentic reply).
+    kind = db.Column(db.String(8), nullable=False, default="read",
+                     server_default="read")
+    # 1 = best, in the model's order. For a quote, its position among
+    # the references the reply quotes.
+    rank = db.Column(db.Integer, nullable=False)
+    # The model's estimate, 0-100: probability that reading it changes
+    # what the user does this week. Null for rows no model scored (a
+    # random control sample rendered through the same list).
+    relevance = db.Column(db.Integer, nullable=True)
+    recommended = db.Column(db.Boolean, nullable=False, default=False)
+    # Who chose this tweet: the model id of the reply that named it, or
+    # 'random' for a control sample. Kept on the row so a list merged from
+    # several runs, or a sample, can still say which selector each tweet
+    # came from without joining back through the node.
+    picked_by = db.Column(db.String(64), nullable=True)
+    # The model's one-line reason, encrypted like a reply (it paraphrases
+    # the user's intentions).
+    why = db.Column(db.Text, nullable=True)
+    # When the model chose: the read's submit (FeedRender.created_at) or
+    # the start of the turn that quoted. A batch collects hours after its
+    # submit, so the row's created_at is not when the choice was made.
+    decided_at = db.Column(db.DateTime, nullable=True)
+    # What the model could know about the reference at decided_at: had
+    # the user marked it read, and their verdict on it then. A row with
+    # no prior verdict is "blind": verdicts the user gives later count
+    # for it (reference_log). Null on rows from before these columns.
+    prior_read = db.Column(db.Boolean, nullable=True)
+    prior_verdict = db.Column(db.String(8), nullable=True)
+    # A Read pick's other verdict (#502, Peter 2026-10-14): the user's
+    # judgement of Loore's intro to the tweet (the paragraph above the
+    # card, `why`), apart from the tweet's own verdict, which stays on
+    # ExternalItem.feedback and in ReferenceAction. 'good' | 'bad' | None
+    # (unrated). The value and when only: the intro is written by a model
+    # that sees the user's profile and intentions, so no copy, hash or
+    # excerpt of it goes with the verdict (Peter: "we shouldn't be
+    # tracking the contents of the point"). Goes with the row: hidden by
+    # a waiting "Delete all my writing" and deleted by the purge.
+    intro_verdict = db.Column(db.String(8), nullable=True)
+    intro_verdict_at = db.Column(db.DateTime, nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    node = db.relationship("Node", backref=db.backref(
+        "feed_picks", cascade="all, delete-orphan"))
+    item = db.relationship("ExternalItem", backref=db.backref(
+        "feed_picks", cascade="all, delete-orphan"))
+
+    __table_args__ = (
+        db.UniqueConstraint("node_id", "external_item_id",
+                            name="uq_feed_pick_node_item"),
+    )
+
+    def set_why(self, plaintext):
+        self.why = encrypt_content(plaintext) if plaintext else None
+
+    def get_why(self):
+        return decrypt_content(self.why) if self.why else ""
+
+
+class ReferenceAction(db.Model):
+    """One thing the user did with a reference (#352): opened it (clicked
+    through to the post), marked it read or unread, or gave a good/bad
+    verdict (value; None = cleared). node_id is the reply it was done in
+    (a Read reply, or an agentic reply quoting it), None when done
+    outside any reply — the reference page, or a mark carried over from
+    before this log existed.
+
+    Facts only. Which actions count for which recommendation (a verdict
+    given on one Read's pick counts for a parallel Read's pick of the
+    same tweet) is decided when the log is read, in reference_log, so
+    that rule can change without repairing stored data. The current
+    state stays on ExternalItem (read_at, feedback) for the pages and the
+    model."""
+    __tablename__ = "reference_action"
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"),
+                        nullable=False, index=True)
+    item_id = db.Column(
+        db.Integer, db.ForeignKey("external_item.id", ondelete="CASCADE"),
+        nullable=False, index=True)
+    # Deleted with the reply (node_cleanup._full_purge): NULL would mean
+    # "outside any reply", which counts for other recommendations.
+    node_id = db.Column(db.Integer,
+                        db.ForeignKey("node.id", ondelete="CASCADE"),
+                        nullable=True, index=True)
+    # 'open' | 'read' | 'unread' | 'verdict'
+    kind = db.Column(db.String(8), nullable=False)
+    # A verdict's value: 'good' | 'bad' | None (cleared).
+    value = db.Column(db.String(8), nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow,
+                           nullable=False)
+
+    item = db.relationship("ExternalItem", backref=db.backref(
+        "actions", cascade="all, delete-orphan"))
+
+
+class FeedRender(db.Model):
+    """What one Community Archive read actually sent the model (2026-09-19).
+
+    The archive render numbers tweets 1..n and the model cites numbers, so
+    a pick can only be resolved against the render it was made from. That
+    render is not reproducible later: the snapshot refreshes nightly and
+    the reader's seen set (read marks, bookmarks) grows between the submit
+    and the batch collect. So the submit pins the list of tweet ids in
+    render order here, and the collect looks the picked numbers up in it
+    and fetches those few tweets by id. The window and counts are the
+    reply page's record of what was read (the "which day was this?"
+    question). One row per reply node, pick-less replies included; a
+    rerun replaces it. It also records what the picks alone cannot: how
+    many picks the collect dropped and when the owner opened the reply
+    (backend/scripts/recommendation_report.py)."""
+    __tablename__ = "feed_render"
+    id = db.Column(db.Integer, primary_key=True)
+    node_id = db.Column(db.Integer, db.ForeignKey("node.id"),
+                        nullable=False, unique=True)
+    export_id = db.Column(db.String(64), nullable=True)
+    days = db.Column(db.Integer, nullable=False, default=1)
+    scope = db.Column(db.String(16), nullable=False, default="all")
+    # UTC bounds of the window the tweets were taken from.
+    window_start = db.Column(db.DateTime, nullable=True)
+    window_end = db.Column(db.DateTime, nullable=True)
+    tweet_count = db.Column(db.Integer, nullable=False, default=0)
+    account_count = db.Column(db.Integer, nullable=False, default=0)
+    # Tweets in the window the reader had already marked read (any row
+    # of the tweet, #352) and that therefore never reached the model.
+    excluded_count = db.Column(db.Integer, nullable=False, default=0)
+    # Comma-joined tweet ids in render order: index i (0-based) is the
+    # tweet the model saw as #i+1. ~100 KB for a day of the archive.
+    tweet_ids = db.Column(db.Text, nullable=False, default="")
+    # How many of the model's picks the collect could not show
+    # (ca_feed.count_dropped_picks, on the batch collect and the admin's
+    # live rerun alike; 2026-10-02): the tweet behind the number is no
+    # longer in the archive snapshot, or the number is outside the render. Each number once; a number cited only in the verdict is no
+    # pick. With no FeedPick row on the reply, a positive count means
+    # every pick was dropped, and 0 means the model picked nothing.
+    # Replies collected before the column existed read 0 either way.
+    dropped_picks = db.Column(db.Integer, nullable=False, default=0,
+                              server_default="0")
+    # When the reply's owner first fetched the finished reply: GET of the
+    # reply node, or an llm-status poll that returned it to a thread page
+    # left open while the batch ran and said it was visible (?visible=1;
+    # a hidden tab's poll does not count) (ca_feed.mark_read_reply_opened).
+    # Set once; another user or an admin opening the reply never sets it.
+    # Null on replies nobody has opened since the column was added
+    # (2026-10-02), whatever happened before.
+    opened_at = db.Column(db.DateTime, nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    node = db.relationship("Node", backref=db.backref(
+        "feed_render", uselist=False, cascade="all, delete-orphan"))
+
+    def set_tweet_ids(self, ids):
+        self.tweet_ids = ",".join(str(i) for i in ids)
+
+    def tweet_id_for(self, n):
+        """The tweet id the model saw as #n, or None."""
+        ids = self.tweet_ids.split(",") if self.tweet_ids else []
+        if 1 <= n <= len(ids):
+            return ids[n - 1] or None
+        return None
+
+
+class ExternalDigestBatchJob(db.Model):
+    """A submitted provider batch carrying nightly external-digest
+    rebuilds — one request per user whose saved references changed.
+    Nothing waits on a digest (it rebuilds at ~4am local), so it rides
+    the Batch API (~50% cheaper). Mirrors PollDraftBatchJob: per-item
+    routing metadata lives in `items` (keyed by custom_id); the beat
+    collector retrieves results and saves each digest artifact.
+    """
+    __tablename__ = "external_digest_batch_job"
+
+    id = db.Column(db.Integer, primary_key=True)
+    # "anthropic" | "openai:<api_model>"
+    provider_key = db.Column(db.String(64), nullable=False)
+    batch_id = db.Column(db.String(255), nullable=False, index=True)
+    # "pending" | "collected" | "abandoned" (never ended within the
+    # collector's patience — the user reads as stale and is resubmitted)
+    status = db.Column(db.String(16), nullable=False, default="pending")
+    # List of per-item dicts: {custom_id, user_id, model_id, corpus_at
+    # (ISO, the corpus state the prompt rendered), total_items}
+    items = db.Column(db.JSON, nullable=False, default=list)
+    submitted_at = db.Column(
+        db.DateTime, nullable=False, default=datetime.utcnow)
+    collected_at = db.Column(db.DateTime, nullable=True)
+
+
+class RecentContextBatchJob(db.Model):
+    """A submitted provider batch carrying recent-context summaries (#380):
+    one request per user whose writing crossed the regeneration threshold.
+    Nobody waits on a recent context, so it rides the Batch API (~50%
+    cheaper); until a batch is collected, prompts keep reading the user's
+    previous summary. Mirrors ExternalDigestBatchJob: per-item routing
+    metadata lives in `items` (keyed by custom_id); the beat collector
+    retrieves results and saves each UserRecentContext.
+    """
+    __tablename__ = "recent_context_batch_job"
+
+    id = db.Column(db.Integer, primary_key=True)
+    # "anthropic" | "openai:<api_model>"
+    provider_key = db.Column(db.String(64), nullable=False)
+    batch_id = db.Column(db.String(255), nullable=False, index=True)
+    # "pending" | "collected" | "abandoned" (never ended within the
+    # collector's patience; its items count as failed)
+    status = db.Column(db.String(16), nullable=False, default="pending")
+    # List of per-item dicts: {custom_id, user_id, profile_id, model_id,
+    # data_cutoff and source_data_cutoff (ISO or None: the window the
+    # prompt rendered), source_tokens}, plus `outcome` once the job is
+    # collected: "saved" | "refused" (cut off before any text; billed) |
+    # "failed" (no usable result) | "skipped" (not saved: account opted
+    # out or deleted, or a newer summary already covers the window).
+    items = db.Column(db.JSON, nullable=False, default=list)
+    submitted_at = db.Column(
+        db.DateTime, nullable=False, default=datetime.utcnow)
+    # Indexed: the refusal backoff counts failed items in jobs collected
+    # after the user's last saved summary (utils/refusal_backoff.py).
+    collected_at = db.Column(db.DateTime, nullable=True, index=True)
+
+
+class UserDataPurge(db.Model):
+    """One request to delete all of a user's data (#268), and the record
+    of what the purge did.
+
+    A request to delete all of a user's writing, the user's own ("Delete
+    all my writing") or an admin's ("Purge data"; Peter, 2026-10-13: "it
+    should definitely work the same as user doing themselves"), hides
+    everything it will delete at once (``scope = "hidden"``; what it hid
+    is recorded in ``UserDataPurgeHidden``) and waits out a grace period
+    (``scheduled_for``) during which the user can restore it, and the
+    admin can undo an admin's request; the purge then deletes what the
+    request hid, and what the user writes after it stays. A job with
+    ``scope = "all"`` deletes everything of the user's: an account
+    deletion, or one created from a shell for an erasure that cannot
+    wait (the app offers none). The beat task
+    ``backend.tasks.user_purge.process_user_data_purges`` claims due jobs
+    and jobs whose runner stopped sending heartbeats, so a purge resumes
+    after a crash or a deploy; every step of the purge is idempotent.
+
+    ``user_id`` and the requester carry no foreign key on purpose: the
+    record must outlive the account when account deletion (#269) drops
+    the user row. Nothing here is user content: ``counts`` holds row and
+    file counts per table, ``error`` the exception class and message of
+    a failed run (the purge never loads content, so none can be in it).
+
+    status: scheduled -> running -> done; scheduled -> cancelled;
+    running -> failed after PURGE_MAX_ATTEMPTS runs that did not finish.
+
+    With ``delete_account`` (#269) the job deletes the account too: after
+    the purge, the identity layer (backend/utils/account_deletion.py)
+    removes the user row and everything that must not outlive it. A
+    restore inside the grace period cancels the job.
+    """
+    __tablename__ = "user_data_purge"
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, nullable=False, index=True)
+    # "self" (the user's own request) | "admin"
+    source = db.Column(db.String(16), nullable=False)
+    # What the purge deletes: "hidden" = what the request hid when it was
+    # made (UserDataPurgeHidden), the user's own request or an admin's;
+    # "all" = everything of the user's (an account deletion).
+    scope = db.Column(db.String(16), nullable=False, default="all",
+                      server_default="all")
+    requested_by_id = db.Column(db.Integer, nullable=True)
+    status = db.Column(db.String(16), nullable=False, default="scheduled",
+                       index=True)
+    # The latest request: the user's "Delete all my writing" while a
+    # writing deletion waits adds to it and moves this and scheduled_for
+    # (Peter, 2026-10-15; user_purge.extend_waiting_purge).
+    requested_at = db.Column(db.DateTime, nullable=False,
+                             default=datetime.utcnow)
+    # When the purge may start: the end of the grace period
+    # (PURGE_GRACE_DAYS) after the latest request, for the user's own
+    # request and an admin's alike.
+    scheduled_for = db.Column(db.DateTime, nullable=False, index=True)
+    cancelled_at = db.Column(db.DateTime, nullable=True)
+    cancelled_by_id = db.Column(db.Integer, nullable=True)
+    # When the first runner started.
+    started_at = db.Column(db.DateTime, nullable=True)
+    # When the runner of the current claim started; null while the claim
+    # waits in the Celery queue (such a claim is not an attempt).
+    runner_started_at = db.Column(db.DateTime, nullable=True)
+    # Set at the claim, touched by the runner after every chunk; a running
+    # job whose heartbeat is older than PURGE_STALE_AFTER is claimed again.
+    heartbeat_at = db.Column(db.DateTime, nullable=True)
+    # Since when the runner has been waiting for the user's in-flight
+    # tasks to end before it deletes anything (null when not waiting).
+    waiting_since = db.Column(db.DateTime, nullable=True)
+    finished_at = db.Column(db.DateTime, nullable=True)
+    # Runs that started (one per claim, counted when its runner starts);
+    # once PURGE_MAX_ATTEMPTS have started without finishing, the next
+    # beat marks the job failed instead of claiming it again.
+    attempts = db.Column(db.Integer, nullable=False, default=0,
+                         server_default="0")
+    # The claim token: the Celery task id of the runner that holds the
+    # job. A runner whose token no longer matches stops.
+    task_id = db.Column(db.String(64), nullable=True)
+    counts = db.Column(db.JSON, nullable=True)
+    error = db.Column(db.String(255), nullable=True)
+    # Account deletion (#269): the purge is followed by the deletion of
+    # the account itself.
+    delete_account = db.Column(db.Boolean, nullable=False, default=False,
+                               server_default=db.text("false"))
+    # The waiting "Delete all my writing" (the user's or an admin's) that
+    # an account deletion replaced: its source, requester, scope and dates
+    # (JSON, ids and ISO dates only). An admin's Undo of the account
+    # deletion puts that request back as it was, so the writing it hid
+    # stays hidden (account_deletion.undo_admin_deletion). Null otherwise.
+    replaced = db.Column(db.JSON, nullable=True)
+
+    ACTIVE_STATUSES = ("scheduled", "running")
+
+
+class ReleasedUsername(db.Model):
+    """A username freed by an account deletion (#269), kept from new
+    accounts until ``reserved_until``: somebody else taking a deleted
+    account's handle could pass for that person, and old links to
+    /@<handle> would show the newcomer's pages. Covers the account's
+    current handle and its former ones (#253). No foreign key and no
+    other data: the account is gone, only the handle and the dates
+    remain, and the row may be deleted once the reservation is over."""
+    __tablename__ = "released_username"
+
+    id = db.Column(db.Integer, primary_key=True)
+    # Lowercased, like UsernameHistory: handles are unique
+    # case-insensitively and every lookup is an equality on this column.
+    username = db.Column(db.String(64), nullable=False, unique=True,
+                         index=True)
+    released_at = db.Column(db.DateTime, nullable=False,
+                            default=datetime.utcnow)
+    reserved_until = db.Column(db.DateTime, nullable=False)
+
+
+class UserDataPurgeHidden(db.Model):
+    """What one "Delete all my writing" job hid, the user's own or an
+    admin's "Purge data" (#268; Peter, 2026-10-09: everything is hidden at
+    once, "Restore my writing" brings back exactly that, and the purge
+    deletes it after the grace period; 2026-10-13: the admin's works the
+    same way). The user's request while the job waits adds what they
+    wrote since under the same job (2026-10-15: one date, one restore).
+
+    One row per hidden thing, written in the same transaction as the job:
+    * ``kind`` = "node", ``row_id`` = a node of the user's that was live
+      at the request; the request soft-deleted it (``deleted_at``) and a
+      restore clears that again.
+    * ``kind`` = "node_deleted": a node the user had deleted before the
+      request. Purged with it, never restored.
+    * ``kind`` = a per-user table (``HIDDEN_ROW_TABLES``), ``row_id`` =
+      its row: hidden while this row exists (backend/utils/hidden_rows.py
+      leaves it out of every ORM query).
+    * ``kind`` = "user_description", ``row_id`` = the user: the short
+      profile description is shown empty.
+    * ``kind`` = "file", ``path`` = a folder or file of the user's audio
+      or import storage that existed at the request ("audio:<rel>" or
+      "stash:<rel>"), so the purge deletes those and not what the user
+      records afterwards.
+
+    Deleted by a restore (the rows show again) and at the end of the
+    purge (the rows are gone). Ids and paths only, never content."""
+    __tablename__ = "user_data_purge_hidden"
+
+    id = db.Column(db.Integer, primary_key=True)
+    job_id = db.Column(db.Integer, db.ForeignKey("user_data_purge.id"),
+                       nullable=False, index=True)
+    kind = db.Column(db.String(48), nullable=False)
+    row_id = db.Column(db.Integer, nullable=True)
+    path = db.Column(db.String(512), nullable=True)
+
+    __table_args__ = (
+        db.Index("ix_user_data_purge_hidden_kind_row", "kind", "row_id"),
+    )
+
+
+# The per-user tables whose rows a waiting "Delete all my writing" hides
+# (UserDataPurgeHidden): every ORM query leaves them out until a restore
+# or the purge. Nodes are hidden by deleted_at instead, so a thread keeps
+# its placeholders and other people's replies.
+HIDDEN_ROW_TABLES = (
+    UserProfile, UserRecentContext, UserTodo, UserArtifact, Draft,
+    ShareDraft, ExternalItem, UserPrompt, PollResponse, FeedPick,
+    ReferenceAction, UserFeedback,
+)
+
+from backend.utils.hidden_rows import install as _install_hidden_rows  # noqa: E402
+
+_install_hidden_rows()

@@ -2,8 +2,9 @@
 
 Verifies that:
 - Any authenticated user can access audio on public nodes
-- Only voice-mode users (admin or paid plan) can access audio on private nodes
-- Free users are blocked from audio on private nodes
+- On a private node, only a user who can see the node gets its audio, and
+  only with voice mode (admin or paid plan)
+- Other users get 404 for a private node's audio, as for the node itself
 """
 
 import os
@@ -175,22 +176,39 @@ class TestAudioAccessPublicNode:
 
 
 class TestAudioAccessPrivateNode:
-    """Only voice-mode users should be able to fetch audio for private nodes."""
+    """Only the node's owner (with voice mode) gets audio for a private node."""
 
-    def test_free_user_blocked_from_private_node_audio(self, app, data):
+    def test_free_user_gets_404_for_another_users_private_node_audio(self, app, data):
         client = app.test_client()
         _login(client, data["alice_id"])  # alice is free plan
 
         resp = client.get(f"/api/nodes/{data['private_node_id']}/audio")
-        assert resp.status_code == 403
+        assert resp.status_code == 404
 
-    def test_paid_user_can_access_private_node_audio(self, app, data):
+    def test_paid_user_gets_404_for_another_users_private_node_audio(self, app, data):
         client = app.test_client()
-        _login(client, data["bob_id"])  # bob is pro plan
+        _login(client, data["bob_id"])  # bob is pro plan, not the author
+
+        resp = client.get(f"/api/nodes/{data['private_node_id']}/audio")
+        assert resp.status_code == 404
+
+    def test_owner_can_access_private_node_audio(self, app, data):
+        client = app.test_client()
+        _login(client, data["carol_id"])  # carol wrote it, alpha plan
 
         resp = client.get(f"/api/nodes/{data['private_node_id']}/audio")
         assert resp.status_code == 200
         assert resp.json["tts_url"] is not None
+
+    def test_free_owner_blocked_from_own_private_node_audio(self, app, data):
+        carol = User.query.get(data["carol_id"])
+        carol.plan = "free"
+        _db.session.commit()
+        client = app.test_client()
+        _login(client, data["carol_id"])
+
+        resp = client.get(f"/api/nodes/{data['private_node_id']}/audio")
+        assert resp.status_code == 403
 
 
 class TestAudioAccessUnauthenticated:

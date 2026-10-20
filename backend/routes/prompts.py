@@ -3,6 +3,10 @@ from flask_login import login_required, current_user
 from backend.models import UserPrompt
 from backend.extensions import db
 from backend.utils.timefmt import iso_utc
+from backend.utils.placeholders import (
+    UserExportValidationError, check_user_export_plan,
+    validate_user_export_placeholders,
+)
 from backend.utils.prompts import (
     PROMPT_DEFAULTS, load_default_prompt, default_prompt_hash,
 )
@@ -61,6 +65,8 @@ def list_prompts():
     prompts = []
     for key, meta in PROMPT_DEFAULTS.items():
         if meta.get('hidden'):
+            continue
+        if meta.get('admin') and not getattr(current_user, "is_admin", False):
             continue
         latest = UserPrompt.query.filter_by(
             user_id=current_user.id, prompt_key=key
@@ -124,18 +130,52 @@ def get_prompt(prompt_key):
         }), 200
 
 
+def _admin_prompt_refused(prompt_key):
+    """A 403 when a non-admin tries to change an admin prompt (the read
+    prompts, #435): a user's saved version would run on every glean of
+    theirs. The list route already hides these from non-admins. Reads the
+    role of the request's user, loaded for this request; anything but an
+    explicit admin is refused."""
+    meta = PROMPT_DEFAULTS.get(prompt_key) or {}
+    if meta.get('admin', False) is not False and (
+            getattr(current_user, "is_admin", False) is not True):
+        return jsonify({"error": "This prompt can't be changed."}), 403
+    return None
+
+
 @prompts_bp.route("/<prompt_key>", methods=["PUT"])
 @login_required
 def update_prompt(prompt_key):
     """Save a new version of a prompt."""
     if prompt_key not in PROMPT_DEFAULTS:
         return jsonify({"error": "Unknown prompt key"}), 404
+    refused = _admin_prompt_refused(prompt_key)
+    if refused is not None:
+        return refused
 
     data = request.get_json() or {}
     content = data.get("content")
 
     if content is None or not content.strip():
         return jsonify({"error": "Content is required"}), 400
+
+    # A saved prompt runs on every thread started under it, so check its
+    # {user_export} placeholders here as well as at generation time:
+    # unknown keys, and the plan gate on an uncapped export. Raises with
+    # the user-facing message the page shows as a toast.
+    try:
+        validate_user_export_placeholders(content, user_id=current_user.id)
+        check_user_export_plan(
+            content,
+            unrestricted_allowed=current_user.has_unrestricted_export,
+            user_id=current_user.id,
+        )
+        # {ca_tweets} in a saved prompt is for admins: a user's reads
+        # come only from the read prompts Glean attaches (#435).
+        from backend.utils.placeholders import check_ca_tweets_access
+        check_ca_tweets_access(content, current_user)
+    except UserExportValidationError as e:
+        return jsonify({"error": str(e)}), 400
 
     meta = PROMPT_DEFAULTS[prompt_key]
     prompt = UserPrompt(
@@ -231,6 +271,9 @@ def revert_prompt(prompt_key, version_id):
     """Create a new version from a historical one."""
     if prompt_key not in PROMPT_DEFAULTS:
         return jsonify({"error": "Unknown prompt key"}), 404
+    refused = _admin_prompt_refused(prompt_key)
+    if refused is not None:
+        return refused
 
     old_prompt = UserPrompt.query.get_or_404(version_id)
 
@@ -238,6 +281,13 @@ def revert_prompt(prompt_key, version_id):
         return jsonify({"error": "Unauthorized"}), 403
     if old_prompt.prompt_key != prompt_key:
         return jsonify({"error": "Version does not belong to this prompt"}), 400
+    # The restored text passes the same {ca_tweets} check as a save: an
+    # older version must not bring back what a save refuses (#435).
+    from backend.utils.placeholders import check_ca_tweets_access
+    try:
+        check_ca_tweets_access(old_prompt.get_content(), current_user)
+    except UserExportValidationError as e:
+        return jsonify({"error": str(e)}), 400
 
     meta = PROMPT_DEFAULTS[prompt_key]
     new_prompt = UserPrompt(
@@ -262,6 +312,9 @@ def revert_to_default(prompt_key):
     """Create a new version from the file default."""
     if prompt_key not in PROMPT_DEFAULTS:
         return jsonify({"error": "Unknown prompt key"}), 404
+    refused = _admin_prompt_refused(prompt_key)
+    if refused is not None:
+        return refused
 
     content = load_default_prompt(prompt_key)
     if not content:
@@ -294,6 +347,9 @@ def acknowledge_default(prompt_key):
     """
     if prompt_key not in PROMPT_DEFAULTS:
         return jsonify({"error": "Unknown prompt key"}), 404
+    refused = _admin_prompt_refused(prompt_key)
+    if refused is not None:
+        return refused
 
     latest = UserPrompt.query.filter_by(
         user_id=current_user.id, prompt_key=prompt_key

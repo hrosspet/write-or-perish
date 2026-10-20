@@ -5,7 +5,8 @@ Covers:
   privacy_level + ai_usage honored, creates system/user/LLM nodes.
 - POST /textmode/<conv_id>/message: requires parent_id, foreign auth,
   parent-not-descendant rejection, privacy inheritance from parent.
-- GET  /textmode/from-node/<id>: foreign auth.
+- GET  /textmode/from-node/<id>: foreign auth; deleted entries as
+  placeholders.
 - POST /nodes/<id>/llm: forwards source_mode to create_llm_placeholder.
 """
 
@@ -121,7 +122,8 @@ def _login(client, user_id):
 
 
 def _make_user(username, **kwargs):
-    u = User(username=username, approved=True, plan="alpha", **kwargs)
+    kwargs.setdefault("plan", "alpha")
+    u = User(username=username, approved=True, **kwargs)
     _db.session.add(u)
     _db.session.flush()
     return u
@@ -251,8 +253,9 @@ class TestTextmodeStart:
             "/api/textmode/start",
             json={"content": "hi", "ai_usage": "none"},
         )
-        assert resp.status_code == 400
-        assert "chat" in resp.get_json()["error"].lower()
+        assert resp.status_code == 403
+        assert resp.get_json()["code"] == "ai_usage_none"
+        assert Node.query.count() == 0
 
     def test_honors_privacy_level_and_ai_usage(self, app):
         client = app.test_client()
@@ -429,6 +432,129 @@ class TestTextmodeFromNode:
         assert data["conversation_id"] == root.id
         contents = [m["content"] for m in data["messages"]]
         assert contents == ["child", "grandchild"]  # root excluded
+
+    def test_another_members_deleted_reply_is_a_tombstone(self, app):
+        """Bob's public reply in alice's thread, deleted by bob: alice's
+        text-mode view of the thread shows it as deleted, as the thread
+        view does, never with its text."""
+        from datetime import datetime
+        client = app.test_client()
+        alice = _make_user("alice")
+        bob = _make_user("bob")
+        _db.session.commit()
+
+        root = _make_node(alice, content="root", privacy_level="public")
+        hers = _make_node(alice, parent_id=root.id, content="alice asks",
+                          privacy_level="public")
+        his = _make_node(bob, parent_id=hers.id, content="BOB DELETED WORDS",
+                         privacy_level="public")
+        latest = _make_node(alice, parent_id=his.id, content="alice again",
+                            privacy_level="public")
+        his.deleted_at = datetime.utcnow()
+        _db.session.commit()
+
+        _login(client, alice.id)
+        resp = client.get(f"/api/textmode/from-node/{latest.id}")
+        assert resp.status_code == 200
+        assert "BOB DELETED WORDS" not in resp.get_data(as_text=True)
+        data = resp.get_json()
+        assert data["conversation_id"] == root.id
+        assert [m["id"] for m in data["messages"]] == [
+            hers.id, his.id, latest.id]
+        gone = data["messages"][1]
+        assert gone["deleted"] is True
+        assert gone["content"] is None
+        assert gone["role"] == "user"
+        assert [m["content"] for m in data["messages"][::2]] == [
+            "alice asks", "alice again"]
+
+    def test_own_deleted_entry_is_a_tombstone(self, app):
+        """The thread view shows the owner's own deleted entry as deleted
+        too; so does text mode, without its text or its AI metadata."""
+        from datetime import datetime
+        client = app.test_client()
+        alice = _make_user("alice")
+        llm_user = _make_user("gpt-5", twitter_id="llm-gpt-5")
+        _db.session.commit()
+
+        root = _make_node(alice, content="root")
+        first = _make_node(alice, parent_id=root.id, content="first")
+        reply = _make_node(llm_user, parent_id=first.id,
+                           content="DELETED AI WORDS", node_type="llm",
+                           llm_model="gpt-5", human_owner=alice)
+        reply.tool_calls_meta = '[{"name": "secret_tool"}]'
+        latest = _make_node(alice, parent_id=reply.id, content="latest")
+        reply.deleted_at = datetime.utcnow()
+        _db.session.commit()
+
+        _login(client, alice.id)
+        resp = client.get(f"/api/textmode/from-node/{latest.id}")
+        assert resp.status_code == 200
+        body = resp.get_data(as_text=True)
+        assert "DELETED AI WORDS" not in body
+        assert "secret_tool" not in body
+        gone = resp.get_json()["messages"][1]
+        assert gone["id"] == reply.id
+        assert gone["deleted"] is True
+        assert gone["content"] is None
+        assert gone["role"] == "assistant"
+
+    def test_deleted_node_itself_is_not_found(self, app):
+        """GET /api/nodes/<id> answers 404 for a deleted node, even to its
+        owner; text mode does the same."""
+        from datetime import datetime
+        client = app.test_client()
+        alice = _make_user("alice")
+        _db.session.commit()
+
+        root = _make_node(alice, content="root")
+        gone = _make_node(alice, parent_id=root.id, content="DELETED WORDS")
+        gone.deleted_at = datetime.utcnow()
+        _db.session.commit()
+
+        _login(client, alice.id)
+        resp = client.get(f"/api/textmode/from-node/{gone.id}")
+        assert resp.status_code == 404
+        assert "DELETED WORDS" not in resp.get_data(as_text=True)
+
+    def test_a_deleted_accounts_reply_is_a_nameless_tombstone(self, app):
+        """#269: bob's public reply in alice's thread, then bob deletes his
+        account (grace period). Alice's text-mode view keeps the whole
+        thread with bob's reply as a deleted placeholder without his name,
+        as the thread view and an AI reply's context show it, and as it
+        will after the purge; it does not end below his reply."""
+        from datetime import datetime
+        client = app.test_client()
+        alice = _make_user("alice")
+        bob = _make_user("bob")
+        _db.session.commit()
+
+        root = _make_node(alice, content="root", privacy_level="public")
+        hers = _make_node(alice, parent_id=root.id, content="alice asks",
+                          privacy_level="public")
+        his = _make_node(bob, parent_id=hers.id, content="BOB HIDDEN WORDS",
+                         privacy_level="public")
+        latest = _make_node(alice, parent_id=his.id, content="alice again",
+                            privacy_level="public")
+        bob.deleted_at = datetime.utcnow()
+        _db.session.commit()
+
+        _login(client, alice.id)
+        resp = client.get(f"/api/textmode/from-node/{latest.id}")
+        assert resp.status_code == 200
+        body = resp.get_data(as_text=True)
+        assert "BOB HIDDEN WORDS" not in body
+        data = resp.get_json()
+        assert data["conversation_id"] == root.id
+        assert [m["id"] for m in data["messages"]] == [
+            hers.id, his.id, latest.id]
+        gone = data["messages"][1]
+        assert gone["deleted"] is True
+        assert gone["content"] is None
+        assert gone["username"] is None
+        assert gone["role"] == "user"
+        assert [m["content"] for m in data["messages"][::2]] == [
+            "alice asks", "alice again"]
 
 
 # ── GET /nodes/<id> ancestor serialization ──────────────────────────────
@@ -957,3 +1083,266 @@ class TestGetPreviousSourceMode:
         _db.session.commit()
 
         assert fn([root, llm_no_mode]) is None
+
+
+# ── {user_export} plan gate ─────────────────────────────────────────────
+
+class TestUserExportPlanGate:
+    """An uncapped {user_export} is refused for non-Pro users before any
+    LLM node exists. The entry itself is always kept: /textmode/start
+    answers 202 with `llm_error` instead of an LLM node (it used to 500
+    and roll the entry back)."""
+
+    UNCAPPED = "Who am I? {user_export}"
+    CAPPED = "Who am I? {user_export?max_export_tokens=100000}"
+
+    def _start(self, app, user, content):
+        client = app.test_client()
+        _db.session.commit()
+        _login(client, user.id)
+        return client.post(
+            "/api/textmode/start",
+            json={"content": content, "model": "gpt-5"},
+        )
+
+    def test_alpha_uncapped_keeps_entry_skips_reply(self, app):
+        alice = _make_user("alice", plan="alpha")
+        resp = self._start(app, alice, self.UNCAPPED)
+        assert resp.status_code == 202
+        data = resp.get_json()
+        assert "llm_node_id" not in data
+        assert "Pro" in data["llm_error"]
+        assert "{user_export?max_export_tokens=100000}" in data["llm_error"]
+        user_node = Node.query.get(data["user_node_id"])
+        assert user_node is not None
+        assert user_node.get_content() == self.UNCAPPED
+        assert Node.query.filter_by(node_type="llm").count() == 0
+
+    def test_free_uncapped_refused(self, app):
+        bob = _make_user("bob", plan="free")
+        data = self._start(app, bob, self.UNCAPPED).get_json()
+        assert "llm_error" in data and "llm_node_id" not in data
+
+    def test_alpha_capped_runs(self, app):
+        alice = _make_user("alice", plan="alpha")
+        data = self._start(app, alice, self.CAPPED).get_json()
+        assert "llm_node_id" in data and "llm_error" not in data
+
+    def test_pro_uncapped_runs(self, app):
+        pat = _make_user("pat", plan="pro")
+        data = self._start(app, pat, self.UNCAPPED).get_json()
+        assert "llm_node_id" in data and "llm_error" not in data
+
+    def test_admin_uncapped_runs(self, app):
+        root = _make_user("root", plan="alpha", is_admin=True)
+        data = self._start(app, root, self.UNCAPPED).get_json()
+        assert "llm_node_id" in data and "llm_error" not in data
+
+    def test_reply_route_answers_400_and_no_node(self, app):
+        """/nodes/<id>/llm is the in-thread reply path; it already
+        surfaces UserExportValidationError as 400 → toast."""
+        alice = _make_user("alice", plan="alpha")
+        entry = _make_node(alice, content=self.UNCAPPED)
+        _db.session.commit()
+        client = app.test_client()
+        _login(client, alice.id)
+        resp = client.post(f"/api/nodes/{entry.id}/llm", json={})
+        assert resp.status_code == 400
+        assert "Pro" in resp.get_json()["error"]
+        assert Node.query.filter_by(node_type="llm").count() == 0
+
+
+# ── POST /textmode/from-node/<id> ────────────────────────────────────────
+
+def _prompt_node(user, prompt_key, parent_id=None):
+    """A prompt node attached by reference, as the routes make them."""
+    from backend.utils.context_artifacts import attach_context_artifacts
+    from backend.utils.prompts import get_user_prompt_record
+    n = _make_node(user, parent_id=parent_id, content="")
+    attach_context_artifacts(
+        n.id, user.id, prompt_record=get_user_prompt_record(user.id, prompt_key))
+    return n
+
+
+class TestTextmodeContinueFromNode:
+    """POST /textmode/from-node: a Text-mode message under an existing node (the reply box under a
+    read reply, #323): the textmode prompt is attached under the node
+    when no agentic prompt sits above it, and the message hangs under
+    that; inside an agentic thread the message hangs under the node."""
+
+    def _read_reply(self, alice):
+        gpt = _make_user("gpt-5")
+        return _make_node(gpt, content="the read reply", node_type="llm",
+                          llm_model="gpt-5", human_owner=alice)
+
+    def test_attaches_the_text_prompt_under_a_node_without_one(self, app):
+        client = app.test_client()
+        alice = _make_user("alice")
+        reply = self._read_reply(alice)
+        _db.session.commit()
+        _login(client, alice.id)
+
+        resp = client.post(f"/api/textmode/from-node/{reply.id}",
+                           json={"content": "why that one?", "model": "gpt-5"})
+        assert resp.status_code == 202
+        data = resp.get_json()
+        prompt = Node.query.get(data["prompt_node_id"])
+        user_node = Node.query.get(data["user_node_id"])
+        llm_node = Node.query.get(data["llm_node_id"])
+        assert prompt.parent_id == reply.id
+        assert prompt.get_prompt_key() == "textmode"
+        assert user_node.parent_id == prompt.id
+        assert user_node.get_content() == "why that one?"
+        assert user_node.ai_usage == reply.ai_usage == "chat"
+        assert llm_node.parent_id == user_node.id
+        assert llm_node.node_type == "llm"
+        assert data["task_id"] == "fake-task-id"
+
+    def _read_thread(self, alice):
+        """alice's own node (train) → read prompt → read reply, the read's
+        nodes 'chat' as the read routes make them."""
+        gpt = _make_user("gpt-5")
+        root = _make_node(alice, content="mine", ai_usage="train")
+        prompt = _prompt_node(alice, "read_thread", parent_id=root.id)
+        read = _make_node(gpt, parent_id=prompt.id, content="picks",
+                          node_type="llm", llm_model="gpt-5",
+                          human_owner=alice)
+        from backend.models import FeedRender
+        _db.session.add(FeedRender(node_id=read.id))  # a finished read
+        return read
+
+    def test_under_a_read_the_message_takes_the_thread_not_the_read(self, app):
+        # #362: the read reply is 'chat' for the tweets it quotes; the
+        # user's message under it takes their node above the read.
+        client = app.test_client()
+        alice = _make_user("alice", default_ai_usage="none")
+        read = self._read_thread(alice)
+        _db.session.commit()
+        _login(client, alice.id)
+
+        resp = client.post(f"/api/textmode/from-node/{read.id}",
+                           json={"content": "why #2?", "model": "gpt-5"})
+        assert resp.status_code == 202, resp.get_json()
+        data = resp.get_json()
+        assert Node.query.get(data["prompt_node_id"]).ai_usage == "train"
+        assert Node.query.get(data["user_node_id"]).ai_usage == "train"
+        # The AI answer takes the thread's setting too (voice review
+        # 2026-09-29); only the recommendation reply is 'chat'.
+        assert Node.query.get(data["llm_node_id"]).ai_usage == "train"
+
+    def test_a_message_under_the_chat_turn_still_takes_the_thread(self, app):
+        # One level down (#362): the AI answer about the picks carries the
+        # thread's 'train', and so does the next message under it and its
+        # own answer.
+        client = app.test_client()
+        alice = _make_user("alice", default_ai_usage="none")
+        read = self._read_thread(alice)
+        _db.session.commit()
+        _login(client, alice.id)
+        first = client.post(f"/api/textmode/from-node/{read.id}",
+                            json={"content": "why #2?", "model": "gpt-5"})
+        first = first.get_json()
+        assert Node.query.get(first["llm_node_id"]).ai_usage == "train"
+
+        resp = client.post(
+            f"/api/textmode/{first['prompt_node_id']}/message",
+            json={"content": "and #3?", "parent_id": first["llm_node_id"],
+                  "model": "gpt-5"})
+        assert resp.status_code == 202, resp.get_json()
+        data = resp.get_json()
+        assert Node.query.get(data["user_node_id"]).ai_usage == "train"
+        assert Node.query.get(data["llm_node_id"]).ai_usage == "train"
+
+    def test_the_forms_ai_usage_is_honoured(self, app):
+        client = app.test_client()
+        alice = _make_user("alice", default_ai_usage="train")
+        read = self._read_thread(alice)
+        _db.session.commit()
+        _login(client, alice.id)
+
+        resp = client.post(f"/api/textmode/from-node/{read.id}", json={
+            "content": "keep this out", "ai_usage": "chat",
+            "auto_generate": False})
+        assert resp.status_code == 202, resp.get_json()
+        assert Node.query.get(resp.get_json()["user_node_id"]).ai_usage == "chat"
+        resp = client.post(f"/api/textmode/from-node/{read.id}", json={
+            "content": "x", "ai_usage": "bogus", "auto_generate": False})
+        assert resp.status_code == 400
+        resp = client.post(f"/api/textmode/from-node/{read.id}", json={
+            "content": "x", "ai_usage": "none", "auto_generate": False})
+        assert resp.status_code == 403
+        assert resp.get_json()["code"] == "ai_usage_none"
+
+    def test_inside_an_agentic_thread_nothing_is_added(self, app):
+        client = app.test_client()
+        alice = _make_user("alice")
+        system = _prompt_node(alice, "textmode")
+        entry = _make_node(alice, parent_id=system.id, content="hello")
+        _db.session.commit()
+        _login(client, alice.id)
+
+        resp = client.post(f"/api/textmode/from-node/{entry.id}",
+                           json={"content": "and then", "model": "gpt-5"})
+        assert resp.status_code == 202
+        data = resp.get_json()
+        assert data["prompt_node_id"] is None
+        assert Node.query.get(data["user_node_id"]).parent_id == entry.id
+        assert "llm_node_id" in data
+
+    def test_auto_generate_off_creates_no_reply(self, app):
+        client = app.test_client()
+        alice = _make_user("alice")
+        reply = self._read_reply(alice)
+        _db.session.commit()
+        _login(client, alice.id)
+
+        resp = client.post(f"/api/textmode/from-node/{reply.id}",
+                           json={"content": "later", "auto_generate": False})
+        assert resp.status_code == 202
+        data = resp.get_json()
+        assert "llm_node_id" not in data
+        assert Node.query.get(data["user_node_id"]).parent_id == data["prompt_node_id"]
+
+    def test_someone_elses_node_is_refused(self, app):
+        client = app.test_client()
+        alice = _make_user("alice")
+        bob = _make_user("bob")
+        theirs = _make_node(bob, content="bob's")
+        _db.session.commit()
+        _login(client, alice.id)
+
+        resp = client.post(f"/api/textmode/from-node/{theirs.id}",
+                           json={"content": "hi"})
+        assert resp.status_code == 403
+        assert Node.query.filter_by(parent_id=theirs.id).count() == 0
+
+    def test_ai_usage_none_is_refused(self, app):
+        client = app.test_client()
+        alice = _make_user("alice")
+        plain = _make_node(alice, content="no ai here", ai_usage="none")
+        _db.session.commit()
+        _login(client, alice.id)
+
+        resp = client.post(f"/api/textmode/from-node/{plain.id}",
+                           json={"content": "hi"})
+        assert resp.status_code == 403
+        assert resp.get_json()["code"] == "ai_usage_none"
+        assert Node.query.filter_by(parent_id=plain.id).count() == 0
+
+    def test_a_none_node_above_refuses_the_reply(self, app):
+        # The message's own setting is 'chat', but the reply would read
+        # a 'none' entry above: refused before anything is written.
+        client = app.test_client()
+        alice = _make_user("alice")
+        plain = _make_node(alice, content="no ai here", ai_usage="none")
+        below = _make_node(alice, parent_id=plain.id, content="later",
+                           ai_usage="chat")
+        _db.session.commit()
+        _login(client, alice.id)
+
+        resp = client.post(f"/api/textmode/from-node/{below.id}",
+                           json={"content": "hi", "ai_usage": "chat"})
+        assert resp.status_code == 403
+        assert resp.get_json()["code"] == "ai_usage_none"
+        assert Node.query.filter_by(parent_id=below.id).count() == 0
+        assert Node.query.filter_by(node_type="llm").count() == 0

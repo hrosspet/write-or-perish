@@ -2,13 +2,15 @@ from flask import Blueprint, request, jsonify, current_app
 from flask_login import login_required, current_user
 from backend.models import (
     Node, NodeVersion, UserPrompt, UserProfile, UserTodo,
-    UserRecentContext, UserArtifact,
+    UserRecentContext, UserArtifact, Thread,
 )
 from backend.extensions import db
 from backend.utils.timefmt import iso_utc
+from backend.utils.slugs import permalink_for
 from datetime import datetime
 from openai import OpenAI
 import os
+import re
 # Additional imports for Voice‑Mode functionality
 from functools import wraps
 from werkzeug.utils import secure_filename
@@ -21,7 +23,14 @@ from backend.utils.privacy import (
     validate_ai_usage,
     get_default_privacy_settings,
     can_user_access_node,
+    can_user_see_node_or_tombstone,
+    can_user_view_tombstone,
     can_user_edit_node,
+    author_gone,
+    owner_hidden,
+    is_node_owner,
+    speech_allowed,
+    SPEECH_REFUSED_MESSAGE,
     PrivacyLevel,
     AIUsage
 )
@@ -33,16 +42,20 @@ from backend.utils.share_guidance import (
     SHARE_GUIDANCE_PLACEHOLDER, SHARE_GUIDANCE_TEXT, share_enabled_for_user,
 )
 from backend.utils.external_guidance import (
-    EXTERNAL_GUIDANCE_PLACEHOLDER, EXTERNAL_GUIDANCE_TEXT,
-    external_content_enabled_for_user,
+    EXTERNAL_GUIDANCE_PLACEHOLDER, render_external_guidance,
 )
 from backend.utils.api_keys import get_openai_chat_key
 from backend.utils.spend import require_spend_headroom
 from backend.utils.webm_utils import get_webm_duration
 from backend.utils.encryption import encrypt_file, decrypt_file_to_temp
-from backend.utils.audio_storage import list_streaming_audio_files
+from backend.utils.audio_storage import (
+    list_streaming_audio_files, storage_path,
+)
 from backend.utils.llm_nodes import (
+    AIUsageRefused, ReadOnlyModelRefused, ai_usage_refused_response,
     create_llm_placeholder, pick_model_for_generation,
+    read_only_model_refusal, read_only_model_response, resolve_chat_model,
+    resolve_read_model,
 )
 from backend.utils.placeholders import UserExportValidationError
 
@@ -68,6 +81,21 @@ def voice_mode_required(f):
     return wrapper
 
 
+def _visible_node(node_id):
+    """The node when the current user may see it (the rule GET /<id>
+    applies), else None. Callers answer None with _node_not_found(), so a
+    node the user cannot see looks the same as one that does not exist.
+    Admins get no exception: they see what any other user sees."""
+    node = Node.query.get(node_id)
+    if node is None or not can_user_access_node(node, current_user.id):
+        return None
+    return node
+
+
+def _node_not_found():
+    return jsonify({"error": "Node not found"}), 404
+
+
 # Root folder (can be overridden via env var)
 AUDIO_STORAGE_ROOT = pathlib.Path(os.environ.get("AUDIO_STORAGE_PATH", "data/audio")).resolve()
 AUDIO_STORAGE_ROOT.mkdir(parents=True, exist_ok=True)
@@ -84,6 +112,48 @@ MAX_AUDIO_BYTES = 200 * 1024 * 1024  # 200 MB
 
 def _allowed_file(filename: str) -> bool:
     return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
+
+
+def _upload_reply_options(values, parent_id, ai_usage):
+    """Parse an audio upload's Text-mode decisions (#342): `agentic` (the
+    new thread gets a system node with the textmode prompt, as a typed or
+    recorded entry does) and `auto_generate` (an LLM reply once the
+    transcript exists; `model` optional). *values* is the multipart form or
+    the chunked-upload init JSON.
+
+    Returns (agentic, auto_reply_model, error_response). The reply model is
+    None when no reply was asked for. Both decisions start a new thread, so
+    they are refused under a parent; and like /textmode/start they need an
+    AI-readable ai_usage.
+    """
+    def _flag(key):
+        v = values.get(key)
+        return v is True or str(v).strip().lower() in ("1", "true", "yes")
+
+    agentic, auto_generate = _flag("agentic"), _flag("auto_generate")
+    if not (agentic or auto_generate):
+        return False, None, None
+    if parent_id:
+        return False, None, (jsonify({
+            "error": "agentic / auto_generate uploads start a new thread",
+        }), 400)
+    from backend.utils.privacy import AI_ALLOWED
+    if ai_usage not in AI_ALLOWED:
+        return False, None, ai_usage_refused_response()
+    model_id = None
+    if auto_generate:
+        model_id = values.get("model") or pick_model_for_generation(
+            None, current_user)
+        if model_id not in current_app.config["SUPPORTED_MODELS"]:
+            return False, None, (jsonify({
+                "error": f"Unsupported model: {model_id}",
+            }), 400)
+        # A new thread is never a read: a read-only model is refused here,
+        # before the upload is stored, not after the transcript.
+        refused = read_only_model_refusal(model_id)
+        if refused is not None:
+            return False, None, read_only_model_response(refused)
+    return agentic, model_id, None
 
 
 def _save_audio_file(file_storage, user_id: int, node_id: int, variant: str) -> str:
@@ -304,20 +374,20 @@ def make_preview(text, length=200):
     return text[:length] + ("..." if len(text) > length else "")
 
 
-def compute_descendant_counts(node):
-    """
-    Recursively computes the total number of descendants (children,
-    grandchildren, etc.) for 'node' and stores it in node._descendant_count.
-    Returns the computed count.
-    """
-    total = 0
-    if node.children:
-        for child in node.children:
-            # For each child, compute its descendant count first, then add 1 (for the child itself)
-            child_descendants = compute_descendant_counts(child)
-            total += 1 + child_descendants
-    node._descendant_count = total  # cache the value on the instance
-    return total
+def _order_and_count_children(children_data):
+    """Sort serialized children with the largest visible subtree first
+    (stable, so ties keep creation order) and return the number of alive
+    nodes the viewer sees below the parent: each child that is not a
+    tombstone plus that child's own descendant_count. Counting from the
+    serialized tree means hidden rows (another user's private reply, a
+    pruned tombstone, anything under a hidden node) never reach the
+    count, and the walk costs no queries of its own."""
+    children_data.sort(key=lambda d: d.get("descendant_count", 0),
+                       reverse=True)
+    return sum(
+        (0 if d.get("deleted") else 1) + d.get("descendant_count", 0)
+        for d in children_data
+    )
 
 
 def _prompt_version_number(prompt):
@@ -330,35 +400,56 @@ def _prompt_version_number(prompt):
     ).count()
 
 
-def _system_prompt_fields(n):
-    """Return system prompt serialization fields for a node."""
+def _system_prompt_fields(n, viewer_id):
+    """Return system prompt serialization fields for a node, as
+    *viewer_id* may see them (see _context_artifact_fields)."""
     prompt = n.get_artifact("prompt")
     if prompt is not None:
+        # The read prompts are shown under Glean's name (#435), also on
+        # prompt versions saved under the earlier titles.
+        from backend.utils.ca_feed import READ_PROMPT_KEYS
+        from backend.utils.prompts import PROMPT_DEFAULTS
+        title = prompt.title
+        if prompt.prompt_key in READ_PROMPT_KEYS:
+            title = PROMPT_DEFAULTS[prompt.prompt_key]["title"]
         return {
             "is_system_prompt": True,
-            "prompt_title": prompt.title,
+            "prompt_title": title,
             "prompt_key": prompt.prompt_key,
             "user_prompt_id": prompt.id,
             "prompt_version_number": _prompt_version_number(prompt),
-            "context_artifacts": _context_artifact_fields(n),
+            "context_artifacts": _context_artifact_fields(n, viewer_id),
         }
-    # No prompt artifact, but other context artifacts may still exist
-    # (e.g. after a per-thread prompt edit detached the prompt artifact)
-    artifacts = _context_artifact_fields(n)
+    # No linked prompt version. A root whose per-thread edit detached the
+    # link keeps its prompt_key stamp: still the session's system prompt
+    # (mode badge, Log preview), just with no title/version to show. Its
+    # other context artifacts (pinned profile etc.) may still exist too.
+    artifacts = _context_artifact_fields(n, viewer_id)
     return {
-        "is_system_prompt": False,
+        "is_system_prompt": n.is_system_prompt,
         "prompt_title": None,
-        "prompt_key": None,
+        "prompt_key": n.get_prompt_key(),
         "user_prompt_id": None,
         "prompt_version_number": None,
         "context_artifacts": artifacts if artifacts else None,
     }
 
 
-def _context_artifact_fields(n):
-    """Build a dict of context artifacts attached to a node."""
+def _context_artifact_fields(n, viewer_id):
+    """Build a dict of context artifacts attached to a node.
+
+    The pinned personal versions (profile, todo, recent context, memory
+    and the other inline artifacts) and the recent-writing range are the
+    node owner's, shown to the owner only: a public thread's system
+    prompt shows other viewers the prompt, and its placeholders read as
+    not available. Each version is also checked to be the viewer's own.
+    """
+    is_owner = (viewer_id is not None
+                and (n.human_owner_id or n.user_id) == viewer_id)
     artifacts = {}
     for row in n.context_artifacts:
+        if row.artifact_type != "prompt" and not is_owner:
+            continue
         if row.artifact_type == "prompt":
             prompt = UserPrompt.query.get(row.artifact_id)
             if prompt:
@@ -370,7 +461,7 @@ def _context_artifact_fields(n):
                 }
         elif row.artifact_type == "profile":
             profile = UserProfile.query.get(row.artifact_id)
-            if profile:
+            if profile and profile.user_id == viewer_id:
                 artifacts["profile"] = {
                     "id": profile.id,
                     "version_number": UserProfile.query.filter(
@@ -381,7 +472,7 @@ def _context_artifact_fields(n):
                 }
         elif row.artifact_type == "todo":
             todo = UserTodo.query.get(row.artifact_id)
-            if todo:
+            if todo and todo.user_id == viewer_id:
                 artifacts["todo"] = {
                     "id": todo.id,
                     "version_number": UserTodo.query.filter(
@@ -392,7 +483,7 @@ def _context_artifact_fields(n):
                 }
         elif row.artifact_type == "recent_context":
             rc = UserRecentContext.query.get(row.artifact_id)
-            if rc:
+            if rc and rc.user_id == viewer_id:
                 artifacts["recent"] = {
                     "id": rc.id,
                     "content": rc.get_content(),
@@ -405,7 +496,8 @@ def _context_artifact_fields(n):
             # Non-inline kinds reach the model via the artifacts index / tools
             # and have no inline placeholder, so they're skipped here.
             art = UserArtifact.query.get(row.artifact_id)
-            if art and art.kind in UserArtifact.INLINE_KINDS:
+            if (art and art.kind in UserArtifact.INLINE_KINDS
+                    and art.user_id == viewer_id):
                 artifacts[art.kind] = {
                     "id": art.id,
                     "version_number": UserArtifact.query.filter(
@@ -429,13 +521,14 @@ def _context_artifact_fields(n):
                 "content": SHARE_GUIDANCE_TEXT if enabled else "",
             }
         if EXTERNAL_GUIDANCE_PLACEHOLDER in content:
-            # Same mirror for the archive-search guidance (#208).
-            ext_enabled = external_content_enabled_for_user(
-                current_app.config, n.human_owner_id or n.user_id)
+            # Same mirror for the archive-search guidance (#208/#329):
+            # the archive paragraph for everyone, plus the saved-references
+            # paragraph when the owner's toggle is on.
             artifacts["external_content_guidance"] = {
-                "content": EXTERNAL_GUIDANCE_TEXT if ext_enabled else "",
+                "content": render_external_guidance(
+                    current_app.config, n.human_owner_id or n.user_id),
             }
-        if "{user_recent_raw}" in content:
+        if "{user_recent_raw}" in content and is_owner:
             from backend.routes.export_data import get_raw_data_date_range
             earliest, latest, total_tokens = get_raw_data_date_range(
                 n.user_id, created_before=n.created_at,
@@ -449,6 +542,27 @@ def _context_artifact_fields(n):
                 }
 
     return artifacts if artifacts else None
+
+
+def _as_parent_user_id(parent):
+    """The parent_user_id that *parent*'s children carry: its effective
+    owner (the human owner of an AI reply). None when its author deleted
+    the account (#269): the placeholder names nobody, by id either."""
+    if parent is None or author_gone(parent):
+        return None
+    return parent.human_owner_id if parent.node_type == "llm" else parent.user_id
+
+
+def _parent_user_id_of(node):
+    """The parent_user_id of a focal node or an ancestor: its own human
+    owner for an AI reply, else its parent's author, or None when that
+    author deleted the account (#269)."""
+    if node.node_type == "llm":
+        return node.human_owner_id
+    parent = node.parent
+    if parent is None or author_gone(parent):
+        return None
+    return parent.user_id
 
 
 def serialize_node_recursive(n, user_id=None, parent_user_id=None):
@@ -487,29 +601,25 @@ def serialize_node_recursive(n, user_id=None, parent_user_id=None):
     def _child_visible(child):
         if can_user_access_node(child, user_id):
             return True
-        if child.deleted_at is None:
+        if child.deleted_at is None and not owner_hidden(child):
             return False
         s = serialize_node_status(child, user_id)
         return s is not None and not s.get("inaccessible")
 
     visible_children = [c for c in n.children if _child_visible(c)]
-    sorted_children = sorted(
-        visible_children, key=lambda c: c._descendant_count, reverse=True,
-    )
     # Mirror the focal serializer's parent_user_id derivation (nodes.py
     # ~line 822) so the frontend's ownedByMe check works the same way
     # at every depth.
-    n_as_parent_user_id = (
-        n.human_owner_id if n.node_type == "llm" else n.user_id
-    )
+    n_as_parent_user_id = _as_parent_user_id(n)
     children_data = [
         serialized for serialized in (
             serialize_node_recursive(
                 child, user_id, parent_user_id=n_as_parent_user_id,
             )
-            for child in sorted_children
+            for child in visible_children
         ) if serialized is not None
     ]
+    descendant_count = _order_and_count_children(children_data)
 
     if status is not None:
         # Tombstone — content already omitted by serialize_node_status.
@@ -521,7 +631,7 @@ def serialize_node_recursive(n, user_id=None, parent_user_id=None):
         return {
             **status,
             "child_count": len(children_data),
-            "descendant_count": n._descendant_count,
+            "descendant_count": descendant_count,
             "children": children_data,
         }
 
@@ -529,13 +639,14 @@ def serialize_node_recursive(n, user_id=None, parent_user_id=None):
         "id": n.id,
         "content": n.get_content(),
         "node_type": n.node_type,
-        "child_count": len(visible_children),
+        # Children as rendered: pruned tombstones dropped out above.
+        "child_count": len(children_data),
         "created_at": iso_utc(n.created_at),
         "updated_at": iso_utc(n.updated_at),
         "username": n.user.username if n.user else "Unknown",
         "llm_model": n.llm_model,
         "origin": n.origin,
-        "descendant_count": n._descendant_count,
+        "descendant_count": descendant_count,
         "user_id": n.user_id,
         "parent_user_id": parent_user_id,
         "children": children_data,
@@ -550,13 +661,12 @@ def serialize_node_recursive(n, user_id=None, parent_user_id=None):
         "privacy_level": n.privacy_level,
         "ai_usage": n.ai_usage,
     }
-    data.update(_system_prompt_fields(n))
+    data.update(_system_prompt_fields(n, user_id))
     return data
 
 
 def approximate_token_count(text):
     return max(1, len(text.split()))
-
 
 
 # ---------------------------------------------------------------------------
@@ -583,6 +693,13 @@ def create_node():
         # ------------------------------------------------------------------
         # Voice‑Mode upload path
         # ------------------------------------------------------------------
+        # A capped user cannot start an upload (#341); the text path
+        # below stays open. The frontend checks before the file picker
+        # opens, but its flag can be stale within a session.
+        from backend.utils.spend import spend_cap_response, user_is_capped
+        if user_is_capped(current_user):
+            return spend_cap_response()
+
         if "audio_file" not in request.files:
             return jsonify({"error": "Field 'audio_file' is required"}), 400
 
@@ -628,6 +745,20 @@ def create_node():
                     "code": "public_reply_required",
                 }), 400
 
+        agentic, auto_reply_model, err = _upload_reply_options(
+            request.form, parent_id, ai_usage)
+        if err is not None:
+            return err
+        system_node = None
+        if agentic:
+            from backend.utils.session_helpers import create_agentic_root
+            from backend.utils.glean import stamp_glean_entry
+            system_node = create_agentic_root(
+                current_user.id, "textmode", privacy_level, ai_usage)
+            # Started from the Glean card (#435).
+            stamp_glean_entry(system_node, current_user,
+                              request.form.get("entry"))
+
         # Placeholder content until transcription is ready.
         placeholder_text = "[Voice note – transcription pending]"
         from backend.utils.tokens import approximate_token_count as _atc2
@@ -635,7 +766,7 @@ def create_node():
         node = Node(
             user_id=current_user.id,
             human_owner_id=current_user.id,
-            parent_id=parent_id,
+            parent_id=system_node.id if system_node else parent_id,
             node_type=node_type,
             transcription_status='pending',  # Set initial status
             privacy_level=privacy_level,
@@ -662,8 +793,15 @@ def create_node():
             rel_path = node.audio_original_url.replace("/media/", "")
             local_path = str(AUDIO_STORAGE_ROOT / rel_path)
 
-            # Enqueue task
-            task = transcribe_audio.delay(node.id, local_path, file.filename)
+            # Enqueue task. The reply model is passed only when a reply was
+            # asked for, so a plain upload is safe during a deploy. An upload
+            # that asks for a reply in the ~3 s between the gunicorn reload
+            # and the Celery restart can still reach an old worker, which
+            # fails the transcription on the unknown kwarg (accepted, #347).
+            task = transcribe_audio.delay(
+                node.id, local_path, file.filename,
+                **({"auto_reply_model": auto_reply_model}
+                   if auto_reply_model else {}))
 
             # Store task ID
             node.transcription_task_id = task.id
@@ -671,7 +809,7 @@ def create_node():
 
             current_app.logger.info(f"Enqueued transcription task {task.id} for node {node.id}")
 
-        return jsonify({
+        response = {
             "id": node.id,
             "audio_original_url": node.audio_original_url,
             "content": node.content,
@@ -679,7 +817,10 @@ def create_node():
             "created_at": iso_utc(node.created_at),
             "transcription_status": node.transcription_status,
             "transcription_task_id": node.transcription_task_id
-        }), 201
+        }
+        if system_node is not None:
+            response["conversation_id"] = system_node.id
+        return jsonify(response), 201
 
     # ------------------------------------------------------------------
     # Text upload path (original behaviour)
@@ -777,9 +918,7 @@ def create_node():
         "created_at": iso_utc(node.created_at),
         "username": current_user.username,
         "privacy_level": node.privacy_level,
-        "permalink": (
-            f"/@{node.user.username}/{node.public_slug}"
-            if node.public_slug and node.user else None),
+        "permalink": permalink_for(node),
         "ai_usage": node.ai_usage,
         "split_into": 1 + len(parts),
         "tip_id": parts[-1].id if parts else node.id
@@ -812,6 +951,15 @@ def update_node(node_id):
             "char_cap": NODE_CHAR_CAP,
         }), 422
 
+    # A read prompt's text is Glean's (#435): only an admin may change it,
+    # here as on the Prompts page. Settings-only edits stay open.
+    from backend.utils.ca_feed import READ_PROMPT_KEYS
+    if (node.get_prompt_key() in READ_PROMPT_KEYS
+            and getattr(current_user, "is_admin", False) is not True
+            and (new_content or "").strip() != (node.get_content() or "").strip()):
+        return jsonify({"error": "This prompt can't be changed."}), 403
+
+    old_privacy, old_ai_usage = node.privacy_level, node.ai_usage
     # Handle privacy settings updates (optional)
     if "privacy_level" in data:
         privacy_level = data["privacy_level"]
@@ -827,7 +975,22 @@ def update_node(node_id):
         ai_usage = data["ai_usage"]
         if not validate_ai_usage(ai_usage):
             return jsonify({"error": f"Invalid ai_usage: {ai_usage}"}), 400
+        # A read's nodes quote other people's public tweets, which Loore
+        # has no licence to train on (see ca_feed.FEED_AI_USAGE).
+        if ai_usage == "train":
+            from backend.utils.ca_feed import is_feed_node
+            if is_feed_node(node):
+                return jsonify({
+                    "error": "A Community Archive read cannot be used for "
+                             "training: it quotes other people's tweets.",
+                }), 400
         node.ai_usage = ai_usage
+
+    # Settings that actually changed here are the only ones a requested
+    # cascade carries to the user's replies: a reply keeps its own privacy
+    # when only AI usage was changed on this node, and vice versa.
+    privacy_changed = "privacy_level" in data and node.privacy_level != old_privacy
+    ai_usage_changed = "ai_usage" in data and node.ai_usage != old_ai_usage
 
     # Resolved text BEFORE any artifact change: for a system node this is
     # the pinned prompt's content, which is also what the editor showed.
@@ -844,6 +1007,15 @@ def update_node(node_id):
     # content takes effect.
     if data.get("detach_prompt") and content_changed:
         from backend.models import NodeContextArtifact
+        # Keep the session kind: the reference goes, but tools, proposal
+        # parsing and mode notes are gated on the prompt key
+        # (_is_agentic_prompt / ancestors_have_prompt), which lives in
+        # node.prompt_key. Roots attached before that column existed get
+        # stamped now, from the row being removed.
+        if not node.prompt_key:
+            linked = node.get_artifact("prompt")
+            if linked is not None:
+                node.prompt_key = linked.prompt_key
         NodeContextArtifact.query.filter_by(
             node_id=node.id, artifact_type="prompt"
         ).delete()
@@ -874,6 +1046,19 @@ def update_node(node_id):
         # edited text — chunk windowing and update gates sum this column.
         from backend.utils.tokens import approximate_token_count as _atc_upd
         node.token_count = _atc_upd(new_content)
+
+    # Optional cascade, chosen in the edit dialog when the node has replies:
+    # the same privacy / AI-usage change applied to every alive reply below
+    # it that the user may edit (own nodes, LLM nodes they are the human
+    # owner of). Other users' replies are untouched.
+    cascaded = []
+    if data.get("apply_to_descendants") and (privacy_changed or ai_usage_changed):
+        from backend.utils.node_settings import apply_settings_to_descendants
+        cascaded = apply_settings_to_descendants(
+            node, current_user.id,
+            privacy_level=node.privacy_level if privacy_changed else None,
+            ai_usage=node.ai_usage if ai_usage_changed else None,
+        )
     try:
         db.session.commit()
     except Exception as e:
@@ -886,139 +1071,85 @@ def update_node(node_id):
             or "privacy_level" in data):
         from backend.utils.public_cache import invalidate_for_node
         invalidate_for_node(node)
+        # That already covers the thread-root pages every cascaded reply
+        # lives under; add the replies' own id URLs.
+        if cascaded and privacy_changed:
+            from backend.utils.public_cache import invalidate
+            invalidate(*[f"/node/{n.id}" for n in cascaded])
 
-    node = get_node(node.id)[0].get_json()  # to find all ancestors and children... / [0] is the actual node (wrapped in Response), [1] is the response code
-    return jsonify({"message": "Node updated", "node": node}), 200
+    # Own fields only. The UI merges these into the node it already holds
+    # (or refetches the focal node when it edited an ancestor/child), so
+    # re-serializing the whole thread here was pure waste: one full
+    # subtree walk and a KMS unwrap per descendant on every save.
+    return jsonify({
+        "message": "Node updated",
+        "node": _focal_own_fields(node, current_user.id),
+        "descendants_updated": len(cascaded),
+    }), 200
 
 # Retrieve a node with its full content (the highlighted node) plus previews of its children.
-@nodes_bp.route("/<int:node_id>", methods=["GET"])
-@login_required
-def get_node(node_id):
-    node = Node.query.get(node_id)
-    if node is None:
-        return jsonify({"error": "Node not found"}), 404
+_ARTIFACT_MODELS = {
+    "prompt": UserPrompt,
+    "profile": UserProfile,
+    "todo": UserTodo,
+    "recent_context": UserRecentContext,
+    "user_artifact": UserArtifact,
+}
 
-    # Soft-deleted nodes 404 even for the owner (§10: direct URL never
-    # serves a tombstone, only ancestor breadcrumbs do). The structural
-    # tombstone lives in serialize_node_recursive / the ancestors loop —
-    # not here at the highlighted-node entry point.
-    if node.deleted_at is not None:
-        return jsonify({"error": "Node not found"}), 404
 
-    # Check if user has permission to access this node
-    if not can_user_access_node(node, current_user.id):
-        return jsonify({"error": "Not authorized to access this node"}), 403
+def _render_set_ciphertexts(nodes):
+    """Every encrypted blob that serializing *nodes* will decrypt: the
+    nodes' own content plus the context artifacts pinned to them.
 
-    # Compute descendant counts once for the entire subtree.
-    compute_descendant_counts(node)
-
-    # Build ancestors. Soft-deleted ancestors the viewer had pre-deletion
-    # access to render as tombstones — without this the breadcrumb chain
-    # would silently skip them and hide the structural fact that something
-    # was once there. Privacy-blocked ancestors (and deletions the viewer
-    # never had access to) are omitted entirely.
-    from backend.utils.serialization import serialize_node_status
-    ancestors = []
-    current = node.parent
-    while current:
-        status = serialize_node_status(current, current_user.id)
-        if status is None:  # alive + accessible
-            ancestor_content = current.get_content()
-            # Mirror the focal serializer's parent_user_id derivation
-            # (nodes.py:822) so the frontend's ownedByMe check works on
-            # ancestors. The walk already has current.parent in hand, no
-            # extra query.
-            ancestor_parent_user_id = (
-                current.human_owner_id if current.node_type == "llm"
-                else (current.parent.user_id if current.parent else None)
+    Also hands each node its ``context_artifacts`` rows and pulls the
+    artifacts themselves into the identity map in bulk, so the per-node
+    ``.query.get()`` calls in _context_artifact_fields become free.
+    """
+    from sqlalchemy.orm.attributes import set_committed_value
+    from backend.models import NodeContextArtifact
+    texts = [n.content for n in nodes]
+    rows_by_node = {n.id: [] for n in nodes}
+    ids = list(rows_by_node)
+    for start in range(0, len(ids), 900):
+        for row in NodeContextArtifact.query.filter(
+                NodeContextArtifact.node_id.in_(ids[start:start + 900])).all():
+            rows_by_node[row.node_id].append(row)
+    wanted = {}
+    for n in nodes:
+        rows = rows_by_node[n.id]
+        set_committed_value(n, "context_artifacts", rows)
+        for row in rows:
+            wanted.setdefault(row.artifact_type, set()).add(row.artifact_id)
+    for artifact_type, artifact_ids in wanted.items():
+        model = _ARTIFACT_MODELS.get(artifact_type)
+        if model is not None:
+            texts.extend(
+                a.content for a in
+                model.query.filter(model.id.in_(list(artifact_ids))).all()
             )
-            ancestor_data = {
-                "id": current.id,
-                "username": current.user.username if current.user else "Unknown",
-                "llm_model": current.llm_model,
-                "content": ancestor_content,
-                "preview": make_preview(ancestor_content),
-                "node_type": current.node_type,
-                "child_count": len(current.children),
-                "created_at": iso_utc(current.created_at),
-                "user_id": current.user_id,
-                "parent_user_id": ancestor_parent_user_id,
-                # Needed by the frontend auto-generate guard, which
-                # checks ai_usage across [node, ...ancestors] before
-                # firing an LLM reply. Without it ancestors look like
-                # ai_usage=undefined and the guard silently fails.
-                "ai_usage": current.ai_usage,
-                # Same undefined trap for Edit-from-ancestor: NodeForm
-                # would fall back to the user's default privacy AND
-                # persist it on save.
-                "privacy_level": current.privacy_level,
-            }
-            ancestor_data.update(_system_prompt_fields(current))
-            ancestors.insert(0, ancestor_data)
-        elif status.get("deleted"):
-            ancestor_data = {
-                **status,
-                "child_count": len(current.children),
-                "ai_usage": current.ai_usage,
-                "privacy_level": current.privacy_level,
-            }
-            ancestor_data.update(_system_prompt_fields(current))
-            ancestors.insert(0, ancestor_data)
-        # else: status.get('inaccessible') — skip entirely (no leak of
-        # structural fact "something is here" to a viewer who never had
-        # access).
-        current = current.parent
+    return texts
 
-    # Filter children by privacy. Tombstones the viewer had pre-deletion
-    # access to are included; serialize_node_recursive renders them with
-    # the deletion shape and recurses into their (possibly alive) children.
-    def _child_visible(child):
-        if can_user_access_node(child, current_user.id):
-            return True
-        if child.deleted_at is None:
-            return False
-        s = serialize_node_status(child, current_user.id)
-        return s is not None and not s.get("inaccessible")
 
-    visible_children = [c for c in node.children if _child_visible(c)]
-    sorted_children = sorted(visible_children, key=lambda child: child._descendant_count, reverse=True)
-    accessible_children = visible_children  # for the child_count field below
-
-    # Compute the focal node's effective owner so first-level children
-    # carry the right parent_user_id without an N+1.
-    focal_as_parent_user_id = (
-        node.human_owner_id if node.node_type == "llm" else node.user_id
-    )
-
-    # Serialize children first (pruned tombstones drop out) so child_count
-    # reflects what the viewer actually sees.
-    serialized_children = [
-        serialized for serialized in (
-            serialize_node_recursive(
-                child, current_user.id,
-                parent_user_id=focal_as_parent_user_id,
-            )
-            for child in sorted_children
-        ) if serialized is not None
-    ]
-    node_data = {
+def _focal_own_fields(node, viewer_id):
+    """The focal node's own serialized fields — everything GET /nodes/<id>
+    returns except the tree (ancestors, children, child_count). Shared
+    with PUT, whose response used to re-run the whole GET (subtree walk,
+    every descendant decrypted) only for the UI to keep the node's own
+    fields and refetch the rest. *viewer_id* is the user the response is
+    for: fields that belong to the node's owner alone go to them only."""
+    data = {
         "id": node.id,
         "content": node.get_content(),
         "node_type": node.node_type,
-        "child_count": len(serialized_children),
-        "ancestors": ancestors,
-        "children": serialized_children,
         "created_at": iso_utc(node.created_at),
         "updated_at": iso_utc(node.updated_at),
-        "permalink": (
-            f"/@{node.user.username}/{node.public_slug}"
-            if node.public_slug and node.user else None),
+        "permalink": permalink_for(node),
         "user": {
             "id": node.user.id,
             "username": node.user.username,
         },
         # Include human owner ID for LLM nodes (so frontend can check edit/delete permission)
-        "parent_user_id": node.human_owner_id if node.node_type == "llm" else (node.parent.user_id if node.parent else None),
+        "parent_user_id": _parent_user_id_of(node),
         # Privacy settings
         "privacy_level": node.privacy_level,
         "ai_usage": node.ai_usage,
@@ -1033,14 +1164,394 @@ def get_node(node_id):
         # prompt (#66).
         "has_tts": bool(node.audio_tts_url),
     }
-    # Include tool call metadata for LLM nodes
+    # Why a reply failed or was cancelled, for its owner only, as on the
+    # llm-status poll: the thread page says it under a failed gleaning
+    # instead of the placeholder text (#435), and under a cancelled read's
+    # text whenever the owner opens it, not only to a page that was
+    # polling when the read was withdrawn.
+    if (node.llm_task_status in ("failed", "cancelled")
+            and node.llm_task_error and is_node_owner(node, viewer_id)):
+        data["llm_task_error"] = node.llm_task_error
+    # The reply's text so far while it is generated (#367): a reload
+    # mid-generation shows it at once; the llm-stream SSE takes over.
+    if node.llm_task_status in ("pending", "processing") \
+            and node.streaming_content:
+        data["streaming_content"] = node.get_streaming_content()
+    # Include tool call metadata for LLM nodes: in full for the reply's
+    # owner, each action's name and outcome for anyone else.
     if node.tool_calls_meta:
-        import json as _json
-        try:
-            node_data["tool_calls_meta"] = _json.loads(node.tool_calls_meta)
-        except (ValueError, TypeError):
-            pass
-    node_data.update(_system_prompt_fields(node))
+        from backend.utils.tool_meta import tool_calls_meta_for
+        visible = tool_calls_meta_for(node, viewer_id)
+        # A reply whose only entry was the app marker reads as a node
+        # with no tool calls: no key, as before the marker existed.
+        if visible:
+            data["tool_calls_meta"] = visible
+        # A Community Archive feed reply carries picks (see FeedPick), as
+        # does a control sample rendered through the same list; the
+        # count is looked up only for nodes marked as either.
+        if any(isinstance(m, dict) and m.get("name") in ("_batch", "_feed_sample")
+               for m in data.get("tool_calls_meta") or []):
+            from backend.models import FeedPick
+            data["feed_picks_count"] = FeedPick.query.filter_by(
+                node_id=node.id, kind="read").count()
+    data.update(_system_prompt_fields(node, current_user.id))
+    # A Community Archive read reply: the thread page shows what the read
+    # covered (the window, from the pinned render) and offers to read
+    # the day again. Focal node only — two small lookups. The window goes
+    # to the reply's owner only: its counts are taken after the owner's
+    # read tweets were left out (`excluded` is how many; the tweet and
+    # account counts are what remained), so they are the owner's read
+    # state. Another viewer of the reply gets it without the window.
+    if node.node_type == "llm" or node.llm_model:
+        from backend.utils.ca_feed import is_read_reply, read_window_fields
+        if is_read_reply(node):
+            data["read_reply"] = True
+            if (node.human_owner_id or node.user_id) == viewer_id:
+                data["read_window"] = read_window_fields(node.feed_render)
+    return data
+
+
+def _recommendation_fields(rec, item, counted):
+    """The per-recommendation marks a quote bubble or pick shows (#352):
+    `feedback` becomes the verdict that counts for this recommendation
+    (see utils/reference_log), `feedback_shared` says it was given
+    elsewhere (a parallel read), and `rated_before` carries the verdict
+    the model could already see when it chose, for the "You rated this …"
+    line beside an empty control.
+
+    Owner only, like the rest (both callers send it to the reply's owner
+    alone). A gleaning's pick (kind 'read') also carries the verdict on
+    Loore's intro to the tweet (`intro_verdict`, #502), and
+    `recommendation_kind` tells the card it is one: the card then shows
+    the pick's own pair under it instead of the tweet's in its footer."""
+    from backend.utils.reference_log import KIND_READ, rated_before
+    out = counted.get(rec.id)
+    before = rated_before(rec, item)
+    return {
+        "feedback": out.verdict if out else item.feedback,
+        "feedback_shared": bool(out and out.verdict_shared),
+        "rated_before": ({"feedback": before["verdict"],
+                          "at": iso_utc(before["at"])} if before else None),
+        "recommendation_id": rec.id,
+        "recommendation_kind": rec.kind,
+        "intro_verdict": rec.intro_verdict if rec.kind == KIND_READ else None,
+    }
+
+
+@nodes_bp.route("/<int:node_id>/feed-picks", methods=["GET"])
+@login_required
+def get_feed_picks(node_id):
+    """The tweets a Community Archive feed reply named, in the model's
+    order, each with the saved reference it became (full text, read
+    mark, verdict) and what the model claimed about it. Owner only."""
+    from backend.models import FeedPick
+    from backend.routes.external import _serialize_item
+    node = Node.query.get_or_404(node_id)
+    owner_id = node.human_owner_id or node.user_id
+    if owner_id != current_user.id:
+        return jsonify({"error": "Unauthorized"}), 403
+    from backend.utils.reference_log import outcomes
+    rows = (FeedPick.query.filter_by(node_id=node.id, kind="read")
+            .order_by(FeedPick.rank.asc()).all())
+    counted = outcomes(rows)
+    picks = []
+    for row in rows:
+        item = _serialize_item(row.item)
+        item["content"] = row.item.get_content() or ""
+        # The verdict that counts for THIS pick (#352): its own, or one
+        # given on the same tweet in a parallel read — not merely the
+        # tweet's latest, which a later quote may have set.
+        item.update(_recommendation_fields(row, row.item, counted))
+        picks.append({
+            "rank": row.rank,
+            "relevance": row.relevance,
+            "recommended": bool(row.recommended),
+            "picked_by": row.picked_by,
+            "why": row.get_why(),
+            "item": item,
+        })
+    return jsonify({"node_id": node.id, "picks": picks})
+
+
+@nodes_bp.route("/<int:node_id>/feed-picks/read", methods=["POST"])
+@login_required
+def mark_feed_picks_read(node_id):
+    """Mark every tweet this feed reply named as read (the list's "Mark
+    all as read"). Idempotent: an already-read item keeps its read_at.
+    Returns {item_id: read_at} for the whole list."""
+    from backend.models import FeedPick
+    node = Node.query.get_or_404(node_id)
+    owner_id = node.human_owner_id or node.user_id
+    if owner_id != current_user.id:
+        return jsonify({"error": "Unauthorized"}), 403
+    from backend.utils.reference_log import ACTION_READ, record_action
+    now = datetime.utcnow()
+    read_at = {}
+    for row in FeedPick.query.filter_by(node_id=node.id, kind="read").all():
+        if row.item.read_at is None:
+            record_action(row.item, ACTION_READ, node_id=node.id, at=now)
+            row.item.read_at = now
+        read_at[row.item.id] = iso_utc(row.item.read_at)
+    db.session.commit()
+    return jsonify({"node_id": node.id, "read_at": read_at})
+
+
+PICK_VERDICT_VALUES = ("good", "bad")
+
+
+@nodes_bp.route("/<int:node_id>/feed-picks/<int:item_id>/verdict",
+                methods=["POST"])
+@login_required
+def set_pick_verdict(node_id, item_id):
+    """The verdicts on one pick of a gleaning (#502, option B, Peter
+    2026-10-14): on Loore's intro to the tweet and on the tweet itself,
+    each 'good', 'bad' or null (unrated). Body: {"intro": ..., "tweet":
+    ...}; a key left out leaves that part as it is, so the pick-level tap
+    sets both in one request and a part's tap sends only its own.
+
+    The tweet's verdict is the reference's verdict, stored and counted as
+    from POST /external/items/<id>/feedback (ExternalItem.feedback, a
+    ReferenceAction logged against this gleaning, which marks the tweet
+    read). The intro's verdict is the pick row's (FeedPick.intro_verdict):
+    its value and time only, never the intro's text. It does not mark the
+    tweet read: it judges what Loore wrote about the tweet.
+
+    Owner only, on a live gleaning of theirs; 404 for a pick the gleaning
+    does not have (or one hidden by a waiting deletion)."""
+    from backend.models import ExternalItem, FeedPick
+    from backend.routes.external import apply_item_feedback
+    from backend.utils.reference_log import KIND_READ
+    node = _visible_node(node_id)
+    if node is None:
+        return _node_not_found()
+    if (node.human_owner_id or node.user_id) != current_user.id:
+        return jsonify({"error": "Unauthorized"}), 403
+    pick = FeedPick.query.filter_by(
+        node_id=node.id, external_item_id=item_id, kind=KIND_READ,
+        user_id=current_user.id).first()
+    item = (ExternalItem.query.filter_by(id=item_id, user_id=current_user.id)
+            .first() if pick is not None else None)
+    if pick is None or item is None:
+        return jsonify({"error": "not found"}), 404
+    data = request.get_json(silent=True) or {}
+    parts = [k for k in ("intro", "tweet") if k in data]
+    if not parts:
+        return jsonify({"error": "give 'intro' and/or 'tweet'"}), 400
+    for k in parts:
+        if data[k] is not None and data[k] not in PICK_VERDICT_VALUES:
+            return jsonify({
+                "error": f"{k} must be 'good', 'bad' or null"}), 400
+    if "intro" in data:
+        pick.intro_verdict = data["intro"]
+        pick.intro_verdict_at = datetime.utcnow() if data["intro"] else None
+    if "tweet" in data:
+        apply_item_feedback(item, data["tweet"], node_id=node.id)
+    db.session.commit()
+    # The marks as the card shows them: `feedback` is the tweet verdict
+    # that counts for this pick (#352), as resolve-quotes sends it.
+    from backend.utils.reference_log import outcomes
+    answer = {
+        "node_id": node.id,
+        "item_id": item.id,
+        "read_at": iso_utc(item.read_at) if item.read_at else None,
+    }
+    answer.update(_recommendation_fields(pick, item, outcomes([pick])))
+    return jsonify(answer), 200
+
+
+@nodes_bp.route("/<int:node_id>", methods=["GET"])
+@login_required
+def get_node(node_id):
+    node = Node.query.get(node_id)
+    if node is None:
+        return jsonify({"error": "Node not found"}), 404
+
+    # Soft-deleted nodes 404 even for the owner (§10: direct URL never
+    # serves a tombstone, only ancestor breadcrumbs do). The structural
+    # tombstone lives in serialize_node_recursive / the ancestors loop —
+    # not here at the highlighted-node entry point.
+    if node.deleted_at is not None:
+        return jsonify({"error": "Node not found"}), 404
+
+    # A node the viewer cannot see is indistinguishable from one that does
+    # not exist: same status, same body. A 403 here would confirm that a
+    # private id is taken (the SSR /node/<id> shell and the in-text link
+    # titles already collapse the two).
+    if not can_user_access_node(node, current_user.id):
+        return jsonify({"error": "Node not found"}), 404
+
+    # Know the whole render set before touching any content: the ancestor
+    # chain (one PK lookup per level) and the full subtree (one query per
+    # level via prefetch_children instead of a lazy `children` load per
+    # node). Then unwrap every DEK the serializers below will need in one
+    # concurrent batch — a cold open used to pay ~80 ms of KMS latency per
+    # node, in sequence, and a leaf of a 120-deep thread has 120 ancestors.
+    from backend.routes.export_data import prefetch_children
+    from backend.utils.encryption import prefetch_deks
+    ancestor_nodes = []
+    current = node.parent
+    while current:
+        ancestor_nodes.append(current)
+        current = current.parent
+    prefetch_children([node])
+    render_set = list(ancestor_nodes)
+    stack = [node]
+    while stack:
+        n = stack.pop()
+        render_set.append(n)
+        stack.extend(n.children)
+    # Ancestors' child counts cover only the children this viewer can
+    # access (one grouped COUNT), not every child row.
+    from backend.utils.thread_tree import visible_child_counts
+    ancestor_child_counts = visible_child_counts(
+        [a.id for a in ancestor_nodes], current_user.id)
+    prefetch_deks(_render_set_ciphertexts(render_set))
+
+    # Build ancestors. Soft-deleted ancestors the viewer had pre-deletion
+    # access to render as tombstones — without this the breadcrumb chain
+    # would silently skip them and hide the structural fact that something
+    # was once there. Privacy-blocked ancestors (and deletions the viewer
+    # never had access to) are omitted entirely.
+    from backend.utils.serialization import serialize_node_status
+    from backend.utils.ca_feed import READ_PROMPT_KEYS
+    from backend.utils.placeholders import CA_TWEETS_PATTERN
+    ancestors = []
+    # A read prompt above this node (by key, or by the {ca_tweets}
+    # placeholder in a PoC-era prompt's copied text): the thread page's
+    # Read button then reads further instead of attaching a prompt —
+    # the same test routes/read.py applies (ca_feed.in_read_thread),
+    # taken here from content the loop decrypts anyway.
+    read_prompt_above = False
+    tombstone_below = False
+    for current in ancestor_nodes:
+        status = serialize_node_status(current, current_user.id)
+        # The count above skips deleted children, but the chain child just
+        # below, when it is a tombstone in this breadcrumb, is visible.
+        child_count = (ancestor_child_counts.get(current.id, 0)
+                       + (1 if tombstone_below else 0))
+        tombstone_below = bool(status and status.get("deleted"))
+        if status is None:  # alive + accessible
+            ancestor_content = current.get_content()
+            if not read_prompt_above and (
+                    current.get_prompt_key() in READ_PROMPT_KEYS
+                    or CA_TWEETS_PATTERN.search(ancestor_content or "")):
+                read_prompt_above = True
+            # Mirror the focal serializer's parent_user_id derivation
+            # (nodes.py:822) so the frontend's ownedByMe check works on
+            # ancestors. The walk already has current.parent in hand, no
+            # extra query.
+            ancestor_parent_user_id = _parent_user_id_of(current)
+            ancestor_data = {
+                "id": current.id,
+                "username": current.user.username if current.user else "Unknown",
+                "llm_model": current.llm_model,
+                "content": ancestor_content,
+                "preview": make_preview(ancestor_content),
+                "node_type": current.node_type,
+                "child_count": child_count,
+                "created_at": iso_utc(current.created_at),
+                "user_id": current.user_id,
+                "parent_user_id": ancestor_parent_user_id,
+                # Needed by the frontend auto-generate guard, which
+                # checks ai_usage across [node, ...ancestors] before
+                # firing an LLM reply. Without it ancestors look like
+                # ai_usage=undefined and the guard silently fails.
+                "ai_usage": current.ai_usage,
+                # Same undefined trap for Edit-from-ancestor: NodeForm
+                # would fall back to the user's default privacy AND
+                # persist it on save.
+                "privacy_level": current.privacy_level,
+            }
+            ancestor_data.update(
+                _system_prompt_fields(current, current_user.id))
+            ancestors.insert(0, ancestor_data)
+        elif status.get("deleted"):
+            ancestor_data = {
+                **status,
+                "child_count": child_count,
+                "ai_usage": current.ai_usage,
+                "privacy_level": current.privacy_level,
+            }
+            ancestor_data.update(
+                _system_prompt_fields(current, current_user.id))
+            ancestors.insert(0, ancestor_data)
+        # else: status.get('inaccessible') — skip entirely (no leak of
+        # structural fact "something is here" to a viewer who never had
+        # access).
+
+    # Filter children by privacy. Tombstones the viewer had pre-deletion
+    # access to are included; serialize_node_recursive renders them with
+    # the deletion shape and recurses into their (possibly alive) children.
+    def _child_visible(child):
+        if can_user_access_node(child, current_user.id):
+            return True
+        if child.deleted_at is None and not owner_hidden(child):
+            return False
+        s = serialize_node_status(child, current_user.id)
+        return s is not None and not s.get("inaccessible")
+
+    visible_children = [c for c in node.children if _child_visible(c)]
+
+    # Compute the focal node's effective owner so first-level children
+    # carry the right parent_user_id without an N+1.
+    focal_as_parent_user_id = _as_parent_user_id(node)
+
+    # Serialize children first (pruned tombstones drop out) so child_count
+    # reflects what the viewer actually sees.
+    serialized_children = [
+        serialized for serialized in (
+            serialize_node_recursive(
+                child, current_user.id,
+                parent_user_id=focal_as_parent_user_id,
+            )
+            for child in visible_children
+        ) if serialized is not None
+    ]
+    _order_and_count_children(serialized_children)
+    focal = _focal_own_fields(node, current_user.id)
+    in_read_thread = bool(
+        read_prompt_above
+        or focal.get("read_reply")
+        or node.get_prompt_key() in READ_PROMPT_KEYS
+        or CA_TWEETS_PATTERN.search(focal.get("content") or ""))
+    # Has this thread produced picks yet? Before the first read reply the
+    # thread page's read action is "Read" (and the generic LLM Response
+    # is not offered: a reply there would be that read); after it, "Read
+    # further". Two queries over the chain (ca_feed.read_reply_ids), only
+    # in a read thread.
+    read_reply_above = False
+    if in_read_thread:
+        from backend.utils.ca_feed import read_reply_ids
+        alive = [n for n in ancestor_nodes if n.deleted_at is None] + [node]
+        read_reply_above = bool(read_reply_ids(alive))
+    # What a new reply under this node starts with (#362): the reply form
+    # pre-selects it. The node's own ai_usage, except in the owner's read
+    # thread, where the walk looks through the read (reply_ai_usage; only
+    # there, so other threads pay no chain queries).
+    reply_usage = node.ai_usage or current_user.default_ai_usage
+    if in_read_thread and (node.human_owner_id or node.user_id) == current_user.id:
+        from backend.utils.llm_nodes import reply_ai_usage
+        reply_usage = reply_ai_usage(
+            node, current_user, parent_content=focal.get("content"))
+    # A thread started from the Glean card (#435): its root carries the
+    # stamp, and every turn offers the Glean button. The chain is in hand.
+    from backend.utils.glean import is_glean_root
+    node_data = {
+        **focal,
+        "child_count": len(serialized_children),
+        "ancestors": ancestors,
+        "children": serialized_children,
+        "in_read_thread": in_read_thread,
+        "read_reply_above": read_reply_above,
+        "reply_ai_usage": reply_usage,
+        "glean_thread": is_glean_root(
+            ancestor_nodes[-1] if ancestor_nodes else node),
+    }
+    # The owner opened a finished Read reply (FeedRender.opened_at, once).
+    # Last, because it commits: the payload above is built.
+    if focal.get("read_reply"):
+        from backend.utils.ca_feed import mark_read_reply_opened
+        mark_read_reply_opened(node, current_user.id)
     return jsonify(node_data), 200
 
 # Resolve {quote:ID} placeholders in a node's content for frontend rendering.
@@ -1059,11 +1570,10 @@ def resolve_node_quotes(node_id):
             "has_quotes": true
         }
     """
-    node = Node.query.get_or_404(node_id)
-
-    # Check if user has permission to access this node
-    if not can_user_access_node(node, current_user.id):
-        return jsonify({"error": "Not authorized to access this node"}), 403
+    # A node the user cannot see gets the same 404 as a missing one.
+    node = _visible_node(node_id)
+    if node is None:
+        return _node_not_found()
 
     content = node.get_content()
     # Node quotes + external-reference quotes ({quote_ext:ID}) in one pass
@@ -1085,6 +1595,28 @@ def resolve_node_quotes(node_id):
     ext_owner_id = node.human_owner_id or node.user_id
     ext_quote_data = get_ext_quote_data(ext_quote_ids, ext_owner_id) \
         if ext_quote_ids else {}
+    if ext_quote_ids and ext_owner_id != current_user.id:
+        # The quoted text is published with the node; the owner's read
+        # mark and verdict on each reference are not. Another viewer gets
+        # the quotes without them (the bubbles show them to the owner
+        # only anyway).
+        for quote in ext_quote_data.values():
+            if quote is not None:
+                quote.pop("read_at", None)
+                quote.pop("feedback", None)
+    elif ext_quote_ids:
+        # The owner's controls show the verdict that counts for the
+        # recommendation this reply made (#352), where it has one.
+        from backend.models import FeedPick
+        from backend.utils.reference_log import outcomes
+        recs = FeedPick.query.filter(
+            FeedPick.node_id == node.id,
+            FeedPick.external_item_id.in_(ext_quote_ids)).all()
+        counted = outcomes(recs)
+        for rec in recs:
+            data = ext_quote_data.get(rec.external_item_id)
+            if data is not None:
+                data.update(_recommendation_fields(rec, rec.item, counted))
 
     return jsonify({
         "quotes": quote_data,
@@ -1093,110 +1625,163 @@ def resolve_node_quotes(node_id):
     }), 200
 
 
-# Retrieve children of a node (as previews).
-@nodes_bp.route("/<int:node_id>/children", methods=["GET"])
+# Titles for in-text links to other nodes (`https://loore.org/node/123`).
+# MarkdownBody swaps a bare node URL for the target's title; this is the
+# batch lookup behind it. One request per rendered body, ids deduplicated
+# and capped, DEKs unwrapped in one concurrent batch like the Log page.
+NODE_TITLES_MAX_IDS = 50
+
+
+def node_link_title(node):
+    """The text a link to *node* should show: the user-given thread name
+    when the node is a named thread's root, else the first line of its
+    content stripped of markdown markers (the same rule the Log card and
+    the public article page use)."""
+    from backend.utils.public_html import split_title
+    thread = getattr(node, "thread", None)
+    if thread is not None:
+        name = (thread.get_name() or "").strip()
+        if name:
+            return name
+    title, _ = split_title(node.get_content())
+    return title
+
+
+@nodes_bp.route("/titles", methods=["GET"])
 @login_required
-def get_children(node_id):
-    node = Node.query.get_or_404(node_id)
-    def make_preview(text, length=200):
-        return text[:length] + ("..." if len(text) > length else "")
-    children = Node.query.filter_by(parent_id=node_id).all()
-    children_list = [{
-        "id": child.id,
-        "preview": make_preview(child.get_content()),
-        "child_count": len(child.children),
-        "node_type": child.node_type,
-    } for child in children]
-    return jsonify({"children": children_list}), 200
+def get_node_titles():
+    """Resolve `?ids=1,2,3` to `{"titles": {"1": {"title": ...}, "2": null}}`.
+
+    null means the viewer cannot see the node (missing, or private to
+    someone else) — the client shows "[Node inaccessible]", so the
+    response never reveals whether the id exists. A soft-deleted node the
+    viewer could see before deletion comes back as `{"deleted": true}`,
+    the same distinction the quote resolver draws."""
+    from backend.utils.encryption import prefetch_deks
+    raw = request.args.get("ids", "")
+    ids = []
+    for part in raw.split(","):
+        part = part.strip()
+        if part.isdigit() and int(part) not in ids:
+            ids.append(int(part))
+    ids = ids[:NODE_TITLES_MAX_IDS]
+    if not ids:
+        return jsonify({"titles": {}}), 200
+
+    nodes = {n.id: n for n in Node.query.filter(Node.id.in_(ids)).all()}
+    visible = [
+        nodes[i] for i in ids
+        if i in nodes and can_user_access_node(nodes[i], current_user.id)
+    ]
+    # A node whose author deleted the account (#269) titles as deleted,
+    # as it quotes and shows in threads.
+    deleted = {
+        i for i in ids
+        if i in nodes
+        and (nodes[i].deleted_at is not None or owner_hidden(nodes[i]))
+        and can_user_view_tombstone(nodes[i], current_user.id)
+    }
+    threads = {
+        t.root_node_id: t
+        for t in Thread.query.filter(
+            Thread.root_node_id.in_([n.id for n in visible])
+        ).all()
+    } if visible else {}
+    prefetch_deks(
+        [n.content for n in visible if n.id not in threads]
+        + [t.name for t in threads.values()]
+    )
+    titles = {}
+    for i in ids:
+        node = nodes.get(i)
+        if i in deleted:
+            titles[str(i)] = {"id": i, "deleted": True, "title": None}
+            continue
+        if node is None or node not in visible:
+            titles[str(i)] = None
+            continue
+        titles[str(i)] = {"id": i, "title": node_link_title(node)}
+    return jsonify({"titles": titles}), 200
+
 
 @nodes_bp.route("/models", methods=["GET"])
 @login_required
 def get_models():
-    """Return the list of available (non-deprecated) models for the frontend."""
+    """The active (non-deprecated) models for the pickers, newest first
+    within each provider. ``featured`` models make the short list;
+    ``read`` models are the only ones the Read button offers (#355);
+    ``chat`` models are the only ones every other picker offers (LLM
+    Response, the Account default). A read-only model (read, not chat)
+    stays in the list so the Read picker can offer it; a client that
+    ignores ``chat`` still cannot chat with it (a reply that is not a
+    read is refused with 400 ``code: model_read_only``)."""
     supported = current_app.config["SUPPORTED_MODELS"]
     models = [
-        {"id": model_id, "name": cfg["display_name"], "provider": cfg["provider"]}
+        {"id": model_id, "name": cfg["display_name"],
+         "provider": cfg["provider"],
+         "featured": bool(cfg.get("featured")),
+         "read": bool(cfg.get("read")),
+         "chat": bool(cfg.get("chat", True))}
         for model_id, cfg in supported.items()
-        if not cfg.get("deprecated")
+        if "provider" in cfg and not cfg.get("deprecated")
     ]
     return jsonify({"models": models}), 200
+
+
+def _model_purpose():
+    """``?purpose=`` of the default-model endpoints: "chat" (a reply,
+    the default) or "read" (the Read button); None when invalid."""
+    purpose = request.args.get("purpose") or "chat"
+    return purpose if purpose in ("chat", "read") else None
 
 
 # Get the default model from server config
 @nodes_bp.route("/default-model", methods=["GET"])
 @login_required
 def get_default_model():
-    """Return the LLM model that would be used for a fresh thread.
+    """Return the LLM model that would be used for a fresh thread:
+    user.preferred_model → DEFAULT_LLM_MODEL, or READ_DEFAULT_MODEL for
+    ``?purpose=read`` (see resolve_chat_model / resolve_read_model)."""
+    purpose = _model_purpose()
+    if purpose is None:
+        return jsonify({"error": "purpose must be 'chat' or 'read'"}), 400
+    if purpose == "read":
+        model_id, source = _suggested_read_model(None)
+    else:
+        model_id, source = resolve_chat_model(None, current_user)
+    return jsonify({"suggested_model": model_id, "source": source}), 200
 
-    Falls through user.preferred_model → server config DEFAULT_LLM_MODEL,
-    matching the backend's actual selection logic when no parent context
-    exists (see ``pick_model_for_generation``).
-    """
-    supported = current_app.config["SUPPORTED_MODELS"]
-    pref = getattr(current_user, "preferred_model", None)
-    if pref:
-        cfg = supported.get(pref)
-        if cfg and not cfg.get("deprecated"):
-            return jsonify({
-                "suggested_model": pref,
-                "source": "user_preference",
-            }), 200
-    default_model = current_app.config.get("DEFAULT_LLM_MODEL", "claude-opus-5")
-    return jsonify({
-        "suggested_model": default_model,
-        "source": "default"
-    }), 200
+
+def _suggested_read_model(anchor):
+    """The Glean picker's default: the glean model set for the user's
+    provider (#435; GPT-5.6 Luna for both during testing); (None,
+    "unavailable") when that provider has no glean model."""
+    from backend.utils.glean import GleanModelUnavailable
+    try:
+        return resolve_read_model(anchor, user=current_user)
+    except GleanModelUnavailable:
+        return None, "unavailable"
 
 
 # Get the suggested model for a new LLM response based on the thread's context
 @nodes_bp.route("/<int:node_id>/suggested-model", methods=["GET"])
 @login_required
 def get_suggested_model(node_id):
-    """
-    Return the suggested model for a new LLM response based on the thread's context.
-
-    Logic:
-    1. Walk up the thread ancestry from the given node
-    2. Find the most recent node with node_type='llm' AND llm_model IS NOT NULL
-    3. If found AND the model is active (not deprecated), return that model
-    4. If the model is deprecated or legacy, fall through to default
-    5. If no predecessor found, return system default
-    """
-    node = Node.query.get_or_404(node_id)
-    supported = current_app.config["SUPPORTED_MODELS"]
-
-    # Walk up the ancestry to find the most recent LLM node
-    current = node
-    while current:
-        if current.node_type == "llm" and current.llm_model:
-            cfg = supported.get(current.llm_model)
-            # Check if the model is supported and not deprecated
-            if cfg and not cfg.get("deprecated"):
-                return jsonify({
-                    "suggested_model": current.llm_model,
-                    "source": "predecessor"
-                }), 200
-            # Deprecated or legacy model — fall through
-            elif cfg or current.llm_model == "gpt-4.5-preview":
-                break
-        current = current.parent
-
-    # No usable predecessor — try the user's account preference
-    pref = getattr(current_user, "preferred_model", None)
-    if pref:
-        cfg = supported.get(pref)
-        if cfg and not cfg.get("deprecated"):
-            return jsonify({
-                "suggested_model": pref,
-                "source": "user_preference",
-            }), 200
-
-    # Fall back to server default
-    default_model = current_app.config.get("DEFAULT_LLM_MODEL", "claude-opus-5")
-    return jsonify({
-        "suggested_model": default_model,
-        "source": "default"
-    }), 200
+    """The model a new reply under *node_id* defaults to: the same walk
+    the reply routes apply when no model is sent. ``?purpose=read`` asks
+    for the Read button's default instead. ``source`` is "predecessor"
+    when an earlier reply in the thread decided it."""
+    node = _visible_node(node_id)
+    if node is None:
+        return _node_not_found()
+    purpose = _model_purpose()
+    if purpose is None:
+        return jsonify({"error": "purpose must be 'chat' or 'read'"}), 400
+    if purpose == "read":
+        model_id, source = _suggested_read_model(node)
+    else:
+        model_id, source = resolve_chat_model(node, current_user)
+    return jsonify({"suggested_model": model_id, "source": source}), 200
 
 # Request an LLM response based on the thread (the ancestors' texts are joined as a prompt).
 @nodes_bp.route("/<int:node_id>/llm", methods=["POST"])
@@ -1254,9 +1839,17 @@ def request_llm_response(node_id):
         return jsonify({"error": str(e)}), 410
     except UserExportValidationError as e:
         # Misconfigured {user_export} placeholder — abort BEFORE creating
-        # any LLM node so the user's feed isn't polluted with a stub
+        # any LLM node so the user's Log isn't polluted with a stub
         # failed response. Frontend surfaces this message as a toast.
         return jsonify({"error": str(e)}), 400
+    except AIUsageRefused as e:
+        # The node, a node above it, or the reply's own setting keeps the
+        # thread away from AI: no reply, nothing created.
+        return ai_usage_refused_response(e)
+    except ReadOnlyModelRefused as e:
+        # A chat reply asked for on a read-only model: refused, never
+        # moved to another model. Nothing created.
+        return read_only_model_response(e)
 
     current_app.logger.info(f"Enqueued LLM completion task {task_id} for parent node {parent_node.id}, new node {llm_node.id}")
 
@@ -1277,15 +1870,16 @@ def add_linked_node(node_id):
     additional_text = data.get("content", "")  # Optional extra text.
     if not linked_node_id:
         return jsonify({"error": "linked_node_id is required"}), 400
-    # Validate that the node to be linked exists and is alive (privacy filter
-    # also excludes soft-deleted, but we want a distinct 410 if specifically
-    # the target is deleted vs 404 if it never existed).
+    # Validate that the node to be linked exists, is visible to the user
+    # and is alive. A node the user cannot see gets the same 404 as one
+    # that does not exist; a deleted one the user could see gets a 410.
     linked_node = Node.query.get(linked_node_id)
-    if not linked_node:
+    if linked_node is None or not can_user_see_node_or_tombstone(
+            linked_node, current_user.id):
         return jsonify({"error": "Linked node not found"}), 404
     if linked_node.deleted_at is not None:
         return jsonify({"error": "Linked node has been deleted"}), 410
-    # Race A guard: lock parent and reject if soft-deleted.
+    # Race A guard: lock parent and reject if soft-deleted or not visible.
     from backend.utils.node_deletion import assert_parent_alive
     err = assert_parent_alive(node_id)
     if err is not None:
@@ -1331,9 +1925,12 @@ def get_audio_urls(node_id):
 
     Response: 200 OK – `{ original_url: str|null, tts_url: str|null }`
               202 Accepted – when TTS generation is in progress
-              404     – when neither audio exists and no generation in progress.
+              404     – when neither audio exists and no generation in progress,
+                        or the node is not visible to the user.
     """
-    node = Node.query.get_or_404(node_id)
+    node = _visible_node(node_id)
+    if node is None:
+        return _node_not_found()
 
     # Public nodes: any authenticated user can listen.
     # Non-public nodes: require voice-mode (admin or paid plan).
@@ -1397,7 +1994,9 @@ def get_audio_chunks(node_id):
     Browsers incorrectly calculate duration from timestamps for WebM files
     with non-zero start times (common with MediaRecorder timeslice recordings).
     """
-    node = Node.query.get_or_404(node_id)
+    node = _visible_node(node_id)
+    if node is None:
+        return _node_not_found()
 
     # Public nodes: any authenticated user can listen.
     # Non-public nodes: require voice-mode (admin or paid plan).
@@ -1478,7 +2077,9 @@ def download_audio(node_id):
     if fmt not in ('original', 'mp3'):
         return jsonify({"error": "Unsupported format, use 'original' or 'mp3'"}), 400
 
-    node = Node.query.get_or_404(node_id)
+    node = _visible_node(node_id)
+    if node is None:
+        return _node_not_found()
 
     if node.privacy_level != "public":
         if not current_user.has_voice_mode:
@@ -1578,9 +2179,12 @@ def generate_tts(node_id):
     In a production setup this would queue a background task.  For the purpose
     of unit tests and the MVP we generate a dummy file synchronously and return
     `202 Accepted` (if generation was triggered) or `200 OK` (if it already
-    exists).
+    exists). The user must be able to see the node (404 otherwise); the
+    speech is billed to them.
     """
-    node = Node.query.get_or_404(node_id)
+    node = _visible_node(node_id)
+    if node is None:
+        return _node_not_found()
 
     # If original recording exists we stream that – generating TTS is not
     # allowed.
@@ -1603,6 +2207,11 @@ def generate_tts(node_id):
             "status": node.tts_task_status,
             "node_id": node.id
         }), 202
+
+    # New speech sends the text to a model: not for a node whose
+    # ai_usage is 'none', a model's reply included.
+    if not speech_allowed(node):
+        return jsonify({"error": SPEECH_REFUSED_MESSAGE}), 403
 
     # Check if OpenAI API key is configured
     api_key = get_openai_chat_key(current_app.config)
@@ -1643,12 +2252,9 @@ def generate_tts(node_id):
 @login_required
 def get_transcription_status(node_id):
     """Get the current transcription status for a node."""
-    node = Node.query.get_or_404(node_id)
-
-    # Check ownership (can_user_access_node handles LLM nodes by walking
-    # up the parent chain to find the human owner)
-    if not can_user_access_node(node) and not getattr(current_user, "is_admin", False):
-        return jsonify({"error": "Unauthorized"}), 403
+    node = _visible_node(node_id)
+    if node is None:
+        return _node_not_found()
 
     # Get task status from Celery if still processing
     task_info = None
@@ -1668,30 +2274,68 @@ def get_transcription_status(node_id):
             current_app.logger.warning(f"Failed to check Celery task status: {e}")
             # Don't fail the request - just return DB status without real-time info
 
-    response = jsonify({
+    # The error text goes to the recording's author only, as the
+    # warnings below and the transcription stream do.
+    payload = {
         "node_id": node.id,
         "status": node.transcription_status,
         "progress": node.transcription_progress or 0,
-        "error": node.transcription_error,
+        "error": (node.transcription_error
+                  if node.user_id == current_user.id else None),
         "started_at": iso_utc(node.transcription_started_at),
         "completed_at": iso_utc(node.transcription_completed_at),
         "content": node.get_content() if node.transcription_status == 'completed' else None,
         "task_info": task_info  # Real-time progress from Celery
-    })
+    }
+    if (node.transcription_status == 'completed'
+            and node.user_id == current_user.id):
+        # A Text-mode upload's reply (#342) and why one was skipped, so
+        # the form can land on the entry with ?awaitLlm or say why not.
+        # Owner only: a warning can say the owner hit the spend cap.
+        from backend.utils.task_warnings import load_task_warnings
+        reply = _reply_below_transcript(node)
+        if reply is not None:
+            payload["llm_node_id"] = reply.id
+        warnings = load_task_warnings(node)
+        if warnings:
+            payload["warnings"] = warnings
+    response = jsonify(payload)
     response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
     return response
+
+
+def _reply_below_transcript(node, max_parts=50):
+    """The LLM reply under an uploaded transcript, or None. A long
+    transcript is split into a serial chain (node_split: each part the
+    only child of the previous, created_at +1 ms), and the reply hangs
+    under the chain's tip. Only split parts are walked, never a later
+    reply the user wrote."""
+    from datetime import timedelta
+    parts_end = (node.created_at or datetime.utcnow()) + timedelta(seconds=1)
+    current = node
+    for _ in range(max_parts):
+        children = Node.query.filter(
+            Node.parent_id == current.id, Node.deleted_at.is_(None)).all()
+        llm = [c for c in children if c.node_type == "llm"]
+        if llm:
+            return llm[0]
+        if len(children) != 1:
+            return None
+        part = children[0]
+        if (part.user_id != node.user_id or part.created_at is None
+                or part.created_at > parts_end):
+            return None
+        current = part
+    return None
 
 
 @nodes_bp.route("/<int:node_id>/llm-status", methods=["GET"])
 @login_required
 def get_llm_status(node_id):
     """Get the current LLM completion status for a node."""
-    node = Node.query.get_or_404(node_id)
-
-    # Check ownership (can_user_access_node handles LLM nodes by walking
-    # up the parent chain to find the human owner)
-    if not can_user_access_node(node) and not getattr(current_user, "is_admin", False):
-        return jsonify({"error": "Unauthorized"}), 403
+    node = _visible_node(node_id)
+    if node is None:
+        return _node_not_found()
 
     # Get task status from Celery if still processing
     task_info = None
@@ -1703,7 +2347,10 @@ def get_llm_status(node_id):
 
             if task.state == 'PROGRESS':
                 task_info = task.info
-            elif task.state == 'SUCCESS':
+            elif task.state == 'SUCCESS' and node.llm_task_status not in (
+                    'failed', 'cancelled'):
+                # A task that returned after marking its node failed or
+                # cancelled (spend cap, a withdrawn batch) keeps that.
                 node.llm_task_status = 'completed'
                 db.session.commit()
                 # Get the created node ID from task result
@@ -1722,40 +2369,73 @@ def get_llm_status(node_id):
             current_app.logger.warning(f"Failed to check Celery task status: {e}")
             # Don't fail the request - just return DB status without real-time info
 
+    # A failed reply's error text and the task's warnings go to the
+    # reply's owner only; anyone else sees the status without them.
+    owner = is_node_owner(node, current_user.id)
     response_data = {
         "node_id": node.id,
         "status": node.llm_task_status,
         "progress": node.llm_task_progress or 0,
-        "error": node.llm_task_error,
+        "error": node.llm_task_error if owner else None,
         "task_info": task_info,
         # Within-turn retrieval chaining (#158): non-null when this node was
         # finalized as an interim retrieval step and the answer lives on the
         # linked continuation node.
         "continuation_node_id": node.continuation_node_id,
+        # #367: voice TTS that started before the reply finished (spoken
+        # while written) — the browser attaches its TTS stream.
+        "tts_task_status": node.tts_task_status,
+        "tts_streaming": node.tts_task_id == "voice-stream",
     }
 
-    # Include content when completed (needed by VoicePage polling)
-    if node.llm_task_status == 'completed':
+    # Include content when completed (needed by VoicePage polling) and
+    # when cancelled (a withdrawn read: the text says only that it was
+    # cancelled; why is in "error", for the owner only).
+    if node.llm_task_status in ('completed', 'cancelled'):
         response_data["content"] = node.get_content()
 
-    # Include tool call metadata if present
+    # Include tool call metadata if present: in full for the reply's
+    # owner, each action's name and outcome for anyone else.
     if node.tool_calls_meta:
-        import json
-        try:
-            response_data["tool_calls_meta"] = json.loads(
-                node.tool_calls_meta
-            )
-        except (json.JSONDecodeError, TypeError):
-            pass
+        from backend.utils.tool_meta import tool_calls_meta_for
+        visible = tool_calls_meta_for(node, current_user.id)
+        if visible:
+            response_data["tool_calls_meta"] = visible
+    # Batch stage ({ca_tweets}): the synchronous part is done and the
+    # turn is queued at the provider. The thread page uses this to stop
+    # the generate spinner and hand the wait to the pending node.
+    batch = next((m for m in response_data.get("tool_calls_meta") or []
+                  if isinstance(m, dict) and m.get("name") == "_batch"),
+                 None)
+    if batch and batch.get("status") in ("submitted", "cancelling") \
+            and node.llm_task_status == "processing":
+        response_data["stage"] = "batch"
+        response_data["batch_submitted_at"] = batch.get("submitted_at")
+    if batch and node.llm_task_status == "completed":
+        from backend.models import FeedPick
+        response_data["feed_picks_count"] = FeedPick.query.filter_by(
+            node_id=node.id, kind="read").count()
 
     # Include user-facing task warnings (rendered as toasts by
     # frontend useLlmTaskWarnings hook). Always include the key so the
-    # client can rely on its presence.
+    # client can rely on its presence. Owner only: a warning can say the
+    # owner hit the spend cap, or why their reply was not started.
     from backend.utils.task_warnings import load_task_warnings
-    response_data["warnings"] = load_task_warnings(node)
+    response_data["warnings"] = load_task_warnings(node) if owner else []
 
     if created_node:
         response_data["node"] = created_node
+
+    # A finished Read reply returned to its owner's thread page counts as
+    # opened (FeedRender.opened_at, once; a no-op for any other node) only
+    # when the page says it is visible (?visible=1, sent by the web
+    # client's poll while document.visibilityState is 'visible'). The page
+    # keeps polling in a background tab, and a request without the flag (an
+    # older client, the iPhone app today, a hidden tab) never counts. Last,
+    # because it commits.
+    if "content" in response_data and request.args.get("visible") == "1":
+        from backend.utils.ca_feed import mark_read_reply_opened
+        mark_read_reply_opened(node, current_user.id)
 
     response = jsonify(response_data)
     response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
@@ -1766,12 +2446,9 @@ def get_llm_status(node_id):
 @login_required
 def get_tts_status(node_id):
     """Get the current TTS generation status for a node."""
-    node = Node.query.get_or_404(node_id)
-
-    # Check ownership (can_user_access_node handles LLM nodes by walking
-    # up the parent chain to find the human owner)
-    if not can_user_access_node(node) and not getattr(current_user, "is_admin", False):
-        return jsonify({"error": "Unauthorized"}), 403
+    node = _visible_node(node_id)
+    if node is None:
+        return _node_not_found()
 
     # Get task status from Celery if still processing
     task_info = None
@@ -1824,13 +2501,39 @@ def get_tts_status(node_id):
 # Chunked upload endpoints
 # ---------------------------------------------------------------------------
 
+# The client names each chunked upload, and the name becomes a folder under
+# chunks/<user id>/. The web app sends "<ms>-<base36>" and the iOS app
+# "<ms>-<UUID prefix>"; only letters, digits, "-" and "_" are accepted.
+_UPLOAD_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
+
+
+def _upload_chunk_dir(upload_id):
+    """The folder that stages the current user's upload *upload_id*, or
+    None when *upload_id* is not a valid id or the folder, with symlinks
+    resolved, would not sit directly in the user's own chunks folder.
+    Every upload route builds the path here and nowhere else."""
+    if not isinstance(upload_id, str) or not _UPLOAD_ID_RE.fullmatch(upload_id):
+        return None
+    user_chunks = (AUDIO_STORAGE_ROOT / "chunks" / str(current_user.id)).resolve()
+    chunk_dir = (user_chunks / upload_id).resolve()
+    if chunk_dir.parent != user_chunks:
+        return None
+    return chunk_dir
+
+
+def _invalid_upload_id():
+    return jsonify({"error": "Invalid upload_id"}), 400
+
 
 @nodes_bp.route("/upload/init", methods=["POST"])
 @login_required
+@require_spend_headroom
 def init_chunked_upload():
     """Initialize a chunked upload session.
 
-    Creates a placeholder node and prepares for chunk reception.
+    Creates a placeholder node and prepares for chunk reception. A capped
+    user gets 402 before the node exists (#341); the chunks and finalize of
+    an upload accepted here are not cap-checked.
 
     Request body:
     {
@@ -1860,6 +2563,9 @@ def init_chunked_upload():
     # Validate required fields
     if not all([filename, filesize, total_chunks, upload_id]):
         return jsonify({"error": "Missing required fields"}), 400
+    chunk_dir = _upload_chunk_dir(upload_id)
+    if chunk_dir is None:
+        return _invalid_upload_id()
 
     # Validate file type
     if not _allowed_file(filename):
@@ -1881,13 +2587,26 @@ def init_chunked_upload():
     if err is not None:
         return err
 
+    agentic, auto_reply_model, err = _upload_reply_options(
+        data, parent_id, ai_usage)
+    if err is not None:
+        return err
+    system_node = None
+    if agentic:
+        from backend.utils.session_helpers import create_agentic_root
+        from backend.utils.glean import stamp_glean_entry
+        system_node = create_agentic_root(
+            current_user.id, "textmode", privacy_level, ai_usage)
+        # Started from the Glean card (#435).
+        stamp_glean_entry(system_node, current_user, data.get("entry"))
+
     # Create placeholder node
     placeholder_text = "[Voice note – upload in progress]"
     from backend.utils.tokens import approximate_token_count as _atc3
     node = Node(
         user_id=current_user.id,
         human_owner_id=current_user.id,
-        parent_id=parent_id,
+        parent_id=system_node.id if system_node else parent_id,
         node_type=node_type,
         transcription_status='pending',
         privacy_level=privacy_level,
@@ -1899,7 +2618,6 @@ def init_chunked_upload():
     db.session.commit()
 
     # Create directory for chunk storage
-    chunk_dir = AUDIO_STORAGE_ROOT / f"chunks/{current_user.id}/{upload_id}"
     chunk_dir.mkdir(parents=True, exist_ok=True)
 
     # Store upload metadata
@@ -1908,7 +2626,9 @@ def init_chunked_upload():
         "filename": filename,
         "filesize": filesize,
         "total_chunks": total_chunks,
-        "uploaded_chunks": []
+        "uploaded_chunks": [],
+        # Read back at finalize, which enqueues the transcription (#342).
+        "auto_reply_model": auto_reply_model,
     }
 
     import json
@@ -1921,10 +2641,13 @@ def init_chunked_upload():
         f"{filename} ({filesize / (1024 * 1024):.1f} MB, {total_chunks} chunks)"
     )
 
-    return jsonify({
+    response = {
         "node_id": node.id,
         "upload_id": upload_id
-    }), 201
+    }
+    if system_node is not None:
+        response["conversation_id"] = system_node.id
+    return jsonify(response), 201
 
 
 @nodes_bp.route("/upload/chunk", methods=["POST"])
@@ -1948,6 +2671,9 @@ def upload_chunk():
 
     if not all([chunk_index is not None, upload_id, node_id]):
         return jsonify({"error": "Missing required fields"}), 400
+    chunk_dir = _upload_chunk_dir(upload_id)
+    if chunk_dir is None:
+        return _invalid_upload_id()
 
     try:
         chunk_index = int(chunk_index)
@@ -1961,7 +2687,6 @@ def upload_chunk():
         return jsonify({"error": "Unauthorized"}), 403
 
     # Save chunk
-    chunk_dir = AUDIO_STORAGE_ROOT / f"chunks/{current_user.id}/{upload_id}"
     if not chunk_dir.exists():
         return jsonify({"error": "Upload session not found"}), 404
 
@@ -2013,6 +2738,9 @@ def finalize_chunked_upload():
 
     if not all([upload_id, node_id]):
         return jsonify({"error": "Missing required fields"}), 400
+    chunk_dir = _upload_chunk_dir(upload_id)
+    if chunk_dir is None:
+        return _invalid_upload_id()
 
     try:
         node_id = int(node_id)
@@ -2025,7 +2753,6 @@ def finalize_chunked_upload():
         return jsonify({"error": "Unauthorized"}), 403
 
     # Load metadata
-    chunk_dir = AUDIO_STORAGE_ROOT / f"chunks/{current_user.id}/{upload_id}"
     if not chunk_dir.exists():
         return jsonify({"error": "Upload session not found"}), 404
 
@@ -2092,7 +2819,11 @@ def finalize_chunked_upload():
     if api_key:
         from backend.tasks.transcription import transcribe_audio
 
-        task = transcribe_audio.delay(node.id, str(target_path), metadata["filename"])
+        auto_reply_model = metadata.get("auto_reply_model")
+        task = transcribe_audio.delay(
+            node.id, str(target_path), metadata["filename"],
+            **({"auto_reply_model": auto_reply_model}
+               if auto_reply_model else {}))
         node.transcription_task_id = task.id
         db.session.commit()
 
@@ -2124,8 +2855,9 @@ def cleanup_chunked_upload():
 
     if not upload_id:
         return jsonify({"error": "Missing upload_id"}), 400
-
-    chunk_dir = AUDIO_STORAGE_ROOT / f"chunks/{current_user.id}/{upload_id}"
+    chunk_dir = _upload_chunk_dir(upload_id)
+    if chunk_dir is None:
+        return _invalid_upload_id()
 
     if chunk_dir.exists():
         import shutil
@@ -2141,36 +2873,13 @@ def cleanup_chunked_upload():
 
 
 # ---------------------------------------------------------------------------
-# Media serving endpoint (simple/dev only – not for production)
-# ---------------------------------------------------------------------------
-
-
-@nodes_bp.route("/media/<path:filename>", methods=["GET"])
-def serve_audio_file(filename):
-    """Serve files from the AUDIO_STORAGE_ROOT with support for range requests.
-
-    This is a **development‑only** helper to unblock tests.  In production the
-    app would be served by the web server (e.g. nginx) or a cloud storage
-    bucket.  Range requests are *not* implemented; whole file is returned.
-
-    Note: The production media blueprint (media_bp at /media) handles
-    encrypted .enc files. This endpoint is only used in tests.
-    """
-    file_path = AUDIO_STORAGE_ROOT / filename
-    if not file_path.is_file():
-        return jsonify({"error": "File not found"}), 404
-    from flask import send_file
-
-    return send_file(file_path)
-
-
-# ---------------------------------------------------------------------------
 # Streaming Transcription endpoints (real-time transcription during recording)
 # ---------------------------------------------------------------------------
 
 
 @nodes_bp.route("/streaming/init", methods=["POST"])
 @login_required
+@require_spend_headroom
 def init_streaming_transcription():
     """Initialize a streaming transcription session.
 
@@ -2234,7 +2943,8 @@ def init_streaming_transcription():
     db.session.commit()
 
     # Create directory for chunk storage
-    chunk_dir = AUDIO_STORAGE_ROOT / f"streaming/{current_user.id}/{session_id}"
+    chunk_dir = storage_path(
+        AUDIO_STORAGE_ROOT, "streaming", current_user.id, session_id)
     chunk_dir.mkdir(parents=True, exist_ok=True)
 
     current_app.logger.info(
@@ -2296,8 +3006,9 @@ def upload_audio_chunk(node_id):
     if node.streaming_session_id != session_id:
         return jsonify({"error": "Session ID mismatch"}), 400
 
-    # Save chunk to disk
-    chunk_dir = AUDIO_STORAGE_ROOT / f"streaming/{current_user.id}/{session_id}"
+    # Save chunk to disk (session_id equals the node's own, checked above)
+    chunk_dir = storage_path(
+        AUDIO_STORAGE_ROOT, "streaming", current_user.id, session_id)
     if not chunk_dir.exists():
         return jsonify({"error": "Streaming session not found"}), 404
 
@@ -2437,11 +3148,10 @@ def get_streaming_status(node_id):
 
     Returns status of all chunks and overall transcription progress.
     """
-    node = Node.query.get_or_404(node_id)
-
-    # Check ownership
-    if node.user_id != current_user.id and not getattr(current_user, "is_admin", False):
-        return jsonify({"error": "Unauthorized"}), 403
+    # Owner only, admins included; anyone else gets the missing-node 404.
+    node = Node.query.get(node_id)
+    if node is None or node.user_id != current_user.id:
+        return _node_not_found()
 
     if not node.streaming_transcription:
         return jsonify({"error": "Node is not in streaming transcription mode"}), 400
@@ -2486,7 +3196,7 @@ def get_streaming_status(node_id):
 @nodes_bp.route("/<int:node_id>/pin", methods=["POST"])
 @login_required
 def pin_node(node_id):
-    """Pin a node to the current user's profile (Dashboard + Feed)."""
+    """Pin a node to the current user's Log."""
     node = Node.query.get_or_404(node_id)
 
     owner_id = node.human_owner_id or node.user_id
@@ -2526,6 +3236,87 @@ def unpin_node(node_id):
     return jsonify({"message": "Node unpinned"}), 200
 
 
+# ---------------------------------------------------------------------------
+# Thread name (Log card label)
+# ---------------------------------------------------------------------------
+
+THREAD_NAME_MAX_LEN = 120
+
+
+@nodes_bp.route("/<int:node_id>/thread-name", methods=["PUT"])
+@login_required
+def set_thread_name(node_id):
+    """Name a thread for the Log. Body: {"thread_name": "..."}.
+
+    The name is a Thread row keyed by the ROOT node (the Log card's
+    thread_root_id); naming a reply is rejected. Empty or whitespace-only
+    clears the name (deletes the row) so the card falls back to the
+    entry's own first-line title.
+
+    The node row itself is never written, so a rename does not bump the
+    root's updated_at — that timestamp drives the Log's "newest node"
+    jump and the profile freshness gates, and a label is not new writing.
+    """
+    node = Node.query.get_or_404(node_id)
+
+    owner_id = node.human_owner_id or node.user_id
+    if owner_id != current_user.id:
+        return jsonify({"error": "Only the owner can rename this thread"}), 403
+
+    if node.parent_id is not None:
+        return jsonify({"error": "Only a thread root can be named"}), 400
+
+    data = request.get_json(silent=True) or {}
+    raw = data.get("thread_name")
+    if raw is not None and not isinstance(raw, str):
+        return jsonify({"error": "thread_name must be a string"}), 400
+    name = (raw or "").strip() or None
+    if name is not None and len(name) > THREAD_NAME_MAX_LEN:
+        return jsonify({
+            "error": f"Thread name is limited to {THREAD_NAME_MAX_LEN} characters",
+            "max_length": THREAD_NAME_MAX_LEN,
+        }), 400
+
+    row = db.session.get(Thread, node.id)
+    if name is None:
+        if row is not None:
+            db.session.delete(row)
+    else:
+        if row is None:
+            row = Thread(root_node_id=node.id)
+            db.session.add(row)
+        row.set_name(name)
+    db.session.commit()
+
+    return jsonify({"thread_name": name}), 200
+
+
+@nodes_bp.route("/<int:node_id>/delete-impact", methods=["GET"])
+@login_required
+def delete_impact(node_id):
+    """What soft-deleting this node would leave behind, for the dialog.
+
+    Query: `delete_descendants` as for DELETE. Returns
+    `orphaned_system_prompt_id`: the thread root's id when the delete
+    would leave the session with only its system prompt alive (so the
+    dialog can offer deleting the prompt too), else null.
+    """
+    from backend.utils.node_deletion import orphaned_system_prompt_id
+
+    raw = request.args.get("delete_descendants")
+    with_descendants = str(raw).lower() in ("true", "1", "yes")
+
+    node = Node.query.get_or_404(node_id)
+    if not can_user_edit_node(node, current_user.id):
+        return jsonify({"error": "Not authorized"}), 403
+
+    return jsonify({
+        "orphaned_system_prompt_id": orphaned_system_prompt_id(
+            node, current_user.id, with_descendants=with_descendants,
+        ),
+    }), 200
+
+
 @nodes_bp.route("/<int:node_id>", methods=["DELETE"])
 @login_required
 def delete_node(node_id):
@@ -2534,13 +3325,28 @@ def delete_node(node_id):
     Sets `deleted_at` rather than removing rows. The Celery cleanup task
     finalizes purge after SOFT_DELETE_GRACE_DAYS (see
     backend/tasks/node_cleanup.py).
+
+    Flags (query string or JSON body): `delete_descendants`, and
+    `delete_orphaned_prompt` — also tombstone the thread's system-prompt
+    root if this delete leaves nothing alive under it.
     """
     from backend.constants import SOFT_DELETE_GRACE_DAYS
-    from backend.utils.node_deletion import soft_delete_node
+    from backend.utils.node_deletion import (
+        soft_delete_node, prompt_root_of, soft_delete_session_if_empty,
+    )
 
-    raw = (request.args.get("delete_descendants")
-           or (request.get_json(silent=True) or {}).get("delete_descendants"))
-    with_descendants = str(raw).lower() in ("true", "1", "yes")
+    body = request.get_json(silent=True) or {}
+
+    def flag(name):
+        raw = request.args.get(name) or body.get(name)
+        return str(raw).lower() in ("true", "1", "yes")
+
+    with_descendants = flag("delete_descendants")
+    # The dialog's "delete the system prompt too" answer. Checked again
+    # here under the root's row lock rather than trusted from the
+    # delete-impact call: an entry added between that call and this one
+    # (another device, the Voice chain) keeps the session.
+    delete_orphaned_prompt = flag("delete_orphaned_prompt")
 
     # Pre-lock 403 short-circuit — cheap and avoids holding a row lock to
     # tell an unauthorized client they can't delete.
@@ -2549,14 +3355,34 @@ def delete_node(node_id):
         return jsonify({"error": "Not authorized"}), 403
 
     try:
-        flagged = soft_delete_node(
+        # Lock the prompt root first (root, then subtree — the same order
+        # as every other walk), so no entry can be inserted under it
+        # while we decide whether it is left empty.
+        prompt_root = (
+            prompt_root_of(pre, current_user.id, lock=True)
+            if delete_orphaned_prompt else None
+        )
+        deleted = soft_delete_node(
             node_id, current_user.id, with_descendants=with_descendants,
         )
-        if flagged is None:
+        if deleted is None:
             # Concurrent purge or permission flip between the pre-check and
             # the locking re-fetch.
             db.session.rollback()
             return jsonify({"error": "Not found or not authorized"}), 404
+        # Every node this request tombstones: the target, the descendants
+        # the cascade took, and the prompt root when it goes with them.
+        gone_ids = list(deleted.ids)
+        pinned_ids = list(deleted.pinned_ids)
+        orphaned_prompt_deleted = None
+        session_gone = (
+            soft_delete_session_if_empty(prompt_root, current_user.id)
+            if prompt_root is not None else None
+        )
+        if session_gone is not None:
+            orphaned_prompt_deleted = prompt_root.id
+            gone_ids += session_gone.ids
+            pinned_ids += session_gone.pinned_ids
         # Deleting a published share's public node via the node UI must
         # reconcile the ShareDraft — otherwise the Share page keeps saying
         # "published" and links a tombstone (#228). Deleting IS revoking.
@@ -2571,17 +3397,29 @@ def delete_node(node_id):
             # Pointer kept: republishing unchanged content undeletes this
             # node (identity follows content).
         db.session.commit()
-        if pre.public_slug or pre.privacy_level == "public":
-            from backend.utils.public_cache import invalidate_for_node
-            invalidate_for_node(pre)
-        return jsonify({
-            "scheduled": flagged,
-            "grace_days": SOFT_DELETE_GRACE_DAYS,
-        }), 200
     except Exception as e:
         db.session.rollback()
         current_app.logger.error(f"Error soft-deleting node {node_id}: {e}")
         return jsonify({"error": "Error deleting node", "details": str(e)}), 500
+
+    # The delete is committed: from here on the answer is 200 whatever
+    # happens, or the client keeps a card for a node that is gone.
+    # Public pages are cached server-side and must stop being served
+    # now. invalidate_deleted never raises; it logs its own failures.
+    from backend.utils.public_cache import invalidate_deleted
+    invalidate_deleted(node_id, gone_ids)
+    return jsonify({
+        "scheduled": len(gone_ids),
+        "grace_days": SOFT_DELETE_GRACE_DAYS,
+        # The session root's id when `delete_orphaned_prompt` took it
+        # too, else null — the client then knows the thread is gone.
+        "orphaned_prompt_deleted": orphaned_prompt_deleted,
+        # Pinned nodes this delete took: each is a Log card of its
+        # own (a reply pinned under the target, possibly in someone
+        # else's thread; the prompt root when it was pinned), so the
+        # Log drops those cards too.
+        "deleted_pinned_ids": pinned_ids,
+    }), 200
 
 
 @nodes_bp.route("/<int:node_id>/tts-chapters", methods=["GET"])
@@ -2594,33 +3432,12 @@ def get_tts_chapters(node_id):
     chunk durations) so the player can jump within the merged file and
     map chapters onto the chunked queue alike.
     """
-    node = Node.query.get_or_404(node_id)
-    if not can_user_access_node(node) and not getattr(
-            current_user, "is_admin", False):
-        return jsonify({"error": "Unauthorized"}), 403
+    node = _visible_node(node_id)
+    if node is None:
+        return _node_not_found()
 
     from backend.models import TTSChunk
+    from backend.utils.audio_processing import tts_chapters
     chunks = TTSChunk.query.filter_by(node_id=node_id).order_by(
         TTSChunk.chunk_index).all()
-    if not chunks:
-        return jsonify({"chapters": []}), 200
-
-    chapters = []
-    elapsed = 0.0
-    seen_sections = set()
-    for chunk in chunks:
-        key = chunk.section_index
-        if key is not None and key not in seen_sections:
-            seen_sections.add(key)
-            chapters.append({
-                "section_index": key,
-                "title": chunk.section_title or "Introduction",
-                "chunk_index": chunk.chunk_index,
-                "start_time": round(elapsed, 2),
-            })
-        elapsed += chunk.duration or 0.0
-
-    # A single untitled section = no real chapters — don't render a list
-    if len(chapters) <= 1:
-        return jsonify({"chapters": []}), 200
-    return jsonify({"chapters": chapters}), 200
+    return jsonify({"chapters": tts_chapters(chunks)}), 200

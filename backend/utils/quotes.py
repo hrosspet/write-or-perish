@@ -17,7 +17,7 @@ from datetime import datetime
 from typing import Tuple, List, Dict, Optional, Set
 from celery.utils.log import get_task_logger
 
-from backend.utils.timefmt import iso_utc
+from backend.utils.timefmt import iso_utc, local_stamp
 
 logger = get_task_logger(__name__)
 
@@ -31,6 +31,21 @@ EXT_QUOTE_PLACEHOLDER_PATTERN = r'\{quote_ext:(\d+)\}'
 
 # Default max depth for recursive quote resolution in direct conversation
 DEFAULT_MAX_DEPTH = 3
+
+# Preamble body for a pinned profile/todo/artifact version whose ai_usage
+# keeps it from the model (#340). The thread keeps its "(ref #N)" line, so
+# the preamble says why the content is missing instead of dropping the ref.
+AI_BLOCKED_ARTIFACT_TEXT = "[AI usage not permitted by author]"
+
+
+def ai_blocked_artifact(row) -> bool:
+    """True when an artifact row (profile, todo, UserArtifact) must not
+    reach a model: its ai_usage is outside AI_ALLOWED. Rows without an
+    ai_usage column (UserPrompt) are never blocked."""
+    from backend.utils.privacy import AI_ALLOWED
+    if not hasattr(row, "ai_usage"):
+        return False
+    return row.ai_usage not in AI_ALLOWED
 
 
 def find_quote_ids(content: str) -> List[int]:
@@ -64,6 +79,7 @@ def get_ext_quote_data(item_ids: List[int], user_id: int) -> Dict[int, Optional[
     there is no cross-user sharing, so access == ownership.
     """
     from backend.models import ExternalItem
+    from backend.utils import document_reference
     from backend.utils.timefmt import iso_utc
 
     result = {}
@@ -72,22 +88,54 @@ def get_ext_quote_data(item_ids: List[int], user_id: int) -> Dict[int, Optional[
         if item is None or item.user_id != user_id:
             result[item_id] = None
             continue
+        # An uploaded document's title and author live in its encrypted
+        # text (utils/document_reference); the card shows them as fields.
+        title, author, content = document_reference.display(
+            item, item.get_content() or "")
         result[item_id] = {
             "id": item.id,
-            "content": item.get_content(),
+            "content": content,
             "source": item.source,
-            "author_handle": item.author_handle,
+            "author_handle": author,
+            # The tweet card's byline (#435): display name, then handle.
+            "author_name": item.author_name,
+            "title": title,
             "url": item.url,
             "posted_at": iso_utc(item.posted_at) if item.posted_at else None,
+            # The reference's owner and their own read mark: the quote
+            # bubble offers "Mark as read" only to the owner (the read
+            # endpoint is owner-only), so a viewer of a public node just
+            # sees the quote.
+            "user_id": item.user_id,
+            "read_at": iso_utc(item.read_at) if item.read_at else None,
+            "feedback": item.feedback,
         }
     return result
+
+
+def quote_stamp(iso: Optional[str], tz_name: Optional[str] = None) -> Optional[str]:
+    """Render an ``iso_utc`` string as ``YYYY-MM-DD HH:MM TZ`` in ``tz_name``
+    (UTC when unset) — the same rendering thread messages carry, minus the
+    brackets, so a quoted node's date reads like its neighbours' (#130).
+    Returns ``None`` when there is no timestamp to render."""
+    if not iso:
+        return None
+    try:
+        dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    return local_stamp(dt, tz_name).strip("[]")
 
 
 def resolve_ext_quotes(content: str, user_id: int,
                        for_llm: bool = False) -> Tuple[str, List[int]]:
     """Replace {quote_ext:ID} placeholders with the saved reference's
     content, verbatim from the DB. No recursion — external items don't
-    nest. Returns (resolved_content, list_of_resolved_item_ids)."""
+    nest. Returns (resolved_content, list_of_resolved_item_ids).
+
+    A read reply's picks, re-sent to the model on later turns of its
+    thread, resolve through ca_feed.render_read_reply_for_model instead:
+    by author and text, with no id and no marks."""
     if not content:
         return content, []
     item_ids = find_ext_quote_ids(content)
@@ -105,13 +153,41 @@ def resolve_ext_quotes(content: str, user_id: int,
                 return f"[Quoted reference #{item_id}: inaccessible]"
             return f"[Quoted reference inaccessible: item {item_id}]"
         resolved_ids.append(item_id)
+        # Tweets have @handles; a web clip's or an uploaded document's
+        # author is a byline or the site's hostname, which an @ would only
+        # misrepresent.
+        from backend.models import BYLINE_SOURCES
         author = d["author_handle"] or "unknown"
+        if d["source"] not in BYLINE_SOURCES:
+            author = f"@{author}"
+        title = d.get("title")
         if for_llm:
+            title_attr = f' title="{title}"' if title else ""
+            posted_attr = (f' posted_at="{d["posted_at"][:10]}"'
+                           if d.get("posted_at") else "")
+            # The user's own marks on this pick, so a thread that
+            # continues after the quote knows whether they read it and
+            # how they rated it (the same two facts search previews
+            # carry). Absent attributes mean unread / unrated.
+            read_attr = (f' read="{d["read_at"][:10]}"'
+                         if d.get("read_at") else "")
+            verdict_attr = (f' verdict="{d["feedback"]}"'
+                            if d.get("feedback") else "")
             return (
                 f'<quoted_reference id="{item_id}" source="{d["source"]}" '
-                f'author="@{author}">\n{d["content"]}\n</quoted_reference>')
+                f'author="{author}"{title_attr}{posted_attr}'
+                f'{read_attr}{verdict_attr}>\n'
+                f'{d["content"]}\n</quoted_reference>')
         posted = f' ({d["posted_at"][:10]})' if d.get("posted_at") else ""
-        return (f'\n--- Saved reference from @{author}{posted} ---\n'
+        label = f'"{title}" from {author}' if title else f"from {author}"
+        # The same two marks in the human rendering (exports): they are
+        # the user's own record of the pick.
+        mark_text = ""
+        if d.get("read_at"):
+            mark_text += f' · read {d["read_at"][:10]}'
+        if d.get("feedback"):
+            mark_text += f' · rated a {d["feedback"]} quote'
+        return (f'\n--- Saved reference {label}{posted}{mark_text} ---\n'
                 f'{d["content"]}\n--- End reference ---\n')
 
     resolved = re.sub(EXT_QUOTE_PLACEHOLDER_PATTERN, replace, content)
@@ -142,7 +218,8 @@ def get_quote_data(node_ids: List[int], user_id: int) -> Dict[int, Optional[dict
     """
     from backend.models import Node
     from backend.utils.privacy import (
-        can_user_access_node, can_user_view_tombstone,
+        author_gone, can_user_access_node, can_user_view_tombstone,
+        owner_hidden,
     )
 
     result = {}
@@ -153,15 +230,18 @@ def get_quote_data(node_ids: List[int], user_id: int) -> Dict[int, Optional[dict
             result[node_id] = None
             continue
         # Soft-deleted: emit a tombstone payload iff viewer had pre-deletion
-        # access; otherwise None (renders as "not accessible").
-        if node.deleted_at is not None:
+        # access; otherwise None (renders as "not accessible"). A node whose
+        # author deleted the account (#269) quotes as deleted, without a name.
+        if node.deleted_at is not None or owner_hidden(node):
             if can_user_view_tombstone(node, user_id):
+                gone = author_gone(node)
                 result[node_id] = {
                     "id": node.id,
                     "deleted": True,
                     "content": None,
-                    "username": node.user.username if node.user else "Unknown",
-                    "user_id": node.user_id,
+                    "username": (None if gone else node.user.username
+                                 if node.user else "Unknown"),
+                    "user_id": None if gone else node.user_id,
                     "created_at": iso_utc(node.created_at),
                     "node_type": node.node_type,
                     "ai_usage": node.ai_usage,
@@ -191,7 +271,9 @@ def resolve_quotes(
     user_id: int,
     for_llm: bool = False,
     max_depth: int = DEFAULT_MAX_DEPTH,
-    _seen_ids: Optional[Set[int]] = None
+    _seen_ids: Optional[Set[int]] = None,
+    tz_name: Optional[str] = None,
+    block_ai_none: Optional[bool] = None,
 ) -> Tuple[str, List[int]]:
     """
     Replace {quote:ID} placeholders with quoted node content, recursively.
@@ -203,6 +285,12 @@ def resolve_quotes(
                  if False, use human-readable format
         max_depth: Maximum recursion depth (default 3). Set to 1 for no recursion.
         _seen_ids: Internal - tracks visited node IDs to prevent cycles
+        tz_name: IANA timezone the quoted node's creation time is rendered
+                 in (UTC when unset) — pass the conversation owner's so it
+                 matches the thread's message stamps
+        block_ai_none: Replace quotes of nodes marked ai_usage='none' with a
+                 placeholder. Defaults to *for_llm*; the AI-filtered export
+                 sets it with the human-readable format (#340 review).
 
     Returns:
         Tuple of (resolved_content, list_of_quoted_node_ids)
@@ -215,6 +303,8 @@ def resolve_quotes(
 
     if _seen_ids is None:
         _seen_ids = set()
+    if block_ai_none is None:
+        block_ai_none = for_llm
 
     quote_ids = find_quote_ids(content)
     if not quote_ids:
@@ -247,7 +337,7 @@ def resolve_quotes(
                 return f"[Quoted node deleted: node {node_id}]"
 
         # AI usage check: block content from nodes that don't permit AI usage
-        if for_llm and data.get("ai_usage") == "none":
+        if block_ai_none and data.get("ai_usage") == "none":
             return f"[Quote #{node_id}: AI usage not permitted by author]"
 
         # Cycle detection
@@ -269,16 +359,25 @@ def resolve_quotes(
                 user_id,
                 for_llm=for_llm,
                 max_depth=max_depth - 1,
-                _seen_ids=new_seen
+                _seen_ids=new_seen,
+                tz_name=tz_name,
+                block_ai_none=block_ai_none,
             )
             resolved_ids.extend(nested_ids)
 
+        stamp = quote_stamp(data.get("created_at"), tz_name)
         if for_llm:
-            # XML format for clear LLM context
-            return f'<quoted_node id="{node_id}" author="{username}">\n{node_content}\n</quoted_node>'
+            # XML format for clear LLM context. The creation stamp is the
+            # quote's only temporal anchor — without it the model can't
+            # place the quoted entry in time relative to the thread.
+            stamp_attr = f' created_at="{stamp}"' if stamp else ""
+            return (f'<quoted_node id="{node_id}" author="{username}"{stamp_attr}>\n'
+                    f'{node_content}\n</quoted_node>')
         else:
             # Human-readable format for exports
-            return f'\n--- Quoted from @{username} (node #{node_id}) ---\n{node_content}\n--- End quote ---\n'
+            when = f", {stamp}" if stamp else ""
+            return (f'\n--- Quoted from @{username} (node #{node_id}{when}) ---\n'
+                    f'{node_content}\n--- End quote ---\n')
 
     resolved_content = re.sub(QUOTE_PLACEHOLDER_PATTERN, replace_quote, content)
     return resolved_content, resolved_ids
@@ -361,7 +460,8 @@ class ExportQuoteResolver:
 
     def __init__(self, user_id: int, max_tokens: int,
                  filter_ai_usage: bool = False,
-                 chronological: bool = False):
+                 chronological: bool = False,
+                 with_preamble: bool = True):
         """
         Initialize the resolver.
 
@@ -372,11 +472,18 @@ class ExportQuoteResolver:
                             being resolved (their content won't be embedded)
             chronological: If True, sort oldest-first (for iterative profile
                           building). Default is newest-first.
+            with_preamble: Whether the export emits the artifacts preamble
+                          (the full text of each referenced system prompt,
+                          profile and todo list). False when the caller
+                          collapses artifacts to reference lines: then the
+                          budget counts only the entries, and the profile
+                          and todo texts are not loaded (#518).
         """
         self.user_id = user_id
         self.max_tokens = max_tokens
         self.filter_ai_usage = filter_ai_usage
         self.chronological = chronological
+        self.with_preamble = with_preamble
         self.entries: List[NodeEntry] = []
         self.included_count: int = 0
         self.included_ids: Set[int] = set()
@@ -391,10 +498,15 @@ class ExportQuoteResolver:
         # System prompt tracking
         self._prompt_tokens: Dict[int, int] = {}  # user_prompt_id → token cost
         self._prompt_contents: Dict[int, str] = {}  # user_prompt_id → content
+        # user_prompt_id → the node whose content the preamble shows, so
+        # an export going to a model can report it (#326).
+        self.prompt_node_ids: Dict[int, int] = {}
         self.referenced_prompt_ids: Set[int] = set()  # final result
         # Generic artifact tracking: (artifact_type, artifact_id) → content
         self._artifact_contents: Dict[Tuple[str, int], str] = {}
         self._artifact_tokens: Dict[Tuple[str, int], int] = {}
+        # (artifact_type, artifact_id) → the user the version belongs to
+        self._artifact_owner: Dict[Tuple[str, int], Optional[int]] = {}
         self.referenced_artifacts: Dict[str, Set[int]] = {
             "prompt": set(), "profile": set(), "todo": set(),
         }
@@ -435,12 +547,21 @@ class ExportQuoteResolver:
                     prompt_content
                 )
                 self._prompt_contents[user_prompt_id] = prompt_content
+                self.prompt_node_ids[user_prompt_id] = node_id
         else:
             if token_count is None:
                 token_count = approximate_token_count(content)
             base_tokens = token_count
 
         quote_ids = find_quote_ids(content)
+
+        # Only the export user's own versions: a node of someone else's
+        # in the user's threads (their system prompt above the user's
+        # reply, their AI reply that read their todo) pins theirs.
+        artifacts = [
+            (atype, aid) for atype, aid in (artifacts or [])
+            if atype == "prompt" or self._artifact_is_own(atype, aid)
+        ]
 
         entry = NodeEntry(
             node_id=node_id,
@@ -453,11 +574,12 @@ class ExportQuoteResolver:
         self.entries.append(entry)
 
         # Cache artifact content for preamble building
-        if artifacts:
+        if artifacts and self.with_preamble:
             for atype, aid in artifacts:
                 key = (atype, aid)
                 if key not in self._artifact_contents:
-                    acontent = self._load_artifact_content(atype, aid)
+                    acontent = self._load_artifact_content(
+                        atype, aid, filter_ai_usage=self.filter_ai_usage)
                     if acontent:
                         self._artifact_contents[key] = acontent
                         self._artifact_tokens[key] = (
@@ -471,9 +593,25 @@ class ExportQuoteResolver:
             'content': content
         }
 
+    def _artifact_is_own(self, artifact_type, artifact_id):
+        """Whether the pinned version belongs to the export's user."""
+        from backend.utils.context_artifacts import pinned_row
+        key = (artifact_type, artifact_id)
+        if key not in self._artifact_owner:
+            row = pinned_row(artifact_type, artifact_id)
+            self._artifact_owner[key] = row.user_id if row else None
+        return self._artifact_owner[key] == self.user_id
+
     @staticmethod
-    def _load_artifact_content(artifact_type, artifact_id):
-        """Load content for an artifact by type and id."""
+    def _load_artifact_content(artifact_type, artifact_id,
+                               filter_ai_usage=False):
+        """Load content for an artifact by type and id.
+
+        With *filter_ai_usage*, a profile or todo version marked outside
+        AI_ALLOWED yields AI_BLOCKED_ARTIFACT_TEXT instead of its content
+        (#340), the same rule the resolver applies to nodes. Prompts carry
+        no ai_usage.
+        """
         if artifact_type == "prompt":
             from backend.models import UserPrompt
             obj = UserPrompt.query.get(artifact_id)
@@ -481,12 +619,16 @@ class ExportQuoteResolver:
         if artifact_type == "profile":
             from backend.models import UserProfile
             obj = UserProfile.query.get(artifact_id)
-            return obj.get_content() if obj else None
-        if artifact_type == "todo":
+        elif artifact_type == "todo":
             from backend.models import UserTodo
             obj = UserTodo.query.get(artifact_id)
-            return obj.get_content() if obj else None
-        return None
+        else:
+            return None
+        if obj is None:
+            return None
+        if filter_ai_usage and ai_blocked_artifact(obj):
+            return AI_BLOCKED_ARTIFACT_TEXT
+        return obj.get_content()
 
     def _truncate(self):
         """
@@ -502,7 +644,9 @@ class ExportQuoteResolver:
 
         Also accounts for prompt preamble overhead: each unique
         user_prompt_id referenced by included entries adds its full
-        content token cost once.
+        content token cost once. Only when the preamble is emitted
+        (with_preamble): a collapsed export shows a prompt as its
+        reference line, which the entry's base_tokens already count.
         """
         total = 0
         self.included_count = 0
@@ -520,7 +664,7 @@ class ExportQuoteResolver:
             self.included_count = len(self.entries)
 
         # Account for prompt preamble overhead
-        if self._prompt_tokens:
+        if self._prompt_tokens and self.with_preamble:
             while self.included_count > 0:
                 entry_total = sum(
                     e.total_tokens
@@ -699,7 +843,10 @@ class ExportQuoteResolver:
         return "\n".join(lines)
 
     def get_artifacts_preamble(self) -> str:
-        """Build preamble sections for all referenced artifact types."""
+        """Build preamble sections for all referenced artifact types
+        ("" for a resolver built without one)."""
+        if not self.with_preamble:
+            return ""
         sections = []
 
         # Prompts (reuse existing logic)
@@ -819,7 +966,11 @@ def resolve_quotes_for_export(
             from backend.models import Node
             quoted_node = Node.query.get(quoted_id)
             username = quoted_node.user.username if quoted_node and quoted_node.user else "Unknown"
-            return f'\n--- Quoted from @{username} (node #{quoted_id}) ---\n{embedded_content}\n--- End quote ---\n'
+            stamp = quote_stamp(
+                iso_utc(quoted_node.created_at) if quoted_node else None)
+            when = f", {stamp}" if stamp else ""
+            return (f'\n--- Quoted from @{username} (node #{quoted_id}{when}) ---\n'
+                    f'{embedded_content}\n--- End quote ---\n')
         else:
             # Resolved by reference - the quoted node is elsewhere in the export
             return f'[See node #{quoted_id} in export]'

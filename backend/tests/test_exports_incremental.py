@@ -940,7 +940,8 @@ class TestEngagedThreadsStrategy:
         alice = _make_user("alice")
         _db.session.commit()
         with pytest.raises(ValueError):
-            _build(alice, include_strategy="bogus")
+            _build(alice, filter_ai_usage=False,
+                   include_strategy="bogus")
 
     def test_authored_threads_default_byte_identical_to_legacy(
         self, app, monkeypatch
@@ -1226,7 +1227,163 @@ class TestFullExportArtifactContent:
         assert "## Artifacts Referenced" not in content
 
 
+class TestPreambleRespectsArtifactAiUsage:
+    """#340: a pinned profile/todo/artifact version marked ai_usage='none'
+    never reaches the model through the export preamble. Its ref line
+    stays; the preamble shows a placeholder instead of the content."""
+
+    def _pinned_thread(self, ai_usage_by_kind):
+        from backend.models import (
+            UserProfile, UserTodo, UserArtifact, NodeContextArtifact,
+        )
+        alice = _make_user("alice")
+        _db.session.commit()
+        profile = UserProfile(
+            user_id=alice.id, generated_by="user",
+            ai_usage=ai_usage_by_kind["profile"],
+        )
+        profile.set_content("SECRET PROFILE BODY")
+        todo = UserTodo(
+            user_id=alice.id, generated_by="user",
+            ai_usage=ai_usage_by_kind["todo"],
+        )
+        todo.set_content("SECRET TODO BODY")
+        art = UserArtifact(
+            user_id=alice.id, kind="memory", title="Memory",
+            generated_by="user", ai_usage=ai_usage_by_kind["artifact"],
+        )
+        art.set_content("SECRET MEMORY BODY")
+        _db.session.add_all([profile, todo, art])
+        _db.session.flush()
+        node = _make_node(
+            alice, content="thread body", ai_usage="chat",
+            token_count=100, created_at=APR_18,
+        )
+        for atype, aid in (("profile", profile.id), ("todo", todo.id),
+                           ("user_artifact", art.id)):
+            _db.session.add(NodeContextArtifact(
+                node_id=node.id, artifact_type=atype, artifact_id=aid))
+        _db.session.commit()
+        return alice, profile, todo, art
+
+    def test_budgeted_export_blocks_none_profile(self, app):
+        alice, profile, todo, _ = self._pinned_thread(
+            {"profile": "none", "todo": "chat", "artifact": "chat"})
+
+        content = _build(alice, filter_ai_usage=True, max_tokens=5000)
+
+        assert "thread body" in content
+        assert "SECRET PROFILE BODY" not in content
+        assert f"### User Profile (ref #{profile.id})" in content
+        assert "[AI usage not permitted by author]" in content
+        # A permitted row next to it still renders.
+        assert "SECRET TODO BODY" in content
+
+    def test_budgeted_export_blocks_none_todo(self, app):
+        alice, _, todo, _ = self._pinned_thread(
+            {"profile": "chat", "todo": "none", "artifact": "chat"})
+
+        content = _build(alice, filter_ai_usage=True, max_tokens=5000)
+
+        assert "SECRET TODO BODY" not in content
+        assert f"### User TODO (ref #{todo.id})" in content
+        assert "SECRET PROFILE BODY" in content
+
+    def test_incremental_budgeted_export_blocks_none_rows(self, app):
+        # The {user_recent_raw} path: created_after + max_tokens.
+        alice, _, _, _ = self._pinned_thread(
+            {"profile": "none", "todo": "none", "artifact": "chat"})
+
+        result = _build(
+            alice, filter_ai_usage=True, created_after=APR_07,
+            max_tokens=5000, return_metadata=True,
+        )
+
+        content = result["content"]
+        assert "thread body" in content
+        assert "SECRET PROFILE BODY" not in content
+        assert "SECRET TODO BODY" not in content
+
+    def test_full_export_blocks_none_rows(self, app):
+        alice, _, _, art = self._pinned_thread(
+            {"profile": "none", "todo": "none", "artifact": "none"})
+
+        content = _build(alice, filter_ai_usage=True)
+
+        assert "thread body" in content
+        for body in ("SECRET PROFILE BODY", "SECRET TODO BODY",
+                     "SECRET MEMORY BODY"):
+            assert body not in content
+        assert f"[Artifact 'memory' v1 (ref #{art.id})]" in content
+        assert content.count("[AI usage not permitted by author]") == 3
+
+    def test_unfiltered_export_keeps_content(self, app):
+        # The user's own download (no AI filter) shows everything.
+        alice, _, _, _ = self._pinned_thread(
+            {"profile": "none", "todo": "none", "artifact": "none"})
+
+        for kwargs in ({}, {"max_tokens": 5000}):
+            content = _build(alice, filter_ai_usage=False, **kwargs)
+            assert "SECRET PROFILE BODY" in content
+            assert "SECRET TODO BODY" in content
+            assert "[AI usage not permitted by author]" not in content
+
+
+class TestUnbudgetedFilteredExportBlocksNoneQuotes:
+    """#344 review: the unbudgeted AI-filtered export (recent-context first
+    attempt, uncapped {user_export}) resolved {quote:ID} with for_llm=False,
+    which skipped the ai_usage check, so a quoted node marked 'none'
+    reached the model."""
+
+    def _quoting_thread(self):
+        alice = _make_user("alice")
+        _db.session.commit()
+        hidden = _make_node(alice, content="SECRET QUOTED BODY",
+                            ai_usage="none", token_count=10)
+        _make_node(alice, content=f"see {{quote:{hidden.id}}} here",
+                   ai_usage="chat", token_count=10)
+        _db.session.commit()
+        return alice, hidden
+
+    def test_filtered_full_export_blocks_none_quote(self, app):
+        alice, hidden = self._quoting_thread()
+
+        content = _build(alice, filter_ai_usage=True)
+
+        assert "SECRET QUOTED BODY" not in content
+        assert (f"[Quote #{hidden.id}: AI usage not permitted by author]"
+                in content)
+
+    def test_unfiltered_full_export_keeps_quote(self, app):
+        alice, _ = self._quoting_thread()
+
+        content = _build(alice, filter_ai_usage=False)
+
+        assert "SECRET QUOTED BODY" in content
+
+
 # ── origin: imported nodes are marked, Loore-native ones are not ────────
+
+class TestFilterAiUsageIsRequired:
+    """The unfiltered export includes rows marked 'none' and exists only
+    for the user's own download. filter_ai_usage has no default, so a new
+    caller cannot get the unfiltered export by leaving the argument out."""
+
+    def test_omitting_filter_ai_usage_raises(self, app):
+        alice = _make_user("alice")
+        _db.session.commit()
+        with pytest.raises(TypeError):
+            _build(alice)
+
+    def test_wrappers_require_it_too(self, app):
+        from backend.tasks import exports, llm_completion
+        alice = _make_user("alice")
+        _db.session.commit()
+        for wrapper in (exports.build_user_export_content,
+                        llm_completion.build_user_export_content):
+            with pytest.raises(TypeError):
+                wrapper(alice)
+
 
 class TestOrigin:
     def test_header_marks_imports_only_and_metadata_counts_origins(self, app):
@@ -1472,3 +1629,121 @@ class TestCompactTweetRendering:
         assert "# Thread 1" in content
         assert "User (alice) via twitter - " in content
         assert "# Tweets by" not in content
+
+
+# ── Windowed DEK prefetch (2026-09-02) ───────────────────────────────────
+
+def test_iter_with_dek_prefetch_keeps_order_and_windows_by_subtree(app, monkeypatch):
+    from backend.routes import export_data
+    from backend.routes.export_data import iter_with_dek_prefetch, prefetch_children
+    u = _make_user("w")
+    roots = []
+    for i in range(5):
+        r = _make_node(u, content=f"root {i}", token_count=1)
+        for j in range(2):
+            _make_node(u, parent_id=r.id, content=f"child {i}.{j}", token_count=1)
+        roots.append(r)
+    _db.session.commit()
+    batches = []
+    monkeypatch.setattr(export_data, "prefetch_deks", lambda texts: batches.append(sorted(texts)) or 0)
+    prefetch_children(roots)
+
+    out = list(iter_with_dek_prefetch(roots, window=4))
+    assert out == roots  # order untouched
+    # 3 nodes per root, window closes at >= 4: two roots per window, then one.
+    assert [len(b) for b in batches] == [6, 6, 3]
+    assert batches[0] == sorted(["root 0", "child 0.0", "child 0.1", "root 1", "child 1.0", "child 1.1"])
+    assert batches[2] == sorted(["root 4", "child 4.0", "child 4.1"])
+
+
+def test_export_render_prefetches_deks_for_every_rendered_node(app, monkeypatch):
+    """The export renderer used to decrypt one node at a time (~80 ms of
+    KMS latency each on a cold worker). Every rendered node's ciphertext
+    must reach the batched prefetch before rendering starts."""
+    from datetime import datetime, timedelta
+    from backend.routes import export_data
+    u = _make_user("pf")
+    base = datetime(2026, 8, 1)
+    for i in range(20):
+        _make_node(u, content=f"tweet {i}", created_at=base + timedelta(minutes=i), token_count=5)
+    root = _make_node(u, content="root", created_at=base + timedelta(days=1), token_count=5)
+    child = _make_node(u, parent_id=root.id, content="reply", created_at=base + timedelta(days=1, minutes=1), token_count=5)
+    _make_node(u, parent_id=child.id, content="reply 2", created_at=base + timedelta(days=1, minutes=2), token_count=5)
+    _db.session.commit()
+    _db.session.expire_all()
+    seen = []
+    monkeypatch.setattr(export_data, "prefetch_deks", lambda texts: seen.extend(texts) or 0)
+
+    out = export_data.build_user_export_content(
+        u, max_tokens=100000, filter_ai_usage=True, chronological_order=True,
+        return_metadata=True, include_strategy="engaged_threads")
+    assert "tweet 19" in out["content"] and "reply 2" in out["content"]
+    assert set(seen) == {f"tweet {i}" for i in range(20)} | {"root", "reply", "reply 2"}
+
+
+class TestPlannerWindowMetadata:
+    """The chunk planner's contract with the incremental window
+    (docs/design/chunk-planner.md): a window never splits a timestamp,
+    reports its own stored units, and `count_remaining_units` sums the
+    same rows the windows draw from."""
+
+    def test_window_takes_every_row_sharing_the_boundary_timestamp(self, app):
+        from backend.routes.export_data import build_user_export_content
+        alice = _make_user("alice")
+        _db.session.commit()
+        ts = APR_07 + timedelta(days=1)
+        a = _make_node(alice, content="a", token_count=1000, created_at=ts)
+        b = _make_node(alice, content="b", token_count=1000, created_at=ts)
+        c = _make_node(alice, content="c", token_count=1000,
+                       created_at=ts + timedelta(seconds=1))
+        _db.session.commit()
+
+        # Budget for one row: the strict fit alone would stop after `a`,
+        # and a resume at created_at > ts would never read `b`.
+        result = build_user_export_content(
+            alice, filter_ai_usage=True, created_after=APR_07,
+            max_tokens=1100, chronological_order=True, return_metadata=True)
+        assert result["node_ids"] == {a.id, b.id}
+        assert result["unit_count"] == 2000
+        assert result["latest_node_created_at"] == ts
+
+        result2 = build_user_export_content(
+            alice, filter_ai_usage=True,
+            created_after=result["latest_node_created_at"],
+            max_tokens=1100, chronological_order=True, return_metadata=True)
+        assert result2["node_ids"] == {c.id}
+        assert result2["unit_count"] == 1000
+
+    def test_count_remaining_units_matches_the_windows(self, app):
+        from backend.routes.export_data import (
+            build_user_export_content, count_remaining_units)
+        alice, bob = _make_user("alice"), _make_user("bob")
+        _db.session.commit()
+        nodes = [
+            _make_node(alice, content=f"n{i}", token_count=1000,
+                       created_at=APR_07 + timedelta(days=i + 1))
+            for i in range(3)
+        ]
+        _make_node(alice, content="opted out", token_count=999,
+                   ai_usage="none", created_at=APR_18)          # not AI-readable
+        _make_node(bob, content="someone else", token_count=999,
+                   created_at=APR_18)                           # not in scope
+        _db.session.commit()
+
+        assert count_remaining_units(alice.id, APR_07) == 3000
+        assert count_remaining_units(alice.id, None) == 3000
+        assert count_remaining_units(alice.id, nodes[0].created_at) == 2000
+
+        # Walking the windows to exhaustion covers exactly that sum.
+        covered, cutoff = 0, APR_07
+        while True:
+            w = build_user_export_content(
+                alice, filter_ai_usage=True, created_after=cutoff,
+                max_tokens=1100, chronological_order=True,
+                return_metadata=True)
+            if not w:
+                break
+            covered += w["unit_count"]
+            cutoff = w["latest_node_created_at"]
+        assert covered == 3000
+        assert count_remaining_units(alice.id, cutoff) == 0

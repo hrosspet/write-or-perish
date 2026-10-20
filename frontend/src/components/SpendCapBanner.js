@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 
 const DEFAULT_MESSAGE =
   "You've reached your monthly usage limit for the free alpha. " +
@@ -13,6 +13,7 @@ const DEFAULT_MESSAGE =
  */
 export default function SpendCapBanner() {
   const [message, setMessage] = useState(null);
+  const ref = useRef(null);
 
   useEffect(() => {
     const onCapped = (e) =>
@@ -21,10 +22,20 @@ export default function SpendCapBanner() {
     return () => window.removeEventListener('loore:spend-capped', onCapped);
   }, []);
 
+  // Toasts share this bottom-center spot. Publish the banner's height so the
+  // toast stack sits above it instead of on top of it (#341: a refused
+  // record or upload press shows a toast while the banner is up).
+  useLayoutEffect(() => {
+    const root = document.documentElement;
+    const h = message && ref.current ? ref.current.offsetHeight : 0;
+    root.style.setProperty('--spendcap-banner-offset', h ? `${h + 8}px` : '0px');
+    return () => root.style.setProperty('--spendcap-banner-offset', '0px');
+  }, [message]);
+
   if (!message) return null;
 
   return (
-    <div style={{
+    <div ref={ref} style={{
       position: 'fixed',
       // Bottom-center, sitting above the mobile floating audio player when
       // present (GlobalAudioPlayer publishes its height as

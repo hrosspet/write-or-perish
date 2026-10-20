@@ -18,6 +18,7 @@ from sqlalchemy.orm import aliased
 from backend.models import Node, User
 from backend.extensions import db
 from backend.utils.privacy import PrivacyLevel
+from backend.utils.slugs import permalink_for
 from backend.utils.timefmt import iso_utc
 
 commons_bp = Blueprint("commons", __name__)
@@ -31,7 +32,8 @@ def _enabled():
 
 def _public_alive(query):
     """Filter to nodes the open web may see: public, living, AND with an
-    author who currently has public sharing switched on. Toggling
+    author who currently has public sharing switched on and has not
+    deleted the account (#269: hidden for the grace period). Toggling
     public_sharing_enabled off takes every piece (and reply) down
     immediately — respecting a takedown beats URL stability."""
     owner = aliased(User)
@@ -42,6 +44,7 @@ def _public_alive(query):
         Node.privacy_level == PrivacyLevel.PUBLIC.value,
         Node.deleted_at.is_(None),
         owner.public_sharing_enabled.is_(True),
+        owner.deleted_at.is_(None),
     )
 
 
@@ -52,7 +55,8 @@ def _publicly_visible(node):
         return False
     owner_id = node.human_owner_id or node.user_id
     owner = User.query.get(owner_id) if owner_id else None
-    return bool(owner and owner.public_sharing_enabled)
+    return bool(owner and owner.public_sharing_enabled
+                and owner.deleted_at is None)
 
 
 def _author_name(node):
@@ -88,9 +92,7 @@ def feed():
         items.append({
             "id": node.id,
             "username": _author_name(node),
-            "permalink": (
-                f"/@{node.user.username}/{node.public_slug}"
-                if node.public_slug and node.user else None),
+            "permalink": permalink_for(node),
             "content": content[:600] + ("…" if len(content) > 600 else ""),
             "created_at": iso_utc(node.created_at),
             "reply_count": reply_count,
@@ -135,7 +137,8 @@ def resolve_permalink(username, slug):
     for unknown user/slug and anything non-public."""
     if not _enabled():
         return jsonify({"error": "Not found"}), 404
-    user = User.query.filter_by(username=username).first()
+    from backend.utils.username_history import resolve_public_handle
+    user, moved = resolve_public_handle(username)
     if user is None:
         return jsonify({"error": "Not found"}), 404
     node = _public_alive(Node.query.filter(
@@ -144,7 +147,15 @@ def resolve_permalink(username, slug):
     )).first()
     if node is None:
         return jsonify({"error": "Not found"}), 404
-    return jsonify({"node_id": node.id}), 200
+    body = {"node_id": node.id}
+    if moved:
+        # A former handle, or the current one in another case (#253): the
+        # SPA swaps the address bar to the canonical URL; the server-
+        # rendered pages 301 instead. Only ever sent with a node that
+        # resolved, so it never names the new handle of anything that
+        # isn't public under it.
+        body["canonical"] = f"/@{user.username}/{slug}"
+    return jsonify(body), 200
 
 
 @commons_bp.route("/node/<int:node_id>", methods=["GET"])

@@ -1,19 +1,31 @@
 import logging
+import time
 from datetime import datetime, timedelta
 from functools import wraps
 from flask import Blueprint, request, jsonify, abort, current_app
 from flask_login import login_required, current_user
+from sqlalchemy.exc import IntegrityError
+from backend.utils.hidden_rows import shown_description
 from backend.models import User, APICostLog
 from backend.extensions import db
 from backend.utils.timefmt import iso_utc
 from sqlalchemy import func
 from backend.utils.magic_link import generate_magic_link_token, hash_token
-from backend.utils.email import send_welcome_email
+from backend.utils.email import send_welcome_email, is_valid_email
 from backend.utils.reserved_usernames import validate_username
 
 logger = logging.getLogger(__name__)
 
 admin_bp = Blueprint("admin_bp", __name__)
+
+# Prompt caching went live on 2026-06-25: Anthropic caching plus the
+# cache_read_tokens accounting merged at 13:56 UTC (#198, a54ce29) and
+# OpenAI cached-input accounting at 14:52 UTC (#199, b87d37b), each
+# auto-deployed to prod within minutes. Conversation turns logged before
+# that have no served-from-cache tokens by construction, so counting them
+# only drags every user's hit-rate down — the admin cache column starts
+# here (15:00 UTC, when the second deploy had landed).
+PROMPT_CACHE_SINCE = datetime(2026, 6, 25, 15, 0)
 
 # Decorator to check that the current user is an admin. Keyed on the
 # is_admin column (matching nodes.py/sse.py), NOT the username — usernames
@@ -43,8 +55,7 @@ def _profile_status_map():
         UserProfile.user_id).subquery()
     latest = {p.user_id: p for p in UserProfile.query.filter(
         UserProfile.id.in_(latest_ids)).all()}
-    from backend.tasks.exports import chunk_budget_for
-    from backend.tasks.profile_batch import _remaining_token_count, _model_for
+    from backend.tasks.exports import should_continue_chain, profile_is_provisional
     users_by_id = {u.id: u for u in User.query.all()}
     out = {}
     for user_id, n in counts.items():
@@ -53,22 +64,25 @@ def _profile_status_map():
         in_flight = bool(u and (u.profile_batch_pending or u.profile_needs_full_regen))
         at_rest = last is not None and (
             last.generation_type == "integration" or last.parent_profile_id is None)
-        # A chain whose latest version is a root chunk is only at rest if
-        # less than a full minimum chunk remains beyond its cutoff (a
-        # small tail legitimately waits for more data). A full chunk's
-        # worth unprocessed with nothing in flight = a stuck rebuild
+        # A chain whose latest version is a root chunk is at rest only
+        # if nothing OLDER than that version remains beyond its cutoff:
+        # such data is an unfinished chain (the continue rule the seeder
+        # applies), and with nothing in flight it is a stuck rebuild
         # (e.g. its batch failed) that ✓ would otherwise hide.
         stuck = False
-        if (at_rest and last.generation_type != "integration" and u
-                and last.source_data_cutoff is not None):
-            _, min_chunk = chunk_budget_for(u, _model_for(u))
-            stuck = _remaining_token_count(u, last.source_data_cutoff) >= min_chunk
+        if at_rest and last.generation_type != "integration" and u:
+            stuck = should_continue_chain(u, last)
         # Nothing in flight and the account can't be seeded: the hourly
         # seeder only walks approved users (budget guard), so a pre-filled
         # Inactive account with a rebuild requested (regen flag) or a
         # chunk still to go (stuck) waits until activation — a different
         # thing from provider latency, and it must not look like it.
+        # A recorded seed error takes precedence: the seeder DID reach the
+        # account and could not build its request (Unsupported model, a
+        # KMS or count-tokens failure) — not a wait on activation.
+        seed_error = (u.profile_seed_error if u else None) or None
         waiting = bool(u and not u.approved and not u.profile_batch_pending
+                       and not seed_error
                        and (u.profile_needs_full_regen or stuck))
         out[user_id] = {
             "versions": n,
@@ -76,9 +90,50 @@ def _profile_status_map():
             "last_created_at": iso_utc(last.created_at) if last else None,
             "state": "generating" if (in_flight or not at_rest or stuck) else "complete",
             "incomplete": stuck and not waiting,
+            # A first build from under a full chunk of data: rebuilt from
+            # scratch, not updated, once the organic gate next trips.
+            "provisional": profile_is_provisional(last),
             "waiting": "inactive" if waiting else None,
+            "seed_error": seed_error,
             "batch_attempts": (u.profile_batch_attempts or 0) if u else 0,
         }
+    return out
+
+
+def _profile_backoff_map():
+    """{user_id: {state, refusals, until}} for users whose profile job is
+    held by the refusal backoff (#368, utils/refusal_backoff.py): "waiting"
+    after one cut-off output in a row (until = when the next try is
+    allowed), "stopped" after two. Users not held are left out. Two
+    queries: the refused profile cost rows (rare) and each of their
+    users' newest saved version."""
+    from backend.models import UserProfile
+    from backend.utils import refusal_backoff as rb
+    refused = db.session.query(APICostLog.user_id, APICostLog.created_at).filter(
+        APICostLog.request_type.in_(rb.PROFILE_REQUEST_TYPES),
+        APICostLog.request_ref == rb.REFUSED_REF).all()
+    if not refused:
+        return {}
+    uids = {uid for uid, _ in refused}
+    last_saved = dict(db.session.query(
+        UserProfile.user_id, func.max(UserProfile.created_at)).filter(
+        UserProfile.user_id.in_(uids)).group_by(UserProfile.user_id).all())
+    streaks = {}
+    for uid, at in refused:
+        since = last_saved.get(uid)
+        if since is None or at > since:
+            streaks.setdefault(uid, []).append(at)
+    now = datetime.utcnow()
+    out = {}
+    for uid, times in streaks.items():
+        n = len(times)
+        if n >= rb.STOP_AFTER:
+            out[uid] = {"state": "stopped", "refusals": n, "until": None}
+            continue
+        until = max(times) + rb.RETRY_WAIT
+        if now < until:
+            out[uid] = {"state": "waiting", "refusals": n,
+                        "until": iso_utc(until)}
     return out
 
 
@@ -86,19 +141,31 @@ def _intentions_status_map():
     """{user_id: {state, versions, last_created_at}} for the Users-tab
     Profile column: "generating" while a kind="intentions" batch item is
     pending (persisted ProfileBatchJob — survives restarts); "failed" when
-    the latest run gave up (overflow twice / batch error) and no artifact
-    version postdates it; else "complete" when at least one intentions
-    artifact version exists."""
+    the latest run gave up (overflow twice / batch error) or its output was
+    refused (cut off before any text, batch or sync — its cost row is
+    marked refused, #368) and no artifact version postdates it; else
+    "complete" when at least one intentions artifact version exists."""
     from backend.models import ProfileBatchJob, UserArtifact
-    pending_ids, gave_up_at = set(), {}
+    from backend.utils.refusal_backoff import REFUSED_REF
+    pending, gave_up_at = {}, {}
     for job in ProfileBatchJob.query.order_by(ProfileBatchJob.submitted_at).all():
         for item in job.items:
             if item.get("kind") != "intentions":
                 continue
             if job.status == "pending":
-                pending_ids.add(item["user_id"])
+                pending[item["user_id"]] = {
+                    "batch_id": job.batch_id,
+                    "submitted_at": iso_utc(job.submitted_at),
+                    "resubmitted": bool(item.get("resubmitted"))}
             elif item.get("gave_up"):
                 gave_up_at[item["user_id"]] = job.submitted_at
+    for uid, when in db.session.query(
+            APICostLog.user_id, func.max(APICostLog.created_at)).filter(
+            APICostLog.request_type == "intentions_infer",
+            APICostLog.request_ref == REFUSED_REF).group_by(
+            APICostLog.user_id).all():
+        if uid not in gave_up_at or gave_up_at[uid] < when:
+            gave_up_at[uid] = when
     rows = db.session.query(
         UserArtifact.user_id, func.count(UserArtifact.id),
         func.max(UserArtifact.created_at),
@@ -113,9 +180,10 @@ def _intentions_status_map():
         if newer is None or newer < when:
             entry = out.setdefault(uid, {"versions": 0, "last_created_at": None})
             entry["state"] = "failed"
-    for uid in pending_ids:
+    for uid, flight in pending.items():
         entry = out.setdefault(uid, {"versions": 0, "last_created_at": None})
         entry["state"] = "generating"
+        entry["batch"] = flight   # so the row can show how long it's been in flight
     return out
 
 
@@ -132,6 +200,8 @@ def list_users():
     users = User.query.order_by(User.created_at.desc()).all()
     profile_status = _profile_status_map()
     intentions_status = _intentions_status_map()
+    profile_backoff = _profile_backoff_map()
+    purge_jobs = _latest_purge_jobs()
 
     # Aggregate total (all-time) spending per user in a single query
     spending_rows = db.session.query(
@@ -152,15 +222,18 @@ def list_users():
     # Unified across providers: cache_read_tokens holds the input SERVED from
     # cache — Anthropic cache reads AND OpenAI cached_tokens — and input_tokens
     # is the full prompt size, so hit-rate = served / total prompt input works
-    # for both (OpenAI has no separate "write" concept). Scoped to
+    # for both (cache_write_tokens likewise unifies Anthropic cache creation
+    # and the OpenAI write subset, #286, but hit-rate only needs reads). Scoped to
     # request_type='conversation' so embeddings/transcription/profile/warm
-    # don't dilute the denominator. NULLs are ignored by SUM.
+    # don't dilute the denominator, and to turns since PROMPT_CACHE_SINCE
+    # so pre-caching history doesn't either. NULLs are ignored by SUM.
     cache_rows = db.session.query(
         APICostLog.user_id,
         func.sum(APICostLog.cache_read_tokens).label("served"),
         func.sum(APICostLog.input_tokens).label("prompt_input"),
     ).filter(
-        APICostLog.request_type == "conversation"
+        APICostLog.request_type == "conversation",
+        APICostLog.created_at >= PROMPT_CACHE_SINCE,
     ).group_by(APICostLog.user_id).all()
     cache_map = {
         row.user_id: (row.served or 0, row.prompt_input or 0)
@@ -179,18 +252,21 @@ def list_users():
             "id": user.id,
             "twitter_id": user.twitter_id,
             "username": user.username,
-            "description": user.description,
+            "description": shown_description(user),
             "created_at": iso_utc(user.created_at),
             "accepted_terms_at": iso_utc(user.accepted_terms_at),
             "approved": user.approved,
             "email": user.email,
             "plan": user.plan,
             "deactivated_at": iso_utc(user.deactivated_at),
+            # Account deleted and in its grace period (#269): hidden.
+            "deleted_at": iso_utc(user.deleted_at),
             "total_spending_usd": total_microdollars / 1_000_000,
             "current_month_spending_usd": month_microdollars / 1_000_000,
-            # Prompt-cache hit-rate over conversation turns (all-time): null
-            # when the user has no conversation prompt input yet. Raw sums
-            # included so the UI can show the breakdown on hover.
+            # Prompt-cache hit-rate over conversation turns since
+            # PROMPT_CACHE_SINCE: null when the user has no conversation
+            # prompt input in that window. Raw sums included so the UI can
+            # show the breakdown on hover.
             "cache_hit_rate": cache_hit_rate,
             "cache_served_tokens": cache_served,
             "cache_input_tokens": prompt_input,
@@ -207,6 +283,13 @@ def list_users():
             "prefill_consent_at": iso_utc(user.prefill_consent_at),
             "spam": bool(user.spam),
             "intentions": intentions_status.get(user.id),
+            # Held by the refusal backoff after cut-off outputs (#368):
+            # {state: "waiting"|"stopped", refusals, until} or null. The
+            # Build profile button asks before overriding it.
+            "profile_backoff": profile_backoff.get(user.id),
+            # Latest data purge (#268), scheduled, running, done or
+            # failed; null when there was none.
+            "data_purge": _purge_job_json(purge_jobs.get(user.id)),
             "profile": profile_status.get(user.id) or {
                 "versions": 0,
                 "last_generation_type": None,
@@ -215,14 +298,18 @@ def list_users():
                           or user.profile_needs_full_regen else "none"),
                 # Rebuild requested, nothing in flight, account inactive →
                 # the seeder won't touch it until activation (see
-                # _profile_status_map).
+                # _profile_status_map). A seed error outranks that.
                 "waiting": ("inactive" if (user.profile_needs_full_regen
                                            and not user.profile_batch_pending
+                                           and not user.profile_seed_error
                                            and not user.approved) else None),
+                "seed_error": user.profile_seed_error or None,
             },
         })
     return jsonify({
         "users": user_list,
+        # Start of the cache hit-rate window, for the column's tooltip.
+        "cache_since": iso_utc(PROMPT_CACHE_SINCE),
         "allowed_plans": sorted(User.ALLOWED_PLANS),
         "per_user_limit_default_usd": config.get(
             "PER_USER_MONTHLY_LIMIT_USD") or 0,
@@ -254,6 +341,18 @@ def activity():
     return jsonify(activity_report(days=days)), 200
 
 
+def _prefill_refusal_response(user):
+    """A 400 carrying a refusal ``code`` (the admin panel shows it as a
+    warning dialog) when a pre-fill or intentions run must not run for
+    this account (#346), else None."""
+    from backend.utils.privacy import prefill_refusal
+    refusal = prefill_refusal(user)
+    if refusal is None:
+        return None
+    code, message = refusal
+    return jsonify({"error": message, "code": code}), 400
+
+
 @admin_bp.route("/users/<int:user_id>/build_profile", methods=["POST"])
 @login_required
 @admin_required
@@ -263,16 +362,33 @@ def build_profile(user_id):
     Sets the full-regen flag (which _should_seed honours unconditionally
     and which makes the first chunk build at any size), pins the user to
     the batch path, and seeds immediately. Idempotent while a job is in
-    flight."""
+    flight.
+
+    The refusal backoff (#368) still holds the seed — after a cut-off
+    output the build waits, after two it is stopped — unless the JSON body
+    has ``"force": true``, which the admin sends after confirming the
+    dialog the Users tab shows for a held user. A saved version then ends
+    the stop."""
     user = User.query.get_or_404(user_id)
+    # Same refusal as pre-fill: this button usually follows one (#346).
+    # Checked here only: the seeder it dispatches also serves the user's
+    # own imports, which a declined tweet seed must not block.
+    refusal = _prefill_refusal_response(user)
+    if refusal:
+        return refusal
     if user.profile_batch_pending:
         return jsonify({"message": "A batch step is already in flight.", "queued": False}), 200
+    force = bool((request.get_json(silent=True) or {}).get("force"))
     user.profile_needs_full_regen = True
     user.profile_force_batch = True
     db.session.commit()
     from backend.tasks.profile_batch import seed_profile_batch_for_user
-    seed_profile_batch_for_user.delay(user.id)
-    return jsonify({"message": "Batch profile build queued.", "queued": True}), 202
+    if force:
+        seed_profile_batch_for_user.delay(user.id, ignore_backoff=True)
+    else:
+        seed_profile_batch_for_user.delay(user.id)
+    return jsonify({"message": "Batch profile build queued.", "queued": True,
+                    "force": force}), 202
 
 
 @admin_bp.route("/users/<int:user_id>/infer_intentions", methods=["POST"])
@@ -281,15 +397,265 @@ def build_profile(user_id):
 def infer_intentions_route(user_id):
     """Generate the intentions artifact from a pre-filled account's public
     tweets (public fork of the tested intentions_detection prompt; whole
-    corpus, newest-kept shrink loop). Returns {"task_id"} — poll
+    corpus, newest-kept shrink loop).
+
+    JSON body (all optional):
+      mode: "batch" (default; ~50% cheaper, collected by the poller,
+            can take hours) | "sync" (one synchronous call at full price,
+            saved within minutes — for when the person is waiting).
+      cancel_pending: true — cancel this user's in-flight intentions
+            batch first (provider-side + job row), then start the run.
+    Returns {"task_id", "mode", "cancelled"} — poll
     /admin/prefill/status/<task_id>."""
-    from backend.utils.privacy import AI_ALLOWED
     user = User.query.get_or_404(user_id)
-    if user.default_ai_usage not in AI_ALLOWED:
-        return jsonify({"error": "User has opted out of AI usage."}), 400
-    from backend.tasks.intentions import infer_intentions
-    task = infer_intentions.delay(user.id)
-    return jsonify({"task_id": task.id}), 202
+    refusal = _prefill_refusal_response(user)
+    if refusal:
+        return refusal
+    data = request.get_json(silent=True) or {}
+    mode = data.get("mode") or "batch"
+    if mode not in ("batch", "sync"):
+        return jsonify({"error": "mode must be 'batch' or 'sync'."}), 400
+    from backend.tasks.intentions import infer_intentions, cancel_pending_intentions
+    cancelled = {"cancelled": 0, "errors": []}
+    if data.get("cancel_pending"):
+        cancelled = cancel_pending_intentions(user.id)
+    task = infer_intentions.delay(user.id, mode)
+    return jsonify({"task_id": task.id, "mode": mode, **cancelled}), 202
+
+
+@admin_bp.route("/users/<int:user_id>/cancel_intentions", methods=["POST"])
+@login_required
+@admin_required
+def cancel_intentions_route(user_id):
+    """Cancel this user's in-flight intentions batch(es): provider-side
+    (best-effort — items already being processed may still bill) and the
+    persisted job row, so the poller never collects or resubmits it.
+    Returns {"cancelled": n, "errors": [..]}."""
+    User.query.get_or_404(user_id)
+    from backend.tasks.intentions import cancel_pending_intentions
+    result = cancel_pending_intentions(user_id)
+    if not result["cancelled"]:
+        return jsonify({**result, "message": "No intentions batch is in flight."}), 200
+    return jsonify(result), 200
+
+
+def _purge_job_json(job):
+    if job is None:
+        return None
+    return {
+        "id": job.id,
+        "status": job.status,
+        "source": job.source,
+        # "hidden": the user's own request, which hid the writing at once
+        # and deletes what it hid; "all": everything of the user's.
+        "scope": job.scope,
+        "requested_at": iso_utc(job.requested_at),
+        "scheduled_for": iso_utc(job.scheduled_for),
+        "started_at": iso_utc(job.started_at),
+        "finished_at": iso_utc(job.finished_at),
+        "attempts": job.attempts or 0,
+        "counts": job.counts,
+        "error": job.error,
+        # An account deletion (#269), not only a data purge.
+        "delete_account": bool(job.delete_account),
+        # An admin's request still waiting out its grace period: the
+        # Users row offers Undo (Peter, 2026-10-13). The user's own
+        # request is theirs to restore.
+        "undoable": job.status == "scheduled" and job.source == "admin",
+    }
+
+
+def _latest_purge_jobs():
+    """{user_id: latest non-cancelled purge job} for the Users table."""
+    from backend.models import UserDataPurge
+    latest = db.session.query(func.max(UserDataPurge.id)).filter(
+        UserDataPurge.status != "cancelled").group_by(UserDataPurge.user_id)
+    return {j.user_id: j for j in UserDataPurge.query.filter(
+        UserDataPurge.id.in_(latest)).all()}
+
+
+@admin_bp.route("/users/<int:user_id>/purge_data", methods=["GET"])
+@login_required
+@admin_required
+def purge_data_status(user_id):
+    """The user's latest purge job (status, counts, error)."""
+    from backend.models import UserDataPurge
+    job = UserDataPurge.query.filter_by(user_id=user_id).order_by(
+        UserDataPurge.id.desc()).first()
+    return jsonify({"job": _purge_job_json(job)}), 200
+
+
+@admin_bp.route("/users/<int:user_id>/purge_data", methods=["POST"])
+@login_required
+@admin_required
+def purge_data_route(user_id):
+    """Delete all of a user's writing (#268): mistaken pre-fills, opt-outs,
+    erasure requests. The account itself stays.
+
+    It works exactly like the user's own "Delete all my writing" (Peter,
+    2026-10-13: "it should definitely work the same as user doing
+    themselves"): everything is hidden at once, the user sees the
+    "Writing deleted" status bar and can restore it, the admin can undo
+    it (``undo_deletion``), and it is deleted for good after the same
+    grace period (PURGE_GRACE_DAYS).
+
+    ``?dry_run=1`` returns what the purge would delete, change and keep,
+    per table, and changes nothing. Otherwise the body must carry
+    ``{"confirm_username": "<the user's username>"}``; the job row
+    records who asked. Counts only, never content. AI and system
+    accounts are refused (409), and so is a second request while one
+    waits or runs (409): the user's own request keeps its date."""
+    from backend.utils import user_purge
+    user = User.query.get_or_404(user_id)
+    reason = user_purge.purge_refusal(user)
+    if reason:
+        return jsonify({"error": f"Refused ({reason}): AI and system "
+                                 "accounts are never purged.",
+                        "code": "purge_refused", "reason": reason}), 409
+
+    if request.args.get("dry_run") in ("1", "true"):
+        counts = user_purge.purge_user_content(user.id, dry_run=True)
+        return jsonify({"dry_run": True, "username": user.username,
+                        "counts": counts,
+                        "grace_days": user_purge.PURGE_GRACE_DAYS,
+                        "job": _purge_job_json(user_purge.active_job(user.id))}), 200
+
+    data = request.get_json(silent=True) or {}
+    if (data.get("confirm_username") or "").strip() != user.username:
+        return jsonify({"error": "Type the username to confirm.",
+                        "code": "confirm_mismatch"}), 400
+
+    job, created = user_purge.schedule_purge(
+        user, requested_by_id=current_user.id, source="admin")
+    if not created and job.delete_account:
+        # The account itself is being deleted (#269): bringing that job
+        # forward would delete the account, not only its data.
+        return jsonify({"error": "This account is scheduled for deletion. "
+                                 "Use Delete account to delete it now.",
+                        "code": "account_deletion_scheduled",
+                        "job": _purge_job_json(job)}), 409
+    if not created:
+        if job.status == "running":
+            return jsonify({"error": "A purge of this account is already "
+                                     "running.", "code": "already_running",
+                            "job": _purge_job_json(job)}), 409
+        # A request is already waiting (the user's own or an admin's): its
+        # writing is hidden and its date stays. A second request would
+        # change nothing the admin can see now.
+        who = "an admin" if job.source == "admin" else "the user"
+        return jsonify({"error": f"The writing was already deleted by {who}. "
+                                 "It is deleted forever on "
+                                 f"{job.scheduled_for:%Y-%m-%d}.",
+                        "code": "already_scheduled",
+                        "job": _purge_job_json(job)}), 409
+    logger.warning("Admin %s deleted the writing of user %s (job %s, "
+                   "restorable until %s)", current_user.id, user.id, job.id,
+                   job.scheduled_for)
+    return jsonify({"job": _purge_job_json(job)}), 202
+
+
+@admin_bp.route("/users/<int:user_id>/delete_account", methods=["POST"])
+@login_required
+@admin_required
+def delete_account_route(user_id):
+    """Delete an account (#269): its data (the #268 purge) and then the
+    account itself. Opt-outs, erasure requests, mistaken whitelists and
+    pre-fills.
+
+    It works like the user's own account deletion (Peter, 2026-10-13:
+    "it should definitely work the same as user doing themselves"): the
+    account is hidden at once and deleted for good after the same grace
+    period; signing in until then offers the user a restore, and the
+    admin can undo it (``undo_deletion``). The account's address gets
+    the same notice as after the user's own request.
+
+    ``?dry_run=1`` returns the purge's counts, the identity layer's and
+    the blast radius (public writing, replies in other people's threads),
+    and changes nothing. Otherwise the body must carry
+    ``{"confirm_username": "<the user's username>"}``. Counts only, never
+    content. AI and system accounts (409), the last admin (409) and an
+    account whose deletion already waits (409) are refused."""
+    from backend.utils import account_deletion, user_purge
+    user = User.query.get_or_404(user_id)
+    if user.id == current_user.id:
+        # An admin's own account goes through the Account page, with its
+        # confirmation and grace period, like everyone's.
+        return jsonify({"error": "Delete your own account on the Account "
+                                 "page.", "code": "own_account"}), 409
+    refusal = account_deletion.deletion_refusal(user)
+    if refusal:
+        code, message = refusal
+        return jsonify({"error": message, "code": code}), 409
+
+    if request.args.get("dry_run") in ("1", "true"):
+        dry = account_deletion.count_account_data(user.id)
+        return jsonify({"dry_run": True, "username": user.username,
+                        "has_email": bool(user.email),
+                        "grace_days": account_deletion.ACCOUNT_DELETION_GRACE_DAYS,
+                        "job": _purge_job_json(user_purge.active_job(user.id)),
+                        **dry}), 200
+
+    data = request.get_json(silent=True) or {}
+    if (data.get("confirm_username") or "").strip() != user.username:
+        return jsonify({"error": "Type the username to confirm.",
+                        "code": "confirm_mismatch"}), 400
+    try:
+        job = account_deletion.schedule_account_deletion(
+            user, requested_by_id=current_user.id, source="admin")
+    except account_deletion.AccountDeletionRefused as e:
+        return jsonify({"error": e.message, "code": e.code,
+                        "job": _purge_job_json(
+                            user_purge.active_job(user.id))}), 409
+    logger.warning("Admin %s deleted account %s (job %s, restorable until "
+                   "%s)", current_user.id, user_id, job.id, job.scheduled_for)
+    if user.email:
+        from backend.utils.email import send_account_deletion_scheduled_email
+        send_account_deletion_scheduled_email(
+            user.email, user.username,
+            account_deletion.format_day(job.scheduled_for), by_admin=True)
+    return jsonify({"job": _purge_job_json(job)}), 202
+
+
+@admin_bp.route("/users/<int:user_id>/undo_deletion", methods=["POST"])
+@login_required
+@admin_required
+def undo_deletion_route(user_id):
+    """Undo an admin's waiting "Purge data" or "Delete account" (Peter,
+    2026-10-13): what it hid shows again, as after the user's own
+    restore. Body: ``{"job_id": <the job the Users row showed>}``, so a
+    stale page cannot undo another request. The user's own request is
+    theirs to restore (409), and a job that has started can no longer be
+    undone (409)."""
+    from backend.utils import account_deletion, user_purge
+    job = user_purge.active_job(user_id)
+    data = request.get_json(silent=True) or {}
+    if job is None or (data.get("job_id") is not None
+                       and data.get("job_id") != job.id):
+        return jsonify({"error": "There is nothing to undo. Reload the "
+                                 "Users table.", "code": "not_scheduled"}), 404
+    if job.status != "scheduled":
+        return jsonify({"error": "The deletion has started and can no longer "
+                                 "be undone.", "code": "already_running",
+                        "job": _purge_job_json(job)}), 409
+    if job.source != "admin":
+        return jsonify({"error": "The user asked for this deletion. Only "
+                                 "they can restore it.", "code": "users_own",
+                        "job": _purge_job_json(job)}), 409
+    if job.delete_account:
+        done = account_deletion.undo_admin_deletion(job.id, current_user.id)
+    else:
+        done = user_purge.undo_admin_purge(job.id, current_user.id)
+    if not done:
+        db.session.expire_all()
+        return jsonify({"error": "The deletion changed meanwhile (it started, "
+                                 "or the user restored it). Reload the Users "
+                                 "table.", "code": "changed",
+                        "job": _purge_job_json(
+                            user_purge.active_job(user_id))}), 409
+    logger.warning("Admin %s undid deletion job %s of user %s",
+                   current_user.id, job.id, user_id)
+    latest = _latest_purge_jobs().get(user_id)
+    return jsonify({"job": _purge_job_json(latest)}), 200
 
 
 @admin_bp.route("/users/<int:user_id>/toggle_spam", methods=["POST"])
@@ -308,13 +674,32 @@ def toggle_user_spam(user_id):
 @login_required
 @admin_required
 def update_user_email(user_id):
+    """Set (or, with an empty string, clear) a user's email directly. The
+    one path that binds an address without the owner confirming it (#260):
+    the admin vouches for it, e.g. to fix a mistyped waitlist address so
+    Activate & Welcome can reach the person."""
     data = request.get_json()
     email = data.get("email")
-    if email is None:
+    if not isinstance(email, str):
         return jsonify({"error": "Email is required."}), 400
+    # Lowercased like every other path that writes an address: sign-in and
+    # the change flow look addresses up lowercased. Nobody confirms this
+    # one, so a typo is only caught here: same validator as everywhere.
+    email = email.strip().lower()
+    if email and not is_valid_email(email):
+        return jsonify({"error": "That is not a valid email address."}), 400
     user = User.query.get_or_404(user_id)
-    user.email = email
-    db.session.commit()
+    user.email = email or None
+    # A change the user left pending must not replace the admin's address
+    # when its link is confirmed later.
+    user.pending_email = None
+    user.email_change_token_hash = None
+    user.email_change_expires_at = None
+    try:
+        db.session.commit()
+    except IntegrityError:
+        db.session.rollback()
+        return jsonify({"error": "That email already belongs to another account."}), 409
     return jsonify({"message": "Email updated", "email": user.email}), 200
 
 @admin_bp.route("/users/<int:user_id>/update_plan", methods=["PUT"])
@@ -360,13 +745,33 @@ def update_user_spend_limit(user_id):
         "current_month_spending_usd": state["spend_usd"],
     }), 200
 
-# New endpoint: Whitelist a user by handle.
+_UNRESOLVED_STATUS = {
+    "not-in-archive": 404, "not-on-x": 404, "ambiguous": 409,
+    "archive-error": 502, "x-error": 502,
+}
+
+
 @admin_bp.route("/whitelist", methods=["POST"])
 @login_required
 @admin_required
 def whitelist_user():
+    """Create an account for an X handle ahead of its owner's first login.
+
+    The account carries the handle's numeric X id from creation, so the
+    owner's X login finds it by id (X logins never match on handle — see
+    auth.py). The id comes from ``resolve_x_id``: the Community Archive
+    (free, exact username match), or one paid X API user read when the
+    body sets ``x_lookup`` — which the admin panel only sends after the
+    admin confirmed the spend in a dialog, per whitelist. That read is
+    billed to the account it creates (the admin's ledger only when there
+    is no account to bill).
+    Created unapproved: whitelisting starts the pre-fill workflow, not
+    ends it — the account is pre-filled (and may be claimed by its owner
+    meanwhile) before it is ready, and the admin approves it by hand once
+    it is. Body: {"handle", "x_lookup"?: bool}."""
+    from backend.utils.x_identity import resolve_x_id, XIdUnresolved, log_user_read
     data = request.get_json() or {}
-    handle = data.get("handle", "").strip()
+    handle = (data.get("handle") or "").strip().lstrip("@")
     if not handle:
         return jsonify({"error": "Handle is required."}), 400
 
@@ -376,16 +781,53 @@ def whitelist_user():
     if error:
         return jsonify({"error": error}), 400
 
-    # Create a new user with the handle
-    user = User(twitter_id=None, username=handle, approved=True)
+    try:
+        # The paid read, if any, goes on the ledger of the account it finds
+        # the id for (like that account's pre-fills) — which does not exist
+        # yet, so the charge is deferred and billed below.
+        resolved = resolve_x_id(handle, x_lookup=bool(data.get("x_lookup")),
+                                defer_cost=True)
+    except XIdUnresolved as e:
+        if e.paid_reads:
+            log_user_read(current_user.id, handle)  # no account to bill
+        body = {"error": e.message, "reason": e.reason}
+        if e.reason in ("not-in-archive", "archive-error"):
+            # The admin panel offers the paid X lookup in a dialog at this
+            # point, with the price; the spend is decided per whitelist.
+            from backend.utils import x_api
+            body["x_lookup_cost_usd"] = x_api.COST_PER_USER_READ
+        return jsonify(body), _UNRESOLVED_STATUS[e.reason]
+
+    holder = User.query.filter_by(twitter_id=resolved.x_id).first()
+    if holder:
+        if resolved.paid_reads:
+            log_user_read(holder.id, handle)  # the read found their id
+        return jsonify({
+            "error": f"That X account already has a Loore account: @{holder.username}.",
+            "user_id": holder.id,
+        }), 409
+
+    user = User(twitter_id=resolved.x_id, username=handle, approved=False)
     db.session.add(user)
     try:
         db.session.commit()
-    except Exception as e:
+    except IntegrityError:
+        # A concurrent whitelist (double submit) or signup took the handle
+        # or the X id between the checks above and this insert.
         db.session.rollback()
-        return jsonify({"error": "DB error", "details": str(e)}), 500
+        if resolved.paid_reads:
+            log_user_read(current_user.id, handle)  # no account of ours to bill
+        return jsonify({
+            "error": "That handle or X account was just added by another request."}), 409
+    if resolved.paid_reads:
+        log_user_read(user.id, handle)
     return jsonify({
         "message": "User whitelisted successfully.",
+        "source": resolved.source,
+        # Who the id belongs to, as the source spells it, so the admin can
+        # see the match — not just an opaque number.
+        "matched": {"username": resolved.username,
+                    "display_name": resolved.display_name},
         "user": {
             "id": user.id,
             "username": user.username,
@@ -456,6 +898,9 @@ def prefill_from_community_archive(user_id):
     defaults to the user's username. Returns {"task_id"} — poll
     /admin/prefill/status/<task_id>."""
     user = User.query.get_or_404(user_id)
+    refusal = _prefill_refusal_response(user)
+    if refusal:
+        return refusal
     data = request.get_json() or {}
     handle = (data.get("handle") or user.username or "").strip().lstrip("@")
     if not handle:
@@ -500,7 +945,10 @@ def prefill_check():
     summary["import_source"] = "parquet" if (big and snapshot_complete) else (
         "parquet (if snapshot is current)" if big and summary.get("detail_source") != "parquet"
         else "rest")
-    summary["profile_threshold_tokens"] = 10000
+    # The first step of the provisional ladder: what a fresh account must
+    # hold for the seeder to build anything at all.
+    from backend.utils.chunk_plan import next_build_threshold
+    summary["profile_threshold_tokens"] = next_build_threshold(0)
     user_id = request.args.get("user_id", type=int)
     if user_id:
         summary["already_imported"] = Node.query.filter(
@@ -570,6 +1018,9 @@ def prefill_from_x_api(user_id):
     /admin/prefill/status/<task_id> (same shape as the CA pre-fill)."""
     from backend.utils import x_api
     user = User.query.get_or_404(user_id)
+    refusal = _prefill_refusal_response(user)
+    if refusal:
+        return refusal
     data = request.get_json() or {}
     handle = (data.get("handle") or user.username or "").strip().lstrip("@")
     if not handle:
@@ -731,6 +1182,13 @@ def create_poll():
     supported = current_app.config.get("SUPPORTED_MODELS", {})
     if model_id not in supported:
         return jsonify({"error": f"Unsupported model: {model_id}"}), 400
+    # A poll drafts answers the way a reply does: only a chat model, the
+    # rule every chat picker and reply route applies (is_chat_model).
+    from backend.utils.llm_nodes import is_chat_model
+    if not is_chat_model(model_id):
+        why = ("deprecated" if supported[model_id].get("deprecated")
+               else "for Read only")
+        return jsonify({"error": f"{model_id} is {why}"}), 400
     data_source = data.get("data_source") or "derived"
     if data_source not in Poll.DATA_SOURCES:
         return jsonify({"error": f"Invalid data_source. Allowed: "
@@ -815,3 +1273,44 @@ def close_poll(poll_id):
         poll.closed_at = datetime.utcnow()
         db.session.commit()
     return jsonify({"id": poll.id, "closed_at": iso_utc(poll.closed_at)}), 200
+
+
+@admin_bp.route("/voice-timing", methods=["GET"])
+@login_required
+@admin_required
+def voice_timing_all():
+    """Where every user's voice-turn wait goes (#371): per-stage medians
+    over all turns and per user, plus the turns themselves (timings,
+    lengths and the model; no content). ?days= (1-7, default 7: records
+    live 7 days) and ?limit= (turns, default 200)."""
+    from backend.utils import voice_timing
+    days = min(max(request.args.get("days", 7, type=int), 1), 7)
+    limit = min(max(request.args.get("limit", 200, type=int), 1),
+                voice_timing.ALL_TURNS)
+    turns = voice_timing.recent_turns_all(time.time() - days * 86400,
+                                          limit)
+    names = dict(db.session.query(User.id, User.username).filter(
+        User.id.in_({user_id for user_id, _ in turns})).all()) \
+        if turns else {}
+    records, by_user = [], {}
+    for user_id, node_id in turns:
+        rec = voice_timing.record(node_id)
+        rec["user_id"] = user_id
+        rec["username"] = names.get(user_id)
+        records.append(rec)
+        by_user.setdefault(user_id, []).append(rec)
+    users = sorted(({
+        "user_id": user_id,
+        "username": names.get(user_id),
+        "turns": len(recs),
+        "median": voice_timing.medians(recs),
+    } for user_id, recs in by_user.items()),
+        key=lambda u: -u["turns"])
+    return jsonify({
+        "days": days,
+        "stages": {name: f"{start} -> {end}" for name, start, end
+                   in voice_timing.STAGES + voice_timing.TAP_STAGES},
+        "median": voice_timing.medians(records),
+        "users": users,
+        "turns": records,
+    }), 200

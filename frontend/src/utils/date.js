@@ -8,7 +8,17 @@
 // value is always interpreted as UTC and then rendered in the browser's local
 // timezone.
 
+// Date-only surfaces (version lists, search results, Commons) read as
+// "Sep 12, 2026"; date+time surfaces (node footers, Log cards) use the
+// compact, sortable "yyyy/mm/dd HH:MM" instead of locale-dependent
+// "9/12/2026, 2:05:30 PM".
 const DATE_OPTS = { month: 'short', day: 'numeric', year: 'numeric' };
+const pad2 = (n) => String(n).padStart(2, '0');
+
+/** Local-time yyyy/mm/dd for an already-parsed Date. */
+export function formatYmd(d) {
+  return `${d.getFullYear()}/${pad2(d.getMonth() + 1)}/${pad2(d.getDate())}`;
+}
 
 /**
  * Parse an ISO timestamp into a Date, defensively treating marker-less strings
@@ -55,7 +65,8 @@ export function formatDate(iso, opts = {}) {
 }
 
 /**
- * Full date + time formatter (locale-aware), e.g. used for node footers.
+ * Date + time formatter, "yyyy/mm/dd HH:MM" in local time (24-hour, no
+ * seconds), e.g. used for node footers and Log cards.
  *
  * @param {string|Date} iso
  * @param {object} [opts]
@@ -66,5 +77,5 @@ export function formatDateTime(iso, opts = {}) {
   if (!iso) return fallback;
   const d = parseTimestamp(iso);
   if (isNaN(d.getTime())) return fallback;
-  return d.toLocaleString();
+  return `${formatYmd(d)} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
 }

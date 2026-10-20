@@ -7,6 +7,7 @@ sync (credit saving). No network — all local.
 """
 import os
 import sys
+from datetime import datetime
 from unittest.mock import MagicMock
 
 os.environ["ENCRYPTION_DISABLED"] = "true"
@@ -113,6 +114,8 @@ def test_find_and_has_ext_quotes():
 def test_resolve_ext_quotes_llm_and_human_formats(app):
     uid = User.query.filter_by(username="tester").first().id
     item = _mk_item(uid, "the saved tweet text")
+    item.posted_at = datetime(2026, 1, 2, 9, 0)
+    _db.session.commit()
 
     llm_text, ids = resolve_ext_quotes(
         f"look: {{quote_ext:{item.id}}}", uid, for_llm=True)
@@ -120,11 +123,54 @@ def test_resolve_ext_quotes_llm_and_human_formats(app):
     assert "<quoted_reference" in llm_text
     assert "the saved tweet text" in llm_text
     assert '@visa' in llm_text
+    # The posted date is the reference's temporal anchor for the model,
+    # the same one the human-readable format already carries.
+    assert 'posted_at="2026-01-02"' in llm_text
 
     human_text, _ = resolve_ext_quotes(
         f"look: {{quote_ext:{item.id}}}", uid, for_llm=False)
     assert "Saved reference from @visa" in human_text
     assert "the saved tweet text" in human_text
+
+
+def test_resolve_ext_quotes_carries_read_and_verdict_to_the_model(app):
+    """A thread that continues after the quote: the model sees whether the
+    user read the pick and how they rated it; unread/unrated stay silent."""
+    uid = User.query.filter_by(username="tester").first().id
+    item = _mk_item(uid, "a quoted pick")
+    marker = f"{{quote_ext:{item.id}}}"
+
+    llm_text, _ = resolve_ext_quotes(marker, uid, for_llm=True)
+    assert ' read="' not in llm_text
+    assert ' verdict="' not in llm_text
+    human_text, _ = resolve_ext_quotes(marker, uid, for_llm=False)
+    assert "· read" not in human_text and "rated" not in human_text
+
+    item.read_at = datetime(2026, 9, 13, 7, 45)
+    item.feedback = "bad"
+    _db.session.commit()
+    llm_text, _ = resolve_ext_quotes(marker, uid, for_llm=True)
+    assert ' read="2026-09-13"' in llm_text
+    assert ' verdict="bad"' in llm_text
+    # The human-readable rendering (exports) carries the same two marks.
+    human_text, _ = resolve_ext_quotes(marker, uid, for_llm=False)
+    assert "· read 2026-09-13 · rated a bad quote ---" in human_text
+
+
+def test_get_ext_quote_data_carries_owner_and_read_mark(app):
+    uid = User.query.filter_by(username="tester").first().id
+    item = _mk_item(uid, "unread so far")
+    data = get_ext_quote_data([item.id], uid)[item.id]
+    assert data["user_id"] == uid
+    assert data["read_at"] is None
+    assert data["feedback"] is None
+
+    item.read_at = datetime(2026, 3, 4, 10, 30)
+    item.feedback = "good"
+    _db.session.commit()
+    data = get_ext_quote_data([item.id], uid)[item.id]
+    assert data["read_at"].startswith("2026-03-04T10:30")
+    assert data["feedback"] == "good"
 
 
 def test_resolve_ext_quotes_owner_only(app):

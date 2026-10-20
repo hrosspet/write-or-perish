@@ -563,3 +563,119 @@ class TestPlaceholderHandlerWiring:
             "backend/utils/llm_nodes.py so misconfigured placeholders "
             "abort BEFORE any LLM node is created"
         )
+
+
+# ── plan gate ───────────────────────────────────────────────────────────
+
+from backend.utils.placeholders import (  # noqa: E402
+    FREE_USER_EXPORT_TOKEN_CAP,
+    USER_EXPORT_EXAMPLE,
+    check_user_export_plan,
+    export_budget_allowed,
+    unrestricted_export_message,
+)
+
+
+class TestExportBudgetAllowed:
+    """An uncapped {user_export} is a Pro feature; everyone else needs a
+    budget within FREE_USER_EXPORT_TOKEN_CAP."""
+
+    def test_entitled_runs_anything(self):
+        assert export_budget_allowed(None, unrestricted_allowed=True)
+        assert export_budget_allowed(10_000_000, unrestricted_allowed=True)
+
+    def test_no_budget_refused(self):
+        assert not export_budget_allowed(None, unrestricted_allowed=False)
+
+    def test_budget_at_cap_allowed(self):
+        assert export_budget_allowed(
+            FREE_USER_EXPORT_TOKEN_CAP, unrestricted_allowed=False)
+
+    def test_budget_over_cap_refused(self):
+        assert not export_budget_allowed(
+            FREE_USER_EXPORT_TOKEN_CAP + 1, unrestricted_allowed=False)
+
+    def test_zero_disables_export_and_is_allowed(self):
+        assert export_budget_allowed(0, unrestricted_allowed=False)
+
+
+class TestCheckUserExportPlan:
+    def test_no_placeholder_no_op(self):
+        check_user_export_plan("plain text", unrestricted_allowed=False)
+        check_user_export_plan("", unrestricted_allowed=False)
+        check_user_export_plan(None, unrestricted_allowed=False)
+
+    def test_entitled_uncapped_passes(self):
+        check_user_export_plan("{user_export}", unrestricted_allowed=True)
+
+    def test_uncapped_refused_with_example(self):
+        with pytest.raises(UserExportValidationError) as exc:
+            check_user_export_plan("{user_export}", unrestricted_allowed=False)
+        msg = str(exc.value)
+        assert msg == unrestricted_export_message()
+        assert "Pro" in msg
+        assert USER_EXPORT_EXAMPLE in msg
+        assert f"max_export_tokens={FREE_USER_EXPORT_TOKEN_CAP}" in msg
+
+    def test_capped_within_limit_passes(self):
+        check_user_export_plan(
+            "{user_export?max_export_tokens=100000}", unrestricted_allowed=False)
+        check_user_export_plan(
+            "{user_export?days=30&max_export_tokens=5000}",
+            unrestricted_allowed=False)
+
+    def test_capped_over_limit_refused(self):
+        with pytest.raises(UserExportValidationError):
+            check_user_export_plan(
+                "{user_export?max_export_tokens=100001}",
+                unrestricted_allowed=False)
+
+    def test_days_alone_is_still_uncapped(self):
+        """A time window bounds nothing in tokens — a busy month can be
+        the whole context window."""
+        with pytest.raises(UserExportValidationError):
+            check_user_export_plan(
+                "{user_export?days=7}", unrestricted_allowed=False)
+
+    def test_non_numeric_budget_counts_as_uncapped(self):
+        """parse_max_export_tokens ignores junk and the task would run
+        the full archive — so refuse it."""
+        with pytest.raises(UserExportValidationError):
+            check_user_export_plan(
+                "{user_export?max_export_tokens=lots}",
+                unrestricted_allowed=False)
+
+    def test_every_placeholder_checked(self):
+        with pytest.raises(UserExportValidationError):
+            check_user_export_plan(
+                "{user_export?max_export_tokens=1000} and later {user_export}",
+                unrestricted_allowed=False)
+
+
+class TestPlanGateWiring:
+    """Source-level checks that the gate sits on every path an export
+    can take: the placeholder factory (typed placeholder), the
+    generation task (inherited placeholder), the prompt-save route."""
+
+    @staticmethod
+    def _calls(rel_path, func_name):
+        path = os.path.join(os.path.dirname(__file__), "..", rel_path)
+        with open(path) as f:
+            tree = ast.parse(f.read())
+        return [
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == func_name
+        ]
+
+    def test_factory_checks_plan(self):
+        assert self._calls("utils/llm_nodes.py", "check_user_export_plan")
+
+    def test_task_checks_budget(self):
+        assert self._calls("tasks/llm_completion.py", "export_budget_allowed")
+
+    def test_prompt_save_checks_plan(self):
+        assert self._calls("routes/prompts.py", "check_user_export_plan")
+        assert self._calls(
+            "routes/prompts.py", "validate_user_export_placeholders")

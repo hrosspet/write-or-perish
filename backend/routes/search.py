@@ -1,10 +1,13 @@
+import html
 import unicodedata
 from datetime import datetime
 
 from flask import Blueprint, jsonify, request
 from flask_login import login_required, current_user
-from sqlalchemy import or_
-from backend.models import Node, NodeContextArtifact, User
+from sqlalchemy import func, or_
+from backend.models import (
+    ExternalItem, Node, NodeContextArtifact,
+)
 from backend.extensions import db
 from backend.utils.timefmt import iso_utc
 
@@ -17,17 +20,40 @@ def _strip_diacritics(text):
     return ''.join(c for c in nfkd if unicodedata.category(c) != 'Mn')
 
 
+# Search results carry `snippet` and `preview` as HTML fragments: every
+# character of the stored text is escaped, and the only markup is the
+# <mark>…</mark> that _snippet adds around matches AFTER escaping. Both
+# clients (web SearchModal, iOS SearchView) parse these two fields as
+# escaped text with <mark> runs, and a web bundle from before #445 still
+# open in a tab renders them as HTML. Stored text includes what other
+# people wrote — bookmarked tweets, Community Archive tweets, clipped
+# pages — so unescaped text here is script on loore.org. Other
+# endpoints' `preview` (e.g. /search/neighbors) stays plain text.
+PREVIEW_CHARS = 200
+
+
+def _preview(content):
+    """The opening of `content` as an escaped HTML fragment."""
+    return (html.escape(content[:PREVIEW_CHARS])
+            + ("..." if len(content) > PREVIEW_CHARS else ""))
+
+
 def _snippet(text, keyword, context_chars=80):
-    """Return a snippet around the first keyword match with <mark> highlighting.
+    """Return an escaped snippet around the first keyword match, with <mark>
+    around each match.
 
     Matches are found diacritics-insensitively but the original text is
-    preserved in the output, with matching spans wrapped in <mark> tags.
+    preserved in the output. Each slice of it is escaped first and the
+    <mark> tags go around the escaped matches, so the result is safe to
+    render as HTML whatever the stored text contains.
     """
     stripped = _strip_diacritics(text).lower()
     kw_stripped = _strip_diacritics(keyword).lower()
-    idx = stripped.find(kw_stripped)
+    # A keyword of nothing but combining marks folds to "": it matches
+    # everywhere and would never advance the highlight loop below.
+    idx = stripped.find(kw_stripped) if kw_stripped else -1
     if idx == -1:
-        return text[:200] + ("..." if len(text) > 200 else "")
+        return _preview(text)
 
     # idx/len refer to positions in the stripped string, which is
     # char-for-char the same length as the original (NFKD + remove Mn
@@ -48,14 +74,107 @@ def _snippet(text, keyword, context_chars=80):
     while i < len(fragment):
         match_start = fragment_stripped.find(kw_stripped, i)
         if match_start == -1:
-            highlighted.append(fragment[i:])
+            highlighted.append(html.escape(fragment[i:]))
             break
-        highlighted.append(fragment[i:match_start])
+        highlighted.append(html.escape(fragment[i:match_start]))
         match_end = match_start + len(kw_stripped)
-        highlighted.append(f"<mark>{fragment[match_start:match_end]}</mark>")
+        highlighted.append(
+            f"<mark>{html.escape(fragment[match_start:match_end])}</mark>")
         i = match_end
 
     return prefix + ''.join(highlighted) + suffix
+
+
+def _parse_date_range(date_from, date_to):
+    """ISO 8601 'from'/'to' query params -> (datetime|None, datetime|None).
+
+    Raises ValueError with a user-facing message on a malformed value.
+    """
+    dt_from = dt_to = None
+    if date_from:
+        try:
+            dt_from = datetime.fromisoformat(date_from)
+        except ValueError:
+            raise ValueError("Invalid 'from' date format. Use ISO 8601.")
+    if date_to:
+        try:
+            dt_to = datetime.fromisoformat(date_to)
+        except ValueError:
+            raise ValueError("Invalid 'to' date format. Use ISO 8601.")
+    return dt_from, dt_to
+
+
+# A reference's date is when it was posted, or when it was saved if the
+# source has no post date (web clips). Used by both search modes so the
+# date filter means the same thing in either.
+_EXTERNAL_DATE = func.coalesce(ExternalItem.posted_at, ExternalItem.fetched_at)
+
+
+def _external_result(item, content, score, snippet=None):
+    """One saved reference in search-result shape (kind='external')."""
+    from backend.utils import document_reference
+    title, author, content = document_reference.display(item, content)
+    return {
+        "id": item.id,
+        "kind": "external",
+        "source": item.source,
+        "author_handle": author,
+        "title": title,
+        "external_url": item.url,
+        "preview": _preview(content),
+        "snippet": snippet,
+        "created_at": iso_utc(item.posted_at or item.fetched_at),
+        "score": score,
+    }
+
+
+def _external_keyword_search(q, dt_from, dt_to, page, per_page):
+    """Keyword search over the user's saved references (scope=external).
+
+    Same shape as the archive keyword search: decrypt, match
+    diacritics-insensitively in memory (title counts too — a clip's
+    title is often the only place its subject is named), paginate.
+    Ordered newest-saved first, as the References page is.
+    """
+    query = ExternalItem.query.filter(
+        ExternalItem.user_id == current_user.id,
+        ExternalItem.saved())  # a Read pick is not a reference (#352)
+    if dt_from is not None:
+        query = query.filter(_EXTERNAL_DATE >= dt_from)
+    if dt_to is not None:
+        query = query.filter(_EXTERNAL_DATE <= dt_to)
+    items = query.order_by(ExternalItem.id.desc()).all()
+
+    start = (page - 1) * per_page
+    if not q:
+        total = len(items)
+        page_items = [(i, i.get_content() or "")
+                      for i in items[start:start + per_page]]
+    else:
+        q_normalized = _strip_diacritics(q).lower()
+        matches = []
+        for item in items:
+            content = item.get_content() or ""
+            haystack = f"{item.title or ''}\n{content}"
+            if q_normalized in _strip_diacritics(haystack).lower():
+                matches.append((item, content))
+        total = len(matches)
+        page_items = matches[start:start + per_page]
+
+    results = [
+        _external_result(item, content, 1.0,
+                         snippet=_snippet(content, q) if q else None)
+        for item, content in page_items
+    ]
+    return jsonify({
+        "results": results,
+        "page": page,
+        "per_page": per_page,
+        "total": total,
+        "has_more": (start + per_page) < total,
+        "search_type": "keyword",
+        "scope": "external",
+    })
 
 
 @search_bp.route("/search", methods=["GET"])
@@ -72,6 +191,16 @@ def search():
     if not q and not date_from and not date_to:
         return jsonify({"error": "Provide at least a keyword (q) or date range (from/to)."}), 400
 
+    try:
+        dt_from, dt_to = _parse_date_range(date_from, date_to)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+    # scope=external searches saved references instead of the archive
+    # (the References page's search button); default is the archive.
+    if request.args.get("scope") == "external":
+        return _external_keyword_search(q, dt_from, dt_to, page, per_page)
+
     # Base query: user's own nodes + nodes where they are the human owner
     # Exclude system prompt nodes (content resolved from UserPrompt)
     prompt_node_ids = db.session.query(
@@ -85,22 +214,16 @@ def search():
             Node.human_owner_id == current_user.id,
         ),
         ~Node.id.in_(db.session.query(prompt_node_ids)),
+        # ...and roots whose per-thread edit detached that link but kept
+        # the prompt_key stamp: still prompt text, not the user's writing.
+        Node.prompt_key.is_(None),
     )
 
     # Date filters (SQL-level, fast)
-    if date_from:
-        try:
-            dt_from = datetime.fromisoformat(date_from)
-            query = query.filter(Node.created_at >= dt_from)
-        except ValueError:
-            return jsonify({"error": "Invalid 'from' date format. Use ISO 8601."}), 400
-
-    if date_to:
-        try:
-            dt_to = datetime.fromisoformat(date_to)
-            query = query.filter(Node.created_at <= dt_to)
-        except ValueError:
-            return jsonify({"error": "Invalid 'to' date format. Use ISO 8601."}), 400
+    if dt_from is not None:
+        query = query.filter(Node.created_at >= dt_from)
+    if dt_to is not None:
+        query = query.filter(Node.created_at <= dt_to)
 
     if node_type:
         query = query.filter(Node.node_type == node_type)
@@ -118,7 +241,7 @@ def search():
             content = node.get_content()
             results.append({
                 "id": node.id,
-                "preview": content[:200] + ("..." if len(content) > 200 else ""),
+                "preview": _preview(content),
                 "snippet": None,
                 "node_type": node.node_type,
                 "created_at": iso_utc(node.created_at),
@@ -154,7 +277,7 @@ def search():
     for node, content in page_matches:
         results.append({
             "id": node.id,
-            "preview": content[:200] + ("..." if len(content) > 200 else ""),
+            "preview": _preview(content),
             "snippet": _snippet(content, q),
             "node_type": node.node_type,
             "created_at": iso_utc(node.created_at),
@@ -187,7 +310,9 @@ def semantic_search():
     from flask import current_app
     from backend.models import NodeEmbedding
     from backend.utils.api_keys import get_openai_chat_key
-    from backend.utils.embeddings import embed_texts, top_k_similar
+    from backend.utils.embeddings import (
+        EMBEDDING_SCAN_CHUNK, embed_texts, top_k_similar,
+    )
 
     q = request.args.get("q", "").strip()
     limit = min(request.args.get("limit", 20, type=int), 50)
@@ -196,19 +321,16 @@ def semantic_search():
     if not q:
         return jsonify({"error": "Provide a query (q)."}), 400
 
-    dt_from = dt_to = None
-    if request.args.get("from"):
-        try:
-            dt_from = datetime.fromisoformat(request.args["from"])
-        except ValueError:
-            return jsonify(
-                {"error": "Invalid 'from' date format. Use ISO 8601."}), 400
-    if request.args.get("to"):
-        try:
-            dt_to = datetime.fromisoformat(request.args["to"])
-        except ValueError:
-            return jsonify(
-                {"error": "Invalid 'to' date format. Use ISO 8601."}), 400
+    try:
+        dt_from, dt_to = _parse_date_range(
+            request.args.get("from"), request.args.get("to"))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+    # scope=external: saved references only (the References page's
+    # search). Default 'archive' ranks the user's nodes and, unless
+    # include_external=0, merges references in by score.
+    external_only = request.args.get("scope") == "external"
 
     api_key = get_openai_chat_key(current_app.config)
     if not api_key:
@@ -224,26 +346,31 @@ def semantic_search():
         db.session.rollback()
         return jsonify({"error": "Embedding the query failed."}), 502
 
-    emb_query = db.session.query(
-        NodeEmbedding.node_id, NodeEmbedding.vector
-    ).filter(NodeEmbedding.user_id == current_user.id)
-    if dt_from is not None or dt_to is not None:
-        emb_query = emb_query.join(Node, Node.id == NodeEmbedding.node_id)
-        if dt_from is not None:
-            emb_query = emb_query.filter(Node.created_at >= dt_from)
-        if dt_to is not None:
-            emb_query = emb_query.filter(Node.created_at <= dt_to)
-    rows = emb_query.all()
-
-    ranked = top_k_similar(query_vector, rows, k=limit, min_score=min_score)
+    ranked = []
+    if not external_only:
+        emb_query = db.session.query(
+            NodeEmbedding.node_id, NodeEmbedding.vector
+        ).filter(NodeEmbedding.user_id == current_user.id)
+        if dt_from is not None or dt_to is not None:
+            emb_query = emb_query.join(
+                Node, Node.id == NodeEmbedding.node_id)
+            if dt_from is not None:
+                emb_query = emb_query.filter(Node.created_at >= dt_from)
+            if dt_to is not None:
+                emb_query = emb_query.filter(Node.created_at <= dt_to)
+        # Streamed in chunks (server-side cursor on Postgres): this runs
+        # inside a gevent worker, so a buffered full-archive scan would
+        # block every request on the hub, not just this one.
+        rows = emb_query.yield_per(EMBEDDING_SCAN_CHUNK)
+        ranked = top_k_similar(
+            query_vector, rows, k=limit, min_score=min_score)
 
     # External references (#155 component 2) — included unless opted out
-    include_external = request.args.get(
+    include_external = external_only or request.args.get(
         "include_external", "1") not in ("0", "false")
     external_results = []
     if include_external:
-        from sqlalchemy import func
-        from backend.models import ExternalItem, ExternalItemEmbedding
+        from backend.models import ExternalItemEmbedding
         ext_query = db.session.query(
             ExternalItemEmbedding.item_id, ExternalItemEmbedding.vector
         ).filter(ExternalItemEmbedding.user_id == current_user.id)
@@ -251,38 +378,26 @@ def semantic_search():
             ext_query = ext_query.join(
                 ExternalItem,
                 ExternalItem.id == ExternalItemEmbedding.item_id)
-            ext_date = func.coalesce(
-                ExternalItem.posted_at, ExternalItem.fetched_at)
             if dt_from is not None:
-                ext_query = ext_query.filter(ext_date >= dt_from)
+                ext_query = ext_query.filter(_EXTERNAL_DATE >= dt_from)
             if dt_to is not None:
-                ext_query = ext_query.filter(ext_date <= dt_to)
-        ext_rows = ext_query.all()
+                ext_query = ext_query.filter(_EXTERNAL_DATE <= dt_to)
+        ext_rows = ext_query.yield_per(EMBEDDING_SCAN_CHUNK)
         ext_ranked = top_k_similar(
             query_vector, ext_rows, k=limit, min_score=min_score)
         items_by_id = {
             i.id: i for i in ExternalItem.query.filter(
                 ExternalItem.id.in_([iid for iid, _ in ext_ranked]),
                 ExternalItem.user_id == current_user.id,
+                ExternalItem.saved(),  # never a Read pick (#352)
             ).all()
         } if ext_ranked else {}
         for item_id, score in ext_ranked:
             item = items_by_id.get(item_id)
             if item is None:
                 continue
-            content = item.get_content() or ""
-            external_results.append({
-                "id": item.id,
-                "kind": "external",
-                "source": item.source,
-                "author_handle": item.author_handle,
-                "external_url": item.url,
-                "preview": content[:200] + ("..." if len(content) > 200
-                                            else ""),
-                "snippet": None,
-                "created_at": iso_utc(item.posted_at or item.fetched_at),
-                "score": round(score, 4),
-            })
+            external_results.append(_external_result(
+                item, item.get_content() or "", round(score, 4)))
     nodes_by_id = {
         n.id: n for n in Node.query.filter(
             Node.id.in_([node_id for node_id, _ in ranked]),
@@ -303,7 +418,7 @@ def semantic_search():
         content = node.get_content() or ""
         results.append({
             "id": node.id,
-            "preview": content[:200] + ("..." if len(content) > 200 else ""),
+            "preview": _preview(content),
             "snippet": None,
             "node_type": node.node_type,
             "created_at": iso_utc(node.created_at),
@@ -323,6 +438,7 @@ def semantic_search():
         "results": merged,
         "total": len(merged),
         "mode": "semantic",
+        "scope": "external" if external_only else "archive",
     }), 200
 
 
@@ -339,7 +455,9 @@ def semantic_neighbors():
     sweep hasn't reached it).
     """
     from backend.models import NodeEmbedding
-    from backend.utils.embeddings import top_k_similar, unpack_vector
+    from backend.utils.embeddings import (
+        EMBEDDING_SCAN_CHUNK, top_k_similar, unpack_vector,
+    )
 
     node_id = request.args.get("node_id", type=int)
     limit = min(request.args.get("limit", 5, type=int), 20)
@@ -364,7 +482,7 @@ def semantic_neighbors():
     ).filter(
         NodeEmbedding.user_id == current_user.id,
         NodeEmbedding.node_id != node_id,
-    ).all()
+    ).yield_per(EMBEDDING_SCAN_CHUNK)
 
     ranked = top_k_similar(query_vector, rows, k=limit, min_score=0.0)
     nodes_by_id = {

@@ -32,6 +32,7 @@ sys.modules.setdefault("celery.utils.log", MagicMock())
 sys.modules.setdefault("celery.result", MagicMock())
 sys.modules.setdefault("ffmpeg", MagicMock())
 
+from datetime import datetime  # noqa: E402
 import pytest  # noqa: E402
 from flask import Flask  # noqa: E402
 
@@ -41,7 +42,7 @@ for _mod in ["flask_login", "backend.models", "backend.extensions"]:
 
 import flask_login as _real_flask_login          # noqa: E402
 from backend.extensions import db as _db         # noqa: E402
-from backend.models import User, Node            # noqa: E402
+from backend.models import User, Node, UserProfile  # noqa: E402
 import backend.models as _real_backend_models    # noqa: E402
 from backend.utils import twitter_archive as ta  # noqa: E402
 
@@ -337,6 +338,7 @@ def test_create_nodes_separate_skips_replies_and_encrypts(app):
         user_id=u.id, rows=iter(_rows()), total=3,
         import_type="separate_nodes", include_replies=False,
         privacy_level="private", ai_usage="none", on_deleted=None,
+        provenance="archive_upload",
         batch_size=1, on_progress=progress.append,
     )
     assert result["created"] == 2 and result["thread_count"] == 2
@@ -344,6 +346,7 @@ def test_create_nodes_separate_skips_replies_and_encrypts(app):
     nodes = Node.query.filter_by(human_owner_id=u.id).order_by(Node.created_at).all()
     assert [n.get_content() for n in nodes] == ["first, oldest", "third, newest"]
     assert all(n.parent_id is None and n.origin == "twitter" for n in nodes)
+    assert all(n.provenance == "archive_upload" for n in nodes)
     assert nodes[0].created_at.year == 2026 and nodes[0].created_at.day == 24
     assert progress[-1] == 3 and len(progress) >= 2  # batched + final
 
@@ -353,7 +356,8 @@ def test_create_nodes_single_thread_chains_and_dedups(app):
     u = _make_user("alice")
     kwargs = dict(user_id=u.id, total=3, import_type="single_thread",
                   include_replies=True, privacy_level="private",
-                  ai_usage="none", on_deleted=None)
+                  ai_usage="none", on_deleted=None,
+                  provenance="archive_upload")
     first = create_twitter_nodes(rows=iter(_rows()), **kwargs)
     assert first["created"] == 3 and first["thread_count"] == 1
     chain = Node.query.filter_by(human_owner_id=u.id).order_by(Node.created_at).all()
@@ -370,7 +374,8 @@ def test_create_nodes_restores_deleted_when_asked(app):
     from datetime import datetime
     u = _make_user("alice")
     n = Node(user_id=u.id, human_owner_id=u.id, node_type="user",
-             source_key="twitter:1", deleted_at=datetime.utcnow())
+             source_key="twitter:1", deleted_at=datetime.utcnow(),
+             provenance="prefill_ca")
     n.set_content("stale")
     _db.session.add(n)
     _db.session.commit()
@@ -378,10 +383,30 @@ def test_create_nodes_restores_deleted_when_asked(app):
         user_id=u.id, rows=iter(_rows()), total=3,
         import_type="separate_nodes", include_replies=False,
         privacy_level="private", ai_usage="none", on_deleted="restore",
+        provenance="archive_upload",
     )
     assert result["restored"] == 1 and result["created"] == 1
     _db.session.refresh(n)
     assert n.deleted_at is None and n.get_content() == "first, oldest"
+    # The restored text is this import's copy, so its provenance is too.
+    assert n.provenance == "archive_upload"
+
+
+def test_create_nodes_requires_a_known_provenance(app):
+    """Provenance is what a later decision on public-sourced tweets will
+    be applied by (#295), so an importer can neither leave it out nor
+    invent a value."""
+    from backend.routes.import_data import create_twitter_nodes
+    u = _make_user("alice")
+    kwargs = dict(user_id=u.id, total=3, import_type="separate_nodes",
+                  include_replies=False, privacy_level="private",
+                  ai_usage="none", on_deleted=None)
+    with pytest.raises(TypeError):
+        create_twitter_nodes(rows=iter(_rows()), **kwargs)
+    with pytest.raises(ValueError):
+        create_twitter_nodes(rows=iter(_rows()), provenance="scraped",
+                             **kwargs)
+    assert Node.query.filter_by(human_owner_id=u.id).count() == 0
 
 
 # ── status endpoint ──────────────────────────────────────────────────────
@@ -414,12 +439,71 @@ def test_status_maps_states_and_hides_other_users(app, monkeypatch):
     _fake_celery(monkeypatch, "SUCCESS", dict(done, user_id=u.id + 1))
     assert client.get("/api/import/status/t1").get_json()["status"] == "queued"
 
-    _fake_celery(monkeypatch, "FAILURE", RuntimeError("boom"))
-    body = client.get("/api/import/status/t1").get_json()
-    assert body["status"] == "failed" and "boom" in body["error"]
-
     _fake_celery(monkeypatch, "PENDING", None)
     assert client.get("/api/import/status/t1").get_json()["status"] == "queued"
+
+
+class _FakeRedis:
+    """The task-owner records (utils/task_owner) in a dict."""
+
+    def __init__(self):
+        self.data = {}
+
+    def setex(self, key, ttl, value):
+        self.data[key] = value.encode()
+
+    def get(self, key):
+        return self.data.get(key)
+
+
+@pytest.fixture
+def owners(monkeypatch):
+    import backend.utils.task_owner as task_owner
+    fake = _FakeRedis()
+    monkeypatch.setattr(task_owner, "_redis", lambda config: fake)
+    return fake
+
+
+def test_confirm_records_the_tasks_owner(app, monkeypatch, owners):
+    from backend.utils.task_owner import task_owned_by
+    client = app.test_client()
+    u = _make_user("alice")
+    _login(client, u.id)
+    _fake_task_module(monkeypatch)
+    token = ta.stash_write(u.id, _rows())
+    resp = client.post("/api/import/twitter/confirm",
+                       json={"import_token": token})
+    assert resp.status_code == 202, resp.get_json()
+    assert task_owned_by("task-123", u.id, {})
+    assert not task_owned_by("task-123", u.id + 1, {})
+
+
+def test_a_failed_import_answers_its_owner_only_without_raw_text(
+        app, monkeypatch, owners):
+    from backend.utils.task_owner import (
+        UserFacingTaskError, record_task_owner)
+    client = app.test_client()
+    u = _make_user("alice")
+    _login(client, u.id)
+    record_task_owner("mine", u.id, {})
+    record_task_owner("theirs", u.id + 1, {})
+
+    raw = RuntimeError('(psycopg2) duplicate key "node_pkey" in /srv/app')
+    _fake_celery(monkeypatch, "FAILURE", raw)
+    body = client.get("/api/import/status/mine").get_json()
+    assert body["status"] == "failed"
+    assert body["error"] == "Import failed"
+    for other in ("theirs", "never-recorded"):
+        resp = client.get(f"/api/import/status/{other}")
+        assert resp.get_json()["status"] == "queued"
+        assert resp.get_json()["error"] is None
+        assert "psycopg2" not in resp.get_data(as_text=True)
+
+    expired = UserFacingTaskError(
+        "Import data expired — please upload the archive again.")
+    _fake_celery(monkeypatch, "FAILURE", expired)
+    body = client.get("/api/import/status/mine").get_json()
+    assert body["error"] == str(expired)
 
 
 # ── Community Archive pre-fill (admin cold-start bootstrap) ───────────────
@@ -445,9 +529,12 @@ def test_community_archive_keyset_paging_and_export_shape(monkeypatch):
         return [_ca_row(3, "c")]
 
     monkeypatch.setattr(ca, "_get", fake_get)
-    rows = list(ca.iter_tweets("Someone", page_size=2))
+    rows = list(ca.iter_tweets("42", page_size=2))
     assert [r["tweet_id"] for r in rows] == ["1", "2", "3"]
     assert "offset" not in calls[0] and calls[1]["order"] == "tweet_id.asc"
+    # Keyed on the account id: a username filter is ilike, where "_" is a
+    # wildcard, and could pull a look-alike account's tweets.
+    assert calls[0]["account_id"] == "eq.42" and "username" not in calls[0]
 
     entry = ca.to_export_entry(_ca_row(9, "hi", reply="5"))["tweet"]
     assert entry["created_at"] == "Mon Aug 24 10:00:00 +0000 2026"
@@ -456,25 +543,277 @@ def test_community_archive_keyset_paging_and_export_shape(monkeypatch):
     assert row["is_reply"] and row["full_text"] == "hi"
 
 
-def test_import_handoff_routes_batch_users_to_seeder(app, monkeypatch):
-    """A batch-pinned user never gets the synchronous profile task after an
-    import; the from-scratch build is requested via the regen flag."""
-    from backend.routes import import_data
-    u = _make_user("batchy")
-    u.profile_force_batch = True
+def test_fetch_account_matches_the_username_exactly(monkeypatch):
+    """The archive's ilike filter treats "_" as a wildcard and returns rows
+    in no order; Loore keys X logins on the id this returns, so a
+    look-alike's id would let that other X user into the account."""
+    from backend.utils import community_archive as ca
+    rows = {}
+
+    def fake_get(table, params, timeout=None):
+        assert table == "all_account"
+        # "_" is ilike's single-character wildcard: sent escaped
+        assert params["username"] == "ilike." + rows["handle"].lstrip("@").replace("_", "\\_")
+        return rows["rows"]
+    monkeypatch.setattr(ca, "_get", fake_get)
+
+    def lookup(handle, *returned):
+        rows.update(handle=handle, rows=[
+            {"account_id": aid, "username": name, "num_tweets": 1} for aid, name in returned])
+        return ca.fetch_account(handle)
+
+    # wildcard look-alikes are rejected, the exact row wins whatever the order
+    assert lookup("jane_doe", ("2", "jane1doe"), ("3", "janeXdoe")) is None
+    assert lookup("jane_doe", ("2", "jane1doe"), ("1", "jane_doe"))["account_id"] == "1"
+    # case-only differences are the same X handle
+    assert lookup("janedoe", ("1", "JaneDoe"))["username"] == "JaneDoe"
+    assert lookup("@JaneDoe", ("1", "janedoe"))["account_id"] == "1"
+    # several exact matches: refuse to guess
+    with pytest.raises(ca.CommunityArchiveError, match="2 Community Archive accounts"):
+        lookup("janedoe", ("1", "janedoe"), ("2", "JaneDoe"))
+    # the same account listed twice is one match
+    assert lookup("janedoe", ("1", "janedoe"), ("1", "janedoe"))["account_id"] == "1"
+    assert lookup("nobody") is None
+    # not an X handle at all ("*" and "%" would be wildcards): no request
+    monkeypatch.setattr(ca, "_get", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no request")))
+    assert ca.fetch_account("ja*ne") is None and ca.fetch_account("100%") is None
+
+
+def test_prefill_parquet_keeps_the_verified_account(app, tmp_path, monkeypatch):
+    """A stale snapshot can map @handle to a former holder. The id that
+    passed the conflict check is the one the tweets are read for and the
+    only one that may be stamped; the snapshot's profile row is never
+    consulted for identity (it once swapped the account and rewrote
+    twitter_id — the regression 9dbf95f introduced)."""
+    from backend.tasks import imports as imports_mod
+    from backend.utils import community_archive as ca
+    snap = tmp_path / "snap"
+    _make_snapshot(snap)  # snapshot: alice → A1 (3 tweets); B2 holds 1 tweet
+    app.config["COMMUNITY_ARCHIVE_PARQUET_MIN_TWEETS"] = 1
+    app.config["COMMUNITY_ARCHIVE_SNAPSHOT_DIR"] = str(snap)
+    u = _make_user("alice")
+    u.twitter_id = "B2"  # whitelisted with today's id
     _db.session.commit()
+    # Today the archive says @alice is account B2 (the handle changed hands
+    # since the snapshot, which still lists alice → A1).
+    monkeypatch.setattr(ca, "fetch_account", lambda h, timeout=None: {
+        "account_id": "B2", "username": "alice", "num_tweets": 1})
+    monkeypatch.setattr(ca, "count_archived", lambda aid: 1)
+    monkeypatch.setattr(ca, "iter_tweets", MagicMock(
+        side_effect=AssertionError("REST must not be used for large accounts")))
+    monkeypatch.setattr(ca, "ensure_snapshot", lambda d, on_progress=None, **k: "2026-08-27T07-03-56Z")
+    monkeypatch.setattr(ca, "fetch_account_parquet", MagicMock(
+        side_effect=AssertionError("the snapshot's profile row must not decide identity")))
     import backend.tasks.exports as ex
+    monkeypatch.setattr(ex, "maybe_trigger_profile_update", MagicMock())
+
+    result = imports_mod.prefill_community_archive_impl(u.id, "alice", {})
+
+    assert result["source"] == "parquet" and result["created"] == 1
+    nodes = Node.query.filter_by(human_owner_id=u.id).all()
+    assert [n.get_content() for n in nodes] == ["bobs tweet"]  # B2's tweets, not A1's
+    assert User.query.get(u.id).twitter_id == "B2"
+    assert result["x_id_stamped"] is False
+
+
+def test_stamp_x_id_never_rekeys_an_account(app):
+    from backend.tasks import imports as imports_mod
+    u = _make_user("alice")
+    u.twitter_id = "A1"
+    _db.session.commit()
+    r = imports_mod._stamp_x_id(u, "Z9")
+    assert r["x_id_stamped"] is False and "signs in with X account A1" in r["x_id_note"]
+    assert u.twitter_id == "A1"
+    # and a placeholder whose owner signed in meanwhile is not stamped either
+    fresh = _make_user("alice2")
+    _db.session.commit()
+    _make_user("alice_owner").twitter_id = "Z9"
+    _db.session.commit()
+    r = imports_mod._stamp_x_id(fresh, "Z9")
+    assert r["x_id_stamped"] is False and "another placeholder" in r["x_id_note"]
+    assert fresh.twitter_id is None
+
+
+def test_stamp_x_id_says_who_took_the_id(app):
+    """An owner who signed in and got a fresh account is one story; a
+    concurrent job stamping another placeholder is another. The note
+    tells them apart by whether anyone has used the holding account."""
+    from datetime import datetime
+    from backend.tasks import imports as imports_mod
+    fresh = _make_user("alice")
+    owner = _make_user("alice_owner")
+    owner.twitter_id = "Z9"
+    owner.last_seen_at = datetime(2026, 9, 17, 10, 0)
+    dup = _make_user("bob")
+    other_placeholder = _make_user("bob_ph")
+    other_placeholder.twitter_id = "Y8"
+    _db.session.commit()
+    r = imports_mod._stamp_x_id(fresh, "Z9")
+    assert "the owner signed in with X during the pre-fill" in r["x_id_note"]
+    assert f"user {owner.id} (@alice_owner)" in r["x_id_note"]
+    r = imports_mod._stamp_x_id(dup, "Y8")
+    assert "another placeholder" in r["x_id_note"] and "@bob_ph" in r["x_id_note"]
+    assert "signed in" not in r["x_id_note"]
+    # an account from before sign-ins were recorded: neither, say so
+    dup2 = _make_user("carol")
+    early = _make_user("carol_early")
+    early.twitter_id = "X7"
+    early.created_at = datetime(2026, 8, 1)
+    _db.session.commit()
+    r = imports_mod._stamp_x_id(dup2, "X7")
+    assert "predates the record (created 2026-08-01)" in r["x_id_note"]
+    assert "may be an early X signup" in r["x_id_note"]
+    assert "check with the person before deleting" in r["x_id_note"]
+    assert "placeholder" not in r["x_id_note"] and "keep one" not in r["x_id_note"]
+
+
+def test_stamp_x_id_does_not_overwrite_a_concurrent_stamp(app):
+    """The account was read at the start of the pre-fill; the backfill (or
+    another pre-fill) stamps it while the tweets are fetched. The write is
+    conditional on the id still being empty, so the other job's id stays."""
+    from sqlalchemy import text
+    from backend.tasks import imports as imports_mod
+    u = _make_user("alice")
+    _db.session.commit()
+    assert u.twitter_id is None  # what this task read
+    # the other job's write lands behind this task's back (no ORM sync)
+    _db.session.execute(text('UPDATE "user" SET twitter_id = :x WHERE id = :id'),
+                        {"x": "Z9", "id": u.id})
+    assert u.twitter_id is None  # still the stale read
+
+    r = imports_mod._stamp_x_id(u, "A1")
+
+    assert r["x_id_stamped"] is False
+    assert "another job attached X account Z9" in r["x_id_note"]
+    assert User.query.get(u.id).twitter_id == "Z9"
+
+
+def test_prefill_uses_the_archive_timeout_not_the_request_budget(app, monkeypatch):
+    from backend.tasks import imports as imports_mod
+    from backend.utils import community_archive as ca
+    from backend.utils.x_identity import LOOKUP_TIMEOUT
+    seen = {}
+    monkeypatch.setattr(ca, "fetch_account",
+                        lambda h, timeout=None: seen.setdefault("timeout", timeout) and None)
+    u = _make_user("alice")
+    _db.session.commit()
+    with pytest.raises(ca.CommunityArchiveError, match="not in the Community Archive"):
+        imports_mod.prefill_community_archive_impl(u.id, "alice", {})
+    assert LOOKUP_TIMEOUT < seen["timeout"] <= ca.TIMEOUT
+
+
+def _chain(user, cutoffs):
+    """Non-integration versions one day apart, then an integration."""
+    versions, parent = [], None
+    for i, cutoff in enumerate(cutoffs):
+        p = UserProfile(user_id=user.id, generated_by="m", tokens_used=0,
+                        generation_type="iterative" if i == 0 else "update",
+                        source_data_cutoff=cutoff,
+                        parent_profile_id=parent.id if parent else None,
+                        created_at=datetime(2026, 8, 1 + i))
+        p.set_content(f"V{i}")
+        _db.session.add(p)
+        _db.session.flush()
+        versions.append(p)
+        parent = p
+    integ = UserProfile(user_id=user.id, generated_by="m", tokens_used=0,
+                        generation_type="integration",
+                        source_data_cutoff=parent.source_data_cutoff,
+                        parent_profile_id=parent.id,
+                        created_at=datetime(2026, 8, 1 + len(cutoffs)))
+    integ.set_content("I")
+    _db.session.add(integ)
+    _db.session.commit()
+    return versions
+
+
+def _tip(user):
+    return (UserProfile.query.filter(UserProfile.user_id == user.id,
+                                     UserProfile.generation_type != "integration")
+            .order_by(UserProfile.created_at.desc()).first())
+
+
+def test_import_invalidates_only_the_versions_it_touches(app, monkeypatch):
+    """An import dated between two cutoffs supersedes the versions built
+    after it, re-tips the chain at the last still-valid version (a revert
+    copy stamped with the import moment) and hands the account to its
+    pipeline to regenerate from there to the end. Shared by every importer."""
+    from backend.routes import import_data
+    import backend.tasks.exports as ex
+    import backend.tasks.profile_batch as pb
     sync = MagicMock(return_value="sync-task")
     monkeypatch.setattr(ex, "maybe_trigger_profile_update", sync)
+    seed = MagicMock()
+    monkeypatch.setattr(pb.seed_profile_batch_for_user, "delay", seed)
+    hand_off = import_data._hand_off_profile_update_after_import
+    cutoffs = [datetime(2026, 1, 10), datetime(2026, 2, 10), datetime(2026, 3, 10)]
 
-    assert import_data._maybe_update_profile_after_import(u.id, None, 50000) is None
-    assert sync.call_count == 0
-    assert User.query.get(u.id).profile_needs_full_regen is True
-
-    # Non-batch users keep the existing synchronous dispatch.
-    v = _make_user("syncy")
+    # Batch account (prod): re-tip at v1, seed now, no full regen.
+    app.config["PROFILE_USE_BATCH"] = True
+    u = _make_user("batch_import")
     _db.session.commit()
-    assert import_data._maybe_update_profile_after_import(v.id, None, 50000) == "sync-task"
+    v = _chain(u, cutoffs)
+    assert hand_off(u, datetime(2026, 1, 20), 2_000) is None   # size is irrelevant to invalidation
+    tip = _tip(u)
+    assert tip.generation_type == "revert" and tip.parent_profile_id == v[0].id
+    assert tip.source_data_cutoff == cutoffs[0] and tip.source_rendered_at is not None
+    assert User.query.get(u.id).profile_needs_full_regen is False
+    assert seed.call_args.args == (u.id,) and sync.call_count == 0
+    # v2 and v3 stay as history; the chain now walks copy → v1.
+    assert [p.id for p in ex._collect_iterative_chain(tip.id)] == [v[0].id, tip.id]
+
+    # Older than the chain's root: everything is invalid → from scratch.
+    w = _make_user("batch_root")
+    _db.session.commit()
+    _chain(w, cutoffs)
+    assert hand_off(w, datetime(2025, 12, 1), 2_000) is None
+    assert User.query.get(w.id).profile_needs_full_regen is True
+    assert _tip(w).generation_type == "update"                  # nothing re-tipped
+
+    # Newer than the tip: nothing invalidated and nothing re-tipped; the
+    # seeding gate is evaluated right away (an immediate seed, whose gates
+    # decide) instead of at the next hourly beat.
+    x = _make_user("batch_newer")
+    _db.session.commit()
+    vx = _chain(x, cutoffs)
+    seed.reset_mock()
+    for tokens in (5_000, 500_000):
+        assert hand_off(x, datetime(2026, 4, 1), tokens) is None
+        assert _tip(x).id == vx[2].id
+        assert User.query.get(x.id).profile_needs_full_regen is False
+    assert seed.call_count == 2
+
+    # No profile yet: same — the ladder in the seeder's gate decides.
+    y = _make_user("batch_fresh")
+    _db.session.commit()
+    seed.reset_mock()
+    assert hand_off(y, None, 50_000) is None
+    assert seed.call_args.args == (y.id,)
+    # An import's seed skips the refusal backoff (#368): a build it
+    # triggers runs even if the profile job is waiting or stopped.
+    assert seed.call_args.kwargs == {"ignore_backoff": True}
+    assert User.query.get(y.id).profile_needs_full_regen is False
+
+    # Sync account: same decisions, dispatched directly.
+    app.config["PROFILE_USE_BATCH"] = False
+    z = _make_user("sync_import")
+    _db.session.commit()
+    vz = _chain(z, cutoffs)
+    assert hand_off(z, datetime(2026, 2, 20), 2_000) == "sync-task"
+    assert sync.call_args.kwargs == {"force_full_regen": False}
+    assert _tip(z).parent_profile_id == vz[1].id
+    assert hand_off(z, datetime(2025, 1, 1), 2_000) == "sync-task"
+    assert sync.call_args.kwargs == {"force_full_regen": True}
+    # Nothing invalidated on a sync account: the heartbeat's gate runs now.
+    heartbeat = MagicMock(return_value="gated")
+    monkeypatch.setattr(ex, "maybe_trigger_incremental_profile_update", heartbeat)
+    assert hand_off(z, datetime(2026, 9, 1), 50_000) == "gated"
+    assert heartbeat.call_args.args[0].id == z.id
+    assert heartbeat.call_args.kwargs == {"ignore_backoff": True}
+    # The Twitter wrapper goes through the same hand-off.
+    fresh = _make_user("sync_fresh")
+    _db.session.commit()
+    assert import_data._maybe_update_profile_after_import(fresh.id, None, 50_000) == "gated"
 
 
 def test_prefill_impl_imports_pins_batch_and_reports(app, monkeypatch):
@@ -482,7 +821,7 @@ def test_prefill_impl_imports_pins_batch_and_reports(app, monkeypatch):
     from backend.utils import community_archive as ca
     u = _make_user("tyler")
     _db.session.commit()
-    monkeypatch.setattr(ca, "fetch_account", lambda h: {
+    monkeypatch.setattr(ca, "fetch_account", lambda h, timeout=None: {
         "account_id": "1", "username": "TylerAlterman", "num_tweets": 3})
     monkeypatch.setattr(ca, "count_archived", lambda aid: 5)
     monkeypatch.setattr(ca, "iter_tweets", lambda h, on_page=None, **k: iter([
@@ -507,6 +846,7 @@ def test_prefill_impl_imports_pins_batch_and_reports(app, monkeypatch):
     nodes = Node.query.filter_by(human_owner_id=u.id).order_by(Node.created_at).all()
     assert [n.get_content() for n in nodes] == ["first", "second"]
     assert all(n.origin == "twitter" and n.ai_usage == "chat" for n in nodes)
+    assert all(n.provenance == "prefill_ca" for n in nodes)
     assert User.query.get(u.id).profile_force_batch is True
     assert User.query.get(u.id).prefilled_handle == "TylerAlterman"
     assert sync.call_count == 0  # never the synchronous path
@@ -519,7 +859,7 @@ def test_prefill_impl_unknown_handle(app, monkeypatch):
     from backend.utils import community_archive as ca
     u = _make_user("nobody")
     _db.session.commit()
-    monkeypatch.setattr(ca, "fetch_account", lambda h: None)
+    monkeypatch.setattr(ca, "fetch_account", lambda h, timeout=None: None)
     with pytest.raises(ca.CommunityArchiveError):
         imports_mod.prefill_community_archive_impl(u.id, "nobody", {})
 
@@ -593,7 +933,10 @@ def test_ensure_snapshot_downloads_once_per_export(tmp_path, monkeypatch):
     snap = tmp_path / "snap"
     assert ca.ensure_snapshot(snap, on_progress=lambda *a: progress.append(a),
                               manifest=manifest) == "E1"
-    assert sorted(p.name for p in snap.iterdir()) == [
+    # (.lock and .download.lock are lock files: _snapshot_lock,
+    # _download_lock.)
+    assert sorted(p.name for p in snap.iterdir()
+                  if p.name not in (".lock", ".download.lock")) == [
         "export_id", "profiles.parquet", "tweets.parquet"]
     assert (snap / "tweets.parquet").read_bytes() == b"abcdef"
     assert opened[0].endswith("/v1/E1/tweets.parquet")
@@ -617,7 +960,7 @@ def test_prefill_impl_large_account_uses_parquet(app, tmp_path, monkeypatch):
     app.config["COMMUNITY_ARCHIVE_SNAPSHOT_DIR"] = str(snap)
     u = _make_user("alice_local")
     _db.session.commit()
-    monkeypatch.setattr(ca, "fetch_account", lambda h: {
+    monkeypatch.setattr(ca, "fetch_account", lambda h, timeout=None: {
         "account_id": "A1", "username": "alice", "num_tweets": 3})
     monkeypatch.setattr(ca, "count_archived", lambda aid: 3)
     monkeypatch.setattr(ca, "iter_tweets", MagicMock(
@@ -642,7 +985,7 @@ def test_prefill_impl_large_account_uses_parquet(app, tmp_path, monkeypatch):
 
 def test_coverage_summary_rest(monkeypatch):
     from backend.utils import community_archive as ca
-    monkeypatch.setattr(ca, "fetch_account", lambda h: {
+    monkeypatch.setattr(ca, "fetch_account", lambda h, timeout=None: {
         "account_id": "9", "username": "cedcolas", "num_tweets": 571,
         "created_via": "twitter_import"})
     monkeypatch.setattr(ca, "count_archived", lambda aid: 6)
@@ -666,7 +1009,7 @@ def test_coverage_summary_parquet(tmp_path, monkeypatch):
     from backend.utils import community_archive as ca
     snap = tmp_path / "snap"
     _make_snapshot(snap)
-    monkeypatch.setattr(ca, "fetch_account", lambda h: {
+    monkeypatch.setattr(ca, "fetch_account", lambda h, timeout=None: {
         "account_id": "A1", "username": "alice", "num_tweets": 3, "created_via": "archive"})
     monkeypatch.setattr(ca, "count_archived", lambda aid: 5)  # live archive grew
     s = ca.coverage_summary("alice", snapshot_dir=snap)
@@ -687,7 +1030,7 @@ def test_prefill_falls_back_to_rest_when_snapshot_lags(app, tmp_path, monkeypatc
     app.config["COMMUNITY_ARCHIVE_SNAPSHOT_DIR"] = str(snap)
     u = _make_user("marvin")
     _db.session.commit()
-    monkeypatch.setattr(ca, "fetch_account", lambda h: {
+    monkeypatch.setattr(ca, "fetch_account", lambda h, timeout=None: {
         "account_id": "M9", "username": "MarvinKeilbach", "num_tweets": 13762})
     monkeypatch.setattr(ca, "count_archived", lambda aid: 1069)
     monkeypatch.setattr(ca, "ensure_snapshot", lambda d, on_progress=None, **k: "E1")
@@ -698,3 +1041,152 @@ def test_prefill_falls_back_to_rest_when_snapshot_lags(app, tmp_path, monkeypatc
     result = imports_mod.prefill_community_archive_impl(u.id, "MarvinKeilbach", {})
     assert result["source"] == "rest" and result["created"] == 2
     assert result["account_num_tweets"] == 13762
+
+
+def test_import_revert_walks_the_current_chain_not_all_history(app, monkeypatch):
+    """Ladder history: a provisional v_a (parent None) superseded by a
+    from-scratch v_b (parent None, the tip). An import dated between their
+    cutoffs is older than the CURRENT chain's root, so it flags a
+    from-scratch build; re-tipping at the stale provisional would continue
+    the chain from a base the ladder already discarded. And a version
+    whose cutoff falls ON the earliest imported second is invalid too: the
+    next window starts strictly after the cutoff, so that node would never
+    be read by any later chunk."""
+    from backend.routes import import_data
+    import backend.tasks.exports as ex
+    import backend.tasks.profile_batch as pb
+    seed = MagicMock()
+    monkeypatch.setattr(pb.seed_profile_batch_for_user, "delay", seed)
+    app.config["PROFILE_USE_BATCH"] = True
+    u = _make_user("ladder_import")
+    _db.session.commit()
+    va = UserProfile(user_id=u.id, generated_by="m", tokens_used=0,
+                     generation_type="initial", source_tokens_used=5_000,
+                     source_data_cutoff=datetime(2026, 1, 10),
+                     parent_profile_id=None, created_at=datetime(2026, 8, 1))
+    va.set_content("PROVISIONAL")
+    vb = UserProfile(user_id=u.id, generated_by="m", tokens_used=0,
+                     generation_type="initial", source_tokens_used=100_000,
+                     source_data_cutoff=datetime(2026, 3, 10),
+                     parent_profile_id=None, created_at=datetime(2026, 8, 2))
+    vb.set_content("FULL")
+    _db.session.add_all([va, vb])
+    _db.session.commit()
+
+    import_data._hand_off_profile_update_after_import(u, datetime(2026, 2, 1), 2_000)
+    assert User.query.get(u.id).profile_needs_full_regen is True
+    assert _tip(u).id == vb.id                                   # nothing re-tipped
+    assert seed.call_args.args == (u.id,)
+
+    # Cutoff exactly on the earliest imported second: that version is invalid.
+    w = _make_user("edge_second")
+    _db.session.commit()
+    v = _chain(w, [datetime(2026, 1, 10), datetime(2026, 2, 10, 12, 0, 0), datetime(2026, 3, 10)])
+    assert ex.revert_profile_for_import(w.id, datetime(2026, 2, 10, 12, 0, 0))[0] == "revert"
+    _db.session.commit()
+    assert _tip(w).parent_profile_id == v[0].id                 # re-tipped BEFORE the equal cutoff
+
+
+def test_prefill_impl_stamps_x_id_only_on_login_less_accounts(app, monkeypatch):
+    """Whitelist → pre-fill → owner's X login: X logins match on the X id
+    only, so a pre-filled account that has no login yet gets the id of the
+    handle it was filled from. Accounts that already sign in some way are
+    never re-keyed, and an id already on another account is not duplicated."""
+    from backend.tasks import imports as imports_mod
+    from backend.utils import community_archive as ca
+    import backend.tasks.exports as ex
+    monkeypatch.setattr(ex, "maybe_trigger_profile_update", MagicMock())
+    monkeypatch.setattr(ca, "fetch_account", lambda h, timeout=None: {
+        "account_id": "1", "username": "TylerAlterman", "num_tweets": 3})
+    monkeypatch.setattr(ca, "count_archived", lambda aid: 2)
+    calls = {"n": 0}
+
+    def rows(h, on_page=None, **k):
+        calls["n"] += 1
+        base = calls["n"] * 10
+        return iter([_ca_row(base + 1, "first"),
+                     _ca_row(base + 2, "second", "2026-08-25T10:00:00+00:00")])
+    monkeypatch.setattr(ca, "iter_tweets", rows)
+
+    placeholder = _make_user("tyler")  # whitelisted, no login of its own yet
+    by_email = _make_user("tyler_mail")
+    by_email.email = "t@example.com"
+    other_x = _make_user("tyler_x")
+    other_x.twitter_id = "999"
+    _db.session.commit()
+
+    # An account with a different X id: a wrong-account pre-fill, refused
+    # before anything is fetched or imported, with a message the admin sees.
+    with pytest.raises(imports_mod.PrefillIdConflict, match="signs in with X account 999"):
+        imports_mod.prefill_community_archive_impl(other_x.id, "tyleralterman", {})
+    assert calls["n"] == 0
+    assert Node.query.filter_by(human_owner_id=other_x.id).count() == 0
+    assert User.query.get(other_x.id).twitter_id == "999"
+
+    result = imports_mod.prefill_community_archive_impl(placeholder.id, "tyleralterman", {})
+    assert User.query.get(placeholder.id).twitter_id == "1"
+    assert result["x_id_stamped"] is True and result["x_id"] == "1"
+
+    # The id now signs in as `placeholder`: filling another account from
+    # the same handle would make two accounts for one person — refused.
+    with pytest.raises(imports_mod.PrefillIdConflict, match="already signs in as user"):
+        imports_mod.prefill_community_archive_impl(by_email.id, "tyleralterman", {})
+    assert Node.query.filter_by(human_owner_id=by_email.id).count() == 0
+
+    # An email account filled from a handle nobody signs in with yet: the
+    # import runs, the id is NOT attached (the owner never proved control
+    # of the X account), and the result says so.
+    monkeypatch.setattr(ca, "fetch_account", lambda h, timeout=None: {
+        "account_id": "2", "username": "OtherHandle", "num_tweets": 3})
+    result = imports_mod.prefill_community_archive_impl(by_email.id, "otherhandle", {})
+    assert User.query.get(by_email.id).twitter_id is None
+    assert result["x_id_stamped"] is False and "signs in by email" in result["x_id_note"]
+    assert Node.query.filter_by(human_owner_id=by_email.id).count() == 2
+
+
+# ── empty tweets (#317) ──────────────────────────────────────────────────
+
+def _row(id_str, text, ts="Wed Jun 24 10:00:00 +0000 2026"):
+    return {"id_str": id_str, "full_text": text, "created_at": ts,
+            "is_reply": False, "in_reply_to_screen_name": None,
+            "favorite_count": 0, "retweet_count": 0, "token_count": 1}
+
+
+def test_create_nodes_skips_tweets_with_no_text(app):
+    """A media-only tweet has no text in the export. Importing it made a
+    blank node: nothing for the profile, a blank Log card, and content
+    no encryption pass can touch (#317)."""
+    from backend.routes.import_data import create_twitter_nodes
+    u = _make_user("alice")
+    rows = [_row("1", "real words"), _row("2", ""), _row("3", "   \n  ")]
+    result = create_twitter_nodes(
+        user_id=u.id, rows=iter(rows), total=3,
+        import_type="separate_nodes", include_replies=False,
+        privacy_level="private", ai_usage="none", on_deleted=None,
+        provenance="archive_upload",
+    )
+    assert result["created"] == 1 and result["empty"] == 2
+    assert result["skipped"] == 0
+    nodes = Node.query.filter_by(human_owner_id=u.id).all()
+    assert [n.get_content() for n in nodes] == ["real words"]
+    # The empty ones left no row at all, so no source_key is burned for
+    # them either: a later import of the same archive re-evaluates them.
+    assert Node.query.filter_by(source_key="twitter:2").count() == 0
+
+
+def test_single_thread_chain_survives_an_empty_tweet(app):
+    """Skipping mid-chain must not orphan the tweets after it."""
+    from backend.routes.import_data import create_twitter_nodes
+    u = _make_user("bob")
+    rows = [_row("1", "first"), _row("2", ""), _row("3", "third")]
+    result = create_twitter_nodes(
+        user_id=u.id, rows=iter(rows), total=3,
+        import_type="single_thread", include_replies=True,
+        privacy_level="private", ai_usage="none", on_deleted=None,
+        provenance="archive_upload",
+    )
+    assert result["created"] == 2 and result["empty"] == 1
+    chain = Node.query.filter_by(human_owner_id=u.id).order_by(Node.id).all()
+    assert chain[0].parent_id is None
+    assert chain[1].parent_id == chain[0].id
+    assert [n.get_content() for n in chain] == ["first", "third"]

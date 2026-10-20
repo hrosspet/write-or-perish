@@ -1,8 +1,11 @@
 import React, { useState, useRef, useEffect } from "react";
-import { Link, useLocation, useNavigate } from "react-router-dom";
+import { Link, useLocation } from "react-router-dom";
 import { useUser } from "../contexts/UserContext";
 import { useTheme } from "../contexts/ThemeContext";
 import GlobalAudioPlayer from "./GlobalAudioPlayer";
+import CraftIcon from "./CraftIcon";
+import CraftModeDialog from "./CraftModeDialog";
+import { useToast } from "../contexts/ToastContext";
 import api from "../api";
 
 const backendUrl = process.env.REACT_APP_BACKEND_URL;
@@ -10,10 +13,13 @@ const backendUrl = process.env.REACT_APP_BACKEND_URL;
 const aboutPaths = ["/why-loore", "/vision", "/how-to"];
 
 function NavBar({ onNewEntryClick }) {
-  const { user, setUser } = useUser();
+  const { user, loading: userLoading, setUser } = useUser();
   const { theme, toggleTheme } = useTheme();
+  const { addToast } = useToast();
+  const [craftDialogOpen, setCraftDialogOpen] = useState(false);
+  // True from "Turn on" until the one-shot glow on the craft items ends.
+  const [craftGlow, setCraftGlow] = useState(false);
   const location = useLocation();
-  const navigate = useNavigate();
   const [aboutOpen, setAboutOpen] = useState(false);
   const [overflowOpen, setOverflowOpen] = useState(false);
   const aboutRef = useRef(null);
@@ -25,35 +31,14 @@ function NavBar({ onNewEntryClick }) {
     return localStorage.getItem('loore_craft_mode') === 'true';
   });
 
-  // Profile generation state — read from backend task_id OR localStorage
-  const [generatingProfile, setGeneratingProfile] = useState(() => {
-    return !!(localStorage.getItem('loore_profile_task_id')
-      || (user && user.profile_generation_task_id));
-  });
-
-  // Sync craft mode, model preference, and profile generation when user loads
+  // Sync craft mode when user loads
   useEffect(() => {
     if (user && user.craft_mode !== undefined) {
       setCraftMode(user.craft_mode);
     }
-    // Sync profile generation state from backend (cross-browser persistence)
-    if (user && user.profile_generation_task_id) {
-      localStorage.setItem('loore_profile_task_id', user.profile_generation_task_id);
-      setGeneratingProfile(true);
-    } else if (user && !user.profile_generation_task_id && !localStorage.getItem('loore_profile_task_id')) {
-      setGeneratingProfile(false);
-    }
   }, [user]);
 
-  // Listen for profile generation completion (dispatched by ProfilePage)
-  useEffect(() => {
-    const handler = () => setGeneratingProfile(false);
-    window.addEventListener('loore_profile_done', handler);
-    return () => window.removeEventListener('loore_profile_done', handler);
-  }, []);
-
-  const toggleCraftMode = async () => {
-    const newValue = !craftMode;
+  const setCraftModeValue = async (newValue) => {
     setCraftMode(newValue);
     localStorage.setItem('loore_craft_mode', String(newValue));
 
@@ -70,22 +55,26 @@ function NavBar({ onNewEntryClick }) {
     }
   };
 
-  // Profile generation handler — navigate to /profile after starting
-  const handleGenerateProfile = async () => {
-    if (generatingProfile) return;
-    setGeneratingProfile(true);
-    try {
-      const res = await api.post("/export/update_profile", { model: user?.preferred_model, force_full_regen: true });
-      localStorage.setItem('loore_profile_task_id', res.data.task_id);
-      window.dispatchEvent(new CustomEvent('loore_profile_started', {
-        detail: { taskId: res.data.task_id }
-      }));
-      setOverflowOpen(false);
-      navigate('/profile');
-    } catch (err) {
-      console.error("Profile generation error:", err);
-      setGeneratingProfile(false);
+  // Turning craft mode ON goes through a confirmation (CraftModeDialog);
+  // turning it OFF is a plain flip.
+  const handleCraftToggleClick = () => {
+    if (craftMode) {
+      setCraftModeValue(false);
+      addToast('Craft mode off.');
+      return;
     }
+    setOverflowOpen(false);
+    setCraftDialogOpen(true);
+  };
+
+  const confirmCraftMode = () => {
+    setCraftDialogOpen(false);
+    setCraftModeValue(true);
+    // Reopen the menu the user came from: the three new items and the
+    // flipped toggle are the immediate, visible result of the choice.
+    setOverflowOpen(true);
+    setCraftGlow(true);
+    addToast('Craft mode on. Its controls carry the sliders icon.', 5000);
   };
 
   // When "Write" is clicked:
@@ -148,6 +137,9 @@ function NavBar({ onNewEntryClick }) {
     zIndex: 1001,
   };
 
+  // Icon + text row inside a menu item; matches the theme toggle's layout.
+  const craftItemLabelStyle = { display: "flex", alignItems: "center", gap: "8px" };
+
   const dropdownItemStyle = {
     display: "block",
     padding: "10px 16px",
@@ -164,7 +156,13 @@ function NavBar({ onNewEntryClick }) {
     transition: "color 0.2s ease",
   };
 
+  // The craft-only items sit in a wrapper with a 4px side margin (room for
+  // the one-shot glow inside the card); 4px less padding keeps their icons
+  // flush with the toggle's.
+  const craftItemStyle = { ...dropdownItemStyle, padding: "10px 12px" };
+
   return (
+    <>
     <nav
       style={{
         position: "fixed",
@@ -177,11 +175,15 @@ function NavBar({ onNewEntryClick }) {
         display: "flex",
         alignItems: "center",
         zIndex: 1000,
-        padding: "0 24px",
+        padding: "0 clamp(14px, 4vw, 24px)",
       }}
     >
+      {/* .nav-brand / .nav-links: index.css shrinks the wordmark and the
+          link gap up to 412px so the kebab (logged in) and Login (logged
+          out) stay on 360–400px phones (#284). */}
       <Link
         to="/"
+        className="nav-brand"
         style={{
           color: "var(--text-secondary)",
           textDecoration: "none",
@@ -194,6 +196,8 @@ function NavBar({ onNewEntryClick }) {
           display: "flex",
           alignItems: "center",
           gap: "10px",
+          whiteSpace: "nowrap",
+          flexShrink: 0,
         }}
       >
         <img
@@ -204,12 +208,25 @@ function NavBar({ onNewEntryClick }) {
         Loore
       </Link>
 
-      <div style={{ display: "flex", alignItems: "center", gap: "clamp(0.8rem, 2vw, 1.8rem)" }}>
+      {/* The links tighten up on narrow screens so the group keeps a
+          clear gap from the logo instead of running into it. */}
+      <div
+        className="nav-links"
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: "clamp(0.55rem, 2vw, 1.8rem)",
+          marginLeft: "clamp(1.1rem, 5vw, 2.5rem)",
+        }}
+      >
         {currentPath !== '/voice' && <GlobalAudioPlayer />}
 
         {/* About dropdown — logged-out visitors only. For logged-in users
-            the three pages live in the overflow menu below. */}
-        {!user && (
+            the three pages live in the overflow menu below. Not while the
+            session is still loading: user is null then too, and About
+            flashed in the bar on every reload before the ⋮ menu took
+            its place (alpha report 2026-09-05). */}
+        {!user && !userLoading && (
         <div ref={aboutRef} style={{ position: "relative" }}>
           <button
             onClick={() => setAboutOpen(!aboutOpen)}
@@ -249,6 +266,25 @@ function NavBar({ onNewEntryClick }) {
             </div>
           )}
         </div>
+        )}
+
+        {/* Home — the home page, same destination as the logo. The logo
+            alone wasn't reading as a link, so the way back gets a named
+            button too. Named "Home", not "Reflect" (#436, Peter
+            2026-10-09): the home page now has a Reflect card of its own. */}
+        {(!user || user.approved) && (
+          <Link
+            to="/"
+            style={{
+              ...linkStyle("/"),
+              color:
+                currentPath === "/" || currentPath === "/landing"
+                  ? "var(--accent)"
+                  : "var(--text-muted)",
+            }}
+          >
+            Home
+          </Link>
         )}
 
         {/* Artifacts — plain link into the documents workspace. It lands on
@@ -330,46 +366,6 @@ function NavBar({ onNewEntryClick }) {
                       Import data
                     </Link>
 
-                    {/* Craft mode items */}
-                    {craftMode && (
-                      <>
-                        <div style={{ borderTop: "1px solid var(--border)", margin: "4px 0" }} />
-                        <button onClick={handleWriteClick} style={dropdownItemStyle}>
-                          Write new entry
-                        </button>
-                        <button onClick={() => {
-                          setOverflowOpen(false);
-                          api.get("/export/threads", { responseType: "blob" })
-                            .then((res) => {
-                              const url = window.URL.createObjectURL(new Blob([res.data]));
-                              const a = document.createElement("a");
-                              a.href = url;
-                              a.download = `loore-export-${new Date().toISOString().slice(0, 10)}.txt`;
-                              a.click();
-                              window.URL.revokeObjectURL(url);
-                            })
-                            .catch((err) => console.error("Export failed:", err));
-                        }} style={dropdownItemStyle}>
-                          Export data
-                        </button>
-                        <Link to="/prompts" onClick={() => setOverflowOpen(false)} style={dropdownItemStyle}>
-                          Prompts
-                        </Link>
-                        <button
-                          onClick={handleGenerateProfile}
-                          disabled={generatingProfile}
-                          style={{
-                            ...dropdownItemStyle,
-                            color: "var(--text-muted)",
-                            cursor: generatingProfile ? "not-allowed" : "pointer",
-                            opacity: generatingProfile ? 0.6 : 1,
-                          }}
-                        >
-                          {generatingProfile ? "Generating profile..." : "(Re-)Generate Profile"}
-                        </button>
-                      </>
-                    )}
-
                     {/* Bottom section */}
                     <div style={{ borderTop: "1px solid var(--border)", margin: "4px 0" }} />
 
@@ -394,34 +390,6 @@ function NavBar({ onNewEntryClick }) {
                         My public page
                       </Link>
                     )}
-
-                    {/* Craft mode toggle */}
-                    <button
-                      onClick={toggleCraftMode}
-                      style={{ ...dropdownItemStyle, display: "flex", justifyContent: "space-between", alignItems: "center" }}
-                    >
-                      <span>Craft mode</span>
-                      <div style={{
-                        width: "32px",
-                        height: "18px",
-                        borderRadius: "9px",
-                        background: craftMode ? "var(--accent)" : "var(--border)",
-                        position: "relative",
-                        transition: "background 0.2s ease",
-                      }}>
-                        <div style={{
-                          width: "14px",
-                          height: "14px",
-                          borderRadius: "50%",
-                          background: "var(--text-primary)",
-                          position: "absolute",
-                          top: "2px",
-                          left: craftMode ? "16px" : "2px",
-                          transition: "left 0.2s ease",
-                        }} />
-                      </div>
-                    </button>
-
                     {/* Theme toggle */}
                     <button
                       onClick={toggleTheme}
@@ -461,6 +429,74 @@ function NavBar({ onNewEntryClick }) {
                         }} />
                       </div>
                     </button>
+
+                    {/* Craft mode toggle. With the mode on, a divider above it
+                        groups the toggle with the craft-only items below. */}
+                    {craftMode && (
+                      <div style={{ borderTop: "1px solid var(--border)", margin: "4px 0" }} />
+                    )}
+                    <button
+                      onClick={handleCraftToggleClick}
+                      title="Shows extra controls: privacy & AI usage per entry, auto-generate toggle, model picker, prompt editing, export."
+                      style={{ ...dropdownItemStyle, display: "flex", justifyContent: "space-between", alignItems: "center" }}
+                    >
+                      <span style={craftItemLabelStyle}><CraftIcon />Craft mode</span>
+                      <div style={{
+                        width: "32px",
+                        height: "18px",
+                        borderRadius: "9px",
+                        background: craftMode ? "var(--accent)" : "var(--border)",
+                        position: "relative",
+                        transition: "background 0.2s ease",
+                      }}>
+                        <div style={{
+                          width: "14px",
+                          height: "14px",
+                          borderRadius: "50%",
+                          background: "var(--text-primary)",
+                          position: "absolute",
+                          top: "2px",
+                          left: craftMode ? "16px" : "2px",
+                          transition: "left 0.2s ease",
+                        }} />
+                      </div>
+                    </button>
+
+                    {/* Craft-only items, right under the toggle so switching
+                        off only collapses what sits below it. Each carries the
+                        toggle's icon, so a user who turned craft mode on and
+                        forgot can tie them back to the switch (alpha feedback 2026-09-05). */}
+                    {craftMode && (
+                      <>
+                        <div
+                          className={craftGlow ? "craft-glow" : undefined}
+                          onAnimationEnd={() => setCraftGlow(false)}
+                          style={{ margin: "0 4px" }}
+                        >
+                        <button onClick={handleWriteClick} style={craftItemStyle}>
+                          <span style={craftItemLabelStyle}><CraftIcon />Write new entry</span>
+                        </button>
+                        <button onClick={() => {
+                          setOverflowOpen(false);
+                          api.get("/export/threads", { responseType: "blob" })
+                            .then((res) => {
+                              const url = window.URL.createObjectURL(new Blob([res.data]));
+                              const a = document.createElement("a");
+                              a.href = url;
+                              a.download = `loore-export-${new Date().toISOString().slice(0, 10)}.txt`;
+                              a.click();
+                              window.URL.revokeObjectURL(url);
+                            })
+                            .catch((err) => console.error("Export failed:", err));
+                        }} style={craftItemStyle}>
+                          <span style={craftItemLabelStyle}><CraftIcon />Export data</span>
+                        </button>
+                        <Link to="/prompts" onClick={() => setOverflowOpen(false)} style={craftItemStyle}>
+                          <span style={craftItemLabelStyle}><CraftIcon />Prompts</span>
+                        </Link>
+                        </div>
+                      </>
+                    )}
                   </>
                 )}
 
@@ -501,6 +537,12 @@ function NavBar({ onNewEntryClick }) {
         )}
       </div>
     </nav>
+    <CraftModeDialog
+      open={craftDialogOpen}
+      onClose={() => setCraftDialogOpen(false)}
+      onConfirm={confirmCraftMode}
+    />
+    </>
   );
 }
 

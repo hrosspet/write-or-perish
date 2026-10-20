@@ -11,8 +11,10 @@ import api from "../api";
  * fresh ask (wording decision 2026-09-01).
  *
  * Design rules (decided 2026-08-27):
- *  - Shown only to X-login users who haven't answered and haven't been
- *    pre-filled yet.
+ *  - Shown only to X-login users who haven't answered. An admin pre-fill
+ *    that already ran (prefilled_handle set) does NOT hide it: the answer
+ *    is the user's to give either way, and the admin Users table shows
+ *    it regardless of whether the pre-fill preceded the signup.
  *  - Two equal-weight buttons, nothing preselected. "Not now" is a real
  *    answer and is stored — it is NOT the same as dismissing.
  *  - Never a blocker: the card is one element on a page the user can
@@ -28,7 +30,7 @@ export default function PrefillConsentCard({ style, delayHint }) {
   // Gate on the server state — except right after answering, when the
   // user object already carries the answer but the card still owes the
   // person a confirmation line.
-  if (!answered && (!user || !user.twitter_login || user.prefill_consent || user.prefilled_handle)) {
+  if (!answered && (!user || !user.twitter_login || user.prefill_consent)) {
     return null;
   }
 

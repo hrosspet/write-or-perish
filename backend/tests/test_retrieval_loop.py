@@ -76,12 +76,21 @@ class _ScriptedProvider:
                 for m in messages
             ],
             "tools": tools,
+            # The keys this call went out on (#325: the training key
+            # never carries content the chain did not license).
+            "api_keys": api_keys,
+            # #348: the baseline response id sent for cache diagnostics.
+            "cache_comparison_response_id": kwargs.get(
+                "cache_comparison_response_id"),
         })
         nxt = cls.responses.pop(0)
         # A queued Exception is raised (e.g. to drive a PromptTooLong on the
         # continuation call); a dict is returned as a normal response.
         if isinstance(nxt, Exception):
             raise nxt
+        # Like the real provider: whether a cache comparison went out (#348).
+        nxt["cache_comparison_sent"] = bool(
+            kwargs.get("cache_comparison_response_id"))
         return nxt
 
 
@@ -420,6 +429,59 @@ def test_textmode_no_retrieval_single_node(app):
     assert APICostLog.query.count() == 1
 
 
+def _cut_off_empty():
+    """A reply that hit max_tokens before any text or tool call — a model
+    that always thinks spending the whole output budget on reasoning."""
+    r = _resp("", inp=36000, out=32000, total=68000)
+    r["truncated"] = True
+    return r
+
+
+def test_empty_truncated_reply_fails_node_with_advice(app):
+    """An empty cut-off reply fails the node instead of saving a blank
+    reply marked completed; the error steers toward a smaller request
+    (a retry would hit the same limit), and the call is still billed."""
+    alice, system, user_node, llm_node = _build_chain("textmode")
+    _ScriptedProvider.reset([_cut_off_empty()])
+
+    with pytest.raises(_llm_task_mod.EmptyTruncatedReplyError):
+        generate_llm_response(
+            _FakeSelf(), user_node.id, llm_node.id, "gpt-5", alice.id,
+            source_mode="textmode",
+        )
+
+    node = _fresh(llm_node.id)
+    assert node.llm_task_status == "failed"
+    assert "smaller steps" in node.llm_task_error
+    assert APICostLog.query.count() == 1
+
+
+def test_empty_truncated_continuation_fails_only_continuation(app):
+    """After a tool round, an empty cut-off continuation fails the
+    continuation node; the completed interim step (and its write) stays."""
+    alice, system, user_node, llm_node = _build_chain("textmode")
+    _ScriptedProvider.reset([
+        _resp("Updating the outline.", tool_calls=[{
+            "id": "t1", "name": "update_artifact",
+            "input": {"kind": "outline", "updated_content": "# Outline"},
+        }]),
+        _cut_off_empty(),
+    ])
+
+    with pytest.raises(_llm_task_mod.EmptyTruncatedReplyError):
+        generate_llm_response(
+            _FakeSelf(), user_node.id, llm_node.id, "gpt-5", alice.id,
+            source_mode="textmode",
+        )
+
+    interim = _fresh(llm_node.id)
+    assert interim.llm_task_status == "completed"
+    assert UserArtifact.latest_for(alice.id, "outline") is not None
+    cont = Node.query.get(interim.continuation_node_id)
+    assert cont.llm_task_status == "failed"
+    assert "smaller steps" in cont.llm_task_error
+
+
 def test_textmode_retrieval_budget_caps_at_max_rounds(app):
     """The loop stops after MAX_RETRIEVAL_ROUNDS interim rounds and finalizes
     even if the model keeps requesting retrieval."""
@@ -501,6 +563,40 @@ def test_textmode_action_tool_continues(app):
         m["text"] for m in _ScriptedProvider.calls[1]["messages"])
     assert "[update_artifact: artifact 'memory' created.]" in second_texts
 
+    # NEXT turn: the outcome is a durable part of the rendered history, not
+    # just that turn's in-flight injection — asked "did that save?", the
+    # model can answer from the record instead of "I got no feedback".
+    user2 = Node(user_id=alice.id, human_owner_id=alice.id,
+                 parent_id=final.id, node_type="user",
+                 privacy_level="private", ai_usage="chat")
+    user2.set_content("did that save?")
+    _db.session.add(user2)
+    _db.session.flush()
+    llm2 = Node(user_id=interim.user_id, human_owner_id=alice.id,
+                parent_id=user2.id, node_type="llm", llm_model="gpt-5",
+                llm_task_status="pending", privacy_level="private",
+                ai_usage="chat")
+    llm2.set_content("[LLM response generation pending...]")
+    _db.session.add(llm2)
+    _db.session.commit()
+
+    _ScriptedProvider.reset([_resp("Yes, it saved.")])
+    generate_llm_response(
+        _FakeSelf(), user2.id, llm2.id, "gpt-5", alice.id,
+        source_mode="textmode",
+    )
+    assert len(_ScriptedProvider.calls) == 1
+    history = _ScriptedProvider.calls[0]["messages"]
+    interim_msgs = [m for m in history
+                    if m["role"] == "assistant"
+                    and "Noting this milestone" in m["text"]]
+    assert len(interim_msgs) == 1
+    assert ("[update_artifact: artifact 'memory' created.]"
+            in interim_msgs[0]["text"])
+    # Already reported same-turn: the cross-turn scan adds no second note.
+    assert sum("artifact 'memory'" in m["text"].lower()
+               or "Artifact 'memory'" in m["text"] for m in history) == 1
+
 
 def test_continuation_terminal_failure_fails_continuation_node(
         app, monkeypatch):
@@ -563,6 +659,92 @@ def test_continuation_transient_failure_retries(app, monkeypatch):
     assert final.llm_task_status == "completed"
     assert final.get_content() == "Here's your answer."
     assert result["llm_node_id"] == final.id
+
+
+@pytest.fixture
+def real_providers(monkeypatch):
+    """The real backend.llm_providers in sys.modules for one test: the
+    task recognises ProviderAccountError (#369) by looking the class up
+    there at call time."""
+    import backend
+    monkeypatch.setattr(backend, "llm_providers",
+                        getattr(backend, "llm_providers", None),
+                        raising=False)
+    monkeypatch.delitem(sys.modules, "backend.llm_providers", raising=False)
+    import backend.llm_providers as mod
+    return mod
+
+
+def _account_error(providers):
+    """A ProviderAccountError as llm_providers raises it: from the SDK's
+    raw error, which must not reach the user."""
+    import httpx
+    import openai
+    raw = openai.OpenAI(api_key="k")._make_status_error(
+        "Error code: 429 - {'error': {'code': 'insufficient_quota'}}",
+        body={"error": {"message": "You exceeded your current quota",
+                        "type": "insufficient_quota",
+                        "code": "insufficient_quota"}},
+        response=httpx.Response(429, request=httpx.Request(
+            "POST", "https://api.openai.com/v1/responses")))
+    err = providers.ProviderAccountError("OpenAI", "billing", "gpt-5")
+    err.__cause__ = raw
+    return err
+
+
+def test_account_failure_fails_the_node_with_the_users_message(
+        app, real_providers):
+    """A call refused for an account reason (#369) fails the node with
+    the plain message — the thread page, the voice toast and the iPhone
+    app all show llm_task_error as is — never the SDK's raw text."""
+    alice, system, user_node, llm_node = _build_chain("textmode")
+    _ScriptedProvider.reset([_account_error(real_providers)])
+
+    with pytest.raises(real_providers.ProviderAccountError):
+        generate_llm_response(
+            _FakeSelf(), user_node.id, llm_node.id, "gpt-5", alice.id,
+            source_mode="textmode",
+        )
+
+    node = _fresh(llm_node.id)
+    assert node.llm_task_status == "failed"
+    assert node.llm_task_error == (
+        "AI replies are temporarily unavailable. This is a problem on "
+        "Loore's side, not yours, and it has been reported.")
+    assert "Error code" not in node.llm_task_error
+
+
+def test_continuation_account_failure_is_not_retried(
+        app, monkeypatch, real_providers):
+    """The continuation call's retries are for temporary failures; an
+    account failure lasts until someone fixes the account (#369), so it
+    fails the continuation node at once with the user's message."""
+    alice, system, user_node, llm_node = _build_chain("textmode")
+    _mk_artifact(alice.id, "reading-list", "books", title="Reading List")
+    monkeypatch.setattr(_llm_task_mod, "CONTINUATION_RETRY_DELAYS", (0, 0))
+
+    _ScriptedProvider.reset([
+        _resp("Let me pull that up.", tool_calls=[{
+            "id": "t1", "name": "read_artifact",
+            "input": {"kind": "reading-list"},
+        }]),
+        _account_error(real_providers),
+        _resp("never sent"),
+    ])
+
+    with pytest.raises(real_providers.ProviderAccountError):
+        generate_llm_response(
+            _FakeSelf(), user_node.id, llm_node.id, "gpt-5", alice.id,
+            source_mode="textmode",
+        )
+
+    assert len(_ScriptedProvider.calls) == 2
+    interim = _fresh(llm_node.id)
+    assert interim.llm_task_status == "completed"
+    cont = Node.query.get(interim.continuation_node_id)
+    assert cont.llm_task_status == "failed"
+    assert cont.llm_task_error == \
+        real_providers.ProviderAccountError.USER_MESSAGE
 
 
 def test_read_full_by_entry_id_resolves_and_continues(app):
@@ -753,40 +935,142 @@ def test_continuation_prompt_too_long_degrades_gracefully(app):
     assert "THE FULL ARCHIVE ENTRY" not in retry_msgs
 
 
-def test_semantic_search_gated_off_for_opted_out_user(app):
-    """Without the per-user opt-in (external_content_enabled, #208 — the
-    Account easter-egg toggle), the semantic_search tool is dropped from
-    the exposed tool list — the model never sees it — and a model-emitted
-    {quote:ID} for an out-of-chain node is NOT pulled mid-turn. The other
-    retrieval tools (read_artifact/read_todo) are unaffected, and manual
-    Cmd+K search is a separate endpoint, also unaffected."""
+def test_archive_search_on_without_references_opt_in(app, monkeypatch):
+    """Own-archive search is on for everyone (#329): with the "External
+    references" toggle off (the default), semantic_search and read_full are
+    still in the tool list, a search returns the user's own entries — and
+    NOT their saved references, even when one matches — so the model never
+    sees an external label it could not follow. (Manual Cmd+K search is a
+    separate endpoint, also unaffected.)"""
+    import backend.utils.embeddings as emb_mod
+    monkeypatch.setattr(
+        emb_mod, "embed_texts", lambda texts, key, **kw: [[1.0, 0.0]])
+
     alice, system, user_node, llm_node = _build_chain("textmode")
     alice.external_content_enabled = False  # default for every user
     archive = Node(user_id=alice.id, human_owner_id=alice.id,
                    node_type="text", privacy_level="private", ai_usage="chat")
-    archive.set_content("AN OUT-OF-CHAIN ENTRY.")
+    archive.set_content("AN OUT-OF-CHAIN ENTRY about zen.")
     _db.session.add(archive)
+    _db.session.flush()
+    _db.session.add(NodeEmbedding(
+        node_id=archive.id, user_id=alice.id, model="test",
+        content_hash="h", vector=pack_vector([1.0, 0.0])))
+    # A saved reference that would rank first if references were on.
+    item = _mk_external_item(
+        alice.id, "the perfect saved tweet about zen", [1.0, 0.0])
     _db.session.commit()
-    aid = archive.id
+    aid, item_id = archive.id, item.id
 
     _ScriptedProvider.reset([
-        _resp("Here's my take. {quote:%d}" % aid),
+        _resp("Checking your archive.",
+              tool_calls=[{"id": "t1", "name": "semantic_search",
+                           "input": {"query": "zen"}}]),
+        _resp("You wrote about this before: {quote:A}."),
     ])
     generate_llm_response(
         _FakeSelf(), user_node.id, llm_node.id, "gpt-5", alice.id,
         source_mode="textmode",
     )
 
-    # Tool list excludes semantic_search but keeps the other retrieval tools.
+    # The search tools are exposed regardless of the toggle.
     tool_names = [t["name"] for t in (_ScriptedProvider.calls[0]["tools"] or [])]
-    assert "semantic_search" not in tool_names
+    assert "semantic_search" in tool_names
+    assert "read_full" in tool_names
     assert "read_artifact" in tool_names
-    # The {quote:ID} did NOT trigger a within-turn pull: one call, no
-    # continuation node, the placeholder stays in the answer for the frontend
-    # to resolve at render time (matches main's behavior).
-    assert len(_ScriptedProvider.calls) == 1
-    node = _fresh(llm_node.id)
-    assert node.continuation_node_id is None
+    # Round 2 saw the archive entry as [A] and no reference at all.
+    assert len(_ScriptedProvider.calls) == 2
+    round2 = "\n".join(
+        m["text"] for m in _ScriptedProvider.calls[1]["messages"])
+    assert "[A]" in round2 and "AN OUT-OF-CHAIN ENTRY" in round2
+    assert "[B]" not in round2
+    assert "saved reference by" not in round2
+    # The quote canonicalized to the archive node; the reference was never
+    # surfaced.
+    _db.session.expire_all()
+    nodes = Node.query.filter(Node.human_owner_id == alice.id).all()
+    all_text = "\n".join(n.get_content() or "" for n in nodes)
+    assert ("{quote:%d}" % aid) in all_text
+    assert "{quote_ext:" not in all_text
+    assert ExternalItem.query.get(item_id).surfaced_count == 0
+
+
+def test_read_full_external_refused_without_references_opt_in(app):
+    """Defense in depth (#329): a search never hands an external label to a
+    user without the toggle, so read_full on one (stale or forged) is
+    refused instead of leaking the reference into the prompt."""
+    alice, system, user_node, llm_node = _build_chain("textmode")
+    alice.external_content_enabled = False
+    item = _mk_external_item(alice.id, "a saved tweet", [1.0, 0.0])
+    _db.session.commit()
+    chain = [system, user_node, llm_node]
+
+    results = _llm_task_mod._execute_tool_calls(
+        [{"id": "t1", "name": "read_full", "input": {"ref": "A"}}],
+        llm_node, chain, alice.id, quote_labels={"A": ("external", item.id)})
+    assert results[0]["status"] == "error"
+    assert "not enabled" in results[0]["error"]
+
+    # Numeric archive-entry ids stay readable for everyone.
+    results = _llm_task_mod._execute_tool_calls(
+        [{"id": "t2", "name": "read_full",
+          "input": {"ref": str(user_node.id)}}],
+        llm_node, chain, alice.id, quote_labels={})
+    assert results[0]["status"] == "success"
+    assert results[0]["kind"] == "node"
+
+    # With the toggle on, the same label resolves.
+    alice.external_content_enabled = True
+    _db.session.commit()
+    results = _llm_task_mod._execute_tool_calls(
+        [{"id": "t3", "name": "read_full", "input": {"ref": "A"}}],
+        llm_node, chain, alice.id, quote_labels={"A": ("external", item.id)})
+    assert results[0]["status"] == "success"
+    assert results[0]["kind"] == "external"
+
+
+def test_external_guidance_splits_on_references_toggle(app):
+    """{external_content_guidance} renders the archive-search paragraph for
+    everyone and appends the saved-references paragraph only when the
+    owner's toggle is on (#329) — identically in render_system_message
+    (pre-warm) and the generation loop's substitution."""
+    alice, system, user_node, llm_node = _build_chain("textmode")
+    # The system node renders its attached prompt artifact's text.
+    prompt = UserPrompt.query.filter_by(user_id=alice.id).one()
+    prompt.set_content("intro\n{external_content_guidance}\nend")
+    alice.external_content_enabled = False
+    _db.session.commit()
+
+    off = _llm_task_mod.render_system_message(system, alice.id)
+    assert "## Archive search" in off
+    assert "saved external references" not in off
+    assert "{external_content_guidance}" not in off
+
+    alice.external_content_enabled = True
+    _db.session.commit()
+    on = _llm_task_mod.render_system_message(system, alice.id)
+    assert "## Archive search" in on
+    assert "saved external references" in on
+    assert on.startswith(off.split("## Archive search")[0])
+
+    # The generation loop substitutes the same bytes: the system message
+    # of the first call equals the pre-warm render.
+    _ScriptedProvider.reset([_resp("hi")])
+    generate_llm_response(
+        _FakeSelf(), user_node.id, llm_node.id, "gpt-5", alice.id,
+        source_mode="textmode",
+    )
+    sys_msg = _ScriptedProvider.calls[0]["messages"][0]["text"]
+    assert sys_msg == on
+
+    # The env killswitch empties the section for everyone.
+    app.config["SEMANTIC_SEARCH_AGENTIC"] = False
+    try:
+        killed = _llm_task_mod.render_system_message(system, alice.id)
+        assert "Archive search" not in killed
+        assert "{external_content_guidance}" not in killed
+    finally:
+        app.config["SEMANTIC_SEARCH_AGENTIC"] = True
 
 
 def test_voice_mode_runs_loop(app):
@@ -868,7 +1152,9 @@ def test_user_export_deduped_to_first_occurrence(app, monkeypatch):
     monkeypatch.setattr(_llm_task_mod, "build_user_export_content",
                         lambda *a, **k: MARKER)
 
-    alice = _mk_user("alice", approved=True, plan="alpha",
+    # Pro: an uncapped {user_export} is refused for other plans (see
+    # check_user_export_plan); this test is about dedup, not the gate.
+    alice = _mk_user("alice", approved=True, plan="pro",
                      external_content_enabled=True)
     llm_user = _mk_user("gpt-5", twitter_id="llm-gpt-5")
     prompt = UserPrompt(user_id=alice.id, prompt_key="textmode", title="P",
@@ -991,6 +1277,8 @@ def test_search_labels_canonicalize_and_bump_surfaced(app, monkeypatch):
         m["text"] for m in _ScriptedProvider.calls[1]["messages"])
     assert "[A]" in round2 and "[B]" in round2
     assert "saved reference by @visa" in round2
+    # Unread reference: no read mark in the preview.
+    assert "marked read by the user" not in round2
     # The FINAL node carries the canonical marker; no continuation node.
     interim = _fresh(llm_node.id)
     final = (Node.query.get(interim.continuation_node_id)
@@ -1006,6 +1294,112 @@ def test_search_labels_canonicalize_and_bump_surfaced(app, monkeypatch):
     assert fresh_item.surfaced_count == 1
     assert fresh_item.last_surfaced_at is not None
     assert result["status"] == "completed"
+
+
+def test_search_preview_shows_users_read_mark(app, monkeypatch):
+    """A reference the user marked read (ExternalItem.read_at — set only
+    by the user's own hand, never by surfacing) carries that mark in the
+    search preview the model sees, dated."""
+    from datetime import datetime
+    import backend.utils.embeddings as emb_mod
+    monkeypatch.setattr(
+        emb_mod, "embed_texts", lambda texts, key, **kw: [[1.0, 0.0]])
+
+    alice, system, user_node, llm_node = _build_chain("textmode")
+    item = _mk_external_item(
+        alice.id, "the perfect saved tweet about zen", [0.9, 0.1])
+    item.read_at = datetime(2026, 9, 10, 8, 0, 0)
+    item.feedback = "good"
+    _db.session.commit()
+
+    _ScriptedProvider.reset([
+        _resp("Checking your archive.",
+              tool_calls=[{"id": "t1", "name": "semantic_search",
+                           "input": {"query": "zen"}}]),
+        _resp("You already read that one — building on it."),
+    ])
+
+    result = generate_llm_response(
+        _FakeSelf(), user_node.id, llm_node.id, "gpt-5", alice.id,
+        source_mode="textmode",
+    )
+
+    assert result["status"] == "completed"
+    assert len(_ScriptedProvider.calls) == 2
+    round2 = "\n".join(
+        m["text"] for m in _ScriptedProvider.calls[1]["messages"])
+    assert "saved reference by @visa" in round2
+    assert "marked read by the user (2026-09-10)" in round2
+    assert "the user rated this a good quote" in round2
+
+
+def test_continued_thread_sees_read_mark_and_verdict_on_earlier_quote(app):
+    """After the assistant quoted a reference, the user marked it read and
+    rated it. The assistant turn keeps its raw {quote_ext:ID} marker, so
+    the next call carries the user's marks as a note in the synthetic
+    final user message; an unmarked quote adds no note."""
+    from datetime import datetime
+    alice, system, user_node, llm_node = _build_chain("textmode")
+    item = _mk_external_item(alice.id, "a tweet the model picked", [0.9, 0.1])
+    other = _mk_external_item(alice.id, "another pick, untouched", [0.1, 0.9])
+    # Turn the placeholder into the completed quoting reply, then continue.
+    llm_node.set_content(
+        "I'd pick this one. {quote_ext:%d} And this. {quote_ext:%d}"
+        % (item.id, other.id))
+    llm_node.llm_task_status = "completed"
+    user2 = Node(user_id=alice.id, human_owner_id=alice.id,
+                 parent_id=llm_node.id, node_type="user",
+                 privacy_level="private", ai_usage="chat")
+    user2.set_content("why that one?")
+    _db.session.add(user2)
+    _db.session.flush()
+    llm2 = Node(user_id=llm_node.user_id, human_owner_id=alice.id,
+                parent_id=user2.id, node_type="llm", llm_model="gpt-5",
+                llm_task_status="pending", privacy_level="private",
+                ai_usage="chat")
+    llm2.set_content("[LLM response generation pending...]")
+    _db.session.add(llm2)
+    _db.session.commit()
+
+    _ScriptedProvider.reset([_resp("Because it fit.")])
+    result = generate_llm_response(
+        _FakeSelf(), user2.id, llm2.id, "gpt-5", alice.id,
+        source_mode="textmode")
+    assert result["status"] == "completed"
+    texts = [m["text"] for m in _ScriptedProvider.calls[0]["messages"]]
+    assert not any("marks on references" in t for t in texts)
+    # The assistant turn is sent with its own marker, not a resolved block.
+    assert any(("{quote_ext:%d}" % item.id) in t for t in texts)
+
+    item.read_at = datetime(2026, 9, 13, 7, 45)
+    item.feedback = "bad"
+    _db.session.commit()
+    llm3_parent = _fresh(llm2.id)
+    user3 = Node(user_id=alice.id, human_owner_id=alice.id,
+                 parent_id=llm3_parent.id, node_type="user",
+                 privacy_level="private", ai_usage="chat")
+    user3.set_content("and now?")
+    _db.session.add(user3)
+    _db.session.flush()
+    llm3 = Node(user_id=llm_node.user_id, human_owner_id=alice.id,
+                parent_id=user3.id, node_type="llm", llm_model="gpt-5",
+                llm_task_status="pending", privacy_level="private",
+                ai_usage="chat")
+    llm3.set_content("[LLM response generation pending...]")
+    _db.session.add(llm3)
+    _db.session.commit()
+
+    _ScriptedProvider.reset([_resp("Noted.")])
+    result = generate_llm_response(
+        _FakeSelf(), user3.id, llm3.id, "gpt-5", alice.id,
+        source_mode="textmode")
+    assert result["status"] == "completed"
+    msgs = _ScriptedProvider.calls[0]["messages"]
+    last = msgs[-1]
+    assert last["role"] == "user"
+    assert ("reference %d (@visa) — read 2026-09-13, rated a bad quote"
+            % item.id) in last["text"]
+    assert "not listed here is unread and unrated" in last["text"]
 
 
 def test_label_canonicalization_in_final_answer(app, monkeypatch):
@@ -1381,3 +1775,272 @@ def test_artifact_substantial_rewrite_echoes_full_text(app):
     # Full new text, not a diff: every line present, un-prefixed.
     assert "- new fact 199" in second_texts
     assert "+- new fact 199" not in second_texts
+
+
+# ── A version AI may not read is never read, echoed or written over ─────
+# The user's latest memory is 'none' (saved while their Default AI usage
+# was None). The context leaves it out, so a model may try to write one.
+# The write is refused whole: the 'none' text reaches no tool result, diff
+# or follow-up call, and the user's version stays the latest.
+
+_NONE_MEMORY = "## Facts\n- SECRET LINE KEPT FROM AI\n- second line"
+
+
+def _all_sent_texts():
+    return "\n".join(m["text"] for c in _ScriptedProvider.calls
+                     for m in c["messages"])
+
+
+@pytest.mark.parametrize("tool_input", [
+    {"kind": "memory",
+     "edits": [{"old_text": "- second line", "new_text": "- a new line"}]},
+    {"kind": "memory", "updated_content": "## Facts\n- written by the model"},
+], ids=["edits", "full_text"])
+def test_artifact_write_over_a_none_version_is_refused(app, tool_input):
+    alice, system, user_node, llm_node = _build_chain("textmode")
+    kept = _mk_artifact(alice.id, "memory", _NONE_MEMORY, title="Memory",
+                        ai_usage="none")
+    _db.session.commit()
+
+    second_texts, entry = _run_update(alice, user_node, llm_node, tool_input)
+
+    assert entry["status"] == "error"
+    assert "kept away from AI" in entry["error"]
+    assert "update_artifact failed" in second_texts
+    assert "kept away from AI" in second_texts
+    # Neither read nor echoed: no call carried any of its text.
+    assert "SECRET LINE" not in _all_sent_texts()
+    assert "SECRET LINE" not in entry["error"]
+    # Not written over: the user's version is still the latest and only one.
+    assert UserArtifact.latest_for(alice.id, "memory").id == kept.id
+    assert UserArtifact.query.filter_by(
+        user_id=alice.id, kind="memory").count() == 1
+
+
+def test_artifact_write_over_a_chat_version_updates_as_before(app):
+    """Only the latest version decides: an older 'none' version does not
+    block a write, and the diff is taken against the readable latest."""
+    alice, system, user_node, llm_node = _build_chain("textmode")
+    _mk_artifact(alice.id, "memory", _NONE_MEMORY, title="Memory",
+                 ai_usage="none")
+    _mk_artifact(alice.id, "memory", "## Facts\n- has a dog", title="Memory",
+                 ai_usage="chat")
+    _db.session.commit()
+
+    second_texts, entry = _run_update(alice, user_node, llm_node, {
+        "kind": "memory",
+        "edits": [{"old_text": "- has a dog", "new_text": "- has two dogs"}],
+    })
+
+    assert entry["status"] == "success"
+    assert (UserArtifact.latest_for(alice.id, "memory").get_content()
+            == "## Facts\n- has two dogs")
+    assert "Your changes to 'memory'" in second_texts
+    assert "+- has two dogs" in second_texts
+    assert "SECRET LINE" not in _all_sent_texts()
+
+
+def test_artifact_echo_never_diffs_against_a_none_version(app):
+    """The echo checks the previous version itself: one AI may not read
+    gives the new text alone, never a diff with its lines."""
+    alice = _mk_user("alice", approved=True, plan="alpha")
+    prev = _mk_artifact(alice.id, "memory", _NONE_MEMORY, ai_usage="none")
+    new = _mk_artifact(alice.id, "memory", "fresh memory from the model")
+    _db.session.commit()
+
+    echo = _llm_task_mod._artifact_update_echo({
+        "name": "update_artifact", "status": "success",
+        "artifact_id": new.id, "kind": "memory",
+        "previous_artifact_id": prev.id,
+    })
+
+    assert "fresh memory from the model" in echo
+    assert "SECRET LINE" not in echo
+    assert "second line" not in echo
+
+
+# ── #222: the prompt always ends on a user turn ──────────────────────────
+
+def test_reply_under_llm_node_ends_with_user_turn(app):
+    """A non-agentic reply whose parent is itself an LLM node would send a
+    prompt ending on an assistant turn (the chain ends at parent_node).
+    Prefill-unsupported models 400 on that; the task now closes the prompt
+    with a neutral user turn."""
+    alice = _mk_user("alice", approved=True, plan="alpha")
+    llm_user = _mk_user("gpt-5", twitter_id="llm-gpt-5")
+    root = Node(user_id=alice.id, human_owner_id=alice.id, node_type="user",
+                privacy_level="private", ai_usage="chat")
+    root.set_content("a thought")
+    _db.session.add(root)
+    _db.session.flush()
+    first_reply = Node(user_id=llm_user.id, human_owner_id=alice.id,
+                       parent_id=root.id, node_type="llm", llm_model="gpt-5",
+                       llm_task_status="completed", privacy_level="private",
+                       ai_usage="chat")
+    first_reply.set_content("a first answer")
+    _db.session.add(first_reply)
+    _db.session.flush()
+    placeholder = Node(user_id=llm_user.id, human_owner_id=alice.id,
+                       parent_id=first_reply.id, node_type="llm",
+                       llm_model="gpt-5", llm_task_status="pending",
+                       privacy_level="private", ai_usage="chat")
+    placeholder.set_content("[LLM response generation pending...]")
+    _db.session.add(placeholder)
+    _db.session.commit()
+
+    _ScriptedProvider.reset([_resp("continuing…")])
+    generate_llm_response(
+        _FakeSelf(), first_reply.id, placeholder.id, "gpt-5", alice.id)
+
+    msgs = _ScriptedProvider.calls[0]["messages"]
+    assert msgs[-2]["role"] == "assistant"
+    assert msgs[-2]["text"].endswith("a first answer")
+    assert msgs[-1] == {"role": "user", "text": "[continue]"}
+
+
+def test_agentic_prompt_already_ending_on_user_turn_is_untouched(app):
+    """Agentic turns end on the injected notes (a user turn); nothing extra
+    is appended — the guard is a no-op there."""
+    alice, system, user_node, llm_node = _build_chain("textmode")
+    _ScriptedProvider.reset([_resp("hi")])
+    generate_llm_response(
+        _FakeSelf(), user_node.id, llm_node.id, "gpt-5", alice.id,
+        source_mode="textmode")
+    msgs = _ScriptedProvider.calls[0]["messages"]
+    assert msgs[-1]["role"] == "user"
+    assert "[continue]" not in msgs[-1]["text"]
+    assert sum(1 for m in msgs if m["text"] == "[continue]") == 0
+
+
+def test_render_variant_carries_the_killswitch(app):
+    """The #192 render-cache key must change when the env killswitch
+    flips, not only on the per-user toggles: with the toggle off, both
+    killswitch states read e0 while rendering different text (archive
+    guidance vs nothing), so without the `a` bit an emergency flip would
+    keep serving the cached archive-search guidance for the TTL."""
+    alice, *_ = _build_chain("textmode")
+    alice.external_content_enabled = False
+    _db.session.commit()
+    on = _llm_task_mod._render_variant(alice.id)
+    assert on.startswith("a1") and on.endswith("e0")
+    app.config["SEMANTIC_SEARCH_AGENTIC"] = False
+    try:
+        off = _llm_task_mod._render_variant(alice.id)
+    finally:
+        app.config["SEMANTIC_SEARCH_AGENTIC"] = True
+    assert off.startswith("a0") and off.endswith("e0")
+    assert on != off
+    # And the toggle itself still moves the key.
+    alice.external_content_enabled = True
+    _db.session.commit()
+    assert _llm_task_mod._render_variant(alice.id).endswith("e1")
+
+
+# ── OpenAI Prompt Cache Diagnostics (#348) ───────────────────────────────
+
+@pytest.fixture
+def diag_model(app):
+    """gpt-5 as a model with cache_diagnostics, restored afterwards."""
+    cfg = _app.config["SUPPORTED_MODELS"]["gpt-5"]
+    cfg["cache_diagnostics"] = True
+    yield
+    cfg.pop("cache_diagnostics", None)
+
+
+def _llm_reply_under(parent, alice, text="next question"):
+    """A user message under *parent* and a pending LLM placeholder under
+    it, as a follow-up turn would create."""
+    llm_user = User.query.filter_by(username="gpt-5").first()
+    user_node = Node(user_id=alice.id, human_owner_id=alice.id,
+                     parent_id=parent.id, node_type="user",
+                     privacy_level="private", ai_usage="chat")
+    user_node.set_content(text)
+    _db.session.add(user_node)
+    _db.session.flush()
+    llm_node = Node(user_id=llm_user.id, human_owner_id=alice.id,
+                    parent_id=user_node.id, node_type="llm",
+                    llm_model="gpt-5", llm_task_status="pending",
+                    privacy_level="private", ai_usage="chat")
+    llm_node.set_content("[LLM response generation pending...]")
+    _db.session.add(llm_node)
+    _db.session.commit()
+    return user_node, llm_node
+
+
+def test_cache_diagnostics_tool_round_then_next_turn(app, diag_model):
+    alice, system, user_node, llm_node = _build_chain("textmode")
+    _mk_artifact(alice.id, "reading-list", "1. Dune", title="Reading List")
+    miss = {"type": "cache_miss", "reason": "input_changed",
+            "comparison_reusable_tokens": 800, "cache_missed_tokens": 120}
+    _ScriptedProvider.reset([
+        dict(_resp("Let me look.", tool_calls=[{
+            "id": "t1", "name": "read_artifact",
+            "input": {"kind": "reading-list"}}]), response_id="resp_1"),
+        dict(_resp("Start with Dune."), response_id="resp_2",
+             cache_diagnostics=miss),
+    ])
+    generate_llm_response(_FakeSelf(), user_node.id, llm_node.id, "gpt-5",
+                          alice.id, source_mode="textmode")
+
+    # The thread's first call has no baseline; the continuation compares
+    # itself to the tool round before it.
+    sent = [c["cache_comparison_response_id"]
+            for c in _ScriptedProvider.calls]
+    assert sent == [None, "resp_1"]
+
+    interim = _fresh(llm_node.id)
+    final_id = interim.continuation_node_id
+    rows = APICostLog.query.order_by(APICostLog.id).all()
+    assert [r.request_ref for r in rows] == [
+        f"node:{interim.id}", f"node:{final_id}"]
+    assert [r.provider_response_id for r in rows] == ["resp_1", "resp_2"]
+    assert rows[0].cache_diag_baseline is None
+    assert rows[0].cache_diag_type is None
+    assert rows[1].cache_diag_baseline == "tool_round"
+    assert rows[1].cache_diag_type == "cache_miss"
+    assert rows[1].cache_diag_reason == "input_changed"
+    assert rows[1].cache_diag_reusable_tokens == 800
+    assert rows[1].cache_diag_missed_tokens == 120
+    assert rows[1].cache_diag_gap_s is not None
+    # Same system prompt on both calls of the turn.
+    assert rows[0].system_prefix_hash
+    assert rows[0].system_prefix_hash == rows[1].system_prefix_hash
+
+    # Next turn, under the final answer: compares to the last call on the
+    # path, which is the continuation's.
+    final = Node.query.get(final_id)
+    _u2, llm2 = _llm_reply_under(final, alice)
+    _ScriptedProvider.reset([dict(_resp("Sure."), response_id="resp_3")])
+    generate_llm_response(_FakeSelf(), _u2.id, llm2.id, "gpt-5", alice.id,
+                          source_mode="textmode")
+    assert _ScriptedProvider.calls[0]["cache_comparison_response_id"] == (
+        "resp_2")
+    row = APICostLog.query.order_by(APICostLog.id.desc()).first()
+    assert row.cache_diag_baseline == "prev_turn"
+    assert row.request_ref == f"node:{llm2.id}"
+
+    # A branch off the first user message sees none of those calls: its
+    # ancestor path holds no LLM node.
+    _u3, llm3 = _llm_reply_under(system, alice, text="another branch")
+    _ScriptedProvider.reset([dict(_resp("Hi."), response_id="resp_4")])
+    generate_llm_response(_FakeSelf(), _u3.id, llm3.id, "gpt-5", alice.id,
+                          source_mode="textmode")
+    assert _ScriptedProvider.calls[0]["cache_comparison_response_id"] is None
+
+
+def test_cache_diagnostics_off_for_models_without_the_flag(app):
+    alice, system, user_node, llm_node = _build_chain("textmode")
+    _ScriptedProvider.reset([dict(_resp("Hello."), response_id="resp_1")])
+    generate_llm_response(_FakeSelf(), user_node.id, llm_node.id, "gpt-5",
+                          alice.id, source_mode="textmode")
+    _u2, llm2 = _llm_reply_under(_fresh(llm_node.id), alice)
+    _ScriptedProvider.reset([dict(_resp("Again."), response_id="resp_2")])
+    generate_llm_response(_FakeSelf(), _u2.id, llm2.id, "gpt-5", alice.id,
+                          source_mode="textmode")
+    assert _ScriptedProvider.calls[0]["cache_comparison_response_id"] is None
+    rows = APICostLog.query.order_by(APICostLog.id).all()
+    # The id and the node are still recorded, so enabling the flag later
+    # has a baseline from the first turn on.
+    assert [r.provider_response_id for r in rows] == ["resp_1", "resp_2"]
+    assert rows[1].request_ref == f"node:{llm2.id}"
+    assert all(r.cache_diag_baseline is None for r in rows)

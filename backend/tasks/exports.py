@@ -10,79 +10,115 @@ from backend.celery_app import celery, flask_app
 from backend.models import User, UserProfile, APICostLog
 from backend.extensions import db
 from backend.llm_providers import (
-    LLMProvider, PromptTooLongError, DEFAULT_MAX_OUTPUT_TOKENS)
+    LLMProvider, PromptTooLongError, DEFAULT_MAX_OUTPUT_TOKENS,
+    model_input_cap, is_empty_truncated, is_refused,
+    EmptyTruncatedOutputError)
 
 from backend.utils.tokens import (
     approximate_token_count, reduce_export_tokens, format_date_metadata,
 )
 from backend.utils.api_keys import get_api_keys_for_usage
-from backend.utils.cost import calculate_llm_cost_microdollars
+from backend.utils.cost import llm_cost_log_fields
+from backend.utils.privacy import AI_ALLOWED, account_allows_ai
+from backend.utils import refusal_backoff
+from backend.utils.refusal_backoff import REFUSED_REF
 
 logger = get_task_logger(__name__)
 
-# Chunking constants for iterative profile generation and incremental updates.
-# Each chunk targets ~90k raw tokens (yielding ~100-110k formatted tokens).
-# Chunks smaller than MIN_CHUNK_TOKENS are deferred to the next update cycle.
-CHUNK_BUDGET = 90000
-MIN_CHUNK_TOKENS = 80000
+# Equal-chunk planner (design note 2026-09-03, docs/design/chunk-planner.md):
+# every chunk is planned over the remainder in STORED content units
+# (Node.token_count, chars/4 of the node's own text). The constants — the
+# 90k target, the 80k organic-growth gate, the cap margin — live in one
+# module and are re-exported here for the chunk loops and the batch builder.
+from backend.utils.chunk_plan import (  # noqa: E402,F401
+    CHUNK_TARGET_UNITS, UPDATE_THRESHOLD_UNITS, CAP_MARGIN,
+    PROVISIONAL_THRESHOLDS, next_build_threshold,
+    plan_chunks, next_window_budget, max_units_for_cap)
 
-# Stored token counts are chars // 4. A model's effective divisor is
-# 4 / (token_multiplier × observed calibration): 4 for older tokenizers,
-# 2 for the new generation, nudged by what the provider actually counted.
-# Clamp the effective divisor to [1, 5] chars/token so one odd chunk can't
-# collapse or explode the budget.
-CHARS_PER_TOKEN_BASE = 4
-CHARS_PER_TOKEN_MIN = 1
-CHARS_PER_TOKEN_MAX = 5
+# Tokenizer families: which BPE a model bills with (config
+# ``tokenizer_family``). Chunk balance never depends on the family; it
+# only selects the prior for the real-token cap check and tags the user's
+# measured ratio, so a figure measured on one tokenizer is never applied
+# to another.
+TOKENIZER_FAMILIES = ("claude_old", "claude_new", "o200k")
+_FAMILY_BY_PROVIDER = {"openai": "o200k", "anthropic": "claude_new"}
+
+# Prior billed-input tokens per stored unit, by content class and family,
+# used for the cap check until the user's first chunk on that family has
+# been measured. These are the UPPER ends of the ranges measured
+# 2026-09-03 (Loore threads: hrosspet's prod chain; tweets: the exgenesis
+# and majamediaco compact exports), so an unmeasured user errs toward one
+# extra split, never toward the pricing tier. The claude_new tweet figure
+# is estimated from the o200k counts (no local tokenizer).
+TOKENS_PER_UNIT_PRIOR = {
+    "threads": {"o200k": 1.15, "claude_old": 1.55, "claude_new": 2.2},
+    "tweets": {"o200k": 2.4, "claude_old": 2.6, "claude_new": 3.1},
+}
+# Sanity bounds on a measured ratio, so one degenerate measurement (an
+# empty or truncated prompt) cannot collapse the cap check for every
+# later chunk. Real corpora measured 0.85–2.4 tokens per unit.
+TOKENS_PER_UNIT_MIN = 0.25
+TOKENS_PER_UNIT_MAX = 8.0
 
 
-def token_multiplier(model_id):
-    """Static chars/4 → model-token factor for a model (config
-    ``token_multiplier``; 1.0 for older tokenizers)."""
+def tokenizer_family(model_id):
+    """The model's tokenizer family (config ``tokenizer_family``), by
+    provider when the config does not say — Anthropic defaulting to the
+    denser new family, the conservative guess for the cap check."""
     from flask import current_app
     cfg = current_app.config.get("SUPPORTED_MODELS", {}).get(model_id) or {}
-    try:
-        return float(cfg.get("token_multiplier") or 1.0)
-    except (TypeError, ValueError):
-        return 1.0
+    family = cfg.get("tokenizer_family")
+    if family in TOKENIZER_FAMILIES:
+        return family
+    return _FAMILY_BY_PROVIDER.get(cfg.get("provider"), "claude_new")
 
 
-def effective_token_ratio(user, model_id):
-    """Stored token_count → expected model tokens: the model's static
-    multiplier times the user's observed calibration, when one exists."""
-    ratio = token_multiplier(model_id)
-    observed = getattr(user, "profile_token_ratio", None)
-    if observed:
-        ratio *= float(observed)
-    # ratio == CHARS_PER_TOKEN_BASE / effective chars-per-token
-    return min(max(ratio, CHARS_PER_TOKEN_BASE / CHARS_PER_TOKEN_MAX),
-               CHARS_PER_TOKEN_BASE / CHARS_PER_TOKEN_MIN)
+def content_class(user):
+    """"tweets" when imported tweets carry the majority of the user's
+    AI-readable units, else "threads" — picks the prior row. One SQL sum."""
+    from sqlalchemy import case, func, or_
+    from backend.models import Node
+    from backend.utils.privacy import AI_ALLOWED
+    tweets, total = db.session.query(
+        func.coalesce(func.sum(case(
+            (Node.origin == "twitter", Node.token_count), else_=0)), 0),
+        func.coalesce(func.sum(Node.token_count), 0),
+    ).filter(
+        or_(Node.user_id == user.id, Node.human_owner_id == user.id),
+        Node.ai_usage.in_(AI_ALLOWED),
+        Node.deleted_at.is_(None),
+    ).one()
+    return "tweets" if total and tweets * 2 > total else "threads"
 
 
-def effective_chars_per_token(user, model_id):
-    """The divisor in ``chars // x`` this user+model currently runs at."""
-    return CHARS_PER_TOKEN_BASE / effective_token_ratio(user, model_id)
+def tokens_per_unit(user, model_id):
+    """Billed input tokens per stored unit for this user on this model's
+    tokenizer family: the measured figure when one exists for the family,
+    else the content-class prior. Read only by the cap check."""
+    family = tokenizer_family(model_id)
+    measured = getattr(user, "profile_token_ratio", None)
+    if measured and getattr(user, "profile_token_ratio_family", None) == family:
+        return float(measured)
+    return TOKENS_PER_UNIT_PRIOR[content_class(user)][family]
 
 
-def chunk_budget_for(user, model_id, base_budget=CHUNK_BUDGET):
-    """(budget, min_chunk) in STORED token units so that a chunk lands near
-    ``base_budget`` real model tokens. MIN_CHUNK_TOKENS scales with it, or
-    every chunk would read as an undersized tail."""
-    ratio = effective_token_ratio(user, model_id)
-    return (max(int(base_budget / ratio), 5000),
-            max(int(MIN_CHUNK_TOKENS / ratio), 1000))
-
-
-def record_token_ratio(user, model_id, estimated_prompt_tokens,
-                       actual_input_tokens):
-    """Store actual/estimated for the chunk just sent. ``estimated`` is the
-    chars/4 count of the prompt text; the model multiplier is applied here
-    so the stored ratio is the residual the multiplier did not explain."""
-    est = float(estimated_prompt_tokens or 0) * token_multiplier(model_id)
-    if est <= 0 or not actual_input_tokens:
+def record_token_ratio(user, model_id, chunk_units, actual_input_tokens):
+    """Store billed input tokens per stored unit for the chunk just sent,
+    tagged with the model's tokenizer family. The prompt's fixed parts
+    (profile, template) are folded in rather than subtracted: the ratio
+    sizes whole prompts, and folding them in over-estimates a larger next
+    chunk and under-estimates a smaller one by at most those parts, which
+    the cap margin covers. Returns the ratio, or None without a usable
+    measurement."""
+    units = float(chunk_units or 0)
+    if units <= 0 or not actual_input_tokens:
         return None
-    user.profile_token_ratio = round(actual_input_tokens / est, 3)
+    ratio = min(max(actual_input_tokens / units, TOKENS_PER_UNIT_MIN),
+                TOKENS_PER_UNIT_MAX)
+    user.profile_token_ratio = round(ratio, 3)
+    user.profile_token_ratio_family = tokenizer_family(model_id)
     return user.profile_token_ratio
+
 
 # Prepended to a user-written profile (generated_by == "user") whenever it's
 # fed to the LLM — as the base for an incremental update or as the root of an
@@ -127,11 +163,12 @@ def _is_task_stale(user):
 
 
 # Import from export_data module
-def build_user_export_content(user, max_tokens=None, filter_ai_usage=False,
+def build_user_export_content(user, max_tokens=None, *, filter_ai_usage,
                               **kwargs):
-    """Import the actual implementation from export_data routes."""
+    """Import the actual implementation from export_data routes.
+    `filter_ai_usage` is required: see the real function's docstring."""
     from backend.routes.export_data import build_user_export_content as _build
-    return _build(user, max_tokens, filter_ai_usage, **kwargs)
+    return _build(user, max_tokens, filter_ai_usage=filter_ai_usage, **kwargs)
 
 
 def _estimate_source_tokens(user):
@@ -148,23 +185,134 @@ def _estimate_source_tokens(user):
     return int(total or 0)
 
 
-def _has_more_source_after(user, ts):
-    """Any AI-readable source data newer than *ts*, in the anchor scope
-    the profile pipeline reads (own + addressed nodes)?
+def profile_is_provisional(profile):
+    """A generated profile that covers less than one full chunk of data
+    (``source_tokens_used`` below ``CHUNK_TARGET_UNITS``) is provisional —
+    an early signup's or a small import's build — not a base worth
+    patching: it is replaced from scratch each time the account's total
+    data crosses the next step of the provisional ladder
+    (``provisional_build_due``), the earlier versions staying as history,
+    unchained. A user-written profile is never provisional: it is the
+    user's own words and stays the base."""
+    if profile is None or profile.generated_by == "user":
+        return False
+    return (profile.source_tokens_used or 0) < CHUNK_TARGET_UNITS
 
-    Used to tell a genuine corpus tail (defer to the next update cycle)
-    from a mid-corpus chunk that merely *renders* compactly — the
-    rendered chars/4 estimate and the stored token_count are different
-    measures, so a budget-full window can re-measure below
-    MIN_CHUNK_TOKENS while plenty of data remains beyond it.
+
+def provisional_build_due(user, latest_profile):
+    """Whether an account with no profile, or a provisional one, has
+    crossed the next step of the provisional ladder (5k, 10k, 15k, 25k,
+    50k, then T) with its total AI-readable units — the from-scratch build
+    that replaces the current version is due. Both seeding gates apply it
+    in place of the 80k incremental gate while the profile is provisional.
+    Returns (due, total_units, threshold)."""
+    covered = (latest_profile.source_tokens_used or 0) if latest_profile else 0
+    threshold = next_build_threshold(covered)
+    total = _estimate_source_tokens(user)
+    return (threshold is not None and total >= threshold), total, threshold
+
+
+def count_remaining_units(user_id, created_after=None):
+    """Units still ahead of the chunk loop after ``created_after``, summed in
+    the export window's own scope (backend.routes.export_data). Thin wrapper
+    so the task modules and their tests reach it through this module."""
+    from backend.routes.export_data import count_remaining_units as _count
+    return _count(user_id, created_after)
+
+
+def should_continue_chain(user, latest_profile):
+    """The continue rule (docs/design/chunk-planner.md): AI-readable data in
+    the profile's scope that lies beyond the latest version's cutoff but
+    already EXISTED when that version's window was rendered is an
+    unfinished chain — a pre-fill or an import still being folded in, the
+    rest of a multi-chunk update, a chunk lost to a worker restart — and
+    the next chunk runs regardless of the interval and volume gates, which
+    measure organic growth. Data written after the render is growth and
+    waits for those gates.
+
+    One rule, three call sites: the seeding gates (batch seeder, sync
+    heartbeat), the step after every saved chunk in both pipelines (so
+    writing during a chunk's generation ends the run at the planned
+    chunks instead of adding a small one per cycle), and the admin
+    "stuck" flag. It replaces the pinned-account special case and the
+    minimum-chunk deferral.
+
+    The boundary is ``source_rendered_at``. A version saved before that
+    column existed cannot tell its leftover (the old sizing deferred a
+    sub-minimum tail after most updates) from growth, so it does not
+    continue on its own: the account's next gate-triggered update covers
+    everything unread anyway. The exception is a pinned (pre-filled)
+    account, which never grows organically and whose leftover would
+    otherwise wait forever — it continues from the version's save time,
+    as the old pinned special case did. Transitional: every version
+    saved from now on carries a render time.
     """
+    cutoff = getattr(latest_profile, "source_data_cutoff", None)
+    if cutoff is None:
+        return False
+    boundary = getattr(latest_profile, "source_rendered_at", None)
+    if boundary is None:
+        if not getattr(user, "profile_force_batch", False):
+            return False
+        boundary = latest_profile.created_at
+    if boundary is None:
+        return False
     from sqlalchemy import or_
     from backend.models import Node
-    return Node.query.filter(
+    from backend.utils.privacy import AI_ALLOWED
+    return db.session.query(Node.id).filter(
         or_(Node.user_id == user.id, Node.human_owner_id == user.id),
-        Node.created_at > ts,
-        Node.ai_usage.in_(['chat', 'train']),
+        Node.ai_usage.in_(AI_ALLOWED),
+        Node.deleted_at.is_(None),
+        Node.created_at > cutoff,
+        Node.created_at < boundary,
     ).first() is not None
+
+
+def integration_due(user, latest_profile):
+    """Whether the run that saved ``latest_profile`` (the update base,
+    ``profile_update_base``) ended before its integration: the base is a
+    generated chunk ("iterative" or "update"), it is the newest
+    non-integration version of any ai_usage, no integration was saved on
+    top of it, its chain is finished (``should_continue_chain`` is false)
+    and it has at least two AI-readable versions to merge. Every run that
+    finishes its chunks integrates them (both pipelines), so this is a run
+    whose integration was refused (#368) or lost to a restart. The next
+    scheduled run then integrates alone (``update_user_profile`` with
+    ``integrate_only``, or the batch builder with ``allow_chunk=False``).
+
+    It cannot loop: a saved integration makes it false, and a refused one
+    counts toward the refusal backoff (one retry, then stopped)."""
+    if latest_profile is None or user.profile_needs_full_regen:
+        return False
+    if latest_profile.generated_by == "user" or \
+            latest_profile.generation_type not in ("iterative", "update"):
+        return False
+    newest = UserProfile.query.with_entities(UserProfile.id).filter(
+        UserProfile.user_id == user.id,
+        UserProfile.generation_type != 'integration',
+    ).order_by(UserProfile.created_at.desc()).first()
+    if newest is None or newest[0] != latest_profile.id:
+        return False
+    if UserProfile.query.with_entities(UserProfile.id).filter_by(
+            user_id=user.id, generation_type="integration",
+            parent_profile_id=latest_profile.id).first() is not None:
+        return False
+    if should_continue_chain(user, latest_profile):
+        return False
+    chain = [p for p in _collect_iterative_chain(latest_profile.id)
+             if p.ai_usage in AI_ALLOWED]
+    return len(chain) >= 2
+
+
+def _log_profile_failure(user_id, exc):
+    """ProfileGenerationTask.on_failure's error line. It has no exc_info, so
+    Sentry can't tell an account failure (#369) from the message alone:
+    log_extra tags it with the cause's fingerprint, grouping it with the
+    task failure."""
+    from backend.utils.provider_alerts import log_extra
+    logger.error(f"Profile generation failed for user {user_id}: {exc}",
+                 extra=log_extra(exc))
 
 
 class ProfileGenerationTask(Task):
@@ -174,168 +322,7 @@ class ProfileGenerationTask(Task):
         """Called when task fails."""
         user_id = args[0] if args else None
         if user_id:
-            logger.error(f"Profile generation failed for user {user_id}: {exc}")
-
-
-@celery.task(base=ProfileGenerationTask, bind=True)
-def generate_user_profile(self, user_id: int, model_id: str):
-    """
-    Asynchronously generate a user profile using LLM analysis.
-
-    Args:
-        user_id: Database ID of the user
-        model_id: Model identifier (e.g., "gpt-5", "claude-sonnet-4.5")
-    """
-    logger.info(f"Starting profile generation task for user {user_id} with model {model_id}")
-
-    with flask_app.app_context():
-        # Get user from database
-        user = User.query.get(user_id)
-        if not user:
-            raise ValueError(f"User {user_id} not found")
-
-        from backend.utils.spend import user_is_capped
-        if user_is_capped(user):
-            logger.warning(
-                "User %s is spend-capped; skipping profile generation", user_id)
-            return
-
-        try:
-            # Validate model is supported
-            if model_id not in flask_app.config["SUPPORTED_MODELS"]:
-                raise ValueError(f"Unsupported model: {model_id}")
-
-            # Step 1: Load prompt template and calculate token budget
-            self.update_state(state='PROGRESS', meta={'progress': 10, 'status': 'Gathering writing samples'})
-
-            prompt_template = _load_prompt(
-                "profile_generation.txt", user_id=user_id
-            )
-
-            api_keys = get_api_keys_for_usage(flask_app.config, 'chat')
-
-            model_cfg = flask_app.config["SUPPORTED_MODELS"][model_id]
-            limit = (model_cfg.get("context_window", 200000)
-                     - min(model_cfg.get("max_output_tokens",
-                                         DEFAULT_MAX_OUTPUT_TOKENS),
-                           DEFAULT_MAX_OUTPUT_TOKENS))
-
-            def _build(budget):
-                # Filter by AI usage: only nodes with ai_usage chat/train
-                export = build_user_export_content(
-                    user, max_tokens=budget, filter_ai_usage=True)
-                if not export:
-                    return None
-                return ([{"role": "user", "content": [
-                    {"type": "text",
-                     "text": prompt_template.replace(
-                         "{user_export}", export)}]}], export)
-
-            # Pre-size by token count: building this export costs minutes
-            # on a large corpus, so a reject-rebuild cycle is the expensive
-            # path — count first (free), shrink once by the real ratio.
-            # The PromptTooLongError retry below stays as the backstop.
-            self.update_state(state='PROGRESS', meta={
-                'progress': 45, 'status': 'Preparing prompt'})
-            from backend.llm_providers import fit_by_count
-            built, max_export_tokens, _real = fit_by_count(
-                model_id, api_keys, limit, None, _build,
-                corpus_tokens=_estimate_source_tokens(user),
-                safety=flask_app.config.get("RETRY_SAFETY_FACTOR", 0.99))
-            if built is None:
-                raise ValueError("No writing found to analyze")
-
-            MAX_RETRIES = 3
-            for attempt in range(MAX_RETRIES + 1):
-                if built is None:
-                    built = _build(max_export_tokens)
-                    if built is None:
-                        raise ValueError("No writing found to analyze")
-                messages, user_export = built
-                built = None  # a retry rebuilds at the reduced budget
-                logger.info(
-                    f"User export built for user {user_id}, length: "
-                    f"{len(user_export)} characters, "
-                    f"~{approximate_token_count(user_export)} tokens "
-                    f"(attempt {attempt + 1})")
-
-                # Step 4: Call LLM API (60% -> 90% progress)
-                self.update_state(state='PROGRESS', meta={'progress': 60, 'status': 'Generating profile'})
-
-                try:
-                    response = LLMProvider.get_completion(model_id, messages, api_keys)
-                    break  # Success
-                except PromptTooLongError as e:
-                    if attempt == MAX_RETRIES:
-                        raise
-                    max_export_tokens = reduce_export_tokens(
-                        max_export_tokens, e.actual_tokens, e.max_tokens,
-                        export_content=user_export
-                    )
-                    logger.warning(
-                        f"Prompt too long ({e.actual_tokens} > {e.max_tokens}), "
-                        f"retrying with max_export_tokens={max_export_tokens} "
-                        f"(attempt {attempt + 2}/{MAX_RETRIES + 1})"
-                    )
-
-            profile_text = response["content"]
-            total_tokens = response["total_tokens"]
-            input_tokens = response.get("input_tokens", 0)
-            output_tokens = response.get("output_tokens", 0)
-
-            logger.info(f"Profile generated for user {user_id}: {len(profile_text)} characters, {total_tokens} tokens")
-
-            # Log API cost
-            cost = calculate_llm_cost_microdollars(model_id, input_tokens, output_tokens)
-            cost_log = APICostLog(
-                user_id=user.id,
-                model_id=model_id,
-                request_type="profile",
-                input_tokens=input_tokens,
-                output_tokens=output_tokens,
-                cost_microdollars=cost,
-            )
-            db.session.add(cost_log)
-
-            # Step 5: Save to database (95% progress)
-            self.update_state(state='PROGRESS', meta={'progress': 95, 'status': 'Saving profile'})
-
-            # AI-generated profiles are private; ai_usage follows the user's
-            # global default (gated to 'chat'/'train' in
-            # profile_eligible_query, so an opted-out user never reaches
-            # here — see #191).
-            from backend.utils.privacy import PrivacyLevel
-            new_profile = UserProfile(
-                user_id=user.id,
-                generated_by=model_id,
-                tokens_used=total_tokens,
-                privacy_level=PrivacyLevel.PRIVATE,
-                ai_usage=user.default_ai_usage,
-            )
-            new_profile.set_content(
-                format_date_metadata(
-                    covers_end=new_profile.source_data_cutoff,
-                ) + profile_text
-            )
-            db.session.add(new_profile)
-            db.session.commit()
-
-            logger.info(f"Profile generation successful for user {user_id}, profile ID: {new_profile.id}")
-
-            from backend.utils.notifications import notify_profile_ready
-            notify_profile_ready(user_id)
-
-            return {
-                'user_id': user_id,
-                'profile_id': new_profile.id,
-                'status': 'completed',
-                'total_tokens': total_tokens,
-                'profile_length': len(profile_text)
-            }
-
-        except Exception as e:
-            logger.error(f"Profile generation error for user {user_id}: {e}", exc_info=True)
-            raise
+            _log_profile_failure(user_id, exc)
 
 
 def _load_prompt(name, user_id=None):
@@ -370,10 +357,7 @@ def _call_llm_with_retries(self, model_id, prompt_text, user_id,
     from flask import current_app
     model_cfg = current_app.config.get(
         "SUPPORTED_MODELS", {}).get(model_id) or {}
-    out_tokens = min(max_tokens or DEFAULT_MAX_OUTPUT_TOKENS,
-                     model_cfg.get("max_output_tokens",
-                                   DEFAULT_MAX_OUTPUT_TOKENS))
-    limit = model_cfg.get("context_window", 200000) - out_tokens
+    limit = model_input_cap(model_cfg, max_tokens)
     safety = current_app.config.get("RETRY_SAFETY_FACTOR", 0.99)
     for _ in range(3):
         if not model_cfg:
@@ -425,25 +409,28 @@ def _call_llm_with_retries(self, model_id, prompt_text, user_id,
 def _save_profile(user, model_id, profile_text, response,
                    source_tokens_used, source_data_cutoff,
                    generation_type, parent_profile_id=None, batch=False,
-                   source_origin_stats=None):
+                   source_origin_stats=None, source_rendered_at=None):
     """Save a new UserProfile and log API cost. Returns the profile.
 
-    batch=True records the Batch API discount in the cost log (issue #173)."""
+    batch=True records the Batch API discount in the cost log (issue #173).
+    source_rendered_at: when the window this version covers was rendered
+    (the continue rule's boundary between unfinished chain and growth)."""
     from backend.utils.privacy import PrivacyLevel
+    from backend.utils.hidden_rows import WritingOnHold, writing_on_hold
 
-    input_tokens = response.get("input_tokens", 0)
-    output_tokens = response.get("output_tokens", 0)
     total_tokens = response["total_tokens"]
 
-    cost = calculate_llm_cost_microdollars(model_id, input_tokens,
-                                           output_tokens, batch=batch)
-    cost_log = APICostLog(
-        user_id=user.id, model_id=model_id,
-        request_type="profile_batch" if batch else "profile",
-        input_tokens=input_tokens, output_tokens=output_tokens,
-        cost_microdollars=cost,
-    )
-    db.session.add(cost_log)
+    _add_profile_cost_log(user, model_id, response, batch=batch)
+    if writing_on_hold(user.id):
+        # "Delete all my writing" hid the writing this version was built
+        # from while it was being generated (#268): the cost is logged,
+        # the version is not saved.
+        db.session.commit()
+        raise WritingOnHold(f"user {user.id}: writing on hold for deletion")
+    # A saved version ends a refusal streak (#368) and whatever error the
+    # admin column showed for it.
+    if user.profile_seed_error:
+        user.profile_seed_error = None
 
     new_profile = UserProfile(
         user_id=user.id, generated_by=model_id,
@@ -455,6 +442,7 @@ def _save_profile(user, model_id, profile_text, response,
         source_tokens_used=source_tokens_used,
         source_data_cutoff=source_data_cutoff,
         source_origin_stats=source_origin_stats,
+        source_rendered_at=source_rendered_at,
         generation_type=generation_type,
         parent_profile_id=parent_profile_id,
     )
@@ -469,72 +457,157 @@ def _save_profile(user, model_id, profile_text, response,
     return new_profile
 
 
-def revert_profile_for_import(user_id, earliest_imported_created_at):
-    """Revert to the last valid profile instead of full regen on import.
+def _add_profile_cost_log(user, model_id, response, batch=False,
+                          refused=False):
+    db.session.add(APICostLog(
+        user_id=user.id, model_id=model_id,
+        request_type="profile_batch" if batch else "profile",
+        # A refused call is a consecutive failure for the backoff (#368).
+        request_ref=REFUSED_REF if refused else None,
+        **llm_cost_log_fields(model_id, response, batch=batch),
+    ))
 
-    Finds the latest non-integration profile whose source_data_cutoff
-    <= earliest_imported_created_at and creates a "revert" copy.
-    If no valid profile exists, falls back to profile_needs_full_regen.
-    """
+
+def refuse_truncated_profile(user, model_id, response, job, batch=False):
+    """Guard before a profile version is saved from model output (#368).
+
+    A version cut off at the output limit — empty, or stopped mid-document
+    — would become the chain tip, the "previous profile" the next chunk
+    or update builds on, and the profile would lose everything the cut-off
+    left out. Instead: write the cost row (the call was billed, marked
+    refused for the backoff), save no version, and raise
+    EmptyTruncatedOutputError so the job fails. The last good version
+    stays the tip, and the next run resumes from it once the backoff
+    (utils/refusal_backoff.py) allows: one more try after an hour, then
+    the job stops for this user."""
+    refused = is_refused(response)
+    if not (response.get("truncated") or refused):
+        return
+    # A model refusal (#470) is handled the same way: its text, empty or
+    # partial, is never a profile.
+    _add_profile_cost_log(user, model_id, response, batch=batch,
+                          refused=True)
+    db.session.commit()
+    empty = is_empty_truncated(response)
+    what = "refused by the model" if refused else "output cut off"
+    n, until, stopped = refusal_backoff.profile_backoff_state(user.id)
+    if stopped:
+        # Second refusal in a row: no more automatic runs for this user.
+        # Shown in the admin Profile column (seed_error); the next saved
+        # version clears it.
+        user.profile_seed_error = (
+            f"Stopped: {what} {n} times in a row "
+            f"({job}); runs again after an import, a saved version "
+            f"or Build profile")[:255]
+        db.session.commit()
+        refusal_backoff.report_stop(
+            user.id, f"profile {job}", n, model_id,
+            "profile_batch" if batch else "profile",
+            cause=(refusal_backoff.REFUSED_CAUSE if refused
+                   else refusal_backoff.CUT_OFF_CAUSE))
+    else:
+        logger.warning(
+            "Profile output not saved for user %s (%s, model %s, %s, "
+            "empty=%s, output_tokens=%s): no version saved, the previous "
+            "one stays; refusal %d, next try after %s", user.id, job,
+            model_id, what, empty, response.get("output_tokens"), n, until)
+    raise EmptyTruncatedOutputError(
+        f"profile {job} for user {user.id}", model_id,
+        response.get("output_tokens"), empty=empty, refused=refused)
+
+
+def retip_profile_chain(user_id, version):
+    """Make ``version`` the chain tip again by writing a "revert" copy of
+    it, stamped with the present moment as its render time. Everything
+    unread as of now — the range that later versions had covered, freshly
+    imported data, organic writing since — then counts as the unfinished
+    chain: the seeder / heartbeat continues from here and the planner
+    covers it to the end in equal chunks. The superseded versions stay as
+    history. Used by imports and by the repair script."""
     from backend.utils.privacy import PrivacyLevel
+    copy = UserProfile(
+        user_id=user_id,
+        generated_by=version.generated_by,
+        tokens_used=0,
+        privacy_level=PrivacyLevel.PRIVATE,
+        ai_usage=version.ai_usage,
+        source_tokens_used=version.source_tokens_used,
+        source_data_cutoff=version.source_data_cutoff,
+        source_origin_stats=version.source_origin_stats,
+        source_rendered_at=datetime.utcnow(),
+        generation_type="revert",
+        parent_profile_id=version.id,
+    )
+    copy.set_content(version.get_content())
+    db.session.add(copy)
+    db.session.flush()
+    logger.info(
+        "User %d: profile chain re-tipped at version %d (cutoff=%s)",
+        user_id, version.id, version.source_data_cutoff)
+    return copy
 
+
+def revert_profile_for_import(user_id, earliest_imported_created_at):
+    """Invalidate only the profile versions an import touches.
+
+    A version is invalid when its window would have held the imported
+    data: its cutoff is at or later than the earliest imported timestamp
+    (a window takes every node on its cutoff's own second and the next
+    one starts strictly after it, so a node imported onto that second
+    belongs to this version, not a later one). The latest version of the
+    CURRENT chain whose cutoff is strictly before that timestamp is still
+    valid and becomes the chain tip again (``retip_profile_chain``); the
+    newer versions are superseded and the chain is regenerated from there
+    to the end. When no version is valid — the import predates the
+    chain's root, or no version carries a cutoff — the whole chain is
+    invalidated and a from-scratch build is flagged.
+
+    Returns ``("full", None)`` (flag set), ``("revert", copy)`` or
+    ``("none", tip)`` when nothing is invalidated: no parseable timestamp,
+    or the import is newer than the tip's cutoff.
+    """
     profiles = UserProfile.query.filter(
         UserProfile.user_id == user_id,
         UserProfile.generation_type != 'integration'
     ).order_by(UserProfile.created_at.desc()).all()
 
+    def _flag_full():
+        user = User.query.get(user_id)
+        if user:
+            user.profile_needs_full_regen = True
+        return "full", None
+
     if not profiles:
-        # No profiles at all — nothing to revert to
-        user = User.query.get(user_id)
-        if user:
-            user.profile_needs_full_regen = True
-        return
+        return _flag_full()
+    tip = profiles[0]
+    if earliest_imported_created_at is None:
+        return "none", tip
 
-    # Find the latest profile with cutoff <= earliest imported timestamp
-    valid_profile = None
-    for p in profiles:
-        if (p.source_data_cutoff
-                and p.source_data_cutoff <= earliest_imported_created_at):
-            valid_profile = p
-            break  # profiles are ordered desc, so first match is latest
-
-    if valid_profile is None:
-        # All profiles are invalidated
-        user = User.query.get(user_id)
-        if user:
-            user.profile_needs_full_regen = True
-        return
-
-    # If the valid profile is already the latest, no revert needed
-    if valid_profile.id == profiles[0].id:
-        return
-
-    # Create a revert profile copying the valid version's content. A revert
-    # reproduces that prior version, so it carries the same ai_usage rather
-    # than a fresh default (#191).
-    new_profile = UserProfile(
-        user_id=user_id,
-        generated_by=valid_profile.generated_by,
-        tokens_used=0,
-        privacy_level=PrivacyLevel.PRIVATE,
-        ai_usage=valid_profile.ai_usage,
-        source_tokens_used=valid_profile.source_tokens_used,
-        source_data_cutoff=valid_profile.source_data_cutoff,
-        source_origin_stats=valid_profile.source_origin_stats,
-        generation_type="revert",
-        parent_profile_id=valid_profile.id,
-    )
-    new_profile.set_content(valid_profile.get_content())
-    db.session.add(new_profile)
+    # Walk the CURRENT chain (tip -> root), not every version the account
+    # ever had: provisional-ladder builds and older from-scratch rebuilds
+    # stay in the table unchained, and re-tipping at one of those would
+    # continue the chain from a base the pipeline already discarded.
+    chain = list(reversed(_collect_iterative_chain(tip.id)))   # tip first
+    valid = next(
+        (p for p in chain
+         if p.source_data_cutoff
+         and p.source_data_cutoff < earliest_imported_created_at),
+        None)
+    if valid is None:
+        return _flag_full()
+    if valid.id == tip.id:
+        return "none", valid
     logger.info(
-        "Reverted user %d profile to version %d (cutoff=%s)",
-        user_id, valid_profile.id, valid_profile.source_data_cutoff
-    )
+        "User %d: import dated %s invalidates %d profile version(s) after "
+        "version %d", user_id, earliest_imported_created_at,
+        sum(1 for p in chain if p.created_at > valid.created_at), valid.id)
+    return "revert", retip_profile_chain(user_id, valid)
 
 
 @celery.task(base=ProfileGenerationTask, bind=True)
 def update_user_profile(self, user_id: int, model_id: str,
-                        previous_profile_id: int = None):
+                        previous_profile_id: int = None,
+                        integrate_only: bool = False):
     """
     Unified profile generation / update task.
 
@@ -542,6 +615,10 @@ def update_user_profile(self, user_id: int, model_id: str,
     using only new data written after the previous profile's cutoff.
     Otherwise, performs initial generation (possibly iterative if the
     source data exceeds the context window budget).
+
+    integrate_only: only the integration over the chain ending at
+    previous_profile_id — the retry of a run whose integration was
+    refused (``integration_due``, #368).
     """
     logger.info(
         f"Starting profile update for user {user_id}, model {model_id}, "
@@ -549,6 +626,11 @@ def update_user_profile(self, user_id: int, model_id: str,
     )
 
     with flask_app.app_context():
+        # /export/profile-progress?task_id= answers for this task id to
+        # this user only, whatever the outcome.
+        from backend.utils.task_owner import record_task_owner
+        record_task_owner(self.request.id, user_id, flask_app.config)
+
         user = User.query.get(user_id)
         if not user:
             raise ValueError(f"User {user_id} not found")
@@ -558,6 +640,17 @@ def update_user_profile(self, user_id: int, model_id: str,
             logger.warning(
                 "User %s is spend-capped; skipping profile update", user_id)
             return
+        if not account_allows_ai(user):
+            logger.info(
+                "User %s has opted out of AI usage; skipping profile update",
+                user_id)
+            return
+        from backend.utils.hidden_rows import WritingOnHold, writing_on_hold
+        if writing_on_hold(user_id):
+            logger.info("User %s: writing on hold for deletion; skipping "
+                        "profile update", user_id)
+            return
+        previous_profile_id = ai_readable_base_id(user_id, previous_profile_id)
 
         # Set concurrency guard
         user.profile_generation_task_id = self.request.id
@@ -576,15 +669,20 @@ def update_user_profile(self, user_id: int, model_id: str,
                 DEFAULT_MAX_OUTPUT_TOKENS)
             api_keys = get_api_keys_for_usage(flask_app.config, 'chat')
 
-            if previous_profile_id:
+            if integrate_only and previous_profile_id:
+                result = _do_integration(
+                    self, user, model_id, previous_profile_id, api_keys
+                ) or {'user_id': user.id, 'profile_id': None,
+                      'status': 'completed',
+                      'message': 'Nothing to integrate'}
+            elif previous_profile_id:
                 result = _do_incremental_update(
                     self, user, model_id, previous_profile_id,
                     context_window, max_output_tokens, api_keys
                 )
             else:
                 result = _do_initial_generation(
-                    self, user, model_id, context_window,
-                    max_output_tokens, api_keys
+                    self, user, model_id, max_output_tokens, api_keys
                 )
 
             success = True
@@ -593,6 +691,10 @@ def update_user_profile(self, user_id: int, model_id: str,
                 notify_profile_ready(user_id)
             return result
 
+        except WritingOnHold:
+            logger.info("User %s: writing put on hold for deletion during "
+                        "the profile update; nothing saved", user_id)
+            return None
         except Exception as e:
             logger.error(
                 f"Profile update error for user {user_id}: {e}",
@@ -662,7 +764,7 @@ def _do_iterative_incremental_update(self, user, model_id, prev_profile,
     """Incremental update with chunked processing."""
     logger.info(
         f"Starting iterative incremental update for user {user.id}, "
-        f"budget={CHUNK_BUDGET} tokens per chunk, cutoff={cutoff}"
+        f"cutoff={cutoff}"
     )
 
     # When the base is the user's own hand-written profile, tell the LLM so
@@ -711,114 +813,29 @@ def _do_iterative_incremental_update(self, user, model_id, prev_profile,
             result = integration_result
     elif chunk_num == 0:
         logger.info(
-            f"User {user.id}: no chunks processed — "
-            f"all data below {MIN_CHUNK_TOKENS} min threshold"
+            f"User {user.id}: no chunks processed — nothing renders "
+            f"after the cutoff"
         )
 
     return result
 
 
-def _do_initial_generation(self, user, model_id, context_window,
-                           max_output_tokens, api_keys):
-    """Initial generation, possibly iterative if data exceeds budget."""
+def _do_initial_generation(self, user, model_id, max_output_tokens,
+                           api_keys):
+    """From-scratch generation: the whole corpus is the remainder and is
+    planned into equal chunks like any other — one chunk (saved as
+    "initial") when it rounds to one, a chain plus integration otherwise."""
     self.update_state(state='PROGRESS', meta={
         'progress': 10, 'status': 'Gathering writing samples'
     })
-
-    gen_template = _load_prompt("profile_generation.txt", user_id=user.id)
-    prompt_tokens = approximate_token_count(gen_template)
-    budget = max(
-        context_window // 2 - prompt_tokens - max_output_tokens - 500,
-        5000
-    )
-
-    # Decide single-pass vs iterative from a SQL token sum, NOT by
-    # rendering the whole corpus: an unbudgeted export loads and decrypts
-    # every node in scope, which OOM-killed the 512 MB staging worker
-    # four seconds into a 61k-node (1.5M-token) Twitter import. The sum
-    # is an estimate of the rendered size (same anchor scope
-    # _has_more_source_after uses); the exact export is only built when
-    # the estimate says it plausibly fits, and re-checked against the
-    # budget before use.
-    estimated_tokens = _estimate_source_tokens(user)
-    if estimated_tokens == 0:
+    # A SQL sum decides whether there is anything to do — never a render
+    # of the whole corpus, which loads and decrypts every node (the 512 MB
+    # staging worker was OOM-killed that way on a 61k-node import).
+    if _estimate_source_tokens(user) == 0:
         raise ValueError("No writing found to analyze")
-
-    # Stored counts are chars/4; the model may tokenize denser than that.
-    ratio = effective_token_ratio(user, model_id)
-    total_export = None
-    if estimated_tokens * ratio <= budget:
-        # engaged_threads: profiles read the user's full conversational
-        # scope — their own threads AND their replies in other users'
-        # threads (anchor-based selection, same scope incremental updates
-        # already use). The legacy authored_threads scope missed the
-        # latter entirely (#110).
-        total_export = build_user_export_content(
-            user, max_tokens=None, filter_ai_usage=True,
-            return_metadata=True, include_strategy="engaged_threads"
-        )
-        if not total_export or not total_export.get("content"):
-            raise ValueError("No writing found to analyze")
-
-    if total_export is not None and total_export["token_count"] * ratio <= budget:
-        # Single-pass generation
-        return _single_pass_generation(
-            self, user, model_id, gen_template, total_export,
-            api_keys, max_output_tokens
-        )
-    else:
-        # Iterative build
-        return _iterative_generation(
-            self, user, model_id, gen_template, budget,
-            context_window, max_output_tokens, api_keys
-        )
-
-
-def _single_pass_generation(self, user, model_id, gen_template,
-                            export_result, api_keys,
-                            max_output_tokens=None):
-    """Single-pass profile generation when all data fits in budget."""
-    self.update_state(state='PROGRESS', meta={
-        'progress': 30, 'status': 'Preparing prompt'
-    })
-
-    content = chunk_content_for_prompt(export_result)
-    prompt = gen_template.replace("{user_export}", content)
-
-    response = _call_llm_with_retries(
-        self, model_id, prompt, user.id, api_keys, progress_base=40,
-        max_tokens=max_output_tokens,
-    )
-
-    # Use actual input tokens from LLM response for accurate tracking
-    actual_source_tokens = response.get(
-        "input_tokens", export_result["token_count"]
-    )
-
-    self.update_state(state='PROGRESS', meta={
-        'progress': 90, 'status': 'Saving profile'
-    })
-
-    new_profile = _save_profile(
-        user, model_id, response["content"], response,
-        source_tokens_used=actual_source_tokens,
-        source_data_cutoff=export_result["latest_node_created_at"],
-        generation_type="initial",
-        source_origin_stats=export_result.get("origin_stats"),
-    )
-
-    logger.info(
-        f"Single-pass profile for user {user.id}: "
-        f"profile {new_profile.id}"
-    )
-
-    return {
-        'user_id': user.id,
-        'profile_id': new_profile.id,
-        'status': 'completed',
-        'total_tokens': response["total_tokens"],
-        'profile_length': len(response["content"]),
-    }
+    gen_template = _load_prompt("profile_generation.txt", user_id=user.id)
+    return _iterative_generation(
+        self, user, model_id, gen_template, max_output_tokens, api_keys)
 
 
 def _collect_iterative_chain(last_profile_id):
@@ -881,6 +898,8 @@ ORIGIN_LABELS = {
     "chatgpt": "ChatGPT conversations (imported)",
     "claude": "Claude conversations (imported)",
     "markdown": "markdown documents (imported)",
+    "docx": "Word documents (imported)",
+    "pdf": "PDF documents (imported)",
     "loore": "written in Loore",
 }
 
@@ -941,24 +960,23 @@ def chunk_content_for_prompt(chunk, prev_stats=None):
 
 
 def build_chunk_prompt(update_template, current_profile_content,
-                       cumulative_source_tokens, chunk, prev_origin_stats=None):
+                       cumulative_units, chunk, prev_origin_stats=None):
     """Build the per-chunk incremental-update prompt (the non-first-chunk
-    branch of _chunked_profile_loop)."""
-    chunk_tokens_est = chunk["token_count"]
+    branch of _chunked_profile_loop). The proportionality figures are in
+    stored content units on BOTH sides — what the profile has covered so
+    far and this window's own rows — so the stated share is not distorted
+    by the tokenizer (past used to be billed tokens and new the rendered
+    chars/4, which roughly halved every chunk's stated share)."""
+    chunk_units = chunk["unit_count"]
     ratio_pct = round(
-        chunk_tokens_est / max(
-            cumulative_source_tokens + chunk_tokens_est, 1
-        ) * 100, 1
-    )
+        chunk_units / max(cumulative_units + chunk_units, 1) * 100, 1)
     prompt = update_template.replace(
         "{existing_profile}", current_profile_content
     )
     prompt = prompt.replace(
         "{new_data}", chunk_content_for_prompt(chunk, prev_origin_stats))
-    prompt = prompt.replace(
-        "{source_tokens_past}", str(cumulative_source_tokens)
-    )
-    prompt = prompt.replace("{source_tokens_new}", str(chunk_tokens_est))
+    prompt = prompt.replace("{source_tokens_past}", str(cumulative_units))
+    prompt = prompt.replace("{source_tokens_new}", str(chunk_units))
     prompt = prompt.replace("{ratio_percent}", str(ratio_pct))
     return prompt
 
@@ -966,8 +984,10 @@ def build_chunk_prompt(update_template, current_profile_content,
 def build_integration_messages(user_id, last_iterative_profile_id):
     """Build the integration message list — one user message per profile
     version in the chain, then the integration prompt. Returns
-    (messages, chain), or (None, None) if there are < 2 versions to merge."""
-    chain = _collect_iterative_chain(last_iterative_profile_id)
+    (messages, chain), or (None, None) if there are < 2 versions to merge.
+    Versions whose ai_usage is not AI-readable are left out (#346)."""
+    chain = [p for p in _collect_iterative_chain(last_iterative_profile_id)
+             if p.ai_usage in AI_ALLOWED]
     if len(chain) < 2:
         return None, None
 
@@ -1038,6 +1058,7 @@ def _do_integration(self, user, model_id, last_iterative_profile_id,
     })
 
     response = LLMProvider.get_completion(model_id, messages, api_keys)
+    refuse_truncated_profile(user, model_id, response, "integration")
 
     last_profile = chain[-1]
     new_profile = _save_profile(
@@ -1064,6 +1085,45 @@ def _do_integration(self, user, model_id, last_iterative_profile_id,
     }
 
 
+def _messages_for(prompt_text):
+    return [{"role": "user", "content": [{"type": "text", "text": prompt_text}]}]
+
+
+def build_fitted_chunk(user, model_id, api_keys, input_cap, cutoff, budget,
+                       remaining_units, prompt_fn):
+    """Render the next window at ``budget`` units and its prompt, count the
+    prompt (free and exact on Anthropic, tiktoken on OpenAI) and, while it
+    exceeds ``input_cap``, shrink the window by the measured ratio and
+    rebuild — the real-count check of the design note, shared by the sync
+    loop and the batch builder. Returns (chunk, prompt), or None when
+    nothing renders after the cutoff. A window still over the cap after
+    the sizing rounds is returned anyway: both callers keep a call-time
+    backstop (the pre-call truncation in _call_llm_with_retries; the
+    failed-item machinery in the batch poller)."""
+    from flask import current_app
+    from backend.llm_providers import fit_by_count
+
+    def _build(units):
+        chunk = build_user_export_content(
+            user, max_tokens=int(units), filter_ai_usage=True,
+            created_after=cutoff, chronological_order=True,
+            return_metadata=True, include_strategy="engaged_threads")
+        if not chunk or not chunk.get("content"):
+            return None
+        prompt = prompt_fn(chunk)
+        return _messages_for(prompt), chunk, prompt
+
+    built, _budget, _real = fit_by_count(
+        model_id, api_keys, input_cap, budget, _build,
+        corpus_tokens=remaining_units, max_rounds=3, min_budget=5000,
+        safety=current_app.config.get("RETRY_SAFETY_FACTOR", 0.99),
+        strict=False)
+    if built is None:
+        return None
+    _messages, chunk, prompt = built
+    return chunk, prompt
+
+
 def _chunked_profile_loop(self, user, model_id, update_template,
                           api_keys, max_output_tokens=None,
                           initial_profile_content=None,
@@ -1073,87 +1133,91 @@ def _chunked_profile_loop(self, user, model_id, update_template,
                           initial_origin_stats=None,
                           first_chunk_prompt_fn=None,
                           generation_type="iterative",
-                          status_prefix="Generating profile",
-                          chunk_budget=CHUNK_BUDGET):
+                          status_prefix="Generating profile"):
     """Shared chunked profile processing loop.
 
-    Processes user data in chronological chunks of ~chunk_budget tokens,
-    calling the LLM to generate/update the profile for each chunk.
+    Before every chunk the remainder after the current cutoff is summed in
+    the window's own scope and planned into equal chunks
+    (``next_window_budget``): the chunk COUNT is rounded, so a fixed corpus
+    is always covered with no leftover tail, and the model's real-token
+    cap only ever raises the count. The final window over-asks and takes
+    everything. Nothing is deferred to "the next update cycle" — a
+    pre-filled corpus never gets one.
 
     Args:
         first_chunk_prompt_fn: Optional callable(chunk) -> prompt string
-            for the first chunk. If provided, the undersized-chunk guard
-            is skipped for the first chunk. If None, update_template is
-            used for all chunks.
-        generation_type: Profile generation_type for saved profiles.
+            for the first chunk (from-scratch generation). If None,
+            update_template is used for all chunks.
+        generation_type: Profile generation_type for saved profiles. A
+            from-scratch build that plans into a single chunk is saved as
+            "initial".
         status_prefix: Label prefix for progress updates.
-        chunk_budget: Max raw tokens per chunk.
 
     Returns:
-        (current_profile_id, chunk_num, cumulative_source_tokens)
+        (current_profile_id, chunk_num, cumulative_units)
     """
+    from flask import current_app
+    model_cfg = current_app.config.get(
+        "SUPPORTED_MODELS", {}).get(model_id) or {}
+    input_cap = model_input_cap(model_cfg, max_output_tokens)
+
     current_profile_content = initial_profile_content
     current_profile_id = initial_profile_id
-    cumulative_source_tokens = initial_source_tokens
+    cumulative_units = initial_source_tokens
     cumulative_origin_stats = initial_origin_stats
     current_cutoff = initial_cutoff
     chunk_num = 0
+    saved = None   # the version saved by the previous iteration
 
     while True:
-        chunk_num += 1
-        progress = min(10 + chunk_num * 15, 85)
+        # After a saved chunk, go on only over data that existed when its
+        # window was rendered; anything written since is organic growth
+        # and waits for the gates (the caller's gate decided the first
+        # step). Otherwise a user writing during their own update would
+        # add a small chunk per iteration until they stopped.
+        if saved is not None and not should_continue_chain(user, saved):
+            logger.info(
+                f"User {user.id}: only data newer than the last window "
+                f"remains — ending the run at {chunk_num} chunk(s)")
+            break
+        remaining = count_remaining_units(user.id, current_cutoff)
+        if remaining <= 0:
+            break
+        progress = min(10 + (chunk_num + 1) * 15, 85)
         self.update_state(state='PROGRESS', meta={
             'progress': progress,
-            'status': f'Processing chunk {chunk_num}'
+            'status': f'Processing chunk {chunk_num + 1}'
         })
 
-        # Re-derived every iteration: the previous chunk's actual token
-        # count calibrates this one (record_token_ratio below).
-        budget, min_chunk = chunk_budget_for(user, model_id, chunk_budget)
-        chunk = build_user_export_content(
-            user, max_tokens=budget, filter_ai_usage=True,
-            created_after=current_cutoff, chronological_order=True,
-            return_metadata=True, include_strategy="engaged_threads"
-        )
+        rho = tokens_per_unit(user, model_id)
+        k, size, budget = next_window_budget(
+            remaining, max_units=max_units_for_cap(input_cap, rho))
+        logger.info(
+            f"User {user.id}: chunk {chunk_num + 1} plan — {remaining} "
+            f"units remain after {current_cutoff}: {k} chunk(s) of "
+            f"{size:.0f}, window budget {budget} (cap {input_cap} tokens "
+            f"at {rho:.2f} tokens/unit)")
 
-        if not chunk or not chunk.get("content"):
-            break
+        is_first_with_gen = bool(
+            first_chunk_prompt_fn and current_profile_content is None)
 
-        chunk_tokens_est = chunk["token_count"]
-        latest_ts = chunk["latest_node_created_at"]
-
-        # Skip undersized chunks — but only when they are the genuine
-        # corpus tail. A chunk can re-measure below the threshold while
-        # being a full budget window (the rendered chars/4 estimate vs
-        # stored token_count unit mismatch); deferring those starves the
-        # rebuild mid-corpus. When first_chunk_prompt_fn is set, the
-        # first chunk is always processed (initial generation must
-        # produce something even with little data).
-        is_first_with_gen = (
-            first_chunk_prompt_fn and current_profile_content is None
-        )
-        if not is_first_with_gen and chunk_tokens_est < min_chunk:
-            if not _has_more_source_after(user, latest_ts):
-                logger.info(
-                    f"User {user.id}: stopping chunked loop — "
-                    f"tail chunk {chunk_num} has {chunk_tokens_est} "
-                    f"formatted tokens < {min_chunk} min threshold "
-                    f"and no data remains after {latest_ts}"
-                )
-                break
-            logger.info(
-                f"User {user.id}: chunk {chunk_num} renders to "
-                f"{chunk_tokens_est} formatted tokens (< {min_chunk}) "
-                f"but more data remains after {latest_ts} — processing"
-            )
-
-        if is_first_with_gen:
-            prompt = first_chunk_prompt_fn(chunk)
-        else:
-            prompt = build_chunk_prompt(
+        def _prompt_for(chunk):
+            if is_first_with_gen:
+                return first_chunk_prompt_fn(chunk)
+            return build_chunk_prompt(
                 update_template, current_profile_content,
-                cumulative_source_tokens, chunk, cumulative_origin_stats
-            )
+                cumulative_units, chunk, cumulative_origin_stats)
+
+        rendered_at = datetime.utcnow()
+        fitted = build_fitted_chunk(
+            user, model_id, api_keys, input_cap, current_cutoff, budget,
+            remaining, _prompt_for)
+        if fitted is None:
+            break
+        chunk, prompt = fitted
+        chunk_num += 1
+        chunk_units = chunk["unit_count"]
+        latest_ts = chunk["latest_node_created_at"]
 
         response = _call_llm_with_retries(
             self, model_id, prompt, user.id, api_keys,
@@ -1161,36 +1225,33 @@ def _chunked_profile_loop(self, user, model_id, update_template,
             status_label=f'{status_prefix}: Chunk {chunk_num}',
             max_tokens=max_output_tokens,
         )
+        # A cut-off chunk (empty or partial) ends the run here, before it
+        # can become the base of the next chunk; the chunks saved so far
+        # stay (#368).
+        refuse_truncated_profile(
+            user, model_id, response, f"chunk {chunk_num}")
 
-        actual_chunk_tokens = response.get(
-            "input_tokens", chunk_tokens_est
-        )
-        cumulative_source_tokens += actual_chunk_tokens
         observed = record_token_ratio(
-            user, model_id, approximate_token_count(prompt),
-            response.get("input_tokens"))
-        if observed is not None:
-            logger.info(
-                f"User {user.id}: chunk {chunk_num} tokenizer calibration "
-                f"actual/estimated={observed} → chars/token="
-                f"{effective_chars_per_token(user, model_id):.2f} "
-                f"(budget was {budget})"
-            )
+            user, model_id, chunk_units, response.get("input_tokens"))
+        cumulative_units += chunk_units
         cumulative_origin_stats = merge_origin_stats(
             cumulative_origin_stats, chunk.get("origin_stats"))
 
         profile = _save_profile(
             user, model_id, response["content"], response,
-            source_tokens_used=cumulative_source_tokens,
+            source_tokens_used=cumulative_units,
             source_data_cutoff=latest_ts,
-            generation_type=generation_type,
+            generation_type=("initial" if is_first_with_gen and k == 1
+                             else generation_type),
             parent_profile_id=current_profile_id,
             source_origin_stats=cumulative_origin_stats,
+            source_rendered_at=rendered_at,
         )
 
         current_profile_content = response["content"]
         current_profile_id = profile.id
         current_cutoff = latest_ts
+        saved = profile
 
         # After the first committed chunk, a from-scratch full regen is no
         # longer needed: chunk 1 is the oldest data, so the chronological
@@ -1207,32 +1268,25 @@ def _chunked_profile_loop(self, user, model_id, update_template,
             )
 
         logger.info(
-            f"User {user.id}: chunk {chunk_num} done — "
-            f"profile {profile.id}, {chunk_tokens_est} formatted tokens, "
-            f"+{actual_chunk_tokens} actual LLM tokens, "
-            f"cumulative={cumulative_source_tokens}"
+            f"User {user.id}: chunk {chunk_num} done — profile {profile.id}, "
+            f"{chunk_units} units, {response.get('input_tokens')} billed "
+            f"input tokens ({observed} tokens/unit), "
+            f"cumulative={cumulative_units}"
         )
 
-        # Check if there's more data after this cutoff (anchor scope:
-        # own + addressed nodes, matching what the export reads)
-        if not _has_more_source_after(user, current_cutoff):
-            break
-
-    return current_profile_id, chunk_num, cumulative_source_tokens
+    return current_profile_id, chunk_num, cumulative_units
 
 
-def _iterative_generation(self, user, model_id, gen_template, budget,
-                          context_window, max_output_tokens, api_keys):
-    """Iterative profile building: process data in chronological chunks."""
-    budget = min(budget, CHUNK_BUDGET)
-    logger.info(
-        f"Starting iterative profile build for user {user.id}, "
-        f"budget={budget} tokens per chunk"
-    )
+def _iterative_generation(self, user, model_id, gen_template,
+                          max_output_tokens, api_keys):
+    """From-scratch profile build in planned chronological chunks: chunk 1
+    takes the generation prompt, later chunks the update prompt, and a
+    multi-chunk chain is integrated at the end."""
+    logger.info(f"Starting profile build for user {user.id}")
 
     update_template = build_update_template(user.id)
 
-    current_profile_id, chunk_num, cumulative_source_tokens = \
+    current_profile_id, chunk_num, cumulative_units = \
         _chunked_profile_loop(
             self, user, model_id, update_template, api_keys,
             max_output_tokens=max_output_tokens,
@@ -1241,11 +1295,13 @@ def _iterative_generation(self, user, model_id, gen_template, budget,
             ),
             generation_type="iterative",
             status_prefix="Generating profile",
-            chunk_budget=budget,
         )
 
+    if current_profile_id is None:
+        raise ValueError("No writing found to analyze")
+
     # Run integration over the iterative chain
-    if current_profile_id and chunk_num > 1:
+    if chunk_num > 1:
         integration_result = _do_integration(
             self, user, model_id, current_profile_id, api_keys
         )
@@ -1257,7 +1313,7 @@ def _iterative_generation(self, user, model_id, gen_template, budget,
     })
 
     logger.info(
-        f"Iterative profile build for user {user.id}: "
+        f"Profile build for user {user.id}: "
         f"{chunk_num} chunks, profile {current_profile_id}"
     )
 
@@ -1265,19 +1321,67 @@ def _iterative_generation(self, user, model_id, gen_template, budget,
         'user_id': user.id,
         'profile_id': current_profile_id,
         'status': 'completed',
-        'total_tokens': cumulative_source_tokens,
+        'total_tokens': cumulative_units,
         'chunks_processed': chunk_num,
     }
 
 
+def ai_readable_base_id(user_id, previous_profile_id):
+    """The update base as the task receives it, re-checked when the task
+    runs, since its ai_usage may have changed after dispatch (#346). A
+    base that is no longer AI-readable is replaced by the newest version
+    that is (profile_update_base). None (a from-scratch build) stays
+    None."""
+    if not previous_profile_id:
+        return None
+    base = UserProfile.query.get(previous_profile_id)
+    if base is None or base.ai_usage in AI_ALLOWED:
+        return previous_profile_id
+    fallback = profile_update_base(user_id)
+    logger.info(
+        "Profile %s is not AI-readable; updating from profile %s instead",
+        base.id, fallback.id if fallback else None)
+    return fallback.id if fallback else None
+
+
+def profile_update_base(user_id):
+    """The newest AI-readable non-integration profile, which the next
+    update builds on, or None when there is none (the next build starts
+    from the writing).
+
+    A version that is not AI-readable is skipped and never sent to a
+    model: a profile written or edited by hand while the account was set
+    to 'none', or a batch step collected after the account was switched.
+    The chain continues from the version before it, with the normal
+    update gates from that version's cutoff, instead of rebuilding the
+    whole account. Integration drops such versions the same way (#346)."""
+    return UserProfile.query.filter(
+        UserProfile.user_id == user_id,
+        UserProfile.generation_type != 'integration',
+        UserProfile.ai_usage.in_(AI_ALLOWED),
+    ).order_by(UserProfile.created_at.desc()).first()
+
+
 def maybe_trigger_profile_update(user_id, model_id=None,
-                                  force_full_regen=False):
+                                  force_full_regen=False,
+                                  integrate_only=False):
     """
     Check concurrency guard and dispatch update_user_profile if safe.
-    Returns the task_id or None if skipped.
+    Returns the task_id or None if skipped. integrate_only: run only the
+    integration over the chain ending at the update base
+    (``integration_due``).
     """
     user = User.query.get(user_id)
     if not user:
+        return None
+    if not account_allows_ai(user):
+        logger.info(
+            f"Skipping profile update for user {user_id}: opted out of AI usage")
+        return None
+    from backend.utils.hidden_rows import writing_on_hold
+    if writing_on_hold(user_id):
+        logger.info(f"Skipping profile update for user {user_id}: writing "
+                    "on hold for deletion")
         return None
 
     # Check concurrency guard
@@ -1298,91 +1402,49 @@ def maybe_trigger_profile_update(user_id, model_id=None,
         db.session.commit()
 
     if model_id is None:
-        model_id = (
-            user.preferred_model
-            or flask_app.config.get("DEFAULT_LLM_MODEL", "claude-opus-5")
-        )
+        from backend.utils.llm_nodes import default_model_for
+        model_id = default_model_for(user)
 
-    # Find latest non-integration profile
-    latest_profile = UserProfile.query.filter(
-        UserProfile.user_id == user_id,
-        UserProfile.generation_type != 'integration'
-    ).order_by(UserProfile.created_at.desc()).first()
+    latest_profile = profile_update_base(user_id)
 
     prev_id = None if force_full_regen else (
         latest_profile.id if latest_profile else None
     )
 
-    task = update_user_profile.delay(user_id, model_id, prev_id)
+    if integrate_only:
+        if prev_id is None:
+            return None
+        task = update_user_profile.delay(
+            user_id, model_id, prev_id, integrate_only=True)
+    else:
+        task = update_user_profile.delay(user_id, model_id, prev_id)
     user.profile_generation_task_id = task.id
     user.profile_generation_task_dispatched_at = datetime.utcnow()
     db.session.commit()
 
     logger.info(
         f"Dispatched profile update task {task.id} for user {user_id}"
-        f" (force_full_regen={force_full_regen})"
+        f" (force_full_regen={force_full_regen},"
+        f" integrate_only={integrate_only})"
     )
     return task.id
 
 
-@celery.task(base=ProfileGenerationTask, bind=True)
-def integrate_user_profile(self, user_id: int, model_id: str,
-                           last_iterative_profile_id: int):
-    """Standalone task for manual profile integration."""
-    logger.info(
-        f"Starting profile integration for user {user_id}, "
-        f"model {model_id}, profile {last_iterative_profile_id}"
-    )
-
-    with flask_app.app_context():
-        user = User.query.get(user_id)
-        if not user:
-            raise ValueError(f"User {user_id} not found")
-
-        from backend.utils.spend import user_is_capped
-        if user_is_capped(user):
-            logger.warning(
-                "User %s is spend-capped; skipping profile integration", user_id)
-            return
-
-        user.profile_generation_task_id = self.request.id
-        user.profile_generation_task_dispatched_at = datetime.utcnow()
-        db.session.commit()
-
-        try:
-            api_keys = get_api_keys_for_usage(flask_app.config, 'chat')
-            result = _do_integration(
-                self, user, model_id,
-                last_iterative_profile_id, api_keys
-            )
-            if not result:
-                return {
-                    'user_id': user_id,
-                    'status': 'completed',
-                    'message': 'Not enough versions to integrate',
-                }
-            return result
-        except Exception as e:
-            logger.error(
-                f"Profile integration error for user {user_id}: {e}",
-                exc_info=True
-            )
-            raise
-        finally:
-            user = User.query.get(user_id)
-            if user:
-                user.profile_generation_task_id = None
-                user.profile_generation_task_dispatched_at = None
-                db.session.commit()
-
-
-def maybe_trigger_incremental_profile_update(user):
+def maybe_trigger_incremental_profile_update(user, ignore_backoff=False):
     """
     Check if enough new writing has accumulated to trigger an
     incremental profile update. Called periodically by Celery beat.
+
+    ignore_backoff: skip the refusal backoff (wait and stop). Only the
+    import hand-off passes it: new data is a new input, so a build the
+    import triggers runs at once (voice review, 2026-10-01). The hourly
+    check never does.
     """
     from datetime import datetime, timedelta
     from backend.models import Node
+
+    if not account_allows_ai(user):
+        return None
 
     # Only for paid plans
     if (user.plan or "free") not in User.VOICE_MODE_PLANS:
@@ -1409,20 +1471,53 @@ def maybe_trigger_incremental_profile_update(user):
     if last_node and (datetime.utcnow() - last_node.created_at) < MIN_INACTIVITY:
         return None
 
-    # Find latest non-integration profile
-    latest_profile = UserProfile.query.filter(
-        UserProfile.user_id == user.id,
-        UserProfile.generation_type != 'integration'
-    ).order_by(UserProfile.created_at.desc()).first()
+    # After a refused (cut-off) output the gates below stay open — nothing
+    # was saved — so without this the same billed call repeats hourly (#368).
+    if not ignore_backoff and refusal_backoff.profile_in_backoff(user.id):
+        return None
 
-    THRESHOLD_TOKENS = 80000
+    latest_profile = profile_update_base(user.id)
+
     MIN_INTERVAL = timedelta(hours=1)
 
     if latest_profile:
+        # An unfinished chain — data beyond the cutoff that is OLDER than
+        # the version (an import still being folded in, a chunk lost to a
+        # restart) — continues regardless of the interval / volume gates.
+        if should_continue_chain(user, latest_profile):
+            logger.info(
+                f"User {user.id}: continuing an unfinished profile chain")
+            return maybe_trigger_profile_update(
+                user.id, force_full_regen=user.profile_needs_full_regen)
+        # A finished chain whose integration was refused (or lost): run the
+        # integration alone (#368).
+        if integration_due(user, latest_profile):
+            logger.info(
+                f"User {user.id}: chain {latest_profile.id} has no "
+                f"integration; integrating it")
+            return maybe_trigger_profile_update(
+                user.id, integrate_only=True)
         # Check minimum interval
         if (datetime.utcnow() - latest_profile.created_at) < MIN_INTERVAL:
             return None
 
+    # No profile, or a provisional one: the ladder decides, and every
+    # build is from scratch (the earlier provisional versions stay as
+    # history, unchained).
+    if latest_profile is None or profile_is_provisional(latest_profile):
+        due, total, threshold = provisional_build_due(user, latest_profile)
+        if not due:
+            logger.debug(
+                f"User {user.id}: {total} units, next provisional build at "
+                f"{threshold}")
+            return None
+        logger.info(
+            f"User {user.id}: {total} units >= {threshold} — "
+            f"{'first' if latest_profile is None else 'next provisional'} "
+            f"build from scratch")
+        return maybe_trigger_profile_update(user.id, force_full_regen=True)
+
+    if latest_profile:
         cutoff = latest_profile.source_data_cutoff
         from sqlalchemy import func, or_
         q = db.session.query(
@@ -1441,30 +1536,19 @@ def maybe_trigger_incremental_profile_update(user):
             # never checked — otherwise a hand-written profile with almost no
             # data gets needlessly overwritten by an LLM generation.
             new_tokens = q.scalar()
-    else:
-        # No profile exists: check total eligible tokens
-        from sqlalchemy import func, or_
-        new_tokens = db.session.query(
-            func.coalesce(func.sum(Node.token_count), 0)
-        ).filter(
-            or_(Node.user_id == user.id,
-                Node.human_owner_id == user.id),
-            Node.ai_usage.in_(['chat', 'train']),
-        ).scalar()
 
-    if new_tokens >= THRESHOLD_TOKENS:
+    if new_tokens >= UPDATE_THRESHOLD_UNITS:
         logger.info(
             f"User {user.id}: triggering profile update — "
-            f"{new_tokens} DB tokens >= {THRESHOLD_TOKENS} threshold"
+            f"{new_tokens} units >= {UPDATE_THRESHOLD_UNITS} threshold"
         )
-        force = user.profile_needs_full_regen
         return maybe_trigger_profile_update(
-            user.id, force_full_regen=force
+            user.id, force_full_regen=user.profile_needs_full_regen
         )
 
     logger.debug(
         f"User {user.id}: skipping profile update — "
-        f"{new_tokens} DB tokens < {THRESHOLD_TOKENS} threshold"
+        f"{new_tokens} units < {UPDATE_THRESHOLD_UNITS} threshold"
     )
     return None
 
@@ -1512,7 +1596,9 @@ def export_user_threads(self, user_id: int):
         try:
             self.update_state(state='PROGRESS', meta={'progress': 20, 'status': 'Building export'})
 
-            export_content = build_user_export_content(user)
+            # The user's own download: rows marked 'none' are included.
+            export_content = build_user_export_content(
+                user, filter_ai_usage=False)
 
             if not export_content:
                 raise ValueError("No threads found to export")

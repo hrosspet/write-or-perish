@@ -1,22 +1,26 @@
 from flask import Blueprint, jsonify, Response, request, current_app
 from flask_login import login_required, current_user
+from backend.utils.hidden_rows import shown_description
 from backend.models import (
     Node, NodeVersion, UserProfile, UserPrompt, UserTodo,
     UserArtifact,
 )
 from backend.extensions import db
-from backend.utils.tokens import approximate_token_count, get_model_context_window
-from backend.utils.privacy import AI_ALLOWED, accessible_nodes_filter, can_user_access_node
+from backend.utils.tokens import approximate_token_count
+from backend.utils.privacy import (
+    AI_ALLOWED, AIUsage, accessible_nodes_filter, can_user_access_node,
+)
 from backend.utils.quotes import (
     resolve_quotes, has_quotes, ExportQuoteResolver,
-    resolve_quotes_for_export, resolve_ext_quotes, has_ext_quotes
+    resolve_quotes_for_export, resolve_ext_quotes, has_ext_quotes,
+    ai_blocked_artifact, AI_BLOCKED_ARTIFACT_TEXT,
 )
 from backend.utils.timefmt import iso_utc
-from backend.utils.spend import require_spend_headroom
+from backend.utils.encryption import prefetch_deks
+from backend.utils.task_owner import failure_text, task_owned_by
 from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import subqueryload
 from datetime import datetime
-import os
 
 export_bp = Blueprint("export_bp", __name__)
 
@@ -29,13 +33,16 @@ def export_data():
             "id": current_user.id,
             "twitter_id": current_user.twitter_id,
             "username": current_user.username,
-            "description": current_user.description,
+            "description": shown_description(current_user),
             "created_at": iso_utc(current_user.created_at),
         },
         "nodes": [],
         "versions": []
     }
-    nodes = Node.query.filter_by(user_id=current_user.id).all()
+    # Deleted entries are not exported, including the ones a waiting
+    # "Delete all my writing" hid (#268).
+    nodes = Node.query.filter_by(user_id=current_user.id,
+                                 deleted_at=None).all()
     for node in nodes:
         user_data["nodes"].append({
             "id": node.id,
@@ -47,7 +54,8 @@ def export_data():
             "created_at": iso_utc(node.created_at),
             "updated_at": iso_utc(node.updated_at)
         })
-    versions = NodeVersion.query.join(Node, Node.id == NodeVersion.node_id).filter(Node.user_id == current_user.id).all()
+    versions = NodeVersion.query.join(Node, Node.id == NodeVersion.node_id).filter(
+        Node.user_id == current_user.id, Node.deleted_at.is_(None)).all()
     for version in versions:
         user_data["versions"].append({
             "id": version.id,
@@ -59,9 +67,15 @@ def export_data():
 
 
 def _node_author_label(node):
-    """Return a compact author label like 'User (alice)' or 'AI (claude-opus-4.6)'."""
+    """Return a compact author label like 'User (alice)' or 'AI (claude-opus-4.6)'.
+
+    No name when the author deleted the account (in its grace period or
+    deleted, #269): their placeholders name nobody, as in threads."""
+    from backend.utils.privacy import author_gone
     if node.node_type == "llm":
         return f"AI ({node.llm_model})" if node.llm_model else "AI (unknown)"
+    if author_gone(node):
+        return "User"
     author = node.user.username if node.user else "Unknown"
     return f"User ({author})"
 
@@ -150,16 +164,55 @@ def prefetch_children(nodes, batch=500):
         level = next_level
 
 
+# Nodes per DEK-prefetch window. Must stay well under the DEK cache size
+# (encryption._DEK_CACHE_MAX, 4096): every DEK unwrapped for a window has
+# to survive in the LRU until that window is rendered, and rendering also
+# decrypts quotes and artifacts on the side. INTRODUCED CONSTANT.
+DEK_PREFETCH_WINDOW = 1000
+
+
+def iter_with_dek_prefetch(roots, window=DEK_PREFETCH_WINDOW):
+    """Yield *roots* in order, unwrapping the DEKs of each upcoming window
+    of subtrees (roots plus their already-loaded ``children``) in one
+    concurrent batch first.
+
+    Rendering decrypts one node at a time, and a cold KMS unwrap is
+    ~80 ms from the prod VM (2026-09-02), so a 5k-node profile chunk
+    spent ~7 minutes waiting on KMS in sequence. Windows keep the
+    prefetched DEKs inside the LRU cache; a root's subtree is never
+    split across windows. Call after prefetch_children(roots) — walking
+    ``children`` here must not lazy-load.
+    """
+    batch, texts = [], []
+    for root in roots:
+        batch.append(root)
+        stack = [root]
+        while stack:
+            n = stack.pop()
+            texts.append(n.content)
+            stack.extend(n.children)
+        if len(texts) >= window:
+            prefetch_deks(texts)
+            yield from batch
+            batch, texts = [], []
+    if batch:
+        prefetch_deks(texts)
+        yield from batch
+
+
 def _filtered_children(node, filter_ai_usage, created_before, included_ids,
-                       keep_tombstones):
+                       keep_tombstones, user_id=None):
     """Children of *node* that should render, sorted chronologically.
 
     keep_tombstones: when a budget pre-selection (included_ids) is
     active, tombstones pass through even if not pre-selected — they take
     no real budget tokens and dropping them creates discontinuities
-    (§5a). The inaccessible-placeholder branch does not extend this
-    courtesy, matching the historical behavior.
+    (§5a). A node hidden with its owner's deleted account (#269) counts
+    as a tombstone for *user_id*, as it will after the purge. The
+    inaccessible-placeholder branch does not extend this courtesy,
+    matching the historical behavior.
     """
+    from backend.utils.privacy import shown_as_deleted
     children = node.children
     if filter_ai_usage:
         children = [c for c in children if c.ai_usage in AI_ALLOWED]
@@ -169,11 +222,48 @@ def _filtered_children(node, filter_ai_usage, created_before, included_ids,
         if keep_tombstones:
             children = [
                 c for c in children
-                if c.id in included_ids or c.deleted_at is not None
+                if c.id in included_ids or shown_as_deleted(c, user_id)
             ]
         else:
             children = [c for c in children if c.id in included_ids]
     return sorted(children, key=lambda c: c.created_at)
+
+
+def _note_entry(licence, node):
+    """Report an entry whose text the export renders to *licence* (a
+    PayloadLicence, #326): an export going to a model carries every
+    rendered entry, the user's own and other people's replies alike, and
+    each is licensed for training by its own ai_usage. None = no report
+    (the user's own data download). A licensed entry is only recorded, in
+    case the licence tracks rows for a cached render."""
+    if licence is None:
+        return
+    if node.ai_usage == AIUsage.TRAIN.value:
+        licence.track_row(node.__tablename__, (node.id,))
+    else:
+        licence.note_usage(node.ai_usage, f"archive entry {node.id}",
+                           row=node)
+
+
+def _note_resolver_preamble(licence, resolver):
+    """Report the rows a budgeted export's preamble renders in full: the
+    system prompts (by the node their text came from) and the pinned
+    profiles and todo lists (#326)."""
+    if licence is None:
+        return
+    licence.note_nodes(
+        [resolver.prompt_node_ids[pid]
+         for pid in resolver.referenced_prompt_ids
+         if pid in resolver.prompt_node_ids],
+        what="archive system prompt")
+    for kind, model in (("profile", UserProfile), ("todo", UserTodo)):
+        ids = resolver.referenced_artifacts.get(kind)
+        if not ids:
+            continue
+        for row_id, ai_usage in model.query.with_entities(
+                model.id, model.ai_usage).filter(model.id.in_(ids)):
+            licence.track_row(model.__tablename__, (row_id,))
+            licence.note_usage(ai_usage, f"archive {kind} {row_id}")
 
 
 class _CompactTweetRun:
@@ -182,11 +272,12 @@ class _CompactTweetRun:
     one `[YYYY-MM-DD HH:MM] text` entry per tweet. Shared by the
     incremental and legacy render loops. Tweets never carry pinned
     artifacts or {quote:ID} placeholders, so the compact line skips those
-    lookups."""
+    lookups. Each rendered tweet reports to *licence* (#326)."""
 
-    def __init__(self, export_lines, username):
+    def __init__(self, export_lines, username, licence=None):
         self.lines = export_lines
         self.username = username
+        self.licence = licence
         self.run = []
 
     def add(self, node):
@@ -201,6 +292,7 @@ class _CompactTweetRun:
         )
         self.lines.append("")
         for tweet in self.run:
+            _note_entry(self.licence, tweet)
             ts = tweet.created_at.strftime("%Y-%m-%d %H:%M")
             self.lines.append(f"[{ts}] {tweet.get_content()}")
             self.lines.append("")
@@ -222,12 +314,25 @@ def _is_flat_tweet_root(node, filter_ai_usage, created_before):
                                        None, keep_tombstones=True))
 
 
-def _artifact_ref_lines(node):
+def _preamble_content(row, filter_ai_usage):
+    """A pinned artifact version's preamble body. With *filter_ai_usage*,
+    a row marked outside AI_ALLOWED renders as a placeholder, never its
+    content (#340)."""
+    if filter_ai_usage and ai_blocked_artifact(row):
+        return AI_BLOCKED_ARTIFACT_TEXT
+    return row.get_content()
+
+
+def _artifact_ref_lines(node, user_id):
     """Reference lines for whatever context artifacts are pinned on *node*.
 
     Returns [] when nothing is pinned. Emitted for EVERY node (not just
     system-prompt nodes) so any node carrying pins — including interim
     retrieval nodes that pinned the artifact they read — surfaces them.
+    Only *user_id*'s own versions are listed: someone else's node in the
+    user's threads pins theirs (the export's preamble leaves them out
+    too). The system prompt is listed either way: its text is the node's
+    own content.
     """
     lines = []
     prompt = node.get_artifact("prompt")
@@ -242,7 +347,7 @@ def _artifact_ref_lines(node):
             f"(ref #{prompt.id})]")
 
     profile = node.get_artifact("profile")
-    if profile is not None:
+    if profile is not None and profile.user_id == user_id:
         profile_ver = UserProfile.query.filter(
             UserProfile.user_id == profile.user_id,
             UserProfile.created_at <= profile.created_at,
@@ -250,7 +355,7 @@ def _artifact_ref_lines(node):
         lines.append(f"[User Profile v{profile_ver} (ref #{profile.id})]")
 
     todo = node.get_artifact("todo")
-    if todo is not None:
+    if todo is not None and todo.user_id == user_id:
         todo_ver = UserTodo.query.filter(
             UserTodo.user_id == todo.user_id,
             UserTodo.created_at <= todo.created_at,
@@ -260,6 +365,8 @@ def _artifact_ref_lines(node):
     # ai_preferences is a UserArtifact (#158 Slice 5) → it flows through the
     # user_artifact loop below as [Artifact 'ai_preferences' vN].
     for kind, artifact in sorted(node.get_user_artifacts().items()):
+        if artifact.user_id != user_id:
+            continue
         artifact_ver = UserArtifact.query.filter(
             UserArtifact.user_id == artifact.user_id,
             UserArtifact.kind == kind,
@@ -272,13 +379,15 @@ def _artifact_ref_lines(node):
 
 
 def _format_node_text(node, index_path, user_id, embedded_quotes,
-                      ai_blocked_ids):
+                      ai_blocked_ids, licence=None, filter_ai_usage=False):
     """The node's own text block: header, any pinned-artifact refs, then
     content. System-prompt nodes emit refs only (their content IS the
-    prompt, shown as a ref)."""
+    prompt, shown as a ref). The node, the entries its quotes embed and
+    the saved references it quotes report to *licence* (#326)."""
     result = _node_header_line(node, index_path)
+    _note_entry(licence, node)
 
-    ref_lines = _artifact_ref_lines(node)
+    ref_lines = _artifact_ref_lines(node, user_id)
     is_prompt_node = node.get_artifact("prompt") is not None
 
     if is_prompt_node:
@@ -298,17 +407,29 @@ def _format_node_text(node, index_path, user_id, embedded_quotes,
     if has_quotes(content):
         if embedded_quotes is not None:
             # Use smart resolution from ExportQuoteResolver
+            if licence is not None:
+                licence.note_nodes(list(embedded_quotes.get(node.id) or ()),
+                                   what="archive quoted entry")
             content = resolve_quotes_for_export(
                 content, node.id, embedded_quotes, user_id,
                 ai_blocked_ids=ai_blocked_ids
             )
         elif user_id:
-            # Fallback to simple resolution (depth 1)
-            content, _ = resolve_quotes(content, user_id, for_llm=False, max_depth=1)
+            # Fallback to simple resolution (depth 1). The unbudgeted
+            # AI-filtered export reaches models too (recent-context first
+            # attempt, uncapped {user_export}), so it blocks quotes of
+            # nodes marked 'none' like the resolver path does.
+            content, quoted_ids = resolve_quotes(
+                content, user_id, for_llm=False, max_depth=1,
+                block_ai_none=filter_ai_usage)
+            if licence is not None:
+                licence.note_nodes(quoted_ids, what="archive quoted entry")
     # {quote_ext:ID} (saved references) resolve inline unconditionally —
     # they're small and never nest, so no dedup machinery is needed.
     if user_id and has_ext_quotes(content):
-        content, _ = resolve_ext_quotes(content, user_id, for_llm=False)
+        content, ext_ids = resolve_ext_quotes(content, user_id, for_llm=False)
+        if licence is not None:
+            licence.note_external(ext_ids, what="archive reference")
 
     result += content
     result += "\n\n"
@@ -324,7 +445,8 @@ def format_node_tree(
     created_before=None,
     embedded_quotes=None,
     included_ids=None,
-    ai_blocked_ids=None
+    ai_blocked_ids=None,
+    licence=None,
 ):
     """
     Format a node and its descendants into a human-readable tree structure
@@ -355,11 +477,20 @@ def format_node_tree(
                         quote resolution that embeds only when needed.
         included_ids: Optional set of node IDs included in the export. Used with
                      embedded_quotes for reference-based resolution.
+        licence: Optional PayloadLicence every rendered entry, quote and
+                 reference reports to (#326).
 
     Returns:
         str: Formatted text representation of the node tree
     """
-    from backend.utils.privacy import can_user_view_tombstone
+    from backend.utils.privacy import can_user_view_tombstone, shown_as_deleted
+
+    def _deleted(n):
+        # Soft-deleted, or hidden with its owner's deleted account
+        # (#269): the same tombstone either way, as after the purge.
+        if user_id is None:
+            return n.deleted_at is not None
+        return shown_as_deleted(n, user_id)
 
     if processed_nodes is None:
         processed_nodes = set()
@@ -381,23 +512,24 @@ def format_node_tree(
             # caller is responsible for the pre-deletion-access check on
             # the entry node; child tombstones are checked at push time
             # below via can_user_view_tombstone.
-            if current.deleted_at is not None:
+            if _deleted(current):
                 kind = "tombstone"
 
         if kind == "node":
             processed_nodes.add(current.id)
             parts.append(_format_node_text(
-                current, path, user_id, embedded_quotes, ai_blocked_ids))
+                current, path, user_id, embedded_quotes, ai_blocked_ids,
+                licence=licence, filter_ai_usage=filter_ai_usage))
             children = _filtered_children(
                 current, filter_ai_usage, created_before, included_ids,
-                keep_tombstones=True)
+                keep_tombstones=True, user_id=user_id)
             child_frames = []
             for i, child in enumerate(children):
                 child_index = f"{path}.{i+1}"
                 # Mark branches (when there are multiple children)
                 if len(children) > 1 and i > 0:
                     child_frames.append(("text", "---\n**BRANCH**\n---\n\n"))
-                if child.deleted_at is not None:
+                if _deleted(child):
                     # Tombstone: render only with pre-deletion access;
                     # otherwise skip (don't leak structural "something
                     # is here").
@@ -431,7 +563,7 @@ def format_node_tree(
         processed_nodes.add(current.id)
         children = _filtered_children(
             current, filter_ai_usage, created_before, included_ids,
-            keep_tombstones=keep_tombstones)
+            keep_tombstones=keep_tombstones, user_id=user_id)
         stack.extend(reversed([
             ("node", gc, f"{path}.{j+1}")
             for j, gc in enumerate(children)
@@ -587,6 +719,21 @@ def _select_incremental_rows(user_id, filter_ai_usage=False,
     return list(rows_by_id.values())
 
 
+def count_remaining_units(user_id, created_after=None, filter_ai_usage=True):
+    """Stored content units (Node.token_count) still ahead of the profile
+    chunk loop after ``created_after``: the sum over exactly the rows the
+    incremental export window draws from (anchor scope plus climb-up
+    ancestors and climb-down descendants, tombstones included, the same
+    filters), so the plan made from this figure and the window it
+    produces agree. The chunk planner calls it before every chunk
+    (docs/design/chunk-planner.md). No node is loaded or decrypted.
+    """
+    rows = _select_incremental_rows(
+        user_id, filter_ai_usage=filter_ai_usage,
+        created_after=created_after)
+    return sum((r.token_count or 0) for r in rows)
+
+
 def _thread_has_alive_node(root_id):
     """Per-thread skip rule (§5a): does the subtree rooted at *root_id*
     contain any node with deleted_at IS NULL?
@@ -614,32 +761,73 @@ def _thread_has_alive_node(root_id):
     ).scalar()
 
 
+# Per-query id-list size for the level-batched thread walk. Keeps each
+# statement small on SQLite (old builds cap bound variables at 999) and
+# cheap to plan on Postgres.
+_WALK_CHUNK = 900
+
+
+def _foreign_thread_node_ids(user_id):
+    """IDs of nodes by OTHER authors inside the user's thread trees.
+
+    A user's thread trees are every node they authored plus all
+    descendants (#110: seeded from every authored node, not just their
+    top-level threads, so replies inside other users' threads count).
+    The authored half needs no id list — callers match it with
+    ``Node.user_id == user_id`` — so this walks only the other authors'
+    nodes: LLM replies, other people's comments, and the sub-threads
+    under them. Soft-deleted nodes are walked through; visibility is the
+    caller's filter.
+
+    Level 1 is a plain join (children of any authored node), which the
+    planner estimates from real column stats. Deeper levels are walked
+    with one ``parent_id IN (...)`` seek per level, and a level stops at
+    the next authored node because that node is its own seed. On a
+    user/LLM alternating thread the walk ends after two levels.
+
+    This replaced a recursive CTE on 2026-09-02: Postgres cannot
+    estimate a recursive work table (it assumes 10x the seed), so on a
+    260k-row table it chose a hash join fed by a full sequential scan of
+    ``node`` for EVERY recursion level — a 120-level thread meant 31
+    million rows scanned per call, 8.5 s on prod, on every thread open
+    and every LLM reply.
+    """
+    parent = db.aliased(Node)
+    frontier = [
+        row[0] for row in
+        db.session.query(Node.id)
+        .join(parent, Node.parent_id == parent.id)
+        .filter(parent.user_id == user_id, Node.user_id != user_id)
+    ]
+    seen = set(frontier)
+    while frontier:
+        next_level = []
+        for i in range(0, len(frontier), _WALK_CHUNK):
+            chunk = frontier[i:i + _WALK_CHUNK]
+            next_level.extend(
+                row[0] for row in
+                db.session.query(Node.id).filter(
+                    Node.parent_id.in_(chunk), Node.user_id != user_id,
+                )
+                if row[0] not in seen
+            )
+        seen.update(next_level)
+        frontier = next_level
+    return seen
+
+
 def _preselect_node_ids(user_id, budget, filter_ai_usage=False,
                         created_before=None, created_after=None,
                         chronological_order=False):
     """Select node IDs that fit within a token budget using a SQL window function.
 
-    Uses a recursive CTE to find all descendants of the user's top-level
-    threads, then filters to accessible nodes only.  Returns a list of
-    node IDs ordered by created_at (direction controlled by
-    chronological_order).  No nodes are loaded or decrypted.
+    Covers the user's thread trees — their own nodes plus other authors'
+    nodes under them (see _foreign_thread_node_ids) — filtered to
+    accessible nodes only.  Returns a list of node IDs ordered by
+    created_at (direction controlled by chronological_order).  No nodes
+    are loaded or decrypted.
     """
-    # Recursive CTE: all node IDs in the user's thread trees. Seeded
-    # from EVERY node the user authored — not just their top-level
-    # threads — so replies they wrote inside other users' threads (and
-    # the sub-threads under them) are included too (#110). Overlapping
-    # subtrees are harmless: membership is checked with IN. Visibility/
-    # privacy is enforced below by _export_visible_filter.
-    base = db.session.query(Node.id).filter(
-        Node.user_id == user_id,
-    ).cte(name="thread_nodes", recursive=True)
-
-    thread_child = db.aliased(Node, flat=True)
-    recursive = db.session.query(thread_child.id).join(
-        base, thread_child.parent_id == base.c.id
-    )
-    thread_cte = base.union_all(recursive)
-
+    foreign_ids = sorted(_foreign_thread_node_ids(user_id))
     sort_order = (
         Node.created_at.asc() if chronological_order
         else Node.created_at.desc()
@@ -648,8 +836,13 @@ def _preselect_node_ids(user_id, budget, filter_ai_usage=False,
         order_by=sort_order
     ).label("cumul")
 
-    inner = db.session.query(Node.id, cumul).filter(
-        Node.id.in_(db.session.query(thread_cte.c.id)),
+    # token_count and created_at ride along in the window subquery so the
+    # budget cut and the final ordering need no second join back to node
+    # (which the planner ran as another full scan).
+    inner = db.session.query(
+        Node.id, Node.token_count, Node.created_at, cumul,
+    ).filter(
+        or_(Node.user_id == user_id, Node.id.in_(foreign_ids)),
         # Includes soft-deleted user-owned nodes so they can render as
         # tombstones in the export tree (§5a).
         _export_visible_filter(Node, user_id),
@@ -663,13 +856,26 @@ def _preselect_node_ids(user_id, budget, filter_ai_usage=False,
 
     inner = inner.subquery()
 
-    return [
-        row[0] for row in
-        db.session.query(inner.c.id).filter(
-            inner.c.cumul - func.coalesce(
-                Node.token_count, 0) < budget
-        ).join(Node, Node.id == inner.c.id).all()
-    ]
+    selected = db.session.query(inner.c.id, inner.c.created_at).filter(
+        inner.c.cumul - func.coalesce(inner.c.token_count, 0) < budget
+    ).order_by(
+        inner.c.created_at.asc() if chronological_order
+        else inner.c.created_at.desc()
+    ).all()
+    if not selected:
+        return []
+    ids = [row[0] for row in selected]
+    # A budget window ends between two nodes; when several nodes share
+    # the boundary timestamp, take them all. The next window starts at
+    # `created_at > cutoff`, so a node left behind on the same second as
+    # the cutoff node would never be read by any chunk (tweets carry
+    # second precision, so ties are reachable).
+    edge_ts = selected[-1][1]
+    seen = set(ids)
+    ties = db.session.query(inner.c.id).filter(
+        inner.c.created_at == edge_ts, inner.c.id.notin_(ids)).all()
+    ids.extend(row[0] for row in ties if row[0] not in seen)
+    return ids
 
 
 def get_raw_data_date_range(user_id, max_tokens=10000, created_before=None):
@@ -756,6 +962,7 @@ def _format_preamble(top_started_at):
 def _build_user_export_incremental(
     user, max_tokens, filter_ai_usage, created_before, created_after,
     chronological_order, return_metadata, collapse_artifacts,
+    licence=None,
 ):
     """Incremental export path (created_after is set). See
     `build_user_export_content` docstring for behavior. The CTE row
@@ -803,12 +1010,21 @@ def _build_user_export_incremental(
         )
         cumulative = 0
         selected_ids = []
+        edge_ts = None
         for r in ordered:
             tk = r.token_count or 0
             if cumulative + tk > budget and cumulative > 0:
-                break
+                # A window ends between two rows; when the boundary
+                # falls inside a run of rows sharing one timestamp, take
+                # the whole run. The next window resumes at
+                # `created_at > cutoff`, so a row left behind on the
+                # cutoff's own second would never be read by any chunk
+                # (tweets carry second precision, so ties are reachable).
+                if r.created_at != edge_ts:
+                    break
             selected_ids.append(r.id)
             cumulative += tk
+            edge_ts = r.created_at
 
         if not selected_ids:
             return None
@@ -823,11 +1039,20 @@ def _build_user_export_incremental(
             key=lambda n: n.created_at,
             reverse=not chronological_order,
         )
+        # The resolver loop below decrypts every selected node, one KMS
+        # unwrap each on a cold worker (~80 ms; a 5k-node profile chunk
+        # waited ~7 minutes here, then again at render time once the
+        # 4k-entry DEK cache had cycled). One concurrent batch up front;
+        # the render loop's windowed prefetch then finds them cached.
+        prefetch_deks(n.content for n in selected_nodes)
 
         resolver = ExportQuoteResolver(
             user.id, budget,
             filter_ai_usage=filter_ai_usage,
-            chronological=chronological_order
+            chronological=chronological_order,
+            # A collapsed export emits no preamble, so the budget counts
+            # only the entries it does emit (#518).
+            with_preamble=not collapse_artifacts,
         )
         for node in selected_nodes:
             content = node.get_content()
@@ -962,15 +1187,16 @@ def _build_user_export_incremental(
     elif resolver is not None:
         preamble = resolver.get_artifacts_preamble()
         if preamble:
+            _note_resolver_preamble(licence, resolver)
             export_lines.append(preamble)
             export_lines.append("---")
             export_lines.append("")
 
     prefetch_children(entry_nodes)
 
-    compact_run = _CompactTweetRun(export_lines, user.username)
+    compact_run = _CompactTweetRun(export_lines, user.username, licence)
     thread_num = 0
-    for entry in entry_nodes:
+    for entry in iter_with_dek_prefetch(entry_nodes):
         if entry.id in compact_ids:
             compact_run.add(entry)
             continue
@@ -998,6 +1224,7 @@ def _build_user_export_incremental(
             embedded_quotes=embedded_quotes,
             included_ids=render_included_ids,
             ai_blocked_ids=ai_blocked_ids,
+            licence=licence,
         )
         export_lines.append(thread_text)
         export_lines.append("---")
@@ -1028,6 +1255,11 @@ def _build_user_export_incremental(
         return {
             "content": content,
             "token_count": approximate_token_count(content),
+            # Stored units (Node.token_count) of the window's own rows:
+            # the figure the chunk planner balances on and the divisor
+            # of the per-user tokens-per-unit ratio. `token_count` above
+            # is the RENDERED chars/4 and includes scaffolding.
+            "unit_count": sum((r.token_count or 0) for r in meta_rows),
             "latest_node_created_at": latest_ts,
             "earliest_node_created_at": earliest_ts,
             "node_count": len(meta_rows),
@@ -1039,11 +1271,12 @@ def _build_user_export_incremental(
 
 
 def build_user_export_content(
-    user, max_tokens=None, filter_ai_usage=False,
+    user, max_tokens=None, *, filter_ai_usage,
     created_before=None, created_after=None,
     chronological_order=False, return_metadata=False,
     collapse_artifacts=False,
     include_strategy="authored_threads",
+    licence=None,
 ):
     """
     Core export logic: Build a human-readable text export of threads for a user.
@@ -1083,9 +1316,14 @@ def build_user_export_content(
         max_tokens: Optional maximum token count. If provided, only includes
                    most recent threads that fit within this limit, and uses
                    smart quote resolution.
-        filter_ai_usage: If True, only include nodes where ai_usage is
-                        'chat' or 'train'. Use True for AI profile
-                        generation, False for user data export.
+        filter_ai_usage: Required, keyword-only. True leaves out every
+                        node, quote and artifact row whose ai_usage is
+                        not 'chat'/'train'; any export that reaches a
+                        model must pass True. False is only for the
+                        user's own download of their data
+                        (/export/threads, export_user_threads), which
+                        includes rows marked 'none'. No default, so a
+                        new caller has to choose.
         created_before: Optional datetime. If provided, only includes
                        nodes created before this timestamp.
         created_after: Optional datetime. If provided, forces the anchor-based
@@ -1094,7 +1332,9 @@ def build_user_export_content(
         chronological_order: If True and max_tokens is set, select oldest
                            nodes first (for iterative profile building).
         return_metadata: If True, return a dict with `content`,
-                        `token_count`, `latest_node_created_at`,
+                        `token_count` (rendered chars/4), `unit_count`
+                        (stored Node.token_count sum of the included
+                        rows), `latest_node_created_at`,
                         `earliest_node_created_at`, `node_count`, and
                         `node_ids` (set of included node IDs; when
                         max_tokens is set this reflects the
@@ -1102,11 +1342,19 @@ def build_user_export_content(
                         use `latest_node_created_at` as a resume
                         cursor).
         collapse_artifacts: If True, suppress full artifact preambles
-                           (artifact ID refs are still inlined).
+                           (artifact ID refs are still inlined), and the
+                           max_tokens budget counts only the entries, as
+                           nothing else is emitted.
         include_strategy: Scope topology when `created_after` is None.
                          "authored_threads" (default) or "engaged_threads".
                          Any other value raises ValueError. See module
                          docstring above for details.
+        licence: Optional PayloadLicence (#326) for an export going to a
+                 model. Everything the export renders reports to it — each
+                 entry (the user's own and other people's replies) and
+                 each preamble row by its own ai_usage, quoted saved
+                 references as other people's writing — so one 'chat'
+                 entry keeps the payload off the training key.
 
     Returns:
         str or dict: Formatted export content (or None if no threads found).
@@ -1125,6 +1373,7 @@ def build_user_export_content(
             chronological_order=chronological_order,
             return_metadata=return_metadata,
             collapse_artifacts=collapse_artifacts,
+            licence=licence,
         )
 
     # Legacy path: top-level threads owned by the user.
@@ -1204,12 +1453,21 @@ def build_user_export_content(
             key=lambda n: n.created_at,
             reverse=not chronological_order,
         )
+        # The resolver loop below decrypts every selected node, one KMS
+        # unwrap each on a cold worker (~80 ms; a 5k-node profile chunk
+        # waited ~7 minutes here, then again at render time once the
+        # 4k-entry DEK cache had cycled). One concurrent batch up front;
+        # the render loop's windowed prefetch then finds them cached.
+        prefetch_deks(n.content for n in selected_nodes)
 
-        # Create resolver with adjusted token budget
+        # Create resolver with adjusted token budget. A collapsed export
+        # emits no preamble, so the budget counts only the entries it
+        # does emit (#518).
         resolver = ExportQuoteResolver(
             user.id, budget,
             filter_ai_usage=filter_ai_usage,
-            chronological=chronological_order
+            chronological=chronological_order,
+            with_preamble=not collapse_artifacts,
         )
 
         # Add only the pre-selected nodes to the resolver (decrypts here)
@@ -1283,6 +1541,7 @@ def build_user_export_content(
     elif resolver is not None:
         preamble = resolver.get_artifacts_preamble()
         if preamble:
+            _note_resolver_preamble(licence, resolver)
             export_lines.append(preamble)
             export_lines.append("---")
             export_lines.append("")
@@ -1301,6 +1560,7 @@ def build_user_export_content(
                 # Prompt artifacts
                 prompt = n.get_artifact("prompt")
                 if prompt is not None and prompt.id not in prompt_versions:
+                    _note_entry(licence, n)
                     vnum = UserPrompt.query.filter(
                         UserPrompt.user_id == prompt.user_id,
                         UserPrompt.prompt_key == prompt.prompt_key,
@@ -1311,34 +1571,54 @@ def build_user_export_content(
                         "version": vnum,
                         "content": n.get_content(),
                     }
+                # Pinned versions of the user's own only (see
+                # _artifact_ref_lines): another author's node in these
+                # threads pins theirs.
                 # Profile artifacts
                 profile = n.get_artifact("profile")
-                if profile is not None and profile.id not in profile_versions:
+                if (profile is not None and profile.user_id == user.id
+                        and profile.id not in profile_versions):
+                    if licence is not None:
+                        licence.note_usage(profile.ai_usage,
+                                           f"archive profile {profile.id}",
+                                           row=profile)
                     pver = UserProfile.query.filter(
                         UserProfile.user_id == profile.user_id,
                         UserProfile.created_at <= profile.created_at,
                     ).count()
                     profile_versions[profile.id] = {
                         "version": pver,
-                        "content": profile.get_content(),
+                        "content": _preamble_content(
+                            profile, filter_ai_usage),
                     }
                 # Todo artifacts
                 todo = n.get_artifact("todo")
-                if todo is not None and todo.id not in todo_versions:
+                if (todo is not None and todo.user_id == user.id
+                        and todo.id not in todo_versions):
+                    if licence is not None:
+                        licence.note_usage(todo.ai_usage,
+                                           f"archive todo list {todo.id}",
+                                           row=todo)
                     tver = UserTodo.query.filter(
                         UserTodo.user_id == todo.user_id,
                         UserTodo.created_at <= todo.created_at,
                     ).count()
                     todo_versions[todo.id] = {
                         "version": tver,
-                        "content": todo.get_content(),
+                        "content": _preamble_content(todo, filter_ai_usage),
                     }
                 # User artifacts (memory, scratchpad, predictions,
                 # ai_preferences, custom):
                 # one entry per referenced version, full content.
                 for kind, artifact in sorted(n.get_user_artifacts().items()):
-                    if artifact.id in artifact_versions:
+                    if (artifact.id in artifact_versions
+                            or artifact.user_id != user.id):
                         continue
+                    if licence is not None:
+                        licence.note_usage(
+                            artifact.ai_usage,
+                            f"archive {kind} artifact {artifact.id}",
+                            row=artifact)
                     art_ver = UserArtifact.query.filter(
                         UserArtifact.user_id == artifact.user_id,
                         UserArtifact.kind == kind,
@@ -1348,7 +1628,8 @@ def build_user_export_content(
                         "kind": kind,
                         "title": artifact.title,
                         "version": art_ver,
-                        "content": artifact.get_content(),
+                        "content": _preamble_content(
+                            artifact, filter_ai_usage),
                     }
 
         has_any_preamble = (
@@ -1418,9 +1699,9 @@ def build_user_export_content(
     # (#276), same as the incremental path; threaded content keeps the
     # full per-thread rendering.
     prefetch_children(top_level_nodes)
-    compact_run = _CompactTweetRun(export_lines, user.username)
+    compact_run = _CompactTweetRun(export_lines, user.username, licence)
     thread_num = 0
-    for node in top_level_nodes:
+    for node in iter_with_dek_prefetch(top_level_nodes):
         if _is_flat_tweet_root(node, filter_ai_usage, created_before):
             compact_run.add(node)
             continue
@@ -1439,7 +1720,8 @@ def build_user_export_content(
             created_before=created_before,
             embedded_quotes=embedded_quotes,
             included_ids=included_ids,
-            ai_blocked_ids=ai_blocked_ids
+            ai_blocked_ids=ai_blocked_ids,
+            licence=licence,
         )
         export_lines.append(thread_text)
 
@@ -1506,7 +1788,9 @@ def export_threads():
     - Properly formatted with hierarchical structure showing branches
     """
     # Use the core export logic
-    export_content = build_user_export_content(current_user)
+    # The user's own download: rows marked 'none' are included.
+    export_content = build_user_export_content(
+        current_user, filter_ai_usage=False)
 
     if not export_content:
         return Response(
@@ -1527,416 +1811,192 @@ def export_threads():
         }
     )
 
-# approximate_token_count is imported from backend.utils.tokens
-
-@export_bp.route("/export/estimate_profile_tokens", methods=["POST"])
-@login_required
-def estimate_profile_tokens():
-    """
-    Estimate the number of tokens that would be used for profile generation.
-    Returns the estimate without actually calling the LLM.
-
-    Request body:
-        {
-            "model": "gpt-5" | "claude-sonnet-4.5" | etc.
-        }
-
-    Returns:
-        {
-            "estimated_tokens": 12345,
-            "model": "gpt-5",
-            "has_content": true
-        }
-    """
-    # Get and validate the model from request body
-    data = request.get_json() or {}
-    model_id = data.get("model")
-
-    if not model_id:
-        model_id = current_app.config.get("DEFAULT_LLM_MODEL", "claude-opus-5")
-
-    # Validate model is supported
-    if model_id not in current_app.config["SUPPORTED_MODELS"]:
-        return jsonify({
-            "error": f"Unsupported model: {model_id}",
-            "supported_models": list(current_app.config["SUPPORTED_MODELS"].keys())
-        }), 400
-
-    # Load the prompt template to calculate its token overhead
-    prompt_template_path = os.path.join(
-        current_app.root_path,
-        "prompts",
-        "profile_generation.txt"
-    )
-
-    try:
-        with open(prompt_template_path, "r", encoding="utf-8") as f:
-            prompt_template = f.read()
-    except FileNotFoundError:
-        current_app.logger.error(f"Prompt template not found at {prompt_template_path}")
-        return jsonify({
-            "error": "Profile generation prompt template not found"
-        }), 500
-
-    # Build full export (no token limit) — the task will retry if too long
-    user_export = build_user_export_content(current_user, max_tokens=None, filter_ai_usage=True)
-
-    if not user_export:
-        return jsonify({
-            "estimated_tokens": 0,
-            "model": model_id,
-            "has_content": False,
-            "error": "No writing found to analyze."
-        }), 200
-
-    # Replace the placeholder with actual user export
-    final_prompt = prompt_template.replace("{user_export}", user_export)
-
-    # Estimate tokens, capped at model's context window
-    estimated_tokens = approximate_token_count(final_prompt)
-    context_window = get_model_context_window(model_id)
-    estimated_tokens = min(estimated_tokens, context_window)
-
-    return jsonify({
-        "estimated_tokens": estimated_tokens,
-        "model": model_id,
-        "has_content": True
-    }), 200
-
-@export_bp.route("/export/update_profile", methods=["POST"])
-@login_required
-@require_spend_headroom
-def update_profile():
-    """
-    Unified endpoint for initial profile generation and incremental updates.
-
-    Finds the latest profile; if one exists, dispatches an incremental update.
-    Otherwise dispatches initial generation (possibly iterative).
-
-    Request body:
-        { "model": "claude-opus-5" }  (optional)
-
-    Returns:
-        { "task_id": "...", "status": "pending", "is_update": bool }
-    """
-    from backend.tasks.exports import update_user_profile
-
-    data = request.get_json() or {}
-    model_id = data.get("model")
-    force_full_regen = data.get("force_full_regen", False)
-
-    if not model_id:
-        model_id = current_app.config.get(
-            "DEFAULT_LLM_MODEL", "claude-opus-5"
-        )
-
-    if force_full_regen:
-        from backend.extensions import db as _db_flag
-        current_user.profile_needs_full_regen = True
-        _db_flag.session.commit()
-
-    if model_id not in current_app.config["SUPPORTED_MODELS"]:
-        return jsonify({
-            "error": f"Unsupported model: {model_id}",
-            "supported_models": list(
-                current_app.config["SUPPORTED_MODELS"].keys()
-            )
-        }), 400
-
-    # Check concurrency guard
-    if current_user.profile_generation_task_id:
-        from backend.tasks.exports import _is_task_stale
-        if _is_task_stale(current_user):
-            current_user.profile_generation_task_id = None
-            current_user.profile_generation_task_dispatched_at = None
-            db.session.commit()
-        else:
-            return jsonify({
-                "task_id": current_user.profile_generation_task_id,
-                "status": "already_running",
-                "is_update": False,
-            }), 200
-
-    # Quick check for any writing
-    has_threads = Node.query.filter_by(
-        user_id=current_user.id, parent_id=None
-    ).first() is not None
-    if not has_threads:
-        return jsonify({
-            "error": "No writing found to analyze."
-        }), 400
-
-    # Find latest non-integration profile
-    latest_profile = UserProfile.query.filter(
-        UserProfile.user_id == current_user.id,
-        UserProfile.generation_type != 'integration'
-    ).order_by(UserProfile.created_at.desc()).first()
-
-    # Determine if full regen is needed
-    needs_full_regen = False
-    if latest_profile:
-        if current_user.profile_needs_full_regen:
-            needs_full_regen = True
-        elif latest_profile.source_data_cutoff is None:
-            # Old profile without cutoff metadata — must regenerate
-            needs_full_regen = True
-
-    prev_id = None if needs_full_regen else (
-        latest_profile.id if latest_profile else None
-    )
-    is_update = prev_id is not None
-
-    task = update_user_profile.delay(current_user.id, model_id, prev_id)
-
-    # Set concurrency guard
-    from backend.extensions import db as _db
-    current_user.profile_generation_task_id = task.id
-    current_user.profile_generation_task_dispatched_at = datetime.utcnow()
-    _db.session.commit()
-
-    current_app.logger.info(
-        f"Enqueued profile {'update' if is_update else 'generation'} "
-        f"task {task.id} for user {current_user.id}"
-    )
-
-    return jsonify({
-        "task_id": task.id,
-        "status": "pending",
-        "is_update": is_update,
-    }), 202
-
-
-@export_bp.route("/export/integrate_profile", methods=["POST"])
-@login_required
-@require_spend_headroom
-def integrate_profile():
-    """
-    Manually trigger profile integration: collect all iterative/update
-    profile versions and integrate them into a single unified profile.
-
-    Request body:
-        { "model": "claude-opus-5" }  (optional)
-
-    Returns:
-        { "task_id": "...", "status": "pending" }
-    """
-    from backend.tasks.exports import integrate_user_profile
-
-    data = request.get_json() or {}
-    model_id = data.get("model")
-    if not model_id:
-        model_id = current_app.config.get(
-            "DEFAULT_LLM_MODEL", "claude-opus-5"
-        )
-
-    if model_id not in current_app.config["SUPPORTED_MODELS"]:
-        return jsonify({
-            "error": f"Unsupported model: {model_id}",
-            "supported_models": list(
-                current_app.config["SUPPORTED_MODELS"].keys()
-            )
-        }), 400
-
-    # Check concurrency guard
-    if current_user.profile_generation_task_id:
-        from backend.tasks.exports import _is_task_stale
-        if _is_task_stale(current_user):
-            current_user.profile_generation_task_id = None
-            current_user.profile_generation_task_dispatched_at = None
-            db.session.commit()
-        else:
-            return jsonify({
-                "task_id": current_user.profile_generation_task_id,
-                "status": "already_running",
-            }), 200
-
-    # Find latest non-integration profile that has iterative parents
-    latest_profile = UserProfile.query.filter(
-        UserProfile.user_id == current_user.id,
-        UserProfile.generation_type != 'integration'
-    ).order_by(UserProfile.created_at.desc()).first()
-
-    if not latest_profile:
-        return jsonify({"error": "No profile found to integrate."}), 400
-
-    task = integrate_user_profile.delay(
-        current_user.id, model_id, latest_profile.id
-    )
-
-    from backend.extensions import db as _db
-    current_user.profile_generation_task_id = task.id
-    current_user.profile_generation_task_dispatched_at = datetime.utcnow()
-    _db.session.commit()
-
-    current_app.logger.info(
-        f"Enqueued profile integration task {task.id} "
-        f"for user {current_user.id}"
-    )
-
-    return jsonify({
-        "task_id": task.id,
-        "status": "pending",
-    }), 202
-
-
-@export_bp.route("/export/generate_profile", methods=["POST"])
-@login_required
-@require_spend_headroom
-def generate_profile():
-    """
-    Generate a comprehensive user profile using an LLM to analyze all of the user's writing.
-    Uses the same export logic as /export/threads via build_user_export_content().
-
-    Request body:
-        {
-            "model": "gpt-5" | "claude-sonnet-4.5" | etc.
-        }
-
-    Returns:
-        {
-            "profile": "The generated profile text...",
-            "model_used": "gpt-5",
-            "tokens_used": 12345
-        }
-    """
-    from backend.llm_providers import LLMProvider
-
-    # Get and validate the model from request body
-    data = request.get_json() or {}
-    model_id = data.get("model")
-
-    if not model_id:
-        model_id = current_app.config.get("DEFAULT_LLM_MODEL", "claude-opus-5")
-
-    # Validate model is supported
-    if model_id not in current_app.config["SUPPORTED_MODELS"]:
-        return jsonify({
-            "error": f"Unsupported model: {model_id}",
-            "supported_models": list(current_app.config["SUPPORTED_MODELS"].keys())
-        }), 400
-
-    # Quick check if user has any writing to analyze
-    has_threads = Node.query.filter_by(user_id=current_user.id, parent_id=None).first() is not None
-    if not has_threads:
-        return jsonify({
-            "error": "No writing found to analyze. Please create some threads first."
-        }), 400
-
-    # Enqueue async profile generation task
-    from backend.tasks.exports import generate_user_profile
-
-    task = generate_user_profile.delay(current_user.id, model_id)
-
-    current_app.logger.info(f"Enqueued profile generation task {task.id} for user {current_user.id}")
-
-    return jsonify({
-        "message": "Profile generation started",
-        "task_id": task.id,
-        "status": "pending"
-    }), 202
-
-
-@export_bp.route("/export/profile-status/<task_id>", methods=["GET"])
-@login_required
-def get_profile_status(task_id):
-    """Get the status of a profile generation task."""
-    from backend.celery_app import celery
-    from backend.models import UserProfile
-
-    task = celery.AsyncResult(task_id)
-
-    # Get task state and info
-    state = task.state
-
-    # Celery returns PENDING for unknown/expired task IDs. If the DB no
-    # longer lists this task as the active generation, the task already
-    # finished — treat it as completed so the frontend stops polling.
-    if state == 'PENDING' and current_user.profile_generation_task_id != task_id:
-        latest = (UserProfile.query
-                  .filter_by(user_id=current_user.id)
-                  .order_by(UserProfile.created_at.desc())
-                  .first())
-        profile_data = None
-        if latest:
-            profile_data = {
-                "id": latest.id,
-                "content": latest.get_content(),
-                "generated_by": latest.generated_by,
-                "tokens_used": latest.tokens_used,
-                "created_at": iso_utc(latest.created_at)
-            }
-        return jsonify({
-            "task_id": task_id,
-            "status": "completed",
-            "progress": 100,
-            "message": "Profile generation complete",
-            "error": None,
-            "profile": profile_data
-        }), 200
-
-    # task.info can be a dict (for PROGRESS state) or an exception (for FAILURE)
-    # or None/other for PENDING states
-    info = {}
-    error_message = None
-    if isinstance(task.info, dict):
-        info = task.info
-    elif isinstance(task.info, Exception):
-        error_message = str(task.info)
-
-    # For failed tasks, try to get the traceback
-    if state == 'FAILURE':
-        error_message = error_message or str(task.info) if task.info else "Unknown error"
-        current_app.logger.error(f"Profile generation task {task_id} failed: {error_message}")
-
-    # If task completed, fetch the profile from database
-    profile_data = None
-    if state == 'SUCCESS' and task.result:
-        result = task.result if isinstance(task.result, dict) else {}
-        profile_id = result.get('profile_id')
-        if profile_id:
-            profile = UserProfile.query.get(profile_id)
-            if profile and profile.user_id == current_user.id:
-                profile_data = {
-                    "id": profile.id,
-                    "content": profile.get_content(),
-                    "generated_by": profile.generated_by,
-                    "tokens_used": profile.tokens_used,
-                    "created_at": iso_utc(profile.created_at)
-                }
-
-    # Map Celery states to frontend-expected statuses
-    status_map = {
-        'PENDING': 'pending',
-        'STARTED': 'processing',
-        'PROGRESS': 'progress',
-        'SUCCESS': 'completed',
-        'FAILURE': 'failed',
-        'REVOKED': 'failed',
+def _latest_profile_snapshot(user):
+    """id / created_at of the newest saved version. The client detects a
+    chunk landing (and the end of a batch chain) by the id changing;
+    the content is fetched from /dashboard when it needs it."""
+    latest = (UserProfile.query.filter_by(user_id=user.id)
+              .order_by(UserProfile.created_at.desc()).first())
+    if not latest:
+        return None
+    return {
+        "id": latest.id,
+        "generation_type": latest.generation_type,
+        "created_at": iso_utc(latest.created_at),
     }
-    frontend_status = status_map.get(state, state.lower())
 
-    return jsonify({
-        "task_id": task_id,
-        "status": frontend_status,
+
+_SYNC_STATUS_MAP = {
+    'PENDING': 'pending',
+    'STARTED': 'processing',
+    'PROGRESS': 'progress',
+    'SUCCESS': 'completed',
+    'FAILURE': 'failed',
+    'REVOKED': 'failed',
+}
+
+# A failed profile build's error, unless the failure was written for the
+# user (utils/task_owner.failure_text).
+PROFILE_FAILED_TEXT = "The profile update failed."
+
+
+def _pending_batch_item(user_id):
+    """The user's in-flight profile step, from the item meta of the
+    pending ProfileBatchJob rows (a handful at any time; items are keyed
+    by custom_id, so scanned in Python). None when the flag is set but no
+    job carries the user — a submit that failed after the flag was set,
+    or a job cancelled by an admin."""
+    from backend.models import ProfileBatchJob
+    jobs = (ProfileBatchJob.query.filter_by(status="pending")
+            .order_by(ProfileBatchJob.id.desc()).all())
+    for job in jobs:
+        for item in job.items or []:
+            if (item.get("user_id") == user_id
+                    and item.get("kind") in ("chunk", "integration")):
+                return item
+    return None
+
+
+def _batch_progress(user):
+    """Progress of the user's in-flight Batch API step (#258).
+
+    The batch pipeline (backend/tasks/profile_batch.py) sets no Celery
+    task id; the in-flight step is read from the pending job's item meta,
+    where the request builder recorded its kind and, for a chunk, its
+    ordinal and the planned total. Nothing is re-planned here: the plan
+    walks the user's whole in-scope corpus (about a second and tens of
+    MB for a 60k-node account), and this runs on every poll.
+    """
+    item = _pending_batch_item(user.id)
+    if item is None:
+        message, progress = "Generating profile", 0
+    elif item.get("kind") == "integration":
+        message, progress = "Integrating profile versions", 95
+    elif item.get("chunk_num") and item.get("chunk_total"):
+        n, total = int(item["chunk_num"]), int(item["chunk_total"])
+        message = f"Generating profile: Chunk {n} of ~{total}"
+        progress = int(100 * (n - 1) / total) if total else 0
+    else:
+        # Item submitted before the ordinal was recorded.
+        message, progress = "Generating profile", 0
+    return {
+        "running": True,
+        "source": "batch",
+        "status": "progress",
+        "progress": progress,
+        "message": message,
+        "task_id": None,
+        "error": None,
+        "latest_profile": _latest_profile_snapshot(user),
+    }
+
+
+def _sync_progress(user):
+    """Progress of the synchronous Celery task the guard points at, with
+    the same staleness rule the dispatchers apply (_is_task_stale:
+    finished, PENDING for 15+ min, or running for 1+ h — Celery kills
+    every task at 1 h). A stale guard is cleared here too, exactly as
+    maybe_trigger_profile_update clears it, so a reload does not report
+    the same dead task again."""
+    from backend.celery_app import celery
+    from backend.tasks.exports import _is_task_stale
+
+    task_id = user.profile_generation_task_id
+    task = celery.AsyncResult(task_id)
+    if _is_task_stale(user):
+        state = task.state
+        if state == 'SUCCESS':
+            status = 'completed'
+        elif state in ('FAILURE', 'REVOKED'):
+            status = 'failed'
+        else:
+            status = 'stalled'
+        current_app.logger.warning(
+            f"Profile task {task_id} for user {user.id} is stale "
+            f"(state {state}); clearing guard")
+        user.profile_generation_task_id = None
+        user.profile_generation_task_dispatched_at = None
+        db.session.commit()
+        return {
+            "running": False,
+            "source": "sync",
+            "status": status,
+            "progress": 100 if status == 'completed' else 0,
+            "message": "",
+            "task_id": task_id,
+            "error": (failure_text(task.info, PROFILE_FAILED_TEXT)
+                      if status == 'failed' else None),
+            "latest_profile": _latest_profile_snapshot(user),
+        }
+
+    state = task.state
+    info = task.info if isinstance(task.info, dict) else {}
+    return {
+        "running": True,
+        "source": "sync",
+        "status": _SYNC_STATUS_MAP.get(state, state.lower()),
         "progress": info.get('progress', 0),
         "message": info.get('status', ''),
-        "error": error_message,
-        "profile": profile_data
+        "task_id": task_id,
+        "error": None,
+        "latest_profile": _latest_profile_snapshot(user),
+    }
+
+
+@export_bp.route("/export/profile-progress", methods=["GET"])
+@login_required
+def get_profile_progress():
+    """Is the current user's profile being built, and how far (#258).
+
+    One source of truth for both pipelines: the Batch API chain
+    (profile_batch_pending — no task id, invisible to the old per-task
+    endpoint) and the synchronous Celery task (profile_generation_task_id).
+    ProfileGenerationWatcher polls this while `running` is true.
+
+    Query `task_id`: the sync task the client last saw running. The
+    task's own `finally` clears the guard before the client can observe
+    the terminal state, so with nothing in flight the outcome of that
+    task is resolved from the Celery result (kept 24 h) — the client
+    gets `completed` / `failed` instead of a bare `idle`. Only for the
+    user's own task (the task records its owner, utils/task_owner);
+    any other id is ignored. A failure says only text written for the
+    user, else a fixed line.
+    """
+    if current_user.profile_batch_pending:
+        return jsonify(_batch_progress(current_user)), 200
+    if current_user.profile_generation_task_id:
+        return jsonify(_sync_progress(current_user)), 200
+
+    status, error = "idle", None
+    last_task_id = request.args.get("task_id")
+    if last_task_id and task_owned_by(last_task_id, current_user.id,
+                                      current_app.config):
+        from backend.celery_app import celery
+        task = celery.AsyncResult(last_task_id)
+        if task.state in ('FAILURE', 'REVOKED'):
+            status = "failed"
+            error = failure_text(task.info, PROFILE_FAILED_TEXT)
+        else:
+            # SUCCESS, or PENDING for an id Celery no longer knows: the
+            # task finished (the guard is gone).
+            status = "completed"
+    return jsonify({
+        "running": False,
+        "source": None,
+        "status": status,
+        "progress": 100 if status == "completed" else 0,
+        "message": "",
+        "task_id": None,
+        "error": error,
+        "latest_profile": _latest_profile_snapshot(current_user),
+        # The batch chain's last step failed and waits for the seeder's
+        # retry (attempts reset to 0 whenever a step is applied), so a
+        # chain that saved a chunk and then failed is not "updated".
+        "batch_step_failed": bool(current_user.profile_batch_attempts),
     }), 200
 
 
-# Delete all of the current user's data from our app.
-@export_bp.route("/delete_my_data", methods=["DELETE"])
-@login_required
-def delete_my_data():
-    try:
-        # Delete all node versions first, then nodes.
-        NodeVersion.query.filter(
-            NodeVersion.node_id.in_(db.session.query(Node.id).filter_by(user_id=current_user.id))
-        ).delete(synchronize_session=False)
-        Node.query.filter_by(user_id=current_user.id).delete(synchronize_session=False)
-        db.session.commit()
-    except Exception as e:
-        db.session.rollback()
-        return jsonify({"error": "Error deleting data", "details": str(e)}), 500
-    return jsonify({"message": "All your app data has been deleted."}), 200
+# DELETE /api/delete_my_data was removed (#268): it deleted only the
+# user's own node rows, missed imports, AI replies and every dependent
+# table, and failed on Postgres's foreign keys. "Delete all my writing"
+# is DELETE /api/account/data (backend/routes/account_data.py).

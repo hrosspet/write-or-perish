@@ -69,13 +69,23 @@ const buttonBaseStyle = {
  *     "this + my replies".
  *   - "thread": always-with-descendants, single Delete button. Used
  *     by the Log card kebab.
+ *   - "reference": a saved reference (#232) — not a node, nothing
+ *     nests under it. Single Delete button.
+ *   - "prompt": follow-up shown when the confirmed delete would leave a
+ *     text/voice session with only its system prompt alive. Asks
+ *     whether to delete the prompt as well. `listedIn` names where the
+ *     session would then be listed by the prompt's text: the Log for a
+ *     private session, the public page for a public one (the Log
+ *     doesn't list alive public roots).
  *
- * onConfirm receives { withDescendants: boolean }.
+ * onConfirm receives { withDescendants: boolean }, or for "prompt"
+ * { includePrompt: boolean }.
  */
 function DeleteConfirmDialog({
   open,
   mode = "single",
   hasChildren = false,
+  listedIn = "your Log",
   onClose,
   onConfirm,
 }) {
@@ -94,7 +104,75 @@ function DeleteConfirmDialog({
   let body;
   let buttons;
 
-  if (mode === "thread") {
+  if (mode === "prompt") {
+    title = "Delete the system prompt too?";
+    // The confirmed delete may be one entry, an AI reply, or a node with
+    // all your replies under it; the copy names none of them.
+    body = (
+      <>
+        After this, nothing is left in the session but its system prompt,
+        and {listedIn} would list the session by the prompt's text.
+      </>
+    );
+    buttons = (
+      <>
+        <button
+          onClick={() => onConfirm({ includePrompt: true })}
+          style={{ ...buttonBaseStyle, color: "var(--accent)" }}
+        >
+          <div style={{ fontWeight: 500 }}>Also delete the system prompt</div>
+          <div style={{
+            fontSize: "0.82rem", color: "var(--text-muted)",
+            fontWeight: 300, marginTop: "2px",
+          }}>
+            The whole session leaves {listedIn}.
+          </div>
+        </button>
+        <button
+          onClick={() => onConfirm({ includePrompt: false })}
+          style={{ ...buttonBaseStyle, color: "var(--text-primary)" }}
+        >
+          <div style={{ fontWeight: 500 }}>Keep the system prompt</div>
+          <div style={{
+            fontSize: "0.82rem", color: "var(--text-muted)",
+            fontWeight: 300, marginTop: "2px",
+          }}>
+            You can continue the session from it.
+          </div>
+        </button>
+        <button
+          onClick={onClose}
+          style={{ ...buttonBaseStyle, color: "var(--text-secondary)" }}
+        >
+          Cancel
+        </button>
+      </>
+    );
+  } else if (mode === "reference") {
+    title = "Delete reference?";
+    body = (
+      <>
+        It leaves your saved references and search. The original stays
+        where it is.
+      </>
+    );
+    buttons = (
+      <>
+        <button
+          onClick={() => onConfirm({ withDescendants: false })}
+          style={{ ...buttonBaseStyle, color: "var(--accent)" }}
+        >
+          Delete
+        </button>
+        <button
+          onClick={onClose}
+          style={{ ...buttonBaseStyle, color: "var(--text-secondary)" }}
+        >
+          Cancel
+        </button>
+      </>
+    );
+  } else if (mode === "thread") {
     title = "Delete entire thread?";
     body = (
       <>

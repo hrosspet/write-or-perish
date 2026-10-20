@@ -28,7 +28,9 @@ for _mod in ["flask_login", "backend.models", "backend.extensions"]:
         del sys.modules[_mod]
 
 from backend.extensions import db as _db  # noqa: E402
-from backend.models import User, Node, NodeEmbedding  # noqa: E402
+from backend.models import (  # noqa: E402
+    User, Node, NodeEmbedding, ExternalItem, ExternalItemEmbedding,
+)
 from backend.utils.embeddings import (  # noqa: E402
     content_hash, cosine_similarity, pack_vector, unpack_vector,
     top_k_similar, retrieve_relevant_snippets,
@@ -40,7 +42,7 @@ _saved_glue = {k: sys.modules.get(k) for k in _GLUE}
 sys.modules["backend.celery_app"] = MagicMock()
 sys.modules.pop("backend.tasks.embeddings", None)
 from backend.tasks.embeddings import (  # noqa: E402
-    _candidate_nodes, _embedding_owner_id,
+    _candidate_external_items, _candidate_nodes, _embedding_owner_id,
 )
 for _k, _v in _saved_glue.items():
     if _v is None:
@@ -163,6 +165,64 @@ def test_candidates_respect_privacy_and_staleness(app):
         assert current.id not in ids  # up to date → skipped
 
 
+def test_candidates_skip_owners_whose_account_is_none(app):
+    """#346: nothing new is embedded for an account set to 'none', even
+    for nodes and references still marked 'chat'. AI replies follow their
+    human owner's account, not the llm-<model> author's."""
+    with app.app_context():
+        allowed = User.query.first()
+        opted_out = User(username="optedout", default_ai_usage="none")
+        llm = User(username="llm-x", twitter_id="llm-x",
+                   default_ai_usage="none")
+        _db.session.add_all([opted_out, llm])
+        _db.session.commit()
+        kept = _mk_node(allowed.id, "embed me")
+        skipped = _mk_node(opted_out.id, "old chat node")
+        reply = Node(user_id=llm.id, human_owner_id=allowed.id,
+                     node_type="llm", ai_usage="chat")
+        reply.set_content("an AI reply")
+        _db.session.add(reply)
+        refs = []
+        for i, uid in enumerate((allowed.id, opted_out.id)):
+            item = ExternalItem(user_id=uid, source="web_clip",
+                                external_id=str(i) * 64)
+            item.set_content("a clipped page")
+            _db.session.add(item)
+            refs.append(item)
+        _db.session.commit()
+
+        ids = {node.id for node, _, _, _ in _candidate_nodes(50)}
+        assert kept.id in ids and reply.id in ids
+        assert skipped.id not in ids
+        ref_ids = {item.id for item, _ in _candidate_external_items(50)}
+        assert ref_ids == {refs[0].id}
+
+
+def test_candidates_skip_a_user_whose_writing_is_on_hold(app):
+    """#268: while "Delete all my writing" waits (or the purge runs),
+    nothing new of the user's is embedded, not even what they write
+    after the request; after a restore it is again."""
+    from datetime import datetime
+    from backend.models import UserDataPurge
+    with app.app_context():
+        user = User.query.first()
+        node = _mk_node(user.id, "written after the request")
+        item = ExternalItem(user_id=user.id, source="web_clip",
+                            external_id="f" * 64)
+        item.set_content("a page")
+        job = UserDataPurge(user_id=user.id, source="self", scope="hidden",
+                            status="scheduled",
+                            scheduled_for=datetime.utcnow())
+        _db.session.add_all([item, job])
+        _db.session.commit()
+        assert node.id not in {n.id for n, _, _, _ in _candidate_nodes(50)}
+        assert item.id not in {i.id for i, _ in _candidate_external_items(50)}
+        job.status = "cancelled"
+        _db.session.commit()
+        assert node.id in {n.id for n, _, _, _ in _candidate_nodes(50)}
+        assert item.id in {i.id for i, _ in _candidate_external_items(50)}
+
+
 def test_embedding_owner_is_human_not_llm_author(app):
     # AI-reply nodes are authored by the synthetic llm-<model> account but
     # owned by the human (human_owner_id). Embedding cost + the row must both
@@ -253,6 +313,48 @@ def test_semantic_search_respects_date_range(app, client, monkeypatch):
     assert resp.status_code == 400
 
 
+def _mk_reference(uid, content, vector, **kw):
+    item = ExternalItem(user_id=uid, source=kw.pop("source", "web_clip"),
+                        external_id=kw.pop("external_id", "x" * 64), **kw)
+    item.set_content(content)
+    _db.session.add(item)
+    _db.session.commit()
+    _db.session.add(ExternalItemEmbedding(
+        item_id=item.id, user_id=uid, model="text-embedding-3-small",
+        content_hash=content_hash(content), vector=pack_vector(vector)))
+    _db.session.commit()
+    return item
+
+
+def test_semantic_search_external_scope_returns_only_references(
+        app, client, monkeypatch):
+    with app.app_context():
+        uid = User.query.first().id
+        node = _mk_node(uid, "my own note on tomatoes")
+        _mk_embedding(node, [1.0, 0.0])
+        ref = _mk_reference(uid, "a clipped guide to tomatoes", [0.9, 0.1],
+                            title="Tomato guide", url="https://e.x/t")
+        other = User(username="other")
+        _db.session.add(other)
+        _db.session.commit()
+        _mk_reference(other.id, "someone else's clip", [1.0, 0.0],
+                      external_id="y" * 64)
+        node_id, ref_id = node.id, ref.id
+
+    _patch_query_embedding(monkeypatch, [1.0, 0.0])
+    body = client.get("/api/search/semantic?q=tomatoes&scope=external").get_json()
+    assert body["scope"] == "external"
+    assert [r["id"] for r in body["results"]] == [ref_id]
+    assert body["results"][0]["kind"] == "external"
+    assert body["results"][0]["title"] == "Tomato guide"
+
+    # Default scope still merges the node in, ranked by score.
+    body = client.get("/api/search/semantic?q=tomatoes").get_json()
+    assert body["scope"] == "archive"
+    assert [(r["id"], r.get("kind", "node")) for r in body["results"]] == [
+        (node_id, "node"), (ref_id, "external")]
+
+
 def test_semantic_search_requires_query(app, client):
     assert client.get("/api/search/semantic").status_code == 400
 
@@ -327,3 +429,113 @@ def test_neighbors_other_users_node_forbidden(app, client):
         nid = _mk_node(other.id, "someone else's node").id
     res = client.get(f"/api/search/neighbors?node_id={nid}")
     assert res.status_code == 403
+
+
+# ── Chunked numpy scan (#330 review: bounded memory, same results) ──────
+
+def _rand_rows(n, dim, seed=0):
+    import random
+    rnd = random.Random(seed)
+    return [(i, pack_vector([rnd.uniform(-1, 1) for _ in range(dim)]))
+            for i in range(1, n + 1)]
+
+
+def test_top_k_similar_matches_reference_cosine_across_chunks(monkeypatch):
+    """Scores and ordering equal the pure-Python cosine_similarity (the
+    definition), and the running top-k across chunk boundaries equals a
+    global sort — the best rows must survive being spread over chunks."""
+    import backend.utils.embeddings as emb_module
+    monkeypatch.setattr(emb_module, "EMBEDDING_SCAN_CHUNK", 7)
+    rows = _rand_rows(50, 16)
+    query = [0.3 * (i % 5) - 0.6 for i in range(16)]
+    reference = sorted(
+        ((nid, cosine_similarity(query, unpack_vector(blob)))
+         for nid, blob in rows),
+        key=lambda pair: pair[1], reverse=True)
+    reference = [(nid, s) for nid, s in reference if s >= 0.1][:9]
+    got = top_k_similar(query, iter(rows), k=9, min_score=0.1)  # generator
+    assert [nid for nid, _ in got] == [nid for nid, _ in reference]
+    for (_, a), (_, b) in zip(got, reference):
+        assert a == pytest.approx(b, abs=1e-12)
+    assert all(isinstance(s, float) for _, s in got)
+
+
+def test_top_k_similar_ties_keep_row_order_and_k_zero():
+    rows = [(1, pack_vector([1.0, 0.0])), (2, pack_vector([2.0, 0.0])),
+            (3, pack_vector([0.5, 0.0]))]
+    ranked = top_k_similar([1.0, 0.0], rows, k=2)
+    assert [nid for nid, _ in ranked] == [1, 2]  # all tie at 1.0
+    assert top_k_similar([1.0, 0.0], rows, k=0) == []
+    assert top_k_similar([1.0, 0.0], [], k=3) == []
+
+
+def test_top_k_similar_zero_vectors_score_zero():
+    rows = [(1, pack_vector([0.0, 0.0])), (2, pack_vector([0.0, 1.0]))]
+    ranked = dict(top_k_similar([0.0, 1.0], rows, k=5, min_score=-1.0))
+    assert ranked[1] == 0.0
+    assert ranked[2] == pytest.approx(1.0)
+    # A zero query has no direction — nothing matches (old code: all 0.0).
+    assert top_k_similar([0.0, 0.0], rows, k=5, min_score=-1.0) == []
+
+
+def test_top_k_similar_skips_rows_of_another_dimension(caplog):
+    """A row embedded under a different model must be missing, not scored
+    as garbage against a truncated vector (old zip() behavior)."""
+    rows = [
+        (1, pack_vector([1.0, 0.0, 0.0])),   # wrong dim: 3 vs query's 2
+        (2, pack_vector([0.9, 0.1])),
+    ]
+    with caplog.at_level("WARNING", logger="backend.utils.embeddings"):
+        ranked = top_k_similar([1.0, 0.0], rows, k=5, min_score=0.0)
+    assert [nid for nid, _ in ranked] == [2]
+    assert "skipped 1 rows" in caplog.text
+
+
+def test_top_k_similar_accepts_memoryview_blobs():
+    # psycopg2 hands bytea back as memoryview, not bytes.
+    rows = [(1, memoryview(pack_vector([1.0, 0.0]))),
+            (2, memoryview(pack_vector([0.0, 1.0])))]
+    assert [nid for nid, _ in top_k_similar([1.0, 0.0], rows, k=1)] == [1]
+
+
+def test_retrieve_relevant_snippets_streams_more_rows_than_a_chunk(
+        app, monkeypatch):
+    """The DB path (yield_per) feeds the scan one chunk at a time and the
+    best match still wins when it sits in the last, partial chunk."""
+    import backend.utils.embeddings as emb_module
+    monkeypatch.setattr(emb_module, "EMBEDDING_SCAN_CHUNK", 2)
+    with app.app_context():
+        uid = User.query.first().id
+        nodes = []
+        for i in range(5):
+            n = _mk_node(uid, f"entry number {i}")
+            _mk_embedding(n, [1.0, 0.1 * (5 - i)])
+            nodes.append(n)
+        best = _mk_node(uid, "the best match, in the tail chunk")
+        _mk_embedding(best, [1.0, 0.0])
+        results = retrieve_relevant_snippets(
+            uid, "q", [], "fake-key", k=2, min_score=0.0,
+            query_vector=[1.0, 0.0])
+        assert [nid for nid, _, _, _ in results] == [best.id, nodes[4].id]
+
+
+def test_semantic_results_escape_stored_markup(app, client, monkeypatch):
+    """Semantic results have no snippet, so clients show `preview` — as
+    markup on both. Stored text, including a clipped page someone else
+    wrote, comes back escaped (#445). The marker is inert."""
+    probe = '<i data-loore-probe="1">probe</i>'
+    escaped = '&lt;i data-loore-probe=&quot;1&quot;&gt;probe&lt;/i&gt;'
+    with app.app_context():
+        uid = User.query.first().id
+        node = _mk_node(uid, f"my note {probe} & more")
+        _mk_embedding(node, [1.0, 0.0])
+        _mk_reference(uid, f"clipped {probe}", [0.9, 0.1], title="<b>T</b>")
+
+    _patch_query_embedding(monkeypatch, [1.0, 0.0])
+    body = client.get("/api/search/semantic?q=note").get_json()
+    node_r, ref_r = body["results"]
+    assert node_r["preview"] == f"my note {escaped} &amp; more"
+    assert ref_r["preview"] == f"clipped {escaped}"
+    assert node_r["snippet"] is None and ref_r["snippet"] is None
+    # The title is a plain-text field (rendered as text by both clients).
+    assert ref_r["title"] == "<b>T</b>"

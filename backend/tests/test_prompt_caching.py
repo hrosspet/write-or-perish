@@ -6,6 +6,7 @@ pinned artifacts, and _call_anthropic content-block passthrough with
 cache_control survival + cache usage fields (mocked Anthropic client).
 """
 import os
+import socket
 import sys
 from unittest.mock import MagicMock
 
@@ -32,7 +33,9 @@ from backend.models import (  # noqa: E402
     User, Node, NodeContextArtifact, UserTodo, APICostLog,
 )
 import backend.utils.prompt_cache as prompt_cache  # noqa: E402
-from backend.utils.cost import calculate_llm_cost_microdollars  # noqa: E402
+from backend.utils.cost import (  # noqa: E402
+    calculate_llm_cost_microdollars, llm_cost_from_response,
+    llm_cost_log_fields)
 
 _GLUE = ("backend.celery_app", "backend.llm_providers",
          "backend.tasks.llm_completion")
@@ -53,6 +56,16 @@ SUPPORTED_MODELS = {
     "claude-opus-4.6": {
         "provider": "anthropic", "api_model": "claude-opus-4-6",
         "input_price_per_mtok": 5.00, "output_price_per_mtok": 25.00,
+    },
+    "claude-fable-5": {
+        "provider": "anthropic", "api_model": "claude-fable-5",
+        "input_price_per_mtok": 10.00, "output_price_per_mtok": 50.00,
+    },
+    # Mirrors backend/config.py: Fable 5.1 cache reads at 0.025x.
+    "claude-fable-5.1": {
+        "provider": "anthropic", "api_model": "claude-fable-5-1",
+        "input_price_per_mtok": 10.00, "output_price_per_mtok": 50.00,
+        "cache_read_multiplier": 0.025,
     },
 }
 
@@ -99,25 +112,157 @@ def test_cost_cache_multipliers(app):
                                + 900_000 * 5 * 0.1 + 50_000 * 5 * 1.25))
 
 
+def test_cost_cache_read_multiplier_override(app):
+    # Fable 5.1 cache hits bill at 0.025x base input (pricing page,
+    # 2026-09-02) instead of the 0.1x module default; the model entry
+    # overrides it via cache_read_multiplier. Writes stay at 1.25x.
+    with app.app_context():
+        read = calculate_llm_cost_microdollars(
+            "claude-fable-5.1", 0, 0, cache_read_tokens=1_000_000)
+        assert read == 250_000
+        write = calculate_llm_cost_microdollars(
+            "claude-fable-5.1", 0, 0, cache_write_tokens=1_000_000)
+        assert write == 12_500_000
+        # Models without the override keep the module default.
+        assert calculate_llm_cost_microdollars(
+            "claude-fable-5", 0, 0, cache_read_tokens=1_000_000) == 1_000_000
+
+
+
+def test_cost_opus_5_5_from_real_config():
+    # Reads the real config entry (not a mirror) so a pricing edit there
+    # is checked against the pricing page figures verified 2026-09-22:
+    # $4 in / $20 out, cache hits $0.20 (0.05x), 5m writes $5 (1.25x),
+    # batch half price.
+    from backend.config import Config
+    app = Flask(__name__)
+    app.config["SUPPORTED_MODELS"] = {
+        "claude-opus-5.5": Config.SUPPORTED_MODELS["claude-opus-5.5"]}
+    with app.app_context():
+        cost = calculate_llm_cost_microdollars
+        assert cost("claude-opus-5.5", 1_000_000, 0) == 4_000_000
+        assert cost("claude-opus-5.5", 0, 1_000_000) == 20_000_000
+        assert cost("claude-opus-5.5", 0, 0,
+                    cache_read_tokens=1_000_000) == 200_000
+        assert cost("claude-opus-5.5", 0, 0,
+                    cache_write_tokens=1_000_000) == 5_000_000
+        assert cost("claude-opus-5.5", 1_000_000, 1_000_000,
+                    batch=True) == 12_000_000
+
+
+def test_cost_sonnet_5_5_from_real_config():
+    # The real config entry against the Anthropic pricing page, verified
+    # 2026-10-02 (cache hits 2026-10-08): $2 in / $10 out, cache hits
+    # $0.10 (0.05x), 5m writes $2.50 (1.25x), batch $1 / $5, no
+    # long-context surcharge.
+    from backend.config import Config
+    app = Flask(__name__)
+    app.config["SUPPORTED_MODELS"] = {
+        "claude-sonnet-5.5": Config.SUPPORTED_MODELS["claude-sonnet-5.5"]}
+    with app.app_context():
+        def cost(*a, **kw):
+            return calculate_llm_cost_microdollars("claude-sonnet-5.5", *a, **kw)
+        assert cost(1_000_000, 0) == 2_000_000
+        assert cost(0, 1_000_000) == 10_000_000
+        assert cost(0, 0, cache_read_tokens=1_000_000) == 100_000
+        assert cost(0, 0, cache_write_tokens=1_000_000) == 2_500_000
+        assert cost(1_000_000, 1_000_000, batch=True) == 6_000_000
+        assert cost(0, 0, cache_read_tokens=1_000_000, batch=True) == 50_000
+        # Flat across the 1M window: 900k input costs 900k x $2.
+        assert cost(900_000, 0) == 1_800_000
+
+
+def test_cost_haiku_5_5_from_real_config():
+    # The real config entry against the Anthropic pricing page, verified
+    # 2026-10-08. Prompts up to 100,000 tokens: $0.10 in / $0.50 out,
+    # cache hits $0.01, 5m writes $0.125. Over 100,000: $0.50 / $2.50,
+    # hits $0.05, writes $0.625 for the whole request. Batch half.
+    from backend.config import Config
+    app = Flask(__name__)
+    app.config["SUPPORTED_MODELS"] = {
+        "claude-haiku-5.5": Config.SUPPORTED_MODELS["claude-haiku-5.5"]}
+    with app.app_context():
+        def cost(*a, **kw):
+            return calculate_llm_cost_microdollars("claude-haiku-5.5", *a, **kw)
+        # 90k input, 2k output: the base tier.
+        assert cost(90_000, 2_000) == 9_000 + 1_000
+        assert cost(90_000, 2_000, batch=True) == 5_000
+        assert cost(0, 0, cache_read_tokens=50_000) == 500
+        assert cost(0, 0, cache_write_tokens=50_000) == 6_250
+        # The tier is "over 100,000": exactly 100k is still the base tier.
+        assert cost(100_000, 0) == 10_000
+        assert cost(100_002, 0) == 50_001
+        # 270k input (a day of Community Archive tweets), 3k output: input
+        # and output both at 5x. A Read runs in batch: $0.07125.
+        assert cost(270_000, 3_000) == 135_000 + 7_500
+        assert cost(270_000, 3_000, batch=True) == 71_250
+        # Cache reads and writes count toward the 100k and are 5x too.
+        assert cost(90_000, 0, cache_read_tokens=20_000) == 45_000 + 1_000
+        assert cost(0, 0, cache_read_tokens=200_000) == 10_000
+        assert cost(0, 0, cache_write_tokens=200_000) == 125_000
+
+
+@pytest.mark.parametrize("model_id, page", [
+    # $/MTok (input, cached input, cache writes, output) from the OpenAI
+    # pricing page, verified 2026-09-23 (gpt-6.1-sol 2026-10-02): short
+    # context, then >272k input.
+    ("gpt-6.1-sol", {"short": (2.00, 0.10, 2.50, 10.00),
+                     "long": (4.00, 0.20, 5.00, 15.00)}),
+    ("gpt-6-sol", {"short": (2.00, 0.20, 2.50, 10.00),
+                   "long": (4.00, 0.40, 5.00, 15.00)}),
+    ("gpt-6-luna", {"short": (0.10, 0.01, 0.125, 0.50),
+                    "long": (0.20, 0.02, 0.25, 0.75)}),
+])
+def test_cost_gpt_6_from_real_config(model_id, page):
+    # Reads the real config entry, like the Opus 5.5 test above. A price
+    # of $X/MTok is X microdollars per token, so N tokens cost X * N.
+    from backend.config import Config
+    app = Flask(__name__)
+    app.config["SUPPORTED_MODELS"] = {
+        model_id: Config.SUPPORTED_MODELS[model_id]}
+    with app.app_context():
+        def cost(n_in, n_out, **kw):
+            return calculate_llm_cost_microdollars(model_id, n_in, n_out, **kw)
+        n = 100_000  # under the 272k tier
+        inp, cached, write, out = page["short"]
+        assert cost(n, 0) == round(inp * n)
+        assert cost(n, 0, cached_input_tokens=n) == round(cached * n)
+        assert cost(n, 0, cache_write_subset_tokens=n) == round(write * n)
+        assert cost(0, 1_000_000) == round(out * 1_000_000)
+        # Batch halves the cached rate too (gpt-6.1-sol: $0.05).
+        assert cost(n, 0, cached_input_tokens=n, batch=True) == round(cached * n / 2)
+        n = 1_000_000  # over the 272k tier: the whole request reprices
+        inp, cached, write, out = page["long"]
+        assert cost(n, 0) == round(inp * n)
+        assert cost(n, 0, cached_input_tokens=n) == round(cached * n)
+        assert cost(n, 0, cache_write_subset_tokens=n) == round(write * n)
+        assert cost(n, n) == round((inp + out) * n)
+        assert cost(n, n, batch=True) == round((inp + out) * n / 2)
+
+
 def test_gated_voice_tools_warm_matches_generation():
     # The pre-warm and generation BOTH build their tool list via
     # gated_voice_tools, so the cached tool prefix is byte-identical. A
     # divergence here (warm keeping semantic_search while generation drops it)
     # silently busts the whole cache — that was the read=0 bug.
     names = lambda ts: [t["name"] for t in ts]  # noqa: E731
-    # search_enabled is the per-user opt-in (#208), resolved by the caller
-    # via _agentic_search_enabled — user toggle under the env killswitch.
-    off = gated_voice_tools({}, search_enabled=False)
-    on = gated_voice_tools({}, search_enabled=True)
-    assert "semantic_search" not in names(off)        # user opted out
-    assert "semantic_search" in names(on)             # user opted in
+    # Own-archive search is on for everyone (#329): the search tools are in
+    # the default list, gated only by the SEMANTIC_SEARCH_AGENTIC killswitch
+    # — never by the per-user "External references" toggle, which acts
+    # inside the handler so the tool prefix is identical across users.
+    default = gated_voice_tools({})
+    assert "semantic_search" in names(default)
+    assert "read_full" in names(default)
+    killed = gated_voice_tools({"SEMANTIC_SEARCH_AGENTIC": False})
+    assert "semantic_search" not in names(killed)
+    assert "read_full" not in names(killed)
+    assert "read_artifact" in names(killed)
     # With everything enabled, the full tool list is exposed.
-    all_on = gated_voice_tools({"SHARE_V1": True}, search_enabled=True)
+    all_on = gated_voice_tools({"SHARE_V1": True})
     assert names(all_on) == names(VOICE_TOOLS)
-    assert names(gated_voice_tools({})) == names(off)  # default == no search
     # Identical inputs -> identical list for both call sites (the invariant).
     cfg = {"SHARE_V1": False}
-    assert gated_voice_tools(cfg, True) == gated_voice_tools(cfg, True)
+    assert gated_voice_tools(cfg) == gated_voice_tools(cfg)
 
 
 def test_api_cost_log_persists_cache_breakdown(app):
@@ -178,12 +323,32 @@ def test_render_cache_roundtrip_and_key_busting(app, monkeypatch):
         assert prompt_cache.get_cached_render(app.config, node) is None
         prompt_cache.store_render(app.config, node, "rendered bytes")
         assert prompt_cache.get_cached_render(
-            app.config, node) == "rendered bytes"
+            app.config, node) == ("rendered bytes", None)
+        # The training-key verdict travels with the text (#326).
+        prompt_cache.store_render(app.config, node, "rendered bytes",
+                                  unlicensed="the memory artifact is 'chat'")
+        assert prompt_cache.get_cached_render(app.config, node) == (
+            "rendered bytes", "the memory artifact is 'chat'")
+        # An entry that is not a text + verdict pair is a miss, never a
+        # verdict-less hit.
+        fake.store[prompt_cache._key(node)] = b"a plain render"
+        assert prompt_cache.get_cached_render(app.config, node) is None
 
         # Editing the node (updated_at changes) busts the key naturally
         from datetime import datetime
         node.updated_at = datetime(2030, 1, 1)
         _db.session.commit()
+        assert prompt_cache.get_cached_render(app.config, node) is None
+
+        # The render variant (killswitch + share / external-references gates,
+        # #329) is part of the key: a toggle flip mid-thread takes a fresh
+        # key instead of serving the stale render for the rest of the TTL.
+        prompt_cache.store_render(app.config, node, "no refs", "a1s0e0")
+        prompt_cache.store_render(app.config, node, "with refs", "a1s0e1")
+        assert prompt_cache.get_cached_render(
+            app.config, node, "a1s0e0").text == "no refs"
+        assert prompt_cache.get_cached_render(
+            app.config, node, "a1s0e1").text == "with refs"
         assert prompt_cache.get_cached_render(app.config, node) is None
 
 
@@ -228,11 +393,28 @@ def test_render_system_message_resolves_pinned_placeholders(app):
         assert render_system_message(node, uid) == text
 
 
+class _CompletedStream(list):
+    """A Responses API event stream holding only the terminal event, for
+    fakes of client.responses.create(..., stream=True)."""
+
+    def __init__(self, response):
+        event = type("Event", (), {})()
+        event.type = "response.completed"
+        event.response = response
+        super().__init__([event])
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
 # ── Provider block passthrough (#187) ────────────────────────────────────
 
 def test_call_anthropic_preserves_blocks_and_cache_usage(app, monkeypatch):
     # Import the real provider module fresh (it may be mocked globally)
-    sys.modules.pop("backend.llm_providers", None)
+    monkeypatch.delitem(sys.modules, "backend.llm_providers", raising=False)
     import backend.llm_providers as providers
 
     captured = {}
@@ -252,13 +434,25 @@ def test_call_anthropic_preserves_blocks_and_cache_usage(app, monkeypatch):
         usage = FakeUsage()
         stop_reason = "end_turn"
 
-    class FakeMessages:
-        def create(self, **kwargs):
-            captured.update(kwargs)
+    class FakeStream:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def get_final_message(self):
             return FakeResponse()
 
+    class FakeMessages:
+        # Streamed: the SDK refuses a non-streaming
+        # request at the 32k output budget.
+        def stream(self, **kwargs):
+            captured.update(kwargs)
+            return FakeStream()
+
     class FakeClient:
-        def __init__(self, api_key=None):
+        def __init__(self, api_key=None, **kwargs):
             self.messages = FakeMessages()
 
     monkeypatch.setattr(providers, "Anthropic", FakeClient)
@@ -287,6 +481,7 @@ def test_call_anthropic_preserves_blocks_and_cache_usage(app, monkeypatch):
     assert result["cache_read_input_tokens"] == 5000
     assert result["cache_creation_input_tokens"] == 300
     assert result["input_tokens"] == 100
+    assert captured["max_tokens"] == providers.DEFAULT_MAX_OUTPUT_TOKENS
 
 
 # ── OpenAI cached-input pricing (#189) ───────────────────────────────────
@@ -314,3 +509,193 @@ def test_openai_cached_input_discount(app):
         capped = calculate_llm_cost_microdollars(
             "gpt-5.5", 100, 0, cached_input_tokens=10_000)
         assert capped == round(100 * 5 * 0.25)
+
+
+# ── OpenAI cache writes (#286 / #241) ────────────────────────────────────
+
+def _sol(app):
+    # Mirrors backend/config.py gpt-5.6-sol: $4/M input, 0.1x cached,
+    # long-context tier above 272k at 2x input / 1.5x output.
+    app.config["SUPPORTED_MODELS"]["gpt-5.6-sol"] = {
+        "provider": "openai", "api_model": "gpt-5.6-sol",
+        "input_price_per_mtok": 4.00, "output_price_per_mtok": 20.00,
+        "cached_input_multiplier": 0.10,
+        "long_context_threshold": 272_000,
+        "long_context_input_multiplier": 2.0,
+        "long_context_output_multiplier": 1.5,
+    }
+
+
+def test_openai_cache_write_subset_no_double_billing(app):
+    """OpenAI's cache_write_tokens is a SUBSET of input_tokens (like
+    cached_tokens), so the written tokens leave the full-price remainder
+    and bill once at 1.25x — never 1.0x + 1.25x."""
+    _sol(app)
+    with app.app_context():
+        # 100k prompt, all of it written to the cache (first turn).
+        cost = calculate_llm_cost_microdollars(
+            "gpt-5.6-sol", 100_000, 0, cache_write_subset_tokens=100_000)
+        assert cost == round(100_000 * 4 * 1.25)   # $0.50, not $1.125
+        # Later turn: 80k served from cache, 15k written, 5k ordinary.
+        mixed = calculate_llm_cost_microdollars(
+            "gpt-5.6-sol", 100_000, 1_000,
+            cached_input_tokens=80_000, cache_write_subset_tokens=15_000)
+        assert mixed == round(5_000 * 4 + 80_000 * 4 * 0.1
+                              + 15_000 * 4 * 1.25 + 1_000 * 20)
+        # The two subsets together can never exceed input_tokens.
+        capped = calculate_llm_cost_microdollars(
+            "gpt-5.6-sol", 100, 0,
+            cached_input_tokens=80, cache_write_subset_tokens=500)
+        assert capped == round(80 * 4 * 0.1 + 20 * 4 * 1.25)
+        # Pre-5.6 models report no writes: nothing changes for them.
+        assert calculate_llm_cost_microdollars(
+            "gpt-5.5", 1_000, 0) == round(1_000 * 5)
+
+
+def test_openai_cache_write_long_context(app):
+    """The long-context surcharge applies to the input price BEFORE the
+    write multiplier: a 300k first-turn write on Sol is $8/M * 1.25."""
+    _sol(app)
+    with app.app_context():
+        cost = calculate_llm_cost_microdollars(
+            "gpt-5.6-sol", 300_000, 0, cache_write_subset_tokens=300_000)
+        assert cost == round(300_000 * 4 * 2.0 * 1.25)
+
+
+def test_cache_write_multiplier_override(app):
+    """A model entry may override the 1.25x write premium (#241), on both
+    the OpenAI subset and the Anthropic disjoint counter."""
+    _sol(app)
+    app.config["SUPPORTED_MODELS"]["gpt-5.6-sol"]["cache_write_multiplier"] = 1.5
+    with app.app_context():
+        assert calculate_llm_cost_microdollars(
+            "gpt-5.6-sol", 1_000, 0, cache_write_subset_tokens=1_000
+        ) == round(1_000 * 4 * 1.5)
+        assert calculate_llm_cost_microdollars(
+            "gpt-5.6-sol", 0, 0, cache_write_tokens=1_000
+        ) == round(1_000 * 4 * 1.5)
+
+
+def test_llm_cost_from_response_reads_every_counter(app):
+    """The response-dict helper feeds every provider counter through, so
+    single-shot pipeline calls price caching like conversation turns."""
+    _sol(app)
+    with app.app_context():
+        openai_resp = {"input_tokens": 100_000, "output_tokens": 500,
+                       "cached_tokens": 60_000,
+                       "cache_write_subset_tokens": 40_000}
+        assert llm_cost_from_response("gpt-5.6-sol", openai_resp) == (
+            calculate_llm_cost_microdollars(
+                "gpt-5.6-sol", 100_000, 500, cached_input_tokens=60_000,
+                cache_write_subset_tokens=40_000))
+        anthropic_resp = {"input_tokens": 1_000, "output_tokens": 10,
+                          "cache_read_input_tokens": 90_000,
+                          "cache_creation_input_tokens": 9_000}
+        assert llm_cost_from_response("claude-opus-4.6", anthropic_resp) == (
+            calculate_llm_cost_microdollars(
+                "claude-opus-4.6", 1_000, 10, cache_read_tokens=90_000,
+                cache_write_tokens=9_000))
+        # batch: explicit flag wins, else the dict's own flag.
+        batched = dict(anthropic_resp, batch=True)
+        assert llm_cost_from_response("claude-opus-4.6", batched) == (
+            calculate_llm_cost_microdollars(
+                "claude-opus-4.6", 1_000, 10, batch=True,
+                cache_read_tokens=90_000, cache_write_tokens=9_000))
+        assert llm_cost_from_response(
+            "claude-opus-4.6", batched, batch=False) == (
+            llm_cost_from_response("claude-opus-4.6", anthropic_resp))
+
+
+def test_call_openai_surfaces_cache_write_subset(app, monkeypatch):
+    """_call_openai must pull input_tokens_details.cache_write_tokens out
+    of the Responses usage under the subset key; a renamed field would
+    silently drop OpenAI write billing back to 1.0x (#286)."""
+    monkeypatch.delitem(sys.modules, "backend.llm_providers", raising=False)
+    import backend.llm_providers as providers
+
+    class FakeDetails:
+        cached_tokens = 2815
+        cache_write_tokens = 3000
+
+    class FakeUsage:
+        input_tokens = 6018
+        output_tokens = 12
+        total_tokens = 6030
+        input_tokens_details = FakeDetails()
+
+    class FakeBlock:
+        type = "output_text"
+        text = "hi"
+
+    class FakeItem:
+        type = "message"
+        content = [FakeBlock()]
+
+    class FakeResponse:
+        output = [FakeItem()]
+        usage = FakeUsage()
+        status = "completed"
+        incomplete_details = None
+
+    class FakeResponses:
+        def create(self, **kwargs):
+            assert kwargs["stream"] is True
+            return _CompletedStream(FakeResponse())
+
+    client_kwargs = {}
+
+    class FakeClient:
+        def __init__(self, api_key=None, **kwargs):
+            client_kwargs.update(kwargs)
+            self.responses = FakeResponses()
+
+    monkeypatch.setattr(providers, "OpenAI", FakeClient)
+    with app.app_context():
+        result = providers.LLMProvider._call_openai(
+            "gpt-5.6-sol", [{"role": "user", "content": "x"}], "k")
+    # A silent reasoning phase must survive GCP's 10-minute idle cutoff.
+    assert client_kwargs["http_client"] is not None
+    options = providers._keepalive_socket_options()
+    assert (socket.SOL_SOCKET, socket.SO_KEEPALIVE, True) in options
+    idle = getattr(socket, "TCP_KEEPIDLE", None)
+    if idle is not None:
+        assert (socket.IPPROTO_TCP, idle, 60) in options
+    assert result["input_tokens"] == 6018
+    assert result["cached_tokens"] == 2815
+    assert result["cache_write_subset_tokens"] == 3000
+    # Never the Anthropic-style disjoint key: that would double-bill.
+    assert "cache_creation_input_tokens" not in result
+
+
+def test_llm_cost_log_fields_unifies_columns_across_providers(app):
+    """One helper fills the APICostLog token columns the same way for
+    every request_type: full-prompt input_tokens, read/write unified."""
+    _sol(app)
+    with app.app_context():
+        anthropic_resp = {"input_tokens": 1_000, "output_tokens": 10,
+                          "cache_read_input_tokens": 90_000,
+                          "cache_creation_input_tokens": 9_000}
+        fields = llm_cost_log_fields("claude-opus-4.6", anthropic_resp)
+        assert fields == {
+            "input_tokens": 100_000, "output_tokens": 10,
+            "cache_read_tokens": 90_000, "cache_write_tokens": 9_000,
+            "cost_microdollars": llm_cost_from_response(
+                "claude-opus-4.6", anthropic_resp)}
+        openai_resp = {"input_tokens": 6_018, "output_tokens": 5,
+                       "cached_tokens": 2_815,
+                       "cache_write_subset_tokens": 3_000, "batch": True}
+        fields = llm_cost_log_fields("gpt-5.6-sol", openai_resp)
+        assert fields["input_tokens"] == 6_018  # already the full prompt
+        assert fields["cache_read_tokens"] == 2_815
+        assert fields["cache_write_tokens"] == 3_000
+        assert fields["cost_microdollars"] == llm_cost_from_response(
+            "gpt-5.6-sol", openai_resp)  # batch flag honored
+        assert fields["cost_microdollars"] < llm_cost_from_response(
+            "gpt-5.6-sol", openai_resp, batch=False)
+        # A bare-count dict (no cache keys) still fills every column.
+        assert llm_cost_log_fields("claude-opus-4.6", {
+            "input_tokens": 3, "output_tokens": 4}) == {
+            "input_tokens": 3, "output_tokens": 4, "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "cost_microdollars": calculate_llm_cost_microdollars(
+                "claude-opus-4.6", 3, 4)}

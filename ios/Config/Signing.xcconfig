@@ -1,0 +1,11 @@
+// Signing for device builds (see ios/README.md "Install on your iPhone").
+// Put your own values in Signing.local.xcconfig next to this file; it is
+// git-ignored and survives `xcodegen`. For example:
+//
+//   DEVELOPMENT_TEAM = ABCDE12345
+//   LOORE_BUNDLE_ID = org.loore.app.yourname
+//
+// Simulator builds and CI need neither.
+LOORE_BUNDLE_ID = org.loore.app
+DEVELOPMENT_TEAM =
+#include? "Signing.local.xcconfig"

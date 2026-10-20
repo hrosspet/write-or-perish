@@ -3,7 +3,16 @@ import requests
 from flask import current_app
 
 
-def create_github_issue(title, description, category, username):
+# Platform labels (Peter's voice review, 2026-10-02 — one tracker for both
+# apps): 'ios' = the native iPhone app, 'web' = the web app (mobile
+# browsers and the PWA included); no platform label = shared design or
+# backend. An issue Loore files for a user gets the label of the app it
+# was filed from (utils/client_platform), none when that is unknown.
+PLATFORM_LABELS = ("ios", "web")
+
+
+def create_github_issue(title, description, category, username,
+                        platform=None):
     """Create a GitHub issue with auto-applied labels.
 
     Args:
@@ -11,6 +20,8 @@ def create_github_issue(title, description, category, username):
         description: Issue body (markdown).
         category: One of 'bug', 'feature', 'enhancement'.
         username: Loore username for per-user label.
+        platform: 'ios' or 'web' adds that label; anything else (None, an
+            unknown value) adds none.
 
     Returns:
         dict with 'url' and 'number' on success.
@@ -28,6 +39,8 @@ def create_github_issue(title, description, category, username):
         raise ValueError("GITHUB_REPO is not configured")
 
     labels = ["loore", category, f"loore:{username}"]
+    if platform in PLATFORM_LABELS:
+        labels.append(platform)
 
     response = requests.post(
         f"https://api.github.com/repos/{repo}/issues",

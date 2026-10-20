@@ -1,5 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
+import NodeOpeningSpinner from '../components/NodeOpeningSpinner';
+import useNodePrefetch from '../hooks/useNodePrefetch';
 import api from '../api';
 import MarkdownBody from '../components/MarkdownBody';
 import { formatDate } from '../utils/date';
@@ -20,6 +22,8 @@ const PAGE_SUBTITLE = 'What people here have chosen to make public.';
 function CommonsPage() {
   const { user } = useUser();
   const navigate = useNavigate();
+  // A thread opens once its node is in, with a spinner here meanwhile.
+  const { pending: openingNode, openNode: prefetchAndOpen } = useNodePrefetch();
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -54,13 +58,14 @@ function CommonsPage() {
   }, [fetchPage]);
 
   // cmd/ctrl-click opens the thread in a new tab; a plain click navigates
-  // in place (mirrors SemanticNeighbors / Cmd+K results).
+  // in place (mirrors SemanticNeighbors / Cmd+K results). In place it goes
+  // through /node/<id>, which shows the permalink once the thread is open:
+  // the permalink route would resolve the slug first, without the node.
   const openNode = (e, item) => {
-    const target = item.permalink || `/node/${item.id}`;
     if (e.metaKey || e.ctrlKey) {
-      window.open(target, '_blank', 'noopener');
+      window.open(item.permalink || `/node/${item.id}`, '_blank', 'noopener');
     } else {
-      navigate(target);
+      prefetchAndOpen(item.id, () => navigate(`/node/${item.id}`));
     }
   };
 
@@ -85,6 +90,7 @@ function CommonsPage() {
 
   return (
     <div style={{ padding: '3rem 2rem 4rem', maxWidth: '720px', margin: '0 auto' }}>
+      {openingNode && <NodeOpeningSpinner />}
       <div style={{ marginBottom: '2.5rem' }}>
         <div style={{
           display: 'flex',

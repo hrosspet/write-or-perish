@@ -97,6 +97,25 @@ def is_valid_timezone(tz_name: Optional[str]) -> bool:
         return False
 
 
+def user_local_hour(user, now=None) -> int:
+    """The hour (0-23) on *user*'s own clock right now.
+
+    Per-user nightly jobs gate on this so each user's work fires in their
+    own night, wherever they are (``User.timezone`` is the browser-captured
+    IANA name). Falls back to UTC for a missing or unrecognized zone.
+    """
+    tz_name = (getattr(user, "timezone", None) or "UTC").strip() or "UTC"
+    now = now or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    if tz_name != "UTC" and ZoneInfo is not None:
+        try:
+            return now.astimezone(ZoneInfo(tz_name)).hour
+        except (ZoneInfoNotFoundError, ValueError, KeyError):
+            pass
+    return now.astimezone(timezone.utc).hour
+
+
 # Matches the local_stamp format (and the [unknown time] fallback) at a
 # message edge, e.g. "[2026-06-10 08:27 UTC]" / "[2026-06-01 20:39 CEST]".
 _EDGE_STAMP_RE = (

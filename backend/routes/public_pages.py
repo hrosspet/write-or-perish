@@ -21,7 +21,7 @@ still carry public_slug through the 30-day grace window).
 from datetime import datetime
 from xml.sax.saxutils import escape as xml_escape
 
-from flask import Blueprint, Response, current_app, request
+from flask import Blueprint, Response, current_app, redirect, request
 from markupsafe import escape
 
 from backend.extensions import db
@@ -187,7 +187,9 @@ def _article_document(root, author_user):
         "url": profile_url,
     }
     twitter_id = author_user.twitter_id or ""
-    if twitter_id.isdigit():
+    # Only for accounts that signed up with X: an X account connected later
+    # to sign in (#311) is not something the user chose to show publicly.
+    if twitter_id.isdigit() and author_user.x_connected_at is None:
         # The numeric X id survives handle renames; /i/user/<id> resolves
         # to the current profile.
         author_person["sameAs"] = [f"https://x.com/i/user/{twitter_id}"]
@@ -259,6 +261,30 @@ def _public_roots_for(user):
 # Routes: articles and profiles
 # ---------------------------------------------------------------------------
 
+def _canonical_redirect(path):
+    """301 to *path* (the same page under the account's current handle,
+    #253), keeping the query string; the fragment never reaches the
+    server and browsers carry it over on their own. Not cacheable: a
+    handle can be taken back, which flips the redirect's direction, and a
+    browser that had pinned the old 301 would then bounce between the two
+    URLs until its cache is cleared. Crawlers follow a 301 regardless."""
+    if request.query_string:
+        path = f"{path}?{request.query_string.decode('latin-1')}"
+    resp = redirect(path, code=301)
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+def _author(username):
+    """(user, moved) for a /@<username> route: the account sharing
+    publicly under the handle, now or formerly (moved=True: the page
+    lives under user.username, so redirect once it is known to render).
+    Resolved in the render path, after the page cache: a cache hit costs
+    no query, and a redirect is never cached (only 200/410 are)."""
+    from backend.utils.username_history import resolve_public_handle
+    return resolve_public_handle(username)
+
+
 @public_pages_bp.route("/@<username>/feed.xml")
 def author_feed(username):
     if not _enabled():
@@ -267,12 +293,12 @@ def author_feed(username):
 
 
 def _render_author_feed(username):
-    user = User.query.filter_by(username=username).first()
-    if user is not None and not user.public_sharing_enabled:
-        user = None
+    user, moved = _author(username)
     roots = _public_roots_for(user) if user else []
     if not roots:
         return Response("Not found", status=404, mimetype="text/plain")
+    if moved:
+        return _canonical_redirect(f"/@{user.username}/feed.xml")
     origin = base_url()
     feed_url = f"{origin}/@{username}/feed.xml"
     updated = max((r.updated_at or r.created_at) for r in roots)
@@ -312,9 +338,11 @@ def article_og_image(username, slug):
     worker (DEK-cached) — no Redis layer, short HTTP cache instead."""
     if not _enabled():
         return Response("Not found", status=404, mimetype="text/plain")
-    user, node, _ = _resolve_permalink(username, slug)
+    user, node, _, moved = _resolve_permalink(username, slug)
     if node is None:
         return Response("Not found", status=404, mimetype="text/plain")
+    if moved:
+        return _canonical_redirect(f"/@{user.username}/{slug}/og.png")
     from backend.utils.og_image import render_article_card
     title, _body = split_title(node.get_content() or "")
     png = render_article_card(title, username, _published_at(node))
@@ -327,12 +355,14 @@ def article_og_image(username, slug):
 def profile_og_image(username):
     if not _enabled():
         return Response("Not found", status=404, mimetype="text/plain")
-    user = User.query.filter_by(username=username).first()
-    if (user is None or not user.public_sharing_enabled
-            or not _public_roots_for(user)):
+    user, moved = _author(username)
+    if user is None or not _public_roots_for(user):
         return Response("Not found", status=404, mimetype="text/plain")
+    if moved:
+        return _canonical_redirect(f"/@{user.username}/og.png")
     from backend.utils.og_image import render_profile_card
-    png = render_profile_card(username, user.description)
+    from backend.utils.hidden_rows import shown_description
+    png = render_profile_card(username, shown_description(user))
     resp = Response(png, mimetype="image/png")
     resp.headers["Cache-Control"] = "public, max-age=3600"
     return resp
@@ -348,39 +378,51 @@ def article(username, slug):
 
 
 def _resolve_permalink(username, slug):
-    """(user, node, tombstoned). Only living public nodes by an opted-in
-    author resolve (the toggle check lives in _public_alive); a soft-
-    deleted row with this slug reports tombstoned for the 410."""
-    user = User.query.filter_by(username=username).first()
-    if user is None or not user.public_sharing_enabled:
-        return None, None, False
+    """(user, node, tombstoned, moved). Only living public nodes by an
+    opted-in author resolve (the toggle check lives in _public_alive); a
+    soft-deleted row with this slug reports tombstoned for the 410.
+    moved (#253): the URL used a former handle, or another case of the
+    current one, and the caller should 301 to user.username — set only
+    with a node, so a former handle never confirms more than the page
+    that is public under the new one (a tombstone under it is a plain
+    404; under another case of the current handle it keeps its 410, that
+    is public already)."""
+    user, moved = _author(username)
+    if user is None:
+        return None, None, False, False
     node = _public_alive(Node.query.filter(
         Node.human_owner_id == user.id,
         Node.public_slug == slug,
     )).first()
     if node is not None:
-        return user, node, False
+        return user, node, False, moved
+    if moved == "former":
+        return None, None, False, False
     tombstoned = db.session.query(Node.id).filter(
         Node.human_owner_id == user.id,
         Node.public_slug == slug,
         Node.deleted_at.isnot(None),
     ).first() is not None
-    return user, None, tombstoned
+    return user, None, tombstoned, False
 
 
 def _render_article(username, slug):
-    user, node, tombstoned = _resolve_permalink(username, slug)
+    user, node, tombstoned, moved = _resolve_permalink(username, slug)
     if node is None:
         return _shell_410() if tombstoned else _shell_404()
+    if moved:
+        return _canonical_redirect(f"/@{user.username}/{slug}")
     body, meta = _article_document(node, user)
     return _html(render_page(meta, body))
 
 
 def _render_article_md(username, slug):
-    user, node, tombstoned = _resolve_permalink(username, slug)
+    user, node, tombstoned, moved = _resolve_permalink(username, slug)
     if node is None:
         status = 410 if tombstoned else 404
         return Response("Not found", status=status, mimetype="text/plain")
+    if moved:
+        return _canonical_redirect(f"/@{user.username}/{slug}.md")
     content = (node.get_content() or "").strip()
     footer = (f"\n\n---\n\nPublished by @{username} on Loore: "
               f"{base_url()}/@{username}/{slug}\n")
@@ -396,19 +438,23 @@ def profile(username):
 
 
 def _render_profile(username):
-    user = User.query.filter_by(username=username).first()
-    if user is not None and not user.public_sharing_enabled:
-        user = None
+    user, moved = _author(username)
     roots = _public_roots_for(user) if user else []
     # A user with nothing public is indistinguishable from a user that
-    # doesn't exist — same as the JSON API's 404 parity.
+    # doesn't exist — same as the JSON API's 404 parity. That holds for a
+    # former handle too (#253): it redirects only to a page that renders.
     if not roots:
         return _shell_404()
+    if moved:
+        return _canonical_redirect(f"/@{user.username}")
     origin = base_url()
     canonical = f"{origin}/@{username}"
     parts = [f"<h1>@{escape(username)}</h1>"]
-    if user.description:
-        parts.append(f"<p>{escape(user.description)}</p>")
+    # Empty while "Delete all my writing" hides it (#268).
+    from backend.utils.hidden_rows import shown_description
+    shown = shown_description(user)
+    if shown:
+        parts.append(f"<p>{escape(shown)}</p>")
     parts.append('<section aria-label="Published pieces">')
     for root in roots:
         content = root.get_content() or ""
@@ -429,7 +475,7 @@ def _render_profile(username):
         parts.append("</article>")
     parts.append("</section>")
 
-    description = (user.description
+    description = (shown
                    or f"Writing published by @{username} on Loore.")
     meta = {
         "title": f"@{username} — Loore",
@@ -508,7 +554,8 @@ def _render_sitemap():
                         Node.privacy_level == "public",
                         Node.deleted_at.is_(None),
                         Node.public_slug.isnot(None),
-                        User.public_sharing_enabled.is_(True))
+                        User.public_sharing_enabled.is_(True),
+                        User.deleted_at.is_(None))
                 .all())
         profiles = {}
         for username, slug, updated_at, created_at in rows:

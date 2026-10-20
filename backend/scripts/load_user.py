@@ -290,6 +290,7 @@ def _run(path, as_username, merge, create_approved, twitter_id=None):
             source_key=key,
             origin=nd.get("origin"),
             tool_calls_meta=nd.get("tool_calls_meta"),
+            prompt_key=nd.get("prompt_key"),
         )
         new.set_content(nd.get("content") or "")
         if _dt(nd.get("created_at")):
@@ -304,6 +305,8 @@ def _run(path, as_username, merge, create_approved, twitter_id=None):
             db.session.add(NodeContextArtifact(
                 node_id=new.id, artifact_type="prompt",
                 artifact_id=_prompt_row(nd["prompt"])))
+            if not new.prompt_key:
+                new.prompt_key = nd["prompt"].get("prompt_key")
             sync_context_artifacts(new.id, user_id, nd["prompt"].get("content") or "")
             pinned += 1
         if nd.get("parent_id") or nd.get("continuation_node_id") or nd.get("linked_node_id"):

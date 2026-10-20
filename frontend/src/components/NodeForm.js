@@ -1,24 +1,31 @@
-import React, { useState, forwardRef, useImperativeHandle, useEffect, useCallback } from "react";
+import React, { useState, useRef, forwardRef, useImperativeHandle, useEffect, useCallback } from "react";
 import { useAsyncTaskPolling } from "../hooks/useAsyncTaskPolling";
 import { useDraft } from "../hooks/useDraft";
+import usePersistedToggle from "../hooks/usePersistedToggle";
 import { useUser } from "../contexts/UserContext";
 import StreamingMicButton from "./StreamingMicButton";
 import PrivacySelector from "./PrivacySelector";
 import RegenerateTtsDialog from "./RegenerateTtsDialog";
+import ApplyToRepliesDialog from "./ApplyToRepliesDialog";
 import SplitContentDialog, { NODE_CHAR_CAP } from "./SplitContentDialog";
 import PublicReplyDialog, { PUBLIC_REPLY_ACK_KEY } from "./PublicReplyDialog";
 import { useOnlineStatus } from "../hooks/useOnlineStatus";
+import { useToast } from "../contexts/ToastContext";
 import api from "../api";
 import { uploadFileInChunks } from "../utils/chunkedUpload";
+import {
+  isSpendBlocked, notifySpendBlocked, isSpendCapError, spendCapToastMessage,
+} from "../utils/spendCap";
 import useSubmitShortcut from "../hooks/useSubmitShortcut";
 
 const NodeForm = forwardRef(
   (
-    { parentId, onSuccess, hideSubmit, initialContent, editMode = false, nodeId, initialPrivacyLevel, initialAiUsage, detachPrompt, hidePowerFeatures = false, placeholder, onSubmitOverride, compact = false, hideAudioUpload = false, allowAgenticPrompt = false, hasGeneratedTts = false, aiUsageFromGlobalDefault = false },
+    { parentId, onSuccess, hideSubmit, initialContent, editMode = false, nodeId, initialPrivacyLevel, initialAiUsage, detachPrompt, hidePowerFeatures = false, placeholder, onSubmitOverride, uploadReplyOptions, compact = false, hideAudioUpload = false, allowAgenticPrompt = false, hasGeneratedTts = false, aiUsageFromGlobalDefault = false, hasChildren = false },
     ref
   ) => {
     const { user } = useUser();
     const isOnline = useOnlineStatus();
+    const { addToast } = useToast();
     const [content, setContent] = useState(initialContent || "");
     const [error, setError] = useState("");
     const [loading, setLoading] = useState(false);
@@ -29,6 +36,12 @@ const NodeForm = forwardRef(
     // When editing an entry that has generated TTS, ask whether to keep or
     // regenerate the now-stale audio before saving (#66).
     const [showTtsDialog, setShowTtsDialog] = useState(false);
+    // Editing a node that has replies and changing its privacy / AI usage:
+    // ask whether the change is for this node only or also for the user's
+    // replies below it, before saving. pendingResumeRef carries the TTS
+    // choice already made so the resumed save keeps it.
+    const [showScopeDialog, setShowScopeDialog] = useState(false);
+    const pendingResumeRef = useRef({});
 
     // Per-entry character cap: oversized new entries are split
     // server-side into serially connected entries after explicit
@@ -89,10 +102,14 @@ const NodeForm = forwardRef(
         localStorage.setItem('loore_last_ai_usage', aiUsage);
       }
     }, [aiUsage, remembersChoices, aiUsageFromGlobalDefault]);
-    // "Agentic Reply" — opt-in to attaching the textmode system prompt
-    // (profile + recent + todo + prefs as context). Local state, OFF by
-    // default — deliberate and distinct from "auto-generate".
-    const [useAgenticPrompt, setUseAgenticPrompt] = useState(false);
+    // "Agentic Reply" — attaches the textmode system prompt (profile +
+    // recent + todo + prefs as context). ON by default wherever it is
+    // offered (#261: a first message without it is the weakest possible
+    // first impression, and a pre-loaded account only pays off on the
+    // agentic path) and remembered in localStorage like Auto-generate, so
+    // switching it off is respected while a fresh account starts agentic.
+    const [useAgenticPrompt, setUseAgenticPrompt] = usePersistedToggle(
+      'loore_agentic_reply', allowAgenticPrompt);
 
     // "Auto-generate" — does an LLM reply fire automatically on submit,
     // so the user doesn't have to click LLM Response manually on the
@@ -103,20 +120,8 @@ const NodeForm = forwardRef(
     // the LLM fires via /textmode/start regardless; if Agentic is OFF
     // and Auto-generate is ON we follow the /nodes/ POST with an
     // explicit /nodes/<id>/llm call.
-    const [useAutoGenerate, setUseAutoGenerateState] = useState(() => {
-      if (!allowAgenticPrompt) return false;
-      const stored = localStorage.getItem('loore_auto_generate');
-      return stored === null ? true : stored === 'true';
-    });
-    const setUseAutoGenerate = useCallback((next) => {
-      setUseAutoGenerateState(prev => {
-        const resolved = typeof next === 'function' ? next(prev) : next;
-        if (allowAgenticPrompt) {
-          localStorage.setItem('loore_auto_generate', String(resolved));
-        }
-        return resolved;
-      });
-    }, [allowAgenticPrompt]);
+    const [useAutoGenerate, setUseAutoGenerate] = usePersistedToggle(
+      'loore_auto_generate', allowAgenticPrompt);
 
     // Draft auto-save hook
     const {
@@ -169,9 +174,12 @@ const NodeForm = forwardRef(
             const parent = response.data;
             setParentPrivacy(parent.privacy_level || "private");
             if (!initialPrivacyLevel && !initialAiUsage) {
-              // Set privacy settings to match parent's settings
+              // Set privacy settings to match parent's settings. AI usage
+              // is the backend's reply default (#362): the parent's, but
+              // under a Read the thread's, since a Read's nodes are 'chat'
+              // only for the tweets they quote.
               setPrivacyLevel(parent.privacy_level || "private");
-              setAiUsage(parent.ai_usage || "none");
+              setAiUsage(parent.reply_ai_usage || parent.ai_usage || "none");
             }
           })
           .catch((err) => {
@@ -202,6 +210,14 @@ const NodeForm = forwardRef(
 
     // Recovery: when a draft has stored (untranscribed) audio chunks,
     // trigger server-side transcription and poll for completion.
+    //
+    // This still fires on its own, but only for a session nobody is
+    // recording: GET /drafts/ no longer returns a live session (#320), so
+    // what arrives here was left behind (reload, crash, navigating away
+    // mid-recording) and the transcript should come back into this box
+    // without a click. If the session turns out to be live after all (its
+    // tab resumed it), the server refuses (409) or reports `live`, and
+    // this view lets go of it instead of completing it.
     useEffect(() => {
       if (!isDraftLoaded || !draft) return;
       if (!draft.session_id || !draft.has_stored_chunks) return;
@@ -209,15 +225,35 @@ const NodeForm = forwardRef(
       setIsRecoveringAudio(true);
       setStreamingSessionId(draft.session_id);
 
+      const letGo = () => {
+        setIsRecoveringAudio(false);
+        setStreamingSessionId(null);
+      };
+
       const triggerRecovery = async () => {
         try {
-          await api.post(`/drafts/streaming/${draft.session_id}/transcribe-remaining`);
+          try {
+            await api.post(`/drafts/streaming/${draft.session_id}/transcribe-remaining`);
+          } catch (err) {
+            if (err.response?.status === 409) {
+              console.warn('[NodeForm] Recording is live in another tab; not recovering it here');
+              letGo();
+              return;
+            }
+            throw err;
+          }
 
           // Poll for completion
           const pollInterval = setInterval(async () => {
             try {
               const res = await api.get(`/drafts/streaming/${draft.session_id}/status`);
-              const { streaming_status, content } = res.data;
+              const { streaming_status, content, live } = res.data;
+
+              if (live) {
+                clearInterval(pollInterval);
+                letGo();
+                return;
+              }
 
               if (content) {
                 setContent(content);
@@ -260,6 +296,24 @@ const NodeForm = forwardRef(
       setContent(initialContent || "");
     }, [deleteDraft, initialContent]);
 
+    // A new entry is sent: the form is cleared before the caller moves on.
+    // The page can stay on screen until the entry's node loads
+    // (NodeDetailWrapper, useNodePrefetch), and the sent text must not be
+    // sendable twice. An edit keeps its text.
+    const succeed = useCallback((data) => {
+      if (!editMode) {
+        setContent("");
+        setUploadedFile(null);
+      }
+      onSuccess(data);
+    }, [editMode, onSuccess]);
+    // For the transcription effect below, which must not re-run when only
+    // the caller's `onSuccess` changes: a page that re-renders while the
+    // entry's node loads (WritePage's spinner) would otherwise handle the
+    // same completed upload twice (its toasts shown twice).
+    const succeedRef = useRef(succeed);
+    useEffect(() => { succeedRef.current = succeed; });
+
     // Auto-start polling when uploadedNodeId is set
     useEffect(() => {
       if (uploadedNodeId) {
@@ -274,15 +328,24 @@ const NodeForm = forwardRef(
         // Delete draft after successful transcription
         deleteDraft();
         setHasDraft(false);
-        const normalizedData = { ...transcriptionData, id: transcriptionData.node_id };
-        onSuccess(normalizedData);
+        // A Text-mode upload's reply (#342): land on the entry with
+        // ?awaitLlm like a typed or recorded one, or say why it was skipped.
+        (transcriptionData.warnings || []).forEach((w) => addToast(w, 10000));
+        const normalizedData = {
+          ...transcriptionData,
+          id: transcriptionData.node_id,
+          user_node_id: transcriptionData.node_id,
+          ...(transcriptionData.llm_node_id
+            && { awaitLlm: transcriptionData.llm_node_id }),
+        };
+        succeedRef.current(normalizedData);
         setUploadedNodeId(null);
       } else if (transcriptionStatus === 'failed') {
         setLoading(false);
         setError(transcriptionError || 'Transcription failed');
         setUploadedNodeId(null);
       }
-    }, [transcriptionStatus, transcriptionData, transcriptionError, onSuccess, deleteDraft]);
+    }, [transcriptionStatus, transcriptionData, transcriptionError, deleteDraft, addToast]);
 
     const handleFileSelect = (event) => {
       const file = event.target.files[0];
@@ -312,7 +375,7 @@ const NodeForm = forwardRef(
       setContent("");
     };
 
-    const handleSubmit = async (event, regenerateTts, splitConfirmed, publicConfirmed) => {
+    const handleSubmit = async (event, regenerateTts, splitConfirmed, publicConfirmed, applyToReplies) => {
       event && event.preventDefault();
       // Validate: require content or audio
       if (!editMode && uploadedFile) {
@@ -334,12 +397,31 @@ const NodeForm = forwardRef(
         return;
       }
 
+      // Changing privacy / AI usage on a node that has replies: ask whether
+      // the change is for this node only or also for the user's replies.
+      // `applyToReplies` is undefined on the initial submit (→ open the
+      // dialog) and a boolean once the user has chosen.
+      if (
+        editMode && nodeId && hasChildren && applyToReplies === undefined
+        && (
+          (initialPrivacyLevel != null && privacyLevel !== initialPrivacyLevel)
+          || (initialAiUsage != null && aiUsage !== initialAiUsage)
+        )
+      ) {
+        pendingResumeRef.current = { regenerateTts };
+        setShowScopeDialog(true);
+        return;
+      }
+
       // Per-entry character cap. New entries can split into serially
       // connected entries (server-side, after consent via the dialog);
       // edits and custom-submit conversations can't, so they get a
       // plain error instead.
       if (content.length > NODE_CHAR_CAP && !uploadedFile) {
-        if (editMode || onSubmitOverride) {
+        // A recorded transcript (streamingSessionId) saves through
+        // save-as-node, which splits server-side, even on a custom-submit
+        // page — only typed custom submits and edits get the hard error.
+        if (editMode || (onSubmitOverride && !streamingSessionId)) {
           setError(
             `This entry is ${content.length.toLocaleString()} characters — ` +
             `above the ${NODE_CHAR_CAP.toLocaleString()}-character limit. ` +
@@ -370,16 +452,23 @@ const NodeForm = forwardRef(
         let response;
 
         // Custom submit (e.g. /textmode/start). Skips /nodes/ POST entirely
-        // and still handles draft cleanup + onSuccess for the caller.
-        if (onSubmitOverride && !editMode && !uploadedFile && !streamingSessionId) {
+        // and still handles draft cleanup + onSuccess for the caller. A
+        // recorded entry (transcript held in a streaming draft, audio
+        // attached) goes through the same override with its session id,
+        // so the page applies one policy to typed and recorded entries —
+        // previously it bypassed the override and landed as a bare node
+        // with no system prompt and no auto-generated reply.
+        if (onSubmitOverride && !editMode && !uploadedFile) {
           const data = await onSubmitOverride({
             content,
             parent_id: parentId,
             privacy_level: privacyLevel,
             ai_usage: aiUsage,
+            streaming_session_id: streamingSessionId || undefined,
           });
           deleteDraft();
           setHasDraft(false);
+          setStreamingSessionId(null);
           // Spend cap: backend kept the system + user nodes but skipped the
           // LLM placeholder (e.g. /textmode/start). Surface the banner.
           if (data && data.spend_capped) {
@@ -387,7 +476,10 @@ const NodeForm = forwardRef(
               window.dispatchEvent(new CustomEvent('loore:spend-capped', {}));
             } catch (e) { /* no-op */ }
           }
-          onSuccess(data);
+          // The entry was saved but the reply was refused (e.g. an
+          // uncapped {user_export} on a non-Pro plan): say why.
+          if (data && data.llm_error) addToast(data.llm_error, 10000);
+          succeed(data);
           setLoading(false);
           return;
         }
@@ -418,17 +510,18 @@ const NodeForm = forwardRef(
               window.dispatchEvent(new CustomEvent('loore:spend-capped', {}));
             } catch (e) { /* no-op */ }
           }
+          if (res.data.llm_error) addToast(res.data.llm_error, 10000);
           if (res.data.llm_node_id) {
-            // Land on the USER node so the entry gets its own URL/history
-            // step; ?awaitLlm hands the pending LLM response to NodeDetail's
-            // polling, which navigates to it on completion.
-            onSuccess({
+            // Through the USER node so the entry gets its own URL/history
+            // step; ?awaitLlm hands the pending LLM response to NodeDetail,
+            // which goes on to it.
+            succeed({
               id: res.data.user_node_id,
               awaitLlm: res.data.llm_node_id,
               ...res.data,
             });
           } else {
-            onSuccess({
+            succeed({
               id: res.data.user_node_id,
               ...res.data,
             });
@@ -439,14 +532,32 @@ const NodeForm = forwardRef(
 
         // Handle streaming transcription completion - draft exists, create node from it
         if (streamingSessionId) {
-          // Save the streaming draft as a node with any edits the user made
+          // Save the streaming draft as a node with any edits the user made.
+          // Top-level entries carry the same decisions the typed paths make
+          // below: Agentic Reply → textmode system node (like
+          // /textmode/start), Auto-generate → LLM reply (like the
+          // /nodes/<id>/llm follow-up). Replies (parentId) send neither —
+          // NodeDetail fires auto-generate for those itself.
+          const topLevelWithAi = !parentId && aiUsage !== 'none';
           const response = await api.post(`/drafts/streaming/${streamingSessionId}/save-as-node`, {
-            content
+            content,
+            ...(topLevelWithAi && useAgenticPrompt && { agentic: true }),
+            ...(topLevelWithAi && useAutoGenerate && allowAgenticPrompt
+              && { auto_generate: true }),
           });
           deleteDraft();
           setHasDraft(false);
           setStreamingSessionId(null);
-          onSuccess(response.data);
+          if (response.data.spend_capped) {
+            try {
+              window.dispatchEvent(new CustomEvent('loore:spend-capped', {}));
+            } catch (e) { /* no-op */ }
+          }
+          // Land on the entry; ?awaitLlm hands a pending reply to NodeDetail.
+          succeed({
+            ...response.data,
+            ...(response.data.llm_node_id && { awaitLlm: response.data.llm_node_id }),
+          });
           setLoading(false);
           return;
         }
@@ -461,10 +572,28 @@ const NodeForm = forwardRef(
             // actually edited; a privacy/AI-usage-only save keeps it.
             ...(detachPrompt && content !== initialContent && { detach_prompt: true }),
             ...(regenerateTts && { regenerate_tts: true }),
+            // Cascade the privacy / AI-usage change to the user's replies
+            // (chosen in ApplyToRepliesDialog).
+            ...(applyToReplies && { apply_to_descendants: true }),
           });
         } else if (uploadedFile) {
           // Upload audio file
           const fileToUpload = uploadedFile;
+
+          // The same two decisions a typed or recorded entry makes (#342):
+          // Agentic Reply → textmode system node, Auto-generate → an LLM
+          // reply once the transcript exists (the transcription task
+          // creates it). A page with its own submit policy (Text mode)
+          // supplies them; otherwise the form's toggles do, for top-level
+          // entries only, as in the recorded branch above.
+          const topLevelWithAi = !parentId && aiUsage !== 'none';
+          const replyOptions = uploadReplyOptions
+            ? (uploadReplyOptions({ ai_usage: aiUsage }) || {})
+            : {
+              ...(topLevelWithAi && useAgenticPrompt && { agentic: true }),
+              ...(topLevelWithAi && useAutoGenerate && allowAgenticPrompt
+                && { auto_generate: true }),
+            };
 
           // Check file size - use chunked upload for files larger than 10MB
           const useChunkedUpload = fileToUpload.size > 10 * 1024 * 1024;
@@ -481,7 +610,8 @@ const NodeForm = forwardRef(
                   parent_id: parentId,
                   node_type: 'user',
                   privacy_level: privacyLevel,
-                  ai_usage: aiUsage
+                  ai_usage: aiUsage,
+                  ...replyOptions,
                 },
                 (progress) => {
                   setUploadProgress(progress);
@@ -509,6 +639,10 @@ const NodeForm = forwardRef(
             if (parentId) formData.append('parent_id', parentId);
             formData.append('privacy_level', privacyLevel);
             formData.append('ai_usage', aiUsage);
+            if (replyOptions.agentic) formData.append('agentic', 'true');
+            if (replyOptions.auto_generate) formData.append('auto_generate', 'true');
+            // A thread started from the Glean card (#435).
+            if (replyOptions.entry) formData.append('entry', replyOptions.entry);
 
             response = await api.post("/nodes/", formData, {
               headers: { 'Content-Type': 'multipart/form-data' }
@@ -553,7 +687,7 @@ const NodeForm = forwardRef(
               `/nodes/${response.data.id}/llm`,
               { source_mode: 'textmode' },
             );
-            onSuccess({
+            succeed({
               ...response.data,
               id: llmRes.data.node_id,
               awaitLlm: llmRes.data.node_id,
@@ -567,11 +701,18 @@ const NodeForm = forwardRef(
           }
         }
 
-        onSuccess(response.data);
+        succeed(response.data);
         setLoading(false);
       } catch (err) {
         console.error("Error in NodeForm:", err);
-        setError(err.response?.data?.error || err.message || "Error submitting form.");
+        if (uploadedFile && isSpendCapError(err)) {
+          // The client-side cap flag was stale; the server refused the
+          // upload before storing anything (#341). The banner is up; the
+          // toast says what happened to this press.
+          addToast(spendCapToastMessage('upload'), 8000);
+        } else {
+          setError(err.response?.data?.error || err.message || "Error submitting form.");
+        }
         setLoading(false);
         setIsUploading(false);
         setUploadProgress(0);
@@ -970,7 +1111,11 @@ const NodeForm = forwardRef(
                     setHasDraft(true);
                   }}
                   onError={(err) => {
-                    setError(err.message || 'Streaming transcription failed');
+                    // A start refused by the monthly spend cap is not a
+                    // failure; the recorder already showed a toast (#341).
+                    if (!err?.spendCapped) {
+                      setError(err.message || 'Streaming transcription failed');
+                    }
                     setLoading(false);
                     setIsStreamingRecording(false);
                   }}
@@ -994,7 +1139,17 @@ const NodeForm = forwardRef(
                     >
                       <button
                         type="button"
-                        onClick={() => fileInputRef.current?.click()}
+                        onClick={() => {
+                          // Refuse before the file picker opens: a capped
+                          // user would otherwise pick and send a file only
+                          // to have it refused (#341).
+                          if (isSpendBlocked()) {
+                            notifySpendBlocked();
+                            addToast(spendCapToastMessage('upload'), 8000);
+                            return;
+                          }
+                          fileInputRef.current?.click();
+                        }}
                         disabled={isStreamingRecording || aiUsage === 'none' || !isOnline}
                         style={{ padding: '8px 16px', cursor: isStreamingRecording || aiUsage === 'none' || !isOnline ? 'not-allowed' : 'pointer', opacity: isStreamingRecording || aiUsage === 'none' || !isOnline ? 0.35 : 1, pointerEvents: isStreamingRecording || aiUsage === 'none' || !isOnline ? 'none' : 'auto' }}
                       >
@@ -1015,6 +1170,21 @@ const NodeForm = forwardRef(
           setShowTtsDialog(false);
           // Resume the save with the user's choice (no event object).
           handleSubmit(null, regenerate);
+        }}
+      />
+      <ApplyToRepliesDialog
+        open={showScopeDialog}
+        privacyChanged={initialPrivacyLevel != null && privacyLevel !== initialPrivacyLevel}
+        aiUsageChanged={initialAiUsage != null && aiUsage !== initialAiUsage}
+        onClose={() => setShowScopeDialog(false)}
+        onChoice={(applyToReplies) => {
+          setShowScopeDialog(false);
+          // Resume the save with the scope chosen, keeping any TTS choice
+          // already made (no event object).
+          handleSubmit(
+            null, pendingResumeRef.current.regenerateTts,
+            undefined, undefined, applyToReplies,
+          );
         }}
       />
       <PublicReplyDialog

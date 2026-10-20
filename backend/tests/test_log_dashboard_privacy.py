@@ -1,0 +1,342 @@
+"""Integration tests for privacy filtering on the Log and node detail.
+
+Tests that private nodes are excluded from the Log and that the node
+detail endpoint returns 403 for unauthorized access.
+
+These tests build a minimal Flask app to avoid conflicts with module-level
+flask_login mocks in other test files (e.g. test_auth.py).
+"""
+
+import os
+import sys
+from unittest.mock import MagicMock
+
+# ── Environment ──────────────────────────────────────────────────────────
+os.environ["ENCRYPTION_DISABLED"] = "true"
+os.environ["DATABASE_URL"] = "sqlite:///:memory:"
+os.environ.setdefault("SECRET_KEY", "test-secret")
+os.environ.setdefault("TWITTER_API_KEY", "fake")
+os.environ.setdefault("TWITTER_API_SECRET", "fake")
+
+# Mock optional heavy deps that may not be installed locally
+sys.modules.setdefault("celery", MagicMock())
+sys.modules.setdefault("celery.utils", MagicMock())
+sys.modules.setdefault("celery.utils.log", MagicMock())
+sys.modules.setdefault("celery.result", MagicMock())
+
+import pytest
+from flask import Flask
+
+# ── Force-import real modules ────────────────────────────────────────────
+# Only evict specific mocks that other test files may have installed.
+# Do NOT blanket-remove all backend.* mocks — other test files (e.g.
+# test_voice_from_node.py) legitimately mock backend.tasks.* modules
+# and removing those breaks their tests.
+for _mod in ["flask_login", "backend.models", "backend.extensions"]:
+    if _mod in sys.modules and isinstance(sys.modules[_mod], MagicMock):
+        del sys.modules[_mod]
+
+import flask_login as _real_flask_login  # noqa: E402
+from backend.extensions import db as _db  # noqa: E402
+from backend.models import User, Node  # noqa: E402
+import backend.models as _real_backend_models  # noqa: E402
+
+
+def _make_app():
+    """Build a minimal Flask app with only the blueprints under test."""
+    from flask_login import LoginManager
+
+    app = Flask(__name__)
+    app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///:memory:"
+    app.config["SECRET_KEY"] = "test-secret"
+    app.config["TESTING"] = True
+
+    _db.init_app(app)
+
+    login_manager = LoginManager(app)
+
+    @login_manager.user_loader
+    def load_user(user_id):
+        return User.query.get(int(user_id))
+
+    from backend.routes.log import log_bp
+    from backend.routes.dashboard import dashboard_bp
+    from backend.routes.nodes import nodes_bp
+
+    app.register_blueprint(log_bp, url_prefix="/api")
+    app.register_blueprint(dashboard_bp, url_prefix="/api/dashboard")
+    app.register_blueprint(nodes_bp, url_prefix="/api/nodes")
+
+    return app
+
+
+@pytest.fixture
+def app():
+    # Snapshot keys we're about to touch so we can restore them exactly.
+    _affected = lambda k: (  # noqa: E731
+        k == "flask_login"
+        or k.startswith("backend.routes")
+        or k == "backend.models"
+    )
+    saved = {k: sys.modules[k] for k in list(sys.modules) if _affected(k)}
+
+    # Install real flask_login and backend.models; purge route modules
+    # so they get re-imported with real decorators/models.
+    # We intentionally leave backend.utils.* untouched — the route code
+    # passes explicit user_id args, so mocked current_user in the utils
+    # module doesn't matter.
+    sys.modules["flask_login"] = _real_flask_login
+    sys.modules["backend.models"] = _real_backend_models
+    for _k in [k for k in list(sys.modules) if k.startswith("backend.routes")]:
+        del sys.modules[_k]
+
+    app = _make_app()
+    with app.app_context():
+        _db.create_all()
+        yield app
+        _db.session.remove()
+        _db.drop_all()
+
+    # Restore sys.modules exactly: remove anything new, reinstate originals
+    for k in [k for k in list(sys.modules) if _affected(k)]:
+        if k not in saved:
+            del sys.modules[k]
+    for k, mod in saved.items():
+        sys.modules[k] = mod
+
+
+@pytest.fixture
+def data(app):
+    """Create two users with public and private nodes each.
+
+    Returns plain IDs to avoid SQLAlchemy DetachedInstanceError.
+    """
+    alice = User(username="alice", approved=True)
+    bob = User(username="bob", approved=True)
+    _db.session.add_all([alice, bob])
+    _db.session.flush()
+
+    alice_public = Node(
+        user_id=alice.id, human_owner_id=alice.id,
+        content="Alice public post",
+        privacy_level="public", node_type="user",
+    )
+    alice_private = Node(
+        user_id=alice.id, human_owner_id=alice.id,
+        content="Alice private post",
+        privacy_level="private", node_type="user",
+    )
+    bob_public = Node(
+        user_id=bob.id, human_owner_id=bob.id,
+        content="Bob public post",
+        privacy_level="public", node_type="user",
+    )
+    bob_private = Node(
+        user_id=bob.id, human_owner_id=bob.id,
+        content="Bob private post",
+        privacy_level="private", node_type="user",
+    )
+
+    _db.session.add_all([alice_public, alice_private, bob_public, bob_private])
+    _db.session.commit()
+
+    return dict(
+        alice_id=alice.id, bob_id=bob.id,
+        alice_public_id=alice_public.id, alice_private_id=alice_private.id,
+        bob_public_id=bob_public.id, bob_private_id=bob_private.id,
+    )
+
+
+def _login(client, user_id):
+    """Set the Flask-Login session cookie so subsequent requests are authenticated."""
+    with client.session_transaction() as sess:
+        sess["_user_id"] = str(user_id)
+        sess["_fresh"] = True
+
+
+# ── Log ──────────────────────────────────────────────────────────────────
+
+class TestLogPrivacy:
+    """GET /api/log should only return the caller's own nodes (personal log)."""
+
+    def test_log_shows_only_own_nodes(self, app, data):
+        client = app.test_client()
+        _login(client, data["alice_id"])
+
+        resp = client.get("/api/log")
+        assert resp.status_code == 200
+        previews = [n["preview"] for n in resp.json["nodes"]]
+
+        # #228: the Log is the private diary — own PUBLIC posts live on
+        # the public page / Commons, not here.
+        assert "Alice public post" not in previews
+        assert "Alice private post" in previews
+        assert "Bob public post" not in previews   # other user's node
+        assert "Bob private post" not in previews   # other user's node
+
+    def test_log_shows_own_private_nodes(self, app, data):
+        client = app.test_client()
+        _login(client, data["bob_id"])
+
+        resp = client.get("/api/log")
+        previews = [n["preview"] for n in resp.json["nodes"]]
+
+        assert "Bob private post" in previews
+        assert "Bob public post" not in previews  # #228: public ≠ Log
+        assert "Alice public post" not in previews  # other user's node
+
+    def test_log_lists_only_own_nodes_and_no_corpus_wide_total(self, app, data):
+        """Only the user's own rows are paged, and the response carries no
+        `total`: counting it re-ran the whole-corpus subtree walk on every
+        page for nothing the client reads."""
+        client = app.test_client()
+        _login(client, data["alice_id"])
+
+        resp = client.get("/api/log")
+        # Alice sees only her private node (#228: her public one lives on
+        # the public page, not in the Log).
+        assert len(resp.json["nodes"]) == 1
+        assert "total" not in resp.json
+        assert resp.json["has_more"] is False and resp.json["next_cursor"] is None
+
+
+# ── Node Detail ──────────────────────────────────────────────────────────
+
+class TestNodeDetailPrivacy:
+    """GET /api/nodes/<id> should return 403 for private nodes of other users."""
+
+    def test_returns_404_for_other_users_private_node(self, app, data):
+        # Not 403: that would confirm the id exists. Same body as a
+        # nonexistent node.
+        client = app.test_client()
+        _login(client, data["alice_id"])
+
+        resp = client.get(f"/api/nodes/{data['bob_private_id']}")
+        assert resp.status_code == 404
+        assert resp.json["error"] == "Node not found"
+
+    def test_owner_can_access_own_private_node(self, app, data):
+        client = app.test_client()
+        _login(client, data["bob_id"])
+
+        resp = client.get(f"/api/nodes/{data['bob_private_id']}")
+        assert resp.status_code == 200
+        assert "Bob private post" in resp.json["content"]
+
+    def test_anyone_can_access_public_node(self, app, data):
+        client = app.test_client()
+        _login(client, data["alice_id"])
+
+        resp = client.get(f"/api/nodes/{data['bob_public_id']}")
+        assert resp.status_code == 200
+        assert "Bob public post" in resp.json["content"]
+
+
+# ── Username rename records history (#253) ───────────────────────────────
+
+def _publisher(username):
+    """An account with public writing: sharing on and a living public
+    root, so /@<handle> renders and a rename must keep it reachable."""
+    user = User(username=username, default_ai_usage="chat",
+                public_sharing_enabled=True)
+    _db.session.add(user)
+    _db.session.commit()
+    node = Node(user_id=user.id, human_owner_id=user.id, node_type="user",
+                privacy_level="public", public_slug="kept")
+    node.set_content("# Kept\n\nA published piece.")
+    _db.session.add(node)
+    _db.session.commit()
+    return user
+
+
+def _former_handles(user_id):
+    from backend.models import UsernameHistory
+    return [x.old_username for x in
+            UsernameHistory.query.filter_by(user_id=user_id).all()]
+
+
+class TestUsernameRenameHistory:
+    def test_rename_reserves_old_handle_and_frees_it_when_taken_back(self, app):
+        renamer = _publisher("renamer")
+        squatter = User(username="squatter", default_ai_usage="chat")
+        _db.session.add(squatter)
+        _db.session.commit()
+
+        client = app.test_client()
+        _login(client, renamer.id)
+        r = client.put("/api/dashboard/user", json={"username": "renamed"})
+        assert r.status_code == 200, r.get_json()
+        assert User.query.get(renamer.id).username == "renamed"
+        assert _former_handles(renamer.id) == ["renamer"]
+
+        # Someone else cannot pick up the redirecting handle… (Flask-Login
+        # caches the loaded user on `g` for the fixture's app context, so
+        # drop it before switching clients.)
+        from flask import g
+        g.pop("_login_user", None)
+        other = app.test_client()
+        _login(other, squatter.id)
+        r = other.put("/api/dashboard/user", json={"username": "renamer"})
+        assert r.status_code == 400
+        assert r.get_json()["error"] == "That username is reserved."
+        r = other.put("/api/dashboard/user", json={"username": "RENAMER"})
+        assert r.status_code == 400
+        assert r.get_json()["error"] == "That username is reserved."
+
+        # …the owner can, which ends the redirect for it.
+        g.pop("_login_user", None)
+        r = client.put("/api/dashboard/user", json={"username": "renamer"})
+        assert r.status_code == 200, r.get_json()
+        assert _former_handles(renamer.id) == ["renamed"]
+
+        # Re-saving the same handle is a no-op for the history.
+        r = client.put("/api/dashboard/user", json={"username": "renamer"})
+        assert r.status_code == 200
+        assert _former_handles(renamer.id) == ["renamed"]
+
+    def test_case_only_rename_records_nothing(self, app):
+        """Current handles resolve case-insensitively and redirect to
+        their stored spelling, so a case change needs no redirect row."""
+        renamer = _publisher("renamer")
+        client = app.test_client()
+        _login(client, renamer.id)
+        r = client.put("/api/dashboard/user", json={"username": "Renamer"})
+        assert r.status_code == 200, r.get_json()
+        assert User.query.get(renamer.id).username == "Renamer"
+        assert _former_handles(renamer.id) == []
+
+    def test_rejected_request_leaves_no_history(self, app):
+        """The history is written after every field check: a request that
+        renames and fails on a later field changes nothing."""
+        renamer = _publisher("renamer")
+        client = app.test_client()
+        _login(client, renamer.id)
+        r = client.put("/api/dashboard/user", json={
+            "username": "renamed", "default_privacy_level": "bogus"})
+        assert r.status_code == 400
+        _db.session.rollback()
+        assert User.query.get(renamer.id).username == "renamer"
+        assert _former_handles(renamer.id) == []
+
+    def test_rename_without_public_writing_reserves_nothing(self, app):
+        """A handle nobody could reach leaves no redirect and no
+        reservation: the next account may have it."""
+        private = User(username="private", default_ai_usage="chat")
+        squatter = User(username="squatter", default_ai_usage="chat")
+        _db.session.add_all([private, squatter])
+        _db.session.commit()
+
+        client = app.test_client()
+        _login(client, private.id)
+        for handle in ["nike", "openai", "x1"]:
+            r = client.put("/api/dashboard/user", json={"username": handle})
+            assert r.status_code == 200, r.get_json()
+        assert _former_handles(private.id) == []
+
+        from flask import g
+        g.pop("_login_user", None)
+        other = app.test_client()
+        _login(other, squatter.id)
+        r = other.put("/api/dashboard/user", json={"username": "private"})
+        assert r.status_code == 200, r.get_json()
+        assert User.query.get(squatter.id).username == "private"

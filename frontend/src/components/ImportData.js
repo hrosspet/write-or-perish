@@ -1,6 +1,14 @@
 import React, { useState, useEffect } from "react";
 import ReactDOM from "react-dom";
 import JSZip from "jszip";
+import {
+  ANALYZE_UPLOAD_TIMEOUT_MS,
+  stripDocxMedia,
+  FileReadError,
+  FILE_READ_MESSAGE,
+  describeAnalyzeError,
+  localFileError,
+} from "../utils/docxUpload";
 import { FaSpinner } from "react-icons/fa";
 import api from "../api";
 import PrivacySelector from "./PrivacySelector";
@@ -30,6 +38,8 @@ const cancelBtnStyle = {
 // Coarse stage labels shown while an import is in flight.
 const STAGE_LABELS = {
   extracting: "Extracting…",
+  preparing: "Preparing…",
+  uploading: "Uploading…",
   analyzing: "Analyzing…",
   importing: "Importing…",
 };
@@ -132,17 +142,28 @@ function ModalTitle({ children }) {
   );
 }
 
-// Extract the conversations.json blob from a Claude/ChatGPT export zip in
-// the browser, so the full (potentially multi-GB) export with images/audio
-// never has to traverse the network.
+// Extract the conversation files from a Claude/ChatGPT export zip in the
+// browser, so the full (potentially multi-GB) export with images/audio
+// never has to traverse the network. Returns a list of {blob, name}, one per
+// file to upload; the server concatenates them in this order.
+// With `includeExtras` (ChatGPT only), "sectioned_conversations.json" and
+// "group_chats.json" are also returned, after the conversation files, as
+// their own parts; the server tells parts apart by name.
 //
 // Entry matching is intentionally flexible:
-//   1. Prefer a file entry whose name ends with "conversations.json".
+//   1. Prefer every file entry whose basename is exactly "conversations.json"
+//      or a numbered shard "conversations-<digits>.json" (ChatGPT exports
+//      are split this way), sorted by name. Other names such as
+//      "sectioned_conversations.json" or "shared_conversations.json" and
+//      macOS "__MACOSX/._conversations.json" files do not match.
 //   2. Otherwise fall back to the largest .json entry whose parsed
 //      top-level value is an array (the export's conversation list).
 // Throws an Error with a `.userMessage` if no suitable entry is found or
 // the zip cannot be read.
-async function extractConversationsBlob(file) {
+const CONVERSATION_FILE_RE = /(^|\/)conversations(-\d+)?\.json$/;
+const EXTRA_FILE_RE = /(^|\/)(sectioned_conversations|group_chats)\.json$/;
+
+async function extractConversationFiles(file, { includeExtras = false } = {}) {
   let zip;
   try {
     zip = await JSZip.loadAsync(file);
@@ -154,9 +175,23 @@ async function extractConversationsBlob(file) {
 
   const entries = Object.values(zip.files).filter((f) => !f.dir);
 
-  const named = entries.find((f) => f.name.endsWith("conversations.json"));
-  if (named) {
-    return named.async("blob");
+  const named = entries
+    .filter((f) => CONVERSATION_FILE_RE.test(f.name))
+    .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  if (named.length) {
+    if (includeExtras) {
+      named.push(
+        ...entries
+          .filter((f) => EXTRA_FILE_RE.test(f.name))
+          .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+      );
+    }
+    return Promise.all(
+      named.map(async (f) => ({
+        blob: await f.async("blob"),
+        name: f.name.split("/").pop(),
+      }))
+    );
   }
 
   // Fallback: among .json entries, pick the largest whose top-level
@@ -175,7 +210,10 @@ async function extractConversationsBlob(file) {
       const text = await entry.async("string");
       const parsed = JSON.parse(text);
       if (Array.isArray(parsed)) {
-        return new Blob([text], { type: "application/json" });
+        return [{
+          blob: new Blob([text], { type: "application/json" }),
+          name: "conversations.json",
+        }];
       }
     } catch {
       // Not valid JSON or not an array — keep looking.
@@ -198,8 +236,15 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
   const [importStage, setImportStage] = useState(null);
   // {done, total} while a background import task runs (Twitter)
   const [importProgress, setImportProgress] = useState(null);
+  const [uploadPercent, setUploadPercent] = useState(null);
+  const uploadDetail =
+    importStage === "uploading" && uploadPercent != null ? ` ${uploadPercent} %` : null;
   const [importPrivacy, setImportPrivacy] = useState("private");
   const [importAiUsage, setImportAiUsage] = useState("none");
+  // "Whose writing is this?" for a PDF: null until the user picks
+  // "mine" or "someone_else". No default: a wrong guess would feed
+  // another author's text into the user's profile.
+  const [whoseWriting, setWhoseWriting] = useState(null);
   const [error, setError] = useState("");
 
   const [showTwitterImportDialog, setShowTwitterImportDialog] = useState(false);
@@ -219,10 +264,15 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
   // confirm with on_deleted set to the user's choice.
   const [deletedPrompt, setDeletedPrompt] = useState(null);
 
-  // Confirm-response stats ({ created, skipped, restored, ... }) shown
+  // Confirm-response stats ({ created, skipped, restored, empty, ... }) shown
   // as a summary after the import finishes; dismissing it reloads the
   // page so the new nodes appear.
   const [importResult, setImportResult] = useState(null);
+
+  // An analyzed PDF (always a single upload) asks whose writing it is.
+  const pdfFile = importFiles?.files?.find((f) => f.source_format === "pdf") || null;
+  const hasPdf = !!pdfFile;
+  const savingReference = hasPdf && whoseWriting === "someone_else";
 
   // Backdrop/Escape dismiss for the confirm-dialog modals: ignored while
   // a request is in flight or while a prompt modal is stacked on top
@@ -256,35 +306,71 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [showPicker]);
 
-  const handleImportFile = (event) => {
-    const file = event.target.files[0];
-    if (!file) return;
+  const handleImportFile = async (event) => {
+    const picked = event.target.files[0];
+    // Reset so picking the same file again after an error fires onChange
+    event.target.value = "";
+    if (!picked) return;
+
+    setShowPicker(false);
+    const localError = localFileError(picked);
+    if (localError) {
+      setError(localError);
+      return;
+    }
+    setError("");
+    setWhoseWriting(null);
+    setImporting(true);
+    setImportStage("preparing");
+    setUploadPercent(null);
+    // The server never reads pictures; leave them out of the upload.
+    // Always upload an in-memory copy (a PDF or zip too): a file picked from
+    // a cloud app on Android can fail when it is read again during upload.
+    let file;
+    try {
+      file = await stripDocxMedia(picked);
+    } catch (err) {
+      console.error("Could not read the picked file:", err);
+      setError(err instanceof FileReadError ? err.message : FILE_READ_MESSAGE);
+      setImporting(false);
+      setImportStage(null);
+      setUploadPercent(null);
+      return;
+    }
 
     const formData = new FormData();
     formData.append("zip_file", file);
 
-    setImporting(true);
-    setImportStage("analyzing");
-    setShowPicker(false);
+    setImportStage("uploading");
+    setUploadPercent(0);
     api.post("/import/analyze", formData, {
-      headers: { "Content-Type": "multipart/form-data" }
+      headers: { "Content-Type": "multipart/form-data" },
+      timeout: ANALYZE_UPLOAD_TIMEOUT_MS,
+      onUploadProgress: (e) => {
+        if (!e.total) return;
+        setUploadPercent(Math.min(100, Math.round((e.loaded / e.total) * 100)));
+        if (e.loaded >= e.total) setImportStage("analyzing");
+      },
     })
       .then((response) => {
         setImportFiles(response.data);
         setShowImportDialog(true);
         setImporting(false);
         setImportStage(null);
+        setUploadPercent(null);
       })
       .catch((err) => {
         console.error("Error analyzing import file:", err);
-        setError(err.response?.data?.error || "Error analyzing import file. Please try again.");
+        setError(describeAnalyzeError(err, picked));
         setImporting(false);
         setImportStage(null);
+        setUploadPercent(null);
       });
   };
 
   const handleConfirmImport = (onDeleted) => {
     if (!importFiles) return;
+    if (hasPdf && !whoseWriting) return;
 
     setImporting(true);
     setImportStage("importing");
@@ -294,6 +380,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
       date_ordering: dateOrdering,
       privacy_level: importPrivacy,
       ai_usage: importAiUsage,
+      ...(hasPdf ? { whose_writing: whoseWriting } : {}),
       ...(onDeleted ? { on_deleted: onDeleted } : {})
     })
       .then((response) => {
@@ -319,6 +406,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
   const handleCancelImport = () => {
     setShowImportDialog(false);
     setImportFiles(null);
+    setWhoseWriting(null);
   };
 
   const handleTwitterImportFile = (event) => {
@@ -426,9 +514,9 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
     setImportStage("extracting");
     setShowPicker(false);
 
-    let conversationsBlob;
+    let conversationFiles;
     try {
-      conversationsBlob = await extractConversationsBlob(file);
+      conversationFiles = await extractConversationFiles(file);
     } catch (err) {
       console.error("Error reading Claude export zip:", err);
       setError(
@@ -442,7 +530,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
     }
 
     const formData = new FormData();
-    formData.append("conversations_file", conversationsBlob, "conversations.json");
+    conversationFiles.forEach((f) => formData.append("conversations_file", f.blob, f.name));
 
     setImportStage("analyzing");
     api.post("/import/claude/analyze", formData, {
@@ -507,9 +595,9 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
     setImportStage("extracting");
     setShowPicker(false);
 
-    let conversationsBlob;
+    let conversationFiles;
     try {
-      conversationsBlob = await extractConversationsBlob(file);
+      conversationFiles = await extractConversationFiles(file, { includeExtras: true });
     } catch (err) {
       console.error("Error reading ChatGPT export zip:", err);
       setError(
@@ -523,7 +611,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
     }
 
     const formData = new FormData();
-    formData.append("conversations_file", conversationsBlob, "conversations.json");
+    conversationFiles.forEach((f) => formData.append("conversations_file", f.blob, f.name));
 
     setImportStage("analyzing");
     api.post("/import/chatgpt/analyze", formData, {
@@ -539,12 +627,10 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
         console.error("Error analyzing ChatGPT import:", err);
         const status = err.response?.status;
         const data = err.response?.data;
-        const backendMsg = data?.error || data?.details;
+        const backendMsg = data?.error;
         let msg;
         if (backendMsg) {
-          msg = data?.details && data?.error
-            ? `${data.error}: ${data.details}`
-            : backendMsg;
+          msg = backendMsg;
         } else if (status === 413) {
           msg = "conversations.json is too large to upload. Please contact support.";
         } else if (status) {
@@ -598,8 +684,32 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
     <div>
       {error && <div style={{ color: "var(--accent)", marginBottom: "0.8rem", fontSize: "0.88rem" }}>{error}</div>}
 
+      {/* A PDF saved as someone else's writing: a Reference, not entries */}
+      {importResult && importResult.saved_as === "reference" && (
+        <ModalShell onDismiss={() => window.location.reload()}>
+          <ModalTitle>{importResult.created ? "Saved as a Reference" : "Already in your References"}</ModalTitle>
+          <p style={{ fontFamily: "var(--sans)", fontWeight: 300, fontSize: "0.92rem", color: "var(--text-secondary)", margin: "0 0 1.4rem" }}>
+            {importResult.created
+              ? "The PDF is saved in your References. It is searchable, you can listen to it on its page, and it stays out of your profile."
+              : "This PDF was saved as a Reference before; nothing new was added."}
+            {importResult.truncated && " It was longer than a Reference holds, so only its beginning was saved."}
+          </p>
+          <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
+            <button
+              onClick={() => { window.location.href = `/references/${importResult.reference_id}`; }}
+              style={primaryBtnStyle}
+            >
+              Open the Reference
+            </button>
+            <button onClick={() => window.location.reload()} style={cancelBtnStyle}>
+              OK
+            </button>
+          </div>
+        </ModalShell>
+      )}
+
       {/* Post-import summary: what was actually imported vs skipped */}
-      {importResult && (
+      {importResult && importResult.saved_as !== "reference" && (
         <ModalShell onDismiss={() => window.location.reload()}>
           <ModalTitle>Import Finished</ModalTitle>
           <div style={{ display: "flex", gap: "2.4rem", marginBottom: "1.3rem" }}>
@@ -608,6 +718,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
               { label: "Restored", value: importResult.restored || 0, highlight: importResult.restored > 0 },
               { label: "Updated", value: importResult.updated || 0, highlight: importResult.updated > 0 },
               { label: "Skipped", value: importResult.skipped || 0, highlight: false },
+              { label: "No text", value: importResult.empty || 0, highlight: false },
             ].filter((s) => s.label === "Imported" || s.value > 0).map((s) => (
               <div key={s.label}>
                 <div style={{
@@ -644,6 +755,12 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
               {importResult.skipped > 0 && (
                 <p style={{ fontFamily: "var(--sans)", fontWeight: 300, fontSize: "0.88rem", color: "var(--text-secondary)", margin: "0 0 1.4rem" }}>
                   Skipped items were already imported and left untouched.
+                </p>
+              )}
+              {importResult.empty > 0 && (
+                <p style={{ fontFamily: "var(--sans)", fontWeight: 300, fontSize: "0.88rem", color: "var(--text-secondary)", margin: "0 0 1.4rem" }}>
+                  Posts with no text — usually media-only tweets — were not
+                  imported. There was nothing to write.
                 </p>
               )}
             </>
@@ -727,7 +844,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
               // takes a few seconds). The .spin transform keeps animating on
               // the compositor thread even while extraction is busy.
               <div style={{ ...importLabelStyle, opacity: 1, cursor: "default", color: "var(--accent)" }}>
-                <ImportSpinner stage={importStage} fallback="Working…" />
+                <ImportSpinner stage={importStage} fallback="Working…" detail={uploadDetail} />
               </div>
             ) : (
               <>
@@ -740,8 +857,8 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
                   <input type="file" accept=".zip" onChange={handleChatGPTImportFile} style={{ display: "none" }} />
                 </label>
                 <label style={importLabelStyle}>
-                  Import Markdown (e.g. Obsidian)
-                  <input type="file" accept=".zip" onChange={handleImportFile} style={{ display: "none" }} />
+                  Import Markdown, Word (.docx) or PDF
+                  <input type="file" accept=".zip,.docx,.doc,.pdf" onChange={handleImportFile} style={{ display: "none" }} />
                 </label>
                 <label style={importLabelStyle}>
                   Import Tweets
@@ -765,6 +882,11 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
                 onClick={() => setShowPicker(!showPicker)}
                 onMouseEnter={() => setHovered(true)}
                 onMouseLeave={() => setHovered(false)}
+                // Keyboard focus shows the hover style: the global
+                // `button { outline: none }` leaves a borderless button
+                // (the Welcome page's) with no focus indication otherwise.
+                onFocus={(e) => { if (e.target.matches(':focus-visible')) setHovered(true); }}
+                onBlur={() => setHovered(false)}
                 disabled={importing}
                 style={{
                   ...btnStyle,
@@ -774,7 +896,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
                 }}
               >
                 {importing
-                  ? <ImportSpinner stage={importStage} fallback="Analyzing…" />
+                  ? <ImportSpinner stage={importStage} fallback="Analyzing…" detail={uploadDetail} />
                   : (buttonLabel || "Import Data")}
               </button>
             )}
@@ -829,13 +951,84 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
         <ModalShell onDismiss={dismissGuard(handleCancelImport)} maxWidth="520px">
           <ModalTitle>Confirm Import</ModalTitle>
           <p style={{ color: "var(--text-secondary)", fontFamily: "var(--sans)", fontWeight: 300 }}>
-            Found <strong style={{ color: "var(--text-primary)" }}>{importFiles.total_files}</strong> .md file{importFiles.total_files !== 1 ? 's' : ''}
+            Found <strong style={{ color: "var(--text-primary)" }}>{importFiles.total_files}</strong> document{importFiles.total_files !== 1 ? 's' : ''}
             ({importFiles.total_size.toLocaleString()} bytes)
           </p>
           <p style={{ color: "var(--text-secondary)", fontFamily: "var(--sans)", fontWeight: 300 }}>
             Estimated tokens: <strong style={{ color: "var(--text-primary)" }}>{importFiles.total_tokens.toLocaleString()}</strong>
           </p>
+          {importFiles.errors && importFiles.errors.length > 0 && (
+            <div style={{ color: "var(--text-secondary)", fontFamily: "var(--sans)", fontWeight: 300 }}>
+              <p>These files could not be imported and are left out:</p>
+              <ul>
+                {/* One line per message, so many PDFs in one zip don't
+                    repeat the same sentence */}
+                {Object.entries(importFiles.errors.reduce((byMessage, e) => {
+                  (byMessage[e.error] = byMessage[e.error] || []).push(e.name);
+                  return byMessage;
+                }, {})).map(([message, names]) => (
+                  <li key={message}>{names.join(", ")}: {message}</li>
+                ))}
+              </ul>
+            </div>
+          )}
 
+          {hasPdf && (
+            <p style={{ color: "var(--text-secondary)", fontFamily: "var(--sans)", fontWeight: 300 }}>
+              {pdfFile.pages} page{pdfFile.pages !== 1 ? "s" : ""}
+              {pdfFile.chapters > 0 ? `, ${pdfFile.chapters} chapters from its bookmarks` : ""}
+            </p>
+          )}
+
+          {hasPdf && (
+            <div role="radiogroup" aria-labelledby="whose-writing-label" style={{ marginTop: "15px", marginBottom: "15px" }}>
+              <div id="whose-writing-label" style={{
+                marginBottom: "10px",
+                fontFamily: "var(--sans)",
+                fontWeight: 400,
+                fontSize: "0.75rem",
+                textTransform: "uppercase",
+                letterSpacing: "0.12em",
+                color: "var(--text-muted)"
+              }}>
+                Whose writing is this?
+              </div>
+              <label style={{ display: "block", marginBottom: "8px", cursor: "pointer", color: "var(--text-secondary)", fontFamily: "var(--sans)", fontWeight: 300 }}>
+                <input
+                  type="radio"
+                  name="whose_writing"
+                  value="mine"
+                  checked={whoseWriting === "mine"}
+                  onChange={(e) => setWhoseWriting(e.target.value)}
+                  style={{ marginRight: "8px" }}
+                />
+                Mine: import it as my own entries
+              </label>
+              <label style={{ display: "block", cursor: "pointer", color: "var(--text-secondary)", fontFamily: "var(--sans)", fontWeight: 300 }}>
+                <input
+                  type="radio"
+                  name="whose_writing"
+                  value="someone_else"
+                  checked={whoseWriting === "someone_else"}
+                  onChange={(e) => setWhoseWriting(e.target.value)}
+                  style={{ marginRight: "8px" }}
+                />
+                Someone else's: save it as a Reference
+              </label>
+              {savingReference && (
+                <p style={{ color: "var(--text-muted)", fontFamily: "var(--sans)", fontWeight: 300, fontSize: "0.85rem", margin: "10px 0 0" }}>
+                  A Reference is searchable and you can listen to it, chapter
+                  by chapter. It isn't your writing, so it stays out of your
+                  profile.
+                  {pdfFile.reference?.truncated && (
+                    ` This PDF is longer than a Reference holds: only the first ${(pdfFile.reference.char_cap || 0).toLocaleString()} characters are saved.`
+                  )}
+                </p>
+              )}
+            </div>
+          )}
+
+          {!savingReference && (<>
           <div style={{ marginTop: "15px", marginBottom: "15px" }}>
             <label style={{
               display: "block",
@@ -912,19 +1105,28 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
             onPrivacyChange={setImportPrivacy}
             onAIUsageChange={setImportAiUsage}
           />
+          </>)}
 
           <div style={{ display: "flex", gap: "10px", marginTop: "15px" }}>
-            <button
-              onClick={() => handleConfirmImport()}
-              disabled={importing}
-              style={{
-                ...primaryBtnStyle,
-                cursor: importing ? "not-allowed" : "pointer",
-                opacity: importing ? 0.6 : 1
-              }}
-            >
-              {importing ? <ImportSpinner stage={importStage} fallback="Importing…" /> : "Confirm Import"}
-            </button>
+            {(() => {
+              // A PDF needs an answer first (no default, see whoseWriting)
+              const confirmDisabled = importing || (hasPdf && !whoseWriting);
+              return (
+                <button
+                  onClick={() => handleConfirmImport()}
+                  disabled={confirmDisabled}
+                  style={{
+                    ...primaryBtnStyle,
+                    cursor: confirmDisabled ? "not-allowed" : "pointer",
+                    opacity: confirmDisabled ? 0.6 : 1
+                  }}
+                >
+                  {importing
+                    ? <ImportSpinner stage={importStage} fallback="Importing…" />
+                    : (savingReference ? "Save as Reference" : "Confirm Import")}
+                </button>
+              );
+            })()}
             <button
               onClick={handleCancelImport}
               disabled={importing}
@@ -1003,6 +1205,11 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
           <p style={{ color: "var(--text-muted)", fontFamily: "var(--sans)", fontWeight: 300, fontSize: "0.85rem" }}>
             Each conversation will be imported as a separate thread.
           </p>
+          {(chatGPTImportData.notices || []).map((notice, i) => (
+            <p key={i} style={{ color: "var(--text-secondary)", fontFamily: "var(--sans)", fontWeight: 300, fontSize: "0.9rem" }}>
+              {notice}
+            </p>
+          ))}
 
           <PrivacySelector
             privacyLevel={importPrivacy}

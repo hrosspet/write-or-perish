@@ -34,7 +34,7 @@ from backend.constants import SOFT_DELETE_GRACE_DAYS
 from backend.extensions import db
 from backend.models import (
     Node, NodeVersion, NodeTranscriptChunk, TTSChunk, Draft,
-    NodeContextArtifact,
+    NodeContextArtifact, ReferenceAction, Thread,
 )
 
 logger = get_task_logger(__name__)
@@ -55,6 +55,15 @@ def _full_purge(node):
     Draft.query.filter_by(llm_node_id=node.id).delete()
 
     NodeContextArtifact.query.filter_by(node_id=node.id).delete()
+    # What the reader did with the reply's recommendations (#352). Its
+    # FeedPick rows go with the node (ORM cascade); the actions are
+    # deleted rather than set to NULL, which would read as done outside
+    # any reply and count for other recommendations of the reference.
+    ReferenceAction.query.filter_by(node_id=node.id).delete()
+    # The thread's user-given name (root rows only; no-op elsewhere). Kept
+    # through the content wipe — it names the thread, whose replies may
+    # still be alive — and goes with the root's row.
+    Thread.query.filter_by(root_node_id=node.id).delete()
 
     Node.query.filter_by(linked_node_id=node.id).update(
         {"linked_node_id": None}
@@ -107,9 +116,14 @@ def cleanup_deleted_nodes():
         # Needs-action filter: content not yet wiped, OR no children
         # (purge-eligible). Excludes long-stable tombstones from per-day
         # re-scan.
+        # A node a "Delete all my writing" hid (#268) is the purge's: it
+        # comes back whole on a restore, or the purge deletes it with
+        # everything else the request hid.
+        from backend.utils.hidden_rows import hidden_ids
         candidates = (
             Node.query
             .filter(Node.deleted_at <= cutoff)
+            .filter(~Node.id.in_(hidden_ids("node")))
             .filter(or_(
                 Node.content.isnot(None),
                 ~has_any_child,

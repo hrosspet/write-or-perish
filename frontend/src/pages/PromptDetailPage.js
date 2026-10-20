@@ -5,9 +5,11 @@ import api from '../api';
 import VersionHistoryDrawer from '../components/VersionHistoryDrawer';
 import useSubmitShortcut from '../hooks/useSubmitShortcut';
 import { formatDate as formatDateShared } from '../utils/date';
+import { useToast } from '../contexts/ToastContext';
 
 export default function PromptDetailPage() {
   const { promptKey } = useParams();
+  const { addToast } = useToast();
   const [prompt, setPrompt] = useState(null);
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState(false);
@@ -53,6 +55,9 @@ export default function PromptDetailPage() {
       setEditing(false);
     } catch (err) {
       console.error('Failed to save prompt:', err);
+      // The backend refuses a prompt whose {user_export} is malformed
+      // or uncapped on a non-Pro plan; its message says what to change.
+      addToast(err?.response?.data?.error || 'Failed to save prompt.', 10000);
     }
     setSaving(false);
   };

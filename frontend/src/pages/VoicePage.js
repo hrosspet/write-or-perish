@@ -1,15 +1,18 @@
-import React, { useState, useCallback, useRef, useEffect } from 'react';
-import { useSearchParams, useNavigate } from 'react-router-dom';
+import React, { useState, useCallback, useRef, useEffect, useId } from 'react';
+import { useSearchParams, useNavigate, Link } from 'react-router-dom';
 import { FaPlay, FaPause, FaUndo, FaRedo, FaKeyboard } from 'react-icons/fa';
 import { useVoiceSession } from '../hooks/useVoiceSession';
+import { useAsyncTaskPolling } from '../hooks/useAsyncTaskPolling';
 import { useUser } from '../contexts/UserContext';
 import { useInterruptedRecovery } from '../hooks/useInterruptedRecovery';
 import RecoveryBanner from '../components/RecoveryBanner';
 import OfflineBanner from '../components/OfflineBanner';
 import ProposalInline from '../components/ProposalInline';
 import { useToast } from '../contexts/ToastContext';
-import { isSpendBlocked, notifySpendBlocked } from '../utils/spendCap';
+import { isSpendBlocked, notifySpendBlocked, spendCapToastMessage } from '../utils/spendCap';
+import { isAiAllowed } from '../utils/aiUsage';
 import api from '../api';
+import { entryQuestion, EVERYDAY_QUESTION } from '../utils/entryPrompt';
 
 // Chain-chapter numerals — turns cap at a handful of nodes (tool-round
 // budget), so a static list covers it.
@@ -182,7 +185,218 @@ function Spinner() {
   );
 }
 
+const containerStyle = {
+  display: 'flex',
+  flexDirection: 'column',
+  alignItems: 'center',
+  justifyContent: 'center',
+  minHeight: 'calc(100vh - 120px)',
+  padding: '40px 24px',
+  background: 'radial-gradient(ellipse at 50% 40%, rgba(196,149,106,0.06) 0%, transparent 70%)',
+  position: 'relative',
+};
+
+// The Glean button under the record button (#435): a labeled pill, so
+// it never reads as a second record button.
+const gleanButtonStyle = (enabled) => ({
+  display: 'inline-flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  gap: '8px',
+  minWidth: '150px',
+  minHeight: '44px',
+  marginTop: '22px',
+  padding: '10px 24px',
+  borderRadius: '999px',
+  border: '1px solid var(--accent)',
+  background: 'var(--accent-subtle)',
+  color: 'var(--accent)',
+  fontFamily: 'var(--sans)',
+  fontSize: '0.95rem',
+  fontWeight: 400,
+  cursor: enabled ? 'pointer' : 'default',
+  opacity: enabled ? 1 : 0.5,
+});
+
+// Shown instead of the record button when AI usage keeps the account (a
+// fresh thread) or the thread Voice would continue away from AI. Voice mode
+// sends what is said to a model to get a reply, so it does not record
+// there. Same text as the server's refusal (backend/utils/llm_nodes.py) and
+// the iPhone app.
+export const VOICE_NEEDS_AI_TEXT = {
+  account: "Voice mode needs AI to listen and reply. Your Default AI usage "
+    + "is set to None, so Loore keeps your entries away from AI. You can "
+    + "change it in Account settings.",
+  thread: "Voice mode needs AI to listen and reply. AI usage in this thread "
+    + "is set to None, so Loore keeps it away from AI. You can change it "
+    + "when you edit the thread's entries, and the default for new entries "
+    + "in Account settings.",
+};
+
+const needsAiLinkStyle = {
+  fontFamily: 'var(--sans)',
+  fontSize: '0.9rem',
+  fontWeight: 300,
+  color: 'var(--accent)',
+  textDecoration: 'none',
+  borderBottom: '1px solid var(--border)',
+  paddingBottom: '2px',
+};
+
+export function VoiceNeedsAi({ scope, threadId }) {
+  return (
+    <div style={containerStyle}>
+      <p style={{
+        fontFamily: 'var(--serif)',
+        fontStyle: 'italic',
+        fontSize: 'clamp(1.2rem, 2.5vw, 1.6rem)',
+        fontWeight: 300,
+        color: 'var(--text-muted)',
+        margin: '0 0 32px 0',
+        textAlign: 'center',
+      }}>
+        Voice mode needs AI
+      </p>
+      <EcgAnimation active={false} dim={true} showScanline={false} />
+      <p style={{
+        fontFamily: 'var(--sans)',
+        fontSize: '0.95rem',
+        fontWeight: 300,
+        color: 'var(--text-secondary)',
+        lineHeight: 1.7,
+        maxWidth: '380px',
+        margin: '0 0 28px 0',
+        textAlign: 'center',
+      }}>
+        {VOICE_NEEDS_AI_TEXT[scope] || VOICE_NEEDS_AI_TEXT.account}
+      </p>
+      <div style={{ display: 'flex', gap: '24px', flexWrap: 'wrap', justifyContent: 'center' }}>
+        {scope === 'thread' && threadId && (
+          <Link to={`/node/${threadId}`} style={needsAiLinkStyle}>
+            Back to the thread
+          </Link>
+        )}
+        <Link to="/account#ai-usage" style={needsAiLinkStyle}>
+          Account settings
+        </Link>
+      </div>
+    </div>
+  );
+}
+
+// Said on the banner of an interrupted recording where Voice mode is
+// blocked and finishing it gets no reply: continuing reopens the mic only
+// to finish that recording, and finalize saves it as an entry without a
+// reply (backend VOICE_REPLY_SKIPPED_AI_USAGE, shown as a toast after).
+export const FINISH_WITHOUT_REPLY_TEXT = "AI usage is set to None, so Loore "
+  + "won't reply. If you continue, your recording is saved as an entry when "
+  + "you finish.";
+
+// GET /voice/availability for the thread *parent* continues (none: the
+// account's Default AI usage decides): null when Voice may record there and
+// reply, else the scope that keeps it away from AI. Rejects when the server
+// cannot be asked.
+function fetchVoiceRefusal(parent) {
+  return api.get('/voice/availability', parent != null ? { params: { parent } } : {})
+    .then((res) => {
+      const data = res.data || {};
+      if (data.allowed !== false) return null;
+      return data.scope === 'thread' ? 'thread' : 'account';
+    });
+}
+
+// Voice mode records only where a reply may follow: a fresh thread when the
+// account's Default AI usage lets AI read it, a continued one (?parent= /
+// ?resume=) when the server says the thread does (GET /voice/availability,
+// the rule streaming init applies). A refusal while recording starts (a
+// setting changed elsewhere) leads to the same message.
+//
+// An interrupted recording is still offered where Voice mode is blocked:
+// this page is the web's only place to finish or discard one (Voice or
+// dictation), so the check runs here and its banner comes before the block,
+// as in the iPhone app.
 export default function VoicePage() {
+  const [searchParams] = useSearchParams();
+  const { user } = useUser();
+  const threadId = searchParams.get('parent') || searchParams.get('resume');
+  // undefined while the server is asked; null: record; else the scope.
+  const [refusal, setRefusal] = useState(threadId ? undefined : null);
+  const recovery = useInterruptedRecovery();
+  // Continue was chosen on an interrupted recording while blocked: the
+  // session stays mounted to finish it, and its ready phase shows the block.
+  const [finishing, setFinishing] = useState(false);
+
+  useEffect(() => {
+    if (!threadId) {
+      setRefusal(null);
+      return undefined;
+    }
+    let cancelled = false;
+    setRefusal(undefined);
+    fetchVoiceRefusal(threadId)
+      .then((scope) => {
+        if (!cancelled) setRefusal(scope);
+      })
+      .catch(() => {
+        // Offline, or a server without the route: record as before; the
+        // server still refuses a turn it may not reply to (init's 403
+        // brings this message back).
+        if (!cancelled) setRefusal(null);
+      });
+    return () => { cancelled = true; };
+  }, [threadId]);
+
+  const accountRefuses = !threadId && !!user && !isAiAllowed(user.default_ai_usage);
+  const shown = accountRefuses ? 'account' : refusal;
+  if (shown === undefined || (shown && !recovery.checked)) {
+    return <div style={containerStyle} />;
+  }
+  if (shown && !recovery.interruptedDraft && !finishing) {
+    return <VoiceNeedsAi scope={shown} threadId={threadId} />;
+  }
+  return (
+    <VoiceSession
+      recovery={recovery}
+      blocked={shown || null}
+      threadId={threadId}
+      onAiUsageRefused={setRefusal}
+      onFinishInterrupted={() => setFinishing(true)}
+    />
+  );
+}
+
+// Whether finishing *draft* (an interrupted recording) gets a reply, asked
+// only where Voice mode is blocked so the banner can say what Continue leads
+// to. Finalize applies the Voice rule to the thread the recording continues:
+// the draft's own parent, else the page's (useVoiceSession keeps it), else
+// the account's Default AI usage. undefined while asking (or no draft);
+// null: a reply follows; else the scope that keeps it away from AI.
+function useFinishRefusal(draft, pageParentId) {
+  const parent = draft ? (draft.parent_id ?? pageParentId ?? null) : null;
+  const [finishRefusal, setFinishRefusal] = useState(undefined);
+  useEffect(() => {
+    setFinishRefusal(undefined);
+    if (!draft) return undefined;
+    let cancelled = false;
+    fetchVoiceRefusal(parent)
+      .then((scope) => {
+        if (!cancelled) setFinishRefusal(scope);
+      })
+      .catch(() => {
+        // Unknown: no note. Finalize still refuses a reply AI usage keeps
+        // out, and says so in its toast.
+        if (!cancelled) setFinishRefusal(null);
+      });
+    return () => { cancelled = true; };
+  }, [draft, parent]);
+  return finishRefusal;
+}
+
+// *blocked*: the scope VoicePage blocks Voice mode for (null when it may
+// record). The session is mounted while blocked only to finish an
+// interrupted recording; its ready phase then shows the block, never the
+// record button, and a ?resume= reply is not played.
+function VoiceSession({ recovery, blocked, threadId, onAiUsageRefused, onFinishInterrupted }) {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const resumeId = searchParams.get('resume');
@@ -191,7 +405,8 @@ export default function VoicePage() {
   const {
     interruptedDraft, checked: recoveryChecked,
     handleDiscard, clearInterrupted,
-  } = useInterruptedRecovery();
+  } = recovery;
+  const finishRefusal = useFinishRefusal(blocked ? interruptedDraft : null, parentId);
 
   const [toolCallsMeta, setToolCallsMeta] = useState(null);
   const [llmContent, setLlmContent] = useState(null);
@@ -199,22 +414,55 @@ export default function VoicePage() {
   const setThreadParentIdRef = useRef(null);
   const lastLlmNodeIdRef = useRef(null);
 
-  const { user } = useUser();
+  const { user, markHasOwnEntries } = useUser();
   const selectedModel = user?.preferred_model || null;
+  // A fresh session asks the welcome question until the user's first entry
+  // (#391); a continued thread keeps the everyday one.
+  const question = threadId ? EVERYDAY_QUESTION : entryQuestion(user);
+
+  // Glean (#435): a session opened from the Glean card (or continuing a
+  // thread started there) shows a Glean button under the record button
+  // once the thread has a recorded message. A glean is a live call; the
+  // page waits for it ("Gleaning") and then opens the gleaning in text
+  // mode. It is never read aloud.
+  const gleanMode = searchParams.get('glean') === '1' && !!user?.glean_enabled;
+  // A continued thread has its messages already; a fresh one gets its
+  // first when the server saves the recording.
+  const [hasMessage, setHasMessage] = useState(!!threadId);
+  // The node a glean starts under: the last finished reply (or the node
+  // the session opened on), or the turn's failed reply. Null while a
+  // turn's reply is still coming.
+  const [gleanAnchor, setGleanAnchor] = useState(
+    !resumeId && parentId ? Number(parentId) : null);
+  const [gleanStarting, setGleanStarting] = useState(false);
+  const [gleanNodeId, setGleanNodeId] = useState(null);
+  const gleanDescId = useId();
+  const getThreadParentIdRef = useRef(null);
 
   const {
     phase, isStopping, hasError, isOnline, streaming, audio, handleStart, handleStop,
     handleContinue, handleResumeSession, handleCancelProcessing, setThreadParentId,
-    handleResumeRecording,
+    handleResumeRecording, getThreadParentId,
   } = useVoiceSession({
     apiEndpoint: '/voice',
     ttsTitle: 'Voice',
-    initialLlmNodeId: resumeId ? Number(resumeId) : null,
+    initialLlmNodeId: resumeId && !blocked ? Number(resumeId) : null,
     initialParentId: parentId ? Number(parentId) : null,
     model: selectedModel,
     aiUsage: user?.default_ai_usage || 'none',
-    onLLMComplete: (nodeId, content, isResume) => {
+    entry: gleanMode ? 'glean' : null,
+    onAiUsageRefused,
+    // The server saved the recording as an entry (#391). This does not wait
+    // for the reply: if it fails or is skipped the entry still exists.
+    onEntrySaved: () => {
+      markHasOwnEntries();
+      setHasMessage(true);
+      // A new turn: Glean waits for its reply, so the glean reads it too.
+      setGleanAnchor(null);
+    },
+    onLLMComplete: (nodeId, content) => {
       lastLlmNodeIdRef.current = nodeId;
+      setGleanAnchor(getThreadParentIdRef.current?.() ?? nodeId);
       setLlmContent(content);
       // ProposalInline handles its own parsing + apply-status derivation
       // from tool_calls_meta. We just feed it the raw content + meta.
@@ -224,14 +472,87 @@ export default function VoicePage() {
         }
       }).catch(() => { /* non-fatal */ });
     },
+    // The reply failed: no reply is coming, so Glean stops waiting for it.
+    // The glean starts under the failed reply, which the server turns
+    // into its parent, as for the Glean button under a failed reply in
+    // text mode: it reads the user's message, never the failure.
+    onLLMFailed: (nodeId) => setGleanAnchor(nodeId),
   });
 
   setThreadParentIdRef.current = setThreadParentId;
+  getThreadParentIdRef.current = getThreadParentId;
 
   const voiceReset = useCallback(() => {
     setLlmContent(null);
     setToolCallsMeta(null);
   }, []);
+
+  // The glean runs live at the provider; this page waits for it and then
+  // opens it in text mode (finished or failed: the thread page shows
+  // either). Never handed to the voice session, so it is never spoken.
+  const { status: gleanStatus, error: gleanPollError } = useAsyncTaskPolling(
+    gleanNodeId ? `/nodes/${gleanNodeId}/llm-status` : null,
+    { enabled: !!gleanNodeId, interval: 2000 },
+  );
+  // A poll that gives up (errors, or the 30-minute cap) opens the thread
+  // page too, which keeps watching the glean: the Voice screen never
+  // stays on "Gleaning" with its buttons disabled.
+  useEffect(() => {
+    if (gleanNodeId && (gleanPollError
+        || ['completed', 'failed', 'cancelled'].includes(gleanStatus))) {
+      navigate(`/node/${gleanNodeId}`);
+    }
+  }, [gleanNodeId, gleanStatus, gleanPollError, navigate]);
+
+  const gleaning = gleanStarting || !!gleanNodeId;
+  const gleanReady = !!gleanAnchor && !gleaning && isOnline;
+  const handleGlean = () => {
+    if (!gleanReady) return;
+    if (isSpendBlocked()) {
+      notifySpendBlocked();
+      addToast(spendCapToastMessage('glean'), 8000);
+      return;
+    }
+    // The voice reply stops, its queue too (the player is global, so a
+    // paused queue would follow the user to the gleaning's page).
+    audio.stop();
+    setGleanStarting(true);
+    api.post(`/read/from-node/${gleanAnchor}`, {})
+      .then((res) => {
+        setGleanNodeId(res.data.llm_node_id || null);
+        if (!res.data.llm_node_id && res.data.prompt_node_id) {
+          navigate(`/node/${res.data.prompt_node_id}`);
+        }
+      })
+      .catch((err) => {
+        if (err?.response?.status !== 402) {
+          addToast(err?.response?.data?.error || 'Could not start the glean.', 6000);
+        }
+      })
+      .finally(() => setGleanStarting(false));
+  };
+  // Under the record button, once the thread has a recorded message. No
+  // tooltip on the voice screen (Peter, 2026-10-14): the button is named
+  // by its label, and screen readers still get the description (as the
+  // app's VoiceOver hint), from text that is not shown.
+  const gleanButton = gleanMode && hasMessage ? (
+    <>
+      <button
+        type="button"
+        onClick={handleGlean}
+        disabled={!gleanReady}
+        aria-busy={gleaning}
+        aria-describedby={gleanDescId}
+        style={gleanButtonStyle(gleanReady)}
+      >
+        {gleaning ? (<><Spinner /><span>Gleaning</span></>) : 'Glean'}
+      </button>
+      <span id={gleanDescId} className="sr-only">
+        {gleanAnchor || gleaning ? "Find today's tweets worth your time, from what you have said so far"
+          : "Glean waits for Loore's reply to your last message"}
+      </span>
+    </>
+  ) : null;
 
   const displayTime = audio.cumulativeTime || 0;
   const displayDuration = audio.totalDuration || 0;
@@ -258,17 +579,6 @@ export default function VoicePage() {
     if (isFinite(newTime)) {
       audio.seekToCumulativeTime(newTime);
     }
-  };
-
-  const containerStyle = {
-    display: 'flex',
-    flexDirection: 'column',
-    alignItems: 'center',
-    justifyContent: 'center',
-    minHeight: 'calc(100vh - 120px)',
-    padding: '40px 24px',
-    background: 'radial-gradient(ellipse at 50% 40%, rgba(196,149,106,0.06) 0%, transparent 70%)',
-    position: 'relative',
   };
 
   // Rendered in every phase so the user can escape to Text Mode. Anchored
@@ -342,12 +652,17 @@ export default function VoicePage() {
   if (showRecovery) {
     return (
       <div style={containerStyle}>
-        {textModeButton}
+        {!blocked && textModeButton}
         <RecoveryBanner
           draft={interruptedDraft}
+          note={blocked && finishRefusal ? FINISH_WITHOUT_REPLY_TEXT : null}
           onContinue={() => {
-            if (isSpendBlocked()) { notifySpendBlocked(); return; }
+            // No spend-cap check: resuming finishes a recording that has
+            // already started, which is always allowed (#341). Where Voice
+            // mode is blocked, the same holds: this reopens the mic only for
+            // that recording, and finalize decides whether a reply follows.
             const { session_id, id, chunk_count, parent_id, streaming_mime_type } = interruptedDraft;
+            if (blocked && onFinishInterrupted) onFinishInterrupted();
             clearInterrupted();
             handleResumeSession({
               sessionId: session_id,
@@ -370,6 +685,12 @@ export default function VoicePage() {
     );
   }
 
+  // Blocked: no fresh turn. Shown after an interrupted recording was
+  // finished or could not be resumed.
+  if (blocked && phase === 'ready') {
+    return <VoiceNeedsAi scope={blocked} threadId={threadId} />;
+  }
+
   // --- READY / RECORDING STATE ---
   if (phase === 'ready' || phase === 'recording') {
     return (
@@ -382,8 +703,10 @@ export default function VoicePage() {
           fontWeight: 300,
           color: 'var(--text-muted)',
           marginBottom: '40px',
+          maxWidth: '640px',
+          textAlign: 'center',
         }}>
-          What's on your mind?
+          {question}
         </p>
 
         <EcgAnimation
@@ -439,18 +762,22 @@ export default function VoicePage() {
             onClick={() => {
               // Block before any recording starts — a long recording stopped
               // only at the end would be lost work (issue #85).
-              if (isSpendBlocked()) { notifySpendBlocked(); return; }
+              if (isSpendBlocked()) {
+                notifySpendBlocked();
+                addToast(spendCapToastMessage('record'), 8000);
+                return;
+              }
               handleStart();
             }}
-            disabled={!isOnline}
+            disabled={!isOnline || gleaning}
             style={{
               width: '72px', height: '72px', borderRadius: '50%',
               border: `2px solid ${isOnline ? 'var(--accent)' : 'var(--text-muted)'}`,
               background: 'transparent',
-              cursor: isOnline ? 'pointer' : 'not-allowed',
+              cursor: isOnline && !gleaning ? 'pointer' : 'not-allowed',
               display: 'flex', alignItems: 'center', justifyContent: 'center',
               transition: 'all 0.2s ease',
-              opacity: isOnline ? 1 : 0.4,
+              opacity: isOnline && !gleaning ? 1 : 0.4,
             }}
           >
             <svg width="24" height="24" viewBox="0 0 24 24" fill={isOnline ? 'var(--accent)' : 'var(--text-muted)'}>
@@ -458,6 +785,8 @@ export default function VoicePage() {
             </svg>
           </button>
         )}
+
+        {phase === 'ready' && gleanButton}
 
         {phase === 'recording' && (
           streaming.isPaused && !isStopping ? (
@@ -736,27 +1065,33 @@ export default function VoicePage() {
       {/* Record button to continue */}
       <button
         onClick={() => {
-          if (isSpendBlocked()) { notifySpendBlocked(); return; }
+          if (isSpendBlocked()) {
+            notifySpendBlocked();
+            addToast(spendCapToastMessage('record'), 8000);
+            return;
+          }
           handleContinue(voiceReset);
         }}
-        disabled={!isOnline}
+        disabled={!isOnline || gleaning}
         title={isOnline ? 'Continue' : "You're offline"}
         style={{
           width: '56px', height: '56px', borderRadius: '50%',
           border: `2px solid ${isOnline ? 'var(--accent)' : 'var(--text-muted)'}`,
           background: 'transparent',
-          cursor: isOnline ? 'pointer' : 'not-allowed',
+          cursor: isOnline && !gleaning ? 'pointer' : 'not-allowed',
           display: 'flex', alignItems: 'center', justifyContent: 'center',
           transition: 'all 0.2s ease',
-          opacity: isOnline ? 0.7 : 0.3,
+          opacity: isOnline && !gleaning ? 0.7 : 0.3,
         }}
-        onMouseEnter={(e) => { if (isOnline) e.currentTarget.style.opacity = '1'; }}
-        onMouseLeave={(e) => { if (isOnline) e.currentTarget.style.opacity = '0.7'; }}
+        onMouseEnter={(e) => { if (isOnline && !gleaning) e.currentTarget.style.opacity = '1'; }}
+        onMouseLeave={(e) => { if (isOnline && !gleaning) e.currentTarget.style.opacity = '0.7'; }}
       >
         <svg width="20" height="20" viewBox="0 0 24 24" fill={isOnline ? 'var(--accent)' : 'var(--text-muted)'}>
           <circle cx="12" cy="12" r="8" />
         </svg>
       </button>
+
+      {gleanButton}
     </div>
   );
 }

@@ -4,7 +4,8 @@ rendering it (backend/tasks/exports._do_initial_generation).
 Regression for the staging OOM after a 61k-node Twitter import: the
 unbudgeted `build_user_export_content(max_tokens=None)` measurement
 loaded and decrypted every node at once. Now `_estimate_source_tokens`
-decides; the full export is only built when it plausibly fits.
+decides whether there is anything to do, and the planned chunk loop
+renders budgeted windows only.
 """
 import os
 import sys
@@ -81,57 +82,27 @@ def test_estimate_counts_only_ai_readable_alive_nodes_in_scope(app):
     assert ex._estimate_source_tokens(other) == 1006  # own 999 + the node addressed to alice
 
 
-def _run_initial(monkeypatch, user, estimate, budget_tokens=10_000):
-    """Drive _do_initial_generation with the export builder and both
-    generation branches mocked; returns (export_mock, single, iterative)."""
-    monkeypatch.setattr(ex, "_estimate_source_tokens", lambda u: estimate)
-    monkeypatch.setattr(ex, "_load_prompt", lambda *a, **k: "T {user_export}")
-    export = MagicMock(return_value={"content": "c", "token_count": estimate,
-                                     "latest_node_created_at": None})
-    monkeypatch.setattr(ex, "build_user_export_content", export)
-    single = MagicMock(return_value="single")
-    iterative = MagicMock(return_value="iterative")
-    monkeypatch.setattr(ex, "_single_pass_generation", single)
-    monkeypatch.setattr(ex, "_iterative_generation", iterative)
-    task = MagicMock()
-    # context_window // 2 - prompt - out - 500 == budget_tokens
-    context_window = 2 * (budget_tokens + 3 + 1000 + 500)
-    result = ex._do_initial_generation(task, user, "m", context_window, 1000, {})
-    return result, export, single, iterative
-
-
 def test_large_corpus_never_renders_unbudgeted_export(app, monkeypatch):
+    """The from-scratch build goes straight to the planned chunk loop
+    (backend/utils/chunk_plan.py): no unbudgeted render of the whole
+    corpus decides anything, and a corpus that plans into one chunk is
+    simply the loop's k == 1 case (tests/test_chunk_loop_planning.py)."""
     u = _user()
-    result, export, single, iterative = _run_initial(monkeypatch, u, estimate=1_500_000)
-    assert result == "iterative"
-    export.assert_not_called()
-    single.assert_not_called()
-
-
-def test_small_corpus_keeps_single_pass_path(app, monkeypatch):
-    u = _user()
-    result, export, single, iterative = _run_initial(monkeypatch, u, estimate=2_000)
-    assert result == "single"
-    export.assert_called_once()
-    assert export.call_args.kwargs["max_tokens"] is None
-    iterative.assert_not_called()
-
-
-def test_underestimate_falls_back_to_iterative(app, monkeypatch):
-    """SQL sum says it fits, the rendered export says it doesn't."""
-    u = _user()
-    monkeypatch.setattr(ex, "_estimate_source_tokens", lambda user: 5_000)
+    monkeypatch.setattr(ex, "_estimate_source_tokens", lambda user: 1_500_000)
     monkeypatch.setattr(ex, "_load_prompt", lambda *a, **k: "T {user_export}")
-    monkeypatch.setattr(ex, "build_user_export_content", MagicMock(return_value={
-        "content": "c", "token_count": 50_000, "latest_node_created_at": None}))
+    export = MagicMock()
+    monkeypatch.setattr(ex, "build_user_export_content", export)
     iterative = MagicMock(return_value="iterative")
     monkeypatch.setattr(ex, "_iterative_generation", iterative)
-    monkeypatch.setattr(ex, "_single_pass_generation", MagicMock(return_value="single"))
-    assert ex._do_initial_generation(MagicMock(), u, "m", 2 * 11_503, 1000, {}) == "iterative"
+
+    assert ex._do_initial_generation(MagicMock(), u, "m", 1000, {}) == "iterative"
+
+    export.assert_not_called()
+    assert iterative.call_args.args[3] == "T {user_export}"   # the generation template
 
 
 def test_empty_corpus_raises(app, monkeypatch):
     u = _user()
     monkeypatch.setattr(ex, "_load_prompt", lambda *a, **k: "T")
     with pytest.raises(ValueError, match="No writing"):
-        ex._do_initial_generation(MagicMock(), u, "m", 100_000, 1000, {})
+        ex._do_initial_generation(MagicMock(), u, "m", 1000, {})

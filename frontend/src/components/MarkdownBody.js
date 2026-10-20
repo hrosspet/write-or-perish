@@ -1,6 +1,10 @@
 import React from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { useInRouterContext, useNavigate } from 'react-router-dom';
+import { parseNodeLink, fetchNodeTitle, cachedNodeTitle } from '../utils/nodeLinks';
+import { classifyImageSource } from '../utils/markdownImages';
+import CopyButton from './CopyButton';
 
 /**
  * The app never renders raw HTML (no rehype-raw), so anything the markdown
@@ -92,6 +96,77 @@ function replaceCheckboxes(children, renderToggle) {
   return { children: mapped, found };
 }
 
+const linkStyle = { color: 'var(--accent)', textDecoration: 'underline' };
+
+/**
+ * True when a link's visible text is just its own URL — a bare
+ * `https://loore.org/node/123` the user pasted (remark-gfm autolinks it) or
+ * `[url](url)`. Only those get their text replaced by the node's title; a
+ * link the author gave their own words keeps them.
+ */
+function isBareUrlLink(children, href) {
+  const text = extractText(children).trim().replace(/\/$/, '');
+  return text === href.replace(/\/$/, '');
+}
+
+const unavailableLinkStyle = {
+  ...linkStyle,
+  color: 'var(--text-muted)',
+  fontStyle: 'italic',
+};
+
+/**
+ * A link to another Loore node, shown as that node's title. While the title
+ * loads (one batched request per render pass, cached afterwards) the raw URL
+ * stays. A node the viewer cannot see renders as "[Node inaccessible]" and a
+ * deleted one as "[Node deleted]" — the same tombstone vocabulary as the
+ * thread view — muted but still a link, so the URL survives in the tooltip.
+ * Navigates in-app; modifier clicks keep the browser's open-in-new-tab
+ * behaviour.
+ */
+function NodeLink({ nodeId, href, children, onNavigate, ...props }) {
+  const [record, setRecord] = React.useState(() => cachedNodeTitle(nodeId));
+  React.useEffect(() => {
+    let alive = true;
+    if (record === undefined) {
+      fetchNodeTitle(nodeId).then((r) => { if (alive) setRecord(r); });
+    }
+    return () => { alive = false; };
+  }, [nodeId, record]);
+  let label = children;
+  let style = linkStyle;
+  if (record === null) {
+    label = '[Node inaccessible]';
+    style = unavailableLinkStyle;
+  } else if (record && record.deleted) {
+    label = '[Node deleted]';
+    style = unavailableLinkStyle;
+  } else if (record && record.title) {
+    label = record.title;
+  }
+  return (
+    <a
+      href={`/node/${nodeId}`}
+      className="loore-node-link"
+      title={label !== children ? href : undefined}
+      style={style}
+      onClick={(e) => {
+        e.stopPropagation();
+        if (e.defaultPrevented || e.button !== 0
+            || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+        e.preventDefault();
+        onNavigate(`/node/${nodeId}`);
+      }}
+      {...props}
+    >{label}</a>
+  );
+}
+
+function RoutedNodeLink(props) {
+  const navigate = useNavigate();
+  return <NodeLink onNavigate={navigate} {...props} />;
+}
+
 /**
  * Inline "add a task here" input row, shown below a checklist item when its
  * hover "+" is clicked. Type + Enter inserts; Esc / blur-when-empty cancels.
@@ -117,6 +192,274 @@ function AddTaskInput({ onSubmit, onCancel }) {
   );
 }
 
+// The per-render values the `li` and `a` renderers need. They travel through
+// context rather than closures so the `components` map handed to
+// ReactMarkdown can keep the same function identities across renders (#321):
+// a new identity is a new component type, and React then unmounts and
+// remounts every list item and link on every render. A remount took the
+// checkbox the user had just clicked (and so focused) out of the DOM
+// mid-commit, the browser laid out the half-removed page while moving focus,
+// and the page jumped to the top. It also wiped a half-typed "+" item on any
+// unrelated parent re-render.
+const MarkdownContext = React.createContext({});
+
+const toggleBaseStyle = {
+  display: 'inline-flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  width: '18px',
+  height: '18px',
+  borderRadius: '50%',
+  flexShrink: 0,
+  marginRight: '8px',
+  fontSize: '0.6rem',
+  color: 'var(--bg-deep)',
+  fontWeight: 600,
+  transition: 'all 0.3s',
+  verticalAlign: 'middle',
+};
+
+function MarkdownListItem({ node, children: liChildren, ...props }) {
+  const { onCheckboxToggle, onAddTask, addingAfter, setAddingAfter } = React.useContext(MarkdownContext);
+  const isTask = props.className === 'task-list-item';
+
+  if (!isTask) {
+    return (
+      <li
+        style={{
+          whiteSpace: 'normal',
+          overflowWrap: 'break-word',
+          marginBottom: '2px',
+        }}
+        {...props}
+      >
+        {liChildren}
+      </li>
+    );
+  }
+
+  const itemText = (onCheckboxToggle || onAddTask) ? extractText(liChildren).trim() : null;
+  const { children: filteredChildren } = replaceCheckboxes(
+    liChildren,
+    (isChecked) => {
+      const interactive = !!onCheckboxToggle;
+      const handlers = interactive ? {
+        onClick: (e) => {
+          e.preventDefault();
+          onCheckboxToggle(itemText, isChecked);
+        },
+        role: 'checkbox',
+        'aria-checked': isChecked,
+        tabIndex: 0,
+        onKeyDown: (e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            onCheckboxToggle(itemText, isChecked);
+          }
+        },
+      } : {};
+      return (
+        <span
+          {...handlers}
+          style={{
+            ...toggleBaseStyle,
+            border: `1.5px solid ${isChecked ? 'var(--accent-dim)' : 'var(--border-hover)'}`,
+            background: isChecked ? 'var(--accent-dim)' : 'none',
+            cursor: interactive ? 'pointer' : 'inherit',
+          }}
+        >
+          {isChecked && '✓'}
+        </span>
+      );
+    },
+  );
+
+  const childArr = React.Children.toArray(filteredChildren);
+  const ownContent = childArr.filter((c) => !isListElement(c));
+  const nestedLists = childArr.filter((c) => isListElement(c));
+  const addable = !!onAddTask;
+
+  return (
+    <li
+      style={{
+        whiteSpace: 'normal',
+        overflowWrap: 'break-word',
+        marginBottom: '2px',
+        listStyleType: 'none',
+      }}
+      {...props}
+    >
+      <span className="loore-task-row" style={{ display: 'block' }}>
+        {ownContent}
+        {addable && (
+          <button
+            type="button"
+            className="loore-add-task"
+            title="Add an item below"
+            aria-label="Add an item below"
+            onMouseDown={(e) => { e.preventDefault(); e.stopPropagation(); setAddingAfter(itemText); }}
+            onClick={(e) => { e.preventDefault(); e.stopPropagation(); setAddingAfter(itemText); }}
+            style={{
+              background: 'none',
+              border: 'none',
+              color: 'var(--accent)',
+              cursor: 'pointer',
+              fontSize: '1.1em',
+              lineHeight: 1,
+              padding: '0 2px',
+              marginLeft: '4px',
+              verticalAlign: 'middle',
+            }}
+          >+</button>
+        )}
+      </span>
+      {nestedLists}
+      {addable && addingAfter === itemText && (
+        <AddTaskInput
+          onSubmit={(t) => { onAddTask(itemText, t); setAddingAfter(null); }}
+          onCancel={() => setAddingAfter(null)}
+        />
+      )}
+    </li>
+  );
+}
+
+// True inside a link's text. An image placeholder there must not be a second
+// link (an <a> cannot contain an <a>), so it is plain text and a click
+// follows the outer link.
+const InsideLinkContext = React.createContext(false);
+
+const imagePlaceholderStyle = {
+  display: 'inline-block',
+  maxWidth: '100%',
+  padding: '1px 8px',
+  border: '1px solid var(--border)',
+  borderRadius: '6px',
+  color: 'var(--text-muted)',
+  fontSize: '0.9em',
+  fontStyle: 'normal',
+  textDecoration: 'none',
+  overflowWrap: 'anywhere',
+};
+
+/**
+ * A markdown image (#441). Loore's own media loads as before. Any other image
+ * shows as "Image from <host>: <alt>" and opens in a new tab only when
+ * clicked, so showing a node never contacts an outside server by itself.
+ */
+function MarkdownImage({ node, src, alt, ...props }) {
+  const insideLink = React.useContext(InsideLinkContext);
+  const source = classifyImageSource(src);
+  if (source.kind === 'own') {
+    return <img alt={alt || ''} style={{ maxWidth: '100%', height: 'auto' }} {...props} src={src} />;
+  }
+  if (source.kind === 'none') {
+    return alt ? <span style={{ color: 'var(--text-muted)' }}>{alt}</span> : null;
+  }
+  const label = alt ? `Image from ${source.host}: ${alt}` : `Image from ${source.host}`;
+  if (insideLink) {
+    return <span className="loore-image-placeholder" style={imagePlaceholderStyle}>{label}</span>;
+  }
+  return (
+    <a
+      href={source.url}
+      className="loore-image-placeholder"
+      style={imagePlaceholderStyle}
+      target="_blank"
+      rel="noopener noreferrer"
+      title="Opens the image in a new tab"
+      onClick={(e) => e.stopPropagation()}
+    >{label}</a>
+  );
+}
+
+function MarkdownLink({ node, children, href, ...props }) {
+  const { onInternalLinkClick, inRouter } = React.useContext(MarkdownContext);
+  const nodeId = href ? parseNodeLink(href) : null;
+  if (nodeId !== null && isBareUrlLink(children, href)) {
+    // Keyed on the target: the link component now survives re-renders, so an
+    // edit that points this position at another node must reset its title.
+    if (onInternalLinkClick) {
+      return <NodeLink key={nodeId} nodeId={nodeId} href={href} onNavigate={onInternalLinkClick} {...props}>{children}</NodeLink>;
+    }
+    if (inRouter) {
+      return <RoutedNodeLink key={nodeId} nodeId={nodeId} href={href} {...props}>{children}</RoutedNodeLink>;
+    }
+    return <NodeLink key={nodeId} nodeId={nodeId} href={href} onNavigate={(to) => { window.location.assign(to); }} {...props}>{children}</NodeLink>;
+  }
+  if (onInternalLinkClick && href && href.startsWith('/')) {
+    return (
+      <a
+        href={href}
+        style={{ color: 'var(--accent)', textDecoration: 'underline' }}
+        onClick={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          onInternalLinkClick(href);
+        }}
+        {...props}
+      ><InsideLinkContext.Provider value>{children}</InsideLinkContext.Provider></a>
+    );
+  }
+  return (
+    <a
+      href={href}
+      style={{ color: 'var(--accent)', textDecoration: 'underline' }}
+      target="_blank"
+      rel="noopener noreferrer"
+      onClick={(e) => e.stopPropagation()}
+      {...props}
+    ><InsideLinkContext.Provider value>{children}</InsideLinkContext.Provider></a>
+  );
+}
+
+/** Plain text of a React node tree (code children can be nested elements). */
+function nodeText(node) {
+  if (node == null || typeof node === 'boolean') return '';
+  if (typeof node === 'string' || typeof node === 'number') return String(node);
+  if (Array.isArray(node)) return node.map(nodeText).join('');
+  return nodeText(node.props && node.props.children);
+}
+
+/**
+ * Fenced code block with a copy button at its top right. The button sits on a
+ * wrapper outside the scrolling <pre>, so it stays visible on long or
+ * horizontally scrolling blocks; it has a card-colored backdrop so it never
+ * leaves text half hidden beneath it. Copies the text as shown (the parser's
+ * single trailing newline is dropped). Inline code never goes through here.
+ */
+export const CodeBlock = ({ node, children, ...props }) => {
+  const text = nodeText(children).replace(/\n$/, '');
+  return (
+    <div style={{ position: 'relative', margin: '0.75em 0' }}>
+      <pre
+        style={{
+          background: 'var(--bg-card)',
+          border: '1px solid var(--border)',
+          borderRadius: '6px',
+          padding: '0.75em 1em',
+          margin: 0,
+          overflowX: 'auto',
+          fontSize: '0.9em',
+        }}
+        {...props}
+      >
+        {children}
+      </pre>
+      <CopyButton
+        text={text}
+        title="Copy code"
+        style={{
+          position: 'absolute', top: '6px', right: '6px',
+          background: 'var(--bg-card)', borderRadius: '4px',
+        }}
+      />
+    </div>
+  );
+};
+
+const REMARK_PLUGINS = [remarkGfm, remarkHtmlAsCode];
+
 /**
  * MarkdownBody — shared ReactMarkdown wrapper with consistent styling.
  *
@@ -139,9 +482,21 @@ function AddTaskInput({ onSubmit, onCancel }) {
 // writing, LLM replies) depends on it; AUTHORED markdown wrapped at a
 // fixed column (e.g. the user changelog) must opt in to flow, or every
 // source line break renders literally — unreadable on narrow screens.
-const MarkdownBody = ({ children, style, paragraphMargin = '0.5em 0', flowText = false, onCheckboxToggle, onAddTask, onInternalLinkClick }) => {
+// inline: render a single line of markdown as phrasing content (a <span>
+// wrapper, paragraphs as <span>s) so it can sit inside an existing label —
+// e.g. a Todo item's text — instead of forcing block layout.
+const MarkdownBody = ({ children, style, paragraphMargin = '0.5em 0', flowText = false, inline = false, onCheckboxToggle, onAddTask, onInternalLinkClick }) => {
   const [addingAfter, setAddingAfter] = React.useState(null);
-  const components = {
+  // MarkdownBody renders inside the app's BrowserRouter, but unit tests and
+  // any future router-less host must not crash on useNavigate.
+  const inRouter = useInRouterContext();
+  const context = React.useMemo(
+    () => ({ onCheckboxToggle, onAddTask, onInternalLinkClick, inRouter, addingAfter, setAddingAfter }),
+    [onCheckboxToggle, onAddTask, onInternalLinkClick, inRouter, addingAfter],
+  );
+  // Memoized on the layout props only: everything that changes from render
+  // to render reaches `li` and `a` through MarkdownContext (see above).
+  const components = React.useMemo(() => ({
     h1: ({ node, children, ...props }) => (
       <h1 style={{ fontFamily: 'var(--serif)', fontSize: '2.2em', fontWeight: 700, lineHeight: 1.2, margin: '1.2em 0 0.4em', color: 'var(--text-primary)' }} {...props}>{children}</h1>
     ),
@@ -161,7 +516,9 @@ const MarkdownBody = ({ children, style, paragraphMargin = '0.5em 0', flowText =
       <h6 style={{ fontFamily: 'var(--serif)', fontSize: '0.95em', fontWeight: 600, lineHeight: 1.35, margin: '0.9em 0 0.3em', color: 'var(--text-primary)' }} {...props}>{children}</h6>
     ),
     p: ({ node, ...props }) => (
-      <p style={{ whiteSpace: flowText ? 'normal' : 'pre-wrap', overflowWrap: 'break-word', margin: paragraphMargin }} {...props} />
+      inline
+        ? <span {...props} />
+        : <p style={{ whiteSpace: flowText ? 'normal' : 'pre-wrap', overflowWrap: 'break-word', margin: paragraphMargin }} {...props} />
     ),
     blockquote: ({ node, ...props }) => (
       <blockquote
@@ -185,9 +542,7 @@ const MarkdownBody = ({ children, style, paragraphMargin = '0.5em 0', flowText =
     del: ({ node, ...props }) => (
       <del style={{ textDecoration: 'line-through', color: 'var(--text-muted)' }} {...props} />
     ),
-    img: ({ node, alt, ...props }) => (
-      <img alt={alt || ''} style={{ maxWidth: '100%', height: 'auto' }} {...props} />
-    ),
+    img: MarkdownImage,
     ul: ({ node, ...props }) => {
       const isTaskList = (props.className || '').split(/\s+/).includes('contains-task-list');
       // Task lists are styled via the `.loore-md ul.contains-task-list` rules in
@@ -200,138 +555,11 @@ const MarkdownBody = ({ children, style, paragraphMargin = '0.5em 0', flowText =
     ol: ({ node, ...props }) => (
       <ol style={{ margin: '4px 0', paddingLeft: '24px' }} {...props} />
     ),
-    li: ({ node, children: liChildren, ...props }) => {
-      const isTask = props.className === 'task-list-item';
-
-      if (isTask) {
-        const itemText = (onCheckboxToggle || onAddTask) ? extractText(liChildren).trim() : null;
-        const { children: filteredChildren } = replaceCheckboxes(
-          liChildren,
-          (isChecked) => {
-            const interactive = !!onCheckboxToggle;
-            const handlers = interactive ? {
-              onClick: (e) => {
-                e.preventDefault();
-                onCheckboxToggle(itemText, isChecked);
-              },
-              role: 'checkbox',
-              'aria-checked': isChecked,
-              tabIndex: 0,
-              onKeyDown: (e) => {
-                if (e.key === 'Enter' || e.key === ' ') {
-                  e.preventDefault();
-                  onCheckboxToggle(itemText, isChecked);
-                }
-              },
-            } : {};
-            return (
-              <span
-                {...handlers}
-                style={{
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  width: '18px',
-                  height: '18px',
-                  borderRadius: '50%',
-                  border: `1.5px solid ${isChecked ? 'var(--accent-dim)' : 'var(--border-hover)'}`,
-                  background: isChecked ? 'var(--accent-dim)' : 'none',
-                  flexShrink: 0,
-                  marginRight: '8px',
-                  fontSize: '0.6rem',
-                  color: 'var(--bg-deep)',
-                  fontWeight: 600,
-                  transition: 'all 0.3s',
-                  cursor: interactive ? 'pointer' : 'inherit',
-                  verticalAlign: 'middle',
-                }}
-              >
-                {isChecked && '✓'}
-              </span>
-            );
-          },
-        );
-
-        const childArr = React.Children.toArray(filteredChildren);
-        const ownContent = childArr.filter((c) => !isListElement(c));
-        const nestedLists = childArr.filter((c) => isListElement(c));
-        const addable = !!onAddTask;
-
-        return (
-          <li
-            style={{
-              whiteSpace: 'normal',
-              overflowWrap: 'break-word',
-              marginBottom: '2px',
-              listStyleType: 'none',
-            }}
-            {...props}
-          >
-            <span className="loore-task-row" style={{ display: 'block' }}>
-              {ownContent}
-              {addable && (
-                <button
-                  type="button"
-                  className="loore-add-task"
-                  title="Add an item below"
-                  aria-label="Add an item below"
-                  onMouseDown={(e) => { e.preventDefault(); e.stopPropagation(); setAddingAfter(itemText); }}
-                  onClick={(e) => { e.preventDefault(); e.stopPropagation(); setAddingAfter(itemText); }}
-                  style={{
-                    background: 'none',
-                    border: 'none',
-                    color: 'var(--accent)',
-                    cursor: 'pointer',
-                    fontSize: '1.1em',
-                    lineHeight: 1,
-                    padding: '0 2px',
-                    marginLeft: '4px',
-                    verticalAlign: 'middle',
-                  }}
-                >+</button>
-              )}
-            </span>
-            {nestedLists}
-            {addable && addingAfter === itemText && (
-              <AddTaskInput
-                onSubmit={(t) => { onAddTask(itemText, t); setAddingAfter(null); }}
-                onCancel={() => setAddingAfter(null)}
-              />
-            )}
-          </li>
-        );
-      }
-
-      return (
-        <li
-          style={{
-            whiteSpace: 'normal',
-            overflowWrap: 'break-word',
-            marginBottom: '2px',
-          }}
-          {...props}
-        >
-          {liChildren}
-        </li>
-      );
-    },
+    li: MarkdownListItem,
     hr: ({ node, ...props }) => (
       <hr style={{ border: 'none', borderTop: '1px solid var(--border)', margin: '20px 0' }} {...props} />
     ),
-    pre: ({ node, ...props }) => (
-      <pre
-        style={{
-          background: 'var(--bg-card)',
-          border: '1px solid var(--border)',
-          borderRadius: '6px',
-          padding: '0.75em 1em',
-          margin: '0.75em 0',
-          overflowX: 'auto',
-          fontSize: '0.9em',
-        }}
-        {...props}
-      />
-    ),
+    pre: CodeBlock,
     code: ({ node, inline, className, children, ...props }) =>
       inline ? (
         <code style={{ whiteSpace: 'pre-wrap', overflowWrap: 'break-word', fontSize: '0.9em' }} {...props}>
@@ -340,32 +568,7 @@ const MarkdownBody = ({ children, style, paragraphMargin = '0.5em 0', flowText =
       ) : (
         <code className={className} {...props}>{children}</code>
       ),
-    a: ({ node, children, href, ...props }) => {
-      if (onInternalLinkClick && href && href.startsWith('/')) {
-        return (
-          <a
-            href={href}
-            style={{ color: 'var(--accent)', textDecoration: 'underline' }}
-            onClick={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-              onInternalLinkClick(href);
-            }}
-            {...props}
-          >{children}</a>
-        );
-      }
-      return (
-        <a
-          href={href}
-          style={{ color: 'var(--accent)', textDecoration: 'underline' }}
-          target="_blank"
-          rel="noopener noreferrer"
-          onClick={(e) => e.stopPropagation()}
-          {...props}
-        >{children}</a>
-      );
-    },
+    a: MarkdownLink,
     table: ({ node, ...props }) => (
       <div style={{ overflowX: 'auto', margin: '8px 0' }}>
         <table style={{ borderCollapse: 'collapse', width: '100%', fontSize: '0.9em' }} {...props} />
@@ -380,14 +583,17 @@ const MarkdownBody = ({ children, style, paragraphMargin = '0.5em 0', flowText =
     td: ({ node, ...props }) => (
       <td style={{ padding: '6px 10px', borderTop: '1px solid var(--border)' }} {...props} />
     ),
-  };
+  }), [inline, flowText, paragraphMargin]);
 
+  const Wrapper = inline ? 'span' : 'div';
   return (
-    <div className="loore-md" style={style}>
-      <ReactMarkdown remarkPlugins={[remarkGfm, remarkHtmlAsCode]} components={components}>
-        {children}
-      </ReactMarkdown>
-    </div>
+    <MarkdownContext.Provider value={context}>
+      <Wrapper className="loore-md" style={style}>
+        <ReactMarkdown remarkPlugins={REMARK_PLUGINS} components={components}>
+          {children}
+        </ReactMarkdown>
+      </Wrapper>
+    </MarkdownContext.Provider>
   );
 };
 

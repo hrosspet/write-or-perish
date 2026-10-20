@@ -1,25 +1,43 @@
-import json
-
 from flask import Blueprint, jsonify, request, current_app
 from flask_login import login_required, current_user
 from backend.models import Node
 from backend.extensions import db
+from backend.utils.serialization import serialize_node_status
 from backend.utils.timefmt import iso_utc
+from backend.utils.tool_meta import tool_calls_meta_for
 from backend.utils.prompts import get_user_prompt_record
+from backend.utils.placeholders import UserExportValidationError
 from backend.utils.llm_nodes import (
-    create_llm_placeholder, pick_model_for_generation,
+    ai_usage_refused_response, create_llm_placeholder,
+    pick_model_for_generation, read_only_model_refusal,
+    read_only_model_response, reply_ai_usage, reply_refusal,
 )
 from backend.utils.context_artifacts import attach_context_artifacts
-from backend.utils.privacy import validate_ai_usage
+from backend.utils.session_helpers import attach_agentic_prompt_under
+from backend.utils.privacy import (
+    can_user_see_node_or_placeholder, validate_ai_usage,
+)
 
 textmode_bp = Blueprint("textmode", __name__)
 
 PROMPT_KEY = 'textmode'
 
 
-def _serialize_message(node):
-    """Serialize a node as a conversation message."""
+def _serialize_message(node, viewer_id):
+    """Serialize a node as a conversation message for *viewer_id*.
+
+    A deleted node, or one the viewer cannot access, comes back as the
+    thread view shows it (serialize_node_status): the deleted placeholder
+    or the inaccessible stub, with no content. An AI reply's
+    tool_calls_meta is in full for its owner only
+    (utils/tool_meta.tool_calls_meta_for)."""
     is_llm = node.node_type == "llm" or node.llm_model is not None
+    status = serialize_node_status(node, viewer_id)
+    if status is not None:
+        msg = dict(status, content=None)
+        if status.get("deleted"):
+            msg["role"] = "assistant" if is_llm else "user"
+        return msg
     msg = {
         "id": node.id,
         "role": "assistant" if is_llm else "user",
@@ -29,10 +47,9 @@ def _serialize_message(node):
         "llm_task_status": node.llm_task_status,
     }
     if is_llm and node.tool_calls_meta:
-        try:
-            msg["tool_calls_meta"] = json.loads(node.tool_calls_meta)
-        except (ValueError, TypeError):
-            pass
+        meta = tool_calls_meta_for(node, viewer_id)
+        if meta:
+            msg["tool_calls_meta"] = meta
     return msg
 
 
@@ -88,9 +105,7 @@ def start_conversation():
     # ai_usage of 'none' contradicts that intent — the frontend is
     # expected to pick a different endpoint (/nodes/) in that case.
     if ai_usage == 'none':
-        return jsonify({
-            "error": "Text mode requires ai_usage of 'chat' or 'train'",
-        }), 400
+        return ai_usage_refused_response()
 
     if not model_id:
         # /textmode/start has no parent — ancestry is empty, so the
@@ -100,7 +115,14 @@ def start_conversation():
     if model_id not in current_app.config["SUPPORTED_MODELS"]:
         return jsonify({"error": f"Unsupported model: {model_id}"}), 400
 
-    # 1. System node with converse prompt
+    # A new thread is never a read: a read-only model is refused before
+    # anything is written, never swapped for another.
+    if auto_generate:
+        refused = read_only_model_refusal(model_id)
+        if refused is not None:
+            return read_only_model_response(refused)
+
+    # 1. System node with the textmode prompt
     prompt_record = get_user_prompt_record(current_user.id, PROMPT_KEY)
     system_node = Node(
         user_id=current_user.id,
@@ -115,6 +137,9 @@ def start_conversation():
     attach_context_artifacts(
         system_node.id, current_user.id, prompt_record=prompt_record,
     )
+    # Started from the Glean card (#435): every turn offers Glean.
+    from backend.utils.glean import stamp_glean_entry
+    stamp_glean_entry(system_node, current_user, data.get("entry"))
 
     # 2. User message node
     from backend.utils.tokens import approximate_token_count
@@ -147,12 +172,29 @@ def start_conversation():
     # 3. Placeholder LLM node and enqueue task — unless the caller
     # explicitly opted out (Agentic Reply ON + Auto-generate OFF).
     if auto_generate:
-        llm_node, task_id = create_llm_placeholder(
-            user_node.id, model_id, current_user.id,
-            privacy_level=privacy_level,
-            ai_usage=ai_usage,
-            source_mode='textmode',
-        )
+        # A refused {user_export} (malformed, or uncapped on a non-Pro
+        # plan) skips only the reply: the system + user nodes are kept,
+        # like the spend-cap branch above, and the message travels as
+        # `llm_error` for the frontend to toast. Before this, the error
+        # escaped as a 500 and the entry was rolled back.
+        try:
+            llm_node, task_id = create_llm_placeholder(
+                user_node.id, model_id, current_user.id,
+                privacy_level=privacy_level,
+                ai_usage=ai_usage,
+                source_mode='textmode',
+            )
+        except UserExportValidationError as e:
+            db.session.commit()
+            current_app.logger.warning(
+                f"textmode/start: LLM reply skipped for node "
+                f"{user_node.id}: {e}"
+            )
+            return jsonify({
+                "conversation_id": system_node.id,
+                "user_node_id": user_node.id,
+                "llm_error": str(e),
+            }), 202
         db.session.commit()
         return jsonify({
             "conversation_id": system_node.id,
@@ -225,8 +267,17 @@ def add_message(conversation_id):
     if not is_descendant:
         return jsonify({"error": "parent_id does not belong to this conversation"}), 400
 
-    ai_usage = last_node.ai_usage or current_user.default_ai_usage
+    ai_usage = reply_ai_usage(last_node, current_user)
     privacy_level = last_node.privacy_level or "private"
+
+    # This route always replies: refused before the message is written
+    # when the thread (or the message's own setting) keeps AI out.
+    refused = reply_refusal(last_node, current_user.id, ai_usage)
+    if refused is not None:
+        return ai_usage_refused_response(refused)
+    refused = read_only_model_refusal(model_id, last_node, new_entry=True)
+    if refused is not None:
+        return read_only_model_response(refused)
 
     # Create user message node
     from backend.utils.tokens import approximate_token_count
@@ -243,13 +294,25 @@ def add_message(conversation_id):
     db.session.add(user_node)
     db.session.flush()
 
-    # Create placeholder LLM node and enqueue task
-    llm_node, task_id = create_llm_placeholder(
-        user_node.id, model_id, current_user.id,
-        privacy_level=privacy_level,
-        ai_usage=ai_usage,
-        source_mode='textmode',
-    )
+    # Create placeholder LLM node and enqueue task. Same stance as
+    # /start: a refused {user_export} keeps the message, skips the reply.
+    try:
+        llm_node, task_id = create_llm_placeholder(
+            user_node.id, model_id, current_user.id,
+            privacy_level=privacy_level,
+            ai_usage=ai_usage,
+            source_mode='textmode',
+        )
+    except UserExportValidationError as e:
+        db.session.commit()
+        current_app.logger.warning(
+            f"textmode/message: LLM reply skipped for node "
+            f"{user_node.id}: {e}"
+        )
+        return jsonify({
+            "user_node_id": user_node.id,
+            "llm_error": str(e),
+        }), 202
 
     return jsonify({
         "user_node_id": user_node.id,
@@ -267,15 +330,27 @@ def get_conversation_from_node(node_id):
     node = Node.query.get_or_404(node_id)
     if node.human_owner_id != current_user.id:
         return jsonify({"error": "Unauthorized"}), 403
+    # A deleted node is not found, as in GET /api/nodes/<id>.
+    if node.deleted_at is not None:
+        return jsonify({"error": "Node not found"}), 404
 
     # Collect ancestor chain (including target node, excluding root).
     # Cycle-safe: stop if we revisit a node or exceed a sane hop limit.
+    # The chain ends below the first ancestor the user cannot see, so the
+    # response never carries content that is not theirs to read. A deleted
+    # ancestor they could see before is a placeholder without content, and
+    # so is one hidden with its owner's deleted account (#269): the walk
+    # passes through it as through any placeholder, as the reply context
+    # does (llm_completion._load_node_chain) and as after the purge. The
+    # start node is the user's own, so it is never hidden from them.
     chain = []
     current = node
     visited = set()
     MAX_HOPS = 1000
     for _ in range(MAX_HOPS):
         if current is None or current.id in visited:
+            break
+        if not can_user_see_node_or_placeholder(current, current_user.id):
             break
         visited.add(current.id)
         chain.append(current)
@@ -290,9 +365,129 @@ def get_conversation_from_node(node_id):
     root = chain[-1]
     # Reverse to chronological, skip root
     chain.reverse()
-    messages = [_serialize_message(n) for n in chain if n.id != root.id]
+    messages = [_serialize_message(n, current_user.id)
+                for n in chain if n.id != root.id]
 
     return jsonify({
         "conversation_id": root.id,
         "messages": messages,
     }), 200
+
+
+@textmode_bp.route("/from-node/<int:node_id>", methods=["POST"])
+@login_required
+def continue_from_node(node_id):
+    """A Text-mode message under *node_id*: the user's message and, unless
+    auto_generate is off, its reply. When no agentic prompt sits above the
+    node the textmode prompt is attached under it first and the message
+    hangs under that, so the thread is an agentic session from here
+    (tools, artifacts, mode notes); inside an agentic thread nothing is
+    added. The text counterpart of POST /voice/from-node.
+
+    Body: { content: string, model?: string, auto_generate?: bool,
+            ai_usage?: string }.
+    Privacy comes from the node. AI usage is the one the reply form sent,
+    else the thread's with the read looked through (reply_ai_usage,
+    #362): a read reply is 'chat' for the tweets it quotes, which says
+    nothing about what the user writes under it.
+
+    The one caller today is the reply box under a read reply (#323): a
+    conversation about the picks says a lot about what the user is
+    oriented toward, and this is what lets the assistant record it in
+    their intentions and memory. The read itself never runs under the
+    agentic prompt (llm_completion strips it on read turns).
+    """
+    node = Node.query.get_or_404(node_id)
+    if node.human_owner_id != current_user.id:
+        return jsonify({"error": "Unauthorized"}), 403
+
+    data = request.get_json() or {}
+    content = data.get("content")
+    if not content or not content.strip():
+        return jsonify({"error": "Content is required"}), 400
+    from backend.utils.node_split import NODE_CHAR_CAP
+    if len(content) > NODE_CHAR_CAP:
+        return jsonify({
+            "error": (
+                f"Content exceeds the {NODE_CHAR_CAP:,}-character "
+                f"per-entry limit."
+            ),
+            "char_cap": NODE_CHAR_CAP,
+        }), 422
+
+    ai_usage = data.get("ai_usage") or reply_ai_usage(node, current_user)
+    if not validate_ai_usage(ai_usage):
+        return jsonify({"error": f"Invalid ai_usage: {ai_usage}"}), 400
+    if ai_usage == 'none':
+        return ai_usage_refused_response()
+    privacy_level = node.privacy_level or "private"
+    auto_generate = bool(data.get("auto_generate", True))
+    if auto_generate:
+        # The reply would read the thread above *node*: refused before
+        # anything is written when a node there keeps AI out.
+        refused = reply_refusal(node, current_user.id, ai_usage)
+        if refused is not None:
+            return ai_usage_refused_response(refused)
+
+    model_id = data.get("model")
+    if not model_id:
+        model_id = pick_model_for_generation(node, current_user)
+    if model_id not in current_app.config["SUPPORTED_MODELS"]:
+        return jsonify({"error": f"Unsupported model: {model_id}"}), 400
+    if auto_generate:
+        # The reply answers the new message: under a read reply that is a
+        # chat turn, which a read-only model may not run. Refused before
+        # anything is written.
+        refused = read_only_model_refusal(model_id, node, new_entry=True)
+        if refused is not None:
+            return read_only_model_response(refused)
+
+    prompt_node = attach_agentic_prompt_under(
+        node, current_user.id, PROMPT_KEY, privacy_level, ai_usage)
+    parent_id = prompt_node.id if prompt_node is not None else node.id
+
+    from backend.utils.tokens import approximate_token_count
+    user_node = Node(
+        user_id=current_user.id,
+        human_owner_id=current_user.id,
+        parent_id=parent_id,
+        node_type="user",
+        privacy_level=privacy_level,
+        ai_usage=ai_usage,
+        token_count=approximate_token_count(content),
+    )
+    user_node.set_content(content)
+    db.session.add(user_node)
+    db.session.flush()
+
+    response = {
+        "prompt_node_id": prompt_node.id if prompt_node is not None else None,
+        "user_node_id": user_node.id,
+    }
+    # Spend cap and a refused {user_export}: the message is kept, only
+    # the reply is skipped — the same stance as /start and /message.
+    from backend.utils.spend import user_is_capped
+    if auto_generate and user_is_capped(current_user):
+        db.session.commit()
+        response["spend_capped"] = True
+        return jsonify(response), 202
+    if auto_generate:
+        try:
+            llm_node, task_id = create_llm_placeholder(
+                user_node.id, model_id, current_user.id,
+                privacy_level=privacy_level,
+                ai_usage=ai_usage,
+                source_mode='textmode',
+            )
+        except UserExportValidationError as e:
+            db.session.commit()
+            current_app.logger.warning(
+                f"textmode/from-node: LLM reply skipped for node "
+                f"{user_node.id}: {e}"
+            )
+            response["llm_error"] = str(e)
+            return jsonify(response), 202
+        response["llm_node_id"] = llm_node.id
+        response["task_id"] = task_id
+    db.session.commit()
+    return jsonify(response), 202

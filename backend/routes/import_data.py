@@ -3,13 +3,42 @@ from flask_login import login_required, current_user
 from backend.models import Node, User, UserProfile
 from backend.extensions import db
 from backend.utils.privacy import AI_ALLOWED
+from backend.utils import docx_import, pdf_import
+from backend.utils.pdf_extract_worker import MAX_CHAPTERS as MAX_PDF_CHAPTERS
 from datetime import datetime, timedelta
 import hashlib
+import os
+import re
+import hmac
+import sys
 import zipfile
+import zlib
 import io
+import shutil
+import tempfile
 import json
 
 import_bp = Blueprint("import_bp", __name__)
+
+DOCX_UNEXPECTED_ERROR = (
+    "Something went wrong while reading this file. You can try again, or "
+    "save the document again as .docx and upload that copy.")
+
+# Analyzed formats that become one entry per chapter (see _file_parts).
+CHAPTER_FORMATS = ("docx", "pdf")
+# The confirm step's answer to "Whose writing is this?" for a PDF.
+WHOSE_WRITING = ("mine", "someone_else")
+
+# Node.provenance values — HOW an imported node reached Loore (the column
+# comment in models.py says what each one vouches for). `origin` names the
+# platform; this names the path, which is what decides whether the text
+# is known to be public (#295).
+PROVENANCE_ARCHIVE_UPLOAD = "archive_upload"  # the user's own export
+PROVENANCE_PREFILL_CA = "prefill_ca"          # Loore fetched, Community Archive
+PROVENANCE_PREFILL_X = "prefill_x"            # Loore fetched, X API
+PROVENANCES = (PROVENANCE_ARCHIVE_UPLOAD, PROVENANCE_PREFILL_CA,
+               PROVENANCE_PREFILL_X)
+
 
 def approximate_token_count(text):
     """
@@ -97,7 +126,8 @@ def _chatgpt_msg_key(msg):
 def _add_imported_message_nodes(user_id, human_owner_id, parent_id,
                                 node_type, llm_model, node_content,
                                 privacy_level, ai_usage, source_key,
-                                msg_created_at, origin):
+                                msg_created_at, origin,
+                                provenance=PROVENANCE_ARCHIVE_UPLOAD):
     """Create the node(s) for one imported message, splitting content
     above NODE_CHAR_CAP into a serial parent→child chain.
 
@@ -106,8 +136,13 @@ def _add_imported_message_nodes(user_id, human_owner_id, parent_id,
     on the tip means re-imports skip the whole message and follow-ups
     chain after the full content — identical to a fresh import.
 
+    Every caller today reads an export the user uploaded, hence the
+    default provenance; a future Loore-fetched path must say what it is.
+
     Returns (tip_node, nodes_created_count).
     """
+    if provenance not in PROVENANCES:
+        raise ValueError(f"Unknown provenance {provenance!r}")
     from backend.utils.node_split import split_text_at_cap
     segments = split_text_at_cap(node_content)
     tip = None
@@ -123,6 +158,7 @@ def _add_imported_message_nodes(user_id, human_owner_id, parent_id,
             ai_usage=ai_usage,
             source_key=source_key if j == len(segments) - 1 else None,
             origin=origin,
+            provenance=provenance,
         )
         # Never pass content= to Node(): that writes the raw column and
         # bypasses KMS envelope encryption (#256). set_content() is the
@@ -157,14 +193,21 @@ def _deleted_match_response(keys, deleted_keys, on_deleted):
 
 
 def _restore_node(node_id, content, privacy_level, ai_usage,
-                  token_count=None):
+                  token_count=None, *, provenance):
     """Un-delete a soft-deleted imported node in place.
 
     Refills content from the archive — this also recovers tombstones
     whose content was already wiped by the cleanup task — and keeps the
     node id, so existing child links stay intact. Privacy/AI-usage are
-    set to this import's choices, like any other (re)imported node.
+    set to this import's choices, like any other (re)imported node, and
+    so is the provenance: the restored text is this import's copy (a
+    re-upload after a CA pre-fill drops the public vouch, which errs on
+    the private side; the reverse regains it). Required, as on
+    create_twitter_nodes, so no importer can bring back a row nobody
+    can classify.
     """
+    if provenance not in PROVENANCES:
+        raise ValueError(f"Unknown provenance {provenance!r}")
     node = Node.query.get(node_id)
     node.set_privacy_level(privacy_level)  # before set_content: decides encryption
     node.set_content(content)
@@ -173,6 +216,7 @@ def _restore_node(node_id, content, privacy_level, ai_usage,
         else approximate_token_count(content)
     )
     node.ai_usage = ai_usage
+    node.provenance = provenance
     node.deleted_at = None
 
 
@@ -183,7 +227,8 @@ def _apply_settings_to_skipped(node_ids, privacy_level, ai_usage):
     import settings, so dedup-skipped (alive) nodes adopt the values
     chosen for this import instead of being a pure no-op. Returns the
     number of nodes whose settings actually changed; callers report it
-    as ``updated`` and keep it disjoint from ``skipped``.
+    as ``updated`` and keep it disjoint from ``skipped``. Provenance is
+    NOT touched: how a node first arrived is a fact, not a setting.
     """
     from sqlalchemy import or_
     ids = [i for i in node_ids if i is not None]
@@ -206,6 +251,256 @@ def _apply_settings_to_skipped(node_ids, privacy_level, ai_usage):
             updated += 1
         db.session.flush()
     return updated
+
+
+def _release_deleted_docx_key(file_data, source_key, key_index,
+                              deleted_keys, on_deleted):
+    """Re-importing a deleted Word document or PDF with "restore" is a new
+    import: the dedup key sits on the last node of its chapter chain, so
+    refilling that node would bring back only the last chapter. The
+    deleted tip gives up the key and the document is imported again in
+    full."""
+    if (file_data.get('source_format') in CHAPTER_FORMATS
+            and on_deleted == 'restore' and source_key in deleted_keys):
+        old = Node.query.get(key_index.pop(source_key))
+        if old is not None:
+            old.source_key = None
+            db.session.flush()
+        deleted_keys.discard(source_key)
+
+
+def _errors_summary(errors, max_names=3):
+    """The skipped files of a zip as one clause per distinct message, so a
+    zip of thirty PDFs says "upload each PDF on its own" once, not thirty
+    times: "a.pdf, b.pdf, c.pdf and 27 more: PDFs inside a zip ..."."""
+    by_message = {}
+    for e in errors:
+        by_message.setdefault(e['error'], []).append(e['name'])
+    parts = []
+    for message, names in by_message.items():
+        shown = ", ".join(names[:max_names])
+        if len(names) > max_names:
+            shown += f" and {len(names) - max_names} more"
+        parts.append(f"{shown}: {message}")
+    return " ".join(parts)
+
+
+def _docx_file_entry(filename, content, modified):
+    """Analyze-step entry for a converted Word document. source_format
+    tells the confirm step to split it into chapter nodes."""
+    return {
+        "name": filename,
+        "filename_without_ext": filename.rsplit('.', 1)[0],
+        "content": content,
+        "size": len(content.encode('utf-8')),
+        "modified_at": modified.isoformat(),
+        "token_count": approximate_token_count(content),
+        "source_format": "docx",
+    }
+
+
+def _pdf_file_entry(filename, pdf):
+    """Analyze-step entry for an extracted PDF. Own entries are dated by
+    the PDF's modification date, else its creation date, else now; a
+    Reference keeps the creation date (when the document was written),
+    else the modification date. `reference` is what the confirm step
+    saves when the user says it is someone else's writing."""
+    from backend.utils import document_reference
+    from backend.utils.node_split import NODE_CHAR_CAP
+    content = pdf["markdown"]
+    stem = filename.rsplit('.', 1)[0]
+    own_date = pdf["modified"] or pdf["created"] or datetime.utcnow()
+    doc_date = pdf["created"] or pdf["modified"]
+    ref_title = pdf_import.reference_title(pdf["title"], stem)
+    # The same room the save leaves for the text under title and author
+    room = document_reference.body_room(ref_title, pdf["author"],
+                                        NODE_CHAR_CAP)
+    return {
+        "name": filename,
+        "filename_without_ext": stem,
+        "content": content,
+        "size": len(content.encode('utf-8')),
+        "modified_at": own_date.isoformat(),
+        "token_count": approximate_token_count(content),
+        "source_format": "pdf",
+        "pages": pdf["pages"],
+        "chapters": pdf["chapters"],
+        "reference": {
+            "title": ref_title,
+            "author": pdf["author"],
+            "date": doc_date.isoformat() if doc_date else None,
+            # A Reference holds one entry's worth of text, as a clip does
+            "truncated": len(content.strip()) > room,
+            "char_cap": room,
+        },
+    }
+
+
+def _analyze_pdf(upload):
+    """/import/analyze for a single .pdf upload."""
+    try:
+        pdf = pdf_import.extract_pdf(upload.stream)
+    except pdf_import.PdfImportError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception:
+        # Event reaches Sentry; only the exception type is logged
+        current_app.logger.error(
+            "Unexpected error reading PDF: %s",
+            type(sys.exc_info()[1]).__name__)
+        return jsonify({"error": pdf_import.PDF_UNEXPECTED_ERROR}), 500
+    entry = _pdf_file_entry(upload.filename, pdf)
+    return jsonify({
+        "files": [entry], "total_files": 1,
+        "total_tokens": entry["token_count"],
+        "total_size": entry["size"], "errors": [],
+    }), 200
+
+
+def _keyed_digest(purpose, *parts):
+    """HMAC-SHA256 hex (64 chars) of `parts` for the current user, keyed
+    with the app's SECRET_KEY: a stable dedup key for an uploaded
+    document's text that does not stand for the text by itself."""
+    secret = current_app.config.get("SECRET_KEY")
+    if not secret:
+        raise RuntimeError("SECRET_KEY is not set")
+    if isinstance(secret, str):
+        secret = secret.encode("utf-8")
+    msg = "\x00".join([purpose, str(current_user.id), *map(str, parts)])
+    return hmac.new(secret, msg.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def _save_pdf_reference(file_data):
+    """Answer "someone else's": the PDF's text is saved as one Reference
+    (an ExternalItem, like a page saved with the Chrome clipper), not as
+    the user's entries, so it never feeds their profile. Mirrors clip():
+    the text is capped at one entry's worth, it is encrypted at rest, a
+    second save of the same text is a no-op, and a copy hidden by a
+    waiting "Delete all my writing" becomes the user's again. Unlike a
+    clip, the title and author go inside the encrypted text
+    (utils/document_reference), not into the plaintext columns. The
+    periodic sweeps pick it up like any new reference (embedding,
+    digest)."""
+    from sqlalchemy.exc import IntegrityError
+    from backend.models import ExternalItem, SOURCE_DOCUMENT
+    from backend.utils import document_reference
+    from backend.utils.hidden_rows import reclaim_external_items
+    from backend.utils.node_split import NODE_CHAR_CAP
+
+    content = file_data.get('content')
+    if not isinstance(content, str) or not content.strip():
+        return jsonify({"error": "This PDF has no text to save."}), 400
+    content = content.strip()
+    # Keyed by the whole extracted text, so the same PDF is one Reference
+    external_id = _keyed_digest("pdf-reference", content)
+    ref = file_data.get('reference')
+    ref = ref if isinstance(ref, dict) else {}
+    title = (str(ref.get('title') or '').strip()
+             or str(file_data.get('filename_without_ext') or '').strip())
+    author = ref.get('author')
+    # The header and the text together hold one entry's worth
+    room = document_reference.body_room(title, author, NODE_CHAR_CAP)
+    truncated = len(content) > room
+    if truncated:
+        content = content[:room].rstrip()
+    content = document_reference.compose(title, author, content)
+    posted_at = pdf_import.parse_date(ref.get('date'))
+    user_id = current_user.id
+
+    reclaim_external_items(user_id, [external_id], sources=[SOURCE_DOCUMENT])
+
+    def lookup():
+        return ExternalItem.query.filter_by(
+            user_id=user_id, source=SOURCE_DOCUMENT,
+            external_id=external_id).first()
+
+    def already_saved(existing):
+        db.session.commit()  # keeps a reclaim from above
+        return jsonify({
+            "message": "Already saved as a reference",
+            "saved_as": "reference", "reference_id": existing.id,
+            "nodes_created": 0, "thread_count": 0,
+            "profile_update_task_id": None,
+            "created": 0, "skipped": 1, "restored": 0, "updated": 0,
+            "truncated": False,
+        }), 200
+
+    existing = lookup()
+    if existing is not None:
+        return already_saved(existing)
+    item = ExternalItem(
+        user_id=user_id, source=SOURCE_DOCUMENT, external_id=external_id,
+        # Title and author are in the encrypted text; the date is kept
+        # as the reference's date, as for every other source
+        author_handle=None, title=None, url=None, posted_at=posted_at,
+        # An uploaded file may be private: assessed, not vouched public
+        public_source=False,
+    )
+    item.set_content(content)
+    db.session.add(item)
+    try:
+        db.session.commit()
+    except IntegrityError:
+        # A double press of Confirm saved it first
+        db.session.rollback()
+        existing = lookup()
+        if existing is None:
+            raise
+        return already_saved(existing)
+    return jsonify({
+        "message": "Saved as a reference",
+        "saved_as": "reference", "reference_id": item.id,
+        "nodes_created": 0, "thread_count": 0,
+        "profile_update_task_id": None,
+        "created": 1, "skipped": 0, "restored": 0, "updated": 0,
+        "truncated": truncated,
+    }), 201
+
+
+def _file_parts(file_data, filename, content):
+    """Node texts for one analyzed file. Markdown: one text. Word
+    documents whose headings repeat, and PDFs with a usable outline: one
+    text per chapter. The filename heading goes on the first text unless
+    it starts with an H1. A PDF never gets more entries per chapter than
+    analyze allows (MAX_CHAPTERS); above that it is split by size."""
+    if file_data.get('source_format') in CHAPTER_FORMATS:
+        parts = docx_import.split_chapters(content)
+        if (file_data.get('source_format') == 'pdf'
+                and len(parts) > MAX_PDF_CHAPTERS + 1):
+            parts = [content]
+    else:
+        parts = [content]
+    if not parts[0].lstrip().startswith('# '):
+        parts[0] = f"# {filename}\n\n{parts[0]}"
+    return parts
+
+
+def _import_file_nodes(file_data, parts, parent_id, source_key, created_at,
+                       privacy_level, ai_usage):
+    """Create the node(s) for one analyzed file: a chain with one entry
+    per part (each part itself splits above the per-node cap). The
+    source_key lands on the last node. Returns (tip_node, nodes_created)."""
+    source_format = file_data.get('source_format')
+    origin = source_format if source_format in CHAPTER_FORMATS else "markdown"
+    tip = None
+    created = 0
+    for k, part in enumerate(parts):
+        tip, n = _add_imported_message_nodes(
+            user_id=current_user.id,
+            human_owner_id=current_user.id,
+            parent_id=parent_id if tip is None else tip.id,
+            node_type="user",
+            llm_model=None,
+            node_content=part,
+            privacy_level=privacy_level,
+            ai_usage=ai_usage,
+            source_key=source_key if k == len(parts) - 1 else None,
+            # one second per chapter keeps the chain in order
+            msg_created_at=(created_at + timedelta(seconds=k)
+                            if created_at else None),
+            origin=origin,
+        )
+        created += n
+    return tip, created
 
 
 @import_bp.route("/import/analyze", methods=["POST"])
@@ -245,25 +540,66 @@ def analyze_import():
     if zip_file.filename == '':
         return jsonify({"error": "No file selected"}), 400
 
+    filename_lower = zip_file.filename.lower()
+    if filename_lower.endswith('.docm'):
+        return jsonify({"error": f"{zip_file.filename}: macro-enabled Word "
+                        "files (.docm) are not accepted; save it as .docx "
+                        "and try again"}), 400
+    if filename_lower.endswith('.doc'):
+        return jsonify({"error": pdf_import.MSG_OLD_DOC}), 400
+
+    # A PDF is extracted in a child process (see utils/pdf_import.py)
+    if filename_lower.endswith('.pdf'):
+        return _analyze_pdf(zip_file)
+
+    # A single Word document is analyzed from the upload stream directly
+    if filename_lower.endswith('.docx'):
+        try:
+            content, modified = docx_import.convert_docx(zip_file.stream)
+        except docx_import.DocxImportError as e:
+            return jsonify({"error": f"{zip_file.filename}: {e}"}), 400
+        except Exception:
+            # Event reaches Sentry; only the exception type is logged
+            current_app.logger.error(
+                "Unexpected error converting .docx: %s",
+                type(sys.exc_info()[1]).__name__)
+            return jsonify({"error": DOCX_UNEXPECTED_ERROR}), 500
+        if not content.strip():
+            return jsonify({"error": f"{zip_file.filename}: the document has no text"}), 400
+        entry = _docx_file_entry(
+            zip_file.filename, content, modified or datetime.utcnow())
+        return jsonify({
+            "files": [entry], "total_files": 1,
+            "total_tokens": entry["token_count"],
+            "total_size": entry["size"], "errors": [],
+        }), 200
+
     # Validate it's a zip file
-    if not zip_file.filename.lower().endswith('.zip'):
-        return jsonify({"error": "File must be a .zip file"}), 400
+    if not filename_lower.endswith('.zip'):
+        return jsonify({"error": "File must be a .zip, .docx or .pdf file"}), 400
 
     try:
         # Read zip file into memory
         zip_bytes = io.BytesIO(zip_file.read())
 
         files_data = []
+        errors = []
+        parse_budget = docx_import.ParseBudget()  # shared by all docx here
         total_tokens = 0
         total_size = 0
 
         with zipfile.ZipFile(zip_bytes, 'r') as zip_ref:
-            # Get list of all .md files in the zip
+            # Get list of all .md / .docx files in the zip (.docm, .doc
+            # and .pdf are listed so that they are reported, not silently
+            # ignored)
             md_files = [f for f in zip_ref.namelist()
-                       if f.lower().endswith('.md') and not f.startswith('__MACOSX/')]
+                        if f.lower().endswith(('.md', '.docx', '.docm',
+                                               '.doc', '.pdf'))
+                        and not f.startswith('__MACOSX/')
+                        and not f.split('/')[-1].startswith('~$')]
 
             if not md_files:
-                return jsonify({"error": "No .md files found in the zip archive"}), 400
+                return jsonify({"error": "No .md or .docx files found in the zip archive"}), 400
 
             for file_path in md_files:
                 # Get file info
@@ -271,14 +607,6 @@ def analyze_import():
 
                 # Skip directories
                 if zip_info.is_dir():
-                    continue
-
-                # Read file content
-                try:
-                    content = zip_ref.read(file_path).decode('utf-8')
-                except UnicodeDecodeError:
-                    # Skip files that can't be decoded as UTF-8
-                    current_app.logger.warning(f"Skipping {file_path}: not valid UTF-8")
                     continue
 
                 # Extract just the filename from the path
@@ -289,6 +617,64 @@ def analyze_import():
                 # ZipInfo date_time is a tuple: (year, month, day, hour, minute, second)
                 dt_tuple = zip_info.date_time
                 file_datetime = datetime(*dt_tuple)
+
+                if filename.lower().endswith('.doc'):
+                    errors.append({"name": filename,
+                                   "error": pdf_import.MSG_OLD_DOC})
+                    continue
+                if filename.lower().endswith('.pdf'):
+                    errors.append({"name": filename,
+                                   "error": pdf_import.MSG_PDF_IN_ZIP})
+                    continue
+
+                if not filename.lower().endswith('.md'):
+                    try:
+                        docx_import.check_extension(filename)
+                        with tempfile.SpooledTemporaryFile(
+                                max_size=docx_import.SPOOL_MAX_MEMORY_BYTES) as tmp:
+                            try:
+                                with zip_ref.open(zip_info) as src:
+                                    shutil.copyfileobj(src, tmp)
+                            except (RuntimeError, zipfile.BadZipFile,
+                                    zlib.error, NotImplementedError):
+                                # encrypted, CRC/data error, unsupported
+                                # compression; zipfile's messages name the
+                                # member, so nothing is logged here
+                                raise docx_import.DocxImportError(
+                                    "the file is damaged or "
+                                    "password-protected")
+                            tmp.seek(0)
+                            content, modified = docx_import.convert_docx(
+                                tmp, parse_budget)
+                    except docx_import.DocxImportError as e:
+                        errors.append({"name": filename, "error": str(e)})
+                        continue
+                    except Exception:
+                        # type only: exception messages can contain names
+                        current_app.logger.error(
+                            "Unexpected error converting .docx in zip: %s",
+                            type(sys.exc_info()[1]).__name__)
+                        errors.append({"name": filename,
+                                       "error": DOCX_UNEXPECTED_ERROR})
+                        continue
+                    if not content.strip():
+                        errors.append({"name": filename,
+                                       "error": "the document has no text"})
+                        continue
+                    entry = _docx_file_entry(
+                        filename, content, modified or file_datetime)
+                    files_data.append(entry)
+                    total_tokens += entry["token_count"]
+                    total_size += entry["size"]
+                    continue
+
+                # Read file content
+                try:
+                    content = zip_ref.read(file_path).decode('utf-8')
+                except UnicodeDecodeError:
+                    # Skip files that can't be decoded as UTF-8
+                    current_app.logger.warning("Skipping a zip entry: not valid UTF-8")
+                    continue
 
                 # Calculate tokens
                 token_count = approximate_token_count(content)
@@ -307,20 +693,26 @@ def analyze_import():
                 total_size += zip_info.file_size
 
         if not files_data:
-            return jsonify({"error": "No valid .md files could be read from the zip archive"}), 400
+            if errors:
+                return jsonify({"error": "No files could be imported. "
+                                         + _errors_summary(errors)}), 400
+            return jsonify({"error": "No valid .md or .docx files could be read from the zip archive"}), 400
 
         return jsonify({
             "files": files_data,
             "total_files": len(files_data),
             "total_tokens": total_tokens,
-            "total_size": total_size
+            "total_size": total_size,
+            "errors": errors,
         }), 200
 
     except zipfile.BadZipFile:
         return jsonify({"error": "Invalid zip file"}), 400
     except Exception as e:
-        current_app.logger.error(f"Error analyzing import: {str(e)}")
-        return jsonify({"error": "Failed to analyze zip file", "details": str(e)}), 500
+        # Event reaches Sentry; only the exception type is logged
+        current_app.logger.error(
+            "Error analyzing import: %s", type(e).__name__)
+        return jsonify({"error": "Failed to analyze zip file"}), 500
 
 
 @import_bp.route("/import/confirm", methods=["POST"])
@@ -340,8 +732,12 @@ def confirm_import():
                 ...
             ],
             "import_type": "single_thread" | "separate_nodes",
-            "date_ordering": "modified" | "created"
+            "date_ordering": "modified" | "created",
+            "whose_writing": "mine" | "someone_else"   (required for a PDF)
         }
+
+    A PDF that is someone else's writing is saved as a Reference instead
+    of entries (see _save_pdf_reference).
 
     Returns:
         {
@@ -371,6 +767,20 @@ def confirm_import():
     if date_ordering not in ['modified', 'created']:
         return jsonify({"error": "Invalid date_ordering. Must be 'modified' or 'created'"}), 400
 
+    # A PDF may be someone else's writing; the user must say (no default:
+    # a wrong guess would feed another author's text into their profile).
+    if any(isinstance(f, dict) and f.get('source_format') == 'pdf'
+           for f in files):
+        whose_writing = data.get('whose_writing')
+        if whose_writing not in WHOSE_WRITING:
+            return jsonify({"error": "Choose whose writing this is: yours, "
+                            "or someone else's."}), 400
+        if whose_writing == 'someone_else':
+            if len(files) != 1:
+                return jsonify({"error": "Save one PDF at a time as a "
+                                "reference."}), 400
+            return _save_pdf_reference(files[0])
+
     try:
         # Sort files by the selected date ordering
         # For now, we only have modified_at from zip metadata, so we'll use that
@@ -383,14 +793,17 @@ def confirm_import():
         skipped_alive_ids = []
         key_index, deleted_keys = _load_source_key_index(current_user.id)
 
-        def _file_source_key(filename, content):
-            """sha256 of (filename, content) for markdown-zip dedup."""
+        def _file_source_key(filename, content, source_format=None):
+            """sha256 of (filename, content) for markdown-zip dedup; a
+            PDF's key is keyed with the server secret and the user."""
+            if source_format == 'pdf':
+                return _keyed_digest("pdf-entry", filename, content)
             raw = f"{filename}\x00{content}"
             return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
         conflict = _deleted_match_response(
             (_file_source_key(f.get('filename_without_ext', 'Untitled'),
-                              f.get('content', ''))
+                              f.get('content', ''), f.get('source_format'))
              for f in files_sorted),
             deleted_keys, on_deleted,
         )
@@ -406,19 +819,20 @@ def confirm_import():
                 content = file_data.get('content', '')
 
                 # Add filename as markdown headline only if content doesn't have H1
-                stripped_content = content.lstrip()
-                if not stripped_content.startswith('# '):
-                    node_content = f"# {filename}\n\n{content}"
-                else:
-                    node_content = content
+                parts = _file_parts(file_data, filename, content)
+                node_content = parts[-1]  # the tip: what a restore refills
 
-                source_key = _file_source_key(filename, content)
+                source_key = _file_source_key(
+                    filename, content, file_data.get('source_format'))
+                _release_deleted_docx_key(file_data, source_key, key_index,
+                                          deleted_keys, on_deleted)
                 if source_key in key_index:
                     # Chain the next new file onto the existing copy so
                     # partially-skipped imports don't orphan new nodes.
                     if source_key in deleted_keys and on_deleted == 'restore':
                         _restore_node(key_index[source_key], node_content,
-                                      privacy_level, ai_usage)
+                                      privacy_level, ai_usage,
+                                      provenance=PROVENANCE_ARCHIVE_UPLOAD)
                         deleted_keys.discard(source_key)
                         nodes_restored += 1
                     else:
@@ -439,19 +853,9 @@ def confirm_import():
 
                 # Create node(s) — files above the per-node cap split
                 # into a serial chain
-                tip, created_count = _add_imported_message_nodes(
-                    user_id=current_user.id,
-                    human_owner_id=current_user.id,
-                    parent_id=parent_id,
-                    node_type="user",
-                    llm_model=None,
-                    node_content=node_content,
-                    privacy_level=privacy_level,
-                    ai_usage=ai_usage,
-                    source_key=source_key,
-                    msg_created_at=node_created_at,
-                    origin="markdown",
-                )
+                tip, created_count = _import_file_nodes(
+                    file_data, parts, parent_id, source_key,
+                    node_created_at, privacy_level, ai_usage)
 
                 key_index[source_key] = tip.id
                 parent_id = tip.id
@@ -467,17 +871,18 @@ def confirm_import():
                 content = file_data.get('content', '')
 
                 # Add filename as markdown headline only if content doesn't have H1
-                stripped_content = content.lstrip()
-                if not stripped_content.startswith('# '):
-                    node_content = f"# {filename}\n\n{content}"
-                else:
-                    node_content = content
+                parts = _file_parts(file_data, filename, content)
+                node_content = parts[-1]  # the tip: what a restore refills
 
-                source_key = _file_source_key(filename, content)
+                source_key = _file_source_key(
+                    filename, content, file_data.get('source_format'))
+                _release_deleted_docx_key(file_data, source_key, key_index,
+                                          deleted_keys, on_deleted)
                 if source_key in key_index:
                     if source_key in deleted_keys and on_deleted == 'restore':
                         _restore_node(key_index[source_key], node_content,
-                                      privacy_level, ai_usage)
+                                      privacy_level, ai_usage,
+                                      provenance=PROVENANCE_ARCHIVE_UPLOAD)
                         deleted_keys.discard(source_key)
                         nodes_restored += 1
                     else:
@@ -498,19 +903,9 @@ def confirm_import():
 
                 # Create top-level node (parent_id=None); files above the
                 # per-node cap split into a serial chain under the root
-                _, created_count = _add_imported_message_nodes(
-                    user_id=current_user.id,
-                    human_owner_id=current_user.id,
-                    parent_id=None,
-                    node_type="user",
-                    llm_model=None,
-                    node_content=node_content,
-                    privacy_level=privacy_level,
-                    ai_usage=ai_usage,
-                    source_key=source_key,
-                    msg_created_at=node_created_at,
-                    origin="markdown",
-                )
+                _, created_count = _import_file_nodes(
+                    file_data, parts, None, source_key,
+                    node_created_at, privacy_level, ai_usage)
 
                 nodes_created += created_count
                 threads_created += 1
@@ -532,54 +927,27 @@ def confirm_import():
                 user_obj = User.query.get(current_user.id)
                 if (user_obj and (user_obj.plan or "free")
                         in User.VOICE_MODE_PLANS):
-                    latest_profile = UserProfile.query.filter_by(
-                        user_id=current_user.id
-                    ).order_by(UserProfile.created_at.desc()).first()
-                    cutoff = (latest_profile.source_data_cutoff
-                              if latest_profile else None)
-
-                    needs_full_regen = False
                     earliest_ts = None
-                    if cutoff:
-                        for f in files_sorted:
-                            raw_ts = f.get('modified_at', '')
-                            if raw_ts:
-                                try:
-                                    ts = datetime.fromisoformat(raw_ts)
-                                    if ts < cutoff:
-                                        needs_full_regen = True
-                                    if (earliest_ts is None
-                                            or ts < earliest_ts):
-                                        earliest_ts = ts
-                                except (ValueError, TypeError):
-                                    pass
-
-                    if needs_full_regen:
-                        from backend.tasks.exports import (
-                            revert_profile_for_import
-                        )
-                        revert_profile_for_import(
-                            user_obj.id, earliest_ts
-                        )
-                        db.session.commit()
+                    for f in files_sorted:
+                        raw_ts = f.get('modified_at', '')
+                        if raw_ts:
+                            try:
+                                ts = datetime.fromisoformat(raw_ts)
+                                if earliest_ts is None or ts < earliest_ts:
+                                    earliest_ts = ts
+                            except (ValueError, TypeError):
+                                pass
 
                     total_imported_tokens = sum(
                         approximate_token_count(f.get('content', ''))
                         for f in files_sorted
                     )
-                    if total_imported_tokens >= 10000:
-                        from backend.tasks.exports import (
-                            maybe_trigger_profile_update
-                        )
-                        profile_update_task_id = (
-                            maybe_trigger_profile_update(
-                                current_user.id,
-                                force_full_regen=needs_full_regen,
-                            )
-                        )
+                    profile_update_task_id = (
+                        _hand_off_profile_update_after_import(
+                            user_obj, earliest_ts, total_imported_tokens))
             except Exception as e:
                 current_app.logger.warning(
-                    f"Auto-trigger profile update failed: {e}"
+                    "Auto-trigger profile update failed: %s", type(e).__name__
                 )
 
         return jsonify({
@@ -595,8 +963,9 @@ def confirm_import():
 
     except Exception as e:
         db.session.rollback()
-        current_app.logger.error(f"Error confirming import: {str(e)}")
-        return jsonify({"error": "Failed to import files", "details": str(e)}), 500
+        current_app.logger.error(
+            "Error confirming import: %s", type(e).__name__)
+        return jsonify({"error": "Failed to import files"}), 500
 
 
 @import_bp.route("/import/twitter/analyze", methods=["POST"])
@@ -637,7 +1006,8 @@ def analyze_twitter_import():
     try:
         token, path = ta.stash_new(current_user.id)
     except OSError as e:
-        current_app.logger.error(f"Twitter import stash failed: {e}")
+        current_app.logger.error(
+            "Twitter import stash failed: %s", type(e).__name__)
         return jsonify({"error": "Could not store the archive for import"}), 500
 
     try:
@@ -652,15 +1022,218 @@ def analyze_twitter_import():
     except Exception as e:
         ta.stash_delete(path)
         current_app.logger.error(
-            f"Error analyzing Twitter import: {str(e)}"
+            "Error analyzing Twitter import: %s", type(e).__name__
         )
         return jsonify({
-            "error": "Failed to analyze Twitter export",
-            "details": str(e)
+            "error": "Failed to analyze Twitter export"
         }), 500
 
     summary["import_token"] = token
     return jsonify(summary), 200
+
+
+def _load_conversation_files(conv_files, source_label):
+    """
+    Parse the uploaded conversation file(s) into one list, in upload
+    order. A sharded export arrives as one part per shard, each holding
+    a JSON array.
+
+    Raises UnicodeDecodeError / json.JSONDecodeError for the caller to
+    report.
+    """
+    raw_conversations = []
+    size_bytes = 0
+    for conv_file in conv_files:
+        conversations_bytes = conv_file.read()
+        size_bytes += len(conversations_bytes)
+        raw_conversations.extend(
+            json.loads(conversations_bytes.decode('utf-8')))
+    current_app.logger.info(
+        "%s import: size_bytes=%d files=%d user_id=%s",
+        source_label,
+        size_bytes,
+        len(conv_files),
+        getattr(current_user, 'id', None),
+    )
+    return raw_conversations
+
+
+def _plural(n, one, many):
+    return one if n == 1 else many
+
+
+# Key names that may appear in a Sentry event. Anything else could be user
+# content (a format keyed by title or id), so it is only counted.
+_CHATGPT_KNOWN_KEYS = frozenset({
+    'id', 'conversation_id', 'title', 'create_time', 'update_time',
+    'current_node', 'mapping', 'conversation_template_id',
+    'default_model_slug', 'is_archived', 'is_starred', 'is_do_not_remember',
+    'is_read_only', 'is_study_mode', 'memory_scope', 'pinned_time',
+    'plugin_ids', 'voice', 'gizmo_id', 'gizmo_type', 'moderation_results',
+    'safe_urls', 'async_status', 'disabled_tool_ids', 'sugar_item_id',
+    'chats', 'messages', 'members', 'name', 'items', 'conversations',
+    'sections',
+})
+
+
+def _chatgpt_file_label(name):
+    """Fixed label for an uploaded file name (client-controlled, so the
+    raw name never goes to Sentry or the logs)."""
+    if name == 'conversations.json':
+        return 'conversations'
+    if re.fullmatch(r'conversations-\d+\.json', name):
+        return 'conversations-shard'
+    if name == 'sectioned_conversations.json':
+        return 'sectioned_conversations'
+    if name == 'group_chats.json':
+        return 'group_chats'
+    return 'other'
+
+
+def _chatgpt_key_summary(obj):
+    """For a dict: its allowlisted key names plus a count of the others
+    (never their text). For anything else: None."""
+    if not isinstance(obj, dict):
+        return None
+    known = sorted(k for k in obj if k in _CHATGPT_KNOWN_KEYS)
+    return {"keys": known, "unknown_key_count": len(obj) - len(known)}
+
+
+def _report_unreadable_chatgpt_items(problems):
+    """One Sentry warning per request for unreadable ChatGPT export
+    items. Counts and key names only: never a value, title or id from
+    the export. A fixed message and fingerprint group the events into
+    one issue; a no-op when Sentry is not initialised."""
+    try:
+        import sentry_sdk
+        with sentry_sdk.new_scope() as scope:
+            scope.fingerprint = ["chatgpt-import-unreadable-items"]
+            scope.set_context("chatgpt_import", {"files": problems})
+            sentry_sdk.capture_message(
+                "ChatGPT import: unreadable export items",
+                level="warning")
+    except Exception:  # reporting must not break the import
+        current_app.logger.exception(
+            "Sentry report of unreadable ChatGPT items failed")
+
+
+def _load_chatgpt_parts(conv_files):
+    """
+    Parse the uploaded ChatGPT parts (told apart by basename) into
+    ([(conversation, messages), ...], notices). A conversation whose
+    linearization raises is counted as unreadable.
+
+    - group_chats.json is not imported; its chats are counted for a notice.
+    - Every other part: each dict item with a dict "mapping" is a
+      conversation (so a conversation-shaped item in
+      sectioned_conversations.json imports like the rest); any other item,
+      or a top level that is not a list, is counted as unreadable.
+    - Conversations repeated across parts are kept once (by "id", else
+      "conversation_id"; first one wins).
+
+    Logs counts only, never content. Raises UnicodeDecodeError /
+    json.JSONDecodeError for the caller to report.
+    """
+    conversations = []  # (conversation, linearized messages) pairs
+    seen_ids = set()
+    unreadable = 0
+    group_chats = 0
+    size_bytes = 0
+    problems = []
+    for conv_file in conv_files:
+        name = os.path.basename(conv_file.filename or '')
+        label = _chatgpt_file_label(name)
+        data = conv_file.read()
+        size_bytes += len(data)
+        parsed = json.loads(data.decode('utf-8'))
+
+        if name == 'group_chats.json':
+            chats = parsed.get('chats') if isinstance(parsed, dict) else None
+            n = len(chats) if isinstance(chats, list) else 0
+            group_chats += n
+            if n or not isinstance(chats, list):
+                current_app.logger.warning(
+                    "ChatGPT import: file=%s group_chats=%d top_level=%s",
+                    label, n, type(parsed).__name__)
+            continue
+
+        if not isinstance(parsed, list):
+            unreadable += 1
+            current_app.logger.warning(
+                "ChatGPT import: file=%s top_level=%s unreadable=1",
+                label, type(parsed).__name__)
+            problems.append({
+                "file": label, "top_level": type(parsed).__name__,
+                "items": None, "unreadable": 1,
+                "unreadable_types": {type(parsed).__name__: 1},
+                "first_unreadable": _chatgpt_key_summary(parsed),
+            })
+            continue
+
+        part_unreadable = 0
+        first_unreadable = None
+        unreadable_types = {}
+        for item in parsed:
+            if not (isinstance(item, dict)
+                    and isinstance(item.get('mapping'), dict)):
+                if part_unreadable == 0:
+                    first_unreadable = _chatgpt_key_summary(item)
+                tname = type(item).__name__
+                unreadable_types[tname] = unreadable_types.get(tname, 0) + 1
+                part_unreadable += 1
+                continue
+            conv_id = item.get('id') or item.get('conversation_id')
+            if isinstance(conv_id, str):  # other types count as absent
+                if conv_id in seen_ids:
+                    continue
+                seen_ids.add(conv_id)
+            if not item['mapping']:
+                continue
+            try:
+                messages = _linearize_chatgpt_messages(
+                    item['mapping'], item.get('current_node'))
+            except (TypeError, AttributeError, KeyError, ValueError) as e:
+                # One malformed conversation must not fail the upload.
+                # Type names only, never values.
+                if part_unreadable == 0:
+                    first_unreadable = {"error": type(e).__name__}
+                tname = "conversation:" + type(e).__name__
+                unreadable_types[tname] = unreadable_types.get(tname, 0) + 1
+                part_unreadable += 1
+                continue
+            if messages:
+                conversations.append((item, messages))
+        unreadable += part_unreadable
+        if part_unreadable:
+            current_app.logger.warning(
+                "ChatGPT import: file=%s items=%d unreadable=%d "
+                "top_level=list", label, len(parsed), part_unreadable)
+            problems.append({
+                "file": label, "top_level": "list", "items": len(parsed),
+                "unreadable": part_unreadable,
+                "unreadable_types": unreadable_types,
+                "first_unreadable": first_unreadable,
+            })
+
+    if problems:
+        _report_unreadable_chatgpt_items(problems)
+
+    current_app.logger.info(
+        "ChatGPT import: size_bytes=%d files=%d user_id=%s",
+        size_bytes, len(conv_files), getattr(current_user, 'id', None))
+
+    notices = []
+    if unreadable:
+        notices.append(
+            f"{unreadable} {_plural(unreadable, 'item', 'items')} in your "
+            f"export {_plural(unreadable, 'is', 'are')} in a format Loore "
+            f"can't read yet, so {_plural(unreadable, 'it', 'they')} "
+            f"won't be imported.")
+    if group_chats:
+        notices.append(
+            f"Group chats aren't imported yet ({group_chats} in your "
+            f"export).")
+    return conversations, notices
 
 
 @import_bp.route("/import/claude/analyze", methods=["POST"])
@@ -704,21 +1277,13 @@ def analyze_claude_import():
     if 'conversations_file' not in request.files:
         return jsonify({"error": "No conversations_file provided"}), 400
 
-    conv_file = request.files['conversations_file']
+    conv_files = request.files.getlist('conversations_file')
 
-    if conv_file.filename == '':
+    if any(f.filename == '' for f in conv_files):
         return jsonify({"error": "No file selected"}), 400
 
     try:
-        conversations_bytes = conv_file.read()
-        current_app.logger.info(
-            "Claude import: size_bytes=%d user_id=%s",
-            len(conversations_bytes),
-            getattr(current_user, 'id', None),
-        )
-        conversations_json = conversations_bytes.decode('utf-8')
-
-        raw_conversations = json.loads(conversations_json)
+        raw_conversations = _load_conversation_files(conv_files, "Claude")
 
         conversations = []
         total_messages = 0
@@ -781,23 +1346,20 @@ def analyze_claude_import():
             "total_size": total_size
         }), 200
 
-    except UnicodeDecodeError as e:
+    except UnicodeDecodeError:
         return jsonify({
-            "error": "conversations.json is not valid UTF-8",
-            "details": str(e)
+            "error": "conversations.json is not valid UTF-8 text"
         }), 400
-    except json.JSONDecodeError as e:
+    except json.JSONDecodeError:
         return jsonify({
-            "error": "Failed to parse conversations JSON",
-            "details": str(e)
+            "error": "conversations.json is not valid JSON"
         }), 400
     except Exception as e:
         current_app.logger.error(
-            f"Error analyzing Claude import: {str(e)}"
+            "Error analyzing Claude import: %s", type(e).__name__
         )
         return jsonify({
-            "error": "Failed to analyze Claude export",
-            "details": str(e)
+            "error": "Failed to analyze Claude export"
         }), 500
 
 
@@ -902,7 +1464,8 @@ def confirm_claude_import():
                     if (source_key in deleted_keys
                             and on_deleted == 'restore'):
                         _restore_node(key_index[source_key], node_content,
-                                      privacy_level, ai_usage)
+                                      privacy_level, ai_usage,
+                                      provenance=PROVENANCE_ARCHIVE_UPLOAD)
                         deleted_keys.discard(source_key)
                         nodes_restored += 1
                     else:
@@ -966,42 +1529,20 @@ def confirm_claude_import():
                 user_obj = User.query.get(current_user.id)
                 if (user_obj and (user_obj.plan or "free")
                         in User.VOICE_MODE_PLANS):
-                    latest_profile = UserProfile.query.filter_by(
-                        user_id=current_user.id
-                    ).order_by(UserProfile.created_at.desc()).first()
-                    cutoff = (latest_profile.source_data_cutoff
-                              if latest_profile else None)
-
-                    needs_full_regen = False
                     earliest_ts = None
-                    if cutoff:
-                        for conv in conversations_sorted:
-                            for msg in conv.get('messages', []):
-                                raw_ts = msg.get('created_at', '')
-                                if raw_ts:
-                                    try:
-                                        raw_ts = raw_ts.replace(
-                                            'Z', '+00:00'
-                                        )
-                                        ts = datetime.fromisoformat(
-                                            raw_ts
-                                        ).replace(tzinfo=None)
-                                        if ts < cutoff:
-                                            needs_full_regen = True
-                                        if (earliest_ts is None
-                                                or ts < earliest_ts):
-                                            earliest_ts = ts
-                                    except (ValueError, TypeError):
-                                        pass
-
-                    if needs_full_regen:
-                        from backend.tasks.exports import (
-                            revert_profile_for_import
-                        )
-                        revert_profile_for_import(
-                            user_obj.id, earliest_ts
-                        )
-                        db.session.commit()
+                    for conv in conversations_sorted:
+                        for msg in conv.get('messages', []):
+                            raw_ts = msg.get('created_at', '')
+                            if raw_ts:
+                                try:
+                                    raw_ts = raw_ts.replace('Z', '+00:00')
+                                    ts = datetime.fromisoformat(
+                                        raw_ts
+                                    ).replace(tzinfo=None)
+                                    if earliest_ts is None or ts < earliest_ts:
+                                        earliest_ts = ts
+                                except (ValueError, TypeError):
+                                    pass
 
                     total_imported_tokens = sum(
                         approximate_token_count(msg.get('text', ''))
@@ -1009,19 +1550,12 @@ def confirm_claude_import():
                         for msg in conv.get('messages', [])
                         if msg.get('text')
                     )
-                    if total_imported_tokens >= 10000:
-                        from backend.tasks.exports import (
-                            maybe_trigger_profile_update
-                        )
-                        profile_update_task_id = (
-                            maybe_trigger_profile_update(
-                                current_user.id,
-                                force_full_regen=needs_full_regen,
-                            )
-                        )
+                    profile_update_task_id = (
+                        _hand_off_profile_update_after_import(
+                            user_obj, earliest_ts, total_imported_tokens))
             except Exception as e:
                 current_app.logger.warning(
-                    f"Auto-trigger profile update failed: {e}"
+                    "Auto-trigger profile update failed: %s", type(e).__name__
                 )
 
         return jsonify({
@@ -1038,11 +1572,10 @@ def confirm_claude_import():
     except Exception as e:
         db.session.rollback()
         current_app.logger.error(
-            f"Error confirming Claude import: {str(e)}"
+            "Error confirming Claude import: %s", type(e).__name__
         )
         return jsonify({
-            "error": "Failed to import Claude conversations",
-            "details": str(e)
+            "error": "Failed to import Claude conversations"
         }), 500
 
 
@@ -1059,11 +1592,16 @@ def _parse_tweet_ts(raw_ts):
 
 
 def create_twitter_nodes(user_id, rows, total, import_type, include_replies,
-                         privacy_level, ai_usage, on_deleted,
+                         privacy_level, ai_usage, on_deleted, *, provenance,
                          batch_size=500, on_progress=None):
     """Create nodes for analyzed tweets. Runs inside the Celery import
     task (backend/tasks/imports.py); ``rows`` is any iterable of compact
     tweet rows sorted by created_at (the analyze step sorts the stash).
+
+    ``provenance`` (one of PROVENANCES) says how these tweets reached
+    Loore — the user's own upload, or a Loore-side fetch from the
+    Community Archive or the X API. Required, not defaulted: a caller
+    that forgets it would leave rows nobody can later classify.
 
     Commits every ``batch_size`` created nodes so a 60k-tweet archive
     never holds one giant transaction, and reports ``done`` rows through
@@ -1074,10 +1612,13 @@ def create_twitter_nodes(user_id, rows, total, import_type, include_replies,
     """
     if import_type not in ('single_thread', 'separate_nodes'):
         raise ValueError("Invalid import_type")
+    if provenance not in PROVENANCES:
+        raise ValueError(f"Unknown provenance {provenance!r}")
 
     nodes_created = 0
     nodes_skipped = 0
     nodes_restored = 0
+    nodes_empty = 0
     skipped_alive_ids = []
     key_index, deleted_keys = _load_source_key_index(user_id)
     parent_id = None
@@ -1092,6 +1633,16 @@ def create_twitter_nodes(user_id, rows, total, import_type, include_replies,
             continue
 
         content = tweet_data.get('full_text', '')
+        if not content.strip():
+            # A tweet with no text (a media-only post, whose text in the
+            # export is empty) would become a blank node: nothing for the
+            # profile to read, a blank card in the Log, and a row no
+            # encryption pass can ever touch — set_content("") stores the
+            # empty string as-is. 39 of these reached prod before this
+            # guard, across 8 accounts (#317).
+            nodes_empty += 1
+            continue
+
         token_count = tweet_data.get(
             'token_count', approximate_token_count(content)
         )
@@ -1106,7 +1657,8 @@ def create_twitter_nodes(user_id, rows, total, import_type, include_replies,
             if source_key in deleted_keys and on_deleted == 'restore':
                 _restore_node(
                     key_index[source_key], content,
-                    privacy_level, ai_usage, token_count
+                    privacy_level, ai_usage, token_count,
+                    provenance=provenance,
                 )
                 deleted_keys.discard(source_key)
                 nodes_restored += 1
@@ -1130,6 +1682,7 @@ def create_twitter_nodes(user_id, rows, total, import_type, include_replies,
             ai_usage=ai_usage,
             source_key=source_key,
             origin="twitter",
+            provenance=provenance,
         )
         node.set_content(content)
         if tweet_created_at:
@@ -1174,52 +1727,82 @@ def create_twitter_nodes(user_id, rows, total, import_type, include_replies,
         "profile_update_task_id": profile_update_task_id,
         "created": nodes_created,
         "skipped": nodes_skipped,
+        "empty": nodes_empty,
         "restored": nodes_restored,
         "updated": nodes_updated,
     }
 
 
 def _maybe_update_profile_after_import(user_id, earliest_ts, imported_tokens):
-    """Revert the profile if imported data predates its cutoff, then
-    trigger an update when enough new tokens landed. Best-effort."""
+    """Twitter path: same hand-off as every other importer. Best-effort."""
     try:
         user_obj = User.query.get(user_id)
         if not user_obj or (user_obj.plan or "free") not in User.VOICE_MODE_PLANS:
             return None
-        latest_profile = UserProfile.query.filter_by(
-            user_id=user_id
-        ).order_by(UserProfile.created_at.desc()).first()
-        cutoff = latest_profile.source_data_cutoff if latest_profile else None
-        needs_full_regen = bool(cutoff and earliest_ts and earliest_ts < cutoff)
-        if needs_full_regen:
-            from backend.tasks.exports import revert_profile_for_import
-            revert_profile_for_import(user_id, earliest_ts)
-            db.session.commit()
-        if imported_tokens >= 10000:
-            from backend.tasks.profile_batch import use_batch_for_user
-            if use_batch_for_user(user_obj, current_app.config):
-                # Batch users are driven by the hourly seeder, never the
-                # synchronous (full-price) path. A from-scratch build or a
-                # rewind past the cutoff is requested via the regen flag;
-                # an incremental update is picked up once the seeder's
-                # token gate is crossed.
-                if needs_full_regen or latest_profile is None:
-                    user_obj.profile_needs_full_regen = True
-                    db.session.commit()
-                current_app.logger.info(
-                    f"User {user_id}: import handed to the batch profile "
-                    f"pipeline (full_regen={needs_full_regen or latest_profile is None})"
-                )
-                return None
-            from backend.tasks.exports import maybe_trigger_profile_update
-            return maybe_trigger_profile_update(
-                user_id, force_full_regen=needs_full_regen,
-            )
+        return _hand_off_profile_update_after_import(
+            user_obj, earliest_ts, imported_tokens)
     except Exception as e:
         current_app.logger.warning(
-            f"Auto-trigger profile update failed: {e}"
+            "Auto-trigger profile update failed: %s", type(e).__name__
         )
     return None
+
+
+def _hand_off_profile_update_after_import(user_obj, earliest_ts, imported_tokens):
+    """After an import, invalidate only the profile versions the imported
+    data touches and regenerate the chain from there to the end, on the
+    pipeline the account is on. Shared by every importer (Twitter,
+    ChatGPT, Claude, markdown).
+
+    - Data older than a version's cutoff invalidates that version
+      (``revert_profile_for_import``): the latest still-valid version
+      becomes the tip again and the chain continues from it now. Older
+      than the whole chain: a from-scratch build now.
+    - Otherwise (data newer than the tip, or no profile yet) nothing is
+      invalidated; the import is new data like any other, and the
+      account's seeding gate is evaluated right away instead of at the
+      next hourly beat — the provisional ladder for a first or
+      provisional profile, the 80k incremental gate for a full one — so
+      an import that tips the account over starts its build immediately
+      and one that does not starts nothing.
+
+    Batch users (all of prod with ``PROFILE_USE_BATCH``) are seeded, and
+    never sent to the synchronous full-price task; sync users dispatch it
+    directly. Returns a task id or None.
+
+    The refusal backoff (utils/refusal_backoff.py) does not apply here: a
+    build the import triggers runs even if the profile job is waiting or
+    stopped after cut-off outputs (#368). An import that triggers no build
+    leaves the backoff as it is."""
+    from backend.tasks.exports import (
+        revert_profile_for_import, maybe_trigger_profile_update,
+        maybe_trigger_incremental_profile_update)
+    from backend.tasks.profile_batch import (
+        use_batch_for_user, seed_profile_batch_for_user)
+
+    tip = UserProfile.query.filter(
+        UserProfile.user_id == user_obj.id,
+        UserProfile.generation_type != 'integration'
+    ).order_by(UserProfile.created_at.desc()).first()
+    action = "none"
+    if tip is not None:
+        action, _version = revert_profile_for_import(user_obj.id, earliest_ts)
+        db.session.commit()
+
+    if use_batch_for_user(user_obj, current_app.config):
+        current_app.logger.info(
+            f"User {user_obj.id}: import ({imported_tokens} tokens) handed "
+            f"to the batch profile pipeline ({action}); seeding now")
+        # An import skips the refusal backoff (wait and stop): it is new
+        # input, so a build it triggers runs now (voice review,
+        # 2026-10-01). The seed's own gates still decide whether it does.
+        seed_profile_batch_for_user.delay(user_obj.id, ignore_backoff=True)
+        return None
+    if action == "none":
+        return maybe_trigger_incremental_profile_update(
+            user_obj, ignore_backoff=True)
+    return maybe_trigger_profile_update(
+        user_obj.id, force_full_regen=(action == "full"))
 
 
 def _tweet_source_key(tweet_data):
@@ -1290,6 +1873,7 @@ def confirm_twitter_import():
         return conflict
 
     from backend.tasks.imports import import_twitter_archive
+    from backend.utils.task_owner import record_task_owner
     task = import_twitter_archive.delay(current_user.id, data['import_token'], {
         "import_type": import_type,
         "include_replies": include_replies,
@@ -1297,6 +1881,8 @@ def confirm_twitter_import():
         "ai_usage": ai_usage,
         "on_deleted": on_deleted,
     })
+    # /import/status answers for this task id to this user only.
+    record_task_owner(task.id, current_user.id, current_app.config)
     return jsonify({
         "task_id": task.id,
         "status": "queued",
@@ -1312,15 +1898,20 @@ def import_status(task_id):
     {"status": "queued" | "running" | "completed" | "failed",
      "done": N, "total": N, "result": {...} | null, "error": str | null}
 
-    Task meta carries the owning user_id; anyone else's task id reads
-    as "queued" forever rather than leaking counts.
+    Answers for the caller's own import only: the task's meta carries
+    the owning user_id while it runs and once it succeeds, and the
+    confirm request recorded the owner (utils/task_owner), which also
+    covers a failure. Anyone else's task id reads as "queued" forever.
+    A failure says only text written for the user, else "Import failed".
     """
     from backend.celery_app import celery
+    from backend.utils.task_owner import failure_text, task_owned_by
 
     task = celery.AsyncResult(task_id)
     info = task.info if isinstance(task.info, dict) else {}
-    owner = info.get("user_id")
-    if task.state in ("PROGRESS", "SUCCESS") and owner != current_user.id:
+    mine = (info.get("user_id") == current_user.id
+            or task_owned_by(task_id, current_user.id, current_app.config))
+    if not mine:
         return jsonify({"task_id": task_id, "status": "queued",
                         "done": 0, "total": None, "result": None,
                         "error": None}), 200
@@ -1336,32 +1927,60 @@ def import_status(task_id):
                         "result": {k: v for k, v in info.items() if k != "user_id"},
                         "error": None}), 200
     if task.state == "FAILURE":
-        err = task.info
         return jsonify({"task_id": task_id, "status": "failed",
                         "done": 0, "total": None, "result": None,
-                        "error": str(err) if err else "Import failed"}), 200
+                        "error": failure_text(task.info, "Import failed")}), 200
     return jsonify({"task_id": task_id, "status": "queued",
                     "done": 0, "total": None, "result": None,
                     "error": None}), 200
 
 
-def _linearize_chatgpt_messages(mapping):
+def _str_parent(entry):
+    parent = entry.get('parent')
+    return parent if isinstance(parent, str) and parent else None
+
+
+def _chatgpt_thread_ids(mapping, current_node=None):
     """
-    Walk the ChatGPT conversation graph from root to leaf
-    following the first child at each step (main thread).
-    Returns a list of message dicts with text, role, created_at, model.
+    Node ids of a ChatGPT conversation's main thread, root first.
+
+    The main thread is the path from the root to ``current_node``: the
+    branch the user last saw in ChatGPT, which after an edited message
+    or a regenerated reply is not the first child. Without a usable
+    current_node, walk from the root following the first child.
     """
+    # A non-string current_node or parent is treated as absent.
+    if not isinstance(current_node, str):
+        current_node = None
+    if current_node in mapping:
+        path = []
+        visited = set()
+        node_id = current_node
+        while node_id in mapping and node_id not in visited:
+            visited.add(node_id)
+            path.append(node_id)
+            parent = mapping[node_id].get('parent')
+            node_id = parent if isinstance(parent, str) else None
+        return path[::-1]
+
     # Find the root node (no parent)
     root_id = None
     for node_id, entry in mapping.items():
-        if not entry.get('parent'):
+        if not _str_parent(entry):
             root_id = node_id
             break
 
     if not root_id:
         return []
 
-    messages = []
+    # Exports since Oct 2026 drop each node's 'children' list; derive
+    # it from the parent pointers, in mapping order.
+    derived_children = {}
+    for node_id, entry in mapping.items():
+        if _str_parent(entry):
+            derived_children.setdefault(entry['parent'], []).append(node_id)
+
+    path = []
     current = root_id
     visited = set()
 
@@ -1370,6 +1989,39 @@ def _linearize_chatgpt_messages(mapping):
         entry = mapping.get(current)
         if not entry:
             break
+        path.append(current)
+        children = entry.get('children')
+        if children is None:
+            children = derived_children.get(current, [])
+        current = children[0] if children else None
+
+    return path
+
+
+def _chatgpt_part_text(part):
+    """Text of one message part: string parts, and the transcript of a
+    voice-mode turn (an "audio_transcription" dict part), as plain text.
+    Other dict parts (images, audio pointers) give ''. To mark spoken
+    turns, change the transcription return value here."""
+    if isinstance(part, str):
+        return part
+    if (isinstance(part, dict)
+            and part.get('content_type') == 'audio_transcription'
+            and isinstance(part.get('text'), str)):
+        return part['text']
+    return ''
+
+
+def _linearize_chatgpt_messages(mapping, current_node=None):
+    """
+    Walk the ChatGPT conversation graph along its main thread (see
+    _chatgpt_thread_ids).
+    Returns a list of message dicts with text, role, created_at, model.
+    """
+    messages = []
+
+    for current in _chatgpt_thread_ids(mapping, current_node):
+        entry = mapping[current]
 
         msg = entry.get('message')
         if msg:
@@ -1377,7 +2029,8 @@ def _linearize_chatgpt_messages(mapping):
             if role in ('user', 'assistant'):
                 parts = msg.get('content', {}).get('parts', [])
                 text = '\n'.join(
-                    str(p) for p in parts if isinstance(p, str)
+                    _chatgpt_part_text(p) for p in parts
+                    if _chatgpt_part_text(p)
                 ).strip()
                 if text:
                     create_time = msg.get('create_time')
@@ -1407,9 +2060,6 @@ def _linearize_chatgpt_messages(mapping):
                         "mapping_id": current,
                     })
 
-        children = entry.get('children', [])
-        current = children[0] if children else None
-
     return messages
 
 
@@ -1425,7 +2075,9 @@ def analyze_chatgpt_import():
 
     Expects:
         - multipart/form-data with 'conversations_file' field containing
-          the conversations.json extracted from a ChatGPT data export
+          the conversations.json extracted from a ChatGPT data export;
+          exports since Oct 2026 split it into conversations-000.json,
+          conversations-001.json, ..., sent as one part each
 
     Returns:
         {
@@ -1439,37 +2091,20 @@ def analyze_chatgpt_import():
     if 'conversations_file' not in request.files:
         return jsonify({"error": "No conversations_file provided"}), 400
 
-    conv_file = request.files['conversations_file']
+    conv_files = request.files.getlist('conversations_file')
 
-    if conv_file.filename == '':
+    if any(f.filename == '' for f in conv_files):
         return jsonify({"error": "No file selected"}), 400
 
     try:
-        conversations_bytes = conv_file.read()
-        current_app.logger.info(
-            "ChatGPT import: size_bytes=%d user_id=%s",
-            len(conversations_bytes),
-            getattr(current_user, 'id', None),
-        )
-        conversations_json = conversations_bytes.decode('utf-8')
-
-        raw_conversations = json.loads(conversations_json)
+        raw_conversations, notices = _load_chatgpt_parts(conv_files)
 
         conversations = []
         total_messages = 0
         total_tokens = 0
         total_size = 0
 
-        for conv in raw_conversations:
-            mapping = conv.get('mapping', {})
-            if not mapping:
-                continue
-
-            messages = _linearize_chatgpt_messages(mapping)
-
-            if not messages:
-                continue
-
+        for conv, messages in raw_conversations:
             conv_token_count = 0
             for msg in messages:
                 token_count = approximate_token_count(msg['text'])
@@ -1502,10 +2137,10 @@ def analyze_chatgpt_import():
             total_tokens += conv_token_count
 
         if not conversations:
-            return jsonify({
-                "error": "No conversations with messages found in the "
-                         "export."
-            }), 400
+            error = "No conversations with messages found in the export."
+            if notices:
+                error = " ".join([error] + notices)
+            return jsonify({"error": error, "notices": notices}), 400
 
         return jsonify({
             "conversations": conversations,
@@ -1513,25 +2148,23 @@ def analyze_chatgpt_import():
             "total_messages": total_messages,
             "total_tokens": total_tokens,
             "total_size": total_size,
+            "notices": notices,
         }), 200
 
-    except UnicodeDecodeError as e:
+    except UnicodeDecodeError:
         return jsonify({
-            "error": "conversations.json is not valid UTF-8",
-            "details": str(e)
+            "error": "conversations.json is not valid UTF-8 text"
         }), 400
-    except json.JSONDecodeError as e:
+    except json.JSONDecodeError:
         return jsonify({
-            "error": "Failed to parse conversations JSON",
-            "details": str(e)
+            "error": "conversations.json is not valid JSON"
         }), 400
     except Exception as e:
         current_app.logger.error(
-            f"Error analyzing ChatGPT import: {str(e)}"
+            "Error analyzing ChatGPT import: %s", type(e).__name__
         )
         return jsonify({
-            "error": "Failed to analyze ChatGPT export",
-            "details": str(e)
+            "error": "Failed to analyze ChatGPT export"
         }), 500
 
 
@@ -1636,7 +2269,8 @@ def confirm_chatgpt_import():
                     if (source_key in deleted_keys
                             and on_deleted == 'restore'):
                         _restore_node(key_index[source_key], node_content,
-                                      privacy_level, ai_usage)
+                                      privacy_level, ai_usage,
+                                      provenance=PROVENANCE_ARCHIVE_UPLOAD)
                         deleted_keys.discard(source_key)
                         nodes_restored += 1
                     else:
@@ -1704,39 +2338,17 @@ def confirm_chatgpt_import():
                 user_obj = User.query.get(current_user.id)
                 if (user_obj and (user_obj.plan or "free")
                         in User.VOICE_MODE_PLANS):
-                    latest_profile = UserProfile.query.filter_by(
-                        user_id=current_user.id
-                    ).order_by(UserProfile.created_at.desc()).first()
-                    cutoff = (latest_profile.source_data_cutoff
-                              if latest_profile else None)
-
-                    needs_full_regen = False
                     earliest_ts = None
-                    if cutoff:
-                        for conv in conversations_sorted:
-                            for msg in conv.get('messages', []):
-                                raw_ts = msg.get('created_at', '')
-                                if raw_ts:
-                                    try:
-                                        ts = datetime.fromisoformat(
-                                            raw_ts
-                                        )
-                                        if ts < cutoff:
-                                            needs_full_regen = True
-                                        if (earliest_ts is None
-                                                or ts < earliest_ts):
-                                            earliest_ts = ts
-                                    except (ValueError, TypeError):
-                                        pass
-
-                    if needs_full_regen:
-                        from backend.tasks.exports import (
-                            revert_profile_for_import
-                        )
-                        revert_profile_for_import(
-                            user_obj.id, earliest_ts
-                        )
-                        db.session.commit()
+                    for conv in conversations_sorted:
+                        for msg in conv.get('messages', []):
+                            raw_ts = msg.get('created_at', '')
+                            if raw_ts:
+                                try:
+                                    ts = datetime.fromisoformat(raw_ts)
+                                    if earliest_ts is None or ts < earliest_ts:
+                                        earliest_ts = ts
+                                except (ValueError, TypeError):
+                                    pass
 
                     total_imported_tokens = sum(
                         approximate_token_count(msg.get('text', ''))
@@ -1744,19 +2356,12 @@ def confirm_chatgpt_import():
                         for msg in conv.get('messages', [])
                         if msg.get('text')
                     )
-                    if total_imported_tokens >= 10000:
-                        from backend.tasks.exports import (
-                            maybe_trigger_profile_update
-                        )
-                        profile_update_task_id = (
-                            maybe_trigger_profile_update(
-                                current_user.id,
-                                force_full_regen=needs_full_regen,
-                            )
-                        )
+                    profile_update_task_id = (
+                        _hand_off_profile_update_after_import(
+                            user_obj, earliest_ts, total_imported_tokens))
             except Exception as e:
                 current_app.logger.warning(
-                    f"Auto-trigger profile update failed: {e}"
+                    "Auto-trigger profile update failed: %s", type(e).__name__
                 )
 
         return jsonify({
@@ -1773,9 +2378,8 @@ def confirm_chatgpt_import():
     except Exception as e:
         db.session.rollback()
         current_app.logger.error(
-            f"Error confirming ChatGPT import: {str(e)}"
+            "Error confirming ChatGPT import: %s", type(e).__name__
         )
         return jsonify({
-            "error": "Failed to import ChatGPT conversations",
-            "details": str(e)
+            "error": "Failed to import ChatGPT conversations"
         }), 500

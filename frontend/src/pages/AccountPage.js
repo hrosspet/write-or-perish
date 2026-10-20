@@ -2,13 +2,65 @@ import React, { useState, useCallback, useRef, useEffect } from "react";
 import { Link, useNavigate, useLocation } from "react-router-dom";
 import { useUser } from "../contexts/UserContext";
 import ModelSelector from "../components/ModelSelector";
+import CraftIcon from "../components/CraftIcon";
 import api from "../api";
 import useSubmitShortcut from "../hooks/useSubmitShortcut";
+import { emailState } from "../utils/emailState";
+import DeleteWritingDialog from "../components/DeleteWritingDialog";
+import DeleteAccountDialog from "../components/DeleteAccountDialog";
+import {
+  formatDeletionDate, reloadUser, restoreWriting, writingRestorable,
+  X_REMOVE_ACCESS_STEPS,
+} from "../utils/dataDeletion";
+
+const backendUrl = process.env.REACT_APP_BACKEND_URL || "";
+
+// Where Connect X (#311) comes back to: /account?x_login=<outcome>#x.
+const X_LOGIN_MESSAGES = {
+  linked: { type: "success", text: "X connected. Sign in with X now opens this account." },
+  cancelled: { type: "info", text: "X was not connected." },
+  failed: { type: "error", text: "Could not read your X account. Please try again." },
+  other_x: { type: "error", text: "This account is already connected to a different X account." },
+  taken: {
+    type: "error",
+    text: "That X account already signs in to another Loore account, so it can't be connected here. If that account was made by accident, write to info@loore.org and we'll remove it so you can connect X here.",
+  },
+  taken_placeholder: {
+    type: "error",
+    text: "An account was already set up for that X account, and no one has signed in to it yet. Write to info@loore.org and we'll join it with this one.",
+  },
+};
 
 export default function AccountPage() {
   const { user, setUser } = useUser();
   const navigate = useNavigate();
   const location = useLocation();
+
+  // Connect X outcome: read once, then drop it from the URL so a reload
+  // doesn't repeat the message.
+  const [xMsg, setXMsg] = useState(
+    () => X_LOGIN_MESSAGES[new URLSearchParams(location.search).get("x_login")] || null
+  );
+  const [xSaving, setXSaving] = useState(false);
+  useEffect(() => {
+    if (new URLSearchParams(location.search).has("x_login")) {
+      navigate({ pathname: location.pathname, hash: location.hash }, { replace: true });
+    }
+  }, [location.search, location.pathname, location.hash, navigate]);
+
+  const disconnectX = async () => {
+    setXSaving(true);
+    setXMsg(null);
+    try {
+      await api.delete("/dashboard/x");
+      setUser((prev) => ({ ...prev, twitter_login: false, twitter_handle: null }));
+      setXMsg({ type: "success", text: "X disconnected. You sign in with email." });
+    } catch (e) {
+      setXMsg({ type: "error", text: e.response?.data?.error || "Could not disconnect X." });
+    } finally {
+      setXSaving(false);
+    }
+  };
 
   // Deep-link anchors (e.g. /account#model from the changelog): scroll
   // the target row into view on arrival. BrowserRouter doesn't handle
@@ -29,11 +81,178 @@ export default function AccountPage() {
 
   const [selectedModel, setSelectedModel] = useState(user?.preferred_model || null);
 
+  // Email change / add (#260). The address only binds when the link sent
+  // to it is confirmed from inside this account (ConfirmEmailPage); until
+  // then the backend keeps it as pending_email and we show "check your
+  // inbox".
+  const [emailInput, setEmailInput] = useState("");
+  const [emailSaving, setEmailSaving] = useState(false);
+  const [emailMsg, setEmailMsg] = useState(null); // { type, text }
+  const emailInputRef = useRef(null);
+  // One request at a time. emailSaving alone does not do it: state lands a
+  // render later, so a second handler in the same tick (or a double click)
+  // still saw false, and each POST mails a link that voids the one before.
+  const emailInFlight = useRef(false);
+
+  const sendEmailLink = async (address, { resend = false } = {}) => {
+    const value = (address || "").trim();
+    if (!value || emailInFlight.current) return;
+    emailInFlight.current = true;
+    setEmailSaving(true);
+    setEmailMsg(null);
+    try {
+      const res = await api.post("/dashboard/email", { email: value });
+      setUser((prev) => ({ ...prev, ...emailState(res.data) }));
+      setEmailInput("");
+      // The pending notice below is the confirmation of a first send.
+      if (resend) {
+        setEmailMsg({ type: "success", text: "New link sent. The earlier one no longer works." });
+      }
+    } catch (e) {
+      setEmailMsg({
+        type: "error",
+        text: e.response?.data?.error || "Could not send the confirmation email.",
+      });
+    } finally {
+      emailInFlight.current = false;
+      setEmailSaving(false);
+    }
+  };
+
+  // Both answer with the account's email state as the server has it, so a
+  // change confirmed elsewhere since this page loaded shows up here.
+  const cancelPendingEmail = async () => {
+    if (emailInFlight.current) return;
+    emailInFlight.current = true;
+    setEmailSaving(true);
+    setEmailMsg(null);
+    try {
+      const res = await api.delete("/dashboard/email/pending");
+      setUser((prev) => ({ ...prev, ...emailState(res.data) }));
+    } catch (e) {
+      setEmailMsg({ type: "error", text: "Could not cancel the pending change." });
+    } finally {
+      emailInFlight.current = false;
+      setEmailSaving(false);
+    }
+  };
+
+  const removeEmail = async () => {
+    if (emailInFlight.current) return;
+    emailInFlight.current = true;
+    setEmailSaving(true);
+    setEmailMsg(null);
+    try {
+      const res = await api.delete("/dashboard/email");
+      setUser((prev) => ({ ...prev, ...emailState(res.data) }));
+      setEmailMsg({ type: "success", text: "Email removed. You sign in with X." });
+    } catch (e) {
+      setEmailMsg({ type: "error", text: e.response?.data?.error || "Could not remove the email." });
+    } finally {
+      emailInFlight.current = false;
+      setEmailSaving(false);
+    }
+  };
+
+  // Cmd+Return / Ctrl+Enter; plain Enter is the input's onKeyDown, which
+  // leaves the modified key to this hook so one keypress sends one link.
+  useSubmitShortcut(
+    emailInputRef,
+    () => sendEmailLink(emailInput),
+    !emailSaving && !!emailInput.trim(),
+  );
+
+  // "Delete all my writing" (#268): the writing is hidden at once and
+  // deleted forever after the grace period; until then "Restore my
+  // writing" brings it back. The state comes with the user (/dashboard)
+  // and is read again when the page opens.
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  const [deletionBusy, setDeletionBusy] = useState(false);
+  const [deletionMsg, setDeletionMsg] = useState(null);
+  const closeDeleteDialog = useCallback(() => setDeleteOpen(false), []);
+
+  // The user is read once per app load, so `new_writing` is stale after
+  // writing in the same session and then opening this page in-app: read
+  // the deletion state again when the page opens (one request, no poll).
+  useEffect(() => {
+    let active = true;
+    (async () => {
+      try {
+        const res = await api.get("/account/data");
+        const status = res?.data;
+        if (!active || !status || typeof status !== "object" || !("status" in status)) return;
+        setUser((prev) => (prev ? { ...prev, data_deletion: status } : prev));
+      } catch (e) {
+        // The state from the app load stays.
+      }
+    })();
+    return () => { active = false; };
+  }, [setUser]);
+
+  const scheduleDeletion = async (typed) => {
+    // Asked again while a deletion waits: it takes in what was written
+    // since, and the page otherwise looks the same apart from the date.
+    const again = writingRestorable(user?.data_deletion);
+    let res;
+    try {
+      res = await api.delete("/account/data", { data: { confirm: typed } });
+    } catch (e) {
+      // Asked again just as the earlier deletion started: the dialog shows
+      // the server's message, and the section the running deletion.
+      if (e?.response?.data?.code === "already_running") reloadUser(setUser);
+      throw e;
+    }
+    setUser((prev) => ({ ...prev, data_deletion: res.data }));
+    setDeleteOpen(false);
+    setDeletionMsg(again && res.data?.purge_at ? {
+      type: "success",
+      text: `What you wrote since is deleted too. You can restore all of it until ${formatDeletionDate(res.data.purge_at)}.`,
+    } : null);
+    // The description and has_own_entries change with the writing.
+    reloadUser(setUser);
+  };
+
+  // "Delete my account" (#269): an email account gets a confirmation
+  // link; one without email is scheduled at once and signed out.
+  const [accountOpen, setAccountOpen] = useState(false);
+  const [accountLinkSent, setAccountLinkSent] = useState(false);
+  const closeAccountDialog = useCallback(() => setAccountOpen(false), []);
+
+  const requestAccountDeletion = async (typed) => {
+    const res = await api.post("/account/delete", { confirm: typed });
+    setAccountOpen(false);
+    if (res.data.status === "scheduled") {
+      // Signed out on the server: a full load drops the app's state.
+      window.location.assign(
+        `/account-deleted?on=${encodeURIComponent(res.data.delete_on || "")}`);
+      return;
+    }
+    setAccountLinkSent(true);
+  };
+
+  const restoreDeletedWriting = async () => {
+    setDeletionBusy(true);
+    setDeletionMsg(null);
+    try {
+      await restoreWriting(setUser);
+      setDeletionMsg({ type: "success", text: "Your writing is restored." });
+    } catch (e) {
+      setDeletionMsg({
+        type: "error",
+        text: e.response?.data?.error || "Could not restore your writing. Please try again.",
+      });
+    } finally {
+      setDeletionBusy(false);
+    }
+  };
+
   // Privacy / AI usage defaults
   const [privacySaving, setPrivacySaving] = useState(false);
   const [publicSideSaving, setPublicSideSaving] = useState(false);
   const [externalContentSaving, setExternalContentSaving] = useState(false);
+  const [gleanSaving, setGleanSaving] = useState(false);
   const [aiUsageSaving, setAiUsageSaving] = useState(false);
+  const [craftSaving, setCraftSaving] = useState(false);
 
   const usernameValid = (val) => {
     const v = val.trim();
@@ -137,6 +356,12 @@ export default function AccountPage() {
 
   const rowStyle = { marginBottom: "1.25rem" };
 
+  const inlineActionStyle = {
+    background: "none", border: "none", padding: 0,
+    color: "var(--accent)", cursor: "pointer",
+    fontFamily: "var(--sans)", fontSize: "inherit",
+  };
+
   if (!user) return null;
 
   return (
@@ -215,17 +440,169 @@ export default function AccountPage() {
         <div style={helperStyle}>Letters, numbers, and underscores only.</div>
       </div>
 
-      <div style={rowStyle}>
+      <div style={rowStyle} id="email">
         <div style={labelStyle}>Email</div>
-        <div
-          style={{
-            ...inputStyle,
-            backgroundColor: "transparent",
-            border: "1px solid var(--border)",
-            opacity: 0.6,
-          }}
-        >
-          {user.email || "—"}
+        <div style={{ display: "flex", gap: "8px" }}>
+          <input
+            ref={emailInputRef}
+            type="email"
+            aria-label={user.email ? `New email address (current: ${user.email})` : "Email address"}
+            value={emailInput}
+            placeholder={user.email || "Add an email to sign in with"}
+            onChange={(e) => {
+              setEmailInput(e.target.value);
+              setEmailMsg(null);
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.metaKey && !e.ctrlKey) sendEmailLink(emailInput);
+            }}
+            style={{ ...inputStyle, flex: 1 }}
+          />
+          <button
+            onClick={() => sendEmailLink(emailInput)}
+            disabled={emailSaving || !emailInput.trim()}
+            style={{
+              padding: "8px 16px",
+              borderRadius: "6px",
+              border: "1px solid var(--accent)",
+              background: "none",
+              color: "var(--accent)",
+              fontFamily: "var(--sans)",
+              fontWeight: 300,
+              fontSize: "0.85rem",
+              whiteSpace: "nowrap",
+              cursor: emailSaving || !emailInput.trim() ? "default" : "pointer",
+              opacity: emailSaving || !emailInput.trim() ? 0.4 : 1,
+            }}
+          >
+            {emailSaving ? "Sending..." : "Send confirmation link"}
+          </button>
+        </div>
+        {user.pending_email && (
+          <div style={helperStyle}>
+            {user.pending_email_expired
+              ? `The confirmation link sent to ${user.pending_email} has expired.`
+              : `Confirmation link sent to ${user.pending_email}. Open it to make it your sign-in address. Nothing after a few minutes? Check the spelling; an address that already signs in to Loore can't be added here.`}
+            {" "}
+            <span style={{ whiteSpace: "nowrap" }}>
+              <button
+                type="button"
+                onClick={() => sendEmailLink(user.pending_email, { resend: true })}
+                disabled={emailSaving}
+                style={inlineActionStyle}
+              >
+                {user.pending_email_expired ? "Send a new link" : "Resend"}
+              </button>
+              {" · "}
+              <button
+                type="button"
+                onClick={cancelPendingEmail}
+                disabled={emailSaving}
+                style={inlineActionStyle}
+              >
+                Cancel
+              </button>
+            </span>
+          </div>
+        )}
+        {emailMsg && (
+          <div
+            style={{
+              ...helperStyle,
+              color: emailMsg.type === "error" ? "var(--accent)" : "var(--text-muted)",
+            }}
+          >
+            {emailMsg.text}
+          </div>
+        )}
+        <div style={helperStyle}>
+          {user.email
+            ? "The new address becomes yours once you confirm it from the link we send to it."
+            : "You currently sign in with X only."}
+          {user.email && user.twitter_login && (
+            <>
+              {" "}
+              <button
+                type="button"
+                onClick={removeEmail}
+                disabled={emailSaving}
+                style={{
+                  background: "none", border: "none", padding: 0,
+                  color: "var(--text-muted)", textDecoration: "underline",
+                  cursor: "pointer", fontFamily: "var(--sans)", fontSize: "inherit",
+                }}
+              >
+                Remove email
+              </button>
+            </>
+          )}
+        </div>
+      </div>
+
+      {/* Connect X (#311). The button leaves for X and comes back here
+          with ?x_login=<outcome>#x; scrollMarginTop clears the navbar. */}
+      <div id="x" style={{ ...rowStyle, scrollMarginTop: "72px" }}>
+        <div style={labelStyle}>X</div>
+        {user.twitter_login ? (
+          <div
+            style={{
+              ...inputStyle,
+              backgroundColor: "transparent",
+              border: "1px solid var(--border)",
+              opacity: 0.6,
+            }}
+          >
+            {user.twitter_handle ? `Connected as @${user.twitter_handle}` : "Connected"}
+          </div>
+        ) : (
+          <a
+            href={`${backendUrl}/auth/x/connect`}
+            style={{
+              display: "inline-block",
+              padding: "8px 16px",
+              borderRadius: "6px",
+              border: "1px solid var(--accent)",
+              color: "var(--accent)",
+              fontFamily: "var(--sans)",
+              fontWeight: 300,
+              fontSize: "0.85rem",
+              textDecoration: "none",
+            }}
+          >
+            Connect X
+          </a>
+        )}
+        {xMsg && (
+          <div
+            style={{
+              ...helperStyle,
+              color: xMsg.type === "error" ? "var(--accent)" : "var(--text-muted)",
+            }}
+          >
+            {xMsg.text}
+          </div>
+        )}
+        <div style={helperStyle}>
+          {user.twitter_login
+            ? "Sign in with X opens this account."
+            : "Lets you sign in with X as well. X will ask you to allow Loore."}
+          {user.twitter_login && user.email && (
+            <>
+              {" "}
+              <button
+                type="button"
+                onClick={disconnectX}
+                disabled={xSaving}
+                style={{
+                  background: "none", border: "none", padding: 0,
+                  color: "var(--text-muted)", textDecoration: "underline",
+                  cursor: "pointer", fontFamily: "var(--sans)", fontSize: "inherit",
+                }}
+              >
+                Disconnect X
+              </button>
+            </>
+          )}
         </div>
       </div>
 
@@ -298,9 +675,34 @@ export default function AccountPage() {
         </div>
       </div>
 
+      {/* Glean (#435): the user's own switch, shown inside the rollout
+          gate. Without a choice it is on for accounts with Community
+          Archive or X data; the server says which (glean_enabled). */}
+      {user.glean_available && (
+        <div id="glean" style={{ ...rowStyle, scrollMarginTop: "72px" }}>
+          <div style={labelStyle}>Glean</div>
+          <select
+            value={user.glean_enabled ? "on" : "off"}
+            disabled={gleanSaving}
+            onChange={(e) =>
+              saveField("glean_enabled", e.target.value === "on", setGleanSaving)
+            }
+            style={selectStyle}
+          >
+            <option value="off">Off</option>
+            <option value="on">On</option>
+          </select>
+          <div style={helperStyle}>
+            When you ask, Loore reads the day's tweets in the Community
+            Archive against what you said and shows you the few worth
+            your time. With Glean off, Loore shows no Glean card or button.
+          </div>
+        </div>
+      )}
+
       {user.external_content_available && (
-        <div style={rowStyle}>
-          <div style={labelStyle}>External content</div>
+        <div id="references" style={{ ...rowStyle, scrollMarginTop: "72px" }}>
+          <div style={labelStyle}>External references</div>
           <select
             value={user.external_content_enabled ? "on" : "off"}
             disabled={externalContentSaving}
@@ -314,9 +716,11 @@ export default function AccountPage() {
             <option value="on">On (experimental)</option>
           </select>
           <div style={helperStyle}>
-            Let Loore search your archive and your saved external content
-            (imported tweets and bookmarks) during conversations, and quote
-            what it finds. Import bookmarks on the{" "}
+            Let Loore also search your saved external references (imported
+            tweets, bookmarks and clipped web pages) during conversations,
+            and quote what it finds. Your own archive is always searchable;
+            this switch only adds references. Import bookmarks or set up
+            the Chrome clipper on the{" "}
             <Link to="/import" style={{ color: "var(--accent)" }}>
               Import page
             </Link>. Experimental.
@@ -346,7 +750,9 @@ export default function AccountPage() {
         </div>
       )}
 
-      <div style={rowStyle}>
+      {/* Anchor for deep links: /account#ai-usage (the Voice screen links
+          here when AI usage keeps Voice mode from recording). */}
+      <div id="ai-usage" style={{ ...rowStyle, scrollMarginTop: "72px" }}>
         <div style={labelStyle}>Default AI usage</div>
         <select
           value={user.default_ai_usage || "chat"}
@@ -362,6 +768,33 @@ export default function AccountPage() {
         </select>
         <div style={helperStyle}>
           Controls how AI can use your new entries by default.
+        </div>
+      </div>
+
+      {/* The craft-mode switch also lives in the ⋮ menu; this row is the
+          place a user who turned it on and forgot can find out what it
+          does and switch it off. Anchor for deep links: /account#craft */}
+      <div id="craft" style={{ ...rowStyle, scrollMarginTop: "72px" }}>
+        <div style={{ ...labelStyle, display: "flex", alignItems: "center", gap: "8px" }}>
+          <CraftIcon />Craft mode
+        </div>
+        <select
+          value={user.craft_mode ? "on" : "off"}
+          disabled={craftSaving}
+          onChange={(e) =>
+            saveField("craft_mode", e.target.value === "on", setCraftSaving)
+          }
+          style={selectStyle}
+        >
+          <option value="off">Off</option>
+          <option value="on">On</option>
+        </select>
+        <div style={helperStyle}>
+          Shows extra controls for people who want to steer the details:
+          privacy and AI usage on each entry, the auto-generate switch and
+          model picker on threads, audio upload, prompt editing and data
+          export. Off is the simpler Loore. Menu items and controls added
+          by craft mode carry the sliders icon.
         </div>
       </div>
 
@@ -389,6 +822,217 @@ export default function AccountPage() {
           Tone, style, boundaries. Updated automatically during Voice sessions.
         </div>
       </div>
+
+      {/* ─── Delete all my writing (#268). Anchor: /account#delete-data,
+          where the reminder banner links. ─── */}
+      <DeleteWritingSection
+        id="delete-data"
+        deletion={user.data_deletion}
+        busy={deletionBusy}
+        msg={deletionMsg}
+        onOpen={() => { setDeletionMsg(null); setDeleteOpen(true); }}
+        onRestore={restoreDeletedWriting}
+        labelStyle={labelStyle}
+        helperStyle={helperStyle}
+      />
+      <DeleteWritingDialog
+        open={deleteOpen}
+        username={user.username}
+        graceDays={user.data_deletion?.grace_days}
+        xConnected={!!user.data_deletion?.x_connected}
+        waitingUntil={writingRestorable(user.data_deletion) ? user.data_deletion.purge_at : null}
+        onConfirm={scheduleDeletion}
+        onClose={closeDeleteDialog}
+      />
+
+      {/* ─── Delete my account (#269). Anchor: /account#delete-account ─── */}
+      <DeleteAccountSection
+        id="delete-account"
+        info={user.account_deletion}
+        email={user.email}
+        linkSent={accountLinkSent}
+        onOpen={() => setAccountOpen(true)}
+        labelStyle={labelStyle}
+        helperStyle={helperStyle}
+      />
+      <DeleteAccountDialog
+        open={accountOpen}
+        username={user.username}
+        email={user.email}
+        info={user.account_deletion}
+        xConnected={!!user.data_deletion?.x_connected}
+        writingDeletionAt={user.data_deletion?.status === "scheduled" ? user.data_deletion.purge_at : null}
+        onConfirm={requestAccountDeletion}
+        onClose={closeAccountDialog}
+      />
+    </div>
+  );
+}
+
+function DeleteAccountSection({ id, info, email, linkSent, onOpen, labelStyle, helperStyle }) {
+  const bodyStyle = { ...helperStyle, fontSize: "0.85rem", lineHeight: 1.6, marginTop: 0 };
+  const days = info?.grace_days || 30;
+  const refusal = info?.refusal;
+  const minutes = Math.round((info?.link_expires_in || 3600) / 60);
+  return (
+    <div id={id} style={{ scrollMarginTop: "72px" }}>
+      <h3 style={sectionTitleStyle}>Delete my account</h3>
+      {linkSent ? (
+        <p style={{ ...labelStyle, lineHeight: 1.6 }}>
+          Check your email: Loore sent a confirmation link to {email}.
+          Nothing changes until you open it and confirm there. The link works
+          for {minutes} minutes.
+        </p>
+      ) : (
+        <>
+          <p style={bodyStyle}>
+            Deletes your account at once and signs you out everywhere. If you change{" "}
+            your mind, you can still restore it by signing in within {days}{" "}
+            days; after that it is deleted forever, with everything in it.
+          </p>
+          {refusal ? (
+            <p style={bodyStyle}>{refusal.message}</p>
+          ) : (
+            <button
+              type="button"
+              onClick={onOpen}
+              style={{ ...quietButtonStyle, color: "var(--error)" }}
+            >
+              Delete my account…
+            </button>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+const sectionTitleStyle = {
+  fontFamily: "var(--serif)",
+  fontWeight: 300,
+  fontSize: "1.15rem",
+  color: "var(--text-primary)",
+  marginTop: "2.5rem",
+  marginBottom: "1rem",
+};
+
+const quietButtonStyle = {
+  padding: "8px 16px",
+  borderRadius: "6px",
+  border: "1px solid var(--border)",
+  background: "none",
+  fontFamily: "var(--sans)",
+  fontWeight: 300,
+  fontSize: "0.85rem",
+  cursor: "pointer",
+};
+
+function DeleteWritingSection({ id, deletion, busy, msg, onOpen, onRestore, labelStyle, helperStyle }) {
+  const status = deletion?.status || null;
+  const bodyStyle = { ...helperStyle, fontSize: "0.85rem", lineHeight: 1.6, marginTop: 0 };
+  return (
+    <div id={id} style={{ scrollMarginTop: "72px" }}>
+      <h3 style={sectionTitleStyle}>Delete all my writing</h3>
+
+      {status === "scheduled" && writingRestorable(deletion) && (
+        <>
+          <p style={{ ...labelStyle, lineHeight: 1.6 }}>
+            Your writing is deleted.
+          </p>
+          <p style={bodyStyle}>
+            You can restore it safely until {formatDeletionDate(deletion.purge_at)}.
+            After that it is deleted forever. What you write from now on stays.
+          </p>
+          <button
+            type="button"
+            onClick={onRestore}
+            disabled={busy}
+            style={{ ...quietButtonStyle, borderColor: "var(--accent)", color: "var(--accent)" }}
+          >
+            {busy ? "Restoring…" : "Restore my writing"}
+          </button>
+          {/* Written or saved since: "Delete all my writing" again adds it
+              to this deletion, with one new date (Peter, 2026-10-15). */}
+          {deletion.new_writing && (
+            <>
+              <p style={{ ...bodyStyle, marginTop: "1.25rem" }}>
+                Since your writing was deleted, you have written or saved
+                more. It stays, unless you delete all your writing again.
+                Then everything is deleted forever on one date,{" "}
+                {deletion.grace_days || 30} days after you ask again, and
+                you can restore all of it until then.
+              </p>
+              <button
+                type="button"
+                onClick={onOpen}
+                disabled={busy}
+                style={{ ...quietButtonStyle, color: "var(--error)" }}
+              >
+                Delete all my writing…
+              </button>
+            </>
+          )}
+        </>
+      )}
+
+      {status === "scheduled" && !writingRestorable(deletion) && (
+        <p style={bodyStyle}>
+          Your writing will be deleted forever on {formatDeletionDate(deletion.purge_at)}.
+        </p>
+      )}
+
+      {status === "running" && (
+        <p style={bodyStyle}>
+          Your writing is being deleted forever now. This can take a few minutes.
+        </p>
+      )}
+
+      {status === "failed" && (
+        <p style={bodyStyle}>
+          Deleting your writing did not finish. We have been told and will
+          complete it.
+        </p>
+      )}
+
+      {(status === null || status === "done") && (
+        <>
+          {status === "done" && (
+            <p style={bodyStyle}>
+              Your writing was deleted forever on {formatDeletionDate(deletion.finished_at)}.
+              {deletion.x_connection_removed && (
+                <> Loore no longer keeps your X connection and asked X to
+                  remove its access. If X still lists Loore, remove it
+                  yourself: {X_REMOVE_ACCESS_STEPS}</>
+              )}
+            </p>
+          )}
+          <p style={bodyStyle}>
+            Deletes everything you have written or recorded in Loore, and
+            what Loore made from it: the AI's replies, your profile, intentions
+            and other documents, saved references and imports. Your account,
+            username and settings stay. You can restore your writing safely
+            within {deletion?.grace_days || 30} days. After that it is deleted forever.
+          </p>
+          <button
+            type="button"
+            onClick={onOpen}
+            style={{ ...quietButtonStyle, color: "var(--error)" }}
+          >
+            Delete all my writing…
+          </button>
+        </>
+      )}
+
+      {msg && (
+        <div
+          style={{
+            ...helperStyle,
+            color: msg.type === "error" ? "var(--error)" : "var(--text-muted)",
+          }}
+        >
+          {msg.text}
+        </div>
+      )}
     </div>
   );
 }

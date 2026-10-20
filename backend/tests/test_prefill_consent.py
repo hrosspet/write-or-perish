@@ -139,3 +139,89 @@ class TestPrefillConsent:
         by_name = {u["username"]: u for u in resp.get_json()["users"]}
         assert by_name["birdperson"]["prefill_consent"] == "yes"
         assert by_name["mailperson"]["prefill_consent"] is None
+
+
+class TestPrefillRefusal:
+    """#346: a declined consent or an account set to 'none' refuses the
+    admin pre-fill and intentions runs; an unanswered consent does not."""
+
+    ROUTES = [
+        ("/api/admin/users/{id}/prefill", "backend.tasks.imports",
+         "prefill_community_archive"),
+        ("/api/admin/users/{id}/prefill-x", "backend.tasks.imports",
+         "prefill_x_api"),
+        ("/api/admin/users/{id}/infer_intentions", "backend.tasks.intentions",
+         "infer_intentions"),
+    ]
+
+    def _tasks(self, monkeypatch):
+        import importlib
+        mocks = {}
+        for _url, module, name in self.ROUTES:
+            task = MagicMock()
+            task.delay.return_value.id = "task-1"
+            monkeypatch.setattr(importlib.import_module(module), name, task)
+            mocks[name] = task
+        return mocks
+
+    def _post_all(self, app, users, target):
+        client = app.test_client()
+        _login(client, users["admin"].id)
+        return [client.post(url.format(id=target.id), json={"handle": "bird"})
+                for url, _m, _n in self.ROUTES]
+
+    def test_declined_consent_refuses(self, app, users, monkeypatch):
+        tasks = self._tasks(monkeypatch)
+        users["tw"].prefill_consent = "no"
+        _db.session.commit()
+        for resp in self._post_all(app, users, users["tw"]):
+            assert resp.status_code == 400
+            assert resp.get_json()["code"] == "prefill_declined"
+        assert not any(t.delay.called for t in tasks.values())
+
+    def test_account_opted_out_refuses(self, app, users, monkeypatch):
+        tasks = self._tasks(monkeypatch)
+        users["tw"].default_ai_usage = "none"
+        users["tw"].prefill_consent = "yes"
+        _db.session.commit()
+        for resp in self._post_all(app, users, users["tw"]):
+            assert resp.status_code == 400
+            assert resp.get_json()["code"] == "ai_opt_out"
+        assert not any(t.delay.called for t in tasks.values())
+
+    def test_unanswered_consent_does_not_block(self, app, users, monkeypatch):
+        tasks = self._tasks(monkeypatch)
+        assert users["tw"].prefill_consent is None
+        for resp in self._post_all(app, users, users["tw"]):
+            assert resp.status_code == 202
+        assert all(t.delay.called for t in tasks.values())
+
+    def test_build_profile_refuses_like_prefill(self, app, users, monkeypatch):
+        """Build profile usually follows a pre-fill, so it refuses on the
+        same two grounds."""
+        import backend.tasks.profile_batch as pb
+        seed = MagicMock()
+        monkeypatch.setattr(pb, "seed_profile_batch_for_user", seed)
+        client = app.test_client()
+        _login(client, users["admin"].id)
+        url = f"/api/admin/users/{users['tw'].id}/build_profile"
+
+        users["tw"].prefill_consent = "no"
+        _db.session.commit()
+        resp = client.post(url)
+        assert resp.status_code == 400
+        assert resp.get_json()["code"] == "prefill_declined"
+
+        users["tw"].prefill_consent = "yes"
+        users["tw"].default_ai_usage = "none"
+        _db.session.commit()
+        resp = client.post(url)
+        assert resp.status_code == 400
+        assert resp.get_json()["code"] == "ai_opt_out"
+        seed.delay.assert_not_called()
+
+        users["tw"].prefill_consent = None
+        users["tw"].default_ai_usage = "chat"
+        _db.session.commit()
+        assert client.post(url).status_code == 202
+        seed.delay.assert_called_once_with(users["tw"].id)

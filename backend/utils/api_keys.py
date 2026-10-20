@@ -36,8 +36,9 @@ def determine_api_key_type(node_chain: list, logger=None) -> str:
         if ai_usage == AIUsage.CHAT:
             return 'chat'
 
-    # If we get here, all nodes either have 'train' or 'none'
-    # 'none' shouldn't reach LLM calls (handled in frontend), but default to 'chat' if it does
+    # If we get here, all nodes either have 'train' or 'none'.
+    # 'none' does not reach LLM calls (the reply routes refuse it and the
+    # completion task's context leaves it out), but default to 'chat' if it does
     for node in user_nodes:
         ai_usage = getattr(node, 'ai_usage', AIUsage.NONE)
         if ai_usage == AIUsage.NONE:
@@ -75,6 +76,40 @@ def get_api_keys_for_usage(config, key_type: str) -> dict:
     }
 
 
+# The settings that can hold each provider's API key, by role: chat and
+# train (get_api_keys_for_usage), OpenAI's batch-only key
+# (llm_batch.apply_batch_key_override) and the legacy single key the
+# others fall back to.
+API_KEY_SETTINGS = {
+    "anthropic": (("chat", "ANTHROPIC_API_KEY_CHAT"),
+                  ("train", "ANTHROPIC_API_KEY_TRAIN"),
+                  ("legacy", "ANTHROPIC_API_KEY")),
+    "openai": (("chat", "OPENAI_API_KEY_CHAT"),
+               ("train", "OPENAI_API_KEY_TRAIN"),
+               ("batch", "OPENAI_API_KEY_BATCH"),
+               ("legacy", "OPENAI_API_KEY")),
+}
+
+
+def api_key_role(config, provider, api_key) -> str:
+    """Which configured key *api_key* is, named by its role: "chat",
+    "train", "batch" or "legacy"; roles joined with "/" when the same key
+    is set in several settings (e.g. "chat/legacy"); "unknown" when it is
+    none of them. For the admin alert of an account failure (#369): it
+    says which key to fix without any part of the key itself."""
+    settings = API_KEY_SETTINGS.get((provider or "").lower(), ())
+    roles = [role for role, name in settings
+             if api_key and config.get(name) == api_key]
+    return "/".join(roles) or "unknown"
+
+
+def api_key_role_settings(provider, role) -> list:
+    """The setting names behind a role from api_key_role (several for a
+    joined role), e.g. ["ANTHROPIC_API_KEY_CHAT"]; [] for "unknown"."""
+    names = dict(API_KEY_SETTINGS.get((provider or "").lower(), ()))
+    return [names[r] for r in (role or "").split("/") if r in names]
+
+
 def get_openai_chat_key(config) -> str:
     """
     Get the OpenAI API key for chat/audio operations.
@@ -91,3 +126,170 @@ def get_openai_chat_key(config) -> str:
         OpenAI API key string
     """
     return config.get("OPENAI_API_KEY_CHAT") or config.get("OPENAI_API_KEY")
+
+
+class PayloadLicence:
+    """The key decision for one turn, kept current as the payload grows.
+
+    ``determine_api_key_type`` reads the nodes IN the chain. What those
+    nodes resolve to is pulled in afterwards — a ``{quote:ID}`` of a node
+    marked 'chat', a ``{quote_ext:ID}`` saved reference (someone else's
+    writing, which Loore has no licence to train on), what a read_full or
+    a semantic_search pulls in mid-turn — and none of it reached that
+    decision (#325). Every resolution reports what it added here, and the
+    caller reads ``key_type`` right before each provider call: a payload
+    that has taken on unlicensed content goes out on the chat key,
+    whichever call of the turn it is. The calls before the pull carried
+    only licensed content and stay as sent.
+
+    'train' means everything in the payload is licensed for training. One
+    piece that is not drops the turn to 'chat', and it never goes back.
+    """
+
+    def __init__(self, key_type: str, logger=None, label: str = "payload",
+                 track_rows: bool = False):
+        self._key_type = key_type
+        self._logger = logger
+        self._label = label
+        # Why it dropped, when it did: a licence used as a collector (one
+        # placeholder's rows, one cached render) hands this on.
+        self.reason = None
+        # With *track_rows*, every row reported, licensed or not, by table
+        # ({table: {ids}}): what a cached render's verdict rests on, to be
+        # re-checked when the render is served again (#326).
+        self.rows = {} if track_rows else None
+
+    def track_row(self, table: str, row_ids) -> None:
+        """Record rows the payload carries (a no-op unless tracking)."""
+        if self.rows is not None and row_ids:
+            self.rows.setdefault(table, set()).update(row_ids)
+
+    @property
+    def key_type(self) -> str:
+        return self._key_type
+
+    def to_chat(self, reason: str) -> None:
+        """Drop to the chat key for the rest of the turn."""
+        if self._key_type == AIUsage.CHAT.value:
+            return
+        self.reason = reason
+        if self._logger:
+            self._logger.info(
+                "%s: %s; chat keys from here on (the chain said %r)",
+                self._label, reason, self._key_type)
+        self._key_type = AIUsage.CHAT.value
+
+    def note_usage(self, ai_usage, what: str, row=None) -> None:
+        """One row resolved into the payload, judged by its own setting:
+        an artifact, the todo list, a search preview's node. *row* (the
+        model instance) is recorded when tracking."""
+        if row is not None:
+            self.track_row(row.__tablename__, (row.id,))
+        if ai_usage != AIUsage.TRAIN.value:
+            self.to_chat(f"{what} is {ai_usage!r}")
+
+    def note_nodes(self, node_ids, what: str = "quoted node") -> None:
+        """Nodes resolved into the payload by id — a ``{quote:ID}``, a
+        read_full — whoever wrote them. Each node's own ai_usage decides,
+        the same rule the chain's nodes are held to."""
+        self.track_row("node", node_ids)
+        if self._key_type == AIUsage.CHAT.value or not node_ids:
+            return
+        from backend.models import Node
+        row = Node.query.with_entities(Node.id, Node.ai_usage).filter(
+            Node.id.in_(set(node_ids)),
+            Node.ai_usage != AIUsage.TRAIN.value,
+        ).first()
+        if row is not None:
+            self.to_chat(f"{what} {row[0]} is {row[1]!r}")
+
+    def note_external(self, item_ids, what: str = "saved reference") -> None:
+        """Saved references resolved into the payload — other people's
+        writing, never licensed for training, whoever saved them."""
+        ids = list(item_ids or ())
+        if ids:
+            self.to_chat(f"{what} {ids[0]} is other people's writing")
+
+
+class ContextUsage:
+    """The user's own rows each prompt placeholder resolved to (#326):
+    the profile, recent context, the todo list, the artifacts, the recent
+    raw archive — each row judged by its own ai_usage, as the chain's
+    nodes are.
+
+    Kept per placeholder rather than on the turn's licence directly. A
+    placeholder resolves once per turn, for the first node carrying it,
+    and the #192 cache replays the system prompt's render on later turns
+    without resolving anything. So the turn's licence hears every
+    placeholder that resolved (``reason()``), and a cached render stores
+    the verdict of the placeholders in its own text (``reason(text)``)
+    together with the rows that verdict covers (``rows(text)``), which a
+    later hit re-checks (``rows_lost_licence``).
+    """
+
+    def __init__(self):
+        self._licences = {}
+
+    def licence(self, placeholder: str) -> PayloadLicence:
+        """The collector *placeholder*'s rows report to."""
+        lic = self._licences.get(placeholder)
+        if lic is None:
+            lic = PayloadLicence(AIUsage.TRAIN.value, track_rows=True)
+            self._licences[placeholder] = lic
+        return lic
+
+    def note_row(self, placeholder: str, row, what: str) -> None:
+        """A row (a model instance with ``ai_usage``) *placeholder*
+        rendered."""
+        self.licence(placeholder).note_usage(row.ai_usage, what, row=row)
+
+    def rows(self, text=None):
+        """{table: sorted ids} of the rows behind every resolved
+        placeholder, or those appearing in *text*."""
+        merged = {}
+        for placeholder, lic in self._licences.items():
+            if text is not None and placeholder not in text:
+                continue
+            for table, ids in (lic.rows or {}).items():
+                merged.setdefault(table, set()).update(ids)
+        return {table: sorted(ids) for table, ids in merged.items()}
+
+    def reason(self, text=None):
+        """Why the rows keep the payload off the training key — of every
+        placeholder that resolved, or of those appearing in *text* — or
+        None when all of them are licensed."""
+        for placeholder, lic in self._licences.items():
+            if text is not None and placeholder not in text:
+                continue
+            if lic.reason:
+                return lic.reason
+        return None
+
+
+def rows_lost_licence(rows):
+    """Why rows a cached render was licensed on no longer are, or None.
+
+    *rows* is ``ContextUsage.rows``. An entry, a reply in the user's
+    threads, or the profile can be switched off 'train' after the render
+    was cached, and nothing about the switch changes the cache key (#326
+    review). Metadata only: one query per table, nothing decrypted. A
+    table this does not know counts as lost, so the render is rebuilt.
+    """
+    from backend.models import (
+        Node, UserArtifact, UserProfile, UserRecentContext, UserTodo,
+    )
+    models = {m.__tablename__: m for m in (
+        Node, UserArtifact, UserProfile, UserRecentContext, UserTodo)}
+    for table, ids in (rows or {}).items():
+        if not ids:
+            continue
+        model = models.get(table)
+        if model is None:
+            return f"unknown table {table!r} in the cached verdict"
+        hit = model.query.with_entities(model.id, model.ai_usage).filter(
+            model.id.in_(list(ids)),
+            model.ai_usage != AIUsage.TRAIN.value,
+        ).first()
+        if hit is not None:
+            return f"{table} {hit[0]} is now {hit[1]!r}"
+    return None

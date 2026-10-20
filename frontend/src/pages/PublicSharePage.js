@@ -28,6 +28,14 @@ export default function PublicSharePage({ usernameOverride }) {
     api.get(`/share/public/${encodeURIComponent(username)}`)
       .then((res) => {
         if (cancelled) return;
+        // A former handle, or the current one in another case (#253):
+        // keep the page, show the canonical URL (query and anchor kept).
+        // In-app links (a legacy /dashboard/<old> redirect, a card) never
+        // reach the server-rendered 301, so the API answers instead.
+        if (res.data.canonical && window.location.pathname === `/@${username}`) {
+          window.history.replaceState(
+            null, '', res.data.canonical + window.location.search + window.location.hash);
+        }
         setData(res.data);
         setStatus('ok');
         // Keep the server-rendered per-route <title> in sync on

@@ -6,7 +6,7 @@ jest.mock('../api', () => ({}));
 
 import {
   parseOrientResponse, stripProposalSections, splitProposalText,
-  parseShareBlocks, hasShareBlocks, hasProposalSections,
+  parseShareBlocks, hasShareBlocks, hasProposalSections, moveProposalItem,
 } from './ProposalInline';
 
 // Regression: the category badges (issue + feedback) must take only the first
@@ -231,4 +231,85 @@ test('shareOnly split leaves the node\'s own ### headings in the prose', () => {
   expect(before).toContain('my prose');
   expect(after).toBe('closing thought');
   expect(before + after).not.toContain('the share');
+});
+
+// ── moveProposalItem (proposal row toggles) ────────────────────────────────
+
+// #377: ticking a task in a proposal with no ### Completed section removed
+// the line and inserted it nowhere — the task vanished from the proposal.
+const NEW_TASKS_ONLY = [
+  'Lead-in.',
+  '',
+  '### New Tasks',
+  '- write the intro',
+  '- call the bank',
+  '',
+  '### Note',
+  'Good momentum.',
+].join('\n');
+
+test('ticking a task with no Completed section creates one above New Tasks', () => {
+  const ticked = moveProposalItem(NEW_TASKS_ONLY, 'write the intro', 'new task', 'completed');
+  expect(ticked).toBe([
+    'Lead-in.',
+    '',
+    '### Completed',
+    '- write the intro',
+    '',
+    '### New Tasks',
+    '- call the bank',
+    '',
+    '### Note',
+    'Good momentum.',
+  ].join('\n'));
+  const parsed = parseOrientResponse(ticked);
+  expect(parsed.completed).toBe('- write the intro');
+  expect(parsed.newTasks).toBe('- call the bank');
+});
+
+test('unticking moves the task back to New Tasks', () => {
+  const ticked = moveProposalItem(NEW_TASKS_ONLY, 'write the intro', 'new task', 'completed');
+  const unticked = moveProposalItem(ticked, 'write the intro', 'completed', 'new task', { prepend: true });
+  const parsed = parseOrientResponse(unticked);
+  expect(parsed.completed).toBeFalsy();
+  expect(parsed.newTasks).toBe('- write the intro\n- call the bank');
+  expect(parsed.note).toBe('Good momentum.');
+});
+
+test('unticking with no New Tasks section creates one below Completed', () => {
+  const text = [
+    '### Completed',
+    '- ship it',
+    '- reply to Ana',
+    '',
+    '### Priority Order',
+    '1. Reply to Ana — quick win',
+  ].join('\n');
+  const unticked = moveProposalItem(text, 'ship it', 'completed', 'new task', { prepend: true });
+  expect(unticked).toBe([
+    '### Completed',
+    '- reply to Ana',
+    '',
+    '### New Tasks',
+    '- ship it',
+    '',
+    '### Priority Order',
+    '1. Reply to Ana — quick win',
+  ].join('\n'));
+});
+
+test('unticking the only item of a trailing Completed section appends New Tasks', () => {
+  const unticked = moveProposalItem('Intro.\n\n### Completed\n- ship it\n', 'ship it', 'completed', 'new task');
+  expect(unticked).toBe('Intro.\n\n### Completed\n\n### New Tasks\n- ship it\n');
+  expect(parseOrientResponse(unticked).newTasks).toBe('- ship it');
+});
+
+test('ticking with both sections present appends to the existing Completed list', () => {
+  const text = '### Completed\n- done one\n\n### New Tasks\n- todo one\n- todo two';
+  expect(moveProposalItem(text, 'todo two', 'new task', 'completed'))
+    .toBe('### Completed\n- done one\n- todo two\n\n### New Tasks\n- todo one');
+});
+
+test('moving an item that is not in the source section leaves content unchanged', () => {
+  expect(moveProposalItem(NEW_TASKS_ONLY, 'not there', 'new task', 'completed')).toBe(NEW_TASKS_ONLY);
 });

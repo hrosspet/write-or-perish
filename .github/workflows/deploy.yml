@@ -4,6 +4,13 @@ on:
   push:
     branches:
       - main
+    # The iOS app ships through Xcode/TestFlight and nothing on the VM reads
+    # ios/, so a push that only touches it would just restart Celery (draining
+    # running tasks, #312) for no change. A push mixing iOS and server files
+    # still deploys; the VM picks up skipped iOS commits on the next deploy.
+    paths-ignore:
+      - "ios/**"
+      - ".github/workflows/ios.yml"
   workflow_dispatch:  # Allows manual triggering from GitHub UI
 
 concurrency:
@@ -111,7 +118,9 @@ jobs:
           scp -i ~/.ssh/deploy_key frontend-build.tar.gz $VM_USER@$VM_HOST:$PROJECT_PATH/
 
           # Execute deployment script on VM
-          ssh -i ~/.ssh/deploy_key $VM_USER@$VM_HOST << 'ENDSSH'
+          # Keepalive: the Celery restart in deploy.sh can print nothing for
+          # up to ~4 minutes while running tasks drain (#312).
+          ssh -o ServerAliveInterval=30 -i ~/.ssh/deploy_key $VM_USER@$VM_HOST << 'ENDSSH'
             set -e  # Exit immediately if any command fails
             cd /home/hrosspet/write-or-perish
 

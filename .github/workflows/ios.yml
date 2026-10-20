@@ -1,0 +1,105 @@
+name: iOS
+
+# Builds the native iPhone app and runs its unit tests on a simulator for pull
+# requests that touch ios/**. Independent of ci.yml and the deploy workflows.
+on:
+  pull_request:
+    paths:
+      - "ios/**"
+      - ".github/workflows/ios.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: ios-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    name: Build and unit tests
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select the newest Xcode 26
+        run: |
+          XCODE=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1)
+          if [ -z "$XCODE" ]; then
+            echo "No Xcode 26 found; available:"; ls -d /Applications/Xcode*.app
+            exit 1
+          fi
+          sudo xcode-select -s "$XCODE/Contents/Developer"
+          xcodebuild -version
+
+      - name: Terms text matches the web
+        run: python3 ios/scripts/check_terms_text.py
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate the Xcode project
+        working-directory: ios
+        run: xcodegen generate
+
+      - name: Pick an iPhone simulator
+        id: sim
+        run: |
+          UDID=$(xcrun simctl list devices available -j | python3 -c '
+          import json, sys
+          devices = json.load(sys.stdin)["devices"]
+          found = []
+          for runtime, items in devices.items():
+              if ".iOS-" not in runtime:
+                  continue
+              version = tuple(int(p) for p in runtime.split(".iOS-")[-1].split("-") if p.isdigit())
+              for d in items:
+                  if d.get("isAvailable", True) and d["name"].startswith("iPhone"):
+                      found.append((version, d["name"], d["udid"]))
+          found.sort()
+          print(found[-1][2] if found else "")
+          ')
+          if [ -z "$UDID" ]; then
+            echo "No iPhone simulator available"; xcrun simctl list runtimes; exit 1
+          fi
+          echo "Using simulator $UDID"
+          xcrun simctl list devices | grep "$UDID"
+          echo "udid=$UDID" >> "$GITHUB_OUTPUT"
+
+      - name: Build for testing
+        working-directory: ios
+        run: |
+          set -o pipefail
+          xcodebuild build-for-testing \
+            -project Loore.xcodeproj -scheme Loore \
+            -destination "id=${{ steps.sim.outputs.udid }}" \
+            -derivedDataPath build/DerivedData \
+            CODE_SIGNING_ALLOWED=NO \
+            | tee build.log | grep -E "error:|warning: .*/ios/Loore|BUILD|Resolved" || true
+          grep -qE "(TEST )?BUILD SUCCEEDED" build.log
+
+      - name: Unit tests
+        working-directory: ios
+        run: |
+          set -o pipefail
+          xcodebuild test-without-building \
+            -project Loore.xcodeproj -scheme Loore \
+            -destination "id=${{ steps.sim.outputs.udid }}" \
+            -derivedDataPath build/DerivedData \
+            -resultBundlePath build/UnitTests.xcresult \
+            | tee test.log | grep -E "error:|Test Suite .*(passed|failed)|Executed|TEST" || true
+          grep -qE "TEST (EXECUTE )?SUCCEEDED" test.log
+
+      - name: Upload test results
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-test-results
+          path: |
+            ios/build.log
+            ios/test.log
+            ios/build/UnitTests.xcresult
+          if-no-files-found: ignore
+          retention-days: 7

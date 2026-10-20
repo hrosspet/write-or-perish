@@ -184,7 +184,7 @@ export default function HowToPage() {
         <Fade delay={0.1}>
           <WorkflowCard
             title="Walk-and-reflect"
-            description="Record a voice note while walking — whatever's on your mind. The transcription appears in your feed instantly. Link your user profile and let Loore reflect: what patterns is it seeing? What was vague that now has a name? The walk becomes a reflection session."
+            description="Record a voice note while walking — whatever's on your mind. The transcription appears in your Log instantly. Link your user profile and let Loore reflect: what patterns is it seeing? What was vague that now has a name? The walk becomes a reflection session."
             steps={["Voice note", "Transcription", "Profile context", "AI reflection"]}
           />
         </Fade>
