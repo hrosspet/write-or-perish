@@ -5,9 +5,9 @@ VISIBLE profiles — pipeline intermediates are not editions. The rule
 lives here so every surface that names a version (the profile page, the
 profile-updated notification) says the same number.
 
-Also shared by the profile routes and the profile jobs (#183): how a
-revert the user made is marked, when two profile texts count as the same,
-and which source coverage a version the user writes carries.
+Also shared by the profile routes and the profile jobs (#183): when two
+profile texts count as the same, and which source coverage a version the
+user writes (an edit, a new profile, a revert) carries.
 """
 from backend.extensions import db
 from backend.models import UserProfile
@@ -19,15 +19,6 @@ from backend.models import UserProfile
 # single-pass build), 'integration' (merged update), 'revert' (a user
 # action), and legacy NULL-typed rows (profiles predating the column).
 PROFILE_HISTORY_HIDDEN_TYPES = ("iterative", "update")
-
-# A revert the user made from the profile history (routes/profile.py
-# revert_profile). It records the user's choice of profile: a version the
-# user wrote by hand that the revert went back past is no longer the
-# user's own profile, so the profile jobs stop folding it in
-# (tasks/exports.latest_user_written_profile). The pipeline's own re-tips
-# after an import or a repair (tasks/exports.retip_profile_chain) stay
-# typed "revert": they are not a choice the user made.
-USER_REVERT = "user_revert"
 
 
 def profile_lines(text):
@@ -56,12 +47,12 @@ def continue_boundary(user, profile):
 
 
 def coverage_of(user, version):
-    """The source coverage of a version the user writes on top of
-    ``version``: an edit of it, or a new profile written while it is the
-    newest version (POST /profile). The new version covers the same
-    writing, so it carries the same cutoff, units and origin stats, and the
-    same continue-rule boundary, and the update gates decide as they did
-    before the user's version existed.
+    """The source coverage of a version the user makes on top of
+    ``version``: an edit of it, a revert to it, or a new profile written
+    while it is the newest version (POST /profile). The new version covers
+    the same writing, so it carries the same cutoff, units and origin
+    stats, and the same continue-rule boundary, and the update gates decide
+    as they did before the user's version existed.
 
     An integration has no render time of its own (its source_rendered_at
     is None). It merges the chain that ends at its parent, so its boundary

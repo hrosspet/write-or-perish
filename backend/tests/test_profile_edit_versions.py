@@ -1,10 +1,12 @@
-"""#183: an edit of a generated profile is saved as a new version the user
-wrote (generated_by "user"), not over the generated version.
+"""#183: every edit of a profile that changes the words is saved as a new
+version the user wrote (generated_by "user"), dated by the edit, with the
+version it changed as its predecessor (parent_profile_id). The edited
+version stays in the history unchanged.
 
-Decision (voice review, Peter, 2026-10-02): a job that regenerates
-something the user has edited keeps the user's edits and refreshes only its
-own part. The profile jobs can only do that when the edit is recorded as
-the user's text, and the generated version stays in the history.
+Decision (voice review, Peter, 2026-10-20): "user edits simply creating a
+new version of profile, which will have the previous version linked as a
+predecessor. This way the next ai update will have the information at
+hand". The pipeline side is in test_profile_edit_wiring.
 """
 from datetime import datetime
 
@@ -22,6 +24,7 @@ def _generated(user, content="### SURFACE MAP\nLikes long walks.\nAvoids conflic
         source_tokens_used=180_000, source_data_cutoff=datetime(2026, 5, 1),
         source_origin_stats={"loore": {"nodes": 40, "tokens": 180_000}},
         source_rendered_at=datetime(2026, 5, 2),
+        created_at=datetime(2026, 5, 3),
         audio_tts_url="user/1/profile/tts.mp3" if with_audio else None,
         tts_task_status="completed" if with_audio else None)
     profile.set_content(content)
@@ -45,8 +48,9 @@ def _edit(app, user, profile, content, **extra):  # noqa: F811
     return resp.get_json()["profile"]["id"]
 
 
-def test_edit_of_generated_version_is_a_new_user_version(app, alice):  # noqa: F811
+def test_an_edit_is_a_new_version_with_its_predecessor_and_date(app, alice):  # noqa: F811
     generated = _generated(alice)
+    before = datetime.utcnow()
 
     new_id = _edit(app, alice, generated,
                    "### SURFACE MAP\nLikes long walks.\nSays no when it matters.")
@@ -59,13 +63,37 @@ def test_edit_of_generated_version_is_a_new_user_version(app, alice):  # noqa: F
     assert new.generated_by == "user"
     assert new.get_content().endswith("Says no when it matters.")
     assert new.parent_profile_id == generated.id
+    assert before <= new.created_at <= datetime.utcnow()     # the edit's date
     assert new.ai_usage == "chat"
     # Covers the same writing as the version it was edited from.
     assert new.source_tokens_used == 180_000
     assert new.source_data_cutoff == datetime(2026, 5, 1)
     assert new.source_origin_stats == generated.source_origin_stats
-    assert new.source_rendered_at == datetime(2026, 5, 2)
     assert UserProfile.query.count() == 2
+
+
+def test_two_edits_make_two_versions(app, alice):  # noqa: F811
+    """Q3 (voice review, 2026-10-20): an edit of the user's own version is
+    a new version too, dated by that edit; the first edit stays as it
+    was. Both are editions in the history."""
+    generated = _generated(alice)
+    first = _edit(app, alice, generated, "first edit")
+
+    second = _edit(app, alice, UserProfile.query.get(first), "second edit")
+
+    assert second != first
+    one, two = UserProfile.query.get(first), UserProfile.query.get(second)
+    assert one.get_content() == "first edit"
+    assert two.get_content() == "second edit"
+    assert two.parent_profile_id == one.id
+    assert one.parent_profile_id == generated.id
+    assert two.created_at >= one.created_at
+    assert two.generated_by == "user"
+    assert two.source_data_cutoff == generated.source_data_cutoff
+    client = app.test_client()
+    _login(client, alice)
+    history = client.get("/profile/versions").get_json()["versions"]
+    assert [v["id"] for v in history] == [second, first, generated.id]
 
 
 def test_keeping_audio_carries_it_to_the_new_version(app, alice):  # noqa: F811
@@ -110,20 +138,19 @@ def test_privacy_only_change_stays_in_place(app, alice):  # noqa: F811
     assert UserProfile.query.count() == 1
 
 
-def test_editing_the_user_version_again_stays_in_place(app, alice):  # noqa: F811
-    """The first edit makes the user's version; later edits of it change
-    that version, so one editing session does not pile up versions."""
+def test_whitespace_only_change_makes_no_new_version(app, alice):  # noqa: F811
+    """Blank lines, trailing spaces and a trailing newline are not an edit
+    of the words: saved in place, no new version."""
     generated = _generated(alice)
-    first = _edit(app, alice, generated, "first edit")
 
-    second = _edit(app, alice, UserProfile.query.get(first), "second edit")
+    same_id = _edit(
+        app, alice, generated,
+        "### SURFACE MAP  \n\nLikes long walks.\n\n\nAvoids conflict.\n")
 
-    assert second == first
-    assert UserProfile.query.get(first).get_content() == "second edit"
-    assert UserProfile.query.count() == 2
+    assert same_id == generated.id
+    assert UserProfile.query.count() == 1
+    assert UserProfile.query.get(generated.id).generated_by == "gpt-5.5"
 
-
-# ── Review of #414 ──────────────────────────────────────────────────────
 
 def _chain_tip_and_integration(user):
     """A finished chain as both pipelines save it: the last chunk carries
@@ -150,27 +177,11 @@ def _chain_tip_and_integration(user):
     return tip, integration
 
 
-def test_whitespace_only_change_makes_no_new_version(app, alice):  # noqa: F811
-    """Finding 2: blank lines, trailing spaces and a trailing newline are
-    not an edit of the words. The generated version is saved in place and
-    no user version is made, so the jobs never label the generated text as
-    the user's own."""
-    generated = _generated(alice)
-
-    same_id = _edit(
-        app, alice, generated,
-        "### SURFACE MAP  \n\nLikes long walks.\n\n\nAvoids conflict.\n")
-
-    assert same_id == generated.id
-    assert UserProfile.query.count() == 1
-    assert UserProfile.query.get(generated.id).generated_by == "gpt-5.5"
-
-
 def test_edit_of_an_integration_carries_its_chain_tips_render_time(app, alice):  # noqa: F811
-    """Finding 3: an integration has no render time of its own; the edit
-    takes the one of the chain tip the integration merged, so the update
-    gates decide as they did before the edit (test_profile_batch has the
-    seeder side)."""
+    """An integration has no render time of its own; the edit takes the
+    one of the chain tip the integration merged, so the update gates
+    decide as they did before the edit (test_profile_batch has the seeder
+    side)."""
     tip, integration = _chain_tip_and_integration(alice)
 
     new = UserProfile.query.get(_edit(app, alice, integration, "my words"))
@@ -181,38 +192,12 @@ def test_edit_of_an_integration_carries_its_chain_tips_render_time(app, alice): 
     assert new.source_tokens_used == 180_000
 
 
-def test_revert_from_the_history_is_marked_as_the_users(app, alice):  # noqa: F811
-    """Finding 1: a revert the user makes is typed USER_REVERT, so the
-    jobs can tell it from the pipeline's re-tips (typed "revert")."""
-    from backend.utils.profile_versions import USER_REVERT
-    generated = _generated(alice)
-    _edit(app, alice, generated, "### SURFACE MAP\nMY EDIT")
-    client = app.test_client()
-    _login(client, alice)
-
-    resp = client.post(f"/profile/revert/{generated.id}")
-
-    assert resp.status_code == 200
-    revert = UserProfile.query.get(resp.get_json()["profile"]["id"])
-    assert revert.generation_type == USER_REVERT
-    assert revert.parent_profile_id == generated.id
-    assert revert.generated_by == "gpt-5.5"
-    assert revert.get_content() == generated.get_content()
-
-
-def test_revert_to_an_integration_carries_its_coverage(app, alice):  # noqa: F811
-    """A revert to an integration on a pre-filled (pinned) account carries
-    the coverage an edit of it would, render time included, so the update
-    gates decide as before the revert (same rule as finding 3)."""
-    from backend.utils.profile_versions import coverage_of
-    alice.profile_force_batch = True
-    tip = _generated(alice)
-    tip.generation_type = "iterative"
-    tip.source_rendered_at = datetime(2026, 5, 3)
-    integration = _generated(alice)
-    integration.parent_profile_id = tip.id
-    integration.source_rendered_at = None
-    _db.session.commit()
+def test_revert_to_the_generated_version_is_the_newest_version(app, alice):  # noqa: F811
+    """A revert from the history after an edit is a new 'revert' row, as on
+    main. It is the newest version, so the next update builds on it and
+    the edit it went back past does not come back."""
+    from backend.tasks.exports import profile_update_base
+    tip, integration = _chain_tip_and_integration(alice)
     _edit(app, alice, integration, "### SURFACE MAP\nMY EDIT")
     client = app.test_client()
     _login(client, alice)
@@ -221,7 +206,30 @@ def test_revert_to_an_integration_carries_its_coverage(app, alice):  # noqa: F81
 
     assert resp.status_code == 200
     revert = UserProfile.query.get(resp.get_json()["profile"]["id"])
-    assert revert.source_rendered_at == datetime(2026, 5, 3)
+    assert revert.generation_type == "revert"
+    assert revert.parent_profile_id == integration.id
+    assert revert.generated_by == "gpt-5.5"
+    assert revert.get_content() == integration.get_content()
+    assert profile_update_base(alice.id).id == revert.id
+
+
+def test_revert_to_an_integration_carries_its_coverage(app, alice):  # noqa: F811
+    """A revert to an integration on a pre-filled (pinned) account carries
+    the coverage an edit of it would, render time included, so the update
+    gates decide as before the revert."""
+    from backend.utils.profile_versions import coverage_of
+    alice.profile_force_batch = True
+    _db.session.commit()
+    tip, integration = _chain_tip_and_integration(alice)
+    _edit(app, alice, integration, "### SURFACE MAP\nMY EDIT")
+    client = app.test_client()
+    _login(client, alice)
+
+    resp = client.post(f"/profile/revert/{integration.id}")
+
+    assert resp.status_code == 200
+    revert = UserProfile.query.get(resp.get_json()["profile"]["id"])
+    assert revert.source_rendered_at == tip.source_rendered_at
     assert revert.source_origin_stats == integration.source_origin_stats
     assert revert.source_data_cutoff == integration.source_data_cutoff
     for key, value in coverage_of(alice, integration).items():
@@ -229,11 +237,11 @@ def test_revert_to_an_integration_carries_its_coverage(app, alice):  # noqa: F81
 
 
 def test_new_profile_follows_the_newest_version(app, alice):  # noqa: F811
-    """Finding 7: POST /profile (the iPhone app's "Save as new" when a new
-    version arrived during an edit) makes a version that follows the
-    newest one: that version is its parent and its coverage is copied, so
-    the next update does not read the whole corpus again, and the jobs see
-    which lines the user changed. The text is the user's, as sent."""
+    """POST /profile (the iPhone app's "Save as new" when a new version
+    arrived during an edit) makes a version that follows the newest one,
+    like an edit of it: that version is its parent and its coverage is
+    copied, so the next update builds on the user's text and does not read
+    the whole corpus again. The text is the user's, as sent."""
     tip, integration = _chain_tip_and_integration(alice)
     client = app.test_client()
     _login(client, alice)
