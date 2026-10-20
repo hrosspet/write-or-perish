@@ -148,6 +148,7 @@
         headingStyle: 'atx', codeBlockStyle: 'fenced', bulletListMarker: '-',
       });
       td.remove(['script', 'style', 'noscript', 'iframe']);
+      LooreTurndownRules(td);
       md = td.turndown(article.content);
     }
     if (!md.trim()) {

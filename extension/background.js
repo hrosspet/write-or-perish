@@ -28,7 +28,7 @@ async function fail(message, extra = {}) {
 async function capture(tabId) {
   const results = await chrome.scripting.executeScript({
     target: { tabId },
-    files: ['vendor/Readability.js', 'vendor/turndown.js', 'capture.js'],
+    files: ['vendor/Readability.js', 'vendor/turndown.js', 'turndown-rules.js', 'capture.js'],
   });
   return results && results[0] ? results[0].result : null;
 }
