@@ -169,17 +169,28 @@ struct ReferenceDetailView: View {
     /// The author and date line with the listen-aloud speaker last on it,
     /// pushed to the right edge (SpeakerButton renders nothing without voice
     /// mode, so the line then reads as before).
+    /// Whether the line exists at all: an author or a date to show, or the
+    /// speaker (which SpeakerButton draws only with voice mode). Otherwise
+    /// the card has no empty row and no extra gap.
+    static func showsBylineRow(_ item: ExternalItem, voiceMode: Bool) -> Bool {
+        let parts = byline(item)
+        return parts.name != nil || parts.handle != nil || parts.date != nil || voiceMode
+    }
+
+    @ViewBuilder
     private func byline(_ item: ExternalItem) -> some View {
-        HStack(alignment: .center, spacing: 8) {
-            bylineText(item)
-            Spacer(minLength: 0)
-            SpeakerButton(target: .item(item.id), content: speakerContent(item),
-                          onTtsGenerated: { self.item?.hasTTS = true })
-                // The 28 pt tap target stays; the layout takes back 5 pt above
-                // and below so the line keeps its height, and the icon sits on
-                // the card's content edge (its 7.5 pt of padding to the right).
-                .padding(.vertical, -5)
-                .padding(.trailing, -7.5)
+        if Self.showsBylineRow(item, voiceMode: app.user?.voiceModeEnabled == true) {
+            HStack(alignment: .center, spacing: 8) {
+                bylineText(item)
+                Spacer(minLength: 0)
+                SpeakerButton(target: .item(item.id), content: speakerContent(item),
+                              onTtsGenerated: { self.item?.hasTTS = true })
+                    // The 28 pt tap target stays; the layout takes back 5 pt above
+                    // and below so the line keeps its height, and the icon sits on
+                    // the card's content edge (its 7.5 pt of padding to the right).
+                    .padding(.vertical, -5)
+                    .padding(.trailing, -7.5)
+            }
         }
     }
 

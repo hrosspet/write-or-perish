@@ -7,6 +7,8 @@ jest.mock('../api', () => ({
 jest.mock('../contexts/ToastContext', () => ({ useToast: () => ({ addToast: jest.fn() }) }));
 // The speaker needs the audio and user contexts; the page only places it.
 jest.mock('../components/SpeakerIcon', () => () => <button type="button">Play audio</button>);
+let mockUser = { voice_mode_enabled: true };
+jest.mock('../contexts/UserContext', () => ({ useUser: () => ({ user: mockUser }) }));
 jest.mock('../components/NodeFormModal', () => ({ children }) => <div>{children}</div>);
 
 import React from 'react';
@@ -69,6 +71,7 @@ const show = (item, state) => {
 };
 
 beforeEach(() => {
+  mockUser = { voice_mode_enabled: true };
   api.get.mockReset();
   api.post.mockReset();
   api.delete.mockReset();
@@ -166,6 +169,29 @@ test('with no URL there is no link, with or without a title', async () => {
   const second = show({ ...page, url: null, title: null });
   await screen.findByTestId('reference-text');
   expect(second.container.querySelectorAll('.ref-card a')).toHaveLength(0);
+});
+
+test('no author, no date and no voice mode: no byline row at all', async () => {
+  mockUser = { voice_mode_enabled: false };
+  const bare = {
+    ...page, author_handle: null, author_name: null, posted_at: null, fetched_at: null,
+  };
+  const { container } = show(bare);
+  await screen.findByRole('heading', { name: 'On slow evenings' });
+  expect(screen.queryByTestId('reference-byline')).toBeNull();
+  expect(container.querySelector('.ref-card-byline-row')).toBeNull();
+  expect(screen.queryByRole('button', { name: 'Play audio' })).toBeNull();
+});
+
+test('with voice mode the speaker still gets its line when there is no author or date', async () => {
+  const bare = {
+    ...page, author_handle: null, author_name: null, posted_at: null, fetched_at: null,
+  };
+  show(bare);
+  await screen.findByRole('heading', { name: 'On slow evenings' });
+  expect(screen.getByTestId('reference-byline')).toContainElement(
+    screen.getByRole('button', { name: 'Play audio' }),
+  );
 });
 
 test('a video keeps its player in the card and its description behind the toggle', async () => {

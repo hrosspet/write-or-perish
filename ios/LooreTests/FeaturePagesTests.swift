@@ -783,6 +783,14 @@ final class FeaturePageModelTests: XCTestCase {
         XCTAssertTrue(bare.runs.allSatisfy { $0.link == nil })
     }
 
+    func testReferenceBylineRowExistsOnlyWithSomethingToShow() throws {
+        let bare = try decode(ExternalItem.self, #"{"id":45,"source":"web_clip","external_id":"c","title":"T","preview":"p","url":"https://example.com/x","has_tts":false,"surfaced_count":0}"#)
+        XCTAssertFalse(ReferenceDetailView.showsBylineRow(bare, voiceMode: false))
+        XCTAssertTrue(ReferenceDetailView.showsBylineRow(bare, voiceMode: true))
+        let dated = try decode(ExternalItem.self, #"{"id":46,"source":"web_clip","external_id":"d","title":"T","preview":"p","url":"https://example.com/x","fetched_at":"2026-10-13T08:00:00Z","has_tts":false,"surfaced_count":0}"#)
+        XCTAssertTrue(ReferenceDetailView.showsBylineRow(dated, voiceMode: false))
+    }
+
     func testReferencePageBylinePerKind() throws {
         let tweet = try decode(ExternalItem.self, #"{"id":42,"source":"community_archive","external_id":"1","author_handle":"miraokafor","author_name":"Mira Okafor","preview":"p","url":"https://x.com/miraokafor/status/1","posted_at":"2026-10-12T21:07:00Z","fetched_at":"2026-10-13T08:00:00Z","has_tts":false,"surfaced_count":1}"#)
         XCTAssertEqual(ReferenceDetailView.byline(tweet),

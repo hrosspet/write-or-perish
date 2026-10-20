@@ -9,6 +9,7 @@ import ReferenceEditForm from '../components/ReferenceEditForm';
 import NodeFormModal from '../components/NodeFormModal';
 import RegenerateTtsDialog from '../components/RegenerateTtsDialog';
 import SpeakerIcon from '../components/SpeakerIcon';
+import { useUser } from '../contexts/UserContext';
 import ReferenceFeedback, { TWEET_LABELS } from '../components/ReferenceFeedback';
 import { useToast } from '../contexts/ToastContext';
 import { formatDate, formatDateTime } from '../utils/date';
@@ -110,6 +111,10 @@ function TitleWithLink({ title, link }) {
  */
 function ReferenceDetailPage() {
   const { id } = useParams();
+  // SpeakerIcon renders nothing without voice mode; the byline row then
+  // must not exist for a reference with no author and no date either.
+  const userCtx = useUser();
+  const canListen = !!(userCtx && userCtx.user && userCtx.user.voice_mode_enabled);
   const navigate = useNavigate();
   // Opened from a card in a thread (a gleaning, #435): the link back to it.
   const location = useLocation();
@@ -305,7 +310,7 @@ function ReferenceDetailPage() {
         </span>
         <Byline
           item={item}
-          listen={(
+          listen={canListen && (
             <SpeakerIcon
               itemId={item.id}
               content={item.title ? `# ${item.title}\n${item.content || ''}` : item.content}
