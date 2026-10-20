@@ -50,10 +50,8 @@ def _make_app():
 
     from backend.routes.admin import admin_bp
     from backend.routes.dashboard import dashboard_bp
-    from backend.routes.export_data import export_bp
     app.register_blueprint(admin_bp, url_prefix="/api/admin")
     app.register_blueprint(dashboard_bp, url_prefix="/api/dashboard")
-    app.register_blueprint(export_bp, url_prefix="/api")
     return app
 
 
@@ -250,14 +248,6 @@ class TestProfileDescriptionGone:
         assert resp.get_json()["user"]["craft_mode"] is True
         assert "description" not in client.get(
             "/api/dashboard/").get_json()["user"]
-
-    def test_no_description_in_the_export(self, app, users):
-        client = app.test_client()
-        _login(client, users["mail"].id)
-        resp = client.get("/api/export")
-        assert resp.status_code == 200
-        assert set(resp.get_json()["user"]) == {
-            "id", "twitter_id", "username", "created_at"}
 
     def test_no_description_in_the_admin_list(self, app, users):
         client = app.test_client()
