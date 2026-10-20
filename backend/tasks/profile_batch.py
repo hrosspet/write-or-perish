@@ -268,8 +268,11 @@ def _build_next_profile_request(user, allow_chunk=True, chunk_num=1):
                     "profile_generation.txt", user_id=user.id)
                 return gen_template.replace(
                     "{user_export}", _exports.chunk_content_for_prompt(chunk))
+            # A version the user wrote or edited carries the same author
+            # note as in the sync loop (#183).
             return _exports.build_chunk_prompt(
-                _exports.build_update_template(user.id), prev.get_content(),
+                _exports.build_update_template(user.id),
+                _exports.update_base_content(prev),
                 cumulative, chunk, prev.source_origin_stats)
 
         # Pre-submit sizing (shared build_fitted_chunk): count the prompt

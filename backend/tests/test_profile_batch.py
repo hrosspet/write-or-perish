@@ -1881,7 +1881,8 @@ def _user_edit(user, version, content="MY CORRECTION"):
 
 def test_183_batch_update_builds_on_the_users_version(app, monkeypatch):
     """The batch step after an edit builds on it: the edit is the step's
-    previous profile, with the batch prompt as on main."""
+    previous profile, and the model is told it is the user's with the
+    note the sync loop uses (main sent it bare on the batch path)."""
     u = _user()
     tip = _prev_profile(u, datetime(2026, 5, 1), gen_type="iterative")
     tip.created_at = datetime.utcnow() - timedelta(days=2)
@@ -1902,7 +1903,26 @@ def test_183_batch_update_builds_on_the_users_version(app, monkeypatch):
     assert req["meta"]["prev_profile_id"] == edit.id
     assert req["meta"]["generation_type"] == "update"
     text = req["request"]["messages"][0]["content"][0]["text"]
-    assert text.startswith("T <<MY CORRECTION>> ")
+    note = pb._exports.USER_WRITTEN_PROFILE_NOTE
+    assert text.startswith(f"T <<{note}\n\nMY CORRECTION>> ")
+    # The same {existing_profile} as the sync loop's.
+    assert pb._exports.update_base_content(edit) == f"{note}\n\nMY CORRECTION"
+
+
+def test_183_batch_update_from_a_generated_base_has_no_note(app, monkeypatch):
+    u = _user()
+    _prev_profile(u, datetime(2026, 5, 1))
+    db.session.commit()
+    _remaining(monkeypatch, 90000)
+    monkeypatch.setattr(pb._exports, "build_user_export_content",
+                        MagicMock(return_value=_chunk()))
+    monkeypatch.setattr(pb._exports, "build_update_template",
+                        lambda uid: "T <<{existing_profile}>> {new_data}")
+
+    req = pb._build_next_profile_request(u)
+
+    text = req["request"]["messages"][0]["content"][0]["text"]
+    assert text.startswith("T <<PREVIOUS PROFILE>> ")
 
 
 def test_183_batch_chunk_saved_after_an_edit_saves_nothing(app):

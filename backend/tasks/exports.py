@@ -132,6 +132,19 @@ USER_WRITTEN_PROFILE_NOTE = (
 )
 
 
+def update_base_content(profile):
+    """The previous profile as the update prompt's {existing_profile}
+    shows it: a version the user wrote or edited (generated_by "user")
+    with USER_WRITTEN_PROFILE_NOTE before it, a generated one as is. The
+    sync loop and the batch builder both read the base through this, so
+    the model is told the author on both paths (#183; Peter, 2026-10-20:
+    the job should send the author of the profile version)."""
+    content = profile.get_content()
+    if profile.generated_by == "user":
+        return f"{USER_WRITTEN_PROFILE_NOTE}\n\n{content}"
+    return content
+
+
 def _is_task_stale(user):
     """Check if the user's profile generation task is stale (lost or timed out).
 
@@ -813,10 +826,9 @@ def _do_iterative_incremental_update(self, user, model_id, prev_profile,
 
     # When the base is the user's own hand-written profile, tell the LLM so
     # (it's chunk 1's {existing_profile}; later chunks build on generated
-    # output and need no note).
-    base_content = prev_profile.get_content()
-    if prev_profile.generated_by == "user":
-        base_content = f"{USER_WRITTEN_PROFILE_NOTE}\n\n{base_content}"
+    # output and need no note). The batch builder reads its base the same
+    # way.
+    base_content = update_base_content(prev_profile)
 
     current_profile_id, chunk_num, cumulative_source_tokens = \
         _chunked_profile_loop(

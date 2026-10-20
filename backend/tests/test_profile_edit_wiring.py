@@ -5,7 +5,8 @@ An edit is a new version the user wrote, with the version it changed as
 its predecessor (routes: test_profile_edit_versions). Here, the jobs:
 
 - the next update builds on the newest version, the user's included, as
-  its previous profile, with the prompts as on main;
+  its previous profile, with the prompts as on main (the batch path now
+  sends the sync path's author note too: test_profile_batch);
 - a version saved while a run is working is not buried under the run's
   output: the step saves nothing and the run ends;
 - a full rebuild reads the writing only, no earlier version (main's
