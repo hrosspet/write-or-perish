@@ -214,13 +214,54 @@ def test_the_next_update_builds_on_the_users_version(app, monkeypatch):
     assert update.parent_profile_id == edit.id
     texts = [m["content"][0]["text"] for m in messages[:-1]]
     assert len(texts) == 2
-    assert texts[0].startswith("Profile No. 1\n")
-    assert f"{MAIN_NOTE}\n\n{edit.get_content()}" in texts[0]
+    assert texts[0] == ("Profile No. 1\n- start to 2026-05-01\n\n"
+                        f"{MAIN_NOTE}\n\n{edit.get_content()}")
+    assert texts[1].startswith("Profile No. 2\n- 2026-05-01 to 2026-06-01\n\n")
     assert "UPDATED, KEEPS MY CORRECTION" in texts[1]
     assert MAIN_NOTE not in texts[1]
     newest = UserProfile.query.get(result["profile_id"])
     assert newest.generation_type == "integration"
     assert newest.parent_profile_id == update.id
+
+
+def test_an_edit_of_a_chunk_replaces_it_in_the_integration(app, monkeypatch):
+    """The version shown is a chunk (no integration on top of it), and the
+    user edits it. The edit replaces the chunk: after the next update, the
+    integration's inputs are the edit and the update, not the chunk the
+    user replaced, and the edit spans from "start" to the cutoff it covers
+    (the real-model check of #414 found [chunk, edit, update] with a
+    zero-length span for the edit)."""
+    import backend.tasks.exports as exports
+    user = _user("chunkedit")
+    chunk = UserProfile(
+        user_id=user.id, generated_by="gpt-5.5", tokens_used=900,
+        ai_usage="chat", generation_type="iterative",
+        source_tokens_used=180_000, source_data_cutoff=MAY,
+        source_rendered_at=MAY + timedelta(hours=1),
+        created_at=MAY + timedelta(hours=2))
+    chunk.set_content("### SURFACE MAP\nTHE TEXT THE USER REPLACED")
+    _db.session.add(chunk)
+    _db.session.commit()
+    edit = _edit(user, chunk, "### SURFACE MAP\nMY CORRECTION")
+    _new_writing(user)
+    seen = _stand_in(monkeypatch, exports, [_window()], [90_000, 0],
+                     ["UPDATED"])
+
+    exports._do_incremental_update(
+        MagicMock(), user, "gpt-5.5", edit.id, 200_000, 32_000, {})
+
+    (_kind, _prompt), (ikind, messages) = seen
+    assert ikind == "integration"
+    texts = _texts(messages)[:-1]
+    assert len(texts) == 2
+    assert texts[0] == ("Profile No. 1\n- start to 2026-05-01\n\n"
+                        f"{MAIN_NOTE}\n\n### SURFACE MAP\nMY CORRECTION")
+    assert texts[1].startswith("Profile No. 2\n- 2026-05-01 to 2026-06-01\n\n")
+    assert texts[1].endswith("UPDATED")
+    assert all("THE TEXT THE USER REPLACED" not in t for t in _texts(messages))
+    update = UserProfile.query.filter_by(generation_type="update").one()
+    assert [p.id for p in exports._collect_iterative_chain(update.id)] == [
+        edit.id, update.id]
 
 
 def test_two_edits_the_update_builds_on_the_second(app):
@@ -241,8 +282,9 @@ def test_two_edits_the_update_builds_on_the_second(app):
     update.set_content("UPDATE")
     _db.session.add(update)
     _db.session.commit()
+    # The second edit replaced the first: the chain starts at it.
     chain = exports._collect_iterative_chain(update.id)
-    assert [p.id for p in chain] == [first.id, second.id, update.id]
+    assert [p.id for p in chain] == [second.id, update.id]
 
 
 def test_an_edit_keeps_the_gates_of_the_version_it_edited(app, monkeypatch):

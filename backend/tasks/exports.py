@@ -834,11 +834,12 @@ def retip_profile_chain(user_id, version):
 
 def _retip_lineage(tip):
     """The versions an import can re-tip at, tip first: the tip's parents
-    as far as the chain goes (``_collect_iterative_chain``), and on through
-    an integration the user edited or reverted to, down to the chunks it
-    merged. An edit of an integration is a new version whose parent is the
-    integration (#183); stopping there turned every import older than the
-    edit's cutoff into a full rebuild. Integrations themselves are never a
+    with the chain's generation types, on through a version the user wrote
+    (where ``_collect_iterative_chain`` stops) and through an integration
+    the user edited or reverted to, down to the chunks it merged. An edit
+    of an integration is a new version whose parent is the integration
+    (#183); stopping there turned every import older than the edit's
+    cutoff into a full rebuild. Integrations themselves are never a
     re-tip point."""
     lineage = []
     seen = set()
@@ -1177,6 +1178,11 @@ def _collect_iterative_chain(last_profile_id):
     "initial") — "initial" for backwards compat with users whose last
     iterative profile was already re-typed by the old code.
 
+    A version the user wrote (generated_by "user") is the chain's first
+    version: an edit replaces the version it was made from (#183), so the
+    walk stops there. The replaced version is never an integration input,
+    and the user's version spans from "start", as its copied coverage does.
+
     Returns list in chronological order (oldest first).
     """
     chain = []
@@ -1193,6 +1199,8 @@ def _collect_iterative_chain(last_profile_id):
         ):
             break
         chain.append(profile)
+        if profile.generated_by == "user":
+            break
         current_id = profile.parent_profile_id
 
     chain.reverse()  # chronological: oldest first
