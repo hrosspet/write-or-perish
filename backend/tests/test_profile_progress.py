@@ -400,3 +400,12 @@ def test_idle_reports_a_failed_batch_step(client, user):
 def test_requires_login(app):
     r = app.test_client().get("/api/export/profile-progress")
     assert r.status_code in (302, 401)
+
+
+# ── the removed JSON dump ────────────────────────────────────────────────
+
+def test_legacy_json_export_is_gone_and_threads_export_remains(client):
+    # GET /api/export (a JSON dump of the user's nodes) had no callers
+    # and was removed; the text export the apps use stays.
+    assert client.get("/api/export").status_code == 404
+    assert client.get("/api/export/threads").status_code == 200
