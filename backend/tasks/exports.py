@@ -321,7 +321,14 @@ def integration_due(user, latest_profile):
         return False
     chain = [p for p in _collect_iterative_chain(latest_profile.id)
              if p.ai_usage in AI_ALLOWED]
-    return len(chain) >= 2
+    return needs_integration(chain)
+
+
+def needs_integration(chain):
+    """Whether a chain has versions to integrate: at least two that are not
+    a rebuild's merge step (#183). A single chunk merged with the user's
+    version is the run's final version, as a single chunk is."""
+    return sum(1 for p in chain if not p.merged_profile_id) >= 2
 
 
 def _log_profile_failure(user_id, exc):
@@ -428,12 +435,15 @@ def _call_llm_with_retries(self, model_id, prompt_text, user_id,
 def _save_profile(user, model_id, profile_text, response,
                    source_tokens_used, source_data_cutoff,
                    generation_type, parent_profile_id=None, batch=False,
-                   source_origin_stats=None, source_rendered_at=None):
+                   source_origin_stats=None, source_rendered_at=None,
+                   merged_profile_id=None):
     """Save a new UserProfile and log API cost. Returns the profile.
 
     batch=True records the Batch API discount in the cost log (issue #173).
     source_rendered_at: when the window this version covers was rendered
-    (the continue rule's boundary between unfinished chain and growth)."""
+    (the continue rule's boundary between unfinished chain and growth).
+    merged_profile_id: on a rebuild's merge step, the user's version it
+    merged (#183)."""
     from backend.utils.privacy import PrivacyLevel
     from backend.utils.hidden_rows import WritingOnHold, writing_on_hold
 
@@ -464,6 +474,7 @@ def _save_profile(user, model_id, profile_text, response,
         source_rendered_at=source_rendered_at,
         generation_type=generation_type,
         parent_profile_id=parent_profile_id,
+        merged_profile_id=merged_profile_id,
     )
     new_profile.set_content(
         format_date_metadata(
@@ -567,6 +578,169 @@ def discard_step_output(user, model_id, response, job, batch=False):
         "next run starts from the newest version", user.id, job)
 
 
+# ── #183: a rebuild merges the user's version at its date ────────────────
+# Peter (voice review, 2026-10-20), option 2: when a chain is rebuilt from
+# an earlier point — a from-scratch build (an import older than the chain,
+# a ladder step, admin Build profile, a repair) or an import's re-tip —
+# the user's version the old chain carried is merged into the new chain
+# when the new chain reaches its date. One integration call merges the
+# rebuilt version and the user's version (main's integration prompt, main's
+# user note before the user's version), and the rebuild continues from the
+# merge.
+
+def carried_user_version(profile):
+    """The newest version the user wrote that ``profile`` carries: the
+    first found walking its lineage (the version, then its parents) that is
+    a version the user wrote (generated_by "user") or a merge step, which
+    stands for the user's version it merged (merged_profile_id). Only
+    AI-readable versions count. None when the lineage has neither. Reads
+    metadata only; nothing is decrypted."""
+    seen = set()
+    current = profile
+    while current is not None and current.id not in seen:
+        seen.add(current.id)
+        if current.ai_usage in AI_ALLOWED:
+            if current.generated_by == "user":
+                return current
+            if current.merged_profile_id:
+                merged = UserProfile.query.get(current.merged_profile_id)
+                if (merged is not None and merged.user_id == current.user_id
+                        and merged.ai_usage in AI_ALLOWED):
+                    return merged
+        if current.parent_profile_id is None:
+            return None
+        current = UserProfile.query.get(current.parent_profile_id)
+    return None
+
+
+def pending_merge_version(user):
+    """The user's version a rebuild or a re-tip in progress still has to
+    merge (User.profile_pending_merge_id), or None."""
+    version_id = getattr(user, "profile_pending_merge_id", None)
+    if not isinstance(version_id, int) or not version_id:
+        return None
+    version = UserProfile.query.get(version_id)
+    if (version is None or version.user_id != user.id
+            or version.ai_usage not in AI_ALLOWED):
+        return None
+    return version
+
+
+def plan_user_version_merge(user, old_base, new_base=None):
+    """Record which version of the user's the new chain must merge, when a
+    chain is rebuilt from an earlier point: at the start of a from-scratch
+    build (``new_base`` None) and when an import re-tips the chain at
+    ``new_base``. It is the user's version the old chain carried
+    (``carried_user_version(old_base)``). Nothing is recorded when the new
+    chain already carries it (a re-tip at the user's version or after it),
+    and a merge already pending (an interrupted rebuild) is kept. The
+    caller commits."""
+    if pending_merge_version(user) is not None:
+        return None
+    carried = carried_user_version(old_base) if old_base is not None else None
+    if carried is None:
+        return None
+    if new_base is not None:
+        kept = carried_user_version(new_base)
+        if kept is not None and (kept.id == carried.id
+                                 or _descends_from(new_base, carried.id)):
+            return None
+    user.profile_pending_merge_id = carried.id
+    logger.info("User %s: the rebuilt chain will merge the user's version "
+                "%s at %s", user.id, carried.id, merge_date(carried))
+    return carried
+
+
+def _descends_from(profile, ancestor_id):
+    """Whether ``ancestor_id`` is ``profile`` or one of its parents."""
+    seen = set()
+    current = profile
+    while current is not None and current.id not in seen:
+        if current.id == ancestor_id:
+            return True
+        seen.add(current.id)
+        if current.parent_profile_id is None:
+            return False
+        current = UserProfile.query.get(current.parent_profile_id)
+    return False
+
+
+def merge_date(version):
+    """The date the new chain merges the user's version at: the end of the
+    writing it covers (its cutoff), or, for a profile written by hand that
+    covers no writing, the time it was written."""
+    return version.source_data_cutoff or version.created_at
+
+
+def merge_due(user, base, version, more_to_read):
+    """Whether the rebuilt chain, now at ``base``, merges ``version``: it
+    has read the writing up to the version's date, or the run has nothing
+    older left to read (``more_to_read`` False; the version is newer than
+    all of the writing)."""
+    if base is None or version is None:
+        return False
+    cutoff = base.source_data_cutoff
+    if cutoff is not None and cutoff >= merge_date(version):
+        return True
+    return not more_to_read
+
+
+def _merge_generation_type(base):
+    """A merge is a step of the chain it joins: "iterative" in a
+    from-scratch build, "update" after a re-tip, and "initial" after a
+    single-chunk build, where it is the run's final version."""
+    if base.generation_type in ("iterative", "update", "initial"):
+        return base.generation_type
+    return "update"
+
+
+def build_merge_messages(user_id, base, version):
+    """The merge call's messages: the rebuilt chain's version, then the
+    user's version, with main's integration prompt and message format and
+    main's user note before the user's version. Both are full profiles
+    covering the writing from the start, so both spans start at "start"."""
+    return _integration_messages(user_id, [base, version], cumulative=True)
+
+
+def save_merge(user, model_id, response, base, version, batch=False):
+    """Save the merge as the chain's next version: the rebuilt version is
+    its parent and it carries that version's coverage, so the rebuild goes
+    on from it as from the version it merged. Clears the pending merge."""
+    merged = _save_profile(
+        user, model_id, response["content"], response,
+        source_tokens_used=base.source_tokens_used,
+        source_data_cutoff=base.source_data_cutoff,
+        generation_type=_merge_generation_type(base),
+        parent_profile_id=base.id, batch=batch,
+        source_origin_stats=base.source_origin_stats,
+        source_rendered_at=base.source_rendered_at,
+        merged_profile_id=version.id)
+    if user.profile_pending_merge_id == version.id:
+        user.profile_pending_merge_id = None
+        db.session.commit()
+    logger.info("User %s: merged the user's version %s into the rebuilt "
+                "chain at version %s -> %s", user.id, version.id, base.id,
+                merged.id)
+    return merged
+
+
+def _do_merge(self, user, model_id, base, version, api_keys):
+    """The synchronous merge step. Returns (text, saved version)."""
+    messages = build_merge_messages(user.id, base, version)
+    if base_moved(user.id, base.id):
+        raise ProfileBaseMoved(f"user {user.id}: merge")
+    self.update_state(state='PROGRESS', meta={
+        'progress': 85, 'status': 'Merging your own version'
+    })
+    response = LLMProvider.get_completion(model_id, messages, api_keys)
+    refuse_truncated_profile(user, model_id, response, "merge")
+    if base_moved(user.id, base.id):
+        discard_step_output(user, model_id, response, "merge")
+        raise ProfileBaseMoved(f"user {user.id}: merge")
+    return response["content"], save_merge(
+        user, model_id, response, base, version)
+
+
 def retip_profile_chain(user_id, version):
     """Make ``version`` the chain tip again by writing a "revert" copy of
     it, stamped with the present moment as its render time. Everything
@@ -652,7 +826,14 @@ def revert_profile_for_import(user_id, earliest_imported_created_at):
         "User %d: import dated %s invalidates %d profile version(s) after "
         "version %d", user_id, earliest_imported_created_at,
         sum(1 for p in chain if p.created_at > valid.created_at), valid.id)
-    return "revert", retip_profile_chain(user_id, valid)
+    old_base = profile_update_base(user_id)
+    copy = retip_profile_chain(user_id, valid)
+    # The regenerated chain merges the user's version the old chain carried
+    # (an edit made after the re-tip point) at its date (#183, option 2).
+    user = User.query.get(user_id)
+    if user is not None:
+        plan_user_version_merge(user, old_base, new_base=copy)
+    return "revert", copy
 
 
 @celery.task(base=ProfileGenerationTask, bind=True)
@@ -799,7 +980,9 @@ def _do_incremental_update(self, user, model_id, previous_profile_id,
         q = q.filter(Node.created_at > cutoff)
     has_new_data = q.first() is not None
 
-    if not has_new_data:
+    # A merge still pending (#183) runs even with no new writing: the chunk
+    # loop makes it its only step.
+    if not has_new_data and pending_merge_version(user) is None:
         logger.info(f"No new data for user {user.id} since cutoff {cutoff}")
         return {
             'user_id': user.id,
@@ -889,6 +1072,10 @@ def _do_initial_generation(self, user, model_id, max_output_tokens,
     # staging worker was OOM-killed that way on a 61k-node import).
     if _estimate_source_tokens(user) == 0:
         raise ValueError("No writing found to analyze")
+    # The user's version the current chain carries is merged into the new
+    # chain at its date (#183, option 2).
+    plan_user_version_merge(user, profile_update_base(user.id))
+    db.session.commit()
     gen_template = _load_prompt("profile_generation.txt", user_id=user.id)
     return _iterative_generation(
         self, user, model_id, gen_template, max_output_tokens, api_keys)
@@ -1046,7 +1233,16 @@ def build_integration_messages(user_id, last_iterative_profile_id):
              if p.ai_usage in AI_ALLOWED]
     if len(chain) < 2:
         return None, None
+    return _integration_messages(user_id, chain), chain
 
+
+def _integration_messages(user_id, chain, cumulative=False):
+    """The integration messages for ``chain`` (oldest first): one user
+    message per version, then the integration prompt. A version the user
+    wrote carries USER_WRITTEN_PROFILE_NOTE. Each version's span runs from
+    the previous version's cutoff; with ``cumulative`` (a rebuild's merge
+    step, #183) every span starts at "start", since each version there is
+    a full profile of the writing up to its cutoff."""
     n_months = _calculate_months_span(chain[0], chain[-1])
     integration_template = _load_prompt(
         "profile_integration.txt", user_id=user_id
@@ -1068,7 +1264,7 @@ def build_integration_messages(user_id, last_iterative_profile_id):
             content = f"{USER_WRITTEN_PROFILE_NOTE}\n\n{content}"
         cutoff = profile.source_data_cutoff
         date_str = cutoff.strftime("%Y-%m-%d") if cutoff else "unknown"
-        if i == 1:
+        if i == 1 or cumulative:
             date_from = "start"
         else:
             prev_cutoff = chain[i - 2].source_data_cutoff
@@ -1090,7 +1286,7 @@ def build_integration_messages(user_id, last_iterative_profile_id):
         "role": "user",
         "content": [{"type": "text", "text": integration_prompt}]
     })
-    return messages, chain
+    return messages
 
 
 def _do_integration(self, user, model_id, last_iterative_profile_id,
@@ -1247,6 +1443,20 @@ def _chunked_profile_loop(self, user, model_id, update_template,
         # working: the next step would build past it (#183).
         if base_moved(user.id, current_profile_id):
             raise ProfileBaseMoved(f"user {user.id}: chunk {chunk_num + 1}")
+        # A rebuilt chain that has reached the date of the user's version
+        # it must merge merges it now and goes on from the merge (#183).
+        base_version = (UserProfile.query.get(current_profile_id)
+                        if current_profile_id is not None else None)
+        pending = (pending_merge_version(user)
+                   if base_version is not None else None)
+        if pending is not None and merge_due(
+                user, base_version, pending,
+                more_to_read=should_continue_chain(user, base_version)):
+            current_profile_content, merged = _do_merge(
+                self, user, model_id, base_version, pending, api_keys)
+            current_profile_id = merged.id
+            saved = merged
+            continue
         remaining = count_remaining_units(user.id, current_cutoff)
         if remaining <= 0:
             break
@@ -1345,6 +1555,17 @@ def _chunked_profile_loop(self, user, model_id, update_template,
             f"input tokens ({observed} tokens/unit), "
             f"cumulative={cumulative_units}"
         )
+
+    # The run ends before the chain reached the date of the user's version
+    # it must merge (the version is newer than all of the writing): the
+    # merge is the run's last step (#183).
+    pending = (pending_merge_version(user)
+               if current_profile_id is not None else None)
+    if pending is not None:
+        _text, merged = _do_merge(
+            self, user, model_id, UserProfile.query.get(current_profile_id),
+            pending, api_keys)
+        current_profile_id = merged.id
 
     return current_profile_id, chunk_num, cumulative_units
 
@@ -1559,6 +1780,14 @@ def maybe_trigger_incremental_profile_update(user, ignore_backoff=False):
         if should_continue_chain(user, latest_profile):
             logger.info(
                 f"User {user.id}: continuing an unfinished profile chain")
+            return maybe_trigger_profile_update(
+                user.id, force_full_regen=user.profile_needs_full_regen)
+        # A rebuilt chain that has still to merge the user's version (its
+        # merge failed, or the run stopped before it) merges it now (#183).
+        if pending_merge_version(user) is not None:
+            logger.info(
+                f"User {user.id}: merging the user's version into the "
+                f"rebuilt chain")
             return maybe_trigger_profile_update(
                 user.id, force_full_regen=user.profile_needs_full_regen)
         # A finished chain whose integration was refused (or lost): run the

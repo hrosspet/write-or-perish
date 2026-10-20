@@ -44,8 +44,9 @@ def _profile_status_map():
     in two grouped queries. state: "complete" when nothing is in flight and
     the chain is at rest — the latest version is an integration (the batch
     rebuild's final step), a root chunk (parent None: a single-chunk
-    build, or a from-scratch rebuild that superseded older versions) or a
-    version the user wrote (every edit makes one, #183) — "generating"
+    build, or a from-scratch rebuild that superseded older versions), a
+    version the user wrote (every edit makes one, #183) or a single-chunk
+    build's merge of the user's version (#183) — "generating"
     while a batch job is in flight / a rebuild is requested / a
     multi-version chain hasn't integrated yet."""
     from backend.models import UserProfile
@@ -68,7 +69,11 @@ def _profile_status_map():
             or last.parent_profile_id is None
             # The user's own version is not a pipeline step: an edit would
             # show "generating" until the next update (#183).
-            or last.generated_by == "user")
+            or last.generated_by == "user"
+            # A single-chunk build that merged the user's version ends with
+            # the merge (#183).
+            or (bool(last.merged_profile_id)
+                and last.generation_type == "initial"))
         # A chain whose latest version is a root chunk is at rest only
         # if nothing OLDER than that version remains beyond its cutoff:
         # such data is an unfinished chain (the continue rule the seeder

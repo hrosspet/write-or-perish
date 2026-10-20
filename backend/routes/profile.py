@@ -111,6 +111,7 @@ def revert_profile(version_id):
     # Copy the encrypted content directly (no decrypt/re-encrypt round).
     new_profile.content = old.content
     db.session.add(new_profile)
+    _user_saved_a_version()
     db.session.commit()
 
     return jsonify({
@@ -303,6 +304,8 @@ def create_profile():
 
     try:
         db.session.add(profile)
+        db.session.flush()
+        _user_saved_a_version()
         db.session.commit()
 
         return jsonify({
@@ -365,6 +368,7 @@ def _save_edit_as_new_version(profile, new_content, data, keep_audio=False):
         db.session.flush()
         if keep_audio:
             _copy_audio(profile, new_profile)
+        _user_saved_a_version()
         db.session.commit()
     except Exception as e:
         db.session.rollback()
@@ -381,6 +385,13 @@ def _save_edit_as_new_version(profile, new_content, data, keep_audio=False):
             "ai_usage": new_profile.ai_usage
         }
     }), 200
+
+
+def _user_saved_a_version():
+    """A version the user saves (an edit, a new profile, a revert) ends a
+    rebuild's pending merge of an older version of theirs (#183): the newest
+    version the user saved wins, and the next run builds on it."""
+    current_user.profile_pending_merge_id = None
 
 
 def _copy_audio(source, target):

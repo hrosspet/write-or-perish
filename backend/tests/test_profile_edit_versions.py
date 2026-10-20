@@ -271,3 +271,16 @@ def test_first_profile_written_from_scratch_has_no_parent(app, alice):  # noqa: 
     assert new.source_data_cutoff is None
     assert new.source_rendered_at is None
     assert not new.source_tokens_used
+
+
+def test_saving_a_version_ends_a_pending_rebuild_merge(app, alice):  # noqa: F811
+    """A rebuild merges the user's version the old chain carried
+    (#183, option 2). A version the user saves meanwhile wins: the pending
+    merge of the older one is dropped."""
+    generated = _generated(alice)
+    alice.profile_pending_merge_id = generated.id
+    _db.session.commit()
+
+    _edit(app, alice, generated, "### SURFACE MAP\nMY NEWER EDIT")
+
+    assert _db.session.get(type(alice), alice.id).profile_pending_merge_id is None

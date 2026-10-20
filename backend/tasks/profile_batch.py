@@ -177,6 +177,10 @@ def _should_seed(user, ignore_backoff=False):
     # pinned-account special case and never leaves a tail unread.
     if latest is not None and _exports.should_continue_chain(user, latest):
         return True
+    # A rebuilt chain that has still to merge the user's version (its merge
+    # failed, or the run stopped before it) merges it now (#183).
+    if latest is not None and _exports.pending_merge_version(user) is not None:
+        return True
     # A finished chain whose integration was refused (or lost): the seeder
     # builds the integration alone (_seed_profile_batches passes
     # allow_chunk=False, #368).
@@ -239,6 +243,19 @@ def _build_next_profile_request(user, allow_chunk=True, chunk_num=1):
     prev_id = prev.id if prev else None
     cutoff = prev.source_data_cutoff if prev else None
     cumulative = (prev.source_tokens_used or 0) if prev else 0
+
+    # #183, option 2: a from-scratch build merges the user's version the
+    # current chain carries into the new chain at its date; a chain that
+    # has reached that date merges it before anything else.
+    if prev is None and _exports.plan_user_version_merge(
+            user, _exports.profile_update_base(user.id)) is not None:
+        db.session.commit()
+    pending = _exports.pending_merge_version(user) if prev is not None else None
+    if pending is not None and _exports.merge_due(
+            user, prev, pending, more_to_read=(
+                allow_chunk and _exports.should_continue_chain(user, prev))):
+        return _merge_request(user, prev, pending, provider, api_model,
+                              model_id, chunk_num)
 
     # The remainder after the cutoff, summed in the export window's own
     # scope, is planned into equal chunks (docs/design/chunk-planner.md):
@@ -335,6 +352,13 @@ def _build_next_profile_request(user, allow_chunk=True, chunk_num=1):
                 },
             }
 
+    # The run ends before the chain reached the date of the user's version
+    # it must merge (the version is newer than all of the writing): the
+    # merge is the run's last step (#183).
+    if pending is not None:
+        return _merge_request(user, prev, pending, provider, api_model,
+                              model_id, chunk_num)
+
     # No (full-size) new data → integrate the chain if there are ≥2 versions
     # and we haven't already integrated this tip.
     if prev is not None:
@@ -342,7 +366,7 @@ def _build_next_profile_request(user, allow_chunk=True, chunk_num=1):
         already = UserProfile.query.filter_by(
             user_id=user.id, generation_type="integration",
             parent_profile_id=prev.id).first()
-        if len(chain) >= 2 and not already:
+        if _exports.needs_integration(chain) and not already:
             messages, _chain = _exports.build_integration_messages(user.id, prev.id)
             if messages is not None:
                 cid = f"profile_{user.id}_{prev.id}_integration"
@@ -365,6 +389,30 @@ def _build_next_profile_request(user, allow_chunk=True, chunk_num=1):
                     },
                 }
     return None
+
+
+def _merge_request(user, prev, version, provider, api_model, model_id,
+                   chunk_num):
+    """The batch request of a rebuild's merge step (#183): the rebuilt
+    chain's version ``prev`` and the user's ``version``, merged with the
+    integration prompt (exports.build_merge_messages)."""
+    messages = _exports.build_merge_messages(user.id, prev, version)
+    cid = f"profile_{user.id}_{prev.id}_merge"
+    return {
+        "provider": provider,
+        "request": {
+            "custom_id": cid, "model_id": model_id,
+            "api_model": api_model, "messages": messages,
+            "max_tokens": DEFAULT_MAX_OUTPUT_TOKENS,
+        },
+        "meta": {
+            "custom_id": cid, "user_id": user.id, "kind": "merge",
+            "prev_profile_id": prev.id, "merged_profile_id": version.id,
+            "model_id": model_id,
+            # The ordinal the next chunk gets; a merge is not a chunk.
+            "chunk_num": chunk_num,
+        },
+    }
 
 
 def _response_from_result(result):
@@ -399,6 +447,9 @@ def _apply_result(user, item, result, submitted_at):
         f"batch {item.get('kind', 'chunk')}", batch=True)
     cutoff = (datetime.fromisoformat(item["source_data_cutoff"])
               if item.get("source_data_cutoff") else None)
+
+    if item["kind"] == "merge":
+        return _apply_merge(user, item, response, submitted_at)
 
     if item["kind"] == "chunk":
         existing = UserProfile.query.filter_by(
@@ -492,6 +543,35 @@ def _apply_result(user, item, result, submitted_at):
         notify_profile_ready(user.id)
     user.profile_batch_attempts = 0
     return None
+
+
+def _apply_merge(user, item, response, submitted_at):
+    """Save a collected merge step (#183) and return the next request:
+    the rebuild goes on from the merge as from the version it merged."""
+    base = UserProfile.query.get(item["prev_profile_id"])
+    version = UserProfile.query.get(item["merged_profile_id"])
+    existing = UserProfile.query.filter_by(
+        user_id=user.id, parent_profile_id=item["prev_profile_id"],
+        merged_profile_id=item["merged_profile_id"]).filter(
+        UserProfile.created_at >= submitted_at).first()
+    if existing:
+        logger.info(f"User {user.id}: merge already saved (idempotent) — "
+                    f"duplicate item, not advancing")
+        user.profile_batch_attempts = 0
+        return None
+    if base is None or version is None or _exports.base_moved(user.id, base.id):
+        # The user saved a version while the merge was in the batch: as for
+        # a chunk, nothing is saved and the next run starts from it.
+        _exports.discard_step_output(
+            user, item["model_id"], response, "batch merge", batch=True)
+        user.profile_batch_attempts = 0
+        return None
+    merged = _exports.save_merge(
+        user, item["model_id"], response, base, version, batch=True)
+    user.profile_batch_attempts = 0
+    return _build_next_profile_request(
+        user, allow_chunk=_exports.should_continue_chain(user, merged),
+        chunk_num=item.get("chunk_num") or 1)
 
 
 def _submit_requests(built, keys):

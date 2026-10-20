@@ -1973,6 +1973,155 @@ def test_183_batch_integration_after_an_edit_saves_nothing(app):
     assert APICostLog.query.filter_by(user_id=u.id).count() == 1
 
 
+# ── #183: a rebuild merges the user's version (option 2, batch path) ────
+
+MAY183, JUN183 = datetime(2026, 5, 1), datetime(2026, 6, 1)
+
+
+def _windows183(monkeypatch, remaining, windows):
+    """Pin the remainder and the window per cutoff, and short templates."""
+    monkeypatch.setattr(pb._exports, "count_remaining_units",
+                        lambda uid, cutoff=None: remaining.get(cutoff, 0))
+    monkeypatch.setattr(
+        pb._exports, "build_user_export_content",
+        lambda user, max_tokens=None, **kw: windows.get(kw.get("created_after")))
+    monkeypatch.setattr(pb._exports, "_load_prompt",
+                        lambda name, user_id=None: f"<{name}> {{user_export}}")
+    monkeypatch.setattr(pb._exports, "build_update_template",
+                        lambda uid: "UPDATE <<{existing_profile}>> {new_data}")
+
+
+def _texts183(req):
+    return [m["content"][0]["text"] for m in req["request"]["messages"]]
+
+
+def _run_steps(u, monkeypatch, first, outputs):
+    """Apply each request with a stand-in result until the run ends.
+    Returns the requests in order."""
+    import backend.utils.notifications as notif
+    monkeypatch.setattr(notif, "notify_profile_ready", lambda uid: None)
+    steps, req = [], first
+    while req is not None:
+        steps.append(req)
+        result = {"content": outputs[req["meta"]["kind"]],
+                  "input_tokens": 10, "output_tokens": 5}
+        req = pb._apply_result(u, req["meta"], result,
+                               datetime.utcnow() - timedelta(seconds=1))
+        db.session.commit()
+    return steps
+
+
+def test_183_batch_full_rebuild_merges_the_users_version(app, monkeypatch):
+    """The batch path makes the sync loop's choices: the 2019 window is read
+    without the edit; after the window that reaches May, a merge request
+    carries the rebuilt version and the user's version with main's note;
+    the integration merges the chain with the merge in it."""
+    _wide_window(app)
+    u = _user()
+    tip = _prev_profile(u, MAY183, source_tokens=100_000, gen_type="iterative")
+    tip.created_at = datetime.utcnow() - timedelta(days=3)
+    integration = _prev_profile(u, MAY183, source_tokens=100_000,
+                                gen_type="integration")
+    integration.parent_profile_id = tip.id
+    integration.created_at = datetime.utcnow() - timedelta(days=2)
+    db.session.commit()
+    edit = _user_edit(u, integration, "MY CORRECTION")
+    u.profile_needs_full_regen = True
+    db.session.commit()
+    y2019, spring = datetime(2019, 12, 1), datetime(2026, 5, 15)
+    _windows183(monkeypatch, {None: 180_000, y2019: 90_000, spring: 0}, {
+        None: _chunk("2019 ARCHIVE", latest=y2019),
+        y2019: _chunk("SPRING WRITING", latest=spring)})
+    monkeypatch.setattr(pb._exports, "should_continue_chain",
+                        lambda user, profile: True)
+
+    steps = _run_steps(u, monkeypatch, pb._build_next_profile_request(u), {
+        "chunk": "REBUILT", "merge": "MERGED", "integration": "FINAL"})
+
+    assert [s["meta"]["kind"] for s in steps] == [
+        "chunk", "chunk", "merge", "integration"]
+    assert "MY CORRECTION" not in "".join(_texts183(steps[0]))
+    merge_req = steps[2]
+    assert merge_req["meta"]["merged_profile_id"] == edit.id
+    assert CUSTOM_ID_RE.match(merge_req["request"]["custom_id"])
+    texts = _texts183(merge_req)
+    assert texts[1] == ("Profile No. 2\n- start to 2026-05-01\n\n"
+                        f"{pb._exports.USER_WRITTEN_PROFILE_NOTE}\n\n"
+                        "MY CORRECTION")
+    merge = UserProfile.query.filter_by(merged_profile_id=edit.id).one()
+    assert merge.parent_profile_id == merge_req["meta"]["prev_profile_id"]
+    assert len(_texts183(steps[3])) == 4           # 2 chunks, the merge, prompt
+    assert User.query.get(u.id).profile_pending_merge_id is None
+    final = UserProfile.query.filter_by(user_id=u.id).order_by(
+        UserProfile.created_at.desc()).first()
+    assert final.generation_type == "integration"
+    assert final.parent_profile_id == merge.id
+
+
+def test_183_batch_main_era_hand_written_profile_is_merged(app, monkeypatch):
+    """Review finding 2 on the batch path: a profile written with POST on
+    main (no parent, no cutoff, 0 units) on a 6k-unit account. After
+    deploy the seeder starts the ladder's from-scratch build (S1); the
+    build ends with a merge of the user's profile, which is the account's
+    newest version. A single chunk merged with it needs no integration."""
+    _wide_window(app)
+    u = _user()
+    own = UserProfile(user_id=u.id, generated_by="user", tokens_used=0,
+                      generation_type="initial", source_tokens_used=0,
+                      source_data_cutoff=None,
+                      created_at=datetime.utcnow() - timedelta(days=30))
+    own.set_content("ABOUT ME, IN MY WORDS")
+    db.session.add(own)
+    node = _seed_node(u, 6_000)
+    node.created_at = datetime.utcnow() - timedelta(days=40)
+    db.session.commit()
+
+    assert pb._should_seed(u) is True
+    assert User.query.get(u.id).profile_needs_full_regen is True
+    latest = node.created_at
+    _windows183(monkeypatch, {None: 6_000, latest: 0},
+                {None: _chunk("EARLY WRITING", units=6_000, latest=latest)})
+
+    steps = _run_steps(u, monkeypatch, pb._build_next_profile_request(u), {
+        "chunk": "BUILT", "merge": "BUILT, WITH MY WORDS",
+        "integration": "UNUSED"})
+
+    assert [s["meta"]["kind"] for s in steps] == ["chunk", "merge"]
+    assert "ABOUT ME" not in "".join(_texts183(steps[0]))
+    assert _texts183(steps[1])[1].endswith("ABOUT ME, IN MY WORDS")
+    newest = UserProfile.query.filter_by(user_id=u.id).order_by(
+        UserProfile.created_at.desc()).first()
+    assert newest.merged_profile_id == own.id
+    assert newest.generation_type == "initial"
+    assert "BUILT, WITH MY WORDS" in newest.get_content()
+
+
+def test_183_batch_merge_after_an_edit_saves_nothing(app, monkeypatch):
+    u = _user()
+    base = _prev_profile(u, JUN183, gen_type="iterative")
+    base.created_at = datetime.utcnow() - timedelta(days=1)
+    own = UserProfile(user_id=u.id, generated_by="user", tokens_used=0,
+                      created_at=datetime.utcnow() - timedelta(days=2))
+    own.set_content("MY OLDER EDIT")
+    db.session.add(own)
+    db.session.commit()
+    item = {"custom_id": f"profile_{u.id}_{base.id}_merge", "user_id": u.id,
+            "kind": "merge", "prev_profile_id": base.id,
+            "merged_profile_id": own.id, "model_id": "test-model"}
+    submitted = datetime.utcnow()
+    edit = _user_edit(u, base, "A NEWER EDIT")
+
+    nxt = pb._apply_result(u, item, {"content": "MERGED",
+                                     "input_tokens": 10, "output_tokens": 5},
+                           submitted)
+
+    assert nxt is None
+    assert UserProfile.query.filter(
+        UserProfile.merged_profile_id.isnot(None)).count() == 0
+    assert pb._exports.profile_update_base(u.id).id == edit.id
+    assert APICostLog.query.filter_by(user_id=u.id).count() == 1
+
+
 def test_profile_refusal_stop_is_reported_as_refused(app, monkeypatch):
     """#470: the second refusal stops the job and the report says
     "refused by the model", not "output cut off"."""

@@ -340,6 +340,24 @@ class TestProfileStatus:
         assert rows["edited"]["profile"]["state"] == "complete"
         assert rows["retipped"]["profile"]["state"] == "generating"
 
+    def test_a_single_chunk_build_ending_with_a_merge_is_at_rest(self, app, users):
+        """#183: a ladder build of one chunk that merged the user's version
+        ends with the merge (typed "initial", no integration after it)."""
+        adm = users["renamed_admin"]
+        merged = User(username="merged", approved=True)
+        _db.session.add(merged)
+        _db.session.flush()
+        own = self._profile(merged, "initial")
+        own.generated_by = "user"
+        chunk = self._profile(merged, "initial")
+        merge = self._profile(merged, "initial", parent=chunk)
+        merge.merged_profile_id = own.id
+        _db.session.commit()
+        client = app.test_client()
+        _login(client, adm.id)
+        rows = {u["username"]: u for u in client.get("/api/admin/users").json["users"]}
+        assert rows["merged"]["profile"]["state"] == "complete"
+
     def test_intentions_column_state(self, app, users):
         from datetime import datetime
         from backend.models import ProfileBatchJob, UserArtifact

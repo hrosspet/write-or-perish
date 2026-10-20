@@ -9,10 +9,11 @@ its predecessor (routes: test_profile_edit_versions). Here, the jobs:
   sends the sync path's author note too: test_profile_batch);
 - a version saved while a run is working is not buried under the run's
   output: the step saves nothing and the run ends;
-- a full rebuild reads the writing only, no earlier version (main's
-  behaviour, unchanged here: how a rebuild should treat an edit is open
-  for Peter);
-- a first profile written by hand follows the provisional ladder (S1).
+- a rebuilt chain (a from-scratch build, an import's re-tip) merges the
+  user's version when it reaches the version's date, with one integration
+  call, and goes on from the merge (Peter, 2026-10-20: option 2);
+- a first profile written by hand follows the provisional ladder (S1),
+  and the ladder's build merges it.
 
 In-memory SQLite, ENCRYPTION_DISABLED, celery mocked so the modules
 import. No test calls a provider: the model call is replaced by a stand-in
@@ -132,10 +133,18 @@ def _new_writing(user):
     _db.session.commit()
 
 
+def _is_merge(messages):
+    """A rebuild's merge call: two versions whose spans both start at
+    "start" (exports.build_merge_messages), then the prompt."""
+    texts = [m["content"][0]["text"] for m in messages]
+    return len(texts) == 3 and texts[1].startswith("Profile No. 2\n- start")
+
+
 def _stand_in(monkeypatch, exports, windows, remaining, chunk_outputs,
-              integration_output="INTEGRATED"):
+              integration_output="INTEGRATED", merge_output="MERGED"):
     """Replace the export, the planner's remainder and both model calls.
-    Returns the list of (kind, prompt or messages) the model received."""
+    Returns the list of (kind, prompt or messages) the model received:
+    "chunk", "merge" or "integration"."""
     import backend.llm_providers as lp
     seen = []
     monkeypatch.setattr(exports, "build_user_export_content",
@@ -156,9 +165,10 @@ def _stand_in(monkeypatch, exports, windows, remaining, chunk_outputs,
     monkeypatch.setattr(exports, "_call_llm_with_retries", call)
 
     def complete(model_id, messages, api_keys, **kw):
-        seen.append(("integration", messages))
-        out = integration_output() if callable(integration_output) \
-            else integration_output
+        merge = _is_merge(messages)
+        seen.append(("merge" if merge else "integration", messages))
+        out = merge_output if merge else integration_output
+        out = out() if callable(out) else out
         return {"content": out, "input_tokens": 2000, "output_tokens": 500,
                 "total_tokens": 2500}
     monkeypatch.setattr(lp.LLMProvider, "get_completion",
@@ -361,37 +371,259 @@ def test_a_from_scratch_first_chunk_is_not_stopped(app, monkeypatch):
     assert exports.base_moved(1, None) is False
 
 
-# ── full rebuilds (main's behaviour; open for Peter) ─────────────────────
+# ── rebuilds merge the user's version (Peter, 2026-10-20: option 2) ──────
 
-def test_a_rebuild_reads_no_earlier_version(app, monkeypatch):
-    """A from-scratch build (an import older than the chain, a ladder step,
-    admin Build profile) starts from the generation prompt over the oldest
-    window; no profile version, the user's edit included, is in any of its
-    prompts. Unchanged from main: how a rebuild should carry the user's
-    edit forward is open for Peter (#414, Needs Peter)."""
+def _texts(messages):
+    return [m["content"][0]["text"] for m in messages]
+
+
+def _writing(user, units=90_000, at=JUN):
+    """Enough stored units for a from-scratch build to start."""
+    node = Node(user_id=user.id, node_type="user", ai_usage="chat",
+                token_count=units, created_at=at, updated_at=at)
+    node.set_content("writing")
+    _db.session.add(node)
+    _db.session.commit()
+    return node
+
+
+def test_a_full_rebuild_merges_the_users_version_at_its_date(app, monkeypatch):
+    """The user's edit covers the writing up to May; an import of a 2019
+    archive rebuilds the chain from scratch. The 2019 window is read
+    without the edit. The window that reaches May is followed by one merge
+    call: the rebuilt version, then the user's version with main's note.
+    The next window builds on the merge, and the final integration merges
+    the chain with the merge in it."""
     import backend.tasks.exports as exports
-    user = _user("rebuilt", profile_needs_full_regen=True)
+    user = _user("archive", profile_needs_full_regen=True)
     _tip, integration = _finished_chain(user)
-    _edit(user, integration, "MY CORRECTION")
+    edit = _edit(user, integration, "### SURFACE MAP\nMY CORRECTION")
+    _writing(user)
     monkeypatch.setattr(exports, "should_continue_chain",
                         lambda user, profile: True)
     seen = _stand_in(
         monkeypatch, exports,
         [_window("2019 ARCHIVE", latest=datetime(2019, 12, 1)),
-         _window("RECENT WRITING", latest=JUN)],
-        [180_000, 90_000, 0], ["REBUILT 1", "REBUILT 2"])
+         _window("SPRING WRITING", latest=datetime(2026, 5, 15)),
+         _window("JUNE WRITING", latest=JUN)],
+        [270_000, 180_000, 90_000, 0],
+        ["REBUILT 2019", "REBUILT SPRING", "REBUILT JUNE"],
+        merge_output="MERGED, KEEPS MY CORRECTION")
 
-    exports._iterative_generation(
-        MagicMock(), user, "gpt-5.5",
-        exports._load_prompt("profile_generation.txt", user_id=user.id),
-        32_000, {})
+    exports._do_initial_generation(MagicMock(), user, "gpt-5.5", 32_000, {})
 
-    prompts = [p if kind == "chunk" else "\n".join(
-        m["content"][0]["text"] for m in p) for kind, p in seen]
-    assert [kind for kind, _ in seen] == ["chunk", "chunk", "integration"]
-    assert "2019 ARCHIVE" in prompts[0]
-    assert all("MY CORRECTION" not in p for p in prompts)
-    assert all(MAIN_NOTE not in p for p in prompts)
+    kinds = [kind for kind, _ in seen]
+    assert kinds == ["chunk", "chunk", "merge", "chunk", "integration"]
+    assert "MY CORRECTION" not in seen[0][1] and "MY CORRECTION" not in seen[1][1]
+    merge_texts = _texts(seen[2][1])
+    assert merge_texts[0].startswith("Profile No. 1\n- start to 2026-05-15\n\n")
+    assert "REBUILT SPRING" in merge_texts[0]
+    assert merge_texts[1] == ("Profile No. 2\n- start to 2026-05-01\n\n"
+                              f"{MAIN_NOTE}\n\n{edit.get_content()}")
+    # The integration prompt, unchanged.
+    assert merge_texts[2].startswith("The above is a series of profile updates")
+    # The window after the merge builds on it.
+    assert _existing_profile(seen[3][1]) == "MERGED, KEEPS MY CORRECTION"
+    merge = UserProfile.query.filter_by(merged_profile_id=edit.id).one()
+    spring = UserProfile.query.get(merge.parent_profile_id)
+    assert "REBUILT SPRING" in spring.get_content()
+    assert merge.generation_type == "iterative"
+    assert merge.source_data_cutoff == datetime(2026, 5, 15)
+    assert merge.source_tokens_used == spring.source_tokens_used
+    june = UserProfile.query.filter_by(parent_profile_id=merge.id).one()
+    assert "REBUILT JUNE" in june.get_content()
+    integrated = [t for t in _texts(seen[4][1])[:-1]]
+    assert len(integrated) == 4                       # 3 chunks + the merge
+    assert "MERGED, KEEPS MY CORRECTION" in integrated[2]
+    assert User.query.get(user.id).profile_pending_merge_id is None
+
+
+def test_a_main_era_hand_written_profile_is_merged_not_replaced(app, monkeypatch):
+    """Review finding 2: a profile written with POST /profile on main (no
+    parent, no cutoff, 0 units) on an account with 5k to 80k units takes
+    the ladder after deploy (S1). The ladder's from-scratch build merges it
+    as the run's last step (it was written after all of the writing), so
+    the account's newest version holds the user's words."""
+    import backend.tasks.exports as exports
+    import backend.tasks.profile_batch as pb
+    monkeypatch.setattr(pb, "use_batch_for_user", lambda *a, **k: False)
+    user = _user("mainera")
+    own = UserProfile(user_id=user.id, generated_by="user", tokens_used=0,
+                      generation_type="initial", source_tokens_used=0,
+                      source_data_cutoff=None,
+                      created_at=datetime(2025, 3, 1))
+    own.set_content("ABOUT ME, IN MY WORDS")
+    _db.session.add(own)
+    _db.session.commit()
+    _writing(user, units=6_000, at=datetime(2025, 1, 2))
+    triggered = []
+    monkeypatch.setattr(exports, "maybe_trigger_profile_update",
+                        lambda *a, **k: triggered.append((a, k)))
+    exports.maybe_trigger_incremental_profile_update(user)
+    assert triggered == [((user.id,), {"force_full_regen": True})]
+
+    seen = _stand_in(
+        monkeypatch, exports,
+        [_window("EARLY WRITING", latest=datetime(2025, 1, 2), units=6_000)],
+        [6_000, 0], ["BUILT FROM THE WRITING"],
+        merge_output="BUILT, WITH MY WORDS")
+    result = exports._do_initial_generation(
+        MagicMock(), user, "gpt-5.5", 32_000, {})
+
+    assert [kind for kind, _ in seen] == ["chunk", "merge"]
+    assert "ABOUT ME" not in seen[0][1]
+    assert _texts(seen[1][1])[1] == (
+        "Profile No. 2\n- start to unknown\n\n"
+        f"{MAIN_NOTE}\n\nABOUT ME, IN MY WORDS")
+    newest = UserProfile.query.order_by(UserProfile.created_at.desc()).first()
+    assert newest.id == result["profile_id"]
+    assert newest.merged_profile_id == own.id
+    assert newest.generation_type == "initial"        # the run's final version
+    assert "BUILT, WITH MY WORDS" in newest.get_content()
+    # The next ladder step carries the same version again.
+    assert exports.carried_user_version(newest).id == own.id
+
+
+def test_a_re_tip_merges_an_edit_made_after_the_re_tip_point(app, monkeypatch):
+    """An import older than part of the chain re-tips it at the last version
+    before the import. The edit made after that point is merged when the
+    regenerated chain reaches its date."""
+    import backend.tasks.exports as exports
+    user = _user("retip")
+    c1 = UserProfile(user_id=user.id, generated_by="gpt-5.5", tokens_used=0,
+                     generation_type="iterative", source_tokens_used=90_000,
+                     source_data_cutoff=JAN, source_rendered_at=JAN,
+                     created_at=JAN)
+    c1.set_content("JANUARY")
+    _db.session.add(c1)
+    _db.session.flush()
+    c2 = UserProfile(user_id=user.id, generated_by="gpt-5.5", tokens_used=0,
+                     generation_type="update", source_tokens_used=180_000,
+                     source_data_cutoff=MAY, source_rendered_at=MAY,
+                     parent_profile_id=c1.id, created_at=MAY)
+    c2.set_content("MAY")
+    _db.session.add(c2)
+    _db.session.commit()
+    edit = _edit(user, c2, "MAY, CORRECTED BY ME")
+
+    action, copy = exports.revert_profile_for_import(user.id, datetime(2026, 3, 1))
+    _db.session.commit()
+
+    assert action == "revert" and copy.parent_profile_id == c1.id
+    assert User.query.get(user.id).profile_pending_merge_id == edit.id
+    _writing(user, at=datetime(2026, 3, 2))
+    seen = _stand_in(
+        monkeypatch, exports,
+        [_window("IMPORTED SPRING", latest=MAY)], [90_000, 0],
+        ["REGENERATED MAY"])
+    exports._do_incremental_update(
+        MagicMock(), user, "gpt-5.5", copy.id, 200_000, 32_000, {})
+
+    assert [kind for kind, _ in seen] == ["chunk", "merge", "integration"]
+    assert _texts(seen[1][1])[1].endswith(
+        f"{MAIN_NOTE}\n\nMAY, CORRECTED BY ME")
+    merge = UserProfile.query.filter_by(merged_profile_id=edit.id).one()
+    assert merge.generation_type == "update"
+    assert User.query.get(user.id).profile_pending_merge_id is None
+
+
+def test_a_re_tip_at_the_edit_merges_nothing(app):
+    """An import newer than the edit's coverage re-tips at the edit or
+    after it: the regenerated chain already carries the edit."""
+    import backend.tasks.exports as exports
+    user = _user("retipkeeps")
+    _tip, integration = _finished_chain(user)
+    edit = _edit(user, integration, "MY CORRECTION",
+                 created_at=datetime.utcnow() - timedelta(days=1))
+    update = UserProfile(user_id=user.id, generated_by="gpt-5.5",
+                         tokens_used=0, generation_type="update",
+                         source_tokens_used=270_000, source_data_cutoff=JUN,
+                         source_rendered_at=JUN, parent_profile_id=edit.id)
+    update.set_content("UPDATE ON MY CORRECTION")
+    _db.session.add(update)
+    _db.session.commit()
+
+    action, copy = exports.revert_profile_for_import(user.id, MAY + timedelta(days=5))
+    _db.session.commit()
+
+    assert action == "revert" and copy.parent_profile_id == edit.id
+    assert User.query.get(user.id).profile_pending_merge_id is None
+
+
+def test_a_revert_past_the_edit_is_not_undone_by_a_rebuild(app):
+    """The user reverted from their edit to the generated version: the
+    version they chose carries no edit, so a rebuild merges nothing."""
+    import backend.tasks.exports as exports
+    user = _user("reverted")
+    _tip, integration = _finished_chain(user)
+    _edit(user, integration, "MY CORRECTION",
+          created_at=datetime.utcnow() - timedelta(minutes=5))
+    revert = UserProfile(user_id=user.id, generated_by="gpt-5.5",
+                         tokens_used=0, generation_type="revert",
+                         source_tokens_used=180_000, source_data_cutoff=MAY,
+                         parent_profile_id=integration.id)
+    revert.set_content(integration.get_content())
+    _db.session.add(revert)
+    _db.session.commit()
+
+    assert exports.profile_update_base(user.id).id == revert.id
+    assert exports.plan_user_version_merge(
+        user, exports.profile_update_base(user.id)) is None
+    assert user.profile_pending_merge_id is None
+
+
+def test_a_version_saved_during_the_merge_is_not_buried(app, monkeypatch):
+    """base_moved holds for the merge step too: an edit saved while the
+    merge runs stays the newest version."""
+    import backend.tasks.exports as exports
+    user = _user("mergerace", profile_needs_full_regen=True)
+    _tip, integration = _finished_chain(user)
+    _edit(user, integration, "MY CORRECTION",
+          created_at=datetime.utcnow() - timedelta(minutes=5))
+    _writing(user)
+    edits = []
+
+    def edit_during_the_merge():
+        newest = UserProfile.query.order_by(
+            UserProfile.created_at.desc()).first()
+        edits.append(_edit(user, newest, "A NEWER EDIT"))
+        return "MERGE THAT NEVER SAW IT"
+    _stand_in(monkeypatch, exports, [_window(latest=JUN)], [90_000, 0],
+              ["REBUILT"], merge_output=edit_during_the_merge)
+
+    with pytest.raises(exports.ProfileBaseMoved):
+        exports._do_initial_generation(MagicMock(), user, "gpt-5.5", 32_000, {})
+
+    assert UserProfile.query.filter(
+        UserProfile.merged_profile_id.isnot(None)).count() == 0
+    assert exports.profile_update_base(user.id).id == edits[0].id
+
+
+def test_a_pending_merge_runs_at_the_next_check(app, monkeypatch):
+    """A rebuild whose merge did not run (it failed, or the run stopped)
+    merges at the next hourly check, whatever the update gates say."""
+    import backend.tasks.exports as exports
+    import backend.tasks.profile_batch as pb
+    monkeypatch.setattr(pb, "use_batch_for_user", lambda *a, **k: False)
+    user = _user("pendingmerge")
+    _tip, integration = _finished_chain(user)
+    edit = _edit(user, integration, "MY CORRECTION",
+                 created_at=datetime.utcnow() - timedelta(minutes=5))
+    rebuilt = UserProfile(user_id=user.id, generated_by="gpt-5.5",
+                          tokens_used=0, generation_type="initial",
+                          source_tokens_used=180_000, source_data_cutoff=MAY,
+                          source_rendered_at=MAY)
+    rebuilt.set_content("REBUILT")
+    _db.session.add(rebuilt)
+    user.profile_pending_merge_id = edit.id
+    _db.session.commit()
+    triggered = []
+    monkeypatch.setattr(exports, "maybe_trigger_profile_update",
+                        lambda *a, **k: triggered.append((a, k)))
+
+    exports.maybe_trigger_incremental_profile_update(user)
+
+    assert triggered == [((user.id,), {"force_full_regen": False})]
 
 
 # ── S1: a first profile written by hand follows the ladder ──────────────
@@ -431,3 +663,31 @@ def test_a_first_hand_written_profile_takes_the_ladder(app, monkeypatch,
 
     assert triggered == ([((user.id,), {"force_full_regen": True})]
                          if due else [])
+
+
+def test_a_pending_merge_with_no_new_writing_still_runs(app, monkeypatch):
+    """The run the pending merge dispatches has no new writing to read: the
+    merge is its only step, on the rebuilt chain's newest version."""
+    import backend.tasks.exports as exports
+    user = _user("mergeonly")
+    _tip, integration = _finished_chain(user)
+    edit = _edit(user, integration, "MY CORRECTION",
+                 created_at=datetime.utcnow() - timedelta(minutes=5))
+    rebuilt = UserProfile(user_id=user.id, generated_by="gpt-5.5",
+                          tokens_used=0, generation_type="initial",
+                          source_tokens_used=180_000, source_data_cutoff=MAY,
+                          source_rendered_at=MAY)
+    rebuilt.set_content("REBUILT")
+    _db.session.add(rebuilt)
+    user.profile_pending_merge_id = edit.id
+    _db.session.commit()
+    seen = _stand_in(monkeypatch, exports, [], [0], [])
+
+    result = exports._do_incremental_update(
+        MagicMock(), user, "gpt-5.5", rebuilt.id, 200_000, 32_000, {})
+
+    assert [kind for kind, _ in seen] == ["merge"]
+    merge = UserProfile.query.get(result["profile_id"])
+    assert merge.merged_profile_id == edit.id
+    assert merge.parent_profile_id == rebuilt.id
+    assert User.query.get(user.id).profile_pending_merge_id is None

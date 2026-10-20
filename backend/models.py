@@ -139,6 +139,11 @@ class User(db.Model, UserMixin):
 
     # Flag: next profile generation should be a full regen (not incremental)
     profile_needs_full_regen = db.Column(db.Boolean, nullable=False, default=False)
+    # The version the user wrote that a rebuild or an import's re-tip in
+    # progress still has to merge into the new chain at its date (#183;
+    # tasks/exports.plan_user_version_merge). Cleared by the merge and by
+    # any version the user saves. A plain id, not a foreign key.
+    profile_pending_merge_id = db.Column(db.Integer, nullable=True)
 
     # --- Profile-generation batch pipeline (issue #173, Part A) ---
     # True while a batch request for this user's profile is in flight
@@ -877,6 +882,11 @@ class UserProfile(db.Model):
     parent_profile_id = db.Column(
         db.Integer, db.ForeignKey("user_profile.id"), nullable=True
     )
+    # On a merge step of a rebuild (#183): the version the user wrote that
+    # this version merged into the rebuilt chain. A later rebuild finds the
+    # user's version through it (tasks/exports.carried_user_version). A
+    # plain id, not a foreign key: it only points within one user's rows.
+    merged_profile_id = db.Column(db.Integer, nullable=True)
 
     # --- Voice‑Mode fields ---
     audio_tts_url = db.Column(db.String, nullable=True)

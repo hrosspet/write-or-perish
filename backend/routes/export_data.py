@@ -1852,7 +1852,8 @@ def _pending_batch_item(user_id):
     for job in jobs:
         for item in job.items or []:
             if (item.get("user_id") == user_id
-                    and item.get("kind") in ("chunk", "integration")):
+                    and item.get("kind") in ("chunk", "integration",
+                                             "merge")):
                 return item
     return None
 
@@ -1872,6 +1873,9 @@ def _batch_progress(user):
         message, progress = "Generating profile", 0
     elif item.get("kind") == "integration":
         message, progress = "Integrating profile versions", 95
+    elif item.get("kind") == "merge":
+        # A rebuild merging the user's own version in (#183).
+        message, progress = "Merging your own version", 85
     elif item.get("chunk_num") and item.get("chunk_total"):
         n, total = int(item["chunk_num"]), int(item["chunk_total"])
         message = f"Generating profile: Chunk {n} of ~{total}"
