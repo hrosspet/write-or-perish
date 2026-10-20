@@ -91,8 +91,7 @@ def app():
     with app.app_context():
         _db.create_all()
         author = User(username="author", default_ai_usage="chat",
-                      public_sharing_enabled=True,
-                      description="Writes about lore.")
+                      public_sharing_enabled=True)
         visitor = User(username="visitor", default_ai_usage="chat",
                        public_sharing_enabled=True)
         hermit = User(username="hermit", default_ai_usage="chat",
@@ -333,8 +332,12 @@ def test_profile_page_lists_articles(app):
     r = app.test_client().get("/@author")
     assert r.status_code == 200
     html = r.get_data(as_text=True)
-    assert "<h1>@author</h1>" in html
-    assert "Writes about lore." in html
+    # The short profile description is gone (#538): the default line, and
+    # nothing between the name and the pieces.
+    assert "<h1>@author</h1><section" in html
+    assert ('<meta name="description" content="Writing published by '
+            '@author on Loore."/>') in html
+    assert '"description": "Writing published by @author on Loore."' in html
     assert "/@author/on-lore" in html
     assert "/@author/second-piece" in html
     assert '<meta property="og:type" content="profile"/>' in html
@@ -401,10 +404,13 @@ def test_article_og_image(app):
 
 
 def test_profile_og_image(app):
+    from backend.utils.og_image import render_profile_card
     _publish("author", ARTICLE, "on-lore")
     r = app.test_client().get("/@author/og.png")
     assert r.status_code == 200
     assert r.mimetype == "image/png"
+    # The default card: "@author" over "Published writing on Loore".
+    assert r.get_data() == render_profile_card("author")
 
 
 def test_og_image_respects_privacy(app):

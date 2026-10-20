@@ -122,7 +122,7 @@ test('a deleted writing shows the date and restores through the restore route', 
   fireEvent.click(screen.getByRole('button', { name: 'Restore my writing' }));
   await waitFor(() => expect(mockPost).toHaveBeenCalledWith('/account/data/restore'));
   await waitFor(() => expect(screen.getByText('Your writing is restored.')).toBeTruthy());
-  // The whole user is read again (description, has_own_entries).
+  // The whole user is read again (has_own_entries).
   expect(mockGet).toHaveBeenCalledWith('/dashboard', { params: { profile: 0 } });
   expect(mockDelete).not.toHaveBeenCalled();
 });

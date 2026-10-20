@@ -30,8 +30,7 @@ from backend.models import (
 )
 from backend.utils.hidden_rows import (
     drop_hidden_poll_response, including_hidden_rows, on_hold_user_ids,
-    reclaim_description, reclaim_external_items, shown_description,
-    writing_on_hold,
+    reclaim_external_items, writing_on_hold,
 )
 from backend.utils.privacy import can_user_access_node
 from backend.utils.system_accounts import ERASED_SYSTEM_USERNAME
@@ -112,11 +111,6 @@ def test_the_request_hides_all_her_writing_at_once(app, world, stubs):
     with including_hidden_rows():
         assert UserProfile.query.filter_by(user_id=a).count() == 2
 
-    # The description shows empty, to her and to others; it is not lost.
-    alice = _db.session.get(User, a)
-    assert shown_description(alice) == ""
-    assert alice.description == "I write about birds"
-
     # Bob no longer sees her public entry, and his reply under it stays.
     assert not can_user_access_node(_db.session.get(Node, world.ids["A1"]), b)
     assert can_user_access_node(_db.session.get(Node, world.ids["B1"]), b)
@@ -154,8 +148,6 @@ def test_restore_brings_back_exactly_what_the_request_hid(app, world, stubs):
     assert _db.session.get(Node, gone_id).deleted_at == T0
     assert UserDataPurgeHidden.query.count() == 0
     assert UserDataPurge.query.one().status == "cancelled"
-    assert shown_description(_db.session.get(User, world.alice.id)) == \
-        "I write about birds"
     assert writing_on_hold(world.alice.id) is False
     # Nothing to restore any more; the purge never starts.
     assert c.post("/api/account/data/restore").status_code == 404
@@ -199,7 +191,7 @@ def test_the_purge_deletes_what_was_hidden_and_keeps_what_came_after(
 
     # Written after the request: a new entry with its recording and an AI
     # reply, a todo version, a draft with its recording, a reference, a
-    # profile she wrote herself, a new description, a cost row.
+    # profile she wrote herself, a cost row.
     alice = _db.session.get(User, a)
     n1 = _node(alice, owner=a, text="a fresh start")
     nl = _node(world.llm, n1, owner=a, node_type="llm", text="a reply")
@@ -209,8 +201,6 @@ def test_the_purge_deletes_what_was_hidden_and_keeps_what_came_after(
     item = _add(ExternalItem(user_id=a, source="web_clip", external_id="e-new",
                              content="new clip"))
     prof = _add(UserProfile(user_id=a, content="mine", generated_by="user"))
-    reclaim_description(a)
-    alice.description = "starting over"
     cost = _add(APICostLog(user_id=a, model_id="m", request_type="conversation",
                            cost_microdollars=5,
                            created_at=job.requested_at + timedelta(seconds=1)))
@@ -245,7 +235,6 @@ def test_the_purge_deletes_what_was_hidden_and_keeps_what_came_after(
     assert [r.id for r in Draft.query.filter_by(user_id=a)] == [draft.id]
     assert [r.id for r in ExternalItem.query.filter_by(user_id=a)] == [item.id]
     assert [r.id for r in UserProfile.query.filter_by(user_id=a)] == [prof.id]
-    assert _db.session.get(User, a).description == "starting over"
     # Old files gone, new ones kept; bob's untouched.
     assert not any(f.exists() for f in world.files_alice)
     assert all(f.exists() for f in new_files)
@@ -352,7 +341,6 @@ def test_an_admin_purge_hides_her_writing_at_once_and_she_restores_it(
         assert n.deleted_at is not None, n.id
     for model in HIDDEN_ROW_TABLES:
         assert model.query.filter_by(user_id=a).count() == 0, model
-    assert shown_description(_db.session.get(User, a)) == ""
     assert writing_on_hold(a) is True
     assert _bob_snapshot(world) == bob_before
 
@@ -531,7 +519,7 @@ class _Since:
 def _write_since(world, stubs, tag):
     """What alice writes or saves after a request: an entry with its
     recording and an AI reply, an entry she deleted herself, a todo
-    list, a draft, a new description."""
+    list, a draft."""
     a = world.alice.id
     alice = _db.session.get(User, a)
     s = _Since()
@@ -545,8 +533,6 @@ def _write_since(world, stubs, tag):
                            generated_by="user")).id
     s.draft = _add(Draft(user_id=a, parent_id=n.id, content=f"{tag} draft",
                          session_id=f"sess-{tag}")).id
-    reclaim_description(a)
-    alice.description = f"{tag} bio"
     _db.session.commit()
     s.file = _file(stubs.audio / f"user/{a}/node/{n.id}/original.webm")
     return s
@@ -604,10 +590,8 @@ def test_asking_again_hides_what_she_wrote_since_under_the_same_job(
         assert _db.session.get(Node, nid).deleted_at == t1, nid
     assert UserTodo.query.filter_by(user_id=a).count() == 0
     assert Draft.query.filter_by(user_id=a).count() == 0
-    assert shown_description(_db.session.get(User, a)) == ""
     # Recorded under the same job, nothing twice: the re-imported entry
-    # keeps its one record; the description she wrote again is recorded
-    # again (writing it took the old record out).
+    # keeps its one record.
     records = _records(job.id)
     assert len(records) == len(set(records))
     assert set(first) <= set(records)
@@ -619,7 +603,6 @@ def test_asking_again_hides_what_she_wrote_since_under_the_same_job(
         ("draft", since.draft, None),
         ("file", None, f"audio:user/{a}/node/{since.node}"),
     }
-    assert ("user_description", a, None) in records
 
     # The old date passes: nothing starts.
     assert up.dispatch_due_jobs(lambda j, t: pytest.fail("old date"),
@@ -640,12 +623,11 @@ def test_one_restore_brings_back_both(app, world, stubs, monkeypatch):
     r = c.post("/api/account/data/restore")
     assert r.status_code == 200 and r.get_json()["status"] is None
     after = _alice_snapshot(world)
-    # Every row of the first batch is as it was before the first request
-    # (the user row is checked below: she wrote a new description).
+    # Every row of the first batch, and her user row, is as it was before
+    # the first request.
     ids = {t: {row["id"] for row in rows} for t, rows in before.items()}
     first_after = {t: [row for row in after[t] if row["id"] in ids[t]]
-                   for t in before if t != "user"}
-    del before["user"]
+                   for t in before}
     assert _same_as(before, first_after)
     assert _db.session.get(Node, gone_id).deleted_at == T0
     # What she wrote since is back too.
@@ -654,8 +636,6 @@ def test_one_restore_brings_back_both(app, world, stubs, monkeypatch):
     assert _db.session.get(Node, since.gone).deleted_at == T0
     assert _db.session.get(UserTodo, since.todo) is not None
     assert _db.session.get(Draft, since.draft) is not None
-    assert shown_description(_db.session.get(User, world.alice.id)) == \
-        "since bio"
     assert UserDataPurgeHidden.query.count() == 0
     assert UserDataPurge.query.one().status == "cancelled"
     assert writing_on_hold(world.alice.id) is False
@@ -825,16 +805,9 @@ def test_the_account_page_offers_it_again_only_with_something_new(
     a = world.alice.id
     c, body = _ask(app, world)
     assert body["new_writing"] is False
-    # A saved reference counts...
+    # A saved reference counts.
     _add(ExternalItem(user_id=a, source="web_clip", external_id="e-new",
                       content="clip"))
-    _db.session.commit()
-    assert c.get("/api/account/data").get_json()["new_writing"] is True
-    _ask(app, world)
-    assert c.get("/api/account/data").get_json()["new_writing"] is False
-    # ...and so does a description written again.
-    reclaim_description(a)
-    _db.session.get(User, a).description = "new"
     _db.session.commit()
     assert c.get("/api/account/data").get_json()["new_writing"] is True
     _ask(app, world)
@@ -977,3 +950,125 @@ def test_a_poll_draft_queued_before_the_request_is_answerable_after_a_restore(
     assert c.post("/api/account/data/restore").status_code == 200
     _db.session.expire_all()
     assert _db.session.get(PollResponse, r1).status == "draft_failed"
+
+
+# ── Records left from the short profile description (#538) ──────────────
+# Until #538 a request also recorded the user's short profile description
+# (kind "user_description", row_id = the user). The description and its
+# column are gone, but a job that was waiting at the deploy still has that
+# record. Nothing reads the kind any more; the restore, the admin's Undo
+# and the purge delete it with the job's other records.
+
+def _old_description_record(job_id, user_id):
+    _add(UserDataPurgeHidden(job_id=job_id, kind="user_description",
+                             row_id=user_id))
+    _db.session.commit()
+
+
+def test_an_old_description_record_changes_nothing_she_sees(
+        app, world, stubs):
+    a = world.alice.id
+    before = _alice_snapshot(world)
+    c, _ = _ask(app, world)
+    job = UserDataPurge.query.one()
+    _old_description_record(job.id, a)
+
+    # The Account page's state and the logs' counts read the job as before.
+    state = c.get("/api/account/data").get_json()
+    assert state["status"] == "scheduled" and state["restorable"] is True
+    assert state["new_writing"] is False
+    assert up.hidden_counts(job.id)["user_description"] == 1
+
+    # Restore: everything comes back, and the old record goes too.
+    r = c.post("/api/account/data/restore")
+    assert r.status_code == 200 and r.get_json()["status"] is None
+    assert _same_as(before, _alice_snapshot(world))
+    assert UserDataPurgeHidden.query.count() == 0
+
+
+def test_asking_again_with_an_old_description_record(
+        app, world, stubs, monkeypatch):
+    a = world.alice.id
+    t1 = datetime.utcnow() + timedelta(minutes=1)
+    _at(monkeypatch, t1)
+    c, _ = _ask(app, world)
+    job = UserDataPurge.query.one()
+    _old_description_record(job.id, a)
+    first = _records(job.id)
+    since = _write_since(world, stubs, "since")
+    _at(monkeypatch, t1 + timedelta(days=10))
+    c, body = _ask(app, world)
+    assert UserDataPurge.query.count() == 1
+    assert body["new_writing"] is False
+    records = _records(job.id)
+    assert len(records) == len(set(records))
+    assert set(first) <= set(records)
+    assert ("node", since.node, None) in records
+    assert [r for r in records if r[0] == "user_description"] == \
+        [("user_description", a, None)]
+
+
+def test_the_purge_with_an_old_description_record(app, world, stubs):
+    a = world.alice.id
+    _ask(app, world)
+    job = UserDataPurge.query.one()
+    _old_description_record(job.id, a)
+    tokens = []
+    later = job.scheduled_for + timedelta(minutes=1)
+    assert up.dispatch_due_jobs(lambda j, t: tokens.append(t),
+                                now=later) == [job.id]
+    assert up.run_purge_job(job.id, tokens[0]) == "done"
+    _db.session.expire_all()
+    assert UserDataPurgeHidden.query.count() == 0
+    assert up.deletion_status(a)["status"] == "done"
+    scope = up.Scope(a, job.id, job.requested_at)
+    assert up.leftovers(up.count_user_data(a, scope=scope)) == {}
+    assert _db.session.get(User, a) is not None
+
+
+def test_the_admin_views_and_undo_with_an_old_description_record(
+        app, world, stubs, monkeypatch):
+    _stub_dispatch(monkeypatch, stubs)
+    a = world.alice.id
+    before = _alice_snapshot(world)
+    job = _admin_purge(app, world)
+    _old_description_record(job["id"], a)
+    admin = _client(app, world.admin)
+
+    r = admin.get(f"/api/admin/users/{a}/purge_data")
+    assert r.status_code == 200 and r.get_json()["job"]["id"] == job["id"]
+    r = admin.get("/api/admin/users")
+    assert r.status_code == 200
+    row = next(u for u in r.get_json()["users"] if u["id"] == a)
+    assert "description" not in row
+
+    r = admin.post(f"/api/admin/users/{a}/undo_deletion",
+                   json={"job_id": job["id"]})
+    assert r.status_code == 200, r.get_json()
+    assert _same_as(before, _alice_snapshot(world))
+    assert UserDataPurgeHidden.query.count() == 0
+
+
+def test_a_purge_clears_a_description_the_migration_missed(app, world, stubs):
+    """The fallback in the purge (#538): had the deploy's migration not
+    dropped the column, the purge still clears the user's description,
+    and only hers. Every other purge test runs it without the column."""
+    from sqlalchemy import text
+    a, b = world.alice.id, world.bob.id
+    _db.session.execute(text(
+        'ALTER TABLE "user" ADD COLUMN description VARCHAR(128)'))
+    _db.session.execute(text(
+        'UPDATE "user" SET description = :d WHERE id IN (:a, :b)'),
+        {"d": "an old bio", "a": a, "b": b})
+    _db.session.commit()
+    _ask(app, world)
+    job = UserDataPurge.query.one()
+    tokens = []
+    later = job.scheduled_for + timedelta(minutes=1)
+    assert up.dispatch_due_jobs(lambda j, t: tokens.append(t),
+                                now=later) == [job.id]
+    assert up.run_purge_job(job.id, tokens[0]) == "done"
+    rows = dict(_db.session.execute(text(
+        'SELECT id, description FROM "user" WHERE id IN (:a, :b)'),
+        {"a": a, "b": b}).all())
+    assert rows == {a: "", b: "an old bio"}

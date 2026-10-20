@@ -1,6 +1,5 @@
 from flask import Blueprint, jsonify, Response, request, current_app
 from flask_login import login_required, current_user
-from backend.utils.hidden_rows import shown_description
 from backend.models import (
     Node, NodeVersion, UserProfile, UserPrompt, UserTodo,
     UserArtifact,
@@ -33,7 +32,6 @@ def export_data():
             "id": current_user.id,
             "twitter_id": current_user.twitter_id,
             "username": current_user.username,
-            "description": shown_description(current_user),
             "created_at": iso_utc(current_user.created_at),
         },
         "nodes": [],

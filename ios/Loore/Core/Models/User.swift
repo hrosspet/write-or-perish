@@ -3,10 +3,11 @@ import Foundation
 /// The signed-in user: `user` in `GET /api/dashboard/` and `PUT /api/dashboard/user`
 /// (map B §2.4.1 "CurrentUser"). Every field is decoded tolerantly; absent
 /// booleans default to the safe side (not approved, terms not current, no flags).
+/// Keys it does not list are ignored, such as the `description` an older server
+/// still sends (the short profile description, removed in #538).
 struct CurrentUser: Decodable, Equatable, Sendable {
     var id: Int
     var username: String
-    var description: String?
     var acceptedTermsAt: Date?
     var termsUpToDate: Bool
     var approved: Bool
@@ -44,7 +45,7 @@ struct CurrentUser: Decodable, Equatable, Sendable {
     var gleanEnabled: Bool
 
     enum CodingKeys: String, CodingKey {
-        case id, username, description, email, plan, timezone
+        case id, username, email, plan, timezone
         case acceptedTermsAt = "accepted_terms_at"
         case termsUpToDate = "terms_up_to_date"
         case approved
@@ -78,7 +79,6 @@ struct CurrentUser: Decodable, Equatable, Sendable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decode(Int.self, forKey: .id)
         username = c.tolerant(.username, default: "")
-        description = c.tolerant(.description)
         acceptedTermsAt = c.tolerant(.acceptedTermsAt)
         termsUpToDate = c.tolerant(.termsUpToDate, default: false)
         approved = c.tolerant(.approved, default: false)

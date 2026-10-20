@@ -18,7 +18,7 @@ that environment's DB and KMS key:
     python backend/scripts/dump_user.py --username RichDecibels --out data/rich.jsonl
 
 What it carries (all of it, not "latest N"):
-  - user: username, description, timezone, preferred_model, plan (flags like
+  - user: username, timezone, preferred_model, plan (flags like
     approved/is_admin are NOT carried — the target decides those)
   - nodes: every alive PUBLIC node the user authored or owns (imported
     archives, published writing, LLM replies in those threads) with parent /
@@ -105,7 +105,6 @@ def _run(username, out_path, include_private=False):
         "source_env": os.environ.get("FLASK_ENV") or os.environ.get("ENV") or "unknown",
         "user": {
             "username": user.username,
-            "description": user.description,
             "timezone": getattr(user, "timezone", None),
             "preferred_model": user.preferred_model,
             "plan": user.plan,

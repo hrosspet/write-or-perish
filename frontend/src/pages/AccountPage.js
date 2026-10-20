@@ -208,7 +208,7 @@ export default function AccountPage() {
       type: "success",
       text: `What you wrote since is deleted too. You can restore all of it until ${formatDeletionDate(res.data.purge_at)}.`,
     } : null);
-    // The description and has_own_entries change with the writing.
+    // has_own_entries changes with the writing.
     reloadUser(setUser);
   };
 
