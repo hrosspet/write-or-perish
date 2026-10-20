@@ -30,10 +30,29 @@ test('a tilde fence and an unclosed fence are unchanged', () => {
   expect(normalizeLinkedImages(open)).toBe(open);
 });
 
-test('inline code holding the shape is unchanged, text after it is repaired', () => {
-  const inline = `Use \`${BROKEN.replace(/\n/g, ' ')}\` like so`;
+test('a single-newline shape in backticks is left alone (no blank line)', () => {
+  const inline = `Use \`[\n${IMG}\n](${HREF})\` like so`;
   expect(normalizeLinkedImages(inline)).toBe(inline);
   expect(normalizeLinkedImages(`\`x\`\n\n${BROKEN}`)).toBe(`\`x\`\n\n${FIXED}`);
+});
+
+test('a blank line before or after the image alone triggers the repair', () => {
+  expect(normalizeLinkedImages(`[\n\n${IMG}](${HREF})`)).toBe(FIXED);
+  expect(normalizeLinkedImages(`[${IMG}\n\n](${HREF})`)).toBe(FIXED);
+});
+
+test('crafted input stays fast', () => {
+  const inputs = [
+    '[![ '.repeat(25000) + '](x)',
+    'a' + '`'.repeat(100000) + ' text ](x) [ ![',
+    '[\n'.repeat(500000),
+    '[ '.repeat(50000) + '![a](b) ' + '](c)',
+  ];
+  for (const input of inputs) {
+    const t = Date.now();
+    normalizeLinkedImages(input);
+    expect(Date.now() - t).toBeLessThan(500);
+  }
 });
 
 test('a repair after a closed fence still happens', () => {
@@ -46,6 +65,7 @@ test('normal links, images and linked images are unchanged', () => {
     IMG,
     FIXED,
     `[ ${IMG} text ](${HREF})`,
+    `[\n${IMG}\n](${HREF})`,
     `[\n\n${IMG}\n\n${IMG}\n\n](${HREF})`,
     '- [ ] a task\n- [x] done',
     '[ ]\n\n![a](b)\n\n(c)',

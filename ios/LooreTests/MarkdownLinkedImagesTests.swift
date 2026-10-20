@@ -27,7 +27,7 @@ final class MarkdownLinkedImagesTests: XCTestCase {
 
     func testCodeIsUnchanged() {
         for text in ["Before\n\n```\n\(broken)\n```\n\nAfter", "~~~md\n\(broken)\n~~~", "```\n\(broken)",
-                     "Use `\(broken.replacingOccurrences(of: "\n", with: " "))` like so"] {
+                     "Use `[\n\(img)\n](\(href))` like so"] {
             XCTAssertEqual(normalize(text), text)
         }
         XCTAssertEqual(normalize("```\ncode\n```\n\n\(broken)"), "```\ncode\n```\n\n\(fixed)")
@@ -35,9 +35,28 @@ final class MarkdownLinkedImagesTests: XCTestCase {
 
     func testNormalMarkdownIsUnchanged() {
         for text in ["See [this](https://a.example/x) and [that](https://b.example).", img, fixed,
-                     "[ \(img) text ](\(href))", "[\n\n\(img)\n\n\(img)\n\n](\(href))",
+                     "[ \(img) text ](\(href))", "[\n\(img)\n](\(href))", "[\n\n\(img)\n\n\(img)\n\n](\(href))",
                      "- [ ] a task\n- [x] done", "[ ]\n\n![a](b)\n\n(c)"] {
             XCTAssertEqual(normalize(text), text)
+        }
+    }
+
+    func testABlankLineOnEitherSideTriggersTheRepair() {
+        XCTAssertEqual(normalize("[\n\n\(img)](\(href))"), fixed)
+        XCTAssertEqual(normalize("[\(img)\n\n](\(href))"), fixed)
+    }
+
+    func testCraftedInputStaysFast() {
+        let inputs = [
+            String(repeating: "[![ ", count: 25_000) + "](x)",
+            "a" + String(repeating: "`", count: 100_000) + " text ](x) [ ![",
+            String(repeating: "[\n", count: 500_000),
+            String(repeating: "[ ", count: 50_000) + "![a](b) " + "](c)",
+        ]
+        for input in inputs {
+            let start = Date()
+            _ = normalize(input)
+            XCTAssertLessThan(Date().timeIntervalSince(start), 2.0)
         }
     }
 }

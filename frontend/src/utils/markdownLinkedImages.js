@@ -16,29 +16,59 @@
  * (MarkdownLinkedImages.swift); keep the two in step.
  *
  * Narrow on purpose: only "[", whitespace, ONE image, whitespace, "](href)".
- * Fenced code blocks and inline code spans are left alone.
+ * Fenced code blocks are left alone.
  */
 
-const BROKEN_IMAGE_LINK =
-  /\[\s*(!\[[^\]\n]*\]\([^()\s]+(?:[ \t]+"[^"\n]*")?\))\s*\]\(([^()\s]+)\)/g;
+// "[", whitespace, ONE image, whitespace, "](href)". The alt excludes "[" so
+// a run of "[![" cannot make the scan quadratic. The match is repaired only
+// when a blank line sits inside the brackets (see below).
+const IMAGE_LINK =
+  /\[(\s*)(!\[[^[\]\n]*\]\([^()\s]+(?:[ \t]+"[^"\n]*")?\))(\s*)\]\(([^()\s]+)\)/g;
+const BLANK_LINE = /\n[^\S\n]*\n/;
 
-// A fenced block (``` or ~~~, closed by the same fence or the end of the
-// text) or an inline code span; these are skipped.
-const CODE = /^[ ]{0,3}(`{3,}|~{3,})[^\n]*\n[\s\S]*?(?:^[ ]{0,3}\1[`~]*[ \t]*$|(?![\s\S]))|(`+)[^`][\s\S]*?\2(?!`)/gm;
+// Only the broken shape has a blank line inside the link text. With single
+// newlines CommonMark already parses the link, and a blank line also means
+// the "[" cannot sit in an inline code span, so no inline-code skipping is
+// needed.
+function repair(segment) {
+  return segment.replace(IMAGE_LINK, (match, before, image, after, href) =>
+    (BLANK_LINE.test(before) || BLANK_LINE.test(after) ? `[${image}](${href})` : match));
+}
+
+const FENCE_OPEN = /^ {0,3}(`{3,}|~{3,})/;
+const FENCE_CLOSE = /^ {0,3}(`{3,}|~{3,})[ \t]*\r?\n?$/;
 
 export function normalizeLinkedImages(text) {
   if (typeof text !== 'string' || !text.includes('](')) return text;
   if (!/\[\s*!\[/.test(text)) return text;
+  // One pass over the lines; a fenced block (closed by a fence of the same
+  // character and at least the same length, or the end of the text) is
+  // copied as it is.
   let out = '';
-  let last = 0;
-  CODE.lastIndex = 0;
-  let m;
-  while ((m = CODE.exec(text))) {
-    out += text.slice(last, m.index).replace(BROKEN_IMAGE_LINK, '[$1]($2)');
-    out += m[0];
-    last = m.index + m[0].length;
-    if (m[0].length === 0) CODE.lastIndex += 1;
+  let segStart = 0;
+  let fence = null;
+  let pos = 0;
+  while (pos < text.length) {
+    const nl = text.indexOf('\n', pos);
+    const end = nl < 0 ? text.length : nl + 1;
+    const line = text.slice(pos, end);
+    if (!fence) {
+      const m = FENCE_OPEN.exec(line);
+      if (m) {
+        out += repair(text.slice(segStart, pos));
+        segStart = pos;
+        fence = m[1];
+      }
+    } else {
+      const m = FENCE_CLOSE.exec(line);
+      if (m && m[1][0] === fence[0] && m[1].length >= fence.length) {
+        out += text.slice(segStart, end);
+        segStart = end;
+        fence = null;
+      }
+    }
+    pos = end;
   }
-  out += text.slice(last).replace(BROKEN_IMAGE_LINK, '[$1]($2)');
+  out += fence ? text.slice(segStart) : repair(text.slice(segStart));
   return out;
 }
