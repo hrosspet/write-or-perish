@@ -859,6 +859,14 @@ final class FeaturePageModelTests: XCTestCase {
                        "writing the first profile while one is generated")
     }
 
+    /// #183 review finding 1: "Save mine as a new version" updates the version
+    /// the edit started from (the backend saves a new version on top of it), not
+    /// the newer one; a first profile is still created.
+    func testProfileSaveAsNewTargetsTheVersionTheEditStartedFrom() {
+        XCTAssertEqual(ProfilePage.saveAsNewTarget(editingBaseId: 7), .update(7))
+        XCTAssertEqual(ProfilePage.saveAsNewTarget(editingBaseId: nil), .create)
+    }
+
     func testWorkspaceRoutesSwitchTheArtifactsTab() {
         let env = AppEnvironment.local
         XCTAssertEqual(AppRoute.parse("/artifacts?create=1", environment: env), .newArtifact)
