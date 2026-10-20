@@ -156,8 +156,5 @@ def render_article_card(title, author, published=None):
     return _render(title, byline)
 
 
-def render_profile_card(username, description=None):
-    byline = (description or "").strip() or "Published writing on Loore"
-    if len(byline) > 90:
-        byline = byline[:90].rsplit(" ", 1)[0] + "…"
-    return _render(f"@{username}", byline)
+def render_profile_card(username):
+    return _render(f"@{username}", "Published writing on Loore")

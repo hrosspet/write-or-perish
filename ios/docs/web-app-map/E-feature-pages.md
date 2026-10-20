@@ -35,7 +35,7 @@ Pages covered: Documents workspace (ArtifactsNav, Profile, Todo, Artifacts incl.
 - ⌘/Ctrl+Enter = primary submit in every edit form (`hooks/useSubmitShortcut`). Esc = cancel edit (`hooks/useEscapeKey`). ⌘K toggles SearchModal (scope `external` when the path starts with `/references`, else `archive`). iOS: `.keyboardShortcut(.return, modifiers: .command)`, `.keyboardShortcut(.cancelAction)`, `.keyboardShortcut("k")`.
 
 ### 0.4 User payload fields these pages read (from `GET /api/dashboard/` → `user`, and echoed by `PUT /api/dashboard/user`)
-`id, username, description, email, pending_email, pending_email_expired, approved, terms_up_to_date, accepted_terms_at, is_admin, plan, voice_mode_enabled, craft_mode, preferred_model, profile_generation_task_id, profile_batch_pending, default_privacy_level, default_ai_usage, twitter_login, twitter_handle, prefill_consent, prefilled_handle, timezone, spend_blocked, share_v1_enabled, share_v1_available, public_sharing_enabled, external_content_available, external_content_enabled`.
+`id, username, email, pending_email, pending_email_expired, approved, terms_up_to_date, accepted_terms_at, is_admin, plan, voice_mode_enabled, craft_mode, preferred_model, profile_generation_task_id, profile_batch_pending, default_privacy_level, default_ai_usage, twitter_login, twitter_handle, prefill_consent, prefilled_handle, timezone, spend_blocked, share_v1_enabled, share_v1_available, public_sharing_enabled, external_content_available, external_content_enabled`.
 
 Feature gates used below:
 - `share_v1_enabled` (env `SHARE_V1` AND the user's opt-in): Share, Commons, "My public page".

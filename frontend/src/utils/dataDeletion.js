@@ -34,8 +34,8 @@ export function writingRestorable(dataDeletion) {
 }
 
 // Restore my writing: the server shows again exactly what the request
-// hid. Then the whole user is read again (has_own_entries, description),
-// so every page shows the writing at once.
+// hid. Then the whole user is read again (has_own_entries), so every page
+// shows the writing at once.
 export async function restoreWriting(setUser) {
   const res = await api.post("/account/data/restore");
   setUser((prev) => (prev ? { ...prev, data_deletion: res.data } : prev));
@@ -43,8 +43,8 @@ export async function restoreWriting(setUser) {
   return res.data;
 }
 
-// After hiding or restoring the writing: the user fields that describe
-// it (has_own_entries, description) change too.
+// After hiding or restoring the writing: the user field that describes
+// it (has_own_entries) changes too.
 export async function reloadUser(setUser) {
   try {
     const res = await api.get("/dashboard", { params: { profile: 0 } });

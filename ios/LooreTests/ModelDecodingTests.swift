@@ -36,6 +36,17 @@ final class ModelDecodingTests: XCTestCase {
         XCTAssertEqual(UserCapabilities(user: user, craftModeFallback: false).craftMode, false)
     }
 
+    func testCurrentUserIgnoresAnOlderServersDescription() throws {
+        // The short profile description is gone (#538); a server from before
+        // still sends it, as text, null or anything else.
+        for value in [#""Field notes""#, "null", "42", #"{"x": 1}"#] {
+            let user = try decode(CurrentUser.self, #"{"id": 3, "username": "seowriter", "approved": true, "description": \#(value)}"#)
+            XCTAssertEqual(user.id, 3, value)
+            XCTAssertEqual(user.username, "seowriter", value)
+            XCTAssertTrue(user.approved, value)
+        }
+    }
+
     func testCapabilitiesPreferServerCraftMode() throws {
         let user = try decode(CurrentUser.self, #"{"id": 1, "craft_mode": false, "approved": true, "share_v1_enabled": true}"#)
         let caps = UserCapabilities(user: user, craftModeFallback: true)

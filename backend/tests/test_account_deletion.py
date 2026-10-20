@@ -1384,7 +1384,7 @@ def test_admin_dry_run_shows_counts_only_then_deletes_after_the_grace(
     # Her public entry A1; her replies to bob's entries B3 and B2.
     assert body["blast_radius"] == {"public_nodes": 1, "replies_to_others": 2}
     text = r.get_data(as_text=True)
-    for words in ("I write about birds", "old root", "bob clip", "draft 2"):
+    for words in ("old root", "bob clip", "draft 2"):
         assert words not in text
     assert UserDataPurge.query.count() == 0
     assert _db.session.get(User, a_id).deleted_at is None

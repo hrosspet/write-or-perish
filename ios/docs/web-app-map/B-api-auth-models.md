@@ -1165,7 +1165,6 @@ Source files: `backend/routes/{dashboard,profile,todo,artifacts,prompts,log,sear
 CurrentUser = {
   "id": int,
   "username": string,
-  "description": string | null,        // max 128 chars
   "accepted_terms_at": iso | null,
   "terms_up_to_date": bool,            // false => show the terms modal (see POST /api/terms/accept)
   "approved": bool,                    // false => waitlist screen; most /api calls 403
@@ -1216,7 +1215,7 @@ LatestProfile = {                      // newest UserProfile row (including pipe
 - Called from: pages/AccountPage.js (username; preferred_model; default_privacy_level; default_ai_usage; external_content_enabled; public_sharing_enabled; craft_mode), components/NavBar.js (`craft_mode` toggle), components/PrefillConsentCard.js (`prefill_consent`).
 - Request (JSON object; send only the fields being changed — each is applied only if the key is present):
   - `username`: string. Trimmed; validated: non-empty, ≤ 64 chars, `[A-Za-z0-9_]+`, not reserved, not taken case-insensitively, not another account's former handle. A rename records history and invalidates cached public pages.
-  - `description`: string, ≤ 128 chars.
+  - `description`: ignored. The short profile description was removed (#538); older app builds may still send it.
   - `craft_mode`: bool.
   - `public_sharing_enabled`: bool.
   - `external_content_enabled`: bool.
@@ -1228,7 +1227,6 @@ LatestProfile = {                      // newest UserProfile row (including pipe
 - Response 200: `{"message": "Profile updated successfully.", "user": CurrentUser}` — the same keys as `GET /api/dashboard/` `user`. The web app replaces its cached user with it.
 - Errors (all `{"error": string}`):
   - 400 `"Email changes go through verification: use POST /api/dashboard/email."`
-  - 400 `"Description exceeds maximum length of 128 characters."`
   - 400 username messages: `"Username cannot be empty."`, `"Username must be 64 characters or fewer."`, `"Username may only contain letters, numbers, and underscores."`, `"That username is reserved."`, `"That username is already taken."`
   - 400 `"Model not offered: <id>"`, `"Invalid privacy level: <v>"`, `"Invalid AI usage value: <v>"`, `"Invalid prefill_consent value: <v>"`
   - 409 `"Your profile changed in another request. Reload and try again."` (unique-constraint race)
@@ -1881,7 +1879,7 @@ Shared confirm response counters (Markdown, Claude, ChatGPT confirm, and the Twi
 - Backend: routes/export_data.py:export_data
 - Auth: login
 - Called from: not called by the frontend.
-- Response 200: `{ "user": {id, twitter_id, username, description, created_at}, "nodes": [{id, content, node_type, parent_id, linked_node_id, token_count, created_at, updated_at}], "versions": [{id, node_id, content, timestamp}] }` (own nodes only; decrypts every node: expensive).
+- Response 200: `{ "user": {id, twitter_id, username, created_at}, "nodes": [{id, content, node_type, parent_id, linked_node_id, token_count, created_at, updated_at}], "versions": [{id, node_id, content, timestamp}] }` (own nodes only; decrypts every node: expensive).
 
 ##### `DELETE /api/delete_my_data`
 - Backend: routes/export_data.py:delete_my_data
@@ -2133,7 +2131,7 @@ Admin detection: `User.is_admin` (DB column). The server checks it in `admin_req
 
 | Method | Path | Request | Response 2xx | Notable errors | Frontend |
 |---|---|---|---|---|---|
-| GET | `/users` | - | `{users:[{id, twitter_id, username, description, created_at, accepted_terms_at, approved, email, plan, deactivated_at, total_spending_usd, current_month_spending_usd, cache_hit_rate, cache_served_tokens, cache_input_tokens, spend_limit_usd, spend_limit_is_override, spend_blocked, profile_batch_pending, profile_force_batch, prefilled_handle, prefill_consent, prefill_consent_at, spam, intentions, profile:{versions, last_generation_type, last_created_at, state, waiting, seed_error}}], cache_since, allowed_plans:[str], per_user_limit_default_usd}` | - | AdminPanel |
+| GET | `/users` | - | `{users:[{id, twitter_id, username, created_at, accepted_terms_at, approved, email, plan, deactivated_at, total_spending_usd, current_month_spending_usd, cache_hit_rate, cache_served_tokens, cache_input_tokens, spend_limit_usd, spend_limit_is_override, spend_blocked, profile_batch_pending, profile_force_batch, prefilled_handle, prefill_consent, prefill_consent_at, spam, intentions, profile:{versions, last_generation_type, last_created_at, state, waiting, seed_error}}], cache_since, allowed_plans:[str], per_user_limit_default_usd}` | - | AdminPanel |
 | POST | `/users/<id>/toggle` | - | `{message, approved}` | 404 | AdminPanel |
 | GET | `/activity?days=` (7-60, default 14) | - | `activity_report()` dict | - | AdminPanel |
 | POST | `/users/<id>/build_profile` | - | 202 `{message, queued:true}` or 200 `{message, queued:false}` | 400 `{error, code}` (prefill refusal) | AdminPanel |
