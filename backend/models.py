@@ -161,6 +161,14 @@ class User(db.Model, UserMixin):
     profile_force_batch = db.Column(
         db.Boolean, nullable=False, default=False,
         server_default=db.text("false"))
+    # True while the per-user spend cap holds back this user's batch profile
+    # work (a chain stopped after the step that crossed the cap, or a seed
+    # skipped for it). The hourly seeder resumes it from the saved version
+    # once the cap lifts, also for a pre-filled account not yet activated,
+    # which its eligible cohort leaves out (backend/tasks/profile_batch.py).
+    profile_cap_held = db.Column(
+        db.Boolean, nullable=False, default=False,
+        server_default=db.text("false"))
     # Measured billed input tokens per stored content unit (Node.token_count)
     # on the user's last profile chunk, tagged with the tokenizer family it
     # was measured on (backend/tasks/exports.TOKENIZER_FAMILIES). The chunk

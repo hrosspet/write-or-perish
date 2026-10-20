@@ -107,6 +107,60 @@ def batch_pipeline_lock():
             except Exception:
                 pass
 
+
+def _spend_capped(user):
+    """Whether the per-user monthly spend cap (backend/utils/spend.py) holds
+    this user's next profile step back. The same rule as the synchronous
+    task, which checks ``user_is_capped`` on entry: spend logged in
+    APICostLog this month (all providers) at or over the user's limit
+    blocks them until the month rolls over, and the admin is emailed once.
+
+    One difference in timing: every cost row dispatches the check that sets
+    the block 15 s later (ENFORCE_CAP_DELAY_SECONDS), but the poller builds
+    the next step right after it saves this step's cost. So the check runs
+    here first, and a user whose step just crossed the cap gets no next
+    step. It runs whatever the global limit: enforce_user_spend_cap
+    resolves the user's effective limit (their own limit from the admin
+    Users tab wins), so a user with their own limit is stopped even while
+    PER_USER_MONTHLY_LIMIT_USD is 0. For an uncapped user it returns before
+    any query (the user is already loaded in the session)."""
+    from backend.utils.spend import enforce_user_spend_cap, user_is_capped
+    if user_is_capped(user):
+        return True
+    enforce_user_spend_cap(user.id, current_app.config)
+    return user_is_capped(user)
+
+
+def _hold_for_cap(user):
+    """Remember that the spend cap holds back this user's batch profile
+    work, so the hourly seeder resumes it when the cap lifts (next month,
+    or when the admin raises the user's limit) even for an account its
+    eligible cohort leaves out: a pre-filled account not yet activated,
+    whose build started from an immediate seed."""
+    if not user.profile_cap_held:
+        user.profile_cap_held = True
+        db.session.commit()
+
+
+def _release_cap_hold(user):
+    if user.profile_cap_held:
+        user.profile_cap_held = False
+        db.session.commit()
+
+
+def _cap_held_users(exclude_ids):
+    """Users whose batch profile work the cap held back, outside the hourly
+    cohort: resumed the way the build started (an immediate seed passes
+    them in without the eligibility query). A deactivated account stays
+    paused (deactivation is the admin's pause switch); a never-activated
+    one (a pre-fill waiting for its owner) is resumed."""
+    return [u for u in User.query.filter(
+        User.profile_cap_held.is_(True),
+        User.deleted_at.is_(None),
+        or_(User.approved.is_(True), User.deactivated_at.is_(None)),
+    ).all() if u.id not in exclude_ids]
+
+
 def _model_for(user):
     from backend.utils.llm_nodes import default_model_for
     return default_model_for(user)
@@ -225,6 +279,13 @@ def _build_next_profile_request(user, allow_chunk=True, chunk_num=1):
     # changed since the chain started (#346).
     if not account_allows_ai(user):
         logger.info(f"User {user.id}: opted out of AI usage; no profile step")
+        return None
+    # Likewise the spend cap: a step already submitted is collected and its
+    # cost logged, but a user who reached the cap gets no next step. The
+    # chain stays where it is and the seeder continues it once the cap
+    # resets at the start of the next month (or the admin raises the limit).
+    if _spend_capped(user):
+        logger.warning(f"User {user.id}: spend-capped; no profile step")
         return None
     model_id = _model_for(user)
     provider, api_model = _provider_and_model(model_id)
@@ -538,6 +599,7 @@ def _submit_requests(built, keys):
             u = User.query.get(item["user_id"])
             if u:
                 u.profile_batch_pending = True
+                u.profile_cap_held = False
         db.session.commit()
         submitted += len(items)
         logger.info(f"Profile batch {batch_id} ({provider_key}): "
@@ -608,6 +670,7 @@ def _seed_profile_batches(users=None, ignore_backoff=False):
     ``users`` restricts the cohort (immediate seed for one user); the
     default is every profile-eligible user. ``ignore_backoff`` is for an
     import's seed and a confirmed admin override only (see _should_seed)."""
+    from backend.utils.spend import user_is_capped
     config = current_app.config
     if config.get("PROFILE_UPDATES_PAUSED"):
         logger.info("PROFILE_UPDATES_PAUSED — skipping batch seeder")
@@ -617,6 +680,10 @@ def _seed_profile_batches(users=None, ignore_backoff=False):
     built = []
     if users is None:
         users = User.profile_eligible_query().all()
+        # Plus the builds the spend cap held back, which resume once it
+        # lifts: a pre-filled account not yet activated is outside the
+        # eligible cohort, and its build started from an immediate seed.
+        users += _cap_held_users({u.id for u in users})
     for user in users:
         if user.profile_batch_pending:
             continue
@@ -636,7 +703,13 @@ def _seed_profile_batches(users=None, ignore_backoff=False):
             continue  # exhausted → synchronous last-resort handles it
         # (force-batch users keep retrying here every cycle instead:
         # they must never fall back to the full-price sync path)
+        # The per-user monthly spend cap, checked as the synchronous task
+        # checks it on entry. The builder below settles it too.
+        if user_is_capped(user):
+            _hold_for_cap(user)
+            continue
         if not _should_seed(user, ignore_backoff=ignore_backoff):
+            _release_cap_hold(user)   # nothing (left) to resume
             continue
         try:
             # An integration retry builds only the integration, never a
@@ -658,7 +731,11 @@ def _seed_profile_batches(users=None, ignore_backoff=False):
             user.profile_seed_error = None
             db.session.commit()
         if req:
-            built.append(req)
+            built.append(req)   # a submitted step releases the hold
+        elif user_is_capped(user):
+            _hold_for_cap(user)   # the builder's own check blocked them
+        else:
+            _release_cap_hold(user)
     return _submit_requests(built, keys)
 
 
@@ -713,6 +790,7 @@ def poll_profile_batches():
 
 def _poll_profile_batches():
     """Impl — runs inside an active app context (testable directly)."""
+    from backend.utils.spend import user_is_capped
     config = current_app.config
     keys = apply_batch_key_override(
         get_api_keys_for_usage(config, 'chat'), config)
@@ -799,7 +877,16 @@ def _poll_profile_batches():
                 next_built.append(nxt)   # stays pending; re-submitted below
             else:
                 user.profile_batch_pending = False
-                _notify_prefill_complete(user)
+                if item.get("kind") == "chunk" and user_is_capped(user):
+                    # Stopped by the spend cap, not finished: no
+                    # "pre-fill complete" email for a chain that resumes
+                    # when the cap lifts (the hold marks it for the
+                    # hourly seeder, also for a not-yet-activated account).
+                    user.profile_cap_held = True
+                    logger.warning(f"User {user.id}: profile chain stopped "
+                                   f"at the spend cap after this step")
+                else:
+                    _notify_prefill_complete(user)
             db.session.commit()
 
         job.status = "collected"
