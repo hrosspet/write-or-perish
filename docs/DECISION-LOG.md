@@ -2323,6 +2323,13 @@ Choices that agents flagged in PRs and that the builder decided because a rule a
 | 2026-09-01 | #278 | release/ops | The hour of the nightly backup | During the US night, apart from the other scheduled backup | Reversible work goes ahead | Fable 5.1 | pending |
 | 2026-09-01 | #278 | data safety | Recording chunks still in flight | Left out of the backup, as transient | Reversible work goes ahead | Fable 5.1 | pending |
 | 2026-09-01 | #278 | release/ops | The database dump | Restores under another database role (no owner or privileges in the dump) | Reversible work goes ahead | Fable 5.1 | pending |
+| 2026-10-20 | #414 | data safety | A version the user saves while a profile run is working | The run's step whose base moved saves nothing (its billed cost is logged) and the run ends; the next run builds on the user's version. Cost: one discarded step, only when the user saves during a run | The user's edit wins | Opus 5.5 | pending |
+| 2026-10-20 | #414 | data safety | The user saves a version while a rebuild still has to merge an older one of theirs | The newer version wins: the next run builds on it, and a from-scratch first chunk merges it instead (also when it was saved while chunk 1 was out); a save marked 'none' keeps the pending merge | The user's edit wins | Opus 5.5 | pending |
+| 2026-10-20 | #414 | reliability | A rebuild's merge that did not run (refused, failed, or the run stopped) | Runs at the next hourly check, regardless of the update gates; the refusal backoff still applies | A rebuild merges the user's version at its date (Peter, 2026-10-20) | Opus 5.5 | pending |
+| 2026-10-20 | #414 | privacy | An edit of a profile version marked 'none' | The new version stays 'none', whatever the account setting | No AI means no AI | Opus 5.5 | pending |
+| 2026-10-20 | #414 | cost | The recent-context summary after a profile edit | Copied to the new version as stored (no model call), not regenerated; whether to regenerate it is left to Peter | Latency counts as quality | Opus 5.5 | pending |
+| 2026-10-20 | #414 | data safety | A profile edit that changes only whitespace (blank lines, trailing spaces, a trailing newline) | Saved in place, no new version | Every added heuristic is named | Opus 5.5 | pending |
+| 2026-10-20 | #414 | product scope | The date a rebuild merges the user's version at | Its cutoff, or the time it was written for a hand-written profile with no cutoff; the merge follows the first step whose cutoff reaches that date | A rebuild merges the user's version at its date (Peter, 2026-10-20); every added heuristic is named | Opus 5.5 | pending |
 
 ## Backfilled decisions
 
