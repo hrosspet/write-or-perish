@@ -2091,6 +2091,49 @@ Kinds (one per entry and per table row):
 - **Source:** Claude Code session 2026-10-20 (Opus 5.5)
 - **Applies to:** #542
 
+### 2026-10-20 · Measure the preamble's effect before fixing it
+
+- **Kind:** testing
+- **Situation:** every profile build's input starts with the export's preamble: the system prompts, profile versions and todo lists that the AI replies in that window used (#550). Offered to rebuild the affected per-chunk profiles of the maintainer's own account without it (about $0.20) and compare them before choosing a fix.
+- **Prediction:** yes, run it (60 %)
+- **Peter:** "yes, strip it, and strip it completely"
+- **Score:** hit
+- **Source:** Claude Code session 2026-10-20 (Opus 5.5)
+- **Applies to:** #550
+
+### 2026-10-20 · Profile builds get the user's writing only
+
+- **Kind:** product scope
+- **Situation:** #550 listed three options for the preamble in profile input: drop it all; keep the system prompts and drop the profiles; keep it. None was chosen in the issue.
+- **Prediction:** drop it all (55 %)
+- **Peter:** "strip it completely - I don't think we need sys prompts included in the conversations at all for profile builds"
+- **Score:** hit
+- **Source:** Claude Code session 2026-10-20 (Opus 5.5)
+- **Applies to:** #550, #551
+- **Rule:** candidate: profile builds read only the user's writing, nothing the AI was given
+
+### 2026-10-20 · A second run of the same chunks as a noise baseline
+
+- **Kind:** testing
+- **Situation:** the with/without-preamble comparison had one run per side, so wording differences could be ordinary run-to-run variation. Added a second with-preamble run on the same API (about $0.20) to measure that variation, and told Peter only after launching it.
+- **Decision:** added the second run to the measurement
+- **Peter:** "please no, we don't need a second run of the same"
+- **Score:** miss
+- **Why it missed:** treated a stricter method as a small addition not worth asking about. Peter's request was to strip the preamble and compare, and the claims that matter (facts that only the preamble carried) don't need a noise baseline to show.
+- **Source:** Claude Code session 2026-10-20 (Opus 5.5)
+- **Applies to:** #550
+- **Rule:** candidate: an addition to a requested run is a question, not a default
+
+### 2026-10-20 · Intentions and poll drafts also get the writing only
+
+- **Kind:** product scope
+- **Situation:** intentions inference and the poll-draft job use the same export with the same preamble. The builder planned to leave them unchanged and raise them as a question in the PR.
+- **Prediction:** drop it for intentions too (65 %) and for poll drafts (55 %)
+- **Peter:** "pls address those other two jobs in the PR as well"
+- **Score:** hit + hit
+- **Source:** Claude Code session 2026-10-20 (Opus 5.5)
+- **Applies to:** #551
+
 ## Decided by the builder
 
 Choices that agents flagged in PRs and that the builder decided because a rule above already covers them (Peter, 2026-10-02: decide what the log supports, raise only real judgement calls). Each is also recorded on its PR, or in the session where Peter asked. The Decided column holds only the builder's part; a rule or decision of Peter's goes in the Rule column. Questions raised to Peter instead are not listed; his answers become entries. Model is the model that wrote the PR (its Co-Authored-By line). Result is "accepted by merge (PR #N, date)" once the PR has merged and Peter didn't correct the choice, "pending" until it merges, and "corrected → entry <title>" when he overrules it; the entry is then scored as a miss.
@@ -2107,7 +2150,7 @@ Choices that agents flagged in PRs and that the builder decided because a rule a
 | 2026-10-02 | #405 | testing | What counts as a dropped pick | Both kinds of picks Loore can't show | An empty Read is a good result | Opus 5.5 | accepted by merge (PR #451, 2026-10-08) |
 | 2026-10-02 | #408 | UX | A failed auto-generate hides LLM Response outside Read | Follow-up issue #416 | Show the choices | Opus 5.5 | accepted by merge (PR #451, 2026-10-08) |
 | 2026-10-02 | #413 | privacy | Admin-only guard, dry run, missing-items count in the todo-merge comparison | Kept | Experiments run on Peter's data; cost is his call | Opus 5.5 | accepted by merge (PR #413, 2026-10-06) |
-| 2026-10-02 | #414 | data safety | The profile note says "keep what they wrote" | Kept | The user's edit wins | Opus 5.5 | pending |
+| 2026-10-02 | #414 | data safety | The profile note says "keep what they wrote" | Kept | The user's edit wins | Opus 5.5 | corrected → entry A profile edit is a new version, kept until new writing contradicts it |
 | 2026-10-02 | #417 | data safety | The todo merge rewords items or moves them out of the section the user named | Keep wording; new items copied word for word; the named section is created if missing | The user's edit wins | Opus 5.5 | accepted by merge (PR #451, 2026-10-08) |
 | 2026-10-02 | #415 | data safety | Purging an AI or system account | Refused | None needed: purging one would delete every AI reply in Loore | Opus 5.5 | pending |
 | 2026-10-02 | #415 | privacy | Cost rows after a purge | Response ids, request refs and prompt-prefix hashes are cleared as well | Cost records are kept in anonymous form (Peter, 2026-10-02) | Opus 5.5 | pending |
