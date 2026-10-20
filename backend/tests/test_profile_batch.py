@@ -1279,8 +1279,11 @@ def test_provisional_first_build_is_rebuilt_from_scratch_at_the_organic_gate(app
     """A generated profile covering under a full chunk of data (an early
     signup's first build) is provisional: when the organic gate trips, the
     seeder requests a from-scratch build instead of an update. Not on the
-    continue rule (a chain in progress), not for a user-written base, not
-    for a profile that already covers a full chunk."""
+    continue rule (a chain in progress), not for a profile that already
+    covers a full chunk. A version the user wrote follows the same rule
+    (voice review, 2026-10-20, #183): a first profile written by hand
+    covers no data and takes the ladder; an edit of a full-chunk version
+    carries its coverage and is updated."""
     ex = pb._exports
     now = datetime.utcnow()
 
@@ -1313,12 +1316,20 @@ def test_provisional_first_build_is_rebuilt_from_scratch_at_the_organic_gate(app
     assert pb._should_seed(v) is True
     assert User.query.get(v.id).profile_needs_full_regen is False
 
-    # The user's own words are never provisional.
+    # A first profile written by hand covers no data: the ladder decides,
+    # as for a generated provisional profile (#183, S1).
     w, tipw = account(0, generated_by="user")
     organic(w, 85_000)
-    assert ex.profile_is_provisional(tipw) is False
+    assert ex.profile_is_provisional(tipw) is True
     assert pb._should_seed(w) is True
-    assert User.query.get(w.id).profile_needs_full_regen is False
+    assert User.query.get(w.id).profile_needs_full_regen is True
+
+    # The user's edit of a full-chunk version carries its coverage.
+    e, tipe = account(90_000, generated_by="user")
+    organic(e, 85_000)
+    assert ex.profile_is_provisional(tipe) is False
+    assert pb._should_seed(e) is True
+    assert User.query.get(e.id).profile_needs_full_regen is False
 
     # A chain in progress (data older than the render) continues; the
     # provisional tip is not a reason to start over.
@@ -1789,6 +1800,402 @@ def test_seeder_builds_the_integration_alone_after_a_refused_one(
     u.profile_batch_pending = False
     _refusal(u, timedelta(minutes=1))
     assert pb._should_seed(u) is False
+
+
+# ── #183: an edit leaves the seed gates as they were ──────────────────
+
+def test_183_edit_of_an_integration_leaves_the_seed_gates_as_they_were(app):
+    """A pre-filled (pinned) account edits its newest version, an
+    integration. The user's version carries the integration's coverage,
+    including the render time of the chain tip the integration merged, so
+    the seeder decides as it did before the edit: writing newer than that
+    render waits for the gates, and an unfinished chain still continues.
+    With the integration's own empty render time, the continue rule
+    measured from the time of the edit and seeded an extra update after
+    every edit. A tip saved before render times existed falls back to its
+    save time on a pinned account, and the edit carries that too."""
+    from backend.utils.profile_versions import coverage_of
+    now = datetime.utcnow()
+
+    def account(unread_written_at, rendered=True):
+        u = _user(profile_force_batch=True)
+        tip = _prev_profile(
+            u, datetime(2026, 5, 1), source_tokens=100_000,
+            gen_type="iterative",
+            rendered_at=(now - timedelta(days=2, minutes=5)
+                         if rendered else None))
+        tip.created_at = now - timedelta(days=2)
+        integration = _prev_profile(u, datetime(2026, 5, 1),
+                                    source_tokens=100_000,
+                                    gen_type="integration")
+        integration.parent_profile_id = tip.id
+        integration.created_at = now - timedelta(days=2) + timedelta(minutes=1)
+        node = _seed_node(u, 3000)
+        node.created_at = unread_written_at
+        db.session.commit()
+        return u, tip, integration
+
+    def edit(u, integration):
+        e = UserProfile(user_id=u.id, generated_by="user", tokens_used=0,
+                        ai_usage="chat", parent_profile_id=integration.id,
+                        **coverage_of(u, integration))
+        e.set_content("edited")
+        db.session.add(e)
+        db.session.commit()
+        return e
+
+    # Writing after the tip's render: growth, which waits for the 80k gate.
+    u, tip, integration = account(now - timedelta(days=1))
+    assert pb._should_seed(u) is False
+    e = edit(u, integration)
+    assert e.source_rendered_at == tip.source_rendered_at
+    assert pb._exports.profile_update_base(u.id).id == e.id
+    assert pb._should_seed(u) is False
+
+    # Writing older than the tip's render: an unfinished chain continues.
+    u, tip, integration = account(now - timedelta(days=3))
+    assert pb._should_seed(u) is True
+    edit(u, integration)
+    assert pb._should_seed(u) is True
+
+    # A tip from before render times: its save time is the boundary.
+    u, tip, integration = account(now - timedelta(days=1), rendered=False)
+    assert pb._should_seed(u) is False
+    e = edit(u, integration)
+    assert e.source_rendered_at == tip.created_at
+    assert pb._should_seed(u) is False
+
+
+def _user_edit(user, version, content="MY CORRECTION"):
+    """The row PUT /profile/<id> saves: a user version on top of the one
+    it changed, with that version's coverage (routes/profile.py)."""
+    from backend.utils.profile_versions import coverage_of
+    e = UserProfile(user_id=user.id, generated_by="user", tokens_used=0,
+                    ai_usage="chat", parent_profile_id=version.id,
+                    **coverage_of(user, version))
+    e.set_content(content)
+    db.session.add(e)
+    db.session.commit()
+    return e
+
+
+def test_183_batch_update_builds_on_the_users_version(app, monkeypatch):
+    """The batch step after an edit builds on it: the edit is the step's
+    previous profile, and the model is told it is the user's with the
+    note the sync loop uses (main sent it bare on the batch path)."""
+    u = _user()
+    tip = _prev_profile(u, datetime(2026, 5, 1), gen_type="iterative")
+    tip.created_at = datetime.utcnow() - timedelta(days=2)
+    integration = _prev_profile(u, datetime(2026, 5, 1),
+                                gen_type="integration")
+    integration.parent_profile_id = tip.id
+    integration.created_at = datetime.utcnow() - timedelta(days=1)
+    db.session.commit()
+    edit = _user_edit(u, integration)
+    _remaining(monkeypatch, 90000)
+    monkeypatch.setattr(pb._exports, "build_user_export_content",
+                        MagicMock(return_value=_chunk()))
+    monkeypatch.setattr(pb._exports, "build_update_template",
+                        lambda uid: "T <<{existing_profile}>> {new_data}")
+
+    req = pb._build_next_profile_request(u)
+
+    assert req["meta"]["prev_profile_id"] == edit.id
+    assert req["meta"]["generation_type"] == "update"
+    text = req["request"]["messages"][0]["content"][0]["text"]
+    note = pb._exports.USER_WRITTEN_PROFILE_NOTE
+    assert text.startswith(f"T <<{note}\n\nMY CORRECTION>> ")
+    # The same {existing_profile} as the sync loop's.
+    assert pb._exports.update_base_content(edit) == f"{note}\n\nMY CORRECTION"
+
+
+def test_183_batch_update_from_a_generated_base_has_no_note(app, monkeypatch):
+    u = _user()
+    _prev_profile(u, datetime(2026, 5, 1))
+    db.session.commit()
+    _remaining(monkeypatch, 90000)
+    monkeypatch.setattr(pb._exports, "build_user_export_content",
+                        MagicMock(return_value=_chunk()))
+    monkeypatch.setattr(pb._exports, "build_update_template",
+                        lambda uid: "T <<{existing_profile}>> {new_data}")
+
+    req = pb._build_next_profile_request(u)
+
+    text = req["request"]["messages"][0]["content"][0]["text"]
+    assert text.startswith("T <<PREVIOUS PROFILE>> ")
+
+
+def test_183_batch_chunk_saved_after_an_edit_saves_nothing(app):
+    """The user edits while a chunk is in the batch. The collected result
+    saves nothing (its cost is logged) and the chain does not advance: the
+    edit stays the newest version, and the seeder's gates start the next
+    run from it."""
+    u = _user()
+    prev = _prev_profile(u, datetime(2026, 5, 1))
+    prev.created_at = datetime.utcnow() - timedelta(days=1)
+    db.session.commit()
+    job, item = _chunk_job(u, prev)
+    edit = _user_edit(u, prev)
+
+    nxt = pb._apply_result(u, item, {"content": "NEVER SAW THE EDIT",
+                                     "input_tokens": 2000,
+                                     "output_tokens": 500},
+                           job.submitted_at)
+
+    assert nxt is None
+    assert UserProfile.query.filter_by(
+        user_id=u.id, generation_type="update",
+        parent_profile_id=prev.id).count() == 0
+    assert pb._exports.profile_update_base(u.id).id == edit.id
+    log = APICostLog.query.filter_by(user_id=u.id).one()
+    assert log.request_type == "profile_batch"
+
+
+def test_183_batch_integration_after_an_edit_saves_nothing(app):
+    u = _user()
+    tip = _prev_profile(u, datetime(2026, 6, 1), gen_type="iterative")
+    tip.created_at = datetime.utcnow() - timedelta(days=1)
+    db.session.commit()
+    job, item = _integration_job(u, tip)
+    edit = _user_edit(u, tip)
+
+    nxt = pb._apply_result(u, item, {"content": "NEVER SAW THE EDIT",
+                                     "input_tokens": 2000,
+                                     "output_tokens": 500},
+                           job.submitted_at)
+
+    assert nxt is None
+    assert UserProfile.query.filter_by(
+        user_id=u.id, generation_type="integration").count() == 0
+    newest = (UserProfile.query.filter_by(user_id=u.id)
+              .order_by(UserProfile.created_at.desc()).first())
+    assert newest.id == edit.id
+    assert APICostLog.query.filter_by(user_id=u.id).count() == 1
+
+
+# ── #183: a rebuild merges the user's version (option 2, batch path) ────
+
+MAY183, JUN183 = datetime(2026, 5, 1), datetime(2026, 6, 1)
+
+
+def _windows183(monkeypatch, remaining, windows):
+    """Pin the remainder and the window per cutoff, and short templates."""
+    monkeypatch.setattr(pb._exports, "count_remaining_units",
+                        lambda uid, cutoff=None: remaining.get(cutoff, 0))
+    monkeypatch.setattr(
+        pb._exports, "build_user_export_content",
+        lambda user, max_tokens=None, **kw: windows.get(kw.get("created_after")))
+    monkeypatch.setattr(pb._exports, "_load_prompt",
+                        lambda name, user_id=None: f"<{name}> {{user_export}}")
+    monkeypatch.setattr(pb._exports, "build_update_template",
+                        lambda uid: "UPDATE <<{existing_profile}>> {new_data}")
+
+
+def _texts183(req):
+    return [m["content"][0]["text"] for m in req["request"]["messages"]]
+
+
+def _run_steps(u, monkeypatch, first, outputs):
+    """Apply each request with a stand-in result until the run ends.
+    Returns the requests in order."""
+    import backend.utils.notifications as notif
+    monkeypatch.setattr(notif, "notify_profile_ready", lambda uid: None)
+    steps, req = [], first
+    while req is not None:
+        steps.append(req)
+        result = {"content": outputs[req["meta"]["kind"]],
+                  "input_tokens": 10, "output_tokens": 5}
+        req = pb._apply_result(u, req["meta"], result,
+                               datetime.utcnow() - timedelta(seconds=1))
+        db.session.commit()
+    return steps
+
+
+def test_183_batch_full_rebuild_merges_the_users_version(app, monkeypatch):
+    """The batch path makes the sync loop's choices: the 2019 window is read
+    without the edit; after the window that reaches May, a merge request
+    carries the rebuilt version and the user's version with main's note;
+    the integration merges the chain with the merge in it."""
+    _wide_window(app)
+    u = _user()
+    tip = _prev_profile(u, MAY183, source_tokens=100_000, gen_type="iterative")
+    tip.created_at = datetime.utcnow() - timedelta(days=3)
+    integration = _prev_profile(u, MAY183, source_tokens=100_000,
+                                gen_type="integration")
+    integration.parent_profile_id = tip.id
+    integration.created_at = datetime.utcnow() - timedelta(days=2)
+    db.session.commit()
+    edit = _user_edit(u, integration, "MY CORRECTION")
+    u.profile_needs_full_regen = True
+    db.session.commit()
+    y2019, spring = datetime(2019, 12, 1), datetime(2026, 5, 15)
+    _windows183(monkeypatch, {None: 180_000, y2019: 90_000, spring: 0}, {
+        None: _chunk("2019 ARCHIVE", latest=y2019),
+        y2019: _chunk("SPRING WRITING", latest=spring)})
+    monkeypatch.setattr(pb._exports, "should_continue_chain",
+                        lambda user, profile: True)
+
+    steps = _run_steps(u, monkeypatch, pb._build_next_profile_request(u), {
+        "chunk": "REBUILT", "merge": "MERGED", "integration": "FINAL"})
+
+    assert [s["meta"]["kind"] for s in steps] == [
+        "chunk", "chunk", "merge", "integration"]
+    assert "MY CORRECTION" not in "".join(_texts183(steps[0]))
+    merge_req = steps[2]
+    assert merge_req["meta"]["merged_profile_id"] == edit.id
+    assert CUSTOM_ID_RE.match(merge_req["request"]["custom_id"])
+    texts = _texts183(merge_req)
+    assert texts[1] == ("Profile No. 2\n- start to 2026-05-01\n\n"
+                        f"{pb._exports.USER_WRITTEN_PROFILE_NOTE}\n\n"
+                        "MY CORRECTION")
+    merge = UserProfile.query.filter_by(merged_profile_id=edit.id).one()
+    assert merge.parent_profile_id == merge_req["meta"]["prev_profile_id"]
+    assert len(_texts183(steps[3])) == 4           # 2 chunks, the merge, prompt
+    assert User.query.get(u.id).profile_pending_merge_id is None
+    final = UserProfile.query.filter_by(user_id=u.id).order_by(
+        UserProfile.created_at.desc()).first()
+    assert final.generation_type == "integration"
+    assert final.parent_profile_id == merge.id
+
+
+def test_183_batch_main_era_hand_written_profile_is_merged(app, monkeypatch):
+    """Review finding 2 on the batch path: a profile written with POST on
+    main (no parent, no cutoff, 0 units) on a 6k-unit account. After
+    deploy the seeder starts the ladder's from-scratch build (S1); the
+    build ends with a merge of the user's profile, which is the account's
+    newest version. A single chunk merged with it needs no integration."""
+    _wide_window(app)
+    u = _user()
+    own = UserProfile(user_id=u.id, generated_by="user", tokens_used=0,
+                      generation_type="initial", source_tokens_used=0,
+                      source_data_cutoff=None,
+                      created_at=datetime.utcnow() - timedelta(days=30))
+    own.set_content("ABOUT ME, IN MY WORDS")
+    db.session.add(own)
+    node = _seed_node(u, 6_000)
+    node.created_at = datetime.utcnow() - timedelta(days=40)
+    db.session.commit()
+
+    assert pb._should_seed(u) is True
+    assert User.query.get(u.id).profile_needs_full_regen is True
+    latest = node.created_at
+    _windows183(monkeypatch, {None: 6_000, latest: 0},
+                {None: _chunk("EARLY WRITING", units=6_000, latest=latest)})
+
+    steps = _run_steps(u, monkeypatch, pb._build_next_profile_request(u), {
+        "chunk": "BUILT", "merge": "BUILT, WITH MY WORDS",
+        "integration": "UNUSED"})
+
+    assert [s["meta"]["kind"] for s in steps] == ["chunk", "merge"]
+    assert "ABOUT ME" not in "".join(_texts183(steps[0]))
+    assert _texts183(steps[1])[1].endswith("ABOUT ME, IN MY WORDS")
+    newest = UserProfile.query.filter_by(user_id=u.id).order_by(
+        UserProfile.created_at.desc()).first()
+    assert newest.merged_profile_id == own.id
+    assert newest.generation_type == "initial"
+    assert "BUILT, WITH MY WORDS" in newest.get_content()
+
+
+def test_183_batch_edit_while_the_first_chunk_is_in_the_batch_is_merged(
+        app, monkeypatch):
+    """Review finding 1, batch path: the user saves a newer edit while a
+    from-scratch chunk 1 is in the batch; the route drops the pending merge
+    of the older edit. Collecting chunk 1 plans the merge again, so the
+    newer edit is merged at its date."""
+    _wide_window(app)
+    u = _user()
+    tip = _prev_profile(u, MAY183, source_tokens=100_000, gen_type="iterative")
+    tip.created_at = datetime.utcnow() - timedelta(days=3)
+    integration = _prev_profile(u, MAY183, source_tokens=100_000,
+                                gen_type="integration")
+    integration.parent_profile_id = tip.id
+    integration.created_at = datetime.utcnow() - timedelta(days=2)
+    db.session.commit()
+    first = _user_edit(u, integration, "FIRST EDIT")
+    first.created_at = datetime.utcnow() - timedelta(days=1)
+    u.profile_needs_full_regen = True
+    db.session.commit()
+    y2019, spring = datetime(2019, 12, 1), datetime(2026, 5, 15)
+    _windows183(monkeypatch, {None: 180_000, y2019: 90_000, spring: 0}, {
+        None: _chunk("2019 ARCHIVE", latest=y2019),
+        y2019: _chunk("SPRING WRITING", latest=spring)})
+    monkeypatch.setattr(pb._exports, "should_continue_chain",
+                        lambda user, profile: True)
+    req = pb._build_next_profile_request(u)
+    db.session.commit()
+    assert User.query.get(u.id).profile_pending_merge_id == first.id
+
+    second = _user_edit(u, first, "SECOND EDIT")
+    u.profile_pending_merge_id = None             # what the route does
+    db.session.commit()
+    steps = _run_steps(u, monkeypatch, req, {
+        "chunk": "REBUILT", "merge": "MERGED", "integration": "FINAL"})
+
+    assert [s["meta"]["kind"] for s in steps] == [
+        "chunk", "chunk", "merge", "integration"]
+    assert steps[2]["meta"]["merged_profile_id"] == second.id
+    assert _texts183(steps[2])[1].endswith("SECOND EDIT")
+
+
+def test_183_batch_merge_collected_after_none_keeps_the_pending_merge(
+        app, monkeypatch):
+    """Review finding 4, batch path: the merge result is collected after
+    the account was set to 'none'. It is saved 'none' and the pending merge
+    is kept, so the merge runs once the account allows AI again."""
+    u = _user()
+    base = _prev_profile(u, JUN183, gen_type="iterative")
+    base.created_at = datetime.utcnow() - timedelta(hours=1)
+    own = UserProfile(user_id=u.id, generated_by="user", tokens_used=0,
+                      ai_usage="chat",
+                      created_at=datetime.utcnow() - timedelta(days=2))
+    own.set_content("MY EDIT")
+    db.session.add(own)
+    db.session.flush()
+    u.profile_pending_merge_id = own.id
+    u.default_ai_usage = "none"
+    db.session.commit()
+    item = {"custom_id": f"profile_{u.id}_{base.id}_merge", "user_id": u.id,
+            "kind": "merge", "prev_profile_id": base.id,
+            "merged_profile_id": own.id, "model_id": "test-model",
+            "chunk_num": 2}
+
+    nxt = pb._apply_result(u, item, {"content": "MERGED", "input_tokens": 10,
+                                     "output_tokens": 5},
+                           datetime.utcnow() - timedelta(seconds=5))
+
+    assert nxt is None
+    assert UserProfile.query.filter_by(merged_profile_id=own.id).one(
+        ).ai_usage == "none"
+    assert User.query.get(u.id).profile_pending_merge_id == own.id
+    u.default_ai_usage = "chat"
+    db.session.commit()
+    assert pb._exports.pending_merge_version(u).id == own.id
+
+
+def test_183_batch_merge_after_an_edit_saves_nothing(app, monkeypatch):
+    u = _user()
+    base = _prev_profile(u, JUN183, gen_type="iterative")
+    base.created_at = datetime.utcnow() - timedelta(days=1)
+    own = UserProfile(user_id=u.id, generated_by="user", tokens_used=0,
+                      created_at=datetime.utcnow() - timedelta(days=2))
+    own.set_content("MY OLDER EDIT")
+    db.session.add(own)
+    db.session.commit()
+    item = {"custom_id": f"profile_{u.id}_{base.id}_merge", "user_id": u.id,
+            "kind": "merge", "prev_profile_id": base.id,
+            "merged_profile_id": own.id, "model_id": "test-model"}
+    submitted = datetime.utcnow()
+    edit = _user_edit(u, base, "A NEWER EDIT")
+
+    nxt = pb._apply_result(u, item, {"content": "MERGED",
+                                     "input_tokens": 10, "output_tokens": 5},
+                           submitted)
+
+    assert nxt is None
+    assert UserProfile.query.filter(
+        UserProfile.merged_profile_id.isnot(None)).count() == 0
+    assert pb._exports.profile_update_base(u.id).id == edit.id
+    assert APICostLog.query.filter_by(user_id=u.id).count() == 1
 
 
 def test_profile_refusal_stop_is_reported_as_refused(app, monkeypatch):
