@@ -152,6 +152,28 @@ def test_plan_repair_reports_complete_and_missing_chains(app):
     assert rt.plan_repair(u)["status"].startswith("complete")
 
 
+def test_apply_branch_records_the_merge_of_a_later_edit(app):
+    """#183: a branch point before the user's version records it as the
+    pending merge, as an import's re-tip does, so the regenerated chain
+    merges it at its date."""
+    u = User(username="edited", plan="alpha", twitter_id=None, approved=True)
+    _db.session.add(u)
+    _db.session.commit()
+    v = _chain(u, [datetime(2025, 1, 1) + timedelta(days=d) for d in (99, 199)])
+    edit = UserProfile(user_id=u.id, generated_by="user", tokens_used=0,
+                       generation_type="initial", ai_usage="chat",
+                       source_tokens_used=v[1].source_tokens_used,
+                       source_data_cutoff=v[1].source_data_cutoff,
+                       parent_profile_id=v[1].id, created_at=datetime(2026, 9, 1))
+    edit.set_content("MY CORRECTION")
+    _db.session.add(edit)
+    _db.session.commit()
+
+    rt.apply_branch(u, v[0])
+
+    assert User.query.get(u.id).profile_pending_merge_id == edit.id
+
+
 def test_apply_branch_stamps_a_render_time_on_legacy_versions(app):
     """Branching from a version that predates render times makes the
     repair moment the boundary, so the tail counts as unfinished even on

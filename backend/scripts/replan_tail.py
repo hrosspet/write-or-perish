@@ -117,10 +117,15 @@ def plan_repair(user):
 
 def apply_branch(user, version):
     """Re-tip the chain at ``version`` (a revert copy stamped with the
-    repair moment, see backend.tasks.exports.retip_profile_chain)."""
+    repair moment, see backend.tasks.exports.retip_profile_chain). As at an
+    import's re-tip, the regenerated chain merges the user's version the
+    old chain carried, when the branch point is before it (#183)."""
     from backend.extensions import db
-    from backend.tasks.exports import retip_profile_chain
+    from backend.tasks.exports import (
+        plan_user_version_merge, profile_update_base, retip_profile_chain)
+    old_base = profile_update_base(user.id)
     copy = retip_profile_chain(user.id, version)
+    plan_user_version_merge(user, old_base, new_base=copy)
     db.session.commit()
     return copy
 
