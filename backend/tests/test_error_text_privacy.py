@@ -122,6 +122,15 @@ def _assert_clean(response, caplog, status):
 
 # --- Responses and log lines -----------------------------------------------
 
+def _assert_logged_with_codes(caplog, type_name):
+    """The log line names the type and codes, and its traceback (what
+    reaches Sentry as frames) has the type without the message."""
+    assert f"{type_name} (sqlstate 23502, table user_profile, column " \
+           "user_id)" in caplog.text
+    assert f"{type_name}: [message removed]" in caplog.text
+    assert any(r.exc_info for r in caplog.records)
+
+
 @pytest.mark.parametrize("method,path,payload,error", [
     ("put", "/api/dashboard/user", {"description": "new text"},
      "Failed to update profile."),
@@ -137,8 +146,40 @@ def test_a_refused_save_returns_and_logs_no_database_text(
     response = getattr(client, method)(path, json=payload)
     _assert_clean(response, caplog, 500)
     assert response.get_json() == {"error": error}
-    # What failed is still logged, as the type
-    assert "DataError" in caplog.text
+    _assert_logged_with_codes(caplog, "DataError")
+
+
+def _profile(ai_usage="chat"):
+    from backend.models import UserProfile
+    user = User.query.filter_by(username="alice").one()
+    profile = UserProfile(user_id=user.id, generated_by="user",
+                          tokens_used=0, privacy_level="private",
+                          ai_usage=ai_usage)
+    profile.set_content("the profile as it was")
+    _db.session.add(profile)
+    _db.session.commit()
+    return profile.id
+
+
+@pytest.mark.parametrize("account_ai_usage", [
+    "chat",  # the profile itself is updated
+    "none",  # an edit while AI is off is saved as a new version (#346)
+])
+def test_a_refused_profile_edit_returns_and_logs_no_database_text(
+        client, monkeypatch, caplog, account_ai_usage):
+    profile_id = _profile()
+    user = User.query.filter_by(username="alice").one()
+    user.default_ai_usage = account_ai_usage
+    _db.session.commit()
+    caplog.set_level(logging.DEBUG)
+    _refusing_commit(monkeypatch)
+    response = client.put(f"/api/profile/{profile_id}",
+                          json={"content": "the profile, edited"})
+    _assert_clean(response, caplog, 500)
+    assert response.get_json() == {"error": "Failed to update profile"}
+    _assert_logged_with_codes(caplog, "DataError")
+    edit_as_version = "as a new version of" in caplog.text
+    assert edit_as_version == (account_ai_usage == "none")
 
 
 def test_a_refused_node_delete_returns_no_database_text(
@@ -155,7 +196,7 @@ def test_a_refused_node_delete_returns_no_database_text(
     response = client.delete(f"/api/nodes/{node.id}")
     _assert_clean(response, caplog, 500)
     assert response.get_json() == {"error": "Error deleting node"}
-    assert "OperationalError" in caplog.text
+    _assert_logged_with_codes(caplog, "OperationalError")
 
 
 # --- The engine -------------------------------------------------------------
@@ -192,47 +233,84 @@ def test_an_unhandled_exception_logs_type_and_frames_not_its_message(
     assert MARKER not in caplog.text
 
 
-def test_create_app_filters_flasks_handler_without_creating_the_logger(app):
-    """The filter goes on Flask's default handler and the app's logger by
-    name; app.logger itself is not created (in a Celery worker that would
-    attach Flask's handler before Celery's)."""
-    from flask.logging import default_handler
-    assert "logger" not in vars(app)
-    for target in (default_handler, logging.getLogger(app.name)):
-        assert sum(isinstance(f, error_privacy.TracebackWithoutMessages)
-                   for f in target.filters) == 1
+def test_importing_the_backend_installs_the_scrubbing_once():
+    import backend  # noqa: F401
+    factory = logging.getLogRecordFactory()
+    assert factory.scrubs_tracebacks
+    error_privacy.install_traceback_scrubbing("backend")
+    assert logging.getLogRecordFactory() is factory
 
 
-def test_the_filter_covers_child_loggers_through_the_handler():
-    """Flask's default handler takes every backend.* module's lines in
-    production; the filter on it formats their tracebacks."""
-    parent = logging.getLogger("error-privacy-test")
-    out = io.StringIO()
-    handler = logging.StreamHandler(out)
-    parent.addHandler(handler)
-    parent.propagate = False
+def _log_chained_error(logger_name):
     try:
-        error_privacy.install_traceback_filter(parent, [handler])
-        error_privacy.install_traceback_filter(parent, [handler])  # once
-        assert len(handler.filters) == 1 and len(parent.filters) == 1
         try:
-            try:
-                raise KeyError(MARKER)
-            except KeyError as e:
-                raise ValueError(f"wrapped {MARKER}") from e
-        except ValueError:
-            logging.getLogger("error-privacy-test.child").exception(
-                "Save failed for node %s", 7)
+            raise KeyError(MARKER)
+        except KeyError as e:
+            raise ValueError(f"wrapped {MARKER}") from e
+    except ValueError:
+        logging.getLogger(logger_name).exception(
+            "Save failed for node %s", 7)
+
+
+def test_tracebacks_stay_clean_whatever_handlers_the_root_logger_has():
+    """A backend.* traceback is cleaned when the record is made, so a root
+    handler added by logging.basicConfig() (or gunicorn's log config, or
+    pytest's) writes it without the message too. Other loggers' records
+    are left alone."""
+    root = logging.getLogger()
+    saved = root.handlers[:]
+    out = io.StringIO()
+    root.handlers = []
+    try:
+        logging.basicConfig(stream=out, format="%(name)s %(message)s")
+        _log_chained_error("backend.routes.error_privacy_probe")
+        _log_chained_error("some_library")
     finally:
-        parent.removeHandler(handler)
-        parent.filters.clear()
-    written = out.getvalue()
-    assert "Save failed for node 7" in written
-    assert "KeyError: [message removed]" in written
-    assert "ValueError: [message removed]" in written
-    assert "direct cause of the following exception" in written
-    assert "test_the_filter_covers_child_loggers_through_the_handler" in written
-    assert MARKER not in written
+        for handler in root.handlers:
+            handler.close()
+        root.handlers = saved
+    ours, theirs = out.getvalue().split("some_library ", 1)
+    assert "Save failed for node 7" in ours
+    assert "KeyError: [message removed]" in ours
+    assert "ValueError: [message removed]" in ours
+    assert "direct cause of the following exception" in ours
+    assert "in _log_chained_error" in ours  # the frame
+    assert MARKER not in ours
+    assert MARKER in theirs  # not a backend logger: unchanged
+
+
+# --- Scrubbing cost ---------------------------------------------------------
+
+@pytest.mark.parametrize("opening", [
+    'value "', "invalid input syntax for ",
+    'invalid input syntax for type integer: "', "DETAIL:", "CONTEXT:",
+    "Key (", "Failing row contains ", "LINE 1: ", "[parameters: "])
+def test_scrubbing_takes_linear_time_on_crafted_text(opening):
+    """An opening phrase repeated with no closing one made the patterns
+    quadratic (4,000 copies of 'value "' in 44 KB took 0.7 s). Patterns are
+    linear now, and text is cut at MAX_SCRUB_CHARS before they run."""
+    import time
+    text = opening * (200_000 // len(opening))
+    started = time.perf_counter()
+    error_privacy.scrub_text(text, [ValueError(MARKER)])
+    capped = time.perf_counter() - started
+    saved = error_privacy.MAX_SCRUB_CHARS
+    error_privacy.MAX_SCRUB_CHARS = 10 ** 9
+    try:
+        started = time.perf_counter()
+        error_privacy.strip_database_values(text)
+        uncapped = time.perf_counter() - started
+    finally:
+        error_privacy.MAX_SCRUB_CHARS = saved
+    assert capped < 0.5 and uncapped < 1.0  # milliseconds in practice
+
+
+def test_long_text_is_cut_before_scrubbing():
+    text = "x" * (error_privacy.MAX_SCRUB_CHARS + 10) + MARKER
+    scrubbed = error_privacy.strip_database_values(text)
+    assert MARKER not in scrubbed
+    assert scrubbed.endswith(
+        f" [{10 + len(MARKER)} more characters removed]")
 
 
 # --- Sentry -----------------------------------------------------------------
@@ -285,11 +363,14 @@ def test_sentry_gets_types_and_frames_but_no_values(monkeypatch):
             log.warning(f"Retrying the save: {e}")
             log.error("Save failed: %s", e)
             log.error(f"Save failed again: {e}")
+            # What the routes write: the traceback and the codes
+            log.exception("Save refused: %s",
+                          error_privacy.describe_exception(e))
             sentry_sdk.capture_exception()
     finally:
         sentry_sdk.init(dsn=None)
 
-    assert len(events) == 3
+    assert len(events) == 4
     for event in events:
         dumped = json.dumps(event, default=str)
         assert MARKER not in dumped
@@ -299,19 +380,22 @@ def test_sentry_gets_types_and_frames_but_no_values(monkeypatch):
                    for c in crumbs)
 
     logged = [e for e in events if e.get("logentry")]
+    codes = "(sqlstate 23502, table user_profile, column user_id)"
     assert {e["logentry"]["formatted"] for e in logged} == {
-        "Save failed: IntegrityError", "Save failed again: IntegrityError"}
+        "Save failed: IntegrityError", "Save failed again: IntegrityError",
+        f"Save refused: IntegrityError {codes}"}
 
-    captured = [e for e in events if e.get("exception")][-1]
-    values = captured["exception"]["values"]
-    assert [v["type"] for v in values] == ["_PgError", "IntegrityError"]
-    top = values[-1]
-    assert top["value"] == ("[message removed] (sqlstate 23502, table "
-                            "user_profile, column user_id)")
-    frames = top["stacktrace"]["frames"]
-    assert frames[-1]["function"] == "save_profile_for_test"
-    assert frames[-1]["lineno"]
-    assert all("vars" not in f for f in frames)
+    with_exception = [e for e in events if e.get("exception")]
+    assert len(with_exception) == 2  # the route's log line, the capture
+    for captured in with_exception:
+        values = captured["exception"]["values"]
+        assert [v["type"] for v in values] == ["_PgError", "IntegrityError"]
+        top = values[-1]
+        assert top["value"] == f"[message removed] {codes}"
+        frames = top["stacktrace"]["frames"]
+        assert frames[-1]["function"] == "save_profile_for_test"
+        assert frames[-1]["lineno"]
+        assert all("vars" not in f for f in frames)
 
 
 def test_database_values_are_stripped_from_any_text():
