@@ -11,6 +11,8 @@
 - A dump gets its .ok marker only when pg_dump succeeded; the media sync
   runs anyway, and a failed sync is retried once.
 - A failed run is reported (OnFailure= → scripts/backup-alert.sh).
+- The database password reaches pg_dump through PGPASSWORD, never its
+  command line, and is never logged.
 
 The script runs in its local mode (BACKUP_BUCKET is a directory) with a
 stub pg_dump; the gs:// path needs a real bucket and is not tested here."""
@@ -308,6 +310,66 @@ def test_backup_without_bucket_fails_loudly(env):
     result = _run(env)
     assert result.returncode == 1
     assert "BACKUP_BUCKET is not set" in result.stderr
+
+
+# --- the database password stays off pg_dump's command line ------------------
+# Any process on the VM can read another's arguments (ps), not its
+# environment. The stub records what pg_dump received.
+
+def _recording_pg_dump(tmp_path):
+    argv_file = tmp_path / "pg_dump-argv"
+    env_file = tmp_path / "pg_dump-pgpassword"
+    _stub(tmp_path / "bin", "pg_dump",
+          f'printf "%s\\n" "$@" > "{argv_file}"\n'
+          f'if [ "${{PGPASSWORD+set}}" = set ]; then '
+          f'printf "%s" "$PGPASSWORD" > "{env_file}"; fi\n'
+          'echo fake-dump\n')
+    return argv_file, env_file
+
+
+@pytest.mark.parametrize("url, password, passed_url", [
+    # URL-encoded password (@, /, a backslash), a port, a query parameter
+    ("postgresql://loore:s3cr%40t%2Fp%5Cw@db.internal:5433/loore_prod"
+     "?sslmode=require",
+     "s3cr@t/p\\w",
+     "postgresql://loore@db.internal:5433/loore_prod?sslmode=require"),
+    # no port
+    ("postgresql://loore:plain-pw@localhost/loore_prod",
+     "plain-pw",
+     "postgresql://loore@localhost/loore_prod"),
+    # the postgres:// spelling and a password with a colon
+    ("postgres://loore:a:b-pw@127.0.0.1/loore_prod",
+     "a:b-pw",
+     "postgresql://loore@127.0.0.1/loore_prod"),
+])
+def test_pg_dump_gets_the_password_in_its_environment_only(
+        env, tmp_path, url, password, passed_url):
+    argv_file, env_file = _recording_pg_dump(tmp_path)
+    result = _run(dict(env, DATABASE_URL=url))
+    assert result.returncode == 0, result.stderr
+
+    argv = argv_file.read_text().splitlines()
+    assert f"--dbname={passed_url}" in argv
+    raw_password = url.split("://", 1)[1].rsplit("@", 1)[0].split(":", 1)[1]
+    for secret in {password, raw_password}:
+        assert not any(secret in arg for arg in argv)
+        assert secret not in result.stdout + result.stderr
+    assert env_file.read_text() == password
+
+
+def test_pg_dump_without_a_password_gets_no_pgpassword(env, tmp_path):
+    argv_file, env_file = _recording_pg_dump(tmp_path)
+    result = _run(dict(env, DATABASE_URL="postgresql:///loore_prod"))
+    assert result.returncode == 0, result.stderr
+    assert "--dbname=postgresql:///loore_prod" in argv_file.read_text().splitlines()
+    assert not env_file.exists()
+
+
+def test_a_database_url_that_is_not_postgres_fails_without_echoing_it(env):
+    result = _run(dict(env, DATABASE_URL="mysql://u:hunter2-pw@h/d"))
+    assert result.returncode == 1
+    assert "DATABASE_URL is not a postgresql:// URL" in result.stderr
+    assert "hunter2" not in result.stdout + result.stderr
 
 
 # --- failure reporting -----------------------------------------------------

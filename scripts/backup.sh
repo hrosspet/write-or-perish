@@ -40,6 +40,48 @@ die() { log "ERROR: $*" >&2; exit 1; }
 [ -n "${DATABASE_URL:-}" ] || die "DATABASE_URL is not set"
 [ -n "${BACKUP_BUCKET:-}" ] || die "BACKUP_BUCKET is not set — backups are NOT running. Set it in .env.production (docs/RUNBOOKS.md → Backups)."
 
+# --- database connection -----------------------------------------------------
+# The password never goes on pg_dump's command line: any process on the VM
+# can read another process's arguments (ps), but not its environment. So
+# DATABASE_URL is split here, pg_dump gets the URL without the password, and
+# the password goes in PGPASSWORD in pg_dump's environment only (see
+# run_pg_dump). The URL keeps its port (or none) and its query parameters
+# (e.g. sslmode). Nothing in this script logs the URL or the password.
+# Form: postgresql://[user[:password]@][host][:port][/dbname][?params]
+url_decode() {  # %XX → byte; printf is a builtin, so no process sees it
+  local s="${1//\\/\\\\}"
+  printf '%b' "${s//%/\\x}"
+}
+
+case "${DATABASE_URL%%://*}" in
+  postgres|postgresql|postgresql+*) ;;
+  *) die "DATABASE_URL is not a postgresql:// URL" ;;
+esac
+DB_REST="${DATABASE_URL#*://}"
+DB_AUTHORITY="${DB_REST%%[/?]*}"        # [user[:password]@][host][:port]
+DB_TAIL="${DB_REST:${#DB_AUTHORITY}}"   # [/dbname][?params]
+DB_USER=""
+DB_PASSWORD=""
+DB_HOSTPORT="$DB_AUTHORITY"
+if [[ "$DB_AUTHORITY" == *@* ]]; then
+  DB_USERINFO="${DB_AUTHORITY%@*}"
+  DB_HOSTPORT="${DB_AUTHORITY##*@}"
+  DB_USER="${DB_USERINFO%%:*}"          # stays %-encoded; libpq decodes it
+  if [[ "$DB_USERINFO" == *:* ]]; then
+    DB_PASSWORD="$(url_decode "${DB_USERINFO#*:}")"
+  fi
+  unset DB_USERINFO
+fi
+DB_URL_NO_PASSWORD="postgresql://${DB_USER:+${DB_USER}@}${DB_HOSTPORT}${DB_TAIL}"
+
+run_pg_dump() {
+  if [ -n "$DB_PASSWORD" ]; then
+    PGPASSWORD="$DB_PASSWORD" pg_dump "$@"
+  else
+    pg_dump "$@"
+  fi
+}
+
 AUDIO_DIR="${AUDIO_STORAGE_PATH:-data/audio}"
 DEST="${BACKUP_BUCKET%/}"
 STAMP="$(date -u +'%Y%m%dT%H%M%SZ')"
@@ -113,13 +155,13 @@ FAILED=""
 # the function fail, so no .ok marker is written for it.
 dump_database() {
   if [ "$MODE" = gcs ]; then
-    pg_dump --format=custom --no-owner --no-privileges "$DATABASE_URL" \
+    run_pg_dump --format=custom --no-owner --no-privileges --dbname="$DB_URL_NO_PASSWORD" \
       | gcloud storage cp --quiet - "${DEST}/db/${DUMP_NAME}" || return 1
     SIZE="$(gcloud storage objects describe "${DEST}/db/${DUMP_NAME}" --format='value(size)')" || return 1
     printf '%s\n' "$SIZE" | gcloud storage cp --quiet - "${DEST}/db/${DUMP_NAME}.ok" || return 1
   else
     mkdir -p "${DEST}/db" || return 1
-    pg_dump --format=custom --no-owner --no-privileges "$DATABASE_URL" \
+    run_pg_dump --format=custom --no-owner --no-privileges --dbname="$DB_URL_NO_PASSWORD" \
       > "${DEST}/db/${DUMP_NAME}" || return 1
     SIZE="$(wc -c < "${DEST}/db/${DUMP_NAME}" | tr -d ' ')" || return 1
     printf '%s\n' "$SIZE" > "${DEST}/db/${DUMP_NAME}.ok" || return 1
