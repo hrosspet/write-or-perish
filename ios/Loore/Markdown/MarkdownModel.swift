@@ -129,6 +129,7 @@ enum MarkdownParser {
 
     static func parse(_ text: String) -> MarkdownDocument {
         guard !text.isEmpty else { return .empty }
+        let text = MarkdownLinkedImages.normalize(text)
         let document = Document(parsing: text, options: [.disableSmartOpts])
         return MarkdownDocument(blocks: blocks(Array(document.children), path: ""))
     }
