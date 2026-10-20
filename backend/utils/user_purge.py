@@ -1347,9 +1347,27 @@ def _purge_user_content(user_id, dry_run, heartbeat, scope):
     for attr, value in PIPELINE_FLAG_RESETS.items():
         setattr(user, attr, value)
     user.prefilled_handle = None
+    _clear_dropped_description(user_id)
     db.session.commit()
     _drop_public_pages(user)
     return dict(counts)
+
+
+def _clear_dropped_description(user_id):
+    """Fallback for #538. The short profile description left the model and
+    the deploy's auto-generated migration drops its column, with the
+    stored text. Should the column still exist (the migration missed it),
+    the purge clears the user's description here, as it did before, so a
+    purge never leaves one behind. Raw SQL: the model no longer maps the
+    column. Remove once prod's ``user`` table is confirmed to have no
+    ``description`` column (PR #539, "After the deploy")."""
+    from sqlalchemy import inspect, text
+    conn = db.session.connection()
+    if any(c["name"] == "description"
+           for c in inspect(conn).get_columns("user")):
+        conn.execute(text(
+            'UPDATE "user" SET description = \'\' WHERE id = :id'),
+            {"id": user_id})
 
 
 # ── Jobs: schedule, cancel, claim, run ──────────────────────────────────

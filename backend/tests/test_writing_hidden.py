@@ -1047,3 +1047,28 @@ def test_the_admin_views_and_undo_with_an_old_description_record(
     assert r.status_code == 200, r.get_json()
     assert _same_as(before, _alice_snapshot(world))
     assert UserDataPurgeHidden.query.count() == 0
+
+
+def test_a_purge_clears_a_description_the_migration_missed(app, world, stubs):
+    """The fallback in the purge (#538): had the deploy's migration not
+    dropped the column, the purge still clears the user's description,
+    and only hers. Every other purge test runs it without the column."""
+    from sqlalchemy import text
+    a, b = world.alice.id, world.bob.id
+    _db.session.execute(text(
+        'ALTER TABLE "user" ADD COLUMN description VARCHAR(128)'))
+    _db.session.execute(text(
+        'UPDATE "user" SET description = :d WHERE id IN (:a, :b)'),
+        {"d": "an old bio", "a": a, "b": b})
+    _db.session.commit()
+    _ask(app, world)
+    job = UserDataPurge.query.one()
+    tokens = []
+    later = job.scheduled_for + timedelta(minutes=1)
+    assert up.dispatch_due_jobs(lambda j, t: tokens.append(t),
+                                now=later) == [job.id]
+    assert up.run_purge_job(job.id, tokens[0]) == "done"
+    rows = dict(_db.session.execute(text(
+        'SELECT id, description FROM "user" WHERE id IN (:a, :b)'),
+        {"a": a, "b": b}).all())
+    assert rows == {a: "", b: "an old bio"}
