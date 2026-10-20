@@ -80,7 +80,7 @@ Every route the backend registers, grouped by feature area, with the request and
 | Import, export, references, share, commons, admin, webhooks | 2.5 | 72 JSON (+14 server-rendered HTML/XML public pages) | 63 |
 | **Total** (profile-progress counted once) | | **203 JSON/redirect routes** | **~172** |
 
-Streaming endpoints: the six `GET /api/sse/...` streams (2.3). File uploads: `POST /api/nodes/` (multipart), `/api/nodes/upload/*` (chunked), `POST /api/drafts/streaming/<sid>/audio-chunk` (multipart, 15 s chunks), `/api/import/*/analyze` (multipart archives) (2.2, 2.3, 2.5). File downloads: `GET /media/<path>` (audio, Range support), `GET /api/nodes/<id>/audio-download`, `GET /api/export*` (2.2, 2.5).
+Streaming endpoints: the six `GET /api/sse/...` streams (2.3). File uploads: `POST /api/nodes/` (multipart), `/api/nodes/upload/*` (chunked), `POST /api/drafts/streaming/<sid>/audio-chunk` (multipart, 15 s chunks), `/api/import/*/analyze` (multipart archives) (2.2, 2.3, 2.5). File downloads: `GET /media/<path>` (audio, Range support), `GET /api/nodes/<id>/audio-download`, `GET /api/export/threads` (2.2, 2.5).
 
 ### 2.1 Auth (`/auth`)
 
@@ -1877,12 +1877,6 @@ Shared confirm response counters (Markdown, Claude, ChatGPT confirm, and the Twi
 ```
 - Notes: the client detects "a new profile version landed" by `latest_profile.id` changing, then fetches the content from `/api/dashboard`. The watcher dispatches `loore_profile_progress` / `loore_profile_done` window events that other components listen to.
 
-##### `GET /api/export`
-- Backend: routes/export_data.py:export_data
-- Auth: login
-- Called from: not called by the frontend.
-- Response 200: `{ "user": {id, twitter_id, username, description, created_at}, "nodes": [{id, content, node_type, parent_id, linked_node_id, token_count, created_at, updated_at}], "versions": [{id, node_id, content, timestamp}] }` (own nodes only; decrypts every node: expensive).
-
 ##### `DELETE /api/delete_my_data`
 - Backend: routes/export_data.py:delete_my_data
 - Auth: login
@@ -2195,7 +2189,6 @@ For iOS: none are needed. The `https://loore.org/@user/slug` and `/node/<id>` UR
 
 | Method + path | Used by |
 |---|---|
-| `GET /api/export` | nobody (legacy JSON export) |
 | `DELETE /api/delete_my_data` | nobody (no UI) |
 | `POST /api/external/clip` | Chrome extension (`extension/background.js`, bearer token) |
 | `GET /api/external/clip/status` | Chrome extension (`extension/options.js`, bearer token) |
