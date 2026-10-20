@@ -7,6 +7,8 @@ jest.mock('../api', () => ({
 jest.mock('../contexts/ToastContext', () => ({ useToast: () => ({ addToast: jest.fn() }) }));
 // The speaker needs the audio and user contexts; the page only places it.
 jest.mock('../components/SpeakerIcon', () => () => <button type="button">Play audio</button>);
+let mockUser = { voice_mode_enabled: true };
+jest.mock('../contexts/UserContext', () => ({ useUser: () => ({ user: mockUser }) }));
 jest.mock('../components/NodeFormModal', () => ({ children }) => <div>{children}</div>);
 
 import React from 'react';
@@ -69,6 +71,7 @@ const show = (item, state) => {
 };
 
 beforeEach(() => {
+  mockUser = { voice_mode_enabled: true };
   api.get.mockReset();
   api.post.mockReset();
   api.delete.mockReset();
@@ -114,10 +117,81 @@ test('a page shows its source, byline, title once and the text', async () => {
   const text = screen.getByTestId('reference-text').textContent;
   expect(text).toContain('The first paragraph of the essay.');
   expect(text).not.toContain('On slow evenings');
-  expect(screen.getByRole('link', { name: 'Open page ↗' })).toHaveAttribute('href', page.url);
+  expect(screen.getByRole('link', { name: 'Open page' })).toHaveAttribute('href', page.url);
   // Not a tweet: the verdict keeps its quote labels (#502).
   expect(screen.getByRole('button', { name: 'Good quote' })).toBeInTheDocument();
   expect(screen.getByText(/Not yet shown by Loore in a conversation/)).toBeInTheDocument();
+});
+
+test('the speaker sits last on the byline line, not in the footer', async () => {
+  const { container } = show(page);
+  await screen.findByRole('heading', { name: 'On slow evenings' });
+
+  const byline = screen.getByTestId('reference-byline');
+  const speaker = screen.getByRole('button', { name: 'Play audio' });
+  expect(byline).toContainElement(speaker);
+  expect(container.querySelector('.ref-card-foot')).not.toContainElement(speaker);
+  // After the author and the date: the last thing on the line.
+  expect(byline.lastElementChild).toContainElement(speaker);
+  expect(screen.getAllByRole('button', { name: 'Play audio' })).toHaveLength(1);
+});
+
+test('with a title the original opens from an icon-only link after it; the footer has no link', async () => {
+  const { container } = show(page);
+  const heading = await screen.findByRole('heading', { name: 'On slow evenings' });
+  const link = screen.getByRole('link', { name: 'Open page' });
+  expect(heading).toContainElement(link);
+  expect(link).toHaveAttribute('href', page.url);
+  expect(link).toHaveAttribute('target', '_blank');
+  expect(link).toHaveAttribute('rel', 'noopener noreferrer');
+  expect(link.textContent).toBe('');
+  // The icon is joined to the last word, so it cannot wrap alone.
+  expect(link.parentElement).toHaveClass('ref-card-title-tail');
+  expect(link.parentElement.textContent).toBe('evenings');
+  expect(container.querySelector('.ref-card-foot a')).toBeNull();
+});
+
+test('with no title the link reads "Open page ↗" where the title would be', async () => {
+  const { container } = show({ ...page, title: '', content: 'Just some text.' });
+  const link = await screen.findByRole('link', { name: 'Open page ↗' });
+  expect(link).toHaveAttribute('href', page.url);
+  expect(container.querySelector('h1')).toBeNull();
+  expect(container.querySelector('.ref-card-foot')).not.toContainElement(link);
+  expect(link.compareDocumentPosition(screen.getByTestId('reference-text')))
+    .toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+});
+
+test('with no URL there is no link, with or without a title', async () => {
+  const { container, unmount } = show({ ...page, url: null });
+  await screen.findByRole('heading', { name: 'On slow evenings' });
+  expect(container.querySelectorAll('.ref-card a')).toHaveLength(0);
+  unmount();
+  const second = show({ ...page, url: null, title: null });
+  await screen.findByTestId('reference-text');
+  expect(second.container.querySelectorAll('.ref-card a')).toHaveLength(0);
+});
+
+test('no author, no date and no voice mode: no byline row at all', async () => {
+  mockUser = { voice_mode_enabled: false };
+  const bare = {
+    ...page, author_handle: null, author_name: null, posted_at: null, fetched_at: null,
+  };
+  const { container } = show(bare);
+  await screen.findByRole('heading', { name: 'On slow evenings' });
+  expect(screen.queryByTestId('reference-byline')).toBeNull();
+  expect(container.querySelector('.ref-card-byline-row')).toBeNull();
+  expect(screen.queryByRole('button', { name: 'Play audio' })).toBeNull();
+});
+
+test('with voice mode the speaker still gets its line when there is no author or date', async () => {
+  const bare = {
+    ...page, author_handle: null, author_name: null, posted_at: null, fetched_at: null,
+  };
+  show(bare);
+  await screen.findByRole('heading', { name: 'On slow evenings' });
+  expect(screen.getByTestId('reference-byline')).toContainElement(
+    screen.getByRole('button', { name: 'Play audio' }),
+  );
 });
 
 test('a video keeps its player in the card and its description behind the toggle', async () => {
@@ -131,7 +205,7 @@ test('a video keeps its player in the card and its description behind the toggle
   fireEvent.click(screen.getByRole('button', { name: 'Show stored text' }));
   expect(screen.getByTestId('reference-text').textContent).toContain('4:10 The argument');
   expect(screen.getByRole('button', { name: 'Hide stored text' })).toBeInTheDocument();
-  expect(screen.getByRole('link', { name: 'YouTube ↗' })).toHaveAttribute('href', video.url);
+  expect(screen.getByRole('link', { name: 'Open on YouTube' })).toHaveAttribute('href', video.url);
 });
 
 test('opening the page marks the reference read once, against the reply it was opened from', async () => {
