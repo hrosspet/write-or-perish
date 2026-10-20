@@ -435,8 +435,7 @@ def _call_llm_with_retries(self, model_id, prompt_text, user_id,
 def _save_profile(user, model_id, profile_text, response,
                    source_tokens_used, source_data_cutoff,
                    generation_type, parent_profile_id=None, batch=False,
-                   source_origin_stats=None, source_rendered_at=None,
-                   merged_profile_id=None):
+                   source_origin_stats=None, source_rendered_at=None, merged_profile_id=None):
     """Save a new UserProfile and log API cost. Returns the profile.
 
     batch=True records the Batch API discount in the cost log (issue #173).
