@@ -734,11 +734,41 @@ def _do_merge(self, user, model_id, base, version, api_keys):
     })
     response = LLMProvider.get_completion(model_id, messages, api_keys)
     refuse_truncated_profile(user, model_id, response, "merge")
-    if base_moved(user.id, base.id):
-        discard_step_output(user, model_id, response, "merge")
-        raise ProfileBaseMoved(f"user {user.id}: merge")
+    _discard_if_base_moved(user, model_id, base.id, response, "merge")
     return response["content"], save_merge(
         user, model_id, response, base, version)
+
+
+def _before_step(self, user, model_id, base_id, api_keys, job):
+    """The sync loop's checks before a step builds on ``base_id``: raise
+    ProfileBaseMoved when a newer version is the base, else run the merge
+    step when one is due (``_merge_if_due``)."""
+    if base_moved(user.id, base_id):
+        raise ProfileBaseMoved(f"user {user.id}: {job}")
+    return _merge_if_due(self, user, model_id, base_id, api_keys)
+
+
+def _discard_if_base_moved(user, model_id, base_id, response, job):
+    """After a step's call: when the base moved meanwhile, log the cost,
+    save nothing and raise ProfileBaseMoved."""
+    if base_moved(user.id, base_id):
+        discard_step_output(user, model_id, response, job)
+        raise ProfileBaseMoved(f"user {user.id}: {job}")
+
+
+def _merge_if_due(self, user, model_id, base_id, api_keys, run_ends=False):
+    """The sync loop's merge step (#183), when one is pending and due on
+    the chain's version ``base_id`` (``merge_due``; always when the run
+    ends). Returns (text, saved version), or None."""
+    pending = pending_merge_version(user) if base_id is not None else None
+    if pending is None:
+        return None
+    base = UserProfile.query.get(base_id)
+    if not run_ends and not merge_due(
+            user, base, pending,
+            more_to_read=should_continue_chain(user, base)):
+        return None
+    return _do_merge(self, user, model_id, base, pending, api_keys)
 
 
 def retip_profile_chain(user_id, version):
@@ -1315,9 +1345,8 @@ def _do_integration(self, user, model_id, last_iterative_profile_id,
 
     response = LLMProvider.get_completion(model_id, messages, api_keys)
     refuse_truncated_profile(user, model_id, response, "integration")
-    if base_moved(user.id, last_iterative_profile_id):
-        discard_step_output(user, model_id, response, "integration")
-        raise ProfileBaseMoved(f"user {user.id}: integration")
+    _discard_if_base_moved(user, model_id, last_iterative_profile_id,
+                           response, "integration")
 
     last_profile = chain[-1]
     new_profile = _save_profile(
@@ -1440,22 +1469,15 @@ def _chunked_profile_loop(self, user, model_id, update_template,
                 f"remains — ending the run at {chunk_num} chunk(s)")
             break
         # The user saved a version (an edit or a revert) while the run was
-        # working: the next step would build past it (#183).
-        if base_moved(user.id, current_profile_id):
-            raise ProfileBaseMoved(f"user {user.id}: chunk {chunk_num + 1}")
-        # A rebuilt chain that has reached the date of the user's version
-        # it must merge merges it now and goes on from the merge (#183).
-        base_version = (UserProfile.query.get(current_profile_id)
-                        if current_profile_id is not None else None)
-        pending = (pending_merge_version(user)
-                   if base_version is not None else None)
-        if pending is not None and merge_due(
-                user, base_version, pending,
-                more_to_read=should_continue_chain(user, base_version)):
-            current_profile_content, merged = _do_merge(
-                self, user, model_id, base_version, pending, api_keys)
-            current_profile_id = merged.id
-            saved = merged
+        # working: the next step would build past it, so the run ends
+        # (ProfileBaseMoved). A rebuilt chain that has reached the date of
+        # the user's version it must merge merges it now and goes on from
+        # the merge (#183).
+        merge = _before_step(self, user, model_id, current_profile_id,
+                             api_keys, f"chunk {chunk_num + 1}")
+        if merge is not None:
+            current_profile_content, saved = merge
+            current_profile_id = saved.id
             continue
         remaining = count_remaining_units(user.id, current_cutoff)
         if remaining <= 0:
@@ -1509,9 +1531,8 @@ def _chunked_profile_loop(self, user, model_id, update_template,
             user, model_id, response, f"chunk {chunk_num}")
         # The same check after the call: a version saved while this chunk
         # was generated stays the newest, and the next run builds on it.
-        if base_moved(user.id, current_profile_id):
-            discard_step_output(user, model_id, response, f"chunk {chunk_num}")
-            raise ProfileBaseMoved(f"user {user.id}: chunk {chunk_num}")
+        _discard_if_base_moved(user, model_id, current_profile_id, response,
+                               f"chunk {chunk_num}")
 
         observed = record_token_ratio(
             user, model_id, chunk_units, response.get("input_tokens"))
@@ -1559,13 +1580,10 @@ def _chunked_profile_loop(self, user, model_id, update_template,
     # The run ends before the chain reached the date of the user's version
     # it must merge (the version is newer than all of the writing): the
     # merge is the run's last step (#183).
-    pending = (pending_merge_version(user)
-               if current_profile_id is not None else None)
-    if pending is not None:
-        _text, merged = _do_merge(
-            self, user, model_id, UserProfile.query.get(current_profile_id),
-            pending, api_keys)
-        current_profile_id = merged.id
+    merge = _merge_if_due(self, user, model_id, current_profile_id, api_keys,
+                          run_ends=True)
+    if merge is not None:
+        current_profile_id = merge[1].id
 
     return current_profile_id, chunk_num, cumulative_units
 
