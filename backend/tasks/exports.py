@@ -1089,6 +1089,22 @@ def _messages_for(prompt_text):
     return [{"role": "user", "content": [{"type": "text", "text": prompt_text}]}]
 
 
+def render_profile_window(user, units, cutoff):
+    """The export a profile build reads: the window after ``cutoff`` at
+    ``units`` stored units, oldest first, in the engaged scope, AI-readable
+    rows only. It carries the user's writing and the replies in it, and
+    no system prompt, profile version or todo list: no preamble, no
+    reference lines, no system-prompt node (#550). Earlier profiles in the
+    input were restated as facts of the new window. One definition, so the
+    sync loop, the batch builder and scripts/simulate_chunk_plan.py render
+    the same bytes."""
+    return build_user_export_content(
+        user, max_tokens=int(units), filter_ai_usage=True,
+        created_after=cutoff, chronological_order=True,
+        return_metadata=True, include_strategy="engaged_threads",
+        omit_artifacts=True)
+
+
 def build_fitted_chunk(user, model_id, api_keys, input_cap, cutoff, budget,
                        remaining_units, prompt_fn):
     """Render the next window at ``budget`` units and its prompt, count the
@@ -1104,10 +1120,7 @@ def build_fitted_chunk(user, model_id, api_keys, input_cap, cutoff, budget,
     from backend.llm_providers import fit_by_count
 
     def _build(units):
-        chunk = build_user_export_content(
-            user, max_tokens=int(units), filter_ai_usage=True,
-            created_after=cutoff, chronological_order=True,
-            return_metadata=True, include_strategy="engaged_threads")
+        chunk = render_profile_window(user, units, cutoff)
         if not chunk or not chunk.get("content"):
             return None
         prompt = prompt_fn(chunk)

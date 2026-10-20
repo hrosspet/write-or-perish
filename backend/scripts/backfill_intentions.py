@@ -146,6 +146,7 @@ def _build_messages(user, template, budget, chronological):
     export = build_user_export_content(
         user, max_tokens=budget, filter_ai_usage=True,
         chronological_order=chronological, include_strategy="engaged_threads",
+        omit_artifacts=True,  # as the intentions job reads it (#550)
     )
     if not export:
         return None

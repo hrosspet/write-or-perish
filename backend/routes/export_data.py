@@ -378,16 +378,50 @@ def _artifact_ref_lines(node, user_id):
     return lines
 
 
+def _is_system_prompt_node(node):
+    """An agentic session's system node: it links a prompt version, or
+    carries the prompt_key stamp a per-thread prompt edit leaves behind
+    (its content is then the edited prompt). Either way its text is a
+    system prompt, not the user's writing. Unlike Node.is_system_prompt,
+    a link whose prompt row is gone counts too (its content renders
+    empty)."""
+    return bool(node.prompt_key) or node.has_artifact("prompt")
+
+
+def _add_artifact_free_entry(resolver, node):
+    """Add *node* to the budget resolver of an export that omits artifacts
+    (#550). Every node counts its stored units, as the window selection
+    counted it. A system-prompt node renders nothing, so its prompt adds
+    no quote to embed; it is not a prompt entry either, whose reference
+    line (and, with a preamble, prompt text) the window never counted.
+    Counting those made the resolver drop the window's newest entries
+    from the rendering while the resume cursor moved past them."""
+    is_system = _is_system_prompt_node(node)
+    resolver.add_node(
+        node_id=node.id,
+        created_at=node.created_at,
+        content="" if is_system else node.get_content(),
+        token_count=node.token_count,
+    )
+
+
 def _format_node_text(node, index_path, user_id, embedded_quotes,
-                      ai_blocked_ids, licence=None, filter_ai_usage=False):
+                      ai_blocked_ids, licence=None, filter_ai_usage=False,
+                      artifact_refs=True):
     """The node's own text block: header, any pinned-artifact refs, then
     content. System-prompt nodes emit refs only (their content IS the
     prompt, shown as a ref). The node, the entries its quotes embed and
-    the saved references it quotes report to *licence* (#326)."""
+    the saved references it quotes report to *licence* (#326).
+
+    With ``artifact_refs=False`` (an export that omits artifacts, #550)
+    no reference line is emitted, and a system-prompt node renders
+    nothing at all ("")."""
+    if not artifact_refs and _is_system_prompt_node(node):
+        return ""
     result = _node_header_line(node, index_path)
     _note_entry(licence, node)
 
-    ref_lines = _artifact_ref_lines(node, user_id)
+    ref_lines = _artifact_ref_lines(node, user_id) if artifact_refs else []
     is_prompt_node = node.get_artifact("prompt") is not None
 
     if is_prompt_node:
@@ -447,6 +481,7 @@ def format_node_tree(
     included_ids=None,
     ai_blocked_ids=None,
     licence=None,
+    artifact_refs=True,
 ):
     """
     Format a node and its descendants into a human-readable tree structure
@@ -479,6 +514,11 @@ def format_node_tree(
                      embedded_quotes for reference-based resolution.
         licence: Optional PayloadLicence every rendered entry, quote and
                  reference reports to (#326).
+        artifact_refs: False leaves out every artifact reference line and
+                 the text of system-prompt nodes (their replies still
+                 render under the same index paths), for an export that
+                 omits artifacts (#550). A tree that is only a system
+                 prompt then renders as "".
 
     Returns:
         str: Formatted text representation of the node tree
@@ -519,7 +559,8 @@ def format_node_tree(
             processed_nodes.add(current.id)
             parts.append(_format_node_text(
                 current, path, user_id, embedded_quotes, ai_blocked_ids,
-                licence=licence, filter_ai_usage=filter_ai_usage))
+                licence=licence, filter_ai_usage=filter_ai_usage,
+                artifact_refs=artifact_refs))
             children = _filtered_children(
                 current, filter_ai_usage, created_before, included_ids,
                 keep_tombstones=True, user_id=user_id)
@@ -962,7 +1003,7 @@ def _format_preamble(top_started_at):
 def _build_user_export_incremental(
     user, max_tokens, filter_ai_usage, created_before, created_after,
     chronological_order, return_metadata, collapse_artifacts,
-    licence=None,
+    licence=None, omit_artifacts=False,
 ):
     """Incremental export path (created_after is set). See
     `build_user_export_content` docstring for behavior. The CTE row
@@ -1055,6 +1096,9 @@ def _build_user_export_incremental(
             with_preamble=not collapse_artifacts,
         )
         for node in selected_nodes:
+            if omit_artifacts:
+                _add_artifact_free_entry(resolver, node)
+                continue
             content = node.get_content()
             node_artifacts = [
                 (a.artifact_type, a.artifact_id)
@@ -1173,6 +1217,7 @@ def _build_user_export_incremental(
         f"**Export Date:** "
         f"{datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}"
     )
+    entry_points_line = len(export_lines)
     export_lines.append(f"**Entry Points:** {len(entry_nodes)}")
     if max_tokens:
         export_lines.append(f"*(Limited to ~{max_tokens:,} tokens)*")
@@ -1196,11 +1241,30 @@ def _build_user_export_incremental(
 
     compact_run = _CompactTweetRun(export_lines, user.username, licence)
     thread_num = 0
+    left_out = 0   # threads that are only a system prompt (omit_artifacts)
     for entry in iter_with_dek_prefetch(entry_nodes):
         if entry.id in compact_ids:
             compact_run.add(entry)
             continue
         compact_run.flush()
+
+        thread_text = format_node_tree(
+            entry,
+            index_path=str(thread_num + 1),
+            filter_ai_usage=filter_ai_usage,
+            user_id=user.id,
+            created_before=created_before,
+            embedded_quotes=embedded_quotes,
+            included_ids=render_included_ids,
+            ai_blocked_ids=ai_blocked_ids,
+            licence=licence,
+            artifact_refs=not omit_artifacts,
+        )
+        if omit_artifacts and not thread_text:
+            # Nothing of this thread in the window but its system
+            # prompt, which this export leaves out (#550).
+            left_out += 1
+            continue
         thread_num += 1
 
         if entry.parent_id is not None:
@@ -1214,23 +1278,17 @@ def _build_user_export_incremental(
             f"{entry.created_at.strftime('%Y-%m-%d %H:%M:%S UTC')}"
         )
         export_lines.append("")
-
-        thread_text = format_node_tree(
-            entry,
-            index_path=str(thread_num),
-            filter_ai_usage=filter_ai_usage,
-            user_id=user.id,
-            created_before=created_before,
-            embedded_quotes=embedded_quotes,
-            included_ids=render_included_ids,
-            ai_blocked_ids=ai_blocked_ids,
-            licence=licence,
-        )
         export_lines.append(thread_text)
         export_lines.append("---")
         export_lines.append("")
 
     compact_run.flush()
+
+    if left_out:
+        if left_out == len(entry_nodes):
+            return None   # the window held nothing but system prompts
+        export_lines[entry_points_line] = (
+            f"**Entry Points:** {len(entry_nodes) - left_out}")
 
     export_lines.append("*End of Export*")
     content = "\n".join(export_lines)
@@ -1277,6 +1335,7 @@ def build_user_export_content(
     collapse_artifacts=False,
     include_strategy="authored_threads",
     licence=None,
+    omit_artifacts=False,
 ):
     """
     Core export logic: Build a human-readable text export of threads for a user.
@@ -1355,6 +1414,13 @@ def build_user_export_content(
                  each preamble row by its own ai_usage, quoted saved
                  references as other people's writing — so one 'chat'
                  entry keeps the payload off the training key.
+        omit_artifacts: If True, the export carries no context artifact
+                       at all: no preamble, no reference lines, and no
+                       system-prompt node (its replies still render; a
+                       thread that is only a system prompt is left out).
+                       Implies collapse_artifacts. For the jobs that read
+                       the user's writing: profile builds, intentions and
+                       poll drafts (#550).
 
     Returns:
         str or dict: Formatted export content (or None if no threads found).
@@ -1365,6 +1431,8 @@ def build_user_export_content(
             f"include_strategy must be 'authored_threads' or "
             f"'engaged_threads', got {include_strategy!r}"
         )
+    if omit_artifacts:
+        collapse_artifacts = True
 
     if created_after is not None or include_strategy == "engaged_threads":
         return _build_user_export_incremental(
@@ -1374,6 +1442,7 @@ def build_user_export_content(
             return_metadata=return_metadata,
             collapse_artifacts=collapse_artifacts,
             licence=licence,
+            omit_artifacts=omit_artifacts,
         )
 
     # Legacy path: top-level threads owned by the user.
@@ -1472,6 +1541,9 @@ def build_user_export_content(
 
         # Add only the pre-selected nodes to the resolver (decrypts here)
         for node in selected_nodes:
+            if omit_artifacts:
+                _add_artifact_free_entry(resolver, node)
+                continue
             content = node.get_content()
             # Collect artifact tuples from join table
             node_artifacts = [
@@ -1701,20 +1773,18 @@ def build_user_export_content(
     prefetch_children(top_level_nodes)
     compact_run = _CompactTweetRun(export_lines, user.username, licence)
     thread_num = 0
+    rendered_any = False
     for node in iter_with_dek_prefetch(top_level_nodes):
         if _is_flat_tweet_root(node, filter_ai_usage, created_before):
             compact_run.add(node)
+            rendered_any = True
             continue
         compact_run.flush()
-        thread_num += 1
-        export_lines.append(f"# Thread {thread_num}")
-        export_lines.append(f"**Started:** {node.created_at.strftime('%Y-%m-%d %H:%M:%S UTC')}")
-        export_lines.append("")
 
         # Format the entire thread tree (depth-first traversal)
         thread_text = format_node_tree(
             node,
-            index_path=str(thread_num),
+            index_path=str(thread_num + 1),
             filter_ai_usage=filter_ai_usage,
             user_id=user.id,
             created_before=created_before,
@@ -1722,13 +1792,23 @@ def build_user_export_content(
             included_ids=included_ids,
             ai_blocked_ids=ai_blocked_ids,
             licence=licence,
+            artifact_refs=not omit_artifacts,
         )
+        if omit_artifacts and not thread_text:
+            continue   # only a system prompt, left out (#550)
+        rendered_any = True
+        thread_num += 1
+        export_lines.append(f"# Thread {thread_num}")
+        export_lines.append(f"**Started:** {node.created_at.strftime('%Y-%m-%d %H:%M:%S UTC')}")
+        export_lines.append("")
         export_lines.append(thread_text)
 
         export_lines.append("---")
         export_lines.append("")
 
     compact_run.flush()
+    if not rendered_any:
+        return None   # nothing but system prompts (omit_artifacts)
 
     # Add footer
     export_lines.append("*End of Export*")

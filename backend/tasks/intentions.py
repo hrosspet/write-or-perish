@@ -72,9 +72,12 @@ def _build_messages(user, template, budget, chronological):
     from backend.routes.export_data import build_user_export_content
     from backend.utils.placeholders import USER_EXPORT_PATTERN
     from backend.utils.tokens import approximate_token_count
+    # The user's writing only: no system prompt, profile or todo list
+    # (#550), the same as a profile build reads.
     export = build_user_export_content(
         user, max_tokens=budget, filter_ai_usage=True,
-        chronological_order=chronological, include_strategy="engaged_threads")
+        chronological_order=chronological, include_strategy="engaged_threads",
+        omit_artifacts=True)
     if not export:
         return None
     prompt = USER_EXPORT_PATTERN.sub(lambda _m: export, template, count=1)
