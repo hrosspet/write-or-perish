@@ -2212,8 +2212,8 @@ def _confirm_conversation_import(source):
         _dispatch_conversation_import(current_user.id, token, task_id, options)
     except Exception as e:
         cs.release_lock(current_user.id, task_id)
-        current_app.logger.error(
-            "Could not queue the %s import: %s", source, type(e).__name__)
+        current_app.logger.exception(
+            "Could not queue the %s import: %s", source, describe_exception(e))
         return jsonify({
             "error": "Could not start the import. Please try again."
         }), 500
