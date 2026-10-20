@@ -135,6 +135,13 @@ celery.conf.update(
             'task': 'backend.tasks.user_purge.process_user_data_purges',
             'schedule': 60.0,  # every minute
         },
+        # Import stashes (an analyzed ChatGPT/Claude export, encrypted, or
+        # a Twitter archive's tweets) that nobody confirmed within their
+        # 24 h TTL. A directory listing when there is nothing to remove.
+        'sweep-import-stashes': {
+            'task': 'backend.tasks.chat_imports.sweep_import_stashes',
+            'schedule': 3600.0,  # hourly
+        },
     },
 )
 
@@ -163,5 +170,6 @@ from backend.tasks import poll_draft  # noqa: F401
 from backend.tasks import external_sync  # noqa: F401
 from backend.tasks import external_digest  # noqa: F401
 from backend.tasks import imports  # noqa: F401
+from backend.tasks import chat_imports  # noqa: F401
 from backend.tasks import intentions  # noqa: F401
 from backend.tasks import user_purge  # noqa: F401

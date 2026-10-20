@@ -8,8 +8,12 @@ Covers POST /api/import/claude/analyze:
 - request shape validation (missing field, empty filename)
 - JSON parse errors
 - empty-conversations case
-- happy path (single + multiple conversations)
+- happy path (single + multiple conversations); the analyzed
+  conversations go to the server-side stash, not into the response
 - login required
+
+and POST /api/import/claude/confirm (dedup, restore), with the
+background job run inline.
 """
 
 import io
@@ -42,6 +46,8 @@ import flask_login as _real_flask_login          # noqa: E402
 from backend.extensions import db as _db         # noqa: E402
 from backend.models import User, Node            # noqa: E402
 import backend.models as _real_backend_models    # noqa: E402
+from backend.tests.test_chatgpt_import import (  # noqa: E402
+    _JobResponse, _run_import_jobs_inline, _stashed)
 
 
 def _make_app():
@@ -67,7 +73,9 @@ def _make_app():
 
 
 @pytest.fixture
-def app():
+def app(tmp_path, monkeypatch):
+    from backend.utils import twitter_archive
+    monkeypatch.setattr(twitter_archive, "STASH_ROOT", tmp_path / "imports")
     _affected = lambda k: (  # noqa: E731
         k == "flask_login"
         or k.startswith("backend.routes")
@@ -81,6 +89,7 @@ def app():
         del sys.modules[_k]
 
     app = _make_app()
+    _run_import_jobs_inline(app, monkeypatch)
     with app.app_context():
         _db.create_all()
         yield app
@@ -239,7 +248,8 @@ class TestAnalyzeClaudeImport:
         assert body["total_messages"] == 2
         assert body["total_tokens"] > 0
         assert body["total_size"] > 0
-        conv = body["conversations"][0]
+        assert "conversations" not in body  # stays on the server
+        conv = _stashed(body)[0]
         assert conv["name"] == "First chat"
         assert conv["message_count"] == 2
         senders = [m["sender"] for m in conv["messages"]]
@@ -264,7 +274,7 @@ class TestAnalyzeClaudeImport:
         body = resp.get_json()
         assert body["total_conversations"] == 2
         assert body["total_messages"] == 4
-        names = [c["name"] for c in body["conversations"]]
+        names = [c["name"] for c in _stashed(body)]
         assert names == ["A", "B"]
 
     def test_blank_messages_filtered_within_conversation(self, app):
@@ -290,7 +300,7 @@ class TestAnalyzeClaudeImport:
         body = resp.get_json()
         # Blank message dropped → 2 usable messages remain.
         assert body["total_messages"] == 2
-        conv = body["conversations"][0]
+        conv = _stashed(body)[0]
         assert conv["message_count"] == 2
         texts = [m["text"] for m in conv["messages"]]
         assert texts == ["real question", "real answer"]
@@ -305,14 +315,26 @@ class TestAnalyzeClaudeImport:
 # ── POST /api/import/claude/confirm (dedup) ──────────────────────────────
 
 def _confirm_conversations(client, conversations, **extra):
-    """POST analyzed conversations to the Claude confirm endpoint."""
-    body = {"conversations": conversations}
+    """Stash analyzed conversations as the analyze step does, then POST
+    the token to the Claude confirm endpoint. The job runs inline; the
+    response's JSON is its result (see _JobResponse)."""
+    from flask import current_app
+    from backend.routes.import_data import _stash_conversations
+    with client.session_transaction() as sess:
+        user_id = int(sess["_user_id"])
+    token = _stash_conversations(
+        user_id, "claude", conversations,
+        sum(len(c["messages"]) for c in conversations))
+    body = {"import_token": token}
     body.update(extra)
-    return client.post(
+    results = current_app.import_results
+    before = len(results)
+    resp = client.post(
         "/api/import/claude/confirm",
         data=json.dumps(body),
         content_type="application/json",
     )
+    return _JobResponse(resp, results[-1] if len(results) > before else None)
 
 
 def _analyzed_conv(name="First chat", created_at="2023-11-14T22:13:20Z",
@@ -355,7 +377,7 @@ class TestAnalyzeClaudeImportUuid:
             client, [_conv(chat_messages=[msg])]
         )
         assert resp.status_code == 200
-        out = resp.get_json()["conversations"][0]["messages"][0]
+        out = _stashed(resp.get_json())[0]["messages"][0]
         assert out["uuid"] == "msg-uuid-1"
 
 
@@ -372,14 +394,14 @@ class TestConfirmClaudeImportDedup:
         convs = [_analyzed_conv()]
 
         r1 = _confirm_conversations(client, convs)
-        assert r1.status_code == 201
+        assert r1.status_code == 202
         b1 = r1.get_json()
         assert b1["created"] == 2
         assert b1["skipped"] == 0
         assert self._count_nodes(alice.id) == 2
 
         r2 = _confirm_conversations(client, convs)
-        assert r2.status_code == 201
+        assert r2.status_code == 202
         b2 = r2.get_json()
         assert b2["created"] == 0
         assert b2["skipped"] == 2
@@ -404,7 +426,7 @@ class TestConfirmClaudeImportDedup:
         _db.session.commit()
 
         r = _confirm_conversations(client, convs, on_deleted="restore")
-        assert r.status_code == 201
+        assert r.status_code == 202
         assert r.get_json()["restored"] == 2
         nodes = Node.query.filter_by(human_owner_id=alice.id).all()
         assert all(n.deleted_at is None for n in nodes)

@@ -199,10 +199,15 @@ private struct ConfirmImportDialog: View {
     }
 
     private var progressLabel: String {
-        if let progress = model.progress, analysis.kind == .twitter {
+        guard let progress = model.progress, progress.total > 0 else { return "Importing…" }
+        switch analysis.kind {
+        case .twitter:
             return "Importing… \(progress.done) / \(progress.total)"
+        case .claude, .chatgpt:
+            return "Importing… \(jsLocaleNumber(progress.done)) of \(jsLocaleNumber(progress.total)) messages"
+        case .markdown:
+            return "Importing…"
         }
-        return "Importing…"
     }
 
     @ViewBuilder private var summary: some View {
