@@ -10,9 +10,13 @@ is what failed and where: the exception's type and its stack frames.
 - Responses carry a message written for the user, never ``str(e)``.
 - ``SQLALCHEMY_ENGINE_OPTIONS["hide_parameters"]`` (config.py) keeps the
   SQL parameters out of every database error's text.
-- ``TracebackWithoutMessages`` writes a traceback to the server log with
-  each exception's type and frames and without its message: Flask's log
-  line for an unhandled exception and every ``logger.exception``.
+- ``install_traceback_scrubbing`` (run when the backend package is
+  imported): every traceback a ``backend.*`` logger writes keeps each
+  exception's type and frames, without its message, whatever handlers
+  are configured. That covers Flask's log line for an unhandled exception
+  and every ``logger.exception``.
+- Log lines name the exception with ``describe_exception``: its type and
+  the value-free codes of ``safe_exception_summary``.
 - ``scrub_sentry_event`` and ``scrub_sentry_breadcrumb`` do the same for
   what reaches Sentry: exception messages are replaced, log messages lose
   the text of the exceptions they quote and any database values.
@@ -32,6 +36,10 @@ MIN_MATCH_LENGTH = 4
 
 # Codes and schema names are kept only when they look like identifiers.
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
+
+# Text scrubbed for Sentry is cut after this many characters and the rest
+# replaced by a note, so the patterns below run over a bounded length.
+MAX_SCRUB_CHARS = 16384
 
 
 def exception_chain(exc):
@@ -108,6 +116,15 @@ def safe_exception_summary(exc):
         return ""
 
 
+def describe_exception(exc):
+    """For a log line: the type, with safe_exception_summary's codes when
+    there are any, e.g. "IntegrityError (sqlstate 23505, constraint
+    user_username_key, table user)". Never the message."""
+    name = type(exc).__name__
+    summary = safe_exception_summary(exc)
+    return f"{name} ({summary})" if summary else name
+
+
 def _type_line(exc):
     cls = type(exc)
     module = getattr(cls, "__module__", None)
@@ -141,32 +158,36 @@ def format_exception_without_messages(exc):
     return "".join(lines).rstrip("\n")
 
 
-class TracebackWithoutMessages(logging.Filter):
-    """Formats a record's traceback without exception messages. Handlers
-    reuse ``record.exc_text`` when it is set, so every handler after this
-    filter writes the traceback this way; Sentry reads ``exc_info``, not
-    the text, and keeps its structured stack trace."""
+def install_traceback_scrubbing(prefix="backend"):
+    """Make every log record from the *prefix* logger or one below it
+    carry its traceback without exception messages
+    (format_exception_without_messages), set as ``record.exc_text`` when
+    the record is made. Formatters reuse ``exc_text`` when it is set, so
+    every handler writes the traceback this way whatever logging setup is
+    in place (gunicorn's, Celery's, ``basicConfig``, pytest's). Sentry
+    reads ``exc_info``, not the text, and keeps its structured stack
+    trace. Other loggers' records are left alone. Once per process."""
+    previous = logging.getLogRecordFactory()
+    if getattr(previous, "scrubs_tracebacks", False):
+        return
+    dotted = prefix + "."
 
-    def filter(self, record):
+    def factory(*args, **kwargs):
+        record = previous(*args, **kwargs)
         try:
             exc_info = record.exc_info
-            if isinstance(exc_info, tuple) and exc_info[1] is not None:
+            if (isinstance(exc_info, tuple) and len(exc_info) > 1
+                    and exc_info[1] is not None
+                    and (record.name == prefix
+                         or record.name.startswith(dotted))):
                 record.exc_text = format_exception_without_messages(
                     exc_info[1])
-        except Exception:  # logging must go on
+        except Exception:  # logging must go on (the full traceback then)
             pass
-        return True
+        return record
 
-
-def install_traceback_filter(logger, handlers=()):
-    """Add TracebackWithoutMessages to *logger* (records logged on it,
-    such as Flask's line for an unhandled exception) and to *handlers*
-    (records from child loggers that reach them: Flask's default handler
-    takes every ``backend.*`` module's lines in the web app). Once each."""
-    for target in [logger, *handlers]:
-        if not any(isinstance(f, TracebackWithoutMessages)
-                   for f in target.filters):
-            target.addFilter(TracebackWithoutMessages())
+    factory.scrubs_tracebacks = True
+    logging.setLogRecordFactory(factory)
 
 
 # --- Text scrubbing --------------------------------------------------------
@@ -177,20 +198,27 @@ def install_traceback_filter(logger, handlers=()):
 _BLOCK_END = (r"(?=\n(?:HINT|CONTEXT|WHERE|QUERY|STATEMENT|LINE \d+):"
               r"|\n\[SQL: |\n\[parameters: |\n\[SQL parameters hidden"
               r"|\n\(Background on this error|\Z)")
+# Every pattern either ends at _BLOCK_END (which matches at the end of the
+# text at the latest) or scans a bounded or quote-free span, so a run over
+# the text is linear in its length. The LINE block is replaced last: the
+# other blocks end where it starts.
 _DATABASE_VALUES = [
+    # A value Postgres could not convert, quoted in the error itself; the
+    # value can hold quotes and newlines, so it runs to the next block
+    (re.compile(r'((?:invalid input (?:syntax|value) for|field value out '
+                r'of range)[^:\n]{0,128}: )".*?' + _BLOCK_END, re.S),
+     r"\1[removed]"),
+    # A number too large for its type: digits, no quotes or newlines
+    (re.compile(r'value "[^"\n]*" is out of range'),
+     "value [removed] is out of range"),
     (re.compile(r"DETAIL:.*?" + _BLOCK_END, re.S), "DETAIL: [removed]"),
     (re.compile(r"CONTEXT:.*?" + _BLOCK_END, re.S), "CONTEXT: [removed]"),
-    # The statement as Postgres received it: psycopg2 sends the values
-    # inline, so the excerpt quotes them
-    (re.compile(r"LINE \d+: .*?" + _BLOCK_END, re.S), "LINE: [removed]"),
     (re.compile(r"Failing row contains .*?" + _BLOCK_END, re.S),
      "Failing row contains [removed]"),
     (re.compile(r"Key \(.*?" + _BLOCK_END, re.S), "Key [removed]"),
-    # A value Postgres could not convert, quoted in the error itself
-    (re.compile(r'((?:invalid input (?:syntax|value) for|field value out '
-                r'of range)[^:\n]*: )".*?"(?=\n|\Z)', re.S), r"\1[removed]"),
-    (re.compile(r'value ".*?" is out of range', re.S),
-     "value [removed] is out of range"),
+    # The statement as Postgres received it: psycopg2 sends the values
+    # inline, so the excerpt quotes them
+    (re.compile(r"LINE \d+: .*?" + _BLOCK_END, re.S), "LINE: [removed]"),
     (re.compile(r"\[parameters: .*?(?=\n\(Background on this error|\Z)",
                 re.S), "[parameters: removed]"),
 ]
@@ -200,7 +228,11 @@ def strip_database_values(text):
     """*text* without the values a Postgres or SQLAlchemy error quotes:
     DETAIL, CONTEXT and LINE blocks, "Failing row contains (…)",
     "Key (…)=(…)", an unconvertible value ('invalid input syntax for type
-    integer: "…"') and SQLAlchemy's "[parameters: …]"."""
+    integer: "…"') and SQLAlchemy's "[parameters: …]". Text longer than
+    MAX_SCRUB_CHARS is cut there first."""
+    if len(text) > MAX_SCRUB_CHARS:
+        text = (text[:MAX_SCRUB_CHARS]
+                + f" [{len(text) - MAX_SCRUB_CHARS} more characters removed]")
     for pattern, replacement in _DATABASE_VALUES:
         text = pattern.sub(replacement, text)
     return text
