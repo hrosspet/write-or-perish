@@ -1808,3 +1808,248 @@ def test_profile_refusal_stop_is_reported_as_refused(app, monkeypatch):
             pb._exports.refuse_truncated_profile(
                 u, "test-model", resp, "chunk", batch=True)
     assert stops[-1]["cause"] == "refused by the model"
+
+
+# ── per-user spend cap (Peter, 2026-10-20: the cap applies to batch jobs) ─
+
+def _cap_harness(app, monkeypatch, limit):
+    """Turn the per-user cap on at ``limit`` USD and stub its two side
+    channels: the deferred check each cost row dispatches (a broker call)
+    and the admin's block email (returned, to count the sends)."""
+    import backend.utils.email as em
+    app.config["PER_USER_MONTHLY_LIMIT_USD"] = limit
+    monkeypatch.setattr("backend.tasks.spend_monitor.enforce_user_cap",
+                        MagicMock())
+    block_email = MagicMock()
+    monkeypatch.setattr(em, "send_user_spend_block_email", block_email)
+    return block_email
+
+
+def _spent(user, usd, created_at=None):
+    row = APICostLog(user_id=user.id, model_id="test-model",
+                     request_type="llm",
+                     cost_microdollars=int(round(usd * 1_000_000)))
+    if created_at is not None:
+        row.created_at = created_at
+    db.session.add(row)
+    db.session.commit()
+
+
+def _last_month():
+    from backend.utils.spend import month_start
+    return month_start() - timedelta(days=1)
+
+
+def _mid_rebuild(monkeypatch, user):
+    """A user part-way through a multi-chunk rebuild: a chunk is in
+    flight and, once it lands, more unread data remains, so without the
+    cap the poller submits the next chunk."""
+    prev = _prev_profile(user, datetime(2026, 5, 1), gen_type="iterative")
+    item = {
+        "custom_id": f"profile_{user.id}_{prev.id}_chunk",
+        "user_id": user.id, "kind": "chunk", "prev_profile_id": prev.id,
+        "generation_type": "iterative", "prev_cumulative": 1000,
+        "source_data_cutoff": "2026-06-01T00:00:00",
+        "rendered_at": datetime.utcnow().isoformat(),
+        "model_id": "test-model", "chunk_units": 90000,
+        "chunk_num": 2, "chunk_total": 5,
+    }
+    job = ProfileBatchJob(provider_key="anthropic", batch_id="b-cap",
+                          status="pending", items=[item],
+                          submitted_at=datetime.utcnow())
+    db.session.add(job)
+    user.profile_batch_pending = True
+    db.session.commit()
+    monkeypatch.setattr(pb, "batch_check_and_collect", lambda bids, keys: (
+        {item["custom_id"]: {"content": "CHUNK 2", "input_tokens": 100_000,
+                             "output_tokens": 10_000}}, {}, {}))
+    monkeypatch.setattr(pb._exports, "should_continue_chain",
+                        lambda u, p: True)
+    _remaining(monkeypatch, 270_000)
+    monkeypatch.setattr(pb._exports, "build_user_export_content",
+                        MagicMock(return_value=_chunk("CHUNK 3 DATA")))
+    monkeypatch.setattr(pb._exports, "build_update_template",
+                        lambda uid: "T {new_data}")
+    submit = MagicMock(return_value={"anthropic": "b-next"})
+    monkeypatch.setattr(pb, "batch_submit", submit)
+    return prev, job, submit
+
+
+def test_seed_skips_a_capped_users_rebuild_until_the_cap_resets(
+        app, monkeypatch):
+    """The import hand-off flags a from-scratch rebuild and seeds at once:
+    a capped user gets no chunk, and the flag waits. Once the month rolls
+    over (the block names last month, the spend is last month's), the
+    same seed submits chunk 1."""
+    block_email = _cap_harness(app, monkeypatch, limit=1.0)
+    from backend.utils.spend import current_month
+    u = _user(profile_force_batch=True, profile_needs_full_regen=True)
+    db.session.commit()
+    _spent(u, 5.0)
+    u.spend_blocked_month = current_month()
+    db.session.commit()
+    _remaining(monkeypatch, 14_000_000)
+    export = MagicMock(return_value=_chunk("DATA"))
+    monkeypatch.setattr(pb._exports, "build_user_export_content", export)
+    monkeypatch.setattr(pb._exports, "_load_prompt",
+                        lambda *a, **k: "G {user_export}")
+    submitted = []
+    monkeypatch.setattr(pb, "batch_submit", lambda reqs, keys, kind: (
+        submitted.append(reqs) or {k: f"b-{k}" for k in reqs}))
+
+    assert pb._seed_profile_batches(users=[u]) == 0
+    export.assert_not_called()
+    assert submitted == []
+    u = User.query.get(u.id)
+    assert u.profile_needs_full_regen is True     # the rebuild still waits
+    assert u.profile_batch_pending is False
+    assert (u.profile_batch_attempts or 0) == 0   # not a failed attempt
+
+    # Next month: the stored block is stale and this month's spend is 0.
+    APICostLog.query.filter_by(user_id=u.id).update(
+        {"created_at": _last_month()})
+    u.spend_blocked_month = current_month(_last_month())
+    db.session.commit()
+    assert pb._seed_profile_batches(users=[u]) == 1
+    (reqs,) = submitted
+    (req,) = next(iter(reqs.values()))
+    assert req["custom_id"] == f"profile_{u.id}_0_chunk"
+    block_email.assert_not_called()
+
+
+def test_capped_flag_alone_holds_the_seed_when_the_global_cap_is_off(
+        app, monkeypatch):
+    """A block the admin set through a per-user limit holds the batch
+    seed even with PER_USER_MONTHLY_LIMIT_USD = 0, as it holds every
+    other path that reads the flag."""
+    from backend.utils.spend import current_month
+    u = _user(profile_force_batch=True, profile_needs_full_regen=True,
+              spend_blocked_month=current_month())
+    db.session.commit()
+    _remaining(monkeypatch, 90000)
+    export = MagicMock(return_value=_chunk("DATA"))
+    monkeypatch.setattr(pb._exports, "build_user_export_content", export)
+    submit = MagicMock(return_value={})
+    monkeypatch.setattr(pb, "batch_submit", submit)
+
+    assert pb._seed_profile_batches(users=[u]) == 0
+    export.assert_not_called()
+    submit.assert_not_called()
+
+
+def test_rebuild_stops_after_the_step_that_crosses_the_cap(app, monkeypatch):
+    """The step in flight is collected, saved and its cost logged; that
+    cost takes the user over the cap, so they are blocked (admin emailed
+    once) and the next chunk is not submitted. The chain is not counted
+    as failed, and a pre-filled account gets no "complete" email. The
+    hourly seeder then leaves the user alone."""
+    import backend.utils.email as em
+    from backend.utils.spend import current_month
+    block_email = _cap_harness(app, monkeypatch, limit=1.0)
+    prefill_sent = []
+    monkeypatch.setattr(em, "send_admin_prefill_complete_notification",
+                        lambda *a: prefill_sent.append(a))
+    u = _user(profile_force_batch=True, prefilled_handle="alice_x")
+    db.session.commit()
+    _spent(u, 0.999999)                       # one microdollar of headroom
+    prev, job, submit = _mid_rebuild(monkeypatch, u)
+
+    pb._poll_profile_batches()
+
+    saved = UserProfile.query.filter_by(
+        user_id=u.id, parent_profile_id=prev.id).one()
+    assert saved.get_content().endswith("CHUNK 2")
+    step_cost = APICostLog.query.filter_by(
+        user_id=u.id, request_type="profile_batch").one()
+    assert step_cost.cost_microdollars > 0
+    u = User.query.get(u.id)
+    assert u.spend_blocked_month == current_month()
+    block_email.assert_called_once()
+    submit.assert_not_called()
+    assert ProfileBatchJob.query.get(job.id).status == "collected"
+    assert ProfileBatchJob.query.filter_by(status="pending").count() == 0
+    assert u.profile_batch_pending is False
+    assert u.profile_batch_attempts == 0
+    assert prefill_sent == []
+
+    assert pb._seed_profile_batches(users=[u]) == 0
+    submit.assert_not_called()
+    block_email.assert_called_once()          # not re-sent
+
+
+def test_step_in_flight_for_an_already_capped_user_is_collected(
+        app, monkeypatch):
+    """Blocked while a step was queued (by a reply, say): the provider
+    bills the step anyway, so it is saved and its cost logged; nothing
+    follows it."""
+    from backend.utils.spend import current_month
+    block_email = _cap_harness(app, monkeypatch, limit=1.0)
+    u = _user(profile_force_batch=True)
+    db.session.commit()
+    _spent(u, 5.0)
+    u.spend_blocked_month = current_month()
+    db.session.commit()
+    prev, job, submit = _mid_rebuild(monkeypatch, u)
+
+    pb._poll_profile_batches()
+
+    assert UserProfile.query.filter_by(
+        user_id=u.id, parent_profile_id=prev.id).count() == 1
+    assert APICostLog.query.filter_by(
+        user_id=u.id, request_type="profile_batch").count() == 1
+    submit.assert_not_called()
+    assert User.query.get(u.id).profile_batch_pending is False
+    block_email.assert_not_called()           # blocked before; no new email
+
+
+@pytest.mark.parametrize("global_limit, override", [
+    (0, None),    # the cap is off (the default)
+    (1.0, 0),     # on, but this user's limit is 0 = uncapped
+])
+def test_uncapped_user_rebuild_is_unaffected_by_spend(
+        app, monkeypatch, global_limit, override):
+    block_email = _cap_harness(app, monkeypatch, limit=global_limit)
+    u = _user(profile_force_batch=True, monthly_spend_limit_usd=override)
+    db.session.commit()
+    _spent(u, 999.0)
+    prev, job, submit = _mid_rebuild(monkeypatch, u)
+
+    pb._poll_profile_batches()
+
+    submit.assert_called_once()
+    nxt = ProfileBatchJob.query.filter_by(batch_id="b-next").one()
+    assert nxt.items[0]["kind"] == "chunk"
+    assert nxt.items[0]["chunk_num"] == 3
+    u = User.query.get(u.id)
+    assert u.spend_blocked_month is None
+    assert u.profile_batch_pending is True
+    block_email.assert_not_called()
+
+
+def test_sync_path_is_unchanged_by_the_batch_cap_check(app, monkeypatch):
+    """The synchronous path keeps its own check (update_user_profile reads
+    the flag on entry). The batch check neither hands a cap-stopped batch
+    user to the full-price sync last resort (their attempts stay 0) nor
+    adds a check to the sync dispatch."""
+    from backend.utils.spend import current_month
+    _cap_harness(app, monkeypatch, limit=1.0)
+    dispatch = MagicMock()
+    dispatch.delay.return_value.id = "task-1"
+    monkeypatch.setattr(pb._exports, "update_user_profile", dispatch)
+
+    batch_user = _user(profile_needs_full_regen=True)
+    db.session.flush()
+    app.config["PROFILE_BATCH_USER_IDS"] = {batch_user.id}
+    batch_user.spend_blocked_month = current_month()
+    db.session.commit()
+    assert pb._seed_profile_batches(users=[batch_user]) == 0
+    assert (User.query.get(batch_user.id).profile_batch_attempts or 0) == 0
+    assert pb._exports.maybe_trigger_incremental_profile_update(
+        batch_user) is None
+    dispatch.delay.assert_not_called()
+
+    sync_user = _user(spend_blocked_month=current_month())
+    db.session.commit()
+    assert pb._exports.maybe_trigger_profile_update(
+        sync_user.id, force_full_regen=True) == "task-1"
+    dispatch.delay.assert_called_once_with(sync_user.id, "test-model", None)

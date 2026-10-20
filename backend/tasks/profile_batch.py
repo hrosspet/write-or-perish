@@ -107,6 +107,31 @@ def batch_pipeline_lock():
             except Exception:
                 pass
 
+
+def _spend_capped(user):
+    """Whether the per-user monthly spend cap (backend/utils/spend.py) holds
+    this user's next profile step back. The same rule as the synchronous
+    task, which checks ``user_is_capped`` on entry: spend logged in
+    APICostLog this month (all providers) at or over the user's limit
+    blocks them until the month rolls over, and the admin is emailed once.
+
+    One difference in timing: every cost row dispatches the check that sets
+    the block 15 s later (ENFORCE_CAP_DELAY_SECONDS), but the poller builds
+    the next step right after it saves this step's cost. So the check runs
+    here first, under the same condition the cost row uses (the global
+    limit is set), and a user whose step just crossed the cap gets no next
+    step. With PER_USER_MONTHLY_LIMIT_USD = 0 only the stored flag is read,
+    as on the synchronous path."""
+    from backend.utils.spend import enforce_user_spend_cap, user_is_capped
+    if user_is_capped(user):
+        return True
+    config = current_app.config
+    if (config.get("PER_USER_MONTHLY_LIMIT_USD") or 0) <= 0:
+        return False
+    enforce_user_spend_cap(user.id, config)
+    return user_is_capped(user)
+
+
 def _model_for(user):
     from backend.utils.llm_nodes import default_model_for
     return default_model_for(user)
@@ -225,6 +250,13 @@ def _build_next_profile_request(user, allow_chunk=True, chunk_num=1):
     # changed since the chain started (#346).
     if not account_allows_ai(user):
         logger.info(f"User {user.id}: opted out of AI usage; no profile step")
+        return None
+    # Likewise the spend cap: a step already submitted is collected and its
+    # cost logged, but a user who reached the cap gets no next step. The
+    # chain stays where it is and the seeder continues it once the cap
+    # resets at the start of the next month (or the admin raises the limit).
+    if _spend_capped(user):
+        logger.warning(f"User {user.id}: spend-capped; no profile step")
         return None
     model_id = _model_for(user)
     provider, api_model = _provider_and_model(model_id)
@@ -608,6 +640,7 @@ def _seed_profile_batches(users=None, ignore_backoff=False):
     ``users`` restricts the cohort (immediate seed for one user); the
     default is every profile-eligible user. ``ignore_backoff`` is for an
     import's seed and a confirmed admin override only (see _should_seed)."""
+    from backend.utils.spend import user_is_capped
     config = current_app.config
     if config.get("PROFILE_UPDATES_PAUSED"):
         logger.info("PROFILE_UPDATES_PAUSED — skipping batch seeder")
@@ -628,6 +661,10 @@ def _seed_profile_batches(users=None, ignore_backoff=False):
         # the immediate seed (admin Build profile, pre-fill, import
         # hand-off) passes users in directly (#346).
         if not account_allows_ai(user):
+            continue
+        # The per-user monthly spend cap, checked as the synchronous task
+        # checks it on entry. The builder below settles it too.
+        if user_is_capped(user):
             continue
         if not use_batch_for_user(user, config):
             continue
@@ -713,6 +750,7 @@ def poll_profile_batches():
 
 def _poll_profile_batches():
     """Impl — runs inside an active app context (testable directly)."""
+    from backend.utils.spend import user_is_capped
     config = current_app.config
     keys = apply_batch_key_override(
         get_api_keys_for_usage(config, 'chat'), config)
@@ -799,7 +837,14 @@ def _poll_profile_batches():
                 next_built.append(nxt)   # stays pending; re-submitted below
             else:
                 user.profile_batch_pending = False
-                _notify_prefill_complete(user)
+                if item.get("kind") == "chunk" and user_is_capped(user):
+                    # Stopped by the spend cap, not finished: no
+                    # "pre-fill complete" email for a chain that resumes
+                    # when the cap resets.
+                    logger.warning(f"User {user.id}: profile chain stopped "
+                                   f"at the spend cap after this step")
+                else:
+                    _notify_prefill_complete(user)
             db.session.commit()
 
         job.status = "collected"

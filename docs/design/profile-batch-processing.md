@@ -207,6 +207,18 @@ halved** to reflect batch pricing. Add a discount to
 dashboards can distinguish. (Long-context multipliers still apply to the
 per-call input, but each chunk stays well under the threshold.)
 
+**Per-user monthly spend cap (Peter, 2026-10-20).** The batch path applies
+the same cap as the synchronous task (`backend/utils/spend.py`,
+`PER_USER_MONTHLY_LIMIT_USD` or the user's own limit; 0 = uncapped). The
+seeder submits no chunk or integration for a capped user. Before each next
+step the builder runs the cap check itself, because the check a cost row
+dispatches runs 15 s later. So a user whose step crossed the cap is blocked
+(the admin is emailed once) and gets no next step. A step already submitted
+is collected, saved and its cost logged. The stop is not a failed attempt,
+so the user never falls back to the full-price sync path. The chain stays
+where it stopped, and the seeder continues it once the block lifts at the
+start of the next month or when the admin raises the user's limit.
+
 ## Failure modes & retry policy
 
 Detection: each `ProfileBatchJob` stores the `custom_id`s it submitted, so on
