@@ -693,6 +693,57 @@ class TestAnalyzeChatgptImport:
         assert "my-diary" not in dumped
         assert scope.fingerprint == ["chatgpt-import-unreadable-items"]
 
+    def test_malformed_conversations_do_not_fail_the_upload(self, app):
+        good = _conv(title="good", mapping=_simple_mapping())
+        bad_node = dict(_conv(title="b1", mapping=_simple_mapping()),
+                        current_node=["x"])
+        bad_id = dict(_conv(title="b2", mapping=_simple_mapping()),
+                      id={"a": 1})
+        bad_parent = _conv(title="b3", mapping={
+            "u1": {"parent": ["root"], "message": None}})
+        resp = self._analyze_parts(app, [
+            ("conversations-000.json", [good, bad_node, bad_id, bad_parent]),
+        ])
+        assert resp.status_code == 200
+        body = resp.get_json()
+        # Non-string current_node / id / parent count as absent: those
+        # conversations import (or yield nothing) instead of failing.
+        assert body["conversations"][0]["name"] == "good"
+        assert [c["name"] for c in body["conversations"]][:3] == [
+            "good", "b1", "b2"]
+        assert body["notices"] == []
+
+    def test_non_dict_mapping_entry_is_unreadable_not_500(self, app):
+        good = _conv(title="good", mapping=_simple_mapping())
+        bad = _conv(title="bad", mapping={"root": "not a dict"})
+        resp = self._analyze_parts(app, [
+            ("conversations-000.json", [good, bad]),
+        ])
+        assert resp.status_code == 200
+        body = resp.get_json()
+        assert [c["name"] for c in body["conversations"]] == ["good"]
+        assert body["notices"] == [
+            "1 item in your export is in a format Loore can't read yet, "
+            "so it won't be imported."]
+
+    def test_failed_conversation_goes_to_sentry_as_type_names(self, app):
+        import json as _json
+        from unittest.mock import patch, MagicMock
+        scope = MagicMock()
+        scope_cm = MagicMock()
+        scope_cm.__enter__.return_value = scope
+        bad = _conv(title="SECRET-T", mapping={"root": "SECRET-V"})
+        with patch("sentry_sdk.capture_message") as capture, \
+                patch("sentry_sdk.new_scope", return_value=scope_cm):
+            self._analyze_parts(app, [
+                ("conversations-000.json",
+                 [_conv(title="g", mapping=_simple_mapping()), bad]),
+            ])
+        assert capture.call_count == 1
+        dumped = _json.dumps(scope.set_context.call_args[0][1])
+        assert "AttributeError" in dumped
+        assert "SECRET" not in dumped
+
     def test_file_labels_are_fixed(self):
         from backend.routes.import_data import _chatgpt_file_label
         assert _chatgpt_file_label("conversations.json") == "conversations"

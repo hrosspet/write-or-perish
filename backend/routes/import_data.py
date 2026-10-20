@@ -1117,7 +1117,8 @@ def _report_unreadable_chatgpt_items(problems):
 def _load_chatgpt_parts(conv_files):
     """
     Parse the uploaded ChatGPT parts (told apart by basename) into
-    (conversations, notices).
+    ([(conversation, messages), ...], notices). A conversation whose
+    linearization raises is counted as unreadable.
 
     - group_chats.json is not imported; its chats are counted for a notice.
     - Every other part: each dict item with a dict "mapping" is a
@@ -1130,7 +1131,7 @@ def _load_chatgpt_parts(conv_files):
     Logs counts only, never content. Raises UnicodeDecodeError /
     json.JSONDecodeError for the caller to report.
     """
-    conversations = []
+    conversations = []  # (conversation, linearized messages) pairs
     seen_ids = set()
     unreadable = 0
     group_chats = 0
@@ -1179,11 +1180,26 @@ def _load_chatgpt_parts(conv_files):
                 part_unreadable += 1
                 continue
             conv_id = item.get('id') or item.get('conversation_id')
-            if conv_id is not None:
+            if isinstance(conv_id, str):  # other types count as absent
                 if conv_id in seen_ids:
                     continue
                 seen_ids.add(conv_id)
-            conversations.append(item)
+            if not item['mapping']:
+                continue
+            try:
+                messages = _linearize_chatgpt_messages(
+                    item['mapping'], item.get('current_node'))
+            except (TypeError, AttributeError, KeyError, ValueError) as e:
+                # One malformed conversation must not fail the upload.
+                # Type names only, never values.
+                if part_unreadable == 0:
+                    first_unreadable = {"error": type(e).__name__}
+                tname = "conversation:" + type(e).__name__
+                unreadable_types[tname] = unreadable_types.get(tname, 0) + 1
+                part_unreadable += 1
+                continue
+            if messages:
+                conversations.append((item, messages))
         unreadable += part_unreadable
         if part_unreadable:
             current_app.logger.warning(
@@ -1920,6 +1936,11 @@ def import_status(task_id):
                     "error": None}), 200
 
 
+def _str_parent(entry):
+    parent = entry.get('parent')
+    return parent if isinstance(parent, str) and parent else None
+
+
 def _chatgpt_thread_ids(mapping, current_node=None):
     """
     Node ids of a ChatGPT conversation's main thread, root first.
@@ -1929,6 +1950,9 @@ def _chatgpt_thread_ids(mapping, current_node=None):
     or a regenerated reply is not the first child. Without a usable
     current_node, walk from the root following the first child.
     """
+    # A non-string current_node or parent is treated as absent.
+    if not isinstance(current_node, str):
+        current_node = None
     if current_node in mapping:
         path = []
         visited = set()
@@ -1936,13 +1960,14 @@ def _chatgpt_thread_ids(mapping, current_node=None):
         while node_id in mapping and node_id not in visited:
             visited.add(node_id)
             path.append(node_id)
-            node_id = mapping[node_id].get('parent')
+            parent = mapping[node_id].get('parent')
+            node_id = parent if isinstance(parent, str) else None
         return path[::-1]
 
     # Find the root node (no parent)
     root_id = None
     for node_id, entry in mapping.items():
-        if not entry.get('parent'):
+        if not _str_parent(entry):
             root_id = node_id
             break
 
@@ -1953,7 +1978,7 @@ def _chatgpt_thread_ids(mapping, current_node=None):
     # it from the parent pointers, in mapping order.
     derived_children = {}
     for node_id, entry in mapping.items():
-        if entry.get('parent'):
+        if _str_parent(entry):
             derived_children.setdefault(entry['parent'], []).append(node_id)
 
     path = []
@@ -2080,17 +2105,7 @@ def analyze_chatgpt_import():
         total_tokens = 0
         total_size = 0
 
-        for conv in raw_conversations:
-            mapping = conv.get('mapping', {})
-            if not mapping:
-                continue
-
-            messages = _linearize_chatgpt_messages(
-                mapping, conv.get('current_node'))
-
-            if not messages:
-                continue
-
+        for conv, messages in raw_conversations:
             conv_token_count = 0
             for msg in messages:
                 token_count = approximate_token_count(msg['text'])
