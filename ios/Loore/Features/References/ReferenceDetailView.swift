@@ -94,14 +94,7 @@ struct ReferenceDetailView: View {
         VStack(alignment: .leading, spacing: 12) {
             sourceRow(item)
             byline(item)
-            if let title = item.title, !title.isEmpty {
-                Text(title)
-                    .font(LooreFont.serif(24, .regular, relativeTo: .title2))
-                    .foregroundStyle(LooreColor.textPrimary)
-                    .lineSpacing(2)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .accessibilityAddTraits(.isHeader)
-            }
+            titleLine(item)
             if let video = item.youtubeVideo {
                 // A video's stored text is its description (with the chapter
                 // list): under the player, behind the toggle.
@@ -173,8 +166,25 @@ struct ReferenceDetailView: View {
         return Byline(name: nonEmpty(item.authorName) ?? nonEmpty(item.authorHandle), handle: nil, date: date)
     }
 
-    @ViewBuilder
+    /// The author and date line with the listen-aloud speaker last on it,
+    /// pushed to the right edge (SpeakerButton renders nothing without voice
+    /// mode, so the line then reads as before).
     private func byline(_ item: ExternalItem) -> some View {
+        HStack(alignment: .center, spacing: 8) {
+            bylineText(item)
+            Spacer(minLength: 0)
+            SpeakerButton(target: .item(item.id), content: speakerContent(item),
+                          onTtsGenerated: { self.item?.hasTTS = true })
+                // The 28 pt tap target stays; the layout takes back 5 pt above
+                // and below so the line keeps its height, and the icon sits on
+                // the card's content edge (its 7.5 pt of padding to the right).
+                .padding(.vertical, -5)
+                .padding(.trailing, -7.5)
+        }
+    }
+
+    @ViewBuilder
+    private func bylineText(_ item: ExternalItem) -> some View {
         let parts = Self.byline(item)
         let hasAuthor = parts.name != nil || parts.handle != nil
         if hasAuthor || parts.date != nil {
@@ -208,6 +218,56 @@ struct ReferenceDetailView: View {
         }
     }
 
+    /// The link to the original: an arrow after the title's last word (joined
+    /// with a no-break space, so it never wraps alone), or, with no title,
+    /// the "Open page ↗" label in the title's place. Nothing without a URL.
+    /// Returns the title as attributed text whose last run links to `url`.
+    static func titleWithLink(_ title: String, url: URL?) -> AttributedString {
+        var text = AttributedString(title.trimmingCharacters(in: .whitespacesAndNewlines))
+        guard let url else { return text }
+        // Join the last word to the arrow: the space before the last word
+        // becomes a no-break space.
+        if let space = text.characters.lastIndex(where: { $0 == " " || $0 == "\n" }) {
+            text.characters.replaceSubrange(space...space, with: "\u{00A0}")
+        }
+        var arrow = AttributedString("\u{00A0}\u{2197}")
+        arrow.link = url
+        arrow.foregroundColor = LooreColor.textMuted
+        text.append(arrow)
+        return text
+    }
+
+    @ViewBuilder
+    private func titleLine(_ item: ExternalItem) -> some View {
+        let url = item.url.flatMap { URL(string: $0) }
+        if let title = item.title, !title.isEmpty {
+            Text(Self.titleWithLink(title, url: url))
+                .font(LooreFont.serif(24, .regular, relativeTo: .title2))
+                .foregroundStyle(LooreColor.textPrimary)
+                .lineSpacing(2)
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityAddTraits(.isHeader)
+                .tint(LooreColor.textMuted)
+                .accessibilityIdentifier("reference.title")
+                .environment(\.openURL, OpenURLAction { tapped in
+                    guard tapped == url, let url else { return .systemAction }
+                    openOriginal(url)
+                    return .handled
+                })
+                .accessibilityAction(named: "Open page") { if let url { openOriginal(url) } }
+        } else if let url {
+            Button { openOriginal(url) } label: {
+                Text(item.sourceLinkLabel)
+                    .font(LooreFont.sans(12.5, .light))
+                    .foregroundStyle(LooreColor.textMuted)
+                    .padding(.vertical, 10)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("reference.openOriginal")
+        }
+    }
+
     private func text(_ item: ExternalItem) -> some View {
         MarkdownView(markdown: item.bodyWithoutTitle, style: .referenceText)
             .frame(maxWidth: Self.textMeasure, alignment: .leading)
@@ -215,26 +275,10 @@ struct ReferenceDetailView: View {
             .accessibilityIdentifier("reference.body")
     }
 
-    /// Listen and the link out on the left; the verdict and the read toggle
-    /// on the right, or on a line of their own when the row is too narrow.
+    /// The verdict and the read toggle on the right, or at the left edge
+    /// when the row is too narrow. (Listen moved up to the byline line, the
+    /// link out to the title.)
     private func footer(_ item: ExternalItem) -> some View {
-        let leading = HStack(spacing: 10) {
-            // The speaker's 28 pt frame: its icon in line with the text edge.
-            SpeakerButton(target: .item(item.id), content: speakerContent(item),
-                          onTtsGenerated: { self.item?.hasTTS = true })
-                .padding(.leading, -7.5)
-            if let link = item.url, let url = URL(string: link) {
-                Button { openOriginal(url) } label: {
-                    Text(item.sourceLinkLabel)
-                        .font(LooreFont.sans(12.5, .light))
-                        .foregroundStyle(LooreColor.textMuted)
-                        .padding(.vertical, 10)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityIdentifier("reference.openOriginal")
-            }
-        }
         let trailing = HStack(spacing: 0) {
             // A tweet's verdict is named as on its gleaning pick (#502).
             ReferenceFeedbackControl(itemId: item.id, feedback: item.feedback, size: 18,
@@ -255,12 +299,10 @@ struct ReferenceDetailView: View {
         }
         return ViewThatFits(in: .horizontal) {
             HStack(spacing: 10) {
-                leading
                 Spacer(minLength: 0)
                 trailing
             }
             VStack(alignment: .leading, spacing: 0) {
-                leading
                 // The ⊕ glyph, not its 40 pt target, in line with the text edge.
                 trailing.padding(.leading, -11)
             }

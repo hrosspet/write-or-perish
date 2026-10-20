@@ -764,6 +764,25 @@ final class FeaturePageModelTests: XCTestCase {
                        .init(name: nil, handle: "@jack", date: LooreDateFormat.dateTime(page.items[0].fetchedAt)))
     }
 
+    func testReferenceTitleLinkJoinsTheArrowToTheLastWord() throws {
+        let url = URL(string: "https://www.example.com/essays/slow")!
+        let linked = ReferenceDetailView.titleWithLink("On slow evenings", url: url)
+        // The arrow carries the link; the title text before it does not.
+        let runs = linked.runs.map { (String(linked[$0.range].characters), $0.link) }
+        XCTAssertEqual(runs.count, 2)
+        XCTAssertNil(runs[0].1)
+        XCTAssertEqual(runs[1].1, url)
+        // No ordinary space before the last word or the arrow: they wrap as one.
+        let plain = String(linked.characters)
+        XCTAssertEqual(plain, "On slow\u{00A0}evenings\u{00A0}\u{2197}")
+        XCTAssertEqual(String(plain.split(separator: " ").last ?? ""), "slow\u{00A0}evenings\u{00A0}\u{2197}")
+        // A one-word title and a title with no URL.
+        XCTAssertEqual(String(ReferenceDetailView.titleWithLink("Evenings", url: url).characters), "Evenings\u{00A0}\u{2197}")
+        let bare = ReferenceDetailView.titleWithLink("On slow evenings", url: nil)
+        XCTAssertEqual(String(bare.characters), "On slow evenings")
+        XCTAssertTrue(bare.runs.allSatisfy { $0.link == nil })
+    }
+
     func testReferencePageBylinePerKind() throws {
         let tweet = try decode(ExternalItem.self, #"{"id":42,"source":"community_archive","external_id":"1","author_handle":"miraokafor","author_name":"Mira Okafor","preview":"p","url":"https://x.com/miraokafor/status/1","posted_at":"2026-10-12T21:07:00Z","fetched_at":"2026-10-13T08:00:00Z","has_tts":false,"surfaced_count":1}"#)
         XCTAssertEqual(ReferenceDetailView.byline(tweet),
