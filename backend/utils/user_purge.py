@@ -1342,17 +1342,11 @@ def _purge_user_content(user_id, dry_run, heartbeat, scope):
             f"still left after {PURGE_MAX_ROUNDS} rounds: "
             + ", ".join(f"{k}={v}" for k, v in sorted(left.items())))
 
-    # The account stays; what described the writing does not. A
-    # description the user wrote after a "Delete all my writing" request
-    # is theirs and stays.
+    # The account stays; what described the writing does not.
     user = db.session.get(User, user_id)
     for attr, value in PIPELINE_FLAG_RESETS.items():
         setattr(user, attr, value)
     user.prefilled_handle = None
-    if scope.everything or db.session.query(UserDataPurgeHidden.id).filter(
-            UserDataPurgeHidden.job_id == scope.job_id,
-            UserDataPurgeHidden.kind == "user_description").first():
-        user.description = ""
     db.session.commit()
     _drop_public_pages(user)
     return dict(counts)
@@ -1496,7 +1490,6 @@ def hide_writing(user, job, now):
       had deleted before are recorded apart and never restored;
     * the rows of the per-user tables (HIDDEN_ROW_TABLES) are left out of
       every query from now on;
-    * the short profile description is shown empty;
     * the folders and files in the user's storage are recorded, so the
       purge deletes those and not what the user records afterwards.
 
@@ -1524,13 +1517,6 @@ def hide_writing(user, job, now):
             kind = model.__tablename__
             _record(J, kind, model, model.user_id == U,
                     ~model.id.in_(hidden_ids(kind, J)))
-        if user.description and db.session.query(
-                UserDataPurgeHidden.id).filter(
-                UserDataPurgeHidden.job_id == J,
-                UserDataPurgeHidden.kind == "user_description",
-        ).first() is None:
-            db.session.add(UserDataPurgeHidden(
-                job_id=J, kind="user_description", row_id=U))
         recorded = {p for (p,) in db.session.query(
             UserDataPurgeHidden.path).filter(
             UserDataPurgeHidden.job_id == J,
@@ -1567,8 +1553,7 @@ def hidden_counts(job_id):
 def unhide_writing(job_ids):
     """Show again what the jobs hid: the nodes they soft-deleted get
     ``deleted_at`` cleared (never the ones the user had deleted before),
-    and the records go, so the hidden rows and the description show
-    again. In the caller's transaction (nothing commits here), so a
+    and the records go, so the hidden rows show again. In the caller's transaction (nothing commits here), so a
     restore that fails half way changes nothing."""
     job_ids = list(job_ids)
     if not job_ids:
@@ -1928,15 +1913,14 @@ def deletion_status(user_id):
 def has_unhidden_writing(user_id):
     """True when the user has writing that no waiting deletion hides: a
     live node of theirs (an entry, or an AI reply they own: its entry may
-    have been deleted on its own, so the reply can be live alone), a row
-    of a per-user table (HIDDEN_ROW_TABLES; the hidden ones are left out
-    of every query) or a description they wrote again. Exists checks on ids only, nothing is loaded or
+    have been deleted on its own, so the reply can be live alone) or a
+    row of a per-user table (HIDDEN_ROW_TABLES; the hidden ones are left
+    out of every query). Exists checks on ids only, nothing is loaded or
     decrypted. The nodes are selected by the user first, in a
     materialized CTE, for the reason own_entries.py gives: the planner
     otherwise expects many live rows and may scan other users' nodes, and
     while a deletion waits the user has none."""
     from sqlalchemy import exists
-    from backend.utils.hidden_rows import description_hidden
     mine = (select(Node.id, Node.deleted_at)
             .where(_owned(user_id, ()))
             .cte("mine")
@@ -1948,6 +1932,4 @@ def has_unhidden_writing(user_id):
         if db.session.query(model.id).filter(
                 model.user_id == user_id).first() is not None:
             return True
-    user = db.session.get(User, user_id)
-    return bool(user is not None and user.description
-                and not description_hidden(user_id))
+    return False

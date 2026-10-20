@@ -22,8 +22,6 @@ class User(db.Model, UserMixin):
     # from the handle anyway; connecting X to sign in publishes nothing.
     x_connected_at = db.Column(db.DateTime, nullable=True)
     username = db.Column(db.String(64), unique=True, nullable=False)
-    # A short description that the user may set (max 128 characters)
-    description = db.Column(db.String(128), nullable=True, default="")
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     accepted_terms_at = db.Column(db.DateTime, nullable=True)
     accepted_terms_version = db.Column(db.String(16), nullable=True)
@@ -2113,15 +2111,18 @@ class UserDataPurgeHidden(db.Model):
     * ``kind`` = a per-user table (``HIDDEN_ROW_TABLES``), ``row_id`` =
       its row: hidden while this row exists (backend/utils/hidden_rows.py
       leaves it out of every ORM query).
-    * ``kind`` = "user_description", ``row_id`` = the user: the short
-      profile description is shown empty.
     * ``kind`` = "file", ``path`` = a folder or file of the user's audio
       or import storage that existed at the request ("audio:<rel>" or
       "stash:<rel>"), so the purge deletes those and not what the user
       records afterwards.
 
     Deleted by a restore (the rows show again) and at the end of the
-    purge (the rows are gone). Ids and paths only, never content."""
+    purge (the rows are gone). Ids and paths only, never content.
+
+    A job that waited when the short profile description was removed
+    (#538) may still have a ``kind`` = "user_description" row. Nothing
+    reads that kind any more: every reader asks for its own kinds, and
+    the restore and the purge delete a job's rows whatever their kind."""
     __tablename__ = "user_data_purge_hidden"
 
     id = db.Column(db.Integer, primary_key=True)

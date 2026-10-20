@@ -134,7 +134,9 @@ def _run(path, as_username, merge, create_approved, twitter_id=None):
     user = User.query.filter_by(username=username).first()
     if user is None:
         u = dump["user"]
-        user = User(username=username, description=u.get("description") or "",
+        # A dump made before #538 may carry the user's "description": the
+        # field is gone, so it is not loaded.
+        user = User(username=username,
                     preferred_model=u.get("preferred_model"),
                     plan=u.get("plan") or "alpha", approved=bool(create_approved))
         if u.get("timezone") and hasattr(user, "timezone"):

@@ -182,14 +182,13 @@ def world(app, stubs):
     w = World()
     w.alice = _add(User(username="alice", email="alice@example.com",
                         twitter_id="1001", approved=True, plan="alpha",
-                        description="I write about birds",
                         prefilled_handle="alicebirds",
                         profile_batch_pending=True, profile_force_batch=True,
                         profile_generation_task_id="t-profile",
                         default_privacy_level="public", craft_mode=True))
     w.bob = _add(User(username="bob", email="bob@example.com",
                       twitter_id="1002", approved=True, plan="alpha",
-                      description="bob's bio", prefilled_handle="bobhandle"))
+                      prefilled_handle="bobhandle"))
     w.admin = _add(User(username="admin", approved=True, is_admin=True))
     w.llm = _add(User(username="claude-opus", twitter_id="llm-claude-opus"))
     a, b, llm = w.alice, w.bob, w.llm
@@ -540,7 +539,6 @@ def test_all_of_alices_data_is_gone(world, stubs):
     assert (user.username, user.email, user.twitter_id, user.plan,
             user.default_privacy_level, user.craft_mode) == (
         "alice", "alice@example.com", "1001", "alpha", "public", True)
-    assert user.description == ""
     assert user.prefilled_handle is None
     assert not user.profile_batch_pending and not user.profile_force_batch
     assert user.profile_generation_task_id is None

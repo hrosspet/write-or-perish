@@ -5,7 +5,6 @@ from functools import wraps
 from flask import Blueprint, request, jsonify, abort, current_app
 from flask_login import login_required, current_user
 from sqlalchemy.exc import IntegrityError
-from backend.utils.hidden_rows import shown_description
 from backend.models import User, APICostLog
 from backend.extensions import db
 from backend.utils.timefmt import iso_utc
@@ -252,7 +251,6 @@ def list_users():
             "id": user.id,
             "twitter_id": user.twitter_id,
             "username": user.username,
-            "description": shown_description(user),
             "created_at": iso_utc(user.created_at),
             "accepted_terms_at": iso_utc(user.accepted_terms_at),
             "approved": user.approved,
