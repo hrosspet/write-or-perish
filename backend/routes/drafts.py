@@ -1,5 +1,6 @@
 from flask import Blueprint, jsonify, request, current_app
 from flask_login import login_required, current_user
+from backend.utils.error_privacy import describe_exception
 from sqlalchemy.exc import IntegrityError
 from backend.models import Draft, Node, NodeTranscriptChunk
 from backend.extensions import db
@@ -814,10 +815,15 @@ def upload_streaming_chunk(session_id):
         try:
             persist_init_segment(upload_path, chunk_dir)
         except (ValueError, OSError) as exc:
-            current_app.logger.error(
-                f"Failed to extract init segment from chunk 0 of "
-                f"session {session_id}: {exc}"
-            )
+            # A ValueError's message is the stream walker's own
+            # (webm_utils: element names, offsets), never the audio, so it
+            # stays in the log and the response; an OSError's text names
+            # server paths, so it is replaced.
+            detail = (str(exc) if isinstance(exc, ValueError)
+                      else "the server could not store the recording")
+            current_app.logger.exception(
+                "Failed to extract init segment from chunk 0 of "
+                "session %s: %s (%s)", session_id, describe_exception(exc), detail)
             try:
                 upload_path.unlink()
             except OSError:
@@ -827,7 +833,7 @@ def upload_streaming_chunk(session_id):
             # 5xx alert dashboards.
             return jsonify({
                 "error": "Could not parse init segment from first chunk",
-                "detail": str(exc),
+                "detail": detail,
                 "code": "init_parse_failed",
             }), 400
         except Exception:
@@ -856,10 +862,9 @@ def upload_streaming_chunk(session_id):
                 f"subsession (resumed recording); init persisted"
             )
         except (ValueError, OSError) as exc:
-            current_app.logger.error(
-                f"Failed to extract subsession init from chunk "
-                f"{chunk_index} of session {session_id}: {exc}"
-            )
+            current_app.logger.exception(
+                "Failed to extract subsession init from chunk %s of "
+                "session %s: %s", chunk_index, session_id, describe_exception(exc))
         except Exception:
             upload_path.unlink(missing_ok=True)
             raise
@@ -1393,9 +1398,11 @@ def save_streaming_as_node(session_id):
                 # read-only model asked to reply (ReadOnlyModelRefused),
                 # skips the reply the same way: the entry is saved.
                 db.session.rollback()
+                # The message is written for the user (llm_error); the
+                # log keeps the type
                 current_app.logger.warning(
-                    f"save-as-node: LLM reply skipped for node {node.id}: {e}"
-                )
+                    "save-as-node: LLM reply skipped for node %s: %s",
+                    node.id, describe_exception(e))
                 response["llm_error"] = str(e)
                 if isinstance(e, (AIUsageRefused, ReadOnlyModelRefused)):
                     response["llm_error_code"] = e.code

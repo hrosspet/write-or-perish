@@ -206,8 +206,9 @@ def serve_media(filename):
 
         try:
             decrypted_content = decrypt_file(str(file_path))
-        except Exception as e:
-            return jsonify({"error": f"Failed to decrypt file: {str(e)}"}), 500
+        except Exception:
+            # decrypt_file logs the failure (type only reaches Sentry)
+            return jsonify({"error": "Failed to decrypt file"}), 500
 
         # Determine mime type from the extension before ".enc"
         plain_name = file_path.name[:-len(".enc")]

@@ -510,6 +510,31 @@ class TestPrefillCheck:
         assert client.get("/api/admin/prefill/check?handle=nobody").status_code == 404
         assert client.get("/api/admin/prefill/check").status_code == 400
 
+    def test_check_failures_say_why_without_exception_text(
+            self, app, users, monkeypatch):
+        """The Community Archive's own message is written for the admin
+        (two accounts share the handle); any other failure names only
+        its type (2026-10-20)."""
+        from backend.utils import community_archive as ca
+        message = ("@twin: 2 Community Archive accounts have exactly that "
+                   "username; refusing to guess which one")
+
+        def ambiguous(h, snapshot_dir=None):
+            raise ca.CommunityArchiveError(message)
+
+        def network(h, snapshot_dir=None):
+            raise OSError("connection to 10.0.0.7 refused")
+
+        client = app.test_client()
+        _login(client, users["renamed_admin"].id)
+        monkeypatch.setattr(ca, "coverage_summary", ambiguous)
+        r = client.get("/api/admin/prefill/check?handle=twin")
+        assert r.status_code == 502 and r.json == {"error": message}
+        monkeypatch.setattr(ca, "coverage_summary", network)
+        r = client.get("/api/admin/prefill/check?handle=twin")
+        assert r.status_code == 502
+        assert r.json == {"error": "Community Archive lookup failed (OSError)."}
+
 
 class TestVoiceTimingAdmin:
     """#371: every user's voice-turn timings, for the admin only."""

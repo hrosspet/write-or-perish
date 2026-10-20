@@ -1,5 +1,6 @@
 from flask import Blueprint, jsonify, request, current_app
 from flask_login import login_required, current_user
+from backend.utils.error_privacy import describe_exception
 from backend.models import Node, User, UserProfile
 from backend.extensions import db
 from backend.utils.privacy import AI_ALLOWED
@@ -349,9 +350,8 @@ def _analyze_pdf(upload):
         return jsonify({"error": str(e)}), 400
     except Exception:
         # Event reaches Sentry; only the exception type is logged
-        current_app.logger.error(
-            "Unexpected error reading PDF: %s",
-            type(sys.exc_info()[1]).__name__)
+        current_app.logger.exception(
+            "Unexpected error reading PDF: %s", describe_exception(sys.exc_info()[1]))
         return jsonify({"error": pdf_import.PDF_UNEXPECTED_ERROR}), 500
     entry = _pdf_file_entry(upload.filename, pdf)
     return jsonify({
@@ -565,9 +565,9 @@ def analyze_import():
             return jsonify({"error": f"{zip_file.filename}: {e}"}), 400
         except Exception:
             # Event reaches Sentry; only the exception type is logged
-            current_app.logger.error(
+            current_app.logger.exception(
                 "Unexpected error converting .docx: %s",
-                type(sys.exc_info()[1]).__name__)
+                describe_exception(sys.exc_info()[1]))
             return jsonify({"error": DOCX_UNEXPECTED_ERROR}), 500
         if not content.strip():
             return jsonify({"error": f"{zip_file.filename}: the document has no text"}), 400
@@ -656,9 +656,9 @@ def analyze_import():
                         continue
                     except Exception:
                         # type only: exception messages can contain names
-                        current_app.logger.error(
+                        current_app.logger.exception(
                             "Unexpected error converting .docx in zip: %s",
-                            type(sys.exc_info()[1]).__name__)
+                            describe_exception(sys.exc_info()[1]))
                         errors.append({"name": filename,
                                        "error": DOCX_UNEXPECTED_ERROR})
                         continue
@@ -715,8 +715,8 @@ def analyze_import():
         return jsonify({"error": "Invalid zip file"}), 400
     except Exception as e:
         # Event reaches Sentry; only the exception type is logged
-        current_app.logger.error(
-            "Error analyzing import: %s", type(e).__name__)
+        current_app.logger.exception(
+            "Error analyzing import: %s", describe_exception(e))
         return jsonify({"error": "Failed to analyze zip file"}), 500
 
 
@@ -952,7 +952,7 @@ def confirm_import():
                             user_obj, earliest_ts, total_imported_tokens))
             except Exception as e:
                 current_app.logger.warning(
-                    "Auto-trigger profile update failed: %s", type(e).__name__
+                    "Auto-trigger profile update failed: %s", describe_exception(e)
                 )
 
         return jsonify({
@@ -968,8 +968,8 @@ def confirm_import():
 
     except Exception as e:
         db.session.rollback()
-        current_app.logger.error(
-            "Error confirming import: %s", type(e).__name__)
+        current_app.logger.exception(
+            "Error confirming import: %s", describe_exception(e))
         return jsonify({"error": "Failed to import files"}), 500
 
 
@@ -1011,8 +1011,8 @@ def analyze_twitter_import():
     try:
         token, path = ta.stash_new(current_user.id)
     except OSError as e:
-        current_app.logger.error(
-            "Twitter import stash failed: %s", type(e).__name__)
+        current_app.logger.exception(
+            "Twitter import stash failed: %s", describe_exception(e))
         return jsonify({"error": "Could not store the archive for import"}), 500
 
     try:
@@ -1026,9 +1026,8 @@ def analyze_twitter_import():
         return jsonify({"error": str(e)}), 400
     except Exception as e:
         ta.stash_delete(path)
-        current_app.logger.error(
-            "Error analyzing Twitter import: %s", type(e).__name__
-        )
+        current_app.logger.exception(
+            "Error analyzing Twitter import: %s", describe_exception(e))
         return jsonify({
             "error": "Failed to analyze Twitter export"
         }), 500
@@ -1381,9 +1380,8 @@ def analyze_claude_import():
             "error": "conversations.json is not valid JSON"
         }), 400
     except Exception as e:
-        current_app.logger.error(
-            "Error analyzing Claude import: %s", type(e).__name__
-        )
+        current_app.logger.exception(
+            "Error analyzing Claude import: %s", describe_exception(e))
         return jsonify({
             "error": "Failed to analyze Claude export"
         }), 500
@@ -1572,7 +1570,7 @@ def _maybe_update_profile_after_import(user_id, earliest_ts, imported_tokens):
             user_obj, earliest_ts, imported_tokens)
     except Exception as e:
         current_app.logger.warning(
-            "Auto-trigger profile update failed: %s", type(e).__name__
+            "Auto-trigger profile update failed: %s", describe_exception(e)
         )
     return None
 
@@ -2006,9 +2004,8 @@ def analyze_chatgpt_import():
             "error": "conversations.json is not valid JSON"
         }), 400
     except Exception as e:
-        current_app.logger.error(
-            "Error analyzing ChatGPT import: %s", type(e).__name__
-        )
+        current_app.logger.exception(
+            "Error analyzing ChatGPT import: %s", describe_exception(e))
         return jsonify({
             "error": "Failed to analyze ChatGPT export"
         }), 500

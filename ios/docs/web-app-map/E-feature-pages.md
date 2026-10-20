@@ -557,7 +557,7 @@ There are four entry points. `ImportPage` renders them inline as labelled file p
 - While working, the options are replaced by a spinner with a stage label: "Extracting…" (client unzip), "Analyzing…" (upload), "Importing…" (confirm).
 - Errors show above the options in accent colour: the server `error` or "Error analyzing … Please try again.".
 - ChatGPT has richer messages:
-  - `"{error}: {details}"` when both are present.
+  - The server's `error` when present.
   - 413 → "conversations.json is too large to upload. Please contact support."
   - Other HTTP status → "Error analyzing ChatGPT export (HTTP {status}). Please try again."
   - No response → "Error analyzing ChatGPT export. The request did not reach the server — check your connection."
