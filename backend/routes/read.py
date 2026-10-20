@@ -318,8 +318,9 @@ def _cancel_submitted_batch(entry):
         cancel(keys[provider], entry["batch_id"])
     except Exception as e:  # noqa: BLE001 - reported, not fatal
         current_app.logger.warning(
-            "Batch %s cancel failed: %s", entry.get("batch_id"), e)
-        entry["cancel_error"] = str(e)
+            "Batch %s cancel failed: %s", entry.get("batch_id"),
+            type(e).__name__)
+        entry["cancel_error"] = type(e).__name__
 
 
 @read_bp.route("/<int:node_id>/rerun", methods=["POST"])
@@ -400,7 +401,8 @@ def rerun_read(node_id):
             generate_llm_response.app.control.revoke(node.llm_task_id)
         except Exception as e:  # noqa: BLE001 - best effort
             current_app.logger.warning(
-                "Revoke of task %s failed: %s", node.llm_task_id, e)
+                "Revoke of task %s failed: %s", node.llm_task_id,
+                type(e).__name__)
     # The new task id is chosen here and committed BEFORE the dispatch:
     # the task bails when the node's task id is not its own (the guard
     # against a lost revoke), so the id must be on the node before the

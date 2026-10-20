@@ -302,7 +302,8 @@ def get_item_tts_status(item_id):
                 item.tts_task_status = "failed"
                 db.session.commit()
         except Exception as e:  # Celery unreachable: answer from the DB
-            current_app.logger.warning(f"Failed to check Celery task status: {e}")
+            current_app.logger.warning(
+                "Failed to check Celery task status: %s", type(e).__name__)
     data = {
         "status": item.tts_task_status,
         "progress": item.tts_task_progress or 0,
@@ -619,10 +620,10 @@ def twitter_callback():
         me.raise_for_status()
         me_data = me.json().get("data", {})
     except requests.RequestException as exc:
-        body = ""
-        if getattr(exc, "response", None) is not None:
-            body = f" — response: {exc.response.text[:500]}"
-        current_app.logger.exception("X OAuth callback failed%s", body)
+        # The type and X's HTTP status, not the response body
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+        current_app.logger.error("X OAuth callback failed: %s (status %s)",
+                                 type(exc).__name__, status)
         return redirect(_frontend_url("/import?x_connect=failed"))
 
     account = ExternalAccount.query.filter_by(

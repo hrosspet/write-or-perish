@@ -98,7 +98,8 @@ def resolve_x_id(handle, *, x_lookup=False, archive=True, cost_user_id=None,
         except ca.CommunityArchiveError as e:  # several exact matches
             raise XIdUnresolved("ambiguous", str(e)) from e
         except Exception as e:  # network / provider errors
-            logger.warning("Community Archive lookup failed for @%s: %s", handle, e)
+            logger.warning("Community Archive lookup failed for @%s: %s",
+                           handle, type(e).__name__)
             account, archive_error = None, e
         if account:
             return ResolvedX(str(account["account_id"]), "community-archive",
@@ -108,7 +109,8 @@ def resolve_x_id(handle, *, x_lookup=False, archive=True, cost_user_id=None,
     if not x_lookup:
         if archive_error is not None:
             raise XIdUnresolved(
-                "archive-error", f"Community Archive lookup failed: {archive_error}")
+                "archive-error", "Community Archive lookup failed "
+                f"({type(archive_error).__name__}).")
         raise XIdUnresolved(
             "not-in-archive", f"@{handle} is not in the Community Archive.")
 
@@ -131,8 +133,10 @@ def resolve_x_id(handle, *, x_lookup=False, archive=True, cost_user_id=None,
     except x_api.XApiError as e:
         raise XIdUnresolved("x-error", str(e), paid_reads=settle(e.sent)) from e
     except Exception as e:
-        logger.warning("X API lookup failed for @%s: %s", handle, e)
-        raise XIdUnresolved("x-error", f"X API lookup failed: {e}",
+        logger.warning("X API lookup failed for @%s: %s",
+                       handle, type(e).__name__)
+        raise XIdUnresolved("x-error",
+                            f"X API lookup failed ({type(e).__name__}).",
                             paid_reads=settle(False)) from e
     paid = settle(True)
     if account is None:

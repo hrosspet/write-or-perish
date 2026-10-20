@@ -276,6 +276,7 @@ def create_profile():
     )
     profile.set_content(content)
 
+    user_id = current_user.id  # read before a rollback expires it
     try:
         db.session.add(profile)
         db.session.commit()
@@ -294,7 +295,11 @@ def create_profile():
         }), 201
     except Exception as e:
         db.session.rollback()
-        return jsonify({"error": "Failed to create profile", "details": str(e)}), 500
+        # The error's text can quote the profile being saved: the response
+        # and the log (and so Sentry) get the type only.
+        current_app.logger.error("Profile create failed for user %s: %s",
+                                 user_id, type(e).__name__)
+        return jsonify({"error": "Failed to create profile"}), 500
 
 
 def _save_edit_as_none_version(profile, new_content, data):
@@ -314,12 +319,16 @@ def _save_edit_as_none_version(profile, new_content, data):
         parent_profile_id=profile.id,
     )
     new_profile.set_content(new_content)
+    edited_id = profile.id  # read before a rollback expires it
     try:
         db.session.add(new_profile)
         db.session.commit()
     except Exception as e:
         db.session.rollback()
-        return jsonify({"error": "Failed to update profile", "details": str(e)}), 500
+        current_app.logger.error(
+            "Profile edit (as a new version of %s) failed: %s",
+            edited_id, type(e).__name__)
+        return jsonify({"error": "Failed to update profile"}), 500
     return jsonify({
         "message": "Profile updated successfully",
         "profile": {
@@ -398,4 +407,6 @@ def update_profile(profile_id):
         }), 200
     except Exception as e:
         db.session.rollback()
-        return jsonify({"error": "Failed to update profile", "details": str(e)}), 500
+        current_app.logger.error("Profile %s update failed: %s",
+                                 profile_id, type(e).__name__)
+        return jsonify({"error": "Failed to update profile"}), 500

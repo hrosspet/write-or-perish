@@ -480,6 +480,7 @@ def update_user():
         from backend.utils.username_history import record_rename
         record_rename(current_user, renamed_from, new_username)
 
+    user_id = current_user.id  # read before a rollback expires it
     try:
         db.session.commit()
         # The opt-out must reach the open web immediately: drop every
@@ -505,7 +506,11 @@ def update_user():
                                  "Reload and try again."}), 409
     except Exception as e:
         db.session.rollback()
-        return jsonify({"error": "Failed to update profile.", "details": str(e)}), 500
+        # A database error's text can quote the values being saved: the
+        # response and the log (and so Sentry) get the type only.
+        logger.error("Profile update failed for user %s: %s",
+                     user_id, type(e).__name__)
+        return jsonify({"error": "Failed to update profile."}), 500
 
 
 # Persist the browser-reported IANA timezone (e.g. "Europe/Prague"), used to
@@ -520,11 +525,13 @@ def update_timezone():
     tz_name = data.get("timezone")
     if not is_valid_timezone(tz_name):
         return jsonify({"error": "Invalid timezone."}), 400
+    user_id = current_user.id  # read before a rollback expires it
     current_user.timezone = tz_name
     try:
         db.session.commit()
     except Exception as e:
         db.session.rollback()
-        return jsonify({"error": "Failed to update timezone.",
-                        "details": str(e)}), 500
+        logger.error("Timezone update failed for user %s: %s",
+                     user_id, type(e).__name__)
+        return jsonify({"error": "Failed to update timezone."}), 500
     return jsonify({"timezone": current_user.timezone}), 200

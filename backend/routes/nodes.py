@@ -218,7 +218,8 @@ def _compress_audio_if_needed(file_path: pathlib.Path) -> pathlib.Path:
         return compressed_path
 
     except Exception as e:
-        current_app.logger.error(f"Audio compression failed: {e}")
+        current_app.logger.error(
+            "Audio compression failed: %s", type(e).__name__)
         return file_path  # Return original if compression fails
 
 
@@ -228,7 +229,8 @@ def _get_audio_duration(file_path: pathlib.Path) -> float:
         audio = AudioSegment.from_file(str(file_path))
         return len(audio) / 1000.0  # pydub returns milliseconds
     except Exception as e:
-        current_app.logger.error(f"Failed to get audio duration: {e}")
+        current_app.logger.error(
+            "Failed to get audio duration: %s", type(e).__name__)
         return 0.0
 
 
@@ -261,7 +263,8 @@ def _chunk_audio(file_path: pathlib.Path, chunk_duration_sec: int = CHUNK_DURATI
         return chunks
 
     except Exception as e:
-        current_app.logger.error(f"Audio chunking failed: {e}")
+        current_app.logger.error(
+            "Audio chunking failed: %s", type(e).__name__)
         return []
 
 
@@ -356,7 +359,9 @@ def _transcribe_audio_file(client: OpenAI, file_path: pathlib.Path) -> str:
                     try:
                         os.unlink(chunk_path)
                     except Exception as e:
-                        current_app.logger.warning(f"Failed to delete chunk file {chunk_path}: {e}")
+                        current_app.logger.warning(
+                            "Failed to delete chunk file %s: %s",
+                            chunk_path, type(e).__name__)
 
     finally:
         # Clean up compressed file if it's different from original
@@ -364,7 +369,9 @@ def _transcribe_audio_file(client: OpenAI, file_path: pathlib.Path) -> str:
             try:
                 os.unlink(processed_path)
             except Exception as e:
-                current_app.logger.warning(f"Failed to delete compressed file {processed_path}: {e}")
+                current_app.logger.warning(
+                    "Failed to delete compressed file %s: %s",
+                    processed_path, type(e).__name__)
 
 
 nodes_bp = Blueprint("nodes_bp", __name__)
@@ -2034,7 +2041,9 @@ def get_audio_chunks(node_id):
                 if duration is None:
                     duration = 300.0
             except Exception as e:
-                current_app.logger.warning(f"Failed to get duration for encrypted chunk {f.name}: {e}")
+                current_app.logger.warning(
+                    "Failed to get duration for encrypted chunk %s: %s",
+                    f.name, type(e).__name__)
                 duration = 300.0
             finally:
                 if temp_path:
@@ -2271,7 +2280,8 @@ def get_transcription_status(node_id):
                 db.session.commit()
         except Exception as e:
             # If Celery check fails, log and continue with DB status
-            current_app.logger.warning(f"Failed to check Celery task status: {e}")
+            current_app.logger.warning(
+                "Failed to check Celery task status: %s", type(e).__name__)
             # Don't fail the request - just return DB status without real-time info
 
     # The error text goes to the recording's author only, as the
@@ -2366,7 +2376,8 @@ def get_llm_status(node_id):
                         }
         except Exception as e:
             # If Celery check fails, log and continue with DB status
-            current_app.logger.warning(f"Failed to check Celery task status: {e}")
+            current_app.logger.warning(
+                "Failed to check Celery task status: %s", type(e).__name__)
             # Don't fail the request - just return DB status without real-time info
 
     # A failed reply's error text and the task's warnings go to the
@@ -2463,19 +2474,14 @@ def get_tts_status(node_id):
                 node.tts_task_status = 'completed'
                 db.session.commit()
             elif task.state == 'FAILURE':
-                # Surface the worker exception so failures are
-                # diagnosable without SSH access to worker logs —
-                # scrubbed: no API keys, no filesystem paths, no
-                # provider response bodies (security review finding).
-                import re as _re
-                raw = f"{type(task.info).__name__}: {task.info}"
-                raw = _re.sub(r"sk-[A-Za-z0-9_\-]+", "[key]", raw)
-                raw = _re.sub(r"(?:/[\w.\-]+){2,}", "[path]", raw)
-                raw = raw.split("{", 1)[0]  # drop JSON response bodies
-                task_info = {"error": raw[:200]}
+                # The worker exception's type only: its text can quote
+                # what the job was working on (Peter, 2026-10-20). The
+                # failure reaches Sentry with its stack trace.
+                task_info = {"error": type(task.info).__name__}
         except Exception as e:
             # If Celery check fails, log and continue with DB status
-            current_app.logger.warning(f"Failed to check Celery task status: {e}")
+            current_app.logger.warning(
+                "Failed to check Celery task status: %s", type(e).__name__)
             # Don't fail the request - just return DB status without real-time info
 
     response_data = {
@@ -2812,7 +2818,9 @@ def finalize_chunked_upload():
         shutil.rmtree(chunk_dir)
         current_app.logger.info(f"Cleaned up chunks for upload {upload_id}")
     except Exception as e:
-        current_app.logger.warning(f"Failed to clean up chunks: {e}")
+        current_app.logger.warning(
+            "Failed to clean up chunks for upload %s: %s",
+            upload_id, type(e).__name__)
 
     # Enqueue transcription task
     api_key = get_openai_chat_key(current_app.config)
@@ -2866,7 +2874,8 @@ def cleanup_chunked_upload():
             current_app.logger.info(f"Cleaned up failed upload {upload_id}")
             return jsonify({"message": "Cleanup successful"}), 200
         except Exception as e:
-            current_app.logger.error(f"Cleanup failed for upload {upload_id}: {e}")
+            current_app.logger.error("Cleanup failed for upload %s: %s",
+                                     upload_id, type(e).__name__)
             return jsonify({"error": "Cleanup failed"}), 500
 
     return jsonify({"message": "Nothing to clean up"}), 200
@@ -3399,8 +3408,9 @@ def delete_node(node_id):
         db.session.commit()
     except Exception as e:
         db.session.rollback()
-        current_app.logger.error(f"Error soft-deleting node {node_id}: {e}")
-        return jsonify({"error": "Error deleting node", "details": str(e)}), 500
+        current_app.logger.error("Error soft-deleting node %s: %s",
+                                 node_id, type(e).__name__)
+        return jsonify({"error": "Error deleting node"}), 500
 
     # The delete is committed: from here on the answer is 200 whatever
     # happens, or the client keeps a card for a node that is gone.

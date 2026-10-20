@@ -1,4 +1,4 @@
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, current_app, jsonify, request
 from flask_login import login_required, current_user
 from backend.models import Node
 from backend.extensions import db
@@ -55,7 +55,12 @@ def create_issue():
             platform=request_client(),
         )
     except (ValueError, RuntimeError) as e:
-        return jsonify({"error": str(e)}), 500
+        # Missing configuration or GitHub's answer: neither is for the
+        # user. The log keeps the type.
+        current_app.logger.error("GitHub issue creation failed: %s",
+                                 type(e).__name__)
+        return jsonify({"error": "Couldn't create the GitHub issue. "
+                                 "Please try again later."}), 500
 
     # Clean up draft
     db.session.delete(draft)

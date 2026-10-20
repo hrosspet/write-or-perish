@@ -872,9 +872,7 @@ def activate_and_welcome(user_id):
 
         send_welcome_email(user.email, magic_link_url)
     except Exception:
-        logger.exception(
-            f"Failed to send welcome email to user {user_id} ({user.email})"
-        )
+        logger.exception("Failed to send welcome email to user %s", user_id)
         return jsonify({
             "message": "User approved but welcome email failed to send.",
             "approved": True,
@@ -931,8 +929,11 @@ def prefill_check():
     try:
         summary = ca.coverage_summary(handle, snapshot_dir=snapshot_dir_for(config))
     except Exception as e:  # network / provider errors → readable, not a 500
-        current_app.logger.warning(f"Community Archive check failed for @{handle}: {e}")
-        return jsonify({"error": f"Community Archive lookup failed: {e}"}), 502
+        current_app.logger.warning(
+            "Community Archive check failed for @%s: %s",
+            handle, type(e).__name__)
+        return jsonify({"error": "Community Archive lookup failed "
+                                 f"({type(e).__name__})."}), 502
     if summary is None:
         return jsonify({"error": f"@{handle} is not in the Community Archive."}), 404
     min_parquet = config.get("COMMUNITY_ARCHIVE_PARQUET_MIN_TWEETS", 5000)
@@ -978,8 +979,10 @@ def prefill_x_check():
     except x_api.XApiError as e:
         return jsonify({"error": str(e)}), 502
     except Exception as e:
-        current_app.logger.warning(f"X API check failed for @{handle}: {e}")
-        return jsonify({"error": f"X API lookup failed: {e}"}), 502
+        current_app.logger.warning("X API check failed for @%s: %s",
+                                   handle, type(e).__name__)
+        return jsonify({"error": "X API lookup failed "
+                                 f"({type(e).__name__})."}), 502
     # The lookup itself is billable: log it against the target user when
     # given, else the admin doing the check.
     user_id = request.args.get("user_id", type=int)
