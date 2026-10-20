@@ -728,10 +728,62 @@ final class ImportTests: StubbedAppTestCase {
         XCTAssertEqual(body["import_token"] as? String, "tok")
         XCTAssertEqual(body["include_replies"] as? Bool, true)
         XCTAssertEqual(body["on_deleted"] as? String, "skip")
-        let claude = ImportAnalysis(kind: .claude, raw: ["conversations": [["name": "c"]]])
+        // Claude/ChatGPT: the analyzed conversations stay on the server.
+        let claude = ImportAnalysis(kind: .claude, raw: ["import_token": "ctok", "total_conversations": 1])
         body = model.confirmBody(claude, onDeleted: nil)
-        XCTAssertEqual((body["conversations"] as? [[String: Any]])?.count, 1)
+        XCTAssertEqual(body["import_token"] as? String, "ctok")
+        XCTAssertNil(body["conversations"])
         XCTAssertNil(body["import_type"])
+    }
+
+    // MARK: ChatGPT/Claude imports run in the background (2026-10-20)
+
+    func testAChatGPTImportIsPolledUntilItsResult() async {
+        var polls = 0
+        StubURLProtocol.install { request in
+            if request.url?.path == "/api/import/chatgpt/confirm" {
+                return .json(202, #"{"task_id":"c1","status":"queued","total":6}"#)
+            }
+            polls += 1
+            return polls == 1
+                ? .json(200, #"{"status":"running","done":3,"total":6}"#)
+                : .json(200, #"{"status":"completed","done":6,"total":6,"result":{"created":6,"skipped":0,"restored":0,"updated":0}}"#)
+        }
+        let model = ImportModel(app: app)
+        model.analysis = ImportAnalysis(kind: .chatgpt, raw: ["import_token": "tok", "total_messages": 6])
+        model.pollInterval = 0.05
+        await model.confirm()
+        XCTAssertEqual(body(of: "POST /api/import/chatgpt/confirm")?["import_token"] as? String, "tok")
+        XCTAssertNil(body(of: "POST /api/import/chatgpt/confirm")?["conversations"])
+        XCTAssertTrue(calls.contains("GET /api/import/status/c1"))
+        XCTAssertEqual(model.result?.created, 6)
+        XCTAssertNil(model.error)
+        XCTAssertFalse(model.busy)
+    }
+
+    func testAnotherRunningImportShowsTheServersMessage() async {
+        StubURLProtocol.install { _ in
+            .json(409, #"{"error":"Another import is still running. Wait until it finishes, then try again.","code":"import_running","task_id":"c0"}"#)
+        }
+        let model = ImportModel(app: app)
+        model.analysis = ImportAnalysis(kind: .claude, raw: ["import_token": "tok"])
+        await model.confirm()
+        XCTAssertEqual(model.error, "Another import is still running. Wait until it finishes, then try again.")
+        XCTAssertNil(model.deletedMatches)
+        XCTAssertFalse(model.busy)
+    }
+
+    func testAFailedClaudeJobSaysWhy() async {
+        StubURLProtocol.install { request in
+            if request.url?.path == "/api/import/claude/confirm" { return .json(202, #"{"task_id":"c2","total":2}"#) }
+            return .json(200, #"{"status":"failed","error":"Import data expired — please upload the export again."}"#)
+        }
+        let model = ImportModel(app: app)
+        model.analysis = ImportAnalysis(kind: .claude, raw: ["import_token": "tok"])
+        model.pollInterval = 0.05
+        await model.confirm()
+        XCTAssertEqual(model.error, "Import data expired — please upload the export again.")
+        XCTAssertNil(model.result)
     }
 
     func testDeletedContentConflictAsksThenRetriesWithTheChoice() async {

@@ -55,10 +55,12 @@ enum ImportKind: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
-/// What an analyze call found (kept to re-post on confirm, as the web does).
+/// What an analyze call found (kept for the confirm, as the web does).
 struct ImportAnalysis {
     let kind: ImportKind
-    /// The analyze answer as JSON objects (`files` / `conversations` are posted back).
+    /// The analyze answer as JSON objects: markdown's `files` are posted back;
+    /// Twitter, Claude and ChatGPT answer with an `import_token` (the archive
+    /// stays on the server and the confirm starts a background job).
     let raw: [String: Any]
 
     private func int(_ key: String) -> Int { (raw[key] as? NSNumber)?.intValue ?? 0 }
@@ -129,7 +131,8 @@ struct ImportResult: Equatable {
 }
 
 /// The import flow: pick → (extract) → analyze → confirm dialog → confirm
-/// (→ Twitter task polling) → 409 restore-or-skip → "Import Finished".
+/// (→ task polling for Twitter, Claude and ChatGPT) → 409 restore-or-skip →
+/// "Import Finished".
 @MainActor
 @Observable
 final class ImportModel {
@@ -140,10 +143,10 @@ final class ImportModel {
     static let timeoutMessage = "The import took longer than the connection allows. It may still finish on the server: check your Log in a few minutes before importing again (a repeat skips what already arrived)."
     static let lostTrackMessage = "Lost track of the import — check your Log to see whether it finished."
     static let continuesMessage = "The import continues in the background. Check your Log in a few minutes."
-    /// A Twitter import whose status shows no progress for this long stops being
-    /// polled (the web polls until the page is reloaded). Heuristic chosen for the
-    /// app, not taken from the web or the backend.
-    static let twitterStallLimit: TimeInterval = 10 * 60
+    /// A background import (Twitter, Claude, ChatGPT) whose status shows no
+    /// progress for this long stops being polled (the web polls until the page is
+    /// reloaded). Heuristic chosen for the app, not taken from the web or the backend.
+    static let taskStallLimit: TimeInterval = 10 * 60
 
     private let app: AppState
     private let log = Logger(subsystem: "org.loore.app", category: "import")
@@ -166,11 +169,11 @@ final class ImportModel {
     /// `409 deleted_content_matches`: the count to show; the retry repeats the confirm.
     var deletedMatches: Int?
     var result: ImportResult?
-    /// A queued Twitter import is being polled: the dialog can be closed meanwhile.
+    /// A queued background import is being polled: the dialog can be closed meanwhile.
     private(set) var pollingTask = false
     /// Polling cadence and the stall limit (tests shorten them).
     var pollInterval: TimeInterval = 1.5
-    var stallLimit: TimeInterval = ImportModel.twitterStallLimit
+    var stallLimit: TimeInterval = ImportModel.taskStallLimit
     private var pollGeneration = 0
 
     init(app: AppState) {
@@ -285,7 +288,7 @@ final class ImportModel {
         var body: [String: Any] = ["privacy_level": privacy.rawString, "ai_usage": aiUsage.rawString]
         switch analysis.kind {
         case .claude, .chatgpt:
-            body["conversations"] = analysis.raw["conversations"] ?? []
+            body["import_token"] = analysis.importToken ?? ""
         case .markdown:
             body["files"] = analysis.raw["files"] ?? []
             body["import_type"] = importType
@@ -321,9 +324,11 @@ final class ImportModel {
                 data = try await app.api.data(for: request).0
             }
             let object = (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
-            if analysis.kind == .twitter, let taskId = object["task_id"] as? String {
+            if analysis.kind != .markdown, let taskId = object["task_id"] as? String {
+                // Twitter, Claude, ChatGPT: the confirm queued a job (a second
+                // confirm of a running Claude/ChatGPT import answers with its id).
                 progress = (0, (object["total"] as? NSNumber)?.intValue ?? 0)
-                await pollTwitter(taskId)
+                await pollTask(taskId, kind: analysis.kind)
             } else {
                 finish(ImportResult(object))
             }
@@ -350,7 +355,7 @@ final class ImportModel {
 
     /// `GET /api/import/status/<task>` every 1.5 s, until the task ends, the user
     /// closes the dialog (`closeWhilePolling`), or nothing changes for `stallLimit`.
-    private func pollTwitter(_ taskId: String) async {
+    private func pollTask(_ taskId: String, kind: ImportKind) async {
         pollGeneration += 1
         let generation = pollGeneration
         pollingTask = true
@@ -368,7 +373,7 @@ final class ImportModel {
                     finish(ImportResult(resultObject))
                     return
                 case "failed":
-                    fail(status["error"]?.stringValue ?? ImportKind.twitter.confirmError)
+                    fail(status["error"]?.stringValue ?? kind.confirmError)
                     return
                 case "running":
                     progress = (status["done"]?.intValue ?? 0, status["total"]?.intValue ?? progress?.total ?? 0)
@@ -393,8 +398,8 @@ final class ImportModel {
         }
     }
 
-    /// Close on the confirm dialog while a Twitter import is polled: the import
-    /// keeps running on the server; the app stops watching it.
+    /// Close on the confirm dialog while a background import is polled: the
+    /// import keeps running on the server; the app stops watching it.
     func closeWhilePolling() {
         guard pollingTask else { return }
         pollGeneration += 1
