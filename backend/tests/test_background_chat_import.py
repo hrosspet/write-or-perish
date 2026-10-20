@@ -587,13 +587,65 @@ def test_the_stash_is_encrypted_at_rest(app, kms):
     assert "message 0 of secret-chat" not in raw
     assert "secret-chat" not in raw
     header = json.loads(raw.split("\n", 1)[0])
+    # "message N of secret-chat" is 24 characters: 6 tokens each.
     assert header == {"format": 1, "source": "chatgpt", "conversations": 1,
-                      "messages": 3}
+                      "messages": 3,
+                      "roles": {"user_msgs": 2, "assistant_msgs": 1,
+                                "user_tokens": 12, "assistant_tokens": 6}}
     for line in raw.strip().split("\n")[1:]:
         assert line.startswith(encryption.ENCRYPTED_PREFIX_V2)
     assert cs.read_keys(path) == [f"chatgpt:secret-chat-m{i}"
                                   for i in range(3)]
     assert _stashed(body)[0]["name"] == "secret-chat"
+
+
+def _log_lines(caplog, marker):
+    return [r.getMessage() for r in caplog.records if marker in r.getMessage()]
+
+
+def test_the_user_and_assistant_split_is_logged_as_counts_only(app, caplog):
+    """Peter, 2026-10-20: learn how much of an import is the user's own
+    text and how much the AI's, from counts in the logs (never text)."""
+    import logging
+    caplog.set_level(logging.INFO)
+    alice, client = _user_and_client(app)
+    raw = [_chat(4, "a-private-title"), _chat(1, "b-private-title")]
+    body = _analyze(client, raw).get_json()
+    # "message N of a-private-title": 28 chars = 7 tokens; b: 7 tokens.
+    [line] = _log_lines(caplog, "user_tokens=")
+    size = len(json.dumps(raw).encode())
+    assert line == (f"ChatGPT import: size_bytes={size} files=1 "
+                    "conversations=2 user_msgs=3 assistant_msgs=2 "
+                    f"user_tokens=21 assistant_tokens=14 user_id={alice.id}")
+    path = cs.stash_path(alice.id, body["import_token"])
+    assert cs.read_header(path)["roles"] == {
+        "user_msgs": 3, "assistant_msgs": 2,
+        "user_tokens": 21, "assistant_tokens": 14}
+    # Not in the analyze response (nor any UI).
+    assert set(body) == {"import_token", "total_conversations",
+                         "total_messages", "total_tokens", "total_size",
+                         "notices"}
+
+    _confirm(client, body["import_token"])
+    [done] = _log_lines(caplog, "import job done")
+    assert done == ("ChatGPT import job done: user_msgs=3 assistant_msgs=2 "
+                    "user_tokens=21 assistant_tokens=14 created=5 skipped=0 "
+                    f"restored=0 updated=0 user_id={alice.id}")
+    assert "private-title" not in caplog.text
+    assert "message 0" not in caplog.text
+
+    caplog.clear()
+    raw = [{"name": "Claude private title", "created_at": "2024-03-01T10:00:00Z",
+            "chat_messages": [
+                {"text": "a question of mine", "sender": "human", "uuid": "q"},
+                {"text": "a much longer answer from the model", "sender": "assistant",
+                 "uuid": "a"}]}]
+    _analyze(client, raw, path="/api/import/claude/analyze")
+    [line] = _log_lines(caplog, "user_tokens=")
+    assert line.startswith("Claude import: size_bytes=")
+    assert ("files=1 conversations=1 user_msgs=1 assistant_msgs=1 "
+            f"user_tokens=4 assistant_tokens=8 user_id={alice.id}") in line
+    assert "private title" not in caplog.text and "question" not in caplog.text
 
 
 def test_stash_expiry(app, monkeypatch):

@@ -1043,8 +1043,9 @@ def _load_conversation_files(conv_files, source_label):
     order. A sharded export arrives as one part per shard, each holding
     a JSON array.
 
-    Raises UnicodeDecodeError / json.JSONDecodeError for the caller to
-    report.
+    Returns (conversations, size_bytes); the analyze step logs the size
+    with its counts. Raises UnicodeDecodeError / json.JSONDecodeError for
+    the caller to report.
     """
     raw_conversations = []
     size_bytes = 0
@@ -1053,14 +1054,36 @@ def _load_conversation_files(conv_files, source_label):
         size_bytes += len(conversations_bytes)
         raw_conversations.extend(
             json.loads(conversations_bytes.decode('utf-8')))
+    return raw_conversations, size_bytes
+
+
+def _role_counts(source, conversations):
+    """Messages and tokens (approximate_token_count, the unit of
+    total_tokens) by who wrote them: the user, or the assistant (an
+    `llm` node on import). Counts only, for the logs and the stash
+    header (Peter, 2026-10-20: learn the real split from real imports)."""
+    role_field = _CONVERSATION_SOURCES[source]["role_field"]
+    counts = {"user_msgs": 0, "assistant_msgs": 0,
+              "user_tokens": 0, "assistant_tokens": 0}
+    for conv in conversations:
+        for msg in conv.get('messages', []):
+            who = ("assistant" if msg.get(role_field) == 'assistant'
+                   else "user")
+            counts[f"{who}_msgs"] += 1
+            counts[f"{who}_tokens"] += msg.get(
+                'token_count', approximate_token_count(msg.get('text', '')))
+    return counts
+
+
+def _log_analyzed_import(label, size_bytes, n_files, conversations, roles):
+    """The analyze step's one log line: sizes and counts, never content
+    or titles."""
     current_app.logger.info(
-        "%s import: size_bytes=%d files=%d user_id=%s",
-        source_label,
-        size_bytes,
-        len(conv_files),
-        getattr(current_user, 'id', None),
-    )
-    return raw_conversations
+        "%s import: size_bytes=%d files=%d conversations=%d user_msgs=%d "
+        "assistant_msgs=%d user_tokens=%d assistant_tokens=%d user_id=%s",
+        label, size_bytes, n_files, len(conversations), roles["user_msgs"],
+        roles["assistant_msgs"], roles["user_tokens"],
+        roles["assistant_tokens"], getattr(current_user, 'id', None))
 
 
 def _plural(n, one, many):
@@ -1136,7 +1159,8 @@ def _load_chatgpt_parts(conv_files):
     - Conversations repeated across parts are kept once (by "id", else
       "conversation_id"; first one wins).
 
-    Logs counts only, never content. Raises UnicodeDecodeError /
+    Also returns the uploaded size (the analyze step logs it). Logs
+    counts only, never content. Raises UnicodeDecodeError /
     json.JSONDecodeError for the caller to report.
     """
     conversations = []  # (conversation, linearized messages) pairs
@@ -1223,10 +1247,6 @@ def _load_chatgpt_parts(conv_files):
     if problems:
         _report_unreadable_chatgpt_items(problems)
 
-    current_app.logger.info(
-        "ChatGPT import: size_bytes=%d files=%d user_id=%s",
-        size_bytes, len(conv_files), getattr(current_user, 'id', None))
-
     notices = []
     if unreadable:
         notices.append(
@@ -1238,7 +1258,7 @@ def _load_chatgpt_parts(conv_files):
         notices.append(
             f"Group chats aren't imported yet ({group_chats} in your "
             f"export).")
-    return conversations, notices
+    return conversations, notices, size_bytes
 
 
 @import_bp.route("/import/claude/analyze", methods=["POST"])
@@ -1280,7 +1300,8 @@ def analyze_claude_import():
         return jsonify({"error": "No file selected"}), 400
 
     try:
-        raw_conversations = _load_conversation_files(conv_files, "Claude")
+        raw_conversations, size_bytes = _load_conversation_files(
+            conv_files, "Claude")
 
         conversations = []
         total_messages = 0
@@ -1329,6 +1350,9 @@ def analyze_claude_import():
 
             total_messages += len(messages)
 
+        roles = _role_counts("claude", conversations)
+        _log_analyzed_import("Claude", size_bytes, len(conv_files),
+                             conversations, roles)
         if not conversations:
             return jsonify({
                 "error": "No conversations with messages found in the "
@@ -1337,7 +1361,8 @@ def analyze_claude_import():
 
         del raw_conversations  # the raw export; only the analysis is kept
         token = _stash_conversations(
-            current_user.id, "claude", conversations, total_messages)
+            current_user.id, "claude", conversations, total_messages,
+            roles=roles)
 
         return jsonify({
             "import_token": token,
@@ -1909,7 +1934,8 @@ def analyze_chatgpt_import():
         return jsonify({"error": "No file selected"}), 400
 
     try:
-        raw_conversations, notices = _load_chatgpt_parts(conv_files)
+        raw_conversations, notices, size_bytes = _load_chatgpt_parts(
+            conv_files)
 
         conversations = []
         total_messages = 0
@@ -1948,6 +1974,9 @@ def analyze_chatgpt_import():
             total_messages += len(messages)
             total_tokens += conv_token_count
 
+        roles = _role_counts("chatgpt", conversations)
+        _log_analyzed_import("ChatGPT", size_bytes, len(conv_files),
+                             conversations, roles)
         if not conversations:
             error = "No conversations with messages found in the export."
             if notices:
@@ -1956,7 +1985,8 @@ def analyze_chatgpt_import():
 
         del raw_conversations  # the raw export; only the analysis is kept
         token = _stash_conversations(
-            current_user.id, "chatgpt", conversations, total_messages)
+            current_user.id, "chatgpt", conversations, total_messages,
+            roles=roles)
 
         return jsonify({
             "import_token": token,
@@ -2070,17 +2100,21 @@ _CONVERSATION_SOURCES = {
 }
 
 
-def _stash_conversations(user_id, source, conversations, total_messages):
+def _stash_conversations(user_id, source, conversations, total_messages,
+                         roles=None):
     """Sort analyzed conversations into import order (oldest first, as
-    the confirm step always did) and stash them; returns the token."""
+    the confirm step always did) and stash them, with the per-role
+    counts (_role_counts) in the header; returns the token."""
     from backend.utils import conversation_stash as cs
     conversations = sorted(conversations,
                            key=lambda c: c.get('created_at', ''))
     msg_key = _CONVERSATION_SOURCES[source]["msg_key"]
     keys = [msg_key(m) for conv in conversations
             for m in conv.get('messages', []) if m.get('text')]
+    if roles is None:
+        roles = _role_counts(source, conversations)
     return cs.write_stash(user_id, source, conversations, keys,
-                          total_messages)
+                          total_messages, roles=roles)
 
 
 def _load_deleted_source_keys(user_id):
@@ -2509,6 +2543,15 @@ def _run_conversation_import(user_id, token, task_id, options, *,
         "updated": state["updated"],
         "total": total,
     }
+    roles = header.get("roles") or {}
+    current_app.logger.info(
+        "%s import job done: user_msgs=%s assistant_msgs=%s user_tokens=%s "
+        "assistant_tokens=%s created=%d skipped=%d restored=%d updated=%d "
+        "user_id=%s", "ChatGPT" if source == "chatgpt" else "Claude",
+        roles.get("user_msgs"), roles.get("assistant_msgs"),
+        roles.get("user_tokens"), roles.get("assistant_tokens"),
+        result["created"], result["skipped"], result["restored"],
+        result["updated"], user_id)
     cs.write_state(user_id, token,
                    {"finished": True, "result": result, "task_id": task_id})
     cs.delete_stash(user_id, token)

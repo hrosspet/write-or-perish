@@ -17,7 +17,8 @@ user data purge already deletes.
 Files:
 
 - ``<token>.conv``: the stash. JSON lines: a header with counts only
-  (no content), the dedup keys of every message, then one line per
+  (no content: conversations, messages, and messages and tokens per
+  author), the dedup keys of every message, then one line per
   conversation in the order the import creates them. Every line after
   the header is sealed with one data key (encryption.new_dek, one KMS
   call per stash) in the same ENC:v2 envelope the node content uses, so
@@ -138,10 +139,12 @@ def _write_json_atomically(path, obj):
 
 # ---- stash -----------------------------------------------------------------
 
-def write_stash(user_id, source, conversations, keys, total_messages):
+def write_stash(user_id, source, conversations, keys, total_messages,
+                roles=None):
     """Store analyzed *conversations* (already in import order) and the
     dedup *keys* of their messages; returns the token. One KMS call (the
-    data key) when encryption is on."""
+    data key) when encryption is on. *roles*: messages and tokens per
+    author (counts only), kept in the header for the job's final log."""
     if source not in SOURCES:
         raise ValueError(f"Unknown source {source!r}")
     sweep_expired()
@@ -155,6 +158,7 @@ def write_stash(user_id, source, conversations, keys, total_messages):
         "source": source,
         "conversations": len(conversations),
         "messages": int(total_messages),
+        "roles": {k: int(v) for k, v in (roles or {}).items()},
     }
     tmp = path.with_name(path.name + ".tmp")
     try:
