@@ -161,12 +161,16 @@ def _profile(ai_usage="chat"):
     return profile.id
 
 
-@pytest.mark.parametrize("account_ai_usage", [
-    "chat",  # the profile itself is updated
-    "none",  # an edit while AI is off is saved as a new version (#346)
+@pytest.mark.parametrize("account_ai_usage,content,as_version", [
+    # An edit that changes the words is saved as a new version (#183).
+    ("chat", "the profile, edited", True),
+    # So is an edit while AI is off, marked 'none' (#346).
+    ("none", "the profile, edited", True),
+    # A change of whitespace only updates the profile itself (#183).
+    ("chat", "the profile as it was\n", False),
 ])
 def test_a_refused_profile_edit_returns_and_logs_no_database_text(
-        client, monkeypatch, caplog, account_ai_usage):
+        client, monkeypatch, caplog, account_ai_usage, content, as_version):
     profile_id = _profile()
     user = User.query.filter_by(username="alice").one()
     user.default_ai_usage = account_ai_usage
@@ -174,12 +178,12 @@ def test_a_refused_profile_edit_returns_and_logs_no_database_text(
     caplog.set_level(logging.DEBUG)
     _refusing_commit(monkeypatch)
     response = client.put(f"/api/profile/{profile_id}",
-                          json={"content": "the profile, edited"})
+                          json={"content": content})
     _assert_clean(response, caplog, 500)
     assert response.get_json() == {"error": "Failed to update profile"}
     _assert_logged_with_codes(caplog, "DataError")
     edit_as_version = "as a new version of" in caplog.text
-    assert edit_as_version == (account_ai_usage == "none")
+    assert edit_as_version == as_version
 
 
 def test_a_refused_node_delete_returns_no_database_text(

@@ -2569,3 +2569,71 @@ def test_sync_path_is_unchanged_by_the_batch_cap_check(app, monkeypatch):
     assert pb._exports.maybe_trigger_profile_update(
         sync_user.id, force_full_regen=True) == "task-1"
     dispatch.delay.assert_called_once_with(sync_user.id, "test-model", None)
+
+
+def test_rebuild_stops_after_a_merge_step_that_crosses_the_cap(
+        app, monkeypatch):
+    """#183's merge step (#414) in a capped rebuild, as for a chunk: the
+    merge in flight is collected, saved and its cost logged; that cost
+    takes the user over the cap, so the next chunk is not submitted, the
+    hold marks the chain for the hourly seeder, and a pre-filled account
+    gets no "complete" email."""
+    import backend.utils.email as em
+    from backend.utils.spend import current_month
+    block_email = _cap_harness(app, monkeypatch, limit=1.0)
+    prefill_sent = []
+    monkeypatch.setattr(em, "send_admin_prefill_complete_notification",
+                        lambda *a: prefill_sent.append(a))
+    u = _user(profile_force_batch=True, prefilled_handle="alice_x")
+    db.session.commit()
+    _spent(u, 0.999999)                       # one microdollar of headroom
+    old = _prev_profile(u, datetime(2026, 4, 1), gen_type="iterative")
+    old.created_at = datetime.utcnow() - timedelta(days=3)
+    db.session.commit()
+    edit = _user_edit(u, old, "MY CORRECTION")
+    edit.created_at = datetime.utcnow() - timedelta(days=2)
+    # The rebuilt chain has read up to the edit's date: the merge is out.
+    prev = _prev_profile(u, datetime(2026, 5, 1), gen_type="iterative")
+    u.profile_pending_merge_id = edit.id
+    item = {
+        "custom_id": f"profile_{u.id}_{prev.id}_merge",
+        "user_id": u.id, "kind": "merge", "prev_profile_id": prev.id,
+        "merged_profile_id": edit.id, "model_id": "test-model",
+        "chunk_num": 3,
+    }
+    job = ProfileBatchJob(provider_key="anthropic", batch_id="b-cap-merge",
+                          status="pending", items=[item],
+                          submitted_at=datetime.utcnow())
+    db.session.add(job)
+    u.profile_batch_pending = True
+    db.session.commit()
+    monkeypatch.setattr(pb, "batch_check_and_collect", lambda bids, keys: (
+        {item["custom_id"]: {"content": "MERGED", "input_tokens": 100_000,
+                             "output_tokens": 10_000}}, {}, {}))
+    # More unread writing after the merge: uncapped, the next chunk goes.
+    monkeypatch.setattr(pb._exports, "should_continue_chain",
+                        lambda user, p: True)
+    _remaining(monkeypatch, 270_000)
+    monkeypatch.setattr(pb._exports, "build_user_export_content",
+                        MagicMock(return_value=_chunk("CHUNK 3 DATA")))
+    monkeypatch.setattr(pb._exports, "build_update_template",
+                        lambda uid: "T {new_data}")
+    submit = MagicMock(return_value={"anthropic": "b-next"})
+    monkeypatch.setattr(pb, "batch_submit", submit)
+
+    pb._poll_profile_batches()
+
+    merge = UserProfile.query.filter_by(
+        user_id=u.id, merged_profile_id=edit.id).one()
+    assert merge.parent_profile_id == prev.id
+    assert APICostLog.query.filter_by(
+        user_id=u.id, request_type="profile_batch").count() == 1
+    u = User.query.get(u.id)
+    assert u.profile_pending_merge_id is None
+    assert u.spend_blocked_month == current_month()
+    block_email.assert_called_once()
+    submit.assert_not_called()
+    assert u.profile_batch_pending is False
+    assert u.profile_batch_attempts == 0
+    assert u.profile_cap_held is True
+    assert prefill_sent == []
