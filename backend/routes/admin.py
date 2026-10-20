@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 from functools import wraps
 from flask import Blueprint, request, jsonify, abort, current_app
 from flask_login import login_required, current_user
+from backend.utils.error_privacy import describe_exception
 from sqlalchemy.exc import IntegrityError
 from backend.utils.hidden_rows import shown_description
 from backend.models import User, APICostLog
@@ -928,10 +929,14 @@ def prefill_check():
     config = current_app.config
     try:
         summary = ca.coverage_summary(handle, snapshot_dir=snapshot_dir_for(config))
+    except ca.CommunityArchiveError as e:
+        # Written for the admin (e.g. two archive accounts share the
+        # handle), like XApiError below
+        return jsonify({"error": str(e)}), 502
     except Exception as e:  # network / provider errors → readable, not a 500
         current_app.logger.warning(
             "Community Archive check failed for @%s: %s",
-            handle, type(e).__name__)
+            handle, describe_exception(e))
         return jsonify({"error": "Community Archive lookup failed "
                                  f"({type(e).__name__})."}), 502
     if summary is None:
@@ -980,7 +985,7 @@ def prefill_x_check():
         return jsonify({"error": str(e)}), 502
     except Exception as e:
         current_app.logger.warning("X API check failed for @%s: %s",
-                                   handle, type(e).__name__)
+                                   handle, describe_exception(e))
         return jsonify({"error": "X API lookup failed "
                                  f"({type(e).__name__})."}), 502
     # The lookup itself is billable: log it against the target user when

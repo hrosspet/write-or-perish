@@ -60,6 +60,7 @@ from datetime import datetime
 
 from flask import Blueprint, jsonify, request, current_app
 from flask_login import login_required, current_user
+from backend.utils.error_privacy import describe_exception
 from backend.models import Node
 from backend.extensions import db
 from backend.utils.prompts import get_user_prompt_record
@@ -319,7 +320,7 @@ def _cancel_submitted_batch(entry):
     except Exception as e:  # noqa: BLE001 - reported, not fatal
         current_app.logger.warning(
             "Batch %s cancel failed: %s", entry.get("batch_id"),
-            type(e).__name__)
+            describe_exception(e))
         entry["cancel_error"] = type(e).__name__
 
 
@@ -402,7 +403,7 @@ def rerun_read(node_id):
         except Exception as e:  # noqa: BLE001 - best effort
             current_app.logger.warning(
                 "Revoke of task %s failed: %s", node.llm_task_id,
-                type(e).__name__)
+                describe_exception(e))
     # The new task id is chosen here and committed BEFORE the dispatch:
     # the task bails when the node's task id is not its own (the guard
     # against a lost revoke), so the id must be on the node before the

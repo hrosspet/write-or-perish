@@ -1,5 +1,6 @@
 from flask import Blueprint, jsonify, request, current_app
 from flask_login import login_required, current_user
+from backend.utils.error_privacy import describe_exception
 from sqlalchemy.exc import IntegrityError
 from backend.models import Draft, Node, NodeTranscriptChunk
 from backend.extensions import db
@@ -820,10 +821,9 @@ def upload_streaming_chunk(session_id):
             # server paths, so it is replaced.
             detail = (str(exc) if isinstance(exc, ValueError)
                       else "the server could not store the recording")
-            current_app.logger.error(
+            current_app.logger.exception(
                 "Failed to extract init segment from chunk 0 of "
-                "session %s: %s (%s)", session_id, type(exc).__name__,
-                detail)
+                "session %s: %s (%s)", session_id, describe_exception(exc), detail)
             try:
                 upload_path.unlink()
             except OSError:
@@ -862,10 +862,9 @@ def upload_streaming_chunk(session_id):
                 f"subsession (resumed recording); init persisted"
             )
         except (ValueError, OSError) as exc:
-            current_app.logger.error(
+            current_app.logger.exception(
                 "Failed to extract subsession init from chunk %s of "
-                "session %s: %s", chunk_index, session_id,
-                type(exc).__name__)
+                "session %s: %s", chunk_index, session_id, describe_exception(exc))
         except Exception:
             upload_path.unlink(missing_ok=True)
             raise
@@ -1403,7 +1402,7 @@ def save_streaming_as_node(session_id):
                 # log keeps the type
                 current_app.logger.warning(
                     "save-as-node: LLM reply skipped for node %s: %s",
-                    node.id, type(e).__name__)
+                    node.id, describe_exception(e))
                 response["llm_error"] = str(e)
                 if isinstance(e, (AIUsageRefused, ReadOnlyModelRefused)):
                     response["llm_error_code"] = e.code

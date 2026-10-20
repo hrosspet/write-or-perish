@@ -21,6 +21,7 @@ from flask import (
     Blueprint, current_app, g, jsonify, redirect, request, session,
 )
 from flask_login import current_user, login_required
+from backend.utils.error_privacy import describe_exception
 from sqlalchemy.exc import IntegrityError
 
 from backend.extensions import db
@@ -303,7 +304,7 @@ def get_item_tts_status(item_id):
                 db.session.commit()
         except Exception as e:  # Celery unreachable: answer from the DB
             current_app.logger.warning(
-                "Failed to check Celery task status: %s", type(e).__name__)
+                "Failed to check Celery task status: %s", describe_exception(e))
     data = {
         "status": item.tts_task_status,
         "progress": item.tts_task_progress or 0,
@@ -620,10 +621,12 @@ def twitter_callback():
         me.raise_for_status()
         me_data = me.json().get("data", {})
     except requests.RequestException as exc:
-        # The type and X's HTTP status, not the response body
+        # The traceback (its frame says which call failed: the token
+        # exchange or /users/me) and X's HTTP status, not the response
+        # body; the traceback carries no message
         status = getattr(getattr(exc, "response", None), "status_code", None)
-        current_app.logger.error("X OAuth callback failed: %s (status %s)",
-                                 type(exc).__name__, status)
+        current_app.logger.exception(
+            "X OAuth callback failed (status %s)", status)
         return redirect(_frontend_url("/import?x_connect=failed"))
 
     account = ExternalAccount.query.filter_by(

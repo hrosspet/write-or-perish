@@ -588,7 +588,9 @@ def test_zip_member_read_errors_are_per_file_and_not_logged(client, caplog):
 
 def test_unexpected_error_log_has_type_only(client, monkeypatch, caplog):
     def boom(*a, **k):
-        raise KeyError("secretname.docx")
+        # Built at run time: the logged traceback quotes this source line
+        # (code, never values), and the name must show up only as a value
+        raise KeyError("secret" + "name.docx")
     monkeypatch.setattr(docx_import, "convert_docx", boom)
     with caplog.at_level("DEBUG"):
         _analyze(client, "secretname.docx", _docx(["x"]))

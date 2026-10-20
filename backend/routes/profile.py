@@ -1,5 +1,6 @@
 from flask import jsonify, current_app
 from flask_login import login_required, current_user
+from backend.utils.error_privacy import describe_exception
 from backend.models import UserProfile
 from backend.extensions import db
 from backend.utils.timefmt import iso_utc
@@ -297,8 +298,8 @@ def create_profile():
         db.session.rollback()
         # The error's text can quote the profile being saved: the response
         # and the log (and so Sentry) get the type only.
-        current_app.logger.error("Profile create failed for user %s: %s",
-                                 user_id, type(e).__name__)
+        current_app.logger.exception(
+            "Profile create failed for user %s: %s", user_id, describe_exception(e))
         return jsonify({"error": "Failed to create profile"}), 500
 
 
@@ -325,9 +326,9 @@ def _save_edit_as_none_version(profile, new_content, data):
         db.session.commit()
     except Exception as e:
         db.session.rollback()
-        current_app.logger.error(
+        current_app.logger.exception(
             "Profile edit (as a new version of %s) failed: %s",
-            edited_id, type(e).__name__)
+            edited_id, describe_exception(e))
         return jsonify({"error": "Failed to update profile"}), 500
     return jsonify({
         "message": "Profile updated successfully",
@@ -407,6 +408,6 @@ def update_profile(profile_id):
         }), 200
     except Exception as e:
         db.session.rollback()
-        current_app.logger.error("Profile %s update failed: %s",
-                                 profile_id, type(e).__name__)
+        current_app.logger.exception("Profile %s update failed: %s",
+                                     profile_id, describe_exception(e))
         return jsonify({"error": "Failed to update profile"}), 500

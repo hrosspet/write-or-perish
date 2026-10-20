@@ -1,5 +1,6 @@
 from flask import Blueprint, jsonify, request, current_app
 from flask_login import login_required, current_user
+from backend.utils.error_privacy import describe_exception
 from backend.models import Node
 from backend.extensions import db
 from backend.utils.serialization import serialize_node_status
@@ -190,7 +191,7 @@ def start_conversation():
             # type (the message can quote their placeholder keys)
             current_app.logger.warning(
                 "textmode/start: LLM reply skipped for node %s: %s",
-                user_node.id, type(e).__name__)
+                user_node.id, describe_exception(e))
             return jsonify({
                 "conversation_id": system_node.id,
                 "user_node_id": user_node.id,
@@ -308,7 +309,7 @@ def add_message(conversation_id):
         db.session.commit()
         current_app.logger.warning(
             "textmode/message: LLM reply skipped for node %s: %s",
-            user_node.id, type(e).__name__)
+            user_node.id, describe_exception(e))
         return jsonify({
             "user_node_id": user_node.id,
             "llm_error": str(e),
@@ -483,7 +484,7 @@ def continue_from_node(node_id):
             db.session.commit()
             current_app.logger.warning(
                 "textmode/from-node: LLM reply skipped for node %s: %s",
-                user_node.id, type(e).__name__)
+                user_node.id, describe_exception(e))
             response["llm_error"] = str(e)
             return jsonify(response), 202
         response["llm_node_id"] = llm_node.id

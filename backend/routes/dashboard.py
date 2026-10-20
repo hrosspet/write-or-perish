@@ -2,6 +2,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from flask import Blueprint, jsonify, request, current_app
 from flask_login import login_required, current_user
+from backend.utils.error_privacy import describe_exception
 from sqlalchemy.exc import IntegrityError
 from backend.utils.hidden_rows import reclaim_description, shown_description
 from backend.models import User, UserProfile
@@ -508,8 +509,8 @@ def update_user():
         db.session.rollback()
         # A database error's text can quote the values being saved: the
         # response and the log (and so Sentry) get the type only.
-        logger.error("Profile update failed for user %s: %s",
-                     user_id, type(e).__name__)
+        logger.exception("Profile update failed for user %s: %s",
+                         user_id, describe_exception(e))
         return jsonify({"error": "Failed to update profile."}), 500
 
 
@@ -531,7 +532,7 @@ def update_timezone():
         db.session.commit()
     except Exception as e:
         db.session.rollback()
-        logger.error("Timezone update failed for user %s: %s",
-                     user_id, type(e).__name__)
+        logger.exception("Timezone update failed for user %s: %s",
+                         user_id, describe_exception(e))
         return jsonify({"error": "Failed to update timezone."}), 500
     return jsonify({"timezone": current_user.timezone}), 200

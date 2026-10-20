@@ -1,5 +1,6 @@
 from flask import Blueprint, request, jsonify, current_app
 from flask_login import login_required, current_user
+from backend.utils.error_privacy import describe_exception
 from backend.models import (
     Node, NodeVersion, UserPrompt, UserProfile, UserTodo,
     UserRecentContext, UserArtifact, Thread,
@@ -218,8 +219,8 @@ def _compress_audio_if_needed(file_path: pathlib.Path) -> pathlib.Path:
         return compressed_path
 
     except Exception as e:
-        current_app.logger.error(
-            "Audio compression failed: %s", type(e).__name__)
+        current_app.logger.exception(
+            "Audio compression failed: %s", describe_exception(e))
         return file_path  # Return original if compression fails
 
 
@@ -229,8 +230,8 @@ def _get_audio_duration(file_path: pathlib.Path) -> float:
         audio = AudioSegment.from_file(str(file_path))
         return len(audio) / 1000.0  # pydub returns milliseconds
     except Exception as e:
-        current_app.logger.error(
-            "Failed to get audio duration: %s", type(e).__name__)
+        current_app.logger.exception(
+            "Failed to get audio duration: %s", describe_exception(e))
         return 0.0
 
 
@@ -263,8 +264,8 @@ def _chunk_audio(file_path: pathlib.Path, chunk_duration_sec: int = CHUNK_DURATI
         return chunks
 
     except Exception as e:
-        current_app.logger.error(
-            "Audio chunking failed: %s", type(e).__name__)
+        current_app.logger.exception(
+            "Audio chunking failed: %s", describe_exception(e))
         return []
 
 
@@ -361,7 +362,7 @@ def _transcribe_audio_file(client: OpenAI, file_path: pathlib.Path) -> str:
                     except Exception as e:
                         current_app.logger.warning(
                             "Failed to delete chunk file %s: %s",
-                            chunk_path, type(e).__name__)
+                            chunk_path, describe_exception(e))
 
     finally:
         # Clean up compressed file if it's different from original
@@ -371,7 +372,7 @@ def _transcribe_audio_file(client: OpenAI, file_path: pathlib.Path) -> str:
             except Exception as e:
                 current_app.logger.warning(
                     "Failed to delete compressed file %s: %s",
-                    processed_path, type(e).__name__)
+                    processed_path, describe_exception(e))
 
 
 nodes_bp = Blueprint("nodes_bp", __name__)
@@ -2043,7 +2044,7 @@ def get_audio_chunks(node_id):
             except Exception as e:
                 current_app.logger.warning(
                     "Failed to get duration for encrypted chunk %s: %s",
-                    f.name, type(e).__name__)
+                    f.name, describe_exception(e))
                 duration = 300.0
             finally:
                 if temp_path:
@@ -2281,7 +2282,7 @@ def get_transcription_status(node_id):
         except Exception as e:
             # If Celery check fails, log and continue with DB status
             current_app.logger.warning(
-                "Failed to check Celery task status: %s", type(e).__name__)
+                "Failed to check Celery task status: %s", describe_exception(e))
             # Don't fail the request - just return DB status without real-time info
 
     # The error text goes to the recording's author only, as the
@@ -2377,7 +2378,7 @@ def get_llm_status(node_id):
         except Exception as e:
             # If Celery check fails, log and continue with DB status
             current_app.logger.warning(
-                "Failed to check Celery task status: %s", type(e).__name__)
+                "Failed to check Celery task status: %s", describe_exception(e))
             # Don't fail the request - just return DB status without real-time info
 
     # A failed reply's error text and the task's warnings go to the
@@ -2481,7 +2482,7 @@ def get_tts_status(node_id):
         except Exception as e:
             # If Celery check fails, log and continue with DB status
             current_app.logger.warning(
-                "Failed to check Celery task status: %s", type(e).__name__)
+                "Failed to check Celery task status: %s", describe_exception(e))
             # Don't fail the request - just return DB status without real-time info
 
     response_data = {
@@ -2820,7 +2821,7 @@ def finalize_chunked_upload():
     except Exception as e:
         current_app.logger.warning(
             "Failed to clean up chunks for upload %s: %s",
-            upload_id, type(e).__name__)
+            upload_id, describe_exception(e))
 
     # Enqueue transcription task
     api_key = get_openai_chat_key(current_app.config)
@@ -2874,8 +2875,8 @@ def cleanup_chunked_upload():
             current_app.logger.info(f"Cleaned up failed upload {upload_id}")
             return jsonify({"message": "Cleanup successful"}), 200
         except Exception as e:
-            current_app.logger.error("Cleanup failed for upload %s: %s",
-                                     upload_id, type(e).__name__)
+            current_app.logger.exception(
+                "Cleanup failed for upload %s: %s", upload_id, describe_exception(e))
             return jsonify({"error": "Cleanup failed"}), 500
 
     return jsonify({"message": "Nothing to clean up"}), 200
@@ -3408,8 +3409,8 @@ def delete_node(node_id):
         db.session.commit()
     except Exception as e:
         db.session.rollback()
-        current_app.logger.error("Error soft-deleting node %s: %s",
-                                 node_id, type(e).__name__)
+        current_app.logger.exception("Error soft-deleting node %s: %s",
+                                     node_id, describe_exception(e))
         return jsonify({"error": "Error deleting node"}), 500
 
     # The delete is committed: from here on the answer is 200 whatever
