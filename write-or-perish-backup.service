@@ -1,0 +1,20 @@
+[Unit]
+Description=Write or Perish nightly backup (pg_dump + media → BACKUP_BUCKET)
+After=network-online.target postgresql.service
+Wants=network-online.target
+# A failed run (or one killed by OOM or a timeout) is reported in the
+# journal, to the heartbeat monitor and to Sentry: scripts/backup-alert.sh.
+OnFailure=write-or-perish-backup-alert.service
+
+[Service]
+Type=oneshot
+User=hrosspet
+Group=hrosspet
+WorkingDirectory=/home/hrosspet/write-or-perish
+EnvironmentFile=/home/hrosspet/write-or-perish/.env.production
+# systemd's default PATH lacks /snap/bin; gcloud may live there.
+Environment=PATH=/usr/local/bin:/usr/bin:/bin:/snap/bin
+ExecStart=/bin/bash /home/hrosspet/write-or-perish/scripts/backup.sh
+# Stay out of the app's way on the small prod VM.
+Nice=10
+IOSchedulingClass=idle

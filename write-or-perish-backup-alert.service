@@ -1,0 +1,11 @@
+[Unit]
+Description=Report a failed Write or Perish nightly backup (OnFailure= of write-or-perish-backup.service)
+
+[Service]
+Type=oneshot
+User=hrosspet
+Group=hrosspet
+WorkingDirectory=/home/hrosspet/write-or-perish
+EnvironmentFile=/home/hrosspet/write-or-perish/.env.production
+Environment=PATH=/usr/local/bin:/usr/bin:/bin:/snap/bin
+ExecStart=/bin/bash /home/hrosspet/write-or-perish/scripts/backup-alert.sh write-or-perish-backup.service
