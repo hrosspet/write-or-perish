@@ -588,6 +588,59 @@ def test_stash_expiry(app, monkeypatch):
     assert not cs.stash_path(alice.id, fresh).exists()
 
 
+def test_a_new_analyze_drops_the_users_other_stashes(app):
+    """One pending export per user: re-picking an export, a cancelled
+    dialog or a lost response must not leave a 100 MB stash for 24 h."""
+    alice = _make_user("alice")
+    bob = _make_user("bob")
+    _db.session.commit()
+    first = _stash(alice.id, _analyzed(1, 2))
+    cs.write_state(alice.id, first, {"next_conv": 0})  # a failed job's place
+    bobs = _stash(bob.id, _analyzed(1, 2))
+    second = _stash(alice.id, _analyzed(1, 2, prefix="s"))
+    assert not cs.stash_path(alice.id, first).exists()
+    assert cs.read_state(alice.id, first) is None
+    assert cs.stash_path(alice.id, second).exists()
+    assert cs.stash_path(bob.id, bobs).exists()  # other users untouched
+
+    # The stash a running job reads stays.
+    assert cs.acquire_lock(alice.id, "t1", second, "chatgpt")[0]
+    third = _stash(alice.id, _analyzed(1, 2, prefix="t"))
+    assert cs.stash_path(alice.id, second).exists()
+    assert cs.stash_path(alice.id, third).exists()
+
+    # Not once its lock went stale: that job is gone.
+    old = time.time() - cs.LOCK_STALE_SECONDS - 5
+    os.utime(cs._lock_path(alice.id), (old, old))
+    fourth = _stash(alice.id, _analyzed(1, 2, prefix="f"))
+    assert not cs.stash_path(alice.id, second).exists()
+    assert not cs.stash_path(alice.id, third).exists()
+    assert cs.stash_path(alice.id, fourth).exists()
+    assert sorted(p.name for p in cs._user_dir(alice.id).glob("*.conv")) == [
+        f"{fourth}.conv"]
+
+
+def test_a_second_concurrent_run_of_the_same_import_does_nothing(app):
+    """The same task delivered again while it runs (the Redis visibility
+    timeout): the second copy must not import, release the running
+    copy's lock or touch its state."""
+    from backend.routes.import_data import run_conversation_import
+    alice = _make_user("alice")
+    _db.session.commit()
+    token = _stash(alice.id, _analyzed(1, 2))
+    assert cs.acquire_lock(alice.id, "t1", token, "chatgpt")[0]
+    with cs.run_guard(alice.id, token):  # the first copy, still running
+        with pytest.raises(cs.RunInProgress):
+            run_conversation_import(alice.id, token, "t1", OPTIONS)
+        assert cs.read_lock(alice.id)["task_id"] == "t1"
+        assert cs.read_state(alice.id, token) is None
+        assert Node.query.count() == 0
+    # The guard is free once that run ends (or its process dies).
+    result = run_conversation_import(alice.id, token, "t1", OPTIONS)
+    assert result["created"] == 2
+    assert not cs._run_path(alice.id, token).exists()
+
+
 def test_a_running_job_keeps_its_stash_fresh(app):
     from backend.routes.import_data import run_conversation_import
     alice = _make_user("alice")

@@ -17,7 +17,9 @@ dies mid-run (a deploy, a crash) the task is delivered again
 (``acks_late`` + ``reject_on_worker_lost``) and the soft time limit
 retries it; both runs keep the task id, so the client's polling follows
 them, and each continues from the saved place. Dedup keys make any
-overlap a skip, never a duplicate.
+overlap a skip, never a duplicate. A copy delivered while the first
+still runs (Redis visibility timeout) finds the run guard taken and is
+ignored.
 """
 from celery.utils.log import get_task_logger
 
@@ -28,6 +30,8 @@ logger = get_task_logger(__name__)
 # HEURISTIC: how many times one import may hit the soft time limit
 # (55 min per run) and continue in a new run.
 MAX_TIME_LIMIT_RESUMES = 5
+# Seconds before a run stopped by the time limit continues.
+RESUME_COUNTDOWN_SECONDS = 5
 
 
 @celery.task(bind=True, name="backend.tasks.chat_imports.import_conversations",
@@ -36,7 +40,7 @@ MAX_TIME_LIMIT_RESUMES = 5
 def import_conversations(self, user_id, token, options):
     """options: privacy_level, ai_usage, on_deleted (already resolved by
     the confirm request)."""
-    from celery.exceptions import SoftTimeLimitExceeded
+    from celery.exceptions import Ignore, SoftTimeLimitExceeded
     from backend.routes.import_data import run_conversation_import
     from backend.utils import conversation_stash as cs
     from backend.utils.task_owner import UserFacingTaskError
@@ -51,6 +55,14 @@ def import_conversations(self, user_id, token, options):
             result = run_conversation_import(
                 user_id, token, self.request.id, options,
                 on_progress=progress, resumable=(SoftTimeLimitExceeded,))
+        except cs.RunInProgress:
+            # The same task delivered again while it still runs (Redis
+            # visibility timeout): the running copy owns the lock, the
+            # state and the result, so this one leaves without a trace.
+            logger.warning(
+                "Conversation import %s for user %s is already running; "
+                "ignoring a second delivery", self.request.id, user_id)
+            raise Ignore()
         except SoftTimeLimitExceeded:
             if self.request.retries >= self.max_retries:
                 cs.release_lock(user_id, self.request.id)
@@ -60,7 +72,7 @@ def import_conversations(self, user_id, token, options):
             logger.warning(
                 "Conversation import for user %s hit the time limit; "
                 "continuing in a new run", user_id)
-            raise self.retry(countdown=5)
+            raise self.retry(countdown=RESUME_COUNTDOWN_SECONDS)
         except UserFacingTaskError:
             raise
         except Exception as e:

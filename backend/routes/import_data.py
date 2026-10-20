@@ -2417,7 +2417,22 @@ def run_conversation_import(user_id, token, task_id, options, *,
     profile hand-off runs once (same rules as the confirm step had),
     the stash is deleted, and the result is returned (and kept in the
     state, so a repeated run of a finished job returns it again).
+
+    The whole run holds the import's run guard: a second run of the
+    same import at the same time raises conversation_stash.RunInProgress
+    before it reads or changes anything (the task turns it into Ignore).
     """
+    from backend.utils import conversation_stash as cs
+
+    with cs.run_guard(user_id, token):
+        return _run_conversation_import(
+            user_id, token, task_id, options, on_progress=on_progress,
+            resumable=resumable, batch_size=batch_size)
+
+
+def _run_conversation_import(user_id, token, task_id, options, *,
+                             on_progress, resumable, batch_size):
+    """run_conversation_import, inside the run guard."""
     from backend.utils import conversation_stash as cs
     from backend.utils.task_owner import UserFacingTaskError
 
