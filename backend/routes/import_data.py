@@ -8,6 +8,7 @@ from backend.utils.pdf_extract_worker import MAX_CHAPTERS as MAX_PDF_CHAPTERS
 from datetime import datetime, timedelta
 import hashlib
 import os
+import re
 import hmac
 import sys
 import zipfile
@@ -1058,6 +1059,43 @@ def _plural(n, one, many):
     return one if n == 1 else many
 
 
+# Key names that may appear in a Sentry event. Anything else could be user
+# content (a format keyed by title or id), so it is only counted.
+_CHATGPT_KNOWN_KEYS = frozenset({
+    'id', 'conversation_id', 'title', 'create_time', 'update_time',
+    'current_node', 'mapping', 'conversation_template_id',
+    'default_model_slug', 'is_archived', 'is_starred', 'is_do_not_remember',
+    'is_read_only', 'is_study_mode', 'memory_scope', 'pinned_time',
+    'plugin_ids', 'voice', 'gizmo_id', 'gizmo_type', 'moderation_results',
+    'safe_urls', 'async_status', 'disabled_tool_ids', 'sugar_item_id',
+    'chats', 'messages', 'members', 'name', 'items', 'conversations',
+    'sections',
+})
+
+
+def _chatgpt_file_label(name):
+    """Fixed label for an uploaded file name (client-controlled, so the
+    raw name never goes to Sentry or the logs)."""
+    if name == 'conversations.json':
+        return 'conversations'
+    if re.fullmatch(r'conversations-\d+\.json', name):
+        return 'conversations-shard'
+    if name == 'sectioned_conversations.json':
+        return 'sectioned_conversations'
+    if name == 'group_chats.json':
+        return 'group_chats'
+    return 'other'
+
+
+def _chatgpt_key_summary(obj):
+    """For a dict: its allowlisted key names plus a count of the others
+    (never their text). For anything else: None."""
+    if not isinstance(obj, dict):
+        return None
+    known = sorted(k for k in obj if k in _CHATGPT_KNOWN_KEYS)
+    return {"keys": known, "unknown_key_count": len(obj) - len(known)}
+
+
 def _report_unreadable_chatgpt_items(problems):
     """One Sentry warning per request for unreadable ChatGPT export
     items. Counts and key names only: never a value, title or id from
@@ -1100,6 +1138,7 @@ def _load_chatgpt_parts(conv_files):
     problems = []
     for conv_file in conv_files:
         name = os.path.basename(conv_file.filename or '')
+        label = _chatgpt_file_label(name)
         data = conv_file.read()
         size_bytes += len(data)
         parsed = json.loads(data.decode('utf-8'))
@@ -1111,32 +1150,32 @@ def _load_chatgpt_parts(conv_files):
             if n or not isinstance(chats, list):
                 current_app.logger.warning(
                     "ChatGPT import: file=%s group_chats=%d top_level=%s",
-                    name, n, type(parsed).__name__)
+                    label, n, type(parsed).__name__)
             continue
 
         if not isinstance(parsed, list):
             unreadable += 1
             current_app.logger.warning(
                 "ChatGPT import: file=%s top_level=%s unreadable=1",
-                name, type(parsed).__name__)
+                label, type(parsed).__name__)
             problems.append({
-                "file": name, "top_level": type(parsed).__name__,
+                "file": label, "top_level": type(parsed).__name__,
                 "items": None, "unreadable": 1,
-                "first_unreadable_keys": (
-                    sorted(str(k)[:40] for k in parsed)[:20]
-                    if isinstance(parsed, dict) else None),
+                "unreadable_types": {type(parsed).__name__: 1},
+                "first_unreadable": _chatgpt_key_summary(parsed),
             })
             continue
 
         part_unreadable = 0
-        first_keys = None
+        first_unreadable = None
+        unreadable_types = {}
         for item in parsed:
             if not (isinstance(item, dict)
                     and isinstance(item.get('mapping'), dict)):
                 if part_unreadable == 0:
-                    first_keys = (sorted(str(k)[:40] for k in item)[:20]
-                                  if isinstance(item, dict)
-                                  else type(item).__name__)
+                    first_unreadable = _chatgpt_key_summary(item)
+                tname = type(item).__name__
+                unreadable_types[tname] = unreadable_types.get(tname, 0) + 1
                 part_unreadable += 1
                 continue
             conv_id = item.get('id') or item.get('conversation_id')
@@ -1149,11 +1188,12 @@ def _load_chatgpt_parts(conv_files):
         if part_unreadable:
             current_app.logger.warning(
                 "ChatGPT import: file=%s items=%d unreadable=%d "
-                "top_level=list", name, len(parsed), part_unreadable)
+                "top_level=list", label, len(parsed), part_unreadable)
             problems.append({
-                "file": name, "top_level": "list", "items": len(parsed),
+                "file": label, "top_level": "list", "items": len(parsed),
                 "unreadable": part_unreadable,
-                "first_unreadable_keys": first_keys,
+                "unreadable_types": unreadable_types,
+                "first_unreadable": first_unreadable,
             })
 
     if problems:

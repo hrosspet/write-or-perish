@@ -659,9 +659,11 @@ class TestAnalyzeChatgptImport:
         assert args == ("ChatGPT import: unreadable export items",)
         assert kwargs == {"level": "warning"}
 
-    def test_sentry_event_context_holds_counts_and_key_names_only(self, app):
+    def test_sentry_event_context_holds_counts_and_allowlisted_keys_only(
+            self, app):
+        import json as _json
         from unittest.mock import patch, MagicMock
-        secret = "SECRET-TITLE-VALUE"
+        secret = "My secret plan"
         scope = MagicMock()
         scope_cm = MagicMock()
         scope_cm.__enter__.return_value = scope
@@ -669,17 +671,35 @@ class TestAnalyzeChatgptImport:
                 patch("sentry_sdk.new_scope", return_value=scope_cm):
             self._analyze_parts(app, [
                 ("sectioned_conversations.json",
-                 [{"title": secret, "id": secret}, "x"]),
+                 [{"title": "x", "id": "y", secret: 1, "other": 2}, "x"]),
+                ("my-diary.json", {secret: 1}),
             ])
-        name, ctx = scope.set_context.call_args[0]
+        calls = scope.set_context.call_args_list
+        assert len(calls) == 1
+        name, ctx = calls[0][0]
         assert name == "chatgpt_import"
-        assert ctx == {"files": [{
-            "file": "sectioned_conversations.json", "top_level": "list",
-            "items": 2, "unreadable": 2,
-            "first_unreadable_keys": ["id", "title"],
-        }]}
-        assert secret not in repr(ctx)
+        assert ctx == {"files": [
+            {"file": "sectioned_conversations", "top_level": "list",
+             "items": 2, "unreadable": 2,
+             "unreadable_types": {"dict": 1, "str": 1},
+             "first_unreadable": {"keys": ["id", "title"],
+                                  "unknown_key_count": 2}},
+            {"file": "other", "top_level": "dict", "items": None,
+             "unreadable": 1, "unreadable_types": {"dict": 1},
+             "first_unreadable": {"keys": [], "unknown_key_count": 1}},
+        ]}
+        dumped = _json.dumps(ctx)
+        assert secret not in dumped
+        assert "my-diary" not in dumped
         assert scope.fingerprint == ["chatgpt-import-unreadable-items"]
+
+    def test_file_labels_are_fixed(self):
+        from backend.routes.import_data import _chatgpt_file_label
+        assert _chatgpt_file_label("conversations.json") == "conversations"
+        assert _chatgpt_file_label("conversations-012.json") == \
+            "conversations-shard"
+        assert _chatgpt_file_label("my-diary.json") == "other"
+        assert _chatgpt_file_label("x/conversations.json") == "other"
 
     def test_clean_export_and_group_chats_send_no_sentry_event(self, app):
         from unittest.mock import patch
