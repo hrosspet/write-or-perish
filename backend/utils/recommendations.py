@@ -20,9 +20,7 @@ from backend.extensions import db
 from backend.models import (
     ExternalItem, ExternalItemEmbedding, UserArtifact, UserProfile,
 )
-from backend.utils.embeddings import (
-    EMBEDDING_SCAN_CHUNK, embed_texts, top_k_similar,
-)
+from backend.utils.embeddings import embed_texts, rank_embeddings
 from backend.utils.privacy import AI_ALLOWED
 
 # Character budgets for the composed query (embedding input is capped at
@@ -88,7 +86,7 @@ def recommend_external_items(user_id, node, api_key, k=3, min_score=0.2):
     *min_score* — the caller renders nothing, never an empty shell.
     """
     # Existence check first so a user with nothing saved costs no embed
-    # call; the scan itself streams in chunks (see top_k_similar).
+    # call; the ranking never loads the whole archive (rank_embeddings).
     has_items = db.session.query(ExternalItemEmbedding.item_id).filter(
         ExternalItemEmbedding.user_id == user_id).first() is not None
     if not has_items:
@@ -107,8 +105,9 @@ def recommend_external_items(user_id, node, api_key, k=3, min_score=0.2):
         ExternalItemEmbedding.item_id, ExternalItemEmbedding.vector
     ).filter(
         ExternalItemEmbedding.user_id == user_id,
-    ).yield_per(EMBEDDING_SCAN_CHUNK)
-    ranked = top_k_similar(query_vector, rows, k=k, min_score=min_score)
+    )
+    ranked = rank_embeddings(query_vector, rows, ExternalItemEmbedding, k=k,
+                             min_score=min_score)
     if not ranked:
         return []
 

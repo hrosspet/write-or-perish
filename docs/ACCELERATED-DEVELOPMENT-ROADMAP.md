@@ -289,7 +289,7 @@ Docker Compose fully verified (#68, #69): `make dev` for local stack, staging on
 **Why before features:** Both Download (semantic search) and Intention Market (matching) need embeddings. Building separately would mean duplicate code and potential inconsistencies.
 
 **Implementation:**
-- pgvector extension in PostgreSQL
+- 🔧 pgvector extension in PostgreSQL — #331 built 2026-10-21: optional SQL ranking for semantic search, off until the extension is installed on prod and `flask pgvector-enable --apply` has run (docs/RUNBOOKS.md)
 - Embedding generation Celery task
 - Embedding column on Node model
 - Basic semantic search API

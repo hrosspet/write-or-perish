@@ -283,9 +283,9 @@ Users have a `plan` column (string, max 16 chars) on the User model. The plan co
 
 ## Feature 2: Download (MemeOS Integration)
 
-> **✅ SHIPPED as quote-as-response (#208, 2026-07-03)** — reframed away from MemeOS + sidebar recommendations; see the Already Built entry and FOUR-FEATURE-ECOSYSTEM.md Feature 2 for the shipped shape. Item statuses below: embeddings/semantic search/RAG ✅ (via #155/#197/#208; #329/#330 turned own-archive search on for everyone and bounded the scan to chunked numpy with streamed rows — 62k-node archive ≈0.2 s CPU / 37 MB peak; the remaining cost is pulling the vectors out of Postgres, which is #331 pgvector); MemeOS client ❌ dropped; recommendation engine ✅ superseded by quote-as-response; theme extraction ✅ as the `external_digest` artifact; spaced-repetition ranking ❌ replaced by legible age/surfacing metadata + prompt instruction (no hidden 70/30 fudge).
+> **✅ SHIPPED as quote-as-response (#208, 2026-07-03)** — reframed away from MemeOS + sidebar recommendations; see the Already Built entry and FOUR-FEATURE-ECOSYSTEM.md Feature 2 for the shipped shape. Item statuses below: embeddings/semantic search/RAG ✅ (via #155/#197/#208; #329/#330 turned own-archive search on for everyone and bounded the scan to chunked numpy with streamed rows — 62k-node archive ≈0.2 s CPU / 37 MB peak; the remaining cost is pulling the vectors out of Postgres, which is #331 pgvector: built 2026-10-21 as an optional SQL ranking over copies of the vectors in a `vec` schema, off until the extension is installed and `flask pgvector-enable --apply` has run, see docs/RUNBOOKS.md); MemeOS client ❌ dropped; recommendation engine ✅ superseded by quote-as-response; theme extraction ✅ as the `external_digest` artifact; spaced-repetition ranking ❌ replaced by legible age/surfacing metadata + prompt instruction (no hidden 70/30 fudge).
 
-**Vector database with pgvector extension** - Store and query embeddings for semantic search over nodes and bookmarks, enabling 10ms similarity searches at scale
+**Vector database with pgvector extension** - Store and query embeddings for semantic search over nodes and bookmarks, enabling 10ms similarity searches at scale — 🔧 #331 built (2026-10-21), off until enabled on prod
 
 **Automatic embedding generation pipeline** - Async task to generate embeddings on node create/edit using OpenAI's text-embedding-3-small model ($0.02/1M tokens)
 
@@ -468,7 +468,7 @@ Based on current project state, dependencies, and strategic value, here's the re
 
 **Priority: Enable semantic search and RAG before building on top**
 
-13. **Vector database with pgvector extension** - Install pgvector, add migration for embedding column
+13. **Vector database with pgvector extension** - Install pgvector, add migration for embedding column — 🔧 #331 built without a migration: copies in a `vec` schema the autogenerate never sees; on once Peter installs the extension and runs `flask pgvector-enable --apply`
 14. **Automatic embedding generation pipeline** - Celery task to embed nodes on create/edit (respects privacy: only embeds training/public nodes)
 15. **Global embedding service** - Centralized embedding API with cost tracking
 16. **Privacy-aware semantic search API** - Endpoint for cosine similarity search that filters by user's access permissions
