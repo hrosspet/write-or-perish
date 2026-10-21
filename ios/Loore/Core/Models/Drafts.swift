@@ -259,6 +259,8 @@ struct TextmodeStartResponse: Decodable, Sendable {
     /// from-node only: textmode prompt inserted under the node, or nil inside an agentic thread.
     var promptNodeId: Int?
     var userNodeId: Int
+    /// start only: the entry's last part when it was split into a chain (the reply sits under it).
+    var tipId: Int?
     var llmNodeId: Int?
     var taskId: String?
     var spendCapped: Bool
@@ -268,6 +270,7 @@ struct TextmodeStartResponse: Decodable, Sendable {
         case conversationId = "conversation_id"
         case promptNodeId = "prompt_node_id"
         case userNodeId = "user_node_id"
+        case tipId = "tip_id"
         case llmNodeId = "llm_node_id"
         case taskId = "task_id"
         case spendCapped = "spend_capped"
@@ -279,6 +282,7 @@ struct TextmodeStartResponse: Decodable, Sendable {
         conversationId = c.tolerant(.conversationId)
         promptNodeId = c.tolerant(.promptNodeId)
         userNodeId = try c.decode(Int.self, forKey: .userNodeId)
+        tipId = c.tolerant(.tipId)
         llmNodeId = c.tolerant(.llmNodeId)
         taskId = c.tolerant(.taskId)
         spendCapped = c.tolerant(.spendCapped, default: false)
