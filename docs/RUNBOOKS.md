@@ -571,8 +571,11 @@ that the background worker does not also read. Run in `~/write-or-perish`:
    ```
 
 5. **Stop the single worker.** Its warm shutdown finishes what it is
-   running (up to 90 s) and puts what it had reserved back on the default
-   queue, which the background worker reads.
+   running (up to 90 s) and puts what it had reserved or scheduled (tasks
+   held until a set time) back on the default queue, which the background
+   worker reads, so this step needs no `inspect` check. The same holds for
+   the restarts in step 4: each worker reads the queues its held tasks go
+   back to.
 
    ```bash
    sudo systemctl disable --now write-or-perish-celery
@@ -611,22 +614,33 @@ those are empty, so nothing is left in a queue nobody reads:
    ```
 
 2. Start the single worker: `sudo systemctl enable --now write-or-perish-celery`.
-3. Stop the two workers once `redis-cli llen interactive` and
-   `redis-cli llen background` stay at 0 and
-   `celery -A backend.celery_app:celery inspect active` shows no import
-   running:
+3. Stop the two workers once nothing is left for them. `redis-cli llen
+   interactive` and `redis-cli llen background` stay at 0, and `inspect
+   active`, `inspect reserved` and `inspect scheduled` list nothing under
+   `interactive@…` and `background@…`, except at most a Read's batch poll
+   (`generate_llm_response`, see below). A scheduled task is one a worker
+   holds until a set time: an import's retry after its time limit, the
+   spaced bookmark syncs, the spend-cap check 15 s after a call. Stopped
+   before that time, it goes back to a queue nobody reads.
 
    ```bash
+   source ~/miniconda3/etc/profile.d/conda.sh && conda activate write-or-perish
+   redis-cli llen interactive; redis-cli llen background
+   celery -A backend.celery_app:celery inspect active
+   celery -A backend.celery_app:celery inspect reserved
+   celery -A backend.celery_app:celery inspect scheduled
+   # all empty for interactive@… and background@…:
    sudo systemctl disable --now write-or-perish-celery-interactive write-or-perish-celery-background
    ```
 
    A task a stopping worker still held goes back to its queue, which
    nobody reads any more. These recover on their own: a Read's batch poll
-   (it re-queues itself every 2 minutes; the 10-minute
-   `resume_stuck_feed_batches` sweep restarts it on the default queue),
-   profile seeds (the hourly seeder), digests (the nightly sweep) and
-   purges (the every-minute check). An import stopped there stays stopped,
-   which is why step 3 waits for imports to finish.
+   (it re-queues itself to the interactive queue every 2 minutes until its
+   batch ends; the 10-minute `resume_stuck_feed_batches` sweep restarts it
+   on the default queue), profile seeds (the hourly seeder), digests (the
+   nightly sweep) and purges (the every-minute check). An import, a
+   bookmark sync or a spend-cap check stranded there does not, which is
+   why step 3 waits until the workers hold nothing else.
 
 ### Docker Compose (local dev, staging)
 
