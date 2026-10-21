@@ -4,6 +4,9 @@ Celery task for asynchronous TTS generation.
 Supports streaming playback - each chunk's audio URL is stored in TTSChunk
 and can be played as soon as it's ready, without waiting for all chunks.
 """
+import hashlib
+import hmac
+import io
 import json
 import re
 import time
@@ -12,6 +15,7 @@ import openai
 import sentry_sdk
 from celery import Task
 from celery.utils.log import get_task_logger
+from flask import current_app
 from openai import OpenAI
 from pathlib import Path
 from pydub import AudioSegment
@@ -24,7 +28,7 @@ from backend.models import Node, UserProfile, ExternalItem, TTSChunk, APICostLog
 from backend.extensions import db
 from backend.utils.audio_processing import section_aware_chunk_text
 from backend.utils.api_keys import get_openai_chat_key
-from backend.utils.encryption import encrypt_file
+from backend.utils.encryption import decrypt_file, encrypt_file
 from backend.utils.cost import calculate_audio_cost_microdollars
 from backend.utils.spoken_links import speak_links
 
@@ -278,19 +282,135 @@ def synthesize_to_file(client, text, path, section_end=False, mark=None):
     return segment
 
 
-def log_tts_cost(user_id, total_duration):
-    """Add (not commit) the APICostLog row for *total_duration* seconds of
-    generated audio."""
-    if total_duration <= 0:
+def log_tts_cost(user_id, seconds):
+    """Record the cost of *seconds* of audio made by one TTS call, and
+    commit it at once: the call is billed whether or not the rest of the
+    job succeeds, and a row left pending would go with a later rollback
+    (#526). One row per chunk; every reader sums cost_microdollars."""
+    if seconds <= 0:
         return
     db.session.add(APICostLog(
         user_id=user_id,
         model_id=TTS_MODEL,
         request_type="tts",
-        audio_duration_seconds=total_duration,
+        audio_duration_seconds=seconds,
         cost_microdollars=calculate_audio_cost_microdollars(
-            TTS_MODEL, total_duration),
+            TTS_MODEL, seconds),
     ))
+    db.session.commit()
+
+
+def tts_chunk_digest(text, section_end):
+    """What a chunk's audio is made from, as an HMAC-SHA256 keyed with the
+    app's SECRET_KEY: the text, the model, the voice and whether the
+    chapter-end pause is appended. An equal digest means the same request,
+    so a retry may keep that chunk's audio (#526). Keyed, so the stored
+    value does not stand for the text by itself (as the PDF import's
+    duplicate key, #529). None when no secret is set: nothing is kept."""
+    secret = current_app.config.get("SECRET_KEY")
+    if not secret:
+        return None
+    if isinstance(secret, str):
+        secret = secret.encode("utf-8")
+    msg = "\x00".join(["tts-chunk", TTS_MODEL, TTS_VOICE,
+                       "chapter-end" if section_end else "", text])
+    return hmac.new(secret, msg.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def _stored_part(path):
+    """The file holding a chunk's audio written to *path*: the plain file
+    (left when its encryption failed; encrypted now, as a new part is) or
+    its .enc sibling. None when neither exists."""
+    if path.is_file():
+        return Path(encrypt_file(str(path)))
+    enc = path.with_name(path.name + ".enc")
+    return enc if enc.is_file() else None
+
+
+def _kept_parts(rows, digests, part_path, audio_root, entity_label):
+    """The audio an earlier run already made for this text (#526), as the
+    segments of chunks 0..k-1: the longest run from the first chunk whose
+    rows are completed, were made from the same input (*digests*) and
+    name the file this run would write. A run that stopped at a failed
+    chunk resumes there, so no chunk is made, or paid for, twice. A part
+    that can't be read back is made again, and so is everything after it.
+    *rows* maps chunk index to the entity's TTSChunk row."""
+    kept = []
+    for i, digest in enumerate(digests):
+        row = rows.get(i)
+        path = part_path(i)
+        url_path = f"/media/{path.relative_to(audio_root).as_posix()}"
+        if (row is None or row.status != 'completed' or digest is None
+                or row.text_digest != digest
+                or (row.audio_url or "").split("?", 1)[0] != url_path):
+            break
+        stored = _stored_part(path)
+        if stored is None:
+            break
+        try:
+            kept.append(AudioSegment.from_file(
+                io.BytesIO(decrypt_file(str(stored))), format="mp3"))
+        except Exception as e:
+            logger.warning("TTS for %s: chunk %s's audio could not be read "
+                           "back, so it is made again (%s)",
+                           entity_label, i, type(e).__name__)
+            break
+    return kept
+
+
+def _prepare_chunk_rows(chunk_fk, chunk_specs, digests, part_path,
+                        audio_root, entity_label):
+    """The entity's TTSChunk records for streaming playback (with chapter
+    metadata, #145): the chunks an earlier run of this text made are kept
+    (#526), and a pending row is added for each other chunk. Every other
+    row goes, since it would collide on the chunk index: rows of a run
+    for other text, the rest of a run that failed, or a streamed voice
+    reply's TTS (#367), whose chunks are cut differently.
+
+    Returns the kept chunks' audio segments and the cache-busting token
+    for this run's /media URLs."""
+    rows = {r.chunk_index: r for r in TTSChunk.query.filter_by(**chunk_fk)}
+    kept = _kept_parts(rows, digests, part_path, audio_root, entity_label)
+    keep = len(kept)
+    for i, row in rows.items():
+        if i >= keep:
+            db.session.expunge(row)
+    TTSChunk.query.filter_by(**chunk_fk).filter(
+        TTSChunk.chunk_index >= keep).delete(synchronize_session=False)
+    for i in range(keep):
+        rows[i].section_title = chunk_specs[i][1]
+        rows[i].section_index = chunk_specs[i][2]
+    created = []
+    for i in range(keep, len(chunk_specs)):
+        _chunk, section_title, section_index = chunk_specs[i]
+        tts_chunk = TTSChunk(
+            chunk_index=i, status='pending',
+            section_index=section_index,
+            section_title=section_title,
+            text_digest=digests[i],
+            **chunk_fk)
+        db.session.add(tts_chunk)
+        created.append(tts_chunk)
+    db.session.commit()
+    if keep:
+        logger.info(f"Keeping {keep} of {len(chunk_specs)} TTS chunks an "
+                    f"earlier run made for {entity_label}")
+
+    # Cache-busting token for the emitted /media URLs. The media path is
+    # fixed per entity (…/node/<id>/tts.mp3) and nginx serves /media with a
+    # 24h Cache-Control, so after a regenerate the browser would replay the
+    # OLD cached file at the identical URL — i.e. the pre-edit text (#66).
+    # The first row this run inserts has an id unique to this run, so a
+    # `?v=<id>` suffix makes every regeneration a distinct URL. Kept rows
+    # keep their URLs: their files don't change. When every chunk is kept,
+    # the newest kept row's id serves: the run that inserted it stopped
+    # before tts.mp3 was made (a finished run's rows go only with its
+    # audio, utils/audio_storage), so no tts.mp3 URL carried it, except a
+    # single chunk's own URL, which names the same file.
+    if created:
+        return kept, created[0].id
+    return kept, max((rows[i].id for i in range(keep)), default=None)
+
 
 # Audio storage root path (matches the one in routes/nodes.py)
 import pathlib
@@ -442,7 +562,9 @@ def _generate_tts_chunks(task, entity, text, target_dir, audio_storage_root,
     Shared TTS generation logic for both nodes and profiles.
 
     Handles text chunking, TTSChunk record creation, audio generation,
-    encryption, concatenation, and cost logging.
+    encryption, concatenation, and cost logging (one row per chunk, as
+    each is made). Chunks an earlier run of the same text already made
+    are kept, not made again (#526).
 
     Both Node and UserProfile expose the same interface:
     tts_task_progress, audio_tts_url, user_id.
@@ -500,33 +622,26 @@ def _generate_tts_chunks(task, entity, text, target_dir, audio_storage_root,
         i for i in range(len(chunk_specs) - 1)
         if chunk_specs[i][2] != chunk_specs[i + 1][2]
     }
+    single = len(chunks) == 1
 
-    # Create TTSChunk records for streaming playback (with chapter
-    # metadata, #145). Rows left by an earlier run that failed (a streamed
-    # voice reply's TTS, #367) would collide on the chunk index.
+    def part_path(i):
+        # A single chunk is written straight to the final file.
+        return final_path if single else target_dir / f"tts_chunk_{i}.mp3"
+
+    digests = [tts_chunk_digest(chunk, i in section_end_indices)
+               for i, chunk in enumerate(chunks)]
+    cost_user_id = requesting_user_id or entity.user_id
+
     chunk_fk = {chunk_fk_attr: entity.id}
-    TTSChunk.query.filter_by(**chunk_fk).delete(synchronize_session=False)
-    created_chunks = []
-    for i, (_chunk, section_title, section_index) in enumerate(chunk_specs):
-        tts_chunk = TTSChunk(
-            chunk_index=i, status='pending',
-            section_index=section_index,
-            section_title=section_title,
-            **chunk_fk)
-        db.session.add(tts_chunk)
-        created_chunks.append(tts_chunk)
-    db.session.commit()
-
-    # Cache-busting token for the emitted /media URLs. The media path is
-    # fixed per entity (…/node/<id>/tts.mp3) and nginx serves /media with a
-    # 24h Cache-Control, so after a regenerate the browser would replay the
-    # OLD cached file at the identical URL — i.e. the pre-edit text (#66).
-    # The freshly-inserted chunk-0 row id is unique to this run, so a
-    # `?v=<id>` suffix makes every regeneration a distinct URL.
-    cache_bust = created_chunks[0].id if created_chunks else None
+    kept_segments, cache_bust = _prepare_chunk_rows(
+        chunk_fk, chunk_specs, digests, part_path, AUDIO_ROOT, entity_label)
+    keep = len(kept_segments)
     _bust = (lambda url: f"{url}?v={cache_bust}") if cache_bust else (lambda url: url)
 
-    if len(chunks) == 1:
+    if single and keep:
+        logger.info(f"TTS audio for {entity_label} was already made")
+
+    elif single:
         # Single chunk: direct streaming to MP3
         task.update_state(
             state='PROGRESS',
@@ -537,6 +652,7 @@ def _generate_tts_chunks(task, entity, text, target_dir, audio_storage_root,
 
         segment = synthesize_to_file(client, chunks[0], final_path)
         chunk_duration = len(segment) / 1000.0
+        log_tts_cost(cost_user_id, chunk_duration)
         encrypt_file(str(final_path))
 
         tts_chunk = TTSChunk.query.filter_by(
@@ -551,11 +667,14 @@ def _generate_tts_chunks(task, entity, text, target_dir, audio_storage_root,
             db.session.commit()
 
     else:
-        # Multiple chunks: generate parts for streaming playback
-        audio_parts = []
+        # Multiple chunks: generate parts for streaming playback, after
+        # the kept ones
+        segments = list(kept_segments)
         chunk_progress_step = 50 / len(chunks)
 
         for i, chunk in enumerate(chunks):
+            if i < keep:
+                continue
             progress = 40 + int((i + 1) * chunk_progress_step)
             task.update_state(
                 state='PROGRESS',
@@ -573,23 +692,24 @@ def _generate_tts_chunks(task, entity, text, target_dir, audio_storage_root,
                 tts_chunk.status = 'processing'
             db.session.commit()
 
-            part_path = target_dir / f"tts_chunk_{i}.mp3"
+            path = part_path(i)
 
             segment = synthesize_to_file(
-                client, chunk, part_path,
+                client, chunk, path,
                 section_end=i in section_end_indices)
             chunk_duration = len(segment) / 1000.0
-            audio_parts.append((i, segment, part_path))
+            log_tts_cost(cost_user_id, chunk_duration)
+            segments.append(segment)
 
             if tts_chunk:
-                rel_path = part_path.relative_to(AUDIO_ROOT)
+                rel_path = path.relative_to(AUDIO_ROOT)
                 tts_chunk.audio_url = _bust(f"/media/{rel_path.as_posix()}")
                 tts_chunk.duration = chunk_duration
                 tts_chunk.status = 'completed'
                 tts_chunk.completed_at = datetime.utcnow()
                 db.session.commit()
 
-            encrypt_file(str(part_path))
+            encrypt_file(str(path))
 
         # Concatenate all segments into final file
         task.update_state(
@@ -599,16 +719,9 @@ def _generate_tts_chunks(task, entity, text, target_dir, audio_storage_root,
         entity.tts_task_progress = 90
         db.session.commit()
 
-        combined = sum([part[1] for part in audio_parts])
+        combined = sum(segments)
         combined.export(final_path, format="mp3")
         encrypt_file(str(final_path))
-
-    # Log TTS cost based on total audio duration
-    total_duration = 0.0
-    for tc in TTSChunk.query.filter_by(**chunk_fk).all():
-        if tc.duration:
-            total_duration += tc.duration
-    log_tts_cost(requesting_user_id or entity.user_id, total_duration)
 
     # Finalize
     task.update_state(
