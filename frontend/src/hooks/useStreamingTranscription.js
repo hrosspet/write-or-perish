@@ -149,6 +149,11 @@ export function useStreamingTranscription(options = {}) {
   const [uploadedChunks, setUploadedChunks] = useState(0);
   const [transcribedChunks, setTranscribedChunks] = useState(0);
   const [errorMessage, setErrorMessage] = useState(null);
+  // #388: a continued session's claim is out. Its transcription stream
+  // stays off until then: opened with this page's key before the claim
+  // made it the writer, the server would answer session_taken_over (also
+  // when Stop is pressed meanwhile, which sets 'finalizing').
+  const [claimPending, setClaimPending] = useState(false);
 
   // Refs for tracking state across callbacks
   const sessionIdRef = useRef(null);
@@ -498,7 +503,7 @@ export function useStreamingTranscription(options = {}) {
     disconnect: disconnectSSE,
     reset: resetSSE,
   } = useDraftTranscriptionSSE(sessionId, {
-    enabled: sessionState === 'recording' || sessionState === 'finalizing',
+    enabled: (sessionState === 'recording' || sessionState === 'finalizing') && !claimPending,
     deviceKey: RECORDING_DEVICE_KEY,
     // #388: another tab or device continued this recording. Told on the
     // stream too, so a paused tab learns it without uploading a chunk.
@@ -790,6 +795,7 @@ export function useStreamingTranscription(options = {}) {
     finalizeRequestedRef.current = false;
     releasedSessionRef.current = null;
     claimRef.current = null;
+    setClaimPending(false);
     // A new session starts from fresh SSE state even when the previous
     // one ended without cancelStreaming (e.g. voice mode back to ready).
     resetSSE();
@@ -871,6 +877,7 @@ export function useStreamingTranscription(options = {}) {
       settled: new Promise((resolve) => { settleClaim = resolve; }),
     };
     claimRef.current = claim;
+    setClaimPending(true);
     try {
       setSessionState('initializing');
       setErrorMessage(null);
@@ -894,6 +901,7 @@ export function useStreamingTranscription(options = {}) {
         claim.shift = next - listedIndex;
         totalChunksRef.current = next;
         settleClaim(true);
+        setClaimPending(false);
       } catch (claimErr) {
         // Nothing was sent: what the recorder caught while the claim was
         // out goes with it.
@@ -905,6 +913,7 @@ export function useStreamingTranscription(options = {}) {
       if (!finalizeRequestedRef.current) setSessionState('recording');
     } catch (err) {
       settleClaim(false);
+      setClaimPending(false);
       console.error('Failed to resume streaming:', err);
       setSessionState('error');
       setErrorMessage(err.message);
@@ -1038,6 +1047,7 @@ export function useStreamingTranscription(options = {}) {
     pendingUploadsRef.current = [];
     failedChunksRef.current = [];
     claimRef.current = null;
+    setClaimPending(false);
   }, [disconnectSSE, resetMediaRecorder, resetSSE, releaseIfAbandoned]);
 
   return {

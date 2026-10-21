@@ -295,6 +295,79 @@ describe('Continue recording claims the session once the recorder runs', () => {
     expect(result.current.sessionState).toBe('recording');
   });
 
+  test('Stop while the claim is out waits for it, then finalizes', async () => {
+    let answerClaim;
+    mockPost.mockImplementation((url) => {
+      if (url.endsWith('/claim')) {
+        return new Promise((resolve) => { answerClaim = resolve; });
+      }
+      return Promise.resolve({ data: {} });
+    });
+    const onError = jest.fn();
+    const { result } = renderHook(() => useStreamingTranscription({ onError }));
+    let resumed;
+    await act(async () => {
+      resumed = result.current.resumeStreaming('s9', 9, 4, 'audio/webm');
+      await flush();
+    });
+
+    let stopped;
+    await act(async () => {
+      stopped = result.current.stopStreaming();
+      await flush();
+    });
+    // 'finalizing', but the stream stays off until the claim made this page
+    // the writer (the server would say session_taken_over).
+    expect(result.current.sessionState).toBe('finalizing');
+    expect(mockSse.opts.enabled).toBe(false);
+    expect(callsTo('/finalize')).toHaveLength(0);
+
+    await act(async () => {
+      answerClaim({ data: { next_chunk_index: 4 } });
+      await resumed;
+      await stopped;
+    });
+
+    expect(callsTo('/finalize')).toHaveLength(1);
+    expect(onError).not.toHaveBeenCalled();
+    expect(result.current.errorMessage).toBeNull();
+    expect(result.current.sessionState).toBe('finalizing');
+    expect(mockSse.opts.enabled).toBe(true);
+  });
+
+  test('Stop while a claim is out that is then refused does not finalize', async () => {
+    let refuseClaim;
+    mockPost.mockImplementation((url) => {
+      if (url.endsWith('/claim')) {
+        return new Promise((_resolve, reject) => { refuseClaim = reject; });
+      }
+      return Promise.resolve({ data: {} });
+    });
+    const onError = jest.fn();
+    const { result } = renderHook(() => useStreamingTranscription({ onError }));
+    let resumed;
+    let stopped;
+    await act(async () => {
+      resumed = result.current.resumeStreaming('s9', 9, 4, 'audio/webm');
+      await flush();
+    });
+    await act(async () => {
+      stopped = result.current.stopStreaming();
+      await flush();
+    });
+
+    await act(async () => {
+      refuseClaim(refusal(409, 'session_live'));
+      await resumed;
+      await stopped;
+    });
+
+    expect(callsTo('/finalize')).toHaveLength(0);
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError.mock.calls[0][0].message).toMatch(/still in progress/);
+    expect(result.current.sessionState).toBe('error');
+  });
+
   test('a recorder that cannot start never claims the session', async () => {
     const denied = new Error('Permission denied');
     denied.name = 'NotAllowedError';
