@@ -1282,3 +1282,19 @@ def test_switching_the_account_to_train_changes_no_existing_artifact(
     assert client.post(
         f"/api/artifacts/memory/revert/{old_id}").status_code in (200, 201)
     assert UserArtifact.latest_for(user.id, "memory").ai_usage == "chat"
+
+
+def test_tool_failure_stores_a_fixed_text_not_the_exception(app, monkeypatch):
+    """The result lands in tool_calls_meta (shown under "Actions taken")
+    and goes back to the model: no exception text in it."""
+    from backend.utils.error_privacy import TOOL_FAILED_TEXT
+
+    def boom(*a, **k):
+        raise RuntimeError("Error code: 429 - typed-by-the-user")
+    monkeypatch.setattr(UserArtifact, "latest_for", boom)
+    with app.app_context():
+        uid = User.query.first().id
+        r = _run_tool(app, "update_artifact",
+                      {"kind": "memory", "updated_content": "x"}, uid)
+    assert r["status"] == "error"
+    assert r["error"] == TOOL_FAILED_TEXT

@@ -23,7 +23,7 @@ from backend.llm_providers import LLMProvider
 from backend.utils.api_keys import get_api_keys_for_usage
 from backend.utils.cost import llm_cost_log_fields
 from backend.utils.error_privacy import (
-    TODO_MERGE_FAILED_TEXT, describe_exception,
+    TODO_MERGE_FAILED_TEXT, describe_exception, user_written_text,
 )
 from backend.models import APICostLog
 from backend.utils.proposals import is_own_live_proposal, node_is_users
@@ -293,7 +293,8 @@ def _run_merge(llm_node, update_summary, user_id, model_id,
                      describe_exception(e), exc_info=True)
         # Calls made before the failing one were billed.
         _log_merge_costs(user_id, model_id, run)
-        _merge_failed(llm_node, user_id, TODO_MERGE_FAILED_TEXT,
+        _merge_failed(llm_node, user_id,
+                      user_written_text(e) or TODO_MERGE_FAILED_TEXT,
                       confirm_node_id)
         db.session.commit()
         return

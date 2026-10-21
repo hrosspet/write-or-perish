@@ -268,6 +268,8 @@ class EmptyTruncatedReplyError(RuntimeError):
     def __init__(self):
         super().__init__(self.USER_MESSAGE)
 
+    user_text = USER_MESSAGE
+
 
 # Retry schedule for the loop's CONTINUATION calls: sleep lengths between
 # attempts (len == number of retries). A transient provider error (overload,
@@ -309,24 +311,13 @@ def _provider_failure(exc):
 
 def reply_error_text(exc):
     """What the reply's owner reads for a failed reply (llm_task_error):
-    the exception's own text only where it is written for the user (the
-    classes below, #369 and the like), otherwise a fixed message. The
+    the exception's own text only where it is written for the user
+    (error_privacy.user_written_text), otherwise a fixed message. The
     exception is logged and sent to Sentry, never stored."""
-    from backend.utils.error_privacy import REPLY_FAILED_TEXT
-    from backend.utils.ca_feed import ArchiveNotReady
-    from backend.utils.llm_nodes import AIUsageRefused, ReadOnlyModelRefused
-    from backend.utils.placeholders import UserExportValidationError
-    written_for_user = [
-        EmptyTruncatedReplyError, UserMessageError, ArchiveNotReady,
-        AIUsageRefused, ReadOnlyModelRefused, UserExportValidationError]
-    providers = sys.modules.get("backend.llm_providers")
-    for name in ("ProviderUnavailableError", "ProviderAccountError"):
-        cls = getattr(providers, name, None)
-        if isinstance(cls, type) and issubclass(cls, BaseException):
-            written_for_user.append(cls)
-    if isinstance(exc, tuple(written_for_user)) and str(exc):
-        return str(exc)
-    return REPLY_FAILED_TEXT
+    from backend.utils.error_privacy import (
+        REPLY_FAILED_TEXT, user_written_text,
+    )
+    return user_written_text(exc) or REPLY_FAILED_TEXT
 
 
 def _account_failure(exc):
@@ -2381,10 +2372,15 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
                 result["error"] = f"Unknown tool: {name}"
 
         except Exception as e:
-            logger.error(f"Tool execution error for {name}: {e}",
-                         exc_info=True)
+            from backend.utils.error_privacy import (
+                TOOL_FAILED_TEXT, describe_exception, user_written_text,
+            )
+            logger.error("Tool execution error for %s: %s", name,
+                         describe_exception(e), exc_info=True)
             result["status"] = "error"
-            result["error"] = str(e)
+            # Stored in tool_calls_meta (shown under "Actions taken") and
+            # sent back to the model: the same fixed text for both.
+            result["error"] = user_written_text(e) or TOOL_FAILED_TEXT
 
         tool_results.append(result)
 
@@ -2619,12 +2615,13 @@ READ_ON_HOLD_TEXT = ("Glean did not run: your writing was deleted. You "
 # What a read withdrawn at the provider says in place of its reply, the
 # same for everyone who can see it.
 CA_BATCH_CANCELLED_TEXT = "This read was cancelled."
-# Why it was withdrawn: the reply's error, which goes to its owner only
-# (llm-status, the llm-stream done event). A spend-limit message is the
-# owner's alone.
+# The reply's error when the poll cap ended the wait; the owner's alone.
 CA_BATCH_GAVE_UP_TEXT = (
     "Loore stopped waiting for the model's answer. The problem has been "
     "reported. Please try again.")
+# Why it was withdrawn: the reply's error, which goes to its owner only
+# (llm-status, the llm-stream done event). A spend-limit message is the
+# owner's alone.
 CA_BATCH_WITHDRAWN_TEXT = (
     "This read was cancelled before it ran: the monthly spend cap was "
     "reached while it was queued at the provider, so the request was "
@@ -2887,8 +2884,12 @@ def _collect_feed_reply(llm_node, resp, ca_refs):
     # the same request would likely be refused again, and a user's provider
     # is never switched.
     if resp.get("refused"):
-        raise FeedReplyError(
-            f"the model refused the Read ({llm_node.llm_model or 'unknown model'})")
+        model_name = llm_node.llm_model or "unknown model"
+        err = FeedReplyError(f"the model refused the Glean ({model_name})")
+        err.user_text = (
+            f"The model ({model_name}) refused this Glean. Choose another "
+            "model.")
+        raise err
     # A reply cut off at the output limit is not the promised object even
     # where its prefix happens to parse. Like a parse failure it is a
     # verdict on this reply (FeedReplyError), not a condition a later

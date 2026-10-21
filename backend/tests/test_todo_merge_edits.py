@@ -799,6 +799,21 @@ def test_task_provider_error_on_the_retry_logs_the_first_call(task):
     assert len(_cost_rows(user)) == 1
 
 
+@pytest.mark.parametrize("cls_name", [
+    "ProviderAccountError", "ModelUnavailableError",
+    "ProviderUnavailableError"])
+def test_task_keeps_the_text_written_for_the_user(task, cls_name):
+    from backend import llm_providers
+    cls = getattr(llm_providers, cls_name)
+    exc = cls("Anthropic") if cls_name == "ProviderUnavailableError" else cls()
+    user, node, _, _ = task.run(reply(("- [ ] swim", "x")), exc)
+
+    entry = _entry(node)
+    assert entry["apply_status"] == "failed"
+    assert entry["apply_error"] == str(exc)
+    assert entry["apply_error"] != TODO_MERGE_FAILED_TEXT
+
+
 def test_task_empty_list_takes_a_full_write(task):
     full = "## Later\n- [ ] book the dentist (under Later)\n"
     user, node, _, provider = task.run(reply(full=full), todo=None)

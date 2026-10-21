@@ -463,7 +463,9 @@ def test_refused_reply_fails_at_the_first_collect_naming_the_model(app, monkeypa
     assert calls["submit"] == []
     node = _reload(llm_node.id)
     assert node.llm_task_status == "failed"
-    assert node.llm_task_error == REPLY_FAILED_TEXT
+    assert "gpt-5" in node.llm_task_error
+    assert "Choose another model" in node.llm_task_error
+    assert "try again" not in node.llm_task_error
 
 
 # ── the collecting run ───────────────────────────────────────────────────
