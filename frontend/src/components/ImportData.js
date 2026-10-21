@@ -807,7 +807,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
       {importResult && importResult.saved_as !== "reference" && (
         <ModalShell onDismiss={() => window.location.reload()}>
           <ModalTitle>Import Finished</ModalTitle>
-          <div style={{ display: "flex", gap: "2.4rem", marginBottom: "1.3rem" }}>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: "1rem 2.4rem", marginBottom: "1.3rem" }}>
             {[
               { label: "Imported", value: importResult.created, highlight: importResult.created > 0 },
               { label: "Restored", value: importResult.restored || 0, highlight: importResult.restored > 0 },
