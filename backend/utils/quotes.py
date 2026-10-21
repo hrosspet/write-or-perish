@@ -712,14 +712,14 @@ class ExportQuoteResolver:
 
     def _get_node_metadata(self, node_id: int) -> Optional[dict]:
         """
-        Get metadata for a node (tokens, quote_ids, content).
+        Get metadata for a node (tokens, quote_ids, content), or None when
+        its text must not be embedded: the node is gone, the user cannot
+        access it, or (with filter_ai_usage) it is marked 'none'.
 
-        Uses cache if available, otherwise fetches from database.
+        The checks apply to every node, also one whose content is already
+        cached (an entry added with add_node); the cache only saves
+        decrypting it again.
         """
-        if node_id in self._node_cache:
-            return self._node_cache[node_id]
-
-        # Fetch from database
         from backend.models import Node
         from backend.utils.privacy import can_user_access_node
         from backend.utils.tokens import approximate_token_count
@@ -732,6 +732,9 @@ class ExportQuoteResolver:
         if self.filter_ai_usage and node.ai_usage == 'none':
             self._ai_blocked_ids.add(node_id)
             return None
+
+        if node_id in self._node_cache:
+            return self._node_cache[node_id]
 
         content = node.get_content()
         metadata = {

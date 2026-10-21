@@ -21,7 +21,9 @@ the quote resolver kept under the same budget, and the two disagreed:
 The cursor moved past every row left out, so no later window read it.
 Now the selection is the budget: the resolver embeds quotes and drops no
 selected row, and an embedded node appears only inside its quote. Which
-rows a window selects, its units and its cursor do not change.
+rows a window selects, its units and its cursor do not change. A
+recent-context window cut to a budget gets the same, as its
+source_data_cutoff counts its rows as covered.
 
 In-memory SQLite, ENCRYPTION_DISABLED, celery mocked so the task modules
 import; the export runs for real, the model calls are scripted.
@@ -265,6 +267,73 @@ def test_a_quoted_newer_row_renders_in_its_own_window_only(app):
     second = _window(alice, 250, first["latest_node_created_at"])
     assert second["node_ids"] == {newer.id}
     assert "NEWERTEXT" in _entries(second["content"])
+
+
+def test_a_budgeted_recent_context_renders_its_tie_run(app):
+    """Recent context is cut to a budget only when its prompt is over the
+    model's input cap. Its source_data_cutoff is the window's latest row,
+    and the tie run on that second now reaches the text; the rows and the
+    cutoff are the ones the same budget selected before."""
+    import backend.tasks.recent_context as rc
+    from backend.routes.export_data import build_user_export_content
+    alice = _alice()
+    for i in range(3):
+        _node(alice, f"BEFORE{i}", T0 + timedelta(minutes=i))
+    tie_ts = T0 + timedelta(minutes=10)
+    for i in range(4):
+        _node(alice, f"TIED{i}", tie_ts)
+    _node(alice, "AFTER", T0 + timedelta(minutes=11))
+    _db.session.commit()
+
+    new = rc._build_recent_export(alice, CUTOFF, max_tokens=550)
+    old = build_user_export_content(
+        alice, max_tokens=550, filter_ai_usage=True, created_after=CUTOFF,
+        chronological_order=True, return_metadata=True,
+        collapse_artifacts=True)
+
+    for key in ("node_ids", "unit_count", "latest_node_created_at"):
+        assert new[key] == old[key], key
+    assert new["latest_node_created_at"] == tie_ts
+    for i in range(4):
+        assert new["content"].count(f"TIED{i}") == 1
+    assert sum(f"TIED{i}" in old["content"] for i in range(4)) < 4
+    assert "AFTER" not in new["content"]
+
+
+@pytest.mark.parametrize("shape", [
+    "user_export", "user_export oldest first", "profile window"])
+def test_a_quote_never_embeds_a_deleted_entry_of_the_window(app, shape):
+    """The quote resolver applies the same access and deleted checks to a
+    node whose content it already holds (an entry of the window) as to one
+    it loads. A kept entry quotes an alive entry from outside the window
+    and a deleted entry of the window; the first embed fills the budget,
+    so the resolver keeps the deleted entry out of the text, and the
+    second quote must not bring its text in. Newest first and oldest
+    first."""
+    from backend.routes.export_data import build_user_export_content
+    alice = _alice()
+    chronological = shape != "user_export"
+    times = [T0 + timedelta(minutes=i) for i in range(4)]
+    if not chronological:
+        times.reverse()          # the kept entry is the newest
+    outside = _node(alice, "OUTSIDEALIVE " + "y" * 587, times[3])
+    deleted = _node(alice, "DELETEDTEXT", times[1])
+    deleted.deleted_at = T0 + timedelta(days=1)
+    _node(alice, f"KEPT {{quote:{outside.id}}} {{quote:{deleted.id}}}",
+          times[0])
+    _node(alice, "FILLER", times[2])
+    _db.session.commit()
+
+    if shape == "profile window":
+        text = _window(alice, 400)["content"]
+    else:
+        text = build_user_export_content(
+            alice, max_tokens=400, filter_ai_usage=True,
+            include_strategy="engaged_threads",
+            chronological_order=chronological)
+
+    assert "KEPT" in text and "OUTSIDEALIVE" in text
+    assert "DELETEDTEXT" not in text
 
 
 def test_a_whole_window_needs_the_incremental_export(app):

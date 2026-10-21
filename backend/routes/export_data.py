@@ -1402,8 +1402,9 @@ def build_user_export_content(
                      selection takes whole. For a caller that resumes
                      after the window's `latest_node_created_at` (profile
                      builds), where a row left out of the text is never
-                     read (#552). Needs the incremental path
-                     (`created_after` or `engaged_threads`).
+                     read, or records it as covered (recent context's
+                     source_data_cutoff) (#552). Needs the incremental
+                     path (`created_after` or `engaged_threads`).
 
     Returns:
         str or dict: Formatted export content (or None if no threads found).
