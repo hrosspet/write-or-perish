@@ -77,7 +77,8 @@ def stamp_session_alive(session_id, only_if_unreleased=False, now=None):
     after the tab released the session (stamp cleared), a stream that has
     not noticed its client left, or an upload still in flight, must not
     make the session live again. Only init and a new SSE connection (the
-    tab that resumes the session) stamp unconditionally.
+    tab that resumes the session) stamp unconditionally; so does a claim
+    (utils/recording_device, #388), with its own update.
     """
     query = Draft.query.filter(
         Draft.session_id == session_id,

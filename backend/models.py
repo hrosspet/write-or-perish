@@ -842,6 +842,14 @@ class Draft(db.Model):
     # See backend/utils/streaming_session.py.
     streaming_heartbeat_at = db.Column(db.DateTime, nullable=True)
 
+    # The device (or tab) that records this session (#388): its key is
+    # set at init and by the claim of a device that continues the
+    # session. Chunks, finalize, release and the transcription stream
+    # sent with another key are refused, so two devices never record into
+    # one session. NULL for a session started by a client older than
+    # #388. See backend/utils/recording_device.py.
+    streaming_device_key = db.Column(db.String(64), nullable=True)
+
     # Relationships
     user = db.relationship("User", backref="drafts")
     node = db.relationship("Node", foreign_keys=[node_id])

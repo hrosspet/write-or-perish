@@ -474,19 +474,37 @@ def encrypt_file_atomically(src, dest) -> str:
     the same *dest* (a chunk uploaded twice at once, #371) then never
     read, encrypt or delete each other's half-written file; the last move
     wins. *src* is gone afterwards either way. Returns the final path."""
+    out, final = stage_encrypted_file(src, dest)
+    try:
+        os.replace(out, final)
+    except Exception:
+        _remove_quietly(out)
+        raise
+    return final
+
+
+def stage_encrypted_file(src, dest):
+    """encrypt_file_atomically without the move: encrypt *src* (a file only
+    this caller writes) beside itself, and return ``(encrypted_path,
+    final_path)``. The caller moves it into place with ``os.replace`` when
+    it is ready, e.g. under a row lock that must not be held across the
+    KMS call (#388). *src* is gone afterwards; on failure nothing is
+    left."""
     src, dest = str(src), str(dest)
     try:
         out = encrypt_file(src)
-        final = dest + ('.enc' if out.endswith('.enc') else '')
-        os.replace(out, final)
-        return final
     except Exception:
         for leftover in (src, src + '.enc'):
-            try:
-                os.remove(leftover)
-            except OSError:
-                pass
+            _remove_quietly(leftover)
         raise
+    return out, dest + ('.enc' if out.endswith('.enc') else '')
+
+
+def _remove_quietly(path):
+    try:
+        os.remove(path)
+    except OSError:
+        pass
 
 
 def decrypt_file(filepath: str) -> bytes:
