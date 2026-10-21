@@ -1158,3 +1158,113 @@ def test_failed_sync_whose_cost_row_cannot_be_written_raises_the_original(
 
     with pytest.raises(requests.HTTPError):
         _sync_mod.sync_twitter_bookmarks(_FakeSelf(), uid)
+
+
+# ── One sync per X connection at a time (#390) ───────────────────────────
+
+class _FakeLock:
+    """redis-py Lock semantics the sync lock relies on."""
+
+    def __init__(self, held, name):
+        self.held, self.name, self.token = held, name, object()
+
+    def acquire(self, blocking=True):
+        if self.name in self.held:
+            return False
+        self.held[self.name] = self.token
+        return True
+
+    def release(self):
+        if self.held.get(self.name) is not self.token:
+            raise RuntimeError("lock not owned")
+        del self.held[self.name]
+
+
+class _FakeLockRedis:
+    def __init__(self):
+        self.held = {}
+        self.timeouts = {}
+
+    def lock(self, name, timeout=None):
+        self.timeouts[name] = timeout
+        return _FakeLock(self.held, name)
+
+
+@pytest.fixture
+def fake_lock(monkeypatch):
+    fake = _FakeLockRedis()
+    monkeypatch.setattr(_sync_mod, "_lock_redis", lambda: fake)
+    return fake
+
+
+def test_a_second_sync_skips_while_one_runs(app, fake_lock, monkeypatch):
+    uid = User.query.first().id
+    seen = []
+
+    def during_first(user_id, max_items):
+        # A second sync starts while the first holds the lock.
+        seen.append(_sync_mod.sync_twitter_bookmarks(_FakeSelf(), uid))
+        return {"status": "ok"}
+    monkeypatch.setattr(_sync_mod, "_sync_twitter_bookmarks", during_first)
+
+    assert _sync_mod.sync_twitter_bookmarks(
+        _FakeSelf(), uid) == {"status": "ok"}
+    assert seen == [{"status": "already_running"}]
+    assert fake_lock.held == {}   # released afterwards
+
+
+def test_the_lock_is_released_when_the_sync_raises(
+        app, fake_lock, monkeypatch):
+    uid = User.query.first().id
+
+    def boom(user_id, max_items):
+        raise RuntimeError("worker error")
+    monkeypatch.setattr(_sync_mod, "_sync_twitter_bookmarks", boom)
+
+    with pytest.raises(RuntimeError):
+        _sync_mod.sync_twitter_bookmarks(_FakeSelf(), uid)
+    assert fake_lock.held == {}
+
+
+def test_the_lock_is_per_user_and_outlives_the_hard_time_limit(
+        app, fake_lock, monkeypatch):
+    uid = User.query.first().id
+    fake_lock.held[f"{_sync_mod.BOOKMARK_SYNC_LOCK_PREFIX}{uid + 1}"] = 1
+    monkeypatch.setattr(_sync_mod, "_sync_twitter_bookmarks",
+                        lambda user_id, max_items: {"status": "ok"})
+
+    # Another user's running sync does not block this user's.
+    assert _sync_mod.sync_twitter_bookmarks(
+        _FakeSelf(), uid) == {"status": "ok"}
+    key = f"{_sync_mod.BOOKMARK_SYNC_LOCK_PREFIX}{uid}"
+    assert fake_lock.timeouts[key] > 3600   # celery_app task_time_limit
+
+
+def test_the_sync_runs_unlocked_when_redis_is_down(app, monkeypatch):
+    uid = User.query.first().id
+
+    def down():
+        raise ConnectionError("no redis")
+    monkeypatch.setattr(_sync_mod, "_lock_redis", down)
+    monkeypatch.setattr(_sync_mod, "_sync_twitter_bookmarks",
+                        lambda user_id, max_items: {"status": "ok"})
+    assert _sync_mod.sync_twitter_bookmarks(
+        _FakeSelf(), uid) == {"status": "ok"}
+
+
+def test_a_disconnect_mid_sync_still_releases_the_lock(
+        app, fake_lock, monkeypatch):
+    """#494's Disconnect X can delete the account row while a sync runs;
+    the lock is keyed by user, so the release does not depend on the row."""
+    uid = User.query.first().id
+    _mk_account(uid, expired=False)
+
+    def delete_row_then_finish(user_id, max_items):
+        ExternalAccount.query.filter_by(user_id=uid).delete()
+        _db.session.commit()
+        return {"status": "ok"}
+    monkeypatch.setattr(_sync_mod, "_sync_twitter_bookmarks",
+                        delete_row_then_finish)
+
+    _sync_mod.sync_twitter_bookmarks(_FakeSelf(), uid)
+    assert fake_lock.held == {}
