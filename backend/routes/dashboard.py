@@ -357,6 +357,24 @@ def remove_email():
                     **_email_state(current_user)}), 200
 
 
+def _end_bookmark_sync(user_id):
+    """End the X bookmarks connection: revoke its stored tokens at X, as
+    the purge does (user_purge.revoke_x_access), then delete it. Bookmarks
+    already saved stay. An unread "X disconnected" notice is answered by
+    this, as by a reconnect. Returns True when X confirmed every token."""
+    from backend.models import ExternalAccount, UserNotification
+    from backend.utils.user_purge import revoke_x_access
+    _, not_revoked = revoke_x_access(user_id, during="Disconnect X")
+    ExternalAccount.query.filter_by(
+        user_id=user_id, provider="twitter").delete(synchronize_session=False)
+    UserNotification.query.filter_by(
+        user_id=user_id, type="x_disconnected", status="unread").update(
+        {"status": "read", "read_at": datetime.utcnow()},
+        synchronize_session=False)
+    db.session.commit()
+    return not not_revoked
+
+
 @dashboard_bp.route("/x", methods=["DELETE"])
 @login_required
 def disconnect_x():
@@ -364,14 +382,37 @@ def disconnect_x():
     (/auth/x/connect). Only allowed when the account keeps another way in
     (its email), as remove_email above is the other way round. Nothing
     imported from X is touched; the X account can then be connected here
-    again, or signed in with on its own, which makes a new account."""
+    again, or signed in with on its own, which makes a new account.
+
+    Loore's access at X ends with it (#494; Peter, 2026-10-09: "I
+    explicitly asked for revoke"). The X sign-in token this session holds
+    is revoked at X, as at account deletion. With
+    {"end_bookmark_sync": true} the X bookmarks connection ends too: its
+    stored tokens are revoked at X and it is deleted, as in the purge.
+    Without it the connection stays (the page asks which, and older
+    clients send nothing). Best effort, as there: a call X refuses or
+    that times out is logged without the token, and the disconnect goes
+    ahead. ``x_access_removed`` says whether X confirmed that Loore has
+    no access left, so the page can show the steps to remove Loore on X
+    otherwise; ``bookmark_sync`` is "ended", "kept" or null (none)."""
+    from backend.models import ExternalAccount
+    from backend.utils.account_deletion import (
+        revoke_x_sign_in, session_x_sign_in_token,
+    )
     only_way_in = jsonify({"error": "X is your only way to sign in. "
                                     "Add an email first."}), 400
     if not current_user.email:
         return only_way_in
+    data = request.get_json(silent=True)
+    end_bookmarks = (isinstance(data, dict)
+                     and data.get("end_bookmark_sync") is True)
+    user_id = current_user.id
+    # Read while the account still has its X id: the token must be that
+    # X account's.
+    sign_in_token = session_x_sign_in_token(current_user)
     # Conditional on the email still being there (see remove_email).
     written = (User.query
-               .filter(User.id == current_user.id, User.email.isnot(None))
+               .filter(User.id == user_id, User.email.isnot(None))
                .update({"twitter_id": None, "twitter_handle": None,
                         "x_connected_at": None},
                        synchronize_session=False))
@@ -379,11 +420,24 @@ def disconnect_x():
     db.session.refresh(current_user)
     if not written:
         return only_way_in
+    removed = revoke_x_sign_in(user_id, sign_in_token, "Disconnect X")
     # The session's X token belongs to the account just disconnected.
     from backend.routes.auth import _drop_x_token
     _drop_x_token()
+    bookmark_sync = None
+    if ExternalAccount.query.filter_by(
+            user_id=user_id, provider="twitter").first() is not None:
+        if end_bookmarks:
+            removed = _end_bookmark_sync(user_id) and removed
+            bookmark_sync = "ended"
+        else:
+            removed = False     # the bookmark sync keeps its access
+            bookmark_sync = "kept"
+    logger.info("User %s disconnected X (X access removed: %s, bookmark "
+                "sync: %s)", user_id, removed, bookmark_sync)
     return jsonify({"message": "X disconnected.", "twitter_login": False,
-                    "twitter_handle": None}), 200
+                    "twitter_handle": None, "x_access_removed": removed,
+                    "bookmark_sync": bookmark_sync}), 200
 
 
 # Updates the user's handle and settings. A `description` key (the short

@@ -126,6 +126,34 @@ export function parseOrientResponse(text) {
   return sections;
 }
 
+// Every issue a reply proposes, in content order: [{title, description,
+// category}]. A new issue starts at each Issue Title heading; the position is
+// the issue_index the create-issue route takes (the backend's
+// parse_github_issues order). One block gives what parseOrientResponse gives.
+export function parseIssueBlocks(text) {
+  const issues = [];
+  let current = null;
+  const parts = stripShareBlocks(text || '').split(/^###\s+/m);
+  for (const part of parts.slice(1)) {
+    if (!part.trim()) continue;
+    const firstNewline = part.indexOf('\n');
+    if (firstNewline < 0) continue;
+    const heading = part.slice(0, firstNewline).trim().toLowerCase();
+    const body = part.slice(firstNewline + 1).trim();
+    if (heading.includes('issue title') || heading === 'title') {
+      current = { title: stripProposalTag(body).trim() };
+      issues.push(current);
+    } else if (!current) {
+      continue;
+    } else if (heading === 'description') {
+      current.description = stripProposalTag(body).trim();
+    } else if (heading === 'category') {
+      current.category = stripProposalTag(body).split('\n')[0].trim().toLowerCase();
+    }
+  }
+  return issues;
+}
+
 export function hasProposalSections(text) {
   if (!text) return false;
   if (hasShareBlocks(text)) return true;
@@ -580,6 +608,7 @@ export default function ProposalInline({
   // otherwise any '### …note…' heading grew a stray Apply button.
   const hasTodo = parsed.completed || parsed.newTasks || parsed.priority;
   const hasIssue = parsed.issueTitle && parsed.issueDescription;
+  const issueBlocks = parseIssueBlocks(content || '');
   const hasFeedback = !!parsed.feedback;
   const shares = parseShareBlocks(content || '');
   const hasShare = shares.length > 0;
@@ -592,9 +621,15 @@ export default function ProposalInline({
   // A failed todo merge leaves the proposal applicable (the server's
   // `retryable`, #434): the card shows "Apply again" next to the error.
   const [canApplyAgain, setCanApplyAgain] = useState(false);
-  const [issueApplyStatus, setIssueApplyStatus] = useState(null);
-  const [issueApplyError, setIssueApplyError] = useState(null);
-  const [issueResult, setIssueResult] = useState(null);
+  // Per-issue state, by position in the reply: idx -> 'started' |
+  // 'completed' | 'error', with the result ({issue_url, issue_number}) or
+  // error text beside it. A reply can propose several issues; each is filed
+  // on its own.
+  const [issueStates, setIssueStates] = useState({});
+  const [issueResults, setIssueResults] = useState({});
+  const [issueErrors, setIssueErrors] = useState({});
+  // From the server meta: position -> {issue_url, issue_number}.
+  const [metaFiledIssues, setMetaFiledIssues] = useState({});
   const [feedbackApplyStatus, setFeedbackApplyStatus] = useState(null);
   const [feedbackApplyError, setFeedbackApplyError] = useState(null);
   // Per-share-block save state: idx -> 'started' | 'completed' | 'error'.
@@ -662,13 +697,18 @@ export default function ProposalInline({
     }
     const issueEntry = toolCallsMeta.find(tc => tc.name === 'propose_github_issue');
     const applyIssueCall = toolCallsMeta.find(tc => tc.name === 'apply_github_issue');
-    if (issueEntry && issueEntry.apply_status === 'completed') {
-      setIssueApplyStatus('completed');
-      setIssueResult({ issue_url: issueEntry.issue_url, issue_number: issueEntry.issue_number });
-    } else if (applyIssueCall && applyIssueCall.status === 'success') {
-      setIssueApplyStatus('completed');
-      setIssueResult({ issue_url: applyIssueCall.issue_url, issue_number: applyIssueCall.issue_number });
+    const filedFromMeta = {};
+    for (const f of (issueEntry?.filed || [])) {
+      filedFromMeta[f.index] = { issue_url: f.issue_url, issue_number: f.issue_number };
     }
+    if (issueEntry?.apply_status === 'completed' && !issueEntry.filed?.length) {
+      // Filed before issues were tracked one by one: that was the LAST
+      // issue of the reply (what the old create button filed).
+      filedFromMeta.last = { issue_url: issueEntry.issue_url, issue_number: issueEntry.issue_number };
+    } else if (!issueEntry && applyIssueCall && applyIssueCall.status === 'success') {
+      filedFromMeta.last = { issue_url: applyIssueCall.issue_url, issue_number: applyIssueCall.issue_number };
+    }
+    if (Object.keys(filedFromMeta).length) setMetaFiledIssues(filedFromMeta);
     const feedbackEntry = toolCallsMeta.find(tc => tc.name === 'propose_feedback');
     const applyFeedbackCall = toolCallsMeta.find(tc => tc.name === 'apply_feedback');
     if (feedbackEntry && feedbackEntry.apply_status === 'completed') {
@@ -741,24 +781,53 @@ export default function ProposalInline({
     }
   }, [nodeId, pollApplyStatus]);
 
-  const handleCreateIssue = useCallback(async () => {
+  // idx: the issue's position in the reply, or null for every issue not
+  // filed yet.
+  const handleCreateIssue = useCallback(async (idx = null) => {
     if (!nodeId) return;
-    setIssueApplyStatus('started');
+    const targets = idx === null
+      ? issueBlocks.map((_, i) => i).filter(i => !issueStates[i] || issueStates[i] === 'error')
+      : [idx];
+    const setAll = (setter, value) => setter(s => ({
+      ...s, ...Object.fromEntries(targets.map(i => [i, value])) }));
+    setAll(setIssueStates, 'started');
     try {
-      const res = await api.post('/github/create-issue', { llm_node_id: nodeId });
-      setIssueApplyStatus('completed');
-      setIssueResult(res.data);
+      const body = idx === null
+        ? { llm_node_id: nodeId, all: true } : { llm_node_id: nodeId, issue_index: idx };
+      const res = await api.post('/github/create-issue', body);
+      const filed = res.data?.issues?.length
+        ? res.data.issues
+        : [{ index: idx ?? 0, issue_url: res.data?.issue_url, issue_number: res.data?.issue_number }];
+      setAll(setIssueStates, 'completed');
+      setIssueResults(r => ({
+        ...r,
+        ...Object.fromEntries(filed.map(f => [f.index, {
+          issue_url: f.issue_url, issue_number: f.issue_number }])) }));
       onApplied?.('propose_github_issue', {
-        apply_status: 'completed',
+        apply_status: res.data?.status || 'completed',
         issue_url: res.data?.issue_url,
         issue_number: res.data?.issue_number,
+        // Everything filed so far, so the node's meta keeps earlier ones.
+        filed: Object.entries({
+          ...metaFiledIssues, ...issueResults,
+          ...Object.fromEntries(filed.map(f => [f.index, f])),
+        }).filter(([index]) => index !== 'last').map(([index, f]) => ({
+          index: Number(index), issue_url: f.issue_url, issue_number: f.issue_number })),
       });
     } catch (err) {
       const msg = err?.response?.data?.error || 'Issue creation failed';
-      setIssueApplyStatus('error');
-      setIssueApplyError(msg);
+      setAll(setIssueStates, 'error');
+      setAll(setIssueErrors, msg);
     }
-  }, [nodeId, onApplied]);
+  }, [nodeId, onApplied, issueBlocks, issueStates, issueResults, metaFiledIssues]);
+
+  // An issue is filed if this session filed it, or the server meta says so.
+  // metaFiledIssues.last: filed before issues were tracked one by one.
+  const metaFiledFor = (idx) => metaFiledIssues[idx]
+    || (idx === issueBlocks.length - 1 ? metaFiledIssues.last : null) || null;
+  const issueStateFor = (idx) => issueStates[idx]
+    || (metaFiledFor(idx) ? 'completed' : null);
+  const issueResultFor = (idx) => issueResults[idx] || metaFiledFor(idx);
 
   const handleSendFeedback = useCallback(async () => {
     if (!nodeId) return;
@@ -919,53 +988,70 @@ export default function ProposalInline({
         </div>
       )}
 
-      {hasGithubIssue && parsed.issueTitle && (
+      {hasGithubIssue && issueBlocks.length > 0 && (
         <div style={styles.issueWrapper}>
           {sectionLabel(styles.roomy ? 'GitHub Issue Proposal' : 'GitHub Issue')}
-          <div style={styles.issueCard}>
-            <h3 style={styles.issueTitleStyle}>{parsed.issueTitle}</h3>
-            {parsed.issueDescription && (
-              <MarkdownBody
-                style={styles.issueDescStyle}
-                paragraphMargin={styles.roomy ? '0 0 8px 0' : '0 0 6px 0'}
-              >
-                {parsed.issueDescription}
-              </MarkdownBody>
-            )}
-            {parsed.issueCategory && (
-              <span style={styles.issueCategory}>{parsed.issueCategory}</span>
-            )}
-          </div>
-          {canAct && (
-          <div style={styles.issueButtonWrapper}>
-            {!issueApplyStatus && (
-              <button onClick={handleCreateIssue} style={styles.button}>
-                {styles.roomy ? 'Create GitHub Issue' : 'Create issue'}
-              </button>
-            )}
-            {issueApplyStatus === 'started' && (
-              <StatusTag style={{ ...styles.statusText, color: 'var(--text-muted)' }}>
-                Creating issue…
-              </StatusTag>
-            )}
-            {issueApplyStatus === 'completed' && (
-              <StatusTag style={{ ...styles.statusText, color: 'var(--success)' }}>
-                Issue created{issueResult?.issue_url && (
-                  <> — <a
-                    href={issueResult.issue_url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    style={{ color: 'var(--success)', textDecoration: 'underline' }}
-                  >#{issueResult.issue_number}</a></>
+          {issueBlocks.map((issue, idx) => {
+            const state = issueStateFor(idx);
+            const result = issueResultFor(idx);
+            return (
+              <div key={idx} style={idx > 0 ? { marginTop: styles.roomy ? '24px' : '14px' } : undefined}>
+                <div style={styles.issueCard}>
+                  <h3 style={styles.issueTitleStyle}>{issue.title}</h3>
+                  {issue.description && (
+                    <MarkdownBody
+                      style={styles.issueDescStyle}
+                      paragraphMargin={styles.roomy ? '0 0 8px 0' : '0 0 6px 0'}
+                    >
+                      {issue.description}
+                    </MarkdownBody>
+                  )}
+                  {issue.category && (
+                    <span style={styles.issueCategory}>{issue.category}</span>
+                  )}
+                </div>
+                {canAct && (
+                <div style={styles.issueButtonWrapper}>
+                  {(!state || state === 'error') && (
+                    <button onClick={() => handleCreateIssue(idx)} style={styles.button}>
+                      {styles.roomy ? 'Create GitHub Issue' : 'Create issue'}
+                    </button>
+                  )}
+                  {state === 'started' && (
+                    <StatusTag style={{ ...styles.statusText, color: 'var(--text-muted)' }}>
+                      Creating issue…
+                    </StatusTag>
+                  )}
+                  {state === 'completed' && (
+                    <StatusTag style={{ ...styles.statusText, color: 'var(--success)' }}>
+                      Issue created{result?.issue_url && (
+                        <> — <a
+                          href={result.issue_url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          style={{ color: 'var(--success)', textDecoration: 'underline' }}
+                        >#{result.issue_number}</a></>
+                      )}
+                    </StatusTag>
+                  )}
+                  {state === 'error' && (
+                    <StatusTag style={{ ...styles.statusText, color: 'var(--accent)' }}>
+                      {issueErrors[idx] || 'Issue creation failed'}
+                    </StatusTag>
+                  )}
+                </div>
                 )}
-              </StatusTag>
-            )}
-            {issueApplyStatus === 'error' && (
-              <StatusTag style={{ ...styles.statusText, color: 'var(--accent)' }}>
-                {issueApplyError || 'Issue creation failed'}
-              </StatusTag>
-            )}
-          </div>
+              </div>
+            );
+          })}
+          {canAct
+            && issueBlocks.filter((_, i) => !issueStateFor(i) || issueStateFor(i) === 'error').length > 1
+            && !issueBlocks.some((_, i) => issueStateFor(i) === 'started') && (
+            <div style={{ ...styles.issueButtonWrapper, marginTop: styles.roomy ? '20px' : '12px' }}>
+              <button onClick={() => handleCreateIssue(null)} style={styles.button}>
+                Create all issues
+              </button>
+            </div>
           )}
         </div>
       )}

@@ -40,6 +40,18 @@ const GLEAN_TITLE = "Loore reads today's Community Archive tweets and shows you 
 export const GLEAN_MENU_LABEL = 'Glean for this reflection';
 export const GLEANINGS_TITLE = "Today's gleanings";
 
+// The node with *targetId* in *node*'s subtree (its serialized
+// children), or null.
+function findInSubtree(node, targetId) {
+  if (!targetId) return null;
+  for (const child of node.children || []) {
+    if (child.id === targetId) return child;
+    const found = findInSubtree(child, targetId);
+    if (found) return found;
+  }
+  return null;
+}
+
 // Recursive component to render children nodes.
 function RenderChildTree({ nodes, onBubbleClick, buildActions }) {
   return (
@@ -846,9 +858,11 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
   };
 
   // Called by NodeForm after it successfully POSTs /nodes/.
-  // `data` is the newly-created child node from the backend.
+  // `data` is the newly-created child node from the backend. A long entry
+  // is saved as a chain of parts, `tip_id` the last: the reply is asked
+  // under it, so it reads the whole entry, and the page opens there.
   const handleInlineSuccess = async (data) => {
-    const newNodeId = data?.id;
+    const newNodeId = data?.tip_id || data?.id;
     if (!newNodeId) return;
     setError("");
     try {
@@ -1199,18 +1213,26 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
   // via /voice/from-node), Craft-bar LLM Response + ModelSelector, and
   // the kebab Edit/Delete menu.
   const showInlineInput = !!currentUser;
+  // A long entry is saved as a chain of parts, and its reply stands under
+  // the last part: on an earlier part (split_tip_id) the check below looks
+  // there.
+  const entryEnd = findInSubtree(node, node.split_tip_id) || node;
   // Auto-generate hides LLM Response because it already asked for the
-  // reply when the node was sent. In a read thread it doesn't always: an
-  // audio upload under the picks is saved without a reply, because
+  // reply when the node was sent. It hides it only while a reply stands
+  // under the node: when none was created (spend cap reached, the request
+  // failed) or the reply failed or was cancelled, the user must be able to
+  // ask again (#416), so the choices show. In a read thread an audio
+  // upload under the picks is saved without a reply by design, because
   // auto-generate can't know whether the user wants to talk about it
-  // (LLM Response) or get more picks (Read further). When Loore can't
-  // know what the user wants next, it shows the choices (#387): a node
-  // of the user's in a read thread with no reply under it yet offers
-  // both, auto-generate on or off.
-  const awaitsChoiceInRead = inReadThread && !isLlmNode
-    && !(node.children || []).some(c => !c.deleted);
+  // (LLM Response) or get more picks (Read further) (#387).
+  // A top-level audio upload is a placeholder until transcription
+  // finishes: no reply is offered to it before then.
+  const awaitsReply = !isLlmNode
+    && !['pending', 'processing'].includes(node.transcription_status)
+    && !(entryEnd.children || []).some(c => !c.deleted
+      && !['failed', 'cancelled'].includes(c.llm_task_status));
   const showCraftBar = isOwner && (craftMode || isPublicThread)
-    && (!autoGenerateActive || awaitsChoiceInRead)
+    && (!autoGenerateActive || awaitsReply)
     && node.ai_usage !== 'none' && !isLlmPending;
   // In a thread started from the Glean card (#435) the action row under
   // every node carries the Glean button, next to LLM Response — the

@@ -201,7 +201,10 @@ def _should_generate_recent_context(user):
 
 def _build_recent_export(user, data_cutoff, max_tokens=None):
     """ALL of the user's AI-readable writing since *data_cutoff* (the
-    profile's cutoff; None = everything), oldest first."""
+    profile's cutoff; None = everything), oldest first. A window cut to
+    *max_tokens* holds every row it selects (``whole_window``, #552): the
+    summary's source_data_cutoff is the window's latest row and counts as
+    covered."""
     from backend.routes.export_data import (
         build_user_export_content as _build_export
     )
@@ -213,6 +216,7 @@ def _build_recent_export(user, data_cutoff, max_tokens=None):
         chronological_order=True,
         return_metadata=True,
         collapse_artifacts=True,
+        whole_window=True,
     )
 
 

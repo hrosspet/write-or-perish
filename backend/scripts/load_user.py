@@ -21,6 +21,9 @@ Options:
                          of the same archive skips existing tweets), the
                          profile chain / contexts / todos / artifacts are
                          appended. Without --merge a non-empty user aborts.
+                         On an existing account whose current intentions
+                         the user wrote (not an inferred version), the
+                         dump's intentions are skipped (#412).
     --create-approved    when the user has to be created, set approved=True
                          (default: created unapproved — the same gate a
                          fresh signup gets; flip it in the admin page)
@@ -223,7 +226,17 @@ def _run(path, as_username, merge, create_approved, twitter_id=None):
         if _dt(td.get("created_at")):
             row.created_at = _dt(td["created_at"])
         db.session.add(row)
+    # The user's edit wins (#412): on an account whose current intentions
+    # are a version the user wrote, restored or had updated in a
+    # conversation, the dump's intentions are left out (a prefill bundle's
+    # are inferred, and would otherwise replace them).
+    from backend.utils.intentions_versions import KIND as INTENTIONS, protected_version
+    kept_intentions = protected_version(user_id)
+    skipped_intentions = 0
     for a in dump.get("artifacts", []):
+        if a["kind"] == INTENTIONS and kept_intentions is not None:
+            skipped_intentions += 1
+            continue
         row = UserArtifact(
             user_id=user_id, kind=a["kind"], title=a.get("title") or a["kind"],
             description=a.get("description"),
@@ -237,6 +250,9 @@ def _run(path, as_username, merge, create_approved, twitter_id=None):
             row.created_at = _dt(a["created_at"])
         db.session.add(row)
     db.session.commit()
+    if skipped_intentions:
+        print(f"kept the account's own intentions: skipped {skipped_intentions} "
+              f"intentions version(s) from the dump", file=sys.stderr)
 
     # Nodes last, so context pins on system nodes resolve to the rows above.
     from backend.models import NodeContextArtifact, UserPrompt

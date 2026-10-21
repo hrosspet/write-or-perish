@@ -73,6 +73,42 @@ def thread_root_of(node_ids):
     )
 
 
+def ancestor_chains(node_ids, *columns):
+    """{id: its ancestors, nearest first} for each id in `node_ids`, with
+    one recursive query. Each ancestor is a row of `id`, `parent_id` and
+    `columns` (Node attributes, read under their own names). A root and
+    an id that doesn't exist are absent. A chain longer than
+    MAX_THREAD_DEPTH is cut there, so it ends without a root.
+    Privacy-blind, like `thread_root_of`."""
+    ids = list({int(i) for i in node_ids})
+    if not ids:
+        return {}
+    names = [c.key for c in columns]
+    up = db.session.query(
+        Node.id.label("start_id"),
+        Node.id.label("id"),
+        Node.parent_id.label("parent_id"),
+        db.literal(0).label("depth"),
+        *[c.label(c.key) for c in columns],
+    ).filter(Node.id.in_(ids)).cte(name="ancestor_chains_walk",
+                                   recursive=True)
+    parent = db.aliased(Node, flat=True)
+    up = up.union_all(
+        db.session.query(
+            up.c.start_id, parent.id, parent.parent_id,
+            (up.c.depth + 1).label("depth"),
+            *[getattr(parent, name) for name in names],
+        )
+        .join(up, parent.id == up.c.parent_id)
+        .filter(up.c.depth < MAX_THREAD_DEPTH)
+    )
+    chains = {}
+    for row in (db.session.query(up).filter(up.c.depth > 0)
+                .order_by(up.c.start_id, up.c.depth)):
+        chains.setdefault(row.start_id, []).append(row)
+    return chains
+
+
 def _walk_deleted_at(node_model):
     """The walk's `deleted_at`: the node's own, or, for a node whose
     author deleted the account and is in its grace period (#269), the

@@ -31,6 +31,8 @@ final class AudioCenter {
     @ObservationIgnored private var voiceController: VoiceTurnController?
     @ObservationIgnored private var observers: [NSObjectProtocol] = []
     @ObservationIgnored var listenTask: Task<Void, Never>?
+    /// A read-aloud failed after part of its audio arrived: announce it when that audio ends.
+    @ObservationIgnored var pendingListenFailure: ChunkQueuePlayer.Source?
     @ObservationIgnored let log = Logger(subsystem: "org.loore.app", category: "audio")
 
     init() {
@@ -44,6 +46,12 @@ final class AudioCenter {
             guard let self else { return }
             if self.player.source == .voice {
                 self.voiceController?.queueFinished()
+            } else if self.finishedQueue() {
+                // Deactivating now would cut the error sound off.
+                Task { [weak self] in
+                    try? await Task.sleep(nanoseconds: UInt64(ToneSynth.errorSoundLength * 1_000_000_000))
+                    self?.deactivate()
+                }
             } else {
                 self.session.deactivate()
             }

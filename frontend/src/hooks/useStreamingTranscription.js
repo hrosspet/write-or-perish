@@ -7,6 +7,7 @@ import { isSpendCapError, spendCapToastMessage } from '../utils/spendCap';
 import { isAiUsageRefusedError, aiUsageRefusalScope } from '../utils/aiUsage';
 import { onPageReturn } from '../utils/pageReturn';
 import { playErrorSound } from '../utils/errorSound';
+import { RECORDING_DEVICE_KEY, TAKEN_OVER_CODE } from '../utils/recordingDevice';
 
 /**
  * Play an urgent mic-interruption alert: the descending error motif once,
@@ -48,20 +49,62 @@ function playInterruptionAlert() {
 const SESSION_ENDED_MESSAGE =
   'This recording was ended from another tab or window, so recording stopped here.';
 
+// #388: shown when another tab or device continued the session this tab
+// records ("Continue recording"). The server refuses what this tab still
+// sends; the audio it did not send stays in this tab's recorder.
+const TAKEN_OVER_MESSAGE =
+  'This recording was continued in another tab or on another device, so '
+  + 'recording stopped here. Any audio this device had not sent yet is not part of it.';
+
+// #388: why "Continue recording" could not claim the session.
+const CLAIM_ENDED_MESSAGE = "This recording has already ended, so it can't be continued.";
+const CLAIM_REFUSED_MESSAGES = {
+  session_live: 'This recording is still in progress in another tab or on another device.',
+  session_not_active: CLAIM_ENDED_MESSAGE,
+  session_not_found: CLAIM_ENDED_MESSAGE,
+};
+const CLAIM_FAILED_MESSAGE = 'The recording could not be continued. Please try again.';
+
 /**
  * Tell the server this tab no longer records the session, so another view
  * may recover it at once instead of after the server's liveness window
- * (#320). sendBeacon survives page unload; the POST is the fallback.
+ * (#320). sendBeacon survives page unload; the POST is the fallback. The
+ * device key lets the server ignore it once another device continued the
+ * session (#388).
  */
 function releaseSession(sessionId) {
+  const path = `/drafts/streaming/${sessionId}/release`
+    + `?device_key=${encodeURIComponent(RECORDING_DEVICE_KEY)}`;
   try {
     if (navigator.sendBeacon && navigator.sendBeacon(
-      `${process.env.REACT_APP_BACKEND_URL || ''}/api/drafts/streaming/${sessionId}/release`
+      `${process.env.REACT_APP_BACKEND_URL || ''}/api${path}`
     )) {
       return;
     }
   } catch (_) { /* fall through to the POST */ }
-  api.post(`/drafts/streaming/${sessionId}/release`).catch(() => {});
+  api.post(path).catch(() => {});
+}
+
+/**
+ * Make this page the writer of an interrupted session before it continues
+ * recording it (#388), so the device that recorded it before is refused
+ * from now on. Resolves to the chunk index to continue from; rejects with a
+ * fatal, user-facing error when the session cannot be continued.
+ */
+async function claimSession(sessionId, listedChunkCount) {
+  try {
+    const res = await api.post(`/drafts/streaming/${sessionId}/claim`, {
+      device_key: RECORDING_DEVICE_KEY,
+    });
+    const next = res.data?.next_chunk_index;
+    return Number.isInteger(next) ? next : (listedChunkCount || 0);
+  } catch (err) {
+    const code = err.response?.data?.code;
+    console.warn('[StreamingTranscription] Claim refused:', code || err.message);
+    const refused = new Error(CLAIM_REFUSED_MESSAGES[code] || CLAIM_FAILED_MESSAGE);
+    refused.fatal = true;
+    throw refused;
+  }
 }
 
 /**
@@ -106,6 +149,11 @@ export function useStreamingTranscription(options = {}) {
   const [uploadedChunks, setUploadedChunks] = useState(0);
   const [transcribedChunks, setTranscribedChunks] = useState(0);
   const [errorMessage, setErrorMessage] = useState(null);
+  // #388: a continued session's claim is out. Its transcription stream
+  // stays off until then: opened with this page's key before the claim
+  // made it the writer, the server would answer session_taken_over (also
+  // when Stop is pressed meanwhile, which sets 'finalizing').
+  const [claimPending, setClaimPending] = useState(false);
 
   // Refs for tracking state across callbacks
   const sessionIdRef = useRef(null);
@@ -128,6 +176,13 @@ export function useStreamingTranscription(options = {}) {
   // resetMediaRecorderRef.
   const stopMediaRecorderRef = useRef(null);
   const resetSSERef = useRef(null);
+  // For the online-retry listener, registered once (#388).
+  const stopEndedSessionRef = useRef(null);
+  // #388: the claim of a continued session ({ sessionId, shift, settled }).
+  // Its chunks wait until it answers and are numbered from the index it
+  // names (`shift` from the listed chunk count); `settled` resolves false
+  // when it was refused. Null for a session this tab started.
+  const claimRef = useRef(null);
 
   // #320: this tab stops recording a session it never finalized (reload,
   // close, navigating away, cancel): tell the server, so the session can
@@ -183,10 +238,13 @@ export function useStreamingTranscription(options = {}) {
   // and deduplicated here. The SSE state is reset because it marked
   // itself complete, which would switch off its reconnect and stale
   // checks for this tab's next recording.
-  const stopEndedSession = useCallback((endedSessionId) => {
+  //
+  // #388: the same when another tab or device continued the session
+  // (TAKEN_OVER_MESSAGE): the server refuses what this tab still sends.
+  const stopEndedSession = useCallback((endedSessionId, message = SESSION_ENDED_MESSAGE) => {
     if (!endedSessionId || endedSessionRef.current === endedSessionId) return;
     endedSessionRef.current = endedSessionId;
-    console.warn(`[StreamingTranscription] Session ${endedSessionId} was ended elsewhere — stopping the recorder`);
+    console.warn(`[StreamingTranscription] Session ${endedSessionId} was ended or continued elsewhere — stopping the recorder`);
     if (stopMediaRecorderRef.current) {
       stopMediaRecorderRef.current();
     }
@@ -196,10 +254,10 @@ export function useStreamingTranscription(options = {}) {
     failedChunksRef.current = failedChunksRef.current.filter(
       (c) => c.sessionId !== endedSessionId);
     setSessionState('error');
-    setErrorMessage(SESSION_ENDED_MESSAGE);
+    setErrorMessage(message);
     playErrorSound();
     if (onError) {
-      const endedErr = new Error(SESSION_ENDED_MESSAGE);
+      const endedErr = new Error(message);
       try {
         endedErr.fatal = true;
         endedErr.sessionEnded = true;
@@ -207,6 +265,7 @@ export function useStreamingTranscription(options = {}) {
       onError(endedErr);
     }
   }, [onError]);
+  stopEndedSessionRef.current = stopEndedSession;
 
   /**
    * Upload a single chunk with exponential backoff retry.
@@ -239,6 +298,7 @@ export function useStreamingTranscription(options = {}) {
         beaconForm.append('chunk', blob, `chunk_${chunkIndex}${ext}`);
         beaconForm.append('chunk_index', chunkIndex.toString());
         beaconForm.append('mime_type', blobType);
+        beaconForm.append('device_key', RECORDING_DEVICE_KEY);
         const sent = navigator.sendBeacon(
           `${process.env.REACT_APP_BACKEND_URL || ''}/api/drafts/streaming/${sessionId}/audio-chunk`,
           beaconForm
@@ -255,6 +315,7 @@ export function useStreamingTranscription(options = {}) {
         formData.append('chunk', blob, `chunk_${chunkIndex}${ext}`);
         formData.append('chunk_index', chunkIndex.toString());
         formData.append('mime_type', blobType);
+        formData.append('device_key', RECORDING_DEVICE_KEY);
 
         await api.post(`/drafts/streaming/${sessionId}/audio-chunk`, formData, {
           headers: { 'Content-Type': 'multipart/form-data' },
@@ -270,6 +331,11 @@ export function useStreamingTranscription(options = {}) {
         if (code === 'session_not_active' || code === 'session_not_found') {
           console.warn(`[StreamingTranscription] Session rejected chunk ${chunkIndex} (${code}); not retrying`);
           return { success: false, fatalError: SESSION_ENDED_MESSAGE, sessionEnded: true };
+        }
+        // #388: another tab or device continued the session.
+        if (code === TAKEN_OVER_CODE) {
+          console.warn(`[StreamingTranscription] Session continued elsewhere: chunk ${chunkIndex} refused, not retrying`);
+          return { success: false, fatalError: TAKEN_OVER_MESSAGE, sessionEnded: true };
         }
 
         // Server rejected chunk 0 because it couldn't parse the format's
@@ -302,16 +368,24 @@ export function useStreamingTranscription(options = {}) {
   }, []);
 
   // Handle chunk upload
-  const uploadChunk = useCallback(async (blob, chunkIndex) => {
+  const uploadChunk = useCallback(async (blob, recorderIndex) => {
     if (!sessionIdRef.current) {
       console.error('[StreamingTranscription] Cannot upload chunk: session not initialized');
       return;
     }
 
     const sessionId = sessionIdRef.current;
-    console.log(`[StreamingTranscription] Starting upload: chunk=${chunkIndex}, blobSize=${blob.size}, session=${sessionId}`);
+    console.log(`[StreamingTranscription] Starting upload: chunk=${recorderIndex}, blobSize=${blob.size}, session=${sessionId}`);
 
     const uploadPromise = (async () => {
+      // #388: a continued session sends nothing before its claim answered,
+      // and numbers its chunks from the index the claim named.
+      let chunkIndex = recorderIndex;
+      const claim = claimRef.current;
+      if (claim && claim.sessionId === sessionId) {
+        if (!(await claim.settled)) return;
+        chunkIndex += claim.shift;
+      }
       const result = await uploadChunkWithRetry(blob, chunkIndex, sessionId);
 
       if (result.success) {
@@ -323,7 +397,7 @@ export function useStreamingTranscription(options = {}) {
         // recording that replaced it.
         console.warn(`[StreamingTranscription] Ignoring fatal upload result for old session ${sessionId}`);
       } else if (result.sessionEnded) {
-        stopEndedSession(sessionId);
+        stopEndedSession(sessionId, result.fatalError);
       } else {
         // Queue for reconnect retry only if the failure wasn't fatal —
         // retrying a parse-failed chunk will produce the same bytes and
@@ -429,7 +503,13 @@ export function useStreamingTranscription(options = {}) {
     disconnect: disconnectSSE,
     reset: resetSSE,
   } = useDraftTranscriptionSSE(sessionId, {
-    enabled: sessionState === 'recording' || sessionState === 'finalizing',
+    enabled: (sessionState === 'recording' || sessionState === 'finalizing') && !claimPending,
+    deviceKey: RECORDING_DEVICE_KEY,
+    // #388: another tab or device continued this recording. Told on the
+    // stream too, so a paused tab learns it without uploading a chunk.
+    onTakenOver: () => {
+      stopEndedSession(sessionIdRef.current, TAKEN_OVER_MESSAGE);
+    },
     onChunkComplete: (data) => {
       setTranscribedChunks(prev => prev + 1);
     },
@@ -456,6 +536,7 @@ export function useStreamingTranscription(options = {}) {
           sessionId: sessionIdRef.current,
           content: data.content,
           llmNodeId: data.llm_node_id || null,
+          userNodeId: data.user_node_id || null,
           // Server-side warning (e.g. misconfigured {user_export}
           // placeholder rejected before LLM dispatch). Voice session
           // surfaces this as a toast.
@@ -535,6 +616,7 @@ export function useStreamingTranscription(options = {}) {
               sessionId: sessionIdRef.current,
               content: res.data.content,
               llmNodeId: res.data.llm_node_id || null,
+              userNodeId: res.data.user_node_id || null,
               warning: res.data.warning || null,
             });
           }
@@ -587,6 +669,13 @@ export function useStreamingTranscription(options = {}) {
           if (result.success) {
             setUploadedChunks(prev => prev + 1);
             totalChunksRef.current = Math.max(totalChunksRef.current, chunkIndex + 1);
+          } else if (result.sessionEnded) {
+            // Ended or continued elsewhere while this tab was offline
+            // (#320, #388): stop recording into it, as a first upload's
+            // refusal does. The audio stays in the recorder.
+            if (sessionIdRef.current === sessionId && stopEndedSessionRef.current) {
+              stopEndedSessionRef.current(sessionId, result.fatalError);
+            }
           } else if (!result.fatalError) {
             // Still failing for a retryable reason — put it back for the
             // next online event. Fatal errors (e.g. webm_header_parse_failed)
@@ -649,6 +738,7 @@ export function useStreamingTranscription(options = {}) {
         privacy_level: privacyLevel,
         ai_usage: aiUsage,
         label: label || undefined,
+        device_key: RECORDING_DEVICE_KEY,
       });
 
       const { draft_id, session_id } = response.data;
@@ -706,6 +796,8 @@ export function useStreamingTranscription(options = {}) {
     let initSucceeded = false;
     finalizeRequestedRef.current = false;
     releasedSessionRef.current = null;
+    claimRef.current = null;
+    setClaimPending(false);
     // A new session starts from fresh SSE state even when the previous
     // one ended without cancelStreaming (e.g. voice mode back to ready).
     resetSSE();
@@ -768,10 +860,26 @@ export function useStreamingTranscription(options = {}) {
   //   chunk 0 was uploaded with, otherwise the server rejects subsequent chunks
   //   with mime_mismatch. If this browser can't record that family, the
   //   recorder hook throws NotSupportedError and we surface that via onError.
+  // #388: once the recorder runs, this page claims the session, so the
+  //   device that recorded it before is refused from now on. A continue
+  //   that cannot record (mic denied, a format this browser can't record)
+  //   fails before the claim and leaves the session to that device. Chunks
+  //   wait for the claim's answer and are numbered from the index it names.
   const resumeStreaming = useCallback(async (existingSessionId, existingDraftId, existingChunkCount, existingMimeType) => {
     let initSucceeded = false;
     finalizeRequestedRef.current = false;
     releasedSessionRef.current = null;
+    // This page may have been the device that lost the session before.
+    endedSessionRef.current = null;
+    const listedIndex = existingChunkCount || 0;
+    let settleClaim = () => {};
+    const claim = {
+      sessionId: existingSessionId,
+      shift: 0,
+      settled: new Promise((resolve) => { settleClaim = resolve; }),
+    };
+    claimRef.current = claim;
+    setClaimPending(true);
     try {
       setSessionState('initializing');
       setErrorMessage(null);
@@ -780,28 +888,46 @@ export function useStreamingTranscription(options = {}) {
       setSessionId(existingSessionId);
       draftIdRef.current = existingDraftId;
       sessionIdRef.current = existingSessionId;
-      totalChunksRef.current = existingChunkCount || 0;
+      totalChunksRef.current = listedIndex;
       initSucceeded = true;
 
-      const durationOffset = (existingChunkCount || 0) * (chunkIntervalMs / 1000);
+      const durationOffset = listedIndex * (chunkIntervalMs / 1000);
       await startMediaRecorder({
-        startingChunkIndex: existingChunkCount || 0,
+        startingChunkIndex: listedIndex,
         durationOffset,
         forceMimeFamily: existingMimeType || null,
       });
-      setSessionState('recording');
+
+      try {
+        const next = await claimSession(existingSessionId, listedIndex);
+        claim.shift = next - listedIndex;
+        totalChunksRef.current = next;
+        settleClaim(true);
+        setClaimPending(false);
+      } catch (claimErr) {
+        // Nothing was sent: what the recorder caught while the claim was
+        // out goes with it.
+        settleClaim(false);
+        resetMediaRecorder();
+        throw claimErr;
+      }
+      // Not when Stop was pressed while the claim was out.
+      if (!finalizeRequestedRef.current) setSessionState('recording');
     } catch (err) {
+      settleClaim(false);
+      setClaimPending(false);
       console.error('Failed to resume streaming:', err);
       setSessionState('error');
       setErrorMessage(err.message);
       // Mirror startStreaming's onError plumbing so the parent sees the
-      // resume-incompatible-browser case and can reset the UI.
-      if (initSucceeded && onError) {
+      // resume-incompatible-browser case and can reset the UI. A refused
+      // claim (fatal, its message written for the user) is told too.
+      if ((initSucceeded || err?.fatal) && onError) {
         try { err.startup = true; } catch (_) { /* DOMException may be sealed */ }
         onError(err);
       }
     }
-  }, [startMediaRecorder, chunkIntervalMs, onError]);
+  }, [startMediaRecorder, resetMediaRecorder, chunkIntervalMs, onError]);
 
   // Stop streaming and finalize
   // extraParams: optional { parent_id, model } for server-side LLM chain
@@ -821,13 +947,31 @@ export function useStreamingTranscription(options = {}) {
     console.log(`[StreamingTranscription] Waiting for ${uploadsToWait.length} pending uploads to complete...`);
     await Promise.allSettled(uploadsToWait);
 
+    // #388: a continued session whose claim was refused has nothing to
+    // finalize (resumeStreaming said why); a claimed one counts from the
+    // index the claim named.
+    const claim = claimRef.current;
+    let claimShift = 0;
+    if (claim && claim.sessionId === sessionIdRef.current) {
+      if (!(await claim.settled)) return;
+      claimShift = claim.shift;
+    }
+
     // Get total chunks — should now include the final chunk
-    const totalChunks = getTotalChunks();
+    const totalChunks = getTotalChunks() + claimShift;
     console.log(`[StreamingTranscription] All uploads settled. totalChunks=${totalChunks}, uploadedChunks=${totalChunksRef.current}`);
+
+    // An upload came back saying the session was ended or continued
+    // elsewhere (#320, #388): stopEndedSession has told the user, and
+    // there is nothing here to finalize.
+    if (sessionIdRef.current && endedSessionRef.current === sessionIdRef.current) {
+      console.warn('[StreamingTranscription] Session ended or continued elsewhere; not finalizing');
+      return;
+    }
 
     try {
       // Call finalize endpoint
-      const finalizePayload = { total_chunks: totalChunks };
+      const finalizePayload = { total_chunks: totalChunks, device_key: RECORDING_DEVICE_KEY };
       if (label) finalizePayload.label = label;
       // Include workflow params for server-side LLM + TTS chain
       if (extraParams?.parent_id) finalizePayload.parent_id = extraParams.parent_id;
@@ -844,6 +988,12 @@ export function useStreamingTranscription(options = {}) {
       // Keep finalizing state until SSE signals completion
 
     } catch (err) {
+      // #388: another tab or device continued the session while this one
+      // was stopped (paused, then Stop with no chunk left to send).
+      if (err.response?.data?.code === TAKEN_OVER_CODE) {
+        stopEndedSession(sessionIdRef.current, TAKEN_OVER_MESSAGE);
+        return;
+      }
       console.error(`[StreamingTranscription] Finalize FAILED:`, err);
       playErrorSound();
       setErrorMessage(err.message);
@@ -851,7 +1001,7 @@ export function useStreamingTranscription(options = {}) {
         onError(err);
       }
     }
-  }, [stopMediaRecorder, getTotalChunks, onError, label]);
+  }, [stopMediaRecorder, getTotalChunks, onError, label, stopEndedSession]);
 
   // Save the streaming draft as a node
   const saveAsNode = useCallback(async (editedContent = null) => {
@@ -898,6 +1048,8 @@ export function useStreamingTranscription(options = {}) {
     totalChunksRef.current = 0;
     pendingUploadsRef.current = [];
     failedChunksRef.current = [];
+    claimRef.current = null;
+    setClaimPending(false);
   }, [disconnectSSE, resetMediaRecorder, resetSSE, releaseIfAbandoned]);
 
   return {

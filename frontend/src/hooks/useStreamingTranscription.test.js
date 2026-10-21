@@ -258,7 +258,9 @@ describe('releasing the session when the tab leaves (#320)', () => {
 
     act(() => { window.dispatchEvent(new Event('pagehide')); });
 
-    expect(mockPost).toHaveBeenCalledWith('/drafts/streaming/s1/release');
+    // With this page's device key (#388).
+    expect(mockPost).toHaveBeenCalledWith(
+      expect.stringMatching(/^\/drafts\/streaming\/s1\/release\?device_key=\w+/));
   });
 });
 

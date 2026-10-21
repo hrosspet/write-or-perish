@@ -31,6 +31,7 @@ from backend.utils.webm_utils import concat_fragmented_media
 from backend.utils.api_keys import get_openai_chat_key
 from backend.utils.encryption import decrypt_file_to_temp
 from backend.utils.cost import calculate_audio_cost_microdollars
+from backend.utils.error_privacy import TRANSCRIPTION_FAILED_TEXT
 from backend.utils import voice_timing
 
 logger = get_task_logger(__name__)
@@ -65,6 +66,16 @@ VOICE_REPLY_SKIPPED_AI_USAGE = (
 VOICE_REPLY_SKIPPED_READ_ONLY = (
     "Your recording is saved. Loore didn't reply because {model} is only "
     "for Read. Choose another model for replies."
+)
+# The same when no chunk of the recording produced text: the entry is kept
+# with its audio, whether chunks failed or came back empty.
+VOICE_REPLY_SKIPPED_NOT_TRANSCRIBED = (
+    "Your recording is saved, but nothing could be transcribed. Loore "
+    "didn't reply."
+)
+VOICE_REPLY_SKIPPED_NO_WORDS = (
+    "Loore didn't hear any words in this recording. It's saved with its "
+    "audio, without a reply."
 )
 
 
@@ -112,7 +123,7 @@ class StreamingTranscriptionTask(Task):
 
                 if chunk:
                     chunk.status = 'failed'
-                    chunk.error = str(exc)[:500]
+                    chunk.error = TRANSCRIPTION_FAILED_TEXT
                     chunk.completed_at = datetime.utcnow()
                     db.session.commit()
                     logger.error(f"Chunk transcription failed for node {node_id}, chunk {chunk_index}: {exc}")
@@ -251,7 +262,7 @@ def transcribe_chunk(self, node_id: int, chunk_index: int, chunk_path: str):
         except Exception as e:
             logger.error(f"Chunk transcription error for node {node_id}, chunk {chunk_index}: {e}", exc_info=True)
             chunk_record.status = 'failed'
-            chunk_record.error = str(e)[:500]
+            chunk_record.error = TRANSCRIPTION_FAILED_TEXT
             chunk_record.completed_at = datetime.utcnow()
             db.session.commit()
             raise
@@ -269,7 +280,7 @@ class FinalizationTask(Task):
                 node = Node.query.get(node_id)
                 if node:
                     node.transcription_status = 'failed'
-                    node.transcription_error = str(exc)[:500]
+                    node.transcription_error = TRANSCRIPTION_FAILED_TEXT
                     node.transcription_completed_at = datetime.utcnow()
                     db.session.commit()
                     logger.error(f"Streaming finalization failed for node {node_id}: {exc}")
@@ -424,7 +435,7 @@ class DraftStreamingTranscriptionTask(Task):
 
                 if chunk:
                     chunk.status = 'failed'
-                    chunk.error = str(exc)[:500]
+                    chunk.error = TRANSCRIPTION_FAILED_TEXT
                     chunk.completed_at = datetime.utcnow()
                     db.session.commit()
                     logger.error(f"Draft chunk transcription failed for session {session_id}, chunk {chunk_index}: {exc}")
@@ -571,7 +582,7 @@ def transcribe_draft_chunk(self, session_id: str, chunk_index: int, chunk_path: 
         except Exception as e:
             logger.error(f"Draft chunk transcription error for session {session_id}, chunk {chunk_index}: {e}", exc_info=True)
             chunk_record.status = 'failed'
-            chunk_record.error = str(e)[:500]
+            chunk_record.error = TRANSCRIPTION_FAILED_TEXT
             chunk_record.completed_at = datetime.utcnow()
             db.session.commit()
             raise
@@ -591,7 +602,7 @@ class BatchTranscriptionTask(Task):
                     NodeTranscriptChunk.chunk_index.in_(chunk_indices)
                 ).update({
                     'status': 'failed',
-                    'error': str(exc)[:500],
+                    'error': TRANSCRIPTION_FAILED_TEXT,
                     'completed_at': datetime.utcnow()
                 }, synchronize_session='fetch')
                 db.session.commit()
@@ -968,7 +979,7 @@ def transcribe_chunk_batch(self, session_id: str, chunk_indices: list):
                     ).first()
                     if chunk_record and chunk_record.status != 'completed':
                         chunk_record.status = 'failed'
-                        chunk_record.error = str(e)[:500]
+                        chunk_record.error = TRANSCRIPTION_FAILED_TEXT
                         chunk_record.completed_at = datetime.utcnow()
                 db.session.commit()
             except Exception as cleanup_err:
@@ -1248,6 +1259,10 @@ def finalize_draft_streaming(self, session_id: str, total_chunks: int,
                 transcripts.append(chunk_text)
 
         full_transcript = "\n\n".join(transcripts)
+        if label == 'Voice' and not full_transcript.strip():
+            # Nothing transcribed (#513): a chunk still pending when the wait
+            # ran out is as lost as a failed one.
+            failed_chunks = [c for c in chunks if c.status != 'completed']
 
         # Title only standalone top-level voice notes. Voice-workflow turns
         # (label='Voice') are conversation messages, not journal notes — never
@@ -1279,14 +1294,60 @@ def finalize_draft_streaming(self, session_id: str, total_chunks: int,
         # if we're about to start a server-side LLM chain — we need to set
         # llm_node_id in the same commit so the SSE all_complete event
         # includes it).
+        if (user_id and model and label == 'Voice'
+                and chunks and not full_transcript.strip()
+                and not failed_chunks):
+            # Empty text from chunks that completed (#513): the entry says so.
+            final_content = "*Note: No words were transcribed*"
         db.session.refresh(draft)
         draft.set_content(final_content)
         draft.streaming_completed_chunks = len(completed_chunks)
 
         should_chain = (user_id and model and full_transcript.strip()
                         and label == 'Voice')
+        # #513: a Voice recording with no transcribed text gets no reply.
+        # The web/iPhone fallback would otherwise send the failure note (or
+        # nothing) to the model.
+        no_text = (user_id and model and label == 'Voice'
+                   and not full_transcript.strip())
 
-        if should_chain:
+        if no_text and not chunks:
+            # No audio was stored at all (started, then stopped at once):
+            # nothing to keep, no entry, no reply. The draft goes with its
+            # warning (SSE deletes the row) and its empty folder.
+            draft.streaming_status = 'completed'
+            draft.streaming_warning = VOICE_REPLY_SKIPPED_NO_WORDS
+            db.session.commit()
+            shutil.rmtree(
+                storage_path(pathlib.Path(os.environ.get(
+                    "AUDIO_STORAGE_PATH", "data/audio")).resolve(),
+                    "drafts", user_id, session_id),
+                ignore_errors=True)
+        elif no_text:
+            # Keep the recording (note + audio) as an entry, with no reply.
+            # Chunks still pending when the wait ran out count as failed
+            # (above); empty text gets its own note.
+            if failed_chunks:
+                skip_message = VOICE_REPLY_SKIPPED_NOT_TRANSCRIBED
+            else:
+                skip_message = VOICE_REPLY_SKIPPED_NO_WORDS
+            try:
+                _start_server_side_llm_chain(
+                    draft, session_id, final_content,
+                    user_id, parent_id, model, label,
+                    entry=entry,
+                    skip_message=skip_message,
+                )
+            except Exception as e:
+                logger.error(
+                    f"Saving untranscribed recording failed for session "
+                    f"{session_id}: {e}", exc_info=True
+                )
+                db.session.rollback()
+                draft = Draft.query.filter_by(session_id=session_id).first()
+                draft.streaming_status = 'completed'
+                db.session.commit()
+        elif should_chain:
             try:
                 _start_server_side_llm_chain(
                     draft, session_id, full_transcript,
@@ -1380,7 +1441,7 @@ def _start_server_side_llm_chain(draft, session_id, transcript,
                                  user_id, parent_id, model, label,
                                  cache_split_offset=None, timing=None,
                                  client=None, prewarm_token=None,
-                                 entry=None):
+                                 entry=None, skip_message=None):
     """
     Create nodes and kick off LLM + TTS generation server-side.
 
@@ -1408,13 +1469,17 @@ def _start_server_side_llm_chain(draft, session_id, transcript,
     from backend.utils.prompts import get_user_prompt_record
     from backend.utils.llm_nodes import (
         AIUsageRefused, ReadOnlyModelRefused, create_llm_placeholder,
-        reply_ai_usage,
+        enqueue_reply_job, reply_ai_usage,
     )
     from backend.utils.context_artifacts import attach_context_artifacts
     from backend.tasks.llm_completion import generate_llm_response
 
     prompt_key = label.lower()  # 'voice'
     refused = _voice_reply_refusal(user_id, parent_id, draft)
+    if refused is None and skip_message:
+        # No reply for another reason (#513: nothing was transcribed); the
+        # recording is saved on its own, like a refused one.
+        refused = skip_message
 
     if parent_id:
         # Inherit ai_usage from the thread, looking through a read (#362)
@@ -1490,7 +1555,9 @@ def _start_server_side_llm_chain(draft, session_id, transcript,
             "Voice recording saved without a reply: AI usage keeps it away "
             "from AI (session_id=%s user_id=%s node=%s)",
             session_id, user_id, user_node.id)
-        _skip_voice_reply(draft, user_node, VOICE_REPLY_SKIPPED_AI_USAGE)
+        _skip_voice_reply(
+            draft, user_node,
+            skip_message or VOICE_REPLY_SKIPPED_AI_USAGE)
         return
 
     # LLM placeholder (don't enqueue yet — we'll chain it).
@@ -1567,14 +1634,19 @@ def _start_server_side_llm_chain(draft, session_id, transcript,
     # it doesn't wait for it.
     if llm_node.llm_model != model:
         prewarm_token = None
-    generate_llm_response.si(
-        tip_node.id, llm_node.id, llm_node.llm_model, user_id,
-        source_mode='voice',
-        cache_split_offset=cache_split_offset,
-        prewarm_token=prewarm_token,
-    ).apply_async()
+    # A job that can't be queued fails the reply at once (#385): the Voice
+    # screen then plays the error sound instead of waiting on "Thinking…".
+    task_id = enqueue_reply_job(
+        llm_node, lambda: generate_llm_response.si(
+            tip_node.id, llm_node.id, llm_node.llm_model, user_id,
+            source_mode='voice',
+            cache_split_offset=cache_split_offset,
+            prewarm_token=prewarm_token,
+        ).apply_async(),
+        record_task_id=False)
 
-    logger.info(
-        f"Server-side LLM chain started for session {session_id}: "
-        f"user_node={user_node.id}, llm_node={llm_node.id}, model={model}"
-    )
+    if task_id is not None:
+        logger.info(
+            f"Server-side LLM chain started for session {session_id}: "
+            f"user_node={user_node.id}, llm_node={llm_node.id}, model={model}"
+        )

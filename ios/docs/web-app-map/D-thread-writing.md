@@ -58,6 +58,7 @@ read_reply (bool, read replies), read_window ({window_start, window_end, tweets,
 child_count, ancestors: [...], children: [...],
 in_read_thread (bool), read_reply_above (bool),
 reply_ai_usage  // what a new reply form should pre-select (#362)
+split_tip_id    // owner only, on an earlier part of a long entry split into a chain: its last part
 ```
 
 **ancestors** (root first, nearest parent last). Each alive ancestor: `id, username, llm_model, content, preview (first 200 chars + "..."), node_type, child_count, created_at, user_id, parent_user_id, ai_usage, privacy_level` + system-prompt fields. A soft-deleted ancestor the viewer could see before deletion: `{id, deleted: true, deleted_at, username, node_type, created_at, child_count, ai_usage, privacy_level, ...prompt fields}`. Ancestors the viewer can't access are **omitted** (the chain can have gaps).
@@ -103,7 +104,7 @@ Not included on ancestors/children: `human_owner_username`, `pinned_at`, `has_or
 | Surface | Floor (craft off) | Ceiling (craft on) |
 |---|---|---|
 | Thread top-right | "Voice Mode" button (owner, ai_usage≠none, not public) | + **Auto-generate** toggle |
-| Action row under focal | Nothing, unless thread is public (owner then sees craft bar) or it's a read thread | **LLM Response + model picker** — shown only when auto-generate is **off** (`showCraftBar = isOwner && (craftMode || isPublicThread) && !autoGenerateActive && node.ai_usage !== 'none' && !isLlmPending`) |
+| Action row under focal | Nothing, unless thread is public (owner then sees craft bar) or it's a read thread | **LLM Response + model picker** — shown when auto-generate is **off**, or when no reply stands under the entry (#416): `showCraftBar = isOwner && (craftMode || isPublicThread) && (!autoGenerateActive || awaitsReply) && node.ai_usage !== 'none' && !isLlmPending`, where `awaitsReply = !isLlmNode && transcription_status not pending/processing && no child that is non-deleted and not failed/cancelled` (children carry `llm_task_status`) |
 | Inline reply form | textarea, Send, Discard draft, Record (mic) | + Privacy/AI-usage selectors, + audio **Upload** button |
 | Reply modal (kebab → Reply) | textarea + **Record + Upload** (upload is not hidden here) | + Privacy/AI-usage selectors |
 | Edit modal | Privacy/AI-usage selectors **always** shown (hidePowerFeatures not passed) | same |
@@ -173,8 +174,8 @@ Inside the card:
 | apply_share | "Share saved as a draft — [Share page]" / "Share save failed" |
 | update_ai_preferences | "Preferences updated" |
 | update_artifact | "Created"/"Updated" + " artifact `<kind>`" (link `/artifacts/<kind>`) |
-| read_artifact | "Read artifact `<kind>`" |
-| read_todo | "Read [todo list]" (link `/todo`) |
+| read_artifact | "Read artifact `<kind>`"; kind `todo` (#218): "Read [todo list]" (link `/todo`) |
+| read_todo | "Read [todo list]" (link `/todo`); the tool before #218, in older replies |
 | semantic_search | "Searched archive & references — “<query>”" |
 | read_full | external: "Read in full — [@handle's post]" (url) or "Read a saved reference in full"; node: "Read in full — [entry #<ref_id>]"; failed: "Read in full (failed)" |
 | other | the raw tool name |
@@ -343,15 +344,15 @@ Pre-checks, in order (each opens a dialog; confirming resumes the same submit wi
 
 Then:
 - **Custom submit** (`onSubmitOverride`, new entry, no uploaded file): call it with `{content, parent_id, privacy_level, ai_usage, streaming_session_id?}`; delete the draft; if `data.spend_capped` fire the spend-cap banner; if `data.llm_error` toast it (10 s); `onSuccess(data)`.
-- **Agentic top-level** (`useAgenticPrompt && !parentId && aiUsage !== 'none' && ≤ cap && no audio`): `POST /textmode/start {content, privacy_level, ai_usage, auto_generate}` → `{conversation_id, user_node_id, llm_node_id?, task_id?, spend_capped?, llm_error?}`; `onSuccess({id: user_node_id, awaitLlm: llm_node_id?, ...})`.
+- **Agentic top-level** (`useAgenticPrompt && !parentId && aiUsage !== 'none' && no audio`, also above the cap: the server splits it and replies under the last part): `POST /textmode/start {content, privacy_level, ai_usage, auto_generate}` → `{conversation_id, user_node_id, tip_id, llm_node_id?, task_id?, spend_capped?, llm_error?}`; `onSuccess({id: user_node_id, awaitLlm: llm_node_id?, ...})`.
 - **Recorded transcript** (`streamingSessionId`): `POST /drafts/streaming/<sid>/save-as-node {content, agentic?: true, auto_generate?: true}` (the flags only for top-level entries with AI allowed and the matching toggles) → `{id, user_node_id, tip_id, content, parent_id, privacy_level, ai_usage, created_at, conversation_id?, llm_node_id?, task_id?, spend_capped?, llm_error?}`.
 - **Edit**: `PUT /nodes/<id> {content, privacy_level, ai_usage, detach_prompt?: true (only if detachPrompt && text changed), regenerate_tts?: true, apply_to_descendants?: true}` → `{message, node: <focal own fields>, descendants_updated: N}`. 422 if > cap; 403 if not editable; 400 if `train` on a read node ("A Community Archive read cannot be used for training: it quotes other people's tweets.").
 - **Audio upload** (new entry): > 10 MB → chunked upload (`/nodes/upload/init|chunk|finalize`, `utils/chunkedUpload.js`), else `POST /nodes/` multipart `{audio_file, parent_id?, privacy_level, ai_usage}` → `{id, transcription_status: 'pending', ...}`; then poll `GET /nodes/<id>/transcription-status` every 2 s until completed (→ `onSuccess({...data, id: node_id})`) or failed (error "Transcription failed"). Validation: ≤ 200 MB ("File size must be under 200 MB"), types webm/wav/m4a/mp3/mp4/mpeg/mpga/ogg/oga/flac/aac ("Invalid file type. Please upload an audio file (mp3, wav, m4a, webm, ogg, flac, aac)"). 402 → toast "You've reached your monthly usage limit, so you can't upload audio until it resets on <Month D>." Selecting a file clears the textarea; typing clears the file.
-- **Plain text**: `POST /nodes/ {content, parent_id, privacy_level, ai_usage}` → `{id, content, node_type, parent_id, linked_node_id, created_at, username, privacy_level, permalink, ai_usage, split_into, tip_id}` (201). Backend auto-splits > 100k content into a serial chain (head keeps the id; `tip_id` is the last part). 400 `{code: "public_reply_required"}` if a reply under a public node isn't public; 410 if the parent was deleted. Then, only for the Write New Entry modal with Auto-generate on and Agentic off (top-level, AI allowed): `POST /nodes/<id>/llm {source_mode:'textmode'}` and `onSuccess({..., id: llm_node_id, awaitLlm: llm_node_id})`.
+- **Plain text**: `POST /nodes/ {content, parent_id, privacy_level, ai_usage}` → `{id, content, node_type, parent_id, linked_node_id, created_at, username, privacy_level, permalink, ai_usage, split_into, tip_id}` (201). Backend auto-splits > 100k content into a serial chain (head keeps the id; `tip_id` is the last part). 400 `{code: "public_reply_required"}` if a reply under a public node isn't public; 410 if the parent was deleted. Then, only for the Write New Entry modal with Auto-generate on and Agentic off (top-level, AI allowed): `POST /nodes/<tip_id || id>/llm {source_mode:'textmode'}` and `onSuccess({..., id: llm_node_id, awaitLlm: llm_node_id})`.
 - Errors: `err.response.data.error || err.message || "Error submitting form."` shown under the form.
 
 **After success, by host:**
-- Thread inline form (`handleInlineSuccess`): chain = `[focal, ...ancestors]`. If auto-generate is active: if any node in the chain has ai_usage outside {chat, train} → set auto-generate **off** and toast **"Turning off auto-generate. AI usage on some nodes is turned off."** (8 s), no reply; else `POST /nodes/<newId>/llm {model: selectedModel, source_mode: 'textmode'}` and navigate `/node/<newId>?awaitLlm=<llmId>`. Otherwise navigate `/node/<newId>`. If the LLM request fails the user still lands on the new node, then the error is handled (§5.7). Note: the check covers the parent chain, not the new reply's own ai_usage; and it uses `data.id` (the head), not `tip_id`, when an entry was split.
+- Thread inline form (`handleInlineSuccess`): chain = `[focal, ...ancestors]`. If auto-generate is active: if any node in the chain has ai_usage outside {chat, train} → set auto-generate **off** and toast **"Turning off auto-generate. AI usage on some nodes is turned off."** (8 s), no reply; else `POST /nodes/<newId>/llm {model: selectedModel, source_mode: 'textmode'}` and navigate `/node/<newId>?awaitLlm=<llmId>`. Otherwise navigate `/node/<newId>`. If the LLM request fails the user still lands on the new node, then the error is handled (§5.7). `newId` is `data.tip_id || data.id`: a long entry split into a chain is answered and opened at its last part, so the reply reads all of it. Note: the check covers the parent chain, not the new reply's own ai_usage.
 - Read-reply form (`submitReadReplyMessage`): recorded → `save-as-node {content, agentic: true, auto_generate, model}`; ai_usage none → plain `POST /nodes/`; otherwise `POST /textmode/from-node/<id> {content, ai_usage, model, auto_generate}` → `{prompt_node_id, user_node_id, llm_node_id?, ...}`; navigate `/node/<user_node_id>[?awaitLlm=<llm_node_id>]`.
 - Write New Entry modal: navigate `/node/<data.id>[?awaitLlm=<data.awaitLlm>]`.
 
@@ -446,7 +447,7 @@ Pending UI: streamed text rendered through QuotedContent with `{quote:N}`/`{quot
 
 - `failed`: toast `llmError || "LLM response generation failed"` (8 s). If viewing the dead pending node: go back to its parent (`navigate(-1)` if we came from the parent, else replace with `/node/<parentId>`), unless the parent is a tombstone. The failed node remains in the thread (content is still the placeholder text).
 - `cancelled` (a queued read withdrawn by the spend cap): toast `llmData.error || "Read cancelled"`, patch content.
-- Backend sets `llm_task_status='failed'` with `llm_task_error` (exception string) on errors; a spend-capped user at task start is failed silently (no error text).
+- Backend sets `llm_task_status='failed'` with `llm_task_error` (a plain message, never exception text) on errors; a spend-capped user at task start is failed silently (no error text).
 
 ### 5.7 Request errors (`handleLlmRequestError`)
 

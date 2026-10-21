@@ -382,6 +382,197 @@ def test_collect_marks_cut_off_results_truncated(monkeypatch):
     assert results["ocut"]["truncated"] is True
 
 
+# ── OpenAI batches that end without every result (#419) ──────────────────
+# A batch where every request failed has no output file; one that expired
+# or was cancelled partway has the billed results of the requests that
+# finished. Both have ended: never pending, the billed results collected.
+
+def _oai_chat_line(custom_id):
+    return json.dumps({"custom_id": custom_id, "response": {
+        "status_code": 200, "body": {
+            "choices": [{"message": {"content": f"OUT {custom_id}"},
+                         "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 100, "completion_tokens": 50}}}})
+
+
+def _oai_error_line(custom_id, code="batch_expired"):
+    return json.dumps({"custom_id": custom_id, "response": None,
+                       "error": {"code": code, "message": "not run"}})
+
+
+def _oai_batch_client(files, **batch):
+    """A fake OpenAI client whose batch ends as ``batch`` says, with the
+    given files (file id -> JSONL lines)."""
+    client = MagicMock()
+    batch.setdefault("created_at", 1000)
+    batch.setdefault("output_file_id", None)
+    batch.setdefault("error_file_id", None)
+    client.batches.retrieve.return_value = SimpleNamespace(**batch)
+    client.files.content.side_effect = lambda fid: SimpleNamespace(
+        content="".join(line + "\n" for line in files[fid]).encode())
+    return client
+
+
+def test_collect_openai_all_failed_batch_has_ended(monkeypatch, caplog):
+    """Every request failed: no output file. Ended at once with no
+    results (the callers fail the items now), not an unreadable batch
+    that waits for the 25 h backstop. The log says why, loudly."""
+    client = _oai_batch_client(
+        {"ef-1": [_oai_error_line("c1", "context_length_exceeded"),
+                  _oai_error_line("c2", "context_length_exceeded")]},
+        status="completed", completed_at=1060, error_file_id="ef-1",
+        request_counts=SimpleNamespace(total=2, completed=0, failed=2))
+    _install_fake_sdks(monkeypatch, openai_client=client)
+
+    results, pending, durations = batch_check_and_collect(
+        {"openai:gpt-x": "b-oai"}, KEYS)
+
+    assert (results, pending) == ({}, {})
+    assert durations == {"openai:gpt-x": 60}
+    # Only the error file is read; never files.content(None).
+    assert [c.args for c in client.files.content.call_args_list] == [
+        ("ef-1",)]
+    assert "context_length_exceeded" in caplog.text
+    assert any(r.levelname == "ERROR" and "0 result(s)" in r.getMessage()
+               for r in caplog.records)
+
+
+def test_collect_openai_all_failed_without_any_file_has_ended(monkeypatch):
+    client = _oai_batch_client(
+        {}, status="completed", completed_at=1060,
+        request_counts=SimpleNamespace(total=1, completed=0, failed=1))
+    _install_fake_sdks(monkeypatch, openai_client=client)
+
+    assert batch_check_and_collect({"openai:gpt-x": "b"}, KEYS)[:2] == (
+        {}, {})
+    client.files.content.assert_not_called()
+
+
+def test_collect_openai_failed_validation_has_ended(monkeypatch):
+    client = _oai_batch_client(
+        {}, status="failed", failed_at=1005,
+        errors=SimpleNamespace(data=[SimpleNamespace(
+            code="invalid_json_line", message="bad line", line=1)]),
+        request_counts=SimpleNamespace(total=0, completed=0, failed=0))
+    _install_fake_sdks(monkeypatch, openai_client=client)
+
+    assert batch_check_and_collect({"openai:gpt-x": "b"}, KEYS)[:2] == (
+        {}, {})
+
+
+def test_collect_openai_empty_output_file_has_ended(monkeypatch):
+    client = _oai_batch_client(
+        {"of-1": []}, status="completed", completed_at=1060,
+        output_file_id="of-1", request_counts="c")
+    _install_fake_sdks(monkeypatch, openai_client=client)
+
+    assert batch_check_and_collect({"openai:gpt-x": "b"}, KEYS)[:2] == (
+        {}, {})
+
+
+@pytest.mark.parametrize("status", ["expired", "cancelled"])
+def test_collect_openai_ended_early_collects_the_billed_results(
+        monkeypatch, status):
+    """Expired at 24 h or cancelled: the requests that finished are
+    billed and in the output file, so they are collected like a
+    completed batch's; the ones that never ran are in the error file and
+    have no result."""
+    client = _oai_batch_client(
+        {"of-1": [_oai_chat_line("done")],
+         "ef-1": [_oai_error_line("not-run", f"batch_{status}")]},
+        status=status, **{f"{status}_at": 1000 + 86400},
+        output_file_id="of-1", error_file_id="ef-1",
+        request_counts=SimpleNamespace(total=2, completed=1, failed=1))
+    _install_fake_sdks(monkeypatch, openai_client=client)
+
+    results, pending, durations = batch_check_and_collect(
+        {"openai:gpt-x": "b-oai"}, KEYS)
+
+    assert pending == {}
+    assert results == {"done": {
+        "content": "OUT done", "input_tokens": 100, "output_tokens": 50,
+        "cached_tokens": 0, "cache_write_subset_tokens": 0,
+        "truncated": False, "refused": False, "batch": True}}
+    assert durations == {"openai:gpt-x": 86400}
+
+
+def test_collect_openai_unreadable_error_file_still_collects(monkeypatch):
+    """The error file only says why; the billed results don't wait on it."""
+    client = _oai_batch_client(
+        {"of-1": [_oai_chat_line("done")]},
+        status="expired", expired_at=2000, output_file_id="of-1",
+        error_file_id="ef-gone",
+        request_counts=SimpleNamespace(total=2, completed=1, failed=1))
+    _install_fake_sdks(monkeypatch, openai_client=client)
+
+    results, pending, _ = batch_check_and_collect({"openai:gpt-x": "b"}, KEYS)
+
+    assert pending == {} and list(results) == ["done"]
+
+
+def test_collect_names_the_failures_outside_the_request(monkeypatch):
+    """transient_failures: the provider down or overloaded, a rate limit,
+    or an account reason (#369). A request the provider rejects (a 400,
+    an unknown model) or one the batch never ran counts against the
+    request, as before."""
+    def oai_line(cid, status, **error):
+        return json.dumps({"custom_id": cid, "error": None, "response": {
+            "status_code": status, "body": {"error": error}}})
+    oai = _oai_batch_client(
+        {"ef-1": [oai_line("o500", 500, type="server_error"),
+                  oai_line("o429", 429, code="rate_limit_exceeded"),
+                  oai_line("oquota", 429, code="insufficient_quota"),
+                  oai_line("o401", 401, code="invalid_api_key"),
+                  oai_line("o400", 400, code="context_length_exceeded"),
+                  oai_line("omodel", 404, code="model_not_found"),
+                  _oai_error_line("onotrun", "batch_expired")]},
+        status="completed", completed_at=1060, error_file_id="ef-1",
+        request_counts=SimpleNamespace(total=7, completed=0, failed=7))
+
+    def ant_item(cid, rtype, etype=None, message=""):
+        err = (SimpleNamespace(error=SimpleNamespace(
+            type=etype, message=message)) if etype else None)
+        return SimpleNamespace(custom_id=cid, result=SimpleNamespace(
+            type=rtype, error=err))
+    ant = MagicMock()
+    ant.messages.batches.retrieve.return_value = SimpleNamespace(
+        processing_status="ended", request_counts="c",
+        created_at=None, ended_at=None)
+    ant.messages.batches.results.return_value = [
+        ant_item("aover", "errored", "overloaded_error"),
+        ant_item("aapi", "errored", "api_error"),
+        ant_item("abill", "errored", "billing_error"),
+        ant_item("aspend", "errored", "invalid_request_error",
+                 "You have reached your specified API usage limits."),
+        ant_item("ainvalid", "errored", "invalid_request_error",
+                 "prompt is too long"),
+        ant_item("aexpired", "expired"),
+    ]
+    _install_fake_sdks(monkeypatch, anthropic_client=ant, openai_client=oai)
+
+    results, pending, _ = batch_check_and_collect(
+        {"anthropic": "b-ant", "openai:gpt-x": "b-oai"}, KEYS)
+
+    assert (dict(results), pending) == ({}, {})
+    assert results.transient_failures == {
+        "o500", "o429", "oquota", "o401", "aover", "aapi", "abill", "aspend"}
+
+
+def test_collect_openai_succeeded_without_output_file_stays_pending(
+        monkeypatch):
+    """Counted (and billed) results whose file isn't there can't be read
+    yet: pending, so the items are not failed while billed."""
+    client = _oai_batch_client(
+        {}, status="completed", completed_at=1060,
+        request_counts=SimpleNamespace(total=2, completed=1, failed=1))
+    _install_fake_sdks(monkeypatch, openai_client=client)
+
+    results, pending, _ = batch_check_and_collect(
+        {"openai:gpt-x": "b-oai"}, KEYS)
+
+    assert (results, pending) == ({}, {"openai:gpt-x": "b-oai"})
+
+
 # ── one-item collect: the provider's verdict vs. a transient error ───────
 # (2026-09-18) The feed poll fails the node only on BatchItemFailed; any
 # other error is polled again.
@@ -443,6 +634,21 @@ def test_collect_one_openai_failed_item_is_a_verdict(monkeypatch):
 
     with pytest.raises(BatchItemFailed, match="boom"):
         openai_batch_collect_one("k", "b-oai", "node-7")
+
+
+def test_collect_one_openai_all_failed_batch_is_a_verdict(monkeypatch):
+    """#419: a one-item batch whose request failed has no output file; the
+    verdict comes at once, without reading a file."""
+    client = MagicMock()
+    client.batches.retrieve.return_value = SimpleNamespace(
+        status="completed", request_counts="counts", output_file_id=None,
+        error_file_id="ef-1")
+    _install_fake_sdks(monkeypatch, openai_client=client)
+
+    with pytest.raises(BatchItemFailed) as info:
+        openai_batch_collect_one("k", "b-oai", "node-7")
+    assert not isinstance(info.value, BatchItemCancelled)
+    client.files.content.assert_not_called()
 
 
 def test_collect_one_openai_still_processing(monkeypatch):

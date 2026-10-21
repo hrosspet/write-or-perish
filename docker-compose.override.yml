@@ -36,7 +36,19 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile.dev
-    command: watchmedo auto-restart --directory=/app/backend --pattern="*.py" --recursive -- celery -A backend.celery_app.celery worker --loglevel=info --concurrency=2
+    command: watchmedo auto-restart --directory=/app/backend --pattern="*.py" --recursive -- python backend/celery_queues.py interactive --loglevel=info --concurrency=2
+    volumes:
+      - ./backend:/app/backend
+      - media_data:/app/data
+
+  # The queue split's background worker (#379). Starts no worker unless
+  # CELERY_SPLIT_QUEUES=true in .env (then `docker compose up -d`
+  # recreates the workers, the backend and beat with it).
+  celery-background:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.dev
+    command: watchmedo auto-restart --directory=/app/backend --pattern="*.py" --recursive -- python backend/celery_queues.py background --loglevel=info --concurrency=1
     volumes:
       - ./backend:/app/backend
       - media_data:/app/data

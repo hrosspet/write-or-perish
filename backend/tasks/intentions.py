@@ -4,8 +4,9 @@ cheaper), using the public fork of the tested intentions_detection prompt.
 
 Mirrors the --batch mode of backend/scripts/backfill_intentions.py. A batch
 can't retry-shrink mid-flight, so sizing happens BEFORE submit, against the
-provider's EXACT count: Anthropic's count_tokens endpoint is free and
-unbilled, so the built prompt is counted first and — when it exceeds the
+provider's count: Anthropic's count_tokens endpoint is free, unbilled and
+exact (on OpenAI it is a tiktoken estimate, LLMProvider.count_tokens), so
+the built prompt is counted first and — when it exceeds the
 context window — the export budget is shrunk by the real ratio (newest
 kept, oldest cut) and rebuilt until it fits. No billed sync probe, no
 "probe unexpectedly fit and got saved at full price" branch, no batch
@@ -23,9 +24,15 @@ Two ways to run (admin picks per click):
     user can be CANCELLED (provider-side + job row marked "cancelled") and
     replaced by a sync run in one click.
 
-Model is PINNED to claude-opus-4-8 (flat pricing across the 1M window; the
-prompt was tested on it) — deliberately no preferred_model override, so
-long-context-premium models (gpt-5.6-sol) can never be picked.
+Model: the user's own (model_for_user), the one their profile, digest and
+recent-context jobs run on (default_model_for: their saved model while it
+is offered for chat, else LLM_NAME), and priced at its provider's rates.
+It was pinned to Opus 4.8 for every user, which moved OpenAI users to
+Anthropic: a user's provider is never switched, not even as a fallback
+(Peter, 2026-10-02). A run that would go to another provider than the
+user's saved model's is refused instead. The whole archive is still read
+in one call, so on OpenAI a large one crosses the 272k long-context price
+tier (token_limits).
 
 The submitted batch is PERSISTED as a ProfileBatchJob row whose item is
 tagged kind="intentions", and collected by the same beat-driven
@@ -33,6 +40,15 @@ poll_profile_batches pass that drives profile chunks — so a worker restart
 or deploy mid-flight loses nothing (the poller picks the batch up on the
 next tick). Saving writes a NEW version of the "intentions" UserArtifact
 plus an APICostLog row (request_type="intentions_infer").
+
+The user's edit wins (#412): a run never replaces a version the user or a
+conversation wrote (utils/intentions_versions), unless the admin confirmed
+replacing that exact version in the dialog. The confirmation
+(``confirmed``: the version's id and the digest of its stored text) is
+checked when the run starts and again when its result is saved: a version
+the user saves while a run is out, or an in-place edit of the confirmed
+one, stays current, and the run's result is dropped (its billed cost is
+logged).
 """
 from celery.utils.log import get_task_logger
 
@@ -40,14 +56,58 @@ from backend.celery_app import celery, flask_app
 
 logger = get_task_logger(__name__)
 
-MODEL_ID = "claude-opus-4.8"  # pinned (config key; api_model is claude-opus-4-8) — see module docstring
+# What a batch item without a "model_id" ran on: every run submitted while
+# the model was pinned, before it followed the user's.
+PINNED_MODEL_ID = "claude-opus-4.8"
 PROMPT_FILE = "intentions_detection_public.txt"
 KIND = "intentions"
-BATCH_OUTPUT_TOKENS = 8192     # ample for a ~14-item intentions list
 # count -> shrink -> rebuild rounds before giving up. The shrink scales by
 # the provider-reported ratio, so round 2 already lands under the limit;
 # more rounds only run if the re-render measures unexpectedly hot.
 MAX_SIZING_ROUNDS = 4
+
+
+def model_for_user(user):
+    """The model the user's intentions run on: the one their other
+    background work runs on (default_model_for). Raises RuntimeError
+    rather than return a model of another provider than the user's saved
+    model's, which default_model_for can do when it falls back to
+    LLM_NAME (a saved model no longer offered for chat, with no
+    replacement on its own provider). Shared with
+    backend/scripts/backfill_intentions.py."""
+    from flask import current_app
+    from backend.utils.llm_nodes import default_model_for
+    supported = current_app.config["SUPPORTED_MODELS"]
+    model_id = default_model_for(user)
+    saved = getattr(user, "preferred_model", None)
+    saved_provider = (supported.get(saved) or {}).get("provider")
+    provider = (supported.get(model_id) or {}).get("provider")
+    if saved_provider and provider != saved_provider:
+        raise RuntimeError(
+            f"user {user.id}: their saved model {saved} is no longer "
+            f"offered, and their intentions don't run on another "
+            f"provider's model ({model_id}).")
+    return model_id
+
+
+def token_limits(model_id):
+    """(input limit, output cap) for one intentions call on *model_id*.
+
+    The output cap leaves room for thinking and the answer, as in the
+    other background jobs (DEFAULT_MAX_OUTPUT_TOKENS within the model's
+    own cap): Opus 5.5 always thinks and OpenAI counts reasoning against
+    the cap, so a lower one can end a run before any text (#366).
+
+    The input is the context window minus that cap, under the provider's
+    input ceiling (max_input_tokens). It is not held under a long-context
+    price tier the way the profile's chunks are (#259): intentions read
+    the whole archive in one call, so that cap would read less of it."""
+    from flask import current_app
+    from backend.llm_providers import DEFAULT_MAX_OUTPUT_TOKENS, model_input_cap
+    cfg = current_app.config["SUPPORTED_MODELS"][model_id]
+    out = min(cfg.get("max_output_tokens", DEFAULT_MAX_OUTPUT_TOKENS),
+              DEFAULT_MAX_OUTPUT_TOKENS)
+    return model_input_cap(cfg, out, price_tier=False), out
 
 
 def _template_and_params():
@@ -85,24 +145,28 @@ def _build_messages(user, template, budget, chronological):
     return messages, export, approximate_token_count(export)
 
 
-def _add_cost_log(user, input_tokens, output_tokens, batch, refused=False):
+def _add_cost_log(user, model_id, input_tokens, output_tokens, batch,
+                  refused=False, kept=False):
     from backend.extensions import db
     from backend.models import APICostLog
     from backend.utils.cost import calculate_llm_cost_microdollars
+    from backend.utils.intentions_versions import KEPT_USER_EDIT_REF
     from backend.utils.refusal_backoff import REFUSED_REF
     cost = calculate_llm_cost_microdollars(
-        MODEL_ID, input_tokens, output_tokens, batch=batch)
+        model_id, input_tokens, output_tokens, batch=batch)
     db.session.add(APICostLog(
-        user_id=user.id, model_id=MODEL_ID, request_type="intentions_infer",
-        # A refused run's row is what the admin column reads as "failed"
+        user_id=user.id, model_id=model_id, request_type="intentions_infer",
+        # A refused run's row is what the admin column reads as "failed",
+        # a run dropped for the user's version as "kept"
         # (routes/admin._intentions_status_map), for batch and sync runs.
-        request_ref=REFUSED_REF if refused else None,
+        request_ref=(REFUSED_REF if refused
+                     else KEPT_USER_EDIT_REF if kept else None),
         input_tokens=input_tokens, output_tokens=output_tokens,
         cost_microdollars=cost))
     return cost
 
 
-def _refuse_empty_truncated(user, response, batch):
+def _refuse_empty_truncated(user, model_id, response, batch):
     """Cut off at the output limit before any text (#368): write the cost
     row, save no artifact version (the previous one stays current) and
     raise EmptyTruncatedOutputError."""
@@ -115,49 +179,68 @@ def _refuse_empty_truncated(user, response, batch):
     if not (refused or is_empty_truncated(response)):
         return
     out_t = response.get("output_tokens", 0)
-    _add_cost_log(user, response.get("input_tokens", 0), out_t, batch,
-                  refused=True)
+    _add_cost_log(user, model_id, response.get("input_tokens", 0), out_t,
+                  batch, refused=True)
     db.session.commit()
     logger.warning("intentions user %s: %s (model %s, output_tokens=%s); "
                    "nothing saved", user.id,
                    "refused by the model" if refused
                    else "output cut off before any text",
-                   MODEL_ID, out_t)
+                   model_id, out_t)
     raise EmptyTruncatedOutputError(
-        f"intentions for user {user.id}", MODEL_ID, out_t, refused=refused)
+        f"intentions for user {user.id}", model_id, out_t, refused=refused)
 
 
-def _save(user, content, input_tokens, output_tokens, total_tokens, batch):
+def _save(user, model_id, content, input_tokens, output_tokens, total_tokens,
+          batch, confirmed=None):
     from backend.extensions import db
     from backend.models import UserArtifact
     from backend.utils.hidden_rows import writing_on_hold
-    cost = _add_cost_log(user, input_tokens, output_tokens, batch)
+    from backend.utils.intentions_versions import may_replace
     if writing_on_hold(user.id):
         # "Delete all my writing" hid the writing these intentions were
         # read from (#268): the cost is logged, nothing saved.
+        cost = _add_cost_log(user, model_id, input_tokens, output_tokens,
+                             batch)
         db.session.commit()
         return {"version": None, "cost_usd": round(cost / 1e6, 4),
-                "llm_tokens": total_tokens, "batch": batch,
+                "llm_tokens": total_tokens, "batch": batch, "model_id": model_id,
                 "on_hold": True}
+    if not may_replace(user.id, confirmed):
+        # The user's edit wins (#412): the user or a conversation saved a
+        # version, or edited the confirmed one in place, that the admin
+        # did not confirm replacing, here while the run was out. The cost
+        # is logged, nothing saved.
+        cost = _add_cost_log(user, model_id, input_tokens, output_tokens,
+                             batch, kept=True)
+        db.session.commit()
+        logger.warning("intentions user %s: the user's version is current; "
+                       "result not saved", user.id)
+        return {"version": None, "cost_usd": round(cost / 1e6, 4),
+                "llm_tokens": total_tokens, "batch": batch, "model_id": model_id,
+                "kept_user_edit": True}
+    cost = _add_cost_log(user, model_id, input_tokens, output_tokens, batch)
     artifact = UserArtifact(
         user_id=user.id, kind=KIND,
         title=UserArtifact.DEFAULT_KINDS.get(KIND, "Intentions"),
-        generated_by=MODEL_ID, tokens_used=total_tokens,
+        generated_by=model_id, tokens_used=total_tokens,
         ai_usage=user.default_ai_usage)
     artifact.set_content(content)
     db.session.add(artifact)
     db.session.commit()
     version = UserArtifact.query.filter_by(user_id=user.id, kind=KIND).count()
     return {"version": version, "cost_usd": round(cost / 1e6, 4),
-            "llm_tokens": total_tokens, "batch": batch}
+            "llm_tokens": total_tokens, "batch": batch, "model_id": model_id}
 
 
-def _submit(user, template, budget, chronological, keys, label, built=None):
+def _submit(user, template, budget, chronological, keys, label, built=None,
+            confirmed=None):
     """Build at `budget` (or reuse `built` from the sizing loop), submit a
     one-user batch, and PERSIST it as a ProfileBatchJob whose item is
     tagged kind="intentions" — the beat poller (poll_profile_batches)
     collects and saves it, so the flight survives worker restarts and
-    deploys."""
+    deploys. The item carries the admin's confirmation, if any, for the
+    check when the result is saved."""
     from datetime import datetime
     from flask import current_app
     from backend.extensions import db
@@ -168,17 +251,24 @@ def _submit(user, template, budget, chronological, keys, label, built=None):
     if built is None:
         raise RuntimeError(f"user {user.id}: no AI-readable archive")
     messages, _, est = built
-    cfg = current_app.config["SUPPORTED_MODELS"][MODEL_ID]
-    req = {"custom_id": f"int-u{user.id}", "model_id": MODEL_ID,
+    # The user's model, resolved as _prepare does: the first submit sends
+    # the prompt _prepare sized for it, and a resubmit after a failure
+    # runs on the user's model as it is now. The item keeps it, so the
+    # result is saved and priced as what ran.
+    model_id = model_for_user(user)
+    cfg = current_app.config["SUPPORTED_MODELS"][model_id]
+    req = {"custom_id": f"int-u{user.id}", "model_id": model_id,
            "api_model": cfg["api_model"], "messages": messages,
-           "max_tokens": BATCH_OUTPUT_TOKENS}
+           "max_tokens": token_limits(model_id)[1]}
     batch_ids = batch_submit({cfg["provider"]: [req]}, keys, "intentions")
     if not batch_ids:
         raise RuntimeError(f"user {user.id}: batch submit failed (see logs)")
     provider_key, batch_id = next(iter(batch_ids.items()))
     item = {"custom_id": req["custom_id"], "user_id": user.id,
-            "kind": "intentions", "budget": budget,
+            "kind": "intentions", "model_id": model_id, "budget": budget,
             "resubmitted": label == "overflow-recalibrated"}
+    if confirmed:
+        item["confirmed"] = confirmed
     db.session.add(ProfileBatchJob(
         provider_key=provider_key, batch_id=batch_id, status="pending",
         items=[item], submitted_at=datetime.utcnow()))
@@ -188,11 +278,11 @@ def _submit(user, template, budget, chronological, keys, label, built=None):
     return {"provider_key": provider_key, "batch_id": batch_id, "item": item}
 
 
-def _prepare(user_id):
+def _prepare(user_id, confirmed=None):
     """Shared prelude of both run modes: eligibility guard, prompt
-    template, and count-based sizing against the provider's exact token
-    count (free — see module docstring). Returns everything a submit or
-    a sync call needs."""
+    template, the user's model, and count-based sizing against the
+    provider's token count (see module docstring). Returns everything a
+    submit or a sync call needs."""
     from flask import current_app
     from backend.models import User
     from backend.utils.api_keys import get_api_keys_for_usage
@@ -210,17 +300,23 @@ def _prepare(user_id):
         # Opted out of AI usage, or declined the tweet seed (#346).
         raise RuntimeError(
             f"user {user_id}: {refusal[1]} Not sending their data to any LLM.")
+    from backend.utils.intentions_versions import may_replace
+    if not may_replace(user_id, confirmed):
+        # The admin route asks first (#412); this catches a version the
+        # user saved after the click, before anything is billed.
+        raise RuntimeError(
+            "The user changed their intentions after you started this run. "
+            "Their version is kept; nothing was sent.")
     template, cap, chronological = _template_and_params()
     config = current_app.config
     api_keys = get_api_keys_for_usage(config, "chat")
+    model_id = model_for_user(user)
 
     from backend.tasks.recent_context import _count_total_eligible_tokens
     # The input must leave room for the response inside the context window.
-    limit = (config["SUPPORTED_MODELS"][MODEL_ID].get("context_window",
-                                                      1_000_000)
-             - BATCH_OUTPUT_TOKENS)
+    limit, max_output = token_limits(model_id)
     built, budget, _real = fit_by_count(
-        MODEL_ID, api_keys, limit, cap,
+        model_id, api_keys, limit, cap,
         lambda b: _build_messages(user, template, b, chronological),
         corpus_tokens=_count_total_eligible_tokens(user.id),
         max_rounds=MAX_SIZING_ROUNDS,
@@ -229,20 +325,24 @@ def _prepare(user_id):
         raise RuntimeError(f"user {user_id}: no AI-readable archive")
     return {"user": user, "template": template, "cap": cap,
             "chronological": chronological, "api_keys": api_keys,
+            "model_id": model_id, "max_output": max_output,
             "built": built, "budget": budget}
 
 
-def start_infer_intentions_impl(user_id):
+def start_infer_intentions_impl(user_id, confirmed=None):
     """Size against the provider's exact token count and submit a batch.
-    Returns ("batch", ref) with the persisted job's coordinates."""
+    Returns ("batch", ref) with the persisted job's coordinates.
+    ``confirmed``: the admin's confirmation to replace the user's version
+    (utils/intentions_versions.confirmation, #412)."""
     from flask import current_app
     from backend.utils.llm_batch import apply_batch_key_override
-    prep = _prepare(user_id)
+    prep = _prepare(user_id, confirmed)
     batch_keys = apply_batch_key_override(prep["api_keys"], current_app.config)
     label = "full-cap" if prep["budget"] == prep["cap"] else "count-calibrated"
     return "batch", _submit(prep["user"], prep["template"], prep["budget"],
                             prep["chronological"], batch_keys, label,
-                            built=prep["built"])
+                            built=prep["built"],
+                            confirmed=confirmed)
 
 
 # Sync mode: PromptTooLongError rebuild-and-retry rounds after the count-based
@@ -250,16 +350,21 @@ def start_infer_intentions_impl(user_id):
 SYNC_MAX_RETRIES = 3
 
 
-def run_infer_intentions_sync_impl(user_id, progress=None):
+def run_infer_intentions_sync_impl(user_id, progress=None,
+                                   confirmed=None):
     """Size (same free count as batch mode), then ONE synchronous completion
     at full price, saved before returning. Returns the saved summary dict
-    (version, cost_usd, llm_tokens, batch=False). `progress(stage)` is an
-    optional callback for the task's PROGRESS state."""
+    (version, cost_usd, llm_tokens, batch=False; version None and
+    kept_user_edit when the user changed their version meanwhile).
+    `progress(stage)` is an optional callback for the task's PROGRESS
+    state. ``confirmed``: the admin's confirmation to replace the user's
+    version (#412)."""
     from backend.llm_providers import LLMProvider, PromptTooLongError
     from backend.utils.tokens import reduce_export_tokens
-    prep = _prepare(user_id)
+    prep = _prepare(user_id, confirmed)
     user, template, chronological = prep["user"], prep["template"], prep["chronological"]
     built, budget = prep["built"], prep["budget"]
+    model_id = prep["model_id"]
     response = None
     for attempt in range(SYNC_MAX_RETRIES + 1):
         if built is None:
@@ -269,13 +374,13 @@ def run_infer_intentions_sync_impl(user_id, progress=None):
         messages, export, est = built
         built = None  # a retry rebuilds at the reduced budget
         if progress:
-            progress(f"calling {MODEL_ID} synchronously (~{est:,} export tokens"
+            progress(f"calling {model_id} synchronously (~{est:,} export tokens"
                      f"{', retry ' + str(attempt) if attempt else ''})")
         logger.info("intentions user %s: sync attempt %s, export ~%s est tokens, budget=%s",
                     user.id, attempt + 1, est, budget)
         try:
             response = LLMProvider.get_completion(
-                MODEL_ID, messages, prep["api_keys"], max_tokens=BATCH_OUTPUT_TOKENS)
+                model_id, messages, prep["api_keys"], max_tokens=prep["max_output"])
             break
         except PromptTooLongError as e:
             if attempt == SYNC_MAX_RETRIES:
@@ -287,10 +392,12 @@ def run_infer_intentions_sync_impl(user_id, progress=None):
     in_t = response.get("input_tokens", 0)
     out_t = response.get("output_tokens", 0)
     total = response.get("total_tokens") or (in_t + out_t)
-    _refuse_empty_truncated(user, response, batch=False)
-    saved = _save(user, response["content"], in_t, out_t, total, batch=False)
-    logger.info("intentions user %s: saved v%s from sync run (%s llm tokens, $%.4f)",
-                user.id, saved["version"], saved["llm_tokens"], saved["cost_usd"])
+    _refuse_empty_truncated(user, model_id, response, batch=False)
+    saved = _save(user, model_id, response["content"], in_t, out_t, total,
+                  batch=False, confirmed=confirmed)
+    if saved["version"] is not None:
+        logger.info("intentions user %s: saved v%s from sync run (%s llm tokens, $%.4f)",
+                    user.id, saved["version"], saved["llm_tokens"], saved["cost_usd"])
     return saved
 
 
@@ -362,15 +469,20 @@ def apply_intentions_item(user, item, result):
     """Called by poll_profile_batches for a collected kind="intentions"
     item. Saves the artifact at batch price. Idempotent enough for poll
     overlap: a second apply would add a version, so the poller marks the
-    job collected in the same pass (like profile items)."""
-    _refuse_empty_truncated(user, result, batch=True)
-    saved = _save(user, result["content"],
+    job collected in the same pass (like profile items). Saved and priced
+    as the model the item ran on: an item submitted while the model was
+    pinned carries none."""
+    model_id = item.get("model_id") or PINNED_MODEL_ID
+    _refuse_empty_truncated(user, model_id, result, batch=True)
+    saved = _save(user, model_id, result["content"],
                   result.get("input_tokens", 0),
                   result.get("output_tokens", 0),
                   result.get("input_tokens", 0) + result.get("output_tokens", 0),
-                  batch=True)
-    logger.info("intentions user %s: saved v%s from batch (%s llm tokens, $%.4f)",
-                user.id, saved["version"], saved["llm_tokens"], saved["cost_usd"])
+                  batch=True,
+                  confirmed=item.get("confirmed"))
+    if saved["version"] is not None:
+        logger.info("intentions user %s: saved v%s from batch (%s llm tokens, $%.4f)",
+                    user.id, saved["version"], saved["llm_tokens"], saved["cost_usd"])
     return saved
 
 
@@ -413,14 +525,18 @@ def _failed_item_tokens(provider_key, batch_id, custom_id, keys):
     return None, None
 
 
+def _mark_item(item, job, **flags):
+    from backend.extensions import db
+    job.items = [{**i, **flags} if i.get("custom_id") == item.get("custom_id")
+                 else i for i in job.items]
+    db.session.commit()
+
+
 def mark_intentions_item_gave_up(item, job):
     """Persist a terminal failure of this item on its job so the admin
     column shows "failed" (otherwise the abandoned run is invisible — the
     job is marked collected and no new artifact version appears)."""
-    from backend.extensions import db
-    job.items = [{**i, "gave_up": True} if i.get("custom_id") == item.get("custom_id")
-                 else i for i in job.items]
-    db.session.commit()
+    _mark_item(item, job, gave_up=True)
 
 
 def handle_failed_intentions_item(user, item, job, keys):
@@ -431,6 +547,14 @@ def handle_failed_intentions_item(user, item, job, keys):
     if item.get("resubmitted"):
         mark_intentions_item_gave_up(item, job)
         logger.warning("intentions user %s: batch failed again after resubmit — giving up", user.id)
+        return
+    from backend.utils.intentions_versions import may_replace
+    if not may_replace(user.id, item.get("confirmed")):
+        # The user saved a version while the batch was out (#412): a
+        # resubmit's result would be dropped, so nothing is resubmitted.
+        _mark_item(item, job, kept_user_edit=True)
+        logger.warning("intentions user %s: batch failed and the user's version "
+                       "is current — not resubmitted", user.id)
         return
     template, cap, chronological = _template_and_params()
     prior = item.get("budget") or cap
@@ -448,18 +572,21 @@ def handle_failed_intentions_item(user, item, job, keys):
                    user.id, label, calibrated)
     try:
         _submit(user, template, calibrated, chronological, keys,
-                "overflow-recalibrated")
+                "overflow-recalibrated",
+                confirmed=item.get("confirmed"))
     except Exception:
         logger.exception("intentions user %s: resubmit failed", user.id)
 
 
 @celery.task(bind=True, name="backend.tasks.intentions.infer_intentions")
-def infer_intentions(self, user_id, mode="batch"):
+def infer_intentions(self, user_id, mode="batch", confirmed=None):
     """mode="batch": sizes (via free exact count) and submits, then ends —
     collection is the beat poller's job, so nothing is lost to worker
     restarts; the admin row's persistent state lives in the Users-tab
     Profile column. mode="sync": sizes, calls the model synchronously,
-    saves, and returns the saved summary (the admin row shows it)."""
+    saves, and returns the saved summary (the admin row shows it).
+    ``confirmed``: the admin's confirmation in the dialog to replace the
+    user's version, {"version_id", "state"} (#412), else None."""
     with flask_app.app_context():
         try:
             if mode == "sync":
@@ -468,13 +595,16 @@ def infer_intentions(self, user_id, mode="batch"):
                         "user_id": user_id, "stage": stage,
                         "done": None, "total": None})
                 progress("sizing the prompt")
-                saved = run_infer_intentions_sync_impl(user_id, progress=progress)
+                saved = run_infer_intentions_sync_impl(
+                    user_id, progress=progress,
+                    confirmed=confirmed)
                 return {"user_id": user_id, "stage": "saved", "mode": "sync",
-                        "model_id": MODEL_ID, "total": None, **saved}
+                        "total": None, **saved}
             self.update_state(state="PROGRESS", meta={
                 "user_id": user_id, "stage": "sizing + submitting batch",
                 "done": None, "total": None})
-            _kind, payload = start_infer_intentions_impl(user_id)
+            _kind, payload = start_infer_intentions_impl(
+                user_id, confirmed=confirmed)
         except Exception:
             logger.exception("Infer intentions (%s) failed for user %s", mode, user_id)
             raise
