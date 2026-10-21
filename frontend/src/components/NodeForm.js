@@ -11,6 +11,7 @@ import SplitContentDialog, { NODE_CHAR_CAP } from "./SplitContentDialog";
 import PublicReplyDialog, { PUBLIC_REPLY_ACK_KEY } from "./PublicReplyDialog";
 import { useOnlineStatus } from "../hooks/useOnlineStatus";
 import { useToast } from "../contexts/ToastContext";
+import RecoveryBanner from './RecoveryBanner';
 import api from "../api";
 import { uploadFileInChunks } from "../utils/chunkedUpload";
 import {
@@ -202,6 +203,9 @@ const NodeForm = forwardRef(
     // Auto-populate form with draft when loaded
     useEffect(() => {
       if (isDraftLoaded && draft && draft.content) {
+        // A left-behind recording is offered in the banner instead (#389);
+        // its text comes into the box only if the user chooses Recover.
+        if (draft.session_id && draft.has_stored_chunks) return;
         // Auto-populate the form with draft content
         setContent(draft.content);
         setHasDraft(true);
@@ -211,17 +215,24 @@ const NodeForm = forwardRef(
     // Recovery: when a draft has stored (untranscribed) audio chunks,
     // trigger server-side transcription and poll for completion.
     //
-    // This still fires on its own, but only for a session nobody is
-    // recording: GET /drafts/ no longer returns a live session (#320), so
-    // what arrives here was left behind (reload, crash, navigating away
-    // mid-recording) and the transcript should come back into this box
-    // without a click. If the session turns out to be live after all (its
-    // tab resumed it), the server refuses (409) or reports `live`, and
-    // this view lets go of it instead of completing it.
+    // Only for a session nobody is recording: GET /drafts/ no longer
+    // returns a live session (#320), so what arrives here was left behind
+    // (reload, crash, navigating away mid-recording). The user is asked
+    // first, with the voice page's banner (#389); Recover starts this and
+    // the transcript comes into the box, Discard removes the recording.
+    // If the session turns out to be live after all (its tab resumed it),
+    // the server refuses (409) or reports `live`, and this view lets go of
+    // it instead of completing it.
+    const [recoveryOffered, setRecoveryOffered] = useState(false);
     useEffect(() => {
       if (!isDraftLoaded || !draft) return;
       if (!draft.session_id || !draft.has_stored_chunks) return;
+      setRecoveryOffered(true);
+    }, [isDraftLoaded, draft]);
 
+    const handleRecoverRecording = useCallback(() => {
+      if (!draft) return;
+      setRecoveryOffered(false);
       setIsRecoveringAudio(true);
       setStreamingSessionId(draft.session_id);
 
@@ -286,7 +297,19 @@ const NodeForm = forwardRef(
       };
 
       triggerRecovery();
-    }, [isDraftLoaded, draft]); // eslint-disable-line react-hooks/exhaustive-deps
+    }, [draft]); // eslint-disable-line react-hooks/exhaustive-deps
+
+    // Discard goes through the voice banner's path: it deletes the session,
+    // its chunk records and its audio folder. Only this one recording.
+    const handleDiscardRecording = useCallback(async () => {
+      if (!draft || !draft.session_id) return;
+      try {
+        await api.delete(`/drafts/streaming/${draft.session_id}/discard`);
+      } catch (err) {
+        console.error('[NodeForm] Failed to discard recording:', err);
+      }
+      setRecoveryOffered(false);
+    }, [draft]);
 
     // Handle discard draft
     const handleDiscardDraft = useCallback(() => {
@@ -970,6 +993,26 @@ const NodeForm = forwardRef(
                 ? 'AI will reply automatically after you submit.'
                 : 'No AI reply. You can click LLM Response on the created node later.'}
             </div>
+          </div>
+        )}
+
+        {recoveryOffered && draft && (
+          <div style={{
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            padding: '16px 12px',
+            border: '1px solid var(--border)',
+            borderRadius: '6px',
+            marginBottom: '8px',
+          }}>
+            <RecoveryBanner
+              draft={draft}
+              note="Recover turns the recording into text in this box."
+              continueLabel="Recover"
+              onContinue={handleRecoverRecording}
+              onDiscard={handleDiscardRecording}
+            />
           </div>
         )}
 
