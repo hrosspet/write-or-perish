@@ -64,8 +64,9 @@ from backend.utils.ca_feed import (
     request_snapshot_refresh, seen_tweet_ids,
 )
 from backend.utils.tool_meta import (
-    get_tool_meta_entry, update_tool_meta, parse_github_issue,
+    get_tool_meta_entry, update_tool_meta,
 )
+from backend.utils.issue_proposals import file_proposed_issues
 from backend.utils.client_platform import CLIENT_MARKER
 from backend.utils.text_edits import apply_text_edits
 from backend.utils.privacy import AI_ALLOWED
@@ -501,9 +502,12 @@ VOICE_TOOLS = [
     {
         "name": "apply_github_issue",
         "description": (
-            "Create the previously proposed GitHub issue. Call this "
+            "Create the previously proposed GitHub issue(s). Call this "
             "ONLY when the user explicitly confirms they want to create "
             "the issue (e.g. 'yes create it', 'go ahead', 'file that'). "
+            "When the reply proposed several issues, this creates all "
+            "that are not created yet; pass issue_numbers to create only "
+            "some (e.g. 'all except the marketing one'). "
             "Do not call proactively. Do not call if the issue was "
             "already created (check the context notes for apply status). "
             "Always produce a text response — the user needs to hear "
@@ -511,7 +515,18 @@ VOICE_TOOLS = [
         ),
         "input_schema": {
             "type": "object",
-            "properties": {},
+            "properties": {
+                "issue_numbers": {
+                    "type": "array",
+                    "items": {"type": "integer"},
+                    "description": (
+                        "Optional. The 1-based positions of the proposed "
+                        "issues to create, in the order the reply lists "
+                        "them. Omit to create every issue not created "
+                        "yet."
+                    ),
+                },
+            },
             "required": [],
         },
     },
@@ -1501,6 +1516,16 @@ def _action_result_text(tr):
             return ("[apply_todo_changes: merge started in the background; "
                     "it will finish shortly.]")
         if name == "apply_github_issue":
+            issues = tr.get("issues") or []
+            if len(issues) > 1:
+                made = ", ".join(
+                    f"#{i['issue_number']} ({i['issue_url']})"
+                    for i in issues)
+                note = (f"[apply_github_issue: {len(issues)} issues "
+                        f"created — {made}")
+                if tr.get("error"):
+                    note += "; the rest failed and are still pending"
+                return note + "]"
             return (f"[apply_github_issue: issue "
                     f"#{tr.get('issue_number')} created — "
                     f"{tr.get('issue_url')}]")
@@ -1980,54 +2005,46 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
                         result["status"] = "error"
                         result["error"] = "No pending GitHub issue found"
                     else:
-                        issue_data = parse_github_issue(
-                            origin_node.get_content() or ""
+                        user = User.query.get(user_id)
+                        username = (
+                            user.username if user else str(user_id)
                         )
-                        if not issue_data.get("title"):
-                            result["status"] = "error"
-                            result["error"] = (
-                                "Could not parse issue from proposal"
-                            )
+                        # Optional 1-based positions pick some of the
+                        # reply's issues; without them every issue not
+                        # filed yet is created.
+                        wanted = inp.get("issue_numbers")
+                        bad_numbers = False
+                        if wanted:
+                            try:
+                                picks = sorted({int(n) - 1 for n in wanted})
+                            except (TypeError, ValueError):
+                                picks = []
+                                bad_numbers = True
                         else:
-                            from backend.utils.github import (
-                                create_github_issue,
+                            picks = [None]
+                        filed_now, err = [], None
+                        if bad_numbers:
+                            err = "Invalid issue_numbers"
+                        for index in picks:
+                            filed, _total, err, _status = (
+                                file_proposed_issues(
+                                    origin_node, draft, username, client,
+                                    index=index)
                             )
-                            user = User.query.get(user_id)
-                            username = (
-                                user.username if user else str(user_id)
-                            )
-                            category = issue_data.get(
-                                "category", "enhancement"
-                            )
-                            if category not in (
-                                "bug", "feature", "enhancement"
-                            ):
-                                category = "enhancement"
-                            gh_result = create_github_issue(
-                                title=issue_data["title"],
-                                description=issue_data.get(
-                                    "description", ""
-                                ),
-                                category=category,
-                                username=username,
-                                platform=client,
-                            )
-                            # Clean up draft
-                            db.session.delete(draft)
-                            db.session.flush()
-                            # Update origin node meta
-                            update_tool_meta(
-                                origin_node,
-                                "propose_github_issue",
-                                {
-                                    "apply_status": "completed",
-                                    "issue_url": gh_result["url"],
-                                    "issue_number": gh_result["number"],
-                                },
-                            )
+                            filed_now += filed
+                            if err:
+                                break
+                        if filed_now:
                             result["status"] = "success"
-                            result["issue_url"] = gh_result["url"]
-                            result["issue_number"] = gh_result["number"]
+                            result["issues"] = filed_now
+                            result["issue_url"] = filed_now[0]["issue_url"]
+                            result["issue_number"] = (
+                                filed_now[0]["issue_number"])
+                            if err:
+                                result["error"] = err
+                        else:
+                            result["status"] = "error"
+                            result["error"] = err
 
             elif name == "update_artifact":
                 kind = (inp.get("kind") or "").strip().lower()

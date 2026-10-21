@@ -188,7 +188,6 @@ def effects(app, monkeypatch):
     merge dispatch, the merge's model call, the GitHub call, and each read
     of a node's text."""
     import backend.routes.todo as todo_routes
-    import backend.routes.github_issues as gh_routes
     import backend.utils.github as gh_utils
     import backend.utils.prompts as prompts
     # Both the route and the tool start a merge through _start_todo_merge,
@@ -200,7 +199,6 @@ def effects(app, monkeypatch):
 
     issue = MagicMock(return_value={
         "url": "https://github.com/owner/repo/issues/9", "number": 9})
-    monkeypatch.setattr(gh_routes, "create_github_issue", issue)
     monkeypatch.setattr(gh_utils, "create_github_issue", issue)
 
     _Provider.calls = []
@@ -744,3 +742,179 @@ def test_cleanup_removes_proposal_drafts_that_dont_belong_to_the_owner(
     assert {d.id for d in Draft.query.all()} == {d.id for d in keep}
     assert NodeTranscriptChunk.query.count() == 0
     assert not folder.exists()
+
+
+# ── Several issues in one reply ──────────────────────────────────────────
+
+THREE_ISSUES = (
+    "Here are three issues.\n"
+    "### Issue Title\nRecord button does nothing\n"
+    "### Description\nTapping record has no effect.\n"
+    "### Category\nbug\n"
+    "### Issue Title\nAdd a dark mode toggle\n"
+    "### Description\nUsers want dark mode.\n"
+    "### Category\nfeature\n"
+    "### Issue Title\nSpeed up the export\n"
+    "### Description\nThe export is slow.\n"
+    "### Category\nenhancement\n")
+
+
+def _numbered_issues(effects):
+    """Each GitHub call answers with the next issue number."""
+    numbers = iter(range(101, 200))
+
+    def create(**kwargs):
+        n = next(numbers)
+        return {"url": f"https://github.com/owner/repo/issues/{n}",
+                "number": n}
+    effects.issue.side_effect = create
+
+
+def _three_issue_proposal(alice):
+    node = _reply(alice, _msg(alice), "issue", content=THREE_ISSUES)
+    draft = _pending(alice, node, "issue")
+    return node, draft
+
+
+def test_parse_github_issues_returns_every_block():
+    from backend.utils.tool_meta import (
+        parse_github_issue, parse_github_issues)
+    issues = parse_github_issues(THREE_ISSUES)
+    assert [i["title"] for i in issues] == [
+        "Record button does nothing", "Add a dark mode toggle",
+        "Speed up the export"]
+    assert [i["category"] for i in issues] == [
+        "bug", "feature", "enhancement"]
+    assert issues[1]["description"] == "Users want dark mode."
+    # A single block parses as before.
+    assert parse_github_issues(ISSUE_TEXT) == [parse_github_issue(ISSUE_TEXT)]
+
+
+def test_route_files_one_issue_and_keeps_the_others_fileable(
+        app, effects):
+    _numbered_issues(effects)
+    alice = _user("alice")
+    node, draft = _three_issue_proposal(alice)
+    client = _client(app, alice)
+
+    resp = client.post("/api/github/create-issue",
+                       json={"llm_node_id": node.id, "issue_index": 1})
+
+    assert resp.status_code == 200
+    assert resp.get_json()["status"] == "partial"
+    assert resp.get_json()["issue_number"] == 101
+    assert effects.issue.call_count == 1
+    assert effects.issue.call_args.kwargs["title"] == "Add a dark mode toggle"
+    assert effects.issue.call_args.kwargs["category"] == "feature"
+    # Still pending, with the filed one recorded.
+    assert Draft.query.filter_by(id=draft.id).count() == 1
+    entry = _meta(node.id)[0]
+    assert entry["apply_status"] == "partial"
+    assert [f["index"] for f in entry["filed"]] == [1]
+
+    # The same one again is refused; nothing more is sent.
+    again = client.post("/api/github/create-issue",
+                        json={"llm_node_id": node.id, "issue_index": 1})
+    assert again.status_code == 400
+    assert effects.issue.call_count == 1
+
+    # The others are still fileable one by one; the last one completes it.
+    assert client.post("/api/github/create-issue", json={
+        "llm_node_id": node.id, "issue_index": 0}).status_code == 200
+    last = client.post("/api/github/create-issue",
+                       json={"llm_node_id": node.id, "issue_index": 2})
+    assert last.get_json()["status"] == "completed"
+    assert Draft.query.filter_by(id=draft.id).count() == 0
+    entry = _meta(node.id)[0]
+    assert entry["apply_status"] == "completed"
+    assert sorted(f["index"] for f in entry["filed"]) == [0, 1, 2]
+    assert [f["issue_number"] for f in sorted(
+        entry["filed"], key=lambda f: f["index"])] == [102, 101, 103]
+
+
+def test_route_without_an_index_files_every_issue_not_filed_yet(
+        app, effects):
+    _numbered_issues(effects)
+    alice = _user("alice")
+    node, draft = _three_issue_proposal(alice)
+    client = _client(app, alice)
+    client.post("/api/github/create-issue",
+                json={"llm_node_id": node.id, "issue_index": 0})
+
+    resp = client.post("/api/github/create-issue",
+                       json={"llm_node_id": node.id})
+
+    body = resp.get_json()
+    assert resp.status_code == 200 and body["status"] == "completed"
+    assert [i["index"] for i in body["issues"]] == [1, 2]
+    assert effects.issue.call_count == 3
+    assert Draft.query.filter_by(id=draft.id).count() == 0
+
+
+def test_route_rejects_a_bad_issue_index(app, effects):
+    alice = _user("alice")
+    node, draft = _three_issue_proposal(alice)
+    client = _client(app, alice)
+
+    for bad in (3, -1, "x"):
+        resp = client.post("/api/github/create-issue",
+                           json={"llm_node_id": node.id, "issue_index": bad})
+        assert resp.status_code == 400
+    effects.issue.assert_not_called()
+
+
+def test_a_github_failure_midway_keeps_the_issues_already_filed(
+        app, effects):
+    alice = _user("alice")
+    node, draft = _three_issue_proposal(alice)
+    effects.issue.side_effect = [
+        {"url": "https://github.com/owner/repo/issues/7", "number": 7},
+        RuntimeError("GitHub said no: secret detail")]
+
+    resp = _client(app, alice).post("/api/github/create-issue",
+                                    json={"llm_node_id": node.id})
+
+    assert resp.status_code == 500
+    assert "secret" not in resp.get_json()["error"]
+    entry = _meta(node.id)[0]
+    assert entry["apply_status"] == "partial"
+    assert [f["index"] for f in entry["filed"]] == [0]
+    assert Draft.query.filter_by(id=draft.id).count() == 1
+
+
+def test_another_users_multi_issue_proposal_is_still_refused(app, effects):
+    alice = _user("alice")
+    bob = _user("bob")
+    node = _reply(bob, _msg(bob, privacy="public"), "issue",
+                  privacy="public", content=THREE_ISSUES)
+    _pending(alice, node, "issue")
+
+    resp = _client(app, alice).post(
+        "/api/github/create-issue",
+        json={"llm_node_id": node.id, "issue_index": 0})
+
+    assert resp.status_code == 404
+    effects.issue.assert_not_called()
+
+
+def test_tool_files_all_or_only_the_numbers_asked_for(app, effects):
+    _numbered_issues(effects)
+    alice = _user("alice")
+    node, draft = _three_issue_proposal(alice)
+    chain, placeholder = _confirm_turn(alice, node)
+
+    some = _lc._execute_tool_calls(
+        [{"name": "apply_github_issue", "input": {"issue_numbers": [1, 3]}}],
+        placeholder, chain, alice.id)[0]
+    assert some["status"] == "success"
+    assert [i["index"] for i in some["issues"]] == [0, 2]
+    assert Draft.query.filter_by(id=draft.id).count() == 1
+
+    rest = _lc._execute_tool_calls(
+        [{"name": "apply_github_issue", "input": {}}],
+        placeholder, chain, alice.id)[0]
+    assert rest["status"] == "success"
+    assert [i["index"] for i in rest["issues"]] == [1]
+    assert effects.issue.call_count == 3
+    assert Draft.query.filter_by(id=draft.id).count() == 0
+    assert _meta(node.id)[0]["apply_status"] == "completed"

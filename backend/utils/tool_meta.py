@@ -96,6 +96,35 @@ def parse_github_issue(content):
     return result
 
 
+def parse_github_issues(content):
+    """Every issue proposed in LLM text, in content order: a list of
+    ``{'title', 'description', 'category'}`` dicts (keys missing when the
+    block lacks them). A new issue starts at each ``### Issue Title`` (or
+    ``### Title``) heading; its ``### Description`` and ``### Category``
+    belong to it. For one block this equals parse_github_issue."""
+    issues = []
+    current = None
+    for part in content.split('### '):
+        if not part.strip():
+            continue
+        first_newline = part.find('\n')
+        if first_newline < 0:
+            continue
+        heading = part[:first_newline].strip().lower()
+        body = part[first_newline + 1:].strip()
+        if 'issue title' in heading or heading == 'title':
+            current = {'title': body}
+            issues.append(current)
+        elif current is None:
+            continue
+        elif heading == 'description':
+            current['description'] = body
+        elif heading == 'category':
+            # Take only the first line to avoid trailing tags
+            current['category'] = body.split('\n')[0].strip().lower()
+    return issues
+
+
 def parse_feedback(content):
     """Parse ### Feedback and ### Feedback category from LLM text.
 
