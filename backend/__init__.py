@@ -38,8 +38,10 @@ install_traceback_scrubbing("backend")
 
 def validate_default_model(config):
     """Refuse to boot on an ``LLM_NAME`` that is not an active (non-
-    deprecated) chat (not ``"chat": False``) SUPPORTED_MODELS key, or on
-    a READ_DEFAULT_MODEL that is not an active read model.
+    deprecated) chat (not ``"chat": False``) SUPPORTED_MODELS key, on
+    a READ_DEFAULT_MODEL that is not an active read model, or on a
+    CHAT_MODEL_<PROVIDER> that is not an active chat model of that
+    provider.
 
     The keys are the dotted display ids (``claude-opus-4.6``); the API ids
     use dashes (``claude-opus-4-6``). Setting the API id in the env file
@@ -87,6 +89,19 @@ def validate_default_model(config):
                 raise RuntimeError(
                     f"{key}={glean_model!r} is not an active model "
                     f"flagged 'read'.")
+        # Each provider's default chat model (#487): a saved model no
+        # longer offered moves to it. Another provider's model here would
+        # move the user to that provider, which is never acceptable.
+        for provider, key in (("anthropic", "CHAT_MODEL_ANTHROPIC"),
+                              ("openai", "CHAT_MODEL_OPENAI")):
+            chat_model = config.get(key)
+            cfg = supported.get(chat_model) or {}
+            if chat_model and (cfg.get("provider") != provider
+                               or cfg.get("deprecated")
+                               or not cfg.get("chat", True)):
+                raise RuntimeError(
+                    f"{key}={chat_model!r} is not an active {provider} "
+                    f"chat model. Active chat models: {chat_models}")
         return
     hint = ""
     dotted = (model_id or "").replace("-", ".")

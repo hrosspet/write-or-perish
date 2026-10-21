@@ -113,3 +113,34 @@ def test_the_shipped_glean_defaults_pass():
         "GLEAN_MODEL_ANTHROPIC": Config.GLEAN_MODEL_ANTHROPIC,
         "GLEAN_MODEL_OPENAI": Config.GLEAN_MODEL_OPENAI,
         "SUPPORTED_MODELS": Config.SUPPORTED_MODELS})
+
+
+def test_a_chat_default_must_be_its_own_providers_chat_model():
+    """#487: a saved model no longer offered moves to its provider's
+    CHAT_MODEL_<PROVIDER>. Another provider's model there would move the
+    user to that provider."""
+    models = {"claude-opus-4.6": {"provider": "anthropic"},
+              "gpt-6-astra": {"provider": "openai"},
+              "gpt-6.1-sol": {"provider": "openai", "read": True,
+                              "chat": False},
+              "gpt-5.5": {"provider": "openai", "deprecated": True}}
+    base = {"DEFAULT_LLM_MODEL": "claude-opus-4.6", "SUPPORTED_MODELS": models}
+    validate_default_model({**base, "CHAT_MODEL_OPENAI": "gpt-6-astra",
+                            "CHAT_MODEL_ANTHROPIC": "claude-opus-4.6"})
+    for bad in ("claude-opus-4.6", "gpt-6.1-sol", "gpt-5.5", "gpt-6"):
+        with pytest.raises(RuntimeError) as e:
+            validate_default_model({**base, "CHAT_MODEL_OPENAI": bad})
+        assert f"CHAT_MODEL_OPENAI={bad!r}" in str(e.value)
+        assert "Active chat models: claude-opus-4.6, gpt-6-astra" in str(e.value)
+
+
+def test_the_shipped_chat_defaults_pass():
+    from backend.config import Config
+    assert (Config.CHAT_MODEL_ANTHROPIC, Config.CHAT_MODEL_OPENAI) == (
+        "claude-opus-5.5", "gpt-6-astra")
+    validate_default_model({
+        "DEFAULT_LLM_MODEL": "claude-opus-4.6",
+        "READ_DEFAULT_MODEL": Config.READ_DEFAULT_MODEL,
+        "CHAT_MODEL_ANTHROPIC": Config.CHAT_MODEL_ANTHROPIC,
+        "CHAT_MODEL_OPENAI": Config.CHAT_MODEL_OPENAI,
+        "SUPPORTED_MODELS": Config.SUPPORTED_MODELS})
