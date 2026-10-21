@@ -732,13 +732,20 @@ def _over_headroom(user, estimate):
 
 # ── requests ──────────────────────────────────────────────────────────────
 
-def _request(models, model_id, custom_id, messages, effort=None):
-    _provider, api_model = _batch._provider_and_model(model_id)
+def _request(models, model_id, custom_id, messages, merge=False):
+    """A batch request. An OpenAI merge goes to the Responses endpoint,
+    as the live call the merge experiments ran through, with the
+    configured reasoning effort; a window stays on chat/completions, as
+    the Luna windows were tested."""
+    provider, api_model = _batch._provider_and_model(model_id)
     req = {"custom_id": custom_id, "model_id": model_id,
            "api_model": api_model, "messages": messages,
            "max_tokens": DEFAULT_MAX_OUTPUT_TOKENS}
-    if effort:
-        req["reasoning_effort"] = effort
+    if merge and provider == "openai":
+        from backend.utils.llm_batch import RESPONSES_ENDPOINT
+        req["endpoint"] = RESPONSES_ENDPOINT
+        if models.merge_effort:
+            req["reasoning_effort"] = models.merge_effort
     return req
 
 
@@ -791,6 +798,7 @@ class _Submission:
         self.built = []
         self.size = 0
         self.sent = 0
+        self.skipped = 0     # windows given up, saved as window_skip rows
         self.failed = False
         self.max_bytes = int(_setting("PROFILE_BATCH_MAX_BYTES", 100_000_000))
 
@@ -909,6 +917,7 @@ def _render_windows(user, state, models, sub, history, deadline):
                 # One entry larger than the version model's cap: never cut,
                 # never sent across the cap's price tier. Given up, loudly.
                 _save_skip(user, meta)
+                sub.skipped += 1
                 _report("Profile window over the version model's cap",
                         user_id=user.id, set=state.set_id, start=_iso(cur),
                         end=_iso(cutoff), model=models.version,
@@ -917,6 +926,7 @@ def _render_windows(user, state, models, sub, history, deadline):
                 # The same window failed twice before, in this set or an
                 # earlier one: give it up without another call.
                 _save_skip(user, meta)
+                sub.skipped += 1
                 _report("Profile window skipped after repeated failures",
                         user_id=user.id, set=state.set_id,
                         start=_iso(cur), end=_iso(cutoff),
@@ -1002,7 +1012,7 @@ def _merge_requests(user, state, models, sub, keys, history):
         attempt = len(history.get(key, ())) + 1
         cid = f"profile_{user.id}_{state.set_id}_g{i}_{attempt}"
         sub.add(provider, _request(models, models.merge, cid, messages,
-                                   models.merge_effort), {
+                                   merge=True), {
             "custom_id": cid, "user_id": user.id, "kind": "group",
             "set": state.set_id, "base_id": base_id,
             "members": [m.id for m in members], "attempt": attempt,
@@ -1028,7 +1038,7 @@ def _merge_requests(user, state, models, sub, keys, history):
     attempt = len(history.get(key, ())) + 1
     cid = f"profile_{user.id}_{state.set_id}_f_{attempt}"
     sub.add(provider, _request(models, models.merge, cid, messages,
-                               models.merge_effort), {
+                               merge=True), {
         "custom_id": cid, "user_id": user.id, "kind": "final",
         "set": state.set_id, "base_id": base_id, "attempt": attempt,
         "start": None, "cutoff": _iso(tip.source_data_cutoff),
@@ -1103,7 +1113,9 @@ def next_work(user, models, keys, deadline):
         return "failed"
     if outcome == "partial":
         return "partial"
-    return "submitted" if sub.sent else "idle"
+    # A pass that only gave windows up still changed the set: the caller
+    # runs another pass, which may find the final due.
+    return "submitted" if (sub.sent or sub.skipped) else "idle"
 
 
 # ── the advance task ──────────────────────────────────────────────────────

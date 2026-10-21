@@ -181,8 +181,10 @@ def _provider_and_model(model_id):
     return cfg["provider"], cfg["api_model"]
 
 
-def _provider_key(provider, api_model):
-    return "anthropic" if provider == "anthropic" else f"openai:{api_model}"
+def _provider_key(provider, api_model, endpoint=None):
+    from backend.utils.llm_batch import openai_batch_key
+    return ("anthropic" if provider == "anthropic"
+            else openai_batch_key(api_model, endpoint))
 
 
 def _latest_non_integration_profile(user_id):
@@ -697,7 +699,8 @@ def _submit_requests(built, keys):
 
     items_by_key = {}
     for b in built:
-        key = _provider_key(b["provider"], b["request"]["api_model"])
+        key = _provider_key(b["provider"], b["request"]["api_model"],
+                            b["request"].get("endpoint"))
         items_by_key.setdefault(key, []).append(b["meta"])
 
     # Provider keys refused for an account reason (llm_batch.SubmittedBatches;

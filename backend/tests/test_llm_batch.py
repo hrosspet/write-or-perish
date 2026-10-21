@@ -695,3 +695,67 @@ def test_batch_submit_openai_writes_utf8_and_the_effort(monkeypatch):
     lines = [json.loads(x) for x in raw.decode("utf-8").splitlines()]
     assert lines[0]["body"]["reasoning_effort"] == "high"
     assert "reasoning_effort" not in lines[1]["body"]
+
+
+def test_batch_submit_openai_responses_endpoint_and_effort(monkeypatch):
+    """A request naming the Responses endpoint goes into its own batch on
+    that endpoint, with the live call's body and the reasoning effort as
+    the Responses API takes it."""
+    written = []
+    client = MagicMock()
+
+    def create(file=None, purpose=None):
+        written.append(file.read())
+        return SimpleNamespace(id=f"file-{len(written)}")
+    client.files.create.side_effect = create
+    client.batches.create.side_effect = [SimpleNamespace(id="b-chat"),
+                                         SimpleNamespace(id="b-resp")]
+    _install_fake_sdks(monkeypatch, openai_client=client)
+
+    out = batch_submit({"openai": [
+        {"custom_id": "w", "model_id": "luna", "api_model": "gpt-x",
+         "messages": [{"role": "user", "content": [
+             {"type": "text", "text": "window"}]}], "max_tokens": 500},
+        {"custom_id": "m", "model_id": "sol", "api_model": "gpt-x",
+         "endpoint": "/v1/responses", "reasoning_effort": "high",
+         "messages": [{"role": "user", "content": [
+             {"type": "text", "text": "merge"}]}], "max_tokens": 700},
+    ]}, KEYS, "profile")
+
+    assert out == {"openai:gpt-x": "b-chat",
+                   "openai:gpt-x:responses": "b-resp"}
+    endpoints = [c.kwargs["endpoint"]
+                 for c in client.batches.create.call_args_list]
+    assert endpoints == ["/v1/chat/completions", "/v1/responses"]
+    line = json.loads(written[1].decode("utf-8"))
+    assert line["url"] == "/v1/responses"
+    assert line["body"] == {
+        "model": "gpt-x", "max_output_tokens": 700, "store": False,
+        "reasoning": {"effort": "high"},
+        "input": [{"role": "user", "content": [
+            {"type": "input_text", "text": "merge"}]}]}
+
+
+def test_collect_openai_reads_a_responses_result(monkeypatch):
+    client = MagicMock()
+    client.batches.retrieve.return_value = SimpleNamespace(
+        status="completed", request_counts="counts", created_at=1.0,
+        completed_at=2.0, output_file_id="of-1")
+    line = json.dumps({"custom_id": "m", "response": {
+        "status_code": 200, "body": {
+            "object": "response", "status": "completed",
+            "output": [{"type": "reasoning"}, {"type": "message", "content": [
+                {"type": "output_text", "text": "MERGED"}]}],
+            "usage": {"input_tokens": 70, "output_tokens": 30,
+                      "input_tokens_details": {"cached_tokens": 5}}}}})
+    client.files.content.return_value = SimpleNamespace(
+        content=(line + "\n").encode())
+    _install_fake_sdks(monkeypatch, openai_client=client)
+
+    results, _, _ = batch_check_and_collect(
+        {"openai:gpt-x:responses": "b"}, KEYS)
+
+    assert results["m"] == {
+        "content": "MERGED", "refused": False, "input_tokens": 70,
+        "output_tokens": 30, "cached_tokens": 5,
+        "cache_write_subset_tokens": 0, "truncated": False, "batch": True}

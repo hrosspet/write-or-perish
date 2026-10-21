@@ -115,11 +115,14 @@ class Provider:
         self.submits.append(requests_by_provider)
         if self.fail_submit:
             return out
+        from backend.utils.llm_batch import openai_batch_key
         for provider, reqs in requests_by_provider.items():
-            self.n += 1
-            key = ("anthropic" if provider == "anthropic"
-                   else f"openai:{reqs[0]['api_model']}")
-            out[key] = f"batch_{self.n}"
+            keys = {"anthropic"} if provider == "anthropic" else {
+                openai_batch_key(r["api_model"], r.get("endpoint"))
+                for r in reqs}
+            for key in sorted(keys):
+                self.n += 1
+                out[key] = f"batch_{self.n}"
         return out
 
     def requests(self, i=-1):
@@ -438,6 +441,22 @@ def test_openai_merge_carries_the_configured_effort(app, world):
     merge = [r for r in world.provider.requests() if "_f_" in r["custom_id"]]
     assert merge and merge[0]["api_model"] == "gpt-6.1-sol"
     assert merge[0]["reasoning_effort"] == "high"
+    assert merge[0]["endpoint"] == "/v1/responses"
+    assert {j.provider_key for j in ProfileBatchJob.query.all()} == {
+        "openai:gpt-6-luna", "openai:gpt-6.1-sol:responses"}
+    _poll()
+    final = _rows(u, "integration")
+    assert len(final) == 1 and final[0].generated_by == "gpt-6.1-sol"
+
+
+def test_an_openai_merge_without_an_effort_sends_none(world):
+    world.corpus = Corpus(800)
+    u = _user(preferred_model="gpt-6-astra", profile_needs_full_regen=True)
+    _advance(u)
+    _poll()
+    _advance(u)
+    merge = [r for r in world.provider.requests() if "_f_" in r["custom_id"]]
+    assert merge and "reasoning_effort" not in merge[0]
 
 
 # ── 4. planning ───────────────────────────────────────────────────────────

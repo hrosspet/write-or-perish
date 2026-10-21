@@ -35,6 +35,20 @@ log = logging.getLogger(__name__)
 # Shared by the external-digest and recent-context collectors.
 BATCH_JOB_MAX_AGE = timedelta(hours=25)
 
+# OpenAI batch endpoints. A request dict may name "endpoint"; the default
+# is chat/completions. The Responses API is the one the live calls use
+# (LLMProvider._call_openai), so a batch request on it runs the model the
+# way a live call does, reasoning effort included (a profile merge, #545).
+CHAT_ENDPOINT = "/v1/chat/completions"
+RESPONSES_ENDPOINT = "/v1/responses"
+
+
+def openai_batch_key(api_model, endpoint=None):
+    """The batch-id key of one OpenAI batch: one per model and endpoint
+    (a batch file holds one endpoint)."""
+    suffix = ":responses" if endpoint == RESPONSES_ENDPOINT else ""
+    return f"openai:{api_model}{suffix}"
+
 
 class BatchItemFailed(RuntimeError):
     """The provider's terminal verdict on a one-item batch: the batch or
@@ -170,12 +184,15 @@ def batch_submit(requests_by_provider, api_keys, phase=None):
     openai_reqs = requests_by_provider.get("openai", [])
     if openai_reqs:
         client = OpenAI(api_key=api_keys["openai"])
-        # Group by api_model
+        # One batch per model and endpoint.
         by_model = {}
         for req in openai_reqs:
-            by_model.setdefault(req["api_model"], []).append(req)
+            by_model.setdefault(
+                (req["api_model"], req.get("endpoint") or CHAT_ENDPOINT),
+                []).append(req)
 
-        for oai_model, reqs in by_model.items():
+        for (oai_model, endpoint), reqs in by_model.items():
+            tmp_path = None
             try:
                 # Write JSONL to a temp file
                 # UTF-8 as is, not \\u escapes: a Czech letter is 2 bytes
@@ -187,20 +204,32 @@ def batch_submit(requests_by_provider, api_keys, phase=None):
                     encoding="utf-8",
                 ) as tmp:
                     for req in reqs:
-                        body = {
-                            "model": oai_model,
-                            "messages": req["messages"],
-                            "max_completion_tokens": req.get(
-                                "max_tokens", 10000),
-                            "temperature": 1,
-                        }
-                        # Optional per request (a profile merge, #545).
-                        if req.get("reasoning_effort"):
-                            body["reasoning_effort"] = req["reasoning_effort"]
+                        effort = req.get("reasoning_effort")
+                        if endpoint == RESPONSES_ENDPOINT:
+                            # The live call's body (_call_openai).
+                            body = {
+                                "model": oai_model,
+                                "input": _responses_input(req["messages"]),
+                                "max_output_tokens": req.get(
+                                    "max_tokens", 10000),
+                                "store": False,
+                            }
+                            if effort:
+                                body["reasoning"] = {"effort": effort}
+                        else:
+                            body = {
+                                "model": oai_model,
+                                "messages": req["messages"],
+                                "max_completion_tokens": req.get(
+                                    "max_tokens", 10000),
+                                "temperature": 1,
+                            }
+                            if effort:
+                                body["reasoning_effort"] = effort
                         line = {
                             "custom_id": req["custom_id"],
                             "method": "POST",
-                            "url": "/v1/chat/completions",
+                            "url": endpoint,
                             "body": body,
                         }
                         tmp.write(json.dumps(line, ensure_ascii=False) + "\n")
@@ -212,24 +241,25 @@ def batch_submit(requests_by_provider, api_keys, phase=None):
 
                 batch = client.batches.create(
                     input_file_id=uploaded.id,
-                    endpoint="/v1/chat/completions",
+                    endpoint=endpoint,
                     completion_window="24h",
                 )
-                key = f"openai:{oai_model}"
+                key = openai_batch_key(oai_model, endpoint)
                 batch_ids[key] = batch.id
                 log.info(f"OpenAI batch submitted for {oai_model}: "
                          f"{batch.id} ({len(reqs)} requests)")
             except Exception as e:
                 if _note_account_failure(e, "OpenAI", oai_model,
                                          api_key=api_keys.get("openai")):
-                    batch_ids.account_refused.add(f"openai:{oai_model}")
+                    batch_ids.account_refused.add(
+                        openai_batch_key(oai_model, endpoint))
                     log.warning(f"OpenAI batch submission for {oai_model} "
                                 f"refused for an account reason "
                                 f"(reported): {e}")
                 else:
                     log.error(f"OpenAI batch submission failed for "
                               f"{oai_model}: {e}")
-                if os.path.exists(tmp_path):
+                if tmp_path and os.path.exists(tmp_path):
                     os.unlink(tmp_path)
 
     return batch_ids
@@ -340,7 +370,10 @@ def batch_check_and_collect(batch_ids, api_keys):
                 cid = entry["custom_id"]
                 resp = entry.get("response", entry.get("result", {}))
                 body = resp.get("body", {})
-                if resp.get("status_code") == 200 and body.get("choices"):
+                if (resp.get("status_code") == 200
+                        and body.get("object") == "response"):
+                    results[cid] = _responses_result(body)
+                elif resp.get("status_code") == 200 and body.get("choices"):
                     usage = body.get("usage")
                     if not usage:
                         # Priced at $0 otherwise, silently — say so.
@@ -372,6 +405,34 @@ def batch_check_and_collect(batch_ids, api_keys):
                                 f"status={resp.get('status_code')}")
 
     return results, still_pending, batch_durations
+
+
+def _responses_result(body):
+    """A Responses API batch result in the collector's shape: the text of
+    the output messages, a refusal block as ``refused``, an incomplete
+    response (the output cap) as ``truncated``, and the usage counters
+    under the live call's keys."""
+    content, refused = "", False
+    for item in body.get("output") or []:
+        if item.get("type") != "message":
+            continue
+        for block in item.get("content") or []:
+            if block.get("type") == "output_text":
+                content += block.get("text") or ""
+            elif block.get("type") == "refusal":
+                refused = True
+    usage = body.get("usage") or {}
+    details = usage.get("input_tokens_details") or {}
+    return {
+        "content": content,
+        "refused": refused,
+        "input_tokens": usage.get("input_tokens", 0) or 0,
+        "output_tokens": usage.get("output_tokens", 0) or 0,
+        "cached_tokens": details.get("cached_tokens", 0) or 0,
+        "cache_write_subset_tokens": details.get("cache_write_tokens", 0) or 0,
+        "truncated": body.get("status") == "incomplete",
+        "batch": True,
+    }
 
 
 # ── single-request Anthropic batch round-trip ──────────────────────────────
