@@ -510,6 +510,54 @@ def test_collect_openai_unreadable_error_file_still_collects(monkeypatch):
     assert pending == {} and list(results) == ["done"]
 
 
+def test_collect_names_the_failures_outside_the_request(monkeypatch):
+    """transient_failures: the provider down or overloaded, a rate limit,
+    or an account reason (#369). A request the provider rejects (a 400,
+    an unknown model) or one the batch never ran counts against the
+    request, as before."""
+    def oai_line(cid, status, **error):
+        return json.dumps({"custom_id": cid, "error": None, "response": {
+            "status_code": status, "body": {"error": error}}})
+    oai = _oai_batch_client(
+        {"ef-1": [oai_line("o500", 500, type="server_error"),
+                  oai_line("o429", 429, code="rate_limit_exceeded"),
+                  oai_line("oquota", 429, code="insufficient_quota"),
+                  oai_line("o401", 401, code="invalid_api_key"),
+                  oai_line("o400", 400, code="context_length_exceeded"),
+                  oai_line("omodel", 404, code="model_not_found"),
+                  _oai_error_line("onotrun", "batch_expired")]},
+        status="completed", completed_at=1060, error_file_id="ef-1",
+        request_counts=SimpleNamespace(total=7, completed=0, failed=7))
+
+    def ant_item(cid, rtype, etype=None, message=""):
+        err = (SimpleNamespace(error=SimpleNamespace(
+            type=etype, message=message)) if etype else None)
+        return SimpleNamespace(custom_id=cid, result=SimpleNamespace(
+            type=rtype, error=err))
+    ant = MagicMock()
+    ant.messages.batches.retrieve.return_value = SimpleNamespace(
+        processing_status="ended", request_counts="c",
+        created_at=None, ended_at=None)
+    ant.messages.batches.results.return_value = [
+        ant_item("aover", "errored", "overloaded_error"),
+        ant_item("aapi", "errored", "api_error"),
+        ant_item("abill", "errored", "billing_error"),
+        ant_item("aspend", "errored", "invalid_request_error",
+                 "You have reached your specified API usage limits."),
+        ant_item("ainvalid", "errored", "invalid_request_error",
+                 "prompt is too long"),
+        ant_item("aexpired", "expired"),
+    ]
+    _install_fake_sdks(monkeypatch, anthropic_client=ant, openai_client=oai)
+
+    results, pending, _ = batch_check_and_collect(
+        {"anthropic": "b-ant", "openai:gpt-x": "b-oai"}, KEYS)
+
+    assert (dict(results), pending) == ({}, {})
+    assert results.transient_failures == {
+        "o500", "o429", "oquota", "o401", "aover", "aapi", "abill", "aspend"}
+
+
 def test_collect_openai_succeeded_without_output_file_stays_pending(
         monkeypatch):
     """Counted (and billed) results whose file isn't there can't be read

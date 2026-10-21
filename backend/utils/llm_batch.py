@@ -83,6 +83,52 @@ class SubmittedBatches(dict):
         self.account_refused = set()
 
 
+class BatchResults(dict):
+    """The results batch_check_and_collect returns, by custom_id, as a
+    dict, plus ``transient_failures``: the custom_ids of the requests that
+    failed for a reason outside the request (the provider down or
+    overloaded, a rate limit, or an account reason such as a spend limit,
+    billing or the key; #369). They are not billed, and the same request
+    can succeed later, so a caller that counts failed items against a
+    retry limit leaves these out, as for an account-refused submit."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.transient_failures = set()
+
+
+# Anthropic error types for a provider that is down or overloaded
+# (Claude API docs, API → Errors): 429 rate_limit_error, 500 api_error,
+# 504 timeout_error, 529 overloaded_error.
+_ANTHROPIC_TRANSIENT_TYPES = {"rate_limit_error", "api_error",
+                              "timeout_error", "overloaded_error"}
+
+
+def _failure_is_transient(provider, status, error):
+    """Whether a batch request's failure says nothing about the request
+    itself: a 5xx or 429 status, a provider-down error type, or an
+    account failure (#369). An unknown model counts against the request:
+    resending it fails the same way."""
+    from backend.llm_providers import account_failure_kind_of_error
+    error = error if isinstance(error, dict) else {}
+    if isinstance(status, int) and (status == 429 or status >= 500):
+        return True
+    if provider == "anthropic" and \
+            error.get("type") in _ANTHROPIC_TRANSIENT_TYPES:
+        return True
+    kind = account_failure_kind_of_error(provider, status, error)
+    return kind is not None and kind != "model_not_found"
+
+
+def _anthropic_item_error(result):
+    """An errored Anthropic batch result's error object as a dict
+    ({type, message, details}); the SDK nests it in an ErrorResponse."""
+    err = getattr(getattr(result, "error", None), "error", None)
+    return {"type": getattr(err, "type", None),
+            "message": getattr(err, "message", None),
+            "details": getattr(err, "details", None)}
+
+
 def apply_batch_key_override(api_keys, config):
     """Overlay the batch-specific OpenAI key (``OPENAI_API_KEY_BATCH``) if set.
 
@@ -240,6 +286,8 @@ def batch_check_and_collect(batch_ids, api_keys):
             cache_creation_input_tokens; OpenAI cached_tokens /
             cache_write_subset_tokens), so llm_cost_from_response prices
             a batch result exactly like a live one (#286).
+            It is a BatchResults: ``transient_failures`` names the
+            requests that failed for a reason outside the request.
         still_pending: dict of batch_ids still processing
         batch_durations: dict mapping provider key -> duration in seconds
 
@@ -255,7 +303,7 @@ def batch_check_and_collect(batch_ids, api_keys):
     from openai import OpenAI
     from backend.llm_providers import TRUNCATED_STOP_REASONS
 
-    results = {}
+    results = BatchResults()
     still_pending = {}
     batch_durations = {}
 
@@ -305,8 +353,15 @@ def batch_check_and_collect(batch_ids, api_keys):
                     }
                     collected += 1
                 else:
+                    error = (_anthropic_item_error(entry.result)
+                             if entry.result.type == "errored" else {})
                     log.warning(f"Anthropic batch item {cid}: "
-                                f"type={entry.result.type}")
+                                f"type={entry.result.type}"
+                                + (f" error={error['type']}"
+                                   if error.get("type") else ""))
+                    if error and _failure_is_transient(
+                            "anthropic", None, error):
+                        results.transient_failures.add(cid)
                     not_collected[entry.result.type] = (
                         not_collected.get(entry.result.type, 0) + 1)
             # As loud as an OpenAI batch that did not complete (#419):
@@ -390,9 +445,14 @@ def batch_check_and_collect(batch_ids, api_keys):
                 else:
                     log.warning(f"OpenAI batch item {cid}: "
                                 f"status={resp.get('status_code')}")
+                    if _failure_is_transient(
+                            "openai", resp.get("status_code"),
+                            entry.get("error") or body.get("error")):
+                        results.transient_failures.add(cid)
             error_file_id = getattr(batch, "error_file_id", None)
             if error_file_id:
-                _log_openai_batch_errors(client, batch_id, error_file_id)
+                results.transient_failures |= _read_openai_batch_errors(
+                    client, batch_id, error_file_id)
             if batch.status != "completed" or not collected:
                 errors = getattr(getattr(batch, "errors", None), "data",
                                  None)
@@ -411,17 +471,20 @@ def _openai_batch_file(client, file_id):
     return [json.loads(line) for line in raw.splitlines() if line.strip()]
 
 
-def _log_openai_batch_errors(client, batch_id, error_file_id):
+def _read_openai_batch_errors(client, batch_id, error_file_id):
     """Log why each request in the batch's error file has no result: it
     failed, or it never ran before the batch expired or was cancelled.
-    None of them is billed. Best effort: the reasons are for the log, and
-    the items fail whether or not the file can be read."""
+    None of them is billed. Returns the custom_ids whose failure was
+    transient (_failure_is_transient). Best effort: the items fail
+    whether or not the file can be read, and an unreadable file names no
+    failure transient."""
+    transient = set()
     try:
         entries = _openai_batch_file(client, error_file_id)
     except Exception as e:  # noqa: BLE001 - the log must not block the collect
         log.warning(f"OpenAI batch {batch_id}: error file "
                     f"{error_file_id} unreadable: {e}")
-        return
+        return transient
     for entry in entries:
         resp = entry.get("response") or {}
         err = entry.get("error") or (resp.get("body") or {}).get("error")
@@ -431,6 +494,10 @@ def _log_openai_batch_errors(client, batch_id, error_file_id):
                     f"status={resp.get('status_code')} "
                     f"error={err.get('code')}: "
                     f"{str(err.get('message'))[:200]}")
+        if entry.get("custom_id") and _failure_is_transient(
+                "openai", resp.get("status_code"), err):
+            transient.add(entry["custom_id"])
+    return transient
 
 
 # ── single-request Anthropic batch round-trip ──────────────────────────────

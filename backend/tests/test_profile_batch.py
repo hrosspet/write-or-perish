@@ -776,12 +776,23 @@ def test_poll_is_not_paused(app, monkeypatch):
         user_id=u.id, parent_profile_id=prev.id).first() is not None
 
 
-def test_poll_fails_stale_job(app, monkeypatch):
+def _raise_unreadable(bids, keys):
+    raise RuntimeError("404: no such batch")
+
+
+@pytest.mark.parametrize("check", [
+    lambda bids, keys: ({}, dict(bids), {}),   # the provider says pending
+    _raise_unreadable,                         # we can't read it at all
+])
+def test_poll_fails_stale_job(app, monkeypatch, check):
+    """A job past the age backstop is failed only when its batch has not
+    ended or can't be read; the poll comes first (#419)."""
     u = _user()
     prev = _prev_profile(u, datetime(2026, 5, 1))
     job, item = _chunk_job(u, prev)
     job.submitted_at = datetime.utcnow() - timedelta(hours=30)  # past SLA
     db.session.commit()
+    monkeypatch.setattr(pb, "batch_check_and_collect", check)
     monkeypatch.setattr(pb, "batch_submit", MagicMock(return_value={}))
 
     pb._poll_profile_batches()
@@ -2743,3 +2754,90 @@ def test_expired_openai_batch_step_is_saved_costed_and_counts_to_the_cap(
     assert u.profile_batch_attempts == 0
     assert u.profile_cap_held is True
     assert ProfileBatchJob.query.get(job.id).status == "collected"
+
+
+def test_an_expired_batch_past_the_stale_age_is_collected_not_failed(
+        app, monkeypatch):
+    """OpenAI reports "expired" only after 24 h, so the job is older than
+    that when the poll sees it. The poll comes before the age check: the
+    finished step is saved and costed, and no attempt is counted (the
+    #566 review's case)."""
+    u = _user()
+    prev = _prev_profile(u, datetime(2026, 5, 1))
+    job, item = _chunk_job(u, prev)
+    job.provider_key = "openai:gpt-x"
+    job.submitted_at = datetime.utcnow() - timedelta(hours=24, minutes=2)
+    db.session.commit()
+    client = _fake_openai_batch(
+        monkeypatch, {"file-out": [{
+            "custom_id": item["custom_id"], "response": {
+                "status_code": 200, "body": {
+                    "choices": [{"message": {"content": "NEW PROFILE"},
+                                 "finish_reason": "stop"}],
+                    "usage": {"prompt_tokens": 2000,
+                              "completion_tokens": 500}}}}]},
+        status="expired", expired_at=1000 + 86400, output_file_id="file-out",
+        request_counts=_counts(1, 0))
+    monkeypatch.setattr(pb._exports, "build_user_export_content",
+                        MagicMock(return_value=None))
+    monkeypatch.setattr(pb._exports, "build_integration_messages",
+                        lambda uid, pid: (None, None))
+    monkeypatch.setattr(pb, "batch_submit", MagicMock(return_value={}))
+
+    pb._poll_profile_batches()
+
+    client.batches.retrieve.assert_called_once()
+    assert ProfileBatchJob.query.get(job.id).status == "collected"
+    assert UserProfile.query.filter_by(
+        user_id=u.id, parent_profile_id=prev.id).one().get_content() \
+        .endswith("NEW PROFILE")
+    assert APICostLog.query.filter_by(
+        user_id=u.id, request_type="profile_batch").count() == 1
+    assert (User.query.get(u.id).profile_batch_attempts or 0) == 0
+
+
+def test_a_young_unreadable_job_stays_pending(app, monkeypatch):
+    u = _user()
+    prev = _prev_profile(u, datetime(2026, 5, 1))
+    job, item = _chunk_job(u, prev)
+    monkeypatch.setattr(pb, "batch_check_and_collect", _raise_unreadable)
+
+    pb._poll_profile_batches()
+
+    assert ProfileBatchJob.query.get(job.id).status == "pending"
+    assert (User.query.get(u.id).profile_batch_attempts or 0) == 0
+
+
+@pytest.mark.parametrize("status, error", [
+    (500, {"code": None, "type": "server_error", "message": "oops"}),
+    (429, {"code": "rate_limit_exceeded", "message": "slow down"}),
+    (429, {"code": "insufficient_quota", "type": "insufficient_quota"}),
+])
+def test_a_provider_or_account_failure_is_not_a_failed_attempt(
+        app, monkeypatch, status, error):
+    """Every request failed for a reason outside the request (a 5xx, a
+    429, the account's quota): not billed, and not counted as an attempt,
+    as an account-refused submit is not (#406). The user is free for
+    the seeder to resend it, and three such outages in a row do not move
+    them to the full-price path."""
+    u = _user()
+    prev = _prev_profile(u, datetime(2026, 5, 1))
+    job, item = _chunk_job(u, prev)
+    job.provider_key = "openai:gpt-x"
+    db.session.commit()
+    _fake_openai_batch(
+        monkeypatch, {"file-err": [{
+            "custom_id": item["custom_id"], "response": {
+                "status_code": status, "body": {"error": error}},
+            "error": None}]},
+        status="completed", completed_at=1060, error_file_id="file-err",
+        request_counts=_counts(0, 1))
+    monkeypatch.setattr(pb, "batch_submit", MagicMock(return_value={}))
+
+    pb._poll_profile_batches()
+
+    u = User.query.get(u.id)
+    assert (u.profile_batch_attempts or 0) == 0
+    assert u.profile_batch_pending is False
+    assert ProfileBatchJob.query.get(job.id).status == "collected"
+    assert APICostLog.query.filter_by(user_id=u.id).count() == 0
