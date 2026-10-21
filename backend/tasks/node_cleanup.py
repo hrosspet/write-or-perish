@@ -12,6 +12,14 @@ Runs once per day. Two distinct actions per soft-deleted candidate:
    artifacts. Row stays as a tombstone shell until its descendants
    eventually purge.
 
+Both delete the node's audio files (#541): its folders under the node's
+user_id and human_owner_id (an AI reply's speech is under the model
+account's folder), and the folders of the recording sessions its rows
+name, once no row names them any more. The files go after the node's
+commit, so a rolled-back cleanup never leaves a row whose audio is gone.
+A crash or a failed delete between the two leaves folders that no row
+names; ``backend/scripts/sweep_orphan_audio.py`` finds those.
+
 The predicate "no child rows in DB" (rather than "no alive descendants")
 matches Postgres' default FK behavior — `Node.parent_id` has no
 `ondelete` rule so we can't `db.session.delete(parent)` while a
@@ -25,6 +33,7 @@ commits).
 """
 
 from datetime import datetime, timedelta
+from typing import NamedTuple
 
 from celery.utils.log import get_task_logger
 from sqlalchemy import exists, or_
@@ -36,8 +45,56 @@ from backend.models import (
     Node, NodeVersion, NodeTranscriptChunk, TTSChunk, Draft,
     NodeContextArtifact, ReferenceAction, Thread,
 )
+from backend.utils import audio_storage
 
 logger = get_task_logger(__name__)
+
+
+class NodeAudio(NamedTuple):
+    """Where a node's audio is on disk, read before its rows change."""
+    node_id: int
+    owner_ids: frozenset    # the node's user_id and human_owner_id
+    session_ids: frozenset  # the recording sessions its rows name
+
+
+def _audio_of(node):
+    """*node*'s audio on disk: its own folders, and the recording sessions
+    its rows name (the older streaming upload's session, and the voice
+    session its transcript chunks came from, whose folder stays behind
+    when moving it onto the node failed)."""
+    sessions = {s for (s,) in db.session.query(
+        NodeTranscriptChunk.session_id).filter(
+        NodeTranscriptChunk.node_id == node.id,
+        NodeTranscriptChunk.session_id.isnot(None))}
+    if node.streaming_session_id:
+        sessions.add(node.streaming_session_id)
+    return NodeAudio(node.id,
+                     frozenset({node.user_id, node.human_owner_id} - {None}),
+                     frozenset(sessions))
+
+
+def remove_node_audio(audio):
+    """Delete the folders of *audio* (a NodeAudio) once the node's rows
+    are committed: the node's own folders, and a session's folders when
+    no row names the session any more. Returns how many folders were
+    deleted. Never raises: a failure is logged (ids only) and the folders
+    stay for the sweep script."""
+    root = audio_storage.AUDIO_STORAGE_ROOT
+    try:
+        dirs = audio_storage.node_audio_dirs(
+            root, audio.node_id, audio.owner_ids)
+        for sid in sorted(audio.session_ids):
+            if (audio_storage.is_storage_id(sid)
+                    and not audio_storage.session_has_row(sid)):
+                dirs += audio_storage.session_audio_dirs(
+                    root, sid, audio.owner_ids)
+    except Exception:
+        db.session.rollback()
+        logger.exception(
+            "cleanup_deleted_nodes: audio of node_id=%s not deleted",
+            audio.node_id)
+        return 0
+    return audio_storage.remove_audio_dirs(dirs, logger)
 
 
 def _full_purge(node):
@@ -45,7 +102,11 @@ def _full_purge(node):
 
     Same body as the legacy delete_node() cleanup steps, minus the
     orphan-children line: the predicate guarantees zero child rows.
+
+    Returns the node's NodeAudio: the caller commits, then deletes the
+    files with remove_node_audio().
     """
+    audio = _audio_of(node)
     NodeVersion.query.filter_by(node_id=node.id).delete()
     NodeTranscriptChunk.query.filter_by(node_id=node.id).delete()
     TTSChunk.query.filter_by(node_id=node.id).delete()
@@ -78,6 +139,7 @@ def _full_purge(node):
 
     # No orphan-children: predicate guarantees zero child rows.
     db.session.delete(node)
+    return audio
 
 
 def _wipe_content_and_versions(node):
@@ -86,16 +148,23 @@ def _wipe_content_and_versions(node):
     Keeps the row so descendants still have a parent_id anchor; the row
     will become eligible for full purge in a later cleanup run once all
     its child rows have purged.
+
+    Returns the node's NodeAudio: the caller commits, then deletes the
+    files with remove_node_audio().
     """
+    audio = _audio_of(node)
     node.content = None
     NodeVersion.query.filter_by(node_id=node.id).delete()
     NodeTranscriptChunk.query.filter_by(node_id=node.id).delete()
     TTSChunk.query.filter_by(node_id=node.id).delete()
-    # Audio file URLs are kept on the row but the underlying chunks are
-    # gone; clear the URL columns too so the frontend doesn't try to
-    # fetch what's no longer there.
+    # The audio files go after the commit (remove_node_audio); clear the
+    # URL columns too so the frontend doesn't try to fetch what's no
+    # longer there. The streaming session goes too, as on the purge's
+    # tombstone: its folder is deleted with the rest.
     node.audio_original_url = None
     node.audio_tts_url = None
+    node.streaming_session_id = None
+    return audio
 
 
 @celery.task(name='backend.tasks.node_cleanup.cleanup_deleted_nodes')
@@ -135,14 +204,16 @@ def cleanup_deleted_nodes():
         purged = 0
         wiped = 0
         errors = 0
+        audio_folders = 0
         for node in candidates:
+            audio = None
             try:
                 child_count = Node.query.filter_by(parent_id=node.id).count()
                 if child_count == 0:
-                    _full_purge(node)
+                    audio = _full_purge(node)
                     purged += 1
                 elif node.content is not None:
-                    _wipe_content_and_versions(node)
+                    audio = _wipe_content_and_versions(node)
                     wiped += 1
                 # Else: stable tombstone, content already None, children
                 # still exist — skip until next descendant cleanup pass.
@@ -154,9 +225,14 @@ def cleanup_deleted_nodes():
                 )
                 errors += 1
                 continue
+            # The rows are committed; now the files (#541).
+            if audio is not None:
+                audio_folders += remove_node_audio(audio)
 
         logger.info(
-            "cleanup_deleted_nodes: purged=%d wiped=%d errors=%d",
-            purged, wiped, errors,
+            "cleanup_deleted_nodes: purged=%d wiped=%d errors=%d "
+            "audio_folders=%d",
+            purged, wiped, errors, audio_folders,
         )
-        return {"purged": purged, "wiped": wiped, "errors": errors}
+        return {"purged": purged, "wiped": wiped, "errors": errors,
+                "audio_folders": audio_folders}
