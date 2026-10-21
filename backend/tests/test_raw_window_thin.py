@@ -175,6 +175,84 @@ def test_a_deleted_entry_counts_as_its_placeholder(app, alice):  # noqa: F811
     assert "SECRET DELETED WORDS" not in window
 
 
+def _session_with_deleted_tail(user, when, deleted, keep_first):
+    """A voice session whose start (and first entry, with *keep_first*)
+    stayed when the rest was deleted: "and all my replies" partway
+    through, or the first entry without its system prompt."""
+    start = _node(user, None, "", when)
+    attach_context_artifacts(start.id, user.id,
+                             prompt_record=_prompt(user, "voice"))
+    last = start
+    if keep_first:
+        last = _node(user, last, "FIRST ENTRY", when + timedelta(seconds=1),
+                     tokens=20)
+    for i in range(deleted):
+        last = _node(user, last, f"GONE {i}", when + timedelta(seconds=i + 2),
+                     tokens=50, llm=i % 2 == 1, deleted=True)
+    _db.session.commit()
+    return start, last
+
+
+@pytest.mark.parametrize("deleted", [100, 300, 600])
+@pytest.mark.parametrize("keep_first", [False, True])
+def test_deleted_entries_with_nothing_alive_below_take_no_room(
+        app, alice, deleted, keep_first):  # noqa: F811
+    """The review's measurements on the PR's first version: 200 deleted
+    entries under an alive start rendered ~14k tokens of placeholders,
+    600 ~102k, in every later session's prompt. A placeholder with no
+    entry below it is not shown and costs nothing."""
+    _session(alice, "textmode", NOW - timedelta(days=2), [
+        (f"OLDER {i}", 1000, False) for i in range(3)])
+    _session_with_deleted_tail(alice, NOW - timedelta(days=1), deleted,
+                               keep_first)
+    system, _entry, _reply = _new_session(alice)
+
+    window = _window(_render(system, alice))
+
+    assert approximate_token_count(window) <= 10_000
+    assert "deleted by author" not in window
+    assert "GONE" not in window
+    for i in range(3):
+        assert f"OLDER {i}" in window
+    assert ("FIRST ENTRY" in window) == keep_first
+
+
+def test_a_run_of_deleted_entries_between_two_kept_ones_is_one_line(app, alice):  # noqa: F811
+    """Forty entries deleted one by one between two kept ones: one
+    placeholder line holds their place."""
+    start, last = _session_with_deleted_tail(
+        alice, NOW - timedelta(days=1), 40, keep_first=True)
+    _node(alice, last, "LAST ENTRY", NOW - timedelta(hours=20), tokens=20)
+    _db.session.commit()
+    system, _entry, _reply = _new_session(alice)
+
+    window = _window(_render(system, alice))
+
+    assert "FIRST ENTRY" in window and "LAST ENTRY" in window
+    assert window.count("deleted by author") == 1
+    assert "[40 nodes deleted by author]" in window
+    assert "[1.1.1.1] User (alice)" in window   # the last entry, one level down
+    assert "GONE" not in window
+
+
+def test_the_pre_selection_passes_a_bounded_number_of_deleted_rows(
+        app, alice, monkeypatch):  # noqa: F811
+    """Deleted rows cost the budget nothing, so a cap keeps the rows
+    loaded bounded (every row is deleted while "Delete all my writing"
+    waits out its 30 days)."""
+    import backend.routes.export_data as export_data
+    _session(alice, "textmode", NOW - timedelta(days=2), [
+        ("KEPT", 20, False)])
+    _session(alice, "voice", NOW - timedelta(days=1), [
+        (f"GONE {i}", 50, False) for i in range(10)], deleted=True)
+    system, _entry, _reply = _new_session(alice)
+    assert "KEPT" in _window(_render(system, alice))
+
+    monkeypatch.setattr(export_data, "MAX_WINDOW_DELETED_ROWS", 5)
+
+    assert "KEPT" not in _window(_render(system, alice))
+
+
 @pytest.mark.parametrize("strategy", ["authored_threads", "engaged_threads"])
 def test_a_quote_of_a_deleted_entry_never_carries_its_text(app, alice, strategy):  # noqa: F811
     """The newest entry quotes an older one and a deleted one. Embedding
