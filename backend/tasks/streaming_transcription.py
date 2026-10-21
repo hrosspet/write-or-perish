@@ -1294,7 +1294,8 @@ def finalize_draft_streaming(self, session_id: str, total_chunks: int,
         # llm_node_id in the same commit so the SSE all_complete event
         # includes it).
         if (user_id and model and label == 'Voice'
-                and not full_transcript.strip() and not failed_chunks):
+                and chunks and not full_transcript.strip()
+                and not failed_chunks):
             # Empty text from chunks that completed (#513): the entry says so.
             final_content = "*Note: No words were transcribed*"
         db.session.refresh(draft)
@@ -1309,7 +1310,19 @@ def finalize_draft_streaming(self, session_id: str, total_chunks: int,
         no_text = (user_id and model and label == 'Voice'
                    and not full_transcript.strip())
 
-        if no_text:
+        if no_text and not chunks:
+            # No audio was stored at all (started, then stopped at once):
+            # nothing to keep, no entry, no reply. The draft goes with its
+            # warning (SSE deletes the row) and its empty folder.
+            draft.streaming_status = 'completed'
+            draft.streaming_warning = VOICE_REPLY_SKIPPED_NO_WORDS
+            db.session.commit()
+            shutil.rmtree(
+                storage_path(pathlib.Path(os.environ.get(
+                    "AUDIO_STORAGE_PATH", "data/audio")).resolve(),
+                    "drafts", user_id, session_id),
+                ignore_errors=True)
+        elif no_text:
             # Keep the recording (note + audio) as an entry, with no reply.
             # Chunks still pending when the wait ran out count as failed
             # (above); empty text gets its own note.

@@ -729,8 +729,7 @@ class TestVoiceFinalize:
         self._finalize(st, user, "sess-warm", chunks=0, model="claude-test")
 
         st._fake_llm.prewarm_anthropic_cache.delay.assert_not_called()
-        # No text at all (#513): the recording is kept as an entry, no reply.
-        assert _llm_count() == 0
+        assert Node.query.count() == 0
 
 
 class TestVoiceFinalizeNothingTranscribed:
@@ -779,6 +778,16 @@ class TestVoiceFinalizeNothingTranscribed:
         entry = Node.query.one()
         assert "No words were transcribed" in entry.get_content()
         st._fake_llm.generate_llm_response.si.assert_not_called()
+
+    def test_zero_chunks_creates_no_entry_and_no_reply(self, st):
+        user = _user()
+        _voice_draft(user, "sess-none-at-all", "chat")
+
+        self._finalize(st, user, "sess-none-at-all", chunks=0)
+
+        assert Node.query.count() == 0
+        st._fake_llm.generate_llm_response.si.assert_not_called()
+        assert NodeTranscriptChunk.query.count() == 0
 
     def test_chunk_still_processing_after_the_wait_counts_as_failed(self, st):
         user = _user()
