@@ -29,6 +29,40 @@ warn() {
     echo -e "${YELLOW}[$(date +'%Y-%m-%d %H:%M:%S')] WARNING:${NC} $1" | tee -a "$LOG_FILE"
 }
 
+# Celery workers. One worker, write-or-perish-celery, reads the default
+# queue, unless the queue split (#379) is set up: then two workers,
+# write-or-perish-celery-interactive and -background (deploy/systemd/).
+# Deploys switch to the two as soon as either is enabled, and never enable
+# one themselves: switching on and off is an ordered, manual procedure
+# (docs/RUNBOOKS.md → "Celery queue split"). Until then nothing below
+# changes.
+SPLIT_WORKER_UNITS="write-or-perish-celery-interactive write-or-perish-celery-background"
+# A .env.production line that turns the routing on: 1, true or yes in any
+# case, as backend/celery_queues.py reads it (for grep -E).
+CELERY_SPLIT_ON_RE='^[[:space:]]*CELERY_SPLIT_QUEUES=[[:space:]]*["'"'"']?(1|[Tt][Rr][Uu][Ee]|[Yy][Ee][Ss])["'"'"']?[[:space:]]*$'
+
+celery_split_installed() {
+    local unit
+    for unit in $SPLIT_WORKER_UNITS; do
+        sudo systemctl is-enabled --quiet "$unit" 2>/dev/null && return 0
+    done
+    return 1
+}
+
+# The worker units a deploy stops and restarts.
+celery_worker_units() {
+    if celery_split_installed; then
+        local units="$SPLIT_WORKER_UNITS"
+        # While switching over, the single worker still runs beside them.
+        if sudo systemctl is-active --quiet write-or-perish-celery 2>/dev/null; then
+            units="$units write-or-perish-celery"
+        fi
+        echo "$units"
+    else
+        echo "write-or-perish-celery"
+    fi
+}
+
 log "====== Starting deployment ======"
 
 # Navigate to project directory
@@ -72,10 +106,13 @@ fi
 # every deploy stopped Gunicorn up front, so 13 of 14 no-op deploys served
 # 502s for a minute each and the one real migration for ~4 minutes.
 SERVICES_STOPPED=0
+# Decided once, before anything is stopped (see celery_worker_units).
+CELERY_WORKER_UNITS=$(celery_worker_units)
 stop_services_for_upgrade() {
     log "Stopping application services for the schema upgrade..."
     sudo systemctl stop write-or-perish-celery-beat 2>/dev/null || true
-    sudo systemctl stop write-or-perish-celery 2>/dev/null || true
+    # One call: with the split, both workers drain at the same time.
+    sudo systemctl stop $CELERY_WORKER_UNITS 2>/dev/null || true
     sudo systemctl stop write-or-perish 2>/dev/null || true
     sleep 2
     SERVICES_STOPPED=1
@@ -199,10 +236,32 @@ if [ -f "$CELERY_SERVICE_SOURCE" ]; then
         log "Celery service file unchanged"
     fi
 
-    # Enable Celery service
-    sudo systemctl enable write-or-perish-celery || warn "Failed to enable Celery service"
+    # Enable Celery service (not once the split workers replace it)
+    if ! celery_split_installed; then
+        sudo systemctl enable write-or-perish-celery || warn "Failed to enable Celery service"
+    fi
 else
     error "Celery service file not found at $CELERY_SERVICE_SOURCE"
+fi
+
+# Keep the queue-split worker units current, once they are enabled
+if celery_split_installed; then
+    SPLIT_UNITS_CHANGED=false
+    for unit in $SPLIT_WORKER_UNITS; do
+        src="$PROJECT_DIR/deploy/systemd/$unit.service"
+        dst="/etc/systemd/system/$unit.service"
+        [ -f "$src" ] || error "Celery worker unit file not found at $src"
+        if ! sudo diff -q "$src" "$dst" >/dev/null 2>&1; then
+            sudo cp "$src" "$dst" || error "Failed to copy $unit.service"
+            SPLIT_UNITS_CHANGED=true
+        fi
+    done
+    if [ "$SPLIT_UNITS_CHANGED" = true ]; then
+        sudo systemctl daemon-reload || error "Failed to reload systemd daemon"
+        log "Celery split worker unit files updated"
+    else
+        log "Celery split worker unit files unchanged"
+    fi
 fi
 
 # Install/update Celery beat service
@@ -349,9 +408,10 @@ else
     error "Gunicorn service failed to start"
 fi
 
-# Restart Celery worker service
-log "Restarting Celery worker service..."
-sudo systemctl restart write-or-perish-celery || error "Failed to restart Celery service"
+# Restart Celery worker service(s). One call: with the split, both workers
+# drain at the same time, and each starts again after its own drain.
+log "Restarting Celery worker service ($CELERY_WORKER_UNITS)..."
+sudo systemctl restart $CELERY_WORKER_UNITS || error "Failed to restart Celery service"
 
 # Restart Celery beat service.
 # The celerybeat-schedule shelve file only caches "last run at" timestamps;
@@ -374,11 +434,24 @@ sleep 3
 FAILED_SERVICES=""
 
 # Check if Celery worker service is running
-if sudo systemctl is-active --quiet write-or-perish-celery; then
-    log "Celery worker service restarted successfully"
-else
-    warn "Celery worker service failed to start"
-    FAILED_SERVICES="$FAILED_SERVICES write-or-perish-celery"
+for unit in $CELERY_WORKER_UNITS; do
+    if sudo systemctl is-active --quiet "$unit"; then
+        log "Celery worker service $unit restarted successfully"
+    else
+        warn "Celery worker service $unit failed to start"
+        FAILED_SERVICES="$FAILED_SERVICES $unit"
+    fi
+done
+
+# Queue split routing without the split workers would leave tasks in
+# queues nobody reads (docs/RUNBOOKS.md → "Celery queue split").
+if grep -qE "$CELERY_SPLIT_ON_RE" "$PROJECT_DIR/.env.production" 2>/dev/null; then
+    if ! celery_split_installed; then
+        warn "CELERY_SPLIT_QUEUES is on, but the split workers are not enabled: interactive and background tasks wait in queues no worker reads"
+        FAILED_SERVICES="$FAILED_SERVICES $SPLIT_WORKER_UNITS"
+    elif sudo systemctl is-active --quiet write-or-perish-celery; then
+        warn "CELERY_SPLIT_QUEUES is on and the single worker still runs beside the split workers: sudo systemctl disable --now write-or-perish-celery"
+    fi
 fi
 
 # Check if Celery beat service is running
@@ -404,12 +477,14 @@ else
 fi
 log "Frontend: /home/hrosspet/write-or-perish/frontend/build"
 log "Backend: Gunicorn running on 127.0.0.1:8000"
-log "Celery: Worker running with 2 concurrent processes"
+log "Celery workers: $CELERY_WORKER_UNITS"
 log "Redis: Running on 127.0.0.1:6379"
 log ""
 log "Service status:"
 sudo systemctl is-active write-or-perish && log "  ✓ Gunicorn (write-or-perish)" || warn "  ✗ Gunicorn not running"
-sudo systemctl is-active write-or-perish-celery && log "  ✓ Celery (write-or-perish-celery)" || warn "  ✗ Celery not running"
+for unit in $CELERY_WORKER_UNITS; do
+    sudo systemctl is-active "$unit" && log "  ✓ Celery ($unit)" || warn "  ✗ Celery ($unit) not running"
+done
 sudo systemctl is-active write-or-perish-celery-beat && log "  ✓ Celery Beat (write-or-perish-celery-beat)" || warn "  ✗ Celery Beat not running"
 sudo systemctl is-active redis-server && log "  ✓ Redis (redis-server)" || warn "  ✗ Redis not running"
 log ""

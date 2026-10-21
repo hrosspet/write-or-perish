@@ -4,6 +4,7 @@ Handles background tasks for long-running operations like transcription, LLM cal
 """
 from celery import Celery
 from backend import create_app
+from backend.celery_queues import split_queues_enabled, task_routes
 
 # Create Flask app for Celery context
 flask_app = create_app()
@@ -144,6 +145,13 @@ celery.conf.update(
         },
     },
 )
+
+# Queue split (#379, backend/celery_queues.py): off unless
+# CELERY_SPLIT_QUEUES is set. Off, no routes are set and every task goes
+# to the default queue, as before; on, each task goes to the interactive
+# or the background queue.
+if split_queues_enabled():
+    celery.conf.task_routes = task_routes(True)
 
 # Keep third-party HTTP/SDK loggers off DEBUG so request bodies (which can
 # contain user content, e.g. profile prompts) never get logged — even when the
