@@ -659,7 +659,7 @@ Common vocabulary:
 - `privacy_level`: `"private" | "circles" | "public"` everywhere except `POST /api/textmode/start`, which validates against `{"private","anonymous","public"}` (see §5.1).
 - `ai_usage`: `"none" | "chat" | "train"`.
 - `model`: a key of `Config.SUPPORTED_MODELS` (dotted ids, e.g. `"claude-opus-4.6"`, `"gpt-6-luna"`); unknown → `400 {"error":"Unsupported model: <id>"}`. When omitted, the server picks: thread ancestry → `user.preferred_model` → `LLM_NAME` (`pick_model_for_generation`).
-- `NODE_CHAR_CAP`: per-entry char limit; over it → `422 {"error":"Content exceeds the N-character per-entry limit.","char_cap":N}`.
+- `NODE_CHAR_CAP`: per-entry char limit; over it → `422 {"error":"Content exceeds the N-character per-entry limit.","char_cap":N}`, except `POST /api/textmode/start` and save-as-node, which split the entry into a chain.
 - Timestamps in this area are ISO-8601 UTC strings with a trailing `Z` (drafts use `isoformat()+"Z"`, textmode uses `iso_utc`).
 - `task_id` values are Celery task ids (UUID strings). The client never polls a task id directly; it polls the node (`GET /api/nodes/<id>/llm-status`, `/tts-status`, owned by the nodes map) or the draft session (`/status` below).
 
@@ -892,12 +892,14 @@ A recording is a Draft row with a `session_id` (UUID string). Audio is uploaded 
 - Response 202 (all variants):
   ```
   { "conversation_id": int,           // system node carrying the textmode prompt (thread root)
-    "user_node_id": int,
-    "llm_node_id"?: int, "task_id"?: string,   // when a reply was queued
+    "user_node_id": int,              // the entry (its first part when it was split)
+    "tip_id": int,                    // the entry's last part (= user_node_id when not split)
+    "llm_node_id"?: int, "task_id"?: string,   // when a reply was queued (under tip_id)
     "spend_capped"?: true,            // auto_generate on but user capped: nodes kept, no reply
     "llm_error"?: string }            // reply refused ({user_export} validation); nodes kept
   ```
-- Errors: `400 {"error":"Content is required"}`, `422 {..., "char_cap"}`, `400 {"error":"Invalid privacy_level: x"}`, `400 {"error":"Invalid ai_usage: x"}`, `400 {"error":"Text mode requires ai_usage of 'chat' or 'train'"}` (the web routes `ai_usage=="none"` entries to `POST /api/nodes/` instead), `400 {"error":"Unsupported model: x"}`.
+- Content above 100 000 chars is split at newline boundaries into a serial chain under the system node, as `POST /api/nodes/` does; the reply goes under the last part, so it reads the whole entry.
+- Errors: `400 {"error":"Content is required"}`, `400 {"error":"Invalid privacy_level: x"}`, `400 {"error":"Invalid ai_usage: x"}`, `400 {"error":"Text mode requires ai_usage of 'chat' or 'train'"}` (the web routes `ai_usage=="none"` entries to `POST /api/nodes/` instead), `400 {"error":"Unsupported model: x"}`.
 - Notes: web then navigates to `/node/<user_node_id>?awaitLlm=<llm_node_id>` and NodeDetail polls/streams the reply.
 
 ##### `POST /api/textmode/from-node/<node_id>`

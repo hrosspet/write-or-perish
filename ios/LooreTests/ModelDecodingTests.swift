@@ -328,7 +328,10 @@ final class ModelDecodingTests: XCTestCase {
 
         let textmode = try decode(TextmodeStartResponse.self, #"{"conversation_id": 1, "user_node_id": 2, "llm_node_id": 3, "task_id": "t"}"#)
         XCTAssertEqual(textmode.llmNodeId, 3)
+        XCTAssertNil(textmode.tipId)
         XCTAssertFalse(textmode.spendCapped)
+        let split = try decode(TextmodeStartResponse.self, #"{"conversation_id": 1, "user_node_id": 2, "tip_id": 4, "llm_node_id": 5}"#)
+        XCTAssertEqual(split.tipId, 4)
     }
 
     func testIntKeyedMapSkipsNonNumericKeys() throws {
