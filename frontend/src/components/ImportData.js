@@ -487,12 +487,20 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
     event.target.value = "";
   };
 
+  // ChatGPT/Claude results count messages (nodes), while the confirm dialog
+  // counts conversations: carry the dialog's figures so the result names both.
+  const conversationResultExtra = (data) => ({
+    unit: "messages",
+    archive_conversations: data.total_conversations,
+    archive_messages: data.total_messages,
+  });
+
   // A background import (Twitter, ChatGPT, Claude): the confirm request only
   // queues a Celery task (node creation for a large archive takes minutes);
   // progress and the result come from polling /import/status until it
   // completes. `retry` re-runs the confirm after the restore-or-skip prompt;
   // `onFinished` closes the confirm dialog.
-  const runBackgroundImport = ({ path, body, retry, onFinished, fallbackError, lostMessage }) => {
+  const runBackgroundImport = ({ path, body, retry, onFinished, fallbackError, lostMessage, resultExtra }) => {
     if (confirmInFlight.current) return;
     confirmInFlight.current = true;
     setImporting(true);
@@ -510,7 +518,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
       if (result.profile_update_task_id && onProfileUpdateStarted) {
         onProfileUpdateStarted(result.profile_update_task_id);
       }
-      setImportResult(result);
+      setImportResult(resultExtra ? { ...result, ...resultExtra } : result);
     };
     const failWith = (message) => {
       confirmInFlight.current = false;
@@ -642,6 +650,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
         ...(onDeleted ? { on_deleted: onDeleted } : {})
       },
       retry: handleConfirmClaudeImport,
+      resultExtra: conversationResultExtra(claudeImportData),
       onFinished: () => {
         setShowClaudeImportDialog(false);
         setClaudeImportData(null);
@@ -740,6 +749,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
         ...(onDeleted ? { on_deleted: onDeleted } : {})
       },
       retry: handleConfirmChatGPTImport,
+      resultExtra: conversationResultExtra(chatGPTImportData),
       onFinished: () => {
         setShowChatGPTImportDialog(false);
         setChatGPTImportData(null);
@@ -821,10 +831,17 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
                   letterSpacing: "0.14em",
                   color: "var(--text-muted)",
                   marginTop: "0.3rem",
-                }}>{s.label}</div>
+                }}>{importResult.unit === "messages" && s.label !== "No text" ? `Messages ${s.label.toLowerCase()}` : s.label}</div>
               </div>
             ))}
           </div>
+          {importResult.unit === "messages" && importResult.archive_conversations > 0 && (
+            <p style={{ fontFamily: "var(--sans)", fontWeight: 300, fontSize: "0.88rem", color: "var(--text-secondary)", margin: "0 0 1.4rem" }}>
+              These numbers count messages. Your archive has{" "}
+              {importResult.archive_conversations.toLocaleString()} conversation{importResult.archive_conversations !== 1 ? "s" : ""}
+              {importResult.archive_messages > 0 && <> with {importResult.archive_messages.toLocaleString()} messages</>}.
+            </p>
+          )}
           {importResult.created === 0 && !importResult.restored && !importResult.updated ? (
             <p style={{ fontFamily: "var(--sans)", fontWeight: 300, fontSize: "0.92rem", color: "var(--text-secondary)", margin: "0 0 1.4rem" }}>
               Everything in this archive was already imported — nothing new was added.
