@@ -338,38 +338,33 @@ gcloud storage rsync --recursive gs://BUCKET/media/<second newest> "$AUDIO_STORA
 gcloud storage rsync --recursive gs://BUCKET/media/<newest> "$AUDIO_STORAGE_PATH"
 ```
 
-Then two clean-ups in `flask shell` on the restored instance.
+Then two clean-ups on the restored instance, before the app and its workers
+start on it, so nothing writes to the media folder meanwhile.
 
 The media folders are additive, so they also hold files deleted after their
 upload: recordings of accounts deleted for good, of "Delete all my writing",
 and the AI replies' audio, which lives under the model account's folder.
 Nothing would ever delete these files again, and every new period would back
-them up anew. Delete each folder whose node, profile, reference or user is
-not in the restored database:
+them up anew. Delete each folder whose entry, profile or saved reference is
+not in the restored database with the orphan-audio sweep (#541), from the
+project directory. The dry run prints counts and bytes only:
 
-```python
-import shutil
-from backend.extensions import db
-from backend.models import Node, User, UserProfile, ExternalItem
-from backend.utils.audio_storage import AUDIO_STORAGE_ROOT as root
-ids = lambda cls: {str(i) for (i,) in db.session.query(cls.id)}
-nodes, users, profiles, items = ids(Node), ids(User), ids(UserProfile), ids(ExternalItem)
-gone = [p for p in root.glob("user/*/node/*") if p.name not in nodes]
-gone += [p for p in root.glob("nodes/*/*") if p.name not in nodes]
-gone += [p for p in root.glob("user/*/profile/*") if p.name not in profiles]
-gone += [p for p in root.glob("user/*/item/*") if p.name not in items]
-gone += [p for p in root.glob("user/*") if p.name not in users]
-gone += [p for p in root.glob("nodes/*") if p.name not in users]
-print(len(gone), "folders to delete")
-for p in gone:
-    shutil.rmtree(p, ignore_errors=True)
-
+```bash
+python backend/scripts/sweep_orphan_audio.py --min-age-hours 0            # dry run
+python backend/scripts/sweep_orphan_audio.py --min-age-hours 0 --apply
 ```
+
+`--min-age-hours 0` turns off the check that keeps folders changed in the
+last 24 hours, which would otherwise keep every file the restore just wrote.
+Use it only while nothing writes to the media folder. The sweep keeps the
+folders of accounts whose deletion can still be undone in the restored
+database (their purge runs again and deletes them) and every folder a stored
+audio URL points into; the script's docstring has the full rule.
 
 TTS regenerated after a period's first upload is kept in that folder in its
 old version (the sync never overwrites), while the restored `TTSChunk` rows
 describe the new one. Clear the TTS of everything regenerated since the
-newest folder's date, so it is generated again when played:
+newest folder's date, so it is generated again when played (in `flask shell`):
 
 ```python
 from datetime import datetime

@@ -1,7 +1,8 @@
 """
-Audio storage helpers: building paths under the storage root, and moving
+Audio storage helpers: building paths under the storage root, moving
 a streaming draft session's audio and transcript rows to the node it
-becomes (so the original recording plays in the Log view).
+becomes (so the original recording plays in the Log view), and deleting
+a deleted entry's audio folders (#541).
 """
 import os
 import pathlib
@@ -68,9 +69,10 @@ def clear_tts_artifacts(entity) -> bool:
     resurfacing the old audio), and resets the async-task tracking
     columns so the UI shows TTS as not-yet-generated.
 
-    DB-only, mirroring the row cleanup in tasks/node_cleanup.py — on-disk
-    audio files are left as orphans (issue #66 "Option 1": require an
-    explicit regenerate; file GC is a separate follow-up).
+    DB-only: the entity is still there, so its on-disk audio files stay
+    in its folder (issue #66 "Option 1": require an explicit regenerate;
+    file GC is a separate follow-up). A deleted entry's folders go with
+    its rows (tasks/node_cleanup.py, #541).
 
     Returns True if anything was cleared (caller still owns the commit).
     """
@@ -217,3 +219,67 @@ def attach_streaming_audio_to_node(session_id, node, user_id):
     db.session.delete(draft)
 
     db.session.commit()
+
+
+# ── A deleted entry's audio (#541) ──────────────────────────────────────
+
+def node_audio_dirs(root, node_id, owner_ids) -> list:
+    """The folders that hold node *node_id*'s audio under each of
+    *owner_ids*: ``user/<owner>/node/<id>/`` (the original upload and the
+    generated speech) and ``nodes/<owner>/<id>/`` (a recording's chunks).
+    An AI reply's speech is under the model account's folder (its
+    user_id), so callers pass the node's user_id and human_owner_id, as
+    the purge does (user_purge._node_dirs)."""
+    dirs = []
+    for owner in sorted(set(owner_ids) - {None}):
+        dirs.append(storage_path(root, "user", owner, "node", node_id))
+        dirs.append(storage_path(root, "nodes", owner, node_id))
+    return dirs
+
+
+def session_audio_dirs(root, session_id, owner_ids) -> list:
+    """The folders of recording session *session_id* under each of
+    *owner_ids*: ``drafts/<owner>/<session>/`` (a voice-mode recording)
+    and ``streaming/<owner>/<session>/`` (the older streaming upload)."""
+    dirs = []
+    for owner in sorted(set(owner_ids) - {None}):
+        dirs.append(storage_path(root, "drafts", owner, session_id))
+        dirs.append(storage_path(root, "streaming", owner, session_id))
+    return dirs
+
+
+def session_has_row(session_id) -> bool:
+    """True when a draft (also one a waiting "Delete all my writing" hid)
+    or a transcript chunk still names recording session *session_id*: its
+    folder belongs to that row then. For the cleanup of a deleted node,
+    which has deleted or cleared its own rows. A node names a session only
+    as the older streaming upload's session, made for that one node
+    (routes/nodes.py), so no other node can; and ``node`` has no index on
+    the column, so it is not asked for each node."""
+    from backend.utils.hidden_rows import including_hidden_rows
+    with including_hidden_rows():
+        for col in (Draft.session_id, NodeTranscriptChunk.session_id):
+            if db.session.query(col).filter(
+                    col == session_id).first() is not None:
+                return True
+    return False
+
+
+def remove_audio_dirs(dirs, logger) -> int:
+    """Delete each folder of *dirs* that exists, with everything in it.
+    Returns how many folders were deleted. A symlink is never followed (a
+    symlinked folder is left alone, a symlink inside is removed as a
+    link). Never raises: a folder that cannot be deleted is logged by
+    path (paths hold ids, never content)."""
+    removed = 0
+    for d in dirs:
+        d = pathlib.Path(d)
+        if d.is_symlink() or not d.is_dir():
+            continue
+        try:
+            shutil.rmtree(d)
+            removed += 1
+        except OSError as e:
+            logger.warning("could not delete audio folder %s (%s)", d,
+                           type(e).__name__)
+    return removed
