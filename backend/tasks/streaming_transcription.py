@@ -66,6 +66,15 @@ VOICE_REPLY_SKIPPED_READ_ONLY = (
     "Your recording is saved. Loore didn't reply because {model} is only "
     "for Read. Choose another model for replies."
 )
+# The same when no chunk of the recording produced text. With failed chunks
+# the audio is kept as an entry; with none (silence) there is nothing to keep.
+VOICE_REPLY_SKIPPED_NOT_TRANSCRIBED = (
+    "Your recording is saved, but nothing could be transcribed. Loore "
+    "didn't reply."
+)
+VOICE_REPLY_SKIPPED_SILENCE = (
+    "Loore didn't hear anything in that recording, so there is no reply."
+)
 
 
 def _voice_reply_refusal(user_id, parent_id, draft):
@@ -1285,8 +1294,37 @@ def finalize_draft_streaming(self, session_id: str, total_chunks: int,
 
         should_chain = (user_id and model and full_transcript.strip()
                         and label == 'Voice')
+        # #513: a Voice recording with no transcribed text gets no reply.
+        # The web/iPhone fallback would otherwise send the failure note (or
+        # nothing) to the model.
+        no_text = (user_id and model and label == 'Voice'
+                   and not full_transcript.strip())
 
-        if should_chain:
+        if no_text and not failed_chunks:
+            # Silence: nothing to keep, no node. The warning tells the client
+            # why no reply is coming (the draft is cleaned up after it).
+            draft.streaming_status = 'completed'
+            draft.streaming_warning = VOICE_REPLY_SKIPPED_SILENCE
+            db.session.commit()
+        elif no_text:
+            # Failed chunks: keep the recording (note + audio) as an entry.
+            try:
+                _start_server_side_llm_chain(
+                    draft, session_id, final_content,
+                    user_id, parent_id, model, label,
+                    entry=entry,
+                    skip_message=VOICE_REPLY_SKIPPED_NOT_TRANSCRIBED,
+                )
+            except Exception as e:
+                logger.error(
+                    f"Saving untranscribed recording failed for session "
+                    f"{session_id}: {e}", exc_info=True
+                )
+                db.session.rollback()
+                draft = Draft.query.filter_by(session_id=session_id).first()
+                draft.streaming_status = 'completed'
+                db.session.commit()
+        elif should_chain:
             try:
                 _start_server_side_llm_chain(
                     draft, session_id, full_transcript,
@@ -1380,7 +1418,7 @@ def _start_server_side_llm_chain(draft, session_id, transcript,
                                  user_id, parent_id, model, label,
                                  cache_split_offset=None, timing=None,
                                  client=None, prewarm_token=None,
-                                 entry=None):
+                                 entry=None, skip_message=None):
     """
     Create nodes and kick off LLM + TTS generation server-side.
 
@@ -1415,6 +1453,10 @@ def _start_server_side_llm_chain(draft, session_id, transcript,
 
     prompt_key = label.lower()  # 'voice'
     refused = _voice_reply_refusal(user_id, parent_id, draft)
+    if refused is None and skip_message:
+        # No reply for another reason (#513: nothing was transcribed); the
+        # recording is saved on its own, like a refused one.
+        refused = skip_message
 
     if parent_id:
         # Inherit ai_usage from the thread, looking through a read (#362)
@@ -1490,7 +1532,9 @@ def _start_server_side_llm_chain(draft, session_id, transcript,
             "Voice recording saved without a reply: AI usage keeps it away "
             "from AI (session_id=%s user_id=%s node=%s)",
             session_id, user_id, user_node.id)
-        _skip_voice_reply(draft, user_node, VOICE_REPLY_SKIPPED_AI_USAGE)
+        _skip_voice_reply(
+            draft, user_node,
+            skip_message or VOICE_REPLY_SKIPPED_AI_USAGE)
         return
 
     # LLM placeholder (don't enqueue yet — we'll chain it).

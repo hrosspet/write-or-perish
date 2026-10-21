@@ -358,6 +358,8 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
       audio.stop();
       const finalTranscript = data.content || transcriptRef.current;
       if (!finalTranscript.trim()) {
+        // #513: nothing was heard; the server says so (no entry saved).
+        if (data.warning) addToast(data.warning, 8000);
         setPhase('ready');
         return;
       }

@@ -617,6 +617,8 @@ final class VoiceTurnController {
 
     private func transcriptReady(_ status: StreamingSessionStatus, _ sid: String, _ gen: Int) async {
         if status.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            // Nothing was heard: the server says so, and saved no entry (#513).
+            if let warning = status.warning { notices.toast(warning, duration: 8) }
             finishQuietly()
             return
         }
