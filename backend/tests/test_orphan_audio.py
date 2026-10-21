@@ -531,6 +531,27 @@ def test_apply_refuses_when_too_much_would_go(world, app):
             assert _exists(root, rel), rel
 
 
+def test_streaming_folders_no_row_names_do_not_dilute_the_guard(app):
+    """An empty database names no streaming session: those folders are
+    left out of the guard's total, so 10 entry folders out of 10 + 10
+    streaming folders still make --apply refuse."""
+    root = app.audio_root
+    rels = [f"user/5/node/{900 + i}" for i in range(10)]
+    rels += [f"streaming/5/s-{i}" for i in range(10)]
+    for rel in rels:
+        _file(root, f"{rel}/a.mp3")
+    _age_tree(root)
+
+    report = sweep_mod.sweep(root, apply=True, now=NOW)
+
+    assert report.refused == sweep_mod.MAX_DELETE_SHARE
+    assert report.owner_folders == 10
+    assert report.folders[(sweep_mod.DELETE, sweep_mod.NODE_GONE)] == 10
+    assert report.folders[(sweep_mod.KEEP, sweep_mod.STREAM_NO_ROW)] == 10
+    for rel in rels:
+        assert _exists(root, rel), rel
+
+
 def test_age_gate_can_be_lowered(world, app):
     report = sweep_mod.sweep(app.audio_root, now=datetime.utcnow(),
                              min_age=timedelta(0))

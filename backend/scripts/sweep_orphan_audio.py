@@ -47,9 +47,11 @@ under ``chunks/``, and every path the layout above does not explain.
 
 Against the wrong database (an empty one, or another instance's) nearly
 every folder would look orphaned, so --apply deletes nothing when more
-than MAX_DELETE_SHARE of the folders it could delete (entries, streaming
-recordings, profiles, references) would go; the output names the
-database it read.
+than MAX_DELETE_SHARE of the folders it could delete (entries, profiles,
+references, and streaming recordings a row names) would go; the output
+names the database it read. A streaming folder no row names is left out
+of that total: it is never deleted, and against the wrong database no
+row names any, so counting them would let the guard pass.
 
 Reads ids, owners, deletion dates and whether a column is empty, never
 content, so nothing is decrypted. The directory walk and the database
@@ -99,9 +101,9 @@ CHUNK_SIZE = 500
 # Rows per fetch when scanning the stored audio URLs.
 URL_FETCH_SIZE = 2000
 # --apply deletes nothing when more than this share of the folders it
-# could delete (SWEPT_KINDS) would go: against the wrong database (an
-# empty one, or another instance's) nearly every folder looks orphaned.
-# --max-share raises it.
+# could delete (Report.owner_folders) would go: against the wrong database
+# (an empty one, or another instance's) nearly every folder looks
+# orphaned. --max-share raises it.
 MAX_DELETE_SHARE = 0.5
 
 # The folders under the storage root whose second level is an account id
@@ -169,7 +171,8 @@ class Report:
         self.folders = Counter()
         self.files = Counter()
         self.bytes = Counter()
-        self.owner_folders = 0   # folders of SWEPT_KINDS seen
+        # Folders of SWEPT_KINDS seen, less the streaming ones no row names.
+        self.owner_folders = 0
         self.refused = None
 
     def add(self, key, folder):
@@ -398,12 +401,14 @@ def _streaming_verdicts(folders, pending, now):
     out = {}
     for f in folders:
         rows = by_sid.get(f.oid, [])
-        if _owners(f, rows) & pending or any(r.id in hidden for r in rows):
-            out[f] = (KEEP, PENDING)
-        elif f.oid in other:
-            out[f] = (KEEP, STREAM_ROW)
-        elif not rows:
+        # Decided first, so that STREAM_NO_ROW means exactly "no row names
+        # it": the share guard leaves those folders out of its total.
+        if not rows and f.oid not in other:
             out[f] = (KEEP, STREAM_NO_ROW)
+        elif _owners(f, rows) & pending or any(r.id in hidden for r in rows):
+            out[f] = (KEEP, PENDING)
+        elif f.oid in other or not rows:
+            out[f] = (KEEP, STREAM_ROW)
         elif all(_cleaned_up(r, f, accounts, cutoff) for r in rows):
             out[f] = (DELETE, STREAM_TOMBSTONE)
         else:
@@ -554,11 +559,14 @@ def _decide_all(run, root):
     for batch in _batches(iter_folders(root), run.chunk_size):
         for f in batch:
             measure(f)
-            if f.kind in SWEPT_KINDS:
-                run.report.owner_folders += 1
         decided = verdicts(batch, pending, run.now)
         for f in batch:
             action, reason = decided[f]
+            # The share guard's total. A streaming folder no row names
+            # never goes, and against the wrong database none is named:
+            # counting those would let the guard pass there.
+            if f.kind in SWEPT_KINDS and reason != STREAM_NO_ROW:
+                run.report.owner_folders += 1
             gate = run.gate(f) if action == DELETE else None
             if action == DELETE and gate is None:
                 candidates.append((f, reason))
@@ -640,8 +648,8 @@ def print_report(report, root, database, apply):
     apply = apply and report.refused is None
     print(f"Audio storage root: {root}")
     print(f"Database: {database}")
-    print("Entry, streaming recording, profile and reference folders: "
-          f"{report.owner_folders}")
+    print("Entry, profile and reference folders, and streaming recordings "
+          f"a row names: {report.owner_folders}")
     for action, title in ((DELETE, "deleted" if apply else "to delete"),
                           (KEEP, "kept"), (GONE, "already gone")):
         keys = sorted(k for k in report.folders if k[0] == action)
