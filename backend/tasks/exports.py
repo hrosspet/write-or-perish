@@ -1207,14 +1207,38 @@ def _collect_iterative_chain(last_profile_id):
     return chain
 
 
-def _calculate_months_span(first_profile, last_profile):
-    """Months between source_data_cutoff of first and last profiles."""
-    first_ts = getattr(first_profile, 'source_data_cutoff', None)
-    last_ts = getattr(last_profile, 'source_data_cutoff', None)
-    if not first_ts or not last_ts:
+def _calculate_months_span(start, end):
+    """Whole months from ``start`` to ``end`` (datetimes), at least 1.
+    The integration prompt's {N_MONTHS}: the period the merged versions'
+    writing covers, from where the first version's window starts to the
+    newest cutoff (#549). 1 when either end is unknown."""
+    if not start or not end:
         return 1
-    delta = last_ts - first_ts
-    return max(1, round(delta.days / 30.44))
+    return max(1, round((end - start).days / 30.44))
+
+
+def _fill_months(template, n_months):
+    """Put ``n_months`` into {N_MONTHS}, as "1 month" rather than
+    "1 months" (#549)."""
+    if n_months == 1:
+        template = template.replace("{N_MONTHS} months", "1 month")
+    return template.replace("{N_MONTHS}", str(n_months))
+
+
+def _first_writing_date(user_id, until):
+    """When the user's AI-readable writing up to ``until`` begins: the
+    start of a chain's first window, which no version stores. Reads
+    created_at only; nothing is decrypted. None when there is none."""
+    from sqlalchemy import func, or_
+    from backend.models import Node
+    query = db.session.query(func.min(Node.created_at)).filter(
+        or_(Node.user_id == user_id, Node.human_owner_id == user_id),
+        Node.ai_usage.in_(AI_ALLOWED),
+        Node.deleted_at.is_(None),
+    )
+    if until is not None:
+        query = query.filter(Node.created_at <= until)
+    return query.scalar()
 
 
 # --- Shared prompt/message builders -------------------------------------
@@ -1222,14 +1246,35 @@ def _calculate_months_span(first_profile, last_profile):
 # (backend/tasks/profile_batch.py) produce byte-identical prompts — single
 # source of truth (issue #173, Part A).
 
+# The headings that close the generation prompt: what to output, and the
+# {user_export} input. "## OUTPUT FORMAT" near the top is not one of them.
+_GENERATION_TAIL_HEADINGS = ("## OUTPUT", "## INPUT")
+
+
+def profile_structure_instructions(gen_template):
+    """The generation prompt as the update and integration prompts embed
+    it: everything before its closing "## OUTPUT" / "## INPUT" sections,
+    so the profile's section instructions (Surface, Shadow and Light Map)
+    and the generation rules are kept and the empty {user_export} input is
+    not (#544, #549). The cut is at the first line that is exactly one of
+    those headings. A prompt of the user's own without them is embedded
+    whole."""
+    lines = gen_template.splitlines(keepends=True)
+    for i, line in enumerate(lines):
+        if line.strip() in _GENERATION_TAIL_HEADINGS:
+            return "".join(lines[:i]).rstrip()
+    return gen_template
+
+
 def build_update_template(user_id):
     """Assemble the incremental-update template: profile_update.txt with the
-    generation prompt (minus its OUTPUT section) embedded."""
+    generation prompt's structure instructions embedded
+    (``profile_structure_instructions``)."""
     update_template = _load_prompt("profile_update.txt", user_id=user_id)
     gen_template = _load_prompt("profile_generation.txt", user_id=user_id)
-    gen_template_no_output = gen_template.split("## OUTPUT")[0]
     return update_template.replace(
-        "{profile_generation_prompt}", gen_template_no_output
+        "{profile_generation_prompt}",
+        profile_structure_instructions(gen_template)
     )
 
 
@@ -1333,24 +1378,123 @@ def build_integration_messages(user_id, last_iterative_profile_id):
     return _integration_messages(user_id, chain), chain
 
 
+def _day(ts):
+    return ts.strftime("%Y-%m-%d") if ts else "unknown"
+
+
+def _written_by_user_on(profile):
+    """When the user wrote ``profile``, a version they wrote: the day it
+    was saved. An edit that changes the words is saved as a new version
+    (routes/profile._save_edit_as_new_version), so this is the edit's
+    date, not the date of the writing it covers (its cutoff is the edited
+    version's). None for a generated version."""
+    if profile is None or profile.generated_by != "user" \
+            or profile.created_at is None:
+        return None
+    return _day(profile.created_at)
+
+
+def _merged_version(profile):
+    """The version the user wrote that a rebuild's merge step merged
+    (``merged_profile_id``), or None. Metadata only."""
+    if not profile.merged_profile_id:
+        return None
+    merged = db.session.get(UserProfile, profile.merged_profile_id)
+    if merged is None or merged.user_id != profile.user_id:
+        return None
+    return merged
+
+
+def _version_label(i, profile, chain, start, cumulative):
+    """The lines above a version in the integration messages (#545).
+
+    Every version covers all the writing from the first window's start
+    (``start``, "the start" when unknown) to its cutoff. In a chain each
+    version after the first is an update of the one before it, so its
+    label also gives the writing it added: the previous version's cutoff
+    to its own. A merge step of a rebuild (#183) adds no writing; it
+    merges the version before it with a version the user wrote, dated by
+    when the user wrote it. With ``cumulative`` (the merge call itself)
+    the versions are full profiles side by side, not updates of each
+    other, so only the coverage line is given. A version the user wrote
+    also says when they wrote it: its cutoff is that of the version they
+    edited, so the coverage alone would date their statement too early,
+    and the integration prompt lets a later generated version override it
+    only where writing after that day shows a fact changed."""
+    cutoff = profile.source_data_cutoff
+    since = _day(start) if start and cutoff and start <= cutoff \
+        else "the start"
+    lines = [f"Profile No. {i}",
+             f"- Covers all the writing from {since} to {_day(cutoff)}"]
+    if not cumulative:
+        if i == 1:
+            lines.append("- The first version")
+        else:
+            prev_cutoff = chain[i - 2].source_data_cutoff
+            if profile.merged_profile_id and prev_cutoff == cutoff:
+                written = _written_by_user_on(_merged_version(profile))
+                on = f" on {written}" if written else ""
+                lines.append(f"- Merges Profile No. {i - 1} with a version "
+                             f"the user wrote{on}; adds no new writing")
+            else:
+                added_from = _day(prev_cutoff) if prev_cutoff else since
+                lines.append(f"- Updates Profile No. {i - 1} with the "
+                             f"writing from {added_from} to {_day(cutoff)}")
+    written = _written_by_user_on(profile)
+    if written:
+        lines.append(f"- Written by the user on {written}")
+    return lines
+
+
+# The integration's output instruction, as the default
+# profile_integration.txt ends. A user's own integration prompt without a
+# "## OUTPUT" line gets it appended: the generation prompt's own output
+# line, which such a prompt used to receive through the full embed, is
+# cut off now (#549).
+INTEGRATION_OUTPUT_SECTION = (
+    "## OUTPUT\n"
+    "Generate the unified profile now. No preamble, no meta-commentary. "
+    "Begin directly with \"### SURFACE MAP\""
+)
+
+
+def _has_output_heading(template):
+    return any(line.strip() == "## OUTPUT"
+               for line in template.splitlines())
+
+
 def _integration_messages(user_id, chain, cumulative=False):
     """The integration messages for ``chain`` (oldest first): one user
-    message per version, then the integration prompt. A version the user
-    wrote carries USER_WRITTEN_PROFILE_NOTE. Each version's span runs from
-    the previous version's cutoff; with ``cumulative`` (a rebuild's merge
-    step, #183) every span starts at "start", since each version there is
-    a full profile of the writing up to its cutoff."""
-    n_months = _calculate_months_span(chain[0], chain[-1])
+    message per version under its label (``_version_label``), then the
+    integration prompt. A version the user wrote carries
+    USER_WRITTEN_PROFILE_NOTE. With ``cumulative`` (a rebuild's merge
+    step, #183) the versions are full profiles of the writing up to their
+    cutoffs, not a chain of updates.
+
+    The first window's start is the user's earliest AI-readable writing up
+    to the first version's cutoff (the newest cutoff when the first
+    version has none, as a profile written by hand before any build).
+    {N_MONTHS} runs from it to the newest cutoff (#549); from the oldest
+    cutoff when no such writing is found. A user's own integration prompt
+    without a "## OUTPUT" line gets INTEGRATION_OUTPUT_SECTION appended."""
+    cutoffs = [p.source_data_cutoff for p in chain if p.source_data_cutoff]
+    end = max(cutoffs) if cutoffs else None
+    start = _first_writing_date(
+        user_id, chain[0].source_data_cutoff or end)
+    n_months = _calculate_months_span(
+        start or (min(cutoffs) if cutoffs else None), end)
     integration_template = _load_prompt(
         "profile_integration.txt", user_id=user_id
     )
     gen_template = _load_prompt("profile_generation.txt", user_id=user_id)
-    integration_prompt = integration_template.replace(
-        "{N_MONTHS}", str(n_months)
-    )
+    integration_prompt = _fill_months(integration_template, n_months)
     integration_prompt = integration_prompt.replace(
-        "{profile_generation_prompt}", gen_template
+        "{profile_generation_prompt}",
+        profile_structure_instructions(gen_template)
     )
+    if not _has_output_heading(integration_template):
+        integration_prompt = (integration_prompt.rstrip() + "\n\n"
+                              + INTEGRATION_OUTPUT_SECTION)
 
     messages = []
     for i, profile in enumerate(chain, 1):
@@ -1359,24 +1503,12 @@ def _integration_messages(user_id, chain, cumulative=False):
         # the integration treats it as the user's own words.
         if profile.generated_by == "user":
             content = f"{USER_WRITTEN_PROFILE_NOTE}\n\n{content}"
-        cutoff = profile.source_data_cutoff
-        date_str = cutoff.strftime("%Y-%m-%d") if cutoff else "unknown"
-        if i == 1 or cumulative:
-            date_from = "start"
-        else:
-            prev_cutoff = chain[i - 2].source_data_cutoff
-            date_from = prev_cutoff.strftime(
-                "%Y-%m-%d"
-            ) if prev_cutoff else "unknown"
+        label = "\n".join(_version_label(i, profile, chain, start, cumulative))
         messages.append({
             "role": "user",
             "content": [{
                 "type": "text",
-                "text": (
-                    f"Profile No. {i}\n"
-                    f"- {date_from} to {date_str}\n\n"
-                    f"{content}"
-                )
+                "text": f"{label}\n\n{content}"
             }]
         })
     messages.append({

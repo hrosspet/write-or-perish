@@ -2045,7 +2045,10 @@ def test_183_batch_full_rebuild_merges_the_users_version(app, monkeypatch):
     assert merge_req["meta"]["merged_profile_id"] == edit.id
     assert CUSTOM_ID_RE.match(merge_req["request"]["custom_id"])
     texts = _texts183(merge_req)
-    assert texts[1] == ("Profile No. 2\n- start to 2026-05-01\n\n"
+    written = edit.created_at.strftime("%Y-%m-%d")
+    assert texts[1] == ("Profile No. 2\n- Covers all the writing from the "
+                        "start to 2026-05-01\n"
+                        f"- Written by the user on {written}\n\n"
                         f"{pb._exports.USER_WRITTEN_PROFILE_NOTE}\n\n"
                         "MY CORRECTION")
     merge = UserProfile.query.filter_by(merged_profile_id=edit.id).one()
