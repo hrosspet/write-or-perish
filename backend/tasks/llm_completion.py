@@ -51,6 +51,7 @@ from backend.utils.api_keys import (
     PayloadLicence,
 )
 from backend.utils.cost import llm_cost_log_fields
+from backend.utils.error_privacy import UserMessageError
 from backend.utils.cache_diagnostics import (
     ConversationCacheDiagnostics, system_prefix_hash,
 )
@@ -304,6 +305,28 @@ def _provider_failure(exc):
         if isinstance(cls, type) and issubclass(cls, BaseException):
             classes.append(cls)
     return isinstance(exc, tuple(classes))
+
+
+def reply_error_text(exc):
+    """What the reply's owner reads for a failed reply (llm_task_error):
+    the exception's own text only where it is written for the user (the
+    classes below, #369 and the like), otherwise a fixed message. The
+    exception is logged and sent to Sentry, never stored."""
+    from backend.utils.error_privacy import REPLY_FAILED_TEXT
+    from backend.utils.ca_feed import ArchiveNotReady
+    from backend.utils.llm_nodes import AIUsageRefused, ReadOnlyModelRefused
+    from backend.utils.placeholders import UserExportValidationError
+    written_for_user = [
+        EmptyTruncatedReplyError, UserMessageError, ArchiveNotReady,
+        AIUsageRefused, ReadOnlyModelRefused, UserExportValidationError]
+    providers = sys.modules.get("backend.llm_providers")
+    for name in ("ProviderUnavailableError", "ProviderAccountError"):
+        cls = getattr(providers, name, None)
+        if isinstance(cls, type) and issubclass(cls, BaseException):
+            written_for_user.append(cls)
+    if isinstance(exc, tuple(written_for_user)) and str(exc):
+        return str(exc)
+    return REPLY_FAILED_TEXT
 
 
 def _account_failure(exc):
@@ -2599,6 +2622,9 @@ CA_BATCH_CANCELLED_TEXT = "This read was cancelled."
 # Why it was withdrawn: the reply's error, which goes to its owner only
 # (llm-status, the llm-stream done event). A spend-limit message is the
 # owner's alone.
+CA_BATCH_GAVE_UP_TEXT = (
+    "Loore stopped waiting for the model's answer. The problem has been "
+    "reported. Please try again.")
 CA_BATCH_WITHDRAWN_TEXT = (
     "This read was cancelled before it ran: the monthly spend cap was "
     "reached while it was queued at the provider, so the request was "
@@ -3003,9 +3029,12 @@ class LLMCompletionTask(Task):
                     node.llm_task_status = 'failed'
                     # Store error message if not already set
                     if not node.llm_task_error:
-                        node.llm_task_error = str(exc)
+                        node.llm_task_error = reply_error_text(exc)
                     db.session.commit()
-                    logger.error(f"LLM completion failed for node {llm_node_id}: {exc}")
+                    from backend.utils.error_privacy import describe_exception
+                    logger.error(
+                        "LLM completion failed for node %s: %s",
+                        llm_node_id, describe_exception(exc))
 
 
 def _own_system_values(text, system_node, user_id, usage):
@@ -3512,7 +3541,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 # and only while they glean (#435).
                 from backend.utils.glean import read_turn_allowed
                 if not read_turn_allowed(User.query.get(user_id), ca_node):
-                    raise ValueError(ca_tweets_denied_message())
+                    raise UserMessageError(ca_tweets_denied_message())
                 # Only admins may change the window or scope (Peter,
                 # 2026-10-14): every {ca_tweets} on the prompt must be
                 # the default unless both its owner and the user the
@@ -3535,7 +3564,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         ca_snapshot_dir,
                         ca_owner.username if ca_owner else "")
                     if ca_follows is None:
-                        raise ValueError(
+                        raise UserMessageError(
                             "{ca_tweets} scope=follows needs a saved list "
                             "of the accounts you follow, and there is none "
                             "for your account yet.")
@@ -4557,7 +4586,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 # support fails here rather than silently running the
                 # unstructured call.
                 if needs_ca and provider not in CA_BATCH_PROVIDERS:
-                    raise ValueError(
+                    raise UserMessageError(
                         f"{{ca_tweets}} is not supported on {model_id} "
                         f"({provider}); pick an Anthropic or OpenAI "
                         "model.")
@@ -5166,7 +5195,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             raise
         except Exception as e:
             error = e
-            error_message = str(e)
+            error_message = reply_error_text(e)
             if batch_entry is not None:
                 # The batch outlives this run. While it is submitted only
                 # the provider's verdict on the item (BatchItemFailed), a
@@ -5179,9 +5208,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 # still submitted.
                 batch_id = batch_entry.get("batch_id")
                 if isinstance(e, MaxRetriesExceededError):
-                    error_message = (
-                        f"Batch {batch_id} had not ended after "
-                        f"{CA_BATCH_MAX_POLLS} polls")
+                    error_message = CA_BATCH_GAVE_UP_TEXT
                 elif not isinstance(e, (BatchItemFailed, FeedReplyError,
                                         EmptyTruncatedReplyError)):
                     logger.warning(
@@ -5203,13 +5230,13 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                             # only __context__), Sentry groups this
                             # failure under the account failure's issue.
                             cap.__cause__ = e
-                            error_message = str(e)
+                            error_message = reply_error_text(e)
                         else:
-                            error_message = (
-                                f"Gave up on batch {batch_id} after "
-                                f"{CA_BATCH_MAX_POLLS} polls; last error: "
-                                f"{e}")
-            logger.error(f"LLM completion error for node {llm_node_id}: {error_message}", exc_info=True)
+                            error_message = CA_BATCH_GAVE_UP_TEXT
+            from backend.utils.error_privacy import describe_exception
+            logger.error(
+                "LLM completion error for node %s: %s", llm_node_id,
+                describe_exception(e), exc_info=True)
             # Fail the node in flight: mid-loop that's the continuation
             # placeholder. Failing llm_node here instead used to clobber the
             # completed interim step's status and strand the continuation at

@@ -404,3 +404,25 @@ def scrub_sentry_breadcrumb(crumb, hint):
     except Exception:
         crumb["message"] = MESSAGE_REMOVED
     return crumb
+
+
+# ── Texts stored where the owner reads them ──────────────────────────────
+# A failed reply, transcription or merge stores a plain message, never
+# str(exc) (Peter, 2026-10-20: no raw exception text anywhere). The
+# exception itself is logged (describe_exception) and reaches Sentry, whose
+# events are scrubbed above.
+REPLY_FAILED_TEXT = (
+    "Loore couldn't write this reply. The problem has been reported. "
+    "Please try again.")
+REPLY_NOT_STARTED_TEXT = "Loore couldn't start a reply."
+TRANSCRIPTION_FAILED_TEXT = (
+    "Loore couldn't transcribe this recording. The problem has been "
+    "reported. Please try again.")
+TODO_MERGE_FAILED_TEXT = (
+    "Loore couldn't apply these changes. The problem has been reported. "
+    "Please try again.")
+
+
+class UserMessageError(ValueError):
+    """A ValueError whose message is written for the user, so a reply
+    task may store it as the reply's error (reply_error_text)."""

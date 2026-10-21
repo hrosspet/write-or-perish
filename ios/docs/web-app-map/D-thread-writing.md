@@ -446,7 +446,7 @@ Pending UI: streamed text rendered through QuotedContent with `{quote:N}`/`{quot
 
 - `failed`: toast `llmError || "LLM response generation failed"` (8 s). If viewing the dead pending node: go back to its parent (`navigate(-1)` if we came from the parent, else replace with `/node/<parentId>`), unless the parent is a tombstone. The failed node remains in the thread (content is still the placeholder text).
 - `cancelled` (a queued read withdrawn by the spend cap): toast `llmData.error || "Read cancelled"`, patch content.
-- Backend sets `llm_task_status='failed'` with `llm_task_error` (exception string) on errors; a spend-capped user at task start is failed silently (no error text).
+- Backend sets `llm_task_status='failed'` with `llm_task_error` (a plain message, never exception text) on errors; a spend-capped user at task start is failed silently (no error text).
 
 ### 5.7 Request errors (`handleLlmRequestError`)
 

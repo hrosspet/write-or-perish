@@ -22,6 +22,9 @@ from backend.extensions import db
 from backend.llm_providers import LLMProvider
 from backend.utils.api_keys import get_api_keys_for_usage
 from backend.utils.cost import llm_cost_log_fields
+from backend.utils.error_privacy import (
+    TODO_MERGE_FAILED_TEXT, describe_exception,
+)
 from backend.models import APICostLog
 from backend.utils.proposals import is_own_live_proposal, node_is_users
 from backend.utils.tool_meta import update_tool_meta
@@ -286,10 +289,12 @@ def _run_merge(llm_node, update_summary, user_id, model_id,
         run_todo_merge(LLMProvider, model_id, messages, api_keys,
                        current_todo, run)
     except Exception as e:
-        logger.error(f"LLM call failed for todo merge: {e}", exc_info=True)
+        logger.error("LLM call failed for todo merge: %s",
+                     describe_exception(e), exc_info=True)
         # Calls made before the failing one were billed.
         _log_merge_costs(user_id, model_id, run)
-        _merge_failed(llm_node, user_id, str(e), confirm_node_id)
+        _merge_failed(llm_node, user_id, TODO_MERGE_FAILED_TEXT,
+                      confirm_node_id)
         db.session.commit()
         return
 
