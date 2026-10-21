@@ -47,8 +47,9 @@ Read since 2026-09-19), per model, variant and turn as above:
     nothing      the model picked nothing
     dropped      the model picked, but Loore could show none of the
                  picks: the tweet had left the archive snapshot by the
-                 collect, or the number was outside the render
-                 (FeedRender.dropped_picks;
+                 collect, the number was outside the render, or the
+                 reader had read the tweet (a Glean again that kept the
+                 earlier list, #511) (FeedRender.dropped_picks;
                  replies collected before the column was deployed,
                  October 2026, count as "nothing")
     opened     replies their owner has opened (FeedRender.opened_at,
