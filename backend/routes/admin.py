@@ -153,11 +153,20 @@ def _intentions_status_map():
     pending (persisted ProfileBatchJob — survives restarts); "failed" when
     the latest run gave up (overflow twice / batch error) or its output was
     refused (cut off before any text, batch or sync — its cost row is
-    marked refused, #368) and no artifact version postdates it; else
-    "complete" when at least one intentions artifact version exists."""
+    marked refused, #368) and no artifact version postdates it; "kept"
+    when the latest run's result was dropped because the user's version was
+    current (#412) and no version postdates that; else "complete" when at
+    least one intentions artifact version exists."""
     from backend.models import ProfileBatchJob, UserArtifact
+    from backend.utils.intentions_versions import KEPT_USER_EDIT_REF
     from backend.utils.refusal_backoff import REFUSED_REF
-    pending, gave_up_at = {}, {}
+    pending, ended = {}, {}
+
+    def run_ended(uid, when, state):
+        # The latest run that ended without saving a version decides.
+        if when is not None and (uid not in ended or ended[uid][0] < when):
+            ended[uid] = (when, state)
+
     for job in ProfileBatchJob.query.order_by(ProfileBatchJob.submitted_at).all():
         for item in job.items:
             if item.get("kind") != "intentions":
@@ -168,14 +177,17 @@ def _intentions_status_map():
                     "submitted_at": iso_utc(job.submitted_at),
                     "resubmitted": bool(item.get("resubmitted"))}
             elif item.get("gave_up"):
-                gave_up_at[item["user_id"]] = job.submitted_at
-    for uid, when in db.session.query(
-            APICostLog.user_id, func.max(APICostLog.created_at)).filter(
+                run_ended(item["user_id"], job.submitted_at, "failed")
+            elif item.get("kept_user_edit"):
+                run_ended(item["user_id"],
+                          job.collected_at or job.submitted_at, "kept")
+    for uid, ref, when in db.session.query(
+            APICostLog.user_id, APICostLog.request_ref,
+            func.max(APICostLog.created_at)).filter(
             APICostLog.request_type == "intentions_infer",
-            APICostLog.request_ref == REFUSED_REF).group_by(
-            APICostLog.user_id).all():
-        if uid not in gave_up_at or gave_up_at[uid] < when:
-            gave_up_at[uid] = when
+            APICostLog.request_ref.in_((REFUSED_REF, KEPT_USER_EDIT_REF))
+    ).group_by(APICostLog.user_id, APICostLog.request_ref).all():
+        run_ended(uid, when, "failed" if ref == REFUSED_REF else "kept")
     rows = db.session.query(
         UserArtifact.user_id, func.count(UserArtifact.id),
         func.max(UserArtifact.created_at),
@@ -185,11 +197,11 @@ def _intentions_status_map():
     out = {uid: {"state": "complete", "versions": n,
                  "last_created_at": iso_utc(last)}
            for uid, n, last in rows}
-    for uid, when in gave_up_at.items():
+    for uid, (when, state) in ended.items():
         newer = last_artifact.get(uid)
         if newer is None or newer < when:
             entry = out.setdefault(uid, {"versions": 0, "last_created_at": None})
-            entry["state"] = "failed"
+            entry["state"] = state
     for uid, flight in pending.items():
         entry = out.setdefault(uid, {"versions": 0, "last_created_at": None})
         entry["state"] = "generating"
@@ -414,8 +426,16 @@ def infer_intentions_route(user_id):
             saved within minutes — for when the person is waiting).
       cancel_pending: true — cancel this user's in-flight intentions
             batch first (provider-side + job row), then start the run.
+      replace_version_id: the id the 409 below named, sent after the
+            admin confirmed replacing that version in the dialog.
     Returns {"task_id", "mode", "cancelled"} — poll
-    /admin/prefill/status/<task_id>."""
+    /admin/prefill/status/<task_id>.
+
+    The user's edit wins (#412): when the current intentions version was
+    written by the user or a conversation, the run is refused with a 409
+    (code "intentions_edited") naming the version, who made it and when,
+    never its text, unless replace_version_id names that version. Checked
+    before cancel_pending, so a refused click cancels nothing."""
     user = User.query.get_or_404(user_id)
     refusal = _prefill_refusal_response(user)
     if refusal:
@@ -424,12 +444,40 @@ def infer_intentions_route(user_id):
     mode = data.get("mode") or "batch"
     if mode not in ("batch", "sync"):
         return jsonify({"error": "mode must be 'batch' or 'sync'."}), 400
+    from backend.utils.intentions_versions import protected_version
+    kept = protected_version(user.id)
+    replace_id = data.get("replace_version_id")
+    if kept is not None and not (replace_id == kept.id
+                                 and not isinstance(replace_id, bool)):
+        return _intentions_edited_response(kept)
     from backend.tasks.intentions import infer_intentions, cancel_pending_intentions
     cancelled = {"cancelled": 0, "errors": []}
     if data.get("cancel_pending"):
         cancelled = cancel_pending_intentions(user.id)
-    task = infer_intentions.delay(user.id, mode)
+    task = infer_intentions.delay(user.id, mode, kept.id if kept else None)
     return jsonify({"task_id": task.id, "mode": mode, **cancelled}), 202
+
+
+def _intentions_edited_response(version):
+    """The 409 the admin panel shows as the "Replace their intentions?"
+    dialog (#412): that the user's version exists, how it came about and
+    when. Metadata only: admins never read the user's text."""
+    from backend.utils.intentions_versions import changed_by
+    by = changed_by(version)
+    what = {
+        "user": "edited their intentions",
+        "revert": "restored an earlier version of their intentions",
+        "conversation": "had their intentions updated in a conversation",
+    }[by]
+    when = f" on {version.created_at:%Y-%m-%d}" if version.created_at else ""
+    return jsonify({
+        "error": (f"This user {what}{when}. Inferring would replace "
+                  "their version."),
+        "code": "intentions_edited",
+        "version_id": version.id,
+        "changed_by": by,
+        "changed_at": iso_utc(version.created_at),
+    }), 409
 
 
 @admin_bp.route("/users/<int:user_id>/cancel_intentions", methods=["POST"])

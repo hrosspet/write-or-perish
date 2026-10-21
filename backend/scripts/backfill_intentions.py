@@ -31,6 +31,12 @@ Two modes:
 Non-destructive: each run creates a new artifact version; prior content stays
 in the artifact's history.
 
+The user's edit wins (#412): a user whose current intentions version they
+wrote, restored or had updated in a conversation is skipped before anything
+is sent, and a result that arrives after the user saved such a version is
+not saved (its billed cost is logged). There is no override here; the admin
+"Infer intentions" button asks for one.
+
 Recovery: in --batch mode each retrieved result is saved immediately, so a
 crash/timeout only leaves the not-yet-retrieved batches unsaved. Their ids
 (with user ids) are printed up front and the provider keeps the results
@@ -84,6 +90,9 @@ from backend.llm_providers import (  # noqa: E402
     EmptyTruncatedOutputError,
 )
 from backend.utils.refusal_backoff import REFUSED_REF  # noqa: E402
+from backend.utils.intentions_versions import (  # noqa: E402
+    KEPT_USER_EDIT_REF, protected_version,
+)
 # Cheap DB token estimate (sum of the user's AI-readable node token_counts —
 # no decryption, no export build), the same one the heartbeat/trigger checks
 # use to gate work.
@@ -126,6 +135,13 @@ def _eligible(app, user, model_id):
     if model_id not in app.config["SUPPORTED_MODELS"]:
         print(f"  ! user {user.id}: unsupported model '{model_id}', skipping")
         return False
+    kept = protected_version(user.id)
+    if kept is not None:
+        print(f"  - user {user.id}: their current intentions "
+              f"({str(kept.created_at)[:10]}) are a version they wrote, "
+              f"restored or had updated in a conversation — skipping, the "
+              f"user's edit wins")
+        return False
     return True
 
 
@@ -161,15 +177,24 @@ def _save_intentions(user, model_id, content, input_tokens, output_tokens,
                      total_tokens, batch):
     """Save a new intentions artifact version + APICostLog, mirroring the
     metadata profile generation records. Returns (version, cost_microdollars,
-    total_tokens). ai_usage follows the user's global default (like the
-    profile); privacy stays "private" (the UserArtifact default)."""
+    total_tokens); version is None when the user saved their own version
+    while the call was out (#412), and nothing but the cost is saved.
+    ai_usage follows the user's global default (like the profile); privacy
+    stays "private" (the UserArtifact default)."""
+    kept = protected_version(user.id) is not None
     cost = calculate_llm_cost_microdollars(
         model_id, input_tokens, output_tokens, batch=batch)
     db.session.add(APICostLog(
         user_id=user.id, model_id=model_id, request_type="intentions_backfill",
+        request_ref=KEPT_USER_EDIT_REF if kept else None,
         input_tokens=input_tokens, output_tokens=output_tokens,
         cost_microdollars=cost,
     ))
+    if kept:
+        db.session.commit()
+        print(f"  - user {user.id}: the user saved their own intentions while "
+              f"the call was out — result not saved (cost=${cost / 1e6:.4f})")
+        return None, cost, total_tokens
     artifact = UserArtifact(
         user_id=user.id, kind=KIND,
         title=UserArtifact.DEFAULT_KINDS.get(KIND, "Intentions"),
@@ -263,9 +288,10 @@ def backfill_user(app, user, template, model_id, dry_run=False):
         response.get("input_tokens", 0), response.get("output_tokens", 0),
         response["total_tokens"], batch=False,
     )
-    print(f"  ✓ user {user.id}: saved intentions v{version} "
-          f"({len(response['content'])} chars, model={model_id}, "
-          f"llm_tokens={total}, cost=${cost / 1e6:.4f})")
+    if version is not None:
+        print(f"  ✓ user {user.id}: saved intentions v{version} "
+              f"({len(response['content'])} chars, model={model_id}, "
+              f"llm_tokens={total}, cost=${cost / 1e6:.4f})")
 
 
 # ── Batch path (--batch, ~50% cheaper) ─────────────────────────────────────
@@ -417,9 +443,10 @@ def run_batch(app, users, template, model_override, dry_run,
                     version, cost, total = _save_intentions(
                         info["user"], info["model_id"], r["content"],
                         in_t, out_t, in_t + out_t, batch=True)
-                    print(f"  ✓ user {uid}: saved intentions v{version} "
-                          f"({len(r['content'])} chars, model={info['model_id']}, "
-                          f"llm_tokens={total}, cost=${cost / 1e6:.4f}, batch 50%)")
+                    if version is not None:
+                        print(f"  ✓ user {uid}: saved intentions v{version} "
+                              f"({len(r['content'])} chars, model={info['model_id']}, "
+                              f"llm_tokens={total}, cost=${cost / 1e6:.4f}, batch 50%)")
                 except Exception as e:  # noqa: BLE001
                     db.session.rollback()
                     print(f"  ✗ user {uid}: save FAILED — {type(e).__name__}: {e}")
@@ -504,9 +531,10 @@ def collect_batches(app, batch_ids, model_override):
                 version, cost, total = _save_intentions(
                     user, model_id, r["content"], in_t, out_t,
                     in_t + out_t, batch=True)
-                print(f"  ✓ batch {batch_id} user {uid}: saved intentions "
-                      f"v{version} ({len(r['content'])} chars, model={model_id}, "
-                      f"llm_tokens={total}, cost=${cost / 1e6:.4f}, batch 50%)")
+                if version is not None:
+                    print(f"  ✓ batch {batch_id} user {uid}: saved intentions "
+                          f"v{version} ({len(r['content'])} chars, model={model_id}, "
+                          f"llm_tokens={total}, cost=${cost / 1e6:.4f}, batch 50%)")
             except Exception as e:  # noqa: BLE001
                 db.session.rollback()
                 print(f"  ✗ batch {batch_id} user {uid}: save FAILED — "

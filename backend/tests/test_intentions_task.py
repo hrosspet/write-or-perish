@@ -436,3 +436,150 @@ def test_poller_skips_job_cancelled_mid_poll(app, wired, monkeypatch):  # noqa: 
     assert resubmits == []
     assert ProfileBatchJob.query.get(job.id).status == "cancelled"
     assert wired == []
+
+
+# ── The user's edit wins (#412) ─────────────────────────────────────────────
+
+def _version(user, generated_by, tokens_used=0, text="mine"):
+    a = UserArtifact(user_id=user.id, kind="intentions", title="Intentions",
+                     generated_by=generated_by, tokens_used=tokens_used)
+    a.set_content(text)
+    _db.session.add(a)
+    _db.session.commit()
+    return a
+
+
+def _current(user):
+    return UserArtifact.latest_for(user.id, "intentions")
+
+
+def test_who_wrote_a_version_reads_tokens_and_author(app):  # noqa: F811
+    """An inference run is the only writer that records tokens; a user's
+    save, a revert and a conversation's update (whatever its model) do
+    not, so all three are protected."""
+    from backend.utils.intentions_versions import (
+        changed_by, is_inferred, protected_version)
+    u = _make_user("who")
+    _db.session.commit()
+    assert protected_version(u.id) is None                  # nothing yet
+    inferred = _version(u, "claude-opus-4.8", tokens_used=120_000)
+    assert is_inferred(inferred) and protected_version(u.id) is None
+    for author, by in (("user", "user"), ("manual", "user"),
+                       ("revert", "revert"),
+                       ("claude-opus-4.8", "conversation"),
+                       ("agentic_session", "conversation")):
+        v = _version(u, author)
+        assert protected_version(u.id).id == v.id, author
+        assert changed_by(v) == by
+    _version(u, "claude-opus-4.8", tokens_used=90_000)       # a confirmed run
+    assert protected_version(u.id) is None
+
+
+def test_start_refuses_an_unconfirmed_user_version(app, wired):  # noqa: F811
+    """The route asks first; the task checks again before anything is
+    billed. A confirmed run carries the version it may replace."""
+    u = _make_user("starter")
+    _db.session.commit()
+    mine = _version(u, "user")
+    with pytest.raises(RuntimeError, match="Their version is kept"):
+        it.start_infer_intentions_impl(u.id)
+    with pytest.raises(RuntimeError, match="Their version is kept"):
+        it.start_infer_intentions_impl(u.id, replace_version_id=mine.id + 99)
+    assert wired == [] and ProfileBatchJob.query.count() == 0
+    _kind, ref = it.start_infer_intentions_impl(u.id, replace_version_id=mine.id)
+    assert ref["item"]["replace_version_id"] == mine.id
+
+
+def test_batch_result_keeps_a_version_the_user_saved_while_out(app, wired):  # noqa: F811
+    from backend.utils.intentions_versions import KEPT_USER_EDIT_REF
+    u = _make_user("racer")
+    _db.session.commit()
+    _version(u, "claude-opus-4.8", tokens_used=100_000, text="inferred")
+    item = {"custom_id": f"int-u{u.id}", "user_id": u.id, "kind": "intentions",
+            "budget": 1_000_000, "resubmitted": False}
+    mine = _version(u, "user")                 # saved while the batch was out
+    saved = it.apply_intentions_item(u, item, {
+        "content": "# Endorsed\nnew", "input_tokens": 100_000, "output_tokens": 1_000})
+    assert saved["version"] is None and saved["kept_user_edit"] is True
+    assert _current(u).id == mine.id
+    assert UserArtifact.query.filter_by(user_id=u.id, kind="intentions").count() == 2
+    log = APICostLog.query.filter_by(user_id=u.id).one()     # billed, so logged
+    assert log.request_ref == KEPT_USER_EDIT_REF and log.cost_microdollars > 0
+
+
+def test_a_confirmed_run_replaces_only_the_version_it_named(app, wired):  # noqa: F811
+    u = _make_user("confirmer")
+    _db.session.commit()
+    mine = _version(u, "user")
+    item = {"custom_id": f"int-u{u.id}", "user_id": u.id, "kind": "intentions",
+            "budget": 1_000_000, "resubmitted": False,
+            "replace_version_id": mine.id}
+    result = {"content": "# Endorsed\nX", "input_tokens": 10, "output_tokens": 1}
+    assert it.apply_intentions_item(u, item, result)["version"] == 2
+    assert _current(u).tokens_used == 11
+    # A version the user saves after the confirmation is protected again.
+    again = _version(u, "user", text="mine again")
+    assert it.apply_intentions_item(u, item, result)["kept_user_edit"] is True
+    assert _current(u).id == again.id
+
+
+def test_sync_run_keeps_a_version_the_user_saved_meanwhile(app, wired, monkeypatch):  # noqa: F811
+    import backend.llm_providers as lp
+    u = _make_user("syncer")
+    _db.session.commit()
+    _version(u, "claude-opus-4.8", tokens_used=100_000, text="inferred")
+    holder = {}
+
+    def completion(model_id, messages, keys, **kw):
+        holder["mine"] = _version(u, "claude-opus-5.5")   # a conversation update
+        return {"content": "# Endorsed\nY", "total_tokens": 11,
+                "input_tokens": 10, "output_tokens": 1}
+    monkeypatch.setattr(lp.LLMProvider, "get_completion", staticmethod(completion))
+    saved = it.run_infer_intentions_sync_impl(u.id)
+    assert saved["version"] is None and saved["kept_user_edit"] is True
+    assert _current(u).id == holder["mine"].id
+
+
+def test_failed_item_is_not_resubmitted_over_a_user_version(app, wired, monkeypatch):  # noqa: F811
+    u = _make_user("failer")
+    _db.session.commit()
+    item = {"custom_id": f"int-u{u.id}", "user_id": u.id, "kind": "intentions",
+            "budget": 1_000_000, "resubmitted": False}
+    job = _job_for(item)
+    _version(u, "revert")
+    monkeypatch.setattr(it, "_failed_item_tokens", lambda pk, bid, cid, keys: (None, None))
+    it.handle_failed_intentions_item(u, item, job, {})
+    assert wired == [] and ProfileBatchJob.query.count() == 1
+    assert ProfileBatchJob.query.get(job.id).items[0]["kept_user_edit"] is True
+
+
+def test_backfill_script_skips_and_keeps_a_user_version(app, wired, monkeypatch, capsys):  # noqa: F811
+    """backfill_intentions.py has no dialog: a user whose current version
+    is their own is skipped before anything is sent, and a result that
+    arrives after the user saved one is not saved (cost logged)."""
+    import importlib
+    import sys
+    from unittest.mock import MagicMock
+    from backend.utils.intentions_versions import KEPT_USER_EDIT_REF
+    # backend.app builds the whole app at import; these checks need none of it.
+    monkeypatch.setitem(sys.modules, "backend.app", MagicMock())
+    monkeypatch.delitem(sys.modules, "backend.scripts.backfill_intentions",
+                        raising=False)
+    script = importlib.import_module("backend.scripts.backfill_intentions")
+    monkeypatch.delitem(sys.modules, "backend.scripts.backfill_intentions")
+
+    u = _make_user("backfilled")
+    _db.session.commit()
+    assert script._eligible(app, u, "claude-opus-4.8") is True
+    _version(u, "claude-opus-4.8", tokens_used=100_000, text="inferred")
+    assert script._eligible(app, u, "claude-opus-4.8") is True
+    mine = _version(u, "user")
+    assert script._eligible(app, u, "claude-opus-4.8") is False
+    assert "the user's edit wins" in capsys.readouterr().out
+
+    version, cost, _total = script._save_intentions(
+        u, "claude-opus-4.8", "# Endorsed\nZ", 10, 1, 11, batch=True)
+    assert version is None and cost > 0
+    assert _current(u).id == mine.id
+    assert APICostLog.query.filter_by(
+        user_id=u.id, request_type="intentions_backfill").one().request_ref == KEPT_USER_EDIT_REF
