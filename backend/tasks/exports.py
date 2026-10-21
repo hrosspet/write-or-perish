@@ -586,6 +586,11 @@ def discard_step_output(user, model_id, response, job, batch=False):
 # rebuilt version and the user's version (main's integration prompt, main's
 # user note before the user's version), and the rebuild continues from the
 # merge.
+#
+# #421: every version of the user's the old chain carried is merged, oldest
+# first, each at its date, not only the newest. The pending merge
+# (User.profile_pending_merge_id) stays the newest one; the older ones are
+# read from its lineage (``user_versions_to_merge``).
 
 def carried_user_version(profile):
     """The newest version the user wrote that ``profile`` carries: the
@@ -612,9 +617,109 @@ def carried_user_version(profile):
     return None
 
 
+_LINEAGE_COLUMNS = (
+    UserProfile.id, UserProfile.user_id, UserProfile.parent_profile_id,
+    UserProfile.generated_by, UserProfile.ai_usage,
+    UserProfile.merged_profile_id)
+
+
+def _lineage_row(profile_id):
+    """A version's lineage columns (no content), or None."""
+    return db.session.query(*_LINEAGE_COLUMNS).filter(
+        UserProfile.id == profile_id).first()
+
+
+def _lineage_rows(profile_id, seen):
+    """The lineage of version ``profile_id`` (the version, then its
+    parents) as lineage rows, newest first. Stops at a version in ``seen``,
+    which collects the ids walked."""
+    current = _lineage_row(profile_id) if profile_id else None
+    while current is not None and current.id not in seen:
+        seen.add(current.id)
+        yield current
+        if current.parent_profile_id is None:
+            return
+        current = _lineage_row(current.parent_profile_id)
+
+
+def _merged_version_row(row):
+    """The user's version a merge step ``row`` stands for, as a lineage
+    row, when it is the same user's and AI-readable; else None."""
+    if not row.merged_profile_id:
+        return None
+    merged = _lineage_row(row.merged_profile_id)
+    if (merged is None or merged.user_id != row.user_id
+            or merged.ai_usage not in AI_ALLOWED):
+        return None
+    return merged
+
+
+def _users_by_writing(row):
+    return row.generated_by == "user" and row.ai_usage in AI_ALLOWED
+
+
+def carried_user_versions(profile):
+    """Every version the user wrote that ``profile`` carries, oldest first,
+    the newest (``carried_user_version``) last: walking its lineage, each
+    version the user wrote (generated_by "user") and each user's version a
+    merge step merged (merged_profile_id). Only AI-readable versions count.
+
+    A version the user replaced with the next version in the lineage, also
+    one of theirs (saves with no model step in between: an edit of their
+    own edit, or of the merge that merged it), is left out: the later save
+    holds that text as the user left it (#421). Reads metadata only;
+    nothing is decrypted. Returns ids."""
+    found, ids = [], set()
+    child = None
+    for row in _lineage_rows(profile.id if profile else None, set()):
+        if row.ai_usage in AI_ALLOWED:
+            carried = (row if row.generated_by == "user"
+                       else _merged_version_row(row))
+            if carried is not None and carried.id not in ids:
+                ids.add(carried.id)
+                if child is None or not _users_by_writing(child):
+                    found.append(carried.id)
+        child = row
+    found.reverse()
+    return found
+
+
+def held_user_versions(base):
+    """The ids of the versions the user wrote that ``base`` already holds:
+    every one in its lineage, every one a merge step in it merged, and
+    everything such a merged version holds in turn. A rebuilt chain at
+    ``base`` merges none of them again. Metadata only."""
+    held, seen = set(), set()
+    stack = [base.id] if base is not None else []
+    while stack:
+        for row in _lineage_rows(stack.pop(), seen):
+            if row.ai_usage not in AI_ALLOWED:
+                continue
+            if row.generated_by == "user":
+                held.add(row.id)
+                continue
+            merged = _merged_version_row(row)
+            if merged is not None:
+                held.add(merged.id)
+                stack.append(merged.id)
+    return held
+
+
+def user_versions_to_merge(pending, base):
+    """The versions of the user's a rebuilt chain at ``base`` still has to
+    merge, oldest first, for the pending merge ``pending`` (the newest
+    version the old chain carried): ``carried_user_versions(pending)``
+    without those ``base`` holds. ``base`` None (a from-scratch build
+    before its first step) holds none. Returns versions."""
+    held = held_user_versions(base)
+    return [UserProfile.query.get(vid)
+            for vid in carried_user_versions(pending) if vid not in held]
+
+
 def pending_merge_version(user):
-    """The user's version a rebuild or a re-tip in progress still has to
-    merge (User.profile_pending_merge_id), or None."""
+    """The newest version of the user's a rebuild or a re-tip in progress
+    still has to merge (User.profile_pending_merge_id), or None. The older
+    versions it carries are merged before it (``user_versions_to_merge``)."""
     version_id = getattr(user, "profile_pending_merge_id", None)
     if not isinstance(version_id, int) or not version_id:
         return None
@@ -626,57 +731,47 @@ def pending_merge_version(user):
 
 
 def plan_user_version_merge(user, old_base, new_base=None):
-    """Record which version of the user's the new chain must merge, when a
+    """Record which versions of the user's the new chain must merge, when a
     chain is rebuilt from an earlier point: at the start of a from-scratch
     build (``new_base`` None) and when an import re-tips the chain at
-    ``new_base``. It is the user's version the old chain carried
-    (``carried_user_version(old_base)``). Nothing is recorded when the new
-    chain already carries it (a re-tip at the user's version or after it),
-    and a merge already pending (an interrupted rebuild) is kept. The
-    caller commits."""
+    ``new_base``. They are the versions of the user's the old chain carried
+    (``carried_user_versions(old_base)``); the newest is recorded, and the
+    older ones are read from its lineage as the rebuild goes (#421).
+    Nothing is recorded when the new chain already holds them all (a re-tip
+    at the newest one or after it), and a merge already pending (an
+    interrupted rebuild) is kept. The caller commits."""
     if pending_merge_version(user) is not None:
         return None
     carried = carried_user_version(old_base) if old_base is not None else None
     if carried is None:
         return None
-    if new_base is not None:
-        kept = carried_user_version(new_base)
-        if kept is not None and (kept.id == carried.id
-                                 or _descends_from(new_base, carried.id)):
-            return None
+    to_merge = user_versions_to_merge(carried, new_base)
+    if not to_merge:
+        return None
     user.profile_pending_merge_id = carried.id
-    logger.info("User %s: the rebuilt chain will merge the user's version "
-                "%s at %s", user.id, carried.id, merge_date(carried))
+    logger.info("User %s: the rebuilt chain will merge the user's versions "
+                "%s at %s", user.id, [v.id for v in to_merge],
+                [merge_date(v) for v in to_merge])
     return carried
 
 
-def _descends_from(profile, ancestor_id):
-    """Whether ``ancestor_id`` is ``profile`` or one of its parents."""
-    seen = set()
-    current = profile
-    while current is not None and current.id not in seen:
-        if current.id == ancestor_id:
-            return True
-        seen.add(current.id)
-        if current.parent_profile_id is None:
-            return False
-        current = UserProfile.query.get(current.parent_profile_id)
-    return False
-
-
 def settled_pending_merge(user, base):
-    """The pending merge to run on ``base``, or None. A base that already
-    descends from the pending version (it was rebuilt on it, or the run
-    that recorded it stopped before its first step) holds it: the pending
-    merge is dropped without a call, so a version is never merged with
-    itself. The caller commits."""
+    """The version of the user's to merge next on ``base``, or None: the
+    oldest of ``user_versions_to_merge`` for the pending merge. A base that
+    already holds every one of them (it was rebuilt on them, or the run
+    that recorded them stopped before its first step) ends the pending
+    merge without a call, so a version is never merged with itself. The
+    caller commits."""
     pending = pending_merge_version(user) if base is not None else None
-    if pending is not None and _descends_from(base, pending.id):
+    if pending is None:
+        return None
+    to_merge = user_versions_to_merge(pending, base)
+    if not to_merge:
         user.profile_pending_merge_id = None
         logger.info("User %s: version %s already holds the user's version "
                     "%s; no merge", user.id, base.id, pending.id)
         return None
-    return pending
+    return to_merge[0]
 
 
 def merge_date(version):
@@ -719,10 +814,11 @@ def build_merge_messages(user_id, base, version):
 def save_merge(user, model_id, response, base, version, batch=False):
     """Save the merge as the chain's next version: the rebuilt version is
     its parent and it carries that version's coverage, so the rebuild goes
-    on from it as from the version it merged. Clears the pending merge,
-    unless the merge was saved as 'none' (the account was switched while
-    the call ran): such a version is never a base, so the merge runs again
-    once the account allows AI."""
+    on from it as from the version it merged. The merge of the pending
+    version, the newest of the user's versions to merge (#421), clears the
+    pending merge, unless it was saved as 'none' (the account was switched
+    while the call ran): such a version is never a base, so the merge runs
+    again once the account allows AI."""
     merged = _save_profile(
         user, model_id, response["content"], response,
         source_tokens_used=base.source_tokens_used,
@@ -787,9 +883,10 @@ def _discard_if_base_moved(user, model_id, base_id, response, job):
 
 
 def _merge_if_due(self, user, model_id, base_id, api_keys, run_ends=False):
-    """The sync loop's merge step (#183), when one is pending and due on
-    the chain's version ``base_id`` (``merge_due``; always when the run
-    ends). Returns (text, saved version), or None."""
+    """The sync loop's merge step (#183), when a version of the user's is
+    still to merge (the oldest first, #421) and due on the chain's version
+    ``base_id`` (``merge_due``; always when the run ends). Returns (text,
+    saved version), or None."""
     base = UserProfile.query.get(base_id) if base_id is not None else None
     pending = settled_pending_merge(user, base)
     if pending is None:
@@ -1551,8 +1648,9 @@ def _chunked_profile_loop(self, user, model_id, update_template,
         # The user saved a version (an edit or a revert) while the run was
         # working: the next step would build past it, so the run ends
         # (ProfileBaseMoved). A rebuilt chain that has reached the date of
-        # the user's version it must merge merges it now and goes on from
-        # the merge (#183).
+        # the next version of the user's it must merge merges it now and
+        # goes on from the merge (#183); versions due at the same step are
+        # merged one after the other, oldest first (#421).
         merge = _before_step(self, user, model_id, current_profile_id,
                              api_keys, f"chunk {chunk_num + 1}")
         if merge is not None:
@@ -1658,12 +1756,14 @@ def _chunked_profile_loop(self, user, model_id, update_template,
             f"cumulative={cumulative_units}"
         )
 
-    # The run ends before the chain reached the date of the user's version
-    # it must merge (the version is newer than all of the writing): the
-    # merge is the run's last step (#183).
-    merge = _merge_if_due(self, user, model_id, current_profile_id, api_keys,
-                          run_ends=True)
-    if merge is not None:
+    # The run ends before the chain reached the date of the user's versions
+    # it must merge (they are newer than all of the writing): the merges are
+    # the run's last steps, oldest first (#183, #421).
+    while True:
+        merge = _merge_if_due(self, user, model_id, current_profile_id,
+                              api_keys, run_ends=True)
+        if merge is None:
+            break
         current_profile_id = merge[1].id
 
     return current_profile_id, chunk_num, cumulative_units
