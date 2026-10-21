@@ -968,3 +968,9 @@ class TestOneUserPolls:
         polls = _as(admin_client).get("/api/admin/polls").get_json()["polls"]
         assert sorted(str(p["audience"]) for p in polls) == [
             "None", "['tester']"]
+
+    def test_audience_field_with_no_usable_name_is_refused(
+            self, admin_client):
+        res = self._create(admin_client, audience_usernames=["@", " "])
+        assert res.status_code == 400
+        assert Poll.query.count() == 0

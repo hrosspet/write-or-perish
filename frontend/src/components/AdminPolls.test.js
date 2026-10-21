@@ -59,3 +59,20 @@ test('sends the typed usernames with the poll, and none when empty', async () =>
   await waitFor(() => expect(mockPost).toHaveBeenCalledTimes(2));
   expect(mockPost.mock.calls[1][1].audience_usernames).toEqual([]);
 });
+
+test('a filled audience field with no usable name is refused, not sent to everyone', async () => {
+  mockGet.mockImplementation((url) => Promise.resolve({ data:
+    url === '/admin/polls'
+      ? { default_model_id: 'm1', polls: [] }
+      : { models: [{ id: 'm1', name: 'M1', kind: 'chat' }] } }));
+  render(<AdminPolls />);
+  fireEvent.change(await screen.findByPlaceholderText(/Ask the community/),
+    { target: { value: 'Q?' } });
+  fireEvent.change(screen.getByLabelText('Only these users'),
+    { target: { value: ' @ , ' } });
+  await waitFor(() => expect(
+    screen.getByTitle('Model that drafts answers').value).toBe('m1'));
+  fireEvent.click(screen.getByText('Create poll'));
+  expect(await screen.findByText(/No usernames/)).toBeInTheDocument();
+  expect(mockPost).not.toHaveBeenCalled();
+});

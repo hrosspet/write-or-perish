@@ -159,15 +159,20 @@ export function AdminPolls() {
 
   const createPoll = async () => {
     if (!question.trim() || !modelId) return;
+    const names = audience
+      .split(/[\s,]+/)
+      .map((n) => n.replace(/^@/, ""))
+      .filter(Boolean);
+    if (audience.trim() && names.length === 0) {
+      setPollsError("No usernames in the audience field.");
+      return;
+    }
     try {
       await api.post("/admin/polls", {
         question,
         model_id: modelId,
         data_source: dataSource,
-        audience_usernames: audience
-          .split(/[\s,]+/)
-          .map((n) => n.replace(/^@/, ""))
-          .filter(Boolean),
+        audience_usernames: names,
       });
       setQuestion("");
       setAudience("");

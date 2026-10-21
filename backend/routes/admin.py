@@ -1224,6 +1224,9 @@ def create_poll():
             unknown.append(name)
         elif user.id not in audience:
             audience.append(user.id)
+    if usernames and not audience and not unknown:
+        # A filled field with no usable name must not become "everyone".
+        return jsonify({"error": "No usernames in the audience field."}), 400
     if unknown:
         return jsonify({"error": "No such user: " + ", ".join(unknown)}), 400
 
