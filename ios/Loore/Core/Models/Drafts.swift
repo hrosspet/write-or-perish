@@ -153,6 +153,8 @@ struct StreamingSessionStatus: Decodable, Sendable {
     var content: String
     /// The Voice chain created the reply.
     var llmNodeId: Int?
+    /// The user's message node, which the reply hangs under (#514).
+    var userNodeId: Int?
     /// The reply was skipped (spend cap, bad placeholder, …).
     var warning: String?
 
@@ -166,6 +168,7 @@ struct StreamingSessionStatus: Decodable, Sendable {
         case completedChunks = "completed_chunks"
         case failedChunks = "failed_chunks"
         case llmNodeId = "llm_node_id"
+        case userNodeId = "user_node_id"
     }
 
     init(from decoder: Decoder) throws {
@@ -180,6 +183,7 @@ struct StreamingSessionStatus: Decodable, Sendable {
         chunks = c.tolerant(.chunks, default: [])
         content = c.tolerant(.content, default: "")
         llmNodeId = c.tolerant(.llmNodeId)
+        userNodeId = c.tolerant(.userNodeId)
         warning = c.tolerant(.warning)
     }
 

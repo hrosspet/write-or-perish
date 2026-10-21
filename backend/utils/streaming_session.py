@@ -108,3 +108,18 @@ def release_session(session_id, user_id):
         },
         synchronize_session=False,
     )
+
+
+def draft_user_node_id(draft):
+    """The user's message node of a finished server-side voice turn (#514).
+
+    The turn's reply hangs under the last node of the user's message, so
+    the client can anchor on the message (Glean after a cancel, the next
+    recording) without waiting for the reply. None when the draft has no
+    reply node.
+    """
+    if not draft.llm_node_id:
+        return None
+    from backend.models import Node
+    llm_node = db.session.get(Node, draft.llm_node_id)
+    return llm_node.parent_id if llm_node else None
