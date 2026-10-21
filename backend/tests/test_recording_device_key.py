@@ -434,6 +434,45 @@ class TestFinalize:
         assert self._finalize(client, d, KEY_B).status_code == 202
         assert _fresh(d).streaming_status == "finalizing"
 
+    @pytest.mark.parametrize("key", [KEY_B, None])
+    def test_two_finalizes_queue_one_task(self, app, finalize_task, key):
+        # A retried finalize (or one from each of two devices): one task,
+        # one entry, one reply.
+        client, alice = _setup(app)
+        d = _make_session(alice, key=KEY_B, heartbeat_age=LIVE)
+
+        first = self._finalize(client, d, key)
+        second = self._finalize(client, d, key)
+
+        assert first.status_code == 202
+        assert second.status_code == 400
+        assert "not in recording state" in second.get_json()["error"]
+        assert finalize_task.finalize_draft_streaming.delay.call_count == 1
+
+    @pytest.mark.parametrize("key", [KEY_B, None])
+    def test_a_finalize_overtaken_by_another_queues_nothing(
+            self, app, finalize_task, monkeypatch, key):
+        # The other finalize moves the session on after this one read it
+        # as 'recording': only one of them may queue the task.
+        client, alice = _setup(app)
+        d = _make_session(alice, key=KEY_B, heartbeat_age=LIVE)
+        from backend.routes import drafts as drafts_module
+        real_parent_error = drafts_module._live_parent_error
+
+        def other_finalize_commits(parent_id):
+            Draft.query.filter_by(id=d.id).update(
+                {"streaming_status": "finalizing"}, synchronize_session=False)
+            _db.session.commit()
+            return real_parent_error(parent_id)
+        monkeypatch.setattr(drafts_module, "_live_parent_error",
+                            other_finalize_commits)
+
+        resp = self._finalize(client, d, key)
+
+        assert resp.status_code == 400
+        assert "not in recording state" in resp.get_json()["error"]
+        finalize_task.finalize_draft_streaming.delay.assert_not_called()
+
     def test_a_finalize_without_a_key_works_as_before(self, app, finalize_task):
         client, alice = _setup(app)
         d = _make_session(alice, key=KEY_B, heartbeat_age=LIVE)

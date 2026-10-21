@@ -1187,19 +1187,34 @@ def finalize_streaming(session_id):
     if total_chunks is None:
         return jsonify({"error": "Missing total_chunks"}), 400
 
+    draft_id = draft.id
     # Locked from here to the commit, so a claim cannot slip in between the
     # check and the status change (#388).
     try:
-        taken_over = is_taken_over_locked(draft.id, device_key)
+        taken_over = is_taken_over_locked(draft_id, device_key)
     except SessionBusy:
         return session_busy_response()
     if taken_over:
         return taken_over_response()
 
-    # Update draft with total chunks and status
-    draft.streaming_total_chunks = total_chunks
-    draft.streaming_status = "finalizing"
+    # Update draft with total chunks and status: only from 'recording', in
+    # one UPDATE, so of two finalizes at once (a retry, or two devices) one
+    # moves the session on and queues the task, and the other gets the
+    # answer of a session already finalizing, as a later one would. Read
+    # above, the status may have changed since.
+    moved = Draft.query.filter(
+        Draft.id == draft_id,
+        Draft.streaming_status == "recording",
+    ).update(
+        {
+            Draft.streaming_total_chunks: total_chunks,
+            Draft.streaming_status: "finalizing",
+        },
+        synchronize_session=False,
+    )
     db.session.commit()
+    if not moved:
+        return jsonify({"error": "Streaming session is not in recording state"}), 400
 
     # Queue finalization task
     from backend.tasks.streaming_transcription import finalize_draft_streaming
@@ -1229,7 +1244,7 @@ def finalize_streaming(session_id):
     return jsonify({
         "message": "Finalization started",
         "task_id": task.id,
-        "draft_id": draft.id,
+        "draft_id": draft_id,
         "total_chunks": total_chunks
     }), 202
 
