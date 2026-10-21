@@ -19,7 +19,7 @@ import os
 import sys
 import tempfile
 from datetime import datetime
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 os.environ["ENCRYPTION_DISABLED"] = "true"
 os.environ["DATABASE_URL"] = "sqlite:///:memory:"
@@ -730,3 +730,97 @@ class TestVoiceFinalize:
 
         st._fake_llm.prewarm_anthropic_cache.delay.assert_not_called()
         assert Node.query.count() == 0
+
+
+class TestVoiceFinalizeNothingTranscribed:
+    """#513: a Voice recording with no transcribed text gets no reply."""
+
+    def _finalize(self, st, user, session_id, chunks=1):
+        return st.finalize_draft_streaming(
+            MagicMock(), session_id, chunks, label="Voice", user_id=user.id,
+            parent_id=None, model="gpt-5")
+
+    def _chunk(self, session_id, status, text=None, index=0):
+        chunk = NodeTranscriptChunk(session_id=session_id, chunk_index=index,
+                                    status=status,
+                                    completed_at=datetime.utcnow())
+        if text is not None:
+            chunk.set_text(text)
+        _db.session.add(chunk)
+        _db.session.commit()
+
+    def test_all_chunks_failed_saves_the_entry_without_a_reply(self, st):
+        user = _user()
+        _voice_draft(user, "sess-failed", "chat")
+        self._chunk("sess-failed", "failed")
+
+        self._finalize(st, user, "sess-failed")
+
+        draft = Draft.query.filter_by(session_id="sess-failed").one()
+        assert draft.streaming_warning == st.VOICE_REPLY_SKIPPED_NOT_TRANSCRIBED
+        assert draft.llm_node_id is None
+        entry = Node.query.one()  # no Voice prompt node, no reply
+        assert "failed to transcribe" in entry.get_content()
+        assert _llm_count() == 0
+        st._fake_llm.generate_llm_response.si.assert_not_called()
+
+    def test_empty_text_saves_the_entry_with_its_own_message(self, st):
+        user = _user()
+        _voice_draft(user, "sess-silent", "chat", text="")
+
+        self._finalize(st, user, "sess-silent")
+
+        draft = Draft.query.filter_by(session_id="sess-silent").one()
+        assert draft.streaming_status == "completed"
+        assert draft.streaming_warning == st.VOICE_REPLY_SKIPPED_NO_WORDS
+        assert draft.llm_node_id is None
+        assert draft.get_content().startswith("*Note:")
+        entry = Node.query.one()
+        assert "No words were transcribed" in entry.get_content()
+        st._fake_llm.generate_llm_response.si.assert_not_called()
+
+    def test_zero_chunks_creates_no_entry_and_no_reply(self, st):
+        user = _user()
+        _voice_draft(user, "sess-none-at-all", "chat")
+
+        self._finalize(st, user, "sess-none-at-all", chunks=0)
+
+        assert Node.query.count() == 0
+        st._fake_llm.generate_llm_response.si.assert_not_called()
+        assert NodeTranscriptChunk.query.count() == 0
+
+    def test_chunk_still_processing_after_the_wait_counts_as_failed(self, st):
+        user = _user()
+        _voice_draft(user, "sess-slow", "chat")
+        self._chunk("sess-slow", "processing")
+
+        import time as real_time
+        ticks = iter(range(0, 10000, 400))
+
+        class FakeTime:
+            sleep = staticmethod(lambda *_: None)
+            monotonic = staticmethod(lambda: next(ticks))
+
+            def __getattr__(self, name):
+                return getattr(real_time, name)
+
+        with patch.object(st, "time", FakeTime()):
+            self._finalize(st, user, "sess-slow")
+
+        draft = Draft.query.filter_by(session_id="sess-slow").one()
+        assert draft.streaming_warning == st.VOICE_REPLY_SKIPPED_NOT_TRANSCRIBED
+        entry = Node.query.one()
+        assert "failed to transcribe" in entry.get_content()
+        st._fake_llm.generate_llm_response.si.assert_not_called()
+
+    def test_some_failed_chunks_still_get_a_reply(self, st):
+        user = _user()
+        _voice_draft(user, "sess-part", "chat", text="spoken words")
+        self._chunk("sess-part", "failed", index=1)
+
+        self._finalize(st, user, "sess-part", chunks=2)
+
+        draft = Draft.query.filter_by(session_id="sess-part").one()
+        assert draft.streaming_warning is None
+        assert draft.llm_node_id is not None
+        st._fake_llm.generate_llm_response.si.assert_called_once()
