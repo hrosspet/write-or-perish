@@ -249,6 +249,7 @@ struct VoiceView: View {
             .padding(.top, 22)
             .accessibilityHint(voice.gleanAnchor != nil || voice.isGleaning
                                ? "Find today's tweets worth your time, from what you have said so far"
+                               : voice.lastEntryHasNoText ? "Glean needs a transcribed message. This one has no text."
                                : "Glean waits for Loore's reply to your last message")
             .accessibilityIdentifier("voice.glean")
             // No model picker here, as on the web (#473): a voice glean runs on the

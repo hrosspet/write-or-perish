@@ -368,7 +368,11 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
       // failed response. Only the reply was skipped: the server saved the
       // recording as an entry before it decided that (_skip_voice_reply).
       if (data.warning) {
-        if (onEntrySavedRef.current) onEntrySavedRef.current();
+        // #513: a recording with no transcribed text is saved as a failure
+        // note only (the server's "*Note: ..." line); Glean has nothing to read.
+        if (onEntrySavedRef.current) {
+          onEntrySavedRef.current({ noText: finalTranscript.trimStart().startsWith('*Note:') });
+        }
         addToast(data.warning, 8000);
         setPhase('ready');
         return;
