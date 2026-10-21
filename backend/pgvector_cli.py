@@ -30,6 +30,12 @@ def _scalar(sql, **params):
     return db.session.execute(sa.text(sql), params).scalar()
 
 
+def _size(n_bytes):
+    if n_bytes >= 1e9:
+        return f"{n_bytes / 1e9:.1f} GB"
+    return f"{n_bytes / 1e6:,.0f} MB"
+
+
 def _report():
     """Print the current state; return (extension_installed, schema_owner,
     rows_to_copy)."""
@@ -64,9 +70,8 @@ def _report():
         to_copy += rows - current
         click.echo(f"{t}: {rows:,} rows, {current:,} with a current copy,"
                    f" {rows - current:,} to copy")
-    click.echo(f"Copying adds about "
-               f"{to_copy * _BYTES_PER_COPY / 1e9:.2f} GB to the database"
-               f" ({_BYTES_PER_COPY / 1000:.1f} KB per row).")
+    click.echo(f"Copying adds about {_size(to_copy * _BYTES_PER_COPY)} to"
+               f" the database ({_BYTES_PER_COPY / 1000:.1f} KB per row).")
     return bool(installed), owner, to_copy
 
 
@@ -138,7 +143,7 @@ def _apply(owner):
         if read > copied:
             line += (f", {read - copied:,} left to the Python path (not a"
                      " finite, non-zero vector of the expected dimension)")
-        click.echo(f"{line}; the copy table is {size / 1e6:,.0f} MB.")
+        click.echo(f"{line}; the copy table takes {_size(size)}.")
     click.echo(
         f"Done in {time.monotonic() - started:.0f} s. Restart the web and"
         " worker processes (a deploy does it): each one checks for the"

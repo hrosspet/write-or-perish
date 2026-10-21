@@ -549,11 +549,15 @@ def test_pg_dropping_the_copies_falls_back_without_breaking_the_session(
     _enable(pg_app)
     assert pgvector.enabled() is True
     _drop_copies()  # the documented off switch, while processes run
+    # Pending work of the caller (e.g. the query's cost log) must survive
+    # the rollback to the savepoint.
+    _db.session.add(User(username="pending"))
 
     ranked = rank_embeddings(_basis(0), _node_rows(uid), NodeEmbedding, k=1)
     assert [nid for nid, _ in ranked] == [node.id]
     assert pgvector._state["enabled"] is False
-    assert _db.session.query(Node).count() == 2  # transaction still usable
+    _db.session.commit()  # transaction still usable
+    assert User.query.filter_by(username="pending").count() == 1
 
 
 @pg_only
