@@ -164,7 +164,8 @@ Built by `_focal_own_fields()` + tree keys added in `get_node()`.
   children: [TreeNode],            // sorted by descendant_count desc
   in_read_thread: Bool,
   read_reply_above: Bool,
-  reply_ai_usage: String           // ai_usage a new reply under this node should default to (#362)
+  reply_ai_usage: String,          // ai_usage a new reply under this node should default to (#362)
+  split_tip_id?: Int               // owner only, on an earlier part of a long entry split into a chain: its last part
 }
 ```
 
@@ -410,7 +411,7 @@ Notes: the whole subtree is returned (no depth limit, no pagination); children a
   - `model?: String` — a `SUPPORTED_MODELS` key. Absent → `resolve_chat_model` (predecessor → user preference → `LLM_NAME`). A deprecated model is silently replaced by the chat default; under a Read thread a non-read model is replaced by the read model.
   - `source_mode?: "voice" | "textmode"`.
 - Response 202: `{ message: "LLM response generation started", task_id: String (Celery id), status: "pending", node_id: Int (the NEW placeholder LLM node) }`.
-- Side effects: creates a child LLM node under `node_id` (content `"[LLM response generation pending...]"`, `node_type: "llm"`, `llm_task_status: "pending"`, inherits the parent's `privacy_level` and `ai_usage`; `ai_usage` "train" is downgraded to "chat" for read turns), enqueues `generate_llm_response`.
+- Side effects: creates a child LLM node under `node_id`, or, when `node_id` is an earlier part of a long entry split into a chain, under the chain's last part (`node_split.split_chain_tip`), so the reply reads the whole entry (content `"[LLM response generation pending...]"`, `node_type: "llm"`, `llm_task_status: "pending"`, inherits the parent's `privacy_level` and `ai_usage`; `ai_usage` "train" is downgraded to "chat" for read turns), enqueues `generate_llm_response`.
 - Errors: 403 `{"error":"You can only request an AI response on your own nodes. Reply first, then generate on your reply."}`; 400 `{"error":"Invalid source_mode: <v>"}`; 400 `{"error":"Unsupported model: <id>","supported_models":[String]}`; 410 `{"error":"Parent node not found" | "Parent node has been deleted"}`; 400 `{"error":<message>}` for a misconfigured `{user_export}`/`{ca_tweets}` placeholder or plan gate (the web toasts it); 402 spend cap; 404 (HTML).
 - Frontend: navigates to the new node with `?awaitLlm=<node_id>`; 402 → silent (banner); other errors → toast with `error`.
 - Follow-up: poll `GET /api/nodes/<node_id>/llm-status` and/or subscribe `GET /api/sse/nodes/<node_id>/llm-stream`.
@@ -506,7 +507,7 @@ Audio URLs returned by these endpoints are site-relative (`/media/...`). The web
 - Backend: routes/nodes.py:get_transcription_status
 - Auth: login + (`can_user_access_node` or admin).
 - Called from: `NodeForm.js` via `useAsyncTaskPolling` after an audio upload (default 2000 ms).
-- Response 200 (no-cache headers): `{ node_id, status: String|null, progress: Int, error: String|null, started_at: ISO|null, completed_at: ISO|null, content: String|null (only when completed), task_info: Object|null }`.
+- Response 200 (no-cache headers): `{ node_id, status: String|null, progress: Int, error: String|null, started_at: ISO|null, completed_at: ISO|null, content: String|null (only when completed), task_info: Object|null }`. Once completed, for the owner only: `tip_id` (the last part when a long transcript was split into a chain, else `node_id`), `llm_node_id?` (the reply under it), `warnings?`.
 - Errors: 403 `{"error":"Unauthorized"}`; 404 (HTML).
 
 ##### Node-level streaming transcription (unused by web; the web records through `/api/drafts/streaming/*` instead)

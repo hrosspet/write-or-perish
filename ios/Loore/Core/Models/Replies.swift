@@ -242,9 +242,11 @@ struct TTSChaptersResponse: Decodable, Sendable {
     var chapters: [Chapter]
 }
 
-/// `GET /api/nodes/<id>/transcription-status`.
+/// `GET /api/nodes/<id>/transcription-status`. `tipId` (owner, once completed)
+/// is the last part when a long transcript was split into a chain.
 struct TranscriptionStatus: Decodable, Sendable {
     var nodeId: Int?
+    var tipId: Int?
     var status: TaskStatus?
     var progress: Int
     var error: String?
@@ -253,11 +255,13 @@ struct TranscriptionStatus: Decodable, Sendable {
     enum CodingKeys: String, CodingKey {
         case status, progress, error, content
         case nodeId = "node_id"
+        case tipId = "tip_id"
     }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         nodeId = c.tolerant(.nodeId)
+        tipId = c.tolerant(.tipId)
         status = c.tolerant(.status)
         progress = c.tolerant(.progress, default: 0)
         error = c.tolerant(.error)

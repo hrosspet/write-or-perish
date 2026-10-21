@@ -148,7 +148,7 @@ def _add_imported_message_nodes(user_id, human_owner_id, parent_id,
     """
     if provenance not in PROVENANCES:
         raise ValueError(f"Unknown provenance {provenance!r}")
-    from backend.utils.node_split import split_text_at_cap
+    from backend.utils.node_split import PART_STEP, split_text_at_cap
     segments = split_text_at_cap(node_content)
     tip = None
     for j, seg in enumerate(segments):
@@ -170,7 +170,7 @@ def _add_imported_message_nodes(user_id, human_owner_id, parent_id,
         # only sanctioned way to store text.
         n.set_content(seg, dek=dek)
         if msg_created_at:
-            n.created_at = msg_created_at + timedelta(milliseconds=j)
+            n.created_at = msg_created_at + PART_STEP * j
         db.session.add(n)
         db.session.flush()
         tip = n

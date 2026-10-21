@@ -475,11 +475,12 @@ final class NodeFormModel {
         await clearAfterSend()
         app.signals.post(.nodeCreated(created.id))
 
-        // Auto-generate without Agentic Reply (Write New Entry only).
+        // Auto-generate without Agentic Reply (Write New Entry only). A long entry is
+        // saved as a chain of parts: the reply goes under the last one so it reads all of it.
         if useAutoGenerate && config.allowAgenticPrompt && config.parentId == nil && aiUsage != .off
             && !useAgenticPrompt {
             if let reply: LLMRequestResponse = try? await api.post(
-                APIPath.nodeLLM(created.id), json: .object(["source_mode": .string("textmode")])) {
+                APIPath.nodeLLM(created.tipId ?? created.id), json: .object(["source_mode": .string("textmode")])) {
                 return NodeFormResult(id: reply.nodeId, awaitLLM: reply.nodeId, tipId: created.tipId)
             }
         }
@@ -579,7 +580,7 @@ final class NodeFormModel {
         if case .finished(let status) = outcome, status.status == .completed {
             await clearAfterSend()
             uploadedFile = nil
-            onSuccess(NodeFormResult(id: status.nodeId ?? nodeId))
+            onSuccess(NodeFormResult(id: status.nodeId ?? nodeId, tipId: status.tipId))
         } else if case .finished(let status) = outcome {
             error = status.error ?? "Transcription failed"
         }
