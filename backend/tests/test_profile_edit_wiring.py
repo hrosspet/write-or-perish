@@ -922,3 +922,266 @@ def test_a_pending_merge_with_no_new_writing_still_runs(app, monkeypatch):
     assert merge.merged_profile_id == edit.id
     assert merge.parent_profile_id == rebuilt.id
     assert User.query.get(user.id).profile_pending_merge_id is None
+
+
+# ── #421: a rebuild merges every edit, not only the newest ──────────────
+
+FEB = datetime(2026, 2, 1)
+# The first correction as the update after it left it, and the second
+# edit, made on that text (_two_edit_rounds).
+UPDATE_WORDING = "FIRST CORRECTION, AS THE UPDATE LEFT IT"
+SECOND_EDIT = f"{UPDATE_WORDING}\nSECOND CORRECTION"
+
+
+def _two_edit_rounds(user):
+    """An old chain with two edit rounds. January and February chunks and
+    their integration; the user corrects the integration (FIRST, dated
+    February); an update builds on that edit (May) and is integrated; the
+    user corrects that integration (SECOND, dated May). The second edit
+    starts from the integration's text, so it carries the first correction
+    in the update's wording, not in the user's: the rebuild's first merge
+    reads the user's wording, the second merge the update's."""
+    now = datetime.utcnow()
+
+    def version(text, gen_type, cutoff, units, parent, age):
+        row = UserProfile(
+            user_id=user.id, generated_by="gpt-5.5", tokens_used=0,
+            ai_usage="chat", generation_type=gen_type,
+            source_tokens_used=units, source_data_cutoff=cutoff,
+            source_rendered_at=None if gen_type == "integration" else cutoff,
+            parent_profile_id=parent.id if parent else None,
+            created_at=now - age)
+        row.set_content(text)
+        _db.session.add(row)
+        _db.session.commit()
+        return row
+    january = version("JANUARY", "iterative", JAN, 90_000, None,
+                      timedelta(days=12))
+    february = version("FEBRUARY", "update", FEB, 180_000, january,
+                       timedelta(days=11))
+    integrated = version("WRONG GUESS", "integration", FEB, 180_000,
+                         february, timedelta(days=10, hours=23))
+    first = _edit(user, integrated, "FIRST CORRECTION",
+                  created_at=now - timedelta(days=9))
+    update = version(UPDATE_WORDING, "update", MAY, 270_000, first,
+                     timedelta(days=5))
+    integrated_again = version(UPDATE_WORDING, "integration", MAY, 270_000,
+                               update, timedelta(days=4, hours=23))
+    assert SECOND_EDIT.startswith(integrated_again.get_content())
+    second = _edit(user, integrated_again, SECOND_EDIT,
+                   created_at=now - timedelta(days=1))
+    return first, second
+
+
+def _sequence(*outputs, record=None):
+    """A stand-in output that returns ``outputs`` in turn and, before each,
+    calls ``record``."""
+    pending = list(outputs)
+
+    def next_output():
+        if record is not None:
+            record()
+        return pending.pop(0)
+    return next_output
+
+
+def test_421_a_full_rebuild_merges_every_edit_at_its_date(app, monkeypatch):
+    """Two edit rounds with an update between them: the rebuild merges the
+    first edit after the window that reaches February and the second after
+    the window that reaches May, each with main's note, and goes on from
+    each merge. The pending merge stays the newest edit until it is
+    merged."""
+    import backend.tasks.exports as exports
+    user = _user("everyedit", profile_needs_full_regen=True)
+    first, second = _two_edit_rounds(user)
+    assert exports.carried_user_versions(second) == [first.id, second.id]
+    _writing(user)
+    monkeypatch.setattr(exports, "should_continue_chain",
+                        lambda user, profile: True)
+    pending_at_merge = []
+    seen = _stand_in(
+        monkeypatch, exports,
+        [_window("2019 ARCHIVE", latest=datetime(2019, 12, 1)),
+         _window("WINTER WRITING", latest=datetime(2026, 3, 1)),
+         _window("SPRING WRITING", latest=datetime(2026, 5, 15)),
+         _window("JUNE WRITING", latest=JUN)],
+        [360_000, 270_000, 180_000, 90_000, 0],
+        ["REBUILT 2019", "REBUILT WINTER", "REBUILT SPRING", "REBUILT JUNE"],
+        merge_output=_sequence(
+            "MERGED FIRST", "MERGED SECOND",
+            record=lambda: pending_at_merge.append(
+                User.query.get(user.id).profile_pending_merge_id)))
+
+    exports._do_initial_generation(MagicMock(), user, "gpt-5.5", 32_000, {})
+
+    assert [kind for kind, _ in seen] == [
+        "chunk", "chunk", "merge", "chunk", "merge", "chunk", "integration"]
+    assert "CORRECTION" not in seen[0][1] + seen[1][1]
+    first_merge, second_merge = _texts(seen[2][1]), _texts(seen[4][1])
+    assert "REBUILT WINTER" in first_merge[0]
+    assert first_merge[1] == ("Profile No. 2\n- start to 2026-02-01\n\n"
+                              f"{MAIN_NOTE}\n\nFIRST CORRECTION")
+    assert _existing_profile(seen[3][1]) == "MERGED FIRST"
+    assert "REBUILT SPRING" in second_merge[0]
+    assert second_merge[1] == (
+        "Profile No. 2\n- start to 2026-05-01\n\n"
+        f"{MAIN_NOTE}\n\n{SECOND_EDIT}")
+    assert _existing_profile(seen[5][1]) == "MERGED SECOND"
+    assert pending_at_merge == [second.id, second.id]
+    merged_first = UserProfile.query.filter_by(merged_profile_id=first.id).one()
+    merged_second = UserProfile.query.filter_by(
+        merged_profile_id=second.id).one()
+    spring = UserProfile.query.get(merged_second.parent_profile_id)
+    assert spring.parent_profile_id == merged_first.id
+    # The integration: 4 chunks, the 2 merges, the prompt.
+    assert len(_texts(seen[6][1])) == 7
+    assert User.query.get(user.id).profile_pending_merge_id is None
+
+
+def test_421_saves_with_no_model_step_between_are_one_merge(app):
+    """Two saves in a row (the second an edit of the first), and an edit of
+    the version a rebuild's merge saved: the later save holds the earlier
+    text as the user left it, so only the latest is merged."""
+    import backend.tasks.exports as exports
+    user = _user("twosaves")
+    _tip, integration = _finished_chain(user)
+    now = datetime.utcnow()
+    first = _edit(user, integration, "FIRST SAVE",
+                  created_at=now - timedelta(hours=3))
+    second = _edit(user, first, "SECOND SAVE",
+                   created_at=now - timedelta(hours=2))
+
+    assert exports.carried_user_versions(second) == [second.id]
+    assert [v.id for v in exports.user_versions_to_merge(second, None)] == [
+        second.id]
+
+    rebuilt = UserProfile(user_id=user.id, generated_by="gpt-5.5",
+                          tokens_used=0, generation_type="initial",
+                          source_tokens_used=90_000, source_data_cutoff=MAY,
+                          source_rendered_at=MAY,
+                          created_at=now - timedelta(hours=1, minutes=30))
+    rebuilt.set_content("REBUILT")
+    _db.session.add(rebuilt)
+    _db.session.flush()
+    merge = UserProfile(user_id=user.id, generated_by="gpt-5.5",
+                        tokens_used=0, generation_type="initial",
+                        source_tokens_used=90_000, source_data_cutoff=MAY,
+                        source_rendered_at=MAY, parent_profile_id=rebuilt.id,
+                        merged_profile_id=second.id,
+                        created_at=now - timedelta(hours=1))
+    merge.set_content("MERGED")
+    _db.session.add(merge)
+    _db.session.commit()
+    edit_of_merge = _edit(user, merge, "THIRD SAVE")
+
+    assert exports.carried_user_versions(merge) == [second.id]
+    assert exports.carried_user_versions(edit_of_merge) == [edit_of_merge.id]
+
+
+def test_421_a_re_tip_between_the_edits_merges_only_the_later_one(app):
+    """An import dated between the two edits re-tips the chain at the
+    first edit: the regenerated chain holds it, and only the second edit
+    is merged."""
+    import backend.tasks.exports as exports
+    user = _user("retipbetween")
+    first, second = _two_edit_rounds(user)
+
+    action, copy = exports.revert_profile_for_import(
+        user.id, datetime(2026, 4, 1))
+    _db.session.commit()
+
+    assert action == "revert" and copy.parent_profile_id == first.id
+    assert User.query.get(user.id).profile_pending_merge_id == second.id
+    assert [v.id for v in exports.user_versions_to_merge(second, copy)] == [
+        second.id]
+
+
+def test_421_a_re_tip_before_both_edits_merges_each_at_its_date(
+        app, monkeypatch):
+    """An import dated before both edits re-tips the chain at the January
+    chunk: the regenerated chain merges the first edit after the window
+    that reaches February and the second after the window that reaches
+    May."""
+    import backend.tasks.exports as exports
+    user = _user("retipbefore")
+    first, second = _two_edit_rounds(user)
+
+    action, copy = exports.revert_profile_for_import(
+        user.id, datetime(2026, 1, 15))
+    _db.session.commit()
+    assert action == "revert"
+    assert User.query.get(user.id).profile_pending_merge_id == second.id
+
+    _writing(user, at=datetime(2026, 1, 16))
+    monkeypatch.setattr(exports, "should_continue_chain",
+                        lambda user, profile: True)
+    seen = _stand_in(
+        monkeypatch, exports,
+        [_window("IMPORTED WINTER", latest=datetime(2026, 3, 1)),
+         _window("SPRING", latest=datetime(2026, 5, 15))],
+        [180_000, 90_000, 0], ["REGENERATED WINTER", "REGENERATED SPRING"],
+        merge_output=_sequence("MERGED FIRST", "MERGED SECOND"))
+    exports._do_incremental_update(
+        MagicMock(), user, "gpt-5.5", copy.id, 200_000, 32_000, {})
+
+    assert [kind for kind, _ in seen] == [
+        "chunk", "merge", "chunk", "merge", "integration"]
+    assert _texts(seen[1][1])[1].endswith(f"{MAIN_NOTE}\n\nFIRST CORRECTION")
+    assert _texts(seen[3][1])[1].endswith(f"{MAIN_NOTE}\n\n{SECOND_EDIT}")
+    assert UserProfile.query.filter_by(
+        merged_profile_id=first.id).one().generation_type == "update"
+    assert User.query.get(user.id).profile_pending_merge_id is None
+
+
+def test_421_edits_newer_than_all_of_the_writing_are_the_last_steps(
+        app, monkeypatch):
+    """The writing after January was deleted, so both edits are newer
+    than all of it: after the single chunk, the run merges the first edit,
+    then the second, and the second merge is the final version (no
+    integration for a single chunk)."""
+    import backend.tasks.exports as exports
+    user = _user("laststeps", profile_needs_full_regen=True)
+    first, second = _two_edit_rounds(user)
+    _writing(user, units=6_000, at=datetime(2026, 1, 10))
+    seen = _stand_in(
+        monkeypatch, exports,
+        [_window("JANUARY WRITING", latest=datetime(2026, 1, 10),
+                 units=6_000)],
+        [6_000], ["REBUILT JANUARY"],
+        merge_output=_sequence("MERGED FIRST", "MERGED SECOND"))
+
+    result = exports._do_initial_generation(
+        MagicMock(), user, "gpt-5.5", 32_000, {})
+
+    assert [kind for kind, _ in seen] == ["chunk", "merge", "merge"]
+    final = UserProfile.query.get(result["profile_id"])
+    assert final.merged_profile_id == second.id
+    assert final.generation_type == "initial"
+    before = UserProfile.query.get(final.parent_profile_id)
+    assert before.merged_profile_id == first.id
+    assert UserProfile.query.get(before.parent_profile_id).merged_profile_id \
+        is None
+    assert User.query.get(user.id).profile_pending_merge_id is None
+
+
+def test_421_a_revert_past_the_second_edit_keeps_the_first(app):
+    """The user reverts to the version they made their second edit on: the
+    first edit is in that version's lineage, so a rebuild still merges it;
+    the second is not merged."""
+    import backend.tasks.exports as exports
+    user = _user("revertsecond")
+    first, second = _two_edit_rounds(user)
+    edited = UserProfile.query.get(second.parent_profile_id)
+    revert = UserProfile(user_id=user.id, generated_by=edited.generated_by,
+                         tokens_used=0, generation_type="revert",
+                         source_tokens_used=edited.source_tokens_used,
+                         source_data_cutoff=edited.source_data_cutoff,
+                         parent_profile_id=edited.id)
+    revert.set_content(edited.get_content())
+    _db.session.add(revert)
+    _db.session.commit()
+
+    assert exports.profile_update_base(user.id).id == revert.id
+    assert exports.plan_user_version_merge(user, revert).id == first.id
+    assert [v.id for v in exports.user_versions_to_merge(first, None)] == [
+        first.id]

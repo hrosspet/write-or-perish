@@ -140,8 +140,11 @@ class User(db.Model, UserMixin):
     profile_needs_full_regen = db.Column(db.Boolean, nullable=False, default=False)
     # The version the user wrote that a rebuild or an import's re-tip in
     # progress still has to merge into the new chain at its date (#183;
-    # tasks/exports.plan_user_version_merge). Cleared by the merge and by
-    # any version the user saves. A plain id, not a foreign key.
+    # tasks/exports.plan_user_version_merge): the newest one the old chain
+    # carried. The older ones it carries are merged before it, each at its
+    # date (#421; tasks/exports.user_versions_to_merge). Cleared by the
+    # merge of this version and by any version the user saves. A plain id,
+    # not a foreign key.
     profile_pending_merge_id = db.Column(db.Integer, nullable=True)
 
     # --- Profile-generation batch pipeline (issue #173, Part A) ---

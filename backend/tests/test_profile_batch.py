@@ -2198,6 +2198,66 @@ def test_183_batch_merge_after_an_edit_saves_nothing(app, monkeypatch):
     assert APICostLog.query.filter_by(user_id=u.id).count() == 1
 
 
+def test_421_batch_full_rebuild_merges_every_edit_at_its_date(
+        app, monkeypatch):
+    """#421 on the batch path: two edit rounds with an update between them.
+    The rebuild merges the first edit after the window that reaches
+    February and the second after the window that reaches May, one merge
+    request each, oldest first, and integrates the chain with both."""
+    _wide_window(app)
+    u = _user()
+    now = datetime.utcnow()
+    feb = datetime(2026, 2, 1)
+
+    def version(gen_type, cutoff, parent, age):
+        p = _prev_profile(u, cutoff, source_tokens=100_000, gen_type=gen_type)
+        p.parent_profile_id = parent.id if parent else None
+        p.created_at = now - age
+        db.session.commit()
+        return p
+    chunk = version("iterative", feb, None, timedelta(days=12))
+    integration = version("integration", feb, chunk, timedelta(days=11))
+    first = _user_edit(u, integration, "FIRST CORRECTION")
+    first.created_at = now - timedelta(days=10)
+    # The second edit starts from the integration's text: the first
+    # correction in the update's wording.
+    wording = "FIRST CORRECTION, AS THE UPDATE LEFT IT"
+    update = version("update", MAY183, first, timedelta(days=5))
+    integration2 = version("integration", MAY183, update, timedelta(days=4))
+    for p in (update, integration2):
+        p.set_content(wording)
+    second = _user_edit(u, integration2, f"{wording}\nSECOND CORRECTION")
+    second.created_at = now - timedelta(days=1)
+    u.profile_needs_full_regen = True
+    db.session.commit()
+    y2019, march, spring = (datetime(2019, 12, 1), datetime(2026, 3, 1),
+                            datetime(2026, 5, 15))
+    _windows183(monkeypatch,
+                {None: 270_000, y2019: 180_000, march: 90_000, spring: 0}, {
+                    None: _chunk("2019 ARCHIVE", latest=y2019),
+                    y2019: _chunk("WINTER WRITING", latest=march),
+                    march: _chunk("SPRING WRITING", latest=spring)})
+    monkeypatch.setattr(pb._exports, "should_continue_chain",
+                        lambda user, profile: True)
+
+    steps = _run_steps(u, monkeypatch, pb._build_next_profile_request(u), {
+        "chunk": "REBUILT", "merge": "MERGED", "integration": "FINAL"})
+
+    assert [s["meta"]["kind"] for s in steps] == [
+        "chunk", "chunk", "merge", "chunk", "merge", "integration"]
+    assert [steps[2]["meta"]["merged_profile_id"],
+            steps[4]["meta"]["merged_profile_id"]] == [first.id, second.id]
+    note = pb._exports.USER_WRITTEN_PROFILE_NOTE
+    assert _texts183(steps[2])[1] == ("Profile No. 2\n- start to 2026-02-01\n\n"
+                                      f"{note}\n\nFIRST CORRECTION")
+    assert _texts183(steps[4])[1].endswith(
+        f"{note}\n\n{wording}\nSECOND CORRECTION")
+    assert len({s["request"]["custom_id"] for s in steps}) == len(steps)
+    # 3 chunks, the 2 merges, the prompt.
+    assert len(_texts183(steps[5])) == 6
+    assert User.query.get(u.id).profile_pending_merge_id is None
+
+
 def test_profile_refusal_stop_is_reported_as_refused(app, monkeypatch):
     """#470: the second refusal stops the job and the report says
     "refused by the model", not "output cut off"."""

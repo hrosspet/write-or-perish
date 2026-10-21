@@ -305,9 +305,10 @@ def _build_next_profile_request(user, allow_chunk=True, chunk_num=1):
     cutoff = prev.source_data_cutoff if prev else None
     cumulative = (prev.source_tokens_used or 0) if prev else 0
 
-    # #183, option 2: a from-scratch build merges the user's version the
-    # current chain carries into the new chain at its date; a chain that
-    # has reached that date merges it before anything else.
+    # #183, option 2: a from-scratch build merges the user's versions the
+    # current chain carries into the new chain, each at its date and the
+    # oldest first (#421); a chain that has reached the next one's date
+    # merges it before anything else, one merge per request.
     if prev is None and _exports.plan_user_version_merge(
             user, _exports.profile_update_base(user.id)) is not None:
         db.session.commit()
@@ -413,9 +414,9 @@ def _build_next_profile_request(user, allow_chunk=True, chunk_num=1):
                 },
             }
 
-    # The run ends before the chain reached the date of the user's version
-    # it must merge (the version is newer than all of the writing): the
-    # merge is the run's last step (#183).
+    # The run ends before the chain reached the date of the user's versions
+    # it must merge (they are newer than all of the writing): the merges
+    # are the run's last steps, oldest first, one per request (#183, #421).
     if pending is not None:
         return _merge_request(user, prev, pending, provider, api_model,
                               model_id, chunk_num)
