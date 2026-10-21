@@ -247,6 +247,10 @@ function App() {
           <Route path="/textmode" element={<ProtectedRoute><WritePage /></ProtectedRoute>} />
           {/* Profile and Todo */}
           <Route path="/profile" element={<ProtectedRoute><ProfilePage /></ProtectedRoute>} />
+          {/* Profile sits beside the other artifacts in the nav, so its
+              /artifacts/<kind> spelling works too (#275). /profile stays
+              canonical: old links, emails and the app keep using it. */}
+          <Route path="/artifacts/profile" element={<Navigate to="/profile" replace />} />
           <Route path="/todo" element={<ProtectedRoute><TodoPage /></ProtectedRoute>} />
           {/* Log (renamed from feed) */}
           <Route path="/log" element={<ProtectedRoute><Log onSearchClick={() => openSearch('archive')} /></ProtectedRoute>} />
