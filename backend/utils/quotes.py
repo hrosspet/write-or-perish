@@ -594,6 +594,19 @@ class ExportQuoteResolver:
             'content': content
         }
 
+    def add_tombstone(self, node_id: int, created_at: 'datetime',
+                      token_count: int):
+        """Add a deleted node, which the export shows as a placeholder
+        line (#525). It counts *token_count* (the placeholder's size) and
+        has no quotes to resolve. Its text is never read, and it is not
+        cached: a quote of it in another entry is looked up like a quote
+        of any deleted node, which is never embedded."""
+        self.entries.append(NodeEntry(
+            node_id=node_id,
+            created_at=created_at,
+            base_tokens=token_count,
+        ))
+
     def _artifact_is_own(self, artifact_type, artifact_id):
         """Whether the pinned version belongs to the export's user."""
         from backend.utils.context_artifacts import pinned_row
