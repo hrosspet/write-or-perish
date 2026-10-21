@@ -313,8 +313,21 @@ final class VoiceTurnController {
         flowTask = Task { [weak self] in
             guard let self else { return }
             let sid: String
+            var firstChunkIndex = draft?.chunkCount ?? 0
             if let draft {
                 sid = draft.sessionId
+                // #388: this phone becomes the session's writer before the mic
+                // opens, so the device that recorded it before is refused from
+                // now on. The claim names the index to continue from.
+                do {
+                    let claim = try await self.backend.claimSession(sessionId: sid)
+                    if let next = claim.nextChunkIndex { firstChunkIndex = next }
+                } catch {
+                    guard gen == self.generation else { return }
+                    self.failStart((error as? APIError)?.userMessage(fallback: Self.claimFailedMessage)
+                                   ?? Self.claimFailedMessage)
+                    return
+                }
             } else {
                 do {
                     // Its own task: leaving the screen cancels this flow, and a
@@ -356,7 +369,7 @@ final class VoiceTurnController {
             self.sessionId = sid
             do {
                 try self.recorder.start(sessionId: sid, uploadURL: self.backend.uploadURL(sessionId: sid),
-                                        firstChunkIndex: draft?.chunkCount ?? 0,
+                                        firstChunkIndex: firstChunkIndex,
                                         elapsedOffset: draft.map { Double($0.chunkCount) * 15 } ?? 0)
             } catch {
                 if draft == nil { await self.backend.discard(sessionId: sid) }
@@ -550,6 +563,11 @@ final class VoiceTurnController {
                                                 entry: self.entry)
             } catch let error as APIError where Self.isAlreadyFinalizing(error) {
                 // A retried finalize whose first answer was lost (C §8.1).
+            } catch let error as APIError where error.code == RecordingDevice.takenOverCode {
+                // #388: another device continued the session while this phone held it.
+                guard gen == self.generation else { return }
+                self.endTurnWithError(RecordingDevice.takenOverMessage, sound: true)
+                return
             } catch {
                 guard gen == self.generation else { return }
                 self.endTurnWithError("Your recording could not be sent. It is kept on the server: open Voice again to continue or discard it.", sound: true)
@@ -562,6 +580,10 @@ final class VoiceTurnController {
             await self.waitForTranscript(sid, gen)
         }
     }
+
+    /// "Continue recording" could not claim the session (#388) and the server
+    /// gave no reason (no connection).
+    static let claimFailedMessage = "The recording could not be continued. Please try again."
 
     /// Stop found chunks the server does not have (no connection): nothing is finalized.
     static let missingChunksMessage = "Part of your recording hasn't reached Loore yet (no connection?). It is kept on this phone and uploads when you're back online: then open Voice to continue or discard it."

@@ -7,6 +7,9 @@ import Foundation
 @MainActor
 protocol VoiceBackend: AnyObject {
     func startSession(parentId: Int?, aiUsage: String) async throws -> StreamingInitResponse
+    /// `POST …/claim` before "Continue recording" (#388): this phone becomes the
+    /// session's writer, and the device that recorded it before is refused.
+    func claimSession(sessionId: String) async throws -> StreamingClaimResponse
     func uploadURL(sessionId: String) -> URL
     /// `POST …/finalize`. A 400 "not in recording state" (a retried finalize
     /// whose first answer was lost) must be treated as success by the caller.
@@ -165,9 +168,15 @@ final class LiveVoiceBackend: VoiceBackend {
             "privacy_level": .string("private"),
             "ai_usage": .string(aiUsage),
             "label": .string("Voice"),
+            "device_key": .string(RecordingDevice.key),
         ]
         body["parent_id"] = parentId.map { .int($0) } ?? .null
         return try await api().post(APIPath.streamingInit, json: .object(body))
+    }
+
+    func claimSession(sessionId: String) async throws -> StreamingClaimResponse {
+        try await api().post(APIPath.streamingClaim(sessionId),
+                             json: .object(["device_key": .string(RecordingDevice.key)]))
     }
 
     func uploadURL(sessionId: String) -> URL {
@@ -175,7 +184,8 @@ final class LiveVoiceBackend: VoiceBackend {
     }
 
     func finalize(sessionId: String, totalChunks: Int, parentId: Int?, model: String?, entry: String?) async throws {
-        var body: [String: JSONValue] = ["total_chunks": .int(totalChunks), "label": .string("Voice")]
+        var body: [String: JSONValue] = ["total_chunks": .int(totalChunks), "label": .string("Voice"),
+                                         "device_key": .string(RecordingDevice.key)]
         if let parentId { body["parent_id"] = .int(parentId) }
         if let model { body["model"] = .string(model) }
         if let entry { body["entry"] = .string(entry) }

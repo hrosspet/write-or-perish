@@ -30,6 +30,14 @@ final class FakeVoiceBackend: VoiceBackend {
         return try startResult.get()
     }
 
+    /// `next_chunk_index` nil: the turn continues from the listed chunk count.
+    var claimResult: Result<StreamingClaimResponse, Error> = .success(StreamingClaimResponse(nextChunkIndex: nil))
+    var claimed: [String] = []
+    func claimSession(sessionId: String) async throws -> StreamingClaimResponse {
+        claimed.append(sessionId)
+        return try claimResult.get()
+    }
+
     func uploadURL(sessionId: String) -> URL { URL(string: "http://test/\(sessionId)/audio-chunk")! }
 
     func finalize(sessionId: String, totalChunks: Int, parentId: Int?, model: String?, entry: String?) async throws {
@@ -1262,6 +1270,40 @@ final class VoiceTurnTests: XCTestCase {
         XCTAssertEqual(recorder.calls, ["start old from 4"])
         XCTAssertFalse(backend.log.contains { $0.hasPrefix("init") })
         XCTAssertEqual(turn.threadParentId, 9)
+        XCTAssertEqual(backend.claimed, ["old"])
+    }
+
+    // #388: the claim names where the continuation starts (a chunk stored
+    // since the listing, or a hole left by a failed upload).
+    func testResumingContinuesFromTheIndexTheClaimNames() async throws {
+        backend.claimResult = .success(StreamingClaimResponse(nextChunkIndex: 6))
+        let draft = try decode(InterruptedDraft.self,
+            #"{"id":3,"session_id":"old","parent_id":9,"label":"Voice","content":"","chunk_count":4,"has_stored_chunks":true,"streaming_mime_type":"audio/mp4"}"#)
+        turn.resumeInterrupted(draft)
+        await wait("recording") { turn.state == .recording }
+        XCTAssertEqual(recorder.calls, ["start old from 6"])
+    }
+
+    // #388: another device is still recording it: the mic never opens.
+    func testARefusedClaimDoesNotRecord() async throws {
+        let body = ServerErrorBody(error: "This recording is still in progress in another tab or on another device.",
+                                   code: "session_live")
+        backend.claimResult = .failure(APIError.server(status: 409, body: body))
+        let draft = try decode(InterruptedDraft.self,
+            #"{"id":3,"session_id":"old","chunk_count":4,"streaming_mime_type":"audio/mp4"}"#)
+        turn.resumeInterrupted(draft)
+        await wait("back to idle") { turn.state == .idle }
+        XCTAssertEqual(recorder.calls, [])
+        XCTAssertEqual(notices.toasts, ["This recording is still in progress in another tab or on another device."])
+    }
+
+    // #388: the session was continued elsewhere while this phone held it.
+    func testATakenOverFinalizeSaysTheRecordingContinuedElsewhere() async throws {
+        backend.finalizeError = APIError.server(status: 409,
+                                                body: ServerErrorBody(error: "x", code: RecordingDevice.takenOverCode))
+        await recordAndStop()
+        await wait("ended") { turn.state == .idle }
+        XCTAssertEqual(notices.toasts.last, RecordingDevice.takenOverMessage)
     }
 
     func testWebMDraftCannotBeResumedNatively() throws {

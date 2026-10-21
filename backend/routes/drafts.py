@@ -16,6 +16,10 @@ from backend.utils.audio_storage import (
 )
 from backend.utils.encryption import encrypt_file_atomically
 from backend.utils.client_platform import request_client
+from backend.utils.recording_device import (
+    claim_session, is_taken_over, is_taken_over_locked, request_device_key,
+    taken_over_response, valid_device_key,
+)
 from backend.utils.llm_nodes import (
     AIUsageRefused, ReadOnlyModelRefused, ai_usage_refused_response,
     pick_model_for_generation, voice_turn_refusal,
@@ -614,6 +618,7 @@ def init_streaming():
         "privacy_level": "private",  // optional
         "ai_usage": "none",  // optional
         "label": "Voice",  // optional
+        "device_key": "...",  // optional - the recording device (#388)
     }
 
     Returns: { "session_id": "uuid", "draft_id": 456 }
@@ -626,6 +631,11 @@ def init_streaming():
     err = _recording_label_error(label)
     if err is not None:
         return err
+    # The recording device's key (utils/recording_device): none from a
+    # client older than #388.
+    device_key = data.get("device_key")
+    if device_key is not None and not valid_device_key(device_key):
+        return jsonify({"error": "Invalid device_key"}), 400
     parent_id = data.get("parent_id")
     err = _live_parent_error(parent_id)
     if err is not None:
@@ -656,6 +666,7 @@ def init_streaming():
         privacy_level=privacy_level,
         ai_usage=ai_usage,
         streaming_heartbeat_at=datetime.utcnow(),
+        streaming_device_key=device_key,
     )
     draft.set_content("")  # Will be populated as chunks are transcribed
     db.session.add(draft)
@@ -675,6 +686,78 @@ def init_streaming():
         "draft_id": draft.id,
         "sse_url": f"/api/sse/drafts/{session_id}/transcription-stream"
     }), 201
+
+
+@drafts_bp.route("/streaming/<session_id>/claim", methods=["POST"])
+@login_required
+def claim_streaming(session_id):
+    """
+    This device continues an interrupted recording ("Continue recording",
+    #388). Its key becomes the session's writer: the device that recorded
+    the session before gets 409 session_taken_over on its next chunk,
+    finalize or transcription stream, instead of recording into it too.
+    The claim stamps the session alive (#320), so it is no longer offered
+    for recovery elsewhere.
+
+    409 session_live while another device or tab is recording the session,
+    400 session_not_active once it is no longer recording, 404
+    session_not_found. The same device may claim again (a retried claim).
+
+    Request body: { "device_key": "..." }
+
+    Returns: { "session_id", "draft_id", "next_chunk_index" }:
+    next_chunk_index is one past the highest chunk the server has. The
+    continuing recorder numbers from there, not from the listed
+    chunk_count: a hole left by a failed upload makes the count too small,
+    and a chunk stored since the listing makes it stale; either way its
+    first chunk would reuse an index and be dropped as a duplicate.
+    """
+    data = request.get_json(silent=True) or {}
+    device_key = data.get("device_key")
+    if not valid_device_key(device_key):
+        return jsonify({"error": "Missing or invalid device_key"}), 400
+
+    # Locked: a keyed chunk upload being stored now finishes first, so the
+    # count below includes it (recording_device.is_taken_over_locked).
+    draft = Draft.query.filter_by(
+        session_id=session_id,
+        user_id=current_user.id,
+    ).with_for_update().first()
+    if not draft:
+        return jsonify({
+            "error": "Streaming session not found",
+            "code": "session_not_found",
+        }), 404
+    if draft.streaming_status != "recording":
+        return jsonify({
+            "error": "This recording has already ended.",
+            "code": "session_not_active",
+        }), 400
+    if session_is_live(draft) and draft.streaming_device_key != device_key:
+        return jsonify({
+            "error": ("This recording is still in progress in another tab "
+                      "or on another device."),
+            "code": "session_live",
+        }), 409
+
+    highest = db.session.query(
+        db.func.max(NodeTranscriptChunk.chunk_index)
+    ).filter(NodeTranscriptChunk.session_id == session_id).scalar()
+    next_chunk_index = 0 if highest is None else highest + 1
+
+    claim_session(draft, device_key)
+    db.session.commit()
+
+    current_app.logger.info(
+        f"Streaming session {session_id} claimed "
+        f"(user: {current_user.id}, next chunk: {next_chunk_index})"
+    )
+
+    return jsonify({
+        "session_id": session_id,
+        "draft_id": draft.id,
+        "next_chunk_index": next_chunk_index,
+    }), 200
 
 
 def _chunk_already_uploaded(chunk_index, chunk):
@@ -700,6 +783,8 @@ def upload_streaming_chunk(session_id):
     - mime_type: optional, family-only or codec-qualified MIME of the
       chunk (e.g. 'audio/webm', 'audio/mp4;codecs=mp4a.40.2'). Defaults
       to 'audio/webm' for backward compatibility with pre-MP4 frontends.
+    - device_key: optional, the recording device's key (#388); 409
+      session_taken_over when another device continued the session.
 
     Returns: { "chunk_index": 0, "task_id": "celery-task-id" }
     """
@@ -717,6 +802,13 @@ def upload_streaming_chunk(session_id):
             "error": "Streaming session not found",
             "code": "session_not_found",
         }), 404
+
+    # Another device continued this recording (#388): this one stops
+    # instead of uploading chunks under the indexes that device records.
+    # Before the stamp, so it never makes the session look live.
+    device_key = request_device_key()
+    if is_taken_over(draft, device_key):
+        return taken_over_response()
 
     if draft.streaming_status not in ["recording", "finalizing"]:
         return jsonify({
@@ -793,6 +885,13 @@ def upload_streaming_chunk(session_id):
     # lists those.)
     upload_path = chunk_dir / f"upload-{uuid.uuid4().hex}{ext}"
     chunk_file.save(upload_path)
+
+    # A claim may have come in since the check above. From here to the
+    # chunk's commit the draft row stays locked, so this chunk is stored
+    # before a claim counts the chunks, or refused here (#388).
+    if is_taken_over_locked(draft, device_key):
+        upload_path.unlink(missing_ok=True)
+        return taken_over_response()
 
     # Chunk 0 carries the format's init segment — the bytes that every
     # later batch needs as a prefix to remain a valid file (WebM:
@@ -976,21 +1075,29 @@ def finalize_streaming(session_id):
 
     400 for a label a recording doesn't carry (_RECORDING_LABELS), 410
     for a parent that has been deleted; the session stays as it was.
+    409 session_taken_over when another device continued the session
+    (#388): this device's total is not the session's.
 
     Request body:
     {
         "total_chunks": 5  // Total number of chunks sent
+        "device_key": "..."  // optional, the recording device (#388)
     }
 
     Returns: { "message": "Finalization started", "draft_id": 123 }
     """
+    # Locked, so a claim cannot slip in between the check below and the
+    # status change (#388).
     draft = Draft.query.filter_by(
         session_id=session_id,
         user_id=current_user.id
-    ).first()
+    ).with_for_update().first()
 
     if not draft:
         return jsonify({"error": "Streaming session not found"}), 404
+
+    if is_taken_over(draft, request_device_key()):
+        return taken_over_response()
 
     if draft.streaming_status != "recording":
         return jsonify({"error": "Streaming session is not in recording state"}), 400
@@ -1203,7 +1310,20 @@ def release_streaming(session_id):
     unmounted mid-recording): the session stops being live now, so a
     reload offers recovery at once instead of after the liveness window
     (#320). A no-op unless the session is still 'recording'.
+
+    A tab whose recording another device continued (#388) gets 409
+    session_taken_over and releases nothing: the session is that
+    device's, and released it would be offered for recovery while it
+    records.
     """
+    device_key = request_device_key()
+    if device_key is not None:
+        draft = Draft.query.filter_by(
+            session_id=session_id,
+            user_id=current_user.id,
+        ).with_for_update().first()
+        if draft is not None and is_taken_over(draft, device_key):
+            return taken_over_response()
     released = release_session(session_id, current_user.id)
     db.session.commit()
     return jsonify({"released": bool(released)}), 200

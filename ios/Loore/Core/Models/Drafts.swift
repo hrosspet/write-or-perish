@@ -102,6 +102,17 @@ struct StreamingInitResponse: Decodable, Sendable {
     }
 }
 
+/// `POST /api/drafts/streaming/<sid>/claim` (200): this phone continues an
+/// interrupted recording and is its writer from now on (#388).
+struct StreamingClaimResponse: Decodable, Sendable {
+    /// One past the highest chunk the server has: the continuation starts here.
+    var nextChunkIndex: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case nextChunkIndex = "next_chunk_index"
+    }
+}
+
 /// `POST /api/drafts/streaming/<sid>/audio-chunk`: 202 stored, or 200 "Chunk already uploaded".
 struct ChunkUploadResponse: Decodable, Sendable {
     var chunkIndex: Int?

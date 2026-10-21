@@ -723,7 +723,7 @@ A recording is a Draft row with a `session_id` (UUID string). Audio is uploaded 
       "parent_deleted"?: true, "warning"?: string } ]
   ```
 - Errors: none specific (empty list when nothing to recover).
-- Notes: `chunk_count` is the number of chunk rows, which the web client uses as the next `chunk_index` when resuming. If an earlier chunk never reached the server, that index is lower than `max(chunk_index)+1` and the first resumed chunk collides with an existing row (answered "already uploaded" and its audio is dropped). A native client should take `max(chunks[].chunk_index)+1` from `GET .../status` instead.
+- Notes: `chunk_count` is the number of chunk rows. If an earlier chunk never reached the server, it is lower than `max(chunk_index)+1`, and a resume numbered from it collides with an existing row (answered "already uploaded" and its audio is dropped). Since #388 both clients resume from the claim's `next_chunk_index` (`POST .../claim`), falling back to `chunk_count`.
 
 ##### `POST /api/drafts/streaming/init`
 - Backend: routes/drafts.py:init_streaming
@@ -736,6 +736,14 @@ A recording is a Draft row with a `session_id` (UUID string). Audio is uploaded 
     "sse_url": "/api/sse/drafts/<session_id>/transcription-stream" }
   ```
 - Errors: 402 spend cap (web: toast "record" message, back to idle, `err.spendCapped`).
+- `device_key` (#388, optional, ≤ 64 chars; 400 if invalid): the recorder's key, stored as the session's writer. The web sends one per page load, the iPhone app one per install. Chunk uploads (form field), finalize (JSON), release and the transcription SSE (query) carry it too; sent with a key that is not the writer's they get `409 {"error":…, "code":"session_taken_over"}` (SSE: event `session_taken_over`, then the stream ends). Requests without a key are not checked.
+
+##### `POST /api/drafts/streaming/<session_id>/claim` (#388)
+- Backend: routes/drafts.py:claim_streaming
+- Called from: useStreamingTranscription `resumeStreaming` ("Continue recording"), before the mic opens; iPhone `VoiceTurnController.beginRecording(resume:)`.
+- Request JSON: `{ "device_key": string }` (required).
+- Response 200: `{ "session_id", "draft_id", "next_chunk_index": int }`: one past the highest stored chunk; the continuation numbers from there. The claimer becomes the writer and the session is stamped live.
+- Errors: `409 session_live` (another device or tab records it; the same key may claim again), `400 session_not_active`, `404 session_not_found`, `400` without a key.
 
 ##### `POST /api/drafts/streaming/<session_id>/audio-chunk` (FILE UPLOAD)
 - Backend: routes/drafts.py:upload_streaming_chunk
