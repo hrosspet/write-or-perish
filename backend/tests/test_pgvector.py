@@ -361,6 +361,28 @@ def test_sweep_syncs_copies_only_when_on_and_never_fails(monkeypatch):
     rollback.assert_called_once()
 
 
+def test_a_failed_sweep_sync_turns_pgvector_off_and_logs_once(monkeypatch):
+    """After the off switch (DROP SCHEMA vec) the sweep must not report the
+    same failure every 5 minutes: one log, then Python for this process."""
+    pgvector._state["enabled"] = True
+    calls = []
+
+    def fail(**kw):
+        calls.append(kw)
+        raise RuntimeError("relation vec.node_embedding does not exist")
+
+    monkeypatch.setattr(pgvector, "sync_copies", fail)
+    monkeypatch.setattr(embedding_tasks.db.session, "rollback", MagicMock())
+    logger = MagicMock()
+    monkeypatch.setattr(embedding_tasks, "logger", logger)
+
+    embedding_tasks._sync_pgvector_copies()
+    assert pgvector._state["enabled"] is False
+    embedding_tasks._sync_pgvector_copies()
+    assert len(calls) == 1
+    assert logger.exception.call_count == 1
+
+
 # ── Postgres + pgvector (opt-in) ─────────────────────────────────────────
 
 pg_only = pytest.mark.skipif(

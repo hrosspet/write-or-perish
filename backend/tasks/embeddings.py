@@ -131,15 +131,19 @@ def _candidate_external_items(limit):
 def _sync_pgvector_copies():
     """pgvector copies (#331): what the sweep embedded is ranked in the
     database from the next search on. Nothing to do until `flask
-    pgvector-enable --apply` has run; a failure only leaves those rows
-    with the Python path for now."""
+    pgvector-enable --apply` has run. A failure (e.g. the copies were
+    dropped, the off switch) is logged once and this process stops using
+    pgvector until it restarts, as after a failed ranking; the rows it
+    embedded stay with the Python path."""
     if not pgvector.enabled():
         return
     try:
         pgvector.sync_copies(limit=pgvector.SWEEP_SYNC_LIMIT)
     except Exception:
         db.session.rollback()
-        logger.exception("pgvector copy sync failed")
+        logger.exception(
+            "pgvector copy sync failed; this process ranks in Python")
+        pgvector.turn_off()
 
 
 @celery.task(name='backend.tasks.embeddings.sweep_embeddings')

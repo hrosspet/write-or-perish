@@ -545,16 +545,24 @@ to Sentry), rolls back to a savepoint and ranks in Python until it restarts.
 
 ### Turning it off
 
-As the app's role or a superuser:
+As the app's role or a superuser, both lines in the same session:
 
 ```sql
+SET lock_timeout = '5s';
 DROP SCHEMA vec CASCADE;
 ```
 
-Running processes fall back to Python at their next search (the first one
-logs the failure above). Nothing else refers to the schema, and the space
-is freed at once. The extension can stay; `DROP EXTENSION vector;` removes
-it too.
+The drop needs an exclusive lock on the embedding tables (the copies'
+foreign keys point at them), so it waits for every running read of them,
+such as the nightly dump, and every search would queue behind it. With the
+timeout it gives up after 5 s instead: if it fails with `canceling
+statement due to lock timeout`, run both lines again a little later.
+
+Each web and worker process then logs one failure (`pgvector ranking
+failed`, or `pgvector copy sync failed` from the embedding sweep) and ranks
+in Python from then on; no restart is needed. Nothing else refers to the
+schema, and the space is freed at once. The extension can stay; `DROP
+EXTENSION vector;` removes it too.
 
 A table that has copies cannot be dropped without `CASCADE` (the copies'
 foreign keys point at `node_embedding` and `external_item_embedding`);
