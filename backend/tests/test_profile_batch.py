@@ -2637,3 +2637,109 @@ def test_rebuild_stops_after_a_merge_step_that_crosses_the_cap(
     assert u.profile_batch_attempts == 0
     assert u.profile_cap_held is True
     assert prefill_sent == []
+
+
+# ── OpenAI batches through the real collect helper (#419) ───────────────
+
+def _fake_openai_batch(monkeypatch, files, **batch):
+    """The real batch_check_and_collect against the OpenAI SDK faked at
+    its import: the batch ends as ``batch`` says, with the given files
+    (file id -> JSONL entries)."""
+    import json
+    import types
+    from types import SimpleNamespace
+    from backend.utils import llm_batch
+    client = MagicMock()
+    batch.setdefault("created_at", 1000)
+    batch.setdefault("output_file_id", None)
+    batch.setdefault("error_file_id", None)
+    client.batches.retrieve.return_value = SimpleNamespace(**batch)
+    client.files.content.side_effect = lambda fid: SimpleNamespace(
+        content="".join(json.dumps(e) + "\n" for e in files[fid]).encode())
+    fake = types.ModuleType("openai")
+    fake.OpenAI = MagicMock(return_value=client)
+    monkeypatch.setitem(sys.modules, "openai", fake)
+    monkeypatch.setattr(pb, "batch_check_and_collect",
+                        llm_batch.batch_check_and_collect)
+    return client
+
+
+def _counts(completed, failed):
+    from types import SimpleNamespace
+    return SimpleNamespace(total=completed + failed, completed=completed,
+                           failed=failed)
+
+
+def test_poll_counts_an_all_failed_openai_batch_as_a_failed_attempt_at_once(
+        app, monkeypatch):
+    """Every request failed (no output file): the first poll after the
+    batch completed counts the failed attempt and frees the user for the
+    seeder, as for any failed item. Before #419 the poll could not read
+    the batch and kept trying until the 24 h stale cutoff."""
+    u = _user()
+    prev = _prev_profile(u, datetime(2026, 5, 1))
+    job, item = _chunk_job(u, prev)
+    job.provider_key = "openai:gpt-x"
+    db.session.commit()
+    _fake_openai_batch(
+        monkeypatch, {"file-err": [{
+            "custom_id": item["custom_id"], "response": {
+                "status_code": 400, "body": {"error": {
+                    "code": "context_length_exceeded",
+                    "message": "too long"}}}, "error": None}]},
+        status="completed", completed_at=1060, error_file_id="file-err",
+        request_counts=_counts(0, 1))
+    submit = MagicMock(return_value={})
+    monkeypatch.setattr(pb, "batch_submit", submit)
+
+    pb._poll_profile_batches()
+
+    u = User.query.get(u.id)
+    assert u.profile_batch_attempts == 1
+    assert u.profile_batch_pending is False
+    assert ProfileBatchJob.query.get(job.id).status == "collected"
+    assert UserProfile.query.filter_by(parent_profile_id=prev.id).count() == 0
+    assert APICostLog.query.filter_by(user_id=u.id).count() == 0
+    submit.assert_not_called()
+
+
+def test_expired_openai_batch_step_is_saved_costed_and_counts_to_the_cap(
+        app, monkeypatch):
+    """The step finished before its batch expired: OpenAI bills it and
+    returns it, so it is saved and its cost logged on the user like any
+    collected step. That cost is what the per-user cap (#543) reads, and
+    here it crosses the cap, so the chain holds."""
+    from backend.utils.spend import current_month
+    block_email = _cap_harness(app, monkeypatch, limit=1.0)
+    u = _user(profile_force_batch=True)
+    db.session.commit()
+    _spent(u, 0.999999)
+    prev, job, submit = _mid_rebuild(monkeypatch, u)
+    job.provider_key = "openai:gpt-x"
+    db.session.commit()
+    _fake_openai_batch(
+        monkeypatch, {"file-out": [{
+            "custom_id": job.items[0]["custom_id"], "response": {
+                "status_code": 200, "body": {
+                    "choices": [{"message": {"content": "CHUNK 2"},
+                                 "finish_reason": "stop"}],
+                    "usage": {"prompt_tokens": 100_000,
+                              "completion_tokens": 10_000}}}}]},
+        status="expired", expired_at=1000 + 86400, output_file_id="file-out",
+        request_counts=_counts(1, 0))
+
+    pb._poll_profile_batches()
+
+    saved = UserProfile.query.filter_by(
+        user_id=u.id, parent_profile_id=prev.id).one()
+    assert saved.get_content().endswith("CHUNK 2")
+    step_cost = APICostLog.query.filter_by(
+        user_id=u.id, request_type="profile_batch").one()
+    assert step_cost.cost_microdollars > 0
+    u = User.query.get(u.id)
+    assert u.spend_blocked_month == current_month()
+    block_email.assert_called_once()
+    submit.assert_not_called()
+    assert u.profile_batch_attempts == 0
+    assert u.profile_cap_held is True
+    assert ProfileBatchJob.query.get(job.id).status == "collected"
