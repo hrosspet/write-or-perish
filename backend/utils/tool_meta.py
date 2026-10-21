@@ -101,7 +101,7 @@ def strip_share_fences(text):
     ### headings, which must never count as proposal headings (todo, issue,
     feedback). The card does the same (stripShareBlocks)."""
     return re.sub(
-        r'^:::share(?:[ \t]+\w+)?[ \t]*\r?\n.*?(?:^:::[ \t]*$\n?|\Z)',
+        r'^:::share(?:[ \t]+[A-Za-z]+)?[ \t]*\r?\n.*?(?:^:::[ \t]*$\n?|\Z)',
         '', text, flags=re.MULTILINE | re.DOTALL | re.IGNORECASE)
 
 

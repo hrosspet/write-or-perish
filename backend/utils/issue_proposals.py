@@ -17,6 +17,7 @@ A request that names no position files only the LAST issue, which is what
 every client did before replies could hold several.
 """
 import redis
+import requests
 from flask import current_app
 
 from backend.extensions import db
@@ -134,7 +135,7 @@ def _file_locked(origin_node, draft, username, platform, index,
                 username=username,
                 platform=platform,
             )
-        except (ValueError, RuntimeError) as e:
+        except (ValueError, RuntimeError, requests.RequestException) as e:
             # Missing configuration or GitHub's answer: neither is for
             # the user. The log keeps the type.
             # describe_exception names GitHub's HTTP status (401 vs 422)

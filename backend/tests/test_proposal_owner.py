@@ -1128,3 +1128,45 @@ def test_tool_reports_created_already_filed_and_failed_truthfully(
     assert "secret" not in summary
     text = _lc._action_result_text(result)
     assert "Already created earlier" in text and "#22" in text
+
+
+def test_a_share_type_word_with_a_digit_is_not_a_fence():
+    """The card and _SHARE_FENCE_RE take letters only as the type word, so
+    ':::share post2' is no fence and its headings count as issues."""
+    from backend.utils.tool_meta import parse_github_issues, strip_share_fences
+    text = (":::share post2\n### Issue Title\nInside\n"
+            "### Description\nBody\n:::\n")
+    assert strip_share_fences(text) == text
+    assert [i["title"] for i in parse_github_issues(text)] == ["Inside"]
+
+
+def test_a_timeout_midway_keeps_the_first_issue_and_a_retry_skips_it(
+        app, effects):
+    import requests
+    alice = _user("alice")
+    node, draft = _three_issue_proposal(alice)
+    client = _client(app, alice)
+    effects.issue.side_effect = [
+        {"url": "https://github.com/owner/repo/issues/31", "number": 31},
+        requests.ConnectTimeout("timed out talking to api.github.com")]
+
+    resp = client.post("/api/github/create-issue",
+                       json={"llm_node_id": node.id, "all": True})
+
+    assert resp.status_code == 500
+    assert "timed out" not in resp.get_json()["error"]
+    entry = _meta(node.id)[0]
+    assert [f["index"] for f in entry["filed"]] == [0]
+
+    effects.issue.reset_mock()
+    effects.issue.side_effect = [
+        {"url": "https://github.com/owner/repo/issues/32", "number": 32},
+        {"url": "https://github.com/owner/repo/issues/33", "number": 33}]
+    retry = client.post("/api/github/create-issue",
+                        json={"llm_node_id": node.id, "all": True})
+
+    assert retry.status_code == 200
+    assert [i["index"] for i in retry.get_json()["issues"]] == [1, 2]
+    titles = [c.kwargs["title"] for c in effects.issue.call_args_list]
+    assert "Record button does nothing" not in titles
+    assert Draft.query.filter_by(id=draft.id).count() == 0
