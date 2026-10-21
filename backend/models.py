@@ -1598,6 +1598,12 @@ class TTSChunk(db.Model):
     status = db.Column(db.String(20), nullable=False, default="pending")  # pending, processing, completed, failed
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     completed_at = db.Column(db.DateTime, nullable=True)
+    # What the audio was made from (tasks/tts.tts_chunk_digest): a keyed
+    # hash of the text, model, voice and chapter-end pause, so a retry
+    # keeps the audio an earlier run already made for the same text and
+    # makes only the rest (#526). Keyed with the app's secret, so it does
+    # not stand for the text by itself. None: never reused.
+    text_digest = db.Column(db.String(64), nullable=True)
 
     # Relationships
     node = db.relationship("Node", backref="tts_chunks")
