@@ -1,0 +1,43 @@
+[Unit]
+Description=Write or Perish Celery Worker (background queue)
+After=network.target redis-server.service postgresql.service
+Requires=redis-server.service
+
+# Queue split (#379): the work nobody waits for (profile builds, imports,
+# digests, batch polls, syncs, sweeps, purges; backend/celery_queues.py),
+# plus the default queue "celery": Celery's own tasks, messages queued
+# before the switch, and their retries. Together with
+# write-or-perish-celery-interactive.service it replaces
+# write-or-perish-celery.service. deploy.sh never installs this file; once
+# the unit is enabled, it keeps it current and restarts it. Switching on
+# and off: docs/RUNBOOKS.md → "Celery queue split".
+
+[Service]
+Type=forking
+User=hrosspet
+Group=hrosspet
+WorkingDirectory=/home/hrosspet/write-or-perish
+EnvironmentFile=/home/hrosspet/write-or-perish/.env.production
+PIDFile=/home/hrosspet/write-or-perish/celery-background.pid
+
+# -n: two workers on one machine need different node names. %%h reaches
+# Celery as %h, the hostname (systemd would expand a single %h itself).
+ExecStart=/bin/bash -c 'source ~/miniconda3/etc/profile.d/conda.sh && conda activate write-or-perish && celery -A backend.celery_app:celery worker -Q background,celery -n background@%%h --loglevel=info --logfile=/home/hrosspet/write-or-perish/logs/celery-background.log --pidfile=/home/hrosspet/write-or-perish/celery-background.pid --detach --concurrency=2'
+
+ExecReload=/bin/kill -s HUP $MAINPID
+
+# The same warm shutdown and 90 s drain as the interactive worker (#312).
+# A job still running after the drain is cut off, as before the split.
+ExecStop=/bin/bash /home/hrosspet/write-or-perish/scripts/celery-graceful-stop.sh $MAINPID 90
+KillMode=mixed
+TimeoutStopSec=300
+
+# The site and the interactive worker get the CPU first when both need
+# it (the backup service uses the same value).
+Nice=10
+
+Restart=on-failure
+RestartSec=10s
+
+[Install]
+WantedBy=multi-user.target

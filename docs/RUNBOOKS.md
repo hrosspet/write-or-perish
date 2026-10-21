@@ -466,3 +466,177 @@ copy of `media/2026-10-22/` by 2026-11-19, whenever you made it.
 - A deletion request cannot be honoured inside backups for up to about 29
   days (28 plus the lifecycle's lag). That is the documented window, inside
   the 30 days the terms promise, not a bug.
+
+---
+
+## Celery queue split
+
+Issue #379. By default one Celery worker (`write-or-perish-celery`, 4
+pool processes) runs every task, so a reply or a voice turn can wait behind
+profile builds and imports, and during a deploy it waits while that worker
+drains. The split runs two workers instead:
+
+| worker | unit | reads | runs |
+|---|---|---|---|
+| interactive | `write-or-perish-celery-interactive` | `interactive` | replies (text, voice, Read/Glean), the voice cache warm, transcription, TTS, the per-user spend-cap check |
+| background | `write-or-perish-celery-background` | `background`, `celery` | profile builds, recent context, intentions, digests, poll drafts, imports and pre-fills, syncs, sweeps, purges; on `celery`: Celery's own tasks and anything queued before the switch |
+
+The full table is `TASK_QUEUES` in `backend/celery_queues.py`; a test fails
+when a task is missing from it. The unit files are in `deploy/systemd/`.
+
+It is off until `CELERY_SPLIT_QUEUES=true` is in `.env.production`. Off, no
+routes are set and every task goes to the default queue `celery`, as before.
+
+What `deploy.sh` does:
+
+- No split unit enabled: what it did before the split (installs, enables
+  and restarts `write-or-perish-celery`).
+- A split unit enabled: copies both unit files from `deploy/systemd/` when
+  they changed, restarts both workers in one call (they drain at the same
+  time, 90 s each), also restarts the single worker while it still runs,
+  and no longer enables it. It never installs or enables a split unit
+  itself.
+- `CELERY_SPLIT_QUEUES` on without an enabled split unit: the deploy turns
+  red, because tasks would wait in queues nobody reads. On while the
+  single worker still runs: a warning.
+
+### Memory
+
+Before switching on, on the VM:
+
+```bash
+free -m
+# What the current worker uses (PSS counts shared pages once)
+for p in $(pgrep -f 'backend.celery_app:celery worker'); do grep '^Pss:' /proc/$p/smaps_rollup; done | awk '{s+=$2} END {printf "%.0f MB\n", s/1024}'
+pgrep -fc 'backend.celery_app:celery worker'   # 5: the main process and 4 pool processes
+```
+
+The two workers run 7 processes instead of 5 (each a main process, plus 3
+and 2 pool processes), so expect them to use about 7/5 of the figure above
+once they have run for a while. During steps 2–5 below the single worker
+runs beside them. If `available` in `free -m` is not well above that
+estimate, lower `--concurrency` in the unit files first (to 2 and 1), or
+free memory for the switch (for example `docker compose -p wop-staging
+stop`, and `start` afterwards). Change the numbers in `deploy/systemd/` in
+the repo, not in `/etc/systemd/system/`: once a split unit is enabled,
+every deploy copies the repo's files over the installed ones.
+
+Concurrency. The interactive worker's 3 pool processes are also how many
+voice turns can end at the same moment: a finishing voice turn holds one
+process while it waits (up to 10 minutes) for its last chunks, and their
+transcription needs another. When every process is held by a waiting
+turn, the transcriptions wait until those turns time out. Before the split
+the limit was 4 minus the background jobs running at that moment; with
+memory to spare, 4 interactive processes keep it at 4. The background
+worker's 2 processes let one long job (an import, an export, the Community
+Archive download) run while the every-minute polls go on.
+
+### Switching on
+
+The order matters: every queue gets a reader before any task is routed to
+it, and the single worker stops only once nothing new reaches its queue
+that the background worker does not also read. Run in `~/write-or-perish`:
+
+1. **Check the code is deployed:** `grep -c celery_queues backend/celery_app.py`
+   prints a number above 0.
+2. **Install and start both workers.** Nothing is routed to their queues
+   yet; the background worker shares the default queue with the single
+   worker.
+
+   ```bash
+   sudo cp deploy/systemd/write-or-perish-celery-interactive.service deploy/systemd/write-or-perish-celery-background.service /etc/systemd/system/
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now write-or-perish-celery-interactive write-or-perish-celery-background
+   systemctl is-active write-or-perish-celery-interactive write-or-perish-celery-background
+   ```
+
+3. **Turn the routing on** (check there is no other `CELERY_SPLIT_QUEUES`
+   line first):
+
+   ```bash
+   grep -n CELERY_SPLIT_QUEUES .env.production
+   echo 'CELERY_SPLIT_QUEUES=true' >> .env.production
+   ```
+
+4. **Restart every process that queues tasks**, so each reads the setting:
+   both new workers (a voice turn queues its reply from a worker), beat
+   (with the schedule-file cleanup `deploy.sh` does) and the site. The site
+   needs a full restart, a few seconds of 502s: a reload does not re-read
+   the env file.
+
+   ```bash
+   sudo systemctl restart write-or-perish-celery-interactive write-or-perish-celery-background
+   sudo systemctl stop write-or-perish-celery-beat && rm -f celerybeat-schedule celerybeat-schedule.* celery-beat.pid && sudo systemctl start write-or-perish-celery-beat
+   sudo systemctl restart write-or-perish
+   ```
+
+5. **Stop the single worker.** Its warm shutdown finishes what it is
+   running (up to 90 s) and puts what it had reserved back on the default
+   queue, which the background worker reads.
+
+   ```bash
+   sudo systemctl disable --now write-or-perish-celery
+   ```
+
+6. **Check** that each worker reads its queues, the queues do not grow, a
+   reply runs on the interactive worker, and memory is fine:
+
+   ```bash
+   source ~/miniconda3/etc/profile.d/conda.sh && conda activate write-or-perish
+   celery -A backend.celery_app:celery inspect active_queues
+   redis-cli llen interactive; redis-cli llen background; redis-cli llen celery
+   # send a reply on the site, then:
+   grep generate_llm_response logs/celery-interactive.log | tail -3
+   tail -5 logs/celery-background.log   # the every-minute batch polls
+   free -m
+   ```
+
+   The next deploy's log lists `Celery workers:
+   write-or-perish-celery-interactive write-or-perish-celery-background`.
+
+### Switching off
+
+The same steps in reverse. The two workers keep reading their queues until
+those are empty, so nothing is left in a queue nobody reads:
+
+1. Remove the setting and restart the processes that queue tasks. From
+   then on every new task goes to the default queue, which the background
+   worker reads:
+
+   ```bash
+   sed -i '/^CELERY_SPLIT_QUEUES=/d' .env.production
+   sudo systemctl restart write-or-perish-celery-interactive write-or-perish-celery-background
+   sudo systemctl stop write-or-perish-celery-beat && rm -f celerybeat-schedule celerybeat-schedule.* celery-beat.pid && sudo systemctl start write-or-perish-celery-beat
+   sudo systemctl restart write-or-perish
+   ```
+
+2. Start the single worker: `sudo systemctl enable --now write-or-perish-celery`.
+3. Stop the two workers once `redis-cli llen interactive` and
+   `redis-cli llen background` stay at 0 and
+   `celery -A backend.celery_app:celery inspect active` shows no import
+   running:
+
+   ```bash
+   sudo systemctl disable --now write-or-perish-celery-interactive write-or-perish-celery-background
+   ```
+
+   A task a stopping worker still held goes back to its queue, which
+   nobody reads any more. These recover on their own: a Read's batch poll
+   (it re-queues itself every 2 minutes; the 10-minute
+   `resume_stuck_feed_batches` sweep restarts it on the default queue),
+   profile seeds (the hourly seeder), digests (the nightly sweep) and
+   purges (the every-minute check). An import stopped there stays stopped,
+   which is why step 3 waits for imports to finish.
+
+### Docker Compose (local dev, staging)
+
+The same setting: `CELERY_SPLIT_QUEUES=true` in `.env` (dev) or in
+`.env.staging` (staging; the next staging deploy applies it), then
+`docker compose up -d`, which recreates the backend, the workers and beat
+with it. The `celery` service is the interactive worker and
+`celery-background` the background one. Both start through
+`backend/celery_queues.py`, which picks their queues from the setting.
+Off, `celery` runs the same worker command as before the split and
+`celery-background` starts no worker (it waits, so that Compose does not
+restart it). There are no ordered steps on dev and staging; switching off
+there can leave a task queued at that moment in a queue nobody reads.

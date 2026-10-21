@@ -1,0 +1,38 @@
+[Unit]
+Description=Write or Perish Celery Worker (interactive queue)
+After=network.target redis-server.service postgresql.service
+Requires=redis-server.service
+
+# Queue split (#379): the work a user waits for (replies, voice turns,
+# transcription, TTS; backend/celery_queues.py). Together with
+# write-or-perish-celery-background.service it replaces
+# write-or-perish-celery.service. deploy.sh never installs this file; once
+# the unit is enabled, it keeps it current and restarts it. Switching on
+# and off: docs/RUNBOOKS.md → "Celery queue split".
+
+[Service]
+Type=forking
+User=hrosspet
+Group=hrosspet
+WorkingDirectory=/home/hrosspet/write-or-perish
+EnvironmentFile=/home/hrosspet/write-or-perish/.env.production
+PIDFile=/home/hrosspet/write-or-perish/celery-interactive.pid
+
+# -n: two workers on one machine need different node names. %%h reaches
+# Celery as %h, the hostname (systemd would expand a single %h itself).
+ExecStart=/bin/bash -c 'source ~/miniconda3/etc/profile.d/conda.sh && conda activate write-or-perish && celery -A backend.celery_app:celery worker -Q interactive -n interactive@%%h --loglevel=info --logfile=/home/hrosspet/write-or-perish/logs/celery-interactive.log --pidfile=/home/hrosspet/write-or-perish/celery-interactive.pid --detach --concurrency=3'
+
+ExecReload=/bin/kill -s HUP $MAINPID
+
+# Warm shutdown with a 90 s drain, as in write-or-perish-celery.service
+# (#312). While this worker drains, replies and voice turns wait, so the
+# drain stays at the maintainer's 90 s (2026-09-29).
+ExecStop=/bin/bash /home/hrosspet/write-or-perish/scripts/celery-graceful-stop.sh $MAINPID 90
+KillMode=mixed
+TimeoutStopSec=300
+
+Restart=on-failure
+RestartSec=10s
+
+[Install]
+WantedBy=multi-user.target
