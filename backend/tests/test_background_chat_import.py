@@ -436,20 +436,31 @@ def test_a_stale_lock_does_not_block_a_new_confirm(app, monkeypatch):
     assert len(queued) == 1
 
 
-def test_a_failed_dispatch_frees_the_lock(app, monkeypatch):
+def test_a_failed_dispatch_frees_the_lock(app, monkeypatch, caplog):
+    import logging
     from backend.routes import import_data
     alice, client = _user_and_client(app)
+    # Built at run time: the logged traceback quotes the raising line.
+    secret = "-".join(["broker", "down"])
 
     def broken(*args):
-        raise ConnectionError("broker down")
+        raise ConnectionError(secret)
 
     monkeypatch.setattr(import_data, "_dispatch_conversation_import", broken)
     token = _stash(alice.id, _analyzed(1, 2))
+    caplog.set_level(logging.ERROR)
     resp = client.post("/api/import/chatgpt/confirm",
                        json={"import_token": token})
     assert resp.status_code == 500
     assert "broker" not in resp.get_data(as_text=True)
     assert cs.read_lock(alice.id) is None
+    # #540's rule for route errors: logged with the traceback and the
+    # exception type, never its text.
+    [record] = [r for r in caplog.records
+                if "Could not queue" in r.getMessage()]
+    assert "ConnectionError" in record.getMessage()
+    assert record.exc_info is not None
+    assert secret not in caplog.text
 
 
 def test_the_deleted_content_prompt_still_comes_first(app, monkeypatch):

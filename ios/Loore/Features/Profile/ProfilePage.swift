@@ -46,7 +46,9 @@ struct ProfilePage: View {
             case .newerVersion:
                 NewerProfileVersionDialog(onSaveAsNew: {
                     dialog = nil
-                    send(.create)
+                    // No audio question here: the new version starts
+                    // without audio, as it did when this sent a POST.
+                    send(Self.saveAsNewTarget(editingBaseId: editingBaseId), regenerateTts: true)
                 }, onDiscard: {
                     dialog = nil
                     editing = false
@@ -202,18 +204,28 @@ struct ProfilePage: View {
 
     /// Where Save sends the editor's text.
     enum SaveTarget: Equatable {
-        /// `PUT /profile/<id>`: the version the edit started from is still the latest.
+        /// `PUT /profile/<id>`: saved as a new version of the user's, with version
+        /// `<id>` (the one the edit started from) as its predecessor (#183).
         case update(Int)
-        /// `POST /profile`: the first profile, or the user's text as a new version.
+        /// `POST /profile`: the first profile.
         case create
-        /// A version was generated while the editor was open: saving over it would
-        /// replace it in place (and keep it out of history), so ask first.
+        /// A version was generated while the editor was open: the user's text would
+        /// become the latest version in its place, so ask first.
         case newerVersionArrived
     }
 
     static func saveTarget(editingBaseId: Int?, latestId: Int?) -> SaveTarget {
         guard latestId == editingBaseId else { return .newerVersionArrived }
         return latestId.map(SaveTarget.update) ?? .create
+    }
+
+    /// "Save mine as a new version" after a newer version arrived: a `PUT` to the
+    /// version the edit started from, so the new version follows that one and
+    /// covers the writing that one covered (#183, review finding 1). A `POST`
+    /// made it follow the newer version instead. Writing a first profile while
+    /// one was generated still sends a `POST`.
+    static func saveAsNewTarget(editingBaseId: Int?) -> SaveTarget {
+        editingBaseId.map(SaveTarget.update) ?? .create
     }
 
     private func startEditing() {

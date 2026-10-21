@@ -18,12 +18,22 @@ else:
 
 from backend.config import Config
 from backend.extensions import db
+from backend.utils.error_privacy import (
+    install_traceback_scrubbing, scrub_sentry_breadcrumb, scrub_sentry_event,
+)
 from flask_migrate import Migrate
 from flask_login import LoginManager, current_user
 from backend.models import User  # noqa: F401 - registers every model (migrations)
 from backend.oauth import init_twitter_blueprint
 from flask_cors import CORS
 from werkzeug.middleware.proxy_fix import ProxyFix
+
+# Tracebacks written by any backend.* logger (Flask's line for an unhandled
+# exception is the "backend" logger's) keep each exception's type and
+# frames, not its message, in every process that imports the backend (web,
+# Celery, scripts, tests) and whatever handlers are configured
+# (Peter, 2026-10-20).
+install_traceback_scrubbing("backend")
 
 
 def validate_default_model(config):
@@ -183,12 +193,16 @@ def create_app():
                 apply_fingerprint(event, exc, rec)
             except Exception:  # never lose an event over grouping
                 pass
-            return event
+            # Last, after the checks above have read the raw text: the
+            # event keeps each exception's type and stack frames, not its
+            # message, and no database values (Peter, 2026-10-20).
+            return scrub_sentry_event(event, hint)
 
         sentry_sdk.init(
             dsn=sentry_dsn,
             environment=os.environ.get("SENTRY_ENVIRONMENT", "production"),
             before_send=_before_send,
+            before_breadcrumb=scrub_sentry_breadcrumb,
             **SENTRY_PRIVACY_OPTIONS,
         )
 

@@ -428,7 +428,8 @@ class TestWhitelistByXId:
         r = client.post("/api/admin/whitelist", json={"handle": "alice"})
 
         assert r.status_code == 502, r.json
-        assert "archive down" in r.json["error"]
+        # The type, not the exception's text (2026-10-20)
+        assert r.json["error"] == "Community Archive lookup failed (OSError)."
         assert r.json["reason"] == "archive-error" and "x_lookup_cost_usd" in r.json
         assert User.query.filter_by(username="alice").first() is None
 

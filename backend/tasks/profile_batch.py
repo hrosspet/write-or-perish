@@ -107,6 +107,60 @@ def batch_pipeline_lock():
             except Exception:
                 pass
 
+
+def _spend_capped(user):
+    """Whether the per-user monthly spend cap (backend/utils/spend.py) holds
+    this user's next profile step back. The same rule as the synchronous
+    task, which checks ``user_is_capped`` on entry: spend logged in
+    APICostLog this month (all providers) at or over the user's limit
+    blocks them until the month rolls over, and the admin is emailed once.
+
+    One difference in timing: every cost row dispatches the check that sets
+    the block 15 s later (ENFORCE_CAP_DELAY_SECONDS), but the poller builds
+    the next step right after it saves this step's cost. So the check runs
+    here first, and a user whose step just crossed the cap gets no next
+    step. It runs whatever the global limit: enforce_user_spend_cap
+    resolves the user's effective limit (their own limit from the admin
+    Users tab wins), so a user with their own limit is stopped even while
+    PER_USER_MONTHLY_LIMIT_USD is 0. For an uncapped user it returns before
+    any query (the user is already loaded in the session)."""
+    from backend.utils.spend import enforce_user_spend_cap, user_is_capped
+    if user_is_capped(user):
+        return True
+    enforce_user_spend_cap(user.id, current_app.config)
+    return user_is_capped(user)
+
+
+def _hold_for_cap(user):
+    """Remember that the spend cap holds back this user's batch profile
+    work, so the hourly seeder resumes it when the cap lifts (next month,
+    or when the admin raises the user's limit) even for an account its
+    eligible cohort leaves out: a pre-filled account not yet activated,
+    whose build started from an immediate seed."""
+    if not user.profile_cap_held:
+        user.profile_cap_held = True
+        db.session.commit()
+
+
+def _release_cap_hold(user):
+    if user.profile_cap_held:
+        user.profile_cap_held = False
+        db.session.commit()
+
+
+def _cap_held_users(exclude_ids):
+    """Users whose batch profile work the cap held back, outside the hourly
+    cohort: resumed the way the build started (an immediate seed passes
+    them in without the eligibility query). A deactivated account stays
+    paused (deactivation is the admin's pause switch); a never-activated
+    one (a pre-fill waiting for its owner) is resumed."""
+    return [u for u in User.query.filter(
+        User.profile_cap_held.is_(True),
+        User.deleted_at.is_(None),
+        or_(User.approved.is_(True), User.deactivated_at.is_(None)),
+    ).all() if u.id not in exclude_ids]
+
+
 def _model_for(user):
     from backend.utils.llm_nodes import default_model_for
     return default_model_for(user)
@@ -177,6 +231,10 @@ def _should_seed(user, ignore_backoff=False):
     # pinned-account special case and never leaves a tail unread.
     if latest is not None and _exports.should_continue_chain(user, latest):
         return True
+    # A rebuilt chain that has still to merge the user's version (its merge
+    # failed, or the run stopped before it) merges it now (#183).
+    if latest is not None and _exports.pending_merge_version(user) is not None:
+        return True
     # A finished chain whose integration was refused (or lost): the seeder
     # builds the integration alone (_seed_profile_batches passes
     # allow_chunk=False, #368).
@@ -195,9 +253,10 @@ def _should_seed(user, ignore_backoff=False):
             user.profile_needs_full_regen = True
             db.session.commit()
         return due
-    # Null cutoff (e.g. a user-written profile): nothing has been folded in
-    # yet, so all eligible data counts as new — measure it instead of
-    # force-seeding (mirrors maybe_trigger_incremental_profile_update).
+    # Null cutoff (a legacy version): nothing has been folded in yet, so
+    # all eligible data counts as new — measure it instead of force-seeding
+    # (mirrors maybe_trigger_incremental_profile_update). A first profile
+    # written by hand covers no data and takes the ladder above.
     new_tokens = _new_token_count(user, latest.source_data_cutoff)
     return new_tokens >= UPDATE_THRESHOLD_UNITS
 
@@ -226,6 +285,13 @@ def _build_next_profile_request(user, allow_chunk=True, chunk_num=1):
     if not account_allows_ai(user):
         logger.info(f"User {user.id}: opted out of AI usage; no profile step")
         return None
+    # Likewise the spend cap: a step already submitted is collected and its
+    # cost logged, but a user who reached the cap gets no next step. The
+    # chain stays where it is and the seeder continues it once the cap
+    # resets at the start of the next month (or the admin raises the limit).
+    if _spend_capped(user):
+        logger.warning(f"User {user.id}: spend-capped; no profile step")
+        return None
     model_id = _model_for(user)
     provider, api_model = _provider_and_model(model_id)
 
@@ -238,6 +304,19 @@ def _build_next_profile_request(user, allow_chunk=True, chunk_num=1):
     prev_id = prev.id if prev else None
     cutoff = prev.source_data_cutoff if prev else None
     cumulative = (prev.source_tokens_used or 0) if prev else 0
+
+    # #183, option 2: a from-scratch build merges the user's version the
+    # current chain carries into the new chain at its date; a chain that
+    # has reached that date merges it before anything else.
+    if prev is None and _exports.plan_user_version_merge(
+            user, _exports.profile_update_base(user.id)) is not None:
+        db.session.commit()
+    pending = _exports.settled_pending_merge(user, prev)
+    if pending is not None and _exports.merge_due(
+            user, prev, pending, more_to_read=(
+                allow_chunk and _exports.should_continue_chain(user, prev))):
+        return _merge_request(user, prev, pending, provider, api_model,
+                              model_id, chunk_num)
 
     # The remainder after the cutoff, summed in the export window's own
     # scope, is planned into equal chunks (docs/design/chunk-planner.md):
@@ -267,8 +346,11 @@ def _build_next_profile_request(user, allow_chunk=True, chunk_num=1):
                     "profile_generation.txt", user_id=user.id)
                 return gen_template.replace(
                     "{user_export}", _exports.chunk_content_for_prompt(chunk))
+            # A version the user wrote or edited carries the same author
+            # note as in the sync loop (#183).
             return _exports.build_chunk_prompt(
-                _exports.build_update_template(user.id), prev.get_content(),
+                _exports.build_update_template(user.id),
+                _exports.update_base_content(prev),
                 cumulative, chunk, prev.source_origin_stats)
 
         # Pre-submit sizing (shared build_fitted_chunk): count the prompt
@@ -331,6 +413,13 @@ def _build_next_profile_request(user, allow_chunk=True, chunk_num=1):
                 },
             }
 
+    # The run ends before the chain reached the date of the user's version
+    # it must merge (the version is newer than all of the writing): the
+    # merge is the run's last step (#183).
+    if pending is not None:
+        return _merge_request(user, prev, pending, provider, api_model,
+                              model_id, chunk_num)
+
     # No (full-size) new data → integrate the chain if there are ≥2 versions
     # and we haven't already integrated this tip.
     if prev is not None:
@@ -338,7 +427,7 @@ def _build_next_profile_request(user, allow_chunk=True, chunk_num=1):
         already = UserProfile.query.filter_by(
             user_id=user.id, generation_type="integration",
             parent_profile_id=prev.id).first()
-        if len(chain) >= 2 and not already:
+        if _exports.needs_integration(chain) and not already:
             messages, _chain = _exports.build_integration_messages(user.id, prev.id)
             if messages is not None:
                 cid = f"profile_{user.id}_{prev.id}_integration"
@@ -361,6 +450,30 @@ def _build_next_profile_request(user, allow_chunk=True, chunk_num=1):
                     },
                 }
     return None
+
+
+def _merge_request(user, prev, version, provider, api_model, model_id,
+                   chunk_num):
+    """The batch request of a rebuild's merge step (#183): the rebuilt
+    chain's version ``prev`` and the user's ``version``, merged with the
+    integration prompt (exports.build_merge_messages)."""
+    messages = _exports.build_merge_messages(user.id, prev, version)
+    cid = f"profile_{user.id}_{prev.id}_merge"
+    return {
+        "provider": provider,
+        "request": {
+            "custom_id": cid, "model_id": model_id,
+            "api_model": api_model, "messages": messages,
+            "max_tokens": DEFAULT_MAX_OUTPUT_TOKENS,
+        },
+        "meta": {
+            "custom_id": cid, "user_id": user.id, "kind": "merge",
+            "prev_profile_id": prev.id, "merged_profile_id": version.id,
+            "model_id": model_id,
+            # The ordinal the next chunk gets; a merge is not a chunk.
+            "chunk_num": chunk_num,
+        },
+    }
 
 
 def _response_from_result(result):
@@ -396,6 +509,9 @@ def _apply_result(user, item, result, submitted_at):
     cutoff = (datetime.fromisoformat(item["source_data_cutoff"])
               if item.get("source_data_cutoff") else None)
 
+    if item["kind"] == "merge":
+        return _apply_merge(user, item, response, submitted_at)
+
     if item["kind"] == "chunk":
         existing = UserProfile.query.filter_by(
             user_id=user.id, parent_profile_id=item["prev_profile_id"],
@@ -410,7 +526,24 @@ def _apply_result(user, item, result, submitted_at):
                         f"duplicate item, not advancing")
             user.profile_batch_attempts = 0
             return None
+        elif _exports.base_moved(user.id, item["prev_profile_id"]):
+            # The user saved a version (an edit or a revert) while this
+            # step was in the batch (#183). Saving the step would bury it:
+            # the step never saw it, and the next one would build on the
+            # step. Nothing is saved; the seeder's gates start the next
+            # run from the newest version.
+            _exports.discard_step_output(
+                user, item["model_id"], response, "batch chunk", batch=True)
+            user.profile_batch_attempts = 0
+            return None
         else:
+            if item["prev_profile_id"] is None:
+                # A from-scratch first chunk: a version the user saved while
+                # it was in the batch cleared the pending merge and is now
+                # the update base; plan the merge of the newest version of
+                # the user's again (#183).
+                _exports.plan_user_version_merge(
+                    user, _exports.profile_update_base(user.id))
             # Cumulative coverage in stored units. An item submitted before
             # the planner carries no unit count and accumulates the billed
             # input tokens it was built with (the legacy figure).
@@ -458,6 +591,13 @@ def _apply_result(user, item, result, submitted_at):
         user_id=user.id, generation_type="integration",
         parent_profile_id=item["prev_profile_id"]).filter(
         UserProfile.created_at >= submitted_at).first()
+    if not existing and _exports.base_moved(user.id, item["prev_profile_id"]):
+        # As for a chunk: an integration saved over a newer version of the
+        # user's would be the version the profile page shows, without it.
+        _exports.discard_step_output(
+            user, item["model_id"], response, "batch integration", batch=True)
+        user.profile_batch_attempts = 0
+        return None
     if not existing:
         _exports._save_profile(
             user, item["model_id"], response["content"], response,
@@ -471,6 +611,35 @@ def _apply_result(user, item, result, submitted_at):
         notify_profile_ready(user.id)
     user.profile_batch_attempts = 0
     return None
+
+
+def _apply_merge(user, item, response, submitted_at):
+    """Save a collected merge step (#183) and return the next request:
+    the rebuild goes on from the merge as from the version it merged."""
+    base = UserProfile.query.get(item["prev_profile_id"])
+    version = UserProfile.query.get(item["merged_profile_id"])
+    existing = UserProfile.query.filter_by(
+        user_id=user.id, parent_profile_id=item["prev_profile_id"],
+        merged_profile_id=item["merged_profile_id"]).filter(
+        UserProfile.created_at >= submitted_at).first()
+    if existing:
+        logger.info(f"User {user.id}: merge already saved (idempotent) — "
+                    f"duplicate item, not advancing")
+        user.profile_batch_attempts = 0
+        return None
+    if base is None or version is None or _exports.base_moved(user.id, base.id):
+        # The user saved a version while the merge was in the batch: as for
+        # a chunk, nothing is saved and the next run starts from it.
+        _exports.discard_step_output(
+            user, item["model_id"], response, "batch merge", batch=True)
+        user.profile_batch_attempts = 0
+        return None
+    merged = _exports.save_merge(
+        user, item["model_id"], response, base, version, batch=True)
+    user.profile_batch_attempts = 0
+    return _build_next_profile_request(
+        user, allow_chunk=_exports.should_continue_chain(user, merged),
+        chunk_num=item.get("chunk_num") or 1)
 
 
 def _submit_requests(built, keys):
@@ -538,6 +707,7 @@ def _submit_requests(built, keys):
             u = User.query.get(item["user_id"])
             if u:
                 u.profile_batch_pending = True
+                u.profile_cap_held = False
         db.session.commit()
         submitted += len(items)
         logger.info(f"Profile batch {batch_id} ({provider_key}): "
@@ -608,6 +778,7 @@ def _seed_profile_batches(users=None, ignore_backoff=False):
     ``users`` restricts the cohort (immediate seed for one user); the
     default is every profile-eligible user. ``ignore_backoff`` is for an
     import's seed and a confirmed admin override only (see _should_seed)."""
+    from backend.utils.spend import user_is_capped
     config = current_app.config
     if config.get("PROFILE_UPDATES_PAUSED"):
         logger.info("PROFILE_UPDATES_PAUSED — skipping batch seeder")
@@ -617,6 +788,10 @@ def _seed_profile_batches(users=None, ignore_backoff=False):
     built = []
     if users is None:
         users = User.profile_eligible_query().all()
+        # Plus the builds the spend cap held back, which resume once it
+        # lifts: a pre-filled account not yet activated is outside the
+        # eligible cohort, and its build started from an immediate seed.
+        users += _cap_held_users({u.id for u in users})
     for user in users:
         if user.profile_batch_pending:
             continue
@@ -636,7 +811,13 @@ def _seed_profile_batches(users=None, ignore_backoff=False):
             continue  # exhausted → synchronous last-resort handles it
         # (force-batch users keep retrying here every cycle instead:
         # they must never fall back to the full-price sync path)
+        # The per-user monthly spend cap, checked as the synchronous task
+        # checks it on entry. The builder below settles it too.
+        if user_is_capped(user):
+            _hold_for_cap(user)
+            continue
         if not _should_seed(user, ignore_backoff=ignore_backoff):
+            _release_cap_hold(user)   # nothing (left) to resume
             continue
         try:
             # An integration retry builds only the integration, never a
@@ -658,7 +839,11 @@ def _seed_profile_batches(users=None, ignore_backoff=False):
             user.profile_seed_error = None
             db.session.commit()
         if req:
-            built.append(req)
+            built.append(req)   # a submitted step releases the hold
+        elif user_is_capped(user):
+            _hold_for_cap(user)   # the builder's own check blocked them
+        else:
+            _release_cap_hold(user)
     return _submit_requests(built, keys)
 
 
@@ -713,6 +898,7 @@ def poll_profile_batches():
 
 def _poll_profile_batches():
     """Impl — runs inside an active app context (testable directly)."""
+    from backend.utils.spend import user_is_capped
     config = current_app.config
     keys = apply_batch_key_override(
         get_api_keys_for_usage(config, 'chat'), config)
@@ -799,7 +985,19 @@ def _poll_profile_batches():
                 next_built.append(nxt)   # stays pending; re-submitted below
             else:
                 user.profile_batch_pending = False
-                _notify_prefill_complete(user)
+                if (item.get("kind") in ("chunk", "merge")
+                        and user_is_capped(user)):
+                    # Stopped by the spend cap, not finished: no
+                    # "pre-fill complete" email for a chain that resumes
+                    # when the cap lifts (the hold marks it for the
+                    # hourly seeder, also for a not-yet-activated account).
+                    # A rebuild's merge step (#183) goes on to the next
+                    # step as a chunk does.
+                    user.profile_cap_held = True
+                    logger.warning(f"User {user.id}: profile chain stopped "
+                                   f"at the spend cap after this step")
+                else:
+                    _notify_prefill_complete(user)
             db.session.commit()
 
         job.status = "collected"

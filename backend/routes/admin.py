@@ -4,8 +4,8 @@ from datetime import datetime, timedelta
 from functools import wraps
 from flask import Blueprint, request, jsonify, abort, current_app
 from flask_login import login_required, current_user
+from backend.utils.error_privacy import describe_exception
 from sqlalchemy.exc import IntegrityError
-from backend.utils.hidden_rows import shown_description
 from backend.models import User, APICostLog
 from backend.extensions import db
 from backend.utils.timefmt import iso_utc
@@ -43,10 +43,12 @@ def _profile_status_map():
     """{user_id: {versions, last_generation_type, last_created_at, state}}
     in two grouped queries. state: "complete" when nothing is in flight and
     the chain is at rest — the latest version is an integration (the batch
-    rebuild's final step) or a root chunk (parent None: a single-chunk
-    build, or a from-scratch rebuild that superseded older versions) —
-    "generating" while a batch job is in flight / a rebuild is requested /
-    a multi-version chain hasn't integrated yet."""
+    rebuild's final step), a root chunk (parent None: a single-chunk
+    build, or a from-scratch rebuild that superseded older versions), a
+    version the user wrote (every edit makes one, #183) or a single-chunk
+    build's merge of the user's version (#183) — "generating"
+    while a batch job is in flight / a rebuild is requested / a
+    multi-version chain hasn't integrated yet."""
     from backend.models import UserProfile
     counts = dict(db.session.query(
         UserProfile.user_id, func.count(UserProfile.id)
@@ -63,7 +65,15 @@ def _profile_status_map():
         u = users_by_id.get(user_id)
         in_flight = bool(u and (u.profile_batch_pending or u.profile_needs_full_regen))
         at_rest = last is not None and (
-            last.generation_type == "integration" or last.parent_profile_id is None)
+            last.generation_type == "integration"
+            or last.parent_profile_id is None
+            # The user's own version is not a pipeline step: an edit would
+            # show "generating" until the next update (#183).
+            or last.generated_by == "user"
+            # A single-chunk build that merged the user's version ends with
+            # the merge (#183).
+            or (bool(last.merged_profile_id)
+                and last.generation_type == "initial"))
         # A chain whose latest version is a root chunk is at rest only
         # if nothing OLDER than that version remains beyond its cutoff:
         # such data is an unfinished chain (the continue rule the seeder
@@ -252,7 +262,6 @@ def list_users():
             "id": user.id,
             "twitter_id": user.twitter_id,
             "username": user.username,
-            "description": shown_description(user),
             "created_at": iso_utc(user.created_at),
             "accepted_terms_at": iso_utc(user.accepted_terms_at),
             "approved": user.approved,
@@ -872,9 +881,7 @@ def activate_and_welcome(user_id):
 
         send_welcome_email(user.email, magic_link_url)
     except Exception:
-        logger.exception(
-            f"Failed to send welcome email to user {user_id} ({user.email})"
-        )
+        logger.exception("Failed to send welcome email to user %s", user_id)
         return jsonify({
             "message": "User approved but welcome email failed to send.",
             "approved": True,
@@ -930,9 +937,16 @@ def prefill_check():
     config = current_app.config
     try:
         summary = ca.coverage_summary(handle, snapshot_dir=snapshot_dir_for(config))
+    except ca.CommunityArchiveError as e:
+        # Written for the admin (e.g. two archive accounts share the
+        # handle), like XApiError below
+        return jsonify({"error": str(e)}), 502
     except Exception as e:  # network / provider errors → readable, not a 500
-        current_app.logger.warning(f"Community Archive check failed for @{handle}: {e}")
-        return jsonify({"error": f"Community Archive lookup failed: {e}"}), 502
+        current_app.logger.warning(
+            "Community Archive check failed for @%s: %s",
+            handle, describe_exception(e))
+        return jsonify({"error": "Community Archive lookup failed "
+                                 f"({type(e).__name__})."}), 502
     if summary is None:
         return jsonify({"error": f"@{handle} is not in the Community Archive."}), 404
     min_parquet = config.get("COMMUNITY_ARCHIVE_PARQUET_MIN_TWEETS", 5000)
@@ -978,8 +992,10 @@ def prefill_x_check():
     except x_api.XApiError as e:
         return jsonify({"error": str(e)}), 502
     except Exception as e:
-        current_app.logger.warning(f"X API check failed for @{handle}: {e}")
-        return jsonify({"error": f"X API lookup failed: {e}"}), 502
+        current_app.logger.warning("X API check failed for @%s: %s",
+                                   handle, describe_exception(e))
+        return jsonify({"error": "X API lookup failed "
+                                 f"({type(e).__name__})."}), 502
     # The lookup itself is billable: log it against the target user when
     # given, else the admin doing the check.
     user_id = request.args.get("user_id", type=int)

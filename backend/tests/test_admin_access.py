@@ -315,6 +315,49 @@ class TestProfileStatus:
         assert rows["seed_fail"]["profile"]["waiting"] is None
         assert rows["seed_fail"]["profile"]["seed_error"] == "ValueError: Unsupported model: claude-opus-4-6"
 
+    def test_a_version_the_user_wrote_is_at_rest(self, app, users):
+        """#183: every edit makes a user version on top of the version it
+        edited. It is not a pipeline step, so the account shows ✓, not
+        "generating" until the next update. A pipeline re-tip after an
+        import ("revert") still shows "generating": its chain continues."""
+        adm = users["renamed_admin"]
+        edited = User(username="edited", approved=True)
+        retipped = User(username="retipped", approved=True)
+        _db.session.add_all([edited, retipped])
+        _db.session.flush()
+        for u in (edited, retipped):
+            c1 = self._profile(u, "iterative")
+            merged = self._profile(u, "integration", parent=c1)
+            if u is edited:
+                edit = self._profile(u, "initial", parent=merged)
+                edit.generated_by = "user"
+            else:
+                self._profile(u, "revert", parent=c1)
+        _db.session.commit()
+        client = app.test_client()
+        _login(client, adm.id)
+        rows = {u["username"]: u for u in client.get("/api/admin/users").json["users"]}
+        assert rows["edited"]["profile"]["state"] == "complete"
+        assert rows["retipped"]["profile"]["state"] == "generating"
+
+    def test_a_single_chunk_build_ending_with_a_merge_is_at_rest(self, app, users):
+        """#183: a ladder build of one chunk that merged the user's version
+        ends with the merge (typed "initial", no integration after it)."""
+        adm = users["renamed_admin"]
+        merged = User(username="merged", approved=True)
+        _db.session.add(merged)
+        _db.session.flush()
+        own = self._profile(merged, "initial")
+        own.generated_by = "user"
+        chunk = self._profile(merged, "initial")
+        merge = self._profile(merged, "initial", parent=chunk)
+        merge.merged_profile_id = own.id
+        _db.session.commit()
+        client = app.test_client()
+        _login(client, adm.id)
+        rows = {u["username"]: u for u in client.get("/api/admin/users").json["users"]}
+        assert rows["merged"]["profile"]["state"] == "complete"
+
     def test_intentions_column_state(self, app, users):
         from datetime import datetime
         from backend.models import ProfileBatchJob, UserArtifact
@@ -509,6 +552,31 @@ class TestPrefillCheck:
         monkeypatch.setattr(ca, "coverage_summary", lambda h, snapshot_dir=None: None)
         assert client.get("/api/admin/prefill/check?handle=nobody").status_code == 404
         assert client.get("/api/admin/prefill/check").status_code == 400
+
+    def test_check_failures_say_why_without_exception_text(
+            self, app, users, monkeypatch):
+        """The Community Archive's own message is written for the admin
+        (two accounts share the handle); any other failure names only
+        its type (2026-10-20)."""
+        from backend.utils import community_archive as ca
+        message = ("@twin: 2 Community Archive accounts have exactly that "
+                   "username; refusing to guess which one")
+
+        def ambiguous(h, snapshot_dir=None):
+            raise ca.CommunityArchiveError(message)
+
+        def network(h, snapshot_dir=None):
+            raise OSError("connection to 10.0.0.7 refused")
+
+        client = app.test_client()
+        _login(client, users["renamed_admin"].id)
+        monkeypatch.setattr(ca, "coverage_summary", ambiguous)
+        r = client.get("/api/admin/prefill/check?handle=twin")
+        assert r.status_code == 502 and r.json == {"error": message}
+        monkeypatch.setattr(ca, "coverage_summary", network)
+        r = client.get("/api/admin/prefill/check?handle=twin")
+        assert r.status_code == 502
+        assert r.json == {"error": "Community Archive lookup failed (OSError)."}
 
 
 class TestVoiceTimingAdmin:

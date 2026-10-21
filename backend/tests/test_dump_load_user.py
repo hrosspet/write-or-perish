@@ -56,7 +56,7 @@ def app(monkeypatch):
 def _seed_source():
     """alice: a 3-node public thread (root→child, child continues to c2),
     one private node, an LLM reply, a 2-profile chain + recent context."""
-    alice = User(username="alice", approved=True, plan="alpha", description="hi")
+    alice = User(username="alice", approved=True, plan="alpha")
     llm = User(username="claude-opus-5")
     db.session.add_all([alice, llm])
     db.session.flush()
@@ -111,6 +111,7 @@ def test_round_trip_remaps_links_and_respects_privacy(app, tmp_path):
     dump_user._run("alice", str(out))
     d = _read(out)
     assert d["format"] == 2
+    assert set(d["user"]) == {"username", "timezone", "preferred_model", "plan"}
     assert [n["source_key"] for n in d["nodes"]] == ["twitter:1", None, "twitter:2"]  # private skipped
     assert d["nodes"][1]["author_username"] == "claude-opus-5"
     assert d["profiles"][1]["parent_profile_id"] == p1_id
@@ -120,7 +121,7 @@ def test_round_trip_remaps_links_and_respects_privacy(app, tmp_path):
     # Load onto a fresh user in the same DB (ids will differ from the source's).
     load_user._run(str(out), "bob", merge=False, create_approved=True)
     bob = User.query.filter_by(username="bob").one()
-    assert bob.approved is True and bob.description == "hi"
+    assert bob.approved is True
     nodes = Node.query.filter_by(human_owner_id=bob.id).order_by(Node.id).all()
     assert len(nodes) == 3
     r, c, k = nodes
@@ -180,6 +181,22 @@ def test_format1_converts_and_loads(app, tmp_path):
     assert _read(converted)["nodes"] == nodes
     load_user._run(str(converted), "carol", merge=False, create_approved=False)
     assert Node.query.filter_by(human_owner_id=User.query.filter_by(username="carol").one().id).count() == 3
+
+
+def test_a_dump_with_the_old_description_loads(app, tmp_path):
+    """A dump made before #538 carries the user's short profile
+    description: the field is gone, so it is skipped."""
+    _seed_source()
+    out = tmp_path / "alice.jsonl"
+    dump_user._run("alice", str(out))
+    lines = out.read_text(encoding="utf-8").splitlines()
+    header = json.loads(lines[0])
+    header["user"]["description"] = "an old bio"
+    lines[0] = json.dumps(header)
+    out.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    load_user._run(str(out), "erin", merge=False, create_approved=False)
+    erin = User.query.filter_by(username="erin").one()
+    assert Node.query.filter_by(human_owner_id=erin.id).count() == 3
 
 
 def test_twitter_id_is_set_and_guarded(app, tmp_path):

@@ -785,7 +785,8 @@ def test_cancel_refusal_is_recorded_and_the_outcome_still_read(app, monkeypatch,
 
     entry = _entry(_reload(llm_node.id))
     assert entry["status"] == "cancelling"
-    assert "already ended" in entry["cancel_error"]
+    # The type is recorded, not the provider's text (2026-10-20)
+    assert entry["cancel_error"] == "RuntimeError"
     assert calls["cancel"] == [("sk-test", "batch_1")]
 
     _run(_Task(), alice, read, llm_node)

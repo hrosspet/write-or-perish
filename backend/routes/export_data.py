@@ -1,8 +1,7 @@
 from flask import Blueprint, jsonify, Response, request, current_app
 from flask_login import login_required, current_user
-from backend.utils.hidden_rows import shown_description
 from backend.models import (
-    Node, NodeVersion, UserProfile, UserPrompt, UserTodo,
+    Node, UserProfile, UserPrompt, UserTodo,
     UserArtifact,
 )
 from backend.extensions import db
@@ -23,47 +22,6 @@ from sqlalchemy.orm import subqueryload
 from datetime import datetime
 
 export_bp = Blueprint("export_bp", __name__)
-
-# Export all of the current user’s data (in JSON format for MVP).
-@export_bp.route("/export", methods=["GET"])
-@login_required
-def export_data():
-    user_data = {
-        "user": {
-            "id": current_user.id,
-            "twitter_id": current_user.twitter_id,
-            "username": current_user.username,
-            "description": shown_description(current_user),
-            "created_at": iso_utc(current_user.created_at),
-        },
-        "nodes": [],
-        "versions": []
-    }
-    # Deleted entries are not exported, including the ones a waiting
-    # "Delete all my writing" hid (#268).
-    nodes = Node.query.filter_by(user_id=current_user.id,
-                                 deleted_at=None).all()
-    for node in nodes:
-        user_data["nodes"].append({
-            "id": node.id,
-            "content": node.get_content(),
-            "node_type": node.node_type,
-            "parent_id": node.parent_id,
-            "linked_node_id": node.linked_node_id,
-            "token_count": node.token_count,
-            "created_at": iso_utc(node.created_at),
-            "updated_at": iso_utc(node.updated_at)
-        })
-    versions = NodeVersion.query.join(Node, Node.id == NodeVersion.node_id).filter(
-        Node.user_id == current_user.id, Node.deleted_at.is_(None)).all()
-    for version in versions:
-        user_data["versions"].append({
-            "id": version.id,
-            "node_id": version.node_id,
-            "content": version.get_content(),
-            "timestamp": iso_utc(version.timestamp)
-        })
-    return jsonify(user_data), 200
 
 
 def _node_author_label(node):
@@ -1932,7 +1890,8 @@ def _pending_batch_item(user_id):
     for job in jobs:
         for item in job.items or []:
             if (item.get("user_id") == user_id
-                    and item.get("kind") in ("chunk", "integration")):
+                    and item.get("kind") in ("chunk", "integration",
+                                             "merge")):
                 return item
     return None
 
@@ -1952,6 +1911,9 @@ def _batch_progress(user):
         message, progress = "Generating profile", 0
     elif item.get("kind") == "integration":
         message, progress = "Integrating profile versions", 95
+    elif item.get("kind") == "merge":
+        # A rebuild merging the user's own version in (#183).
+        message, progress = "Merging your own version", 85
     elif item.get("chunk_num") and item.get("chunk_total"):
         n, total = int(item["chunk_num"]), int(item["chunk_total"])
         message = f"Generating profile: Chunk {n} of ~{total}"

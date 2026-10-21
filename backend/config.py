@@ -7,6 +7,12 @@ class Config:
     # "postgresql://username:password@localhost/writeorperish"
     SQLALCHEMY_DATABASE_URI = os.environ.get("DATABASE_URL", "postgresql://localhost/writeorperish")
     SQLALCHEMY_TRACK_MODIFICATIONS = False
+    # A database error's text leaves out the statement's parameters (what
+    # was being saved), and so does SQLAlchemy's statement logging.
+    # Postgres's own DETAIL line can still quote the row: see
+    # backend/utils/error_privacy.py for how that is kept out of
+    # responses, logs and Sentry.
+    SQLALCHEMY_ENGINE_OPTIONS = {"hide_parameters": True}
 
     # Twitter OAuth configuration
     TWITTER_API_KEY = os.environ.get("TWITTER_API_KEY")

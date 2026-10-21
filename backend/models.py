@@ -23,8 +23,6 @@ class User(db.Model, UserMixin):
     # from the handle anyway; connecting X to sign in publishes nothing.
     x_connected_at = db.Column(db.DateTime, nullable=True)
     username = db.Column(db.String(64), unique=True, nullable=False)
-    # A short description that the user may set (max 128 characters)
-    description = db.Column(db.String(128), nullable=True, default="")
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     accepted_terms_at = db.Column(db.DateTime, nullable=True)
     accepted_terms_version = db.Column(db.String(16), nullable=True)
@@ -140,6 +138,11 @@ class User(db.Model, UserMixin):
 
     # Flag: next profile generation should be a full regen (not incremental)
     profile_needs_full_regen = db.Column(db.Boolean, nullable=False, default=False)
+    # The version the user wrote that a rebuild or an import's re-tip in
+    # progress still has to merge into the new chain at its date (#183;
+    # tasks/exports.plan_user_version_merge). Cleared by the merge and by
+    # any version the user saves. A plain id, not a foreign key.
+    profile_pending_merge_id = db.Column(db.Integer, nullable=True)
 
     # --- Profile-generation batch pipeline (issue #173, Part A) ---
     # True while a batch request for this user's profile is in flight
@@ -161,6 +164,14 @@ class User(db.Model, UserMixin):
     # switch / canary list. Set by admin pre-fills (Community Archive):
     # a bootstrapped corpus must never hit the synchronous (full-price) path.
     profile_force_batch = db.Column(
+        db.Boolean, nullable=False, default=False,
+        server_default=db.text("false"))
+    # True while the per-user spend cap holds back this user's batch profile
+    # work (a chain stopped after the step that crossed the cap, or a seed
+    # skipped for it). The hourly seeder resumes it from the saved version
+    # once the cap lifts, also for a pre-filled account not yet activated,
+    # which its eligible cohort leaves out (backend/tasks/profile_batch.py).
+    profile_cap_held = db.Column(
         db.Boolean, nullable=False, default=False,
         server_default=db.text("false"))
     # Measured billed input tokens per stored content unit (Node.token_count)
@@ -887,6 +898,11 @@ class UserProfile(db.Model):
     parent_profile_id = db.Column(
         db.Integer, db.ForeignKey("user_profile.id"), nullable=True
     )
+    # On a merge step of a rebuild (#183): the version the user wrote that
+    # this version merged into the rebuilt chain. A later rebuild finds the
+    # user's version through it (tasks/exports.carried_user_version). A
+    # plain id, not a foreign key: it only points within one user's rows.
+    merged_profile_id = db.Column(db.Integer, nullable=True)
 
     # --- Voice‑Mode fields ---
     audio_tts_url = db.Column(db.String, nullable=True)
@@ -2123,15 +2139,18 @@ class UserDataPurgeHidden(db.Model):
     * ``kind`` = a per-user table (``HIDDEN_ROW_TABLES``), ``row_id`` =
       its row: hidden while this row exists (backend/utils/hidden_rows.py
       leaves it out of every ORM query).
-    * ``kind`` = "user_description", ``row_id`` = the user: the short
-      profile description is shown empty.
     * ``kind`` = "file", ``path`` = a folder or file of the user's audio
       or import storage that existed at the request ("audio:<rel>" or
       "stash:<rel>"), so the purge deletes those and not what the user
       records afterwards.
 
     Deleted by a restore (the rows show again) and at the end of the
-    purge (the rows are gone). Ids and paths only, never content."""
+    purge (the rows are gone). Ids and paths only, never content.
+
+    A job that waited when the short profile description was removed
+    (#538) may still have a ``kind`` = "user_description" row. Nothing
+    reads that kind any more: every reader asks for its own kinds, and
+    the restore and the purge delete a job's rows whatever their kind."""
     __tablename__ = "user_data_purge_hidden"
 
     id = db.Column(db.Integer, primary_key=True)

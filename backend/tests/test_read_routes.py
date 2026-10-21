@@ -602,7 +602,8 @@ class TestRerun:
         assert resp.status_code == 202, resp.get_json()
         meta = json.loads(Node.query.get(reply.id).tool_calls_meta)
         assert meta[0]["status"] == "cancelled"
-        assert "already ended" in meta[0]["cancel_error"]
+        # The type is recorded, not the provider's text (2026-10-20)
+        assert meta[0]["cancel_error"] == "RuntimeError"
 
     def test_failed_reply_without_batch_reruns(self, app, monkeypatch):
         task = _llm_task(monkeypatch)

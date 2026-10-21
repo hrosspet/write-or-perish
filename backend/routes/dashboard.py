@@ -2,8 +2,8 @@ import logging
 from datetime import datetime, timedelta, timezone
 from flask import Blueprint, jsonify, request, current_app
 from flask_login import login_required, current_user
+from backend.utils.error_privacy import describe_exception
 from sqlalchemy.exc import IntegrityError
-from backend.utils.hidden_rows import reclaim_description, shown_description
 from backend.models import User, UserProfile
 from backend.extensions import db
 from backend.utils.email import (
@@ -74,7 +74,6 @@ def _serialize_current_user():
     return {
         "id": current_user.id,
         "username": current_user.username,
-        "description": shown_description(current_user),
         "accepted_terms_at": iso_utc(current_user.accepted_terms_at),
         "terms_up_to_date": _terms_up_to_date(current_user),
         "approved": current_user.approved,
@@ -387,13 +386,14 @@ def disconnect_x():
                     "twitter_handle": None}), 200
 
 
-# New endpoint to update the user’s display handle and description.
+# Updates the user's handle and settings. A `description` key (the short
+# profile description, removed in #538; older app builds may still send
+# it) is ignored.
 @dashboard_bp.route("/user", methods=["PUT"])
 @login_required
 def update_user():
     data = request.get_json()
     new_username = data.get("username")
-    new_description = data.get("description")
     # `email` is deliberately NOT accepted here any more (#260): binding an
     # address to a logged-in session without proving control of it would
     # let a hijacked session re-home the account. POST /dashboard/email
@@ -402,9 +402,6 @@ def update_user():
         return jsonify({
             "error": "Email changes go through verification: use "
                      "POST /api/dashboard/email."}), 400
-
-    if new_description and len(new_description) > 128:
-        return jsonify({"error": "Description exceeds maximum length of 128 characters."}), 400
 
     renamed_from = None
     if new_username:
@@ -418,13 +415,6 @@ def update_user():
         if new_username != current_user.username:
             renamed_from = current_user.username
         current_user.username = new_username
-
-    if new_description is not None:
-        if new_description != shown_description(current_user):
-            # A description written while "Delete all my writing" hides
-            # the old one is the user's and stays after the purge (#268).
-            reclaim_description(current_user.id)
-            current_user.description = new_description
 
     if "craft_mode" in data:
         current_user.craft_mode = bool(data["craft_mode"])
@@ -480,6 +470,7 @@ def update_user():
         from backend.utils.username_history import record_rename
         record_rename(current_user, renamed_from, new_username)
 
+    user_id = current_user.id  # read before a rollback expires it
     try:
         db.session.commit()
         # The opt-out must reach the open web immediately: drop every
@@ -505,7 +496,11 @@ def update_user():
                                  "Reload and try again."}), 409
     except Exception as e:
         db.session.rollback()
-        return jsonify({"error": "Failed to update profile.", "details": str(e)}), 500
+        # A database error's text can quote the values being saved: the
+        # response and the log (and so Sentry) get the type only.
+        logger.exception("Profile update failed for user %s: %s",
+                         user_id, describe_exception(e))
+        return jsonify({"error": "Failed to update profile."}), 500
 
 
 # Persist the browser-reported IANA timezone (e.g. "Europe/Prague"), used to
@@ -520,11 +515,13 @@ def update_timezone():
     tz_name = data.get("timezone")
     if not is_valid_timezone(tz_name):
         return jsonify({"error": "Invalid timezone."}), 400
+    user_id = current_user.id  # read before a rollback expires it
     current_user.timezone = tz_name
     try:
         db.session.commit()
     except Exception as e:
         db.session.rollback()
-        return jsonify({"error": "Failed to update timezone.",
-                        "details": str(e)}), 500
+        logger.exception("Timezone update failed for user %s: %s",
+                         user_id, describe_exception(e))
+        return jsonify({"error": "Failed to update timezone."}), 500
     return jsonify({"timezone": current_user.timezone}), 200

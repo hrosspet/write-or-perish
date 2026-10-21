@@ -195,28 +195,3 @@ def drop_hidden_poll_response(poll_id, user_id):
         db.session.delete(row)
         db.session.flush()
     return True
-
-
-# ── The short profile description ───────────────────────────────────────
-
-def description_hidden(user_id):
-    """The user's description is hidden by a waiting "Delete all my
-    writing"."""
-    from backend.extensions import db
-    from backend.models import UserDataPurgeHidden as H
-    return db.session.query(H.id).filter(
-        H.kind == "user_description", H.row_id == user_id).first() is not None
-
-
-def shown_description(user):
-    """The description as others and the user see it: empty while a
-    waiting "Delete all my writing" hides it."""
-    if user is None or not user.description:
-        return user.description if user is not None else None
-    return "" if description_hidden(user.id) else user.description
-
-
-def reclaim_description(user_id):
-    """The user wrote a new description during the grace period: it is
-    theirs and stays after the purge."""
-    return _unhide("user_description", [user_id])

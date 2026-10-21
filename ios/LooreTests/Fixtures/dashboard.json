@@ -6,7 +6,6 @@
     "craft_mode": false,
     "default_ai_usage": "chat",
     "default_privacy_level": "private",
-    "description": "Field notes on memory and intention.",
     "email": "seowriter@example.invalid",
     "external_content_available": true,
     "external_content_enabled": true,

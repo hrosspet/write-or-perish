@@ -48,7 +48,7 @@ def _world():
 # What the clients read from `user`: the web app keeps the whole object
 # (UserContext), the iPhone app decodes it as CurrentUser.
 USER_FIELDS = {
-    "id", "username", "description", "accepted_terms_at",
+    "id", "username", "accepted_terms_at",
     "terms_up_to_date", "approved", "email", "is_admin", "plan",
     "voice_mode_enabled", "craft_mode", "preferred_model",
     "profile_generation_task_id", "profile_batch_pending",
@@ -118,6 +118,8 @@ def test_app_load_decrypts_nothing(app):  # noqa: F811
     assert entries == 0
     assert "latest_profile" not in body
     assert USER_FIELDS <= set(body["user"])
+    # The short profile description is gone (#538).
+    assert "description" not in body["user"]
     assert body["user"]["username"] == "alice"
 
 

@@ -131,6 +131,8 @@ Users have a `plan` column (string, max 16 chars) on the User model. The plan co
 
 ✅ **Node visibility levels and access control** - COMPLETED: Added privacy_level column (private/circles/public) and ai_usage column (none/chat/train) with API enforcement to control who can read each node
 
+✅ **No exception text in responses, logs or Sentry (2026-10-20)** - COMPLETED: A database error's text can quote the values being saved. Route error responses carry a message written for the user, never `str(e)` (no `details`); log lines carry the exception type and non-content ids. The engine runs with `hide_parameters=True` (`SQLALCHEMY_ENGINE_OPTIONS`). `backend/utils/error_privacy.py`: tracebacks in the web app's log keep types and frames without messages (Flask's unhandled-exception line, `logger.exception`), and Sentry's `before_send` / `before_breadcrumb` replace exception messages with `[message removed]` (plus SQLSTATE, constraint/table/column names, HTTP status, error code or errno), remove the quoted exception text from log messages and breadcrumbs, and strip the values a database error quotes: Postgres DETAIL / CONTEXT / LINE blocks, "Failing row contains", "Key (…)=(…)", an unconvertible value and `[parameters: …]` (Peter, 2026-10-20; follows #531)
+
 ✅ **Application-level encryption with GCP KMS** - COMPLETED: Envelope encryption (v2) using AES-256-GCM with KMS-wrapped DEKs. REST transport for gevent compatibility. In-memory DEK cache (up to 4096 entries) to minimize KMS calls. Format: `ENC:v2:<wrapped-dek>:<nonce+ciphertext>`. Audio files also encrypted at rest via `encrypt_file()` — uploads, streaming chunks, and TTS output all get `.enc` extension on disk while DB URLs remain clean (media route handles `.enc` fallback).
 
 **Embedding isolation architecture** - Generate embeddings server-side from plaintext, store with user_id in pgvector, always filter queries by user_id + visibility
@@ -185,7 +187,7 @@ Users have a `plan` column (string, max 16 chars) on the User model. The plan co
 
 **Age restriction** - Set explicit minimum age for the service (16 is GDPR default in CZ) and add to terms
 
-**Backup documentation** - Document what's backed up, retention period, encryption status, and how long deleted data persists in backups
+✅ **Backup documentation** - COMPLETED (runbook): `docs/RUNBOOKS.md` → "Backups and restore" documents what's backed up, the locked 28-day retention, encryption status, and that deleted data persists in backups for up to about 29 days, inside the 30 days the terms promise after an account's final deletion.
 
 **Cookie / tracking disclosure** - Disclose cookie usage (session cookies at minimum); may need cookie banner for EU compliance
 
@@ -267,7 +269,7 @@ Users have a `plan` column (string, max 16 chars) on the User model. The plan co
 
 **Automated Dependabot PRs** - Set up GitHub Dependabot to automatically create PRs for dependency updates (complement to existing Safety checks)
 
-**Database backup and restore automation** - Daily backups with tested restore procedures to prevent data loss
+✅ **Database backup and restore automation** - COMPLETED: nightly `pg_dump` + media sync to GCS with locked 28-day retention (`scripts/backup.sh`, systemd timer installed by `deploy.sh`, restore procedure + quarterly restore test in `docs/RUNBOOKS.md`)
 
 **Health check endpoints** - `/health` and `/ready` endpoints for load balancer and monitoring to detect unhealthy instances
 
@@ -448,7 +450,7 @@ Based on current project state, dependencies, and strategic value, here's the re
 5. **Logging infrastructure with structured logs** - Add JSON logging with request IDs for debugging
 6. **Error monitoring with Sentry** - Integrate Sentry for both backend and frontend error tracking
 7. **Health check endpoints** - `/health` and `/ready` for monitoring and load balancer health checks
-8. **Database backup and restore automation** - Automated daily backups with tested restore procedures
+8. ✅ **Database backup and restore automation** - COMPLETED: nightly `pg_dump` + media → GCS, locked 28-day retention, restore runbook
 9. **Dependabot configuration** - Enable GitHub Dependabot for automated dependency update PRs
 
 **Deliverable:** Solid foundation with actual tests running in existing CI pipeline, monitoring, and development environment

@@ -1279,8 +1279,11 @@ def test_provisional_first_build_is_rebuilt_from_scratch_at_the_organic_gate(app
     """A generated profile covering under a full chunk of data (an early
     signup's first build) is provisional: when the organic gate trips, the
     seeder requests a from-scratch build instead of an update. Not on the
-    continue rule (a chain in progress), not for a user-written base, not
-    for a profile that already covers a full chunk."""
+    continue rule (a chain in progress), not for a profile that already
+    covers a full chunk. A version the user wrote follows the same rule
+    (voice review, 2026-10-20, #183): a first profile written by hand
+    covers no data and takes the ladder; an edit of a full-chunk version
+    carries its coverage and is updated."""
     ex = pb._exports
     now = datetime.utcnow()
 
@@ -1313,12 +1316,20 @@ def test_provisional_first_build_is_rebuilt_from_scratch_at_the_organic_gate(app
     assert pb._should_seed(v) is True
     assert User.query.get(v.id).profile_needs_full_regen is False
 
-    # The user's own words are never provisional.
+    # A first profile written by hand covers no data: the ladder decides,
+    # as for a generated provisional profile (#183, S1).
     w, tipw = account(0, generated_by="user")
     organic(w, 85_000)
-    assert ex.profile_is_provisional(tipw) is False
+    assert ex.profile_is_provisional(tipw) is True
     assert pb._should_seed(w) is True
-    assert User.query.get(w.id).profile_needs_full_regen is False
+    assert User.query.get(w.id).profile_needs_full_regen is True
+
+    # The user's edit of a full-chunk version carries its coverage.
+    e, tipe = account(90_000, generated_by="user")
+    organic(e, 85_000)
+    assert ex.profile_is_provisional(tipe) is False
+    assert pb._should_seed(e) is True
+    assert User.query.get(e.id).profile_needs_full_regen is False
 
     # A chain in progress (data older than the render) continues; the
     # provisional tip is not a reason to start over.
@@ -1791,6 +1802,402 @@ def test_seeder_builds_the_integration_alone_after_a_refused_one(
     assert pb._should_seed(u) is False
 
 
+# ── #183: an edit leaves the seed gates as they were ──────────────────
+
+def test_183_edit_of_an_integration_leaves_the_seed_gates_as_they_were(app):
+    """A pre-filled (pinned) account edits its newest version, an
+    integration. The user's version carries the integration's coverage,
+    including the render time of the chain tip the integration merged, so
+    the seeder decides as it did before the edit: writing newer than that
+    render waits for the gates, and an unfinished chain still continues.
+    With the integration's own empty render time, the continue rule
+    measured from the time of the edit and seeded an extra update after
+    every edit. A tip saved before render times existed falls back to its
+    save time on a pinned account, and the edit carries that too."""
+    from backend.utils.profile_versions import coverage_of
+    now = datetime.utcnow()
+
+    def account(unread_written_at, rendered=True):
+        u = _user(profile_force_batch=True)
+        tip = _prev_profile(
+            u, datetime(2026, 5, 1), source_tokens=100_000,
+            gen_type="iterative",
+            rendered_at=(now - timedelta(days=2, minutes=5)
+                         if rendered else None))
+        tip.created_at = now - timedelta(days=2)
+        integration = _prev_profile(u, datetime(2026, 5, 1),
+                                    source_tokens=100_000,
+                                    gen_type="integration")
+        integration.parent_profile_id = tip.id
+        integration.created_at = now - timedelta(days=2) + timedelta(minutes=1)
+        node = _seed_node(u, 3000)
+        node.created_at = unread_written_at
+        db.session.commit()
+        return u, tip, integration
+
+    def edit(u, integration):
+        e = UserProfile(user_id=u.id, generated_by="user", tokens_used=0,
+                        ai_usage="chat", parent_profile_id=integration.id,
+                        **coverage_of(u, integration))
+        e.set_content("edited")
+        db.session.add(e)
+        db.session.commit()
+        return e
+
+    # Writing after the tip's render: growth, which waits for the 80k gate.
+    u, tip, integration = account(now - timedelta(days=1))
+    assert pb._should_seed(u) is False
+    e = edit(u, integration)
+    assert e.source_rendered_at == tip.source_rendered_at
+    assert pb._exports.profile_update_base(u.id).id == e.id
+    assert pb._should_seed(u) is False
+
+    # Writing older than the tip's render: an unfinished chain continues.
+    u, tip, integration = account(now - timedelta(days=3))
+    assert pb._should_seed(u) is True
+    edit(u, integration)
+    assert pb._should_seed(u) is True
+
+    # A tip from before render times: its save time is the boundary.
+    u, tip, integration = account(now - timedelta(days=1), rendered=False)
+    assert pb._should_seed(u) is False
+    e = edit(u, integration)
+    assert e.source_rendered_at == tip.created_at
+    assert pb._should_seed(u) is False
+
+
+def _user_edit(user, version, content="MY CORRECTION"):
+    """The row PUT /profile/<id> saves: a user version on top of the one
+    it changed, with that version's coverage (routes/profile.py)."""
+    from backend.utils.profile_versions import coverage_of
+    e = UserProfile(user_id=user.id, generated_by="user", tokens_used=0,
+                    ai_usage="chat", parent_profile_id=version.id,
+                    **coverage_of(user, version))
+    e.set_content(content)
+    db.session.add(e)
+    db.session.commit()
+    return e
+
+
+def test_183_batch_update_builds_on_the_users_version(app, monkeypatch):
+    """The batch step after an edit builds on it: the edit is the step's
+    previous profile, and the model is told it is the user's with the
+    note the sync loop uses (main sent it bare on the batch path)."""
+    u = _user()
+    tip = _prev_profile(u, datetime(2026, 5, 1), gen_type="iterative")
+    tip.created_at = datetime.utcnow() - timedelta(days=2)
+    integration = _prev_profile(u, datetime(2026, 5, 1),
+                                gen_type="integration")
+    integration.parent_profile_id = tip.id
+    integration.created_at = datetime.utcnow() - timedelta(days=1)
+    db.session.commit()
+    edit = _user_edit(u, integration)
+    _remaining(monkeypatch, 90000)
+    monkeypatch.setattr(pb._exports, "build_user_export_content",
+                        MagicMock(return_value=_chunk()))
+    monkeypatch.setattr(pb._exports, "build_update_template",
+                        lambda uid: "T <<{existing_profile}>> {new_data}")
+
+    req = pb._build_next_profile_request(u)
+
+    assert req["meta"]["prev_profile_id"] == edit.id
+    assert req["meta"]["generation_type"] == "update"
+    text = req["request"]["messages"][0]["content"][0]["text"]
+    note = pb._exports.USER_WRITTEN_PROFILE_NOTE
+    assert text.startswith(f"T <<{note}\n\nMY CORRECTION>> ")
+    # The same {existing_profile} as the sync loop's.
+    assert pb._exports.update_base_content(edit) == f"{note}\n\nMY CORRECTION"
+
+
+def test_183_batch_update_from_a_generated_base_has_no_note(app, monkeypatch):
+    u = _user()
+    _prev_profile(u, datetime(2026, 5, 1))
+    db.session.commit()
+    _remaining(monkeypatch, 90000)
+    monkeypatch.setattr(pb._exports, "build_user_export_content",
+                        MagicMock(return_value=_chunk()))
+    monkeypatch.setattr(pb._exports, "build_update_template",
+                        lambda uid: "T <<{existing_profile}>> {new_data}")
+
+    req = pb._build_next_profile_request(u)
+
+    text = req["request"]["messages"][0]["content"][0]["text"]
+    assert text.startswith("T <<PREVIOUS PROFILE>> ")
+
+
+def test_183_batch_chunk_saved_after_an_edit_saves_nothing(app):
+    """The user edits while a chunk is in the batch. The collected result
+    saves nothing (its cost is logged) and the chain does not advance: the
+    edit stays the newest version, and the seeder's gates start the next
+    run from it."""
+    u = _user()
+    prev = _prev_profile(u, datetime(2026, 5, 1))
+    prev.created_at = datetime.utcnow() - timedelta(days=1)
+    db.session.commit()
+    job, item = _chunk_job(u, prev)
+    edit = _user_edit(u, prev)
+
+    nxt = pb._apply_result(u, item, {"content": "NEVER SAW THE EDIT",
+                                     "input_tokens": 2000,
+                                     "output_tokens": 500},
+                           job.submitted_at)
+
+    assert nxt is None
+    assert UserProfile.query.filter_by(
+        user_id=u.id, generation_type="update",
+        parent_profile_id=prev.id).count() == 0
+    assert pb._exports.profile_update_base(u.id).id == edit.id
+    log = APICostLog.query.filter_by(user_id=u.id).one()
+    assert log.request_type == "profile_batch"
+
+
+def test_183_batch_integration_after_an_edit_saves_nothing(app):
+    u = _user()
+    tip = _prev_profile(u, datetime(2026, 6, 1), gen_type="iterative")
+    tip.created_at = datetime.utcnow() - timedelta(days=1)
+    db.session.commit()
+    job, item = _integration_job(u, tip)
+    edit = _user_edit(u, tip)
+
+    nxt = pb._apply_result(u, item, {"content": "NEVER SAW THE EDIT",
+                                     "input_tokens": 2000,
+                                     "output_tokens": 500},
+                           job.submitted_at)
+
+    assert nxt is None
+    assert UserProfile.query.filter_by(
+        user_id=u.id, generation_type="integration").count() == 0
+    newest = (UserProfile.query.filter_by(user_id=u.id)
+              .order_by(UserProfile.created_at.desc()).first())
+    assert newest.id == edit.id
+    assert APICostLog.query.filter_by(user_id=u.id).count() == 1
+
+
+# ── #183: a rebuild merges the user's version (option 2, batch path) ────
+
+MAY183, JUN183 = datetime(2026, 5, 1), datetime(2026, 6, 1)
+
+
+def _windows183(monkeypatch, remaining, windows):
+    """Pin the remainder and the window per cutoff, and short templates."""
+    monkeypatch.setattr(pb._exports, "count_remaining_units",
+                        lambda uid, cutoff=None: remaining.get(cutoff, 0))
+    monkeypatch.setattr(
+        pb._exports, "build_user_export_content",
+        lambda user, max_tokens=None, **kw: windows.get(kw.get("created_after")))
+    monkeypatch.setattr(pb._exports, "_load_prompt",
+                        lambda name, user_id=None: f"<{name}> {{user_export}}")
+    monkeypatch.setattr(pb._exports, "build_update_template",
+                        lambda uid: "UPDATE <<{existing_profile}>> {new_data}")
+
+
+def _texts183(req):
+    return [m["content"][0]["text"] for m in req["request"]["messages"]]
+
+
+def _run_steps(u, monkeypatch, first, outputs):
+    """Apply each request with a stand-in result until the run ends.
+    Returns the requests in order."""
+    import backend.utils.notifications as notif
+    monkeypatch.setattr(notif, "notify_profile_ready", lambda uid: None)
+    steps, req = [], first
+    while req is not None:
+        steps.append(req)
+        result = {"content": outputs[req["meta"]["kind"]],
+                  "input_tokens": 10, "output_tokens": 5}
+        req = pb._apply_result(u, req["meta"], result,
+                               datetime.utcnow() - timedelta(seconds=1))
+        db.session.commit()
+    return steps
+
+
+def test_183_batch_full_rebuild_merges_the_users_version(app, monkeypatch):
+    """The batch path makes the sync loop's choices: the 2019 window is read
+    without the edit; after the window that reaches May, a merge request
+    carries the rebuilt version and the user's version with main's note;
+    the integration merges the chain with the merge in it."""
+    _wide_window(app)
+    u = _user()
+    tip = _prev_profile(u, MAY183, source_tokens=100_000, gen_type="iterative")
+    tip.created_at = datetime.utcnow() - timedelta(days=3)
+    integration = _prev_profile(u, MAY183, source_tokens=100_000,
+                                gen_type="integration")
+    integration.parent_profile_id = tip.id
+    integration.created_at = datetime.utcnow() - timedelta(days=2)
+    db.session.commit()
+    edit = _user_edit(u, integration, "MY CORRECTION")
+    u.profile_needs_full_regen = True
+    db.session.commit()
+    y2019, spring = datetime(2019, 12, 1), datetime(2026, 5, 15)
+    _windows183(monkeypatch, {None: 180_000, y2019: 90_000, spring: 0}, {
+        None: _chunk("2019 ARCHIVE", latest=y2019),
+        y2019: _chunk("SPRING WRITING", latest=spring)})
+    monkeypatch.setattr(pb._exports, "should_continue_chain",
+                        lambda user, profile: True)
+
+    steps = _run_steps(u, monkeypatch, pb._build_next_profile_request(u), {
+        "chunk": "REBUILT", "merge": "MERGED", "integration": "FINAL"})
+
+    assert [s["meta"]["kind"] for s in steps] == [
+        "chunk", "chunk", "merge", "integration"]
+    assert "MY CORRECTION" not in "".join(_texts183(steps[0]))
+    merge_req = steps[2]
+    assert merge_req["meta"]["merged_profile_id"] == edit.id
+    assert CUSTOM_ID_RE.match(merge_req["request"]["custom_id"])
+    texts = _texts183(merge_req)
+    assert texts[1] == ("Profile No. 2\n- start to 2026-05-01\n\n"
+                        f"{pb._exports.USER_WRITTEN_PROFILE_NOTE}\n\n"
+                        "MY CORRECTION")
+    merge = UserProfile.query.filter_by(merged_profile_id=edit.id).one()
+    assert merge.parent_profile_id == merge_req["meta"]["prev_profile_id"]
+    assert len(_texts183(steps[3])) == 4           # 2 chunks, the merge, prompt
+    assert User.query.get(u.id).profile_pending_merge_id is None
+    final = UserProfile.query.filter_by(user_id=u.id).order_by(
+        UserProfile.created_at.desc()).first()
+    assert final.generation_type == "integration"
+    assert final.parent_profile_id == merge.id
+
+
+def test_183_batch_main_era_hand_written_profile_is_merged(app, monkeypatch):
+    """Review finding 2 on the batch path: a profile written with POST on
+    main (no parent, no cutoff, 0 units) on a 6k-unit account. After
+    deploy the seeder starts the ladder's from-scratch build (S1); the
+    build ends with a merge of the user's profile, which is the account's
+    newest version. A single chunk merged with it needs no integration."""
+    _wide_window(app)
+    u = _user()
+    own = UserProfile(user_id=u.id, generated_by="user", tokens_used=0,
+                      generation_type="initial", source_tokens_used=0,
+                      source_data_cutoff=None,
+                      created_at=datetime.utcnow() - timedelta(days=30))
+    own.set_content("ABOUT ME, IN MY WORDS")
+    db.session.add(own)
+    node = _seed_node(u, 6_000)
+    node.created_at = datetime.utcnow() - timedelta(days=40)
+    db.session.commit()
+
+    assert pb._should_seed(u) is True
+    assert User.query.get(u.id).profile_needs_full_regen is True
+    latest = node.created_at
+    _windows183(monkeypatch, {None: 6_000, latest: 0},
+                {None: _chunk("EARLY WRITING", units=6_000, latest=latest)})
+
+    steps = _run_steps(u, monkeypatch, pb._build_next_profile_request(u), {
+        "chunk": "BUILT", "merge": "BUILT, WITH MY WORDS",
+        "integration": "UNUSED"})
+
+    assert [s["meta"]["kind"] for s in steps] == ["chunk", "merge"]
+    assert "ABOUT ME" not in "".join(_texts183(steps[0]))
+    assert _texts183(steps[1])[1].endswith("ABOUT ME, IN MY WORDS")
+    newest = UserProfile.query.filter_by(user_id=u.id).order_by(
+        UserProfile.created_at.desc()).first()
+    assert newest.merged_profile_id == own.id
+    assert newest.generation_type == "initial"
+    assert "BUILT, WITH MY WORDS" in newest.get_content()
+
+
+def test_183_batch_edit_while_the_first_chunk_is_in_the_batch_is_merged(
+        app, monkeypatch):
+    """Review finding 1, batch path: the user saves a newer edit while a
+    from-scratch chunk 1 is in the batch; the route drops the pending merge
+    of the older edit. Collecting chunk 1 plans the merge again, so the
+    newer edit is merged at its date."""
+    _wide_window(app)
+    u = _user()
+    tip = _prev_profile(u, MAY183, source_tokens=100_000, gen_type="iterative")
+    tip.created_at = datetime.utcnow() - timedelta(days=3)
+    integration = _prev_profile(u, MAY183, source_tokens=100_000,
+                                gen_type="integration")
+    integration.parent_profile_id = tip.id
+    integration.created_at = datetime.utcnow() - timedelta(days=2)
+    db.session.commit()
+    first = _user_edit(u, integration, "FIRST EDIT")
+    first.created_at = datetime.utcnow() - timedelta(days=1)
+    u.profile_needs_full_regen = True
+    db.session.commit()
+    y2019, spring = datetime(2019, 12, 1), datetime(2026, 5, 15)
+    _windows183(monkeypatch, {None: 180_000, y2019: 90_000, spring: 0}, {
+        None: _chunk("2019 ARCHIVE", latest=y2019),
+        y2019: _chunk("SPRING WRITING", latest=spring)})
+    monkeypatch.setattr(pb._exports, "should_continue_chain",
+                        lambda user, profile: True)
+    req = pb._build_next_profile_request(u)
+    db.session.commit()
+    assert User.query.get(u.id).profile_pending_merge_id == first.id
+
+    second = _user_edit(u, first, "SECOND EDIT")
+    u.profile_pending_merge_id = None             # what the route does
+    db.session.commit()
+    steps = _run_steps(u, monkeypatch, req, {
+        "chunk": "REBUILT", "merge": "MERGED", "integration": "FINAL"})
+
+    assert [s["meta"]["kind"] for s in steps] == [
+        "chunk", "chunk", "merge", "integration"]
+    assert steps[2]["meta"]["merged_profile_id"] == second.id
+    assert _texts183(steps[2])[1].endswith("SECOND EDIT")
+
+
+def test_183_batch_merge_collected_after_none_keeps_the_pending_merge(
+        app, monkeypatch):
+    """Review finding 4, batch path: the merge result is collected after
+    the account was set to 'none'. It is saved 'none' and the pending merge
+    is kept, so the merge runs once the account allows AI again."""
+    u = _user()
+    base = _prev_profile(u, JUN183, gen_type="iterative")
+    base.created_at = datetime.utcnow() - timedelta(hours=1)
+    own = UserProfile(user_id=u.id, generated_by="user", tokens_used=0,
+                      ai_usage="chat",
+                      created_at=datetime.utcnow() - timedelta(days=2))
+    own.set_content("MY EDIT")
+    db.session.add(own)
+    db.session.flush()
+    u.profile_pending_merge_id = own.id
+    u.default_ai_usage = "none"
+    db.session.commit()
+    item = {"custom_id": f"profile_{u.id}_{base.id}_merge", "user_id": u.id,
+            "kind": "merge", "prev_profile_id": base.id,
+            "merged_profile_id": own.id, "model_id": "test-model",
+            "chunk_num": 2}
+
+    nxt = pb._apply_result(u, item, {"content": "MERGED", "input_tokens": 10,
+                                     "output_tokens": 5},
+                           datetime.utcnow() - timedelta(seconds=5))
+
+    assert nxt is None
+    assert UserProfile.query.filter_by(merged_profile_id=own.id).one(
+        ).ai_usage == "none"
+    assert User.query.get(u.id).profile_pending_merge_id == own.id
+    u.default_ai_usage = "chat"
+    db.session.commit()
+    assert pb._exports.pending_merge_version(u).id == own.id
+
+
+def test_183_batch_merge_after_an_edit_saves_nothing(app, monkeypatch):
+    u = _user()
+    base = _prev_profile(u, JUN183, gen_type="iterative")
+    base.created_at = datetime.utcnow() - timedelta(days=1)
+    own = UserProfile(user_id=u.id, generated_by="user", tokens_used=0,
+                      created_at=datetime.utcnow() - timedelta(days=2))
+    own.set_content("MY OLDER EDIT")
+    db.session.add(own)
+    db.session.commit()
+    item = {"custom_id": f"profile_{u.id}_{base.id}_merge", "user_id": u.id,
+            "kind": "merge", "prev_profile_id": base.id,
+            "merged_profile_id": own.id, "model_id": "test-model"}
+    submitted = datetime.utcnow()
+    edit = _user_edit(u, base, "A NEWER EDIT")
+
+    nxt = pb._apply_result(u, item, {"content": "MERGED",
+                                     "input_tokens": 10, "output_tokens": 5},
+                           submitted)
+
+    assert nxt is None
+    assert UserProfile.query.filter(
+        UserProfile.merged_profile_id.isnot(None)).count() == 0
+    assert pb._exports.profile_update_base(u.id).id == edit.id
+    assert APICostLog.query.filter_by(user_id=u.id).count() == 1
+
+
 def test_profile_refusal_stop_is_reported_as_refused(app, monkeypatch):
     """#470: the second refusal stops the job and the report says
     "refused by the model", not "output cut off"."""
@@ -1808,3 +2215,425 @@ def test_profile_refusal_stop_is_reported_as_refused(app, monkeypatch):
             pb._exports.refuse_truncated_profile(
                 u, "test-model", resp, "chunk", batch=True)
     assert stops[-1]["cause"] == "refused by the model"
+
+
+# ── per-user spend cap (Peter, 2026-10-20: the cap applies to batch jobs) ─
+
+def _cap_harness(app, monkeypatch, limit):
+    """Turn the per-user cap on at ``limit`` USD and stub its two side
+    channels: the deferred check each cost row dispatches (a broker call)
+    and the admin's block email (returned, to count the sends)."""
+    import backend.utils.email as em
+    app.config["PER_USER_MONTHLY_LIMIT_USD"] = limit
+    monkeypatch.setattr("backend.tasks.spend_monitor.enforce_user_cap",
+                        MagicMock())
+    block_email = MagicMock()
+    monkeypatch.setattr(em, "send_user_spend_block_email", block_email)
+    return block_email
+
+
+def _spent(user, usd, created_at=None):
+    row = APICostLog(user_id=user.id, model_id="test-model",
+                     request_type="llm",
+                     cost_microdollars=int(round(usd * 1_000_000)))
+    if created_at is not None:
+        row.created_at = created_at
+    db.session.add(row)
+    db.session.commit()
+
+
+def _last_month():
+    from backend.utils.spend import month_start
+    return month_start() - timedelta(days=1)
+
+
+def _mid_rebuild(monkeypatch, user):
+    """A user part-way through a multi-chunk rebuild: a chunk is in
+    flight and, once it lands, more unread data remains, so without the
+    cap the poller submits the next chunk."""
+    prev = _prev_profile(user, datetime(2026, 5, 1), gen_type="iterative")
+    item = {
+        "custom_id": f"profile_{user.id}_{prev.id}_chunk",
+        "user_id": user.id, "kind": "chunk", "prev_profile_id": prev.id,
+        "generation_type": "iterative", "prev_cumulative": 1000,
+        "source_data_cutoff": "2026-06-01T00:00:00",
+        "rendered_at": datetime.utcnow().isoformat(),
+        "model_id": "test-model", "chunk_units": 90000,
+        "chunk_num": 2, "chunk_total": 5,
+    }
+    job = ProfileBatchJob(provider_key="anthropic", batch_id="b-cap",
+                          status="pending", items=[item],
+                          submitted_at=datetime.utcnow())
+    db.session.add(job)
+    user.profile_batch_pending = True
+    db.session.commit()
+    monkeypatch.setattr(pb, "batch_check_and_collect", lambda bids, keys: (
+        {item["custom_id"]: {"content": "CHUNK 2", "input_tokens": 100_000,
+                             "output_tokens": 10_000}}, {}, {}))
+    monkeypatch.setattr(pb._exports, "should_continue_chain",
+                        lambda u, p: True)
+    _remaining(monkeypatch, 270_000)
+    monkeypatch.setattr(pb._exports, "build_user_export_content",
+                        MagicMock(return_value=_chunk("CHUNK 3 DATA")))
+    monkeypatch.setattr(pb._exports, "build_update_template",
+                        lambda uid: "T {new_data}")
+    submit = MagicMock(return_value={"anthropic": "b-next"})
+    monkeypatch.setattr(pb, "batch_submit", submit)
+    return prev, job, submit
+
+
+def test_seed_skips_a_capped_users_rebuild_until_the_cap_resets(
+        app, monkeypatch):
+    """The import hand-off flags a from-scratch rebuild and seeds at once:
+    a capped user gets no chunk, and the flag waits. Once the month rolls
+    over (the block names last month, the spend is last month's), the
+    same seed submits chunk 1."""
+    block_email = _cap_harness(app, monkeypatch, limit=1.0)
+    from backend.utils.spend import current_month
+    u = _user(profile_force_batch=True, profile_needs_full_regen=True)
+    db.session.commit()
+    _spent(u, 5.0)
+    u.spend_blocked_month = current_month()
+    db.session.commit()
+    _remaining(monkeypatch, 14_000_000)
+    export = MagicMock(return_value=_chunk("DATA"))
+    monkeypatch.setattr(pb._exports, "build_user_export_content", export)
+    monkeypatch.setattr(pb._exports, "_load_prompt",
+                        lambda *a, **k: "G {user_export}")
+    submitted = []
+    monkeypatch.setattr(pb, "batch_submit", lambda reqs, keys, kind: (
+        submitted.append(reqs) or {k: f"b-{k}" for k in reqs}))
+
+    assert pb._seed_profile_batches(users=[u]) == 0
+    export.assert_not_called()
+    assert submitted == []
+    u = User.query.get(u.id)
+    assert u.profile_needs_full_regen is True     # the rebuild still waits
+    assert u.profile_batch_pending is False
+    assert (u.profile_batch_attempts or 0) == 0   # not a failed attempt
+    assert u.profile_cap_held is True
+
+    # Next month: the stored block is stale and this month's spend is 0.
+    APICostLog.query.filter_by(user_id=u.id).update(
+        {"created_at": _last_month()})
+    u.spend_blocked_month = current_month(_last_month())
+    db.session.commit()
+    assert pb._seed_profile_batches(users=[u]) == 1
+    (reqs,) = submitted
+    (req,) = next(iter(reqs.values()))
+    assert req["custom_id"] == f"profile_{u.id}_0_chunk"
+    assert User.query.get(u.id).profile_cap_held is False
+    block_email.assert_not_called()
+
+
+def test_capped_flag_alone_holds_the_seed_when_the_global_cap_is_off(
+        app, monkeypatch):
+    """A block the admin set through a per-user limit holds the batch
+    seed even with PER_USER_MONTHLY_LIMIT_USD = 0, as it holds every
+    other path that reads the flag."""
+    from backend.utils.spend import current_month
+    u = _user(profile_force_batch=True, profile_needs_full_regen=True,
+              spend_blocked_month=current_month())
+    db.session.commit()
+    _remaining(monkeypatch, 90000)
+    export = MagicMock(return_value=_chunk("DATA"))
+    monkeypatch.setattr(pb._exports, "build_user_export_content", export)
+    submit = MagicMock(return_value={})
+    monkeypatch.setattr(pb, "batch_submit", submit)
+
+    assert pb._seed_profile_batches(users=[u]) == 0
+    export.assert_not_called()
+    submit.assert_not_called()
+
+
+def test_rebuild_stops_after_the_step_that_crosses_the_cap(app, monkeypatch):
+    """The step in flight is collected, saved and its cost logged; that
+    cost takes the user over the cap, so they are blocked (admin emailed
+    once) and the next chunk is not submitted. The chain is not counted
+    as failed, and a pre-filled account gets no "complete" email. The
+    hourly seeder then leaves the user alone."""
+    import backend.utils.email as em
+    from backend.utils.spend import current_month
+    block_email = _cap_harness(app, monkeypatch, limit=1.0)
+    prefill_sent = []
+    monkeypatch.setattr(em, "send_admin_prefill_complete_notification",
+                        lambda *a: prefill_sent.append(a))
+    u = _user(profile_force_batch=True, prefilled_handle="alice_x")
+    db.session.commit()
+    _spent(u, 0.999999)                       # one microdollar of headroom
+    prev, job, submit = _mid_rebuild(monkeypatch, u)
+
+    pb._poll_profile_batches()
+
+    saved = UserProfile.query.filter_by(
+        user_id=u.id, parent_profile_id=prev.id).one()
+    assert saved.get_content().endswith("CHUNK 2")
+    step_cost = APICostLog.query.filter_by(
+        user_id=u.id, request_type="profile_batch").one()
+    assert step_cost.cost_microdollars > 0
+    u = User.query.get(u.id)
+    assert u.spend_blocked_month == current_month()
+    block_email.assert_called_once()
+    submit.assert_not_called()
+    assert ProfileBatchJob.query.get(job.id).status == "collected"
+    assert ProfileBatchJob.query.filter_by(status="pending").count() == 0
+    assert u.profile_batch_pending is False
+    assert u.profile_batch_attempts == 0
+    assert u.profile_cap_held is True
+    assert prefill_sent == []
+
+    assert pb._seed_profile_batches(users=[u]) == 0
+    submit.assert_not_called()
+    block_email.assert_called_once()          # not re-sent
+
+
+def test_own_limit_stops_the_rebuild_while_the_global_cap_is_off(
+        app, monkeypatch):
+    """Global limit 0 (the default). The admin sets one user's limit to
+    $50 while they have spent $10, so they are not blocked. When a later
+    chunk takes them over $50, the step is saved and its cost logged, the
+    user is blocked and no next chunk is submitted, although no cost row
+    schedules a check while the global limit is 0."""
+    from backend.utils.spend import current_month, reconcile_user_spend_block
+    block_email = _cap_harness(app, monkeypatch, limit=0)
+    u = _user(profile_force_batch=True)
+    db.session.commit()
+    _spent(u, 10.0)
+    u.monthly_spend_limit_usd = 50.0
+    assert reconcile_user_spend_block(u, app.config)["blocked"] is False
+    db.session.commit()
+    _spent(u, 39.999999)                      # the rebuild's earlier chunks
+    prev, job, submit = _mid_rebuild(monkeypatch, u)
+
+    pb._poll_profile_batches()
+
+    assert UserProfile.query.filter_by(
+        user_id=u.id, parent_profile_id=prev.id).count() == 1
+    assert APICostLog.query.filter_by(
+        user_id=u.id, request_type="profile_batch").count() == 1
+    u = User.query.get(u.id)
+    assert u.spend_blocked_month == current_month()
+    block_email.assert_called_once()
+    submit.assert_not_called()
+    assert u.profile_batch_pending is False
+
+
+def test_cap_check_costs_no_query_for_an_uncapped_user(app, monkeypatch):
+    """The builder runs the check before every step. For a user with no
+    limit (global 0, no own limit) it must not query: the user is already
+    loaded. With an own limit it sums the month's spend."""
+    from sqlalchemy import event
+    _cap_harness(app, monkeypatch, limit=0)
+    u = _user(profile_force_batch=True)
+    db.session.commit()
+    u.default_ai_usage   # loaded, as account_allows_ai leaves it in the builder
+    statements = []
+
+    def count(conn, cursor, statement, *a):
+        statements.append(statement)
+
+    event.listen(db.engine, "before_cursor_execute", count)
+    try:
+        assert pb._spend_capped(u) is False
+        assert statements == []
+        u.monthly_spend_limit_usd = 50.0
+        assert pb._spend_capped(u) is False
+        assert any("sum" in s.lower() for s in statements)
+    finally:
+        event.remove(db.engine, "before_cursor_execute", count)
+
+
+@pytest.mark.parametrize("lift", ["next_month", "admin_raises_limit"])
+def test_inactive_prefill_stopped_at_the_cap_resumes_from_its_tip(
+        app, monkeypatch, lift):
+    """A pre-filled account not yet activated is outside the hourly
+    cohort (profile_eligible_query needs approved): its build started
+    from an immediate seed. Stopped at the cap, it is resumed by the
+    hourly seeder once the cap lifts, from the saved version, not from
+    scratch. A deactivated account in the same state stays paused."""
+    from backend.utils.spend import current_month, reconcile_user_spend_block
+    _cap_harness(app, monkeypatch, limit=1.0)
+    u = _user(profile_force_batch=True, prefilled_handle="alice_x")
+    u.approved = False
+    paused = _user(profile_force_batch=True, profile_cap_held=True,
+                   deactivated_at=datetime.utcnow())
+    paused.approved = False
+    _prev_profile(paused, datetime(2026, 5, 1), gen_type="iterative")
+    db.session.commit()
+    _spent(u, 0.999999)
+    prev, job, submit = _mid_rebuild(monkeypatch, u)
+
+    pb._poll_profile_batches()
+    tip = UserProfile.query.filter_by(
+        user_id=u.id, parent_profile_id=prev.id).one()
+    assert User.query.get(u.id).profile_cap_held is True
+    submit.assert_not_called()
+
+    assert pb._seed_profile_batches() == 0     # hourly pass, still capped
+    submit.assert_not_called()
+
+    u = User.query.get(u.id)
+    if lift == "next_month":
+        APICostLog.query.filter_by(user_id=u.id).update(
+            {"created_at": _last_month()})
+        u.spend_blocked_month = current_month(_last_month())
+    else:
+        u.monthly_spend_limit_usd = 100.0
+        assert reconcile_user_spend_block(u, app.config)["blocked"] is False
+    db.session.commit()
+
+    assert pb._seed_profile_batches() == 1     # hourly pass
+    (req,) = submit.call_args.args[0]["anthropic"]
+    assert req["custom_id"] == f"profile_{u.id}_{tip.id}_chunk"
+    resumed = ProfileBatchJob.query.filter_by(batch_id="b-next").one()
+    assert resumed.items[0]["prev_profile_id"] == tip.id
+    u = User.query.get(u.id)
+    assert u.profile_batch_pending is True
+    assert u.profile_cap_held is False
+    assert User.query.get(paused.id).profile_batch_pending is False
+
+
+def test_step_in_flight_for_an_already_capped_user_is_collected(
+        app, monkeypatch):
+    """Blocked while a step was queued (by a reply, say): the provider
+    bills the step anyway, so it is saved and its cost logged; nothing
+    follows it."""
+    from backend.utils.spend import current_month
+    block_email = _cap_harness(app, monkeypatch, limit=1.0)
+    u = _user(profile_force_batch=True)
+    db.session.commit()
+    _spent(u, 5.0)
+    u.spend_blocked_month = current_month()
+    db.session.commit()
+    prev, job, submit = _mid_rebuild(monkeypatch, u)
+
+    pb._poll_profile_batches()
+
+    assert UserProfile.query.filter_by(
+        user_id=u.id, parent_profile_id=prev.id).count() == 1
+    assert APICostLog.query.filter_by(
+        user_id=u.id, request_type="profile_batch").count() == 1
+    submit.assert_not_called()
+    assert User.query.get(u.id).profile_batch_pending is False
+    block_email.assert_not_called()           # blocked before; no new email
+
+
+@pytest.mark.parametrize("global_limit, override", [
+    (0, None),    # the cap is off (the default)
+    (1.0, 0),     # on, but this user's limit is 0 = uncapped
+])
+def test_uncapped_user_rebuild_is_unaffected_by_spend(
+        app, monkeypatch, global_limit, override):
+    block_email = _cap_harness(app, monkeypatch, limit=global_limit)
+    u = _user(profile_force_batch=True, monthly_spend_limit_usd=override)
+    db.session.commit()
+    _spent(u, 999.0)
+    prev, job, submit = _mid_rebuild(monkeypatch, u)
+
+    pb._poll_profile_batches()
+
+    submit.assert_called_once()
+    nxt = ProfileBatchJob.query.filter_by(batch_id="b-next").one()
+    assert nxt.items[0]["kind"] == "chunk"
+    assert nxt.items[0]["chunk_num"] == 3
+    u = User.query.get(u.id)
+    assert u.spend_blocked_month is None
+    assert u.profile_batch_pending is True
+    block_email.assert_not_called()
+
+
+def test_sync_path_is_unchanged_by_the_batch_cap_check(app, monkeypatch):
+    """The synchronous path keeps its own check (update_user_profile reads
+    the flag on entry). The batch check neither hands a cap-stopped batch
+    user to the full-price sync last resort (their attempts stay 0) nor
+    adds a check to the sync dispatch."""
+    from backend.utils.spend import current_month
+    _cap_harness(app, monkeypatch, limit=1.0)
+    dispatch = MagicMock()
+    dispatch.delay.return_value.id = "task-1"
+    monkeypatch.setattr(pb._exports, "update_user_profile", dispatch)
+
+    batch_user = _user(profile_needs_full_regen=True)
+    db.session.flush()
+    app.config["PROFILE_BATCH_USER_IDS"] = {batch_user.id}
+    batch_user.spend_blocked_month = current_month()
+    db.session.commit()
+    assert pb._seed_profile_batches(users=[batch_user]) == 0
+    assert (User.query.get(batch_user.id).profile_batch_attempts or 0) == 0
+    assert pb._exports.maybe_trigger_incremental_profile_update(
+        batch_user) is None
+    dispatch.delay.assert_not_called()
+
+    sync_user = _user(spend_blocked_month=current_month())
+    db.session.commit()
+    assert pb._exports.maybe_trigger_profile_update(
+        sync_user.id, force_full_regen=True) == "task-1"
+    dispatch.delay.assert_called_once_with(sync_user.id, "test-model", None)
+
+
+def test_rebuild_stops_after_a_merge_step_that_crosses_the_cap(
+        app, monkeypatch):
+    """#183's merge step (#414) in a capped rebuild, as for a chunk: the
+    merge in flight is collected, saved and its cost logged; that cost
+    takes the user over the cap, so the next chunk is not submitted, the
+    hold marks the chain for the hourly seeder, and a pre-filled account
+    gets no "complete" email."""
+    import backend.utils.email as em
+    from backend.utils.spend import current_month
+    block_email = _cap_harness(app, monkeypatch, limit=1.0)
+    prefill_sent = []
+    monkeypatch.setattr(em, "send_admin_prefill_complete_notification",
+                        lambda *a: prefill_sent.append(a))
+    u = _user(profile_force_batch=True, prefilled_handle="alice_x")
+    db.session.commit()
+    _spent(u, 0.999999)                       # one microdollar of headroom
+    old = _prev_profile(u, datetime(2026, 4, 1), gen_type="iterative")
+    old.created_at = datetime.utcnow() - timedelta(days=3)
+    db.session.commit()
+    edit = _user_edit(u, old, "MY CORRECTION")
+    edit.created_at = datetime.utcnow() - timedelta(days=2)
+    # The rebuilt chain has read up to the edit's date: the merge is out.
+    prev = _prev_profile(u, datetime(2026, 5, 1), gen_type="iterative")
+    u.profile_pending_merge_id = edit.id
+    item = {
+        "custom_id": f"profile_{u.id}_{prev.id}_merge",
+        "user_id": u.id, "kind": "merge", "prev_profile_id": prev.id,
+        "merged_profile_id": edit.id, "model_id": "test-model",
+        "chunk_num": 3,
+    }
+    job = ProfileBatchJob(provider_key="anthropic", batch_id="b-cap-merge",
+                          status="pending", items=[item],
+                          submitted_at=datetime.utcnow())
+    db.session.add(job)
+    u.profile_batch_pending = True
+    db.session.commit()
+    monkeypatch.setattr(pb, "batch_check_and_collect", lambda bids, keys: (
+        {item["custom_id"]: {"content": "MERGED", "input_tokens": 100_000,
+                             "output_tokens": 10_000}}, {}, {}))
+    # More unread writing after the merge: uncapped, the next chunk goes.
+    monkeypatch.setattr(pb._exports, "should_continue_chain",
+                        lambda user, p: True)
+    _remaining(monkeypatch, 270_000)
+    monkeypatch.setattr(pb._exports, "build_user_export_content",
+                        MagicMock(return_value=_chunk("CHUNK 3 DATA")))
+    monkeypatch.setattr(pb._exports, "build_update_template",
+                        lambda uid: "T {new_data}")
+    submit = MagicMock(return_value={"anthropic": "b-next"})
+    monkeypatch.setattr(pb, "batch_submit", submit)
+
+    pb._poll_profile_batches()
+
+    merge = UserProfile.query.filter_by(
+        user_id=u.id, merged_profile_id=edit.id).one()
+    assert merge.parent_profile_id == prev.id
+    assert APICostLog.query.filter_by(
+        user_id=u.id, request_type="profile_batch").count() == 1
+    u = User.query.get(u.id)
+    assert u.profile_pending_merge_id is None
+    assert u.spend_blocked_month == current_month()
+    block_email.assert_called_once()
+    submit.assert_not_called()
+    assert u.profile_batch_pending is False
+    assert u.profile_batch_attempts == 0
+    assert u.profile_cap_held is True
+    assert prefill_sent == []

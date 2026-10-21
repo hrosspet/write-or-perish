@@ -1,5 +1,6 @@
 from flask import jsonify, current_app
 from flask_login import login_required, current_user
+from backend.utils.error_privacy import describe_exception
 from backend.models import UserProfile
 from backend.extensions import db
 from backend.utils.timefmt import iso_utc
@@ -18,7 +19,11 @@ from backend.utils.privacy import (
 )
 from backend.utils.api_keys import get_openai_chat_key
 from backend.utils.spend import require_spend_headroom
-from backend.utils.profile_versions import visible_profiles_query
+from backend.utils.profile_versions import (
+    visible_profiles_query,
+    same_profile_text,
+    coverage_of,
+)
 
 profile_bp = Blueprint("profile", __name__)
 
@@ -75,8 +80,11 @@ def get_profile_version(version_id):
 @login_required
 def revert_profile(version_id):
     """Create a new profile version from a historical one. Mirrors the
-    in-pipeline revert (tasks/exports.py): a new row typed 'revert' that
-    carries the source version's attribution and ai_usage (#191)."""
+    in-pipeline revert (tasks/exports.retip_profile_chain): a new row typed
+    'revert' that carries the source version's attribution and ai_usage
+    (#191). It is the newest version, so the next update builds on it, and
+    a run in progress stops before it saves over it
+    (tasks/exports.base_moved, #183)."""
     old = UserProfile.query.get_or_404(version_id)
     if old.user_id != current_user.id:
         return jsonify({"error": "Unauthorized"}), 403
@@ -93,14 +101,18 @@ def revert_profile(version_id):
         tokens_used=0,
         privacy_level=old.privacy_level,
         ai_usage=old.ai_usage,
-        source_tokens_used=old.source_tokens_used,
-        source_data_cutoff=old.source_data_cutoff,
+        # The same coverage an edit of it would carry, render time
+        # included: copying only the cutoff left an integration's empty
+        # render time, so a pinned (pre-filled) account's continue rule
+        # measured from the revert and seeded an extra update.
+        **coverage_of(current_user, old),
         generation_type="revert",
         parent_profile_id=old.id,
     )
     # Copy the encrypted content directly (no decrypt/re-encrypt round).
     new_profile.content = old.content
     db.session.add(new_profile)
+    _user_saved_a_version(new_profile)
     db.session.commit()
 
     return jsonify({
@@ -247,7 +259,17 @@ def get_tts_status(profile_id):
 @profile_bp.route("/", methods=["POST"])
 @login_required
 def create_profile():
-    """Create a new user-generated profile."""
+    """Create a new profile version the user wrote (generated_by "user").
+
+    When the user already has a profile, the new version follows the
+    newest one, like an edit of it (``update_profile``): that version is
+    its parent, and the new one carries its source coverage
+    (``coverage_of``), so the next update builds on the user's text and
+    reads only writing after that version's cutoff. The iPhone app sends a
+    POST when a new version arrived while the user was editing ("Save as
+    new"). A first profile, written when the user has none, has neither a
+    parent nor coverage; it follows the provisional ladder like any first
+    profile (tasks/exports.profile_is_provisional)."""
     from flask import request
 
     data = request.get_json()
@@ -267,17 +289,27 @@ def create_profile():
     if not validate_privacy_level(privacy_level):
         return jsonify({"error": f"Invalid privacy_level: {privacy_level}"}), 400
 
+    newest = UserProfile.query.filter_by(
+        user_id=current_user.id
+    ).order_by(UserProfile.created_at.desc()).first()
     profile = UserProfile(
         user_id=current_user.id,
         generated_by="user",
         tokens_used=0,
         privacy_level=privacy_level,
-        ai_usage=ai_usage
+        ai_usage=ai_usage,
+        parent_profile_id=newest.id if newest else None,
+        **(coverage_of(current_user, newest) if newest else {}),
     )
     profile.set_content(content)
 
+    user_id = current_user.id  # read before a rollback expires it
     try:
         db.session.add(profile)
+        db.session.flush()
+        if newest is not None and profile.ai_usage in AI_ALLOWED:
+            _carry_recent_context(newest, profile)
+        _user_saved_a_version(profile)
         db.session.commit()
 
         return jsonify({
@@ -294,32 +326,67 @@ def create_profile():
         }), 201
     except Exception as e:
         db.session.rollback()
-        return jsonify({"error": "Failed to create profile", "details": str(e)}), 500
+        # The error's text can quote the profile being saved: the response
+        # and the log (and so Sentry) get the type only.
+        current_app.logger.exception(
+            "Profile create failed for user %s: %s", user_id, describe_exception(e))
+        return jsonify({"error": "Failed to create profile"}), 500
 
 
-def _save_edit_as_none_version(profile, new_content, data):
-    """A profile edit made while the account is set to 'none', saved as a
-    new version with the account's ai_usage. It covers the same source
-    data as the edited version, so it carries that version's source
-    figures, and it links to it as its parent. The update pipeline skips
-    it as a base (tasks/exports.profile_update_base)."""
+def _edit_ai_usage(profile):
+    """The ai_usage of a version saved from an edit of ``profile``: the
+    account setting when the text is written (#191, #346), except that an
+    edit of a version marked 'none' stays 'none'. Most of its text was
+    written under 'none', and nothing marked None reaches a model."""
+    if profile.ai_usage not in AI_ALLOWED:
+        return profile.ai_usage
+    return current_user.default_ai_usage
+
+
+def _save_edit_as_new_version(profile, new_content, data, keep_audio=False):
+    """A profile edit saved as a new version the user wrote
+    (generated_by "user", dated by the edit). The edited version keeps its
+    text, ai_usage and audio and stays in the history.
+
+    The new version is the edited one's successor: it links to it as its
+    parent, and it covers the same source data, so it carries that
+    version's coverage (``coverage_of``; for an integration, the
+    continue-rule boundary is that of the chain tip it merged). It is the
+    newest version, so the next update builds on it as its previous
+    profile (tasks/exports.profile_update_base), and a run in progress
+    stops before it saves over it (tasks/exports.base_moved). Voice review,
+    2026-10-20 (#183). A version marked 'none' is skipped as a base, as
+    before (#346).
+
+    keep_audio: the user chose to keep the existing audio for the edited
+    text (the frontend's "keep or regenerate" prompt, #66), so the new
+    version reuses the edited version's audio files."""
     new_profile = UserProfile(
         user_id=current_user.id,
         generated_by="user",
         tokens_used=0,
         privacy_level=data.get("privacy_level", profile.privacy_level),
-        ai_usage=current_user.default_ai_usage,
-        source_tokens_used=profile.source_tokens_used,
-        source_data_cutoff=profile.source_data_cutoff,
+        ai_usage=_edit_ai_usage(profile),
         parent_profile_id=profile.id,
+        **coverage_of(current_user, profile),
     )
     new_profile.set_content(new_content)
+    edited_id = profile.id  # read before a rollback expires it
     try:
         db.session.add(new_profile)
+        db.session.flush()
+        if keep_audio:
+            _copy_audio(profile, new_profile)
+        if new_profile.ai_usage in AI_ALLOWED:
+            _carry_recent_context(profile, new_profile)
+        _user_saved_a_version(new_profile)
         db.session.commit()
     except Exception as e:
         db.session.rollback()
-        return jsonify({"error": "Failed to update profile", "details": str(e)}), 500
+        current_app.logger.exception(
+            "Profile edit (as a new version of %s) failed: %s",
+            edited_id, describe_exception(e))
+        return jsonify({"error": "Failed to update profile"}), 500
     return jsonify({
         "message": "Profile updated successfully",
         "profile": {
@@ -332,6 +399,60 @@ def _save_edit_as_none_version(profile, new_content, data):
             "ai_usage": new_profile.ai_usage
         }
     }), 200
+
+
+def _carry_recent_context(source, target):
+    """A version the user saves on top of ``source`` keeps ``source``'s
+    recent-context summary (#183). Chat replies look the summary up by the
+    newest profile's id, so without a copy they had none until the summary
+    job wrote a new one (10 to 20 minutes), and that job spent a model call
+    on writing the summary already covered. The copy covers the same
+    writing: same cutoff and save time, the text copied as stored (not
+    decrypted), no model call."""
+    from backend.models import UserRecentContext
+    summary = (UserRecentContext.query
+               .filter_by(user_id=source.user_id, profile_id=source.id)
+               .order_by(UserRecentContext.created_at.desc()).first())
+    if summary is None:
+        return
+    db.session.add(UserRecentContext(
+        user_id=summary.user_id, content=summary.content,
+        generated_by=summary.generated_by, tokens_used=0,
+        created_at=summary.created_at,
+        source_data_cutoff=summary.source_data_cutoff,
+        source_tokens_covered=summary.source_tokens_covered,
+        profile_id=target.id, ai_usage=summary.ai_usage))
+
+
+def _user_saved_a_version(version):
+    """A version the user saves (an edit, a new profile, a revert) ends a
+    rebuild's pending merge of an older version of theirs (#183): the newest
+    version the user saved wins, and the next run builds on it. A version
+    marked 'none' is never a base, so it ends nothing: the pending merge
+    still runs once the account allows AI."""
+    if version.ai_usage in AI_ALLOWED:
+        current_user.profile_pending_merge_id = None
+
+
+def _copy_audio(source, target):
+    """Point ``target`` at ``source``'s finished speech: the scalar URL and
+    the per-chunk rows the streaming player reads. The files are shared;
+    they belong to the same user, and clearing audio never deletes files
+    (utils/audio_storage.clear_tts_artifacts)."""
+    from backend.models import TTSChunk
+    if not source.audio_tts_url or source.tts_task_status != "completed":
+        return
+    target.audio_tts_url = source.audio_tts_url
+    target.tts_task_status = "completed"
+    target.tts_task_progress = 100
+    for chunk in TTSChunk.query.filter_by(profile_id=source.id).order_by(
+            TTSChunk.chunk_index).all():
+        db.session.add(TTSChunk(
+            profile_id=target.id, chunk_index=chunk.chunk_index,
+            section_index=chunk.section_index,
+            section_title=chunk.section_title, audio_url=chunk.audio_url,
+            duration=chunk.duration, status=chunk.status,
+            completed_at=chunk.completed_at))
 
 
 @profile_bp.route("/<int:profile_id>", methods=["PUT"])
@@ -357,19 +478,32 @@ def update_profile(profile_id):
     if "privacy_level" in data and not validate_privacy_level(data["privacy_level"]):
         return jsonify({"error": f"Invalid privacy_level: {data['privacy_level']}"}), 400
 
-    # Text written while the account is set to 'none' must not land in an
-    # AI-readable row (#346). Such an edit is saved as a new version marked
-    # 'none'; the edited version keeps its text, its ai_usage and its audio.
-    if (new_content != profile.get_content()
-            and profile.ai_usage in AI_ALLOWED
-            and not account_allows_ai(current_user)):
-        return _save_edit_as_none_version(profile, new_content, data)
+    # Every edit that changes the words is saved as a new version the user
+    # wrote, dated by the edit, with the edited version as its predecessor
+    # (voice review, 2026-10-20, #183). The edited version keeps its text,
+    # its ai_usage and its audio. A change of whitespace only (blank lines,
+    # trailing spaces, a trailing newline) is not an edit of the words: it
+    # is saved in place and makes no new version, except while the account
+    # is set to 'none', when no text change lands in an AI-readable row
+    # (#346).
+    old_content = profile.get_content()
+    text_changed = new_content != old_content
+    words_changed = (text_changed
+                     and not same_profile_text(old_content, new_content))
+    none_edit = (text_changed and profile.ai_usage in AI_ALLOWED
+                 and not account_allows_ai(current_user))
+    if words_changed or none_edit:
+        # A 'none' version gets no speech, so it never takes audio.
+        return _save_edit_as_new_version(
+            profile, new_content, data,
+            keep_audio=(_edit_ai_usage(profile) in AI_ALLOWED
+                        and not data.get("regenerate_tts")))
 
     # Editing the text makes generated TTS audio stale. The frontend asks
     # the user whether to keep or regenerate and only sends
     # regenerate_tts=true when they choose to regenerate; we then clear the
     # audio so fresh TTS is generated on the next request (#66).
-    if data.get("regenerate_tts") and new_content != profile.get_content():
+    if data.get("regenerate_tts") and text_changed:
         from backend.utils.audio_storage import clear_tts_artifacts
         clear_tts_artifacts(profile)
 
@@ -398,4 +532,6 @@ def update_profile(profile_id):
         }), 200
     except Exception as e:
         db.session.rollback()
-        return jsonify({"error": "Failed to update profile", "details": str(e)}), 500
+        current_app.logger.exception("Profile %s update failed: %s",
+                                     profile_id, describe_exception(e))
+        return jsonify({"error": "Failed to update profile"}), 500

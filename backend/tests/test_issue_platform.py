@@ -129,6 +129,28 @@ def test_create_github_issue_adds_the_platform_label(
     assert labels == ["loore", "bug", "loore:alice"] + extra
 
 
+@pytest.mark.parametrize("status", [401, 422])
+def test_a_refused_issue_carries_githubs_status(monkeypatch, status):
+    """The status tells an expired token from a refused request in the
+    log line, which never has GitHub's response text (2026-10-20)."""
+    import backend.utils.github as github
+    from backend.utils.error_privacy import describe_exception
+    flask_app = Flask(__name__)
+    flask_app.config["GITHUB_TOKEN"] = "t"
+    flask_app.config["GITHUB_REPO"] = "owner/repo"
+    post = MagicMock()
+    post.return_value.status_code = status
+    post.return_value.text = '{"message": "Validation Failed: title x"}'
+    monkeypatch.setattr(github.requests, "post", post)
+
+    with flask_app.app_context(), pytest.raises(RuntimeError) as caught:
+        github.create_github_issue("Title", "Body", "bug", "alice")
+
+    assert isinstance(caught.value, github.GitHubAPIError)
+    assert describe_exception(caught.value) == (
+        f"GitHubAPIError (status {status})")
+
+
 # ── The reply placeholder carries the turn's app ─────────────────────────
 
 class TestPlaceholderStamp:
@@ -354,3 +376,23 @@ def test_create_issue_route_labels_the_app(gh_app, headers, platform):
     assert kwargs["platform"] == platform
     assert kwargs["category"] == "bug"
     assert kwargs["title"] == "Record button does nothing"
+
+
+def test_a_refused_issue_logs_the_status_not_githubs_text(gh_app, caplog):
+    import logging
+    from backend.utils.github import GitHubAPIError
+    gh_app.create_issue_mock.side_effect = GitHubAPIError(
+        'GitHub API error 401: {"message": "Bad credentials"}', 401)
+    alice = _user()
+    proposal = _pending_issue(alice)
+    caplog.set_level(logging.ERROR)
+
+    resp = _client(gh_app, alice).post(
+        "/api/github/create-issue", json={"llm_node_id": proposal.id})
+
+    assert resp.status_code == 500
+    assert resp.get_json() == {"error": "Couldn't create the GitHub issue. "
+                                        "Please try again later."}
+    assert "GitHub issue creation failed: GitHubAPIError (status 401)" \
+        in caplog.text
+    assert "Bad credentials" not in caplog.text

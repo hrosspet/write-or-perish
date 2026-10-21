@@ -4,6 +4,7 @@ import remarkGfm from 'remark-gfm';
 import { useInRouterContext, useNavigate } from 'react-router-dom';
 import { parseNodeLink, fetchNodeTitle, cachedNodeTitle } from '../utils/nodeLinks';
 import { classifyImageSource } from '../utils/markdownImages';
+import { normalizeLinkedImages } from '../utils/markdownLinkedImages';
 import CopyButton from './CopyButton';
 
 /**
@@ -585,12 +586,15 @@ const MarkdownBody = ({ children, style, paragraphMargin = '0.5em 0', flowText =
     ),
   }), [inline, flowText, paragraphMargin]);
 
+  // Clips saved before extension 0.1.2 hold broken linked images.
+  const source = React.useMemo(() => normalizeLinkedImages(children), [children]);
+
   const Wrapper = inline ? 'span' : 'div';
   return (
     <MarkdownContext.Provider value={context}>
       <Wrapper className="loore-md" style={style}>
         <ReactMarkdown remarkPlugins={REMARK_PLUGINS} components={components}>
-          {children}
+          {source}
         </ReactMarkdown>
       </Wrapper>
     </MarkdownContext.Provider>

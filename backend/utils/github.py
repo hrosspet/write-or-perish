@@ -11,6 +11,16 @@ from flask import current_app
 PLATFORM_LABELS = ("ios", "web")
 
 
+class GitHubAPIError(RuntimeError):
+    """GitHub refused or failed the call. ``status_code`` is its HTTP
+    status, so a log line can tell an expired token (401) from a refused
+    request (422) without the response's text (error_privacy)."""
+
+    def __init__(self, message, status_code):
+        super().__init__(message)
+        self.status_code = status_code
+
+
 def create_github_issue(title, description, category, username,
                         platform=None):
     """Create a GitHub issue with auto-applied labels.
@@ -28,7 +38,7 @@ def create_github_issue(title, description, category, username,
 
     Raises:
         ValueError: If config is missing.
-        RuntimeError: If the GitHub API call fails.
+        GitHubAPIError (a RuntimeError): If the GitHub API call fails.
     """
     token = current_app.config.get("GITHUB_TOKEN")
     repo = current_app.config.get("GITHUB_REPO")
@@ -57,9 +67,10 @@ def create_github_issue(title, description, category, username,
     )
 
     if response.status_code not in (200, 201):
-        raise RuntimeError(
+        raise GitHubAPIError(
             f"GitHub API error {response.status_code}: "
-            f"{response.text[:200]}"
+            f"{response.text[:200]}",
+            response.status_code,
         )
 
     data = response.json()

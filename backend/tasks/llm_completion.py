@@ -2640,9 +2640,10 @@ def _request_batch_cancel(entry, api_key, provider):
     try:
         return cancel_one(api_key, entry["batch_id"])
     except Exception as e:  # noqa: BLE001 - recorded, not fatal
+        from backend.utils.error_privacy import describe_exception
         logger.warning("Batch %s cancel request failed: %s",
-                       entry.get("batch_id"), e)
-        entry["cancel_error"] = str(e)
+                       entry.get("batch_id"), describe_exception(e))
+        entry["cancel_error"] = type(e).__name__
         return None
 
 

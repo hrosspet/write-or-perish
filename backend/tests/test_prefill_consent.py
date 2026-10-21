@@ -4,6 +4,8 @@
 - The dashboard user payload exposes twitter_login + prefill_consent so
   the card can gate itself (X-login users, unanswered).
 - The admin user list carries the answer.
+- The short profile description is gone (#538): an older app's
+  `description` is ignored, and no user payload carries it.
 Follows the real-app + sqlite pattern from test_admin_access.py.
 """
 import os
@@ -225,3 +227,32 @@ class TestPrefillRefusal:
         _db.session.commit()
         assert client.post(url).status_code == 202
         seed.delay.assert_called_once_with(users["tw"].id)
+
+
+class TestProfileDescriptionGone:
+    """#538: older app builds may still send `description`; it is ignored
+    and never refused."""
+
+    def test_update_user_ignores_a_description(self, app, users):
+        client = app.test_client()
+        _login(client, users["mail"].id)
+        for value in ("x" * 300, "", None, 5):
+            resp = client.put("/api/dashboard/user",
+                              json={"description": value})
+            assert resp.status_code == 200, value
+            assert "description" not in resp.get_json()["user"]
+        # Sent with other fields, the others still apply.
+        resp = client.put("/api/dashboard/user",
+                          json={"description": "hi", "craft_mode": True})
+        assert resp.status_code == 200
+        assert resp.get_json()["user"]["craft_mode"] is True
+        assert "description" not in client.get(
+            "/api/dashboard/").get_json()["user"]
+
+    def test_no_description_in_the_admin_list(self, app, users):
+        client = app.test_client()
+        _login(client, users["admin"].id)
+        resp = client.get("/api/admin/users")
+        assert resp.status_code == 200
+        rows = resp.get_json()["users"]
+        assert rows and all("description" not in u for u in rows)
