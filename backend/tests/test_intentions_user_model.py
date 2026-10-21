@@ -216,6 +216,18 @@ def test_token_limits(app, it):  # noqa: F811
     assert it.token_limits("claude-opus-3") == (195_904, 4096)
 
 
+def test_every_large_openai_model_has_its_input_ceiling():
+    """OpenAI keeps 128k of a 1.05M window for output whatever is asked,
+    so a model without max_input_tokens would be sized to 1,018,000 input
+    tokens and rejected over 922k (GPT-6 Astra had none)."""
+    from backend.config import Config
+    missing = [key for key, cfg in Config.SUPPORTED_MODELS.items()
+               if cfg["provider"] == "openai"
+               and cfg.get("context_window", 0) > 922_000
+               and not cfg.get("max_input_tokens")]
+    assert missing == []
+
+
 def test_model_input_cap_keeps_the_price_tier_by_default(app):  # noqa: F811
     from backend.llm_providers import model_input_cap
     cfg = {"context_window": 1050000, "max_input_tokens": 922000,

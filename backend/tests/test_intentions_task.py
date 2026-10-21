@@ -6,6 +6,7 @@ test_intentions_user_model.py."""
 import pytest
 
 from backend.tests.test_twitter_import import app, _make_user, _db  # noqa: F401
+from backend.config import Config
 from backend.models import UserArtifact, APICostLog, ProfileBatchJob
 
 # Imported lazily in the `wired` fixture: an eager import at collection time
@@ -24,12 +25,9 @@ MODELS = {
     "claude-opus-4.8": {"provider": "anthropic", "api_model": "claude-opus-4-8",
                         "context_window": 1000000, "deprecated": True,
                         "input_price_per_mtok": 5.0, "output_price_per_mtok": 25.0},
-    "gpt-6-astra": {"provider": "openai", "api_model": "gpt-6-astra",
-                    "context_window": 1050000, "max_input_tokens": 922000,
-                    "input_price_per_mtok": 10.0, "output_price_per_mtok": 50.0,
-                    "long_context_threshold": 272000,
-                    "long_context_input_multiplier": 2.0,
-                    "long_context_output_multiplier": 1.5},
+    # The real entry: its window, input ceiling and long-context pricing
+    # are what the OpenAI sizing and cost tests check.
+    "gpt-6-astra": Config.SUPPORTED_MODELS["gpt-6-astra"],
     "gpt-5.5": {"provider": "openai", "api_model": "gpt-5.5",
                 "context_window": 1050000, "max_input_tokens": 922000,
                 "deprecated": True,
