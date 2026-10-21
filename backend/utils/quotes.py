@@ -458,7 +458,7 @@ class ExportQuoteResolver:
         included_ids, embedded_quotes, ai_blocked_ids = resolver.get_resolution_result()
     """
 
-    def __init__(self, user_id: int, max_tokens: int,
+    def __init__(self, user_id: int, max_tokens: Optional[int],
                  filter_ai_usage: bool = False,
                  chronological: bool = False,
                  with_preamble: bool = True):
@@ -467,7 +467,10 @@ class ExportQuoteResolver:
 
         Args:
             user_id: User ID for access checks when fetching quoted content
-            max_tokens: Maximum tokens allowed in the export
+            max_tokens: Maximum tokens allowed in the export. None: no
+                       budget, every entry stays and only the quotes are
+                       resolved (the caller's selection already sized the
+                       window and must see all of it rendered, #552).
             filter_ai_usage: If True, block nodes with ai_usage='none' from
                             being resolved (their content won't be embedded)
             chronological: If True, sort oldest-first (for iterative profile
@@ -648,15 +651,18 @@ class ExportQuoteResolver:
         content token cost once. Only when the preamble is emitted
         (with_preamble): a collapsed export shows a prompt as its
         reference line, which the entry's base_tokens already count.
+
+        Without a budget (max_tokens None) every entry is included.
         """
         total = 0
         self.included_count = 0
         # Start with embedded IDs - these are always "included"
         self.included_ids = set(self._embedded_ids)
+        budgeted = self.max_tokens is not None
 
         for i, entry in enumerate(self.entries):
             entry_tokens = entry.total_tokens
-            if total + entry_tokens > self.max_tokens:
+            if budgeted and total + entry_tokens > self.max_tokens:
                 self.included_count = i
                 break
             total += entry_tokens
@@ -665,7 +671,7 @@ class ExportQuoteResolver:
             self.included_count = len(self.entries)
 
         # Account for prompt preamble overhead
-        if self._prompt_tokens and self.with_preamble:
+        if self._prompt_tokens and self.with_preamble and budgeted:
             while self.included_count > 0:
                 entry_total = sum(
                     e.total_tokens
