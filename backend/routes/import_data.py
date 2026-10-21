@@ -2060,6 +2060,9 @@ IMPORT_RUNNING_MESSAGE = (
 IMPORT_SUPERSEDED_MESSAGE = (
     "This import was started again and continues there. Check your Log in "
     "a few minutes.")
+IMPORT_STOPPED_MESSAGE = (
+    "The import stopped several times before it could finish. Press "
+    "Confirm Import again to continue where it stopped.")
 
 
 def _parse_chatgpt_ts(raw_ts):
@@ -2198,16 +2201,17 @@ def _confirm_conversation_import(source):
         return conflict
 
     task_id = str(uuid.uuid4())
-    acquired, holder = cs.acquire_lock(current_user.id, task_id, token, source)
-    if not acquired:
-        if holder:  # another confirm got there first
-            return _running_import_response(holder, token, total)
-        return jsonify({"error": IMPORT_RUNNING_MESSAGE}), 409
     options = {
         "privacy_level": privacy_level,
         "ai_usage": ai_usage,
         "on_deleted": on_deleted,
     }
+    acquired, holder = cs.acquire_lock(current_user.id, task_id, token,
+                                       source, options)
+    if not acquired:
+        if holder:  # another confirm got there first
+            return _running_import_response(holder, token, total)
+        return jsonify({"error": IMPORT_RUNNING_MESSAGE}), 409
     try:
         _dispatch_conversation_import(current_user.id, token, task_id, options)
     except Exception as e:
@@ -2457,10 +2461,14 @@ def run_conversation_import(user_id, token, task_id, options, *,
     The whole run holds the import's run guard: a second run of the
     same import at the same time raises conversation_stash.RunInProgress
     before it reads or changes anything (the task turns it into Ignore).
+    A heartbeat thread keeps the user's lock fresh while the run's
+    process lives (conversation_stash.keep_alive); when the process dies
+    the lock goes stale, and the resume beat sends the task again
+    (backend/tasks/chat_imports.resume_stalled_imports).
     """
     from backend.utils import conversation_stash as cs
 
-    with cs.run_guard(user_id, token):
+    with cs.run_guard(user_id, token), cs.keep_alive(user_id, task_id):
         return _run_conversation_import(
             user_id, token, task_id, options, on_progress=on_progress,
             resumable=resumable, batch_size=batch_size)
@@ -2474,6 +2482,9 @@ def _run_conversation_import(user_id, token, task_id, options, *,
 
     state = cs.read_state(user_id, token)
     if state and state.get("finished"):
+        # A run that died between finishing and releasing its lock left
+        # the lock behind; this run (the task sent again) frees it.
+        cs.release_lock(user_id, task_id)
         return dict(state["result"])
 
     path = cs.stash_path(user_id, token)
@@ -2484,10 +2495,20 @@ def _run_conversation_import(user_id, token, task_id, options, *,
     source = header["source"]
     total = header.get("messages", 0)
 
-    if not cs.claim_lock(user_id, task_id, token, source):
+    claim = cs.claim_lock(user_id, task_id, token, source, options)
+    if claim == cs.SUPERSEDED:
         # This run waited in the queue until its lock went stale, and a
         # new confirm started the import again: that run does the work.
         raise UserFacingTaskError(IMPORT_SUPERSEDED_MESSAGE)
+    if claim == cs.STOPPED:
+        # Runs of this task died again and again without saving a
+        # commit: stop instead of running it over and over. The stash
+        # and the saved place stay for a new confirm.
+        current_app.logger.warning(
+            "Conversation import %s for user %s stopped: its runs died "
+            "more than %d times without progress", task_id, user_id,
+            cs.MAX_CRASH_RESUMES)
+        raise UserFacingTaskError(IMPORT_STOPPED_MESSAGE)
     cs.touch(path)
 
     if not state or state.get("options") != options:
@@ -2497,6 +2518,8 @@ def _run_conversation_import(user_id, token, task_id, options, *,
         cs.write_state(user_id, token, dict(st, task_id=task_id))
         cs.touch(path)
         cs.heartbeat(user_id, task_id)
+        # A saved commit is progress: only deaths without one count.
+        cs.clear_crashes(user_id, task_id)
 
     def progress(done):
         cs.heartbeat(user_id, task_id)
