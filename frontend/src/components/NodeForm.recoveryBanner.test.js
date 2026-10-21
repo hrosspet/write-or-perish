@@ -123,3 +123,12 @@ test('Discard shows the typed draft the recording was hiding', async () => {
   fireEvent.click(await screen.findByText('Discard'));
   await waitFor(() => expect(screen.getByRole('textbox').value).toBe('older typed words'));
 });
+
+test('the box is read-only while the recovered audio is transcribing', async () => {
+  renderForm();
+  fireEvent.click(await screen.findByText('Recover'));
+  expect(await screen.findByText('Transcribing recovered audio...')).toBeTruthy();
+  expect(screen.getByRole('textbox').readOnly).toBe(true);
+  await waitFor(() => expect(screen.getByRole('textbox').readOnly).toBe(false),
+    { timeout: 5000 });
+});

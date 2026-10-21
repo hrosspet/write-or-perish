@@ -806,6 +806,7 @@ const NodeForm = forwardRef(
         <textarea
           ref={textareaRef}
           value={content}
+          readOnly={isRecoveringAudio}
           onChange={(e) => {
             const newContent = e.target.value;
             setContent(newContent);
