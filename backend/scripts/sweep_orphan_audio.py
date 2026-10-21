@@ -16,8 +16,13 @@ A folder is deleted only when its owner is certainly gone:
 * ``user/<uid>/node/<nid>/`` and ``nodes/<uid>/<nid>/`` (an entry's
   audio): there is no node <nid>; or node <nid> is a tombstone that links
   no audio (deleted, its content, recording and speech URLs cleared) and
-  can't come back: deleted more than SOFT_DELETE_GRACE_DAYS ago, or the
-  account <uid> it was written under is deleted for good.
+  can't come back ("cleaned up"): deleted more than
+  SOFT_DELETE_GRACE_DAYS ago, or the account <uid> it was written under
+  is deleted for good.
+* ``streaming/<uid>/<session>/`` (the older streaming upload's chunks,
+  made for one entry, whose ``streaming_session_id`` names it): every
+  node that names the session is such a cleaned-up tombstone, and no
+  draft or transcript chunk names it.
 * ``user/<uid>/profile/<pid>/`` and ``user/<uid>/item/<iid>/``: there is
   no such profile or saved reference (rows a waiting "Delete all my
   writing" hid count as there).
@@ -34,16 +39,17 @@ and never when
   written before its row is committed;
 * it holds a symlink or anything else that is not a plain file or folder.
 
-Everything else is kept and counted: the recording sessions under
-``drafts/`` and ``streaming/`` and the upload staging under ``chunks/``
-(Discard deletes a session's folder itself, so a session folder no row
-names is more likely a recording lost to an error than one the user
-threw away), and every path the layout above does not explain.
+Everything else is kept and counted: a recording session folder no row
+names, under ``drafts/`` or under ``streaming/`` (Discard deletes a
+voice draft's folder itself, so one no row names may be a recording lost
+to an error rather than one the user threw away), the upload staging
+under ``chunks/``, and every path the layout above does not explain.
 
 Against the wrong database (an empty one, or another instance's) nearly
 every folder would look orphaned, so --apply deletes nothing when more
-than MAX_DELETE_SHARE of the entry, profile and reference folders would
-go; the output names the database it read.
+than MAX_DELETE_SHARE of the folders it could delete (entries, streaming
+recordings, profiles, references) would go; the output names the
+database it read.
 
 Reads ids, owners, deletion dates and whether a column is empty, never
 content, so nothing is decrypted. The directory walk and the database
@@ -92,9 +98,9 @@ MIN_AGE_HOURS = 24
 CHUNK_SIZE = 500
 # Rows per fetch when scanning the stored audio URLs.
 URL_FETCH_SIZE = 2000
-# --apply deletes nothing when more than this share of the entry, profile
-# and reference folders would go: against the wrong database (an empty
-# one, or another instance's) nearly every folder looks orphaned.
+# --apply deletes nothing when more than this share of the folders it
+# could delete (SWEPT_KINDS) would go: against the wrong database (an
+# empty one, or another instance's) nearly every folder looks orphaned.
 # --max-share raises it.
 MAX_DELETE_SHARE = 0.5
 
@@ -111,6 +117,8 @@ _URL_FOLDER_RE = re.compile(
 _PENDING_PURGE_STATUSES = UserDataPurge.ACTIVE_STATUSES + ("failed",)
 
 DELETE, KEEP, GONE = "delete", "keep", "gone"
+# The kinds of folder the sweep may delete.
+SWEPT_KINDS = ("node", "streaming", "profile", "item")
 
 # Reasons, as printed.
 NODE_GONE = "entry folders: the entry is gone"
@@ -124,9 +132,13 @@ PENDING = "an account or writing deletion can still be undone"
 REFERENCED = "a stored audio URL points into it"
 RECENT = "changed in the last {hours:g} h"
 ODD = "holds a symlink or a special file"
-SESSION_ROW = "recording session folders: a row names the session"
-SESSION_NO_ROW = ("recording session folders: no row names the session "
-                  "(not swept)")
+STREAM_TOMBSTONE = ("streaming recording folders: the entry was deleted and "
+                    "cleaned up")
+STREAM_ROW = "streaming recording folders: a row names the session"
+STREAM_NO_ROW = ("streaming recording folders: no row names the session "
+                 "(not swept)")
+DRAFT_ROW = "voice draft folders: a row names the session"
+DRAFT_NO_ROW = "voice draft folders: no row names the session (not swept)"
 UPLOAD = "upload staging folders (not swept)"
 UNKNOWN = "paths the layout does not explain"
 VANISHED = "gone before it was deleted"
@@ -139,7 +151,7 @@ class Folder:
                  "newest", "odd", "gone")
 
     def __init__(self, kind, path, rel, uid=None, oid=None):
-        self.kind = kind    # node | profile | item | session | upload | unknown
+        self.kind = kind    # SWEPT_KINDS, draft, upload or unknown
         self.path = path
         self.rel = rel      # path under the root, e.g. "user/5/node/12"
         self.uid = uid      # the account id in the path
@@ -157,7 +169,7 @@ class Report:
         self.folders = Counter()
         self.files = Counter()
         self.bytes = Counter()
-        self.owner_folders = 0   # entry, profile and reference folders seen
+        self.owner_folders = 0   # folders of SWEPT_KINDS seen
         self.refused = None
 
     def add(self, key, folder):
@@ -228,8 +240,10 @@ def _session_and_node_folders(top, udir, rel_u):
             yield Folder("unknown", f.path, rel)
         elif top == "nodes" and _ID_RE.fullmatch(f.name):
             yield Folder("node", f.path, rel, uid, int(f.name))
-        elif top in ("drafts", "streaming") and is_storage_id(f.name):
-            yield Folder("session", f.path, rel, uid, f.name)
+        elif top == "drafts" and is_storage_id(f.name):
+            yield Folder("draft", f.path, rel, uid, f.name)
+        elif top == "streaming" and is_storage_id(f.name):
+            yield Folder("streaming", f.path, rel, uid, f.name)
         elif top == "chunks":
             yield Folder("upload", f.path, rel, uid, f.name)
         else:
@@ -301,38 +315,99 @@ def pending_user_ids():
     return ids
 
 
-def _node_verdicts(folders, pending, now):
-    """{folder: (action, reason)} for entry folders. Reads ids, owners,
-    deletion dates and whether content and audio URLs are empty, never
+def _node_rows(cond):
+    """The nodes matching *cond*: ids, owners, the deletion date, the
+    streaming session and whether content and audio URLs are empty, never
     content."""
-    ids = sorted({f.oid for f in folders})
-    rows = {r.id: r for r in db.session.query(
+    return db.session.query(
         Node.id, Node.user_id, Node.human_owner_id, Node.deleted_at,
+        Node.streaming_session_id,
         Node.content.is_(None).label("no_content"),
         Node.audio_original_url.is_(None).label("no_recording"),
         Node.audio_tts_url.is_(None).label("no_speech"),
-    ).filter(Node.id.in_(ids))}
-    hidden = {i for (i,) in db.session.execute(hidden_ids("node").where(
-        UserDataPurgeHidden.row_id.in_(ids)))}
+    ).filter(cond).all()
+
+
+def _hidden_nodes(ids):
+    """The ids of *ids* that a "Delete all my writing" hid."""
+    if not ids:
+        return set()
+    return {i for (i,) in db.session.execute(hidden_ids("node").where(
+        UserDataPurgeHidden.row_id.in_(sorted(ids))))}
+
+
+def _accounts(folders):
+    """The account ids in the folders' paths that still exist."""
     uids = sorted({f.uid for f in folders})
-    accounts = {i for (i,) in db.session.query(User.id).filter(
+    return {i for (i,) in db.session.query(User.id).filter(
         User.id.in_(uids))}
+
+
+def _owners(folder, rows):
+    owners = {folder.uid}
+    for r in rows:
+        owners |= {r.user_id, r.human_owner_id}
+    return owners - {None}
+
+
+def _cleaned_up(r, folder, accounts, cutoff):
+    """Node row *r* is a tombstone that links no audio and can't come
+    back: deleted, its content and audio URLs cleared, and deleted before
+    *cutoff* or written under an account deleted for good."""
+    return (r.deleted_at is not None and r.no_content and r.no_recording
+            and r.no_speech
+            and (r.deleted_at <= cutoff or folder.uid not in accounts))
+
+
+def _node_verdicts(folders, pending, now):
+    """{folder: (action, reason)} for entry folders."""
+    rows = {r.id: r for r in _node_rows(
+        Node.id.in_(sorted({f.oid for f in folders})))}
+    hidden = _hidden_nodes(rows)
+    accounts = _accounts(folders)
     cutoff = now - timedelta(days=SOFT_DELETE_GRACE_DAYS)
     out = {}
     for f in folders:
         r = rows.get(f.oid)
-        owners = {f.uid} | ({r.user_id, r.human_owner_id} if r else set())
-        if owners & pending or f.oid in hidden:
+        if _owners(f, [r] if r else []) & pending or f.oid in hidden:
             out[f] = (KEEP, PENDING)
         elif r is None:
             out[f] = (DELETE, NODE_GONE)
         elif r.deleted_at is None:
             out[f] = (KEEP, OWNER_THERE)
-        elif (r.no_content and r.no_recording and r.no_speech
-                and (r.deleted_at <= cutoff or f.uid not in accounts)):
+        elif _cleaned_up(r, f, accounts, cutoff):
             out[f] = (DELETE, TOMBSTONE)
         else:
             out[f] = (KEEP, RESTORABLE)
+    return out
+
+
+def _streaming_verdicts(folders, pending, now):
+    """{folder: (action, reason)} for ``streaming/<uid>/<session>/``: it
+    goes when every node naming the session is cleaned up and no draft or
+    transcript chunk names it. One that no row names is kept."""
+    sids = sorted({f.oid for f in folders})
+    by_sid = {}
+    for r in _node_rows(Node.streaming_session_id.in_(sids)):
+        by_sid.setdefault(r.streaming_session_id, []).append(r)
+    hidden = _hidden_nodes({r.id for rows in by_sid.values() for r in rows})
+    other = _sessions_named(sids, (Draft.session_id,
+                                   NodeTranscriptChunk.session_id))
+    accounts = _accounts(folders)
+    cutoff = now - timedelta(days=SOFT_DELETE_GRACE_DAYS)
+    out = {}
+    for f in folders:
+        rows = by_sid.get(f.oid, [])
+        if _owners(f, rows) & pending or any(r.id in hidden for r in rows):
+            out[f] = (KEEP, PENDING)
+        elif f.oid in other:
+            out[f] = (KEEP, STREAM_ROW)
+        elif not rows:
+            out[f] = (KEEP, STREAM_NO_ROW)
+        elif all(_cleaned_up(r, f, accounts, cutoff) for r in rows):
+            out[f] = (DELETE, STREAM_TOMBSTONE)
+        else:
+            out[f] = (KEEP, STREAM_ROW)
     return out
 
 
@@ -354,15 +429,25 @@ def _row_verdicts(folders, model, gone_reason, pending):
     return out
 
 
-def _session_verdicts(folders):
-    sids = sorted({f.oid for f in folders})
+def _sessions_named(sids, cols):
+    """The session ids of *sids* that a row names in one of *cols*
+    (hidden drafts included)."""
     named = set()
     with including_hidden_rows():
-        for col in (Draft.session_id, Node.streaming_session_id,
-                    NodeTranscriptChunk.session_id):
+        for col in cols:
             named |= {s for (s,) in db.session.query(col).filter(
                 col.in_(sids))}
-    return {f: (KEEP, SESSION_ROW if f.oid in named else SESSION_NO_ROW)
+    return named
+
+
+def _draft_verdicts(folders):
+    """Voice draft folders are never deleted, only counted by whether a
+    row names the session."""
+    named = _sessions_named(
+        sorted({f.oid for f in folders}),
+        (Draft.session_id, Node.streaming_session_id,
+         NodeTranscriptChunk.session_id))
+    return {f: (KEEP, DRAFT_ROW if f.oid in named else DRAFT_NO_ROW)
             for f in folders}
 
 
@@ -380,8 +465,10 @@ def verdicts(folders, pending, now):
     if by_kind.get("item"):
         out.update(_row_verdicts(by_kind["item"], ExternalItem, ITEM_GONE,
                                  pending))
-    if by_kind.get("session"):
-        out.update(_session_verdicts(by_kind["session"]))
+    if by_kind.get("streaming"):
+        out.update(_streaming_verdicts(by_kind["streaming"], pending, now))
+    if by_kind.get("draft"):
+        out.update(_draft_verdicts(by_kind["draft"]))
     for f in by_kind.get("upload", ()):
         out[f] = (KEEP, UPLOAD)
     for f in by_kind.get("unknown", ()):
@@ -467,7 +554,7 @@ def _decide_all(run, root):
     for batch in _batches(iter_folders(root), run.chunk_size):
         for f in batch:
             measure(f)
-            if f.kind in ("node", "profile", "item"):
+            if f.kind in SWEPT_KINDS:
                 run.report.owner_folders += 1
         decided = verdicts(batch, pending, run.now)
         for f in batch:
@@ -520,8 +607,8 @@ def sweep(root, *, apply=False, now=None, min_age=None,
     """Walk *root*, decide every folder, and with *apply* delete the
     folders whose owner is gone (see the module docstring). Returns a
     Report. Dry run unless *apply*. With *apply*, nothing is deleted when
-    more than *max_share* of the entry, profile and reference folders
-    would go (``report.refused``; the report then counts what would)."""
+    more than *max_share* of the folders of SWEPT_KINDS would go
+    (``report.refused``; the report then counts what would)."""
     run = _Run(now or datetime.utcnow(),
                timedelta(hours=MIN_AGE_HOURS) if min_age is None else min_age,
                chunk_size)
@@ -553,7 +640,8 @@ def print_report(report, root, database, apply):
     apply = apply and report.refused is None
     print(f"Audio storage root: {root}")
     print(f"Database: {database}")
-    print(f"Entry, profile and reference folders: {report.owner_folders}")
+    print("Entry, streaming recording, profile and reference folders: "
+          f"{report.owner_folders}")
     for action, title in ((DELETE, "deleted" if apply else "to delete"),
                           (KEEP, "kept"), (GONE, "already gone")):
         keys = sorted(k for k in report.folders if k[0] == action)
@@ -567,7 +655,8 @@ def print_report(report, root, database, apply):
                   f"{report.files[key]} file(s), {_size(report.bytes[key])}")
     if report.refused is not None:
         print(f"\nnothing deleted: more than {report.refused:.0%} of the "
-              "entry, profile and reference folders would go. Check that "
+              "entry, streaming recording, profile and reference folders "
+              "would go. Check that "
               "the database above is the one these files belong to; if the "
               "share is expected, rerun with a higher --max-share")
     elif not apply:
@@ -585,9 +674,9 @@ def main(argv=None):
                              f"recently (default {MIN_AGE_HOURS})")
     parser.add_argument("--max-share", type=float, default=MAX_DELETE_SHARE,
                         help="with --apply, delete nothing when more than "
-                             "this share of the entry, profile and "
-                             f"reference folders would go (default "
-                             f"{MAX_DELETE_SHARE})")
+                             "this share of the entry, streaming recording, "
+                             "profile and reference folders would go "
+                             f"(default {MAX_DELETE_SHARE})")
     args = parser.parse_args(argv)
     if args.min_age_hours < 0:
         parser.error("--min-age-hours must not be negative")

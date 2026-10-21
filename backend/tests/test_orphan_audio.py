@@ -228,9 +228,44 @@ def test_cleanup_wipe_deletes_folders_and_the_session(app):
     row = _db.session.get(Node, parent.id)
     assert row is not None and row.content is None
     assert row.audio_original_url is None and row.audio_tts_url is None
-    assert row.streaming_session_id is None
+    # Kept, so the sweep still finds the session's folder should its
+    # delete ever fail.
+    assert row.streaming_session_id == "sess-old"
     assert not f_rec.exists() and not f_stream.exists()
     assert f_child.exists()
+
+
+def test_cleanup_handles_more_candidates_than_one_batch(app):
+    """The candidates' ids are read first, then each node is processed
+    and committed: no cursor stays open across the commits (on Postgres
+    a commit closed the old yield_per cursor after the first batch)."""
+    root = app.audio_root
+    alice = _user("alice")
+    n = _cleanup.CLEANUP_BATCH_SIZE + 5
+    ids = [_node(alice, deleted_at=OLD).id for _ in range(n)]
+    restored = _node(alice, deleted_at=OLD)
+    _db.session.commit()
+    for nid in ids:
+        _file(root, f"user/{alice.id}/node/{nid}/original.webm.enc")
+    f_restored = _file(root, f"user/{alice.id}/node/{restored.id}/a.mp3")
+    real = _cleanup._still_candidates
+
+    def restore_one_first(batch, cutoff):
+        # A node restored after the first select is left alone.
+        Node.query.filter_by(id=restored.id).update({"deleted_at": None})
+        _db.session.commit()
+        return real(batch, cutoff)
+    _cleanup._still_candidates = restore_one_first
+    try:
+        result = _run_cleanup()
+    finally:
+        _cleanup._still_candidates = real
+
+    assert result == {"purged": n, "wiped": 0, "errors": 0,
+                      "audio_folders": n}
+    assert Node.query.filter(Node.id.in_(ids)).count() == 0
+    assert _db.session.get(Node, restored.id).deleted_at is None
+    assert f_restored.exists()
 
 
 def test_cleanup_keeps_a_session_folder_another_row_names(app):
@@ -323,12 +358,18 @@ def world(app):
     _add(UserDataPurge(user_id=c, source="self", scope="hidden",
                        scheduled_for=NOW + timedelta(days=20)))
 
-    live = _node(w.alice)
+    live = _node(w.alice, streaming_session_id="s-live-stream")
     restorable = _node(w.alice, deleted_at=NOW - timedelta(days=5))
-    wiped = _node(w.alice, deleted_at=OLD)
+    # Wiped by the old cleanup, which kept the streaming session; a live
+    # reply below keeps the tombstone.
+    wiped = _node(w.alice, deleted_at=OLD, streaming_session_id="s-wiped")
     wiped.content = None
-    fresh_tombstone = _node(w.alice, deleted_at=NOW - timedelta(days=5))
+    _node(w.alice, wiped)
+    fresh_tombstone = _node(w.alice, deleted_at=NOW - timedelta(days=5),
+                            streaming_session_id="s-fresh")
     fresh_tombstone.content = None
+    bobs_wiped = _node(w.bob, deleted_at=OLD, streaming_session_id="s-bob")
+    bobs_wiped.content = None
     # A purged account's tombstone, handed to the erased account.
     handed = _node(w.erased, owner=w.erased.id,
                    deleted_at=NOW - timedelta(days=2))
@@ -371,6 +412,7 @@ def world(app):
         sweep_mod.TOMBSTONE: [
             f"user/{a}/node/{wiped.id}",
             f"user/777/node/{handed.id}"],      # account 777 is gone
+        sweep_mod.STREAM_TOMBSTONE: [f"streaming/{a}/s-wiped"],
         sweep_mod.PROFILE_GONE: [f"user/{a}/profile/9001"],
         sweep_mod.ITEM_GONE: [f"user/{a}/item/9101"],
     }
@@ -385,12 +427,14 @@ def world(app):
         sweep_mod.PENDING: [
             f"user/{b}/node/{gone}", f"user/{llm}/node/{bobs_reply.id}",
             f"user/{c}/node/{gone}", f"user/{c}/profile/9001",
-            f"user/{llm}/node/{legacy.id}"],
+            f"user/{llm}/node/{legacy.id}", f"streaming/{b}/s-bob"],
         sweep_mod.REFERENCED: [
             f"user/{a}/profile/9002", f"user/{a}/item/9102"],
-        sweep_mod.SESSION_ROW: [f"drafts/{a}/s-live"],
-        sweep_mod.SESSION_NO_ROW: [
-            f"drafts/{a}/s-lost", f"streaming/{a}/s-old"],
+        sweep_mod.STREAM_ROW: [
+            f"streaming/{a}/s-live-stream", f"streaming/{a}/s-fresh"],
+        sweep_mod.STREAM_NO_ROW: [f"streaming/{a}/s-old"],
+        sweep_mod.DRAFT_ROW: [f"drafts/{a}/s-live"],
+        sweep_mod.DRAFT_NO_ROW: [f"drafts/{a}/s-lost"],
         sweep_mod.UPLOAD: [f"chunks/{a}/up-1"],
         sweep_mod.UNKNOWN: [
             f"user/{a}/node/0123", f"user/{a}/notes", "misc", "nodes/x"],
