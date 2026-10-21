@@ -19,6 +19,7 @@ from backend.extensions import db
 from backend.models import (
     ExternalItem, ExternalItemEmbedding, Node, NodeEmbedding, User,
 )
+from backend.utils import pgvector
 from backend.utils.api_keys import get_openai_chat_key
 from backend.utils.embeddings import (
     EMBEDDING_MODEL, content_hash, embed_texts, pack_vector,
@@ -127,6 +128,20 @@ def _candidate_external_items(limit):
     )
 
 
+def _sync_pgvector_copies():
+    """pgvector copies (#331): what the sweep embedded is ranked in the
+    database from the next search on. Nothing to do until `flask
+    pgvector-enable --apply` has run; a failure only leaves those rows
+    with the Python path for now."""
+    if not pgvector.enabled():
+        return
+    try:
+        pgvector.sync_copies(limit=pgvector.SWEEP_SYNC_LIMIT)
+    except Exception:
+        db.session.rollback()
+        logger.exception("pgvector copy sync failed")
+
+
 @celery.task(name='backend.tasks.embeddings.sweep_embeddings')
 def sweep_embeddings(limit=SWEEP_BATCH_SIZE):
     with flask_app.app_context():
@@ -211,6 +226,8 @@ def sweep_embeddings(limit=SWEEP_BATCH_SIZE):
                 ))
                 ext_embedded += 1
             db.session.commit()
+
+        _sync_pgvector_copies()
 
         logger.info(
             "Embedding sweep: %d nodes embedded, %d external items "

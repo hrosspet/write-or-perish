@@ -478,6 +478,11 @@ def create_app():
     )
     app.cli.add_command(init_db_command)
     app.cli.add_command(backfill_human_owner_command)
+    from backend.pgvector_cli import (
+        pgvector_compare_command, pgvector_enable_command,
+    )
+    app.cli.add_command(pgvector_enable_command)
+    app.cli.add_command(pgvector_compare_command)
 
     try:
         from experiments.prompt_rct.run_rct import rct_cli

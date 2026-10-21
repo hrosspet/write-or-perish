@@ -1543,8 +1543,10 @@ class NodeEmbedding(db.Model):
     edited; content_hash is the hash of the STORED content bytes, i.e. the
     encrypted blob for encrypted nodes, so the unchanged-check needs no
     KMS decrypt and no plaintext fingerprint is stored). Vectors are
-    packed float32 (struct) — no pgvector dependency; similarity is
-    brute-force cosine in Python, fine at alpha scale. Only nodes with
+    packed float32 (struct), so the models need no pgvector; where
+    pgvector is turned on, a copy of each vector in the `vec` schema is
+    ranked in SQL (backend/utils/pgvector.py, #331), otherwise similarity
+    is a chunked cosine scan in Python. Only nodes with
     ai_usage in AI_ALLOWED are embedded (embedding sends content to
     OpenAI, so 'none' nodes are never submitted).
     """
