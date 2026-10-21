@@ -961,7 +961,7 @@ def _format_preamble(top_started_at):
 def _build_user_export_incremental(
     user, max_tokens, filter_ai_usage, created_before, created_after,
     chronological_order, return_metadata, collapse_artifacts,
-    licence=None, omit_artifacts=False,
+    licence=None, omit_artifacts=False, whole_window=False,
 ):
     """Incremental export path (created_after is set). See
     `build_user_export_content` docstring for behavior. The CTE row
@@ -1046,7 +1046,10 @@ def _build_user_export_incremental(
         prefetch_deks(n.content for n in selected_nodes)
 
         resolver = ExportQuoteResolver(
-            user.id, budget,
+            user.id,
+            # A whole window's budget is the selection above: the
+            # resolver only resolves its quotes (#552).
+            None if whole_window else budget,
             filter_ai_usage=filter_ai_usage,
             chronological=chronological_order,
             # A collapsed export emits no preamble, so the budget counts
@@ -1093,6 +1096,15 @@ def _build_user_export_incremental(
             resolver.get_resolution_result()
         )
         render_included_ids = included_ids
+        if whole_window:
+            # The window's own rows, each rendered once as an entry. A
+            # node the resolver embedded is also in included_ids; here
+            # it shows only inside its quote. Counted as part of the
+            # window, an embedded older parent hid the reply under it
+            # (the reply was not an entry point, and the parent is not
+            # one either), and an embedded newer row was an entry here
+            # and again in its own window.
+            render_included_ids = set(selected_ids)
 
     # Per-thread skip rule (§5a): exclude entry points whose entire
     # subtree (within the user's accessible/owned set) is soft-deleted.
@@ -1294,6 +1306,7 @@ def build_user_export_content(
     include_strategy="authored_threads",
     licence=None,
     omit_artifacts=False,
+    whole_window=False,
 ):
     """
     Core export logic: Build a human-readable text export of threads for a user.
@@ -1379,6 +1392,19 @@ def build_user_export_content(
                        Implies collapse_artifacts. For the jobs that read
                        the user's writing: profile builds, intentions and
                        poll drafts (#550).
+        whole_window: If True (with max_tokens), the text holds every row
+                     the budget window selects, each once as an entry, in
+                     order: the quote resolver embeds quotes but drops no
+                     selected row, and a node it embeds renders only
+                     inside its quote. The text can then run past the
+                     budget by its quote embeds and by a run of rows
+                     sharing the window's last timestamp, which the
+                     selection takes whole. For a caller that resumes
+                     after the window's `latest_node_created_at` (profile
+                     builds), where a row left out of the text is never
+                     read, or records it as covered (recent context's
+                     source_data_cutoff) (#552). Needs the incremental
+                     path (`created_after` or `engaged_threads`).
 
     Returns:
         str or dict: Formatted export content (or None if no threads found).
@@ -1401,7 +1427,12 @@ def build_user_export_content(
             collapse_artifacts=collapse_artifacts,
             licence=licence,
             omit_artifacts=omit_artifacts,
+            whole_window=whole_window,
         )
+    if whole_window:
+        raise ValueError(
+            "whole_window needs the incremental export (created_after or "
+            "include_strategy='engaged_threads')")
 
     # Legacy path: top-level threads owned by the user.
     query = Node.query.filter_by(

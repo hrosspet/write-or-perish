@@ -1450,14 +1450,16 @@ def render_profile_window(user, units, cutoff):
     rows only. It carries the user's writing and the replies in it, and
     no system prompt, profile version or todo list: no preamble, no
     reference lines, no system-prompt node (#550). Earlier profiles in the
-    input were restated as facts of the new window. One definition, so the
-    sync loop, the batch builder and scripts/simulate_chunk_plan.py render
-    the same bytes."""
+    input were restated as facts of the new window. Every row the window
+    selects is in the text, once and in order (``whole_window``, #552):
+    the next window starts after this one's cursor, so a row left out
+    here would never be read. One definition, so the sync loop, the batch
+    builder and scripts/simulate_chunk_plan.py render the same bytes."""
     return build_user_export_content(
         user, max_tokens=int(units), filter_ai_usage=True,
         created_after=cutoff, chronological_order=True,
         return_metadata=True, include_strategy="engaged_threads",
-        omit_artifacts=True)
+        omit_artifacts=True, whole_window=True)
 
 
 def build_fitted_chunk(user, model_id, api_keys, input_cap, cutoff, budget,
