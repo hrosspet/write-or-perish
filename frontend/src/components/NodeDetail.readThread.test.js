@@ -300,6 +300,24 @@ describe('#416: LLM Response after an automatic reply that did not happen', () =
     expect(buttons().llm).toBeNull();
   });
 
+  test.each(['pending', 'processing'])('an audio upload still %s transcription offers no reply', async (status) => {
+    localStorage.setItem('loore_auto_generate', 'true');
+    routes['/nodes/60'] = plainEntry({ transcription_status: status });
+
+    renderAt('/node/60');
+    await screen.findByText('A note.');
+    expect(buttons().llm).toBeNull();
+  });
+
+  test('once transcription is completed it offers LLM Response', async () => {
+    localStorage.setItem('loore_auto_generate', 'true');
+    routes['/nodes/60'] = plainEntry({ transcription_status: 'completed' });
+
+    renderAt('/node/60');
+    await screen.findByText('A note.');
+    expect(buttons().llm).toBeEnabled();
+  });
+
   test('in a read thread, a failed reply under the upload does not hide it either', async () => {
     localStorage.setItem('loore_auto_generate', 'true');
     routes['/nodes/60'] = uploadUnderPicks({

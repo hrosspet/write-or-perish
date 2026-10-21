@@ -103,7 +103,7 @@ Not included on ancestors/children: `human_owner_username`, `pinned_at`, `has_or
 | Surface | Floor (craft off) | Ceiling (craft on) |
 |---|---|---|
 | Thread top-right | "Voice Mode" button (owner, ai_usage≠none, not public) | + **Auto-generate** toggle |
-| Action row under focal | Nothing, unless thread is public (owner then sees craft bar) or it's a read thread | **LLM Response + model picker** — shown only when auto-generate is **off** (`showCraftBar = isOwner && (craftMode || isPublicThread) && !autoGenerateActive && node.ai_usage !== 'none' && !isLlmPending`) |
+| Action row under focal | Nothing, unless thread is public (owner then sees craft bar) or it's a read thread | **LLM Response + model picker** — shown when auto-generate is **off**, or when no reply stands under the entry (#416): `showCraftBar = isOwner && (craftMode || isPublicThread) && (!autoGenerateActive || awaitsReply) && node.ai_usage !== 'none' && !isLlmPending`, where `awaitsReply = !isLlmNode && transcription_status not pending/processing && no child that is non-deleted and not failed/cancelled` (children carry `llm_task_status`) |
 | Inline reply form | textarea, Send, Discard draft, Record (mic) | + Privacy/AI-usage selectors, + audio **Upload** button |
 | Reply modal (kebab → Reply) | textarea + **Record + Upload** (upload is not hidden here) | + Privacy/AI-usage selectors |
 | Edit modal | Privacy/AI-usage selectors **always** shown (hidePowerFeatures not passed) | same |

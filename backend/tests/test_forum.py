@@ -870,3 +870,15 @@ def test_thread_children_carry_llm_task_status(app):
 
     detail = author.get(f"/api/nodes/{root.id}").get_json()
     assert [c["llm_task_status"] for c in detail["children"]] == ["failed"]
+
+
+def test_focal_node_carries_transcription_status(app):
+    """The page offers no reply to an audio upload still being
+    transcribed (#416)."""
+    author = _client_for(app, "author")
+    root = _mk_node("author", "[Transcription pending]")
+    root.transcription_status = "processing"
+    _db.session.commit()
+
+    detail = author.get(f"/api/nodes/{root.id}").get_json()
+    assert detail["transcription_status"] == "processing"

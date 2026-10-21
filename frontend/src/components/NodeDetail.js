@@ -1207,7 +1207,10 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
   // upload under the picks is saved without a reply by design, because
   // auto-generate can't know whether the user wants to talk about it
   // (LLM Response) or get more picks (Read further) (#387).
+  // A top-level audio upload is a placeholder until transcription
+  // finishes: no reply is offered to it before then.
   const awaitsReply = !isLlmNode
+    && !['pending', 'processing'].includes(node.transcription_status)
     && !(node.children || []).some(c => !c.deleted
       && !['failed', 'cancelled'].includes(c.llm_task_status));
   const showCraftBar = isOwner && (craftMode || isPublicThread)

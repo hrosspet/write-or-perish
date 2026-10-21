@@ -1169,6 +1169,9 @@ def _focal_own_fields(node, viewer_id):
         "llm_model": node.llm_model,
         "origin": node.origin,
         "llm_task_status": node.llm_task_status,
+        # An audio upload is a placeholder until transcription finishes;
+        # the page offers no reply to it before then (#416).
+        "transcription_status": node.transcription_status,
         "has_original_audio": bool(node.audio_original_url or node.streaming_transcription),
         # Whether this node has GENERATED TTS audio (distinct from an
         # original voice recording). Drives the "regenerate audio?" edit
