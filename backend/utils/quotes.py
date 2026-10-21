@@ -475,7 +475,8 @@ class ExportQuoteResolver:
             with_preamble: Whether the export emits the artifacts preamble
                           (the full text of each referenced system prompt,
                           profile and todo list). False when the caller
-                          collapses artifacts to reference lines: then the
+                          collapses artifacts to reference lines or omits
+                          them (#550): then the
                           budget counts only the entries, and the profile
                           and todo texts are not loaded (#518).
         """

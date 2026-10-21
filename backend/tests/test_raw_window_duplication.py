@@ -348,8 +348,10 @@ def test_a_user_export_is_not_filled_again(app, monkeypatch):  # noqa: F811
     dict(max_tokens=10000, include_strategy="engaged_threads"),
 ])
 def test_an_export_that_is_not_collapsed_keeps_its_preamble(app, alice, kwargs):  # noqa: F811
-    """{user_export}, profile and intentions jobs pass no collapse: they
-    still get the referenced prompt and profile in full."""
+    """{user_export} and the data download pass no collapse: they still
+    get the referenced prompt and profile in full. (Profile builds,
+    intentions and poll drafts omit them since #550:
+    test_writing_only_exports.)"""
     from backend.routes.export_data import build_user_export_content
     _earlier_session(alice)
 

@@ -41,8 +41,7 @@ def main():
     with app.app_context():
         from backend.extensions import db
         from backend.models import User, Node
-        from backend.routes.export_data import (
-            build_user_export_content, count_remaining_units)
+        from backend.routes.export_data import count_remaining_units
         from backend.tasks import exports as ex
         from backend.llm_providers import (
             DEFAULT_MAX_OUTPUT_TOKENS, model_input_cap)
@@ -71,10 +70,8 @@ def main():
         target = args.target or ex.CHUNK_TARGET_UNITS
 
         def build(budget, cutoff):
-            return build_user_export_content(
-                user, max_tokens=int(budget), filter_ai_usage=True,
-                created_after=cutoff, chronological_order=True,
-                return_metadata=True, include_strategy="engaged_threads")
+            # The real builds' own renderer (no prompt/profile/todo, #550).
+            return ex.render_profile_window(user, budget, cutoff)
 
         total = count_remaining_units(user.id, None)
         nodes_total = db.session.query(func.count(Node.id)).filter(

@@ -88,9 +88,11 @@ def _recent_window_context(user, model_cfg):
     from backend.tasks.exports import build_user_export_content
     budget = (model_cfg.get("context_window", 200000)
               - MAX_DRAFT_TOKENS - WINDOW_OVERHEAD_TOKENS)
+    # The user's writing only: no system prompt, profile or todo list
+    # (#550).
     export = build_user_export_content(
         user, max_tokens=budget, filter_ai_usage=True,
-        include_strategy="engaged_threads")
+        include_strategy="engaged_threads", omit_artifacts=True)
     if not export:
         return ""
     return "## The user's recent writing\n\n" + export
