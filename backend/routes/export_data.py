@@ -557,21 +557,22 @@ def format_node_tree(
             if current.id in seen:
                 continue
             seen.add(current.id)
-            if kind == "node":
-                kids = []
-                for child in _children(current, True):
-                    if _deleted(child):
-                        if user_id is None or can_user_view_tombstone(
-                                child, user_id):
-                            kids.append(("tombstone", child))
-                    elif user_id and not can_user_access_node(
+            # The walk's access rule, for every node (see the "node"
+            # frame below). A deleted child the user could not see is
+            # left out with everything below it, so it counts as dead:
+            # it takes no child slot and does not break a run.
+            kids = []
+            for child in _children(current, kind != "inaccessible"):
+                if _deleted(child):
+                    if user_id is None or can_user_view_tombstone(
                             child, user_id):
-                        kids.append(("inaccessible", child))
+                        kids.append(("tombstone", child))
                     else:
-                        kids.append(("node", child))
-            else:
-                kids = [("tombstone" if _deleted(c) else "node", c)
-                        for c in _children(current, kind == "tombstone")]
+                        dead.add(child.id)
+                elif user_id and not can_user_access_node(child, user_id):
+                    kids.append(("inaccessible", child))
+                else:
+                    kids.append(("node", child))
             below[current.id] = [c for _, c in kids]
             stack.append((kind, current, True))
             stack.extend((k, c, False) for k, c in kids)
@@ -644,7 +645,10 @@ def format_node_tree(
                 kids = [c for c in _children(last, True)
                         if c.id not in dead]
                 if (len(kids) != 1 or not _deleted(kids[0])
-                        or kids[0].id in processed_nodes):
+                        or kids[0].id in processed_nodes
+                        or (user_id is not None
+                            and not can_user_view_tombstone(
+                                kids[0], user_id))):
                     break
                 processed_nodes.add(last.id)
                 last = kids[0]
