@@ -1191,9 +1191,6 @@ def get_streaming_status(session_id):
         user_node_id = draft_user_node_id(draft)
         if user_node_id:
             status_data["user_node_id"] = user_node_id
-        user_node_id = draft_user_node_id(draft)
-        if user_node_id:
-            status_data["user_node_id"] = user_node_id
     # Same field the SSE all_complete event carries: the frontend's polling
     # fallback (iOS drops SSE when backgrounded) needs it too, or it treats
     # a skipped reply as "no server-side chain" and saves the entry again.

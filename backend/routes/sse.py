@@ -538,9 +538,6 @@ def draft_transcription_stream(session_id):
                         user_node_id = draft_user_node_id(current_draft)
                         if user_node_id:
                             complete_data["user_node_id"] = user_node_id
-                        user_node_id = draft_user_node_id(current_draft)
-                        if user_node_id:
-                            complete_data["user_node_id"] = user_node_id
                     if (current_draft.llm_node_id
                             or current_draft.streaming_warning):
                         # Node already exists — draft only lingered for this
