@@ -56,7 +56,8 @@ from backend.utils.cache_diagnostics import (
 )
 from backend.utils.llm_batch import BatchItemFailed, BatchItemCancelled
 from backend.utils.ca_feed import (
-    CA_CHAT_TURN_NOTE, CA_READ_AGAIN_TURN, CA_TWEETS_CHAT_STUB,
+    CA_CHAT_TURN_NOTE, CA_READ_AGAIN_TURN, CA_READ_AGAIN_TURN_KEPT,
+    CA_TWEETS_CHAT_STUB,
     FEED_AI_USAGE, READ_FURTHER_MARKER,
     FeedReplyError, count_dropped_picks, read_reply_ids, record_feed_render,
     ca_turn as _ca_turn,
@@ -4502,7 +4503,10 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 ca_read_since = read_since_note(ca_read_numbers)
                 ca_note = None
                 if ca_turn == "read_again":
-                    ca_note = CA_READ_AGAIN_TURN
+                    # After the note naming tweets of a kept list read
+                    # since, the request says they are in it (#511).
+                    ca_note = (CA_READ_AGAIN_TURN_KEPT if ca_read_since
+                               else CA_READ_AGAIN_TURN)
                 elif ca_turn == "chat":
                     ca_note = CA_CHAT_TURN_NOTE
                 plain_notes = []

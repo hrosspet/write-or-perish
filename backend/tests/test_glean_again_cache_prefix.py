@@ -30,7 +30,8 @@ from backend.tests.test_read_context import _prompt_node, _user_node
 from backend.extensions import db as _db
 from backend.models import ExternalItem, FeedPick, FeedRender, Node
 from backend.utils.ca_feed import (
-    CA_READ_AGAIN_TURN, READ_FURTHER_MARKER, list_to_keep, read_numbers,
+    CA_READ_AGAIN_TURN, CA_READ_AGAIN_TURN_KEPT, READ_FURTHER_MARKER,
+    list_to_keep, read_numbers,
     read_reply_ids, read_since_note, seen_tweet_ids,
 )
 
@@ -130,7 +131,11 @@ def _glean(monkeypatch, alice, parent, llm_node, picks):
     return _RecordingProvider.requests[0]
 
 
-def _gleaned_and_rated(monkeypatch, snapshot):
+# The sentence of the read-further request that a kept list makes false.
+READ_OUT_OF_LIST = "Tweets I have read are out of that list;"
+
+
+def _gleaned_and_rated(monkeypatch, snapshot, rate=True):
     """A reflection, the Glean prompt under it, the first gleaning (it
     picks bob's #3) and the user's verdict on that pick, which marks the
     tweet read (routes/external.apply_item_feedback, as the page does).
@@ -156,9 +161,10 @@ def _gleaned_and_rated(monkeypatch, snapshot):
     assert gleaning.llm_task_status == "completed"
     pick = ExternalItem.query.filter_by(user_id=alice.id,
                                         external_id="t3").one()
-    apply_item_feedback(pick, "good", node_id=gleaning.id)
-    _db.session.commit()
-    assert seen_tweet_ids(alice.id) == {"t3", "t6"}
+    if rate:
+        apply_item_feedback(pick, "good", node_id=gleaning.id)
+        _db.session.commit()
+        assert seen_tweet_ids(alice.id) == {"t3", "t6"}
     return alice, llm_user, read, gleaning, pick, first
 
 
@@ -216,7 +222,10 @@ def test_glean_again_after_a_rating_sends_the_first_request_byte_for_byte(app, m
     marks = closing.index('@bob\'s tweet "slow mornings make the work '
                           'better" — read ')
     since = closing.index(read_since_note([3]))
-    assert marks < since < closing.index(CA_READ_AGAIN_TURN)
+    assert marks < since < closing.index(CA_READ_AGAIN_TURN_KEPT)
+    # The request no longer says the read tweets are out of the list.
+    assert READ_OUT_OF_LIST not in closing
+    assert CA_READ_AGAIN_TURN not in closing
 
     # The pinned render is the first one's list; the read tweet's pick is
     # dropped and counted, the other one is saved.
@@ -255,7 +264,42 @@ def test_a_third_glean_keeps_the_list_and_names_every_tweet_read_since(app, monk
     assert second["messages"][n]["role"] == "user"
     assert third["messages"][:n] == second["messages"][:n]
     assert _list_message(third) == _list_message(first)
-    assert read_since_note([3, 5]) in third["messages"][-1]["content"][-1]["text"]
+    closing = third["messages"][-1]["content"][-1]["text"]
+    assert closing.index(read_since_note([3, 5])) < closing.index(
+        CA_READ_AGAIN_TURN_KEPT)
+    assert READ_OUT_OF_LIST not in closing
+
+
+def test_glean_again_with_nothing_read_since_sends_the_usual_request(app, monkeypatch, snapshot):  # noqa: F811
+    """No rating in between: the list is kept as well, nothing is named
+    and the read-further request is the usual one, word for word."""
+    alice, llm_user, read, gleaning, pick, first = _gleaned_and_rated(
+        monkeypatch, snapshot, rate=False)
+    again = _placeholder(llm_user, alice, gleaning.id,
+                         meta=[{"name": READ_FURTHER_MARKER}])
+    second = _glean(monkeypatch, alice, gleaning, again, [])
+    n = len(first["messages"])
+    assert second["messages"][:n] == first["messages"]
+    closing = second["messages"][-1]["content"][-1]["text"]
+    assert closing.endswith(CA_READ_AGAIN_TURN)
+    assert "not candidates" not in closing
+
+
+def test_the_usual_read_further_request_is_unchanged():
+    """Only a kept list's closing turn reads differently (#511)."""
+    assert CA_READ_AGAIN_TURN == (
+        "Read further: go through today's tweets again against everything "
+        "above — your earlier picks, my marks on them, and whatever I have "
+        "written since. Your earlier picks are quoted above by author and "
+        "text; they carry no numbers, as the numbers belong to today's list "
+        "alone. Tweets I have read are out of that list; an unread earlier "
+        "pick is yours to repeat if it still stands and is in today's list, "
+        "by its number there. Beyond that, find what else is worth my time. "
+        "Answer in the same shape, a verdict and the picks.")
+    assert READ_OUT_OF_LIST not in CA_READ_AGAIN_TURN_KEPT
+    assert ("Tweets I had read before that list was made are out of it, and "
+            "the ones named above are in it but are not candidates; an "
+            "unread earlier pick") in CA_READ_AGAIN_TURN_KEPT
 
 
 def test_glean_again_on_a_new_export_renders_the_day_afresh(app, monkeypatch, snapshot):  # noqa: F811
@@ -274,6 +318,7 @@ def test_glean_again_on_a_new_export_renders_the_day_afresh(app, monkeypatch, sn
     closing = second["messages"][-1]["content"][-1]["text"]
     assert "not candidates" not in closing
     assert CA_READ_AGAIN_TURN in closing
+    assert CA_READ_AGAIN_TURN_KEPT not in closing
     row = FeedRender.query.filter_by(node_id=again.id).one()
     assert row.tweet_ids == "t1,t2,t4,t5"
     assert row.excluded_count == 2

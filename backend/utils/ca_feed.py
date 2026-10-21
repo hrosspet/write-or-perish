@@ -68,15 +68,26 @@ CA_TWEETS_CHAT_STUB = (
 # The user turn that closes a read-further request (the Read button
 # anywhere in a read thread, or a reply asked for directly under a read
 # reply). It replaces the generic "[continue]".
-CA_READ_AGAIN_TURN = (
+_READ_AGAIN_HEAD = (
     "Read further: go through today's tweets again against everything "
     "above — your earlier picks, my marks on them, and whatever I have "
     "written since. Your earlier picks are quoted above by author and "
     "text; they carry no numbers, as the numbers belong to today's list "
-    "alone. Tweets I have read are out of that list; an unread earlier "
-    "pick is yours to repeat if it still stands and is in today's list, "
-    "by its number there. Beyond that, find what else is worth my time. "
-    "Answer in the same shape, a verdict and the picks.")
+    "alone. ")
+_READ_AGAIN_TAIL = (
+    "an unread earlier pick is yours to repeat if it still stands and is "
+    "in today's list, by its number there. Beyond that, find what else is "
+    "worth my time. Answer in the same shape, a verdict and the picks.")
+CA_READ_AGAIN_TURN = (
+    _READ_AGAIN_HEAD + "Tweets I have read are out of that list; "
+    + _READ_AGAIN_TAIL)
+# The same request after read_since_note (#511): a kept list still holds
+# the tweets read since it was made, so that sentence alone says so. Only
+# in the closing turn, after the cached prefix.
+CA_READ_AGAIN_TURN_KEPT = (
+    _READ_AGAIN_HEAD + "Tweets I had read before that list was made are "
+    "out of it, and the ones named above are in it but are not "
+    "candidates; " + _READ_AGAIN_TAIL)
 
 # tool_calls_meta entry name on a placeholder the Read button created
 # inside a read thread: the task reads it as "this turn is a read", not
