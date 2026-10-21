@@ -456,6 +456,7 @@ export function useStreamingTranscription(options = {}) {
           sessionId: sessionIdRef.current,
           content: data.content,
           llmNodeId: data.llm_node_id || null,
+          userNodeId: data.user_node_id || null,
           // Server-side warning (e.g. misconfigured {user_export}
           // placeholder rejected before LLM dispatch). Voice session
           // surfaces this as a toast.
@@ -535,6 +536,7 @@ export function useStreamingTranscription(options = {}) {
               sessionId: sessionIdRef.current,
               content: res.data.content,
               llmNodeId: res.data.llm_node_id || null,
+              userNodeId: res.data.user_node_id || null,
               warning: res.data.warning || null,
             });
           }

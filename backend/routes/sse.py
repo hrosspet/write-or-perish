@@ -10,7 +10,9 @@ from flask import Blueprint, Response, request, jsonify, current_app
 from flask_login import login_required, current_user
 from backend.models import Node, UserProfile, NodeTranscriptChunk, TTSChunk, Draft
 from backend.extensions import db
-from backend.utils.streaming_session import stamp_session_alive
+from backend.utils.streaming_session import (
+    draft_user_node_id, stamp_session_alive,
+)
 import json
 import time
 
@@ -533,6 +535,12 @@ def draft_transcription_stream(session_id):
                         complete_data["warning"] = current_draft.streaming_warning
                     if current_draft.llm_node_id:
                         complete_data["llm_node_id"] = current_draft.llm_node_id
+                        user_node_id = draft_user_node_id(current_draft)
+                        if user_node_id:
+                            complete_data["user_node_id"] = user_node_id
+                        user_node_id = draft_user_node_id(current_draft)
+                        if user_node_id:
+                            complete_data["user_node_id"] = user_node_id
                     if (current_draft.llm_node_id
                             or current_draft.streaming_warning):
                         # Node already exists — draft only lingered for this

@@ -69,6 +69,9 @@ final class VoiceTurnController {
     /// session opened on, or the turn's failed reply. Nil while a turn's reply is
     /// still coming, so the glean reads that reply too (web `gleanAnchor`).
     private(set) var gleanAnchor: Int?
+    /// The current turn's message node, once the server has named it (#514). A
+    /// cancel anchors Glean on it: the reply it waited for will not be used.
+    private var turnUserNodeId: Int?
     private(set) var gleanPhase: GleanPhase = .idle
     /// The last glean finished: the lock screen says so until the next recording.
     private(set) var gleaningDone = false
@@ -302,6 +305,7 @@ final class VoiceTurnController {
         isInterrupted = false
         longRecordingWarned = false
         gleaningDone = false
+        turnUserNodeId = nil
         elapsed = draft.map { Double($0.chunkCount) * 15 } ?? 0
         audio.refreshNowPlaying()
         do {
@@ -628,6 +632,7 @@ final class VoiceTurnController {
             return
         }
         if let nodeId = status.llmNodeId {
+            turnUserNodeId = status.userNodeId
             entrySaved()
             timing.setTurnNode(nodeId)
             timing.mark("llm_node_known")
@@ -639,6 +644,7 @@ final class VoiceTurnController {
             let answer = try await backend.legacyVoice(content: status.content, model: model(), aiUsage: aiUsage(),
                                                        parentId: threadParentId, sessionId: sid, entry: entry)
             guard gen == generation else { return }
+            turnUserNodeId = answer.userNodeId
             entrySaved()
             timing.setTurnNode(answer.llmNodeId)
             timing.mark("llm_node_known")
@@ -1329,6 +1335,11 @@ final class VoiceTurnController {
         // finalize (a second "next" press, M11). The web cancels only once thinking.
         guard state != .stopping else { return }
         timing.endTurn()
+        // No reply is coming for this turn, so Glean stops waiting for it and
+        // starts under the user's message (web `onCancelled`, #514).
+        if let userNodeId = turnUserNodeId, gleanAnchor == nil, hasRecordedMessage {
+            gleanAnchor = userNodeId
+        }
         resetTurn(keepQueue: false)
         state = .idle
         audio.deactivate()

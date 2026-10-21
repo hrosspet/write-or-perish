@@ -149,6 +149,21 @@ test('a failed reply stops Glean waiting: the glean starts under the failed repl
   expect(mockPost).toHaveBeenCalledWith('/read/from-node/57', {});
 });
 
+test('cancelling the reply while it thinks: Glean starts under the user message (#514)', async () => {
+  renderAt('/voice?glean=1');
+  await screen.findByText("What's on your mind?");
+  act(() => { mockSessionOptions.onEntrySaved(); });
+  expect(glean()).toBeDisabled();
+
+  // The user pressed cancel on "Thinking...": no reply is coming.
+  act(() => { mockSessionOptions.onCancelled(56); });
+  expect(glean()).toBeEnabled();
+
+  mockPost.mockResolvedValue({ data: { prompt_node_id: 58, llm_node_id: 59 } });
+  await act(async () => { fireEvent.click(glean()); });
+  expect(mockPost).toHaveBeenCalledWith('/read/from-node/56', {});
+});
+
 test('when the gleaning is ready the view switches to text mode', async () => {
   renderAt('/voice?parent=42&glean=1');
   await screen.findByText("What's on your mind?");

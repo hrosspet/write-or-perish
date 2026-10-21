@@ -155,6 +155,46 @@ test('a fallback POST the server rejects saved nothing and counts as nothing', a
   expect(onEntrySaved).not.toHaveBeenCalled();
 });
 
+// #514: cancelling "Thinking..." tells the page the user's message node, on
+// the server-side chain (the server names it) and on the fallback POST.
+const renderCancellable = (onCancelled) => renderHook(() => useVoiceSession({
+  apiEndpoint: '/voice', onEntrySaved, onCancelled, aiUsage: 'chat',
+}));
+
+test('a cancel reports the user message node, server-side chain', async () => {
+  const onCancelled = jest.fn();
+  const { result } = renderCancellable(onCancelled);
+
+  await finishRecording({ content: 'my words', llmNodeId: 7, userNodeId: 6 });
+  act(() => { result.current.handleCancelProcessing(); });
+
+  expect(onCancelled).toHaveBeenCalledWith(6);
+  expect(result.current.getThreadParentId()).toBe(6);
+});
+
+test('a cancel reports the user message node, fallback POST', async () => {
+  mockPost.mockResolvedValue({ data: { llm_node_id: 9, user_node_id: 8 } });
+  const onCancelled = jest.fn();
+  const { result } = renderCancellable(onCancelled);
+
+  await finishRecording({ content: 'my words', llmNodeId: null });
+  act(() => { result.current.handleCancelProcessing(); });
+
+  expect(onCancelled).toHaveBeenCalledWith(8);
+});
+
+test("a cancel does not report the previous turn's message", async () => {
+  const onCancelled = jest.fn();
+  const { result } = renderCancellable(onCancelled);
+
+  await finishRecording({ content: 'first', llmNodeId: 7, userNodeId: 6 });
+  // The second turn's message node is not known (an older server).
+  await finishRecording({ content: 'second', llmNodeId: 9 });
+  act(() => { result.current.handleCancelProcessing(); });
+
+  expect(onCancelled).not.toHaveBeenCalled();
+});
+
 test('a session without the callback still completes', async () => {
   onEntrySaved = undefined;
   const { result } = renderSession();

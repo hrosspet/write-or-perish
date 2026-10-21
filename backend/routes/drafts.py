@@ -25,7 +25,8 @@ from backend.utils.webm_utils import (
     chunk_is_init_bearing, persist_init_segment,
 )
 from backend.utils.streaming_session import (
-    not_live_clause, release_session, session_is_live, stamp_session_alive,
+    draft_user_node_id, not_live_clause, release_session, session_is_live,
+    stamp_session_alive,
 )
 
 drafts_bp = Blueprint("drafts_bp", __name__)
@@ -1187,6 +1188,12 @@ def get_streaming_status(session_id):
     }
     if draft.llm_node_id:
         status_data["llm_node_id"] = draft.llm_node_id
+        user_node_id = draft_user_node_id(draft)
+        if user_node_id:
+            status_data["user_node_id"] = user_node_id
+        user_node_id = draft_user_node_id(draft)
+        if user_node_id:
+            status_data["user_node_id"] = user_node_id
     # Same field the SSE all_complete event carries: the frontend's polling
     # fallback (iOS drops SSE when backgrounded) needs it too, or it treats
     # a skipped reply as "no server-side chain" and saves the entry again.
