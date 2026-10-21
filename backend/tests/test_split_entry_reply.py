@@ -201,6 +201,26 @@ class TestSplitChainTip:
         _db.session.flush()
         assert split_chain_tip(entry) is entry
 
+    @pytest.mark.parametrize("msg_created_at", [
+        None, datetime(2025, 3, 1, 8, 30, 0)])
+    def test_an_imported_long_message_is_found_to_its_last_part(
+            self, app, msg_created_at):
+        # A message with no usable timestamp (null or 0 create_time, or
+        # one that fails to parse) is split the same way.
+        from backend.routes.import_data import _add_imported_message_nodes
+        alice = _user()
+        big = "\n".join(f"line {i} " + "q" * 90 for i in range(1500))
+        tip, created = _add_imported_message_nodes(
+            user_id=alice.id, human_owner_id=alice.id, parent_id=None,
+            node_type="user", llm_model=None, node_content=big,
+            privacy_level="private", ai_usage="chat",
+            source_key="chatgpt:1", msg_created_at=msg_created_at,
+            origin="chatgpt")
+        _db.session.commit()
+        assert created >= 2
+        head = Node.query.filter_by(parent_id=None, user_id=alice.id).one()
+        assert split_chain_tip(head).id == tip.id
+
     def test_a_deleted_part_ends_the_walk(self, app):
         alice = _user()
         chain = _split_entry(alice)

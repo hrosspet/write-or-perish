@@ -150,6 +150,9 @@ def _add_imported_message_nodes(user_id, human_owner_id, parent_id,
         raise ValueError(f"Unknown provenance {provenance!r}")
     from backend.utils.node_split import PART_STEP, split_text_at_cap
     segments = split_text_at_cap(node_content)
+    # Parts are PART_STEP apart, also for a message without a usable
+    # timestamp: that is how split_chain_tip finds the last part.
+    base = msg_created_at or datetime.utcnow()
     tip = None
     for j, seg in enumerate(segments):
         n = Node(
@@ -169,8 +172,7 @@ def _add_imported_message_nodes(user_id, human_owner_id, parent_id,
         # bypasses KMS envelope encryption (#256). set_content() is the
         # only sanctioned way to store text.
         n.set_content(seg, dek=dek)
-        if msg_created_at:
-            n.created_at = msg_created_at + PART_STEP * j
+        n.created_at = base + PART_STEP * j
         db.session.add(n)
         db.session.flush()
         tip = n
