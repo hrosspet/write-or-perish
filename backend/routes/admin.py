@@ -1210,13 +1210,32 @@ def create_poll():
         return jsonify({"error": f"Invalid data_source. Allowed: "
                                  f"{list(Poll.DATA_SOURCES)}"}), 400
 
+    # Optional audience (#411): usernames; empty or absent = everyone.
+    audience, unknown = [], []
+    usernames = data.get("audience_usernames") or []
+    if not isinstance(usernames, list):
+        return jsonify({"error": "audience_usernames must be a list."}), 400
+    for name in usernames:
+        name = str(name).strip().lstrip("@")
+        if not name:
+            continue
+        user = User.query.filter_by(username=name).first()
+        if user is None:
+            unknown.append(name)
+        elif user.id not in audience:
+            audience.append(user.id)
+    if unknown:
+        return jsonify({"error": "No such user: " + ", ".join(unknown)}), 400
+
     poll = Poll(question=question, created_by=current_user.id,
-                model_id=model_id, data_source=data_source)
+                model_id=model_id, data_source=data_source,
+                audience_user_ids=audience or None)
     db.session.add(poll)
     db.session.commit()
     return jsonify({"id": poll.id, "question": poll.question,
                     "model_id": poll.model_id,
                     "data_source": poll.data_source,
+                    "audience_size": len(audience),
                     "created_at": iso_utc(poll.created_at)}), 201
 
 
@@ -1234,6 +1253,11 @@ def list_polls():
     for poll_id, status, n in rows:
         counts.setdefault(poll_id, {})[status] = n
 
+    all_polls = Poll.query.order_by(Poll.created_at.desc()).all()
+    audience_ids = {i for p in all_polls for i in (p.audience_user_ids or [])}
+    names = dict(db.session.query(User.id, User.username).filter(
+        User.id.in_(audience_ids)).all()) if audience_ids else {}
+
     return jsonify({
         # The app-wide default, so the create-poll selector can preselect
         # a CONCRETE model instead of an ambiguous "default" option.
@@ -1244,12 +1268,15 @@ def list_polls():
             "question": p.question,
             "model_id": p.model_id,
             "data_source": p.data_source,
+            # Who it goes to (#411): usernames only, never content.
+            "audience": ([names.get(i) for i in p.audience_user_ids]
+                         if p.audience_user_ids else None),
             "created_at": iso_utc(p.created_at),
             "closed_at": iso_utc(p.closed_at),
             "sent_count": counts.get(p.id, {}).get("sent", 0),
             "declined_count": counts.get(p.id, {}).get("declined", 0),
         }
-        for p in Poll.query.order_by(Poll.created_at.desc()).all()
+        for p in all_polls
     ]}), 200
 
 

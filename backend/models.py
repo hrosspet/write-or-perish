@@ -1687,6 +1687,9 @@ class Poll(db.Model):
                            nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow, index=True)
     closed_at = db.Column(db.DateTime, nullable=True)
+    # Who gets the poll (#411): a list of user ids, or null/empty for
+    # everyone (every poll made before this column, and the default).
+    audience_user_ids = db.Column(db.JSON, nullable=True)
 
     creator = db.relationship("User", foreign_keys=[created_by])
 
@@ -1695,6 +1698,11 @@ class Poll(db.Model):
     @property
     def active(self):
         return self.closed_at is None
+
+    def reaches(self, user_id):
+        """True when the poll goes to this user: everyone, unless the
+        admin named an audience."""
+        return not self.audience_user_ids or user_id in self.audience_user_ids
 
 
 class PollResponse(db.Model):

@@ -866,3 +866,105 @@ class TestDraftBatchPipeline:
         second = get_poll_system_user()
         assert first.id == second.id
         assert first.username == POLL_SYSTEM_USERNAME
+
+
+class _as:
+    """Flask-Login caches the loaded user on g for the whole test app
+    context; clear it before each request so the client's own session
+    decides who is logged in."""
+    def __init__(self, c):
+        self.c = c
+
+    def _go(self, method, *a, **kw):
+        from flask import g
+        g.pop("_login_user", None)
+        return getattr(self.c, method)(*a, **kw)
+
+    def get(self, *a, **kw):
+        return self._go("get", *a, **kw)
+
+    def post(self, *a, **kw):
+        return self._go("post", *a, **kw)
+
+    def put(self, *a, **kw):
+        return self._go("put", *a, **kw)
+
+
+class TestOneUserPolls:
+    """#411: an admin can address a poll to named users."""
+
+    @pytest.fixture(autouse=True)
+    def _everyone_has_written(self, app):
+        for u in User.query.all():
+            _write_entry(u)
+
+    def _create(self, admin_client, **extra):
+        body = {"question": "Can you say more?", "model_id": "test-model"}
+        body.update(extra)
+        return _as(admin_client).post("/api/admin/polls", json=body)
+
+    def _other(self, app):
+        other = User(username="other", approved=True,
+                     created_at=datetime(2026, 1, 1))
+        _db.session.add(other)
+        _db.session.commit()
+        _write_entry(other)
+        return _login(app, "other")
+
+    def test_create_with_audience_reaches_only_that_user(
+            self, app, client, admin_client):
+        res = self._create(admin_client, audience_usernames=["@tester"])
+        assert res.status_code == 201
+        assert res.get_json()["audience_size"] == 1
+        assert [p["question"] for p in _as(client).get(
+            "/api/updates").get_json()["polls"]] == ["Can you say more?"]
+        other_client = self._other(app)
+        assert _as(other_client).get("/api/updates").get_json()["polls"] == []
+
+    def test_other_users_cannot_open_or_answer_it(self, app, admin_client):
+        poll_id = self._create(
+            admin_client, audience_usernames=["tester"]).get_json()["id"]
+        c = self._other(app)
+        base = f"/api/updates/polls/{poll_id}"
+        assert _as(c).get(base).status_code == 404
+        assert _as(c).put(base + "/response",
+                     json={"content": "x"}).status_code == 404
+        assert _as(c).post(base + "/send").status_code == 404
+        assert _as(c).post(base + "/decline").status_code == 404
+        assert PollResponse.query.count() == 0
+
+    def test_audience_user_answers_and_admin_sees_the_sent_answer(
+            self, client, admin_client):
+        poll_id = self._create(
+            admin_client, audience_usernames=["tester"]).get_json()["id"]
+        base = f"/api/updates/polls/{poll_id}"
+        assert _as(client).put(base + "/response",
+                          json={"content": "More detail"}).status_code == 200
+        # A draft is private: the admin sees nothing until Send.
+        assert _as(admin_client).get(
+            f"/api/admin/polls/{poll_id}/responses"
+        ).get_json()["responses"] == []
+        assert _as(client).post(base + "/send").status_code == 200
+        rows = _as(admin_client).get(
+            f"/api/admin/polls/{poll_id}/responses").get_json()["responses"]
+        assert [(r["username"], r["content"]) for r in rows] == [
+            ("tester", "More detail")]
+
+    def test_unknown_username_is_refused(self, admin_client):
+        res = self._create(admin_client, audience_usernames=["nobody"])
+        assert res.status_code == 400
+        assert "nobody" in res.get_json()["error"]
+        assert Poll.query.count() == 0
+
+    def test_empty_audience_means_everyone(self, client, admin_client):
+        res = self._create(admin_client, audience_usernames=[])
+        assert res.get_json()["audience_size"] == 0
+        assert Poll.query.one().audience_user_ids is None
+        assert len(_as(client).get("/api/updates").get_json()["polls"]) == 1
+
+    def test_list_shows_audience_usernames_only(self, admin_client):
+        self._create(admin_client, audience_usernames=["tester"])
+        self._create(admin_client)
+        polls = _as(admin_client).get("/api/admin/polls").get_json()["polls"]
+        assert sorted(str(p["audience"]) for p in polls) == [
+            "None", "['tester']"]
