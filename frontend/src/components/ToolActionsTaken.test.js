@@ -75,6 +75,22 @@ test('the owner sees the details and links as before', () => {
   expect(container.textContent).toContain('— No readable artifact');
 });
 
+test('the owner sees a todo read as a link to the todo list, old and new', () => {
+  // read_artifact on 'todo' since #218; read_todo in replies from before.
+  const { container } = renderActions({
+    detailed: true,
+    toolCallsMeta: [
+      { name: 'read_artifact', status: 'success', kind: 'todo', todo_id: 3 },
+      { name: 'read_todo', status: 'success', todo_id: 2 },
+    ],
+  });
+  const lines = Array.from(container.querySelectorAll('button ~ div > div'))
+    .map(el => el.textContent);
+  expect(lines).toEqual(['✓ Read todo list', '✓ Read todo list']);
+  const hrefs = Array.from(container.querySelectorAll('a')).map(a => a.getAttribute('href'));
+  expect(hrefs).toEqual(['/todo', '/todo']);
+});
+
 test('nothing to show: no block', () => {
   const { container } = renderActions({ toolCallsMeta: [{ name: '_mode' }], detailed: false });
   expect(container).toBeEmptyDOMElement();

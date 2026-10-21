@@ -50,9 +50,9 @@ def attach_context_artifacts(node_id, user_id, prompt_record=None):
     per artifact type the prompt content actually references via
     placeholders — a pin means "this exact version is embedded in this
     node's context". Types the agent pulls on demand are NOT pinned here:
-    the todo (read_todo, #158 Slice 3) and non-inline artifacts
-    (read_artifact) get pinned by the retrieval loop on the node whose
-    turn fetched them.
+    the todo (#158 Slice 3) and non-inline artifacts, both read with
+    read_artifact (#218), get pinned by the retrieval loop on the node
+    whose turn fetched them.
 
     Should be called right after the system node is flushed (so node_id
     is valid) and before the session is committed.

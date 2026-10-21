@@ -173,8 +173,8 @@ Inside the card:
 | apply_share | "Share saved as a draft — [Share page]" / "Share save failed" |
 | update_ai_preferences | "Preferences updated" |
 | update_artifact | "Created"/"Updated" + " artifact `<kind>`" (link `/artifacts/<kind>`) |
-| read_artifact | "Read artifact `<kind>`" |
-| read_todo | "Read [todo list]" (link `/todo`) |
+| read_artifact | "Read artifact `<kind>`"; kind `todo` (#218): "Read [todo list]" (link `/todo`) |
+| read_todo | "Read [todo list]" (link `/todo`); the tool before #218, in older replies |
 | semantic_search | "Searched archive & references — “<query>”" |
 | read_full | external: "Read in full — [@handle's post]" (url) or "Read a saved reference in full"; node: "Read in full — [entry #<ref_id>]"; failed: "Read in full (failed)" |
 | other | the raw tool name |

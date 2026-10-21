@@ -66,10 +66,12 @@ function OwnerToolLabel({ tc }) {
       {tc.name === 'update_artifact' && (
         <>{tc.created ? 'Created' : 'Updated'} artifact{tc.kind ? <> <Link to={`/artifacts/${tc.kind}`} style={{ color: 'var(--accent)', textDecoration: 'none' }}><code style={{ fontSize: '0.95em' }}>{tc.kind}</code></Link></> : ''}</>
       )}
-      {tc.name === 'read_artifact' && (
+      {tc.name === 'read_artifact' && tc.kind !== 'todo' && (
         <>Read artifact{tc.kind ? <> <Link to={`/artifacts/${tc.kind}`} style={{ color: 'var(--accent)', textDecoration: 'none' }}><code style={{ fontSize: '0.95em' }}>{tc.kind}</code></Link></> : ''}</>
       )}
-      {tc.name === 'read_todo' && (
+      {/* The todo list is read with read_artifact since #218; read_todo is
+          the tool before it, still in older replies. */}
+      {(tc.name === 'read_todo' || (tc.name === 'read_artifact' && tc.kind === 'todo')) && (
         <>Read <Link to="/todo" style={{ color: 'var(--accent)', textDecoration: 'none' }}>todo list</Link></>
       )}
       {tc.name === 'semantic_search' && (

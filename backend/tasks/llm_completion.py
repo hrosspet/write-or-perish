@@ -239,11 +239,18 @@ def _own_pin(row, user_id):
 # of these tools, the retrieved content is injected back into the message
 # stream and the model is re-called so it answers WITH the content in the same
 # turn — instead of the cross-turn injection done by _scan_proposal_statuses.
-# read_artifact pulls a UserArtifact by kind; read_todo pulls the user's todo
-# list (its own model, no longer shown inline — #158 Slice 3); semantic_search
-# pulls relevant snippets from the user's own archive by meaning (#155).
+# read_artifact pulls a UserArtifact by kind, and the user's todo list (its
+# own model, no longer shown inline — #158 Slice 3) as kind 'todo' (#218);
+# semantic_search pulls relevant snippets from the user's own archive by
+# meaning (#155). read_todo was the todo's own tool before #218: no longer
+# offered, but older threads' prompts still name it, so a call to it is
+# served as read_artifact on 'todo', and the results it left in
+# tool_calls_meta still resolve.
 RETRIEVAL_TOOLS = {"read_artifact", "read_todo", "semantic_search",
                    "read_full"}
+# The read_artifact kind that reads the UserTodo row instead of a
+# UserArtifact (#218).
+TODO_KIND = "todo"
 # Max number of interim tool round-trips before the model must answer.
 # The within-turn loop continues after EVERY tool call (retrieval AND action
 # tools like update_artifact) — models follow the standard tool-use contract
@@ -635,12 +642,13 @@ VOICE_TOOLS = [
         "name": "read_artifact",
         "description": (
             "Request the full content of one of the user's artifacts "
-            "listed in the artifacts index. The content is injected back "
-            "into your context within the same turn and you answer with "
-            "it. Use this only for artifacts in the index — anything "
-            "already shown inline in your context is always present and "
-            "should not be read. Tell the user you're pulling it up. Always "
-            "produce a text response alongside the call."
+            "listed in the artifacts index, the todo list (as 'todo') "
+            "included. The content is injected back into your context "
+            "within the same turn and you answer with it. Use this only "
+            "for artifacts in the index — anything already shown inline "
+            "in your context is always present and should not be read. "
+            "Tell the user you're pulling it up. Always produce a text "
+            "response alongside the call."
         ),
         "input_schema": {
             "type": "object",
@@ -651,25 +659,6 @@ VOICE_TOOLS = [
                 },
             },
             "required": ["kind"],
-        },
-    },
-    {
-        "name": "read_todo",
-        "description": (
-            "Pull the user's current todo list into context. The todo "
-            "list is listed in the artifacts index (as 'todo') rather than "
-            "shown inline, so read it on demand whenever the conversation "
-            "turns to their tasks, plans, or priorities — and before "
-            "proposing todo changes, so your proposal builds on what's "
-            "actually there. Like read_artifact, the content is injected "
-            "back into your context within the same turn and you answer "
-            "with it, so tell the user you're pulling it up. Always produce "
-            "a text response alongside the call."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {},
-            "required": [],
         },
     },
     {
@@ -840,6 +829,8 @@ ALWAYS_INLINE_KINDS = UserArtifact.INLINE_KINDS
 # silently diverges from the real UserTodo. Each value is a message pointing
 # the model at the correct path. (ai_preferences is NOT here — Slice 5 folded
 # it into the UserArtifact model, so it's a normal writable artifact now.)
+# The keys are UserArtifact.RESERVED_KINDS, which the artifact routes refuse
+# too (#218).
 RESERVED_ARTIFACT_KINDS = {
     "todo": ("Todo changes go through proposals — put them under the "
              "### Completed / ### New Tasks / ### Priority Order headings in "
@@ -864,10 +855,11 @@ def _todo_index_line(user_id, pinned_node=None):
 
     Todo is its own model (not a UserArtifact) and since #158 Slice 3 is no
     longer shown inline — it appears in the index and is pulled on demand via
-    read_todo, which pins the version it read to the fetching node. System
-    nodes therefore no longer pin a todo at session start; only legacy nodes
-    (or custom prompts embedding {user_todo}) carry one, and it's honored
-    when present, falling back to latest otherwise.
+    read_artifact on kind 'todo' (#218), which pins the version it read to
+    the fetching node. System nodes therefore no longer pin a todo at
+    session start; only legacy nodes (or custom prompts embedding
+    {user_todo}) carry one, and it's honored when present, falling back to
+    latest otherwise.
     A todo the user opted out of AI access is omitted entirely; an
     absent or empty todo is still listed (as ``(empty)``) so the model knows
     the surface exists. No open/priority counts (noise).
@@ -885,8 +877,7 @@ def _todo_index_line(user_id, pinned_node=None):
         suffix = f"(~{approximate_token_count(content)} tokens)"
     else:
         suffix = "(empty)"
-    return (f"- todo — the user's running task list; pull it with "
-            f"read_todo {suffix}")
+    return f"- {TODO_KIND} — the user's running task list {suffix}"
 
 
 def get_user_artifacts_context(user_id, pinned_node=None, usage=None,
@@ -897,7 +888,7 @@ def get_user_artifacts_context(user_id, pinned_node=None, usage=None,
     per-session snapshot recorded on *pinned_node* (#191 semantics), falling
     back to latest for legacy nodes. ai_usage is re-checked on resolved rows.
     The todo list (its own model) is listed in the index too, pulled via
-    read_todo (#158 Slice 3).
+    read_artifact like the rest (#158 Slice 3, #218).
 
     Each row that reaches the text reports to *usage* (a ContextUsage,
     #326) under its placeholder: memory, scratchpad and intentions by
@@ -1226,9 +1217,18 @@ def _note_artifact_content(licence, artifact):
     licence.note_usage(artifact.ai_usage, f"the {artifact.kind} artifact")
 
 
+def _reads_todo(tr):
+    """Whether a tool result read the user's todo list: read_artifact on
+    kind 'todo' (#218), or a read_todo result (the tool before #218, still
+    in older threads' tool_calls_meta)."""
+    name = tr.get("name")
+    return name == "read_todo" or (
+        name == "read_artifact" and tr.get("kind") == TODO_KIND)
+
+
 def _retrieval_injection_text(tr, user_id, with_labels=False, licence=None):
     """Build the context-injection string for a successful retrieval tool
-    result (read_artifact / read_todo / semantic_search), re-resolving the
+    result (read_artifact / semantic_search / read_full), re-resolving the
     content fresh from the source row — content is never stored in
     tool_calls_meta. Re-checks ai_usage so a mid-session opt-out is honored.
     Returns None if nothing is (still) available.
@@ -1252,6 +1252,14 @@ def _retrieval_injection_text(tr, user_id, with_labels=False, licence=None):
     falls back to id-based quoting, since the label map died with its turn.
     """
     name = tr.get("name")
+    if _reads_todo(tr):
+        todo = UserTodo.query.get(tr.get("todo_id"))
+        if (todo is None or todo.user_id != user_id
+                or todo.ai_usage not in AI_ALLOWED):
+            return None
+        if licence is not None:
+            licence.note_usage(todo.ai_usage, "the todo list")
+        return f"[Your current todo list:\n{todo.get_content()}]"
     if name == "read_artifact":
         artifact = UserArtifact.query.get(tr.get("artifact_id"))
         if (artifact is None or artifact.user_id != user_id
@@ -1261,14 +1269,6 @@ def _retrieval_injection_text(tr, user_id, with_labels=False, licence=None):
             _note_artifact_content(licence, artifact)
         return (f"[Contents of artifact '{tr.get('kind', '?')}' you "
                 f"requested:\n{artifact.get_content()}]")
-    if name == "read_todo":
-        todo = UserTodo.query.get(tr.get("todo_id"))
-        if (todo is None or todo.user_id != user_id
-                or todo.ai_usage not in AI_ALLOWED):
-            return None
-        if licence is not None:
-            licence.note_usage(todo.ai_usage, "the todo list")
-        return f"[Your current todo list:\n{todo.get_content()}]"
     if name == "read_full":
         # Re-resolve via the quote machinery (permission + ai_usage checks
         # built in; depth 1 — nested {quote:ID} stay as placeholders), as
@@ -1395,10 +1395,10 @@ def _retrieval_pin(tr):
     """(artifact_type, artifact_id) to pin on the interim node for a
     successful retrieval result, so the export references the exact version
     read. Returns (None, None) for unrecognized/unpinnable results."""
+    if _reads_todo(tr):
+        return ("todo", tr.get("todo_id"))
     if tr.get("name") == "read_artifact":
         return ("user_artifact", tr.get("artifact_id"))
-    if tr.get("name") == "read_todo":
-        return ("todo", tr.get("todo_id"))
     return (None, None)
 
 
@@ -2102,41 +2102,51 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
                         result["previous_artifact_id"] = (
                             previous.id if previous else None)
 
-            elif name == "read_artifact":
-                # Any readable kind, including 'external_digest' — the
-                # saved-references topic map is NOT gated by the "External
-                # references" toggle, unlike semantic_search's reference
-                # matches and read_full on an external label. It is the
-                # user's own data, so nothing leaks; the guidance only
-                # points users with the toggle on at the digest. Known
-                # asymmetry (#330 review), left as is.
-                kind = (inp.get("kind") or "").strip().lower()
-                artifact = UserArtifact.latest_for(user_id, kind)
-                if artifact is None or artifact.ai_usage not in AI_ALLOWED:
-                    result["status"] = "error"
-                    result["error"] = f"No readable artifact of kind {kind!r}"
-                else:
-                    # Content is NOT stored in tool meta (plaintext column)
-                    # — the retrieval loop / _scan_proposal_statuses
-                    # re-resolves it from the encrypted row and injects it.
-                    result["status"] = "success"
-                    result["artifact_id"] = artifact.id
+            elif name in ("read_artifact", "read_todo"):
+                # read_todo: the todo's own tool before #218, served for
+                # the older threads whose prompts still name it.
+                kind = (TODO_KIND if name == "read_todo"
+                        else (inp.get("kind") or "").strip().lower())
+                if kind == TODO_KIND:
+                    # Todo is its own model (not a UserArtifact), pulled on
+                    # demand since it's no longer shown inline (#158 Slice
+                    # 3), through read_artifact since #218. The kind is kept
+                    # on a failure too: the Actions line names the todo list.
                     result["kind"] = kind
-
-            elif name == "read_todo":
-                # Todo is its own model (not a UserArtifact), pulled on
-                # demand since it's no longer shown inline (#158 Slice 3).
-                todo = UserTodo.query.filter_by(user_id=user_id).order_by(
-                    UserTodo.created_at.desc()
-                ).first()
-                if todo is None or todo.ai_usage not in AI_ALLOWED:
-                    result["status"] = "error"
-                    result["error"] = "The todo list is empty or unavailable."
+                    todo = UserTodo.query.filter_by(
+                        user_id=user_id).order_by(
+                        UserTodo.created_at.desc()).first()
+                    if todo is None or todo.ai_usage not in AI_ALLOWED:
+                        result["status"] = "error"
+                        result["error"] = (
+                            "The todo list is empty or unavailable.")
+                    else:
+                        # Content re-resolved from the encrypted row at
+                        # injection time; only the row id sits in tool meta.
+                        result["status"] = "success"
+                        result["todo_id"] = todo.id
                 else:
-                    # Content re-resolved from the encrypted row at injection
-                    # time; only the row id sits in tool meta.
-                    result["status"] = "success"
-                    result["todo_id"] = todo.id
+                    # Any other readable kind, including 'external_digest'
+                    # — the saved-references topic map is NOT gated by the
+                    # "External references" toggle, unlike semantic_search's
+                    # reference matches and read_full on an external label.
+                    # It is the user's own data, so nothing leaks; the
+                    # guidance only points users with the toggle on at the
+                    # digest. Known asymmetry (#330 review), left as is.
+                    artifact = UserArtifact.latest_for(user_id, kind)
+                    if (artifact is None
+                            or artifact.ai_usage not in AI_ALLOWED):
+                        result["status"] = "error"
+                        result["error"] = (
+                            f"No readable artifact of kind {kind!r}")
+                    else:
+                        # Content is NOT stored in tool meta (plaintext
+                        # column) — the retrieval loop /
+                        # _scan_proposal_statuses re-resolves it from the
+                        # encrypted row and injects it.
+                        result["status"] = "success"
+                        result["artifact_id"] = artifact.id
+                        result["kind"] = kind
 
             elif name == "semantic_search":
                 # Search the user's own archive by meaning (#155). Embeds the
@@ -4852,7 +4862,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
 
             # ── Within-turn retrieval loop gating (#158) ───────────────────
             # Both agentic modes (text + voice) run the bounded within-turn
-            # retrieval loop so read_artifact/read_todo resolve same-turn. Any
+            # retrieval loop so read_artifact etc. resolve same-turn. Any
             # other (non-agentic) caller — source_mode None — stays single-shot.
             if batch_resp is not None:
                 # The collecting run: the poll above found the batch ended

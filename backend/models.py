@@ -1066,6 +1066,14 @@ class UserArtifact(db.Model):
     # silently desync one side (which once left {user_intentions} unrendered).
     INLINE_KINDS = ("memory", "scratchpad", "ai_preferences", "intentions")
 
+    # Names of documents that are NOT UserArtifacts (their own models, or
+    # system-generated), so no write may create an artifact under them: one
+    # named "todo" would sit next to the real list in the agentic index,
+    # and read_artifact on "todo" reads the list, never it (#218). The AI's
+    # update_artifact refuses them (RESERVED_ARTIFACT_KINDS) and so do the
+    # artifact routes.
+    RESERVED_KINDS = ("todo", "profile", "recent_context")
+
     def set_content(self, plaintext):
         self.content = encrypt_content(plaintext)
 
