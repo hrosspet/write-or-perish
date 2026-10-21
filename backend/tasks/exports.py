@@ -1382,6 +1382,29 @@ def _day(ts):
     return ts.strftime("%Y-%m-%d") if ts else "unknown"
 
 
+def _written_by_user_on(profile):
+    """When the user wrote ``profile``, a version they wrote: the day it
+    was saved. An edit that changes the words is saved as a new version
+    (routes/profile._save_edit_as_new_version), so this is the edit's
+    date, not the date of the writing it covers (its cutoff is the edited
+    version's). None for a generated version."""
+    if profile is None or profile.generated_by != "user" \
+            or profile.created_at is None:
+        return None
+    return _day(profile.created_at)
+
+
+def _merged_version(profile):
+    """The version the user wrote that a rebuild's merge step merged
+    (``merged_profile_id``), or None. Metadata only."""
+    if not profile.merged_profile_id:
+        return None
+    merged = db.session.get(UserProfile, profile.merged_profile_id)
+    if merged is None or merged.user_id != profile.user_id:
+        return None
+    return merged
+
+
 def _version_label(i, profile, chain, start, cumulative):
     """The lines above a version in the integration messages (#545).
 
@@ -1390,29 +1413,54 @@ def _version_label(i, profile, chain, start, cumulative):
     version after the first is an update of the one before it, so its
     label also gives the writing it added: the previous version's cutoff
     to its own. A merge step of a rebuild (#183) adds no writing; it
-    merges the version before it with a version the user wrote. With
-    ``cumulative`` (the merge call itself) the versions are full profiles
-    side by side, not updates of each other, so only the coverage line is
-    given."""
+    merges the version before it with a version the user wrote, dated by
+    when the user wrote it. With ``cumulative`` (the merge call itself)
+    the versions are full profiles side by side, not updates of each
+    other, so only the coverage line is given. A version the user wrote
+    also says when they wrote it: its cutoff is that of the version they
+    edited, so the coverage alone would date their statement too early,
+    and the integration prompt lets a later generated version override it
+    only where writing after that day shows a fact changed."""
     cutoff = profile.source_data_cutoff
     since = _day(start) if start and cutoff and start <= cutoff \
         else "the start"
     lines = [f"Profile No. {i}",
              f"- Covers all the writing from {since} to {_day(cutoff)}"]
-    if cumulative:
-        return lines
-    if i == 1:
-        lines.append("- The first version")
-        return lines
-    prev_cutoff = chain[i - 2].source_data_cutoff
-    if profile.merged_profile_id and prev_cutoff == cutoff:
-        lines.append(f"- Merges Profile No. {i - 1} with a version the user "
-                     "wrote; adds no new writing")
-    else:
-        added_from = _day(prev_cutoff) if prev_cutoff else since
-        lines.append(f"- Updates Profile No. {i - 1} with the writing from "
-                     f"{added_from} to {_day(cutoff)}")
+    if not cumulative:
+        if i == 1:
+            lines.append("- The first version")
+        else:
+            prev_cutoff = chain[i - 2].source_data_cutoff
+            if profile.merged_profile_id and prev_cutoff == cutoff:
+                written = _written_by_user_on(_merged_version(profile))
+                on = f" on {written}" if written else ""
+                lines.append(f"- Merges Profile No. {i - 1} with a version "
+                             f"the user wrote{on}; adds no new writing")
+            else:
+                added_from = _day(prev_cutoff) if prev_cutoff else since
+                lines.append(f"- Updates Profile No. {i - 1} with the "
+                             f"writing from {added_from} to {_day(cutoff)}")
+    written = _written_by_user_on(profile)
+    if written:
+        lines.append(f"- Written by the user on {written}")
     return lines
+
+
+# The integration's output instruction, as the default
+# profile_integration.txt ends. A user's own integration prompt without a
+# "## OUTPUT" line gets it appended: the generation prompt's own output
+# line, which such a prompt used to receive through the full embed, is
+# cut off now (#549).
+INTEGRATION_OUTPUT_SECTION = (
+    "## OUTPUT\n"
+    "Generate the unified profile now. No preamble, no meta-commentary. "
+    "Begin directly with \"### SURFACE MAP\""
+)
+
+
+def _has_output_heading(template):
+    return any(line.strip() == "## OUTPUT"
+               for line in template.splitlines())
 
 
 def _integration_messages(user_id, chain, cumulative=False):
@@ -1427,7 +1475,8 @@ def _integration_messages(user_id, chain, cumulative=False):
     to the first version's cutoff (the newest cutoff when the first
     version has none, as a profile written by hand before any build).
     {N_MONTHS} runs from it to the newest cutoff (#549); from the oldest
-    cutoff when no such writing is found."""
+    cutoff when no such writing is found. A user's own integration prompt
+    without a "## OUTPUT" line gets INTEGRATION_OUTPUT_SECTION appended."""
     cutoffs = [p.source_data_cutoff for p in chain if p.source_data_cutoff]
     end = max(cutoffs) if cutoffs else None
     start = _first_writing_date(
@@ -1443,6 +1492,9 @@ def _integration_messages(user_id, chain, cumulative=False):
         "{profile_generation_prompt}",
         profile_structure_instructions(gen_template)
     )
+    if not _has_output_heading(integration_template):
+        integration_prompt = (integration_prompt.rstrip() + "\n\n"
+                              + INTEGRATION_OUTPUT_SECTION)
 
     messages = []
     for i, profile in enumerate(chain, 1):

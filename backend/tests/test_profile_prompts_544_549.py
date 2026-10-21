@@ -43,7 +43,7 @@ for _mod in ["flask_login", "backend.models", "backend.extensions"]:
         del sys.modules[_mod]
 
 from backend.extensions import db as _db                 # noqa: E402
-from backend.models import User, UserProfile, Node      # noqa: E402
+from backend.models import User, UserProfile, Node, UserPrompt  # noqa: E402
 
 PROMPTS = os.path.join(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))), "prompts")
@@ -93,13 +93,14 @@ def _writing(user, at, ai_usage="chat", deleted=False):
 
 def _version(user, cutoff, parent=None, text="SYNTHETIC PROFILE",
              generated_by="gpt-5.5", generation_type="iterative",
-             merged_profile_id=None):
+             merged_profile_id=None, created_at=None):
     profile = UserProfile(
         user_id=user.id, generated_by=generated_by, tokens_used=0,
         ai_usage="chat", generation_type=generation_type,
         source_tokens_used=1000, source_data_cutoff=cutoff,
         parent_profile_id=parent.id if parent else None,
-        merged_profile_id=merged_profile_id)
+        merged_profile_id=merged_profile_id,
+        created_at=created_at or datetime.utcnow())
     profile.set_content(text)
     _db.session.add(profile)
     _db.session.commit()
@@ -194,8 +195,11 @@ def test_integration_prompt_asks_for_the_newest_value(app):
     prompt = _texts(exports.build_integration_messages(user.id, second.id)[0])[-1]
     assert ("When a fact changes over time (an age, where they live, a job, "
             "the state of a relationship or a dispute), state its newest "
-            "value; the dates given with each profile tell which is newest."
-            in prompt)
+            "value: the one from the most recent writing that states it, as "
+            "the dates given with each profile show. A profile the user wrote "
+            "states the facts as of the day they wrote it; a generated "
+            "profile overrides it only where writing dated after that day "
+            "shows the fact changed." in prompt)
     assert ("Where the writing gives a birth year or a date, state that "
             "rather than an age." in prompt)
 
@@ -295,7 +299,8 @@ def test_a_merge_step_in_the_chain_adds_no_writing(app):
     user = _user()
     _writing(user, datetime(2024, 1, 10))
     own = _version(user, datetime(2024, 6, 1), generated_by="user",
-                   generation_type="update", text="IN MY WORDS")
+                   generation_type="update", text="IN MY WORDS",
+                   created_at=datetime(2024, 8, 15))
     v1 = _version(user, datetime(2024, 3, 1))
     v2 = _version(user, datetime(2024, 6, 1), parent=v1)
     merge = _version(user, datetime(2024, 6, 1), parent=v2,
@@ -306,8 +311,8 @@ def test_a_merge_step_in_the_chain_adds_no_writing(app):
     assert _label(texts[2]) == (
         "Profile No. 3\n"
         "- Covers all the writing from 2024-01-10 to 2024-06-01\n"
-        "- Merges Profile No. 2 with a version the user wrote; adds no new "
-        "writing")
+        "- Merges Profile No. 2 with a version the user wrote on "
+        "2024-08-15; adds no new writing")
     assert _label(texts[3]) == (
         "Profile No. 4\n"
         "- Covers all the writing from 2024-01-10 to 2024-09-01\n"
@@ -322,7 +327,8 @@ def test_a_hand_written_first_version_with_no_coverage(app):
     user = _user()
     _writing(user, datetime(2025, 1, 2))
     own = _version(user, None, generated_by="user",
-                   generation_type="initial", text="ABOUT ME")
+                   generation_type="initial", text="ABOUT ME",
+                   created_at=datetime(2024, 12, 1))
     v2 = _version(user, datetime(2025, 6, 1), parent=own,
                   generation_type="update")
 
@@ -330,7 +336,8 @@ def test_a_hand_written_first_version_with_no_coverage(app):
     assert _label(texts[0]) == (
         "Profile No. 1\n"
         "- Covers all the writing from the start to unknown\n"
-        "- The first version")
+        "- The first version\n"
+        "- Written by the user on 2024-12-01")
     assert texts[0].endswith(f"{exports.USER_WRITTEN_PROFILE_NOTE}\n\nABOUT ME")
     assert _label(texts[1]) == (
         "Profile No. 2\n"
@@ -345,13 +352,17 @@ def test_the_merge_call_labels_two_full_profiles(app):
     user's version both cover the writing from its start; neither label
     claims an update of the other, and {N_MONTHS} runs from the start to
     the newer cutoff (the old count went from the base's cutoff back to
-    the user's version's and said 1)."""
+    the user's version's and said 1). The user's version also says when
+    they wrote it: its coverage is that of the version they edited
+    (2025-05-01), but they wrote it on 2026-10-01, after all the writing
+    the rebuilt version covers (review of #586)."""
     import backend.tasks.exports as exports
     user = _user()
     _writing(user, datetime(2024, 1, 10))
     base = _version(user, datetime(2025, 7, 1), text="REBUILT")
     own = _version(user, datetime(2025, 5, 1), generated_by="user",
-                   generation_type="update", text="IN MY WORDS")
+                   generation_type="update", text="IN MY WORDS",
+                   created_at=datetime(2026, 10, 1))
 
     texts = _texts(exports.build_merge_messages(user.id, base, own))
     assert len(texts) == 3
@@ -360,7 +371,69 @@ def test_the_merge_call_labels_two_full_profiles(app):
                         "2025-07-01\n\nREBUILT")
     assert texts[1] == ("Profile No. 2\n"
                         "- Covers all the writing from 2024-01-10 to "
-                        "2025-05-01\n\n"
+                        "2025-05-01\n"
+                        "- Written by the user on 2026-10-01\n\n"
                         f"{exports.USER_WRITTEN_PROFILE_NOTE}\n\nIN MY WORDS")
     assert "over the course of ~18 months." in texts[2]
     assert PLACEHOLDER.search(texts[2]) is None
+    # The rule the dates serve: the user's statement stands unless later
+    # writing changes it.
+    assert "A profile the user wrote states the facts as of the day they " \
+        "wrote it" in texts[2]
+
+
+# ── review of #586: a user's own integration prompt keeps an output line ──
+
+def _own_prompt(user, key, content):
+    prompt = UserPrompt(user_id=user.id, prompt_key=key, title=key,
+                        generated_by="user")
+    prompt.set_content(content)
+    _db.session.add(prompt)
+    _db.session.commit()
+
+
+def test_default_output_line_matches_the_constant(app):
+    """The default prompt ends with the line a user's own prompt gets, and
+    gets it from the file, not appended a second time."""
+    import backend.tasks.exports as exports
+    assert _read("profile_integration.txt").endswith(
+        "\n\n" + exports.INTEGRATION_OUTPUT_SECTION)
+    user = _user()
+    first = _version(user, datetime(2025, 3, 1))
+    second = _version(user, datetime(2025, 6, 1), parent=first)
+    prompt = _texts(exports.build_integration_messages(user.id, second.id)[0])[-1]
+    assert prompt.count(exports.INTEGRATION_OUTPUT_SECTION) == 1
+
+
+def test_own_integration_prompt_without_output_gets_the_default_line(app):
+    """A prompt saved from the old default ends with
+    {profile_generation_prompt}; it used to get the generation prompt's
+    output line through the full embed, and gets the integration's now."""
+    import backend.tasks.exports as exports
+    user = _user()
+    _own_prompt(user, "profile_integration",
+                "Merge these ~{N_MONTHS} months of profiles, my way.\n\n"
+                "{profile_generation_prompt}")
+    first = _version(user, datetime(2025, 3, 1))
+    second = _version(user, datetime(2025, 6, 1), parent=first)
+    prompt = _texts(exports.build_integration_messages(user.id, second.id)[0])[-1]
+
+    assert prompt.startswith("Merge these ~3 months of profiles, my way.")
+    assert prompt.endswith("\n\n" + exports.INTEGRATION_OUTPUT_SECTION)
+    assert prompt.count("## OUTPUT\n") == 1
+    assert PLACEHOLDER.search(prompt) is None
+
+
+def test_own_integration_prompt_with_output_is_left_as_written(app):
+    import backend.tasks.exports as exports
+    user = _user()
+    own = ("Merge these profiles.\n\n{profile_generation_prompt}\n\n"
+           "## OUTPUT\nStart with a one-line summary, then the maps.")
+    _own_prompt(user, "profile_integration", own)
+    first = _version(user, datetime(2025, 3, 1))
+    second = _version(user, datetime(2025, 6, 1), parent=first)
+    prompt = _texts(exports.build_integration_messages(user.id, second.id)[0])[-1]
+
+    assert prompt.endswith(
+        "## OUTPUT\nStart with a one-line summary, then the maps.")
+    assert exports.INTEGRATION_OUTPUT_SECTION not in prompt
