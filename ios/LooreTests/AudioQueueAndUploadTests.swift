@@ -283,6 +283,34 @@ final class ChunkUploaderTests: XCTestCase {
         XCTAssertTrue(bodies.first?.contains("name=\"device_key\"\r\n\r\n\(RecordingDevice.key)") == true)
     }
 
+    // #388: the phone lost the session to another device, then claimed it back in
+    // the same run: the continuation's chunks are sent, not dropped as a dead session's.
+    func testASessionClaimedBackAfterATakeoverUploadsAgain() async throws {
+        var takenOver = true
+        var sent: [Int] = []
+        uploader.transport = { [unowned self] request, file in
+            if takenOver {
+                let body = #"{"error":"x","code":"session_taken_over"}"#
+                return (Data(body.utf8), HTTPURLResponse(url: request.url!, statusCode: 409, httpVersion: nil, headerFields: nil)!)
+            }
+            sent.append(self.index(of: request, file: file))
+            return (Data("{}".utf8), HTTPURLResponse(url: request.url!, statusCode: 202, httpVersion: nil, headerFields: nil)!)
+        }
+        uploader.open(sessionId: "s7", uploadURL: URL(string: "http://x/c")!, firstIndex: 3)
+        uploader.enqueue(sessionId: "s7", chunk: chunk(3))
+        let lost = await uploader.settle(sessionId: "s7")
+        XCTAssertEqual(lost.fatalMessage, RecordingDevice.takenOverMessage)
+
+        takenOver = false
+        uploader.open(sessionId: "s7", uploadURL: URL(string: "http://x/c")!, firstIndex: 5)
+        for i in 5...7 { uploader.enqueue(sessionId: "s7", chunk: chunk(i)) }
+        let outcome = await uploader.settle(sessionId: "s7")
+        XCTAssertEqual(sent, [5, 6, 7])
+        XCTAssertNil(outcome.fatalMessage)
+        XCTAssertEqual(outcome.produced, 3)
+        XCTAssertEqual(outcome.totalForFinalize, 8)
+    }
+
     // M2: a dead session keeps no audio on disk and is not "resumed" at every launch.
     func testFatalSessionKeepsNoAudioAndIsNotResumed() async throws {
         uploader.transport = { request, _ in

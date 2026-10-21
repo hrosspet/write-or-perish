@@ -54,6 +54,13 @@ protocol VoiceRecording: AnyObject {
     /// capture is held, as after an interruption.
     var onSourceFailed: (() -> Void)? { get set }
     func start(sessionId: String, uploadURL: URL, firstChunkIndex: Int, elapsedOffset: Double) throws
+    /// As `start`, but the chunks stay on the phone until `releaseHeldChunks` (#388:
+    /// a continued recording sends nothing before its claim answered).
+    func startHoldingChunks(sessionId: String, uploadURL: URL, firstChunkIndex: Int,
+                            elapsedOffset: Double) throws
+    /// The claim answered: the held chunks and every later one go to the server,
+    /// numbered from `firstChunkIndex` (the index the claim named).
+    func releaseHeldChunks(firstChunkIndex: Int)
     /// User pause: flushes the current segment; capture keeps the session alive.
     func pause()
     func resume() throws

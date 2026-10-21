@@ -173,6 +173,11 @@ export function useStreamingTranscription(options = {}) {
   const resetSSERef = useRef(null);
   // For the online-retry listener, registered once (#388).
   const stopEndedSessionRef = useRef(null);
+  // #388: the claim of a continued session ({ sessionId, shift, settled }).
+  // Its chunks wait until it answers and are numbered from the index it
+  // names (`shift` from the listed chunk count); `settled` resolves false
+  // when it was refused. Null for a session this tab started.
+  const claimRef = useRef(null);
 
   // #320: this tab stops recording a session it never finalized (reload,
   // close, navigating away, cancel): tell the server, so the session can
@@ -358,16 +363,24 @@ export function useStreamingTranscription(options = {}) {
   }, []);
 
   // Handle chunk upload
-  const uploadChunk = useCallback(async (blob, chunkIndex) => {
+  const uploadChunk = useCallback(async (blob, recorderIndex) => {
     if (!sessionIdRef.current) {
       console.error('[StreamingTranscription] Cannot upload chunk: session not initialized');
       return;
     }
 
     const sessionId = sessionIdRef.current;
-    console.log(`[StreamingTranscription] Starting upload: chunk=${chunkIndex}, blobSize=${blob.size}, session=${sessionId}`);
+    console.log(`[StreamingTranscription] Starting upload: chunk=${recorderIndex}, blobSize=${blob.size}, session=${sessionId}`);
 
     const uploadPromise = (async () => {
+      // #388: a continued session sends nothing before its claim answered,
+      // and numbers its chunks from the index the claim named.
+      let chunkIndex = recorderIndex;
+      const claim = claimRef.current;
+      if (claim && claim.sessionId === sessionId) {
+        if (!(await claim.settled)) return;
+        chunkIndex += claim.shift;
+      }
       const result = await uploadChunkWithRetry(blob, chunkIndex, sessionId);
 
       if (result.success) {
@@ -776,6 +789,7 @@ export function useStreamingTranscription(options = {}) {
     let initSucceeded = false;
     finalizeRequestedRef.current = false;
     releasedSessionRef.current = null;
+    claimRef.current = null;
     // A new session starts from fresh SSE state even when the previous
     // one ended without cancelStreaming (e.g. voice mode back to ready).
     resetSSE();
@@ -838,36 +852,59 @@ export function useStreamingTranscription(options = {}) {
   //   chunk 0 was uploaded with, otherwise the server rejects subsequent chunks
   //   with mime_mismatch. If this browser can't record that family, the
   //   recorder hook throws NotSupportedError and we surface that via onError.
-  // #388: before the mic opens, this page claims the session, so the device
-  //   that recorded it before is refused from now on; the claim names the
-  //   chunk index to continue from.
+  // #388: once the recorder runs, this page claims the session, so the
+  //   device that recorded it before is refused from now on. A continue
+  //   that cannot record (mic denied, a format this browser can't record)
+  //   fails before the claim and leaves the session to that device. Chunks
+  //   wait for the claim's answer and are numbered from the index it names.
   const resumeStreaming = useCallback(async (existingSessionId, existingDraftId, existingChunkCount, existingMimeType) => {
     let initSucceeded = false;
     finalizeRequestedRef.current = false;
     releasedSessionRef.current = null;
     // This page may have been the device that lost the session before.
     endedSessionRef.current = null;
+    const listedIndex = existingChunkCount || 0;
+    let settleClaim = () => {};
+    const claim = {
+      sessionId: existingSessionId,
+      shift: 0,
+      settled: new Promise((resolve) => { settleClaim = resolve; }),
+    };
+    claimRef.current = claim;
     try {
       setSessionState('initializing');
       setErrorMessage(null);
-
-      const startingChunkIndex = await claimSession(existingSessionId, existingChunkCount);
 
       setDraftId(existingDraftId);
       setSessionId(existingSessionId);
       draftIdRef.current = existingDraftId;
       sessionIdRef.current = existingSessionId;
-      totalChunksRef.current = startingChunkIndex;
+      totalChunksRef.current = listedIndex;
       initSucceeded = true;
 
-      const durationOffset = (existingChunkCount || 0) * (chunkIntervalMs / 1000);
+      const durationOffset = listedIndex * (chunkIntervalMs / 1000);
       await startMediaRecorder({
-        startingChunkIndex,
+        startingChunkIndex: listedIndex,
         durationOffset,
         forceMimeFamily: existingMimeType || null,
       });
-      setSessionState('recording');
+
+      try {
+        const next = await claimSession(existingSessionId, listedIndex);
+        claim.shift = next - listedIndex;
+        totalChunksRef.current = next;
+        settleClaim(true);
+      } catch (claimErr) {
+        // Nothing was sent: what the recorder caught while the claim was
+        // out goes with it.
+        settleClaim(false);
+        resetMediaRecorder();
+        throw claimErr;
+      }
+      // Not when Stop was pressed while the claim was out.
+      if (!finalizeRequestedRef.current) setSessionState('recording');
     } catch (err) {
+      settleClaim(false);
       console.error('Failed to resume streaming:', err);
       setSessionState('error');
       setErrorMessage(err.message);
@@ -879,7 +916,7 @@ export function useStreamingTranscription(options = {}) {
         onError(err);
       }
     }
-  }, [startMediaRecorder, chunkIntervalMs, onError]);
+  }, [startMediaRecorder, resetMediaRecorder, chunkIntervalMs, onError]);
 
   // Stop streaming and finalize
   // extraParams: optional { parent_id, model } for server-side LLM chain
@@ -899,8 +936,18 @@ export function useStreamingTranscription(options = {}) {
     console.log(`[StreamingTranscription] Waiting for ${uploadsToWait.length} pending uploads to complete...`);
     await Promise.allSettled(uploadsToWait);
 
+    // #388: a continued session whose claim was refused has nothing to
+    // finalize (resumeStreaming said why); a claimed one counts from the
+    // index the claim named.
+    const claim = claimRef.current;
+    let claimShift = 0;
+    if (claim && claim.sessionId === sessionIdRef.current) {
+      if (!(await claim.settled)) return;
+      claimShift = claim.shift;
+    }
+
     // Get total chunks — should now include the final chunk
-    const totalChunks = getTotalChunks();
+    const totalChunks = getTotalChunks() + claimShift;
     console.log(`[StreamingTranscription] All uploads settled. totalChunks=${totalChunks}, uploadedChunks=${totalChunksRef.current}`);
 
     // An upload came back saying the session was ended or continued
@@ -990,6 +1037,7 @@ export function useStreamingTranscription(options = {}) {
     totalChunksRef.current = 0;
     pendingUploadsRef.current = [];
     failedChunksRef.current = [];
+    claimRef.current = null;
   }, [disconnectSSE, resetMediaRecorder, resetSSE, releaseIfAbandoned]);
 
   return {

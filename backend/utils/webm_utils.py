@@ -148,13 +148,18 @@ def init_segment_name(ext: str, index: int = None) -> str:
 
 def persist_init_segment(
     chunk_path: pathlib.Path, chunk_dir: pathlib.Path,
-    index: int = None,
-) -> None:
+    index: int = None, stage: bool = False,
+):
     """Extract the init segment from an init-bearing chunk on disk and
     persist it at `chunk_dir/init{ext}.enc` (chunk 0) or
     `chunk_dir/init.{index}{ext}.enc` (a resumed subsession's first chunk,
     #124) — without `.enc` when encryption is disabled. `ext` matches the
     chunk's file extension (`.webm` or `.mp4`).
+
+    With `stage=True` the encrypted init stays under a name of its own and
+    `(encrypted_path, final_path)` is returned: the caller moves it into
+    place (`os.replace`) under the draft row lock, after checking that the
+    chunk may still be stored (#388).
 
     Dispatches on the chunk's suffix: WebM goes through the EBML walker,
     MP4 through the ISOBMFF box walker. Both raise ValueError on malformed
@@ -165,7 +170,9 @@ def persist_init_segment(
     """
     # Local import avoids circular imports; encryption depends on this
     # module's sibling files.
-    from backend.utils.encryption import encrypt_file_atomically
+    from backend.utils.encryption import (
+        encrypt_file_atomically, stage_encrypted_file,
+    )
 
     ext = chunk_path.suffix.lower()
     with open(chunk_path, 'rb') as f:
@@ -186,7 +193,10 @@ def persist_init_segment(
     tmp_path = chunk_dir / f"upload-{uuid.uuid4().hex}{ext}"
     with open(tmp_path, 'wb') as f:
         f.write(init_bytes)
+    if stage:
+        return stage_encrypted_file(tmp_path, init_path)
     encrypt_file_atomically(tmp_path, init_path)
+    return None
 
 
 def _walk_segment_children(data: bytes):

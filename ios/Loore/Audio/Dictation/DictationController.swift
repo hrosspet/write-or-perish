@@ -241,6 +241,7 @@ final class DictationController {
             guard gen == self.generation else { return }
             self.elapsed = recorder.elapsed
             if let fatal = outcome.fatalMessage {
+                if fatal == RecordingDevice.takenOverMessage { recorder.forget(sessionId: sid) }
                 app.audio.sounds.playError()
                 self.fail(fatal)
                 return
@@ -399,6 +400,11 @@ final class DictationController {
         guard state == .recording else { return }
         generation += 1
         recorder?.cancel()
+        // #388: the session is another device's now; its upload state here
+        // would drop the chunks of a later continue on this phone.
+        if message == RecordingDevice.takenOverMessage, let sid = sessionId {
+            recorder?.forget(sessionId: sid)
+        }
         app?.audio.session.deactivate()
         app?.audio.sounds.playError()
         fail(message)

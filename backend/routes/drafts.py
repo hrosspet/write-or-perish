@@ -14,10 +14,11 @@ from datetime import datetime
 from backend.utils.audio_storage import (
     is_storage_id, move_session_audio_to_node, storage_path,
 )
-from backend.utils.encryption import encrypt_file_atomically
+from backend.utils.encryption import stage_encrypted_file
 from backend.utils.client_platform import request_client
 from backend.utils.recording_device import (
-    claim_session, is_taken_over, is_taken_over_locked, request_device_key,
+    SessionBusy, claim_session, is_taken_over, is_taken_over_locked,
+    lock_writer_key, request_device_key, session_busy_response,
     taken_over_response, valid_device_key,
 )
 from backend.utils.llm_nodes import (
@@ -717,17 +718,25 @@ def claim_streaming(session_id):
     if not valid_device_key(device_key):
         return jsonify({"error": "Missing or invalid device_key"}), 400
 
-    # Locked: a keyed chunk upload being stored now finishes first, so the
-    # count below includes it (recording_device.is_taken_over_locked).
     draft = Draft.query.filter_by(
         session_id=session_id,
         user_id=current_user.id,
-    ).with_for_update().first()
+    ).first()
     if not draft:
         return jsonify({
             "error": "Streaming session not found",
             "code": "session_not_found",
         }), 404
+    draft_id = draft.id
+
+    # Locked: a keyed chunk upload being stored now finishes first, so the
+    # count below includes it (recording_device.is_taken_over_locked). The
+    # row is read again under the lock.
+    try:
+        lock_writer_key(draft_id)
+    except SessionBusy:
+        return session_busy_response()
+    db.session.refresh(draft)
     if draft.streaming_status != "recording":
         return jsonify({
             "error": "This recording has already ended.",
@@ -755,9 +764,24 @@ def claim_streaming(session_id):
 
     return jsonify({
         "session_id": session_id,
-        "draft_id": draft.id,
+        "draft_id": draft_id,
         "next_chunk_index": next_chunk_index,
     }), 200
+
+
+def _discard_staged(staged):
+    """Remove the encrypted files an upload staged and will not use."""
+    for encrypted, _final in staged:
+        pathlib.Path(encrypted).unlink(missing_ok=True)
+
+
+def _move_staged(staged):
+    """Move an upload's staged files into place, in order (the init segment
+    before the chunk); returns the last one's final path."""
+    final = None
+    for encrypted, final in staged:
+        os.replace(encrypted, final)
+    return final
 
 
 def _chunk_already_uploaded(chunk_index, chunk):
@@ -819,6 +843,7 @@ def upload_streaming_chunk(session_id):
     # A chunk is the recording tab's sign of life (#320) — unless the tab
     # already released the session: an upload still in flight when the
     # tab left must not make it live again.
+    draft_id = draft.id
     stamp_session_alive(session_id, only_if_unreleased=True)
     db.session.commit()
 
@@ -886,17 +911,18 @@ def upload_streaming_chunk(session_id):
     upload_path = chunk_dir / f"upload-{uuid.uuid4().hex}{ext}"
     chunk_file.save(upload_path)
 
-    # A claim may have come in since the check above. From here to the
-    # chunk's commit the draft row stays locked, so this chunk is stored
-    # before a claim counts the chunks, or refused here (#388).
-    if is_taken_over_locked(draft, device_key):
-        upload_path.unlink(missing_ok=True)
-        return taken_over_response()
+    # The files this upload puts in place, as (encrypted file under a name
+    # of its own, final path): the init segment when the chunk carries one,
+    # then the chunk. Encrypting needs a KMS call, so it happens here,
+    # before the draft row is locked; the files are moved into place only
+    # under the lock, once the chunk may still be stored (#388).
+    staged = []
+    session_mime = None
 
     # Chunk 0 carries the format's init segment — the bytes that every
     # later batch needs as a prefix to remain a valid file (WebM:
-    # EBML/Segment/Tracks; fMP4: ftyp+moov). Extract and persist it now,
-    # before the upload file is encrypted and moved into place.
+    # EBML/Segment/Tracks; fMP4: ftyp+moov). Extract and stage it now,
+    # before the upload file is encrypted.
     #
     # Reject the upload if extraction fails: batch 1 (chunks 0..19) would
     # still succeed because chunk 0 carries its own header, but any batch
@@ -912,7 +938,8 @@ def upload_streaming_chunk(session_id):
         # misattributed to a parse failure the user can't do anything
         # about.
         try:
-            persist_init_segment(upload_path, chunk_dir)
+            staged_init = persist_init_segment(
+                upload_path, chunk_dir, stage=True)
         except (ValueError, OSError) as exc:
             # A ValueError's message is the stream walker's own
             # (webm_utils: element names, offsets), never the audio, so it
@@ -938,10 +965,12 @@ def upload_streaming_chunk(session_id):
         except Exception:
             upload_path.unlink(missing_ok=True)
             raise
+        if staged_init:
+            staged.append(staged_init)
         # Only persist the family mime AFTER successful init extraction —
         # if persist_init_segment raised, we don't want a half-committed
         # mime that'd survive a future early-commit refactor.
-        draft.streaming_mime_type = form_mime_family
+        session_mime = form_mime_family
     elif chunk_is_init_bearing(upload_path):
         # A chunk N>0 that carries its own stream header came from a
         # fresh MediaRecorder — the user resumed a recovered recording
@@ -955,7 +984,10 @@ def upload_streaming_chunk(session_id):
         # rejecting would lose it outright, while keeping it preserves
         # at worst today's behavior for this subsession.
         try:
-            persist_init_segment(upload_path, chunk_dir, index=chunk_index)
+            staged_init = persist_init_segment(
+                upload_path, chunk_dir, index=chunk_index, stage=True)
+            if staged_init:
+                staged.append(staged_init)
             current_app.logger.info(
                 f"Session {session_id}: chunk {chunk_index} opens a new "
                 f"subsession (resumed recording); init persisted"
@@ -966,10 +998,29 @@ def upload_streaming_chunk(session_id):
                 "session %s: %s", chunk_index, session_id, describe_exception(exc))
         except Exception:
             upload_path.unlink(missing_ok=True)
+            _discard_staged(staged)
             raise
 
     # Encrypt the audio chunk at rest
-    encrypted_path = encrypt_file_atomically(upload_path, chunk_path)
+    try:
+        staged.append(stage_encrypted_file(upload_path, chunk_path))
+    except Exception:
+        _discard_staged(staged)
+        raise
+
+    # A claim may have come in since the check above. From here to the
+    # chunk's commit the draft row stays locked, so this chunk is stored
+    # before a claim counts the chunks, or refused here, its files never
+    # put in place (#388). Only quick steps until the commit: no KMS call
+    # or other network wait (recording_device.lock_writer_key).
+    try:
+        taken_over = is_taken_over_locked(draft_id, device_key)
+    except SessionBusy:
+        _discard_staged(staged)
+        return session_busy_response()
+    if taken_over:
+        _discard_staged(staged)
+        return taken_over_response()
 
     # Create transcript chunk record (linked to session, not node)
     # Chunks are stored on disk first; transcription is batched every 20 chunks
@@ -978,16 +1029,22 @@ def upload_streaming_chunk(session_id):
         session_id=session_id,
         chunk_index=chunk_index
     ).first()
+    if existing_chunk and existing_chunk.status != 'failed':
+        # A copy that lost the race to a duplicate (#371): the stored one
+        # stays, files included.
+        _discard_staged(staged)
+        return _chunk_already_uploaded(chunk_index, existing_chunk)
+
+    encrypted_path = _move_staged(staged)
+    if session_mime:
+        draft.streaming_mime_type = session_mime
 
     if existing_chunk:
         # Update existing chunk if it failed before
-        if existing_chunk.status == 'failed':
-            existing_chunk.status = 'stored'
-            existing_chunk.error = None
-            db.session.commit()
-            transcript_chunk = existing_chunk
-        else:
-            return _chunk_already_uploaded(chunk_index, existing_chunk)
+        existing_chunk.status = 'stored'
+        existing_chunk.error = None
+        db.session.commit()
+        transcript_chunk = existing_chunk
     else:
         transcript_chunk = NodeTranscriptChunk(
             session_id=session_id,
@@ -1086,23 +1143,25 @@ def finalize_streaming(session_id):
 
     Returns: { "message": "Finalization started", "draft_id": 123 }
     """
-    # Locked, so a claim cannot slip in between the check below and the
-    # status change (#388).
+    # The body first: reading it can wait on the network, which must not
+    # happen while the draft row is locked below (#388).
+    data = request.get_json() or {}
+    device_key = request_device_key()
+
     draft = Draft.query.filter_by(
         session_id=session_id,
         user_id=current_user.id
-    ).with_for_update().first()
+    ).first()
 
     if not draft:
         return jsonify({"error": "Streaming session not found"}), 404
 
-    if is_taken_over(draft, request_device_key()):
+    if is_taken_over(draft, device_key):
         return taken_over_response()
 
     if draft.streaming_status != "recording":
         return jsonify({"error": "Streaming session is not in recording state"}), 400
 
-    data = request.get_json() or {}
     total_chunks = data.get("total_chunks")
     label = data.get("label")  # 'Voice', or none (_RECORDING_LABELS)
     err = _recording_label_error(label)
@@ -1127,6 +1186,15 @@ def finalize_streaming(session_id):
 
     if total_chunks is None:
         return jsonify({"error": "Missing total_chunks"}), 400
+
+    # Locked from here to the commit, so a claim cannot slip in between the
+    # check and the status change (#388).
+    try:
+        taken_over = is_taken_over_locked(draft.id, device_key)
+    except SessionBusy:
+        return session_busy_response()
+    if taken_over:
+        return taken_over_response()
 
     # Update draft with total chunks and status
     draft.streaming_total_chunks = total_chunks
@@ -1321,9 +1389,14 @@ def release_streaming(session_id):
         draft = Draft.query.filter_by(
             session_id=session_id,
             user_id=current_user.id,
-        ).with_for_update().first()
-        if draft is not None and is_taken_over(draft, device_key):
-            return taken_over_response()
+        ).first()
+        if draft is not None:
+            try:
+                taken_over = is_taken_over_locked(draft.id, device_key)
+            except SessionBusy:
+                return session_busy_response()
+            if taken_over:
+                return taken_over_response()
     released = release_session(session_id, current_user.id)
     db.session.commit()
     return jsonify({"released": bool(released)}), 200

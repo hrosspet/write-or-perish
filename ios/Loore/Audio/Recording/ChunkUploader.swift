@@ -144,6 +144,13 @@ final class ChunkUploader: NSObject {
 
     /// Starts tracking a session (before its first chunk).
     func open(sessionId: String, uploadURL: URL, firstIndex: Int = 0) {
+        // A session that died here (a fatal answer) and is recorded into again:
+        // this phone claimed it back from the device that continued it (#388).
+        // Its audio was deleted at the fatal answer, and its fatal state would
+        // drop every new chunk, so it starts over.
+        if manifests[sessionId]?.chunks.values.contains(where: { $0.status == .fatal }) == true {
+            forget(sessionId: sessionId)
+        }
         if manifests[sessionId] == nil {
             var manifest = Manifest(sessionId: sessionId, uploadURL: uploadURL)
             manifest.firstIndex = firstIndex

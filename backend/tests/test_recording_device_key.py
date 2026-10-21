@@ -389,6 +389,25 @@ class TestChunksAfterATakeover:
         assert not [p for p in _chunk_dir(alice, d).iterdir()
                     if p.name.startswith("upload-")]
 
+    def test_a_busy_row_lock_stores_nothing(self, app, monkeypatch):
+        # The lock wait ran out (lock_timeout): 503, which the recorders
+        # retry, and no file is left or put in place.
+        client, alice = _setup(app)
+        d = _make_session(alice)
+        from backend.utils import recording_device
+
+        def busy(_draft_id):
+            raise recording_device.SessionBusy()
+        monkeypatch.setattr(recording_device, "lock_writer_key", busy)
+
+        resp = _post_chunk(client, d, 2, key=KEY_A)
+
+        assert resp.status_code == 503
+        assert resp.get_json()["code"] == "session_busy"
+        assert NodeTranscriptChunk.query.filter_by(
+            session_id=d.session_id, chunk_index=2).count() == 0
+        assert list(_chunk_dir(alice, d).iterdir()) == []
+
 
 class TestFinalize:
     def _finalize(self, client, d, key):

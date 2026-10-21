@@ -137,6 +137,13 @@ final class FakeRecorder: VoiceRecording {
         if let startError { throw startError }
         elapsed = elapsedOffset + 3
     }
+    func startHoldingChunks(sessionId: String, uploadURL: URL, firstChunkIndex: Int,
+                            elapsedOffset: Double) throws {
+        calls.append("start \(sessionId) holding from \(firstChunkIndex)")
+        if let startError { throw startError }
+        elapsed = elapsedOffset + 3
+    }
+    func releaseHeldChunks(firstChunkIndex: Int) { calls.append("release from \(firstChunkIndex)") }
     var resumeError: Error?
     func pause() { calls.append("pause") }
     func resume() throws {
@@ -1267,7 +1274,8 @@ final class VoiceTurnTests: XCTestCase {
             #"{"id":3,"session_id":"old","parent_id":9,"label":"Voice","content":"","chunk_count":4,"has_stored_chunks":true,"streaming_mime_type":"audio/mp4"}"#)
         turn.resumeInterrupted(draft)
         await wait("recording") { turn.state == .recording }
-        XCTAssertEqual(recorder.calls, ["start old from 4"])
+        // #388: the recorder starts holding its chunks, then the claim releases them.
+        XCTAssertEqual(recorder.calls, ["start old holding from 4", "release from 4"])
         XCTAssertFalse(backend.log.contains { $0.hasPrefix("init") })
         XCTAssertEqual(turn.threadParentId, 9)
         XCTAssertEqual(backend.claimed, ["old"])
@@ -1281,11 +1289,22 @@ final class VoiceTurnTests: XCTestCase {
             #"{"id":3,"session_id":"old","parent_id":9,"label":"Voice","content":"","chunk_count":4,"has_stored_chunks":true,"streaming_mime_type":"audio/mp4"}"#)
         turn.resumeInterrupted(draft)
         await wait("recording") { turn.state == .recording }
-        XCTAssertEqual(recorder.calls, ["start old from 6"])
+        XCTAssertEqual(recorder.calls, ["start old holding from 4", "release from 6"])
     }
 
-    // #388: another device is still recording it: the mic never opens.
-    func testARefusedClaimDoesNotRecord() async throws {
+    // #388: a continue whose microphone cannot start never claims the session,
+    // so the device that has it keeps it.
+    func testAMicrophoneThatCannotStartNeverClaims() async throws {
+        recorder.startError = NSError(domain: "mic", code: 1)
+        let draft = try decode(InterruptedDraft.self,
+            #"{"id":3,"session_id":"old","chunk_count":4,"streaming_mime_type":"audio/mp4"}"#)
+        turn.resumeInterrupted(draft)
+        await wait("back to idle") { turn.state == .idle }
+        XCTAssertEqual(backend.claimed, [])
+    }
+
+    // #388: another device is still recording it: the held chunks are dropped.
+    func testARefusedClaimSendsNothing() async throws {
         let body = ServerErrorBody(error: "This recording is still in progress in another tab or on another device.",
                                    code: "session_live")
         backend.claimResult = .failure(APIError.server(status: 409, body: body))
@@ -1293,7 +1312,7 @@ final class VoiceTurnTests: XCTestCase {
             #"{"id":3,"session_id":"old","chunk_count":4,"streaming_mime_type":"audio/mp4"}"#)
         turn.resumeInterrupted(draft)
         await wait("back to idle") { turn.state == .idle }
-        XCTAssertEqual(recorder.calls, [])
+        XCTAssertEqual(recorder.calls, ["start old holding from 4", "cancel"])
         XCTAssertEqual(notices.toasts, ["This recording is still in progress in another tab or on another device."])
     }
 

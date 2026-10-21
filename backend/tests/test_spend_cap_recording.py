@@ -562,9 +562,12 @@ class TestDuplicateChunkUpload:
         monkeypatch.undo()
         assert NodeTranscriptChunk.query.filter_by(
             session_id=self.SESSION, chunk_index=5).count() == 1
-        # This copy's file was moved into place; no upload file is left.
-        assert sorted(p.name for p in chunk_dir.iterdir()) == [
-            "chunk_0005.webm"]
+        # No upload file is left. Seen by the check just before the move
+        # (1), this copy leaves the stored chunk's files alone (#388 puts
+        # files in place only after that check); seen only by the insert
+        # (2), its file was moved into place.
+        assert sorted(p.name for p in chunk_dir.iterdir()) == (
+            [] if missed_checks == 1 else ["chunk_0005.webm"])
 
     def test_first_copy_is_stored(self, client, alice):
         chunk_dir = self._session(alice, stored_row=False)

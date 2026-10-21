@@ -740,7 +740,7 @@ A recording is a Draft row with a `session_id` (UUID string). Audio is uploaded 
 
 ##### `POST /api/drafts/streaming/<session_id>/claim` (#388)
 - Backend: routes/drafts.py:claim_streaming
-- Called from: useStreamingTranscription `resumeStreaming` ("Continue recording"), before the mic opens; iPhone `VoiceTurnController.beginRecording(resume:)`.
+- Called from: useStreamingTranscription `resumeStreaming` ("Continue recording") and iPhone `VoiceTurnController.beginRecording(resume:)`, once the recorder has started; its chunks wait for the answer and are renumbered from `next_chunk_index`.
 - Request JSON: `{ "device_key": string }` (required).
 - Response 200: `{ "session_id", "draft_id", "next_chunk_index": int }`: one past the highest stored chunk; the continuation numbers from there. The claimer becomes the writer and the session is stamped live.
 - Errors: `409 session_live` (another device or tab records it; the same key may claim again), `400 session_not_active`, `404 session_not_found`, `400` without a key.

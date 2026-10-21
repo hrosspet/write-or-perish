@@ -236,8 +236,8 @@ describe('another device continued this recording', () => {
   });
 });
 
-describe('Continue recording claims the session first', () => {
-  test('records from the index the claim names', async () => {
+describe('Continue recording claims the session once the recorder runs', () => {
+  test('claims after the recorder started, and numbers chunks from the index the claim names', async () => {
     const { result } = renderHook(() => useStreamingTranscription({}));
 
     await act(async () => {
@@ -247,10 +247,68 @@ describe('Continue recording claims the session first', () => {
     const claim = callsTo('/drafts/streaming/s9/claim');
     expect(claim).toHaveLength(1);
     expect(claim[0][1]).toEqual({ device_key: RECORDING_DEVICE_KEY });
-    // The claim answered 5: chunk 4 is already on the server.
+    // The recorder started first, numbering from the listed count.
     expect(mockStartRecording).toHaveBeenCalledWith(
-      expect.objectContaining({ startingChunkIndex: 5, forceMimeFamily: 'audio/webm' }));
+      expect.objectContaining({ startingChunkIndex: 4, forceMimeFamily: 'audio/webm' }));
     expect(result.current.sessionState).toBe('recording');
+
+    // The claim answered 5 (chunk 4 is already on the server): the
+    // recorder's chunk 4 goes up as chunk 5, and finalize counts it.
+    await act(async () => {
+      mockRecorderOpts.onChunkReady(new Blob(['a']), 4);
+      await flush();
+    });
+    expect(callsTo('/audio-chunk')[0][1].get('chunk_index')).toBe('5');
+    await act(async () => { await result.current.stopStreaming(); });
+    expect(callsTo('/finalize')[0][1].total_chunks).toBe(3); // getTotalChunks() 2 + 1
+  });
+
+  test('a chunk ready before the claim answers waits for it', async () => {
+    let answerClaim;
+    mockPost.mockImplementation((url) => {
+      if (url.endsWith('/claim')) {
+        return new Promise((resolve) => { answerClaim = resolve; });
+      }
+      return Promise.resolve({ data: {} });
+    });
+    const { result } = renderHook(() => useStreamingTranscription({}));
+    let resumed;
+    await act(async () => {
+      resumed = result.current.resumeStreaming('s9', 9, 4, 'audio/webm');
+      await flush();
+    });
+    expect(result.current.sessionState).toBe('initializing');
+
+    await act(async () => {
+      mockRecorderOpts.onChunkReady(new Blob(['a']), 4);
+      await flush();
+    });
+    expect(callsTo('/audio-chunk')).toHaveLength(0);
+
+    await act(async () => {
+      answerClaim({ data: { next_chunk_index: 6 } });
+      await resumed;
+      await flush();
+    });
+    expect(callsTo('/audio-chunk')).toHaveLength(1);
+    expect(callsTo('/audio-chunk')[0][1].get('chunk_index')).toBe('6');
+    expect(result.current.sessionState).toBe('recording');
+  });
+
+  test('a recorder that cannot start never claims the session', async () => {
+    const denied = new Error('Permission denied');
+    denied.name = 'NotAllowedError';
+    mockStartRecording.mockImplementationOnce(() => Promise.reject(denied));
+    const onError = jest.fn();
+    const { result } = renderHook(() => useStreamingTranscription({ onError }));
+
+    await act(async () => {
+      await result.current.resumeStreaming('s9', 9, 4, 'audio/webm');
+    });
+
+    expect(callsTo('/claim')).toHaveLength(0);
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(result.current.sessionState).toBe('error');
   });
 
   test.each([
@@ -258,7 +316,7 @@ describe('Continue recording claims the session first', () => {
     ['session_not_active', 400, /already ended/],
     ['session_not_found', 404, /already ended/],
     [undefined, 500, /could not be continued/],
-  ])('a refused claim (%s) never opens the mic and says why', async (code, status, text) => {
+  ])('a refused claim (%s) stops the recorder, sends nothing and says why', async (code, status, text) => {
     mockPost.mockImplementation((url) => (
       url.endsWith('/claim') ? Promise.reject(refusal(status, code)) : Promise.resolve({ data: {} })
     ));
@@ -268,8 +326,13 @@ describe('Continue recording claims the session first', () => {
     await act(async () => {
       await result.current.resumeStreaming('s9', 9, 4, 'audio/webm');
     });
+    await act(async () => {
+      mockRecorderOpts.onChunkReady(new Blob(['a']), 4);
+      await flush();
+    });
 
-    expect(mockStartRecording).not.toHaveBeenCalled();
+    expect(mockResetRecording).toHaveBeenCalled();
+    expect(callsTo('/audio-chunk')).toHaveLength(0);
     expect(onError).toHaveBeenCalledTimes(1);
     const err = onError.mock.calls[0][0];
     expect(err.fatal).toBe(true);
