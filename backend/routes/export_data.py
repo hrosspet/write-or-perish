@@ -88,11 +88,21 @@ def _export_visible_filter(model, user_id):
 
 def _node_header_line(node, index_path):
     """Markdown header line shared by all node renderings."""
-    depth = len(index_path.split('.'))
-    header = "#" * min(depth + 1, 6)
     ts = node.created_at.strftime("%Y-%m-%d %H:%M:%S UTC")
-    return (f"{header} [{index_path}] {_node_author_label(node)}"
+    return (f"{_index_heading(index_path)} {_node_author_label(node)}"
             f"{_origin_suffix(node)} - {ts}\n")
+
+
+# What a reply the user cannot access renders as, under a heading that
+# holds only its place in the thread: no author, no time.
+INACCESSIBLE_TEXT = "[Reply not accessible]"
+
+
+def _index_heading(index_path):
+    """The Markdown heading of the node at *index_path*, e.g. '### [1.2]':
+    one level deeper per level of the thread."""
+    depth = len(index_path.split('.'))
+    return f"{'#' * min(depth + 1, 6)} [{index_path}]"
 
 
 def prefetch_children(nodes, batch=500):
@@ -550,10 +560,13 @@ def format_node_tree(
             placeholder = "[Node deleted by author]\n\n"
             keep_tombstones = True
         else:
-            placeholder = ("[Content not accessible — private node by "
-                           "another user]\n\n")
+            # Another user's reply the user cannot access leaves no
+            # trace but its place: no author, no time.
+            placeholder = f"{INACCESSIBLE_TEXT}\n\n"
             keep_tombstones = False
-        parts.append(_node_header_line(current, path) + placeholder)
+        header = (_node_header_line(current, path) if kind == "tombstone"
+                  else _index_heading(path) + "\n")
+        parts.append(header + placeholder)
         processed_nodes.add(current.id)
         children = _filtered_children(
             current, filter_ai_usage, created_before, included_ids,

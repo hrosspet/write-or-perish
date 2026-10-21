@@ -5,12 +5,13 @@ and under any placeholder.
 from, what the user's export shows: its text, the deleted-entry
 placeholder (only for a user who could see the node before it was
 deleted; otherwise nothing, with everything below it), or the
-not-accessible placeholder. The same rule holds under a live entry,
+not-accessible placeholder, which holds only the reply's place in the
+thread (no author, no time). The same rule holds under a live entry,
 under a deleted one, and under a placeholder for another user's private
 reply, whichever path builds the export: the user's own data download
 (``/export/threads``, no budget, so no pre-selected rows), the same
 export filtered to AI-readable rows (the recent-context build of a user
-without a profile), and the incremental path.
+without a profile), the incremental path and the budgeted raw window.
 
 In-memory SQLite, ENCRYPTION_DISABLED; the export runs for real and
 calls no outside service.
@@ -45,7 +46,7 @@ import backend.models as _real_backend_models  # noqa: E402
 
 T0 = datetime(2026, 5, 1, 9, 0, 0)
 TOMBSTONE = "[Node deleted by author]"
-INACCESSIBLE = "[Content not accessible"
+INACCESSIBLE = "[Reply not accessible]"
 
 
 def _make_app():
@@ -152,6 +153,11 @@ def _node(user, content, parent=None, privacy="private", ai_usage="chat",
     return node
 
 
+def _ts(node):
+    """A node's time as an export heading shows it."""
+    return node.created_at.strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
 def _download(app, user):
     """The user's own data download, through the route."""
     client = app.test_client()
@@ -253,6 +259,9 @@ def test_others_deleted_public_reply_keeps_its_placeholder(app, alice, bob):
     assert content.count(TOMBSTONE) == 2
     assert "BOBGONE" not in content
     assert "BOBBELOW" in content
+    # The user could see the reply before it was deleted: its
+    # placeholder keeps the author and the time, as in the thread.
+    assert f"User (bob) - {_ts(gone)}" in content
 
 
 # ── under the placeholder for another user's private reply ─────────────
@@ -277,6 +286,57 @@ def test_public_reply_below_a_private_reply_is_downloaded(app, alice, bob):
     content = _download(app, alice)
     assert "BOBPRIVATE" not in content
     assert "ALICEPUBLIC" in content
+
+
+def _reply_made_private_later(alice, bob, root_deleted=False):
+    """alice's thread, bob's reply that alice answered while it was
+    public, then made private."""
+    root = _node(alice, "ALICEROOT", privacy="public", deleted=root_deleted)
+    reply = _node(bob, "BOBPRIVATE", parent=root, privacy="public")
+    _node(alice, "ALICEBELOW", parent=reply)
+    reply.privacy_level = "private"
+    _db.session.commit()
+    return reply
+
+
+@pytest.mark.parametrize("root_deleted", [False, True])
+def test_not_accessible_placeholder_holds_only_its_place(
+        app, alice, bob, root_deleted):
+    reply = _reply_made_private_later(alice, bob, root_deleted)
+
+    content = _download(app, alice)
+    assert "BOBPRIVATE" not in content
+    assert "bob" not in content
+    assert _ts(reply) not in content
+    assert f"### [1.1]\n{INACCESSIBLE}\n" in content
+    # The user's own reply below keeps its place in the thread.
+    assert "#### [1.1.1] User (alice)" in content
+    assert "ALICEBELOW" in content
+
+
+def _budgeted_window(user):
+    from backend.routes.export_data import build_user_export_content
+    result = build_user_export_content(
+        user, max_tokens=10000, filter_ai_usage=True,
+        return_metadata=True, collapse_artifacts=True)
+    return result["content"] if result else ""
+
+
+@pytest.mark.parametrize("build", [
+    "ai_filtered", "engaged_threads", "budgeted_window"])
+def test_no_export_names_a_reply_the_user_cannot_access(
+        app, alice, bob, build):
+    reply = _reply_made_private_later(alice, bob)
+
+    content = {
+        "ai_filtered": _ai_export,
+        "engaged_threads": _incremental_export,
+        "budgeted_window": _budgeted_window,
+    }[build](alice)
+    assert "ALICEROOT" in content
+    assert "BOBPRIVATE" not in content
+    assert "bob" not in content
+    assert _ts(reply) not in content
 
 
 # ── the other ways the same renderer runs ──────────────────────────────
@@ -344,9 +404,10 @@ def test_reply_by_an_account_in_its_grace_period(app, alice, bob):
 
 
 def test_live_entry_renders_as_before(app, alice, bob):
-    """Under a live entry nothing changes: a private reply is a
-    placeholder, a deleted one the user could not see is left out, a
-    public one is shown, and branches keep their markers."""
+    """Under a live entry the walk is unchanged: a private reply is a
+    placeholder (with no author or time), a deleted one the user could
+    not see is left out, a public one is shown, and branches keep their
+    markers."""
     root = _node(alice, "ALICEROOT")
     _node(bob, "BOBPRIVATE", parent=root)
     _node(bob, "BOBGONE", parent=root, deleted=True)
