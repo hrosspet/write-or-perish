@@ -774,6 +774,11 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
           ttsTriggeredForNodeRef.current = null;
           return;
         }
+        // A refusal that arrives after the user continued, cancelled or
+        // left belongs to a turn that is over: it must not end the new
+        // turn's recording or chain (the app's replyFailed guards the
+        // same way).
+        if (turn !== turnRef.current) return;
         soundReplyFailure(llmNodeId, turn);
         setHasError(true);
         finishGenerating();
