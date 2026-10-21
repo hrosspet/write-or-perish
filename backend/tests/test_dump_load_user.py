@@ -259,3 +259,41 @@ def test_system_node_prompt_pin_round_trips(app, tmp_path):
     # second load onto bob reuses the prompt row rather than duplicating it
     load_user._run(str(out), "bob", merge=True, create_approved=True)
     assert UserPrompt.query.filter_by(user_id=bob.id, prompt_key="textmode").count() == 1
+
+
+def test_a_bundles_intentions_never_replace_the_accounts_own(app, tmp_path):
+    """#412: the dump's intentions (a prefill bundle's are inferred) load
+    onto a new account or one whose current intentions were inferred, and
+    are skipped on an account whose current version the user wrote. The
+    other artifacts load either way."""
+    from backend.models import UserArtifact
+    alice = _seed_source()[0]
+
+    def artifact(user, kind, generated_by, tokens_used, text):
+        a = UserArtifact(user_id=user.id, kind=kind, title=kind,
+                         generated_by=generated_by, tokens_used=tokens_used)
+        a.set_content(text)
+        db.session.add(a)
+        db.session.commit()
+    artifact(alice, "intentions", "claude-opus-4.8", 120_000, "inferred")
+    artifact(alice, "memory", "claude-opus-5", 0, "facts")
+    out = tmp_path / "alice.jsonl"
+    dump_user._run("alice", str(out))
+
+    def intentions(username):
+        uid = User.query.filter_by(username=username).one().id
+        return [a.get_content() for a in UserArtifact.query.filter_by(
+            user_id=uid, kind="intentions").order_by(UserArtifact.id)]
+
+    load_user._run(str(out), "fresh", merge=False, create_approved=False)
+    assert intentions("fresh") == ["inferred"]
+    load_user._run(str(out), "fresh", merge=True, create_approved=False)
+    assert intentions("fresh") == ["inferred", "inferred"]   # inferred: replaceable
+
+    edited = User(username="edited", approved=True)
+    db.session.add(edited)
+    db.session.commit()
+    artifact(edited, "intentions", "user", 0, "my own")
+    load_user._run(str(out), "edited", merge=True, create_approved=False)
+    assert intentions("edited") == ["my own"]
+    assert UserArtifact.latest_for(edited.id, "memory").get_content() == "facts"
