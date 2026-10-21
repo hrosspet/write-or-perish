@@ -51,7 +51,7 @@ sys.modules.pop("backend.tasks.llm_completion", None)
 from backend.tasks.llm_completion import (  # noqa: E402
     _execute_tool_calls, _scan_proposal_statuses, _mark_status_reported,
     _auto_create_drafts, _detect_feedback_proposal, _redact_tool_input,
-    _retrieval_injection_text,
+    _retrieval_injection_text, RESERVED_ARTIFACT_KINDS,
     get_user_artifacts_context, get_user_ai_preferences_content,
 )
 
@@ -206,6 +206,40 @@ def test_put_rejects_bad_kind(app, client):
     assert client.put(
         "/api/artifacts/Bad Kind!", json={"content": "x"}
     ).status_code == 400
+
+
+@pytest.mark.parametrize("kind", ["todo", "profile", "recent_context"])
+def test_artifact_writes_refuse_reserved_kinds(app, client, kind):
+    """No artifact route writes under a reserved name (#218): an artifact
+    named 'todo' would be listed next to the real list in the agentic
+    index, and read_artifact on 'todo' reads the list, never it. The
+    refusal is a plain message, and nothing is saved."""
+    uid = User.query.first().id
+    r = client.put(f"/api/artifacts/{kind}",
+                   json={"content": "x", "description": "d"})
+    assert r.status_code == 400
+    assert "can't be saved as an artifact" in r.get_json()["error"]
+    assert UserArtifact.query.filter_by(user_id=uid, kind=kind).count() == 0
+    # A row made before the guard (by hand here) can't be edited or
+    # reverted either.
+    old = _mk_artifact(uid, kind, "made before the guard")
+    assert client.patch(f"/api/artifacts/{kind}",
+                        json={"content": "y"}).status_code == 400
+    assert client.post(
+        f"/api/artifacts/{kind}/revert/{old.id}").status_code == 400
+    assert UserArtifact.query.filter_by(user_id=uid, kind=kind).count() == 1
+
+
+def test_the_todo_refusal_points_at_the_todo_page(app, client):
+    r = client.put("/api/artifacts/todo", json={"content": "- [ ] a"})
+    assert r.get_json()["error"] == (
+        "Your todo list has its own page and can't be saved as an "
+        "artifact. Edit it on the Todo page.")
+
+
+def test_reserved_kinds_match_the_ai_guard(app):
+    """The routes and update_artifact refuse the same names."""
+    assert set(RESERVED_ARTIFACT_KINDS) == set(UserArtifact.RESERVED_KINDS)
 
 
 def test_get_unknown_custom_kind_404(app, client):

@@ -804,6 +804,8 @@ ALWAYS_INLINE_KINDS = UserArtifact.INLINE_KINDS
 # silently diverges from the real UserTodo. Each value is a message pointing
 # the model at the correct path. (ai_preferences is NOT here — Slice 5 folded
 # it into the UserArtifact model, so it's a normal writable artifact now.)
+# The keys are UserArtifact.RESERVED_KINDS, which the artifact routes refuse
+# too (#218).
 RESERVED_ARTIFACT_KINDS = {
     "todo": ("Todo changes go through proposals — put them under the "
              "### Completed / ### New Tasks / ### Priority Order headings in "
