@@ -44,13 +44,23 @@ services:
           memory: 512M
 
   celery:
-    command: celery -A backend.celery_app.celery worker --loglevel=debug --concurrency=2
-    environment:
+    command: python backend/celery_queues.py interactive --loglevel=debug --concurrency=2
+    environment: &staging-worker-environment
       # Dark features live on staging by design (must match the backend
       # service — the worker renders prompts and executes tools).
       - SHARE_V1=true
       - STREAMING_VOICE_TTS=true
       - SEMANTIC_SEARCH_AGENTIC=true
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+  # Queue split background worker (#379): off unless CELERY_SPLIT_QUEUES=true
+  # in .env.staging; off, it starts no worker and only waits.
+  celery-background:
+    command: python backend/celery_queues.py background --loglevel=debug --concurrency=1
+    environment: *staging-worker-environment
     deploy:
       resources:
         limits:

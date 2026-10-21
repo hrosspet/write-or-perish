@@ -91,7 +91,9 @@ jobs:
             # Hide dev override so Docker Compose doesn't auto-load it
             mv -f docker-compose.override.yml docker-compose.override.yml.bak 2>/dev/null || true
 
-            # Build and start backend services only (backend, celery, db, redis)
+            # Build and start backend services only (backend, the Celery
+            # workers, db, redis). celery-background runs a worker only with
+            # CELERY_SPLIT_QUEUES=true in .env.staging (#379).
             # --force-recreate: the rm -rf + mkdir of frontend/build-staging
             # above changes the directory inode, and the backend bind-mounts
             # that dir read-only for SSR (render_page reads index.html).
@@ -105,7 +107,7 @@ jobs:
               -f docker-compose.staging.yml \
               --env-file .env.staging \
               -p wop-staging \
-              up -d --build --force-recreate backend celery db redis
+              up -d --build --force-recreate backend celery celery-background db redis
 
             # Start frontend with pre-built assets (no build, just nginx + volume mount)
             # --force-recreate is required because rm -rf + mkdir above changes the

@@ -368,6 +368,7 @@ Users have a `plan` column (string, max 16 chars) on the User model. The plan co
 **Caching layer with Redis** - Cache embeddings, LLM responses, match scores, and recommendation results to reduce latency and API costs
 
 **Background job prioritization** - Celery queue management with priority levels (urgent: user-triggered vs low: batch processing) and failure retry logic
+  - 🔧 Interactive/background queue split (#379, 2026-10-21): built, off until `CELERY_SPLIT_QUEUES` is switched on on prod (docs/RUNBOOKS.md → "Celery queue split").
 
 ---
 
@@ -609,7 +610,7 @@ Based on current project state, dependencies, and strategic value, here's the re
 71. **Cost tracking and quota management** - Per-user LLM usage tracking per feature with tier enforcement
 72. **Analytics and insight dashboard** - Track flywheel metrics (journal→download→upload→market→journal cycle time)
 73. **Privacy consent management UI** - Centralized dashboard for all privacy settings across features
-74. **Background job prioritization** - Optimize Celery queues with priority levels (urgent/normal/low)
+74. **Background job prioritization** - Optimize Celery queues with priority levels (urgent/normal/low) — 🔧 interactive/background split built (#379), off until switched on
 75. **Spam detection across features** - ML-based spam detection for shares, intentions, messages
 76. **Frontend: Unified dashboard** - Show activity across all four features with privacy indicators
 77. **End-to-end flywheel tests** - Test complete cycle from journaling to connection with permission checks
