@@ -91,7 +91,7 @@ from backend.llm_providers import (  # noqa: E402
 )
 from backend.utils.refusal_backoff import REFUSED_REF  # noqa: E402
 from backend.utils.intentions_versions import (  # noqa: E402
-    KEPT_USER_EDIT_REF, protected_version,
+    KEPT_USER_EDIT_REF, changed_at, protected_version,
 )
 # Cheap DB token estimate (sum of the user's AI-readable node token_counts —
 # no decryption, no export build), the same one the heartbeat/trigger checks
@@ -138,7 +138,7 @@ def _eligible(app, user, model_id):
     kept = protected_version(user.id)
     if kept is not None:
         print(f"  - user {user.id}: their current intentions "
-              f"({str(kept.created_at)[:10]}) are a version they wrote, "
+              f"({str(changed_at(kept))[:10]}) are a version they wrote, "
               f"restored or had updated in a conversation — skipping, the "
               f"user's edit wins")
         return False

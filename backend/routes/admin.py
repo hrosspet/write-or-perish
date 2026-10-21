@@ -426,16 +426,19 @@ def infer_intentions_route(user_id):
             saved within minutes — for when the person is waiting).
       cancel_pending: true — cancel this user's in-flight intentions
             batch first (provider-side + job row), then start the run.
-      replace_version_id: the id the 409 below named, sent after the
-            admin confirmed replacing that version in the dialog.
+      replace_version_id, replace_changed_at: the version_id and
+            changed_at the 409 below named, sent after the admin confirmed
+            replacing that version in the dialog.
     Returns {"task_id", "mode", "cancelled"} — poll
     /admin/prefill/status/<task_id>.
 
     The user's edit wins (#412): when the current intentions version was
     written by the user or a conversation, the run is refused with a 409
-    (code "intentions_edited") naming the version, who made it and when,
-    never its text, unless replace_version_id names that version. Checked
-    before cancel_pending, so a refused click cancels nothing."""
+    (code "intentions_edited") naming the version, who made it and when it
+    last changed, never its text, unless the body names that version and
+    that change. The run then carries the version's id and stored state,
+    which the task checks again at start and at save. Checked before
+    cancel_pending, so a refused click cancels nothing."""
     user = User.query.get_or_404(user_id)
     refusal = _prefill_refusal_response(user)
     if refusal:
@@ -444,39 +447,45 @@ def infer_intentions_route(user_id):
     mode = data.get("mode") or "batch"
     if mode not in ("batch", "sync"):
         return jsonify({"error": "mode must be 'batch' or 'sync'."}), 400
-    from backend.utils.intentions_versions import protected_version
+    from backend.utils.intentions_versions import (
+        changed_at, confirmation, protected_version)
     kept = protected_version(user.id)
-    replace_id = data.get("replace_version_id")
-    if kept is not None and not (replace_id == kept.id
-                                 and not isinstance(replace_id, bool)):
-        return _intentions_edited_response(kept)
+    confirmed = None
+    if kept is not None:
+        replace_id = data.get("replace_version_id")
+        if not (replace_id == kept.id and not isinstance(replace_id, bool)
+                and data.get("replace_changed_at") == iso_utc(changed_at(kept))):
+            return _intentions_edited_response(kept)
+        confirmed = confirmation(kept)
     from backend.tasks.intentions import infer_intentions, cancel_pending_intentions
     cancelled = {"cancelled": 0, "errors": []}
     if data.get("cancel_pending"):
         cancelled = cancel_pending_intentions(user.id)
-    task = infer_intentions.delay(user.id, mode, kept.id if kept else None)
+    task = infer_intentions.delay(user.id, mode, confirmed)
     return jsonify({"task_id": task.id, "mode": mode, **cancelled}), 202
 
 
 def _intentions_edited_response(version):
     """The 409 the admin panel shows as the "Replace their intentions?"
     dialog (#412): that the user's version exists, how it came about and
-    when. Metadata only: admins never read the user's text."""
-    from backend.utils.intentions_versions import changed_by
+    when it last changed. Metadata only: admins never read the user's
+    text."""
+    from backend.utils.intentions_versions import changed_at, changed_by
     by = changed_by(version)
     what = {
         "user": "edited their intentions",
         "revert": "restored an earlier version of their intentions",
         "conversation": "had their intentions updated in a conversation",
     }[by]
-    when = f" on {version.created_at:%Y-%m-%d}" if version.created_at else ""
+    last = changed_at(version)
+    when = f" on {last:%Y-%m-%d}" if last else ""
     return jsonify({
         "error": (f"This user {what}{when}. Inferring would replace "
                   "their version."),
         "code": "intentions_edited",
         "version_id": version.id,
         "changed_by": by,
-        "changed_at": iso_utc(version.created_at),
+        "changed_at": iso_utc(last),
     }), 409
 
 

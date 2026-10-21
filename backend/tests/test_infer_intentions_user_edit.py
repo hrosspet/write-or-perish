@@ -1,8 +1,9 @@
 """#412: the admin "Infer intentions" route refuses to replace intentions
 the user wrote, restored or had updated in a conversation, unless the
-admin confirmed replacing that exact version; the refusal names the
-version, who made it and when, never its text. The Users-tab column shows
-a run whose result was dropped for the user's version as "kept"."""
+admin confirmed replacing that exact version as it was when asked; the
+refusal names the version, who made it and when it last changed, never
+its text. The Users-tab column shows a run whose result was dropped for
+the user's version as "kept"."""
 from datetime import datetime, timedelta
 from unittest.mock import MagicMock
 
@@ -45,8 +46,8 @@ def _post(app, users, body):  # noqa: F811
                        json=body)
 
 
-@pytest.mark.parametrize("author,by", [("user", "user"), ("revert", "revert"),
-                                        ("claude-opus-5.5", "conversation")])
+@pytest.mark.parametrize("author,by", [
+    ("user", "user"), ("revert", "revert"), ("claude-opus-5.5", "conversation")])
 def test_a_user_version_is_refused_with_its_metadata_only(app, users, task, author, by):  # noqa: F811
     mine = _version(users["tw"], author)
     resp = _post(app, users, {"mode": "sync", "cancel_pending": True})
@@ -60,21 +61,81 @@ def test_a_user_version_is_refused_with_its_metadata_only(app, users, task, auth
     assert task.cancels == []                           # a refused click cancels nothing
 
 
+def _confirm(asked):
+    """The body the dialog's "Replace their version" sends for a 409."""
+    return {"replace_version_id": asked["version_id"],
+            "replace_changed_at": asked["changed_at"]}
+
+
 def test_confirming_that_version_runs_and_passes_it_on(app, users, task):  # noqa: F811
+    from backend.utils.intentions_versions import confirmation
     mine = _version(users["tw"], "user")
-    resp = _post(app, users, {"mode": "batch", "replace_version_id": mine.id})
+    asked = _post(app, users, {}).get_json()
+    resp = _post(app, users, {"mode": "batch", **_confirm(asked)})
     assert resp.status_code == 202
-    task.delay.assert_called_once_with(users["tw"].id, "batch", mine.id)
+    task.delay.assert_called_once_with(users["tw"].id, "batch", confirmation(mine))
 
 
 def test_a_stale_confirmation_asks_again_for_the_newer_version(app, users, task):  # noqa: F811
     old = _version(users["tw"], "user", created_at=datetime.utcnow() - timedelta(days=2))
+    stale = _post(app, users, {}).get_json()
     newer = _version(users["tw"], "user")
-    for replace in (old.id, True, str(newer.id), None):
-        resp = _post(app, users, {"replace_version_id": replace})
-        assert resp.status_code == 409, replace
+    fresh = _post(app, users, {}).get_json()
+    for body in (_confirm(stale),
+                 {**_confirm(fresh), "replace_version_id": True},
+                 {**_confirm(fresh), "replace_version_id": str(newer.id)},
+                 {**_confirm(fresh), "replace_changed_at": stale["changed_at"]},
+                 {"replace_version_id": newer.id},
+                 {}):
+        resp = _post(app, users, body)
+        assert resp.status_code == 409, body
         assert resp.get_json()["version_id"] == newer.id
-    assert not task.delay.called
+    assert old.id != newer.id and not task.delay.called
+
+
+def test_an_in_place_edit_after_the_confirmation_is_kept(app, users, task, monkeypatch):  # noqa: F811
+    """The review's sequence: the user's version X is current; the admin
+    confirms replacing it; while the batch is out, the user ticks a box,
+    which edits X in place (same id); the result arrives and must not
+    replace X. The next 409 shows the tick as the last change."""
+    import backend.tasks.intentions as it
+    from backend.routes.artifacts import artifacts_bp
+    from backend.utils.intentions_versions import KEPT_USER_EDIT_REF
+    app.register_blueprint(artifacts_bp, url_prefix="/api/artifacts")
+    app.config["SUPPORTED_MODELS"] = {"claude-opus-4.8": {
+        "provider": "anthropic", "api_model": "claude-opus-4-8",
+        "input_price_per_mtok": 5.0, "output_price_per_mtok": 25.0}}
+    owner = users["tw"]
+    x = _version(owner, "user", created_at=datetime.utcnow() - timedelta(days=1))
+    asked = _post(app, users, {}).get_json()
+    assert _post(app, users, {"mode": "batch", **_confirm(asked)}).status_code == 202
+    confirmed = task.delay.call_args.args[2]
+    item = {"custom_id": f"int-u{owner.id}", "user_id": owner.id,
+            "kind": "intentions", "budget": 1, "resubmitted": False,
+            "confirmed": confirmed}
+
+    from flask import g
+    g.pop("_login_user", None)     # Flask-Login caches the admin on g
+    client = app.test_client()
+    _login(client, owner.id)
+    resp = client.patch("/api/artifacts/intentions",
+                        json={"content": "- [x] my private intention"})
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+    assert resp.get_json()["artifact"]["id"] == x.id
+    g.pop("_login_user", None)
+
+    saved = it.apply_intentions_item(owner, item, {
+        "content": "# Endorsed\ninferred", "input_tokens": 10, "output_tokens": 1})
+    assert saved["version"] is None and saved["kept_user_edit"] is True
+    current = UserArtifact.latest_for(owner.id, "intentions")
+    assert current.id == x.id
+    assert current.get_content() == "- [x] my private intention"
+    assert APICostLog.query.filter_by(user_id=owner.id).one().request_ref == KEPT_USER_EDIT_REF
+
+    again = _post(app, users, _confirm(asked))      # the old confirmation
+    assert again.status_code == 409
+    assert again.get_json()["changed_at"] > asked["changed_at"]
+    assert again.get_json()["changed_at"].startswith(f"{datetime.utcnow():%Y-%m-%d}")
 
 
 @pytest.mark.parametrize("inferred", [False, True])

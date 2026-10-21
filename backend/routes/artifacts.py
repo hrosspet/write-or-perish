@@ -6,6 +6,7 @@ PUT inserts a new row; the latest row per (user, kind) is current. PATCH
 (checklist clicks) may edit the latest row in place — see patch_artifact.
 """
 import re
+from datetime import datetime
 
 from flask import Blueprint, jsonify, request
 from flask_login import login_required, current_user
@@ -196,6 +197,8 @@ def patch_artifact(kind):
     ).first() is not None
     if latest.generated_by in ("user", "manual") and not pinned:
         artifact = latest
+        # The edit's time, which created_at no longer gives (#412).
+        artifact.updated_at = datetime.utcnow()
     else:
         artifact = UserArtifact(
             user_id=current_user.id,

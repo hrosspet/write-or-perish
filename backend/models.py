@@ -1017,6 +1017,11 @@ class UserArtifact(db.Model):
     # came from an inference run (utils/intentions_versions, #412).
     tokens_used = db.Column(db.Integer, nullable=False, default=0)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    # When the text was last edited in place (a checklist click or "+"
+    # insert on the user's own version, routes/artifacts.patch_artifact);
+    # None if it never was. The admin's "Replace their intentions?" dialog
+    # shows it as the user's last change (#412).
+    updated_at = db.Column(db.DateTime, nullable=True)
     privacy_level = db.Column(db.String(16), nullable=False, default="private")
     # Artifacts are LLM working memory — must be AI-readable to function.
     ai_usage = db.Column(db.String(16), nullable=False, default="chat")

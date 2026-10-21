@@ -681,14 +681,15 @@ function AdminPanel() {
 
   // mode: "batch" (default, ~50% cheaper, hours) | "sync" (full price, minutes).
   // cancelPending: cancel the user's in-flight batch first, then start.
-  // replaceVersionId: the user's version the admin confirmed replacing in
-  // the dialog (#412); without it the backend refuses when one is current.
+  // replace: { versionId, changedAt } of the user's version the admin
+  // confirmed replacing in the dialog (#412); without it, or after the user
+  // changed that version again, the backend refuses when one is current.
   const inferIntentions = async (userId, mode = "batch", cancelPending = false,
-                                 replaceVersionId = null) => {
+                                 replace = null) => {
     try {
       const res = await api.post(`/admin/users/${userId}/infer_intentions`, {
         mode, cancel_pending: cancelPending,
-        ...(replaceVersionId ? { replace_version_id: replaceVersionId } : {}),
+        ...(replace ? { replace_version_id: replace.versionId, replace_changed_at: replace.changedAt } : {}),
       });
       patchIntent(userId, {
         taskId: res.data.task_id, mode, status: "queued", error: null, result: null,
@@ -1216,7 +1217,8 @@ function AdminPanel() {
         onConfirm={() => {
           const ask = intentionsAsk;
           setIntentionsAsk(null);
-          inferIntentions(ask.userId, ask.mode, ask.cancelPending, ask.versionId);
+          inferIntentions(ask.userId, ask.mode, ask.cancelPending,
+            { versionId: ask.versionId, changedAt: ask.changedAt });
         }}
       />
       <AdminRefusalDialog refusal={refusal} onClose={() => setRefusal(null)} />

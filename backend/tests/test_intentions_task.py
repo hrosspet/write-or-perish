@@ -477,17 +477,28 @@ def test_who_wrote_a_version_reads_tokens_and_author(app):  # noqa: F811
 
 def test_start_refuses_an_unconfirmed_user_version(app, wired):  # noqa: F811
     """The route asks first; the task checks again before anything is
-    billed. A confirmed run carries the version it may replace."""
+    billed: the confirmed version, in the state it was confirmed in. A
+    confirmed run carries the confirmation on its batch item."""
+    from backend.utils.intentions_versions import confirmation
     u = _make_user("starter")
     _db.session.commit()
     mine = _version(u, "user")
+    confirmed = confirmation(mine)
     with pytest.raises(RuntimeError, match="Their version is kept"):
         it.start_infer_intentions_impl(u.id)
     with pytest.raises(RuntimeError, match="Their version is kept"):
-        it.start_infer_intentions_impl(u.id, replace_version_id=mine.id + 99)
+        it.start_infer_intentions_impl(
+            u.id, confirmed={**confirmed, "version_id": mine.id + 99})
+    with pytest.raises(RuntimeError, match="Their version is kept"):
+        it.start_infer_intentions_impl(u.id, confirmed=mine.id)  # an id alone
     assert wired == [] and ProfileBatchJob.query.count() == 0
-    _kind, ref = it.start_infer_intentions_impl(u.id, replace_version_id=mine.id)
-    assert ref["item"]["replace_version_id"] == mine.id
+    _kind, ref = it.start_infer_intentions_impl(u.id, confirmed=confirmed)
+    assert ref["item"]["confirmed"] == confirmed
+    # Edited in place after the click (same id, new text): refused again.
+    mine.set_content("mine, one box ticked")
+    _db.session.commit()
+    with pytest.raises(RuntimeError, match="Their version is kept"):
+        it.start_infer_intentions_impl(u.id, confirmed=confirmed)
 
 
 def test_batch_result_keeps_a_version_the_user_saved_while_out(app, wired):  # noqa: F811
@@ -508,12 +519,13 @@ def test_batch_result_keeps_a_version_the_user_saved_while_out(app, wired):  # n
 
 
 def test_a_confirmed_run_replaces_only_the_version_it_named(app, wired):  # noqa: F811
+    from backend.utils.intentions_versions import confirmation
     u = _make_user("confirmer")
     _db.session.commit()
     mine = _version(u, "user")
     item = {"custom_id": f"int-u{u.id}", "user_id": u.id, "kind": "intentions",
             "budget": 1_000_000, "resubmitted": False,
-            "replace_version_id": mine.id}
+            "confirmed": confirmation(mine)}
     result = {"content": "# Endorsed\nX", "input_tokens": 10, "output_tokens": 1}
     assert it.apply_intentions_item(u, item, result)["version"] == 2
     assert _current(u).tokens_used == 11

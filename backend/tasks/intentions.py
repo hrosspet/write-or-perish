@@ -36,10 +36,12 @@ plus an APICostLog row (request_type="intentions_infer").
 
 The user's edit wins (#412): a run never replaces a version the user or a
 conversation wrote (utils/intentions_versions), unless the admin confirmed
-replacing that exact version in the dialog (``replace_version_id``). The
-check runs when the run starts and again when its result is saved: a
-version the user saves while a run is out stays current, and the run's
-result is dropped (its billed cost is logged).
+replacing that exact version in the dialog. The confirmation
+(``confirmed``: the version's id and the digest of its stored text) is
+checked when the run starts and again when its result is saved: a version
+the user saves while a run is out, or an in-place edit of the confirmed
+one, stays current, and the run's result is dropped (its billed cost is
+logged).
 """
 from celery.utils.log import get_task_logger
 
@@ -139,7 +141,7 @@ def _refuse_empty_truncated(user, response, batch):
 
 
 def _save(user, content, input_tokens, output_tokens, total_tokens, batch,
-          replace_version_id=None):
+          confirmed=None):
     from backend.extensions import db
     from backend.models import UserArtifact
     from backend.utils.hidden_rows import writing_on_hold
@@ -152,10 +154,11 @@ def _save(user, content, input_tokens, output_tokens, total_tokens, batch,
         return {"version": None, "cost_usd": round(cost / 1e6, 4),
                 "llm_tokens": total_tokens, "batch": batch,
                 "on_hold": True}
-    if not may_replace(user.id, replace_version_id):
+    if not may_replace(user.id, confirmed):
         # The user's edit wins (#412): the user or a conversation saved a
-        # version the admin did not confirm replacing, here while the run
-        # was out. The cost is logged, nothing saved.
+        # version, or edited the confirmed one in place, that the admin
+        # did not confirm replacing, here while the run was out. The cost
+        # is logged, nothing saved.
         cost = _add_cost_log(user, input_tokens, output_tokens, batch,
                              kept=True)
         db.session.commit()
@@ -179,13 +182,13 @@ def _save(user, content, input_tokens, output_tokens, total_tokens, batch,
 
 
 def _submit(user, template, budget, chronological, keys, label, built=None,
-            replace_version_id=None):
+            confirmed=None):
     """Build at `budget` (or reuse `built` from the sizing loop), submit a
     one-user batch, and PERSIST it as a ProfileBatchJob whose item is
     tagged kind="intentions" — the beat poller (poll_profile_batches)
     collects and saves it, so the flight survives worker restarts and
-    deploys. The item carries the user's version the admin confirmed
-    replacing, if any, for the check when the result is saved."""
+    deploys. The item carries the admin's confirmation, if any, for the
+    check when the result is saved."""
     from datetime import datetime
     from flask import current_app
     from backend.extensions import db
@@ -207,8 +210,8 @@ def _submit(user, template, budget, chronological, keys, label, built=None,
     item = {"custom_id": req["custom_id"], "user_id": user.id,
             "kind": "intentions", "budget": budget,
             "resubmitted": label == "overflow-recalibrated"}
-    if replace_version_id:
-        item["replace_version_id"] = replace_version_id
+    if confirmed:
+        item["confirmed"] = confirmed
     db.session.add(ProfileBatchJob(
         provider_key=provider_key, batch_id=batch_id, status="pending",
         items=[item], submitted_at=datetime.utcnow()))
@@ -218,7 +221,7 @@ def _submit(user, template, budget, chronological, keys, label, built=None,
     return {"provider_key": provider_key, "batch_id": batch_id, "item": item}
 
 
-def _prepare(user_id, replace_version_id=None):
+def _prepare(user_id, confirmed=None):
     """Shared prelude of both run modes: eligibility guard, prompt
     template, and count-based sizing against the provider's exact token
     count (free — see module docstring). Returns everything a submit or
@@ -241,7 +244,7 @@ def _prepare(user_id, replace_version_id=None):
         raise RuntimeError(
             f"user {user_id}: {refusal[1]} Not sending their data to any LLM.")
     from backend.utils.intentions_versions import may_replace
-    if not may_replace(user_id, replace_version_id):
+    if not may_replace(user_id, confirmed):
         # The admin route asks first (#412); this catches a version the
         # user saved after the click, before anything is billed.
         raise RuntimeError(
@@ -269,20 +272,20 @@ def _prepare(user_id, replace_version_id=None):
             "built": built, "budget": budget}
 
 
-def start_infer_intentions_impl(user_id, replace_version_id=None):
+def start_infer_intentions_impl(user_id, confirmed=None):
     """Size against the provider's exact token count and submit a batch.
     Returns ("batch", ref) with the persisted job's coordinates.
-    ``replace_version_id``: the user's version the admin confirmed
-    replacing (#412)."""
+    ``confirmed``: the admin's confirmation to replace the user's version
+    (utils/intentions_versions.confirmation, #412)."""
     from flask import current_app
     from backend.utils.llm_batch import apply_batch_key_override
-    prep = _prepare(user_id, replace_version_id)
+    prep = _prepare(user_id, confirmed)
     batch_keys = apply_batch_key_override(prep["api_keys"], current_app.config)
     label = "full-cap" if prep["budget"] == prep["cap"] else "count-calibrated"
     return "batch", _submit(prep["user"], prep["template"], prep["budget"],
                             prep["chronological"], batch_keys, label,
                             built=prep["built"],
-                            replace_version_id=replace_version_id)
+                            confirmed=confirmed)
 
 
 # Sync mode: PromptTooLongError rebuild-and-retry rounds after the count-based
@@ -291,17 +294,17 @@ SYNC_MAX_RETRIES = 3
 
 
 def run_infer_intentions_sync_impl(user_id, progress=None,
-                                   replace_version_id=None):
+                                   confirmed=None):
     """Size (same free count as batch mode), then ONE synchronous completion
     at full price, saved before returning. Returns the saved summary dict
     (version, cost_usd, llm_tokens, batch=False; version None and
-    kept_user_edit when the user saved a version meanwhile).
+    kept_user_edit when the user changed their version meanwhile).
     `progress(stage)` is an optional callback for the task's PROGRESS
-    state. ``replace_version_id``: the user's version the admin confirmed
-    replacing (#412)."""
+    state. ``confirmed``: the admin's confirmation to replace the user's
+    version (#412)."""
     from backend.llm_providers import LLMProvider, PromptTooLongError
     from backend.utils.tokens import reduce_export_tokens
-    prep = _prepare(user_id, replace_version_id)
+    prep = _prepare(user_id, confirmed)
     user, template, chronological = prep["user"], prep["template"], prep["chronological"]
     built, budget = prep["built"], prep["budget"]
     response = None
@@ -333,7 +336,7 @@ def run_infer_intentions_sync_impl(user_id, progress=None,
     total = response.get("total_tokens") or (in_t + out_t)
     _refuse_empty_truncated(user, response, batch=False)
     saved = _save(user, response["content"], in_t, out_t, total, batch=False,
-                  replace_version_id=replace_version_id)
+                  confirmed=confirmed)
     if saved["version"] is not None:
         logger.info("intentions user %s: saved v%s from sync run (%s llm tokens, $%.4f)",
                     user.id, saved["version"], saved["llm_tokens"], saved["cost_usd"])
@@ -415,7 +418,7 @@ def apply_intentions_item(user, item, result):
                   result.get("output_tokens", 0),
                   result.get("input_tokens", 0) + result.get("output_tokens", 0),
                   batch=True,
-                  replace_version_id=item.get("replace_version_id"))
+                  confirmed=item.get("confirmed"))
     if saved["version"] is not None:
         logger.info("intentions user %s: saved v%s from batch (%s llm tokens, $%.4f)",
                     user.id, saved["version"], saved["llm_tokens"], saved["cost_usd"])
@@ -485,7 +488,7 @@ def handle_failed_intentions_item(user, item, job, keys):
         logger.warning("intentions user %s: batch failed again after resubmit — giving up", user.id)
         return
     from backend.utils.intentions_versions import may_replace
-    if not may_replace(user.id, item.get("replace_version_id")):
+    if not may_replace(user.id, item.get("confirmed")):
         # The user saved a version while the batch was out (#412): a
         # resubmit's result would be dropped, so nothing is resubmitted.
         _mark_item(item, job, kept_user_edit=True)
@@ -509,20 +512,20 @@ def handle_failed_intentions_item(user, item, job, keys):
     try:
         _submit(user, template, calibrated, chronological, keys,
                 "overflow-recalibrated",
-                replace_version_id=item.get("replace_version_id"))
+                confirmed=item.get("confirmed"))
     except Exception:
         logger.exception("intentions user %s: resubmit failed", user.id)
 
 
 @celery.task(bind=True, name="backend.tasks.intentions.infer_intentions")
-def infer_intentions(self, user_id, mode="batch", replace_version_id=None):
+def infer_intentions(self, user_id, mode="batch", confirmed=None):
     """mode="batch": sizes (via free exact count) and submits, then ends —
     collection is the beat poller's job, so nothing is lost to worker
     restarts; the admin row's persistent state lives in the Users-tab
     Profile column. mode="sync": sizes, calls the model synchronously,
     saves, and returns the saved summary (the admin row shows it).
-    ``replace_version_id``: the user's version the admin confirmed
-    replacing in the dialog (#412), else None."""
+    ``confirmed``: the admin's confirmation in the dialog to replace the
+    user's version, {"version_id", "state"} (#412), else None."""
     with flask_app.app_context():
         try:
             if mode == "sync":
@@ -533,14 +536,14 @@ def infer_intentions(self, user_id, mode="batch", replace_version_id=None):
                 progress("sizing the prompt")
                 saved = run_infer_intentions_sync_impl(
                     user_id, progress=progress,
-                    replace_version_id=replace_version_id)
+                    confirmed=confirmed)
                 return {"user_id": user_id, "stage": "saved", "mode": "sync",
                         "model_id": MODEL_ID, "total": None, **saved}
             self.update_state(state="PROGRESS", meta={
                 "user_id": user_id, "stage": "sizing + submitting batch",
                 "done": None, "total": None})
             _kind, payload = start_infer_intentions_impl(
-                user_id, replace_version_id=replace_version_id)
+                user_id, confirmed=confirmed)
         except Exception:
             logger.exception("Infer intentions (%s) failed for user %s", mode, user_id)
             raise

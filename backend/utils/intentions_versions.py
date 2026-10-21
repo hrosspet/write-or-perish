@@ -15,11 +15,14 @@ An intentions version has one of three kinds of writer:
 
 The user's edit wins (Peter, 2026-10-02): an inference run does not
 replace a version the user or a conversation wrote. The admin button asks
-first and replaces only the version the admin confirmed; the paths with no
-dialog (the batch poller, the backfill script, load_user.py) skip.
+first and replaces only the version the admin confirmed, in the state it
+had then; the paths with no dialog (the batch poller, the backfill script,
+load_user.py) skip.
 
-Reads metadata only; nothing is decrypted.
+Reads metadata and stored ciphertext only; nothing is decrypted.
 """
+import hashlib
+
 from backend.models import UserArtifact
 
 KIND = "intentions"
@@ -45,13 +48,38 @@ def protected_version(user_id):
     return current
 
 
-def may_replace(user_id, replace_version_id=None):
+def changed_at(version):
+    """When the user's version last changed: its last in-place edit (a
+    checklist click or "+" insert, routes/artifacts.patch_artifact), else
+    when it was saved."""
+    return version.updated_at or version.created_at
+
+
+def version_state(version):
+    """A digest of the version's stored text: the ciphertext, never
+    decrypted. Any edit changes it, also one made in place under the same
+    id. It stays on the server (the task argument and the batch item)."""
+    return hashlib.sha256((version.content or "").encode("utf-8")).hexdigest()
+
+
+def confirmation(version):
+    """What an admin's "Replace their version" covers: this version, in
+    the state it has now."""
+    return {"version_id": version.id, "state": version_state(version)}
+
+
+def may_replace(user_id, confirmed=None):
     """Whether an inference result may become the user's current version:
-    the current one is an inference run's, or it is the version an admin
-    confirmed replacing (``replace_version_id``). A version the user saves
-    after that confirmation is protected again."""
+    the current one is an inference run's, or it is the version the admin
+    confirmed replacing, unchanged since (``confirmed``, from
+    confirmation()). A version the user saves after that confirmation, or
+    an in-place edit of the confirmed one, is protected again."""
     kept = protected_version(user_id)
-    return kept is None or kept.id == replace_version_id
+    if kept is None:
+        return True
+    return (isinstance(confirmed, dict)
+            and confirmed.get("version_id") == kept.id
+            and confirmed.get("state") == version_state(kept))
 
 
 def changed_by(version):
