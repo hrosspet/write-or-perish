@@ -1347,6 +1347,232 @@ class TestDisconnectX:
         assert alice.twitter_id == "123"
 
 
+# ── Disconnect X revokes Loore's access at X (#494) ─────────────────────
+
+X_SIGN_IN = {"oauth_token": "123-sign-in-9f3e", "oauth_token_secret":
+             "sign-in-secret-77ab", "user_id": "123",
+             "screen_name": "alice"}
+BOOKMARK_ACCESS = "bookmark-access-5d21"
+BOOKMARK_REFRESH = "bookmark-refresh-c4e8"
+
+
+class _FakeX:
+    """X's two revoke endpoints behind requests.post (the OAuth 1.0a sign-in
+    invalidate, the OAuth 2.0 revoke); any other call fails the test.
+    *sign_in* / *bookmarks* is "ok", "error" (503), "invalid" (401) or
+    "timeout"."""
+
+    def __init__(self, monkeypatch, user_id, sign_in="ok", bookmarks="ok"):
+        import requests
+        from backend.models import ExternalAccount
+        from backend.utils import external_content as ext
+        self.sign_in, self.revoked = [], []
+
+        def answer(outcome):
+            if outcome == "timeout":
+                raise requests.Timeout("read timed out")
+            r = MagicMock()
+            code = {"error": 503, "invalid": 401}.get(outcome)
+            if code:
+                r.raise_for_status.side_effect = requests.HTTPError(
+                    f"{code} Error", response=MagicMock(status_code=code))
+            r.json.return_value = {"revoked": True}
+            return r
+
+        def post(url, **kw):
+            if url == ext.X_INVALIDATE_SIGN_IN_URL:
+                auth = kw["auth"].client
+                self.sign_in.append((auth.resource_owner_key,
+                                     auth.resource_owner_secret,
+                                     kw["timeout"]))
+                return answer(sign_in)
+            assert url == ext.X_REVOKE_URL, url
+            # Revoked while the stored connection still exists.
+            rows = ExternalAccount.query.filter_by(user_id=user_id).count()
+            self.revoked.append((kw["data"]["token"], kw["timeout"], rows))
+            return answer(bookmarks)
+        monkeypatch.setattr(ext.requests, "post", post)
+
+
+def _no_token_logged(caplog):
+    secrets = (X_SIGN_IN["oauth_token"], X_SIGN_IN["oauth_token_secret"],
+               BOOKMARK_ACCESS, BOOKMARK_REFRESH)
+    assert not any(s in r.getMessage() for r in caplog.records
+                   for s in secrets)
+
+
+class TestDisconnectXRevokes:
+    """The sign-in token this session holds is revoked at X, as at account
+    deletion (#464); with end_bookmark_sync the X bookmarks connection is
+    revoked and deleted, as in the purge (#415). Best effort: a failure
+    never stops the disconnect, and the answer says whether X confirmed,
+    so the page can show the steps to remove Loore on X."""
+
+    def _alice(self, real_app, token=X_SIGN_IN, bookmarks=False):
+        from backend.models import ExternalAccount
+        alice = _add(username="alice", email="alice@example.com",
+                     twitter_id="123", twitter_handle="alice", approved=True)
+        if bookmarks:
+            real_app.config["X_CLIENT_ID"] = "cid"
+            real_app.config["X_CLIENT_SECRET"] = "csecret"
+            acc = ExternalAccount(user_id=alice.id, provider="twitter",
+                                  external_user_id="123", handle="alice")
+            acc.set_tokens(BOOKMARK_ACCESS, BOOKMARK_REFRESH)
+            _db.session.add(acc)
+            _db.session.commit()
+        client = _signed_in(real_app, alice)
+        if token is not None:
+            with client.session_transaction() as sess:
+                sess["twitter_oauth_token"] = dict(token)
+        return alice, client
+
+    def test_the_sign_in_is_revoked_at_x(self, real_app, monkeypatch, caplog):
+        from backend.utils.user_purge import X_REVOKE_TIMEOUT_SECONDS
+        caplog.set_level("INFO")
+        alice, client = self._alice(real_app)
+        x = _FakeX(monkeypatch, alice.id)
+
+        r = client.delete("/api/dashboard/x")
+
+        assert r.status_code == 200
+        body = r.get_json()
+        assert body["x_access_removed"] is True
+        assert body["bookmark_sync"] is None
+        assert x.sign_in == [(X_SIGN_IN["oauth_token"],
+                              X_SIGN_IN["oauth_token_secret"],
+                              X_REVOKE_TIMEOUT_SECONDS)]
+        assert x.revoked == []
+        _db.session.refresh(alice)
+        assert alice.twitter_id is None
+        assert "twitter_oauth_token" not in _session(client)
+        _no_token_logged(caplog)
+
+    @pytest.mark.parametrize("outcome,level", [
+        ("error", "ERROR"), ("timeout", "ERROR"), ("invalid", "WARNING")])
+    def test_a_failed_revoke_still_disconnects(self, real_app, monkeypatch,
+                                               caplog, outcome, level):
+        alice, client = self._alice(real_app)
+        x = _FakeX(monkeypatch, alice.id, sign_in=outcome)
+
+        r = client.delete("/api/dashboard/x")
+
+        assert r.status_code == 200
+        assert r.get_json()["x_access_removed"] is False   # steps shown
+        assert len(x.sign_in) == 1
+        _db.session.refresh(alice)
+        assert alice.twitter_id is None
+        assert "twitter_oauth_token" not in _session(client)
+        failed = [rec for rec in caplog.records
+                  if "X did not revoke the X sign-in" in rec.getMessage()]
+        assert [rec.levelname for rec in failed] == [level]
+        assert "Disconnect X of user" in failed[0].getMessage()
+        _no_token_logged(caplog)
+
+    @pytest.mark.parametrize("token", [
+        None,                                   # e.g. an email sign-in
+        dict(X_SIGN_IN, user_id="456"),         # another X account's
+        dict(X_SIGN_IN, expires_at=1),          # expired
+    ], ids=["none", "other_x_account", "expired"])
+    def test_without_this_accounts_sign_in_token_no_call(
+            self, real_app, monkeypatch, token):
+        alice, client = self._alice(real_app, token=token)
+        x = _FakeX(monkeypatch, alice.id)
+
+        r = client.delete("/api/dashboard/x")
+
+        assert r.status_code == 200
+        assert r.get_json()["x_access_removed"] is False   # steps shown
+        assert x.sign_in == []
+        _db.session.refresh(alice)
+        assert alice.twitter_id is None
+        assert "twitter_oauth_token" not in _session(client)
+
+    def test_a_refused_disconnect_revokes_nothing(self, real_app, monkeypatch):
+        alice = _add(username="alice", twitter_id="123", approved=True)
+        client = _signed_in(real_app, alice)
+        with client.session_transaction() as sess:
+            sess["twitter_oauth_token"] = dict(X_SIGN_IN)
+        x = _FakeX(monkeypatch, alice.id)
+
+        r = client.delete("/api/dashboard/x")
+
+        assert r.status_code == 400
+        assert x.sign_in == [] and x.revoked == []
+        assert "twitter_oauth_token" in _session(client)
+
+    def test_ending_the_bookmark_sync_revokes_and_deletes_it(
+            self, real_app, monkeypatch, caplog):
+        from backend.models import (
+            ExternalAccount, ExternalItem, UserNotification,
+        )
+        from backend.utils.user_purge import X_REVOKE_TIMEOUT_SECONDS
+        caplog.set_level("INFO")
+        alice, client = self._alice(real_app, bookmarks=True)
+        _db.session.add(ExternalItem(user_id=alice.id,
+                                     source="twitter_bookmark",
+                                     external_id="9", content="saved"))
+        _db.session.add(UserNotification(user_id=alice.id,
+                                         type="x_disconnected",
+                                         title="X disconnected"))
+        _db.session.commit()
+        x = _FakeX(monkeypatch, alice.id)
+
+        r = client.delete("/api/dashboard/x",
+                          json={"end_bookmark_sync": True})
+
+        assert r.status_code == 200
+        body = r.get_json()
+        assert body["bookmark_sync"] == "ended"
+        assert body["x_access_removed"] is True
+        assert len(x.sign_in) == 1
+        assert x.revoked == [(BOOKMARK_ACCESS, X_REVOKE_TIMEOUT_SECONDS, 1),
+                             (BOOKMARK_REFRESH, X_REVOKE_TIMEOUT_SECONDS, 1)]
+        assert ExternalAccount.query.filter_by(user_id=alice.id).count() == 0
+        # The saved bookmarks stay; the reconnect notice is answered.
+        assert ExternalItem.query.filter_by(user_id=alice.id).count() == 1
+        assert UserNotification.query.filter_by(
+            user_id=alice.id, status="unread").count() == 0
+        _no_token_logged(caplog)
+
+    def test_the_bookmark_sync_stays_unless_asked(self, real_app, monkeypatch):
+        from backend.models import ExternalAccount
+        alice, client = self._alice(real_app, bookmarks=True)
+        x = _FakeX(monkeypatch, alice.id)
+
+        r = client.delete("/api/dashboard/x")       # older clients too
+
+        assert r.status_code == 200
+        body = r.get_json()
+        assert body["bookmark_sync"] == "kept"
+        # The bookmark sync keeps its access, so X still lists Loore.
+        assert body["x_access_removed"] is False
+        assert len(x.sign_in) == 1 and x.revoked == []
+        assert ExternalAccount.query.filter_by(user_id=alice.id).count() == 1
+
+    @pytest.mark.parametrize("outcome", ["error", "timeout"])
+    def test_a_failed_bookmark_revoke_still_ends_the_sync(
+            self, real_app, monkeypatch, caplog, outcome):
+        from backend.models import ExternalAccount
+        alice, client = self._alice(real_app, bookmarks=True)
+        x = _FakeX(monkeypatch, alice.id, bookmarks=outcome)
+
+        r = client.delete("/api/dashboard/x",
+                          json={"end_bookmark_sync": True})
+
+        assert r.status_code == 200
+        body = r.get_json()
+        assert body["bookmark_sync"] == "ended"
+        assert body["x_access_removed"] is False   # steps shown
+        assert [t for t, _, _ in x.revoked] == [BOOKMARK_ACCESS,
+                                                BOOKMARK_REFRESH]
+        assert ExternalAccount.query.filter_by(user_id=alice.id).count() == 0
+        errors = [rec.getMessage() for rec in caplog.records
+                  if rec.levelname == "ERROR"]
+        assert len(errors) == 2
+        assert all(m.startswith("Disconnect X of user") for m in errors)
+        _no_token_logged(caplog)
+
+
 class TestConnectXExtras:
     def test_a_new_link_is_recorded_and_the_address_told(self, app, monkeypatch):
         import backend.routes.auth as auth_mod
