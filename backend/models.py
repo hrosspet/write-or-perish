@@ -1913,7 +1913,10 @@ class FeedRender(db.Model):
     tweet_count = db.Column(db.Integer, nullable=False, default=0)
     account_count = db.Column(db.Integer, nullable=False, default=0)
     # Tweets in the window the reader had already marked read (any row
-    # of the tweet, #352) and that therefore never reached the model.
+    # of the tweet, #352) and that therefore never reached the model. A
+    # read again that keeps the list of the read before it (#511) leaves
+    # out the same tweets; the ones read since stay in its list, and a
+    # note tells the model they are not candidates.
     excluded_count = db.Column(db.Integer, nullable=False, default=0)
     # Comma-joined tweet ids in render order: index i (0-based) is the
     # tweet the model saw as #i+1. ~100 KB for a day of the archive.
@@ -1921,8 +1924,10 @@ class FeedRender(db.Model):
     # How many of the model's picks the collect could not show
     # (ca_feed.count_dropped_picks, on the batch collect and the admin's
     # live rerun alike; 2026-10-02): the tweet behind the number is no
-    # longer in the archive snapshot, or the number is outside the render. Each number once; a number cited only in the verdict is no
-    # pick. With no FeedPick row on the reply, a positive count means
+    # longer in the archive snapshot, or the number is outside the render,
+    # or (a live read again that kept the earlier list, #511) the reader
+    # has read the tweet since that list was made. Each number once; a
+    # number cited only in the verdict is no pick. With no FeedPick row on the reply, a positive count means
     # every pick was dropped, and 0 means the model picked nothing.
     # Replies collected before the column existed read 0 either way.
     dropped_picks = db.Column(db.Integer, nullable=False, default=0,

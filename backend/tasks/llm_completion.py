@@ -61,7 +61,8 @@ from backend.utils.ca_feed import (
     FeedReplyError, count_dropped_picks, read_reply_ids, record_feed_render,
     ca_turn as _ca_turn,
     ArchiveNotReady, refs_from_render, render_read_reply_for_model,
-    request_snapshot_refresh, seen_tweet_ids,
+    request_snapshot_refresh, seen_tweet_ids, list_to_keep, read_numbers,
+    read_since_note,
 )
 from backend.utils.tool_meta import (
     get_tool_meta_entry, update_tool_meta, parse_github_issue,
@@ -2846,15 +2847,21 @@ def _claim_failed_feed_cost(node, resp):
     return True
 
 
-def _collect_feed_reply(llm_node, resp, ca_refs):
+def _collect_feed_reply(llm_node, resp, ca_refs, read_since=()):
     """Turn the feed's JSON answer into the reply: each pick becomes a
     saved reference + FeedPick row (rank, relevance, recommend and the
     quote-tweet text, for judging the model's claims against the user's
     verdicts later), and the node text is the whole rendered feed: the
     verdict, then each quote-tweet over its {quote_ext:ID} marker. The
-    same path serves the batch collect and the admin's live rerun."""
+    same path serves the batch collect and the admin's live rerun.
+
+    *read_since* are the numbers of a kept list (#511) whose tweet the
+    reader has read since it was made: the closing note told the model
+    they are not candidates, and a pick of one is dropped here and
+    counted with the other dropped picks, so a tweet the reader has read
+    is never picked again, as before the list was kept."""
     from backend.utils.ca_feed import (
-        parse_feed_reply, render_feed_reply, save_feed_picks)
+        parse_feed_reply, pick_numbers, render_feed_reply, save_feed_picks)
     # A refusal is the provider's verdict on this request (#454): the text
     # is an apology, not JSON. Say so, naming the model, before parsing.
     # Terminal like a parse failure (the stored batch result is immutable);
@@ -2884,6 +2891,16 @@ def _collect_feed_reply(llm_node, resp, ca_refs):
         # (refs_from_render), so a Read of only such picks is not
         # reported as one where the model picked nothing. (A batch from
         # before renders were pinned has no row: nothing to count on.)
+        if read_since:
+            read_since = set(read_since)
+            picked_read = sorted(set(pick_numbers(resp["content"]))
+                                 & read_since)
+            if picked_read:
+                logger.warning(
+                    "Node %s: dropping picks of tweets the reader has "
+                    "read: %s", llm_node.id, picked_read)
+            ca_refs = {n: ref for n, ref in ca_refs.items()
+                       if n not in read_since}
         from backend.models import FeedRender
         render = FeedRender.query.filter_by(node_id=llm_node.id).first()
         if render is not None:
@@ -3502,6 +3519,9 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         [n.id for n in dropped])
             ca_tweets_content = None
             ca_refs = None
+            # The numbers of a kept list (#511) whose tweet the reader has
+            # read since: named in the closing note, never a pick.
+            ca_read_numbers = []
             if needs_ca:
                 from backend.tasks.imports import snapshot_dir_for
                 from backend.utils import community_archive as ca
@@ -3546,7 +3566,8 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     ca_refs = CA_REFS_PINNED
                     ca_tweets_content = CA_TWEETS_STUB
                 else:
-                    ca_seen = ()
+                    ca_seen = set()
+                    ca_keep = frozenset()
                     if batch_resp is None:
                         # A read about to be sent reads the export in the
                         # cache and never waits for a newer one to
@@ -3556,6 +3577,19 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         # the reader has already seen.
                         request_snapshot_refresh(ca_snapshot_dir, log=logger)
                         ca_seen = seen_tweet_ids(user_id)
+                        if ca_live or not _read_batch_requested(llm_node):
+                            # A live read again on the export of the read
+                            # before it keeps that read's list as it was,
+                            # so the request's prefix is read from the
+                            # prompt cache (#511); what the reader has
+                            # read since goes in the closing note. Not
+                            # for the admin's batch experiments: a batch
+                            # comes back long after any cache entry has
+                            # gone, and its collect knows no note.
+                            ca_keep = list_to_keep(
+                                node_chain, ca_node, ca_reply_ids, user_id,
+                                ca.snapshot_export_id(ca_snapshot_dir),
+                                ca_days, ca_scope)
                     # else: a batch submitted before renders were pinned;
                     # re-render the day as it was rendered then (no seen
                     # filter) so its numbers still match.
@@ -3566,7 +3600,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                                                ca_owner.prefilled_handle]
                             if ca_owner else (),
                             include_usernames=ca_follows,
-                            exclude_tweet_ids=ca_seen)
+                            exclude_tweet_ids=ca_seen - ca_keep)
                     except ca.CommunityArchiveError as e:
                         # No export cached yet (a fresh machine or data
                         # volume): queue the first fetch, and give the
@@ -3583,6 +3617,12 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         "Rendered %s for node %s: %s (~%d tokens)",
                         ca_placeholder_match, ca_node.id, ca_stats,
                         approximate_token_count(ca_tweets_content))
+                    if ca_keep:
+                        ca_read_numbers = read_numbers(ca_refs, ca_seen)
+                        logger.info(
+                            "Node %s: kept the earlier read's list (%d "
+                            "tweets); %d of them read since",
+                            llm_node_id, len(ca_keep), len(ca_read_numbers))
                     if batch_resp is None:
                         # One run renders into a reply: a run another one
                         # has replaced since it started (the admin's
@@ -4003,7 +4043,8 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 finalize writes for a collected reply (_log_api_cost). The
                 task's error handler commits it with the failure."""
                 try:
-                    return _collect_feed_reply(llm_node, resp, ca_refs)
+                    return _collect_feed_reply(llm_node, resp, ca_refs,
+                                               read_since=ca_read_numbers)
                 except FeedReplyError:
                     if (not resp.get("cut_off")
                             and _claim_failed_feed_cost(llm_node, resp)):
@@ -4442,9 +4483,11 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 # loop). Nothing to inject here.
 
                 # The user's read marks / verdicts on references quoted
-                # earlier in the thread (see _reference_marks_note), and
-                # the read thread's turn note: on a read-again the
-                # request itself, on a chat turn the reminder that the
+                # earlier in the thread (see _reference_marks_note), the
+                # tweets of a kept list read since it was made (#511:
+                # here, after the cached prefix, instead of out of the
+                # list), and the read thread's turn note: on a read-again
+                # the request itself, on a chat turn the reminder that the
                 # read prompt above still asks for a verdict and picks
                 # while this turn answers the user's message. A read turn
                 # is never agentic (its agentic prompts were stripped
@@ -4456,6 +4499,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     quoted_ext_ids, user_id, labels=pick_labels,
                     intro_verdicts=_intro_verdicts(rendered_read_ids,
                                                    user_id))
+                ca_read_since = read_since_note(ca_read_numbers)
                 ca_note = None
                 if ca_turn == "read_again":
                     ca_note = CA_READ_AGAIN_TURN
@@ -4465,6 +4509,8 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 notes = agentic_notes if is_agentic else plain_notes
                 if reference_marks:
                     notes.append(reference_marks)
+                if ca_read_since:
+                    notes.append(ca_read_since)
                 if ca_note:
                     notes.append(ca_note)
 
