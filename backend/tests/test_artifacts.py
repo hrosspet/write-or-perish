@@ -407,40 +407,72 @@ def test_read_artifact_tool_unknown_kind(app):
         assert r["status"] == "error"
 
 
-def test_read_todo_tool_returns_ref_not_content(app):
+# The todo list is read with read_artifact on kind 'todo' (#218); read_todo
+# was its own tool before that and stays served for older threads.
+_TODO_READS = [("read_artifact", {"kind": "todo"}),
+               ("read_artifact", {"kind": " Todo "}),
+               ("read_todo", {})]
+
+
+@pytest.mark.parametrize("name, inp", _TODO_READS)
+def test_todo_read_returns_ref_not_content(app, name, inp):
     with app.app_context():
         uid = User.query.first().id
         todo = _mk_todo(uid, "buy milk\nfinish slice 3")
-        r = _run_tool(app, "read_todo", {}, uid)
+        r = _run_tool(app, name, inp, uid)
         assert r["status"] == "success"
+        assert r["name"] == name
         assert r["todo_id"] == todo.id
+        assert r["kind"] == "todo"
+        assert "artifact_id" not in r
         # Content must never sit in tool meta (plaintext column)
         assert "buy milk" not in json.dumps(r)
 
 
-def test_read_todo_tool_no_todo(app):
+def test_todo_read_ignores_an_artifact_named_todo(app):
+    """kind 'todo' is the todo list, never a UserArtifact of that name."""
     with app.app_context():
         uid = User.query.first().id
-        r = _run_tool(app, "read_todo", {}, uid)
+        todo = _mk_todo(uid, "the real list")
+        _mk_artifact(uid, "todo", "a shadow artifact")
+        r = _run_tool(app, "read_artifact", {"kind": "todo"}, uid)
+        assert r["todo_id"] == todo.id
+        assert "artifact_id" not in r
+
+
+@pytest.mark.parametrize("name, inp", _TODO_READS)
+def test_todo_read_no_todo(app, name, inp):
+    with app.app_context():
+        uid = User.query.first().id
+        r = _run_tool(app, name, inp, uid)
         assert r["status"] == "error"
+        assert r["error"] == "The todo list is empty or unavailable."
+        assert r["kind"] == "todo"
 
 
-def test_read_todo_tool_ai_blocked(app):
+@pytest.mark.parametrize("name, inp", _TODO_READS)
+def test_todo_read_ai_blocked(app, name, inp):
     with app.app_context():
         uid = User.query.first().id
         _mk_todo(uid, "private tasks", ai_usage="none")
-        r = _run_tool(app, "read_todo", {}, uid)
+        r = _run_tool(app, name, inp, uid)
         assert r["status"] == "error"
+        assert "todo_id" not in r
 
 
-def test_scan_statuses_delivers_todo_content(app):
-    """Cross-turn (voice/single-shot) read_todo delivery injects the content
+@pytest.mark.parametrize("entry", [
+    {"name": "read_artifact", "kind": "todo"},
+    # A result an older thread's read_todo call left in tool_calls_meta.
+    {"name": "read_todo"},
+])
+def test_scan_statuses_delivers_todo_content(app, entry):
+    """Cross-turn (voice/single-shot) todo delivery injects the content
     once, re-resolved from the row, then stops on the next scan."""
     with app.app_context():
         uid = User.query.first().id
         todo = _mk_todo(uid, "the actual tasks")
         node = _node_with_meta(uid, [
-            {"name": "read_todo", "status": "success", "todo_id": todo.id},
+            {**entry, "status": "success", "todo_id": todo.id},
         ])
         notes, to_mark = _scan_proposal_statuses([node], uid)
         joined = "\n".join(notes)
@@ -1072,12 +1104,14 @@ def test_index_includes_todo_with_content(app):
         uid = User.query.first().id
         _mk_todo(uid, "task one\ntask two")
         _, _, _, index = get_user_artifacts_context(uid)
-        assert "todo" in index
-        assert "read_todo" in index
+        first = index.split("\n")[0]
+        assert first.startswith("- todo — the user's running task list (~")
+        # One read verb for the whole index (#218): no tool named per line.
+        assert "read_todo" not in index
         # No raw todo content leaks into the index line.
         assert "task one" not in index
         # A non-empty todo reports a token estimate, not "(empty)".
-        assert "tokens)" in index.split("\n")[0]
+        assert first.endswith("tokens)")
 
 
 def test_index_lists_empty_todo(app):
@@ -1095,7 +1129,8 @@ def test_index_omits_ai_blocked_todo(app):
         uid = User.query.first().id
         _mk_todo(uid, "private tasks", ai_usage="none")
         _, _, _, index = get_user_artifacts_context(uid)
-        assert "read_todo" not in index
+        assert "- todo —" not in index
+        assert "running task list" not in index
 
 
 # ── AI preferences folded into the artifact model (#158 Slice 5) ───────────

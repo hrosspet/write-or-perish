@@ -358,8 +358,14 @@ def test_textmode_retrieval_loop_injects_and_continues(app):
     assert len(pins) == 1
 
 
-def test_textmode_retrieval_loop_read_todo(app):
-    """read_todo rides the same within-turn loop: the model's first call
+@pytest.mark.parametrize("name, inp", [
+    ("read_artifact", {"kind": "todo"}),
+    # The todo's own tool before #218: older threads' prompts still name
+    # it, and a call to it is served the same way.
+    ("read_todo", {}),
+])
+def test_textmode_retrieval_loop_read_todo(app, name, inp):
+    """A todo read rides the same within-turn loop: the model's first call
     requests the todo, the loop injects it, and the continuation answers
     with it. The exact todo version read is pinned to the interim node."""
     alice, system, user_node, llm_node = _build_chain("textmode")
@@ -368,7 +374,7 @@ def test_textmode_retrieval_loop_read_todo(app):
 
     _ScriptedProvider.reset([
         _resp("Let me pull up your todo.", tool_calls=[{
-            "id": "t1", "name": "read_todo", "input": {},
+            "id": "t1", "name": name, "input": inp,
         }]),
         _resp("Start with shipping slice 3."),
     ])
@@ -384,7 +390,8 @@ def test_textmode_retrieval_loop_read_todo(app):
     interim = _fresh(llm_node.id)
     assert interim.continuation_node_id is not None
     meta = json.loads(interim.tool_calls_meta)
-    assert any(e.get("name") == "read_todo" for e in meta)
+    assert any(e.get("name") == name and e.get("todo_id") == todo.id
+               for e in meta)
 
     final = Node.query.get(interim.continuation_node_id)
     assert final.get_content() == "Start with shipping slice 3."

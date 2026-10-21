@@ -266,9 +266,9 @@ def test_voice_turn_is_spoken_through_a_tool_round(voice):
               "### Completed\n- old task\n### Note\nNice work.\n"
               "## Later\nThe rest.")
     _LiveProvider.reset([
-        (["Let me check your list.", look, _Tool("read_todo")],
+        (["Let me check your list.", look, _Tool("read_artifact")],
          _resp("Let me check your list.", tool_calls=[{
-             "id": "t1", "name": "read_todo", "input": {}}])),
+             "id": "t1", "name": "read_artifact", "input": {"kind": "todo"}}])),
         ([answer[:9], answer[9:40], answer[40:]], _resp(answer)),
     ])
     _run(user_node, llm_node, alice, mode="voice")
@@ -331,8 +331,8 @@ def test_voice_turn_marks_where_the_wait_goes(voice, monkeypatch):
 def test_textless_tool_round_speaks_its_fallback_line(voice):
     alice, _, user_node, llm_node = _build_chain("voice")
     _LiveProvider.reset([
-        ([_Tool("read_todo")], _resp("", tool_calls=[{
-            "id": "t1", "name": "read_todo", "input": {}}])),
+        ([_Tool("read_artifact")], _resp("", tool_calls=[{
+            "id": "t1", "name": "read_artifact", "input": {"kind": "todo"}}])),
         (["Here it is."], _resp("Here it is.")),
     ])
     _run(user_node, llm_node, alice, mode="voice")
