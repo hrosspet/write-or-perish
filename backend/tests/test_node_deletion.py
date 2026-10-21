@@ -847,7 +847,9 @@ def test_budgeted_export_preselects_before_loading(app, alice, monkeypatch):
     assert content is not None
     assert "entry number 39" in content          # newest first
     assert "entry number 00" not in content      # outside the window
-    assert 0 < len(calls) < 40                    # only the window, not the corpus
+    # No per-thread query at all: the window checks its own rows for an
+    # alive one (#525), not each thread in the database.
+    assert calls == []
     assert "**Total Threads:** 40" in content     # header still counts everything
     assert "Included Threads" in content
 

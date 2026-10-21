@@ -17,7 +17,8 @@ from backend.utils.quotes import (
 from backend.utils.timefmt import iso_utc
 from backend.utils.encryption import prefetch_deks
 from backend.utils.task_owner import failure_text, task_owned_by
-from sqlalchemy import and_, func, or_
+from backend.utils.thread_tree import ancestor_chains
+from sqlalchemy import and_, case, func, or_
 from sqlalchemy.orm import subqueryload
 from datetime import datetime
 
@@ -83,6 +84,23 @@ def _export_visible_filter(model, user_id):
                 model.human_owner_id == user_id,
             ),
         ),
+    )
+
+
+# What a deleted node renders in place of its text (§5a).
+TOMBSTONE_TEXT = "[Node deleted by author]"
+# What a deleted node costs a budgeted window (#525): its placeholder line,
+# by the same chars/4 measure as an entry's stored token_count (6 units).
+# Its former size counted until the purge, and could empty the window.
+TOMBSTONE_UNITS = approximate_token_count(TOMBSTONE_TEXT)
+
+
+def _window_units(model):
+    """SQL: what *model*'s row costs a budgeted window. Its stored
+    token_count, or TOMBSTONE_UNITS once it is deleted (#525)."""
+    return case(
+        (model.deleted_at.is_(None), func.coalesce(model.token_count, 0)),
+        else_=TOMBSTONE_UNITS,
     )
 
 
@@ -163,12 +181,12 @@ def _filtered_children(node, filter_ai_usage, created_before, included_ids,
     """Children of *node* that should render, sorted chronologically.
 
     keep_tombstones: when a budget pre-selection (included_ids) is
-    active, tombstones pass through even if not pre-selected — they take
-    no real budget tokens and dropping them creates discontinuities
-    (§5a). A node hidden with its owner's deleted account (#269) counts
-    as a tombstone for *user_id*, as it will after the purge. The
-    inaccessible-placeholder branch does not extend this courtesy,
-    matching the historical behavior.
+    active, tombstones pass through even if not pre-selected — they cost
+    a window no more than their placeholder line (TOMBSTONE_UNITS) and
+    dropping them creates discontinuities (§5a). A node hidden with its
+    owner's deleted account (#269) counts as a tombstone for *user_id*,
+    as it will after the purge. The inaccessible-placeholder branch does
+    not extend this courtesy, matching the historical behavior.
     """
     from backend.utils.privacy import shown_as_deleted
     children = node.children
@@ -552,7 +570,7 @@ def format_node_tree(
         # route through the "node" kind (cycle check + deleted routing)
         # with no BRANCH markers, matching the old recursive helpers.
         if kind == "tombstone":
-            placeholder = "[Node deleted by author]\n\n"
+            placeholder = f"{TOMBSTONE_TEXT}\n\n"
             keep_tombstones = True
         else:
             placeholder = ("[Content not accessible — private node by "
@@ -760,6 +778,90 @@ def _thread_has_alive_node(root_id):
     ).scalar()
 
 
+def _window_threads(window_nodes, user_id, filter_ai_usage):
+    """Where the rows of a budgeted window render (#525).
+
+    The window takes the newest rows, so a thread's oldest rows, its
+    root first, are the first to fall outside it. A row renders under
+    its parent when the parent is in the window. A row whose parent is
+    not starts a block of its own: the thread's root, or, when the
+    thread started before the window, its newest part. (Rendering from
+    roots only, a session longer than the window emptied it.)
+
+    A row is left out where it is when its thread renders whole: when
+    the thread is not the user's own (this export's scope), or, with
+    *filter_ai_usage*, when a node above it is outside AI_ALLOWED (the
+    walk down stops there). A block whose rows are all deleted is left
+    out (§5a).
+
+    Returns (starts, continued_from, shown): the rows that start a
+    block, oldest first; {start id: the thread root's created_at} for
+    the blocks that continue an earlier thread; and the ids of the rows
+    the blocks show.
+    """
+    window = {n.id: n for n in window_nodes}
+    loose = [n.id for n in window_nodes
+             if n.parent_id is not None and n.parent_id not in window]
+    chains = ancestor_chains(
+        loose, Node.user_id, Node.ai_usage, Node.created_at)
+    # Row id -> the window row it renders under, None for a block's
+    # start. A row missing here is left out.
+    under = {}
+    continued_from = {}
+    for n in window_nodes:
+        if n.parent_id is None:
+            if n.user_id == user_id:
+                under[n.id] = None
+            continue
+        if n.parent_id in window:
+            under[n.id] = n.parent_id
+            continue
+        for row in chains.get(n.id, ()):
+            if filter_ai_usage and row.ai_usage not in AI_ALLOWED:
+                break
+            if row.id in window:
+                under[n.id] = row.id
+                break
+            if row.parent_id is None:
+                if row.user_id == user_id:
+                    under[n.id] = None
+                    continued_from[n.id] = row.created_at
+                break
+
+    # Each row's block start; None when the row is left out.
+    start_of = {}
+    for n in window_nodes:
+        path, seen, cur = [], set(), n.id
+        while (cur not in start_of and under.get(cur) is not None
+               and cur not in seen):
+            path.append(cur)
+            seen.add(cur)
+            cur = under[cur]
+        if cur in start_of:
+            start = start_of[cur]
+        elif cur in under and cur not in seen:
+            start = cur
+        else:
+            start = None   # left out, or a parent cycle
+        for row_id in path + [cur]:
+            start_of.setdefault(row_id, start)
+
+    rows_of = {}
+    for n in window_nodes:
+        if start_of[n.id] is not None:
+            rows_of.setdefault(start_of[n.id], []).append(n)
+    starts = sorted(
+        (window[start] for start, rows in rows_of.items()
+         if any(r.deleted_at is None for r in rows)),
+        key=lambda n: (n.created_at, n.id),
+    )
+    shown = {r.id for s in starts for r in rows_of[s.id]}
+    return (starts,
+            {s.id: continued_from[s.id] for s in starts
+             if s.id in continued_from},
+            shown)
+
+
 # Per-query id-list size for the level-batched thread walk. Keeps each
 # statement small on SQLite (old builds cap bound variables at 999) and
 # cheap to plan on Postgres.
@@ -824,22 +926,23 @@ def _preselect_node_ids(user_id, budget, filter_ai_usage=False,
     nodes under them (see _foreign_thread_node_ids) — filtered to
     accessible nodes only.  Returns a list of node IDs ordered by
     created_at (direction controlled by chronological_order).  No nodes
-    are loaded or decrypted.
+    are loaded or decrypted. A deleted node counts as its placeholder
+    line (_window_units, #525).
     """
     foreign_ids = sorted(_foreign_thread_node_ids(user_id))
     sort_order = (
         Node.created_at.asc() if chronological_order
         else Node.created_at.desc()
     )
-    cumul = func.sum(Node.token_count).over(
+    cumul = func.sum(_window_units(Node)).over(
         order_by=sort_order
     ).label("cumul")
 
-    # token_count and created_at ride along in the window subquery so the
-    # budget cut and the final ordering need no second join back to node
-    # (which the planner ran as another full scan).
+    # The row's units and created_at ride along in the window subquery so
+    # the budget cut and the final ordering need no second join back to
+    # node (which the planner ran as another full scan).
     inner = db.session.query(
-        Node.id, Node.token_count, Node.created_at, cumul,
+        Node.id, _window_units(Node).label("units"), Node.created_at, cumul,
     ).filter(
         or_(Node.user_id == user_id, Node.id.in_(foreign_ids)),
         # Includes soft-deleted user-owned nodes so they can render as
@@ -856,7 +959,7 @@ def _preselect_node_ids(user_id, budget, filter_ai_usage=False,
     inner = inner.subquery()
 
     selected = db.session.query(inner.c.id, inner.c.created_at).filter(
-        inner.c.cumul - func.coalesce(inner.c.token_count, 0) < budget
+        inner.c.cumul - inner.c.units < budget
     ).order_by(
         inner.c.created_at.asc() if chronological_order
         else inner.c.created_at.desc()
@@ -898,7 +1001,7 @@ def get_raw_data_date_range(user_id, max_tokens=10000, created_before=None):
 
     row = db.session.query(
         func.min(Node.created_at), func.max(Node.created_at),
-        func.coalesce(func.sum(Node.token_count), 0),
+        func.coalesce(func.sum(_window_units(Node)), 0),
     ).filter(Node.id.in_(selected_ids)).one()
     return row[0], row[1], row[2]
 
@@ -1043,7 +1146,9 @@ def _build_user_export_incremental(
         # waited ~7 minutes here, then again at render time once the
         # 4k-entry DEK cache had cycled). One concurrent batch up front;
         # the render loop's windowed prefetch then finds them cached.
-        prefetch_deks(n.content for n in selected_nodes)
+        # Deleted rows are never decrypted (#525).
+        prefetch_deks(n.content for n in selected_nodes
+                      if n.deleted_at is None)
 
         resolver = ExportQuoteResolver(
             user.id, budget,
@@ -1054,6 +1159,11 @@ def _build_user_export_incremental(
             with_preamble=not collapse_artifacts,
         )
         for node in selected_nodes:
+            if node.deleted_at is not None:
+                # Shown as its placeholder line; its text is never read.
+                resolver.add_tombstone(node.id, node.created_at,
+                                       TOMBSTONE_UNITS)
+                continue
             if omit_artifacts:
                 _add_artifact_free_entry(resolver, node)
                 continue
@@ -1305,7 +1415,9 @@ def build_user_export_content(
         user does not need to author every node — replies from others on
         their threads are included if accessible. Does NOT include foreign
         threads the user replied to. Matches the user-facing `/export/threads`
-        data dump.
+        data dump. With `max_tokens`, a thread whose start is older than
+        the window shows its newest part, under a continuation line, and
+        a deleted node counts as its placeholder line (#525).
       - **`engaged_threads`**: anchored on every node where the user is author
         or `human_owner_id`. From each anchor, climb up through accessible
         parents to the root or first inaccessible node, and climb down
@@ -1433,6 +1545,11 @@ def build_user_export_content(
     selected_ids = None
     budget = None
 
+    # The budgeted window's thread blocks (#525): which blocks continue
+    # a thread that started before the window, and the rows they show.
+    continued_from = {}
+    shown_ids = None
+
     if max_tokens:
         # Budgeted callers ({user_recent_raw} every reply, {user_export}
         # windows) must never materialise the whole corpus: pre-select the
@@ -1447,27 +1564,9 @@ def build_user_export_content(
             created_before=created_before, created_after=created_after,
             chronological_order=chronological_order,
         )
-        all_top_level_nodes = (
-            query.filter(Node.id.in_(selected_ids))
-            .order_by(Node.created_at.desc()).all()
-        ) if selected_ids else []
-    else:
-        all_top_level_nodes = query.order_by(Node.created_at.desc()).all()
+        if not selected_ids:
+            return None
 
-    # §5a per-thread skip: drop fully-deleted threads so the export
-    # doesn't show a chain of `[Node deleted by author]` placeholders
-    # for content the user explicitly removed. Mixed threads (some
-    # alive, some deleted) still show through with tombstones rendered
-    # by format_node_tree's tombstone shell.
-    all_top_level_nodes = [
-        n for n in all_top_level_nodes if _thread_has_alive_node(n.id)
-    ]
-
-    if not all_top_level_nodes:
-        return None
-
-    # If max_tokens is specified, use ExportQuoteResolver for smart quote handling
-    if max_tokens:
         # Load selected Node objects with context_artifacts eager-loaded
         selected_nodes = (
             Node.query
@@ -1475,9 +1574,10 @@ def build_user_export_content(
             .options(subqueryload(Node.context_artifacts))
             .all()
         )
-        # Sort in Python to match the desired order
+        # Sort in Python to match the desired order. The id settles a
+        # tie, so two renders of one window are the same bytes.
         selected_nodes.sort(
-            key=lambda n: n.created_at,
+            key=lambda n: (n.created_at, n.id),
             reverse=not chronological_order,
         )
         # The resolver loop below decrypts every selected node, one KMS
@@ -1485,7 +1585,9 @@ def build_user_export_content(
         # waited ~7 minutes here, then again at render time once the
         # 4k-entry DEK cache had cycled). One concurrent batch up front;
         # the render loop's windowed prefetch then finds them cached.
-        prefetch_deks(n.content for n in selected_nodes)
+        # Deleted rows are never decrypted (#525).
+        prefetch_deks(n.content for n in selected_nodes
+                      if n.deleted_at is None)
 
         # Create resolver with adjusted token budget. A collapsed export
         # emits no preamble, so the budget counts only the entries it
@@ -1499,6 +1601,11 @@ def build_user_export_content(
 
         # Add only the pre-selected nodes to the resolver (decrypts here)
         for node in selected_nodes:
+            if node.deleted_at is not None:
+                # Shown as its placeholder line; its text is never read.
+                resolver.add_tombstone(node.id, node.created_at,
+                                       TOMBSTONE_UNITS)
+                continue
             if omit_artifacts:
                 _add_artifact_free_entry(resolver, node)
                 continue
@@ -1540,13 +1647,22 @@ def build_user_export_content(
         # Get the results
         included_ids, embedded_quotes, ai_blocked_ids = resolver.get_resolution_result()
 
-        # Filter top-level nodes to only those with content in the export
-        top_level_nodes = [n for n in all_top_level_nodes if n.id in included_ids]
-        # Reverse to get chronological order (oldest to newest among selected)
-        top_level_nodes.reverse()
+        # Every row in the window renders, also in a thread whose start
+        # is older than the window (#525), oldest block first.
+        top_level_nodes, continued_from, shown_ids = _window_threads(
+            [n for n in selected_nodes if n.id in included_ids],
+            user.id, filter_ai_usage)
     else:
-        # No limit - use all threads in chronological order
-        top_level_nodes = list(reversed(all_top_level_nodes))
+        # §5a per-thread skip: drop fully-deleted threads so the export
+        # doesn't show a chain of `[Node deleted by author]` placeholders
+        # for content the user explicitly removed. Mixed threads (some
+        # alive, some deleted) still show through with tombstones rendered
+        # by format_node_tree's tombstone shell. All threads, in
+        # chronological order.
+        top_level_nodes = [
+            n for n in reversed(query.order_by(Node.created_at.desc()).all())
+            if _thread_has_alive_node(n.id)
+        ]
 
     if not top_level_nodes:
         return None
@@ -1756,6 +1872,10 @@ def build_user_export_content(
             continue   # only a system prompt, left out (#550)
         rendered_any = True
         thread_num += 1
+        if node.id in continued_from:
+            # The thread started before the window (#525).
+            export_lines.append(_format_preamble(continued_from[node.id]))
+            export_lines.append("")
         export_lines.append(f"# Thread {thread_num}")
         export_lines.append(f"**Started:** {node.created_at.strftime('%Y-%m-%d %H:%M:%S UTC')}")
         export_lines.append("")
@@ -1774,17 +1894,11 @@ def build_user_export_content(
     content = "\n".join(export_lines)
 
     if return_metadata:
-        # Date range from the pre-selected window (not inflated by
-        # quote dependencies the resolver may have pulled in).
-        if selected_ids:
-            row = db.session.query(
-                func.min(Node.created_at), func.max(Node.created_at),
-                func.count(Node.id),
-            ).filter(Node.id.in_(selected_ids)).one()
-            earliest_ts, latest_ts, node_count = row
-            node_ids = set(selected_ids)
-            meta_rows = db.session.query(Node.origin, Node.token_count).filter(
-                Node.id.in_(selected_ids)).all()
+        if shown_ids is not None:
+            # The rows the window shows (#525): not the pre-selection,
+            # whose oldest row the resolver can leave out, nor the quote
+            # dependencies the resolver may have pulled in.
+            meta_nodes = [n for n in selected_nodes if n.id in shown_ids]
         else:
             # No max_tokens path — scan all included nodes
             meta_nodes = []
@@ -1793,15 +1907,15 @@ def build_user_export_content(
                     top_node, filter_ai_usage, created_before,
                     user_id=user.id,
                 ))
-            latest_ts = max(
-                (n.created_at for n in meta_nodes), default=None
-            )
-            earliest_ts = min(
-                (n.created_at for n in meta_nodes), default=None
-            )
-            node_count = len(meta_nodes)
-            node_ids = {n.id for n in meta_nodes}
-            meta_rows = meta_nodes
+        latest_ts = max(
+            (n.created_at for n in meta_nodes), default=None
+        )
+        earliest_ts = min(
+            (n.created_at for n in meta_nodes), default=None
+        )
+        node_count = len(meta_nodes)
+        node_ids = {n.id for n in meta_nodes}
+        meta_rows = meta_nodes
         return {
             "content": content,
             "token_count": approximate_token_count(content),
