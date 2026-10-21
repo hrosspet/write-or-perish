@@ -1,10 +1,12 @@
 """Admin "Infer intentions" (batch-first): count-based sizing/submit,
-collect, saving, and the pinned-model / opt-out guards."""
+collect, saving, and the opt-out guards. The user's model and provider:
+test_intentions_user_model.py."""
 
 
 import pytest
 
 from backend.tests.test_twitter_import import app, _make_user, _db  # noqa: F401
+from backend.config import Config
 from backend.models import UserArtifact, APICostLog, ProfileBatchJob
 
 # Imported lazily in the `wired` fixture: an eager import at collection time
@@ -13,9 +15,24 @@ from backend.models import UserArtifact, APICostLog, ProfileBatchJob
 it = None
 
 
-MODELS = {"claude-opus-4.8": {"provider": "anthropic", "api_model": "claude-opus-4-8",
-                              "context_window": 1000000,
-                              "input_price_per_mtok": 5.0, "output_price_per_mtok": 25.0}}
+# DEFAULT_LLM_MODEL (LLM_NAME) is claude-opus-5.5 here, as on prod.
+# claude-opus-4.8 is what every run was pinned to; items submitted then
+# carry no model_id.
+MODELS = {
+    "claude-opus-5.5": {"provider": "anthropic", "api_model": "claude-opus-5-5",
+                        "context_window": 1000000,
+                        "input_price_per_mtok": 4.0, "output_price_per_mtok": 20.0},
+    "claude-opus-4.8": {"provider": "anthropic", "api_model": "claude-opus-4-8",
+                        "context_window": 1000000, "deprecated": True,
+                        "input_price_per_mtok": 5.0, "output_price_per_mtok": 25.0},
+    # The real entry: its window, input ceiling and long-context pricing
+    # are what the OpenAI sizing and cost tests check.
+    "gpt-6-astra": Config.SUPPORTED_MODELS["gpt-6-astra"],
+    "gpt-5.5": {"provider": "openai", "api_model": "gpt-5.5",
+                "context_window": 1050000, "max_input_tokens": 922000,
+                "deprecated": True,
+                "input_price_per_mtok": 5.0, "output_price_per_mtok": 30.0},
+}
 
 
 @pytest.fixture
@@ -24,14 +41,19 @@ def wired(app, monkeypatch, tmp_path):  # noqa: F811
     import backend.tasks.intentions as _it
     it = _it
     app.config["SUPPORTED_MODELS"] = MODELS
+    app.config["DEFAULT_LLM_MODEL"] = "claude-opus-5.5"
     import backend.routes.export_data as ed
     import backend.utils.llm_batch as lb
     import backend.tasks.recent_context as rc
     monkeypatch.setattr(ed, "build_user_export_content",
                         lambda user, **kw: f"EXPORT[{kw.get('max_tokens')}]")
     submitted = []
+    # Keyed as llm_batch.batch_submit keys its batches: "anthropic", or
+    # "openai:<api_model>".
     monkeypatch.setattr(lb, "batch_submit", lambda by_provider, keys, kind: (
-        submitted.append(by_provider) or {"anthropic": f"b-{len(submitted)}"}))
+        submitted.append(by_provider) or {
+            (p if p == "anthropic" else f"openai:{reqs[0]['api_model']}"):
+            f"b-{len(submitted)}" for p, reqs in by_provider.items()}))
     monkeypatch.setattr(lb, "apply_batch_key_override", lambda keys, cfg: keys)
     monkeypatch.setattr(rc, "_count_total_eligible_tokens", lambda uid: 1000)
     # Default: the counted prompt fits the context comfortably.
@@ -51,12 +73,13 @@ def test_small_corpus_submits_batch_directly_and_persists_job(app, wired, monkey
     kind, ref = it.start_infer_intentions_impl(u.id)
     assert kind == "batch" and ref["batch_id"] == "b-1"
     req = wired[0]["anthropic"][0]
-    assert req["model_id"] == "claude-opus-4.8" and req["api_model"] == "claude-opus-4-8"
+    assert req["model_id"] == "claude-opus-5.5" and req["api_model"] == "claude-opus-5-5"
     assert "EXPORT[" in req["messages"][0]["content"][0]["text"]
     # The flight is persisted — a worker restart loses nothing.
     job = ProfileBatchJob.query.filter_by(batch_id="b-1", status="pending").one()
     assert job.items == [{"custom_id": f"int-u{u.id}", "user_id": u.id,
-                          "kind": "intentions", "budget": 1000000, "resubmitted": False}]
+                          "kind": "intentions", "model_id": "claude-opus-5.5",
+                          "budget": 1000000, "resubmitted": False}]
 
 
 def test_oversized_count_shrinks_budget_then_submits(app, wired, monkeypatch):  # noqa: F811
@@ -74,7 +97,7 @@ def test_oversized_count_shrinks_budget_then_submits(app, wired, monkeypatch):  
     kind, ref = it.start_infer_intentions_impl(u.id)
     assert kind == "batch"
     budget = ref["item"]["budget"]
-    # min(1M, 900k corpus) * (1M - 8192)/1.4M * 0.99 ≈ 631k
+    # min(1M, 900k corpus) * (1M - 32k output)/1.4M * 0.99 ≈ 616k
     assert budget is not None and 600_000 < budget < 700_000
     assert APICostLog.query.count() == 0  # counting is free — nothing billed
 
@@ -147,7 +170,9 @@ def test_apply_intentions_item_saves_at_batch_price(app, wired):  # noqa: F811
                                                "input_tokens": 100_000, "output_tokens": 1_000})
     assert saved["batch"] is True and saved["version"] == 1
     log = APICostLog.query.filter_by(user_id=u.id, request_type="intentions_infer").one()
+    # An item without a model_id ran on the pinned Opus 4.8: priced so.
     assert log.cost_microdollars == int((100_000 * 5.0 + 1_000 * 25.0) * 0.5)  # batch = 50%
+    assert log.model_id == "claude-opus-4.8"
     assert UserArtifact.query.filter_by(user_id=u.id, kind="intentions").count() == 1
 
 
@@ -322,10 +347,10 @@ def test_sync_mode_calls_model_once_and_saves_at_full_price(app, wired, monkeypa
     stages = []
     saved = it.run_infer_intentions_sync_impl(u.id, progress=stages.append)
     assert saved["batch"] is False and saved["version"] == 1
-    assert calls == [("claude-opus-4.8", {"max_tokens": it.BATCH_OUTPUT_TOKENS})]
+    assert calls == [("claude-opus-5.5", {"max_tokens": 32000})]
     assert stages and "synchronously" in stages[0]
     log = APICostLog.query.filter_by(user_id=u.id, request_type="intentions_infer").one()
-    assert log.cost_microdollars == int(100_000 * 5.0 + 1_000 * 25.0)  # full price
+    assert log.cost_microdollars == int(100_000 * 4.0 + 1_000 * 20.0)  # full price
     assert UserArtifact.query.filter_by(user_id=u.id, kind="intentions").count() == 1
     assert wired == []                                # nothing submitted
     assert ProfileBatchJob.query.count() == 0         # nothing persisted

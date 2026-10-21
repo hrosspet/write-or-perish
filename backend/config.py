@@ -286,6 +286,7 @@ class Config:
             "provider": "openai",
             "api_model": "gpt-6-astra",
             "cache_diagnostics": True,
+            "max_input_tokens": 922000,
             "display_name": "GPT-6 Astra",
             "featured": True,
             "context_window": 1050000,

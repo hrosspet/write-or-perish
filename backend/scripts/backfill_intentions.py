@@ -47,8 +47,12 @@ Privacy: any selected user who has globally opted out of AI usage
 (default_ai_usage='none') is skipped entirely — their data is never sent to an
 LLM (the gate runs before any export is built, in both modes).
 
-Model per user: their `preferred_model` if set and supported, else Opus 4.8
-(override for all with --model). The {user_export?...} params (keep,
+Model per user: the one the intentions task picks for them
+(tasks.intentions.model_for_user: the model their profile and other
+background work run on, never another provider's), with the task's input
+and output limits (token_limits). --model replaces it only for users whose
+model is of the same provider; a user on the other provider is skipped, so
+nobody's provider is switched. The {user_export?...} params (keep,
 max_export_tokens) are read straight from the prompt, so it stays the single
 source of truth.
 
@@ -56,7 +60,7 @@ Usage:
     python backend/scripts/backfill_intentions.py                  # just user 1 (operator), sync
     python backend/scripts/backfill_intentions.py 46 27 1 33 50 31 42 45
     python backend/scripts/backfill_intentions.py --batch 46 27 1 33 50 31 42 45   # ~50% cheaper
-    python backend/scripts/backfill_intentions.py --model claude-opus-4.8 1 27
+    python backend/scripts/backfill_intentions.py --model claude-opus-5.5 1 27   # skips users on OpenAI
     python backend/scripts/backfill_intentions.py --dry-run 1       # build export, skip LLM + save
     python backend/scripts/backfill_intentions.py --collect msgbatch_a msgbatch_b   # recover a crashed/timed-out --batch run
 """
@@ -100,22 +104,36 @@ from backend.tasks.recent_context import (  # noqa: E402
     _count_total_eligible_tokens,
 )
 
-DEFAULT_MODEL = "claude-opus-4.8"
+# The intentions task's model per user and its limits, so a backfill runs
+# on what the task would.
+from backend.tasks.intentions import model_for_user, token_limits  # noqa: E402
+
 PROMPT_FILE = "intentions_detection.txt"
 KIND = "intentions"
 MAX_RETRIES = 3
-BATCH_OUTPUT_TOKENS = 8192  # output cap — ample for a ~14-item intentions list
 # --batch mode: count -> shrink -> rebuild rounds before giving up on a user.
 MAX_SIZING_ROUNDS = 4
 
 
 def _resolve_model(app, user, override):
-    if override:
-        return override
-    pref = user.preferred_model
-    if pref and pref in app.config["SUPPORTED_MODELS"]:
-        return pref
-    return DEFAULT_MODEL
+    """The model a run for this user goes to, or None (reason printed) to
+    skip the user: their intentions model (model_for_user), or --model
+    when it is of the same provider. A user's provider is never switched,
+    not even by an operator's --model (Peter, 2026-10-02)."""
+    try:
+        model_id = model_for_user(user)
+    except RuntimeError as e:
+        print(f"  ! {e} Skipping.")
+        return None
+    if not override:
+        return model_id
+    supported = app.config["SUPPORTED_MODELS"]
+    provider = supported[model_id]["provider"]
+    if (supported.get(override) or {}).get("provider") != provider:
+        print(f"  - user {user.id}: their model is {model_id} ({provider}); "
+              f"--model {override} is another provider's — skipping")
+        return None
+    return override
 
 
 def _load_template(app):
@@ -246,8 +264,7 @@ def backfill_user(app, user, template, model_id, dry_run=False):
     # Pre-size by token count: rebuilding the export after a reject costs
     # minutes on a big corpus. The PromptTooLongError retry loop below
     # stays as the backstop for count drift (tiktoken on OpenAI models).
-    limit = (app.config["SUPPORTED_MODELS"][model_id].get(
-        "context_window", 200_000) - BATCH_OUTPUT_TOKENS)
+    limit, max_output = token_limits(model_id)
     built, max_export_tokens, _real = fit_by_count(
         model_id, api_keys, limit, max_export_tokens,
         lambda b: _build_messages(user, template, b, chronological),
@@ -270,7 +287,8 @@ def backfill_user(app, user, template, model_id, dry_run=False):
             print("    [dry-run] skipping LLM call + save")
             return
         try:
-            response = LLMProvider.get_completion(model_id, messages, api_keys)
+            response = LLMProvider.get_completion(
+                model_id, messages, api_keys, max_tokens=max_output)
             break
         except PromptTooLongError as e:
             if attempt == MAX_RETRIES:
@@ -335,7 +353,7 @@ def _submit_batch_for(app, user, template, model_id, budget, chronological,
     cfg = app.config["SUPPORTED_MODELS"][model_id]
     req = {"custom_id": f"int-u{user.id}", "model_id": model_id,
            "api_model": cfg["api_model"], "messages": messages,
-           "max_tokens": BATCH_OUTPUT_TOKENS}
+           "max_tokens": token_limits(model_id)[1]}
     batch_ids = batch_submit({cfg["provider"]: [req]}, batch_keys, "intentions")
     if not batch_ids:
         print(f"  ✗ user {user.id}: batch submit failed (see logs)")
@@ -362,8 +380,7 @@ def _dispatch_batch_user(app, user, template, model_id, cap_budget,
     fits. A None count (endpoint down, tiktoken missing) submits at the
     cap and relies on the overflow report + sync re-run as backstop."""
     db_tokens = _count_total_eligible_tokens(user.id)
-    limit = (app.config["SUPPORTED_MODELS"][model_id].get(
-        "context_window", 200_000) - BATCH_OUTPUT_TOKENS)
+    limit, _max_output = token_limits(model_id)
 
     try:
         built, budget, real = fit_by_count(
@@ -398,7 +415,7 @@ def run_batch(app, users, template, model_override, dry_run,
     pending = {}  # user_id -> {user, model_id, custom_id, provider_key, batch_id, db_tokens}
     for user in users:
         model_id = _resolve_model(app, user, model_override)
-        if not _eligible(app, user, model_id):
+        if model_id is None or not _eligible(app, user, model_id):
             continue
         try:
             _dispatch_batch_user(app, user, template, model_id, cap_budget,
@@ -491,8 +508,10 @@ def collect_batches(app, batch_ids, model_override):
     """Fetch already-submitted batches by id and save their results — recovers
     a --batch run that crashed or timed out before retrieving them. The user
     is read from each result's custom_id ('int-u<id>'); the model is re-resolved
-    per user (pass --model to force one). Batches already saved before the
-    crash are independent — re-collecting one just writes another version."""
+    per user (model_for_user), or --model names the one the batches ran on
+    (nothing is sent, so no provider check). Batches already saved before
+    the crash are independent — re-collecting one just writes another
+    version."""
     keys = apply_batch_key_override(
         get_api_keys_for_usage(app.config, "chat"), app.config)
     for batch_id in batch_ids:
@@ -524,7 +543,12 @@ def collect_batches(app, batch_ids, model_override):
             if not user:
                 print(f"  ! batch {batch_id}: user {uid} not found, skipping")
                 continue
-            model_id = _resolve_model(app, user, model_override)
+            try:
+                model_id = model_override or model_for_user(user)
+            except RuntimeError as e:
+                print(f"  ! batch {batch_id}: {e} Pass --model with the "
+                      f"model the batch ran on.")
+                continue
             try:
                 in_t, out_t = r["input_tokens"], r["output_tokens"]
                 _refuse_empty_truncated(user, model_id, r, batch=True)
@@ -547,8 +571,10 @@ def main():
     ap.add_argument("user_ids", nargs="*", type=int,
                     help="User IDs to backfill (default: 1, the operator).")
     ap.add_argument("--model", default=None,
-                    help="Force this model for all users (default: each user's "
-                         f"preferred_model, else {DEFAULT_MODEL}).")
+                    help="Run on this model instead of each user's "
+                         "intentions model, for the users whose model is "
+                         "of the same provider (the others are skipped). "
+                         "With --collect: the model the batches ran on.")
     ap.add_argument("--batch", action="store_true",
                     help="Submit via the Batch API (~50%% cheaper, async): one "
                          "batch per user, sized by a free provider token "
@@ -593,6 +619,8 @@ def main():
         else:
             for user in users:
                 model_id = _resolve_model(app, user, args.model)
+                if model_id is None:
+                    continue
                 try:
                     backfill_user(app, user, template, model_id,
                                   dry_run=args.dry_run)
