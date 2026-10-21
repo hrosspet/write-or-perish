@@ -1408,7 +1408,7 @@ def _start_server_side_llm_chain(draft, session_id, transcript,
     from backend.utils.prompts import get_user_prompt_record
     from backend.utils.llm_nodes import (
         AIUsageRefused, ReadOnlyModelRefused, create_llm_placeholder,
-        reply_ai_usage,
+        enqueue_reply_job, reply_ai_usage,
     )
     from backend.utils.context_artifacts import attach_context_artifacts
     from backend.tasks.llm_completion import generate_llm_response
@@ -1567,14 +1567,19 @@ def _start_server_side_llm_chain(draft, session_id, transcript,
     # it doesn't wait for it.
     if llm_node.llm_model != model:
         prewarm_token = None
-    generate_llm_response.si(
-        tip_node.id, llm_node.id, llm_node.llm_model, user_id,
-        source_mode='voice',
-        cache_split_offset=cache_split_offset,
-        prewarm_token=prewarm_token,
-    ).apply_async()
+    # A job that can't be queued fails the reply at once (#385): the Voice
+    # screen then plays the error sound instead of waiting on "Thinking…".
+    task_id = enqueue_reply_job(
+        llm_node, lambda: generate_llm_response.si(
+            tip_node.id, llm_node.id, llm_node.llm_model, user_id,
+            source_mode='voice',
+            cache_split_offset=cache_split_offset,
+            prewarm_token=prewarm_token,
+        ).apply_async(),
+        record_task_id=False)
 
-    logger.info(
-        f"Server-side LLM chain started for session {session_id}: "
-        f"user_node={user_node.id}, llm_node={llm_node.id}, model={model}"
-    )
+    if task_id is not None:
+        logger.info(
+            f"Server-side LLM chain started for session {session_id}: "
+            f"user_node={user_node.id}, llm_node={llm_node.id}, model={model}"
+        )
