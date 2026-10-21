@@ -2501,12 +2501,13 @@ def _run_conversation_import(user_id, token, task_id, options, *,
         # new confirm started the import again: that run does the work.
         raise UserFacingTaskError(IMPORT_SUPERSEDED_MESSAGE)
     if claim == cs.STOPPED:
-        # Runs of this task died again and again: stop instead of
-        # running it over and over. The stash and the saved place stay
-        # for a new confirm.
+        # Runs of this task died again and again without saving a
+        # commit: stop instead of running it over and over. The stash
+        # and the saved place stay for a new confirm.
         current_app.logger.warning(
             "Conversation import %s for user %s stopped: its runs died "
-            "more than %d times", task_id, user_id, cs.MAX_CRASH_RESUMES)
+            "more than %d times without progress", task_id, user_id,
+            cs.MAX_CRASH_RESUMES)
         raise UserFacingTaskError(IMPORT_STOPPED_MESSAGE)
     cs.touch(path)
 
@@ -2517,6 +2518,8 @@ def _run_conversation_import(user_id, token, task_id, options, *,
         cs.write_state(user_id, token, dict(st, task_id=task_id))
         cs.touch(path)
         cs.heartbeat(user_id, task_id)
+        # A saved commit is progress: only deaths without one count.
+        cs.clear_crashes(user_id, task_id)
 
     def progress(done):
         cs.heartbeat(user_id, task_id)

@@ -887,6 +887,56 @@ def test_an_import_whose_runs_keep_dying_stops_and_can_be_confirmed_again(
     assert cs.read_lock(alice.id) is None
 
 
+def test_runs_that_each_get_further_never_stop_the_import(app, monkeypatch):
+    """A deploy cuts every run off (the pool's SIGTERM arrives in the task
+    as SystemExit, which no handler of the job catches): each run saved
+    a commit before it died, so the crash count starts over and the
+    import finishes, however many runs it takes."""
+    from backend.routes import import_data
+    alice = _make_user("alice")
+    _db.session.commit()
+    token = _stash(alice.id, _analyzed(10, 2))
+    assert cs.acquire_lock(alice.id, "t1", token, "chatgpt", OPTIONS)[0]
+    real_add = import_data._add_imported_message_nodes
+    places, crashes_at_start = [], []
+
+    def cut_off_after_four(*args, **kwargs):
+        made["n"] += 1
+        if made["n"] > 4:
+            raise SystemExit(1)
+        return real_add(*args, **kwargs)
+
+    monkeypatch.setattr(import_data, "_add_imported_message_nodes",
+                        cut_off_after_four)
+    real_claim = cs.claim_lock
+
+    def recording_claim(*args):
+        answer = real_claim(*args)
+        crashes_at_start.append(cs.read_lock(alice.id)["crashes"])
+        return answer
+
+    monkeypatch.setattr(cs, "claim_lock", recording_claim)
+    result = None
+    for _ in range(cs.MAX_CRASH_RESUMES + 3):
+        made = {"n": 0}
+        try:
+            result = import_data.run_conversation_import(
+                alice.id, token, "t1", OPTIONS, batch_size=2)
+            break
+        except SystemExit:
+            _db.session.rollback()
+            places.append(cs.read_state(alice.id, token)["next_conv"])
+            assert cs.read_lock(alice.id)["running"]  # left as a kill
+
+    assert places == [2, 4, 6, 8]
+    # Each resumed run counted one crash; its first commit cleared it.
+    assert crashes_at_start == [0, 1, 1, 1, 1]
+    assert result is not None and result["created"] == 20
+    keys = _keys(alice.id)
+    assert len(keys) == 20 and len(set(keys)) == 20
+    assert cs.read_lock(alice.id) is None
+
+
 def test_the_heartbeat_thread_keeps_a_running_lock_fresh(app):
     alice = _make_user("alice")
     _db.session.commit()

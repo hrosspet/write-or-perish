@@ -42,9 +42,10 @@ Files:
   run's heartbeat thread (keep_alive) touches the lock every
   HEARTBEAT_SECONDS, so a running lock untouched for LOCK_STALE_SECONDS
   means the run's process died (stalled_locks; the resume beat sends
-  the job again). ``crashes``: how many runs of this task died;
-  ``stopped``: the job gave up after MAX_CRASH_RESUMES of them, and the
-  lock no longer blocks a new confirm. Changes to it happen under an
+  the job again). ``crashes``: how many runs of this task died since
+  its last saved commit; ``stopped``: the job gave up after
+  MAX_CRASH_RESUMES of them, and the lock no longer blocks a new
+  confirm. Changes to it happen under an
   flock on ``conversation-import.mutex`` (an empty file).
 
 A stash is deleted when its job finishes, when the user analyzes
@@ -79,9 +80,12 @@ LOCK_STALE_SECONDS = 3 * 60
 # while the job waits in the queue behind other tasks; it no longer
 # counts after this long (the value every lock had before #546).
 QUEUED_LOCK_STALE_SECONDS = 30 * 60
-# HEURISTIC: how many times a run of one import may die and be resumed.
-# The run after that stops with a message to press Confirm Import again,
-# so an import that kills its worker is not run over and over.
+# HEURISTIC: how many times in a row a run of one import may die before
+# saving a commit (its place did not move) and be resumed. The run after
+# that stops with a message to press Confirm Import again, so an import
+# that kills its worker is not run over and over. A run that saves a
+# commit clears the count (clear_crashes): runs that each get further (a
+# deploy per run) never stop the import.
 MAX_CRASH_RESUMES = 3
 
 # claim_lock's answers.
@@ -425,11 +429,14 @@ def claim_lock(user_id, task_id, token, source, options=None):
     this run's), SUPERSEDED (another task holds a lock that counts: this
     run waited in the queue until its lock went stale, and a new confirm
     started the import again), or STOPPED (runs of this task died more
-    than MAX_CRASH_RESUMES times; the lock is left stopped, so later
-    deliveries of the task stop too, and a new confirm may start again).
+    than MAX_CRASH_RESUMES times in a row without saving a commit; the
+    lock is left stopped, so later deliveries of the task stop too, and
+    a new confirm may start again).
 
     A lock this task holds that is still ``running`` means the previous
-    run never left it: that run died, and this one counts the crash."""
+    run never left it: that run died (killed, or cut off by a deploy),
+    and this one counts the crash. clear_crashes resets the count when
+    a run saves a commit."""
     with _lock_mutex(user_id):
         held = read_lock(user_id)
         if held is None or held.get("task_id") != task_id:
@@ -448,6 +455,17 @@ def claim_lock(user_id, task_id, token, source, options=None):
                     return STOPPED
         _write_lock(user_id, dict(lock, waiting=False, running=True))
         return CLAIMED
+
+
+def clear_crashes(user_id, task_id):
+    """The run saved a commit: its place moved, so the deaths before it
+    no longer count towards MAX_CRASH_RESUMES. Writes the lock only when
+    it has a count to clear."""
+    with _lock_mutex(user_id):
+        held = read_lock(user_id)
+        if (held is not None and held.get("task_id") == task_id
+                and held.get("crashes")):
+            _write_lock(user_id, dict(held, crashes=0))
 
 
 def requeue_lock(user_id, task_id):

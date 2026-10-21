@@ -26,8 +26,9 @@ the task out again only after its visibility timeout, an hour later
 (#546). ``resume_stalled_imports`` (beat, every minute) sends such a
 task again under its id within minutes: the run's heartbeat thread died
 with it, so its lock went stale (conversation_stash.stalled_locks). The
-run counts how often runs of its task died and stops after
-MAX_CRASH_RESUMES of them (conversation_stash.claim_lock).
+run counts how often runs of its task died without saving a commit and
+stops after MAX_CRASH_RESUMES of them in a row
+(conversation_stash.claim_lock, clear_crashes).
 """
 from celery.utils.log import get_task_logger
 
