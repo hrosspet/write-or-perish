@@ -514,6 +514,50 @@ def _with_read_marker(meta, is_read_turn, live):
     return meta
 
 
+# ── A reply whose job can't be queued fails (#385) ───────────────────────
+# A reply is saved first (its placeholder, committed) and its job queued
+# second. When the queueing fails (the broker is unreachable, or the
+# publish raises for another reason) no job exists, so the placeholder is
+# marked failed at once: the pages and the app then show the failed reply
+# the way they show any other (the toast, the Voice error sound, the
+# LLM Response button to ask again) instead of "Thinking…" until their
+# poll gives up. Written for the user; the exception goes to the log and
+# Sentry, never into the message.
+REPLY_NOT_QUEUED_MESSAGE = (
+    "Loore couldn't start this reply. Please try again in a minute.")
+
+
+def enqueue_reply_job(llm_node, dispatch, record_task_id=True):
+    """Queue the generation job of *llm_node*, a reply already committed.
+    *dispatch* queues it (``generate_llm_response.delay(...)`` or
+    ``.apply_async(...)``) and returns its AsyncResult; with
+    *record_task_id* its id is saved on the node. Returns the task id, or
+    None when the job could not be queued: then the node is marked failed
+    with REPLY_NOT_QUEUED_MESSAGE (a TTS job it waited for too), committed,
+    and the exception is logged as an error, which reaches Sentry. Every
+    path that saves a reply and then queues its job goes through here."""
+    from backend.utils.error_privacy import describe_exception
+    try:
+        result = dispatch()
+    except Exception as e:  # noqa: BLE001 - any failure leaves no job
+        current_app.logger.exception(
+            "Could not queue the reply job for node %s: %s",
+            llm_node.id, describe_exception(e))
+        llm_node.llm_task_status = "failed"
+        llm_node.llm_task_error = REPLY_NOT_QUEUED_MESSAGE
+        # The Voice finalize marks the reply's audio pending before the
+        # job is queued (the job makes it): none is coming now.
+        if llm_node.tts_task_status == "pending":
+            llm_node.tts_task_status = "failed"
+        db.session.commit()
+        return None
+    task_id = result.id
+    if record_task_id:
+        llm_node.llm_task_id = task_id
+        db.session.commit()
+    return task_id
+
+
 def create_llm_placeholder(parent_node_id, model_id, human_owner_id,
                            privacy_level="private", ai_usage="chat",
                            placeholder_text="[LLM response generation pending...]",
@@ -521,7 +565,9 @@ def create_llm_placeholder(parent_node_id, model_id, human_owner_id,
                            client=None, read_live=True):
     """Create an LLM placeholder node, optionally enqueue generation task.
 
-    Returns (llm_node, task_id) -- task_id is None if enqueue=False.
+    Returns (llm_node, task_id) -- task_id is None if enqueue=False, and
+    when the job could not be queued: the node is then already marked
+    failed (enqueue_reply_job, #385).
     *meta* seeds the node's tool_calls_meta (a list of entries) in the
     same commit that creates it, so a marker the task reads (the read
     thread's "_read", routes/read.py) is there before the task can start.
@@ -684,12 +730,10 @@ def create_llm_placeholder(parent_node_id, model_id, human_owner_id,
     task_id = None
     if enqueue:
         from backend.tasks.llm_completion import generate_llm_response
-        task = generate_llm_response.delay(
-            parent_node_id, llm_node.id, model_id, human_owner_id,
-            source_mode=source_mode,
-        )
-        llm_node.llm_task_id = task.id
-        db.session.commit()
-        task_id = task.id
+        task_id = enqueue_reply_job(
+            llm_node, lambda: generate_llm_response.delay(
+                parent_node_id, llm_node.id, model_id, human_owner_id,
+                source_mode=source_mode,
+            ))
 
     return llm_node, task_id

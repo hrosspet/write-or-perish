@@ -673,6 +673,80 @@ class TestRerun:
         assert resp.status_code == 403
 
 
+# ── Tests: a job that can't be queued (#385) ───────────────────────────
+
+
+class TestQueueDown:
+    """A glean whose job can't be queued (the broker is down) fails at
+    once, with a message for the user, instead of "Gleaning…" until the
+    page stops polling (llm_nodes.enqueue_reply_job)."""
+
+    BROKER_DOWN = "Error 111 connecting to redis:6379. Connection refused."
+
+    def _assert_failed(self, node_id):
+        from backend.utils.llm_nodes import REPLY_NOT_QUEUED_MESSAGE
+        reply = Node.query.get(node_id)
+        assert reply.llm_task_status == "failed"
+        assert reply.llm_task_error == REPLY_NOT_QUEUED_MESSAGE
+        assert self.BROKER_DOWN not in reply.llm_task_error
+
+    def test_a_glean_fails(self, app, monkeypatch):
+        task = _llm_task(monkeypatch)
+        task.delay.side_effect = ConnectionRefusedError(self.BROKER_DOWN)
+        client = app.test_client()
+        alice = _make_user("alice", is_admin=True)
+        entry = _make_node(alice, content="entry")
+        _db.session.commit()
+
+        _login(client, alice.id)
+        resp = client.post(f"/api/read/from-node/{entry.id}",
+                           json={"model": "gpt-5"})
+
+        # The page polls the reply and shows its failed gleaning.
+        assert resp.status_code == 202, resp.get_json()
+        data = resp.get_json()
+        assert data["task_id"] is None
+        self._assert_failed(data["llm_node_id"])
+
+    def test_glean_again_fails(self, app, monkeypatch):
+        task = _llm_task(monkeypatch)
+        task.delay.side_effect = ConnectionRefusedError(self.BROKER_DOWN)
+        client = app.test_client()
+        alice = _make_user("alice", is_admin=True)
+        prompt = _make_prompt_node(alice, "read")
+        comment = _make_node(alice, parent_id=prompt.id, content="more")
+        _db.session.commit()
+
+        _login(client, alice.id)
+        resp = client.post(f"/api/read/from-node/{comment.id}",
+                           json={"model": "gpt-5"})
+
+        assert resp.status_code == 202, resp.get_json()
+        self._assert_failed(resp.get_json()["llm_node_id"])
+
+    def test_a_rerun_fails_instead_of_staying_processing(self, app,
+                                                         monkeypatch):
+        task = _llm_task(monkeypatch)
+        task.apply_async.side_effect = ConnectionRefusedError(
+            self.BROKER_DOWN)
+        client = app.test_client()
+        alice = _make_user("alice", is_admin=True)
+        _, reply = _make_read_reply(alice, status="failed", batch=False)
+
+        _login(client, alice.id)
+        resp = client.post(f"/api/read/{reply.id}/rerun", json={"live": True})
+
+        # Nothing new was created: the admin's call is answered directly.
+        assert resp.status_code == 503, resp.get_json()
+        from backend.utils.llm_nodes import REPLY_NOT_QUEUED_MESSAGE
+        assert resp.get_json()["error"] == REPLY_NOT_QUEUED_MESSAGE
+        self._assert_failed(reply.id)
+        # Still failed, so it can be rerun once the queue is back.
+        task.apply_async.side_effect = None
+        resp = client.post(f"/api/read/{reply.id}/rerun", json={"live": True})
+        assert resp.status_code == 202, resp.get_json()
+
+
 # ── Tests: the read never runs under the agentic prompt ────────────────
 
 

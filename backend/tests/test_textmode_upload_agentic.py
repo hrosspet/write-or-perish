@@ -421,6 +421,28 @@ class TestTranscribeAudioReply:
         assert (tr._t["llm"].generate_llm_response.delay.call_args.kwargs
                 ["source_mode"] == "textmode")
 
+    def test_reply_fails_when_its_job_cannot_be_queued(self, tr):
+        # #385: the broker is down. The transcript is saved; the reply is
+        # marked failed (the page's poll toasts the message), and the
+        # entry gets no warning carrying the connection error.
+        from backend.utils.llm_nodes import REPLY_NOT_QUEUED_MESSAGE
+        broker_down = "Error 111 connecting to redis:6379. Connection refused."
+        tr._t["llm"].generate_llm_response.delay.side_effect = (
+            ConnectionRefusedError(broker_down))
+        entry = tr._t["entry"]
+
+        tr.transcribe_audio(MagicMock(), entry.id, tr._t["audio"],
+                            "talk.m4a", auto_reply_model="gpt-5")
+
+        _db.session.refresh(entry)
+        assert entry.transcription_status == "completed"
+        assert entry.get_content() == "uploaded words"
+        assert broker_down not in (entry.llm_task_warnings or "")
+        reply = Node.query.filter_by(parent_id=entry.id,
+                                     node_type="llm").one()
+        assert reply.llm_task_status == "failed"
+        assert reply.llm_task_error == REPLY_NOT_QUEUED_MESSAGE
+
     def test_no_reply_to_an_empty_transcript(self, tr):
         entry = tr._t["entry"]
         tr.OpenAI.return_value.audio.transcriptions.create.return_value = (
