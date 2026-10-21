@@ -8,6 +8,7 @@ import useSubmitShortcut from "../hooks/useSubmitShortcut";
 import { emailState } from "../utils/emailState";
 import DeleteWritingDialog from "../components/DeleteWritingDialog";
 import DeleteAccountDialog from "../components/DeleteAccountDialog";
+import DisconnectXDialog from "../components/DisconnectXDialog";
 import {
   formatDeletionDate, reloadUser, restoreWriting, writingRestorable,
   X_REMOVE_ACCESS_STEPS,
@@ -31,6 +32,24 @@ const X_LOGIN_MESSAGES = {
   },
 };
 
+// What Disconnect X (#494) did, from the server's answer: whether X
+// confirmed that Loore's access is gone, and what became of the bookmark
+// sync. Otherwise the user gets the steps to remove Loore on X.
+export function disconnectXMessage(data) {
+  const parts = ["X disconnected. You sign in with email."];
+  if (data?.bookmark_sync === "kept") {
+    parts.push("Your X bookmarks keep syncing, so X still lists Loore as an app with access to your account.");
+    return parts.join(" ");
+  }
+  if (data?.bookmark_sync === "ended") {
+    parts.push("Bookmark sync has stopped; bookmarks already in Loore stay.");
+  }
+  parts.push(data?.x_access_removed
+    ? "Loore has removed its access on X."
+    : `X may still list Loore as an app with access to your account. To remove it: ${X_REMOVE_ACCESS_STEPS}`);
+  return parts.join(" ");
+}
+
 export default function AccountPage() {
   const { user, setUser } = useUser();
   const navigate = useNavigate();
@@ -48,19 +67,38 @@ export default function AccountPage() {
     }
   }, [location.search, location.pathname, location.hash, navigate]);
 
-  const disconnectX = async () => {
+  // Disconnect X (#494): the server revokes Loore's access at X. An
+  // account that also syncs its X bookmarks is asked first whether that
+  // sync ends too.
+  const [disconnectXOpen, setDisconnectXOpen] = useState(false);
+  const disconnectX = async (endBookmarkSync) => {
     setXSaving(true);
     setXMsg(null);
     try {
-      await api.delete("/dashboard/x");
+      const res = endBookmarkSync
+        ? await api.delete("/dashboard/x", { data: { end_bookmark_sync: true } })
+        : await api.delete("/dashboard/x");
       setUser((prev) => ({ ...prev, twitter_login: false, twitter_handle: null }));
-      setXMsg({ type: "success", text: "X disconnected. You sign in with email." });
+      setXMsg({ type: "success", text: disconnectXMessage(res?.data) });
+      setDisconnectXOpen(false);
+      // The deletion dialogs' X notes read the rest of the user.
+      reloadUser(setUser);
     } catch (e) {
+      setDisconnectXOpen(false);
       setXMsg({ type: "error", text: e.response?.data?.error || "Could not disconnect X." });
     } finally {
       setXSaving(false);
     }
   };
+  const startDisconnectX = () => {
+    if (user?.data_deletion?.x_connected) {
+      setXMsg(null);
+      setDisconnectXOpen(true);
+    } else {
+      disconnectX(false);
+    }
+  };
+  const closeDisconnectX = useCallback(() => setDisconnectXOpen(false), []);
 
   // Deep-link anchors (e.g. /account#model from the changelog): scroll
   // the target row into view on arrival. BrowserRouter doesn't handle
@@ -591,7 +629,7 @@ export default function AccountPage() {
               {" "}
               <button
                 type="button"
-                onClick={disconnectX}
+                onClick={startDisconnectX}
                 disabled={xSaving}
                 style={{
                   background: "none", border: "none", padding: 0,
@@ -604,6 +642,12 @@ export default function AccountPage() {
             </>
           )}
         </div>
+        <DisconnectXDialog
+          open={disconnectXOpen}
+          busy={xSaving}
+          onChoose={disconnectX}
+          onClose={closeDisconnectX}
+        />
       </div>
 
       <div style={rowStyle}>

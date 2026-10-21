@@ -115,7 +115,8 @@ PURGE_MAX_WAIT = timedelta(minutes=65)
 # Each call to X's token revoke endpoint (connect and read, each): the
 # purge does not wait longer for X, and a call that times out is logged
 # and the stored connection deleted anyway. X answers in well under a
-# second; at most two calls per connection.
+# second; at most two calls per connection. The X sign-in revoke of
+# account deletion and Disconnect X (#494) uses it too.
 X_REVOKE_TIMEOUT_SECONDS = 10
 
 IN_FLIGHT_STATUSES = ("pending", "processing")
@@ -1111,67 +1112,73 @@ def _tombstone(ids, now):
     }, synchronize_session=False)
 
 
-def _revoke_x_access(user_id):
-    """Revoke the user's stored X tokens at X, before the purge deletes
-    them, so X stops listing Loore as an app with access to the account.
+def revoke_x_access(user_id, during="user purge"):
+    """Revoke the user's stored X tokens (the bookmark connection) at X,
+    before the caller deletes them, so X stops listing Loore as an app
+    with access to the account. The purge calls it, and Disconnect X when
+    the user ends the bookmark sync with it (#494); *during* names the
+    action in the log.
 
-    Never raises and never holds the purge up: a call X refuses, one that
+    Never raises and never holds the caller up: a call X refuses, one that
     times out (X_REVOKE_TIMEOUT_SECONDS) or a token that cannot be read is
-    logged without the token, and the purge deletes the connection
-    anyway. The user was told how to remove Loore on X themselves if it
+    logged without the token, and the caller deletes the connection
+    anyway. The user is told how to remove Loore on X themselves if it
     is still listed. Logged as an error (Sentry), except for a connection
     X had already refused (``revoked_at``), where a refusal is expected.
 
     The tokens are decrypted here, one connection at a time, to send them
     to X: they are credentials Loore holds, not the user's writing.
     An access token past its expiry grants nothing and is not sent.
-    Returns how many tokens X confirmed revoked."""
+    Returns (revoked, not_revoked): how many tokens X confirmed revoked,
+    and how many it did not (refused, timed out, unreadable, or X is not
+    configured here)."""
     from flask import current_app
     from backend.utils.external_content import x_revoke_token
 
     accounts = ExternalAccount.query.filter(
         ExternalAccount.user_id == user_id).order_by(ExternalAccount.id).all()
-    if not accounts:
-        return 0
-    client_id = current_app.config.get("X_CLIENT_ID")
-    if not client_id:
-        logger.warning("user purge of user %s: X is not configured here, "
-                       "so the stored X connection is deleted without "
-                       "revoking it at X", user_id)
-        return 0
-    client_secret = current_app.config.get("X_CLIENT_SECRET")
     now = _now()
-    revoked = 0
+    tokens = []
     for account in accounts:
         if account.provider != "twitter":
             continue
         expected = account.revoked_at is not None
-        kinds = []
         if account.access_token and not (
                 account.token_expires_at and account.token_expires_at <= now):
-            kinds.append(("access", account.get_access_token))
+            tokens.append(("access", account.get_access_token, expected))
         if account.refresh_token:
-            kinds.append(("refresh", account.get_refresh_token))
-        for kind, read in kinds:
-            try:
-                token = read()
-                if not token:
-                    continue
-                x_revoke_token(token, client_id, client_secret,
-                               timeout=X_REVOKE_TIMEOUT_SECONDS)
-                revoked += 1
-            except Exception as e:  # noqa: BLE001 - never stops the purge
-                response = getattr(e, "response", None)
-                status = getattr(response, "status_code", None)
-                (logger.warning if expected else logger.error)(
-                    "user purge of user %s: X did not revoke the stored X "
-                    "%s token (%s%s); the connection is deleted anyway",
-                    user_id, kind, type(e).__name__,
-                    f", HTTP {status}" if status else "")
+            tokens.append(("refresh", account.get_refresh_token, expected))
+    if not tokens:
+        return 0, 0
+    client_id = current_app.config.get("X_CLIENT_ID")
+    if not client_id:
+        logger.warning("%s of user %s: X is not configured here, so the "
+                       "stored X connection is deleted without revoking it "
+                       "at X", during, user_id)
+        return 0, len(tokens)
+    client_secret = current_app.config.get("X_CLIENT_SECRET")
+    revoked = not_revoked = 0
+    for kind, read, expected in tokens:
+        try:
+            token = read()
+            if not token:
+                continue
+            x_revoke_token(token, client_id, client_secret,
+                           timeout=X_REVOKE_TIMEOUT_SECONDS)
+            revoked += 1
+        except Exception as e:  # noqa: BLE001 - never stops the caller
+            not_revoked += 1
+            response = getattr(e, "response", None)
+            status = getattr(response, "status_code", None)
+            (logger.warning if expected else logger.error)(
+                "%s of user %s: X did not revoke the stored X %s token "
+                "(%s%s); the connection is deleted anyway", during,
+                user_id, kind, type(e).__name__,
+                f", HTTP {status}" if status else "")
     if revoked:
-        logger.info("user purge of user %s: %d stored X token(s) revoked "
-                    "at X", user_id, revoked)
-    return revoked
+        logger.info("%s of user %s: %d stored X token(s) revoked at X",
+                    during, user_id, revoked)
+    return revoked, not_revoked
 
 
 def _beat(heartbeat):
@@ -1190,7 +1197,7 @@ def _purge_round(user, plan, counts, heartbeat):
     for chunk in _chunks(sessions):
         counts["node_transcript_chunk"] += _delete(
             NodeTranscriptChunk, _session_chunk_filter(chunk, owned_ids))
-    _revoke_x_access(U)
+    revoke_x_access(U)
     counts["external_account"] += _delete(ExternalAccount,
                                           ExternalAccount.user_id == U)
     counts["draft"] += _delete(Draft, scope.rows(Draft))

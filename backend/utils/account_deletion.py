@@ -185,38 +185,49 @@ def session_x_sign_in_token(user):
     return token
 
 
-def end_x_sign_in(user):
-    """At the user's own deletion request: invalidate this session's
-    "Sign in with X" token at X, then drop it from the session.
+def revoke_x_sign_in(user_id, token, during):
+    """Invalidate a "Sign in with X" token (from session_x_sign_in_token)
+    at X; *during* names the action in the log ("account deletion",
+    "Disconnect X").
 
     Best effort, as the purge's revoke of the bookmark connection: one
     call bounded by X_REVOKE_TIMEOUT_SECONDS; a failure is logged without
-    the token and never stops the deletion. X answering 401 means the
-    token was already invalid (the user removed Loore on X), a warning.
-    A restore stays possible: signing in with X again asks X again.
-    Returns True when X confirmed."""
+    the token and never raises, so it never stops the action. X answering
+    401 means the token was already invalid (the user removed Loore on
+    X), a warning. Returns True when X confirmed; False without a token
+    (no call) or when the call failed."""
     from flask import current_app
     from backend.utils.external_content import x_invalidate_sign_in_token
     from backend.utils.user_purge import X_REVOKE_TIMEOUT_SECONDS
-    token = session_x_sign_in_token(user)
-    ok = False
-    if token is not None:
-        try:
-            x_invalidate_sign_in_token(
-                token["oauth_token"], token["oauth_token_secret"],
-                current_app.config.get("TWITTER_API_KEY"),
-                current_app.config.get("TWITTER_API_SECRET"),
-                timeout=X_REVOKE_TIMEOUT_SECONDS)
-            ok = True
-            logger.info("account deletion of user %s: the X sign-in was "
-                        "revoked at X", user.id)
-        except Exception as e:  # noqa: BLE001 - never stops the deletion
-            status = getattr(getattr(e, "response", None), "status_code",
-                             None)
-            (logger.warning if status == 401 else logger.error)(
-                "account deletion of user %s: X did not revoke the X "
-                "sign-in (%s%s); the deletion goes ahead", user.id,
-                type(e).__name__, f", HTTP {status}" if status else "")
+    if token is None:
+        return False
+    try:
+        x_invalidate_sign_in_token(
+            token["oauth_token"], token["oauth_token_secret"],
+            current_app.config.get("TWITTER_API_KEY"),
+            current_app.config.get("TWITTER_API_SECRET"),
+            timeout=X_REVOKE_TIMEOUT_SECONDS)
+    except Exception as e:  # noqa: BLE001 - never stops the action
+        status = getattr(getattr(e, "response", None), "status_code", None)
+        (logger.warning if status == 401 else logger.error)(
+            "%s of user %s: X did not revoke the X sign-in (%s%s); it goes "
+            "ahead anyway", during, user_id, type(e).__name__,
+            f", HTTP {status}" if status else "")
+        return False
+    logger.info("%s of user %s: the X sign-in was revoked at X", during,
+                user_id)
+    return True
+
+
+def end_x_sign_in(user):
+    """At the user's own deletion request: invalidate this session's
+    "Sign in with X" token at X (revoke_x_sign_in), then drop it from the
+    session. A failure never stops the deletion. A restore stays
+    possible: signing in with X again asks X again. Returns True when X
+    confirmed."""
+    from flask import current_app
+    ok = revoke_x_sign_in(user.id, session_x_sign_in_token(user),
+                          "account deletion")
     # As routes/auth.py's _drop_x_token: the next "Sign in with X" in this
     # browser goes through X again (it would fail on the revoked token).
     bp = current_app.blueprints.get("twitter")
