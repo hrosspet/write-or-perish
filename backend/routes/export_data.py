@@ -88,11 +88,21 @@ def _export_visible_filter(model, user_id):
 
 def _node_header_line(node, index_path):
     """Markdown header line shared by all node renderings."""
-    depth = len(index_path.split('.'))
-    header = "#" * min(depth + 1, 6)
     ts = node.created_at.strftime("%Y-%m-%d %H:%M:%S UTC")
-    return (f"{header} [{index_path}] {_node_author_label(node)}"
+    return (f"{_index_heading(index_path)} {_node_author_label(node)}"
             f"{_origin_suffix(node)} - {ts}\n")
+
+
+# What a reply the user cannot access renders as, under a heading that
+# holds only its place in the thread: no author, no time.
+INACCESSIBLE_TEXT = "[Reply not accessible]"
+
+
+def _index_heading(index_path):
+    """The Markdown heading of the node at *index_path*, e.g. '### [1.2]':
+    one level deeper per level of the thread."""
+    depth = len(index_path.split('.'))
+    return f"{'#' * min(depth + 1, 6)} [{index_path}]"
 
 
 def prefetch_children(nodes, batch=500):
@@ -451,8 +461,9 @@ def format_node_tree(
     overflowed the call stack — the same failure
     `_collect_all_nodes_in_tree` had before c556e4d, one stage later in
     the pipeline. Stack frames are (kind, node, index_path), where kind
-    mirrors the old mutual recursion: "node" (cycle-checked; routes
-    soft-deleted nodes to the tombstone shell), "tombstone", and
+    mirrors the old mutual recursion: "node" (cycle-checked; applies the
+    access rule: renders the node, routes it to the tombstone or
+    inaccessible shell, or leaves it out), "tombstone", and
     "inaccessible". Branch separators are pushed as ("text", str)
     frames, so the concatenated output is identical to the recursive
     version's.
@@ -506,12 +517,19 @@ def format_node_tree(
             # Avoid infinite loops from circular references
             if current.id in processed_nodes:
                 continue
-            # Soft-deleted: render the tombstone shell (no content). The
-            # caller is responsible for the pre-deletion-access check on
-            # the entry node; child tombstones are checked at push time
-            # below via can_user_view_tombstone.
+            # The access rule, the same for every node at any depth,
+            # under a live node or a placeholder shell. Soft-deleted:
+            # the tombstone shell (no content), only for a user who
+            # could see the node before; otherwise it is left out with
+            # everything below it (no structural "something is here").
+            # Not accessible to the user: the inaccessible shell.
             if _deleted(current):
+                if user_id is not None and not can_user_view_tombstone(
+                        current, user_id):
+                    continue
                 kind = "tombstone"
+            elif user_id and not can_user_access_node(current, user_id):
+                kind = "inaccessible"
 
         if kind == "node":
             processed_nodes.add(current.id)
@@ -528,19 +546,6 @@ def format_node_tree(
                 # Mark branches (when there are multiple children)
                 if len(children) > 1 and i > 0:
                     child_frames.append(("text", "---\n**BRANCH**\n---\n\n"))
-                if _deleted(child):
-                    # Tombstone: render only with pre-deletion access;
-                    # otherwise skip (don't leak structural "something
-                    # is here").
-                    if user_id is None or can_user_view_tombstone(
-                            child, user_id):
-                        child_frames.append(
-                            ("tombstone", child, child_index))
-                    continue
-                if user_id and not can_user_access_node(child, user_id):
-                    child_frames.append(
-                        ("inaccessible", child, child_index))
-                    continue
                 child_frames.append(("node", child, child_index))
             # LIFO: push reversed so children pop left-to-right,
             # preserving the recursive version's pre-order output.
@@ -549,16 +554,19 @@ def format_node_tree(
 
         # Placeholder shells (tombstone / inaccessible). Children still
         # render — they may be alive, accessible replies. All children
-        # route through the "node" kind (cycle check + deleted routing)
+        # route through the "node" kind (cycle check + the access rule)
         # with no BRANCH markers, matching the old recursive helpers.
         if kind == "tombstone":
             placeholder = "[Node deleted by author]\n\n"
             keep_tombstones = True
         else:
-            placeholder = ("[Content not accessible — private node by "
-                           "another user]\n\n")
+            # Another user's reply the user cannot access leaves no
+            # trace but its place: no author, no time.
+            placeholder = f"{INACCESSIBLE_TEXT}\n\n"
             keep_tombstones = False
-        parts.append(_node_header_line(current, path) + placeholder)
+        header = (_node_header_line(current, path) if kind == "tombstone"
+                  else _index_heading(path) + "\n")
+        parts.append(header + placeholder)
         processed_nodes.add(current.id)
         children = _filtered_children(
             current, filter_ai_usage, created_before, included_ids,
