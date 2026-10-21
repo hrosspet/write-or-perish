@@ -420,11 +420,12 @@ def test_no_digest_while_the_writing_is_on_hold(app, monkeypatch):
 
 
 def _pending_job(user, corpus_at, provider_key="anthropic",
-                 batch_id="batch_x", submitted_at=None):
+                 batch_id="batch_x", submitted_at=None,
+                 model_id="claude-opus-5"):
     job = ExternalDigestBatchJob(
         provider_key=provider_key, batch_id=batch_id, items=[{
             "custom_id": f"external-digest-{user.id}",
-            "user_id": user.id, "model_id": "claude-opus-5",
+            "user_id": user.id, "model_id": model_id,
             "corpus_at": corpus_at.isoformat(), "total_items": 1,
         }])
     if submitted_at is not None:
@@ -488,6 +489,109 @@ def test_collector_leaves_a_failed_item_stale_and_waits_on_pending(
     assert UserArtifact.latest_for(user.id, _digest.DIGEST_KIND) is None
     assert _digest.digest_is_stale(user.id) is True
     assert APICostLog.query.count() == 0
+
+
+# ── OpenAI batches through the real collect helper (#419) ───────────────
+
+def _fake_openai_batch(monkeypatch, files, **batch):
+    """The OpenAI SDK faked at its import: the batch ends as ``batch``
+    says, with the given files (file id -> JSONL entries)."""
+    import json
+    import types
+    from types import SimpleNamespace
+    client = MagicMock()
+    batch.setdefault("created_at", 1000)
+    batch.setdefault("output_file_id", None)
+    batch.setdefault("error_file_id", None)
+    client.batches.retrieve.return_value = SimpleNamespace(**batch)
+    client.files.content.side_effect = lambda fid: SimpleNamespace(
+        content="".join(json.dumps(e) + "\n" for e in files[fid]).encode())
+    fake = types.ModuleType("openai")
+    fake.OpenAI = MagicMock(return_value=client)
+    monkeypatch.setitem(sys.modules, "openai", fake)
+    return client
+
+
+def _counts(completed, failed):
+    from types import SimpleNamespace
+    return SimpleNamespace(total=completed + failed, completed=completed,
+                           failed=failed)
+
+
+def test_collector_closes_an_all_failed_openai_batch_at_once(
+        app, monkeypatch):
+    """Every request failed, so the batch has no output file. The job
+    closes on the first poll and the user is free for the next night's
+    sweep, instead of staying in flight for the 25 h backstop."""
+    user = User.query.first()
+    _mk_item(user.id, "a")
+    job = _pending_job(user, datetime.utcnow(),
+                       provider_key="openai:gpt-6-astra",
+                       batch_id="batch_all_failed", model_id="gpt-6-astra")
+    _fake_openai_batch(
+        monkeypatch, {"file-err": [{
+            "custom_id": f"external-digest-{user.id}", "response": {
+                "status_code": 400, "body": {"error": {
+                    "code": "context_length_exceeded",
+                    "message": "too long"}}}, "error": None}]},
+        status="completed", completed_at=1060, error_file_id="file-err",
+        request_counts=_counts(0, 1))
+
+    assert _digest._collect_digest_batches() == {"collected": 1,
+                                                 "abandoned": 0}
+    _db.session.expire_all()
+    assert ExternalDigestBatchJob.query.get(job.id).status == "collected"
+    assert user.id not in _digest._users_in_pending_batches()
+    assert _digest.digest_is_stale(user.id) is True
+    assert UserArtifact.latest_for(user.id, _digest.DIGEST_KIND) is None
+    assert APICostLog.query.count() == 0   # a failed request isn't billed
+
+
+def test_collector_saves_and_costs_an_expired_batchs_finished_items(
+        app, monkeypatch):
+    """OpenAI bills the requests that finished before the batch expired
+    and returns them in its output file: saved, with a cost row on the
+    user at batch price. The one that never ran stays stale, unbilled."""
+    done = User.query.first()
+    late = User(username="late")
+    _db.session.add(late)
+    _db.session.commit()
+    corpus_at = datetime.utcnow()
+    job = ExternalDigestBatchJob(
+        provider_key="openai:gpt-6-astra", batch_id="batch_expired", items=[
+            {"custom_id": f"external-digest-{u.id}", "user_id": u.id,
+             "model_id": "gpt-6-astra", "corpus_at": corpus_at.isoformat(),
+             "total_items": 1} for u in (done, late)])
+    _db.session.add(job)
+    _db.session.commit()
+    for u in (done, late):
+        _mk_item(u.id, f"clip-{u.id}")
+    _fake_openai_batch(
+        monkeypatch, {
+            "file-out": [{
+                "custom_id": f"external-digest-{done.id}", "response": {
+                    "status_code": 200, "body": {
+                        "choices": [{"message": {"content": "# Topics\n- x"},
+                                     "finish_reason": "stop"}],
+                        "usage": {"prompt_tokens": 1000,
+                                  "completion_tokens": 100}}}}],
+            "file-err": [{
+                "custom_id": f"external-digest-{late.id}", "response": None,
+                "error": {"code": "batch_expired", "message": "not run"}}]},
+        status="expired", expired_at=1000 + 86400,
+        output_file_id="file-out", error_file_id="file-err",
+        request_counts=_counts(1, 1))
+
+    assert _digest._collect_digest_batches() == {"collected": 1,
+                                                 "abandoned": 0}
+    artifact = UserArtifact.latest_for(done.id, _digest.DIGEST_KIND)
+    assert artifact.get_content() == "# Topics\n- x"
+    log = APICostLog.query.one()
+    assert (log.user_id, log.request_type) == (done.id, "external_digest")
+    # 1000 in x $10 + 100 out x $50 = 15000 microdollars, halved for batch.
+    assert log.cost_microdollars == 7500
+    assert UserArtifact.latest_for(late.id, _digest.DIGEST_KIND) is None
+    assert _digest.digest_is_stale(late.id) is True
 
 
 def _raise_not_found(ids, keys):

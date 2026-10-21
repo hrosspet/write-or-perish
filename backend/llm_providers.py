@@ -282,6 +282,16 @@ def account_failure_kind(exc, model_call=True):
     return None
 
 
+def account_failure_kind_of_error(provider, status, error):
+    """account_failure_kind for an error that arrives as data rather than
+    as an exception: a batch request's error object ({type, code,
+    message, details}) and its HTTP status (None when there is none)."""
+    error = error if isinstance(error, dict) else {}
+    if provider == "anthropic":
+        return _anthropic_account_kind(status, error, model_call=True)
+    return _openai_account_kind(status, error.get("code"), error.get("type"))
+
+
 def provider_error_detail(exc):
     """What the provider said, for the admin alert: HTTP status, error
     type and code, message, request id. Account errors carry no user
