@@ -246,9 +246,9 @@ def _submit(user, template, budget, chronological, keys, label, built=None):
 
 def _prepare(user_id):
     """Shared prelude of both run modes: eligibility guard, prompt
-    template, and count-based sizing against the provider's exact token
-    count (free — see module docstring). Returns everything a submit or
-    a sync call needs."""
+    template, the user's model, and count-based sizing against the
+    provider's token count (see module docstring). Returns everything a
+    submit or a sync call needs."""
     from flask import current_app
     from backend.models import User
     from backend.utils.api_keys import get_api_keys_for_usage
