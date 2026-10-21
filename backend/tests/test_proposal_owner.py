@@ -832,8 +832,32 @@ def test_route_files_one_issue_and_keeps_the_others_fileable(
         entry["filed"], key=lambda f: f["index"])] == [102, 101, 103]
 
 
-def test_route_without_an_index_files_every_issue_not_filed_yet(
-        app, effects):
+def test_route_without_an_index_files_only_the_last_issue(app, effects):
+    """What the iPhone app, an old tab and old confirms send: no index."""
+    _numbered_issues(effects)
+    alice = _user("alice")
+    node, draft = _three_issue_proposal(alice)
+    client = _client(app, alice)
+
+    resp = client.post("/api/github/create-issue",
+                       json={"llm_node_id": node.id})
+
+    body = resp.get_json()
+    assert resp.status_code == 200 and body["status"] == "partial"
+    assert body["issue_number"] == 101
+    assert effects.issue.call_count == 1
+    assert effects.issue.call_args.kwargs["title"] == "Speed up the export"
+    assert effects.issue.call_args.kwargs["category"] == "enhancement"
+    assert Draft.query.filter_by(id=draft.id).count() == 1
+    assert [f["index"] for f in _meta(node.id)[0]["filed"]] == [2]
+    # The same request again files nothing more.
+    again = client.post("/api/github/create-issue",
+                        json={"llm_node_id": node.id})
+    assert again.status_code == 400
+    assert effects.issue.call_count == 1
+
+
+def test_route_with_all_files_every_issue_not_filed_yet(app, effects):
     _numbered_issues(effects)
     alice = _user("alice")
     node, draft = _three_issue_proposal(alice)
@@ -842,13 +866,154 @@ def test_route_without_an_index_files_every_issue_not_filed_yet(
                 json={"llm_node_id": node.id, "issue_index": 0})
 
     resp = client.post("/api/github/create-issue",
-                       json={"llm_node_id": node.id})
+                       json={"llm_node_id": node.id, "all": True})
 
     body = resp.get_json()
     assert resp.status_code == 200 and body["status"] == "completed"
     assert [i["index"] for i in body["issues"]] == [1, 2]
     assert effects.issue.call_count == 3
     assert Draft.query.filter_by(id=draft.id).count() == 0
+
+
+def test_a_single_issue_without_an_index_is_filed_as_before(app, effects):
+    alice = _user("alice")
+    node = _reply(alice, _msg(alice), "issue")
+    draft = _pending(alice, node, "issue")
+
+    resp = _client(app, alice).post("/api/github/create-issue",
+                                    json={"llm_node_id": node.id})
+
+    body = resp.get_json()
+    assert resp.status_code == 200 and body["status"] == "completed"
+    assert body["issue_number"] == 9
+    assert Draft.query.filter_by(id=draft.id).count() == 0
+
+
+def test_a_share_block_with_a_title_heading_does_not_shift_the_numbers():
+    """The card skips :::share blocks when it numbers issues (parseIssueBlocks);
+    so must the backend, or a click files another issue's text."""
+    from backend.utils.tool_meta import parse_github_issues
+    text = (":::share need\nLooking for a partner.\n"
+            "### Title\nNot an issue\n### Description\nIn the share.\n"
+            ":::\n" + THREE_ISSUES)
+    assert [i["title"] for i in parse_github_issues(text)] == [
+        "Record button does nothing", "Add a dark mode toggle",
+        "Speed up the export"]
+
+
+def test_route_files_the_right_issue_when_a_share_block_has_a_title(
+        app, effects):
+    _numbered_issues(effects)
+    alice = _user("alice")
+    node = _reply(alice, _msg(alice), "issue", content=(
+        ":::share need\nHi.\n### Title\nNot an issue\n"
+        "### Description\nIn the share.\n:::\n" + THREE_ISSUES))
+    _pending(alice, node, "issue")
+
+    _client(app, alice).post("/api/github/create-issue", json={
+        "llm_node_id": node.id, "issue_index": 0})
+
+    assert effects.issue.call_args.kwargs["title"] == "Record button does nothing"
+
+
+class _ThreadLocks:
+    """A stand-in for the Redis client: one real lock per name."""
+    def __init__(self):
+        import threading
+        self._locks = {}
+        self._guard = threading.Lock()
+        self._threading = threading
+
+    def lock(self, name, timeout=None, blocking_timeout=None):
+        with self._guard:
+            return self._locks.setdefault(name, self._threading.Lock())
+
+
+def test_concurrent_clicks_never_file_one_position_twice(app, effects,
+                                                         monkeypatch):
+    """Two requests for the same issue at once: the second waits for the
+    lock, reads the first one's record, and files nothing."""
+    import threading
+    import backend.utils.issue_proposals as ip
+    locks = _ThreadLocks()
+    monkeypatch.setattr(ip, "_lock_client", lambda: locks)
+    _numbered_issues(effects)
+    alice = _user("alice")
+    node, draft = _three_issue_proposal(alice)
+    node_id, alice_id = node.id, alice.id
+
+    inside = threading.Event()
+    release = threading.Event()
+    real = effects.issue.side_effect
+
+    def slow(**kwargs):
+        inside.set()
+        release.wait(5)
+        return real(**kwargs)
+    effects.issue.side_effect = slow
+
+    codes = {}
+
+    def click(name):
+        with app.app_context():
+            codes[name] = _client(app, User.query.get(alice_id)).post(
+                "/api/github/create-issue",
+                json={"llm_node_id": node_id, "issue_index": 1}
+            ).status_code
+
+    first = threading.Thread(target=click, args=("first",))
+    first.start()
+    assert inside.wait(5)
+    second = threading.Thread(target=click, args=("second",))
+    second.start()
+    release.set()
+    first.join(10)
+    second.join(10)
+
+    assert sorted(codes.values()) == [200, 400]
+    assert effects.issue.call_count == 1
+    _db.session.expire_all()
+    assert [f["index"] for f in _meta(node_id)[0]["filed"]] == [1]
+
+
+def test_the_second_request_reads_the_record_after_taking_the_lock(
+        app, effects, monkeypatch):
+    """A record written while the request waited for the lock is seen: a
+    different position filed in between is kept, not overwritten."""
+    import backend.utils.issue_proposals as ip
+    from backend.utils.tool_meta import update_tool_meta
+    _numbered_issues(effects)
+    alice = _user("alice")
+    node, draft = _three_issue_proposal(alice)
+    node_id = node.id
+
+    class _Lock:
+        def acquire(self, blocking=True):
+            # Another request files issue 0 while this one waited.
+            other = Node.query.get(node_id)
+            update_tool_meta(other, "propose_github_issue", {
+                "apply_status": "partial",
+                "filed": [{"index": 0, "issue_url": "u0",
+                           "issue_number": 50}]})
+            _db.session.commit()
+            _db.session.expire_all()
+            return True
+
+        def release(self):
+            pass
+
+    monkeypatch.setattr(ip, "_lock_client", lambda: types.SimpleNamespace(
+        lock=lambda *a, **k: _Lock()))
+
+    for i in (0, 1):
+        resp = _client(app, alice).post(
+            "/api/github/create-issue",
+            json={"llm_node_id": node_id, "issue_index": i})
+        if i == 0:
+            assert resp.status_code == 400
+    assert [f["index"] for f in sorted(
+        _meta(node_id)[0]["filed"], key=lambda f: f["index"])] == [0, 1]
+    assert effects.issue.call_count == 1
 
 
 def test_route_rejects_a_bad_issue_index(app, effects):
@@ -872,7 +1037,7 @@ def test_a_github_failure_midway_keeps_the_issues_already_filed(
         RuntimeError("GitHub said no: secret detail")]
 
     resp = _client(app, alice).post("/api/github/create-issue",
-                                    json={"llm_node_id": node.id})
+                                    json={"llm_node_id": node.id, "all": True})
 
     assert resp.status_code == 500
     assert "secret" not in resp.get_json()["error"]
@@ -897,7 +1062,24 @@ def test_another_users_multi_issue_proposal_is_still_refused(app, effects):
     effects.issue.assert_not_called()
 
 
-def test_tool_files_all_or_only_the_numbers_asked_for(app, effects):
+def test_tool_without_numbers_files_only_the_last_issue(app, effects):
+    _numbered_issues(effects)
+    alice = _user("alice")
+    node, draft = _three_issue_proposal(alice)
+    chain, placeholder = _confirm_turn(alice, node)
+
+    result = _lc._execute_tool_calls(
+        [{"name": "apply_github_issue", "input": {}}],
+        placeholder, chain, alice.id)[0]
+
+    assert result["status"] == "success"
+    assert result["issue_number"] == 101
+    assert [i["index"] for i in result["issues"]] == [2]
+    assert effects.issue.call_count == 1
+    assert Draft.query.filter_by(id=draft.id).count() == 1
+
+
+def test_tool_files_the_numbers_asked_for_or_all(app, effects):
     _numbered_issues(effects)
     alice = _user("alice")
     node, draft = _three_issue_proposal(alice)
@@ -911,10 +1093,38 @@ def test_tool_files_all_or_only_the_numbers_asked_for(app, effects):
     assert Draft.query.filter_by(id=draft.id).count() == 1
 
     rest = _lc._execute_tool_calls(
-        [{"name": "apply_github_issue", "input": {}}],
+        [{"name": "apply_github_issue", "input": {"all": True}}],
         placeholder, chain, alice.id)[0]
     assert rest["status"] == "success"
     assert [i["index"] for i in rest["issues"]] == [1]
     assert effects.issue.call_count == 3
     assert Draft.query.filter_by(id=draft.id).count() == 0
     assert _meta(node.id)[0]["apply_status"] == "completed"
+
+
+def test_tool_reports_created_already_filed_and_failed_truthfully(
+        app, effects):
+    alice = _user("alice")
+    node, draft = _three_issue_proposal(alice)
+    chain, placeholder = _confirm_turn(alice, node)
+    effects.issue.side_effect = [
+        {"url": "https://github.com/owner/repo/issues/21", "number": 21},
+        {"url": "https://github.com/owner/repo/issues/22", "number": 22},
+        RuntimeError("secret detail")]
+    _lc._execute_tool_calls(
+        [{"name": "apply_github_issue", "input": {"issue_numbers": [1]}}],
+        placeholder, chain, alice.id)
+
+    result = _lc._execute_tool_calls(
+        [{"name": "apply_github_issue",
+          "input": {"issue_numbers": [1, 2, 3]}}],
+        placeholder, chain, alice.id)[0]
+
+    assert result["status"] == "success"
+    assert [i["issue_number"] for i in result["issues"]] == [22]
+    summary = result["summary"]
+    assert "#22" in summary and "Already created earlier: 1" in summary
+    assert "Not created: issue 3" in summary and "still pending" in summary
+    assert "secret" not in summary
+    text = _lc._action_result_text(result)
+    assert "Already created earlier" in text and "#22" in text

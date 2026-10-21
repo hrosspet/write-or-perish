@@ -114,7 +114,7 @@ test('"Create all issues" files every issue not filed yet in one call', async ()
   fireEvent.click(screen.getByText('Create all issues'));
 
   await waitFor(() => expect(api.post).toHaveBeenCalledWith(
-    '/github/create-issue', { llm_node_id: 7 }));
+    '/github/create-issue', { llm_node_id: 7, all: true }));
   expect(await screen.findByText('#3')).toBeInTheDocument();
   expect(screen.getAllByText(/Issue created/)).toHaveLength(3);
   expect(screen.queryByText('Create all issues')).not.toBeInTheDocument();
@@ -139,4 +139,37 @@ test('a single issue filed before issues were tracked one by one still shows as 
 
   expect(screen.getByText('#9')).toBeInTheDocument();
   expect(screen.queryByText('Create issue')).not.toBeInTheDocument();
+});
+
+test('an old completed entry with no list of filed issues marks the LAST issue', () => {
+  // The old create button filed the last issue block of a reply.
+  renderCard(THREE, [{
+    name: 'propose_github_issue', status: 'success', apply_status: 'completed',
+    issue_url: 'https://github.com/o/r/issues/9', issue_number: 9,
+  }]);
+
+  const link = screen.getByText('#9');
+  expect(screen.getAllByText(/Issue created/)).toHaveLength(1);
+  // The link sits under the third card, not the first.
+  const cards = screen.getAllByText(/^(Record button does nothing|Add a dark mode toggle|Speed up the export)$/);
+  const lastCard = cards[2].closest('div').parentElement;
+  expect(lastCard).toContainElement(link);
+  expect(screen.getAllByText('Create issue')).toHaveLength(2);
+});
+
+test('a ### Title inside a :::share block is not an issue (same numbering as the backend)', () => {
+  const text = [
+    ':::share need',
+    'Looking for a thinking partner.',
+    '### Title',
+    'Not an issue',
+    '### Description',
+    'Part of the share.',
+    ':::',
+    ONE,
+    '### Issue Title', 'Second real issue',
+    '### Description', 'Second.',
+  ].join('\n');
+  expect(parseIssueBlocks(text).map(i => i.title)).toEqual([
+    'Record button does nothing', 'Second real issue']);
 });

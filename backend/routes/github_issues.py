@@ -1,7 +1,6 @@
 from flask import Blueprint, jsonify, request
 from flask_login import login_required, current_user
 from backend.models import Node
-from backend.extensions import db
 from backend.utils.client_platform import request_client
 from backend.utils.issue_proposals import file_proposed_issues
 from backend.utils.privacy import can_user_access_node
@@ -37,7 +36,9 @@ def create_issue():
         return jsonify({"error": "No pending GitHub issue found"}), 404
 
     # Each issue in the reply is filed on its own: ``issue_index`` (0-based,
-    # content order) files one; without it every issue not filed yet.
+    # content order) files one; ``all`` files every issue not filed yet.
+    # With neither, only the last issue is filed: what clients that don't
+    # know about several issues (the iPhone app, old tabs) have always got.
     issue_index = data.get("issue_index")
     if issue_index is not None:
         try:
@@ -47,9 +48,7 @@ def create_issue():
 
     filed_now, total, error, status = file_proposed_issues(
         origin_node, draft, current_user.username, request_client(),
-        index=issue_index)
-    # Issues filed before a failure stay recorded.
-    db.session.commit()
+        index=issue_index, all_unfiled=bool(data.get("all")))
     if error:
         return jsonify({"error": error}), status
 

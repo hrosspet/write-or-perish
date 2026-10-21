@@ -702,10 +702,11 @@ export default function ProposalInline({
       filedFromMeta[f.index] = { issue_url: f.issue_url, issue_number: f.issue_number };
     }
     if (issueEntry?.apply_status === 'completed' && !issueEntry.filed?.length) {
-      // Filed before issues were tracked one by one: the only issue.
-      filedFromMeta[0] = { issue_url: issueEntry.issue_url, issue_number: issueEntry.issue_number };
+      // Filed before issues were tracked one by one: that was the LAST
+      // issue of the reply (what the old create button filed).
+      filedFromMeta.last = { issue_url: issueEntry.issue_url, issue_number: issueEntry.issue_number };
     } else if (!issueEntry && applyIssueCall && applyIssueCall.status === 'success') {
-      filedFromMeta[0] = { issue_url: applyIssueCall.issue_url, issue_number: applyIssueCall.issue_number };
+      filedFromMeta.last = { issue_url: applyIssueCall.issue_url, issue_number: applyIssueCall.issue_number };
     }
     if (Object.keys(filedFromMeta).length) setMetaFiledIssues(filedFromMeta);
     const feedbackEntry = toolCallsMeta.find(tc => tc.name === 'propose_feedback');
@@ -792,7 +793,7 @@ export default function ProposalInline({
     setAll(setIssueStates, 'started');
     try {
       const body = idx === null
-        ? { llm_node_id: nodeId } : { llm_node_id: nodeId, issue_index: idx };
+        ? { llm_node_id: nodeId, all: true } : { llm_node_id: nodeId, issue_index: idx };
       const res = await api.post('/github/create-issue', body);
       const filed = res.data?.issues?.length
         ? res.data.issues
@@ -810,7 +811,7 @@ export default function ProposalInline({
         filed: Object.entries({
           ...metaFiledIssues, ...issueResults,
           ...Object.fromEntries(filed.map(f => [f.index, f])),
-        }).map(([index, f]) => ({
+        }).filter(([index]) => index !== 'last').map(([index, f]) => ({
           index: Number(index), issue_url: f.issue_url, issue_number: f.issue_number })),
       });
     } catch (err) {
@@ -821,9 +822,12 @@ export default function ProposalInline({
   }, [nodeId, onApplied, issueBlocks, issueStates, issueResults, metaFiledIssues]);
 
   // An issue is filed if this session filed it, or the server meta says so.
+  // metaFiledIssues.last: filed before issues were tracked one by one.
+  const metaFiledFor = (idx) => metaFiledIssues[idx]
+    || (idx === issueBlocks.length - 1 ? metaFiledIssues.last : null) || null;
   const issueStateFor = (idx) => issueStates[idx]
-    || (metaFiledIssues[idx] ? 'completed' : null);
-  const issueResultFor = (idx) => issueResults[idx] || metaFiledIssues[idx] || null;
+    || (metaFiledFor(idx) ? 'completed' : null);
+  const issueResultFor = (idx) => issueResults[idx] || metaFiledFor(idx);
 
   const handleSendFeedback = useCallback(async () => {
     if (!nodeId) return;

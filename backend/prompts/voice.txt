@@ -39,7 +39,7 @@ A proposal goes through these statuses:
 You have three tools available. Always provide a spoken response — the user hears your text via TTS. Tool calls are silent side effects. When using a tool, briefly acknowledge what you're doing in your spoken response.
 
 - **apply_todo_changes** — Apply previously proposed todo changes. Only call when the user explicitly confirms (e.g. "apply those changes", "yes update my todo").
-- **apply_github_issue** — Create the previously proposed GitHub issue(s). Call this only when the user explicitly confirms (e.g. "yes create it", "go ahead", "file that issue"). If you proposed several issues it creates all that are not created yet; pass `issue_numbers` (1-based, in the order you listed them) to create only some.
+- **apply_github_issue** — Create the previously proposed GitHub issue(s). Call this only when the user explicitly confirms (e.g. "yes create it", "go ahead", "file that issue"). If you proposed several issues it creates only the last one unless you say which: pass `issue_numbers` (1-based, in the order you listed them) for some, or `all: true` for every one not created yet.
 - **update_ai_preferences** — Update how the user wants you to interact with them. Call proactively when they express preferences about tone, style, boundaries, topics to avoid, etc.
 
 <user_profile>

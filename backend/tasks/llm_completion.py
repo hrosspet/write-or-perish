@@ -66,7 +66,8 @@ from backend.utils.ca_feed import (
 from backend.utils.tool_meta import (
     get_tool_meta_entry, update_tool_meta,
 )
-from backend.utils.issue_proposals import file_proposed_issues
+from backend.utils.issue_proposals import file_issues_for_tool
+from backend.utils.tool_meta import strip_share_fences
 from backend.utils.client_platform import CLIENT_MARKER
 from backend.utils.text_edits import apply_text_edits
 from backend.utils.privacy import AI_ALLOWED
@@ -505,9 +506,10 @@ VOICE_TOOLS = [
             "Create the previously proposed GitHub issue(s). Call this "
             "ONLY when the user explicitly confirms they want to create "
             "the issue (e.g. 'yes create it', 'go ahead', 'file that'). "
-            "When the reply proposed several issues, this creates all "
-            "that are not created yet; pass issue_numbers to create only "
-            "some (e.g. 'all except the marketing one'). "
+            "When the reply proposed several issues, this creates only "
+            "the last one unless you say which: pass issue_numbers for "
+            "some (e.g. 'all except the marketing one': list the "
+            "others), or all=true for every one not created yet. "
             "Do not call proactively. Do not call if the issue was "
             "already created (check the context notes for apply status). "
             "Always produce a text response — the user needs to hear "
@@ -516,14 +518,20 @@ VOICE_TOOLS = [
         "input_schema": {
             "type": "object",
             "properties": {
+                "all": {
+                    "type": "boolean",
+                    "description": (
+                        "Optional. true creates every proposed issue "
+                        "that is not created yet."
+                    ),
+                },
                 "issue_numbers": {
                     "type": "array",
                     "items": {"type": "integer"},
                     "description": (
                         "Optional. The 1-based positions of the proposed "
                         "issues to create, in the order the reply lists "
-                        "them. Omit to create every issue not created "
-                        "yet."
+                        "them."
                     ),
                 },
             },
@@ -1148,9 +1156,7 @@ def _strip_share_fences(text):
     """Remove fenced :::share blocks — their bodies may legitimately
     contain ### headings, which must never trigger the other proposal
     detectors (todo/issue/feedback)."""
-    return re.sub(
-        r'^:::share(?:[ \t]+\w+)?[ \t]*\r?\n.*?(?:^:::[ \t]*$\n?|\Z)',
-        '', text, flags=re.MULTILINE | re.DOTALL | re.IGNORECASE)
+    return strip_share_fences(text)
 
 
 def _detect_todo_proposal(text):
@@ -1516,16 +1522,8 @@ def _action_result_text(tr):
             return ("[apply_todo_changes: merge started in the background; "
                     "it will finish shortly.]")
         if name == "apply_github_issue":
-            issues = tr.get("issues") or []
-            if len(issues) > 1:
-                made = ", ".join(
-                    f"#{i['issue_number']} ({i['issue_url']})"
-                    for i in issues)
-                note = (f"[apply_github_issue: {len(issues)} issues "
-                        f"created — {made}")
-                if tr.get("error"):
-                    note += "; the rest failed and are still pending"
-                return note + "]"
+            if tr.get("summary"):
+                return f"[apply_github_issue: {tr['summary']}]"
             return (f"[apply_github_issue: issue "
                     f"#{tr.get('issue_number')} created — "
                     f"{tr.get('issue_url')}]")
@@ -2010,41 +2008,12 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
                             user.username if user else str(user_id)
                         )
                         # Optional 1-based positions pick some of the
-                        # reply's issues; without them every issue not
-                        # filed yet is created.
-                        wanted = inp.get("issue_numbers")
-                        bad_numbers = False
-                        if wanted:
-                            try:
-                                picks = sorted({int(n) - 1 for n in wanted})
-                            except (TypeError, ValueError):
-                                picks = []
-                                bad_numbers = True
-                        else:
-                            picks = [None]
-                        filed_now, err = [], None
-                        if bad_numbers:
-                            err = "Invalid issue_numbers"
-                        for index in picks:
-                            filed, _total, err, _status = (
-                                file_proposed_issues(
-                                    origin_node, draft, username, client,
-                                    index=index)
-                            )
-                            filed_now += filed
-                            if err:
-                                break
-                        if filed_now:
-                            result["status"] = "success"
-                            result["issues"] = filed_now
-                            result["issue_url"] = filed_now[0]["issue_url"]
-                            result["issue_number"] = (
-                                filed_now[0]["issue_number"])
-                            if err:
-                                result["error"] = err
-                        else:
-                            result["status"] = "error"
-                            result["error"] = err
+                        # reply's issues, `all` takes every one not
+                        # created yet; with neither, only the last one.
+                        result.update(file_issues_for_tool(
+                            origin_node, draft, username, client,
+                            numbers=inp.get("issue_numbers"),
+                            all_unfiled=bool(inp.get("all"))))
 
             elif name == "update_artifact":
                 kind = (inp.get("kind") or "").strip().lower()

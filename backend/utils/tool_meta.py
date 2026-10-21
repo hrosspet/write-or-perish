@@ -96,15 +96,27 @@ def parse_github_issue(content):
     return result
 
 
+def strip_share_fences(text):
+    """Remove fenced :::share blocks: their bodies may legitimately contain
+    ### headings, which must never count as proposal headings (todo, issue,
+    feedback). The card does the same (stripShareBlocks)."""
+    return re.sub(
+        r'^:::share(?:[ \t]+\w+)?[ \t]*\r?\n.*?(?:^:::[ \t]*$\n?|\Z)',
+        '', text, flags=re.MULTILINE | re.DOTALL | re.IGNORECASE)
+
+
 def parse_github_issues(content):
     """Every issue proposed in LLM text, in content order: a list of
     ``{'title', 'description', 'category'}`` dicts (keys missing when the
     block lacks them). A new issue starts at each ``### Issue Title`` (or
     ``### Title``) heading; its ``### Description`` and ``### Category``
-    belong to it. For one block this equals parse_github_issue."""
+    belong to it. Share fences are left out and the text is split at
+    line-start ``###`` headings, as the card does (parseIssueBlocks), so
+    both number the issues the same way."""
     issues = []
     current = None
-    for part in content.split('### '):
+    parts = re.split(r'^###\s+', strip_share_fences(content), flags=re.MULTILINE)
+    for part in parts[1:]:
         if not part.strip():
             continue
         first_newline = part.find('\n')
