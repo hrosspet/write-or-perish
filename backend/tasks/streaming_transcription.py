@@ -66,14 +66,15 @@ VOICE_REPLY_SKIPPED_READ_ONLY = (
     "Your recording is saved. Loore didn't reply because {model} is only "
     "for Read. Choose another model for replies."
 )
-# The same when no chunk of the recording produced text. With failed chunks
-# the audio is kept as an entry; with none (silence) there is nothing to keep.
+# The same when no chunk of the recording produced text: the entry is kept
+# with its audio, whether chunks failed or came back empty.
 VOICE_REPLY_SKIPPED_NOT_TRANSCRIBED = (
     "Your recording is saved, but nothing could be transcribed. Loore "
     "didn't reply."
 )
-VOICE_REPLY_SKIPPED_SILENCE = (
-    "Loore didn't hear anything in that recording, so there is no reply."
+VOICE_REPLY_SKIPPED_NO_WORDS = (
+    "Loore didn't hear any words in this recording. It's saved with its "
+    "audio, without a reply."
 )
 
 
@@ -1257,6 +1258,10 @@ def finalize_draft_streaming(self, session_id: str, total_chunks: int,
                 transcripts.append(chunk_text)
 
         full_transcript = "\n\n".join(transcripts)
+        if label == 'Voice' and not full_transcript.strip():
+            # Nothing transcribed (#513): a chunk still pending when the wait
+            # ran out is as lost as a failed one.
+            failed_chunks = [c for c in chunks if c.status != 'completed']
 
         # Title only standalone top-level voice notes. Voice-workflow turns
         # (label='Voice') are conversation messages, not journal notes — never
@@ -1288,6 +1293,10 @@ def finalize_draft_streaming(self, session_id: str, total_chunks: int,
         # if we're about to start a server-side LLM chain — we need to set
         # llm_node_id in the same commit so the SSE all_complete event
         # includes it).
+        if (user_id and model and label == 'Voice'
+                and not full_transcript.strip() and not failed_chunks):
+            # Empty text from chunks that completed (#513): the entry says so.
+            final_content = "*Note: No words were transcribed*"
         db.session.refresh(draft)
         draft.set_content(final_content)
         draft.streaming_completed_chunks = len(completed_chunks)
@@ -1300,20 +1309,20 @@ def finalize_draft_streaming(self, session_id: str, total_chunks: int,
         no_text = (user_id and model and label == 'Voice'
                    and not full_transcript.strip())
 
-        if no_text and not failed_chunks:
-            # Silence: nothing to keep, no node. The warning tells the client
-            # why no reply is coming (the draft is cleaned up after it).
-            draft.streaming_status = 'completed'
-            draft.streaming_warning = VOICE_REPLY_SKIPPED_SILENCE
-            db.session.commit()
-        elif no_text:
-            # Failed chunks: keep the recording (note + audio) as an entry.
+        if no_text:
+            # Keep the recording (note + audio) as an entry, with no reply.
+            # Chunks still pending when the wait ran out count as failed
+            # (above); empty text gets its own note.
+            if failed_chunks:
+                skip_message = VOICE_REPLY_SKIPPED_NOT_TRANSCRIBED
+            else:
+                skip_message = VOICE_REPLY_SKIPPED_NO_WORDS
             try:
                 _start_server_side_llm_chain(
                     draft, session_id, final_content,
                     user_id, parent_id, model, label,
                     entry=entry,
-                    skip_message=VOICE_REPLY_SKIPPED_NOT_TRANSCRIBED,
+                    skip_message=skip_message,
                 )
             except Exception as e:
                 logger.error(

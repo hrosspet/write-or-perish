@@ -19,7 +19,7 @@ import os
 import sys
 import tempfile
 from datetime import datetime
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 os.environ["ENCRYPTION_DISABLED"] = "true"
 os.environ["DATABASE_URL"] = "sqlite:///:memory:"
@@ -729,7 +729,8 @@ class TestVoiceFinalize:
         self._finalize(st, user, "sess-warm", chunks=0, model="claude-test")
 
         st._fake_llm.prewarm_anthropic_cache.delay.assert_not_called()
-        assert Node.query.count() == 0
+        # No text at all (#513): the recording is kept as an entry, no reply.
+        assert _llm_count() == 0
 
 
 class TestVoiceFinalizeNothingTranscribed:
@@ -764,7 +765,7 @@ class TestVoiceFinalizeNothingTranscribed:
         assert _llm_count() == 0
         st._fake_llm.generate_llm_response.si.assert_not_called()
 
-    def test_silence_gets_a_message_and_no_nodes(self, st):
+    def test_empty_text_saves_the_entry_with_its_own_message(self, st):
         user = _user()
         _voice_draft(user, "sess-silent", "chat", text="")
 
@@ -772,9 +773,35 @@ class TestVoiceFinalizeNothingTranscribed:
 
         draft = Draft.query.filter_by(session_id="sess-silent").one()
         assert draft.streaming_status == "completed"
-        assert draft.streaming_warning == st.VOICE_REPLY_SKIPPED_SILENCE
+        assert draft.streaming_warning == st.VOICE_REPLY_SKIPPED_NO_WORDS
         assert draft.llm_node_id is None
-        assert Node.query.count() == 0
+        assert draft.get_content().startswith("*Note:")
+        entry = Node.query.one()
+        assert "No words were transcribed" in entry.get_content()
+        st._fake_llm.generate_llm_response.si.assert_not_called()
+
+    def test_chunk_still_processing_after_the_wait_counts_as_failed(self, st):
+        user = _user()
+        _voice_draft(user, "sess-slow", "chat")
+        self._chunk("sess-slow", "processing")
+
+        import time as real_time
+        ticks = iter(range(0, 10000, 400))
+
+        class FakeTime:
+            sleep = staticmethod(lambda *_: None)
+            monotonic = staticmethod(lambda: next(ticks))
+
+            def __getattr__(self, name):
+                return getattr(real_time, name)
+
+        with patch.object(st, "time", FakeTime()):
+            self._finalize(st, user, "sess-slow")
+
+        draft = Draft.query.filter_by(session_id="sess-slow").one()
+        assert draft.streaming_warning == st.VOICE_REPLY_SKIPPED_NOT_TRANSCRIBED
+        entry = Node.query.one()
+        assert "failed to transcribe" in entry.get_content()
         st._fake_llm.generate_llm_response.si.assert_not_called()
 
     def test_some_failed_chunks_still_get_a_reply(self, st):

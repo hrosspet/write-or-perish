@@ -69,6 +69,9 @@ final class VoiceTurnController {
     /// session opened on, or the turn's failed reply. Nil while a turn's reply is
     /// still coming, so the glean reads that reply too (web `gleanAnchor`).
     private(set) var gleanAnchor: Int?
+    /// The last saved entry had no transcribed text (#513): no reply, so
+    /// Glean says why instead of waiting.
+    private(set) var lastEntryHasNoText = false
     private(set) var gleanPhase: GleanPhase = .idle
     /// The last glean finished: the lock screen says so until the next recording.
     private(set) var gleaningDone = false
@@ -617,14 +620,13 @@ final class VoiceTurnController {
 
     private func transcriptReady(_ status: StreamingSessionStatus, _ sid: String, _ gen: Int) async {
         if status.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            // Nothing was heard: the server says so, and saved no entry (#513).
-            if let warning = status.warning { notices.toast(warning, duration: 8) }
             finishQuietly()
             return
         }
         if let warning = status.warning {
             // Only the reply was skipped: the recording is saved as an entry.
-            entrySaved()
+            // A failure note alone is the server's "no text" entry (#513).
+            entrySaved(noText: status.content.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("*Note:"))
             notices.toast(warning, duration: 8)
             finishQuietly()
             return
@@ -1180,7 +1182,8 @@ final class VoiceTurnController {
 
     /// The server saved the recording as an entry (web `onEntrySaved`): the
     /// thread has a message, and Glean waits for this turn's reply.
-    private func entrySaved() {
+    private func entrySaved(noText: Bool = false) {
+        lastEntryHasNoText = noText
         hasRecordedMessage = true
         gleanAnchor = nil
         audio.refreshNowPlaying()

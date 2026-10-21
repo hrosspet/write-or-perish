@@ -429,6 +429,9 @@ function VoiceSession({ recovery, blocked, threadId, onAiUsageRefused, onFinishI
   // A continued thread has its messages already; a fresh one gets its
   // first when the server saves the recording.
   const [hasMessage, setHasMessage] = useState(!!threadId);
+  // The last saved entry had no transcribed text (#513): no reply, so Glean
+  // says why instead of waiting.
+  const [lastEntryNoText, setLastEntryNoText] = useState(false);
   // The node a glean starts under: the last finished reply (or the node
   // the session opened on), or the turn's failed reply. Null while a
   // turn's reply is still coming.
@@ -454,9 +457,10 @@ function VoiceSession({ recovery, blocked, threadId, onAiUsageRefused, onFinishI
     onAiUsageRefused,
     // The server saved the recording as an entry (#391). This does not wait
     // for the reply: if it fails or is skipped the entry still exists.
-    onEntrySaved: () => {
+    onEntrySaved: (info) => {
       markHasOwnEntries();
       setHasMessage(true);
+      setLastEntryNoText(!!info?.noText);
       // A new turn: Glean waits for its reply, so the glean reads it too.
       setGleanAnchor(null);
     },
@@ -549,6 +553,7 @@ function VoiceSession({ recovery, blocked, threadId, onAiUsageRefused, onFinishI
       </button>
       <span id={gleanDescId} className="sr-only">
         {gleanAnchor || gleaning ? "Find today's tweets worth your time, from what you have said so far"
+          : lastEntryNoText ? "Glean needs a transcribed message. This one has no text."
           : "Glean waits for Loore's reply to your last message"}
       </span>
     </>

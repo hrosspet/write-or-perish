@@ -457,7 +457,9 @@ class TestCappedRecordingIsTranscribed:
 
         warmed = fake_llm.prewarm_anthropic_cache.delay.called
         assert warmed is (not capped)
-        assert (Node.query.count() > 0) is (not capped)
+        # No text here (#513), so a capped recording is kept as a single
+        # entry (no early system node); uncapped has the system node too.
+        assert Node.query.count() == (2 if not capped else 1)
 
     def test_accepted_upload_is_transcribed(self, st, monkeypatch):
         # An upload the server accepted before the cap flipped finishes.
