@@ -322,6 +322,12 @@ createdb writeorperish_restored
 pg_restore --no-owner --no-privileges -d writeorperish_restored /tmp/restore.dump
 ```
 
+Once pgvector is on (see "pgvector ranking for semantic search" below), the
+dump creates the `vector` extension: install the pgvector package on the
+target server first, or that one step fails. The copies themselves are not
+in the dump; after the restore, `flask pgvector-enable --apply` rebuilds
+them, and until then searches rank in Python.
+
 Purges re-run by themselves. Both kinds (account deletion, "Delete all my
 writing") run 30 days after the request, and the oldest dump is 28 days old,
 so a purge that ran after the dump was made is still scheduled in it, and
@@ -410,7 +416,9 @@ match prod's (`flask shell` on the VM: `Node.query.count()`,
 `User.query.count()`), or are a little lower because of rows added since the
 dump. If `pg_restore` stops with "unsupported version … in file header",
 the local Postgres is older than prod's: run the test in a `postgres` image
-of prod's major version.
+of prod's major version. Once pgvector is on in prod, the dump creates the
+`vector` extension, which the local `postgres` image does not have: run the
+test in a throwaway `pgvector/pgvector:pg<major>` container instead.
 
 Media — on the VM, from the project directory, compare the number of files
 the backup takes with the number of objects in the newest period folder (the
@@ -466,3 +474,96 @@ copy of `media/2026-10-22/` by 2026-11-19, whenever you made it.
 - A deletion request cannot be honoured inside backups for up to about 29
   days (28 plus the lifecycle's lag). That is the documented window, inside
   the 30 days the terms promise, not a bug.
+
+---
+
+## pgvector ranking for semantic search (#331)
+
+Semantic search (Cmd+K, the agentic archive search, references, similar
+items) ranks embeddings by cosine similarity. Without pgvector, every search
+streams all of the user's vectors (6 KB each) out of Postgres and scores
+them in Python. With pgvector on, Postgres ranks a copy of each vector and
+returns only the top results.
+
+It is off until these steps are done, and the deploy does not depend on
+them: the models have no pgvector column, so `flask db migrate` generates
+nothing for it. The copies live in their own schema, `vec`, which Alembic's
+autogenerate does not compare, so it never proposes to drop them. Each web
+and worker process checks once, at its first search, whether the extension
+and the copy tables exist.
+
+### Turning it on
+
+1. Install the pgvector package for the server's PostgreSQL major version
+   (`postgresql-<major>-pgvector` from the PostgreSQL project's package
+   repository, or build pgvector from source).
+2. As a superuser, connected to the app's database (`sudo -u postgres psql
+   -d <database>`), with the app's database role as `<app role>` (the user
+   in `DATABASE_URL`):
+
+   ```sql
+   CREATE EXTENSION IF NOT EXISTS vector;
+   CREATE SCHEMA IF NOT EXISTS vec AUTHORIZATION <app role>;
+   ```
+
+3. From the project directory, with the app's environment: a report first.
+   It changes nothing and prints how many rows will be copied and about how
+   much disk that takes (~8.5 KB per embedding, about what the embedding
+   table already uses). Check the free space on the database's disk against
+   it.
+
+   ```bash
+   flask pgvector-enable
+   ```
+
+4. Copy. Idempotent: run it again at any time, it only copies what is
+   missing. It reads 500 rows at a time and commits each chunk, so memory
+   stays small; on a laptop it copied 62,000 rows in 90 s.
+
+   ```bash
+   flask pgvector-enable --apply
+   ```
+
+5. Restart the web and worker services (or deploy) so each process checks
+   again. From then on the embedding sweep copies what it embeds.
+
+### Checking that it works
+
+```bash
+flask pgvector-compare --username hrosspet
+```
+
+It takes the user's newest embedding as the query, ranks that user's
+archive in SQL and in Python, prints both timings and whether the top 10
+agree. It reads embedding rows only, no content. Expected: `Same top 10 in
+the same order: yes`, with a score difference around 1e-7 (pgvector sums in
+single precision). Each web and worker process also logs `pgvector ranking
+on (schema vec)` once, at its first search.
+
+If a SQL ranking fails, the process logs `pgvector ranking failed` (it goes
+to Sentry), rolls back to a savepoint and ranks in Python until it restarts.
+
+### Turning it off
+
+As the app's role or a superuser, both lines in the same session:
+
+```sql
+SET lock_timeout = '5s';
+DROP SCHEMA vec CASCADE;
+```
+
+The drop needs an exclusive lock on the embedding tables (the copies'
+foreign keys point at them), so it waits for every running read of them,
+such as the nightly dump, and every search would queue behind it. With the
+timeout it gives up after 5 s instead: if it fails with `canceling
+statement due to lock timeout`, run both lines again a little later.
+
+Each web and worker process then logs one failure (`pgvector ranking
+failed`, or `pgvector copy sync failed` from the embedding sweep) and ranks
+in Python from then on; no restart is needed. Nothing else refers to the
+schema, and the space is freed at once. The extension can stay; `DROP
+EXTENSION vector;` removes it too.
+
+A table that has copies cannot be dropped without `CASCADE` (the copies'
+foreign keys point at `node_embedding` and `external_item_embedding`);
+nothing in the app drops them.
