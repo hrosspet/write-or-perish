@@ -534,10 +534,11 @@ const NodeForm = forwardRef(
         // on the independent Auto-generate toggle — when it's off, the
         // backend skips the LLM and returns only conversation/user IDs,
         // letting the user click LLM Response manually later after any
-        // edits or follow-up nodes they want to add first.
+        // edits or follow-up nodes they want to add first. An entry above
+        // the cap goes here too: the server splits it into parts and puts
+        // the reply under the last one.
         if (useAgenticPrompt && !editMode && !uploadedFile
-            && !streamingSessionId && !parentId && aiUsage !== 'none'
-            && content.length <= NODE_CHAR_CAP) {
+            && !streamingSessionId && !parentId && aiUsage !== 'none') {
           const res = await api.post('/textmode/start', {
             content,
             privacy_level: privacyLevel,
