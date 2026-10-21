@@ -727,8 +727,10 @@ const NodeForm = forwardRef(
           && response?.data?.id;
         if (shouldAutoGenerate) {
           try {
+            // A long entry is saved as a chain of parts: the reply goes
+            // under the last one (tip_id), so it reads the whole entry.
             const llmRes = await api.post(
-              `/nodes/${response.data.id}/llm`,
+              `/nodes/${response.data.tip_id || response.data.id}/llm`,
               { source_mode: 'textmode' },
             );
             succeed({

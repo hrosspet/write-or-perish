@@ -323,6 +323,10 @@ final class ModelDecodingTests: XCTestCase {
         XCTAssertTrue(saved.spendCapped)
         XCTAssertNil(saved.llmNodeId)
 
+        let transcribed = try decode(TranscriptionStatus.self, #"{"node_id": 9, "tip_id": 11, "status": "completed", "progress": 100, "content": "x"}"#)
+        XCTAssertEqual(transcribed.tipId, 11)
+        XCTAssertNil(try decode(TranscriptionStatus.self, #"{"node_id": 9, "status": "processing", "progress": 40}"#).tipId)
+
         let chunk = try decode(ChunkUploadResponse.self, #"{"message": "Chunk already uploaded", "chunk_index": "4", "status": "stored"}"#)
         XCTAssertEqual(chunk.chunkIndex, 4)
 
