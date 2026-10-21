@@ -856,3 +856,17 @@ def test_public_cache_resolves_roots_for_a_user_in_one_walk(app):
         event.remove(_db.engine, "after_cursor_execute", after)
     assert {r.id for r in roots} == {root.id}
     assert len(walks) == 2  # one for _roots_of above, one inside invalidate_for_user
+
+
+def test_thread_children_carry_llm_task_status(app):
+    """A reply's task status reaches the page with the tree, so a failed
+    reply is told from one that answers its parent (#416)."""
+    author = _client_for(app, "author")
+    root = _mk_node("author", "root piece")
+    reply = _mk_node("author", "reply", parent=root)
+    reply.node_type = "llm"
+    reply.llm_task_status = "failed"
+    _db.session.commit()
+
+    detail = author.get(f"/api/nodes/{root.id}").get_json()
+    assert [c["llm_task_status"] for c in detail["children"]] == ["failed"]

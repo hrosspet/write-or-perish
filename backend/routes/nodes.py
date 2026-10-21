@@ -654,6 +654,9 @@ def serialize_node_recursive(n, user_id=None, parent_user_id=None):
         "username": n.user.username if n.user else "Unknown",
         "llm_model": n.llm_model,
         "origin": n.origin,
+        # So the page can tell a failed or cancelled reply from one that
+        # answers its parent (#416): only the latter hides LLM Response.
+        "llm_task_status": n.llm_task_status,
         "descendant_count": descendant_count,
         "user_id": n.user_id,
         "parent_user_id": parent_user_id,
