@@ -2219,9 +2219,14 @@ def test_421_batch_full_rebuild_merges_every_edit_at_its_date(
     integration = version("integration", feb, chunk, timedelta(days=11))
     first = _user_edit(u, integration, "FIRST CORRECTION")
     first.created_at = now - timedelta(days=10)
+    # The second edit starts from the integration's text: the first
+    # correction in the update's wording.
+    wording = "FIRST CORRECTION, AS THE UPDATE LEFT IT"
     update = version("update", MAY183, first, timedelta(days=5))
     integration2 = version("integration", MAY183, update, timedelta(days=4))
-    second = _user_edit(u, integration2, "FIRST CORRECTION\nSECOND CORRECTION")
+    for p in (update, integration2):
+        p.set_content(wording)
+    second = _user_edit(u, integration2, f"{wording}\nSECOND CORRECTION")
     second.created_at = now - timedelta(days=1)
     u.profile_needs_full_regen = True
     db.session.commit()
@@ -2246,7 +2251,7 @@ def test_421_batch_full_rebuild_merges_every_edit_at_its_date(
     assert _texts183(steps[2])[1] == ("Profile No. 2\n- start to 2026-02-01\n\n"
                                       f"{note}\n\nFIRST CORRECTION")
     assert _texts183(steps[4])[1].endswith(
-        f"{note}\n\nFIRST CORRECTION\nSECOND CORRECTION")
+        f"{note}\n\n{wording}\nSECOND CORRECTION")
     assert len({s["request"]["custom_id"] for s in steps}) == len(steps)
     # 3 chunks, the 2 merges, the prompt.
     assert len(_texts183(steps[5])) == 6

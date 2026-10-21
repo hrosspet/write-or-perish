@@ -927,14 +927,20 @@ def test_a_pending_merge_with_no_new_writing_still_runs(app, monkeypatch):
 # ── #421: a rebuild merges every edit, not only the newest ──────────────
 
 FEB = datetime(2026, 2, 1)
+# The first correction as the update after it left it, and the second
+# edit, made on that text (_two_edit_rounds).
+UPDATE_WORDING = "FIRST CORRECTION, AS THE UPDATE LEFT IT"
+SECOND_EDIT = f"{UPDATE_WORDING}\nSECOND CORRECTION"
 
 
 def _two_edit_rounds(user):
     """An old chain with two edit rounds. January and February chunks and
     their integration; the user corrects the integration (FIRST, dated
     February); an update builds on that edit (May) and is integrated; the
-    user corrects that integration (SECOND, dated May; its text keeps the
-    first correction as the update left it)."""
+    user corrects that integration (SECOND, dated May). The second edit
+    starts from the integration's text, so it carries the first correction
+    in the update's wording, not in the user's: the rebuild's first merge
+    reads the user's wording, the second merge the update's."""
     now = datetime.utcnow()
 
     def version(text, gen_type, cutoff, units, parent, age):
@@ -957,13 +963,12 @@ def _two_edit_rounds(user):
                          february, timedelta(days=10, hours=23))
     first = _edit(user, integrated, "FIRST CORRECTION",
                   created_at=now - timedelta(days=9))
-    update = version("FIRST CORRECTION, AS THE UPDATE LEFT IT", "update",
-                     MAY, 270_000, first, timedelta(days=5))
-    integrated_again = version("FIRST CORRECTION, AS THE UPDATE LEFT IT",
-                               "integration", MAY, 270_000, update,
-                               timedelta(days=4, hours=23))
-    second = _edit(user, integrated_again,
-                   "FIRST CORRECTION\nSECOND CORRECTION",
+    update = version(UPDATE_WORDING, "update", MAY, 270_000, first,
+                     timedelta(days=5))
+    integrated_again = version(UPDATE_WORDING, "integration", MAY, 270_000,
+                               update, timedelta(days=4, hours=23))
+    assert SECOND_EDIT.startswith(integrated_again.get_content())
+    second = _edit(user, integrated_again, SECOND_EDIT,
                    created_at=now - timedelta(days=1))
     return first, second
 
@@ -1020,7 +1025,7 @@ def test_421_a_full_rebuild_merges_every_edit_at_its_date(app, monkeypatch):
     assert "REBUILT SPRING" in second_merge[0]
     assert second_merge[1] == (
         "Profile No. 2\n- start to 2026-05-01\n\n"
-        f"{MAIN_NOTE}\n\nFIRST CORRECTION\nSECOND CORRECTION")
+        f"{MAIN_NOTE}\n\n{SECOND_EDIT}")
     assert _existing_profile(seen[5][1]) == "MERGED SECOND"
     assert pending_at_merge == [second.id, second.id]
     merged_first = UserProfile.query.filter_by(merged_profile_id=first.id).one()
@@ -1122,8 +1127,7 @@ def test_421_a_re_tip_before_both_edits_merges_each_at_its_date(
     assert [kind for kind, _ in seen] == [
         "chunk", "merge", "chunk", "merge", "integration"]
     assert _texts(seen[1][1])[1].endswith(f"{MAIN_NOTE}\n\nFIRST CORRECTION")
-    assert _texts(seen[3][1])[1].endswith(
-        f"{MAIN_NOTE}\n\nFIRST CORRECTION\nSECOND CORRECTION")
+    assert _texts(seen[3][1])[1].endswith(f"{MAIN_NOTE}\n\n{SECOND_EDIT}")
     assert UserProfile.query.filter_by(
         merged_profile_id=first.id).one().generation_type == "update"
     assert User.query.get(user.id).profile_pending_merge_id is None
