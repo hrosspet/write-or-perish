@@ -220,6 +220,31 @@ class TestResumeIsAllowedWhenCapped:
 
         assert data["warning"] == "reply skipped"
 
+    def test_status_names_the_users_message_node(self, client, alice):
+        # #514: the client anchors on the user's message when the user
+        # cancels before the reply comes, so the status names it.
+        user_node = Node(user_id=alice.id, human_owner_id=alice.id,
+                         node_type="user")
+        user_node.set_content("my words")
+        _db.session.add(user_node)
+        _db.session.commit()
+        llm_node = Node(user_id=alice.id, human_owner_id=alice.id,
+                        node_type="llm", parent_id=user_node.id)
+        llm_node.set_content("")
+        _db.session.add(llm_node)
+        _db.session.commit()
+        draft = Draft(user_id=alice.id, session_id="sess-user-node",
+                      streaming_status="completed",
+                      llm_node_id=llm_node.id)
+        draft.set_content("my words")
+        _db.session.add(draft)
+        _db.session.commit()
+
+        data = client.get("/drafts/streaming/sess-user-node/status").get_json()
+
+        assert data["llm_node_id"] == llm_node.id
+        assert data["user_node_id"] == user_node.id
+
 
 class TestSavedWithoutReplyDraftIsNotRestored:
     """#345 review: a Voice finalize that skipped the reply (cap) keeps

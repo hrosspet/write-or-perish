@@ -256,9 +256,10 @@ final class VoiceTurnTests: XCTestCase {
         XCTAssertTrue(condition(), "timed out waiting: \(what)")
     }
 
-    private func status(_ s: String, llm: Int? = nil, content: String = "hello there", warning: String? = nil) throws -> StreamingSessionStatus {
+    private func status(_ s: String, llm: Int? = nil, user: Int? = nil, content: String = "hello there", warning: String? = nil) throws -> StreamingSessionStatus {
         var json = #"{"session_id":"sid-1","streaming_status":"\#(s)","content":"\#(content)","chunks":[]"#
         if let llm { json += #","llm_node_id":\#(llm)"# }
+        if let user { json += #","user_node_id":\#(user)"# }
         if let warning { json += #","warning":"\#(warning)""# }
         return try decode(StreamingSessionStatus.self, json + "}")
     }
@@ -1345,6 +1346,18 @@ final class VoiceTurnTests: XCTestCase {
         XCTAssertEqual(turn.gleanAnchor, 101, "the server starts it from the failed reply's parent")
         XCTAssertTrue(turn.canGlean)
         XCTAssertEqual(turn.lockScreenGlean, .ready)
+    }
+
+    func testCancellingTheReplyStartsGleanUnderTheUsersMessage() async throws {
+        gleanSession()
+        backend.statuses = [try status("completed", llm: 101, user: 100)]
+        backend.llmStatuses[101] = [try llm(101, "processing")]
+        await recordAndStop()
+        await wait("entry saved") { turn.showsGleanButton }
+        XCTAssertFalse(turn.canGlean, "disabled while the reply is still coming")
+        turn.cancelProcessing()
+        XCTAssertEqual(turn.gleanAnchor, 100, "the reply will not be used: Glean reads the message")
+        XCTAssertTrue(turn.canGlean)
     }
 
     func testAContinuedGleanThreadOffersGleanAtOnce() {

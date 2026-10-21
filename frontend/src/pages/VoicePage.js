@@ -481,6 +481,9 @@ function VoiceSession({ recovery, blocked, threadId, onAiUsageRefused, onFinishI
     // into its parent, as for the Glean button under a failed reply in
     // text mode: it reads the user's message, never the failure.
     onLLMFailed: (nodeId) => setGleanAnchor(nodeId),
+    // The user cancelled the reply: none is coming, so Glean starts under
+    // their message instead of waiting for it (#514).
+    onCancelled: (userNodeId) => setGleanAnchor(userNodeId),
   });
 
   setThreadParentIdRef.current = setThreadParentId;
