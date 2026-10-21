@@ -75,6 +75,11 @@ k = max(k, ceil(R·ρ / room))                   # cap only ever raises k
 - Windows include every node sharing the boundary timestamp (the
   incremental window's budget loop and `_preselect_node_ids` alike), or a
   node on the cutoff's second is never read.
+- The text holds every row the window selects (#552): the quote
+  resolver adds embeds but drops no row, so the text can run past
+  the unit budget by its embeds and its last-second run. The
+  real-count check (`fit_by_count`) is what keeps the prompt under
+  the cap.
 
 **Continue rule** (replaces the pinned-account special case and the
 minimum-chunk deferral): remaining data that already *existed when the
