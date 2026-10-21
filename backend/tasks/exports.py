@@ -1759,14 +1759,22 @@ def _chunked_profile_loop(self, user, model_id, update_template,
     # The run ends before the chain reached the date of the user's versions
     # it must merge (they are newer than all of the writing): the merges are
     # the run's last steps, oldest first (#183, #421).
-    while True:
-        merge = _merge_if_due(self, user, model_id, current_profile_id,
-                              api_keys, run_ends=True)
-        if merge is None:
-            break
-        current_profile_id = merge[1].id
+    current_profile_id = _merge_the_rest(self, user, model_id,
+                                         current_profile_id, api_keys)
 
     return current_profile_id, chunk_num, cumulative_units
+
+
+def _merge_the_rest(self, user, model_id, base_id, api_keys):
+    """At the end of a sync run: merge every version of the user's still to
+    merge, oldest first, each on the previous merge. Returns the id of the
+    run's last version."""
+    while True:
+        merge = _merge_if_due(self, user, model_id, base_id, api_keys,
+                              run_ends=True)
+        if merge is None:
+            return base_id
+        base_id = merge[1].id
 
 
 def _iterative_generation(self, user, model_id, gen_template,
