@@ -47,6 +47,7 @@ import flask_login as _real_flask_login  # noqa: E402
 from backend.extensions import db as _db  # noqa: E402
 from backend.models import User, Node, NodeContextArtifact  # noqa: E402
 import backend.models as _real_backend_models  # noqa: E402
+from backend.utils.error_privacy import REPLY_NOT_STARTED_TEXT  # noqa: E402
 
 SUPPORTED = {
     "gpt-5": {"provider": "openai", "api_model": "gpt-5"},
@@ -501,4 +502,4 @@ class TestTranscribeAudioReply:
         _db.session.refresh(entry)
         assert entry.transcription_status == "completed"
         assert entry.get_content() == "uploaded words"
-        assert json.loads(entry.llm_task_warnings) == ["broker down"]
+        assert json.loads(entry.llm_task_warnings) == [REPLY_NOT_STARTED_TEXT]

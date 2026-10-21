@@ -27,6 +27,7 @@ from backend.models import Node, ExternalItem, FeedPick, APICostLog
 from backend.utils import llm_batch
 from backend.utils.llm_batch import BatchItemFailed, BatchItemCancelled
 from backend.utils.cost import llm_cost_log_fields as _real_cost_fields
+from backend.utils.error_privacy import REPLY_FAILED_TEXT
 
 POLL = _llm_task_mod.CA_BATCH_POLL_SECONDS
 MAX_POLLS = _llm_task_mod.CA_BATCH_MAX_POLLS
@@ -268,7 +269,7 @@ def test_provider_verdict_fails_the_node(app, monkeypatch, tmp_path):  # noqa: F
     assert task.retries == []
     node = _reload(llm_node.id)
     assert node.llm_task_status == "failed"
-    assert "expired" in node.llm_task_error
+    assert node.llm_task_error == REPLY_FAILED_TEXT
 
 
 def test_poll_cap_fails_the_node(app, monkeypatch, tmp_path):  # noqa: F811
@@ -281,7 +282,7 @@ def test_poll_cap_fails_the_node(app, monkeypatch, tmp_path):  # noqa: F811
 
     node = _reload(llm_node.id)
     assert node.llm_task_status == "failed"
-    assert f"{MAX_POLLS} polls" in node.llm_task_error
+    assert node.llm_task_error == _llm_task_mod.CA_BATCH_GAVE_UP_TEXT
 
 
 def test_poll_error_at_the_cap_fails_the_node_with_the_last_error(app, monkeypatch, tmp_path):  # noqa: F811
@@ -295,8 +296,8 @@ def test_poll_error_at_the_cap_fails_the_node_with_the_last_error(app, monkeypat
 
     node = _reload(llm_node.id)
     assert node.llm_task_status == "failed"
-    assert "provider unreachable" in node.llm_task_error
-    assert f"{MAX_POLLS} polls" in node.llm_task_error
+    assert "provider unreachable" not in node.llm_task_error
+    assert node.llm_task_error == _llm_task_mod.CA_BATCH_GAVE_UP_TEXT
 
 
 def _openai_status_error(status, code):
@@ -399,7 +400,7 @@ def test_error_without_a_batch_still_fails_the_node(app, monkeypatch, tmp_path):
     assert calls["submit"] == []
     node = _reload(llm_node.id)
     assert node.llm_task_status == "failed"
-    assert "snapshot directory missing" in node.llm_task_error
+    assert node.llm_task_error == REPLY_FAILED_TEXT
 
 
 def test_truncated_reply_fails_at_the_first_collect(app, monkeypatch, tmp_path):  # noqa: F811
@@ -422,7 +423,7 @@ def test_truncated_reply_fails_at_the_first_collect(app, monkeypatch, tmp_path):
     assert calls["submit"] == []
     node = _reload(llm_node.id)
     assert node.llm_task_status == "failed"
-    assert "cut off" in node.llm_task_error
+    assert node.llm_task_error == REPLY_FAILED_TEXT
 
 
 def test_unparseable_reply_fails_at_the_first_collect(app, monkeypatch, tmp_path):  # noqa: F811
@@ -440,7 +441,7 @@ def test_unparseable_reply_fails_at_the_first_collect(app, monkeypatch, tmp_path
     assert calls["render"] == 1
     node = _reload(llm_node.id)
     assert node.llm_task_status == "failed"
-    assert "not JSON" in node.llm_task_error
+    assert node.llm_task_error == REPLY_FAILED_TEXT
 
 
 def test_refused_reply_fails_at_the_first_collect_naming_the_model(app, monkeypatch, tmp_path):  # noqa: F811
@@ -462,9 +463,9 @@ def test_refused_reply_fails_at_the_first_collect_naming_the_model(app, monkeypa
     assert calls["submit"] == []
     node = _reload(llm_node.id)
     assert node.llm_task_status == "failed"
-    assert "refused the Read" in node.llm_task_error
     assert "gpt-5" in node.llm_task_error
-    assert "not JSON" not in node.llm_task_error
+    assert "Choose another model" in node.llm_task_error
+    assert "try again" not in node.llm_task_error
 
 
 # ── the collecting run ───────────────────────────────────────────────────
@@ -814,7 +815,7 @@ def test_cancel_nobody_asked_for_fails_the_node(app, monkeypatch, tmp_path):  # 
     assert calls["cancel"] == []
     node = _reload(llm_node.id)
     assert node.llm_task_status == "failed"
-    assert "cancelled" in node.llm_task_error
+    assert node.llm_task_error == REPLY_FAILED_TEXT
     assert _entry(node)["status"] == "submitted"
 
 

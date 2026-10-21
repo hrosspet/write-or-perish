@@ -31,6 +31,7 @@ from backend.utils.webm_utils import concat_fragmented_media
 from backend.utils.api_keys import get_openai_chat_key
 from backend.utils.encryption import decrypt_file_to_temp
 from backend.utils.cost import calculate_audio_cost_microdollars
+from backend.utils.error_privacy import TRANSCRIPTION_FAILED_TEXT
 from backend.utils import voice_timing
 
 logger = get_task_logger(__name__)
@@ -122,7 +123,7 @@ class StreamingTranscriptionTask(Task):
 
                 if chunk:
                     chunk.status = 'failed'
-                    chunk.error = str(exc)[:500]
+                    chunk.error = TRANSCRIPTION_FAILED_TEXT
                     chunk.completed_at = datetime.utcnow()
                     db.session.commit()
                     logger.error(f"Chunk transcription failed for node {node_id}, chunk {chunk_index}: {exc}")
@@ -261,7 +262,7 @@ def transcribe_chunk(self, node_id: int, chunk_index: int, chunk_path: str):
         except Exception as e:
             logger.error(f"Chunk transcription error for node {node_id}, chunk {chunk_index}: {e}", exc_info=True)
             chunk_record.status = 'failed'
-            chunk_record.error = str(e)[:500]
+            chunk_record.error = TRANSCRIPTION_FAILED_TEXT
             chunk_record.completed_at = datetime.utcnow()
             db.session.commit()
             raise
@@ -279,7 +280,7 @@ class FinalizationTask(Task):
                 node = Node.query.get(node_id)
                 if node:
                     node.transcription_status = 'failed'
-                    node.transcription_error = str(exc)[:500]
+                    node.transcription_error = TRANSCRIPTION_FAILED_TEXT
                     node.transcription_completed_at = datetime.utcnow()
                     db.session.commit()
                     logger.error(f"Streaming finalization failed for node {node_id}: {exc}")
@@ -434,7 +435,7 @@ class DraftStreamingTranscriptionTask(Task):
 
                 if chunk:
                     chunk.status = 'failed'
-                    chunk.error = str(exc)[:500]
+                    chunk.error = TRANSCRIPTION_FAILED_TEXT
                     chunk.completed_at = datetime.utcnow()
                     db.session.commit()
                     logger.error(f"Draft chunk transcription failed for session {session_id}, chunk {chunk_index}: {exc}")
@@ -581,7 +582,7 @@ def transcribe_draft_chunk(self, session_id: str, chunk_index: int, chunk_path: 
         except Exception as e:
             logger.error(f"Draft chunk transcription error for session {session_id}, chunk {chunk_index}: {e}", exc_info=True)
             chunk_record.status = 'failed'
-            chunk_record.error = str(e)[:500]
+            chunk_record.error = TRANSCRIPTION_FAILED_TEXT
             chunk_record.completed_at = datetime.utcnow()
             db.session.commit()
             raise
@@ -601,7 +602,7 @@ class BatchTranscriptionTask(Task):
                     NodeTranscriptChunk.chunk_index.in_(chunk_indices)
                 ).update({
                     'status': 'failed',
-                    'error': str(exc)[:500],
+                    'error': TRANSCRIPTION_FAILED_TEXT,
                     'completed_at': datetime.utcnow()
                 }, synchronize_session='fetch')
                 db.session.commit()
@@ -978,7 +979,7 @@ def transcribe_chunk_batch(self, session_id: str, chunk_indices: list):
                     ).first()
                     if chunk_record and chunk_record.status != 'completed':
                         chunk_record.status = 'failed'
-                        chunk_record.error = str(e)[:500]
+                        chunk_record.error = TRANSCRIPTION_FAILED_TEXT
                         chunk_record.completed_at = datetime.utcnow()
                 db.session.commit()
             except Exception as cleanup_err:
