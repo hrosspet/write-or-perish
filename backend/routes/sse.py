@@ -441,21 +441,31 @@ def draft_transcription_stream(session_id):
     - event: content_update - Draft content has been updated
     - event: error - An error occurred
     - event: heartbeat - Keep-alive ping
+    - event: session_taken_over - Another device continued the recording
+      (#388); the stream ends
 
     Query params:
     - last_chunk: Index of the last chunk the client has received
+    - device_key: the recording device's key (#388), optional
     """
+    from backend.utils.recording_device import (
+        TAKEN_OVER, TAKEN_OVER_ERROR, is_taken_over,
+    )
+
     draft = Draft.query.filter_by(session_id=session_id).first()
     if draft is None or draft.user_id != current_user.id:
         return _not_found("Streaming session")
 
     # Get the last chunk index the client has seen
     last_chunk = request.args.get('last_chunk', -1, type=int)
+    device_key = request.args.get('device_key') or None
 
     # Only the tab recording the session opens this stream, so a
     # (re)connect is a sign of life — also for a resumed session whose
-    # previous tab released it (#320).
-    if draft.streaming_status == 'recording':
+    # previous tab released it (#320). Not from a device whose recording
+    # another device continued (#388).
+    if (draft.streaming_status == 'recording'
+            and not is_taken_over(draft, device_key)):
         stamp_session_alive(session_id)
         db.session.commit()
 
@@ -484,6 +494,17 @@ def draft_transcription_stream(session_id):
                 current_draft = Draft.query.filter_by(session_id=session_id).first()
                 if not current_draft:
                     yield format_sse_message({"error": "Draft not found"}, event="error")
+                    break
+
+                # Another device continued this recording (#388): this
+                # device stops. Checked first, so its stream neither stamps
+                # the session nor takes that device's all_complete (whose
+                # handling deletes the draft).
+                if is_taken_over(current_draft, device_key):
+                    yield format_sse_message({
+                        "error": TAKEN_OVER_ERROR,
+                        "code": TAKEN_OVER,
+                    }, event=TAKEN_OVER)
                     break
 
                 # Get any new completed chunks

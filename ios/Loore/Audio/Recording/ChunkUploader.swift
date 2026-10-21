@@ -21,7 +21,9 @@ import os
 ///   next launch retries it) and is reported, so the caller does not finalize
 ///   without it.
 /// - `init_parse_failed` on chunk 0 is fatal (the session is dead, its audio is
-///   deleted at once); other 4xx answers are given up without retry.
+///   deleted at once); so is `session_taken_over` (#388: another device
+///   continued the session, which no longer takes this phone's chunks). Other
+///   4xx answers are given up without retry.
 /// - A relaunch resumes whatever is left (`resumePending()`); sign-out deletes
 ///   the whole queue (`reset()`).
 @MainActor
@@ -142,6 +144,13 @@ final class ChunkUploader: NSObject {
 
     /// Starts tracking a session (before its first chunk).
     func open(sessionId: String, uploadURL: URL, firstIndex: Int = 0) {
+        // A session that died here (a fatal answer) and is recorded into again:
+        // this phone claimed it back from the device that continued it (#388).
+        // Its audio was deleted at the fatal answer, and its fatal state would
+        // drop every new chunk, so it starts over.
+        if manifests[sessionId]?.chunks.values.contains(where: { $0.status == .fatal }) == true {
+            forget(sessionId: sessionId)
+        }
         if manifests[sessionId] == nil {
             var manifest = Manifest(sessionId: sessionId, uploadURL: uploadURL)
             manifest.firstIndex = firstIndex
@@ -162,6 +171,7 @@ final class ChunkUploader: NSObject {
         form.addFile("chunk", filename: "chunk_\(chunk.index).mp4", mimeType: "audio/mp4", data: chunk.data)
         form.addField("chunk_index", String(chunk.index))
         form.addField("mime_type", "audio/mp4")
+        form.addField("device_key", RecordingDevice.key)
         let body = form.finalized()
         do {
             try directory(for: sessionId).createIfNeeded(fileManager)
@@ -464,6 +474,13 @@ final class ChunkUploader: NSObject {
                 return .fatal("Your audio recording could not be processed. Please try recording again. (\(detail))")
             }
             return .giveUp
+        case 409:
+            // #388: another device continued the session; retrying cannot help.
+            let json = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any]
+            if json?["code"] as? String == RecordingDevice.takenOverCode {
+                return .fatal(RecordingDevice.takenOverMessage)
+            }
+            return .retry
         case 401, 403, 404, 413, 422:
             return .giveUp
         default:
@@ -586,6 +603,28 @@ private final class BackgroundDelegate: NSObject, URLSessionTaskDelegate {
             owner?.backgroundCompletionHandler = nil
         }
     }
+}
+
+/// This phone's recording key (#388), one per install. It goes with every
+/// recording request: `device_key` in init and claim (which make it the
+/// session's writer), in each chunk's form and in finalize. A session another
+/// device continued refuses it with `session_taken_over`, so two devices never
+/// record into one session. Per install, not per launch: chunks a killed app
+/// left behind upload after the relaunch with the same key.
+enum RecordingDevice {
+    static let takenOverCode = "session_taken_over"
+    static let takenOverMessage = "This recording was continued in another tab or on another device, so recording stopped here. Any audio this phone had not sent yet is not part of it."
+    private static let defaultsKey = "loore_recording_device_key"
+
+    static let key: String = {
+        let defaults = UserDefaults.standard
+        if let saved = defaults.string(forKey: RecordingDevice.defaultsKey), !saved.isEmpty {
+            return saved
+        }
+        let made = UUID().uuidString
+        defaults.set(made, forKey: RecordingDevice.defaultsKey)
+        return made
+    }()
 }
 
 private extension URL {

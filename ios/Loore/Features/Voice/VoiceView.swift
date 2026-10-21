@@ -275,7 +275,14 @@ struct VoiceView: View {
     @ViewBuilder private func recoveryButtons(_ draft: InterruptedDraft) -> some View {
         Button("Continue recording") {
             interrupted = nil
-            voice.resumeInterrupted(draft)
+            Task {
+                // Before the claim (#388): a continue whose microphone is off
+                // leaves the recording to the device that has it.
+                if !app.audio.usesDebugAudioFile {
+                    guard await ensureMicrophone() else { return }
+                }
+                voice.resumeInterrupted(draft)
+            }
         }
         .buttonStyle(RecoveryButtonStyle(accent: true))
         .accessibilityIdentifier("voice.recovery.continue")

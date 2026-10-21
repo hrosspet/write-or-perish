@@ -31,6 +31,14 @@ final class VoiceRecorder: VoiceRecording {
     private let inbox = ChunkInbox()
     private let log = Logger(subsystem: "org.loore.app", category: "recorder")
     private let recordingLog: RecordingLog
+    /// #388: a continued recording keeps its chunks on the phone until its claim
+    /// answered (`releaseHeldChunks`). The uploader is not opened before, so
+    /// nothing reaches the server while another device is the session's writer.
+    private var holdingChunks = false
+    /// The index the writer numbers from while holding (the listed chunk count);
+    /// the claim's index replaces it, and the difference is added to every chunk.
+    private var heldFirstIndex = 0
+    private var indexShift = 0
 
     init(uploader: ChunkUploader? = nil, debugFile: URL? = nil, recordingLog: RecordingLog = .shared) {
         self.uploader = uploader ?? .shared
@@ -48,17 +56,44 @@ final class VoiceRecorder: VoiceRecording {
     var hasProducedChunks: Bool { nextIndex > 0 }
 
     func start(sessionId: String, uploadURL: URL, firstChunkIndex: Int, elapsedOffset: Double) throws {
+        try begin(sessionId: sessionId, uploadURL: uploadURL, firstChunkIndex: firstChunkIndex,
+                  elapsedOffset: elapsedOffset, holdChunks: false)
+    }
+
+    func startHoldingChunks(sessionId: String, uploadURL: URL, firstChunkIndex: Int,
+                            elapsedOffset: Double) throws {
+        try begin(sessionId: sessionId, uploadURL: uploadURL, firstChunkIndex: firstChunkIndex,
+                  elapsedOffset: elapsedOffset, holdChunks: true)
+    }
+
+    func releaseHeldChunks(firstChunkIndex: Int) {
+        guard holdingChunks, let sessionId, let uploadURL else { return }
+        holdingChunks = false
+        indexShift = firstChunkIndex - heldFirstIndex
+        uploader.open(sessionId: sessionId, uploadURL: uploadURL, firstIndex: firstChunkIndex)
+        recordingLog.note("claim answered: chunks from \(firstChunkIndex)")
+        drainInbox()
+    }
+
+    private func begin(sessionId: String, uploadURL: URL, firstChunkIndex: Int, elapsedOffset: Double,
+                       holdChunks: Bool) throws {
         cancel()
         self.sessionId = sessionId
         self.uploadURL = uploadURL
         self.elapsedOffset = elapsedOffset
         secondsBeforeWriter = 0
+        holdingChunks = holdChunks
+        heldFirstIndex = firstChunkIndex
+        indexShift = 0
         uploader.onFatal = { [weak self] sid, message in
             guard let self, sid == self.sessionId else { return }
             self.onFatal?(message)
         }
-        uploader.open(sessionId: sessionId, uploadURL: uploadURL, firstIndex: firstChunkIndex)
-        recordingLog.note("recorder start: session \(sessionId.prefix(8)), first chunk \(firstChunkIndex)")
+        if !holdChunks {
+            uploader.open(sessionId: sessionId, uploadURL: uploadURL, firstIndex: firstChunkIndex)
+        }
+        recordingLog.note("recorder start: session \(sessionId.prefix(8)), first chunk \(firstChunkIndex)"
+                          + (holdChunks ? " (held until the claim answers)" : ""))
         writer = try makeWriter(firstIndex: firstChunkIndex)
         let source = makeSource()
         let converter = PCMConverter()
@@ -107,8 +142,9 @@ final class VoiceRecorder: VoiceRecording {
     }
 
     private func drainInbox() {
-        guard let sessionId else { return }
-        for chunk in inbox.popAll() {
+        guard let sessionId, !holdingChunks else { return }
+        for var chunk in inbox.popAll() {
+            chunk.index += indexShift
             recordingLog.note("chunk \(chunk.index): \(String(format: "%.1f", chunk.duration)) s, \(chunk.data.count / 1024) KB")
             chunkObserver?(chunk)
             uploader.enqueue(sessionId: sessionId, chunk: chunk)
@@ -146,6 +182,14 @@ final class VoiceRecorder: VoiceRecording {
         source?.stop()
         source = nil
         if let writer { await writer.finish() }
+        if holdingChunks {
+            // Stopped before the claim answered (the turn does not allow it):
+            // nothing was sent, nothing is finalized (#388).
+            cancel()
+            return ChunkUploader.Outcome(produced: 0, stored: 0, failed: [],
+                                         fatalMessage: VoiceTurnController.claimFailedMessage,
+                                         prior: heldFirstIndex)
+        }
         drainInbox()
         guard let sessionId else {
             return ChunkUploader.Outcome(produced: 0, stored: 0, failed: [], fatalMessage: nil)
@@ -164,6 +208,11 @@ final class VoiceRecorder: VoiceRecording {
         source = nil
         writer = nil
         currentWriterUnsafe = nil
+        if holdingChunks {
+            // Never sent: a continue whose claim failed or was abandoned (#388).
+            _ = inbox.popAll()
+            holdingChunks = false
+        }
         if let sessionId { uploader.close(sessionId: sessionId) }
     }
 
