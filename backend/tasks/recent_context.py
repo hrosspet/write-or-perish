@@ -53,12 +53,12 @@ MIN_GENERATION_INTERVAL = timedelta(minutes=5)
 
 
 def _get_latest_chat_profile(user_id):
-    """Return the latest profile with ai_usage in ('chat', 'train'), or None."""
+    """Return the latest profile with ai_usage in ('chat', 'train'), or
+    None. A large build's windows and groups are not profiles (#545)."""
+    from backend.utils.profile_versions import current_profile_query
     return (
-        UserProfile.query
-        .filter_by(user_id=user_id)
+        current_profile_query(user_id)
         .filter(UserProfile.ai_usage.in_(AI_ALLOWED))
-        .order_by(UserProfile.created_at.desc())
         .first()
     )
 

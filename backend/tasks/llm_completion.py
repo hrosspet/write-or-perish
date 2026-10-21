@@ -2398,9 +2398,10 @@ def get_user_profile_content(user_id, pinned_node=None, usage=None):
         pinned_node.get_artifact("profile") if pinned_node else None,
         user_id)
     if profile is None:
-        profile = UserProfile.query.filter_by(user_id=user_id).order_by(
-            UserProfile.created_at.desc()
-        ).first()
+        # A large build's windows and groups are never the profile: the
+        # previous one stays until the build's final merge (#545).
+        from backend.utils.profile_versions import current_profile_query
+        profile = current_profile_query(user_id).first()
 
     if profile and profile.ai_usage in AI_ALLOWED:
         if usage is not None:
@@ -2447,9 +2448,10 @@ def get_user_recent_content(user_id, pinned_node=None, usage=None):
         pinned_node.get_artifact("recent_context") if pinned_node else None,
         user_id)
     if rc is None:
-        profile = UserProfile.query.filter_by(user_id=user_id).filter(
+        from backend.utils.profile_versions import current_profile_query
+        profile = current_profile_query(user_id).filter(
             UserProfile.ai_usage.in_(AI_ALLOWED)
-        ).order_by(UserProfile.created_at.desc()).first()
+        ).first()
         profile_id = profile.id if profile else None
 
         q = UserRecentContext.query.filter_by(user_id=user_id)

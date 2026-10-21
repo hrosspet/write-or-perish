@@ -40,7 +40,10 @@ def _terms_up_to_date(user):
 
 def get_latest_profile(user):
     """Get the most recent profile for a user, or None if no profile exists."""
-    profile = UserProfile.query.filter_by(user_id=user.id).order_by(UserProfile.created_at.desc()).first()
+    # A large build's windows and groups are never shown: the previous
+    # profile stays until the build's final merge (#545).
+    from backend.utils.profile_versions import current_profile_query
+    profile = current_profile_query(user.id).first()
     if profile:
         return {
             "id": profile.id,

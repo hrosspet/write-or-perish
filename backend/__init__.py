@@ -36,6 +36,48 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 install_traceback_scrubbing("backend")
 
 
+PROFILE_MODEL_KEYS = (
+    ("PROFILE_VERSION_MODEL_ANTHROPIC", "anthropic"),
+    ("PROFILE_VERSION_MODEL_OPENAI", "openai"),
+    ("PROFILE_MERGE_MODEL_ANTHROPIC", "anthropic"),
+    ("PROFILE_MERGE_MODEL_OPENAI", "openai"),
+)
+PROFILE_REASONING_EFFORTS = ("none", "minimal", "low", "medium", "high",
+                             "xhigh")
+
+
+def validate_profile_models(config):
+    """Refuse to boot on a profile version or merge model (#545) that is
+    not an active SUPPORTED_MODELS key of the provider its setting names.
+    Unlike the Glean settings, these never cross providers: a user's
+    writing reaches only models of their own chat model's provider. No
+    "chat" requirement: Haiku 5.5 and GPT-6.1 Sol are read only in the
+    pickers and still run background jobs."""
+    supported = config.get("SUPPORTED_MODELS") or {}
+    for key, provider in PROFILE_MODEL_KEYS:
+        model_id = config.get(key)
+        if not model_id:
+            continue
+        cfg = supported.get(model_id) or {}
+        if not cfg or cfg.get("deprecated") or cfg.get("provider") != provider:
+            raise RuntimeError(
+                f"{key}={model_id!r} is not an active {provider} model.")
+    effort = config.get("PROFILE_MERGE_REASONING_EFFORT_OPENAI")
+    if effort and effort not in PROFILE_REASONING_EFFORTS:
+        raise RuntimeError(
+            f"PROFILE_MERGE_REASONING_EFFORT_OPENAI={effort!r} is not one "
+            f"of {', '.join(PROFILE_REASONING_EFFORTS)}.")
+    structure = config.get("PROFILE_MERGE_STRUCTURE")
+    if structure and structure not in ("flat", "grouped"):
+        raise RuntimeError(
+            f"PROFILE_MERGE_STRUCTURE={structure!r} is not 'flat' or "
+            f"'grouped'.")
+    size = config.get("PROFILE_MERGE_GROUP_SIZE")
+    if size is not None and int(size) < 2:
+        raise RuntimeError(
+            f"PROFILE_MERGE_GROUP_SIZE={size!r} must be at least 2.")
+
+
 def validate_default_model(config):
     """Refuse to boot on an ``LLM_NAME`` that is not an active (non-
     deprecated) chat (not ``"chat": False``) SUPPORTED_MODELS key, or on
@@ -87,6 +129,7 @@ def validate_default_model(config):
                 raise RuntimeError(
                     f"{key}={glean_model!r} is not an active model "
                     f"flagged 'read'.")
+        validate_profile_models(config)
         return
     hint = ""
     dotted = (model_id or "").replace("-", ".")

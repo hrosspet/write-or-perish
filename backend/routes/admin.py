@@ -64,7 +64,8 @@ def _profile_status_map():
         last = latest.get(user_id)
         u = users_by_id.get(user_id)
         in_flight = bool(u and (u.profile_batch_pending or u.profile_needs_full_regen))
-        at_rest = last is not None and (
+        at_rest = last is not None and last.generation_type not in (
+            "window", "window_skip", "group") and (
             last.generation_type == "integration"
             or last.parent_profile_id is None
             # The user's own version is not a pipeline step: an edit would

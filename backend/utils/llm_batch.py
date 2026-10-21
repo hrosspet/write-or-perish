@@ -178,23 +178,32 @@ def batch_submit(requests_by_provider, api_keys, phase=None):
         for oai_model, reqs in by_model.items():
             try:
                 # Write JSONL to a temp file
+                # UTF-8 as is, not \\u escapes: a Czech letter is 2 bytes
+                # instead of 6 and an emoji 4 instead of 12, against the
+                # 200 MB input file limit (a large build sends its whole
+                # corpus in one submission, #545).
                 with tempfile.NamedTemporaryFile(
-                    mode="w", suffix=".jsonl", delete=False
+                    mode="w", suffix=".jsonl", delete=False,
+                    encoding="utf-8",
                 ) as tmp:
                     for req in reqs:
+                        body = {
+                            "model": oai_model,
+                            "messages": req["messages"],
+                            "max_completion_tokens": req.get(
+                                "max_tokens", 10000),
+                            "temperature": 1,
+                        }
+                        # Optional per request (a profile merge, #545).
+                        if req.get("reasoning_effort"):
+                            body["reasoning_effort"] = req["reasoning_effort"]
                         line = {
                             "custom_id": req["custom_id"],
                             "method": "POST",
                             "url": "/v1/chat/completions",
-                            "body": {
-                                "model": oai_model,
-                                "messages": req["messages"],
-                                "max_completion_tokens": req.get(
-                                    "max_tokens", 10000),
-                                "temperature": 1,
-                            },
+                            "body": body,
                         }
-                        tmp.write(json.dumps(line) + "\n")
+                        tmp.write(json.dumps(line, ensure_ascii=False) + "\n")
                     tmp_path = tmp.name
 
                 with open(tmp_path, "rb") as f:
@@ -305,19 +314,28 @@ def batch_check_and_collect(batch_ids, api_keys):
                 still_pending[key] = batch_id
                 continue
             if batch.status != "completed":
+                # An expired or cancelled batch still carries the results
+                # of the requests that finished by then, and those were
+                # billed (#419): they are collected below; the rest are
+                # missing from the results, as failed items are.
                 log.error(f"OpenAI batch {batch_id} ended with "
                           f"status={batch.status}")
-                continue
             # Compute batch duration
-            if batch.created_at and batch.completed_at:
+            if batch.created_at and getattr(batch, "completed_at", None):
                 duration = batch.completed_at - batch.created_at
                 batch_durations[key] = round(duration, 1)
                 log.info(f"OpenAI batch {key} duration: {duration:.0f}s "
                          f"({duration/60:.1f}min)")
+            output_file_id = getattr(batch, "output_file_id", None)
+            if not output_file_id:
+                # Nothing finished (every request failed, or the batch
+                # ended before any did): no results, at once.
+                continue
             # Download results
-            content_bytes = client.files.content(
-                batch.output_file_id).content
+            content_bytes = client.files.content(output_file_id).content
             for line in content_bytes.decode().strip().split("\n"):
+                if not line.strip():
+                    continue
                 entry = json.loads(line)
                 cid = entry["custom_id"]
                 resp = entry.get("response", entry.get("result", {}))

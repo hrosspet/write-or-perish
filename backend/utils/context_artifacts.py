@@ -133,11 +133,11 @@ def sync_context_artifacts(node_id, user_id, content):
 def _resolve_latest_artifact(artifact_type, user_id):
     """Find the latest artifact ID for a given type and user."""
     if artifact_type == 'profile':
+        # Never a large build's window or group (#545).
+        from backend.utils.profile_versions import current_profile_query
         row = (
-            UserProfile.query
-            .filter_by(user_id=user_id)
+            current_profile_query(user_id)
             .filter(UserProfile.ai_usage.in_(AI_ALLOWED))
-            .order_by(UserProfile.created_at.desc())
             .first()
         )
     elif artifact_type == 'todo':
@@ -149,11 +149,10 @@ def _resolve_latest_artifact(artifact_type, user_id):
             .first()
         )
     elif artifact_type == 'recent_context':
+        from backend.utils.profile_versions import current_profile_query
         profile = (
-            UserProfile.query
-            .filter_by(user_id=user_id)
+            current_profile_query(user_id)
             .filter(UserProfile.ai_usage.in_(AI_ALLOWED))
-            .order_by(UserProfile.created_at.desc())
             .first()
         )
         profile_id = profile.id if profile else None

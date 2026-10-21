@@ -903,6 +903,16 @@ class UserProfile(db.Model):
     # user's version through it (tasks/exports.carried_user_version). A
     # plain id, not a foreign key: it only points within one user's rows.
     merged_profile_id = db.Column(db.Integer, nullable=True)
+    # Independent versions of a large build (#545,
+    # backend/tasks/profile_windows.py): the window set a "window",
+    # "window_skip", "group" or final "integration" row belongs to. Every
+    # row of one set carries the same id; a later update adds windows to
+    # the user's current set.
+    window_set = db.Column(db.String(32), nullable=True, index=True)
+    # The exclusive start of the writing a window, skipped window or group
+    # covers: the previous window's cutoff. None on the first window of a
+    # set built from the start of the writing.
+    covers_start = db.Column(db.DateTime, nullable=True)
 
     # --- Voice‑Mode fields ---
     audio_tts_url = db.Column(db.String, nullable=True)
