@@ -37,6 +37,20 @@ class Config:
     # otherwise (validate_default_model). Prod sets LLM_NAME explicitly.
     DEFAULT_LLM_MODEL = os.environ.get("LLM_NAME") or "claude-opus-4.6"
 
+    # Each provider's default chat model (#487). A saved model that is no
+    # longer offered for chat (a preference, a thread's model, the model
+    # an old page sends; deprecated or since removed) is replaced with a
+    # model of its own provider, never another provider's: "A user's
+    # model is theirs" (LOORE-ESSENCE). The user's own model of that
+    # provider comes first; else the provider's default. The provider
+    # of DEFAULT_LLM_MODEL has LLM_NAME as its default, so its setting
+    # here applies only while LLM_NAME is another provider's model. Each
+    # must be an active chat model of its own provider (checked at boot,
+    # validate_default_model).
+    CHAT_MODEL_ANTHROPIC = (os.environ.get("CHAT_MODEL_ANTHROPIC")
+                            or "claude-opus-5.5")
+    CHAT_MODEL_OPENAI = os.environ.get("CHAT_MODEL_OPENAI") or "gpt-6-astra"
+
     # The model a read (routes/read.py) runs on when neither the request
     # nor an earlier read reply in the thread names one. Reads run only on
     # models flagged "read" in SUPPORTED_MODELS (#355).
@@ -222,9 +236,12 @@ class Config:
     #
     # Model picker keys (#355):
     #   deprecated — hidden from every picker and never inherited from a
-    #                thread; old replies keep their label, and a thread
-    #                whose last reply used it falls back to the user's
-    #                preference / LLM_NAME.
+    #                thread; old replies keep their label. A preference,
+    #                a thread or a request still on it moves to a model
+    #                of the same provider (#487): the user's own model of
+    #                that provider, else CHAT_MODEL_<PROVIDER> /
+    #                LLM_NAME. Deprecate a model rather than remove its
+    #                entry: the entry is how its provider is known.
     #   featured   — in the picker's short list (with the selected model);
     #                the rest sit behind "More models…". Set by hand.
     #   read       — a read (Community Archive picks) may run on it; the
