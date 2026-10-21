@@ -36,6 +36,7 @@ for _mod in ["flask_login", "backend.models", "backend.extensions"]:
 
 from backend.extensions import db as _db  # noqa: E402
 from backend.models import Draft, Node, User, UserTodo  # noqa: E402
+from backend.utils.error_privacy import TODO_MERGE_FAILED_TEXT  # noqa: E402
 
 
 @pytest.fixture
@@ -315,6 +316,6 @@ def test_a_merge_whose_model_call_raised_can_be_applied_again(
 
     entry = _entry(proposal.id, "propose_todo")
     assert entry["apply_status"] == "failed"
-    assert entry["apply_error"] == "provider unavailable"
+    assert entry["apply_error"] == TODO_MERGE_FAILED_TEXT
     assert entry["retryable"] is True
     assert [d.parent_id for d in _pending_drafts(user.id)] == [proposal.id]

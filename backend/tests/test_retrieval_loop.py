@@ -45,6 +45,7 @@ from backend.models import (  # noqa: E402
     UserTodo, ExternalItem, ExternalItemEmbedding, NodeEmbedding,
 )
 from backend.utils.embeddings import pack_vector  # noqa: E402
+from backend.utils.error_privacy import REPLY_FAILED_TEXT  # noqa: E402
 
 
 # ── Scriptable LLM provider stub ─────────────────────────────────────────
@@ -628,7 +629,8 @@ def test_continuation_terminal_failure_fails_continuation_node(
     assert interim.continuation_node_id is not None
     cont = Node.query.get(interim.continuation_node_id)
     assert cont.llm_task_status == "failed"
-    assert "provider overloaded" in (cont.llm_task_error or "")
+    assert "provider overloaded" not in (cont.llm_task_error or "")
+    assert cont.llm_task_error == REPLY_FAILED_TEXT
 
 
 def test_continuation_transient_failure_retries(app, monkeypatch):
