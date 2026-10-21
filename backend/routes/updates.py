@@ -9,7 +9,7 @@ PollResponse in models.py.
 import logging
 from datetime import datetime
 
-from flask import Blueprint, jsonify, request, current_app
+from flask import Blueprint, jsonify, request, current_app, abort
 from flask_login import login_required, current_user
 
 from backend.extensions import db
@@ -87,6 +87,8 @@ def _pending_polls_for(user):
     pending = []
     for poll in Poll.query.filter_by(closed_at=None).order_by(
             Poll.created_at.asc()).all():
+        if not poll.reaches(user.id):
+            continue
         resp = responses.get(poll.id)
         if resp is not None and resp.status in ("sent", "declined"):
             continue
@@ -200,8 +202,17 @@ def mark_notification(notification_id, action):
 # Polls — the user side (two-phase opt-in)
 # ---------------------------------------------------------------------------
 
-def _get_active_poll(poll_id):
+def _get_poll_for_user(poll_id):
+    """The poll, or 404 when it is not addressed to the current user (a
+    one-user poll is invisible to everyone else, #411)."""
     poll = Poll.query.get_or_404(poll_id)
+    if not poll.reaches(current_user.id):
+        abort(404)
+    return poll
+
+
+def _get_active_poll(poll_id):
+    poll = _get_poll_for_user(poll_id)
     if poll.closed_at is not None:
         return None
     return poll
@@ -225,7 +236,7 @@ def _get_or_create_response(poll):
 def get_poll(poll_id):
     """Poll + the user's own response state (polled while a draft is being
     generated)."""
-    poll = Poll.query.get_or_404(poll_id)
+    poll = _get_poll_for_user(poll_id)
     resp = PollResponse.query.filter_by(
         poll_id=poll.id, user_id=current_user.id).first()
     return jsonify({
@@ -321,7 +332,7 @@ def send_response(poll_id):
 @login_required
 def decline_poll(poll_id):
     """'No thanks' — permanently dismisses the poll for this user."""
-    poll = Poll.query.get_or_404(poll_id)
+    poll = _get_poll_for_user(poll_id)
     resp = _get_or_create_response(poll)
     if resp.status == "sent":
         return jsonify({"error": "Already sent."}), 409

@@ -115,12 +115,13 @@ const adminSelectStyle = {
   appearance: "none",
 };
 
-function AdminPolls() {
+export function AdminPolls() {
   const [polls, setPolls] = useState([]);
   const [question, setQuestion] = useState("");
   const [models, setModels] = useState([]);
   const [modelId, setModelId] = useState("");
   const [dataSource, setDataSource] = useState("derived");
+  const [audience, setAudience] = useState(""); // usernames; empty = everyone
   const [responses, setResponses] = useState({}); // poll_id -> array
   const [pollsError, setPollsError] = useState("");
 
@@ -158,13 +159,23 @@ function AdminPolls() {
 
   const createPoll = async () => {
     if (!question.trim() || !modelId) return;
+    const names = audience
+      .split(/[\s,]+/)
+      .map((n) => n.replace(/^@/, ""))
+      .filter(Boolean);
+    if (audience.trim() && names.length === 0) {
+      setPollsError("No usernames in the audience field.");
+      return;
+    }
     try {
       await api.post("/admin/polls", {
         question,
         model_id: modelId,
         data_source: dataSource,
+        audience_usernames: names,
       });
       setQuestion("");
+      setAudience("");
       fetchPolls();
     } catch (err) {
       setPollsError(err.response?.data?.error || "Failed to create poll.");
@@ -227,6 +238,15 @@ function AdminPolls() {
             <option key={s.value} value={s.value}>{s.label}</option>
           ))}
         </select>
+        <input
+          type="text"
+          value={audience}
+          onChange={(e) => setAudience(e.target.value)}
+          placeholder="Only these users (usernames)"
+          title="Leave empty to send to everyone"
+          aria-label="Only these users"
+          style={{ padding: "8px", width: "190px" }}
+        />
         <button onClick={createPoll}>Create poll</button>
       </div>
       {pollsError && <div style={{ color: "var(--error)" }}>{pollsError}</div>}
@@ -241,6 +261,11 @@ function AdminPolls() {
                   (s) => s.value === p.data_source) || POLL_DATA_SOURCES[0]
                 ).label.toLowerCase()}
               </span>
+              {p.audience && (
+                <span style={{ color: "var(--text-muted)", fontSize: "0.8rem" }}>
+                  {" "}— only {p.audience.join(", ")}
+                </span>
+              )}
               {p.closed_at && (
                 <em style={{ color: "var(--text-muted)" }}> (closed)</em>
               )}
