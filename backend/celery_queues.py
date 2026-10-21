@@ -89,6 +89,8 @@ TASK_QUEUES = {
     # Imports, pre-fills and syncs.
     "backend.tasks.chat_imports.import_conversations": _B,
     "backend.tasks.chat_imports.sweep_import_stashes": _B,
+    # Beat (every minute): re-sends an import whose worker died (#546).
+    "backend.tasks.chat_imports.resume_stalled_imports": _B,
     "backend.tasks.imports.import_twitter_archive": _B,
     "backend.tasks.imports.prefill_community_archive": _B,
     "backend.tasks.imports.prefill_x_api": _B,
