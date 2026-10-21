@@ -82,3 +82,44 @@ test('Discard deletes the session through the discard path only', async () => {
   await waitFor(() => expect(screen.queryByText('Unfinished Voice recording')).toBeNull());
   expect(screen.getByRole('textbox').value).toBe('');
 });
+
+const renderWithSubmit = (onSubmitOverride) =>
+  render(<MemoryRouter><NodeForm onSubmitOverride={onSubmitOverride} /></MemoryRouter>);
+
+test('the banner buttons do not submit the form', async () => {
+  const onSubmitOverride = jest.fn();
+  renderWithSubmit(onSubmitOverride);
+  fireEvent.change(await screen.findByRole('textbox'), { target: { value: 'half-written thought' } });
+  fireEvent.click(await screen.findByText('Discard'));
+  await waitFor(() => expect(mockDelete).toHaveBeenCalled());
+  expect(onSubmitOverride).not.toHaveBeenCalled();
+  expect(screen.queryByText(/Content is required/)).toBeNull();
+});
+
+test('Recover keeps text typed while the banner was showing', async () => {
+  const onSubmitOverride = jest.fn();
+  renderWithSubmit(onSubmitOverride);
+  fireEvent.change(await screen.findByRole('textbox'), { target: { value: 'my typed paragraph' } });
+  fireEvent.click(await screen.findByText('Recover'));
+  await waitFor(() => expect(screen.getByRole('textbox').value)
+    .toBe('my typed paragraph\n\nrecovered words'), { timeout: 5000 });
+  expect(onSubmitOverride).not.toHaveBeenCalled();
+});
+
+test('Discard shows the typed draft the recording was hiding', async () => {
+  let draftCalls = 0;
+  mockGet.mockImplementation((url) => {
+    if (url.startsWith('/drafts/')) {
+      draftCalls += 1;
+      return Promise.resolve({
+        data: draftCalls === 1
+          ? draftResponse
+          : { id: 3, content: 'older typed words', updated_at: '2026-10-01T09:00:00' },
+      });
+    }
+    return Promise.resolve({ data: {} });
+  });
+  renderForm();
+  fireEvent.click(await screen.findByText('Discard'));
+  await waitFor(() => expect(screen.getByRole('textbox').value).toBe('older typed words'));
+});

@@ -47,6 +47,7 @@ export default function RecoveryBanner({ draft, onContinue, onDiscard, note, con
 
       <div style={{ display: 'flex', gap: '16px' }}>
         <button
+          type="button"
           onClick={onContinue}
           style={{
             padding: '10px 24px',
@@ -63,6 +64,7 @@ export default function RecoveryBanner({ draft, onContinue, onDiscard, note, con
           {continueLabel || 'Continue recording'}
         </button>
         <button
+          type="button"
           onClick={onDiscard}
           style={{
             padding: '10px 24px',

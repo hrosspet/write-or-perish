@@ -224,6 +224,8 @@ const NodeForm = forwardRef(
     // the server refuses (409) or reports `live`, and this view lets go of
     // it instead of completing it.
     const [recoveryOffered, setRecoveryOffered] = useState(false);
+    const contentRef = React.useRef(content);
+    contentRef.current = content;
     useEffect(() => {
       if (!isDraftLoaded || !draft) return;
       if (!draft.session_id || !draft.has_stored_chunks) return;
@@ -235,6 +237,10 @@ const NodeForm = forwardRef(
       setRecoveryOffered(false);
       setIsRecoveringAudio(true);
       setStreamingSessionId(draft.session_id);
+      // Text typed while the banner was up stays: the transcript goes after it.
+      const typedBefore = contentRef.current;
+      const withTyped = (transcript) =>
+        typedBefore.trim() ? `${typedBefore.replace(/\s+$/, '')}\n\n${transcript}` : transcript;
 
       const letGo = () => {
         setIsRecoveringAudio(false);
@@ -267,14 +273,14 @@ const NodeForm = forwardRef(
               }
 
               if (content) {
-                setContent(content);
+                setContent(withTyped(content));
               }
 
               if (streaming_status === 'completed' || streaming_status === 'failed') {
                 clearInterval(pollInterval);
                 setIsRecoveringAudio(false);
                 if (content) {
-                  saveDraft(content);
+                  saveDraft(withTyped(content));
                   setHasDraft(true);
                 }
               }
@@ -309,7 +315,22 @@ const NodeForm = forwardRef(
         console.error('[NodeForm] Failed to discard recording:', err);
       }
       setRecoveryOffered(false);
-    }, [draft]);
+      // The recording hid the plain typed draft of this place (GET returns
+      // the newest one): show it, so the next keystroke does not autosave
+      // over it. Text already typed in the box wins.
+      try {
+        const params = new URLSearchParams();
+        if (editMode && nodeId) params.append('node_id', nodeId);
+        if (!editMode && parentId) params.append('parent_id', parentId);
+        const res = await api.get(`/drafts/?${params.toString()}`);
+        if (res.data && res.data.content && !res.data.session_id) {
+          if (!contentRef.current.trim()) {
+            setContent(res.data.content);
+            setHasDraft(true);
+          }
+        }
+      } catch (_) { /* no typed draft */ }
+    }, [draft, editMode, nodeId, parentId]);
 
     // Handle discard draft
     const handleDiscardDraft = useCallback(() => {
