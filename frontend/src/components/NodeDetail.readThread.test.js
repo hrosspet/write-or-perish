@@ -245,17 +245,88 @@ describe('#387: the action row in a read thread (a Glean-card thread)', () => {
     expect(buttons().read).toBeInTheDocument();
   });
 
-  test('outside a read thread, auto-generate still hides LLM Response', async () => {
+  test('outside a read thread, an answered entry still hides LLM Response', async () => {
     localStorage.setItem('loore_auto_generate', 'true');
     routes['/nodes/60'] = uploadUnderPicks({
       content: 'A note.', ancestors: [], in_read_thread: false, read_reply_above: false,
-      glean_thread: false,
+      glean_thread: false, children: [AI_REPLY_CHILD], child_count: 1,
     });
 
     renderAt('/node/60');
     await screen.findByText('A note.');
     expect(buttons().llm).toBeNull();
     expect(buttons().read).toBeNull();
+  });
+});
+
+describe('#416: LLM Response after an automatic reply that did not happen', () => {
+  const buttons = () => {
+    const row = Array.from(document.querySelectorAll('[data-action-group] button'));
+    return { llm: row.find((b) => b.textContent === 'LLM Response') || null };
+  };
+  const plainEntry = (overrides = {}) => uploadUnderPicks({
+    content: 'A note.', ancestors: [], in_read_thread: false, read_reply_above: false,
+    glean_thread: false, ...overrides,
+  });
+
+  test('outside a read thread, an entry with no reply offers LLM Response', async () => {
+    localStorage.setItem('loore_auto_generate', 'true');
+    routes['/nodes/60'] = plainEntry();
+
+    renderAt('/node/60');
+    await screen.findByText('A note.');
+    expect(buttons().llm).toBeEnabled();
+  });
+
+  test.each(['failed', 'cancelled'])('a %s reply does not hide it', async (status) => {
+    localStorage.setItem('loore_auto_generate', 'true');
+    routes['/nodes/60'] = plainEntry({
+      children: [{ ...AI_REPLY_CHILD, llm_task_status: status }], child_count: 1,
+    });
+
+    renderAt('/node/60');
+    await screen.findByText('A note.');
+    expect(buttons().llm).toBeEnabled();
+  });
+
+  test.each(['pending', 'processing', 'completed'])('a %s reply hides it', async (status) => {
+    localStorage.setItem('loore_auto_generate', 'true');
+    routes['/nodes/60'] = plainEntry({
+      children: [{ ...AI_REPLY_CHILD, llm_task_status: status }], child_count: 1,
+    });
+
+    renderAt('/node/60');
+    await screen.findByText('A note.');
+    expect(buttons().llm).toBeNull();
+  });
+
+  test.each(['pending', 'processing'])('an audio upload still %s transcription offers no reply', async (status) => {
+    localStorage.setItem('loore_auto_generate', 'true');
+    routes['/nodes/60'] = plainEntry({ transcription_status: status });
+
+    renderAt('/node/60');
+    await screen.findByText('A note.');
+    expect(buttons().llm).toBeNull();
+  });
+
+  test('once transcription is completed it offers LLM Response', async () => {
+    localStorage.setItem('loore_auto_generate', 'true');
+    routes['/nodes/60'] = plainEntry({ transcription_status: 'completed' });
+
+    renderAt('/node/60');
+    await screen.findByText('A note.');
+    expect(buttons().llm).toBeEnabled();
+  });
+
+  test('in a read thread, a failed reply under the upload does not hide it either', async () => {
+    localStorage.setItem('loore_auto_generate', 'true');
+    routes['/nodes/60'] = uploadUnderPicks({
+      children: [{ ...AI_REPLY_CHILD, llm_task_status: 'failed' }], child_count: 1,
+    });
+
+    renderAt('/node/60');
+    await screen.findByText(/What I make of these picks/);
+    expect(buttons().llm).toBeEnabled();
   });
 });
 

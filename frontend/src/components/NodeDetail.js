@@ -1200,17 +1200,21 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
   // the kebab Edit/Delete menu.
   const showInlineInput = !!currentUser;
   // Auto-generate hides LLM Response because it already asked for the
-  // reply when the node was sent. In a read thread it doesn't always: an
-  // audio upload under the picks is saved without a reply, because
+  // reply when the node was sent. It hides it only while a reply stands
+  // under the node: when none was created (spend cap reached, the request
+  // failed) or the reply failed or was cancelled, the user must be able to
+  // ask again (#416), so the choices show. In a read thread an audio
+  // upload under the picks is saved without a reply by design, because
   // auto-generate can't know whether the user wants to talk about it
-  // (LLM Response) or get more picks (Read further). When Loore can't
-  // know what the user wants next, it shows the choices (#387): a node
-  // of the user's in a read thread with no reply under it yet offers
-  // both, auto-generate on or off.
-  const awaitsChoiceInRead = inReadThread && !isLlmNode
-    && !(node.children || []).some(c => !c.deleted);
+  // (LLM Response) or get more picks (Read further) (#387).
+  // A top-level audio upload is a placeholder until transcription
+  // finishes: no reply is offered to it before then.
+  const awaitsReply = !isLlmNode
+    && !['pending', 'processing'].includes(node.transcription_status)
+    && !(node.children || []).some(c => !c.deleted
+      && !['failed', 'cancelled'].includes(c.llm_task_status));
   const showCraftBar = isOwner && (craftMode || isPublicThread)
-    && (!autoGenerateActive || awaitsChoiceInRead)
+    && (!autoGenerateActive || awaitsReply)
     && node.ai_usage !== 'none' && !isLlmPending;
   // In a thread started from the Glean card (#435) the action row under
   // every node carries the Glean button, next to LLM Response — the
