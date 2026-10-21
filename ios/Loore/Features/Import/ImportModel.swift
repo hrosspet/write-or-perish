@@ -88,6 +88,10 @@ struct ImportResult: Equatable {
     var updated = 0
     var empty = 0
     var profileUpdateTaskId: String?
+    /// ChatGPT/Claude: the numbers count messages, while the confirm dialog
+    /// counted conversations; `archiveSummary` names both.
+    var countsMessages = false
+    var archiveSummary: String?
 
     init(_ object: [String: Any]) {
         func int(_ key: String) -> Int { (object[key] as? NSNumber)?.intValue ?? 0 }
@@ -112,13 +116,15 @@ struct ImportResult: Equatable {
         [("Imported", created, created > 0), ("Restored", restored, restored > 0), ("Updated", updated, updated > 0),
          ("Skipped", skipped, false), ("No text", empty, false)]
             .filter { $0.0 == "Imported" || $0.1 > 0 }
+            .map { (countsMessages && $0.0 != "No text" ? "Messages \($0.0.lowercased())" : $0.0, $0.1, $0.2) }
     }
 
     var notes: [String] {
+        let summary = archiveSummary.map { [$0] } ?? []
         if created == 0 && restored == 0 && updated == 0 {
-            return ["Everything in this archive was already imported — nothing new was added."]
+            return summary + ["Everything in this archive was already imported — nothing new was added."]
         }
-        var out: [String] = []
+        var out: [String] = summary
         if updated > 0 {
             out.append("Updated items were already imported; their privacy and AI-usage settings now match this import.")
         }
@@ -419,6 +425,13 @@ final class ImportModel {
     }
 
     private func finish(_ outcome: ImportResult) {
+        var outcome = outcome
+        if let analysis, analysis.kind == .claude || analysis.kind == .chatgpt, analysis.totalConversations > 0 {
+            outcome.countsMessages = true
+            let conversations = analysis.totalConversations
+            outcome.archiveSummary = "These numbers count messages. Your archive has \(jsLocaleNumber(conversations)) conversation\(conversations == 1 ? "" : "s")"
+                + (analysis.totalMessages > 0 ? " with \(jsLocaleNumber(analysis.totalMessages)) messages." : ".")
+        }
         analysis = nil
         stage = nil
         progress = nil

@@ -824,6 +824,12 @@ final class ImportTests: StubbedAppTestCase {
         XCTAssertEqual(result.stats.map(\.label), ["Imported", "Updated", "Skipped", "No text"])
         XCTAssertEqual(result.notes.count, 3)
         XCTAssertEqual(ImportResult(["created": 0]).stats.map(\.label), ["Imported"])
+
+        var conversations = ImportResult(["created": 6, "skipped": 2])
+        conversations.countsMessages = true
+        conversations.archiveSummary = "These numbers count messages. Your archive has 2 conversations with 8 messages."
+        XCTAssertEqual(conversations.stats.map(\.label), ["Messages imported", "Messages skipped"])
+        XCTAssertEqual(conversations.notes.first, conversations.archiveSummary)
     }
 }
 
