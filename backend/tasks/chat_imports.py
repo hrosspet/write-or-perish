@@ -20,6 +20,14 @@ them, and each continues from the saved place. Dedup keys make any
 overlap a skip, never a duplicate. A copy delivered while the first
 still runs (Redis visibility timeout) finds the run guard taken and is
 ignored.
+
+When the whole worker is killed outright (e.g. for memory), Redis hands
+the task out again only after its visibility timeout, an hour later
+(#546). ``resume_stalled_imports`` (beat, every minute) sends such a
+task again under its id within minutes: the run's heartbeat thread died
+with it, so its lock went stale (conversation_stash.stalled_locks). The
+run counts how often runs of its task died and stops after
+MAX_CRASH_RESUMES of them (conversation_stash.claim_lock).
 """
 from celery.utils.log import get_task_logger
 
@@ -72,6 +80,8 @@ def import_conversations(self, user_id, token, options):
             logger.warning(
                 "Conversation import for user %s hit the time limit; "
                 "continuing in a new run", user_id)
+            # The lock waits for the next run; that run is no crash.
+            cs.requeue_lock(user_id, self.request.id)
             raise self.retry(countdown=RESUME_COUNTDOWN_SECONDS)
         except UserFacingTaskError:
             raise
@@ -83,6 +93,43 @@ def import_conversations(self, user_id, token, options):
 
         result["user_id"] = user_id
         return result
+
+
+@celery.task(name="backend.tasks.chat_imports.resume_stalled_imports")
+def resume_stalled_imports():
+    """Beat (every minute): send a conversation import whose run died
+    again, under the same task id, so the client's polling follows the
+    new run. It continues from the saved place. A task that already has
+    an outcome (failed at the hard time limit, revoked) is not sent
+    again; only its leftover lock is removed. One glob over the users'
+    import folders when nothing stalled."""
+    from celery import states
+    from backend.utils import conversation_stash as cs
+
+    resumed = 0
+    for user_id, lock in cs.stalled_locks():
+        task_id = lock.get("task_id")
+        if not task_id or not isinstance(lock.get("options"), dict):
+            continue  # nothing to send it again with
+
+        def send(held, user_id=user_id, task_id=task_id):
+            import_conversations.apply_async(
+                args=(user_id, held["token"], held["options"]),
+                task_id=task_id)
+
+        try:
+            if import_conversations.AsyncResult(task_id).state \
+                    in states.READY_STATES:
+                cs.release_stalled(user_id, task_id)
+            elif cs.resume_stalled(user_id, task_id, send):
+                resumed += 1
+                logger.warning(
+                    "Conversation import %s for user %s stopped without "
+                    "finishing; sent again", task_id, user_id)
+        except Exception as e:  # noqa: BLE001 - the next beat tries again
+            logger.error("Could not resume conversation import %s for "
+                         "user %s: %s", task_id, user_id, type(e).__name__)
+    return {"resumed": resumed}
 
 
 @celery.task(name="backend.tasks.chat_imports.sweep_import_stashes")

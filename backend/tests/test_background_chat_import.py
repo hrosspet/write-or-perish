@@ -421,13 +421,22 @@ def test_a_second_confirm_returns_the_running_job(app, monkeypatch):
     assert len(queued) == 1
 
 
+def _age_lock(user_id, seconds):
+    old = time.time() - seconds
+    os.utime(cs._lock_path(user_id), (old, old))
+
+
 def test_a_stale_lock_does_not_block_a_new_confirm(app, monkeypatch):
     alice, client = _user_and_client(app)
     queued = _queue_only(monkeypatch)
     token = _stash(alice.id, _analyzed(1, 2))
     assert cs.acquire_lock(alice.id, "dead-task", token, "chatgpt")[0]
-    old = time.time() - cs.LOCK_STALE_SECONDS - 5
-    os.utime(cs._lock_path(alice.id), (old, old))
+    # A job waiting in the queue keeps its lock for half an hour.
+    _age_lock(alice.id, cs.LOCK_STALE_SECONDS + 5)
+    resp = client.post("/api/import/chatgpt/confirm",
+                       json={"import_token": token})
+    assert resp.get_json()["task_id"] == "dead-task"
+    _age_lock(alice.id, cs.QUEUED_LOCK_STALE_SECONDS + 5)
     resp = client.post("/api/import/chatgpt/confirm",
                        json={"import_token": token})
     assert resp.status_code == 202
@@ -702,7 +711,7 @@ def test_a_new_analyze_drops_the_users_other_stashes(app):
     assert cs.stash_path(alice.id, third).exists()
 
     # Not once its lock went stale: that job is gone.
-    old = time.time() - cs.LOCK_STALE_SECONDS - 5
+    old = time.time() - cs.QUEUED_LOCK_STALE_SECONDS - 5
     os.utime(cs._lock_path(alice.id), (old, old))
     fourth = _stash(alice.id, _analyzed(1, 2, prefix="f"))
     assert not cs.stash_path(alice.id, second).exists()
@@ -746,6 +755,194 @@ def test_a_running_job_keeps_its_stash_fresh(app):
         alice.id, token, "t1", OPTIONS,
         on_progress=lambda done, total: seen.append(cs.is_fresh(path)))
     assert seen and all(seen)
+
+
+# ── after a worker is killed outright (#546) ─────────────────────────────
+
+def _die_mid_run(monkeypatch, user_id, token, task_id, after_nodes,
+                 options=OPTIONS, batch_size=2):
+    """A run whose process dies after *after_nodes* nodes: no handler
+    runs, so the lock is left as the run had it (running)."""
+    from backend.routes.import_data import run_conversation_import
+    restore = _crash_after(monkeypatch, after_nodes)
+    with pytest.raises(_Crash):
+        run_conversation_import(user_id, token, task_id, options,
+                                batch_size=batch_size, resumable=(_Crash,))
+    restore()
+    _db.session.rollback()
+
+
+def test_a_dead_runs_lock_frees_a_new_confirm_within_minutes(
+        app, monkeypatch):
+    alice, client = _user_and_client(app)
+    token = _stash(alice.id, _analyzed(4, 2))
+    assert cs.acquire_lock(alice.id, "t1", token, "chatgpt", OPTIONS)[0]
+    _die_mid_run(monkeypatch, alice.id, token, "t1", 3)
+    held = cs.read_lock(alice.id)
+    assert held["running"] and not held["waiting"]
+
+    queued = _queue_only(monkeypatch)
+    other = _stash(alice.id, _analyzed(1, 2, prefix="o"))
+    resp = client.post("/api/import/chatgpt/confirm",
+                       json={"import_token": other})
+    assert resp.status_code == 409  # within minutes of its last heartbeat
+
+    _age_lock(alice.id, cs.LOCK_STALE_SECONDS + 5)
+    resp = client.post("/api/import/chatgpt/confirm",
+                       json={"import_token": other})
+    assert resp.status_code == 202
+    assert cs.read_lock(alice.id)["task_id"] == resp.get_json()["task_id"]
+    assert len(queued) == 1
+
+
+def test_a_dead_run_is_found_resumed_and_finishes_without_duplicates(
+        app, monkeypatch):
+    from backend.routes.import_data import run_conversation_import
+    alice = _make_user("alice")
+    _db.session.commit()
+    token = _stash(alice.id, _analyzed(6, 2))
+    assert cs.acquire_lock(alice.id, "t1", token, "chatgpt", OPTIONS)[0]
+    _die_mid_run(monkeypatch, alice.id, token, "t1", 5)
+    assert len(_keys(alice.id)) == 4  # two committed chunks
+
+    assert list(cs.stalled_locks()) == []  # still within its heartbeats
+    _age_lock(alice.id, cs.LOCK_STALE_SECONDS + 5)
+    [(user_id, lock)] = list(cs.stalled_locks())
+    assert user_id == alice.id and lock["task_id"] == "t1"
+
+    sent = []
+    resumed = cs.resume_stalled(alice.id, "t1", sent.append)
+    assert [(s["token"], s["options"]) for s in sent] == [(token, OPTIONS)]
+    assert resumed["waiting"] and resumed["running"]
+    # Waiting in the queue: not sent twice, and it counts as running.
+    assert list(cs.stalled_locks()) == []
+    assert cs.resume_stalled(alice.id, "t1", sent.append) is None
+    assert cs.running_job(alice.id)["task_id"] == "t1"
+
+    claims = []
+    real_claim = cs.claim_lock
+
+    def recording_claim(*args):
+        answer = real_claim(*args)
+        claims.append((answer, cs.read_lock(alice.id)["crashes"]))
+        return answer
+
+    monkeypatch.setattr(cs, "claim_lock", recording_claim)
+    result = run_conversation_import(alice.id, token, "t1", OPTIONS,
+                                     batch_size=2)
+    keys = _keys(alice.id)
+    assert len(keys) == 12 and len(set(keys)) == 12
+    assert result["created"] == 12
+    assert claims == [(cs.CLAIMED, 1)]  # the resumed run counted the crash
+    assert cs.read_lock(alice.id) is None
+
+
+def test_a_resumed_run_counts_the_crash_a_time_limit_stop_does_not(app):
+    alice = _make_user("alice")
+    _db.session.commit()
+    token = _stash(alice.id, _analyzed(1, 2))
+    assert cs.acquire_lock(alice.id, "t1", token, "chatgpt", OPTIONS)[0]
+    assert cs.claim_lock(alice.id, "t1", token, "chatgpt", OPTIONS) \
+        == cs.CLAIMED
+    assert cs.read_lock(alice.id)["crashes"] == 0
+    cs.requeue_lock(alice.id, "t1")  # the time limit: a clean stop
+    assert cs.claim_lock(alice.id, "t1", token, "chatgpt", OPTIONS) \
+        == cs.CLAIMED
+    assert cs.read_lock(alice.id)["crashes"] == 0
+    # That run died; the next run of the task finds the lock running.
+    assert cs.claim_lock(alice.id, "t1", token, "chatgpt", OPTIONS) \
+        == cs.CLAIMED
+    assert cs.read_lock(alice.id)["crashes"] == 1
+
+
+def test_an_import_whose_runs_keep_dying_stops_and_can_be_confirmed_again(
+        app, monkeypatch):
+    from backend.routes.import_data import (
+        IMPORT_STOPPED_MESSAGE, run_conversation_import)
+    from backend.utils.task_owner import UserFacingTaskError
+    alice, client = _user_and_client(app)
+    token = _stash(alice.id, _analyzed(6, 2))
+    assert cs.acquire_lock(alice.id, "t1", token, "chatgpt", OPTIONS)[0]
+    for _ in range(cs.MAX_CRASH_RESUMES + 1):
+        _die_mid_run(monkeypatch, alice.id, token, "t1", 1)
+    assert cs.read_lock(alice.id)["crashes"] == cs.MAX_CRASH_RESUMES
+
+    with pytest.raises(UserFacingTaskError) as stopped:
+        run_conversation_import(alice.id, token, "t1", OPTIONS, batch_size=2)
+    assert str(stopped.value) == IMPORT_STOPPED_MESSAGE
+    held = cs.read_lock(alice.id)
+    assert held["stopped"] and not held["running"]
+    assert list(cs.stalled_locks()) == []
+    # Later deliveries of the same task stop too.
+    with pytest.raises(UserFacingTaskError):
+        run_conversation_import(alice.id, token, "t1", OPTIONS, batch_size=2)
+
+    # The user presses Confirm Import again: a new job continues from
+    # the saved place, with no duplicates.
+    resp = client.post("/api/import/chatgpt/confirm",
+                       json={"import_token": token})
+    assert resp.status_code == 202
+    keys = _keys(alice.id)
+    assert len(keys) == 12 and len(set(keys)) == 12
+    assert cs.read_lock(alice.id) is None
+
+
+def test_the_heartbeat_thread_keeps_a_running_lock_fresh(app):
+    alice = _make_user("alice")
+    _db.session.commit()
+    token = _stash(alice.id, _analyzed(1, 2))
+    assert cs.acquire_lock(alice.id, "t1", token, "chatgpt", OPTIONS)[0]
+    cs.claim_lock(alice.id, "t1", token, "chatgpt", OPTIONS)
+    _age_lock(alice.id, cs.LOCK_STALE_SECONDS + 5)
+    assert cs.read_lock(alice.id)["stale"]
+    with cs.keep_alive(alice.id, "t1", interval=0.01):
+        deadline = time.time() + 5
+        while cs.read_lock(alice.id)["stale"] and time.time() < deadline:
+            time.sleep(0.01)
+        assert not cs.read_lock(alice.id)["stale"]
+    # The thread ends with the run: nothing touches the lock afterwards.
+    _age_lock(alice.id, cs.LOCK_STALE_SECONDS + 5)
+    time.sleep(0.05)
+    assert cs.read_lock(alice.id)["stale"]
+    # It touches only its own task's lock.
+    with cs.keep_alive(alice.id, "another-task", interval=0.01):
+        time.sleep(0.05)
+    assert cs.read_lock(alice.id)["stale"]
+
+
+def test_a_failed_send_leaves_the_lock_for_the_next_beat(app):
+    alice = _make_user("alice")
+    _db.session.commit()
+    token = _stash(alice.id, _analyzed(1, 2))
+    assert cs.acquire_lock(alice.id, "t1", token, "chatgpt", OPTIONS)[0]
+    cs.claim_lock(alice.id, "t1", token, "chatgpt", OPTIONS)
+    _age_lock(alice.id, cs.LOCK_STALE_SECONDS + 5)
+
+    def broker_down(lock):
+        raise ConnectionError()
+
+    with pytest.raises(ConnectionError):
+        cs.resume_stalled(alice.id, "t1", broker_down)
+    held = cs.read_lock(alice.id)
+    assert held["running"] and not held["waiting"]
+    _age_lock(alice.id, cs.LOCK_STALE_SECONDS + 5)
+    assert [lock["task_id"] for _, lock in cs.stalled_locks()] == ["t1"]
+
+
+def test_a_finished_import_sent_again_frees_the_lock_it_left(app):
+    """A run that died between finishing and releasing its lock: the
+    task sent again returns the result and removes the lock."""
+    from backend.routes.import_data import run_conversation_import
+    alice = _make_user("alice")
+    _db.session.commit()
+    token = _stash(alice.id, _analyzed(2, 2))
+    first = run_conversation_import(alice.id, token, "t1", OPTIONS)
+    assert cs.acquire_lock(alice.id, "t1", token, "chatgpt", OPTIONS)[0]
+    cs.claim_lock(alice.id, "t1", token, "chatgpt", OPTIONS)
+    again = run_conversation_import(alice.id, token, "t1", OPTIONS)
+    assert again == first
+    assert cs.read_lock(alice.id) is None
+    assert len(_keys(alice.id)) == 4
 
 
 # ── the profile hand-off ─────────────────────────────────────────────────

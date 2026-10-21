@@ -142,6 +142,14 @@ celery.conf.update(
             'task': 'backend.tasks.chat_imports.sweep_import_stashes',
             'schedule': 3600.0,  # hourly
         },
+        # A ChatGPT/Claude import whose worker was killed outright would
+        # wait an hour for Redis to hand it out again (#546); this sends
+        # it again once its lock stops getting heartbeats (3 min). A glob
+        # over the import folders when nothing stalled.
+        'resume-stalled-imports': {
+            'task': 'backend.tasks.chat_imports.resume_stalled_imports',
+            'schedule': 60.0,  # every minute
+        },
     },
 )
 
