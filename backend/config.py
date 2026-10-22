@@ -141,17 +141,20 @@ class Config:
         os.environ.get("PROFILE_MERGE_MODEL_ANTHROPIC") or "claude-opus-5.5")
     PROFILE_MERGE_MODEL_OPENAI = (
         os.environ.get("PROFILE_MERGE_MODEL_OPENAI") or "gpt-6.1-sol")
-    # Reasoning effort sent with an OpenAI merge request (chat/completions
-    # "reasoning_effort"). Empty: the model's default. One of
-    # PROFILE_REASONING_EFFORTS otherwise (checked at boot).
+    # Reasoning effort sent with an OpenAI merge request (a Responses
+    # batch request's "reasoning.effort"). One of PROFILE_REASONING_EFFORTS
+    # (checked at boot). "high" (2026-10-22): on identical input Sol kept
+    # 27 of 41 core facts at high effort against 25 at its default.
     PROFILE_MERGE_REASONING_EFFORT_OPENAI = (
-        os.environ.get("PROFILE_MERGE_REASONING_EFFORT_OPENAI") or "").lower()
-    # "grouped": windows are merged in fixed groups of
-    # PROFILE_MERGE_GROUP_SIZE, then the groups; "flat": one merge over
-    # every window, falling back to grouped when it exceeds the merge
-    # model's input cap.
+        os.environ.get("PROFILE_MERGE_REASONING_EFFORT_OPENAI")
+        or "high").lower()
+    # "flat" (default): one merge over every window while it fits the
+    # merge model's input cap, else fixed groups of
+    # PROFILE_MERGE_GROUP_SIZE, then the groups; "grouped": always the
+    # groups above PROFILE_MERGE_GROUP_SIZE windows. Flat on 2026-10-22's
+    # 149-version test: fewer errors, every template sub-heading kept.
     PROFILE_MERGE_STRUCTURE = (
-        os.environ.get("PROFILE_MERGE_STRUCTURE") or "grouped").lower()
+        os.environ.get("PROFILE_MERGE_STRUCTURE") or "flat").lower()
     PROFILE_MERGE_GROUP_SIZE = int(
         os.environ.get("PROFILE_MERGE_GROUP_SIZE") or "30")
     # Submissions of one window before it is given up: a refused, cut-off

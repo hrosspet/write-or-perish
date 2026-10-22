@@ -16,10 +16,11 @@ out one Batch round trip at a time. Instead:
   saved as a "window" row of the user's window set.
 - The MERGE model of the user's provider integrates the versions with the
   integration prompt and independent labels ("Covers the writing from A to
-  B"): in one call, or in fixed groups of PROFILE_MERGE_GROUP_SIZE first
-  ("grouped", the default). The final merge is an "integration" row of the
-  set, and only it is ever the user's profile: until it is saved, every
-  reader keeps the previous one (utils/profile_versions
+  B"): in one call while they fit the merge model's cap ("flat", the
+  default), else in fixed groups of PROFILE_MERGE_GROUP_SIZE first (always
+  above that size with "grouped"). The final merge is an "integration"
+  row of the set, and only it is ever the user's profile: until it is
+  saved, every reader keeps the previous one (utils/profile_versions
   .current_profile_query).
 - Later updates of such a profile add windows to the same set and redo
   only the newest group and the final.
@@ -461,7 +462,7 @@ def _group_size():
 
 
 def _structure():
-    return _setting("PROFILE_MERGE_STRUCTURE", "grouped")
+    return _setting("PROFILE_MERGE_STRUCTURE", "flat")
 
 
 def _set_started_at(windows):
@@ -694,7 +695,11 @@ def estimate_cost_usd(user, state, models, plan_windows, plan=None):
     calls = []   # versions per merge call
     if n_new or state.windows_in_flight:
         n_after = len(state.windows) + len(state.windows_in_flight) + n_new
-        if _structure() == "grouped" and n_after > size:
+        # As the merge goes out: flat while one call fits the merge
+        # model's cap, else in groups (_merge_requests).
+        flat_tokens = (n_after + 2) * per_version + MERGE_PROMPT_TOKENS
+        if n_after > size and (_structure() == "grouped"
+                               or flat_tokens > _cap(models.merge)):
             groups = math.ceil(n_after / size)
             current = len(_set_rows(user.id, state.set_id, ("group",)))
             to_build = max(1, groups - max(0, min(current, groups - 1)))

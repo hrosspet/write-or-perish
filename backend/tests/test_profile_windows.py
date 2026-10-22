@@ -424,7 +424,8 @@ def test_the_shipped_profile_model_defaults_pass():
                              or k == "SUPPORTED_MODELS"})
     assert Config.PROFILE_VERSION_MODEL_ANTHROPIC == "claude-haiku-5.5"
     assert Config.PROFILE_MERGE_MODEL_OPENAI == "gpt-6.1-sol"
-    assert Config.PROFILE_MERGE_STRUCTURE == "grouped"
+    assert Config.PROFILE_MERGE_REASONING_EFFORT_OPENAI == "high"
+    assert Config.PROFILE_MERGE_STRUCTURE == "flat"
     assert Config.PROFILE_MERGE_GROUP_SIZE == 30
 
 
@@ -1400,3 +1401,7 @@ def test_the_estimate_for_a_large_anthropic_build(app, world):
     n = 330
     est = pw.estimate_cost_usd(u, state, models, (n, 14_100_000))
     assert 5 < est < 10
+    # Flat falls back to groups above the merge model's cap, and the
+    # estimate with it.
+    app.config["PROFILE_MERGE_STRUCTURE"] = "flat"
+    assert pw.estimate_cost_usd(u, state, models, (n, 14_100_000)) == est
