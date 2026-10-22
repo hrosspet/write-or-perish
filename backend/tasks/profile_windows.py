@@ -506,6 +506,19 @@ def _group_matches(group, members):
             and all(group.created_at > m.created_at for m in members))
 
 
+def set_superseded(user, set_id, final=None):
+    """Whether the user saved a version after the set's newest final
+    (``final``, looked up when not given). The set is then no longer
+    extended: the next update builds on the user's version ("the user's
+    edit wins"), so nothing more of the set is sent, and a window of it
+    collected afterwards is not saved (its cost row is)."""
+    if final is None:
+        from backend.utils.profile_versions import latest_set_final
+        final = latest_set_final(user.id, set_id)
+    return final is not None and _user_version_after(
+        user, final.created_at) is not None
+
+
 def _with_user_version(inputs, version, base):
     """``inputs`` (by cutoff) with the user's version placed at its date
     (exports.merge_date): after every input whose cutoff is not later."""
@@ -531,10 +544,7 @@ def merge_plan(user, state, grouped=None):
     plan = MergePlan()
     from backend.utils.profile_versions import latest_set_final
     final = latest_set_final(user.id, state.set_id)
-    if final is not None and _user_version_after(
-            user, final.created_at) is not None:
-        # The user saved a version after the set's final: the set is no
-        # longer extended, and the next update builds on their version.
+    if set_superseded(user, state.set_id, final):
         return plan
     grouped = (_structure() == "grouped") if grouped is None else grouped
     size = _group_size()
@@ -1063,6 +1073,11 @@ def next_work(user, models, keys, deadline):
         # A set is started only for a build that plans into two or more
         # chunks; anything smaller is the chained path's (the seeder).
         return "idle"
+    if not fresh and set_superseded(user, set_id):
+        # A set still in flight after the user saved a version on its
+        # final: nothing more goes out for it. Once its items are in (and
+        # discarded), the next pass builds on the user's version.
+        return "idle"
     history = attempt_history(user.id)
     if fresh and base is None:
         # A rebuild from the start merges the user's version the current
@@ -1260,6 +1275,23 @@ def _collect_window(user, item, result, job, history, template, notes):
         _exports.discard_step_output(user, item["model_id"], response,
                                      "profile window", batch=True)
         return "dropped"
+    start, cutoff = _dt(item.get("start")), _dt(item.get("cutoff"))
+    existing = UserProfile.query.filter_by(
+        user_id=user.id, window_set=item["set"], covers_start=start,
+        source_data_cutoff=cutoff, generation_type="window").filter(
+        UserProfile.created_at >= job.submitted_at).first()
+    if existing is not None:
+        return "saved"
+    if set_superseded(user, item["set"]):
+        # The user saved a version after the set's final while this window
+        # was in the batch. Saving it (or a skip row in its place) would
+        # make the set's tip the update base again, on a set that is no
+        # longer merged: the edit would be stranded and every later window
+        # billed and never used. The next update builds on the user's
+        # version instead.
+        _exports.discard_step_output(user, item["model_id"], response,
+                                     "profile window", batch=True)
+        return "superseded"
     problem = _window_problem(response, template)
     if problem:
         # Billed: the cost row is written. Not marked refused for the
@@ -1273,13 +1305,6 @@ def _collect_window(user, item, result, job, history, template, notes):
             _save_skip(user, item)
             notes["skipped"].append((item, problem))
         return problem
-    start, cutoff = _dt(item.get("start")), _dt(item.get("cutoff"))
-    existing = UserProfile.query.filter_by(
-        user_id=user.id, window_set=item["set"], covers_start=start,
-        source_data_cutoff=cutoff, generation_type="window").filter(
-        UserProfile.created_at >= job.submitted_at).first()
-    if existing is not None:
-        return "saved"
     _exports._save_profile(
         user, item["model_id"], response["content"], response,
         source_tokens_used=item.get("cumulative"), source_data_cutoff=cutoff,

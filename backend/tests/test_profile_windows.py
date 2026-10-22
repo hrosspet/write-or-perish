@@ -1064,6 +1064,52 @@ def test_an_edit_after_the_final_is_updated_on_the_chained_path(world):
     assert len(world.provider.submits) == n
 
 
+def _update_in_flight(world, user):
+    """A finished set of five windows, then 85k units of new writing whose
+    update window is in the batch. Returns (rows, final)."""
+    rows = _set_of(user, 5)
+    _corpus_for(world, rows)
+    _finish(world, user)
+    final = [f for f in _rows(user, "integration") if f.window_set][0]
+    world.corpus.add(85, start=datetime.utcnow() + timedelta(days=2))
+    _advance(user)
+    assert [i for i in _items("window") if "outcome" not in i]
+    return rows, final
+
+
+def test_an_edit_after_the_final_discards_an_update_window_in_flight(world):
+    """Review of #589, finding 1: the window collected after the edit is
+    not saved (its cost row is), the edit is the base, and the set gets
+    nothing more."""
+    u = _user()
+    rows, final = _update_in_flight(world, u)
+    edit = _edit(u, final)
+    costs = APICostLog.query.filter_by(user_id=u.id).count()
+    _poll()
+    assert {i["outcome"] for i in _items("window") if i["set"] == "set1"
+            and i["start"] == rows[-1].source_data_cutoff.isoformat()} == {
+        "superseded"}
+    assert len(_rows(u, "window")) == 5
+    assert APICostLog.query.filter_by(user_id=u.id).count() > costs
+    assert ex.profile_update_base(u.id).id == edit.id
+    assert not pw.wants_window_build(u)          # one chunk: chained
+    n = len(world.provider.submits)
+    _advance(u)
+    assert len(world.provider.submits) == n
+
+
+def test_a_set_in_flight_after_an_edit_on_its_final_sends_nothing_more(
+        world):
+    u = _user()
+    _rows_, final = _update_in_flight(world, u)
+    _edit(u, final)
+    # More writing while the window is in the batch.
+    world.corpus.add(85, start=datetime.utcnow() + timedelta(days=20))
+    n = len(world.provider.submits)
+    assert _advance(u) == "idle"
+    assert len(world.provider.submits) == n
+
+
 # ── 13. spend ─────────────────────────────────────────────────────────────
 
 def test_a_build_over_the_headroom_is_held(world):
