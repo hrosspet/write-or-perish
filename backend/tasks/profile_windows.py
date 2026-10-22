@@ -533,9 +533,10 @@ def _with_user_version(inputs, version, base):
 
 def merge_plan(user, state, grouped=None):
     """The merges due now. Groups are fixed slices of the windows by time
-    (1-30, 31-60, ...): a slice inside the leading run of saved windows is
-    final once it is full, so it can go out while a later window is being
-    retried; the last slice waits until every window is in. A saved group
+    (1-30, 31-60, ...): a full slice that ends inside the leading run of
+    saved windows (before the first gap or window in flight) is final, so
+    it can go out while a later window is being retried; the slices from
+    the gap on wait until every window is in. A saved group
     is reused while it starts and ends where its slice does and is newer
     than every member; a slice of one window is not merged. The final is
     due when every window is in, every group is current, nothing of the
@@ -559,12 +560,14 @@ def merge_plan(user, state, grouped=None):
     complete = state.complete
     slices = []
     if grouped and (len(windows) > size or not complete):
-        limit = len(windows) if complete else state.prefix
-        for i in range(0, limit, size):
-            members = windows[i:i + size]
-            if not complete and len(members) < size:
-                break
-            slices.append(members)
+        # While a window is missing or in flight, only full slices that end
+        # inside the leading run of saved windows go out: a slice reaching
+        # past the gap would take the windows after it in the gap's place,
+        # and once the gap is filled it would match no slice (billed, never
+        # used).
+        starts = (range(0, len(windows), size) if complete
+                  else range(0, state.prefix - size + 1, size))
+        slices = [windows[i:i + size] for i in starts]
     mid = []
     all_current = True
     for members in slices:

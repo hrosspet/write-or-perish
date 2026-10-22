@@ -1031,6 +1031,30 @@ def test_a_gap_fill_invalidates_only_its_group(world):
     assert plan.groups[0][0].covers_start == rows[29].source_data_cutoff
 
 
+def test_no_group_reaches_past_a_missing_window(world):
+    """Review of #589, finding 4: with window 40 of 65 missing, the group
+    1-30 goes out with the retry, and no group takes windows 31-39 and
+    41-61 in the gap's place."""
+    u = _user()
+    rows = _set_of(u, 65)
+    _corpus_for(world, rows)
+    db.session.delete(rows[39])
+    db.session.commit()
+    state = pw.set_state(u, "set1", None)
+    assert state.prefix == 39 and not state.complete
+    plan = pw.merge_plan(u, state)
+    assert [(g[0].covers_start, g[-1].source_data_cutoff)
+            for g in plan.groups] == [(None, rows[29].source_data_cutoff)]
+    _advance(u)
+    windows, groups = _items("window"), _items("group")
+    assert [w["start"] for w in windows] == [
+        rows[38].source_data_cutoff.isoformat()]
+    assert [(g["start"], g["cutoff"]) for g in groups] == [
+        (None, rows[29].source_data_cutoff.isoformat())]
+    assert not _items("final")
+
+
+
 # ── 11. the user's edits ──────────────────────────────────────────────────
 
 def _edit(user, of, when=None):
