@@ -667,11 +667,11 @@ def estimate_cost_usd(user, state, models, plan_windows, plan=None):
     rho = _exports.tokens_per_unit(user, models.version)
     cost = 0
     if n_new:
-        cost += calculate_llm_cost_microdollars(
+        # Priced per (average) window: a price tier applies per request.
+        cost += n_new * calculate_llm_cost_microdollars(
             models.version,
-            int(units_new * rho + n_new * WINDOW_PROMPT_OVERHEAD_TOKENS),
-            n_new * EXPECTED_OUTPUT.get(models.version,
-                                        DEFAULT_EXPECTED_OUTPUT),
+            int(units_new * rho / n_new + WINDOW_PROMPT_OVERHEAD_TOKENS),
+            EXPECTED_OUTPUT.get(models.version, DEFAULT_EXPECTED_OUTPUT),
             batch=True)
     per_version = MERGE_TOKENS_PER_VERSION.get(
         models.version, DEFAULT_MERGE_TOKENS_PER_VERSION)

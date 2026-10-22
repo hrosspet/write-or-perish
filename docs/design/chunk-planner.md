@@ -202,3 +202,24 @@ Landed (PR #285):
   at depth 120). Check nothing parses it, then shorten it.
 - Claude-new tweet priors are estimated from o200k counts; the first
   measured chunk replaces them.
+
+## Independent versions for large builds (#545, 2026-10-22)
+
+A build whose remainder plans into two or more chunks on the user's chat
+model no longer runs as a chain: the remainder is planned into windows by
+the same `next_window_budget`, at the version model's cap (Haiku 5.5's 100k
+price tier, GPT-6 Luna's 272k), each window is read on its own and the
+versions are merged afterwards (`docs/design/profile-batch-processing.md`,
+"Independent versions for large builds"). Three differences in the planning:
+
+- The planner's ratio sizes a window, and the counted tokens decide: a
+  window over the cap is rendered again smaller (`fit_window`, up to 8
+  renders) and the next one starts where it ends. The ratio of one window
+  ranged from 1.33 to 2.92 tokens per unit on a synthetic 14.1M-unit
+  ChatGPT import, because node headers grow with thread depth.
+- The tokens-per-unit ratio is read once per advance task, so the windows
+  of one build are planned with one ratio, as the experiments planned them;
+  each collected window records its measured ratio for later builds.
+- A gap (a window to read again) is bounded at both ends
+  (`count_remaining_units(created_before=)`, `render_profile_window(until=)`),
+  so it cannot spill into the window after it.

@@ -1211,3 +1211,36 @@ def test_held_writing_drops_window_results(world, monkeypatch):
     assert _rows(u, "window") == []
     db.session.refresh(u)
     assert u.profile_batch_pending is False
+
+
+def test_kill_switch_off_bases_updates_outside_any_set(app, world):
+    u = _user()
+    chain = _profile(u, gen_type="update", cutoff=T0)
+    rows = _set_of(u, 3, start=T0 + timedelta(days=1))
+    assert ex.profile_update_base(u.id).id == rows[-1].id
+    app.config["PROFILE_INDEPENDENT_VERSIONS"] = False
+    assert ex.profile_update_base(u.id).id == chain.id
+
+
+def test_the_seeder_gate_opens_for_a_set_whose_final_is_due(world):
+    u = _user()
+    rows = _set_of(u, 5, created=datetime.utcnow())
+    _corpus_for(world, rows)
+    # Within the hourly interval and with no new writing: only the set's
+    # own work (its final) opens the gate.
+    assert pb._should_seed(u) is True
+    _advance(u)
+    _poll()
+    assert pb._should_seed(u) is False
+
+
+def test_the_estimate_for_a_large_anthropic_build(app, world):
+    """About $2.9 of Haiku windows (each under its 100k tier) plus about $4
+    of Opus merges for 14.1M units: the estimate prices every request in
+    its own tier."""
+    u = _user()
+    models = pw.profile_models_for(u)
+    state = pw.SetState("s", None, [], [], [])
+    n = 330
+    est = pw.estimate_cost_usd(u, state, models, (n, 14_100_000))
+    assert 5 < est < 10
