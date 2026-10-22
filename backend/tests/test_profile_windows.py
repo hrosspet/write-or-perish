@@ -239,10 +239,7 @@ def _advance(user):
     """Run the advance task's body as the dispatched task would."""
     task_id = pw.dispatch_advance(user)
     assert task_id is not None
-    out = pw.advance(user.id, task_id)
-    if os.environ.get("PW_DEBUG"):
-        print("ADVANCE", out, db.session.get(User, user.id).profile_seed_error)
-    return out
+    return pw.advance(user.id, task_id)
 
 
 def _poll():
