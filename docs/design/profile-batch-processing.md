@@ -446,9 +446,13 @@ user to Batch (`profile_force_batch`: never the full-price synchronous
 fallback). `advance_profile_windows` (acks late) derives everything from the
 database: the set (in-flight items, a full-rebuild flag, the set whose tip
 is the update base, or a new set), its missing ranges, the due groups and
-the final; checks the spend cap and the estimated cost of the rest against
-the user's limit (over it: held, `profile_cap_held`, a note in the admin
-column); renders and submits. It holds no pipeline lock; past
+the final; checks the spend cap (a user over their limit is held,
+`profile_cap_held`, and the hourly seeder resumes the set when the month
+turns or the admin raises the limit); logs the estimated cost of the rest;
+renders and submits. The estimate is not a gate (Peter, 2026-10-22: "send
+it and let the cap stop it halfway"): all of a build's windows go out in
+one submission, so the cap can only hold the merges after them, and while
+the user is capped it also blocks their replies until the 1st. It holds no pipeline lock; past
 `PROFILE_WINDOW_RENDER_SECONDS` it submits what it has and dispatches a
 new task. The poller collects window, group and final items (`collect`) and
 dispatches the advance; the hourly seeder routes builds to it
