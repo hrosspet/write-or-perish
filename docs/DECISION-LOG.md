@@ -2407,6 +2407,155 @@ Kinds (one per entry and per table row):
 - **Source:** Claude Code session 2026-10-22 (Opus 5.5)
 - **Applies to:** #545, #589
 
+### 2026-10-22 · #589: a window the model declines twice is skipped
+
+- **Kind:** reliability
+- **Situation:** #589 Needs Peter 1: a window the version model declines twice, or one entry larger than the version model's input cap. As built, the window is skipped: the merge sees a note with the window's dates, and Sentry is alerted. The alternatives were to split the window into halves first, or to stop the build.
+- **Prediction:** skip it, as built (65 %); halves first (25 %); stop the build (10 %).
+- **Peter:** "other defaults are ok" (in the reply that changed item 2)
+- **Score:** hit
+- **Source:** Claude Code session 2026-10-22 (Opus 5.5)
+- **Applies to:** #589
+
+### 2026-10-22 · #589: a build over the user's spend headroom
+
+- **Kind:** cost
+- **Situation:** #589 Needs Peter 2: a build whose estimated cost is over what the user has left of their monthly spend limit. As built, such a build was held before any window went out, with a note in the admin column; the per-user cap was also checked before each later submission.
+- **Prediction:** the hold, as built (70 %); submit anyway, or only warn (20 %).
+- **Peter:** "send it and let the cap stop it halfway. It will self-heal the following month, won't it?"
+- **Score:** miss. The windows now go out whatever the estimate, which is only logged, and the per-user cap holds the merges until the month turns or the limit is raised (bc967a9e). A new test shows the build finishing after either, with no further code change.
+- **Why it missed:** the estimate was treated as a second limit next to the per-user cap. Peter relies on the cap alone: the build makes progress now, the cap stops it, and it resumes by itself when the month turns.
+- **Source:** Claude Code session 2026-10-22 (Opus 5.5)
+- **Applies to:** #589
+
+### 2026-10-22 · #589's hold on a build's cost estimate
+
+- **Kind:** cost
+- **Situation:** as first built, #589 estimated a build's cost before any window was sent and held the build, with the admin note "Waiting for spend headroom", when the estimate was over what the user had left of their monthly limit. Listed under Needs Peter with the hold as the default.
+- **Decision:** built the hold on the estimate as the default.
+- **Peter:** "send it and let the cap stop it halfway. It will self-heal the following month, won't it?"
+- **Score:** miss. Removed in bc967a9e; the per-user cap before each submission stays.
+- **Why it missed:** as in the entry before: a second limit on an estimate, where Peter relies on the cap.
+- **Source:** Claude Code session 2026-10-22 (Opus 5.5)
+- **Applies to:** #589
+
+### 2026-10-22 · #589: no profile until a first build is finished
+
+- **Kind:** UX
+- **Situation:** #589 Needs Peter 3: a first build, for a user with no earlier profile, shows no profile until its final merge is saved; the progress line shows the steps. The alternative was a provisional profile, for example from one quick chunk or the newest window.
+- **Prediction:** as built (60 %); a provisional profile (25 %).
+- **Peter:** "other defaults are ok"
+- **Score:** hit
+- **Source:** Claude Code session 2026-10-22 (Opus 5.5)
+- **Applies to:** #589
+
+### 2026-10-22 · #589: how often a large profile is updated
+
+- **Kind:** product scope
+- **Situation:** #589 Needs Peter 4: after a large import, the profile is updated when 80k units of new writing have collected (the existing gate, as built and recommended); the alternative was to rebuild the newest window every week. On 2026-10-20 Peter had required weekly updates (entry "No weighted view of the profile").
+- **Prediction:** a weekly refresh of the newest window, as a follow-up (60 %); keep the gate (35 %).
+- **Peter:** "the week I mentioned is approximate. What's defining for profile chunks is that they amount to approx the same amount of data. Which is the case now, so it should not change"
+- **Score:** miss. The gate stays, and no weekly refresh is built.
+- **Why it missed:** "weekly" was read as a requirement on time. Peter had used it as a rough size: what matters is that the chunks hold about the same amount of writing, which the gate gives.
+- **Source:** Claude Code session 2026-10-22 (Opus 5.5)
+- **Applies to:** #589, #545
+
+### 2026-10-22 · #589 keeps the 80k gate for large profiles
+
+- **Kind:** product scope
+- **Situation:** the same question: updates of a window set by the existing 80k gate, or a weekly rebuild of the newest window.
+- **Decision:** kept the gate and built no weekly refresh; recommended keeping it under Needs Peter.
+- **Peter:** "the week I mentioned is approximate. What's defining for profile chunks is that they amount to approx the same amount of data. Which is the case now, so it should not change"
+- **Score:** hit, although the builder's own prediction in the entry before expected the weekly refresh.
+- **Source:** Claude Code session 2026-10-22 (Opus 5.5)
+- **Applies to:** #589
+
+### 2026-10-22 · #589: OpenAI merges by Sol at high effort
+
+- **Kind:** cost
+- **Situation:** #589 Needs Peter 5: no OpenAI merge reached the bar Opus sets (on the same versions, Sol at high effort kept 27 of 41 core facts, GPT-6 Astra 26, Opus 33, none of them with errors; Sol costs a fifth of Astra). As built: GPT-6.1 Sol at high effort. The alternatives were more work on an OpenAI merge prompt first, or Astra.
+- **Prediction:** Sol at high effort for now (55 %); more prompt work first (30 %); Astra (10 %).
+- **Peter:** "other defaults are ok"
+- **Score:** hit. The builder's choice is the row "The merge model for OpenAI users" under "Decided by the builder".
+- **Source:** Claude Code session 2026-10-22 (Opus 5.5)
+- **Applies to:** #589
+
+### 2026-10-22 · #589 and train #581: which merges first
+
+- **Kind:** release/ops
+- **Situation:** #589 and train #581 conflict in five files. The morning's root node in local Loore offered two ways: merge #581 first and then update #589 (about 15 minutes), or one PR combining both (branch `merge/589-with-581`, tested), so that prod deploys once. Peter merges.
+- **Prediction:** one combined PR (55 %); #581 first (40 %).
+- **Peter:** "ideally I'd merge 589 first, because I still haven't review the train"
+- **Score:** miss. #589 merges first; the tested resolution for #581 waits on its branch.
+- **Why it missed:** the options were built around the conflict and the number of deploys. Whether Peter had reviewed the train yet was not considered, and the train waits for his review. #589's own ready comment had said that either order works.
+- **Source:** Claude Code session 2026-10-22 (Opus 5.5); asked in local Loore
+- **Applies to:** #589, #581
+
+### 2026-10-22 · #589's refusal check: no minimum length per map
+
+- **Kind:** reliability
+- **Situation:** #589 counts a version as refused when one of the three map headings is missing, so a version that keeps the headings but declines a section under one of them would pass. Offered a minimum length per map as a small change, and recommended it.
+- **Prediction:** yes (65 %); not needed now, or an issue (30 %).
+- **Peter:** "no, this is good"
+- **Score:** miss. No minimum length.
+- **Why it missed:** the check was proposed for a failure the tests had not shown: the two Haiku versions that declined in the tests did so in plain text, which the heading check catches.
+- **Source:** Claude Code session 2026-10-22 (Opus 5.5)
+- **Applies to:** #589
+
+### 2026-10-22 · #589's refusal check: ask or decide
+
+- **Kind:** escalation
+- **Situation:** a minimum length per map for #589's refusal check, recommended by the builder as a small change.
+- **Decision:** asked Peter instead of deciding
+- **Peter:** "no, this is good"
+- **Score:** hit, deciding alone would have built a check he declined
+- **Source:** Claude Code session 2026-10-22 (Opus 5.5)
+- **Applies to:** #589
+
+### 2026-10-22 · Follow-up issues from #589's large-import audit
+
+- **Kind:** product scope
+- **Situation:** #589's "Left out" list held the findings of the audit and the dry run for a 14M-unit import, as issues to file. Asked about filing them: poll drafts' source of recent writing cannot fit for a user this size, and the recent writing renders nothing right after a large import; keyword search loads every entry of the user on each request, slow at this size; the synchronous "Export data" download times out at this size.
+- **Prediction:** file each of them (proposed; no confidence recorded).
+- **Peter:** poll drafts and recent writing: "ok, no need to file" · keyword search: "I know. That's why keyword search is allowed only for admins" · the export: "file it"
+- **Score:** miss + miss + hit
+- **Why it missed:** keyword search: the audit described its cost at this size without checking who can use it; only admins can, and Peter knew the cost. Poll drafts and recent writing: the list put every finding of the dry run up for filing, without a judgement of which would matter to a user.
+- **Source:** Claude Code session 2026-10-22 (Opus 5.5)
+- **Applies to:** #589
+
+### 2026-10-22 · A content deletion held the whole account for 30 days
+
+- **Kind:** product scope
+- **Situation:** #415 (#268) built "Delete all my writing": all of the account's content is hidden at once and deleted after 30 days unless the user restores it. While a request waits, one check on the whole account (`writing_on_hold`) stops the user's background jobs (profile builds, recent context, intentions, digests, external sync, embeddings, Glean), and results that come back for the user are dropped. Filed at Peter's request, #590 replaces this hold.
+- **Decision:** held every background job of the account for the 30 days.
+- **Peter:** "careful, that writing is not on hold during the 30 day period" · "The user can delete all the content in their account, but then start writing from scratch. So new profile builds can be scheduled afterwards. It's just that builds based on data that the user requested to delete, shouldn't finish."
+- **Score:** miss. In #590, only a job that read its input before the request saves nothing; otherwise the account works like a new one.
+- **Why it missed:** the builder could have seen it in #415: the UI let the user write and get replies during the 30 days, and #415 kept what they wrote then, so the account stayed in use while every job that builds on the new writing was held. The hold kept results built from the hidden content from being saved by stopping everything, where only the jobs that had read that content needed to stop.
+- **Source:** issue #590, filed at Peter's request in Claude Code session 2026-10-22; the hold was built in #415 (Opus 5.5)
+- **Applies to:** #268, #415, #590
+
+### 2026-10-22 · "Delete all my writing" named only part of what it deletes
+
+- **Kind:** user-facing text
+- **Situation:** the name came from #268's proposal and shipped in #415 on the Account page's button, the dialog and the banner, with "Restore my writing" to undo it. The action hides and deletes all of the account's content, including what the AI wrote: the profile, intentions and other documents, the todo list, drafts, shares and saved references.
+- **Decision:** kept the name "Delete all my writing" for an action that covers everything in the account.
+- **Peter:** "it should be called Delete all my content"
+- **Score:** miss. #590 renames it.
+- **Why it missed:** the name described the issue's first idea of the action, the user's own writing, and was not checked against #415's own list of what goes, which includes what the AI wrote.
+- **Source:** issue #590, filed at Peter's request in Claude Code session 2026-10-22; the name shipped in #415 (Opus 5.5)
+- **Applies to:** #268, #415, #590
+
+### 2026-10-22 · #590: a restore during the 30 days keeps the new content
+
+- **Kind:** product scope
+- **Situation:** Peter's model for #590: after "Delete all my content" the account works like a new one, and deleting the account is how a user makes Loore stop. Asked how "Restore my content" works during the 30 days when the user has written since the request. Recommended treating the restore like an import of older writing: the old and the new content both stay, the old profile versions come back in the history, and the profile is rebuilt over both through the import path.
+- **Prediction:** as recommended (75 %); the restore drops the new content, or works only when nothing new was written (15 %).
+- **Peter:** on the model: "makes logically sense" · on the old versions in the history: "definitely" · "Redoing the whole profile history would be wasteful. Count the restored tip as the tip and drop the profiles built since then (it's only 30 days, so there won't be many versions). The rest heals automatically, because the new writing just triggers profile update."
+- **Score:** partial: two of the three parts. Both contents stay and the old versions come back; there is no rebuild: the restored profile is the current one again, the versions built since the request are dropped, and the new writing reaches it by the usual update.
+- **Why it missed:** the import path was taken whole, its rebuild included, without setting the cost of redoing the profile history against at most 30 days of versions that the new writing updates anyway.
+- **Source:** Claude Code session 2026-10-22 (Opus 5.5)
+- **Applies to:** #590
+
 ## Decided by the builder
 
 Choices that agents flagged in PRs and that the builder decided because a rule above already covers them (Peter, 2026-10-02: decide what the log supports, raise only real judgement calls). Each is also recorded on its PR, or in the session where Peter asked. The Decided column holds only the builder's part; a rule or decision of Peter's goes in the Rule column. Questions raised to Peter instead are not listed; his answers become entries. Model is the model that wrote the PR (its Co-Authored-By line). Result is "accepted by merge (PR #N, date)" once the PR has merged and Peter didn't correct the choice, "pending" until it merges, and "corrected → entry <title>" when he overrules it; the entry is then scored as a miss.
@@ -2650,7 +2799,7 @@ Choices that agents flagged in PRs and that the builder decided because a rule a
 | 2026-10-21 | #589 | testing | The window size of the Haiku 5.5 versions in the Haiku test | Prod's chunk planner size for Haiku (46.6k units here), under Haiku's 100k-token price step: 53 versions against the 26 Luna windows, so the test mixes the change of model with the number of versions; said so before the run | Test what would ship; #259 (no request across a price tier) | Opus 5.5 | pending |
 | 2026-10-22 | #589 | testing | When Haiku 5.5 is good enough to write Anthropic users' versions | Set before the evaluation: the Sol bar applied to Haiku. Against the Luna events final with an Opus merge (33 core facts, 1 wrong): at least 30 core facts, at most 2 wrong, specific maps, at least 15 of 18 sub-headings; refusals noted as a risk. Haiku scored 31, 0 wrong, 18 of 18, and is the default in #589 | "potentially Haiku if accuracy allows" (Peter, 2026-10-22); the Sol thresholds he accepted (2026-10-21); every added heuristic is named | Opus 5.5 | pending |
 | 2026-10-22 | #589 | product scope | The merge structure of a set of independent versions | `flat`: one merge while all versions fit under the merge model's input cap, groups of 30 above it; switched from `grouped` after the 149-version test. Flat: 32 of 41 core facts, 1 wrong, 18 of 18 sub-headings. Grouped: 34 (4 of them borderline), 0 wrong core facts, 3 other errors, 13 of 18 sub-headings, $0.50 more. Grouped met the bar set before the test (within 3 core facts and 1 wrong core fact of flat); flat was chosen on the other errors, the sub-headings and the cost | Fixed groups with only the newest merged again (Peter, 2026-10-20), now above the cap only; every added heuristic is named | Opus 5.5 | pending |
-| 2026-10-22 | #589 | cost | The merge model for OpenAI users | GPT-6.1 Sol at high reasoning effort, although no OpenAI merge reached the bar Opus sets: on the same versions Sol at its default effort kept 25 of 41 core facts, at high effort 27, GPT-6 Astra 26 and Opus 33, none of them with errors; Sol costs a fifth of Astra. A prompt asking for about 650 tokens a section was no clear gain (30 and 26 in two runs, against 26 for a repeat without it). Under Needs Peter in #589 | A user's model is theirs (an OpenAI user's merge stays with OpenAI); Quality first, for now | Opus 5.5 | pending |
+| 2026-10-22 | #589 | cost | The merge model for OpenAI users | GPT-6.1 Sol at high reasoning effort, although no OpenAI merge reached the bar Opus sets: on the same versions Sol at its default effort kept 25 of 41 core facts, at high effort 27, GPT-6 Astra 26 and Opus 33, none of them with errors; Sol costs a fifth of Astra. A prompt asking for about 650 tokens a section was no clear gain (30 and 26 in two runs, against 26 for a repeat without it). Under Needs Peter in #589 | A user's model is theirs (an OpenAI user's merge stays with OpenAI); Quality first, for now | Opus 5.5 | hit: accepted by Peter (2026-10-22), entry "#589: OpenAI merges by Sol at high effort" |
 
 ## Backfilled decisions
 
