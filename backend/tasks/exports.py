@@ -2054,11 +2054,15 @@ def profile_update_base(user_id):
     is newer than the windows but older than the set's final merge (it is
     merged inside the final) or the set has no final yet (the final will
     merge it). A version the user saves after the final is the base: the
-    next update builds on it. A group is never a base. With
-    PROFILE_INDEPENDENT_VERSIONS off, a set's rows are skipped and the
-    chained path continues from the newest version outside any set."""
+    next update builds on it. A group is never a base.
+
+    With PROFILE_INDEPENDENT_VERSIONS off, a set's windows and groups are
+    skipped: the chained path continues from the newest set final when no
+    version outside any set is newer than it (a user whose profile is a
+    set keeps it and gets chained updates on it, instead of a from-scratch
+    chained rebuild), else from that newer version."""
     from backend.utils.profile_versions import (
-        SET_INTERNAL_TYPES, WINDOW_TYPES, current_window_set,
+        SET_INTERNAL_TYPES, WINDOW_TYPES, current_window_set, latest_final,
         latest_set_final, window_set_tip)
     from flask import current_app
     windows_on = bool(current_app.config.get("PROFILE_INDEPENDENT_VERSIONS"))
@@ -2069,8 +2073,14 @@ def profile_update_base(user_id):
         UserProfile.generation_type.notin_(excluded),
         UserProfile.ai_usage.in_(AI_ALLOWED),
     ).order_by(UserProfile.created_at.desc()).first()
-    if newest is None or not windows_on:
+    if not windows_on:
+        final = latest_final(user_id)
+        if final is not None and (newest is None
+                                  or final.created_at > newest.created_at):
+            return final
         return newest
+    if newest is None:
+        return None
     if newest.generation_type in WINDOW_TYPES:
         return window_set_tip(user_id, newest.window_set) or newest
     set_id = current_window_set(user_id)

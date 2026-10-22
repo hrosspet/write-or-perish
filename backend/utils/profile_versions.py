@@ -179,3 +179,14 @@ def latest_set_final(user_id, set_id):
         UserProfile.generation_type == "integration",
         _ai_readable(),
     ).order_by(UserProfile.created_at.desc()).first()
+
+
+def latest_final(user_id):
+    """The user's newest AI-readable final merge of any window set, or
+    None."""
+    return UserProfile.query.filter(
+        UserProfile.user_id == user_id,
+        UserProfile.window_set.isnot(None),
+        UserProfile.generation_type == "integration",
+        _ai_readable(),
+    ).order_by(UserProfile.created_at.desc()).first()

@@ -1322,6 +1322,39 @@ def test_kill_switch_off_bases_updates_outside_any_set(app, world):
     assert ex.profile_update_base(u.id).id == chain.id
 
 
+def test_kill_switch_off_updates_a_sets_final_on_the_chained_path(
+        app, world):
+    """Review of #589, finding 5: with the switch off, a user whose profile
+    is a set's final keeps it as the base: no from-scratch chained
+    rebuild, and the next update chains on the final."""
+    u = _user()
+    rows = _set_of(u, 5, created=datetime.utcnow() - timedelta(hours=3))
+    final = _profile(u, gen_type="integration",
+                     cutoff=rows[-1].source_data_cutoff, units=14_100_000,
+                     window_set="set1", parent_profile_id=rows[-1].id,
+                     created_at=datetime.utcnow() - timedelta(hours=2))
+    n = Node(user_id=u.id, node_type="user", ai_usage="chat",
+             token_count=90_000, created_at=T0 + timedelta(hours=1))
+    n.set_content("synthetic writing")
+    db.session.add(n)
+    db.session.commit()
+    app.config["PROFILE_INDEPENDENT_VERSIONS"] = False
+    assert ex.profile_update_base(u.id).id == final.id
+    assert pb._should_seed(u) is False
+    db.session.refresh(u)
+    assert not u.profile_needs_full_regen
+    world.corpus = Corpus(85, start=rows[-1].source_data_cutoff
+                          + timedelta(hours=1))
+    req = pb._build_next_profile_request(u)
+    assert req["meta"]["kind"] == "chunk"
+    assert req["meta"]["prev_profile_id"] == final.id
+    assert req["meta"]["generation_type"] == "update"
+    # A version outside the set that is newer than the final is the base.
+    later = _profile(u, gen_type="update", cutoff=rows[-1].source_data_cutoff
+                     + timedelta(days=1), parent_profile_id=final.id)
+    assert ex.profile_update_base(u.id).id == later.id
+
+
 def test_the_seeder_gate_opens_for_a_set_whose_final_is_due(world):
     u = _user()
     rows = _set_of(u, 5, created=datetime.utcnow())
