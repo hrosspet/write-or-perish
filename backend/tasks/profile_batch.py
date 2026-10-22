@@ -724,6 +724,18 @@ def _submit_requests(built, keys):
                     if not refused:
                         u.profile_batch_attempts = (
                             (u.profile_batch_attempts or 0) + 1)
+            # A window set's items (#545) that never went out are recorded
+            # as a failed job with outcome "missing": the set's attempt
+            # history then counts the submission (three, then a day's
+            # wait), so a refusal that lasts (a spend limit) does not have
+            # the whole set rendered again every hour. Nothing to poll, and
+            # no collected_at: it does not re-dispatch the advance at once.
+            set_items = [dict(i, outcome="missing") for i in items
+                         if i.get("kind") in SET_ITEM_KINDS]
+            if set_items:
+                db.session.add(ProfileBatchJob(
+                    provider_key=provider_key, batch_id="unsubmitted",
+                    status="failed", items=set_items, submitted_at=now))
             db.session.commit()
             continue
         db.session.add(ProfileBatchJob(

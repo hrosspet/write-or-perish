@@ -950,6 +950,10 @@ def _render_windows(user, state, models, sub, history, deadline):
                     models, models.version, cid,
                     [{"role": "user", "content": [
                         {"type": "text", "text": prompt}]}]), meta)
+                if sub.failed:
+                    # A slice was refused at submission: nothing rendered
+                    # after it would go out in this run.
+                    return None
             cur = cutoff
             if end is not None and cutoff is not None and cutoff >= end:
                 break
@@ -1121,7 +1125,7 @@ def next_work(user, models, keys, deadline):
     if state.due:
         outcome = _render_windows(user, state, models, sub, history,
                                   deadline)
-    if outcome != "partial":
+    if outcome != "partial" and not sub.failed:
         _merge_requests(user, state, models, sub, keys, history)
     sub.flush()
     if sub.failed:

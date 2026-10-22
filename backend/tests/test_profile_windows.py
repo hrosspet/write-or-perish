@@ -764,6 +764,34 @@ def test_a_stale_job_counts_its_windows_as_missing(world, monkeypatch):
     assert pw.advance_profile_windows.apply_async.call_count == 2
 
 
+def test_refused_submissions_stop_rendering_after_the_third(world):
+    """Review of #589, finding 3: a submission the provider refuses (no
+    batch id, e.g. a spend limit) is recorded in the attempt history, so
+    the set is not rendered again every hour while the refusal lasts."""
+    world.corpus = _windows_corpus(3)
+    world.provider.fail_submit = True
+    u = _user(profile_needs_full_regen=True)
+    renders = []
+    for _ in range(4):
+        before = len(world.corpus.renders)
+        assert _advance(u) in ("failed", "idle")
+        renders.append(len(world.corpus.renders) - before)
+    assert all(renders[:3]) and renders[3] == 0
+    failed = ProfileBatchJob.query.filter_by(status="failed").all()
+    assert len(failed) == 3
+    assert {i["outcome"] for job in failed for i in job.items} == {"missing"}
+    assert not ProfileBatchJob.query.filter_by(status="pending").count()
+    # No immediate re-dispatch: one advance per call above.
+    assert pw.advance_profile_windows.apply_async.call_count == 4
+    db.session.refresh(u)
+    assert u.profile_seed_error.startswith(pw.STOP_NOTE)
+    assert u.profile_batch_pending is False
+    # A day later it gets one more try.
+    later = datetime.utcnow() + timedelta(hours=25)
+    assert pw.provider_stop_until(pw.attempt_history(u.id), ("window", None),
+                                  later) is None
+
+
 # ── 9. merges ─────────────────────────────────────────────────────────────
 
 def _set_of(user, n, set_id="set1", base=None, start=T0, step=None,
