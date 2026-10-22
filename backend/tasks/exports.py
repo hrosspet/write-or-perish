@@ -1,7 +1,7 @@
 """
 Celery tasks for asynchronous data export operations.
 """
-from datetime import datetime
+from datetime import datetime, timedelta
 from celery import Task
 from celery.utils.log import get_task_logger
 import os
@@ -233,12 +233,16 @@ def provisional_build_due(user, latest_profile):
     return (threshold is not None and total >= threshold), total, threshold
 
 
-def count_remaining_units(user_id, created_after=None):
-    """Units still ahead of the chunk loop after ``created_after``, summed in
-    the export window's own scope (backend.routes.export_data). Thin wrapper
-    so the task modules and their tests reach it through this module."""
+def count_remaining_units(user_id, created_after=None, created_before=None):
+    """Units still ahead of the chunk loop after ``created_after`` (and,
+    for a window set's gap, before ``created_before``, exclusive), summed
+    in the export window's own scope (backend.routes.export_data). Thin
+    wrapper so the task modules and their tests reach it through this
+    module."""
     from backend.routes.export_data import count_remaining_units as _count
-    return _count(user_id, created_after)
+    if created_before is None:
+        return _count(user_id, created_after)
+    return _count(user_id, created_after, created_before=created_before)
 
 
 def should_continue_chain(user, latest_profile):
@@ -435,14 +439,20 @@ def _call_llm_with_retries(self, model_id, prompt_text, user_id,
 def _save_profile(user, model_id, profile_text, response,
                    source_tokens_used, source_data_cutoff,
                    generation_type, parent_profile_id=None, batch=False,
-                   source_origin_stats=None, source_rendered_at=None, merged_profile_id=None):
+                   source_origin_stats=None, source_rendered_at=None, merged_profile_id=None,
+                   window_set=None, covers_start=None, date_line_start=None,
+                   date_line_tokens=None):
     """Save a new UserProfile and log API cost. Returns the profile.
 
     batch=True records the Batch API discount in the cost log (issue #173).
     source_rendered_at: when the window this version covers was rendered
     (the continue rule's boundary between unfinished chain and growth).
     merged_profile_id: on a rebuild's merge step, the user's version it
-    merged (#183)."""
+    merged (#183).
+    window_set / covers_start: a window set's row (#545). The stored text
+    then starts with the window's own dates, "[Covers A to B (N tokens)]",
+    A being ``date_line_start`` and N ``date_line_tokens`` (the window's
+    own units, where source_tokens_used is cumulative)."""
     from backend.utils.privacy import PrivacyLevel
     from backend.utils.hidden_rows import WritingOnHold, writing_on_hold
 
@@ -474,11 +484,15 @@ def _save_profile(user, model_id, profile_text, response,
         generation_type=generation_type,
         parent_profile_id=parent_profile_id,
         merged_profile_id=merged_profile_id,
+        window_set=window_set,
+        covers_start=covers_start,
     )
     new_profile.set_content(
         format_date_metadata(
+            covers_start=date_line_start,
             covers_end=source_data_cutoff,
-            tokens=source_tokens_used,
+            tokens=(source_tokens_used if date_line_tokens is None
+                    else date_line_tokens),
         ) + profile_text
     )
     db.session.add(new_profile)
@@ -497,7 +511,21 @@ def _add_profile_cost_log(user, model_id, response, batch=False,
     ))
 
 
-def refuse_truncated_profile(user, model_id, response, job, batch=False):
+def refuse_truncated_profile(user, model_id, response, job, batch=False,
+                             problem=None):
+    """Guard before a profile version is saved from model output (#368).
+
+    ``problem``: why the output is not a profile although the API flagged
+    nothing (``profile_output_problem``, e.g. a refusal written as text);
+    handled like a refusal. Passed by the window set's merges (#545)."""
+    if problem and not (response.get("truncated") or is_refused(response)):
+        response = dict(response, refused=True)
+        logger.warning("Profile output for user %s (%s, model %s) is not a "
+                       "profile: %s", user.id, job, model_id, problem)
+    return _refuse_truncated_profile(user, model_id, response, job, batch)
+
+
+def _refuse_truncated_profile(user, model_id, response, job, batch=False):
     """Guard before a profile version is saved from model output (#368).
 
     A version cut off at the output limit — empty, or stopped mid-document
@@ -895,6 +923,19 @@ def revert_profile_for_import(user_id, earliest_imported_created_at):
     if not profiles:
         return _flag_full()
     tip = profiles[0]
+    from backend.utils.profile_versions import (
+        SET_INTERNAL_TYPES, window_set_tip)
+    if tip.generation_type in SET_INTERNAL_TYPES:
+        # A large build's window set (#545): an import newer than the
+        # set's tip is new writing for its next window; an older one
+        # rebuilds the set from scratch (a partial re-tip of a set is not
+        # worth its code: rebuilding the windows costs a few dollars).
+        set_tip = window_set_tip(user_id, tip.window_set) or tip
+        if earliest_imported_created_at is None or (
+                set_tip.source_data_cutoff is not None
+                and set_tip.source_data_cutoff < earliest_imported_created_at):
+            return "none", set_tip
+        return _flag_full()
     if earliest_imported_created_at is None:
         return "none", tip
 
@@ -924,6 +965,20 @@ def revert_profile_for_import(user_id, earliest_imported_created_at):
     if user is not None:
         plan_user_version_merge(user, old_base, new_base=copy)
     return "revert", copy
+
+
+def window_hand_off(user, task_id, integrate_only=False):
+    """The synchronous task's hand-off (#545): a build that plans into two
+    or more chunks, or the next step of a large build's window set, runs
+    as independent versions on the Batch API, inside this task and under
+    its id, so there is one implementation also for accounts not on the
+    batch path. Returns the task's result, or None to go on as before."""
+    if integrate_only:
+        return None
+    from backend.tasks import profile_windows
+    if not profile_windows.wants_window_build(user):
+        return None
+    return profile_windows.run_advance_inline(user, task_id)
 
 
 @celery.task(base=ProfileGenerationTask, bind=True)
@@ -972,6 +1027,9 @@ def update_user_profile(self, user_id: int, model_id: str,
             logger.info("User %s: writing on hold for deletion; skipping "
                         "profile update", user_id)
             return
+        handed_off = window_hand_off(user, self.request.id, integrate_only)
+        if handed_off is not None:
+            return handed_off
         previous_profile_id = ai_readable_base_id(user_id, previous_profile_id)
 
         # Set concurrency guard
@@ -1207,14 +1265,38 @@ def _collect_iterative_chain(last_profile_id):
     return chain
 
 
-def _calculate_months_span(first_profile, last_profile):
-    """Months between source_data_cutoff of first and last profiles."""
-    first_ts = getattr(first_profile, 'source_data_cutoff', None)
-    last_ts = getattr(last_profile, 'source_data_cutoff', None)
-    if not first_ts or not last_ts:
+def _calculate_months_span(start, end):
+    """Whole months from ``start`` to ``end`` (datetimes), at least 1.
+    The integration prompt's {N_MONTHS}: the period the merged versions'
+    writing covers, from where the first version's window starts to the
+    newest cutoff (#549). 1 when either end is unknown."""
+    if not start or not end:
         return 1
-    delta = last_ts - first_ts
-    return max(1, round(delta.days / 30.44))
+    return max(1, round((end - start).days / 30.44))
+
+
+def _fill_months(template, n_months):
+    """Put ``n_months`` into {N_MONTHS}, as "1 month" rather than
+    "1 months" (#549)."""
+    if n_months == 1:
+        template = template.replace("{N_MONTHS} months", "1 month")
+    return template.replace("{N_MONTHS}", str(n_months))
+
+
+def _first_writing_date(user_id, until):
+    """When the user's AI-readable writing up to ``until`` begins: the
+    start of a chain's first window, which no version stores. Reads
+    created_at only; nothing is decrypted. None when there is none."""
+    from sqlalchemy import func, or_
+    from backend.models import Node
+    query = db.session.query(func.min(Node.created_at)).filter(
+        or_(Node.user_id == user_id, Node.human_owner_id == user_id),
+        Node.ai_usage.in_(AI_ALLOWED),
+        Node.deleted_at.is_(None),
+    )
+    if until is not None:
+        query = query.filter(Node.created_at <= until)
+    return query.scalar()
 
 
 # --- Shared prompt/message builders -------------------------------------
@@ -1222,14 +1304,105 @@ def _calculate_months_span(first_profile, last_profile):
 # (backend/tasks/profile_batch.py) produce byte-identical prompts — single
 # source of truth (issue #173, Part A).
 
+# The headings that close the generation prompt: what to output, and the
+# {user_export} input. "## OUTPUT FORMAT" near the top is not one of them.
+_GENERATION_TAIL_HEADINGS = ("## OUTPUT", "## INPUT")
+
+
+def profile_structure_instructions(gen_template):
+    """The generation prompt as the update and integration prompts embed
+    it: everything before its closing "## OUTPUT" / "## INPUT" sections,
+    so the profile's section instructions (Surface, Shadow and Light Map)
+    and the generation rules are kept and the empty {user_export} input is
+    not (#544, #549). The cut is at the first line that is exactly one of
+    those headings. A prompt of the user's own without them is embedded
+    whole."""
+    lines = gen_template.splitlines(keepends=True)
+    for i, line in enumerate(lines):
+        if line.strip() in _GENERATION_TAIL_HEADINGS:
+            return "".join(lines[:i]).rstrip()
+    return gen_template
+
+
+# ── Independent versions of a large build (#545) ─────────────────────────
+# Peter's paragraph, exact text, as tested on 2026-10-21/22 (Luna and Haiku
+# runs). It goes into the generation prompt of a window version only: a
+# build that fits one chunk, an update and every merge never see it.
+EVENTS_IN_WINDOW_PARAGRAPH = (
+    "After the Light Map, add a final section headed "
+    "`### EVENTS IN THIS WINDOW`: a dated list of what happened and what "
+    "changed in the writer's life during the period this writing covers "
+    "(results, decisions, new projects or launches, and changes in "
+    "relationships, work, health or where they live), oldest first, each "
+    "with the date or month the writing gives. Include only what the "
+    "writing states. About 300 tokens.")
+EVENTS_HEADING = "EVENTS IN THIS WINDOW"
+
+# What a merge sees for a window given up after its outputs failed
+# (a "window_skip" row), under the window's own dates.
+WINDOW_SKIPPED_TEXT = ("[No profile of this period: the model declined to "
+                       "read this writing.]")
+
+# The three sections every profile output has (profile_generation.txt).
+PROFILE_MAP_HEADINGS = ("SURFACE MAP", "SHADOW MAP", "LIGHT MAP")
+
+
+def window_generation_template(user_id):
+    """The generation prompt a window version is built with: the user's
+    generation prompt (their own, if they wrote one) with
+    EVENTS_IN_WINDOW_PARAGRAPH and a blank line inserted at the start of
+    the first line that is exactly "## INPUT", which is where the
+    experiments put it (after the "## OUTPUT" instruction and its blank
+    line). A prompt without that line gets it before the line holding
+    {user_export}; a prompt with neither, at the end. Inserted here, not
+    written into the file: a one-chunk build must not get it, the prompts
+    page shows the file, and a user's own prompt gets it too."""
+    template = _load_prompt("profile_generation.txt", user_id=user_id)
+    inserted = EVENTS_IN_WINDOW_PARAGRAPH + "\n\n"
+    lines = template.splitlines(keepends=True)
+    for marker in (lambda line: line.strip() == "## INPUT",
+                   lambda line: "{user_export}" in line):
+        for i, line in enumerate(lines):
+            if marker(line):
+                return "".join(lines[:i]) + inserted + "".join(lines[i:])
+    logger.info("User %s: generation prompt has no input line; the events "
+                "paragraph goes at its end", user_id)
+    return template.rstrip() + "\n\n" + EVENTS_IN_WINDOW_PARAGRAPH + "\n"
+
+
+def profile_output_problem(text, template, events=False):
+    """Why a model output is not a profile, or None. The reason names a
+    missing part, never the output's text, so it can be logged.
+
+    A profile has a heading line (one starting with "#") for each of the
+    Surface, Shadow and Light Map that ``template`` asks for (a user's own
+    prompt without them is not checked); the names are compared upper-case
+    anywhere in the heading, so "### SECTION 2: SHADOW MAP" passes. With
+    ``events`` (a window version) it also has exactly one heading holding
+    "EVENTS IN THIS WINDOW". A model that declines in plain text, with no
+    refusal flag (2 of 53 Haiku versions, 2026-10-22), fails this."""
+    headings = [line.upper() for line in (text or "").splitlines()
+                if line.lstrip().startswith("#")]
+    asked = (template or "").upper()
+    for name in PROFILE_MAP_HEADINGS:
+        if name in asked and not any(name in h for h in headings):
+            return f"no {name} heading"
+    if events:
+        n = sum(1 for h in headings if EVENTS_HEADING in h)
+        if n != 1:
+            return f"{n} {EVENTS_HEADING} headings"
+    return None
+
+
 def build_update_template(user_id):
     """Assemble the incremental-update template: profile_update.txt with the
-    generation prompt (minus its OUTPUT section) embedded."""
+    generation prompt's structure instructions embedded
+    (``profile_structure_instructions``)."""
     update_template = _load_prompt("profile_update.txt", user_id=user_id)
     gen_template = _load_prompt("profile_generation.txt", user_id=user_id)
-    gen_template_no_output = gen_template.split("## OUTPUT")[0]
     return update_template.replace(
-        "{profile_generation_prompt}", gen_template_no_output
+        "{profile_generation_prompt}",
+        profile_structure_instructions(gen_template)
     )
 
 
@@ -1333,24 +1506,152 @@ def build_integration_messages(user_id, last_iterative_profile_id):
     return _integration_messages(user_id, chain), chain
 
 
-def _integration_messages(user_id, chain, cumulative=False):
+def _day(ts):
+    return ts.strftime("%Y-%m-%d") if ts else "unknown"
+
+
+def _written_by_user_on(profile):
+    """When the user wrote ``profile``, a version they wrote: the day it
+    was saved. An edit that changes the words is saved as a new version
+    (routes/profile._save_edit_as_new_version), so this is the edit's
+    date, not the date of the writing it covers (its cutoff is the edited
+    version's). None for a generated version."""
+    if profile is None or profile.generated_by != "user" \
+            or profile.created_at is None:
+        return None
+    return _day(profile.created_at)
+
+
+def _merged_version(profile):
+    """The version the user wrote that a rebuild's merge step merged
+    (``merged_profile_id``), or None. Metadata only."""
+    if not profile.merged_profile_id:
+        return None
+    merged = db.session.get(UserProfile, profile.merged_profile_id)
+    if merged is None or merged.user_id != profile.user_id:
+        return None
+    return merged
+
+
+def _version_label(i, profile, chain, start, cumulative):
+    """The lines above a version in the integration messages (#545).
+
+    Every version covers all the writing from the first window's start
+    (``start``, "the start" when unknown) to its cutoff. In a chain each
+    version after the first is an update of the one before it, so its
+    label also gives the writing it added: the previous version's cutoff
+    to its own. A merge step of a rebuild (#183) adds no writing; it
+    merges the version before it with a version the user wrote, dated by
+    when the user wrote it. With ``cumulative`` (the merge call itself)
+    the versions are full profiles side by side, not updates of each
+    other, so only the coverage line is given. A version the user wrote
+    also says when they wrote it: its cutoff is that of the version they
+    edited, so the coverage alone would date their statement too early,
+    and the integration prompt lets a later generated version override it
+    only where writing after that day shows a fact changed."""
+    cutoff = profile.source_data_cutoff
+    since = _day(start) if start and cutoff and start <= cutoff \
+        else "the start"
+    lines = [f"Profile No. {i}",
+             f"- Covers all the writing from {since} to {_day(cutoff)}"]
+    if not cumulative:
+        if i == 1:
+            lines.append("- The first version")
+        else:
+            prev_cutoff = chain[i - 2].source_data_cutoff
+            if profile.merged_profile_id and prev_cutoff == cutoff:
+                written = _written_by_user_on(_merged_version(profile))
+                on = f" on {written}" if written else ""
+                lines.append(f"- Merges Profile No. {i - 1} with a version "
+                             f"the user wrote{on}; adds no new writing")
+            else:
+                added_from = _day(prev_cutoff) if prev_cutoff else since
+                lines.append(f"- Updates Profile No. {i - 1} with the "
+                             f"writing from {added_from} to {_day(cutoff)}")
+    written = _written_by_user_on(profile)
+    if written:
+        lines.append(f"- Written by the user on {written}")
+    return lines
+
+
+# The integration's output instruction, as the default
+# profile_integration.txt ends. A user's own integration prompt without a
+# "## OUTPUT" line gets it appended: the generation prompt's own output
+# line, which such a prompt used to receive through the full embed, is
+# cut off now (#549).
+INTEGRATION_OUTPUT_SECTION = (
+    "## OUTPUT\n"
+    "Generate the unified profile now. No preamble, no meta-commentary. "
+    "Begin directly with \"### SURFACE MAP\""
+)
+
+
+def _has_output_heading(template):
+    return any(line.strip() == "## OUTPUT"
+               for line in template.splitlines())
+
+
+def _independent_label(i, profile, start):
+    """The lines above an input of a window set's merge (#545). A window,
+    a skipped window or a group covers only its own writing: "Covers the
+    writing from A to B", A being where it starts (the start of the
+    writing for the set's first window). Any other input (the set's base,
+    a version the user wrote) is a full profile: "Covers all the writing
+    from <start> to B". A version the user wrote also says when."""
+    from backend.utils.profile_versions import SET_INTERNAL_TYPES
+    cutoff = profile.source_data_cutoff
+    if profile.generation_type in SET_INTERNAL_TYPES:
+        since = _day(profile.covers_start or start)
+        lines = [f"Profile No. {i}",
+                 f"- Covers the writing from {since} to {_day(cutoff)}"]
+    else:
+        since = _day(start) if start and cutoff and start <= cutoff \
+            else "the start"
+        lines = [f"Profile No. {i}",
+                 f"- Covers all the writing from {since} to {_day(cutoff)}"]
+    written = _written_by_user_on(profile)
+    if written:
+        lines.append(f"- Written by the user on {written}")
+    return lines
+
+
+def _integration_messages(user_id, chain, cumulative=False,
+                          independent=False):
     """The integration messages for ``chain`` (oldest first): one user
-    message per version, then the integration prompt. A version the user
-    wrote carries USER_WRITTEN_PROFILE_NOTE. Each version's span runs from
-    the previous version's cutoff; with ``cumulative`` (a rebuild's merge
-    step, #183) every span starts at "start", since each version there is
-    a full profile of the writing up to its cutoff."""
-    n_months = _calculate_months_span(chain[0], chain[-1])
+    message per version under its label (``_version_label``), then the
+    integration prompt. A version the user wrote carries
+    USER_WRITTEN_PROFILE_NOTE. With ``cumulative`` (a rebuild's merge
+    step, #183) the versions are full profiles of the writing up to their
+    cutoffs, not a chain of updates.
+
+    The first window's start is the user's earliest AI-readable writing up
+    to the first version's cutoff (the newest cutoff when the first
+    version has none, as a profile written by hand before any build).
+    {N_MONTHS} runs from it to the newest cutoff (#549); from the oldest
+    cutoff when no such writing is found. A user's own integration prompt
+    without a "## OUTPUT" line gets INTEGRATION_OUTPUT_SECTION appended.
+
+    With ``independent`` (a window set's group or final merge, #545) the
+    inputs are labelled by ``_independent_label``; the integration prompt
+    is the same."""
+    cutoffs = [p.source_data_cutoff for p in chain if p.source_data_cutoff]
+    end = max(cutoffs) if cutoffs else None
+    start = _first_writing_date(
+        user_id, chain[0].source_data_cutoff or end)
+    n_months = _calculate_months_span(
+        start or (min(cutoffs) if cutoffs else None), end)
     integration_template = _load_prompt(
         "profile_integration.txt", user_id=user_id
     )
     gen_template = _load_prompt("profile_generation.txt", user_id=user_id)
-    integration_prompt = integration_template.replace(
-        "{N_MONTHS}", str(n_months)
-    )
+    integration_prompt = _fill_months(integration_template, n_months)
     integration_prompt = integration_prompt.replace(
-        "{profile_generation_prompt}", gen_template
+        "{profile_generation_prompt}",
+        profile_structure_instructions(gen_template)
     )
+    if not _has_output_heading(integration_template):
+        integration_prompt = (integration_prompt.rstrip() + "\n\n"
+                              + INTEGRATION_OUTPUT_SECTION)
 
     messages = []
     for i, profile in enumerate(chain, 1):
@@ -1359,24 +1660,14 @@ def _integration_messages(user_id, chain, cumulative=False):
         # the integration treats it as the user's own words.
         if profile.generated_by == "user":
             content = f"{USER_WRITTEN_PROFILE_NOTE}\n\n{content}"
-        cutoff = profile.source_data_cutoff
-        date_str = cutoff.strftime("%Y-%m-%d") if cutoff else "unknown"
-        if i == 1 or cumulative:
-            date_from = "start"
-        else:
-            prev_cutoff = chain[i - 2].source_data_cutoff
-            date_from = prev_cutoff.strftime(
-                "%Y-%m-%d"
-            ) if prev_cutoff else "unknown"
+        label = "\n".join(
+            _independent_label(i, profile, start) if independent
+            else _version_label(i, profile, chain, start, cumulative))
         messages.append({
             "role": "user",
             "content": [{
                 "type": "text",
-                "text": (
-                    f"Profile No. {i}\n"
-                    f"- {date_from} to {date_str}\n\n"
-                    f"{content}"
-                )
+                "text": f"{label}\n\n{content}"
             }]
         })
     messages.append({
@@ -1444,7 +1735,7 @@ def _messages_for(prompt_text):
     return [{"role": "user", "content": [{"type": "text", "text": prompt_text}]}]
 
 
-def render_profile_window(user, units, cutoff):
+def render_profile_window(user, units, cutoff, until=None):
     """The export a profile build reads: the window after ``cutoff`` at
     ``units`` stored units, oldest first, in the engaged scope, AI-readable
     rows only. It carries the user's writing and the replies in it, and
@@ -1452,16 +1743,23 @@ def render_profile_window(user, units, cutoff):
     reference lines, no system-prompt node (#550). Earlier profiles in the
     input were restated as facts of the new window. One definition, so the
     sync loop, the batch builder and scripts/simulate_chunk_plan.py render
-    the same bytes."""
+    the same bytes.
+
+    ``until``: the window ends at this moment, inclusive (a window set's
+    gap ends where the next window starts, #545), so a re-rendered window
+    cannot spill into the one after it."""
+    kwargs = {}
+    if until is not None:
+        kwargs["created_before"] = until + timedelta(microseconds=1)
     return build_user_export_content(
         user, max_tokens=int(units), filter_ai_usage=True,
         created_after=cutoff, chronological_order=True,
         return_metadata=True, include_strategy="engaged_threads",
-        omit_artifacts=True)
+        omit_artifacts=True, **kwargs)
 
 
 def build_fitted_chunk(user, model_id, api_keys, input_cap, cutoff, budget,
-                       remaining_units, prompt_fn):
+                       remaining_units, prompt_fn, until=None):
     """Render the next window at ``budget`` units and its prompt, count the
     prompt (free and exact on Anthropic, tiktoken on OpenAI) and, while it
     exceeds ``input_cap``, shrink the window by the measured ratio and
@@ -1475,7 +1773,9 @@ def build_fitted_chunk(user, model_id, api_keys, input_cap, cutoff, budget,
     from backend.llm_providers import fit_by_count
 
     def _build(units):
-        chunk = render_profile_window(user, units, cutoff)
+        chunk = (render_profile_window(user, units, cutoff, until=until)
+                 if until is not None
+                 else render_profile_window(user, units, cutoff))
         if not chunk or not chunk.get("content"):
             return None
         prompt = prompt_fn(chunk)
@@ -1746,12 +2046,50 @@ def profile_update_base(user_id):
     to 'none', or a batch step collected after the account was switched.
     The chain continues from the version before it, with the normal
     update gates from that version's cutoff, instead of rebuilding the
-    whole account. Integration drops such versions the same way (#346)."""
-    return UserProfile.query.filter(
+    whole account. Integration drops such versions the same way (#346).
+
+    A large build's window set (#545, tasks/profile_windows): the base is
+    the set's tip, the window with the latest cutoff, whenever the newest
+    version is one of its windows, and also when a version the user saved
+    is newer than the windows but older than the set's final merge (it is
+    merged inside the final) or the set has no final yet (the final will
+    merge it). A version the user saves after the final is the base: the
+    next update builds on it. A group is never a base.
+
+    With PROFILE_INDEPENDENT_VERSIONS off, a set's windows and groups are
+    skipped: the chained path continues from the newest set final when no
+    version outside any set is newer than it (a user whose profile is a
+    set keeps it and gets chained updates on it, instead of a from-scratch
+    chained rebuild), else from that newer version."""
+    from backend.utils.profile_versions import (
+        SET_INTERNAL_TYPES, WINDOW_TYPES, current_window_set, latest_final,
+        latest_set_final, window_set_tip)
+    from flask import current_app
+    windows_on = bool(current_app.config.get("PROFILE_INDEPENDENT_VERSIONS"))
+    excluded = ("integration", "group") if windows_on else (
+        ("integration",) + SET_INTERNAL_TYPES)
+    newest = UserProfile.query.filter(
         UserProfile.user_id == user_id,
-        UserProfile.generation_type != 'integration',
+        UserProfile.generation_type.notin_(excluded),
         UserProfile.ai_usage.in_(AI_ALLOWED),
     ).order_by(UserProfile.created_at.desc()).first()
+    if not windows_on:
+        final = latest_final(user_id)
+        if final is not None and (newest is None
+                                  or final.created_at > newest.created_at):
+            return final
+        return newest
+    if newest is None:
+        return None
+    if newest.generation_type in WINDOW_TYPES:
+        return window_set_tip(user_id, newest.window_set) or newest
+    set_id = current_window_set(user_id)
+    if set_id is None:
+        return newest
+    final = latest_set_final(user_id, set_id)
+    if final is not None and newest.created_at > final.created_at:
+        return newest
+    return window_set_tip(user_id, set_id) or newest
 
 
 def maybe_trigger_profile_update(user_id, model_id=None,
@@ -1933,7 +2271,11 @@ def maybe_trigger_incremental_profile_update(user, ignore_backoff=False):
             Node.ai_usage.in_(['chat', 'train']),
         )
         if cutoff:
-            new_tokens = q.filter(Node.updated_at >= cutoff).scalar()
+            # Writing created after the cutoff, as the window reads it.
+            # updated_at counted every imported node (its import time) as
+            # new, so the first entry after a large import triggered a tiny
+            # update and a re-integration (R11, #545).
+            new_tokens = q.filter(Node.created_at > cutoff).scalar()
         else:
             # No cutoff (a legacy version saved before cutoffs were
             # recorded): nothing has been folded into it yet, so all the

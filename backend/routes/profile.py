@@ -23,6 +23,7 @@ from backend.utils.profile_versions import (
     visible_profiles_query,
     same_profile_text,
     coverage_of,
+    current_profile_query,
 )
 
 profile_bp = Blueprint("profile", __name__)
@@ -89,9 +90,7 @@ def revert_profile(version_id):
     if old.user_id != current_user.id:
         return jsonify({"error": "Unauthorized"}), 403
 
-    latest = UserProfile.query.filter_by(
-        user_id=current_user.id
-    ).order_by(UserProfile.created_at.desc()).first()
+    latest = current_profile_query(current_user.id).first()
     if latest is not None and latest.id == old.id:
         return jsonify({"error": "Already the current version"}), 400
 
@@ -289,9 +288,8 @@ def create_profile():
     if not validate_privacy_level(privacy_level):
         return jsonify({"error": f"Invalid privacy_level: {privacy_level}"}), 400
 
-    newest = UserProfile.query.filter_by(
-        user_id=current_user.id
-    ).order_by(UserProfile.created_at.desc()).first()
+    # The profile in use, never a large build's window or group (#545).
+    newest = current_profile_query(current_user.id).first()
     profile = UserProfile(
         user_id=current_user.id,
         generated_by="user",

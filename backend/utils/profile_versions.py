@@ -18,7 +18,34 @@ from backend.models import UserProfile
 # the profile. Everything else stays visible: 'initial' (complete
 # single-pass build), 'integration' (merged update), 'revert' (a user
 # action), and legacy NULL-typed rows (profiles predating the column).
-PROFILE_HISTORY_HIDDEN_TYPES = ("iterative", "update")
+#
+# The rows of a large build's window set (#545, tasks/profile_windows.py)
+# are intermediates too: a "window" is one window's version, built from
+# that window alone; a "window_skip" marks a window given up after its
+# outputs failed; a "group" merges consecutive windows. They are never the
+# user's profile: only the set's final "integration" is.
+WINDOW_TYPES = ("window", "window_skip")
+SET_INTERNAL_TYPES = WINDOW_TYPES + ("group",)
+PROFILE_HISTORY_HIDDEN_TYPES = ("iterative", "update") + SET_INTERNAL_TYPES
+
+
+def not_set_internal(column=None):
+    """SQL criterion: a profile row that is not a window set's
+    intermediate (legacy NULL-typed rows included)."""
+    column = column if column is not None else UserProfile.generation_type
+    return db.or_(column.is_(None), column.notin_(SET_INTERNAL_TYPES))
+
+
+def current_profile_query(user_id):
+    """The user's profile rows that can be their current profile, newest
+    first: everything but a window set's intermediates. Every reader of
+    "the user's profile" (replies, recent context, the profile page, session
+    pins) goes through this, so a large build in progress never serves one
+    window's version: the profile in use stays the previous one until the
+    build's final merge is saved. Callers keep their own ai_usage filter."""
+    return UserProfile.query.filter(
+        UserProfile.user_id == user_id, not_set_internal(),
+    ).order_by(UserProfile.created_at.desc())
 
 
 def profile_lines(text):
@@ -103,3 +130,63 @@ def current_profile_version(user_id):
     if latest is None:
         return None, None
     return base.count(), latest.created_at
+
+
+# ── A large build's window set (#545) ────────────────────────────────────
+# Metadata lookups only (no content is loaded or decrypted), shared by the
+# update-base rule (tasks/exports.profile_update_base) and the window
+# pipeline (tasks/profile_windows).
+
+def _ai_readable():
+    from backend.utils.privacy import AI_ALLOWED
+    return UserProfile.ai_usage.in_(AI_ALLOWED)
+
+
+def current_window_set(user_id):
+    """The window set of the user's newest AI-readable window (or skipped
+    window), or None when they have none."""
+    row = db.session.query(UserProfile.window_set).filter(
+        UserProfile.user_id == user_id,
+        UserProfile.generation_type.in_(WINDOW_TYPES),
+        UserProfile.window_set.isnot(None),
+        _ai_readable(),
+    ).order_by(UserProfile.created_at.desc()).first()
+    return row[0] if row else None
+
+
+def window_set_tip(user_id, set_id):
+    """The set's AI-readable window (or skipped window) with the latest
+    cutoff: the end of the writing the set has read."""
+    if not set_id:
+        return None
+    return UserProfile.query.filter(
+        UserProfile.user_id == user_id,
+        UserProfile.window_set == set_id,
+        UserProfile.generation_type.in_(WINDOW_TYPES),
+        _ai_readable(),
+    ).order_by(UserProfile.source_data_cutoff.desc(),
+               UserProfile.created_at.desc()).first()
+
+
+def latest_set_final(user_id, set_id):
+    """The set's newest AI-readable final merge (an "integration" row
+    carrying the set's id), or None."""
+    if not set_id:
+        return None
+    return UserProfile.query.filter(
+        UserProfile.user_id == user_id,
+        UserProfile.window_set == set_id,
+        UserProfile.generation_type == "integration",
+        _ai_readable(),
+    ).order_by(UserProfile.created_at.desc()).first()
+
+
+def latest_final(user_id):
+    """The user's newest AI-readable final merge of any window set, or
+    None."""
+    return UserProfile.query.filter(
+        UserProfile.user_id == user_id,
+        UserProfile.window_set.isnot(None),
+        UserProfile.generation_type == "integration",
+        _ai_readable(),
+    ).order_by(UserProfile.created_at.desc()).first()

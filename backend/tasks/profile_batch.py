@@ -37,7 +37,8 @@ from backend.utils.api_keys import get_api_keys_for_usage
 from backend.utils.privacy import account_allows_ai
 from backend.utils import refusal_backoff
 from backend.utils.llm_batch import (
-    batch_submit, batch_check_and_collect, apply_batch_key_override)
+    BATCH_JOB_MAX_AGE, batch_submit, batch_check_and_collect,
+    apply_batch_key_override)
 # Module reference, not `from ... import names`: exports imports
 # celery_app, which imports this module to register its tasks. When a
 # web request touches backend.tasks.exports FIRST (e.g. POST
@@ -55,7 +56,14 @@ MIN_INACTIVITY = timedelta(minutes=30)
 MIN_INTERVAL = timedelta(hours=1)
 
 MAX_BATCH_ATTEMPTS = 3              # batch retries before sync last-resort
-BATCH_STALE_AFTER = timedelta(hours=24)   # provider SLA ceiling
+# A job still pending after this is failed and retried. Both providers end
+# a batch themselves at 24 h and still return its finished (billed)
+# results, so the stale rule waits for that plus polling slack instead of
+# failing a just-expired batch before its results are read (#419).
+BATCH_STALE_AFTER = BATCH_JOB_MAX_AGE
+
+# Item kinds of a large build's window set (tasks/profile_windows, #545).
+SET_ITEM_KINDS = ("window", "group", "final")
 
 
 def use_batch_for_user(user, config):
@@ -173,8 +181,10 @@ def _provider_and_model(model_id):
     return cfg["provider"], cfg["api_model"]
 
 
-def _provider_key(provider, api_model):
-    return "anthropic" if provider == "anthropic" else f"openai:{api_model}"
+def _provider_key(provider, api_model, endpoint=None):
+    from backend.utils.llm_batch import openai_batch_key
+    return ("anthropic" if provider == "anthropic"
+            else openai_batch_key(api_model, endpoint))
 
 
 def _latest_non_integration_profile(user_id):
@@ -190,7 +200,10 @@ def _new_token_count(user, cutoff):
         Node.ai_usage.in_(['chat', 'train']),
     )
     if cutoff is not None:
-        q = q.filter(Node.updated_at >= cutoff)
+        # Writing created after the cutoff, as the window reads it: an
+        # import's nodes carry the import time as updated_at, which made
+        # the first entry after a large import trigger an update (R11).
+        q = q.filter(Node.created_at > cutoff)
     return q.scalar()
 
 
@@ -231,6 +244,13 @@ def _should_seed(user, ignore_backoff=False):
     # pinned-account special case and never leaves a tail unread.
     if latest is not None and _exports.should_continue_chain(user, latest):
         return True
+    # A large build's window set with a range still to read, a group or
+    # its final due (tasks/profile_windows, #545).
+    if latest is not None and latest.generation_type in ("window",
+                                                         "window_skip"):
+        from backend.tasks import profile_windows
+        if profile_windows.set_work_due(user, latest):
+            return True
     # A rebuilt chain that has still to merge the user's version (its merge
     # failed, or the run stopped before it) merges it now (#183).
     if latest is not None and _exports.pending_merge_version(user) is not None:
@@ -653,16 +673,21 @@ def _submit_requests(built, keys):
     account reason (#369): a spend limit or a revoked key says nothing about
     the requests, and an outage spanning three hourly seeds would otherwise
     move every unpinned batch user to the full-price path for good."""
-    # Invariant: ONE in-flight step per user. Drop duplicate custom_ids
-    # (OpenAI rejects the whole batch) and extra steps for the same user
-    # (they'd race each other on the chain); keep the first built.
+    # Invariant: ONE in-flight step per user on the chained path. Drop
+    # duplicate custom_ids (OpenAI rejects the whole batch) and extra steps
+    # for the same user (they'd race each other on the chain); keep the
+    # first built. A window set's items (meta "set", #545) are independent
+    # of each other: one user's windows, groups and final go out together.
     seen_users, seen_ids, unique = set(), set(), []
     for b in built:
         uid, cid = b["meta"]["user_id"], b["request"]["custom_id"]
-        if uid in seen_users or cid in seen_ids:
+        chained = "set" not in b["meta"]
+        if cid in seen_ids or (chained and uid in seen_users):
             logger.warning(f"Dropping duplicate batch request {cid} for user {uid}")
             continue
-        seen_users.add(uid); seen_ids.add(cid); unique.append(b)
+        if chained:
+            seen_users.add(uid)
+        seen_ids.add(cid); unique.append(b)
     built = unique
     if not built:
         return 0
@@ -674,7 +699,8 @@ def _submit_requests(built, keys):
 
     items_by_key = {}
     for b in built:
-        key = _provider_key(b["provider"], b["request"]["api_model"])
+        key = _provider_key(b["provider"], b["request"]["api_model"],
+                            b["request"].get("endpoint"))
         items_by_key.setdefault(key, []).append(b["meta"])
 
     # Provider keys refused for an account reason (llm_batch.SubmittedBatches;
@@ -698,6 +724,18 @@ def _submit_requests(built, keys):
                     if not refused:
                         u.profile_batch_attempts = (
                             (u.profile_batch_attempts or 0) + 1)
+            # A window set's items (#545) that never went out are recorded
+            # as a failed job with outcome "missing": the set's attempt
+            # history then counts the submission (three, then a day's
+            # wait), so a refusal that lasts (a spend limit) does not have
+            # the whole set rendered again every hour. Nothing to poll, and
+            # no collected_at: it does not re-dispatch the advance at once.
+            set_items = [dict(i, outcome="missing") for i in items
+                         if i.get("kind") in SET_ITEM_KINDS]
+            if set_items:
+                db.session.add(ProfileBatchJob(
+                    provider_key=provider_key, batch_id="unsubmitted",
+                    status="failed", items=set_items, submitted_at=now))
             db.session.commit()
             continue
         db.session.add(ProfileBatchJob(
@@ -750,15 +788,64 @@ def _notify_prefill_complete(user):
 
 
 def _fail_job(job, reason):
+    # A window set's items (#545) become "missing" outcomes, which bound
+    # their own retries; the set's advance then submits them again.
+    set_items = [i for i in job.items or []
+                 if i.get("kind") in SET_ITEM_KINDS]
+    advance_users = set()
+    if set_items:
+        from backend.tasks import profile_windows
+        advance_users = profile_windows.collect(job, set_items, {})
     job.status = "failed"
     job.collected_at = datetime.utcnow()
     for item in job.items:
+        if item.get("kind") in SET_ITEM_KINDS:
+            continue
         u = User.query.get(item["user_id"])
         if u:
             u.profile_batch_pending = False
             u.profile_batch_attempts = (u.profile_batch_attempts or 0) + 1
     db.session.commit()
     logger.warning(f"Profile batch {job.batch_id} failed ({reason})")
+    _advance_users(advance_users)
+
+
+def _advance_users(user_ids):
+    if not user_ids:
+        return
+    from backend.tasks import profile_windows
+    for user_id in user_ids:
+        try:
+            profile_windows.dispatch_advance(User.query.get(user_id))
+        except Exception as e:
+            logger.error(f"Dispatching the profile window advance for user "
+                         f"{user_id} failed: {type(e).__name__}")
+
+
+def _clear_stuck_pending():
+    """Clear profile_batch_pending for users no pending job carries and no
+    live task holds (audit R7): a worker killed between a job's collection
+    and the next step's submission left the flag set with nothing in
+    flight, which the seeder, the admin "Build profile" button and the
+    progress label all took for a step in flight, for good."""
+    carried = {item.get("user_id")
+               for job in ProfileBatchJob.query.filter_by(status="pending").all()
+               for item in job.items or []}
+    cleared = 0
+    for u in User.query.filter(User.profile_batch_pending.is_(True)).all():
+        if u.id in carried:
+            continue
+        if u.profile_generation_task_id and not _exports._is_task_stale(u):
+            continue
+        u.profile_batch_pending = False
+        u.profile_generation_task_id = None
+        u.profile_generation_task_dispatched_at = None
+        cleared += 1
+        logger.warning(f"User {u.id}: cleared a stuck profile_batch_pending "
+                       f"(no pending job carries the user)")
+    if cleared:
+        db.session.commit()
+    return cleared
 
 
 # ── scheduled tasks ───────────────────────────────────────────────────
@@ -787,6 +874,7 @@ def _seed_profile_batches(users=None, ignore_backoff=False):
         get_api_keys_for_usage(config, 'chat'), config)
     built = []
     if users is None:
+        _clear_stuck_pending()
         users = User.profile_eligible_query().all()
         # Plus the builds the spend cap held back, which resume once it
         # lifts: a pre-filled account not yet activated is outside the
@@ -820,6 +908,13 @@ def _seed_profile_batches(users=None, ignore_backoff=False):
             _release_cap_hold(user)   # nothing (left) to resume
             continue
         try:
+            # A build that plans into two or more chunks, or the next step
+            # of a window set, goes to the window pipeline (#545); its
+            # advance task renders outside this pass's lock.
+            from backend.tasks import profile_windows
+            if profile_windows.wants_window_build(user):
+                profile_windows.dispatch_advance(user)
+                continue
             # An integration retry builds only the integration, never a
             # chunk over organic growth since the chain's last render.
             req = _build_next_profile_request(
@@ -922,6 +1017,7 @@ def _poll_profile_batches():
         if job.status != "pending":
             continue
 
+        set_items = []
         for item in job.items:
             user = User.query.get(item["user_id"])
             if not user:
@@ -934,6 +1030,10 @@ def _poll_profile_batches():
                 if item.get("kind") != "intentions":
                     user.profile_batch_pending = False
                     db.session.commit()
+                continue
+            if item.get("kind") in SET_ITEM_KINDS:
+                # A window set's item (#545): collected below, together.
+                set_items.append(item)
                 continue
             result = results.get(item["custom_id"])
             if item.get("kind") == "intentions":
@@ -1000,8 +1100,13 @@ def _poll_profile_batches():
                     _notify_prefill_complete(user)
             db.session.commit()
 
+        advance_users = set()
+        if set_items:
+            from backend.tasks import profile_windows
+            advance_users = profile_windows.collect(job, set_items, results)
         job.status = "collected"
         job.collected_at = datetime.utcnow()
         db.session.commit()
+        _advance_users(advance_users)
 
     _submit_requests(next_built, keys)

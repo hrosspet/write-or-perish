@@ -134,10 +134,13 @@ def _new_writing(user):
 
 
 def _is_merge(messages):
-    """A rebuild's merge call: two versions whose spans both start at
-    "start" (exports.build_merge_messages), then the prompt."""
+    """A rebuild's merge call: two full versions side by side, each label
+    giving only its coverage (exports.build_merge_messages), then the
+    prompt. An integration's second version also says what it added."""
     texts = [m["content"][0]["text"] for m in messages]
-    return len(texts) == 3 and texts[1].startswith("Profile No. 2\n- start")
+    return (len(texts) == 3 and texts[1].startswith("Profile No. 2\n- Covers")
+            and "\n- Updates Profile No. 1" not in texts[1]
+            and "\n- Merges Profile No. 1" not in texts[1])
 
 
 def _stand_in(monkeypatch, exports, windows, remaining, chunk_outputs,
@@ -174,6 +177,11 @@ def _stand_in(monkeypatch, exports, windows, remaining, chunk_outputs,
     monkeypatch.setattr(lp.LLMProvider, "get_completion",
                         staticmethod(complete))
     return seen
+
+
+def _day(version):
+    """The day a version the user wrote was saved, as its label gives it."""
+    return version.created_at.strftime("%Y-%m-%d")
 
 
 def _existing_profile(prompt):
@@ -214,9 +222,16 @@ def test_the_next_update_builds_on_the_users_version(app, monkeypatch):
     assert update.parent_profile_id == edit.id
     texts = [m["content"][0]["text"] for m in messages[:-1]]
     assert len(texts) == 2
-    assert texts[0] == ("Profile No. 1\n- start to 2026-05-01\n\n"
+    assert texts[0] == ("Profile No. 1\n"
+                        "- Covers all the writing from the start to 2026-05-01\n"
+                        "- The first version\n"
+                        f"- Written by the user on {_day(edit)}\n\n"
                         f"{MAIN_NOTE}\n\n{edit.get_content()}")
-    assert texts[1].startswith("Profile No. 2\n- 2026-05-01 to 2026-06-01\n\n")
+    assert texts[1].startswith(
+        "Profile No. 2\n"
+        "- Covers all the writing from the start to 2026-06-01\n"
+        "- Updates Profile No. 1 with the writing from 2026-05-01 to "
+        "2026-06-01\n\n")
     assert "UPDATED, KEEPS MY CORRECTION" in texts[1]
     assert MAIN_NOTE not in texts[1]
     newest = UserProfile.query.get(result["profile_id"])
@@ -254,9 +269,16 @@ def test_an_edit_of_a_chunk_replaces_it_in_the_integration(app, monkeypatch):
     assert ikind == "integration"
     texts = _texts(messages)[:-1]
     assert len(texts) == 2
-    assert texts[0] == ("Profile No. 1\n- start to 2026-05-01\n\n"
+    assert texts[0] == ("Profile No. 1\n"
+                        "- Covers all the writing from the start to 2026-05-01\n"
+                        "- The first version\n"
+                        f"- Written by the user on {_day(edit)}\n\n"
                         f"{MAIN_NOTE}\n\n### SURFACE MAP\nMY CORRECTION")
-    assert texts[1].startswith("Profile No. 2\n- 2026-05-01 to 2026-06-01\n\n")
+    assert texts[1].startswith(
+        "Profile No. 2\n"
+        "- Covers all the writing from the start to 2026-06-01\n"
+        "- Updates Profile No. 1 with the writing from 2026-05-01 to "
+        "2026-06-01\n\n")
     assert texts[1].endswith("UPDATED")
     assert all("THE TEXT THE USER REPLACED" not in t for t in _texts(messages))
     update = UserProfile.query.filter_by(generation_type="update").one()
@@ -489,11 +511,18 @@ def test_a_full_rebuild_merges_the_users_version_at_its_date(app, monkeypatch):
     assert kinds == ["chunk", "chunk", "merge", "chunk", "integration"]
     assert "MY CORRECTION" not in seen[0][1] and "MY CORRECTION" not in seen[1][1]
     merge_texts = _texts(seen[2][1])
-    assert merge_texts[0].startswith("Profile No. 1\n- start to 2026-05-15\n\n")
+    # Both are full profiles from the start of the writing; no "Updates"
+    # line, since neither is an update of the other.
+    assert merge_texts[0].startswith(
+        "Profile No. 1\n- Covers all the writing from the start to "
+        "2026-05-15\n\n")
     assert "REBUILT SPRING" in merge_texts[0]
-    assert merge_texts[1] == ("Profile No. 2\n- start to 2026-05-01\n\n"
-                              f"{MAIN_NOTE}\n\n{edit.get_content()}")
-    # The integration prompt, unchanged.
+    assert merge_texts[1] == (
+        "Profile No. 2\n- Covers all the writing from the start to "
+        "2026-05-01\n"
+        f"- Written by the user on {_day(edit)}\n\n"
+        f"{MAIN_NOTE}\n\n{edit.get_content()}")
+    # main's integration prompt.
     assert merge_texts[2].startswith("The above is a series of profile updates")
     # The window after the merge builds on it.
     assert _existing_profile(seen[3][1]) == "MERGED, KEEPS MY CORRECTION"
@@ -546,7 +575,8 @@ def test_a_main_era_hand_written_profile_is_merged_not_replaced(app, monkeypatch
     assert [kind for kind, _ in seen] == ["chunk", "merge"]
     assert "ABOUT ME" not in seen[0][1]
     assert _texts(seen[1][1])[1] == (
-        "Profile No. 2\n- start to unknown\n\n"
+        "Profile No. 2\n- Covers all the writing from the start to unknown\n"
+        "- Written by the user on 2025-03-01\n\n"
         f"{MAIN_NOTE}\n\nABOUT ME, IN MY WORDS")
     newest = UserProfile.query.order_by(UserProfile.created_at.desc()).first()
     assert newest.id == result["profile_id"]

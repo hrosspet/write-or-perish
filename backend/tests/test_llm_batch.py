@@ -619,3 +619,143 @@ def test_read_batch_collect_skips_a_thinking_block(monkeypatch):
     assert resp["content"] == '{"verdict": "ok"}'
     assert (resp["input_tokens"], resp["output_tokens"]) == (270_000, 3_000)
     assert resp["truncated"] is False and resp["batch"] is True
+
+
+# ── #545 / #419: large profile builds on OpenAI's Batch API ─────────────────
+
+def _oai_line(cid, content="P"):
+    return json.dumps({
+        "custom_id": cid,
+        "response": {"status_code": 200, "body": {
+            "choices": [{"message": {"content": content}}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+        }},
+    })
+
+
+def test_collect_openai_expired_batch_returns_its_finished_items(monkeypatch):
+    """A batch that expired at 24 h still carries the results of the
+    requests that finished (and were billed): they are collected, the
+    rest are missing."""
+    client = MagicMock()
+    client.batches.retrieve.return_value = SimpleNamespace(
+        status="expired", request_counts="counts", created_at=1.0,
+        completed_at=None, output_file_id="of-partial")
+    client.files.content.return_value = SimpleNamespace(
+        content=(_oai_line("w1") + "\n" + _oai_line("w2") + "\n").encode())
+    _install_fake_sdks(monkeypatch, openai_client=client)
+
+    results, pending, _ = batch_check_and_collect(
+        {"openai:gpt-x": "b"}, KEYS)
+
+    assert pending == {}
+    assert set(results) == {"w1", "w2"}
+
+
+def test_collect_openai_batch_without_output_returns_at_once(monkeypatch):
+    for status in ("failed", "expired", "completed", "cancelled"):
+        client = MagicMock()
+        client.batches.retrieve.return_value = SimpleNamespace(
+            status=status, request_counts="counts", created_at=1.0,
+            completed_at=None, output_file_id=None)
+        _install_fake_sdks(monkeypatch, openai_client=client)
+
+        results, pending, _ = batch_check_and_collect(
+            {"openai:gpt-x": "b"}, KEYS)
+
+        assert (results, pending) == ({}, {})
+        client.files.content.assert_not_called()
+
+
+def test_batch_submit_openai_writes_utf8_and_the_effort(monkeypatch):
+    """The JSONL keeps non-ASCII text as UTF-8 (2 bytes for a Czech letter,
+    not a 6-byte escape) against the 200 MB input limit, and a request's
+    reasoning effort reaches the body."""
+    written = {}
+    client = MagicMock()
+
+    def create(file=None, purpose=None):
+        written["bytes"] = file.read()
+        return SimpleNamespace(id="file-1")
+    client.files.create.side_effect = create
+    client.batches.create.return_value = SimpleNamespace(id="b-oai")
+    _install_fake_sdks(monkeypatch, openai_client=client)
+
+    batch_submit({"openai": [
+        {"custom_id": "m", "model_id": "sol", "api_model": "gpt-x",
+         "messages": [{"role": "user", "content": "žluťoučký kůň 🐴"}],
+         "max_tokens": 500, "reasoning_effort": "high"},
+        {"custom_id": "v", "model_id": "luna", "api_model": "gpt-x",
+         "messages": [{"role": "user", "content": "plain"}],
+         "max_tokens": 500}]}, KEYS, "profile")
+
+    raw = written["bytes"]
+    assert "žluťoučký kůň 🐴".encode("utf-8") in raw
+    assert b"\\u" not in raw
+    lines = [json.loads(x) for x in raw.decode("utf-8").splitlines()]
+    assert lines[0]["body"]["reasoning_effort"] == "high"
+    assert "reasoning_effort" not in lines[1]["body"]
+
+
+def test_batch_submit_openai_responses_endpoint_and_effort(monkeypatch):
+    """A request naming the Responses endpoint goes into its own batch on
+    that endpoint, with the live call's body and the reasoning effort as
+    the Responses API takes it."""
+    written = []
+    client = MagicMock()
+
+    def create(file=None, purpose=None):
+        written.append(file.read())
+        return SimpleNamespace(id=f"file-{len(written)}")
+    client.files.create.side_effect = create
+    client.batches.create.side_effect = [SimpleNamespace(id="b-chat"),
+                                         SimpleNamespace(id="b-resp")]
+    _install_fake_sdks(monkeypatch, openai_client=client)
+
+    out = batch_submit({"openai": [
+        {"custom_id": "w", "model_id": "luna", "api_model": "gpt-x",
+         "messages": [{"role": "user", "content": [
+             {"type": "text", "text": "window"}]}], "max_tokens": 500},
+        {"custom_id": "m", "model_id": "sol", "api_model": "gpt-x",
+         "endpoint": "/v1/responses", "reasoning_effort": "high",
+         "messages": [{"role": "user", "content": [
+             {"type": "text", "text": "merge"}]}], "max_tokens": 700},
+    ]}, KEYS, "profile")
+
+    assert out == {"openai:gpt-x": "b-chat",
+                   "openai:gpt-x:responses": "b-resp"}
+    endpoints = [c.kwargs["endpoint"]
+                 for c in client.batches.create.call_args_list]
+    assert endpoints == ["/v1/chat/completions", "/v1/responses"]
+    line = json.loads(written[1].decode("utf-8"))
+    assert line["url"] == "/v1/responses"
+    assert line["body"] == {
+        "model": "gpt-x", "max_output_tokens": 700, "store": False,
+        "reasoning": {"effort": "high"},
+        "input": [{"role": "user", "content": [
+            {"type": "input_text", "text": "merge"}]}]}
+
+
+def test_collect_openai_reads_a_responses_result(monkeypatch):
+    client = MagicMock()
+    client.batches.retrieve.return_value = SimpleNamespace(
+        status="completed", request_counts="counts", created_at=1.0,
+        completed_at=2.0, output_file_id="of-1")
+    line = json.dumps({"custom_id": "m", "response": {
+        "status_code": 200, "body": {
+            "object": "response", "status": "completed",
+            "output": [{"type": "reasoning"}, {"type": "message", "content": [
+                {"type": "output_text", "text": "MERGED"}]}],
+            "usage": {"input_tokens": 70, "output_tokens": 30,
+                      "input_tokens_details": {"cached_tokens": 5}}}}})
+    client.files.content.return_value = SimpleNamespace(
+        content=(line + "\n").encode())
+    _install_fake_sdks(monkeypatch, openai_client=client)
+
+    results, _, _ = batch_check_and_collect(
+        {"openai:gpt-x:responses": "b"}, KEYS)
+
+    assert results["m"] == {
+        "content": "MERGED", "refused": False, "input_tokens": 70,
+        "output_tokens": 30, "cached_tokens": 5,
+        "cache_write_subset_tokens": 0, "truncated": False, "batch": True}

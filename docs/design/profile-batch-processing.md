@@ -341,3 +341,127 @@ interpolated from `.env.staging`.
      the cost of the equivalent synchronous run.
    - `User.profile_batch_pending` returns to `false` when the user's pipeline
      finishes; `profile_batch_attempts` stays 0 on success.
+
+## Independent versions for large builds (#545, 2026-10-22)
+
+Code: `backend/tasks/profile_windows.py`, with small hooks in
+`profile_batch.py` (seeder, poller, `_submit_requests`), `exports.py`
+(prompts, update base, sync hand-off) and `utils/profile_versions.py`.
+
+**When it applies.** A build whose remainder plans into two or more chunks
+on the user's chat model, as the chained path plans it (a huge import, a
+long backlog, a from-scratch rebuild of a large account), and every later
+update of a profile built this way. A build that fits one chunk and a
+chained update that fits one chunk run as before. A version the user saves
+after a set's final takes the chained path again; a window of the set
+collected after that version is not saved (its cost row is), and nothing
+more of the set is sent. `PROFILE_INDEPENDENT_VERSIONS=false` turns the
+path off everywhere; the update base then skips a set's windows and groups
+and is the newest set final unless a version outside any set is newer, so
+a user whose profile is a set gets chained updates on its final (a first
+build stopped before its final is rebuilt on the chained path).
+
+**Windows.** The remainder is cut into windows by the same planner
+(`next_window_budget`), at the version model's input cap: Haiku 5.5's 100k
+price tier for Anthropic users (about 43k units a window at the 2.2 prior),
+GPT-6 Luna's 272k tier for OpenAI users. Each rendered window is counted
+(`LLMProvider.count_tokens`) and rendered again smaller while it is over the
+cap (`fit_window`); a window is never cut and never sent over the cap, and
+the next window starts at the last entry the smaller one holds. One entry
+larger than the cap is given up (a `window_skip` row and a Sentry alert).
+
+**One version per window.** The prompt is the generation prompt with
+`EVENTS_IN_WINDOW_PARAGRAPH` inserted before `## INPUT`
+(`window_generation_template`; inserted in code, so one-chunk builds, the
+prompts page and the update and merge prompts never carry it). Every
+window of the user goes out in one Batch submission, split into several
+batches only above `PROFILE_BATCH_MAX_BYTES` (100 MB), all submitted in the
+same task run.
+
+**Models.** Per provider of the user's chat model, never another
+provider's: `PROFILE_VERSION_MODEL_ANTHROPIC` / `_OPENAI` (Haiku 5.5 / GPT-6
+Luna) and `PROFILE_MERGE_MODEL_ANTHROPIC` / `_OPENAI` (Opus 5.5 / GPT-6.1
+Sol), checked at boot (`validate_profile_models`) and again per build
+(`profile_models_for`). An OpenAI merge is a Batch request on
+`/v1/responses` with the live call's body and
+`PROFILE_MERGE_REASONING_EFFORT_OPENAI` as `reasoning.effort` (default
+`high`); windows stay on `/v1/chat/completions`.
+
+**Rows.** `UserProfile.window_set` (12 hex characters) and `covers_start`.
+`window`: one window's version, its text starting with
+`[Covers A to B (N tokens)]` for its own window; `source_tokens_used` is
+cumulative, so the ladder and the gates work as before. `window_skip`: a
+window given up, with `WINDOW_SKIPPED_TEXT`. `group`: a merge of consecutive
+windows. The set's final is an `integration` row with the set's id, its
+parent the tip window and `merged_profile_id` the user's version it merged.
+Windows and groups are hidden from every reader of the profile
+(`current_profile_query`), from the history and from version numbers: until
+the final is saved, the previous profile stays in use (nothing is shown on
+a first build).
+
+**Checks.** A window's output must have the Surface, Shadow and Light Map
+headings its prompt asks for and exactly one `EVENTS IN THIS WINDOW`
+heading (`profile_output_problem`); a group or final, the three maps. A
+model that declines in plain text fails this.
+
+**Merge.** The integration prompt of #586, unchanged, over independently
+labelled inputs: "Covers the writing from A to B" for a window or group,
+"Covers all the writing from <start> to B" for the set's base (a chained
+profile the set continues) and for a version the user wrote ("Written by
+the user on D"), placed at its date. `PROFILE_MERGE_STRUCTURE=flat`
+(default): one call over every window while it fits the merge model's cap,
+falling back to the groups above it. `grouped`: up to
+`PROFILE_MERGE_GROUP_SIZE` (30) windows go into one final call; above that,
+fixed slices 1–30, 31–60, … are merged into groups and the final merges the
+groups (a slice of one window enters the final as it is). A full slice that
+ends before the first missing or in-flight window is final, so it can go
+out while that window is retried, and is never redone unless one of its
+windows is replaced. Every merge is counted first; a group or
+final over the cap stops the build loudly (`profile_seed_error`, Sentry)
+and is not retried until the merge settings change or a version is saved.
+
+**Updates.** The 80k gate (now on `created_at`, R11) adds one or two windows
+after the tip; the newest group and the final are redone, nothing else.
+
+**Failures.** Content (refused, cut off, or not a profile): the cost row is
+written, but not as a refusal for the user-level backoff; the window is
+submitted again unchanged once, then a `window_skip` row is written and
+Sentry gets an alert with ids and dates only. Provider (no result, an
+expired or failed batch, a stale job): retried up to three submissions,
+then the window waits a day (`refusal_backoff.UNBILLED_STOP_EXPIRY`) and
+`profile_seed_error` says so. The attempt history is the outcomes the
+collector writes back onto each job's items, read for seven days and keyed
+by the window's start, not its set; a submission the provider refuses (no
+batch id) is recorded as a failed job whose items are "missing", so it
+counts as a provider failure. A range whose units are counted but which
+renders nothing (threads holding only a system prompt) counts as covered.
+Expired and cancelled OpenAI batches
+have their finished results collected (#419); profile jobs are stale after
+25 h. Merges keep the integration rule (one retry after an hour, then
+stopped).
+
+**Running it.** `dispatch_advance` claims the per-user guard
+(`profile_generation_task_id`), sets `profile_batch_pending` and pins the
+user to Batch (`profile_force_batch`: never the full-price synchronous
+fallback). `advance_profile_windows` (acks late) derives everything from the
+database: the set (in-flight items, a full-rebuild flag, the set whose tip
+is the update base, or a new set), its missing ranges, the due groups and
+the final; checks the spend cap (a user over their limit is held,
+`profile_cap_held`, and the hourly seeder resumes the set when the month
+turns or the admin raises the limit); logs the estimated cost of the rest;
+renders and submits. The estimate is not a gate (Peter, 2026-10-22: "send
+it and let the cap stop it halfway"): all of a build's windows go out in
+one submission, so the cap can only hold the merges after them, and while
+the user is capped it also blocks their replies until the 1st. It holds no pipeline lock; past
+`PROFILE_WINDOW_RENDER_SECONDS` it submits what it has and dispatches a
+new task. The poller collects window, group and final items (`collect`) and
+dispatches the advance; the hourly seeder routes builds to it
+(`wants_window_build`), opens its gate for a set with work due
+(`set_work_due`) and clears a stuck `profile_batch_pending` that no job and
+no live task carries (R7). The synchronous task hands such builds to the
+same advance (`window_hand_off`), so accounts off the batch path use it too.
+
+**Known limits.** An import older than a set's windows while the set is in
+flight is not seen by that set (as for a chained build's first chunk). A
+revert from the history during a build is merged into the final as a full
+profile.

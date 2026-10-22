@@ -24,7 +24,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
 from backend.extensions import db
 from backend.models import (
-    Node, User, UserProfile, UserTodo, UserArtifact,
+    Node, User, UserTodo, UserArtifact,
 )
 from backend.utils.privacy import AI_ALLOWED
 
@@ -153,8 +153,9 @@ def run_export(n, out_path):
             d.update(extra)
         return d
 
-    profile = (UserProfile.query.filter_by(user_id=user.id)
-               .order_by(UserProfile.created_at.desc()).first())
+    # The current profile, never a large build's window or group (#545).
+    from backend.utils.profile_versions import current_profile_query
+    profile = current_profile_query(user.id).first()
     todo = (UserTodo.query.filter_by(user_id=user.id)
             .order_by(UserTodo.created_at.desc()).first())
     ai_prefs = UserArtifact.latest_for(user.id, "ai_preferences")

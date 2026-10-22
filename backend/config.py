@@ -119,6 +119,61 @@ class Config:
     PROFILE_UPDATES_PAUSED = os.environ.get(
         "PROFILE_UPDATES_PAUSED", "false").lower() in ("1", "true", "yes")
 
+    # --- Independent profile versions for large builds (#545) ---
+    # A build whose remainder plans into two or more chunks on the user's
+    # chat model reads each window on its own (generation prompt plus the
+    # events paragraph), all windows in one Batch submission, and a merge
+    # model integrates the versions (backend/tasks/profile_windows.py,
+    # docs/design/profile-batch-processing.md). Off: every build takes
+    # the chained path, as before.
+    PROFILE_INDEPENDENT_VERSIONS = (
+        os.environ.get("PROFILE_INDEPENDENT_VERSIONS") or "true"
+    ).lower() in ("1", "true", "yes")
+    # The version and merge models, one pair per provider of the user's
+    # chat model. Each must be an active model of THAT provider (checked
+    # at boot, validate_default_model): a user's writing never reaches
+    # another provider's model.
+    PROFILE_VERSION_MODEL_ANTHROPIC = (
+        os.environ.get("PROFILE_VERSION_MODEL_ANTHROPIC") or "claude-haiku-5.5")
+    PROFILE_VERSION_MODEL_OPENAI = (
+        os.environ.get("PROFILE_VERSION_MODEL_OPENAI") or "gpt-6-luna")
+    PROFILE_MERGE_MODEL_ANTHROPIC = (
+        os.environ.get("PROFILE_MERGE_MODEL_ANTHROPIC") or "claude-opus-5.5")
+    PROFILE_MERGE_MODEL_OPENAI = (
+        os.environ.get("PROFILE_MERGE_MODEL_OPENAI") or "gpt-6.1-sol")
+    # Reasoning effort sent with an OpenAI merge request (a Responses
+    # batch request's "reasoning.effort"). One of PROFILE_REASONING_EFFORTS
+    # (checked at boot). "high" (2026-10-22): on identical input Sol kept
+    # 27 of 41 core facts at high effort against 25 at its default.
+    PROFILE_MERGE_REASONING_EFFORT_OPENAI = (
+        os.environ.get("PROFILE_MERGE_REASONING_EFFORT_OPENAI")
+        or "high").lower()
+    # "flat" (default): one merge over every window while it fits the
+    # merge model's input cap, else fixed groups of
+    # PROFILE_MERGE_GROUP_SIZE, then the groups; "grouped": always the
+    # groups above PROFILE_MERGE_GROUP_SIZE windows. Flat on 2026-10-22's
+    # 149-version test: fewer errors, every template sub-heading kept.
+    PROFILE_MERGE_STRUCTURE = (
+        os.environ.get("PROFILE_MERGE_STRUCTURE") or "flat").lower()
+    PROFILE_MERGE_GROUP_SIZE = int(
+        os.environ.get("PROFILE_MERGE_GROUP_SIZE") or "30")
+    # Submissions of one window before it is given up: a refused, cut-off
+    # or invalid output is retried once unchanged, then skipped; a
+    # provider failure (no result) is retried until the third, then the
+    # window waits a day (refusal_backoff.UNBILLED_STOP_EXPIRY).
+    PROFILE_VERSION_CONTENT_ATTEMPTS = int(
+        os.environ.get("PROFILE_VERSION_CONTENT_ATTEMPTS") or "2")
+    PROFILE_VERSION_PROVIDER_ATTEMPTS = int(
+        os.environ.get("PROFILE_VERSION_PROVIDER_ATTEMPTS") or "3")
+    # One submission's request bytes before it is split into another
+    # batch (OpenAI's input file limit is 200 MB, Anthropic's 256 MB).
+    PROFILE_BATCH_MAX_BYTES = int(
+        os.environ.get("PROFILE_BATCH_MAX_BYTES") or "100000000")
+    # Rendering time one advance task spends before it submits what it
+    # has and hands the rest to a new task (under the 3300 s soft limit).
+    PROFILE_WINDOW_RENDER_SECONDS = int(
+        os.environ.get("PROFILE_WINDOW_RENDER_SECONDS") or "2400")
+
     # --- Agentic semantic search (#155/#208/#329) ---
     # Manual Cmd+K semantic search is always on. Own-archive semantic_search
     # as a within-turn LLM tool (and the read_full / {quote:ID} pull it
