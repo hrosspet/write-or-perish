@@ -2146,6 +2146,267 @@ Kinds (one per entry and per table row):
 - **Applies to:** #453
 - **Rule:** candidate: an issue that lists options without a chosen one is "your call", not "ready to build"
 
+### 2026-10-20 · #414's real-model check: yes, when local Loore is free
+
+- **Kind:** testing
+- **Situation:** before #414 (profile edits survive updates and rebuilds) could go into a train, offered a check with real models on local Loore: a test account with a copy of a long profile as the user's edited version, one update and one full rebuild, about $1–3 on the local key. Local Loore is down for a minute while it switches branches.
+- **Prediction:** yes (85 %).
+- **Peter:** "good, but let's leave it for later when I'm not actively using local Loore. Mark it in my todos" · later the same day: "now is the right time to run it, I'm not using local Loore"
+- **Score:** hit. The check passed ($0.87) and found one wiring gap, fixed in #414 before its merge (a row in "Decided by the builder").
+- **Source:** Claude Code session 2026-10-20 (Opus 5.5)
+- **Applies to:** #414
+
+### 2026-10-20 · Integration designs: tested before choosing
+
+- **Kind:** product scope
+- **Situation:** after Peter ruled out a weighted view of the profile, the builder proposed a balanced core: chunk profiles merged only in equal pairs, the visible profile built from the core by prod's update step over the remaining writing, then weekly updates. Its diagrams listed a merge of unequal pieces as a design Peter had ruled out ("no way to weigh vibes").
+- **Prediction:** accepts the balanced core (45 %); wants a different scheme (40 %); wants to test first (15 %).
+- **Peter:** "I'd like to compare the following approaches for the Luna P_i partial profiles: - A with Luna 6 for integration, and Opus 5.5 for integration - C with Opus 5.5 for integration, and there should be an instruction for weighing the profiles and coverage data in the different versions - a variant of C, that would continue merging pairs of nearest possible weight"
+- **Score:** miss: he chose to test four merges of the same chunk profiles first, among them the merge of unequal pieces with an instruction to weigh coverage, and not the core with an update tail.
+- **Why it missed:** "no way to weigh vibes" was read as ruling out every merge of unequal pieces, so the design that kept them apart was expected to win. With the design open and each run under $5, he tests before he chooses.
+- **Source:** voice review in local Loore 2026-10-20 (Opus 5.5)
+- **Applies to:** #545
+
+### 2026-10-20 · #414 left out of train #548 after its check passed
+
+- **Kind:** process
+- **Situation:** train #548 was built before #414's real-model check had run, so its summary node listed #414 as not in the train. The check passed during the evening, and #414 was reviewed and green, but the plan was still to merge it after the train, in a deploy of its own; it overlapped the train in 9 files.
+- **Decision:** kept #414 out of the train after its check passed.
+- **Peter:** "btw reading 201560, the #414 is still not included there. Is that intentional?"
+- **Score:** miss. #414 was added to the train as its last commit and merged with it.
+- **Why it missed:** what went into the train was decided once, when it was built, and not looked at again when the reason for leaving #414 out had gone. Two deploys of overlapping changes cost more than one.
+- **Source:** Claude Code session 2026-10-20 (Opus 5.5)
+- **Applies to:** #414, #548
+
+### 2026-10-21 · Cc-opus also with the coverage line
+
+- **Kind:** testing
+- **Situation:** Peter asked for one more merge design, Cc-opus: the balanced pieces merged in time order. The builder ran it without C-opus's line that tells the merge to weigh each piece by how much writing it covers, so that the order would be the only difference from Cn-opus. Peter asked why. The answer gave the reason and its catch (the last merge sets 24 chunks against 2) and offered a variant with the line, about $0.30.
+- **Prediction:** yes, run it (60 %).
+- **Peter:** "why's that?" · "Could you now run Cc-opus, but with the coverage-weighing line?" · "only the fixed profiles"
+- **Score:** hit. Ran as Ccw-opus, on the round without the export's preamble only.
+- **Source:** Claude Code session 2026-10-21 (Opus 5.5)
+- **Applies to:** #545
+
+### 2026-10-21 · What runs on the chained versions
+
+- **Kind:** testing
+- **Situation:** a new run built the Luna chunk profiles as a chain, the way prod does, instead of independently. Asked which merges to run on it.
+- **Prediction:** prod's integration with Opus, A-opus (60 %); read only the last version (25 %); a C design (15 %).
+- **Peter:** "I'd like to see A-luna, A-opus, and one of C- designs. Which one do you think is the best based on my comments on the resulting profile versions?"
+- **Score:** partial: A-opus was in his list, with A-luna and one C design beside it. The builder recommended Cc-opus as the C design and ran it; that recommendation is not scored.
+- **Source:** Claude Code session 2026-10-21 (Opus 5.5)
+- **Applies to:** #545
+
+### 2026-10-21 · #545 merges with A-opus
+
+- **Kind:** product scope
+- **Situation:** after the chained run, Peter's own reading put Cc-opus slightly ahead; the blind evaluator put A-opus (prod's flat integration, by Opus 5.5) first and Cc-opus close behind, with Cc-opus making 3 errors and costing about 7 times as much. Asked which design #545 should use.
+- **Prediction:** A-opus (40 %); Cc-opus with labels saying that each chained version covers everything before it (35 %); more runs before deciding (25 %).
+- **Peter:** "I agree A-opus seems best overall. It was close second for me in both evaluations I ran, and when I look at the side by side comparison, plus the price, it seems best."
+- **Score:** hit
+- **Source:** Claude Code session 2026-10-21 (Opus 5.5)
+- **Applies to:** #545, #589
+
+### 2026-10-21 · "Its A-opus did as well as the chained one"
+
+- **Kind:** process
+- **Situation:** a reply on large imports said that round 2's A-opus, merged from independent versions, did as well as the A-opus merged from chained versions. Each had come first in its own evaluation, scored on a different list of facts; nobody had compared the two. Whether versions can be made in parallel depended on the claim.
+- **Decision:** stated the two as equal without a direct comparison.
+- **Peter:** "did it? I think I'll need to re-read the two A-opus profiles"
+- **Score:** miss. The next reply said that the claim was stronger than the evidence and offered the direct comparison.
+- **Why it missed:** two first places in separate evaluations were read as a tie between them.
+- **Source:** voice review in local Loore 2026-10-21 (Opus 5.5)
+- **Applies to:** #545
+
+### 2026-10-21 · The new design's cost set against the chain on Opus
+
+- **Kind:** process
+- **Situation:** the same reply put the cost of merging independent versions in groups for the tester's import, about $2–4, "next to the $72 of the chain": a chain whose versions Opus writes. The experiments had just shown versions by GPT-6 Luna to be viable.
+- **Decision:** compared the new design with the chain on Opus.
+- **Peter:** "why are you counting $72 for the chain? That's for Opus, isn't it? How much is it for Luna that our experiments have just shown to be viable."
+- **Score:** miss. With Luna versions the chain costs about $2 for that import, and the merges become the main cost.
+- **Why it missed:** prod's current setup was taken as the baseline instead of the cheapest option the same day's results allowed, which made the new design look better than it was.
+- **Source:** voice review in local Loore 2026-10-21 (Opus 5.5)
+- **Applies to:** #545
+
+### 2026-10-21 · The two A-opus finals compared directly
+
+- **Kind:** testing
+- **Situation:** after that correction, offered a direct comparison of the two A-opus finals by the evaluator, on one list of facts: about 15 minutes, no model cost.
+- **Prediction:** yes (65 %).
+- **Peter:** "pls compare them"
+- **Score:** hit. The chain did better on recent events and the independent versions on biography and structure; most of the gap came from the prompts the two sets were written with (#544).
+- **Source:** Claude Code session 2026-10-21 (Opus 5.5); asked in local Loore
+- **Applies to:** #545, #544
+
+### 2026-10-21 · The prompt fixes go in before the rerun
+
+- **Kind:** product scope
+- **Situation:** two kinds of fix to the profile prompts were open. #544: update steps had lost the Shadow and Light map instructions since February; on 2026-10-20 the builder proposed fixing it before any model comparison, since a small model may not infer the structure the way the frontier models had. And two merge-prompt fixes: labels that say what each version covers, and the newest value wins for a fact that changes. Asked whether to make them now.
+- **Prediction:** fix #544 before the comparisons (80 %); the merge fixes now (80 %).
+- **Peter:** "yes, I was about to write that we should fix the bugs and then rerun both" · "to fairly compare the chained vs. independent profiles, we'd need to fix the update bug" · "oh and then there are the merge fixes - could we fix these bugs and then re-run both chained and independent luna + A-opus merge experiments?"
+- **Score:** hit + hit. Built as #586, together with #549.
+- **Source:** Claude Code session 2026-10-21 (Opus 5.5); the #544 question was first put on 2026-10-20
+- **Applies to:** #586, #544, #549
+
+### 2026-10-21 · A fair comparison at 26 versions first
+
+- **Kind:** testing
+- **Situation:** the direct comparison showed that the two sets of versions had been written with different prompts. Proposed folding a fair comparison into the scale test: about 150 versions made both ways on one fixed prompt, plus a line asking each version for its window's dated events, and both merge structures, about $10.
+- **Prediction:** yes, fold it into the scale test (70 %).
+- **Peter:** "we should fix the bugs and then rerun both" · "could we fix these bugs and then re-run both chained and independent luna + A-opus merge experiments?"
+- **Score:** partial: a comparison on one prompt, yes; but at the 26 versions already tested, with the fixes alone, no events line, and before the scale test.
+- **Why it missed:** three changes were bundled into one run. Peter kept them apart, so that the rerun shows what the fixes alone change.
+- **Source:** Claude Code session 2026-10-21 (Opus 5.5)
+- **Applies to:** #545, #586
+
+### 2026-10-21 · The rerun started before #586's review was done
+
+- **Kind:** process
+- **Situation:** the plan for #586 (the prompt fixes) was a second agent's review and, in parallel, a rerun of the 26 chained and 26 independent Luna versions with the PR's code, each merged by A-opus (about $1.50). The plan was stated in a reply, not asked; once the run had started, a status line said so.
+- **Decision:** started the rerun while the review was still running.
+- **Peter:** "shouldn't this wait for the review?"
+- **Score:** partial: the review changed only the merge prompt, so the 52 versions stayed valid and were kept; both merges were run again on the reviewed prompt (about $0.75), and the one finished before the review was set aside.
+- **Why it missed:** time was saved at the risk of testing prompts that would not ship. A run that tests a PR's prompts depends on that PR's review.
+- **Source:** Claude Code session 2026-10-21 (Opus 5.5)
+- **Applies to:** #586
+
+### 2026-10-21 · The rerun started before #586's review was done: ask or decide
+
+- **Kind:** escalation
+- **Situation:** a rerun that tests #586's prompts started while the review of #586 was still running.
+- **Decision:** decided without asking Peter
+- **Peter:** "shouldn't this wait for the review?"
+- **Score:** miss. The reply before had stated the order ("In parallel, an agent uses the PR's code to rerun…") instead of putting it to him as a choice.
+- **Source:** Claude Code session 2026-10-21 (Opus 5.5)
+- **Applies to:** #586
+
+### 2026-10-21 · The rerun's results wait for the review
+
+- **Kind:** process
+- **Situation:** offered two ways on: let the run finish but hold its evaluation until the review is done, and run it again if the review changes prompt text (about $1.50); or stop the run now and start it after the review.
+- **Prediction:** the hold (60 %); stop now (40 %).
+- **Peter:** "ok, go ahead as above"
+- **Score:** hit
+- **Source:** Claude Code session 2026-10-21 (Opus 5.5)
+- **Applies to:** #586
+
+### 2026-10-21 · The two earlier A-opus finals scored again with the new ones
+
+- **Kind:** testing
+- **Situation:** after Peter corrected five facts in the scoring list, the evaluation of the two new A-opus finals (fixed prompts, chained and independent) also scored the two earlier A-opus finals on the corrected list: one list for all four, and the two independent runs show how much a result moves from run to run. Added without asking, at no model cost, and said so before it ran.
+- **Decision:** four finals in the evaluation instead of two.
+- **Peter:** "what 4? I thought we'd get 2" · "great, could you pls give me the table summary as before? Just for the 4? In loore"
+- **Score:** hit. Unlike the noise-baseline run of 2026-10-20, the addition cost nothing and was said before it ran.
+- **Source:** Claude Code session 2026-10-21 (Opus 5.5)
+- **Applies to:** #545
+
+### 2026-10-21 · One more test: independent versions that list each window's dated events
+
+- **Kind:** testing
+- **Situation:** after the rerun, the independent versions still missed recent events that the chain carried. Asked whether to run one more test before the scale test: independent Luna versions whose prompt asks for a dated list of each window's events, merged by A-opus and scored on the same list of facts, about $0.70. The section's length, about 300 tokens, was the builder's choice.
+- **Prediction:** yes (75 %).
+- **Peter:** "yes pls"
+- **Score:** hit
+- **Source:** Claude Code session 2026-10-21 (Opus 5.5)
+- **Applies to:** #545, #589
+
+### 2026-10-21 · Version and merge models in pairs, one pair per provider
+
+- **Kind:** provider
+- **Situation:** the pair tested so far, GPT-6 Luna versions with an Opus merge, can't serve any real user, because a user's writing goes only to their own provider's models. Pointed this out and named the pairs to test instead: Haiku 5.5 versions with an Opus merge for Anthropic users, and Luna versions merged by GPT-6.1 Sol or GPT-6 Astra for OpenAI users.
+- **Prediction:** Peter agrees and wants a pair per provider (70 %).
+- **Peter:** "I'd like to see these tests: - A-opus merge over Haiku 5.5 chunks - Sol 6.1 used instead of Opus in the A-opus merge over Luna profiles"
+- **Score:** hit: his next tests were the two pairs.
+- **Source:** Claude Code session 2026-10-21 (Opus 5.5)
+- **Applies to:** #589
+- **Rule:** A user's model is theirs
+
+### 2026-10-21 · The scale test: one merge against two levels
+
+- **Kind:** testing
+- **Situation:** for imports of about 14M units, proposed a scale test: about 150 Luna versions of Peter's history, merged once by Opus and by a two-level merge (groups of at most 30, then one merge of the groups). Also asked whether to make the versions both chained and independent, about $5 more.
+- **Prediction:** run the scale test (75 %); with both chained and independent versions (55 %).
+- **Peter:** "the 150 luna profiles on smaller chunks, merged using the A design done by Sol 6.1 if the experiment above finds it's ~similar or better than Opus 5.5" · "the question is whether to run them chained, or independent. The latency benefit is obvious, so if the test that is currently running brings independent closer in accuracy to chained, that would be preferred. If it doesn't improve much on the test you're running, go with chained pls" · "no, I meant the experiment you proposed earlier - 1 merge, vs. the two level merge"
+- **Score:** hit + miss: the scale test ran as proposed; chained against independent was settled by the events test, not tested at scale.
+- **Source:** Claude Code session 2026-10-21 (Opus 5.5)
+- **Applies to:** #545, #589
+
+### 2026-10-21 · When independent versions count as close enough to the chain
+
+- **Kind:** testing
+- **Situation:** Peter's rule for the three tests: independent versions if the events test brings them close to the chain in accuracy, otherwise chained. The builder set the threshold before the result and flagged it as its own: the events final has at least 3 of the 4 recent events, at least 29 of the 41 core facts (within 3 of the fixed chain's 32, the measured run-to-run variation), and at most 2 wrong core facts.
+- **Decision:** those three conditions.
+- **Peter:** "> it has no more than 2 wrong core facts. - I'd go with 1"
+- **Score:** partial: two of the three conditions stand; at most 1 wrong core fact, not 2.
+- **Why it missed:** the margin for wrong facts was set the same way as the margin for facts present, from the run-to-run variation. Peter allows fewer errors than omissions.
+- **Source:** Claude Code session 2026-10-21 (Opus 5.5)
+- **Applies to:** #545, #589
+
+### 2026-10-21 · When Sol counts as about as good as Opus
+
+- **Kind:** testing
+- **Situation:** Peter asked for GPT-6.1 Sol in place of Opus in the A merge, and for Sol in the scale test if it is about as good. The builder set the bar before the result and flagged it as its own: on the same Luna versions, Sol has at most 3 fewer core facts than Opus, at most one more wrong core fact, all 18 sub-headings, and Shadow and Light maps that the evaluator finds specific rather than generic.
+- **Decision:** that bar.
+- **Peter:** "I like your thresholds"
+- **Score:** hit. Sol failed it at its default and at high effort, so the scale test used Opus.
+- **Source:** Claude Code session 2026-10-21 (Opus 5.5)
+- **Applies to:** #589
+
+### 2026-10-21 · "Merged using the A design" read as A only
+
+- **Kind:** testing
+- **Situation:** Peter's third test was "the 150 luna profiles on smaller chunks, merged using the A design". The builder read this as the single merge only, dropped the two-level merge it had proposed for the scale test, and said so in its list of choices.
+- **Decision:** the single A merge only.
+- **Peter:** "no, I meant the experiment you proposed earlier - 1 merge, vs. the two level merge"
+- **Score:** miss
+- **Why it missed:** his wording was read literally. "The A design" chose the A prompt over the C designs for the merge; the test he meant was the builder's own scale test, which compares one merge with two levels.
+- **Source:** Claude Code session 2026-10-21 (Opus 5.5)
+- **Applies to:** #545, #589
+
+### 2026-10-22 · The tester's import waits for the new build path
+
+- **Kind:** release/ops
+- **Situation:** the tester with the 14M-unit ChatGPT export was on hold. Recommended keeping them on hold until the merge in two levels ships.
+- **Prediction:** yes (80 %).
+- **Peter:** "if the results come out with a cleanly best strategy, pls implement this strategy so that I can review it tomorrow and let the user finally import their 14M+ units of data and generate a profile"
+- **Score:** hit: the import waits for the implementation and his review of it (#589).
+- **Source:** Claude Code session 2026-10-22 (Opus 5.5)
+- **Applies to:** #589
+
+### 2026-10-22 · The $10 is on top of the planned tests
+
+- **Kind:** cost
+- **Situation:** Peter: "feel free to run some more experiments if the results of the currently planned ones suggest so. The budget for tonight is $10". The reply counted the $10 as the night's total, the planned tests included (about $7–9 of it).
+- **Decision:** that reading.
+- **Peter:** "no, I meant additional $10 for new experiments if they'll make sense"
+- **Score:** miss. The extra experiments used $2.02 of the $10.
+- **Why it missed:** the budget was read as a cap on all of the night's spending, though the sentence before it was about further experiments. The planned tests were approved already and needed no budget.
+- **Source:** Claude Code session 2026-10-22 (Opus 5.5)
+- **Applies to:** #589
+
+### 2026-10-22 · An audit and a dry run before the tester's import
+
+- **Kind:** testing
+- **Situation:** Peter asked what else could be done towards large imports. Proposed three things that didn't depend on the test results: (1) a read-only audit of what else grows with a 14M-unit import (other jobs that read the whole export, memory, encryption and embedding calls per item, the spend cap, a long chain across a deploy); (2) a local dry run of the profile pipeline on a synthetic user of that size with a stand-in model; (3) a setting per provider for the model that writes the versions, inside the implementation PR. At most three Opus agents at a time.
+- **Prediction:** yes to both the audit and the dry run (80 %); the audit only (15 %).
+- **Peter:** "agreed with the 3 tasks and Opus agents"
+- **Score:** hit. The dry run found two windows that would have gone over Haiku's price step and a flat merge over the merge model's input cap; #589 handles both.
+- **Source:** Claude Code session 2026-10-22 (Opus 5.5)
+- **Applies to:** #589
+
+### 2026-10-22 · The borderline fact in the events test
+
+- **Kind:** testing
+- **Situation:** the events test's final passed Peter's rule for independent versions (at most 1 wrong core fact) only because the evaluator counted one borderline wording as present; counted as wrong, the rule would have picked the chain. Asked Peter whether that wording was right enough. The first message named the borderline call but not the fact.
+- **Prediction:** wrong, it misstates his position (55 %); the fact itself has changed since (25 %).
+- **Peter:** "I still don't understand what's the borderline fact" · "good enough, especially looking at other statistics, that are quite a lot better than alternatives"
+- **Score:** miss. Independent versions with the events line were chosen; a second sample also passed (32 core facts, 0 wrong).
+- **Why it missed:** the one fact was judged on its own, by the strict reading. Peter judged it against the rest of the table, where the events final did clearly better than the alternatives.
+- **Source:** Claude Code session 2026-10-22 (Opus 5.5)
+- **Applies to:** #545, #589
+
 ## Decided by the builder
 
 Choices that agents flagged in PRs and that the builder decided because a rule above already covers them (Peter, 2026-10-02: decide what the log supports, raise only real judgement calls). Each is also recorded on its PR, or in the session where Peter asked. The Decided column holds only the builder's part; a rule or decision of Peter's goes in the Rule column. Questions raised to Peter instead are not listed; his answers become entries. Model is the model that wrote the PR (its Co-Authored-By line). Result is "accepted by merge (PR #N, date)" once the PR has merged and Peter didn't correct the choice, "pending" until it merges, and "corrected → entry <title>" when he overrules it; the entry is then scored as a miss.
@@ -2385,6 +2646,11 @@ Choices that agents flagged in PRs and that the builder decided because a rule a
 | 2026-10-20 | #414 | cost | The recent-context summary after a profile edit | Copied to the new version as stored (no model call), not regenerated; whether to regenerate it is left to Peter | Latency counts as quality | Opus 5.5 | accepted by merge (PR #548, 2026-10-21) |
 | 2026-10-20 | #414 | data safety | A profile edit that changes only whitespace (blank lines, trailing spaces, a trailing newline) | Saved in place, no new version | Every added heuristic is named | Opus 5.5 | accepted by merge (PR #548, 2026-10-21) |
 | 2026-10-20 | #414 | product scope | The date a rebuild merges the user's version at | Its cutoff, or the time it was written for a hand-written profile with no cutoff; the merge follows the first step whose cutoff reaches that date | A rebuild merges the user's version at its date (Peter, 2026-10-20); every added heuristic is named | Opus 5.5 | accepted by merge (PR #548, 2026-10-21) |
+| 2026-10-20 | #414 | product scope | The version a user's edit replaced, when a later integration runs | Not an integration input: the integration chain starts at the user's version (found by the real-model check) | An edit is a new version, with the version it changed as its predecessor (Peter, 2026-10-20) | Opus 5.5 | accepted by merge (PR #548, 2026-10-21) |
+| 2026-10-21 | #589 | testing | The window size of the Haiku 5.5 versions in the Haiku test | Prod's chunk planner size for Haiku (46.6k units here), under Haiku's 100k-token price step: 53 versions against the 26 Luna windows, so the test mixes the change of model with the number of versions; said so before the run | Test what would ship; #259 (no request across a price tier) | Opus 5.5 | pending |
+| 2026-10-22 | #589 | testing | When Haiku 5.5 is good enough to write Anthropic users' versions | Set before the evaluation: the Sol bar applied to Haiku. Against the Luna events final with an Opus merge (33 core facts, 1 wrong): at least 30 core facts, at most 2 wrong, specific maps, at least 15 of 18 sub-headings; refusals noted as a risk. Haiku scored 31, 0 wrong, 18 of 18, and is the default in #589 | "potentially Haiku if accuracy allows" (Peter, 2026-10-22); the Sol thresholds he accepted (2026-10-21); every added heuristic is named | Opus 5.5 | pending |
+| 2026-10-22 | #589 | product scope | The merge structure of a set of independent versions | `flat`: one merge while all versions fit under the merge model's input cap, groups of 30 above it; switched from `grouped` after the 149-version test. Flat: 32 of 41 core facts, 1 wrong, 18 of 18 sub-headings. Grouped: 34 (4 of them borderline), 0 wrong core facts, 3 other errors, 13 of 18 sub-headings, $0.50 more. Grouped met the bar set before the test (within 3 core facts and 1 wrong core fact of flat); flat was chosen on the other errors, the sub-headings and the cost | Fixed groups with only the newest merged again (Peter, 2026-10-20), now above the cap only; every added heuristic is named | Opus 5.5 | pending |
+| 2026-10-22 | #589 | cost | The merge model for OpenAI users | GPT-6.1 Sol at high reasoning effort, although no OpenAI merge reached the bar Opus sets: on the same versions Sol at its default effort kept 25 of 41 core facts, at high effort 27, GPT-6 Astra 26 and Opus 33, none of them with errors; Sol costs a fifth of Astra. A prompt asking for about 650 tokens a section was no clear gain (30 and 26 in two runs, against 26 for a repeat without it). Under Needs Peter in #589 | A user's model is theirs (an OpenAI user's merge stays with OpenAI); Quality first, for now | Opus 5.5 | pending |
 
 ## Backfilled decisions
 
