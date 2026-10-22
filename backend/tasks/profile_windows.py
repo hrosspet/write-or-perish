@@ -885,9 +885,11 @@ def _render_windows(user, state, models, sub, history, deadline):
                   for _s, _e, units in state.due)
     total = len(state.windows) + len(state.windows_in_flight) + planned
     n = 0
-    for start, end, _units in state.due:
+    for rng in list(state.due):
+        start, end, _units = rng
         cur = start
         cumulative, stats = _cumulative_before(state, start)
+        rendered = False
         while True:
             remaining = (_exports.count_remaining_units(
                 user.id, cur, created_before=_after(end))
@@ -906,7 +908,19 @@ def _render_windows(user, state, models, sub, history, deadline):
             fitted = fit_window(user, models.version, keys, cap, cur,
                                 budget, end, _prompt, rho)
             if fitted is None:
+                if not rendered:
+                    # Units are counted in the range but nothing in it
+                    # renders (for example threads holding only a system
+                    # prompt, or tombstones): it is covered, so the set
+                    # can complete and its final go out.
+                    logger.info("User %s: profile set %s: the range %s..%s "
+                                "counts %s units but renders nothing; "
+                                "counted as covered", user.id, state.set_id,
+                                _iso(start) or "start", _iso(end) or "end",
+                                remaining)
+                    state.due.remove(rng)
                 break
+            rendered = True
             chunk, prompt, tokens, fits = fitted
             cutoff = chunk["latest_node_created_at"]
             units = chunk["unit_count"]

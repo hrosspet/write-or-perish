@@ -61,6 +61,7 @@ class Corpus:
         self.rows = [(start + i * step, units) for i in range(n)]
         self.renders = []
         self.hot = set()   # row timestamps that render 10x their units
+        self.silent = set()   # rows that are counted but render nothing
 
     def add(self, n, units=1000, start=None, step=timedelta(hours=1)):
         start = start or (self.rows[-1][0] + step)
@@ -79,6 +80,8 @@ class Corpus:
         budget = (max_tokens or 10**12) - 100
         picked, total = [], 0
         for t, u in self._sel(created_after, created_before):
+            if t in self.silent:
+                continue
             if picked and total + u > budget:
                 break
             picked.append((t, u))
@@ -545,6 +548,26 @@ def test_the_render_budget_submits_part_and_dispatches_the_rest(app, world):
     items = _items("window")
     assert len(items) == 2 and items[1]["start"] == items[0]["cutoff"]
     assert {i["set"] for i in items} == {items[0]["set"]}
+
+
+def test_a_range_that_renders_nothing_counts_as_covered(world, monkeypatch):
+    """Units counted after the tip that render nothing (a thread holding
+    only a system prompt): the set completes and its final goes out,
+    without a Sentry alert."""
+    u = _user()
+    rows = _set_of(u, 5)
+    _corpus_for(world, rows)
+    quiet = rows[-1].source_data_cutoff + timedelta(hours=1)
+    world.corpus.rows.append((quiet, 1000))
+    world.corpus.silent = {quiet}
+    sent = []
+    monkeypatch.setattr(pw, "_report", lambda title, **tags: sent.append(
+        title))
+    assert pw.set_state(u, "set1", None).due
+    _advance(u)
+    assert not _items("window")
+    assert len(_items("final")) == 1
+    assert sent == []
 
 
 # ── 5. _submit_requests ───────────────────────────────────────────────────
