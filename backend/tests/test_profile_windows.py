@@ -781,11 +781,32 @@ def test_a_stale_job_counts_its_windows_as_missing(world, monkeypatch):
     job = ProfileBatchJob.query.first()
     job.submitted_at = datetime.utcnow() - timedelta(hours=26)
     db.session.commit()
+    # Still not ended after BATCH_STALE_AFTER: the poller reads the batch
+    # before the age check (#419), so only a batch that has not ended by
+    # then is stale.
+    monkeypatch.setattr(world.provider, "collect",
+                        lambda batch_ids, keys: ({}, dict(batch_ids), {}))
     _poll()
     db.session.refresh(job)
     assert job.status == "failed"
     assert {i["outcome"] for i in job.items} == {"missing"}
     assert pw.advance_profile_windows.apply_async.call_count == 2
+
+
+def test_a_set_job_that_ended_after_a_day_is_collected(world):
+    """A batch the provider ended at 24 h still returns its finished
+    (billed) results (#419): a set's job older than a day whose batch has
+    ended is collected, not failed as stale."""
+    world.corpus = _windows_corpus(2)
+    u = _user(profile_needs_full_regen=True)
+    _advance(u)
+    job = ProfileBatchJob.query.first()
+    job.submitted_at = datetime.utcnow() - timedelta(hours=26)
+    db.session.commit()
+    _poll()
+    db.session.refresh(job)
+    assert job.status == "collected"
+    assert {i["outcome"] for i in job.items} == {"saved"}
 
 
 def test_refused_submissions_stop_rendering_after_the_third(world):
