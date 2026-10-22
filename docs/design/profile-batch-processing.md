@@ -353,8 +353,13 @@ on the user's chat model, as the chained path plans it (a huge import, a
 long backlog, a from-scratch rebuild of a large account), and every later
 update of a profile built this way. A build that fits one chunk and a
 chained update that fits one chunk run as before. A version the user saves
-after a set's final takes the chained path again. `PROFILE_INDEPENDENT_VERSIONS=false`
-turns the path off everywhere; the update base then skips a set's rows.
+after a set's final takes the chained path again; a window of the set
+collected after that version is not saved (its cost row is), and nothing
+more of the set is sent. `PROFILE_INDEPENDENT_VERSIONS=false` turns the
+path off everywhere; the update base then skips a set's windows and groups
+and is the newest set final unless a version outside any set is newer, so
+a user whose profile is a set gets chained updates on its final (a first
+build stopped before its final is rebuilt on the chained path).
 
 **Windows.** The remainder is cut into windows by the same planner
 (`next_window_budget`), at the version model's input cap: Haiku 5.5's 100k
@@ -379,8 +384,8 @@ Luna) and `PROFILE_MERGE_MODEL_ANTHROPIC` / `_OPENAI` (Opus 5.5 / GPT-6.1
 Sol), checked at boot (`validate_profile_models`) and again per build
 (`profile_models_for`). An OpenAI merge is a Batch request on
 `/v1/responses` with the live call's body and
-`PROFILE_MERGE_REASONING_EFFORT_OPENAI` as `reasoning.effort` (empty: the
-model's default); windows stay on `/v1/chat/completions`.
+`PROFILE_MERGE_REASONING_EFFORT_OPENAI` as `reasoning.effort` (default
+`high`); windows stay on `/v1/chat/completions`.
 
 **Rows.** `UserProfile.window_set` (12 hex characters) and `covers_start`.
 `window`: one window's version, its text starting with
@@ -403,14 +408,15 @@ model that declines in plain text fails this.
 labelled inputs: "Covers the writing from A to B" for a window or group,
 "Covers all the writing from <start> to B" for the set's base (a chained
 profile the set continues) and for a version the user wrote ("Written by
-the user on D"), placed at its date. `PROFILE_MERGE_STRUCTURE=grouped`
-(default): up to `PROFILE_MERGE_GROUP_SIZE` (30) windows go into one final
-call; above that, fixed slices 1–30, 31–60, … are merged into groups and the
-final merges the groups (a slice of one window enters the final as it is).
-A full slice is final once its windows are in, so it can go out while a
-later window is retried, and is never redone unless one of its windows is
-replaced. `flat`: one call over every window, falling back to groups when
-it exceeds the merge model's cap. Every merge is counted first; a group or
+the user on D"), placed at its date. `PROFILE_MERGE_STRUCTURE=flat`
+(default): one call over every window while it fits the merge model's cap,
+falling back to the groups above it. `grouped`: up to
+`PROFILE_MERGE_GROUP_SIZE` (30) windows go into one final call; above that,
+fixed slices 1–30, 31–60, … are merged into groups and the final merges the
+groups (a slice of one window enters the final as it is). A full slice that
+ends before the first missing or in-flight window is final, so it can go
+out while that window is retried, and is never redone unless one of its
+windows is replaced. Every merge is counted first; a group or
 final over the cap stops the build loudly (`profile_seed_error`, Sentry)
 and is not retried until the merge settings change or a version is saved.
 
@@ -425,7 +431,11 @@ expired or failed batch, a stale job): retried up to three submissions,
 then the window waits a day (`refusal_backoff.UNBILLED_STOP_EXPIRY`) and
 `profile_seed_error` says so. The attempt history is the outcomes the
 collector writes back onto each job's items, read for seven days and keyed
-by the window's start, not its set. Expired and cancelled OpenAI batches
+by the window's start, not its set; a submission the provider refuses (no
+batch id) is recorded as a failed job whose items are "missing", so it
+counts as a provider failure. A range whose units are counted but which
+renders nothing (threads holding only a system prompt) counts as covered.
+Expired and cancelled OpenAI batches
 have their finished results collected (#419); profile jobs are stale after
 25 h. Merges keep the integration rule (one retry after an hour, then
 stopped).
