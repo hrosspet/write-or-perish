@@ -7,10 +7,11 @@ import React from 'react';
  * @param {Object} props.draft - The interrupted draft object
  * @param {Function} props.onContinue - Called when user clicks "Continue recording"
  * @param {Function} props.onDiscard - Called when user clicks "Discard"
+ * @param {string} [props.continueLabel] - Label of the first button (default "Continue recording")
  * @param {string} [props.note] - Optional line between the title and the buttons (what continuing leads to)
  * @param {React.ReactNode} props.children - Optional content to render above the banner (e.g. animation)
  */
-export default function RecoveryBanner({ draft, onContinue, onDiscard, note, children }) {
+export default function RecoveryBanner({ draft, onContinue, onDiscard, note, continueLabel, children }) {
   const labelText = draft.label || 'Voice';
 
   return (
@@ -46,6 +47,7 @@ export default function RecoveryBanner({ draft, onContinue, onDiscard, note, chi
 
       <div style={{ display: 'flex', gap: '16px' }}>
         <button
+          type="button"
           onClick={onContinue}
           style={{
             padding: '10px 24px',
@@ -59,9 +61,10 @@ export default function RecoveryBanner({ draft, onContinue, onDiscard, note, chi
             transition: 'all 0.2s',
           }}
         >
-          Continue recording
+          {continueLabel || 'Continue recording'}
         </button>
         <button
+          type="button"
           onClick={onDiscard}
           style={{
             padding: '10px 24px',

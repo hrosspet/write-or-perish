@@ -51,21 +51,26 @@ from backend.utils.api_keys import (
     PayloadLicence,
 )
 from backend.utils.cost import llm_cost_log_fields
+from backend.utils.error_privacy import UserMessageError
 from backend.utils.cache_diagnostics import (
     ConversationCacheDiagnostics, system_prefix_hash,
 )
 from backend.utils.llm_batch import BatchItemFailed, BatchItemCancelled
 from backend.utils.ca_feed import (
-    CA_CHAT_TURN_NOTE, CA_READ_AGAIN_TURN, CA_TWEETS_CHAT_STUB,
+    CA_CHAT_TURN_NOTE, CA_READ_AGAIN_TURN, CA_READ_AGAIN_TURN_KEPT,
+    CA_TWEETS_CHAT_STUB,
     FEED_AI_USAGE, READ_FURTHER_MARKER,
     FeedReplyError, count_dropped_picks, read_reply_ids, record_feed_render,
     ca_turn as _ca_turn,
     ArchiveNotReady, refs_from_render, render_read_reply_for_model,
-    request_snapshot_refresh, seen_tweet_ids,
+    request_snapshot_refresh, seen_tweet_ids, list_to_keep, read_numbers,
+    read_since_note,
 )
 from backend.utils.tool_meta import (
-    get_tool_meta_entry, update_tool_meta, parse_github_issue,
+    get_tool_meta_entry, update_tool_meta,
 )
+from backend.utils.issue_proposals import file_issues_for_tool
+from backend.utils.tool_meta import strip_share_fences
 from backend.utils.client_platform import CLIENT_MARKER
 from backend.utils.text_edits import apply_text_edits
 from backend.utils.privacy import AI_ALLOWED
@@ -235,11 +240,18 @@ def _own_pin(row, user_id):
 # of these tools, the retrieved content is injected back into the message
 # stream and the model is re-called so it answers WITH the content in the same
 # turn — instead of the cross-turn injection done by _scan_proposal_statuses.
-# read_artifact pulls a UserArtifact by kind; read_todo pulls the user's todo
-# list (its own model, no longer shown inline — #158 Slice 3); semantic_search
-# pulls relevant snippets from the user's own archive by meaning (#155).
+# read_artifact pulls a UserArtifact by kind, and the user's todo list (its
+# own model, no longer shown inline — #158 Slice 3) as kind 'todo' (#218);
+# semantic_search pulls relevant snippets from the user's own archive by
+# meaning (#155). read_todo was the todo's own tool before #218: no longer
+# offered, but older threads' prompts still name it, so a call to it is
+# served as read_artifact on 'todo', and the results it left in
+# tool_calls_meta still resolve.
 RETRIEVAL_TOOLS = {"read_artifact", "read_todo", "semantic_search",
                    "read_full"}
+# The read_artifact kind that reads the UserTodo row instead of a
+# UserArtifact (#218).
+TODO_KIND = "todo"
 # Max number of interim tool round-trips before the model must answer.
 # The within-turn loop continues after EVERY tool call (retrieval AND action
 # tools like update_artifact) — models follow the standard tool-use contract
@@ -266,6 +278,8 @@ class EmptyTruncatedReplyError(RuntimeError):
 
     def __init__(self):
         super().__init__(self.USER_MESSAGE)
+
+    user_text = USER_MESSAGE
 
 
 # Retry schedule for the loop's CONTINUATION calls: sleep lengths between
@@ -304,6 +318,17 @@ def _provider_failure(exc):
         if isinstance(cls, type) and issubclass(cls, BaseException):
             classes.append(cls)
     return isinstance(exc, tuple(classes))
+
+
+def reply_error_text(exc):
+    """What the reply's owner reads for a failed reply (llm_task_error):
+    the exception's own text only where it is written for the user
+    (error_privacy.user_written_text), otherwise a fixed message. The
+    exception is logged and sent to Sentry, never stored."""
+    from backend.utils.error_privacy import (
+        REPLY_FAILED_TEXT, user_written_text,
+    )
+    return user_written_text(exc) or REPLY_FAILED_TEXT
 
 
 def _account_failure(exc):
@@ -501,9 +526,13 @@ VOICE_TOOLS = [
     {
         "name": "apply_github_issue",
         "description": (
-            "Create the previously proposed GitHub issue. Call this "
+            "Create the previously proposed GitHub issue(s). Call this "
             "ONLY when the user explicitly confirms they want to create "
             "the issue (e.g. 'yes create it', 'go ahead', 'file that'). "
+            "When the reply proposed several issues, this creates only "
+            "the last one unless you say which: pass issue_numbers for "
+            "some (e.g. 'all except the marketing one': list the "
+            "others), or all=true for every one not created yet. "
             "Do not call proactively. Do not call if the issue was "
             "already created (check the context notes for apply status). "
             "Always produce a text response — the user needs to hear "
@@ -511,7 +540,24 @@ VOICE_TOOLS = [
         ),
         "input_schema": {
             "type": "object",
-            "properties": {},
+            "properties": {
+                "all": {
+                    "type": "boolean",
+                    "description": (
+                        "Optional. true creates every proposed issue "
+                        "that is not created yet."
+                    ),
+                },
+                "issue_numbers": {
+                    "type": "array",
+                    "items": {"type": "integer"},
+                    "description": (
+                        "Optional. The 1-based positions of the proposed "
+                        "issues to create, in the order the reply lists "
+                        "them."
+                    ),
+                },
+            },
             "required": [],
         },
     },
@@ -610,12 +656,13 @@ VOICE_TOOLS = [
         "name": "read_artifact",
         "description": (
             "Request the full content of one of the user's artifacts "
-            "listed in the artifacts index. The content is injected back "
-            "into your context within the same turn and you answer with "
-            "it. Use this only for artifacts in the index — anything "
-            "already shown inline in your context is always present and "
-            "should not be read. Tell the user you're pulling it up. Always "
-            "produce a text response alongside the call."
+            "listed in the artifacts index, the todo list (as 'todo') "
+            "included. The content is injected back into your context "
+            "within the same turn and you answer with it. Use this only "
+            "for artifacts in the index — anything already shown inline "
+            "in your context is always present and should not be read. "
+            "Tell the user you're pulling it up. Always produce a text "
+            "response alongside the call."
         ),
         "input_schema": {
             "type": "object",
@@ -626,25 +673,6 @@ VOICE_TOOLS = [
                 },
             },
             "required": ["kind"],
-        },
-    },
-    {
-        "name": "read_todo",
-        "description": (
-            "Pull the user's current todo list into context. The todo "
-            "list is listed in the artifacts index (as 'todo') rather than "
-            "shown inline, so read it on demand whenever the conversation "
-            "turns to their tasks, plans, or priorities — and before "
-            "proposing todo changes, so your proposal builds on what's "
-            "actually there. Like read_artifact, the content is injected "
-            "back into your context within the same turn and you answer "
-            "with it, so tell the user you're pulling it up. Always produce "
-            "a text response alongside the call."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {},
-            "required": [],
         },
     },
     {
@@ -815,6 +843,8 @@ ALWAYS_INLINE_KINDS = UserArtifact.INLINE_KINDS
 # silently diverges from the real UserTodo. Each value is a message pointing
 # the model at the correct path. (ai_preferences is NOT here — Slice 5 folded
 # it into the UserArtifact model, so it's a normal writable artifact now.)
+# The keys are UserArtifact.RESERVED_KINDS, which the artifact routes refuse
+# too (#218).
 RESERVED_ARTIFACT_KINDS = {
     "todo": ("Todo changes go through proposals — put them under the "
              "### Completed / ### New Tasks / ### Priority Order headings in "
@@ -839,10 +869,11 @@ def _todo_index_line(user_id, pinned_node=None):
 
     Todo is its own model (not a UserArtifact) and since #158 Slice 3 is no
     longer shown inline — it appears in the index and is pulled on demand via
-    read_todo, which pins the version it read to the fetching node. System
-    nodes therefore no longer pin a todo at session start; only legacy nodes
-    (or custom prompts embedding {user_todo}) carry one, and it's honored
-    when present, falling back to latest otherwise.
+    read_artifact on kind 'todo' (#218), which pins the version it read to
+    the fetching node. System nodes therefore no longer pin a todo at
+    session start; only legacy nodes (or custom prompts embedding
+    {user_todo}) carry one, and it's honored when present, falling back to
+    latest otherwise.
     A todo the user opted out of AI access is omitted entirely; an
     absent or empty todo is still listed (as ``(empty)``) so the model knows
     the surface exists. No open/priority counts (noise).
@@ -860,8 +891,7 @@ def _todo_index_line(user_id, pinned_node=None):
         suffix = f"(~{approximate_token_count(content)} tokens)"
     else:
         suffix = "(empty)"
-    return (f"- todo — the user's running task list; pull it with "
-            f"read_todo {suffix}")
+    return f"- {TODO_KIND} — the user's running task list {suffix}"
 
 
 def get_user_artifacts_context(user_id, pinned_node=None, usage=None,
@@ -872,7 +902,7 @@ def get_user_artifacts_context(user_id, pinned_node=None, usage=None,
     per-session snapshot recorded on *pinned_node* (#191 semantics), falling
     back to latest for legacy nodes. ai_usage is re-checked on resolved rows.
     The todo list (its own model) is listed in the index too, pulled via
-    read_todo (#158 Slice 3).
+    read_artifact like the rest (#158 Slice 3, #218).
 
     Each row that reaches the text reports to *usage* (a ContextUsage,
     #326) under its placeholder: memory, scratchpad and intentions by
@@ -1133,9 +1163,7 @@ def _strip_share_fences(text):
     """Remove fenced :::share blocks — their bodies may legitimately
     contain ### headings, which must never trigger the other proposal
     detectors (todo/issue/feedback)."""
-    return re.sub(
-        r'^:::share(?:[ \t]+\w+)?[ \t]*\r?\n.*?(?:^:::[ \t]*$\n?|\Z)',
-        '', text, flags=re.MULTILINE | re.DOTALL | re.IGNORECASE)
+    return strip_share_fences(text)
 
 
 def _detect_todo_proposal(text):
@@ -1203,9 +1231,18 @@ def _note_artifact_content(licence, artifact):
     licence.note_usage(artifact.ai_usage, f"the {artifact.kind} artifact")
 
 
+def _reads_todo(tr):
+    """Whether a tool result read the user's todo list: read_artifact on
+    kind 'todo' (#218), or a read_todo result (the tool before #218, still
+    in older threads' tool_calls_meta)."""
+    name = tr.get("name")
+    return name == "read_todo" or (
+        name == "read_artifact" and tr.get("kind") == TODO_KIND)
+
+
 def _retrieval_injection_text(tr, user_id, with_labels=False, licence=None):
     """Build the context-injection string for a successful retrieval tool
-    result (read_artifact / read_todo / semantic_search), re-resolving the
+    result (read_artifact / semantic_search / read_full), re-resolving the
     content fresh from the source row — content is never stored in
     tool_calls_meta. Re-checks ai_usage so a mid-session opt-out is honored.
     Returns None if nothing is (still) available.
@@ -1229,6 +1266,14 @@ def _retrieval_injection_text(tr, user_id, with_labels=False, licence=None):
     falls back to id-based quoting, since the label map died with its turn.
     """
     name = tr.get("name")
+    if _reads_todo(tr):
+        todo = UserTodo.query.get(tr.get("todo_id"))
+        if (todo is None or todo.user_id != user_id
+                or todo.ai_usage not in AI_ALLOWED):
+            return None
+        if licence is not None:
+            licence.note_usage(todo.ai_usage, "the todo list")
+        return f"[Your current todo list:\n{todo.get_content()}]"
     if name == "read_artifact":
         artifact = UserArtifact.query.get(tr.get("artifact_id"))
         if (artifact is None or artifact.user_id != user_id
@@ -1238,14 +1283,6 @@ def _retrieval_injection_text(tr, user_id, with_labels=False, licence=None):
             _note_artifact_content(licence, artifact)
         return (f"[Contents of artifact '{tr.get('kind', '?')}' you "
                 f"requested:\n{artifact.get_content()}]")
-    if name == "read_todo":
-        todo = UserTodo.query.get(tr.get("todo_id"))
-        if (todo is None or todo.user_id != user_id
-                or todo.ai_usage not in AI_ALLOWED):
-            return None
-        if licence is not None:
-            licence.note_usage(todo.ai_usage, "the todo list")
-        return f"[Your current todo list:\n{todo.get_content()}]"
     if name == "read_full":
         # Re-resolve via the quote machinery (permission + ai_usage checks
         # built in; depth 1 — nested {quote:ID} stay as placeholders), as
@@ -1372,10 +1409,10 @@ def _retrieval_pin(tr):
     """(artifact_type, artifact_id) to pin on the interim node for a
     successful retrieval result, so the export references the exact version
     read. Returns (None, None) for unrecognized/unpinnable results."""
+    if _reads_todo(tr):
+        return ("todo", tr.get("todo_id"))
     if tr.get("name") == "read_artifact":
         return ("user_artifact", tr.get("artifact_id"))
-    if tr.get("name") == "read_todo":
-        return ("todo", tr.get("todo_id"))
     return (None, None)
 
 
@@ -1501,6 +1538,8 @@ def _action_result_text(tr):
             return ("[apply_todo_changes: merge started in the background; "
                     "it will finish shortly.]")
         if name == "apply_github_issue":
+            if tr.get("summary"):
+                return f"[apply_github_issue: {tr['summary']}]"
             return (f"[apply_github_issue: issue "
                     f"#{tr.get('issue_number')} created — "
                     f"{tr.get('issue_url')}]")
@@ -1980,54 +2019,17 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
                         result["status"] = "error"
                         result["error"] = "No pending GitHub issue found"
                     else:
-                        issue_data = parse_github_issue(
-                            origin_node.get_content() or ""
+                        user = User.query.get(user_id)
+                        username = (
+                            user.username if user else str(user_id)
                         )
-                        if not issue_data.get("title"):
-                            result["status"] = "error"
-                            result["error"] = (
-                                "Could not parse issue from proposal"
-                            )
-                        else:
-                            from backend.utils.github import (
-                                create_github_issue,
-                            )
-                            user = User.query.get(user_id)
-                            username = (
-                                user.username if user else str(user_id)
-                            )
-                            category = issue_data.get(
-                                "category", "enhancement"
-                            )
-                            if category not in (
-                                "bug", "feature", "enhancement"
-                            ):
-                                category = "enhancement"
-                            gh_result = create_github_issue(
-                                title=issue_data["title"],
-                                description=issue_data.get(
-                                    "description", ""
-                                ),
-                                category=category,
-                                username=username,
-                                platform=client,
-                            )
-                            # Clean up draft
-                            db.session.delete(draft)
-                            db.session.flush()
-                            # Update origin node meta
-                            update_tool_meta(
-                                origin_node,
-                                "propose_github_issue",
-                                {
-                                    "apply_status": "completed",
-                                    "issue_url": gh_result["url"],
-                                    "issue_number": gh_result["number"],
-                                },
-                            )
-                            result["status"] = "success"
-                            result["issue_url"] = gh_result["url"]
-                            result["issue_number"] = gh_result["number"]
+                        # Optional 1-based positions pick some of the
+                        # reply's issues, `all` takes every one not
+                        # created yet; with neither, only the last one.
+                        result.update(file_issues_for_tool(
+                            origin_node, draft, username, client,
+                            numbers=inp.get("issue_numbers"),
+                            all_unfiled=bool(inp.get("all"))))
 
             elif name == "update_artifact":
                 kind = (inp.get("kind") or "").strip().lower()
@@ -2114,41 +2116,51 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
                         result["previous_artifact_id"] = (
                             previous.id if previous else None)
 
-            elif name == "read_artifact":
-                # Any readable kind, including 'external_digest' — the
-                # saved-references topic map is NOT gated by the "External
-                # references" toggle, unlike semantic_search's reference
-                # matches and read_full on an external label. It is the
-                # user's own data, so nothing leaks; the guidance only
-                # points users with the toggle on at the digest. Known
-                # asymmetry (#330 review), left as is.
-                kind = (inp.get("kind") or "").strip().lower()
-                artifact = UserArtifact.latest_for(user_id, kind)
-                if artifact is None or artifact.ai_usage not in AI_ALLOWED:
-                    result["status"] = "error"
-                    result["error"] = f"No readable artifact of kind {kind!r}"
-                else:
-                    # Content is NOT stored in tool meta (plaintext column)
-                    # — the retrieval loop / _scan_proposal_statuses
-                    # re-resolves it from the encrypted row and injects it.
-                    result["status"] = "success"
-                    result["artifact_id"] = artifact.id
+            elif name in ("read_artifact", "read_todo"):
+                # read_todo: the todo's own tool before #218, served for
+                # the older threads whose prompts still name it.
+                kind = (TODO_KIND if name == "read_todo"
+                        else (inp.get("kind") or "").strip().lower())
+                if kind == TODO_KIND:
+                    # Todo is its own model (not a UserArtifact), pulled on
+                    # demand since it's no longer shown inline (#158 Slice
+                    # 3), through read_artifact since #218. The kind is kept
+                    # on a failure too: the Actions line names the todo list.
                     result["kind"] = kind
-
-            elif name == "read_todo":
-                # Todo is its own model (not a UserArtifact), pulled on
-                # demand since it's no longer shown inline (#158 Slice 3).
-                todo = UserTodo.query.filter_by(user_id=user_id).order_by(
-                    UserTodo.created_at.desc()
-                ).first()
-                if todo is None or todo.ai_usage not in AI_ALLOWED:
-                    result["status"] = "error"
-                    result["error"] = "The todo list is empty or unavailable."
+                    todo = UserTodo.query.filter_by(
+                        user_id=user_id).order_by(
+                        UserTodo.created_at.desc()).first()
+                    if todo is None or todo.ai_usage not in AI_ALLOWED:
+                        result["status"] = "error"
+                        result["error"] = (
+                            "The todo list is empty or unavailable.")
+                    else:
+                        # Content re-resolved from the encrypted row at
+                        # injection time; only the row id sits in tool meta.
+                        result["status"] = "success"
+                        result["todo_id"] = todo.id
                 else:
-                    # Content re-resolved from the encrypted row at injection
-                    # time; only the row id sits in tool meta.
-                    result["status"] = "success"
-                    result["todo_id"] = todo.id
+                    # Any other readable kind, including 'external_digest'
+                    # — the saved-references topic map is NOT gated by the
+                    # "External references" toggle, unlike semantic_search's
+                    # reference matches and read_full on an external label.
+                    # It is the user's own data, so nothing leaks; the
+                    # guidance only points users with the toggle on at the
+                    # digest. Known asymmetry (#330 review), left as is.
+                    artifact = UserArtifact.latest_for(user_id, kind)
+                    if (artifact is None
+                            or artifact.ai_usage not in AI_ALLOWED):
+                        result["status"] = "error"
+                        result["error"] = (
+                            f"No readable artifact of kind {kind!r}")
+                    else:
+                        # Content is NOT stored in tool meta (plaintext
+                        # column) — the retrieval loop /
+                        # _scan_proposal_statuses re-resolves it from the
+                        # encrypted row and injects it.
+                        result["status"] = "success"
+                        result["artifact_id"] = artifact.id
+                        result["kind"] = kind
 
             elif name == "semantic_search":
                 # Search the user's own archive by meaning (#155). Embeds the
@@ -2358,10 +2370,15 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
                 result["error"] = f"Unknown tool: {name}"
 
         except Exception as e:
-            logger.error(f"Tool execution error for {name}: {e}",
-                         exc_info=True)
+            from backend.utils.error_privacy import (
+                TOOL_FAILED_TEXT, describe_exception, user_written_text,
+            )
+            logger.error("Tool execution error for %s: %s", name,
+                         describe_exception(e), exc_info=True)
             result["status"] = "error"
-            result["error"] = str(e)
+            # Stored in tool_calls_meta (shown under "Actions taken") and
+            # sent back to the model: the same fixed text for both.
+            result["error"] = user_written_text(e) or TOOL_FAILED_TEXT
 
         tool_results.append(result)
 
@@ -2598,6 +2615,10 @@ READ_ON_HOLD_TEXT = ("Glean did not run: your writing was deleted. You "
 # What a read withdrawn at the provider says in place of its reply, the
 # same for everyone who can see it.
 CA_BATCH_CANCELLED_TEXT = "This read was cancelled."
+# The reply's error when the poll cap ended the wait; the owner's alone.
+CA_BATCH_GAVE_UP_TEXT = (
+    "Loore stopped waiting for the model's answer. The problem has been "
+    "reported. Please try again.")
 # Why it was withdrawn: the reply's error, which goes to its owner only
 # (llm-status, the llm-stream done event). A spend-limit message is the
 # owner's alone.
@@ -2848,23 +2869,33 @@ def _claim_failed_feed_cost(node, resp):
     return True
 
 
-def _collect_feed_reply(llm_node, resp, ca_refs):
+def _collect_feed_reply(llm_node, resp, ca_refs, read_since=()):
     """Turn the feed's JSON answer into the reply: each pick becomes a
     saved reference + FeedPick row (rank, relevance, recommend and the
     quote-tweet text, for judging the model's claims against the user's
     verdicts later), and the node text is the whole rendered feed: the
     verdict, then each quote-tweet over its {quote_ext:ID} marker. The
-    same path serves the batch collect and the admin's live rerun."""
+    same path serves the batch collect and the admin's live rerun.
+
+    *read_since* are the numbers of a kept list (#511) whose tweet the
+    reader has read since it was made: the closing note told the model
+    they are not candidates, and a pick of one is dropped here and
+    counted with the other dropped picks, so a tweet the reader has read
+    is never picked again, as before the list was kept."""
     from backend.utils.ca_feed import (
-        parse_feed_reply, render_feed_reply, save_feed_picks)
+        parse_feed_reply, pick_numbers, render_feed_reply, save_feed_picks)
     # A refusal is the provider's verdict on this request (#454): the text
     # is an apology, not JSON. Say so, naming the model, before parsing.
     # Terminal like a parse failure (the stored batch result is immutable);
     # the same request would likely be refused again, and a user's provider
     # is never switched.
     if resp.get("refused"):
-        raise FeedReplyError(
-            f"the model refused the Read ({llm_node.llm_model or 'unknown model'})")
+        model_name = llm_node.llm_model or "unknown model"
+        err = FeedReplyError(f"the model refused the Glean ({model_name})")
+        err.user_text = (
+            f"The model ({model_name}) refused this Glean. Choose another "
+            "model.")
+        raise err
     # A reply cut off at the output limit is not the promised object even
     # where its prefix happens to parse. Like a parse failure it is a
     # verdict on this reply (FeedReplyError), not a condition a later
@@ -2886,6 +2917,16 @@ def _collect_feed_reply(llm_node, resp, ca_refs):
         # (refs_from_render), so a Read of only such picks is not
         # reported as one where the model picked nothing. (A batch from
         # before renders were pinned has no row: nothing to count on.)
+        if read_since:
+            read_since = set(read_since)
+            picked_read = sorted(set(pick_numbers(resp["content"]))
+                                 & read_since)
+            if picked_read:
+                logger.warning(
+                    "Node %s: dropping picks of tweets the reader has "
+                    "read: %s", llm_node.id, picked_read)
+            ca_refs = {n: ref for n, ref in ca_refs.items()
+                       if n not in read_since}
         from backend.models import FeedRender
         render = FeedRender.query.filter_by(node_id=llm_node.id).first()
         if render is not None:
@@ -3005,9 +3046,12 @@ class LLMCompletionTask(Task):
                     node.llm_task_status = 'failed'
                     # Store error message if not already set
                     if not node.llm_task_error:
-                        node.llm_task_error = str(exc)
+                        node.llm_task_error = reply_error_text(exc)
                     db.session.commit()
-                    logger.error(f"LLM completion failed for node {llm_node_id}: {exc}")
+                    from backend.utils.error_privacy import describe_exception
+                    logger.error(
+                        "LLM completion failed for node %s: %s",
+                        llm_node_id, describe_exception(exc))
 
 
 def _own_system_values(text, system_node, user_id, usage):
@@ -3504,6 +3548,9 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         [n.id for n in dropped])
             ca_tweets_content = None
             ca_refs = None
+            # The numbers of a kept list (#511) whose tweet the reader has
+            # read since: named in the closing note, never a pick.
+            ca_read_numbers = []
             if needs_ca:
                 from backend.tasks.imports import snapshot_dir_for
                 from backend.utils import community_archive as ca
@@ -3514,7 +3561,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 # and only while they glean (#435).
                 from backend.utils.glean import read_turn_allowed
                 if not read_turn_allowed(User.query.get(user_id), ca_node):
-                    raise ValueError(ca_tweets_denied_message())
+                    raise UserMessageError(ca_tweets_denied_message())
                 # Only admins may change the window or scope (Peter,
                 # 2026-10-14): every {ca_tweets} on the prompt must be
                 # the default unless both its owner and the user the
@@ -3537,7 +3584,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         ca_snapshot_dir,
                         ca_owner.username if ca_owner else "")
                     if ca_follows is None:
-                        raise ValueError(
+                        raise UserMessageError(
                             "{ca_tweets} scope=follows needs a saved list "
                             "of the accounts you follow, and there is none "
                             "for your account yet.")
@@ -3548,7 +3595,8 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     ca_refs = CA_REFS_PINNED
                     ca_tweets_content = CA_TWEETS_STUB
                 else:
-                    ca_seen = ()
+                    ca_seen = set()
+                    ca_keep = frozenset()
                     if batch_resp is None:
                         # A read about to be sent reads the export in the
                         # cache and never waits for a newer one to
@@ -3558,6 +3606,19 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         # the reader has already seen.
                         request_snapshot_refresh(ca_snapshot_dir, log=logger)
                         ca_seen = seen_tweet_ids(user_id)
+                        if ca_live or not _read_batch_requested(llm_node):
+                            # A live read again on the export of the read
+                            # before it keeps that read's list as it was,
+                            # so the request's prefix is read from the
+                            # prompt cache (#511); what the reader has
+                            # read since goes in the closing note. Not
+                            # for the admin's batch experiments: a batch
+                            # comes back long after any cache entry has
+                            # gone, and its collect knows no note.
+                            ca_keep = list_to_keep(
+                                node_chain, ca_node, ca_reply_ids, user_id,
+                                ca.snapshot_export_id(ca_snapshot_dir),
+                                ca_days, ca_scope)
                     # else: a batch submitted before renders were pinned;
                     # re-render the day as it was rendered then (no seen
                     # filter) so its numbers still match.
@@ -3568,7 +3629,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                                                ca_owner.prefilled_handle]
                             if ca_owner else (),
                             include_usernames=ca_follows,
-                            exclude_tweet_ids=ca_seen)
+                            exclude_tweet_ids=ca_seen - ca_keep)
                     except ca.CommunityArchiveError as e:
                         # No export cached yet (a fresh machine or data
                         # volume): queue the first fetch, and give the
@@ -3585,6 +3646,12 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         "Rendered %s for node %s: %s (~%d tokens)",
                         ca_placeholder_match, ca_node.id, ca_stats,
                         approximate_token_count(ca_tweets_content))
+                    if ca_keep:
+                        ca_read_numbers = read_numbers(ca_refs, ca_seen)
+                        logger.info(
+                            "Node %s: kept the earlier read's list (%d "
+                            "tweets); %d of them read since",
+                            llm_node_id, len(ca_keep), len(ca_read_numbers))
                     if batch_resp is None:
                         # One run renders into a reply: a run another one
                         # has replaced since it started (the admin's
@@ -4005,7 +4072,8 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 finalize writes for a collected reply (_log_api_cost). The
                 task's error handler commits it with the failure."""
                 try:
-                    return _collect_feed_reply(llm_node, resp, ca_refs)
+                    return _collect_feed_reply(llm_node, resp, ca_refs,
+                                               read_since=ca_read_numbers)
                 except FeedReplyError:
                     if (not resp.get("cut_off")
                             and _claim_failed_feed_cost(llm_node, resp)):
@@ -4444,9 +4512,11 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 # loop). Nothing to inject here.
 
                 # The user's read marks / verdicts on references quoted
-                # earlier in the thread (see _reference_marks_note), and
-                # the read thread's turn note: on a read-again the
-                # request itself, on a chat turn the reminder that the
+                # earlier in the thread (see _reference_marks_note), the
+                # tweets of a kept list read since it was made (#511:
+                # here, after the cached prefix, instead of out of the
+                # list), and the read thread's turn note: on a read-again
+                # the request itself, on a chat turn the reminder that the
                 # read prompt above still asks for a verdict and picks
                 # while this turn answers the user's message. A read turn
                 # is never agentic (its agentic prompts were stripped
@@ -4458,15 +4528,21 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     quoted_ext_ids, user_id, labels=pick_labels,
                     intro_verdicts=_intro_verdicts(rendered_read_ids,
                                                    user_id))
+                ca_read_since = read_since_note(ca_read_numbers)
                 ca_note = None
                 if ca_turn == "read_again":
-                    ca_note = CA_READ_AGAIN_TURN
+                    # After the note naming tweets of a kept list read
+                    # since, the request says they are in it (#511).
+                    ca_note = (CA_READ_AGAIN_TURN_KEPT if ca_read_since
+                               else CA_READ_AGAIN_TURN)
                 elif ca_turn == "chat":
                     ca_note = CA_CHAT_TURN_NOTE
                 plain_notes = []
                 notes = agentic_notes if is_agentic else plain_notes
                 if reference_marks:
                     notes.append(reference_marks)
+                if ca_read_since:
+                    notes.append(ca_read_since)
                 if ca_note:
                     notes.append(ca_note)
 
@@ -4559,7 +4635,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 # support fails here rather than silently running the
                 # unstructured call.
                 if needs_ca and provider not in CA_BATCH_PROVIDERS:
-                    raise ValueError(
+                    raise UserMessageError(
                         f"{{ca_tweets}} is not supported on {model_id} "
                         f"({provider}); pick an Anthropic or OpenAI "
                         "model.")
@@ -4818,7 +4894,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
 
             # ── Within-turn retrieval loop gating (#158) ───────────────────
             # Both agentic modes (text + voice) run the bounded within-turn
-            # retrieval loop so read_artifact/read_todo resolve same-turn. Any
+            # retrieval loop so read_artifact etc. resolve same-turn. Any
             # other (non-agentic) caller — source_mode None — stays single-shot.
             if batch_resp is not None:
                 # The collecting run: the poll above found the batch ended
@@ -5168,7 +5244,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             raise
         except Exception as e:
             error = e
-            error_message = str(e)
+            error_message = reply_error_text(e)
             if batch_entry is not None:
                 # The batch outlives this run. While it is submitted only
                 # the provider's verdict on the item (BatchItemFailed), a
@@ -5181,9 +5257,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 # still submitted.
                 batch_id = batch_entry.get("batch_id")
                 if isinstance(e, MaxRetriesExceededError):
-                    error_message = (
-                        f"Batch {batch_id} had not ended after "
-                        f"{CA_BATCH_MAX_POLLS} polls")
+                    error_message = CA_BATCH_GAVE_UP_TEXT
                 elif not isinstance(e, (BatchItemFailed, FeedReplyError,
                                         EmptyTruncatedReplyError)):
                     logger.warning(
@@ -5205,13 +5279,13 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                             # only __context__), Sentry groups this
                             # failure under the account failure's issue.
                             cap.__cause__ = e
-                            error_message = str(e)
+                            error_message = reply_error_text(e)
                         else:
-                            error_message = (
-                                f"Gave up on batch {batch_id} after "
-                                f"{CA_BATCH_MAX_POLLS} polls; last error: "
-                                f"{e}")
-            logger.error(f"LLM completion error for node {llm_node_id}: {error_message}", exc_info=True)
+                            error_message = CA_BATCH_GAVE_UP_TEXT
+            from backend.utils.error_privacy import describe_exception
+            logger.error(
+                "LLM completion error for node %s: %s", llm_node_id,
+                describe_exception(e), exc_info=True)
             # Fail the node in flight: mid-loop that's the continuation
             # placeholder. Failing llm_node here instead used to clobber the
             # completed interim step's status and strand the continuation at

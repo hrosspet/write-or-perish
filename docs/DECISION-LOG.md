@@ -2407,6 +2407,70 @@ Kinds (one per entry and per table row):
 - **Source:** Claude Code session 2026-10-22 (Opus 5.5)
 - **Applies to:** #545, #589
 
+### 2026-10-21 · #216 is not built in the overnight run
+
+- **Kind:** product scope
+- **Situation:** Peter asked for every issue marked "ready to build" on the board to be built overnight, each as its own PR, while he slept. #216 (the profile job reconciles the memory artifact: absorb facts, then prune memory) was marked ready on 2026-10-02. On 2026-10-16, in #518, Peter put memory consolidation off ("leave the other options discussed in the issue for later"); #216 is the same change.
+- **Decision:** left #216 unbuilt; the later decision wins over the earlier ready mark. Said so on the board and in the train's summary node.
+- **Peter:** no reaction yet.
+- **Score:** not scored: no reaction yet
+- **Source:** Claude Code session 2026-10-21 (Opus 5.5)
+- **Applies to:** #216, #518
+- **Rule:** candidate: a later decision of Peter's on the same change overrides an earlier "ready to build" mark
+
+### 2026-10-21 · #216 is not built: ask or decide
+
+- **Kind:** escalation
+- **Situation:** as above; Peter was asleep and had said he wouldn't be available for decisions.
+- **Decision:** decided without asking Peter
+- **Peter:** no reaction yet.
+- **Score:** not scored: no reaction yet
+- **Source:** Claude Code session 2026-10-21 (Opus 5.5)
+- **Applies to:** #216
+
+### 2026-10-21 · Reviews for the resumed builders: ask or decide
+
+- **Kind:** escalation
+- **Situation:** Peter came back mid-run and asked that no agent be resumed until he said so. Later he said "Could you pls resume the already started agents? But don't start anything more that." Two of the resumed agents were builders whose PRs (#579, #580) would each need a separate review agent, and adding PRs to the train needs the train agent.
+- **Decision:** asked Peter instead of deciding, before starting the reviews and waking the train agent. Prediction: he says yes (75 %).
+- **Peter:** "ok, finish the whole process for these, but don't start any new work pls"
+- **Score:** hit
+- **Source:** Claude Code session 2026-10-21 (Opus 5.5)
+- **Applies to:** #579, #580
+- **Rule:** candidate: "don't start anything more" means no new issues; the review and train steps of work already started are part of finishing it
+
+### 2026-10-21 · The last 50 minutes before the usage reset: ask or decide
+
+- **Kind:** escalation
+- **Situation:** earlier in the afternoon Peter had said "slowly finish what you've started and pls don't start anything new". With train #581 green and nothing running, he asked "Anything else to run? Another reset in 50 mins and 50% left".
+- **Decision:** decided without asking Peter: started three agents (a second train branch for #582, #584 and #585 on top of #581's head, with no PR; a migration dry run of #581 on a throwaway database; a builder for a pre-existing bug found by #584's review, with no issue filed, which became #587) and asked only where the new PRs land and whether to test on staging. Prediction: he agrees with starting them (80 %).
+- **Peter:** "One train. Yes, file it" (no objection to the started work).
+- **Score:** hit
+- **Source:** Claude Code session 2026-10-21 (Opus 5.5)
+- **Applies to:** #581, #587
+- **Rule:** candidate: "anything else to run?" is an invitation to start reversible work without asking first; ask only where its results land
+
+### 2026-10-21 · #582, #584, #585 and #587: onto train #581 or a second train
+
+- **Kind:** process
+- **Situation:** merge train #581 (28 PRs) was green and not merged yet when four more PRs became ready. In the train's summary node I had recommended a second small train after #581 merges (prediction: yes, 75 %). Before Peter answered, the three were tested together on top of #581's head, and I changed the recommendation in the terminal: add them to #581 while it is unmerged, so prod deploys once (prediction: onto #581, 55 %).
+- **Decision:** recommended adding them to #581.
+- **Peter:** "One train."
+- **Score:** hit (against the recommendation in force when he answered; the earlier one in the summary node would have missed)
+- **Source:** Claude Code session 2026-10-21 (Opus 5.5)
+- **Applies to:** #581, #582, #584, #585, #587
+- **Rule:** candidate: while a train is unmerged, finished PRs join it, so prod deploys once
+
+### 2026-10-21 · File the refusal of an Agentic Reply entry with privacy Circles (#588)
+
+- **Kind:** product scope
+- **Situation:** the review of #587 found a pre-existing bug: with Agentic Reply on and privacy set to Circles ("coming soon", still offered in both forms), the agentic route refuses the entry; the text stays in the form. Separate from #587's change.
+- **Decision:** left out of #587; recommended filing it as an issue. Prediction: yes (70 %).
+- **Peter:** "Yes, file it"
+- **Score:** hit
+- **Source:** Claude Code session 2026-10-21 (Opus 5.5)
+- **Applies to:** #588, #587
+
 ## Decided by the builder
 
 Choices that agents flagged in PRs and that the builder decided because a rule above already covers them (Peter, 2026-10-02: decide what the log supports, raise only real judgement calls). Each is also recorded on its PR, or in the session where Peter asked. The Decided column holds only the builder's part; a rule or decision of Peter's goes in the Rule column. Questions raised to Peter instead are not listed; his answers become entries. Model is the model that wrote the PR (its Co-Authored-By line). Result is "accepted by merge (PR #N, date)" once the PR has merged and Peter didn't correct the choice, "pending" until it merges, and "corrected → entry <title>" when he overrules it; the entry is then scored as a miss.
@@ -2651,6 +2715,45 @@ Choices that agents flagged in PRs and that the builder decided because a rule a
 | 2026-10-22 | #589 | testing | When Haiku 5.5 is good enough to write Anthropic users' versions | Set before the evaluation: the Sol bar applied to Haiku. Against the Luna events final with an Opus merge (33 core facts, 1 wrong): at least 30 core facts, at most 2 wrong, specific maps, at least 15 of 18 sub-headings; refusals noted as a risk. Haiku scored 31, 0 wrong, 18 of 18, and is the default in #589 | "potentially Haiku if accuracy allows" (Peter, 2026-10-22); the Sol thresholds he accepted (2026-10-21); every added heuristic is named | Opus 5.5 | pending |
 | 2026-10-22 | #589 | product scope | The merge structure of a set of independent versions | `flat`: one merge while all versions fit under the merge model's input cap, groups of 30 above it; switched from `grouped` after the 149-version test. Flat: 32 of 41 core facts, 1 wrong, 18 of 18 sub-headings. Grouped: 34 (4 of them borderline), 0 wrong core facts, 3 other errors, 13 of 18 sub-headings, $0.50 more. Grouped met the bar set before the test (within 3 core facts and 1 wrong core fact of flat); flat was chosen on the other errors, the sub-headings and the cost | Fixed groups with only the newest merged again (Peter, 2026-10-20), now above the cap only; every added heuristic is named | Opus 5.5 | pending |
 | 2026-10-22 | #589 | cost | The merge model for OpenAI users | GPT-6.1 Sol at high reasoning effort, although no OpenAI merge reached the bar Opus sets: on the same versions Sol at its default effort kept 25 of 41 core facts, at high effort 27, GPT-6 Astra 26 and Opus 33, none of them with errors; Sol costs a fifth of Astra. A prompt asking for about 650 tokens a section was no clear gain (30 and 26 in two runs, against 26 for a repeat without it). Under Needs Peter in #589 | A user's model is theirs (an OpenAI user's merge stays with OpenAI); Quality first, for now | Opus 5.5 | pending |
+| 2026-10-21 | #553 | data safety | A Voice recording with stored audio but no transcribed text (failed, timed out or empty) | Saved as an entry with its audio and no reply; the PR's first version made no entry for silence | No recording with content is lost | Opus 5.5 | pending |
+| 2026-10-21 | #553 | UX | Glean under an entry with no transcribed text | Disabled, with its own text | The issue's own request | Opus 5.5 | pending |
+| 2026-10-21 | #565 | product scope | Whether the recent-context job gets the same whole-window rendering | Yes, in the same PR | #551: sibling jobs are fixed in the same PR | Opus 5.5 | pending |
+| 2026-10-21 | #565 | privacy | The quote resolver's cache path skipped the access and deleted checks of its database path | Fixed in the same PR, for every caller | Deleted text never reaches a prompt | Opus 5.5 | pending |
+| 2026-10-21 | #558 | reliability | The daily cleanup's cursor error on Postgres, found in review | Fixed in the same PR, since the PR's file deletion runs in that loop | Fix the root cause | Opus 5.5 | pending |
+| 2026-10-21 | #570 | data safety | Text typed while the recovery banner shows | Recover keeps it and adds the transcript after it; the box is read-only while recovered audio is transcribed | The user's edit wins | Opus 5.5 | pending |
+| 2026-10-21 | #566 | cost | An all-failed batch whose requests failed for a transient reason (5xx, 429, account) | No attempt is counted, so it can't move the user to the full-price fallback | #406: account-reason refusals are not attempts | Opus 5.5 | pending |
+| 2026-10-21 | #568 | data safety | An in-place edit of intentions after the admin confirmed a replacement | The confirmation covers the version's state, so the edit wins | The user's edit wins | Opus 5.5 | pending |
+| 2026-10-21 | #572 | data safety | A request to file an issue that names no position (iPhone app, old web tabs, voice confirms) | Files only the last issue, as before; filing several needs an explicit choice | Ask when the choice matters | Opus 5.5 | pending |
+| 2026-10-21 | #575 | UX | An audience field with no usable username | Refused, instead of a poll for everyone | Problems show | Opus 5.5 | pending |
+| 2026-10-21 | #555 | provider | OpenAI's replacement for a retired saved model | GPT-6 Astra, the strongest OpenAI chat model | Quality first (early phase; cost is Peter's call) | Opus 5.5 | pending |
+| 2026-10-21 | #579 | release/ops | Whether deploying the Celery split changes anything before Peter's server steps | Built inert: off unless `CELERY_SPLIT_QUEUES` is set, the new units are installed by nothing | Ask only before irreversible actions | Opus 5.5 | pending |
+| 2026-10-21 | #580 | release/ops | Whether deploying pgvector search needs the extension first | Built inert: the copies live in their own schema, which autogenerate doesn't see, and every search takes today's path until Peter's steps | Ask only before irreversible actions | Opus 5.5 | pending |
+| 2026-10-21 | #580 | cost | Exact float32 copies or `halfvec` for the vector copies | Exact float32 (scores within 3.3e-8 of the Python path); the disk size is under Needs Peter | Quality first (early phase; cost is Peter's call) | Opus 5.5 | pending |
+| 2026-10-21 | #578 | data safety | Writing a reserved kind (todo, profile, recent context) through the generic artifact routes | PUT, PATCH and revert are refused, so a todo artifact made before the PR becomes read-only there; the todo page stays the one place to edit the list | candidate: a reserved artifact is written only by its own page | Opus 5.5 | pending |
+| 2026-10-21 | #577 | data safety | A late duplicate chunk for a position already stored | Leaves the stored files alone and answers "already uploaded", instead of the last upload replacing them | No recording with content is lost | Opus 5.5 | pending |
+| 2026-10-21 | #576 | reliability | More than 2000 deleted rows in a user's recent-writing window | The selection ends at the cap, so rows loaded stay bounded; dropping only the deleted rows past it is a follow-up | Fix the root cause (bounded work per prompt) | Opus 5.5 | pending |
+| 2026-10-21 | #582 | privacy | What the owner sees when a reply, transcription, upload-reply warning or todo merge fails | A fixed message per area; exceptions written for the user (account, overload, retired model, refusals, empty reply, archive not ready) keep their text, in replies and todo merges alike | #540: messages written for the user stay, other errors get fixed texts | Sonnet 5.5 | pending |
+| 2026-10-21 | #582 | privacy | How the exceptions that keep their text are chosen | An allowlist, so a new exception type gets the fixed text | #540: one rule for every exception | Sonnet 5.5 | pending |
+| 2026-10-21 | #582 | user-facing text | The failure message | One per area, "reported, try again"; a refused Glean names the model and says to choose another, and a thread too long for the model says to start a new thread or choose a model that reads more | Plain, direct, short | Sonnet 5.5 | pending |
+| 2026-10-21 | #582 | privacy | A failed tool call's error, stored under "Actions taken" and sent to the model | One fixed text for both, so the model loses the exception's detail | #540: the field is shown to the owner | Sonnet 5.5 | pending |
+| 2026-10-21 | #582 | product scope | Whether transcription errors and the todo-merge error get the same change | Yes, in the same PR | #551: sibling paths are fixed in the same PR | Sonnet 5.5 | pending |
+| 2026-10-21 | #582 | privacy | The message when a Community Archive batch gives up polling | No batch id and no last error in it; the details are in the log | #540: what failed, not the values | Sonnet 5.5 | pending |
+| 2026-10-21 | #585 | provider | The model intentions run on | The user's own, the one their other background jobs use (default_model_for), instead of the pinned Opus 4.8 | A user's model is theirs | Opus 5.5 | pending |
+| 2026-10-21 | #585 | provider | Intentions for a user with no saved model | LLM_NAME, the model their replies use (Opus 5.5 on prod) | A user's model is theirs | Opus 5.5 | pending |
+| 2026-10-21 | #585 | provider | A retired saved model whose replacement is another provider's | The run is refused before anything is sent, with the reason in the admin row | A user's model is theirs; problems show | Opus 5.5 | pending |
+| 2026-10-21 | #585 | reliability | The output cap of an intentions run | 32,000 (DEFAULT_MAX_OUTPUT_TOKENS) instead of 8,192, so thinking can't use up the cap; the largest Anthropic prompt goes from 991,808 to 968,000 tokens | #366: room for thinking and the answer | Opus 5.5 | pending |
+| 2026-10-21 | #585 | cost | The price of a collected batch | The model it ran on, not the user's model when it is collected; items from before the deploy are priced as Opus 4.8 | Every billed call records its cost | Opus 5.5 | pending |
+| 2026-10-21 | #585 | provider | The one resubmit after a failed batch item | Runs on the user's model at the time of the resubmit | A user's model is theirs | Opus 5.5 | pending |
+| 2026-10-21 | #585 | provider | The backfill script's --model flag | Applies only to users on the same provider; the others are skipped with a message | Entry "The provider rule: not without the user's knowledge" (2026-10-09) | Opus 5.5 | pending |
+| 2026-10-21 | #584 | product scope | Where the reply goes when one is asked on an earlier part of a long entry | Under the last part, decided by the server for every client | Problems show; fix the cause | Opus 5.5 | pending |
+| 2026-10-21 | #584 | UX | Where the thread opens after a long entry is sent from the reply box | On its last part, so the reply box there continues the whole entry | Autonomy | Opus 5.5 | pending |
+| 2026-10-21 | #584 | data safety | How the parts of a long entry are recognised | From what is stored (same author, same type, 1 ms apart), with no new column and no migration; a deleted part ends the chain; imported messages without a timestamp now get the same 1 ms step | Autonomy | Opus 5.5 | pending |
+| 2026-10-21 | #584 | privacy | Who gets split_tip_id | The entry's owner only, since only the owner's action row uses it | Entry "The server finishes an upload's reply; warnings stay private" (2026-10-01) | Opus 5.5 | pending |
+| 2026-10-21 | #584 | product scope | Whether the iPhone app gets the same change | Yes, in the same PR | Profile chapters on the iPhone too (2026-10-16) | Opus 5.5 | pending |
+| 2026-10-21 | #584 | process | How the iPhone change is checked before merge (the builder had put "unit tests only" under Needs Peter) | Run in the app on the simulator against the branch's backend, with no model call, instead of asking Peter | #520: an iPhone change is run in the app before merge | Opus 5.5 | pending |
+| 2026-10-21 | #587 | product scope | The reply of an agentic entry above the length cap | One reply, under the last part, reading the whole entry, with the Agentic Reply system prompt kept | Problems show; fix the cause | Opus 5.5 | pending |
+| 2026-10-21 | #587 | UX | Where the page opens after sending a long agentic entry | On its first part, then on to the pending reply, as for a short agentic entry | Autonomy | Opus 5.5 | pending |
+| 2026-10-21 | #587 | product scope | Whether the iPhone app gets the same change | Yes, in the same PR | Profile chapters on the iPhone too (2026-10-16) | Opus 5.5 | pending |
 
 ## Backfilled decisions
 
@@ -3414,3 +3517,9 @@ Builder decisions listed in PRs that merged without Peter correcting them, backf
 | 2026-10-20 | #542 | user-facing text | No changelog entry: a fix, not an announcement | Opus 5.5 | accepted by merge (PR #542, 2026-10-20) |
 | 2026-10-20 | #542 | release/ops | 500 messages per commit; a stash expires after 24 h; a lock untouched for 30 min no longer counts; at most 5 resumes after the 55-minute time limit (`CONVERSATION_BATCH_SIZE`, `STASH_TTL_SECONDS`, `LOCK_STALE_SECONDS`, `MAX_TIME_LIMIT_RESUMES`) | Opus 5.5 | accepted by merge (PR #542, 2026-10-20) |
 | 2026-10-20 | #542 | UX | The export's upload gets a 10-minute timeout with progress; the dialog polls every 1.5 s and gives up after 5 failed polls in a row; the iPhone's 10-minute stall limit covers chat imports too | Opus 5.5 | accepted by merge (PR #542, 2026-10-20) |
+| 2026-10-21 | #551 | product scope | Profile builds, intentions and poll drafts also lose the reference lines to prompts, profile versions and todo lists, through a new flag (`omit_artifacts`) that only these jobs use; `collapse_artifacts` keeps its meaning for recent context and the raw window | Opus 5.5 | accepted by merge (PR #551, 2026-10-21) |
+| 2026-10-21 | #551 | product scope | A system prompt the user edited for one thread is left out too: it is still a system prompt, not writing about themselves | Opus 5.5 | accepted by merge (PR #551, 2026-10-21) |
+| 2026-10-21 | #551 | product scope | A thread that is only a system prompt is left out, and a window of nothing but system prompts returns no data, so the build stops there as it does for an empty window | Opus 5.5 | accepted by merge (PR #551, 2026-10-21) |
+| 2026-10-21 | #551 | data safety | In these exports the budget resolver charges each node its stored units, as the selection does, so a window's newest entries are no longer dropped from the text while its cursor moves past them | Opus 5.5 | accepted by merge (PR #551, 2026-10-21) |
+| 2026-10-21 | #551 | product scope | The intentions backfill script gets the same input; poll drafts that read the profile, recent summary and intentions (`derived`) are unchanged | Opus 5.5 | accepted by merge (PR #551, 2026-10-21) |
+| 2026-10-21 | #551 | data safety | A `{quote:N}` the user wrote that points at a system node is kept as it renders today, so the user's writing stays whole | Opus 5.5 | accepted by merge (PR #551, 2026-10-21) |

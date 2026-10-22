@@ -56,10 +56,12 @@ MIN_INACTIVITY = timedelta(minutes=30)
 MIN_INTERVAL = timedelta(hours=1)
 
 MAX_BATCH_ATTEMPTS = 3              # batch retries before sync last-resort
-# A job still pending after this is failed and retried. Both providers end
-# a batch themselves at 24 h and still return its finished (billed)
-# results, so the stale rule waits for that plus polling slack instead of
-# failing a just-expired batch before its results are read (#419).
+# A pending job not ended after this is failed and retried: the
+# providers' 24 h window plus polling slack, shared with the digest and
+# recent-context collectors. Both providers end a batch themselves at
+# 24 h and still return its finished (billed) results, so the stale rule
+# waits for that instead of failing a just-expired batch before its
+# results are read (was 24 h, #419).
 BATCH_STALE_AFTER = BATCH_JOB_MAX_AGE
 
 # Item kinds of a large build's window set (tasks/profile_windows, #545).
@@ -999,17 +1001,21 @@ def _poll_profile_batches():
         get_api_keys_for_usage(config, 'chat'), config)
     next_built = []
     for job in ProfileBatchJob.query.filter_by(status="pending").all():
-        if datetime.utcnow() - job.submitted_at > BATCH_STALE_AFTER:
-            _fail_job(job, "stale")
-            continue
         try:
             results, still_pending, _ = batch_check_and_collect(
                 {job.provider_key: job.batch_id}, keys)
         except Exception as e:
             logger.warning(f"Poll failed for batch {job.batch_id}: {e}")
-            continue
+            # Unreadable, not merely unfinished: the age backstop below
+            # is for this case too.
+            results, still_pending = {}, {job.provider_key: job.batch_id}
         if job.provider_key in still_pending:
-            continue  # not ended yet
+            # Not ended yet, or unreadable. Polled before the age check
+            # (#419): a batch expires at 24 h with its finished steps
+            # billed, so only one that has not ended by then is failed.
+            if datetime.utcnow() - job.submitted_at > BATCH_STALE_AFTER:
+                _fail_job(job, "stale")
+            continue
         # An admin "Cancel batch" may have landed while the provider call
         # above was in flight: re-read the row, and never collect (or
         # overflow-resubmit) a job that is no longer pending.
@@ -1058,6 +1064,21 @@ def _poll_profile_batches():
                                  f"{user.id}: {e}", exc_info=True)
                 continue
             if result is None:
+                if item["custom_id"] in getattr(
+                        results, "transient_failures", ()):
+                    # The provider was down or overloaded, or the account
+                    # could not pay: not billed, and nothing wrong with
+                    # the request. Not an attempt, as an account-refused
+                    # submit is not (#406): an outage spanning three
+                    # hourly seeds would otherwise move the user to the
+                    # full-price path for good. The seeder resends it.
+                    user.profile_batch_pending = False
+                    db.session.commit()
+                    logger.warning(
+                        f"Batch item failed for user {user.id} "
+                        f"({item['custom_id']}) for a provider or account "
+                        f"reason; not counted as an attempt")
+                    continue
                 user.profile_batch_attempts = (
                     user.profile_batch_attempts or 0) + 1
                 user.profile_batch_pending = False

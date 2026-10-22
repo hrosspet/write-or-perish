@@ -23,7 +23,7 @@ Contents
   - any other `@login_required` path (e.g. `/auth/logout`) → `302` to `/auth/login`, which itself starts the X OAuth flow (302 to `/auth/twitter` → 302 to api.twitter.com). A native client must not follow redirects blindly on non-`/api` paths; treat a 302 whose `Location` contains `/auth/login` or `twitter.com` as "signed out".
 - **Approval gate** (`block_unapproved_users` before_request): a signed-in user with `approved == false` gets `403 {"error": "Your account is not approved. Please wait for approval."}` on every `/api` call except: any `GET /api/dashboard*`, `PUT /api/dashboard/user*`, `POST|DELETE /api/dashboard/email` and `/api/dashboard/email/*`, anything under `/api/terms`, plus `/auth/*` and public-page endpoints.
 - **Spend cap** (per-user monthly USD cap): any cost-incurring call from a capped user returns `402 {"error": "monthly_spend_limit_reached", "message": "You've reached your monthly usage limit for the free alpha. It resets at the start of next month."}`. Raised by `@require_spend_headroom` (or an inline check) on: `POST /api/nodes/` in multipart (audio file) mode, `POST /api/nodes/<id>/llm`, `POST /api/nodes/<id>/tts`, `POST /api/nodes/upload/init`, `POST /api/nodes/streaming/init`, `POST /api/drafts/streaming/init`, `POST /api/profile/<id>/tts`, `POST /api/external/items/<id>/tts`; and by the app-wide `SpendCapExceeded` error handler on any path that creates an LLM placeholder node (textmode/voice/read starts etc.). The reset is the first day of the next month, UTC.
-- **Provider failures.** Provider-side failures (OpenAI/Anthropic 429, org spend limit, overload) do not become HTTP errors: the async task fails and the raw exception text lands in the node's `llm_task_error`, which `GET /api/nodes/<id>/llm-status` returns with `status: "failed"`.
+- **Provider failures.** Provider-side failures (OpenAI/Anthropic 429, org spend limit, overload) do not become HTTP errors: the async task fails and the node's `llm_task_error` gets a fixed plain message (the exception is logged and reported, never stored); only errors written for the user, such as an account or overload message, keep their own text, which `GET /api/nodes/<id>/llm-status` returns with `status: "failed"`.
 - **CORS** (`flask-cors`) allows only `FRONTEND_URL` with credentials; CORS is enforced by browsers only, so native `URLSession` calls are unaffected.
 - **Timestamps.** Almost every route serializes with `backend/utils/timefmt.iso_utc`: naive UTC datetimes as `datetime.isoformat() + "Z"`. Python's `isoformat()` emits **microseconds (6 digits) when non-zero and no fraction when zero**: `"2026-09-30T12:34:56.123456Z"` or `"2026-09-30T12:34:56Z"`. A few timezone-aware columns (e.g. `prefill_consent_at`) come out with `+00:00` instead of `Z`. `/api/updates` changelog entries carry a date-only `"2026-09-30"`. The `/api/log` cursor is an opaque string built from a naive isoformat (`"<iso>|<id>"`); pass it back unchanged. Swift: write one tolerant date decoder (try fractional, then non-fractional, then `+00:00`, then date-only); `ISO8601DateFormatter` with `.withFractionalSeconds` must not be assumed to accept 6 digits on every iOS version, so trim the fraction to 3 digits before parsing.
 - **Trailing slashes.** Routes declared as `"/"` under a prefix (e.g. `GET /api/dashboard/`, `POST /api/nodes/`, `GET/POST/DELETE /api/drafts/`) are canonical with the slash; the slashless form gets a `308` to the slash form. This applies to `/api/dashboard/`, `/api/nodes/` (POST), `/api/drafts/` (GET/POST/DELETE), `/api/todo/` (GET/PATCH/PUT), `/api/artifacts/` (GET), `/api/profile/` (POST), `/api/prompts/` (GET), `/api/voice/` (POST). URLSession follows 308 keeping method and body, but call the canonical form to save a round trip. The opposite case: `GET /api/updates` has no slash and `/api/updates/` is a 404.
@@ -164,7 +164,8 @@ Built by `_focal_own_fields()` + tree keys added in `get_node()`.
   children: [TreeNode],            // sorted by descendant_count desc
   in_read_thread: Bool,
   read_reply_above: Bool,
-  reply_ai_usage: String           // ai_usage a new reply under this node should default to (#362)
+  reply_ai_usage: String,          // ai_usage a new reply under this node should default to (#362)
+  split_tip_id?: Int               // owner only, on an earlier part of a long entry split into a chain: its last part
 }
 ```
 
@@ -410,7 +411,7 @@ Notes: the whole subtree is returned (no depth limit, no pagination); children a
   - `model?: String` — a `SUPPORTED_MODELS` key. Absent → `resolve_chat_model` (predecessor → user preference → `LLM_NAME`). A deprecated model is silently replaced by the chat default; under a Read thread a non-read model is replaced by the read model.
   - `source_mode?: "voice" | "textmode"`.
 - Response 202: `{ message: "LLM response generation started", task_id: String (Celery id), status: "pending", node_id: Int (the NEW placeholder LLM node) }`.
-- Side effects: creates a child LLM node under `node_id` (content `"[LLM response generation pending...]"`, `node_type: "llm"`, `llm_task_status: "pending"`, inherits the parent's `privacy_level` and `ai_usage`; `ai_usage` "train" is downgraded to "chat" for read turns), enqueues `generate_llm_response`.
+- Side effects: creates a child LLM node under `node_id`, or, when `node_id` is an earlier part of a long entry split into a chain, under the chain's last part (`node_split.split_chain_tip`), so the reply reads the whole entry (content `"[LLM response generation pending...]"`, `node_type: "llm"`, `llm_task_status: "pending"`, inherits the parent's `privacy_level` and `ai_usage`; `ai_usage` "train" is downgraded to "chat" for read turns), enqueues `generate_llm_response`.
 - Errors: 403 `{"error":"You can only request an AI response on your own nodes. Reply first, then generate on your reply."}`; 400 `{"error":"Invalid source_mode: <v>"}`; 400 `{"error":"Unsupported model: <id>","supported_models":[String]}`; 410 `{"error":"Parent node not found" | "Parent node has been deleted"}`; 400 `{"error":<message>}` for a misconfigured `{user_export}`/`{ca_tweets}` placeholder or plan gate (the web toasts it); 402 spend cap; 404 (HTML).
 - Frontend: navigates to the new node with `?awaitLlm=<node_id>`; 402 → silent (banner); other errors → toast with `error`.
 - Follow-up: poll `GET /api/nodes/<node_id>/llm-status` and/or subscribe `GET /api/sse/nodes/<node_id>/llm-stream`.
@@ -506,7 +507,7 @@ Audio URLs returned by these endpoints are site-relative (`/media/...`). The web
 - Backend: routes/nodes.py:get_transcription_status
 - Auth: login + (`can_user_access_node` or admin).
 - Called from: `NodeForm.js` via `useAsyncTaskPolling` after an audio upload (default 2000 ms).
-- Response 200 (no-cache headers): `{ node_id, status: String|null, progress: Int, error: String|null, started_at: ISO|null, completed_at: ISO|null, content: String|null (only when completed), task_info: Object|null }`.
+- Response 200 (no-cache headers): `{ node_id, status: String|null, progress: Int, error: String|null, started_at: ISO|null, completed_at: ISO|null, content: String|null (only when completed), task_info: Object|null }`. Once completed, for the owner only: `tip_id` (the last part when a long transcript was split into a chain, else `node_id`), `llm_node_id?` (the reply under it), `warnings?`.
 - Errors: 403 `{"error":"Unauthorized"}`; 404 (HTML).
 
 ##### Node-level streaming transcription (unused by web; the web records through `/api/drafts/streaming/*` instead)
@@ -659,7 +660,7 @@ Common vocabulary:
 - `privacy_level`: `"private" | "circles" | "public"` everywhere except `POST /api/textmode/start`, which validates against `{"private","anonymous","public"}` (see §5.1).
 - `ai_usage`: `"none" | "chat" | "train"`.
 - `model`: a key of `Config.SUPPORTED_MODELS` (dotted ids, e.g. `"claude-opus-4.6"`, `"gpt-6-luna"`); unknown → `400 {"error":"Unsupported model: <id>"}`. When omitted, the server picks: thread ancestry → `user.preferred_model` → `LLM_NAME` (`pick_model_for_generation`).
-- `NODE_CHAR_CAP`: per-entry char limit; over it → `422 {"error":"Content exceeds the N-character per-entry limit.","char_cap":N}`.
+- `NODE_CHAR_CAP`: per-entry char limit; over it → `422 {"error":"Content exceeds the N-character per-entry limit.","char_cap":N}`, except `POST /api/textmode/start` and save-as-node, which split the entry into a chain.
 - Timestamps in this area are ISO-8601 UTC strings with a trailing `Z` (drafts use `isoformat()+"Z"`, textmode uses `iso_utc`).
 - `task_id` values are Celery task ids (UUID strings). The client never polls a task id directly; it polls the node (`GET /api/nodes/<id>/llm-status`, `/tts-status`, owned by the nodes map) or the draft session (`/status` below).
 
@@ -723,7 +724,7 @@ A recording is a Draft row with a `session_id` (UUID string). Audio is uploaded 
       "parent_deleted"?: true, "warning"?: string } ]
   ```
 - Errors: none specific (empty list when nothing to recover).
-- Notes: `chunk_count` is the number of chunk rows, which the web client uses as the next `chunk_index` when resuming. If an earlier chunk never reached the server, that index is lower than `max(chunk_index)+1` and the first resumed chunk collides with an existing row (answered "already uploaded" and its audio is dropped). A native client should take `max(chunks[].chunk_index)+1` from `GET .../status` instead.
+- Notes: `chunk_count` is the number of chunk rows. If an earlier chunk never reached the server, it is lower than `max(chunk_index)+1`, and a resume numbered from it collides with an existing row (answered "already uploaded" and its audio is dropped). Since #388 both clients resume from the claim's `next_chunk_index` (`POST .../claim`), falling back to `chunk_count`.
 
 ##### `POST /api/drafts/streaming/init`
 - Backend: routes/drafts.py:init_streaming
@@ -736,6 +737,14 @@ A recording is a Draft row with a `session_id` (UUID string). Audio is uploaded 
     "sse_url": "/api/sse/drafts/<session_id>/transcription-stream" }
   ```
 - Errors: 402 spend cap (web: toast "record" message, back to idle, `err.spendCapped`).
+- `device_key` (#388, optional, ≤ 64 chars; 400 if invalid): the recorder's key, stored as the session's writer. The web sends one per page load, the iPhone app one per install. Chunk uploads (form field), finalize (JSON), release and the transcription SSE (query) carry it too; sent with a key that is not the writer's they get `409 {"error":…, "code":"session_taken_over"}` (SSE: event `session_taken_over`, then the stream ends). Requests without a key are not checked.
+
+##### `POST /api/drafts/streaming/<session_id>/claim` (#388)
+- Backend: routes/drafts.py:claim_streaming
+- Called from: useStreamingTranscription `resumeStreaming` ("Continue recording") and iPhone `VoiceTurnController.beginRecording(resume:)`, once the recorder has started; its chunks wait for the answer and are renumbered from `next_chunk_index`.
+- Request JSON: `{ "device_key": string }` (required).
+- Response 200: `{ "session_id", "draft_id", "next_chunk_index": int }`: one past the highest stored chunk; the continuation numbers from there. The claimer becomes the writer and the session is stamped live.
+- Errors: `409 session_live` (another device or tab records it; the same key may claim again), `400 session_not_active`, `404 session_not_found`, `400` without a key.
 
 ##### `POST /api/drafts/streaming/<session_id>/audio-chunk` (FILE UPLOAD)
 - Backend: routes/drafts.py:upload_streaming_chunk
@@ -892,12 +901,14 @@ A recording is a Draft row with a `session_id` (UUID string). Audio is uploaded 
 - Response 202 (all variants):
   ```
   { "conversation_id": int,           // system node carrying the textmode prompt (thread root)
-    "user_node_id": int,
-    "llm_node_id"?: int, "task_id"?: string,   // when a reply was queued
+    "user_node_id": int,              // the entry (its first part when it was split)
+    "tip_id": int,                    // the entry's last part (= user_node_id when not split)
+    "llm_node_id"?: int, "task_id"?: string,   // when a reply was queued (under tip_id)
     "spend_capped"?: true,            // auto_generate on but user capped: nodes kept, no reply
     "llm_error"?: string }            // reply refused ({user_export} validation); nodes kept
   ```
-- Errors: `400 {"error":"Content is required"}`, `422 {..., "char_cap"}`, `400 {"error":"Invalid privacy_level: x"}`, `400 {"error":"Invalid ai_usage: x"}`, `400 {"error":"Text mode requires ai_usage of 'chat' or 'train'"}` (the web routes `ai_usage=="none"` entries to `POST /api/nodes/` instead), `400 {"error":"Unsupported model: x"}`.
+- Content above 100 000 chars is split at newline boundaries into a serial chain under the system node, as `POST /api/nodes/` does; the reply goes under the last part, so it reads the whole entry.
+- Errors: `400 {"error":"Content is required"}`, `400 {"error":"Invalid privacy_level: x"}`, `400 {"error":"Invalid ai_usage: x"}`, `400 {"error":"Text mode requires ai_usage of 'chat' or 'train'"}` (the web routes `ai_usage=="none"` entries to `POST /api/nodes/` instead), `400 {"error":"Unsupported model: x"}`.
 - Notes: web then navigates to `/node/<user_node_id>?awaitLlm=<llm_node_id>` and NodeDetail polls/streams the reply.
 
 ##### `POST /api/textmode/from-node/<node_id>`

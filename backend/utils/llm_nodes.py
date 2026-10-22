@@ -122,18 +122,98 @@ def is_chat_model(model_id):
     return bool(cfg.get("chat", True))
 
 
+# ── A saved model keeps its provider (#487) ──────────────────────────────
+# A model no longer offered for chat (deprecated, read only, or removed
+# from SUPPORTED_MODELS) can still be saved: an account preference, a
+# thread's last reply, a stored session's model, a page opened before the
+# deprecation. What runs in its place is a model of the same provider:
+# the user's own model there if they have one, else that provider's
+# default. Never another provider's: "A user's model is theirs" (Peter,
+# 2026-10-02; #418, #487).
+CHAT_MODEL_KEYS = {
+    "anthropic": "CHAT_MODEL_ANTHROPIC",
+    "openai": "CHAT_MODEL_OPENAI",
+}
+# Loore's first model, from before SUPPORTED_MODELS; still on the oldest
+# replies.
+LEGACY_MODEL_PROVIDERS = {"gpt-4.5-preview": "openai"}
+# The provider of a saved id whose SUPPORTED_MODELS entry was removed.
+_MODEL_ID_PREFIXES = (("claude-", "anthropic"), ("gpt-", "openai"))
+
+
+def saved_model_provider(model_id):
+    """The provider of a model id that was saved or sent: its
+    SUPPORTED_MODELS entry's, else the legacy id's, else the id's prefix
+    ("claude-" Anthropic, "gpt-" OpenAI) for an entry removed since.
+    None when none of these tells."""
+    if not model_id:
+        return None
+    cfg = current_app.config.get("SUPPORTED_MODELS", {}).get(model_id)
+    if cfg is not None:
+        return cfg.get("provider")
+    if model_id in LEGACY_MODEL_PROVIDERS:
+        return LEGACY_MODEL_PROVIDERS[model_id]
+    return next((provider for prefix, provider in _MODEL_ID_PREFIXES
+                 if model_id.startswith(prefix)), None)
+
+
+def provider_chat_model(provider):
+    """*provider*'s default chat model: DEFAULT_LLM_MODEL (LLM_NAME) when
+    it is that provider's, else the provider's own setting
+    (CHAT_MODEL_ANTHROPIC / CHAT_MODEL_OPENAI) while it is an active chat
+    model of that provider. None otherwise, never another provider's
+    model (the boot check, validate_default_model, rules that out for
+    the configured providers)."""
+    if not provider:
+        return None
+    default = current_app.config.get("DEFAULT_LLM_MODEL")
+    if is_chat_model(default) and saved_model_provider(default) == provider:
+        return default
+    key = CHAT_MODEL_KEYS.get(provider)
+    model_id = current_app.config.get(key) if key else None
+    if is_chat_model(model_id) and saved_model_provider(model_id) == provider:
+        return model_id
+    return None
+
+
+def same_provider_chat_model(model_id, *candidates):
+    """The chat model that runs in place of *model_id*, a saved model no
+    longer offered for chat: the first of *candidates* (the thread's and
+    the user's own models, nearest first) that is an active chat model
+    of the same provider, else that provider's default
+    (provider_chat_model). None when the provider can't be told or has
+    no chat model."""
+    provider = saved_model_provider(model_id)
+    if provider is None:
+        return None
+    for candidate in candidates:
+        if (is_chat_model(candidate)
+                and saved_model_provider(candidate) == provider):
+            return candidate
+    return provider_chat_model(provider)
+
+
 def effective_preferred_model(user):
-    """The user's saved model while it is still offered for chat, else
-    None. A preference for a model deprecated since, or read only, has no
-    effect anywhere: the reply routes, the background tasks and the
-    Account page all fall back to DEFAULT_LLM_MODEL (#355)."""
+    """The chat model the user's saved model stands for: the saved model
+    while it is still offered for chat; a model no longer offered
+    (deprecated, read only, removed) is replaced with its provider's
+    default (same_provider_chat_model, #487). The saved value stays as
+    it is. None without a saved model, or when its provider can't be
+    told. The reply routes, the background tasks and the Account page
+    all read it, so they agree."""
     pref = getattr(user, "preferred_model", None) if user is not None else None
-    return pref if pref and is_chat_model(pref) else None
+    if not pref:
+        return None
+    if is_chat_model(pref):
+        return pref
+    return same_provider_chat_model(pref)
 
 
 def default_model_for(user):
     """The model a user's background work (profile, digest, recent
-    context) runs on: their active preference, else DEFAULT_LLM_MODEL."""
+    context) runs on: their preference (effective_preferred_model: its
+    provider's default once it is no longer offered), else
+    DEFAULT_LLM_MODEL."""
     return (effective_preferred_model(user)
             or current_app.config.get("DEFAULT_LLM_MODEL", "claude-opus-4.6"))
 
@@ -232,17 +312,20 @@ def resolve_chat_model(parent_node, user, chain=None):
       1. ("predecessor") the closest ancestor LLM reply's ``llm_model``,
          skipping reads: a read runs on a read model (Luna), and that
          must not become the default for the conversation around it.
-      2. ("user_preference") ``user.preferred_model`` (active, chat).
+      2. ("user_preference") ``user.preferred_model``
+         (effective_preferred_model: its provider's default once it is
+         no longer offered).
       3. ("default") ``DEFAULT_LLM_MODEL`` from the Flask config / env.
 
     If the closest non-read LLM ancestor is recognized but not usable for
     chat (deprecated, read only, or the historical ``gpt-4.5-preview``
-    legacy id), the walk stops there and falls through to
-    ``user.preferred_model``.
-    Walking past it to find an even older active model would silently
-    override the user's current account preference. Truly-unknown
-    ancestors keep walking — they're typically placeholder rows from data
-    migrations.
+    legacy id), the walk stops there and the thread stays with that
+    model's provider (#487): the user's account model when it is that
+    provider's, else the provider's default (same_provider_chat_model),
+    still "predecessor". Walking past it to find an even older active
+    model would pick a model nobody chose for this point of the thread.
+    Truly-unknown ancestors keep walking — they're typically placeholder
+    rows from data migrations and imports ("chatgpt", "claude-web").
     """
     supported = current_app.config.get("SUPPORTED_MODELS", {})
     chain = chain or _Chain(parent_node)
@@ -251,7 +334,12 @@ def resolve_chat_model(parent_node, user, chain=None):
             continue
         if is_chat_model(node.llm_model):
             return node.llm_model, "predecessor"
-        if node.llm_model in supported or node.llm_model == "gpt-4.5-preview":
+        if (node.llm_model in supported
+                or node.llm_model in LEGACY_MODEL_PROVIDERS):
+            replacement = same_provider_chat_model(
+                node.llm_model, effective_preferred_model(user))
+            if replacement:
+                return replacement, "predecessor"
             break
 
     pref = effective_preferred_model(user)
@@ -265,9 +353,11 @@ def glean_provider(anchor_node, user, chain=None):
     """The provider of a glean's DEFAULT model under *anchor_node* for
     *user*: the provider of the user's own conversation there — the
     closest chat reply in the thread that was made FOR this user (their
-    own AI reply: human owner == user), else their account model, else
-    the server default. Replies made for someone else (another user's AI
-    reply higher up a public thread) never count. The provider picks
+    own AI reply: human owner == user), also on a model no longer
+    offered, else their account model (also when no longer offered: its
+    provider, effective_preferred_model), else the server default.
+    Replies made for someone else (another user's AI reply higher up a
+    public thread) never count. The provider picks
     which glean setting is the default (GLEAN_MODEL_ANTHROPIC /
     GLEAN_MODEL_OPENAI); during Glean's testing both are GPT-5.6 Luna
     (Peter, 2026-10-14). The user may pick another provider's model in
@@ -281,10 +371,10 @@ def glean_provider(anchor_node, user, chain=None):
             continue
         if (node.human_owner_id or node.user_id) != user_id:
             continue
-        if is_chat_model(node.llm_model):
-            return model_provider(node.llm_model)
         if node.llm_model in supported:
-            break  # the user's own reply on a model no longer offered
+            # Also on a model no longer offered: the thread stays with
+            # its provider, as its next chat reply does (#487).
+            return model_provider(node.llm_model)
     return model_provider(
         effective_preferred_model(user)
         or current_app.config.get("DEFAULT_LLM_MODEL", "claude-opus-4.6"))
@@ -514,6 +604,50 @@ def _with_read_marker(meta, is_read_turn, live):
     return meta
 
 
+# ── A reply whose job can't be queued fails (#385) ───────────────────────
+# A reply is saved first (its placeholder, committed) and its job queued
+# second. When the queueing fails (the broker is unreachable, or the
+# publish raises for another reason) no job exists, so the placeholder is
+# marked failed at once: the pages and the app then show the failed reply
+# the way they show any other (the toast, the Voice error sound, the
+# LLM Response button to ask again) instead of "Thinking…" until their
+# poll gives up. Written for the user; the exception goes to the log and
+# Sentry, never into the message.
+REPLY_NOT_QUEUED_MESSAGE = (
+    "Loore couldn't start this reply. Please try again in a minute.")
+
+
+def enqueue_reply_job(llm_node, dispatch, record_task_id=True):
+    """Queue the generation job of *llm_node*, a reply already committed.
+    *dispatch* queues it (``generate_llm_response.delay(...)`` or
+    ``.apply_async(...)``) and returns its AsyncResult; with
+    *record_task_id* its id is saved on the node. Returns the task id, or
+    None when the job could not be queued: then the node is marked failed
+    with REPLY_NOT_QUEUED_MESSAGE (a TTS job it waited for too), committed,
+    and the exception is logged as an error, which reaches Sentry. Every
+    path that saves a reply and then queues its job goes through here."""
+    from backend.utils.error_privacy import describe_exception
+    try:
+        result = dispatch()
+    except Exception as e:  # noqa: BLE001 - any failure leaves no job
+        current_app.logger.exception(
+            "Could not queue the reply job for node %s: %s",
+            llm_node.id, describe_exception(e))
+        llm_node.llm_task_status = "failed"
+        llm_node.llm_task_error = REPLY_NOT_QUEUED_MESSAGE
+        # The Voice finalize marks the reply's audio pending before the
+        # job is queued (the job makes it): none is coming now.
+        if llm_node.tts_task_status == "pending":
+            llm_node.tts_task_status = "failed"
+        db.session.commit()
+        return None
+    task_id = result.id
+    if record_task_id:
+        llm_node.llm_task_id = task_id
+        db.session.commit()
+    return task_id
+
+
 def create_llm_placeholder(parent_node_id, model_id, human_owner_id,
                            privacy_level="private", ai_usage="chat",
                            placeholder_text="[LLM response generation pending...]",
@@ -521,7 +655,9 @@ def create_llm_placeholder(parent_node_id, model_id, human_owner_id,
                            client=None, read_live=True):
     """Create an LLM placeholder node, optionally enqueue generation task.
 
-    Returns (llm_node, task_id) -- task_id is None if enqueue=False.
+    Returns (llm_node, task_id) -- task_id is None if enqueue=False, and
+    when the job could not be queued: the node is then already marked
+    failed (enqueue_reply_job, #385).
     *meta* seeds the node's tool_calls_meta (a list of entries) in the
     same commit that creates it, so a marker the task reads (the read
     thread's "_read", routes/read.py) is there before the task can start.
@@ -625,7 +761,11 @@ def create_llm_placeholder(parent_node_id, model_id, human_owner_id,
     # with ReadOnlyModelRefused, before any write: moving the reply to the
     # chat default could move it to another provider, which is never
     # acceptable (Peter, 2026-10-02). A deprecated one (a preference saved
-    # before the deprecation) is still replaced by the chat default (#355).
+    # before the deprecation, a page opened before it, a stored session's
+    # model) is replaced with a model of its own provider (#418, #487):
+    # the thread's or the user's own model of that provider, else the
+    # provider's default (same_provider_chat_model). Only an id whose
+    # provider can't be told at all keeps the chat default.
     # This is the one place that knows the turn, so the routes that only
     # check that the model exists stay right for a read turn they carry;
     # routes that write the user's entry first ask read_only_model_refusal
@@ -637,7 +777,9 @@ def create_llm_placeholder(parent_node_id, model_id, human_owner_id,
     elif is_active_model(model_id) and not is_chat_model(model_id):
         raise ReadOnlyModelRefused(model_id)
     elif not is_chat_model(model_id):
-        new_model_id = resolve_chat_model(parent, owner, chain=chain)[0]
+        resolved = resolve_chat_model(parent, owner, chain=chain)[0]
+        new_model_id = same_provider_chat_model(
+            model_id, resolved, effective_preferred_model(owner)) or resolved
         current_app.logger.info(
             "Reply under node %s: model %s is not offered -> %s",
             parent.id, model_id, new_model_id)
@@ -684,12 +826,10 @@ def create_llm_placeholder(parent_node_id, model_id, human_owner_id,
     task_id = None
     if enqueue:
         from backend.tasks.llm_completion import generate_llm_response
-        task = generate_llm_response.delay(
-            parent_node_id, llm_node.id, model_id, human_owner_id,
-            source_mode=source_mode,
-        )
-        llm_node.llm_task_id = task.id
-        db.session.commit()
-        task_id = task.id
+        task_id = enqueue_reply_job(
+            llm_node, lambda: generate_llm_response.delay(
+                parent_node_id, llm_node.id, model_id, human_owner_id,
+                source_mode=source_mode,
+            ))
 
     return llm_node, task_id

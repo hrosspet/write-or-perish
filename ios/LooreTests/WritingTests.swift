@@ -171,6 +171,33 @@ final class NodeFormModelTests: StubbedAppTestCase {
         XCTAssertEqual(body(of: "POST /api/textmode/start")?["auto_generate"] as? Bool, false)
     }
 
+    /// An agentic entry above the cap goes to /textmode/start too, which splits it and
+    /// replies under its last part. It used to go to the plain path and get no reply.
+    func testWriteNewEntryAgenticAboveTheCapStartsATextmodeThreadWithAReply() async {
+        StubURLProtocol.install { request in
+            if request.url?.path(percentEncoded: true) == "/api/textmode/start" {
+                return .json(202, #"{"conversation_id":1,"user_node_id":2,"tip_id":4,"llm_node_id":5}"#)
+            }
+            return .json(200, "{}")
+        }
+        defaults.set(true, forKey: DefaultsKey.agenticReply)
+        defaults.set(true, forKey: DefaultsKey.autoGenerate)
+        let (model, result) = form(NodeFormConfig(parentId: nil, allowAgenticPrompt: true))
+        model.aiUsage = .chat
+        let long = String(repeating: "line\n", count: nodeCharCap / 2)
+        model.content = long
+        await model.submit()
+        XCTAssertTrue(model.showSplitDialog)
+        model.confirmSplit()
+        await model.dialogSubmit?.value
+        XCTAssertEqual(result()?.id, 2)
+        XCTAssertEqual(result()?.awaitLLM, 5)
+        XCTAssertEqual(result()?.tipId, 4)
+        XCTAssertEqual(body(of: "POST /api/textmode/start")?["content"] as? String, long)
+        XCTAssertEqual(body(of: "POST /api/textmode/start")?["auto_generate"] as? Bool, true)
+        XCTAssertFalse(calls.contains("POST /api/nodes/"))
+    }
+
     func testWriteNewEntryWithoutAgenticButAutoGenerateRequestsAReply() async {
         StubURLProtocol.install { request in
             if request.url?.path(percentEncoded: true) == "/api/nodes/" { return .json(201, #"{"id":20}"#) }
@@ -186,6 +213,26 @@ final class NodeFormModelTests: StubbedAppTestCase {
         XCTAssertEqual(result()?.id, 21)
         XCTAssertEqual(result()?.awaitLLM, 21)
         XCTAssertEqual(body(of: "POST /api/nodes/20/llm")?["source_mode"] as? String, "textmode")
+    }
+
+    func testWriteNewEntryAboveTheCapAsksForTheReplyUnderItsLastPart() async {
+        StubURLProtocol.install { request in
+            if request.url?.path(percentEncoded: true) == "/api/nodes/" { return .json(201, #"{"id":20,"tip_id":22,"split_into":3}"#) }
+            if request.url?.path(percentEncoded: true) == "/api/nodes/22/llm" { return .json(202, #"{"node_id":23,"status":"pending"}"#) }
+            return .json(200, "{}")
+        }
+        defaults.set(false, forKey: DefaultsKey.agenticReply)
+        defaults.set(true, forKey: DefaultsKey.autoGenerate)
+        let (model, result) = form(NodeFormConfig(parentId: nil, allowAgenticPrompt: true))
+        model.aiUsage = .chat
+        model.content = String(repeating: "line\n", count: nodeCharCap / 2)
+        await model.submit()
+        model.confirmSplit()
+        await model.dialogSubmit?.value
+        XCTAssertEqual(result()?.id, 23)
+        XCTAssertEqual(result()?.awaitLLM, 23)
+        XCTAssertNotNil(body(of: "POST /api/nodes/22/llm"))
+        XCTAssertFalse(calls.contains("POST /api/nodes/20/llm"))
     }
 
     func testAPlainFormNeverAutoGenerates() async {
@@ -385,6 +432,17 @@ final class ThreadModelTests: StubbedAppTestCase {
         XCTAssertTrue(opened)
         XCTAssertTrue(calls.contains("GET /api/nodes/11"))
         XCTAssertTrue(auto)
+    }
+
+    func testInlineReplyToASplitEntryIsAskedUnderItsLastPart() async {
+        let model = await loadedModel()
+        var auto = true
+        let binding = Binding(get: { auto }, set: { auto = $0 })
+        await model.inlineReplySent(NodeFormResult(id: 11, tipId: 13), autoGenerate: binding)
+        XCTAssertNotNil(body(of: "POST /api/nodes/13/llm"))
+        XCTAssertFalse(calls.contains("POST /api/nodes/11/llm"))
+        let opened = await eventually { self.app.router.path(for: self.app.router.selectedTab).last == .thread(id: 13, awaitLLM: 77) }
+        XCTAssertTrue(opened)
     }
 
     func testAChainWithAIOffTurnsAutoGenerateOff() async {

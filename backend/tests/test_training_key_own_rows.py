@@ -245,6 +245,10 @@ def test_opening_a_listed_chat_artifact_counts_by_its_own_row(app, keys):  # noq
 @pytest.mark.parametrize("tool, kind, usage, follow_up_key", [
     ("read_artifact", "memory", "train", "sk-train"),
     ("read_artifact", "memory", "chat", "sk-chat"),
+    # The todo list: read_artifact on 'todo' since #218, and read_todo,
+    # its tool before that, which older threads' prompts still name.
+    ("read_artifact", "todo", "train", "sk-train"),
+    ("read_artifact", "todo", "chat", "sk-chat"),
     ("read_todo", None, "train", "sk-train"),
     ("read_todo", None, "chat", "sk-chat"),
     # The saved-references digest counts by its own stamped ai_usage,
@@ -255,7 +259,7 @@ def test_opening_a_listed_chat_artifact_counts_by_its_own_row(app, keys):  # noq
 def test_a_tool_pull_of_an_own_row_moves_only_its_continuation(app, keys, tool, kind, usage, follow_up_key):  # noqa: F811
     alice, system, user_node, llm_node = _train_chain("textmode")
     _train_user(alice)
-    if tool == "read_todo":
+    if tool == "read_todo" or kind == "todo":
         _mk_todo(alice.id, OWN, ai_usage=usage)
     else:
         _mk_artifact(alice.id, kind, OWN, ai_usage=usage)

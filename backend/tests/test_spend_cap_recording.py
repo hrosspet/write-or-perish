@@ -220,6 +220,31 @@ class TestResumeIsAllowedWhenCapped:
 
         assert data["warning"] == "reply skipped"
 
+    def test_status_names_the_users_message_node(self, client, alice):
+        # #514: the client anchors on the user's message when the user
+        # cancels before the reply comes, so the status names it.
+        user_node = Node(user_id=alice.id, human_owner_id=alice.id,
+                         node_type="user")
+        user_node.set_content("my words")
+        _db.session.add(user_node)
+        _db.session.commit()
+        llm_node = Node(user_id=alice.id, human_owner_id=alice.id,
+                        node_type="llm", parent_id=user_node.id)
+        llm_node.set_content("")
+        _db.session.add(llm_node)
+        _db.session.commit()
+        draft = Draft(user_id=alice.id, session_id="sess-user-node",
+                      streaming_status="completed",
+                      llm_node_id=llm_node.id)
+        draft.set_content("my words")
+        _db.session.add(draft)
+        _db.session.commit()
+
+        data = client.get("/drafts/streaming/sess-user-node/status").get_json()
+
+        assert data["llm_node_id"] == llm_node.id
+        assert data["user_node_id"] == user_node.id
+
 
 class TestSavedWithoutReplyDraftIsNotRestored:
     """#345 review: a Voice finalize that skipped the reply (cap) keeps
@@ -562,9 +587,12 @@ class TestDuplicateChunkUpload:
         monkeypatch.undo()
         assert NodeTranscriptChunk.query.filter_by(
             session_id=self.SESSION, chunk_index=5).count() == 1
-        # This copy's file was moved into place; no upload file is left.
-        assert sorted(p.name for p in chunk_dir.iterdir()) == [
-            "chunk_0005.webm"]
+        # No upload file is left. Seen by the check just before the move
+        # (1), this copy leaves the stored chunk's files alone (#388 puts
+        # files in place only after that check); seen only by the insert
+        # (2), its file was moved into place.
+        assert sorted(p.name for p in chunk_dir.iterdir()) == (
+            [] if missed_checks == 1 else ["chunk_0005.webm"])
 
     def test_first_copy_is_stored(self, client, alice):
         chunk_dir = self._session(alice, stored_row=False)

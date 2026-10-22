@@ -83,6 +83,20 @@ test('confirm sends the token, polls the job, shows "N of M messages", then the 
   expect(await screen.findByText(/3 of 6 messages/)).toBeTruthy();
   expect(screen.getByRole('button', { name: /Importing/ }).disabled).toBe(true);
   expect(await screen.findByText('Import Finished', {}, { timeout: 4000 })).toBeTruthy();
+  // The result counts messages and says so, next to the dialog's conversations.
+  expect(screen.getByText('Messages imported')).toBeTruthy();
+  expect(screen.getByText(/These numbers count messages\. Your archive has 2 conversations with 6 messages\./)).toBeTruthy();
+});
+
+test('a re-import result labels the skipped count as messages', async () => {
+  const button = await openConfirm(/Import Claude/, () =>
+    Promise.resolve({ data: { task_id: 'job-4', status: 'queued', total: 6 } }));
+  mockGet.mockResolvedValue({ data: { status: 'completed', done: 6, total: 6,
+    result: { ...result, created: 0, skipped: 6 } } });
+  fireEvent.click(button);
+  expect(await screen.findByText('Import Finished', {}, { timeout: 4000 })).toBeTruthy();
+  expect(screen.getByText('Messages skipped')).toBeTruthy();
+  expect(screen.getByText(/Your archive has 2 conversations/)).toBeTruthy();
 });
 
 test('a failed confirm shows its error inside the dialog and Confirm works again', async () => {

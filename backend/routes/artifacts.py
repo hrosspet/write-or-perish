@@ -6,6 +6,7 @@ PUT inserts a new row; the latest row per (user, kind) is current. PATCH
 (checklist clicks) may edit the latest row in place — see patch_artifact.
 """
 import re
+from datetime import datetime
 
 from flask import Blueprint, jsonify, request
 from flask_login import login_required, current_user
@@ -17,6 +18,25 @@ from backend.utils.timefmt import iso_utc
 artifacts_bp = Blueprint("artifacts", __name__)
 
 _KIND_RE = re.compile(r'^[a-z0-9][a-z0-9_-]{0,47}$')
+
+# What a write under a reserved name (UserArtifact.RESERVED_KINDS) is
+# refused with.
+_RESERVED_KIND_ERRORS = {
+    "todo": ("Your todo list has its own page and can't be saved as an "
+             "artifact. Edit it on the Todo page."),
+    "profile": ("Your profile is built by Loore and can't be saved as an "
+                "artifact."),
+    "recent_context": ("Recent context is built by Loore and can't be saved "
+                       "as an artifact."),
+}
+
+
+def _reserved_kind_refusal(kind):
+    """A 400 response for a write under a reserved name, else None."""
+    if kind not in UserArtifact.RESERVED_KINDS:
+        return None
+    return jsonify({"error": _RESERVED_KIND_ERRORS.get(
+        kind, "This name is reserved. Pick another name.")}), 400
 
 
 def _render_desc(desc):
@@ -125,6 +145,9 @@ def update_artifact(kind):
             "Invalid kind: use a short lowercase slug "
             "(letters, digits, dashes)."
         )}), 400
+    refusal = _reserved_kind_refusal(kind)
+    if refusal is not None:
+        return refusal
 
     data = request.get_json() or {}
     content = data.get("content")
@@ -182,6 +205,9 @@ def patch_artifact(kind):
     change becomes a new user version instead, and later clicks edit
     that one.
     """
+    refusal = _reserved_kind_refusal(kind)
+    if refusal is not None:
+        return refusal
     data = request.get_json() or {}
     content = data.get("content")
     if content is None:
@@ -196,6 +222,8 @@ def patch_artifact(kind):
     ).first() is not None
     if latest.generated_by in ("user", "manual") and not pinned:
         artifact = latest
+        # The edit's time, which created_at no longer gives (#412).
+        artifact.updated_at = datetime.utcnow()
     else:
         artifact = UserArtifact(
             user_id=current_user.id,
@@ -245,6 +273,9 @@ def get_artifact_version(version_id):
 @login_required
 def revert_artifact(kind, version_id):
     """Create a new artifact version from a historical one."""
+    refusal = _reserved_kind_refusal(kind)
+    if refusal is not None:
+        return refusal
     old = UserArtifact.query.get_or_404(version_id)
     if old.user_id != current_user.id:
         return jsonify({"error": "Unauthorized"}), 403

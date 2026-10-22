@@ -842,6 +842,14 @@ class Draft(db.Model):
     # See backend/utils/streaming_session.py.
     streaming_heartbeat_at = db.Column(db.DateTime, nullable=True)
 
+    # The device (or tab) that records this session (#388): its key is
+    # set at init and by the claim of a device that continues the
+    # session. Chunks, finalize, release and the transcription stream
+    # sent with another key are refused, so two devices never record into
+    # one session. NULL for a session started by a client older than
+    # #388. See backend/utils/recording_device.py.
+    streaming_device_key = db.Column(db.String(64), nullable=True)
+
     # Relationships
     user = db.relationship("User", backref="drafts")
     node = db.relationship("Node", foreign_keys=[node_id])
@@ -1022,8 +1030,16 @@ class UserArtifact(db.Model):
     description = db.Column(db.String(255), nullable=True)
     content = db.Column(db.Text, nullable=False)
     generated_by = db.Column(db.String(64), nullable=False)
+    # LLM tokens a job spent on this version; 0 for the user's saves,
+    # reverts and conversation updates. An intentions version with tokens
+    # came from an inference run (utils/intentions_versions, #412).
     tokens_used = db.Column(db.Integer, nullable=False, default=0)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    # When the text was last edited in place (a checklist click or "+"
+    # insert on the user's own version, routes/artifacts.patch_artifact);
+    # None if it never was. The admin's "Replace their intentions?" dialog
+    # shows it as the user's last change (#412).
+    updated_at = db.Column(db.DateTime, nullable=True)
     privacy_level = db.Column(db.String(16), nullable=False, default="private")
     # Artifacts are LLM working memory — must be AI-readable to function.
     ai_usage = db.Column(db.String(16), nullable=False, default="chat")
@@ -1067,6 +1083,14 @@ class UserArtifact(db.Model):
     # display serializer both read this, so adding an inline kind can't
     # silently desync one side (which once left {user_intentions} unrendered).
     INLINE_KINDS = ("memory", "scratchpad", "ai_preferences", "intentions")
+
+    # Names of documents that are NOT UserArtifacts (their own models, or
+    # system-generated), so no write may create an artifact under them: one
+    # named "todo" would sit next to the real list in the agentic index,
+    # and read_artifact on "todo" reads the list, never it (#218). The AI's
+    # update_artifact refuses them (RESERVED_ARTIFACT_KINDS) and so do the
+    # artifact routes.
+    RESERVED_KINDS = ("todo", "profile", "recent_context")
 
     def set_content(self, plaintext):
         self.content = encrypt_content(plaintext)
@@ -1553,8 +1577,10 @@ class NodeEmbedding(db.Model):
     edited; content_hash is the hash of the STORED content bytes, i.e. the
     encrypted blob for encrypted nodes, so the unchanged-check needs no
     KMS decrypt and no plaintext fingerprint is stored). Vectors are
-    packed float32 (struct) — no pgvector dependency; similarity is
-    brute-force cosine in Python, fine at alpha scale. Only nodes with
+    packed float32 (struct), so the models need no pgvector; where
+    pgvector is turned on, a copy of each vector in the `vec` schema is
+    ranked in SQL (backend/utils/pgvector.py, #331), otherwise similarity
+    is a chunked cosine scan in Python. Only nodes with
     ai_usage in AI_ALLOWED are embedded (embedding sends content to
     OpenAI, so 'none' nodes are never submitted).
     """
@@ -1608,6 +1634,12 @@ class TTSChunk(db.Model):
     status = db.Column(db.String(20), nullable=False, default="pending")  # pending, processing, completed, failed
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     completed_at = db.Column(db.DateTime, nullable=True)
+    # What the audio was made from (tasks/tts.tts_chunk_digest): a keyed
+    # hash of the text, model, voice and chapter-end pause, so a retry
+    # keeps the audio an earlier run already made for the same text and
+    # makes only the rest (#526). Keyed with the app's secret, so it does
+    # not stand for the text by itself. None: never reused.
+    text_digest = db.Column(db.String(64), nullable=True)
 
     # Relationships
     node = db.relationship("Node", backref="tts_chunks")
@@ -1697,6 +1729,9 @@ class Poll(db.Model):
                            nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow, index=True)
     closed_at = db.Column(db.DateTime, nullable=True)
+    # Who gets the poll (#411): a list of user ids, or null/empty for
+    # everyone (every poll made before this column, and the default).
+    audience_user_ids = db.Column(db.JSON, nullable=True)
 
     creator = db.relationship("User", foreign_keys=[created_by])
 
@@ -1705,6 +1740,11 @@ class Poll(db.Model):
     @property
     def active(self):
         return self.closed_at is None
+
+    def reaches(self, user_id):
+        """True when the poll goes to this user: everyone, unless the
+        admin named an audience."""
+        return not self.audience_user_ids or user_id in self.audience_user_ids
 
 
 class PollResponse(db.Model):
@@ -1923,7 +1963,10 @@ class FeedRender(db.Model):
     tweet_count = db.Column(db.Integer, nullable=False, default=0)
     account_count = db.Column(db.Integer, nullable=False, default=0)
     # Tweets in the window the reader had already marked read (any row
-    # of the tweet, #352) and that therefore never reached the model.
+    # of the tweet, #352) and that therefore never reached the model. A
+    # read again that keeps the list of the read before it (#511) leaves
+    # out the same tweets; the ones read since stay in its list, and a
+    # note tells the model they are not candidates.
     excluded_count = db.Column(db.Integer, nullable=False, default=0)
     # Comma-joined tweet ids in render order: index i (0-based) is the
     # tweet the model saw as #i+1. ~100 KB for a day of the archive.
@@ -1931,8 +1974,10 @@ class FeedRender(db.Model):
     # How many of the model's picks the collect could not show
     # (ca_feed.count_dropped_picks, on the batch collect and the admin's
     # live rerun alike; 2026-10-02): the tweet behind the number is no
-    # longer in the archive snapshot, or the number is outside the render. Each number once; a number cited only in the verdict is no
-    # pick. With no FeedPick row on the reply, a positive count means
+    # longer in the archive snapshot, or the number is outside the render,
+    # or (a live read again that kept the earlier list, #511) the reader
+    # has read the tweet since that list was made. Each number once; a
+    # number cited only in the verdict is no pick. With no FeedPick row on the reply, a positive count means
     # every pick was dropped, and 0 means the model picked nothing.
     # Replies collected before the column existed read 0 either way.
     dropped_picks = db.Column(db.Integer, nullable=False, default=0,

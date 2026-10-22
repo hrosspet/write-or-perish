@@ -1,15 +1,21 @@
 """Embedding generation + similarity for semantic search (#155).
 
-Vectors are packed float32 blobs (stdlib array — no pgvector). Similarity
-is a brute-force cosine scan over the user's rows, done in numpy in
-fixed-size chunks with a running top-k, so the cost is bounded by the
-chunk, not the archive: a 62k-node archive scores in ~0.2 s with a
-~40 MB peak (12 MB of blobs plus the float64 working copy), where the
-previous pure-Python loop took ~8.6 s and held all 382 MB of blobs in
-the worker (#330 review; prod's largest archives are Twitter pre-fills
-of that size). Callers stream rows with
-.yield_per(EMBEDDING_SCAN_CHUNK) so the DB driver does not buffer the
-whole result set either. pgvector is the destination (#331).
+Vectors are packed float32 blobs (stdlib array). Callers rank them with
+rank_embeddings(), which has two paths:
+
+* In Postgres with pgvector turned on (backend/utils/pgvector.py, #331),
+  the database ranks a pgvector copy of each vector and returns only the
+  top k rows; nothing else leaves the database.
+* Everywhere else (sqlite, a database without the extension, before
+  `flask pgvector-enable --apply`), a brute-force cosine scan over the
+  user's rows, done in numpy in fixed-size chunks with a running top-k,
+  so the cost is bounded by the chunk, not the archive: a 62k-node
+  archive scores in ~0.2 s with a ~40 MB peak (12 MB of blobs plus the
+  float64 working copy), where the previous pure-Python loop took ~8.6 s
+  and held all 382 MB of blobs in the worker (#330 review; prod's largest
+  archives are Twitter pre-fills of that size). Rows stream with
+  .yield_per(EMBEDDING_SCAN_CHUNK) so the DB driver does not buffer the
+  whole result set either.
 
 Embedding calls use the OpenAI chat key (retrieval is 'chat' usage) and
 log cost to APICostLog like every other provider call.
@@ -20,6 +26,7 @@ import math
 from array import array
 
 import numpy as np
+from sqlalchemy.exc import SQLAlchemyError
 
 from backend.extensions import db
 from backend.models import APICostLog
@@ -28,6 +35,8 @@ from backend.utils.cost import EMBEDDING_PRICE_PER_MTOK
 logger = logging.getLogger(__name__)
 
 EMBEDDING_MODEL = "text-embedding-3-small"
+# Dimension of EMBEDDING_MODEL's vectors; the pgvector copies are typed to it.
+EMBEDDING_DIM = 1536
 # text-embedding-3-small hard-caps each input at 8191 tokens. We cap by
 # chars (no tokenizer dependency). Prose runs ~4 chars/token in English but
 # can be ~2.2 in Czech and lower still for code/CJK, so 30000 chars routinely
@@ -185,6 +194,48 @@ def top_k_similar(query_vector, rows, k=10, min_score=0.0):
     return best
 
 
+def rank_embeddings(query_vector, query, source, k=10, min_score=0.0):
+    """Top-*k* [(id, score)] of *query*, sorted desc, filtered by
+    *min_score*. *query* selects (id, vector blob) rows of *source*
+    (NodeEmbedding or ExternalItemEmbedding) with the caller's filters,
+    not yet executed.
+
+    With pgvector on, the database ranks the rows that have a matching
+    copy and returns its top *k*; the few rows without one (embedded since
+    the last copy sync) are scored here and merged in, so the result
+    covers every row either way. Otherwise every row streams through
+    top_k_similar, as before. A database error on the pgvector path rolls
+    back to a savepoint, is logged (Sentry), and this process ranks in
+    Python from then on.
+    """
+    from backend.utils import pgvector
+
+    literal = None
+    if k > 0 and pgvector.enabled():
+        literal = pgvector.vector_literal(query_vector)
+    if literal is not None:
+        try:
+            with db.session.begin_nested():
+                in_db = pgvector.finite_scores(
+                    pgvector.ranked_in_db(query, source, literal, k).all(),
+                    min_score)
+                rest = top_k_similar(
+                    query_vector,
+                    pgvector.without_copy(query, source).yield_per(
+                        EMBEDDING_SCAN_CHUNK),
+                    k=k, min_score=min_score)
+        except SQLAlchemyError:
+            logger.exception(
+                "pgvector ranking failed; this process ranks in Python")
+            pgvector.turn_off()
+        else:
+            merged = sorted(in_db + rest, key=lambda pair: pair[1],
+                            reverse=True)
+            return merged[:k]
+    return top_k_similar(query_vector, query.yield_per(EMBEDDING_SCAN_CHUNK),
+                         k=k, min_score=min_score)
+
+
 def retrieve_relevant_snippets(user_id, query_text, exclude_node_ids,
                                api_key, k=4, min_score=0.35,
                                snippet_chars=400, query_vector=None):
@@ -204,16 +255,14 @@ def retrieve_relevant_snippets(user_id, query_text, exclude_node_ids,
             request_type="embedding_query",
         )[0]
 
-    # Streamed, not .all(): with stream_results psycopg2 uses a server-side
-    # cursor, so neither the driver nor the scan holds the whole archive.
     rows = db.session.query(
         NodeEmbedding.node_id, NodeEmbedding.vector
     ).filter(
         NodeEmbedding.user_id == user_id,
         ~NodeEmbedding.node_id.in_(exclude_node_ids or [-1]),
-    ).yield_per(EMBEDDING_SCAN_CHUNK)
-
-    ranked = top_k_similar(query_vector, rows, k=k, min_score=min_score)
+    )
+    ranked = rank_embeddings(query_vector, rows, NodeEmbedding, k=k,
+                             min_score=min_score)
     if not ranked:
         return []
 
@@ -250,9 +299,9 @@ def retrieve_relevant_references(user_id, query_vector, k=4, min_score=0.35,
         ExternalItemEmbedding.item_id, ExternalItemEmbedding.vector
     ).filter(
         ExternalItemEmbedding.user_id == user_id,
-    ).yield_per(EMBEDDING_SCAN_CHUNK)
-
-    ranked = top_k_similar(query_vector, rows, k=k, min_score=min_score)
+    )
+    ranked = rank_embeddings(query_vector, rows, ExternalItemEmbedding, k=k,
+                             min_score=min_score)
     if not ranked:
         return []
 

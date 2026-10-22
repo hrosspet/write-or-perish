@@ -69,6 +69,12 @@ final class VoiceTurnController {
     /// session opened on, or the turn's failed reply. Nil while a turn's reply is
     /// still coming, so the glean reads that reply too (web `gleanAnchor`).
     private(set) var gleanAnchor: Int?
+    /// The last saved entry had no transcribed text (#513): no reply, so
+    /// Glean says why instead of waiting.
+    private(set) var lastEntryHasNoText = false
+    /// The current turn's message node, once the server has named it (#514). A
+    /// cancel anchors Glean on it: the reply it waited for will not be used.
+    private var turnUserNodeId: Int?
     private(set) var gleanPhase: GleanPhase = .idle
     /// The last glean finished: the lock screen says so until the next recording.
     private(set) var gleaningDone = false
@@ -302,6 +308,7 @@ final class VoiceTurnController {
         isInterrupted = false
         longRecordingWarned = false
         gleaningDone = false
+        turnUserNodeId = nil
         elapsed = draft.map { Double($0.chunkCount) * 15 } ?? 0
         audio.refreshNowPlaying()
         do {
@@ -355,14 +362,39 @@ final class VoiceTurnController {
             }
             self.sessionId = sid
             do {
-                try self.recorder.start(sessionId: sid, uploadURL: self.backend.uploadURL(sessionId: sid),
-                                        firstChunkIndex: draft?.chunkCount ?? 0,
-                                        elapsedOffset: draft.map { Double($0.chunkCount) * 15 } ?? 0)
+                let uploadURL = self.backend.uploadURL(sessionId: sid)
+                if let draft {
+                    // A continued session: its chunks wait for the claim below.
+                    try self.recorder.startHoldingChunks(sessionId: sid, uploadURL: uploadURL,
+                                                         firstChunkIndex: draft.chunkCount,
+                                                         elapsedOffset: Double(draft.chunkCount) * 15)
+                } else {
+                    try self.recorder.start(sessionId: sid, uploadURL: uploadURL, firstChunkIndex: 0,
+                                            elapsedOffset: 0)
+                }
             } catch {
                 if draft == nil { await self.backend.discard(sessionId: sid) }
                 guard gen == self.generation else { return }
                 self.failStart("The microphone could not start. Close other apps using it (calls, voice memos) and try again.")
                 return
+            }
+            if let draft {
+                // #388: the recorder runs, so this phone now claims the session:
+                // the device that recorded it before is refused from then on. A
+                // continue whose microphone could not start never got here and
+                // left the session to that device. The claim names the index the
+                // held chunks are numbered from.
+                do {
+                    let claim = try await self.backend.claimSession(sessionId: sid)
+                    guard gen == self.generation else { return }
+                    self.recorder.releaseHeldChunks(firstChunkIndex: claim.nextChunkIndex ?? draft.chunkCount)
+                } catch {
+                    guard gen == self.generation else { return }
+                    self.recorder.cancel()
+                    self.failStart((error as? APIError)?.userMessage(fallback: Self.claimFailedMessage)
+                                   ?? Self.claimFailedMessage)
+                    return
+                }
             }
             self.state = .recording
             self.startTicker(gen)
@@ -528,6 +560,8 @@ final class VoiceTurnController {
             self.audio.switchToPlayback()
             self.elapsed = self.recorder.elapsed
             if let fatal = outcome.fatalMessage {
+                // #388: see uploadFailedFatally.
+                if fatal == RecordingDevice.takenOverMessage { self.recorder.forget(sessionId: sid) }
                 self.endTurnWithError(fatal, sound: true)
                 return
             }
@@ -550,6 +584,11 @@ final class VoiceTurnController {
                                                 entry: self.entry)
             } catch let error as APIError where Self.isAlreadyFinalizing(error) {
                 // A retried finalize whose first answer was lost (C §8.1).
+            } catch let error as APIError where error.code == RecordingDevice.takenOverCode {
+                // #388: another device continued the session while this phone held it.
+                guard gen == self.generation else { return }
+                self.endTurnWithError(RecordingDevice.takenOverMessage, sound: true)
+                return
             } catch {
                 guard gen == self.generation else { return }
                 self.endTurnWithError("Your recording could not be sent. It is kept on the server: open Voice again to continue or discard it.", sound: true)
@@ -563,6 +602,10 @@ final class VoiceTurnController {
         }
     }
 
+    /// "Continue recording" could not claim the session (#388) and the server
+    /// gave no reason (no connection).
+    static let claimFailedMessage = "The recording could not be continued. Please try again."
+
     /// Stop found chunks the server does not have (no connection): nothing is finalized.
     static let missingChunksMessage = "Part of your recording hasn't reached Loore yet (no connection?). It is kept on this phone and uploads when you're back online: then open Voice to continue or discard it."
 
@@ -574,6 +617,11 @@ final class VoiceTurnController {
         guard state == .recording || state == .starting else { return }
         generation += 1
         recorder.cancel()
+        // #388: the session is another device's now. Its upload state here (a
+        // fatal chunk) would drop every chunk if this phone continues it later.
+        if message == RecordingDevice.takenOverMessage, let sid = sessionId {
+            recorder.forget(sessionId: sid)
+        }
         endTurnWithError(message, sound: true)
     }
 
@@ -622,12 +670,14 @@ final class VoiceTurnController {
         }
         if let warning = status.warning {
             // Only the reply was skipped: the recording is saved as an entry.
-            entrySaved()
+            // A failure note alone is the server's "no text" entry (#513).
+            entrySaved(noText: status.content.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("*Note:"))
             notices.toast(warning, duration: 8)
             finishQuietly()
             return
         }
         if let nodeId = status.llmNodeId {
+            turnUserNodeId = status.userNodeId
             entrySaved()
             timing.setTurnNode(nodeId)
             timing.mark("llm_node_known")
@@ -639,6 +689,7 @@ final class VoiceTurnController {
             let answer = try await backend.legacyVoice(content: status.content, model: model(), aiUsage: aiUsage(),
                                                        parentId: threadParentId, sessionId: sid, entry: entry)
             guard gen == generation else { return }
+            turnUserNodeId = answer.userNodeId
             entrySaved()
             timing.setTurnNode(answer.llmNodeId)
             timing.mark("llm_node_known")
@@ -1178,7 +1229,8 @@ final class VoiceTurnController {
 
     /// The server saved the recording as an entry (web `onEntrySaved`): the
     /// thread has a message, and Glean waits for this turn's reply.
-    private func entrySaved() {
+    private func entrySaved(noText: Bool = false) {
+        lastEntryHasNoText = noText
         hasRecordedMessage = true
         gleanAnchor = nil
         audio.refreshNowPlaying()
@@ -1329,6 +1381,11 @@ final class VoiceTurnController {
         // finalize (a second "next" press, M11). The web cancels only once thinking.
         guard state != .stopping else { return }
         timing.endTurn()
+        // No reply is coming for this turn, so Glean stops waiting for it and
+        // starts under the user's message (web `onCancelled`, #514).
+        if let userNodeId = turnUserNodeId, gleanAnchor == nil, hasRecordedMessage {
+            gleanAnchor = userNodeId
+        }
         resetTurn(keepQueue: false)
         state = .idle
         audio.deactivate()

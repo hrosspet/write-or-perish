@@ -285,6 +285,123 @@ class TestTextmodeStart:
         assert resp.status_code == 401
 
 
+# ── /textmode/start with an entry above the per-node cap ─────────────────
+
+def _long_entry():
+    """Three parts' worth of text, with line breaks to split on."""
+    from backend.utils.node_split import NODE_CHAR_CAP
+    line = "x" * 99 + "\n"
+    return line * (NODE_CHAR_CAP * 5 // 2 // len(line))
+
+
+def _chain(head):
+    """*head* and the serial parts under it, in order."""
+    nodes = [head]
+    while True:
+        kids = [c for c in nodes[-1].children if c.node_type == "user"]
+        if not kids:
+            return nodes
+        assert len(kids) == 1
+        nodes.append(kids[0])
+
+
+class TestTextmodeStartLongEntry:
+    """An agentic entry above the cap is split into a chain of parts
+    under the textmode system node, and its one reply goes under the
+    last part, so its context reads the whole entry. Before, the route
+    refused it with a 422 and the web and iPhone forms sent it to the
+    plain path instead, where it got no reply and no textmode prompt."""
+
+    def test_splits_and_replies_under_last_part(self, app):
+        client = app.test_client()
+        alice = _make_user("alice")
+        _db.session.commit()
+        _login(client, alice.id)
+        content = _long_entry()
+
+        # A fresh stub for this test: another test file may have put its
+        # own in sys.modules after this module's was installed.
+        task_mod = MagicMock()
+        task_mod.generate_llm_response.delay.return_value.id = "t"
+        with patch.dict(sys.modules,
+                        {"backend.tasks.llm_completion": task_mod}):
+            resp = client.post(
+                "/api/textmode/start",
+                json={"content": content, "model": "gpt-5"},
+            )
+        assert resp.status_code == 202
+        data = resp.get_json()
+
+        system = Node.query.get(data["conversation_id"])
+        first = Node.query.get(data["user_node_id"])
+        assert first.parent_id == system.id
+        parts = _chain(first)
+        assert len(parts) == 3
+        assert "".join(p.get_content() for p in parts) == content
+        assert data["tip_id"] == parts[-1].id
+
+        # One reply, under the last part: every part is above it.
+        llm_nodes = Node.query.filter_by(node_type="llm").all()
+        assert [n.id for n in llm_nodes] == [data["llm_node_id"]]
+        assert llm_nodes[0].parent_id == parts[-1].id
+        from backend.utils.thread_tree import ancestor_chain
+        above = [n.id for n in ancestor_chain(llm_nodes[0].id)]
+        assert set(p.id for p in parts) | {system.id} <= set(above)
+        task_mod.generate_llm_response.delay.assert_called_once()
+        assert task_mod.generate_llm_response.delay.call_args.args[:2] == (
+            parts[-1].id, llm_nodes[0].id)
+
+    def test_auto_generate_off_splits_without_reply(self, app):
+        client = app.test_client()
+        alice = _make_user("alice")
+        _db.session.commit()
+        _login(client, alice.id)
+
+        resp = client.post(
+            "/api/textmode/start",
+            json={"content": _long_entry(), "auto_generate": False},
+        )
+        assert resp.status_code == 202
+        data = resp.get_json()
+        assert "llm_node_id" not in data
+        parts = _chain(Node.query.get(data["user_node_id"]))
+        assert len(parts) == 3
+        assert data["tip_id"] == parts[-1].id
+        assert Node.query.filter_by(node_type="llm").count() == 0
+
+    def test_spend_capped_keeps_the_whole_entry(self, app):
+        client = app.test_client()
+        alice = _make_user("alice")
+        _db.session.commit()
+        _login(client, alice.id)
+
+        with patch("backend.utils.spend.user_is_capped", return_value=True):
+            resp = client.post(
+                "/api/textmode/start",
+                json={"content": _long_entry(), "model": "gpt-5"},
+            )
+        assert resp.status_code == 202
+        data = resp.get_json()
+        assert data["spend_capped"] is True
+        parts = _chain(Node.query.get(data["user_node_id"]))
+        assert len(parts) == 3
+        assert data["tip_id"] == parts[-1].id
+        assert Node.query.filter_by(node_type="llm").count() == 0
+
+    def test_short_entry_tip_is_the_entry(self, app):
+        client = app.test_client()
+        alice = _make_user("alice")
+        _db.session.commit()
+        _login(client, alice.id)
+
+        resp = client.post(
+            "/api/textmode/start",
+            json={"content": "a short note", "model": "gpt-5"},
+        )
+        data = resp.get_json()
+        assert data["tip_id"] == data["user_node_id"]
+
+
 # ── /textmode/<conv_id>/message ──────────────────────────────────────────
 
 class TestTextmodeAddMessage:
@@ -725,7 +842,8 @@ class TestModelSelectionPriority:
         )
         assert resp.status_code == 202
         llm_node = Node.query.get(resp.get_json()["llm_node_id"])
-        # Falls through to DEFAULT (skips deprecated preference)
+        # The deprecated preference stands for its provider's default:
+        # OpenAI's is LLM_NAME here (#487).
         assert llm_node.llm_model == "gpt-5"
 
     def test_message_inherits_model_from_ancestry(self, app):
@@ -781,20 +899,20 @@ class TestModelSelectionPriority:
         llm_node = Node.query.get(resp.get_json()["llm_node_id"])
         assert llm_node.llm_model == "gpt-5.1"
 
-    def test_deprecated_closest_ancestor_falls_through_to_preference(self, app):
+    def test_deprecated_closest_ancestor_keeps_its_provider(self, app):
         """If the closest LLM ancestor used a now-deprecated model, the
-        walker must stop there and fall through to user.preferred_model
-        — silently skipping past it to an older active ancestor would
-        diverge from /suggested-model and override the user's current
-        account preference."""
+        walker must stop there — silently skipping past it to an older
+        active ancestor would diverge from /suggested-model — and the
+        thread stays with that model's provider (#487): never the
+        account preference of another provider."""
         client = app.test_client()
         alice = _make_user("alice", preferred_model="claude-opus-4.7")
         _db.session.commit()
 
         # Chain: root -> active_llm(gpt-5.1) -> middle -> deprecated_llm
         # If the helper walked past the deprecated ancestor it would
-        # surface gpt-5.1; with the alignment fix it surfaces the user
-        # preference (claude-opus-4.7).
+        # surface gpt-5.1; the account preference (claude-opus-4.7) is
+        # Anthropic's. It surfaces OpenAI's default (LLM_NAME here).
         root = _make_node(alice, content="root")
         older_llm_user = _make_user(
             "gpt-5.1", twitter_id="llm-gpt-5.1-deptest",
@@ -818,7 +936,31 @@ class TestModelSelectionPriority:
         resp = client.post(f"/api/nodes/{dep_llm.id}/llm", json={})
         assert resp.status_code == 202
         new_llm = Node.query.get(resp.get_json()["node_id"])
-        assert new_llm.llm_model == "claude-opus-4.7"
+        assert new_llm.llm_model == "gpt-5"
+
+    def test_deprecated_ancestor_takes_the_users_own_model_of_its_provider(
+            self, app):
+        """The account preference is that provider's: the thread goes on
+        with it rather than the provider's default (#487)."""
+        client = app.test_client()
+        alice = _make_user("alice", preferred_model="gpt-5.1")
+        _db.session.commit()
+        root = _make_node(alice, content="root")
+        dep_user = _make_user(
+            "deprecated-model", twitter_id="llm-dep-own-model",
+        )
+        dep_llm = _make_node(
+            dep_user, parent_id=root.id, content="dep",
+            node_type="llm", llm_model="deprecated-model",
+            human_owner=alice,
+        )
+        _db.session.commit()
+
+        _login(client, alice.id)
+        resp = client.post(f"/api/nodes/{dep_llm.id}/llm", json={})
+        assert resp.status_code == 202
+        new_llm = Node.query.get(resp.get_json()["node_id"])
+        assert new_llm.llm_model == "gpt-5.1"
 
     def test_nodes_llm_inherits_from_ancestry(self, app):
         """POST /nodes/<id>/llm with no explicit model walks ancestry."""
@@ -877,9 +1019,10 @@ class TestSuggestedModelEndpoint:
         assert body["suggested_model"] == "gpt-5"
         assert body["source"] == "default"
 
-    def test_suggested_model_deprecated_ancestor_falls_through(self, app):
+    def test_suggested_model_deprecated_ancestor_keeps_its_provider(self, app):
         """Display endpoint must agree with pick_model_for_generation:
-        deprecated closest ancestor → fall through to user preference."""
+        deprecated closest ancestor → its provider's default (#487), as
+        "predecessor" so the picker shows it."""
         client = app.test_client()
         alice = _make_user("alice", preferred_model="claude-opus-4.7")
         _db.session.commit()
@@ -899,8 +1042,8 @@ class TestSuggestedModelEndpoint:
         resp = client.get(f"/api/nodes/{dep_llm.id}/suggested-model")
         assert resp.status_code == 200
         body = resp.get_json()
-        assert body["suggested_model"] == "claude-opus-4.7"
-        assert body["source"] == "user_preference"
+        assert body["suggested_model"] == "gpt-5"
+        assert body["source"] == "predecessor"
 
     def test_suggested_model_falls_through_to_user_preference(self, app):
         """Node has no LLM ancestor — fall through to preference."""

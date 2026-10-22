@@ -45,6 +45,7 @@ from backend.models import (  # noqa: E402
     UserTodo, ExternalItem, ExternalItemEmbedding, NodeEmbedding,
 )
 from backend.utils.embeddings import pack_vector  # noqa: E402
+from backend.utils.error_privacy import REPLY_FAILED_TEXT  # noqa: E402
 
 
 # ── Scriptable LLM provider stub ─────────────────────────────────────────
@@ -358,8 +359,14 @@ def test_textmode_retrieval_loop_injects_and_continues(app):
     assert len(pins) == 1
 
 
-def test_textmode_retrieval_loop_read_todo(app):
-    """read_todo rides the same within-turn loop: the model's first call
+@pytest.mark.parametrize("name, inp", [
+    ("read_artifact", {"kind": "todo"}),
+    # The todo's own tool before #218: older threads' prompts still name
+    # it, and a call to it is served the same way.
+    ("read_todo", {}),
+])
+def test_textmode_retrieval_loop_read_todo(app, name, inp):
+    """A todo read rides the same within-turn loop: the model's first call
     requests the todo, the loop injects it, and the continuation answers
     with it. The exact todo version read is pinned to the interim node."""
     alice, system, user_node, llm_node = _build_chain("textmode")
@@ -368,7 +375,7 @@ def test_textmode_retrieval_loop_read_todo(app):
 
     _ScriptedProvider.reset([
         _resp("Let me pull up your todo.", tool_calls=[{
-            "id": "t1", "name": "read_todo", "input": {},
+            "id": "t1", "name": name, "input": inp,
         }]),
         _resp("Start with shipping slice 3."),
     ])
@@ -384,7 +391,8 @@ def test_textmode_retrieval_loop_read_todo(app):
     interim = _fresh(llm_node.id)
     assert interim.continuation_node_id is not None
     meta = json.loads(interim.tool_calls_meta)
-    assert any(e.get("name") == "read_todo" for e in meta)
+    assert any(e.get("name") == name and e.get("todo_id") == todo.id
+               for e in meta)
 
     final = Node.query.get(interim.continuation_node_id)
     assert final.get_content() == "Start with shipping slice 3."
@@ -628,7 +636,8 @@ def test_continuation_terminal_failure_fails_continuation_node(
     assert interim.continuation_node_id is not None
     cont = Node.query.get(interim.continuation_node_id)
     assert cont.llm_task_status == "failed"
-    assert "provider overloaded" in (cont.llm_task_error or "")
+    assert "provider overloaded" not in (cont.llm_task_error or "")
+    assert cont.llm_task_error == REPLY_FAILED_TEXT
 
 
 def test_continuation_transient_failure_retries(app, monkeypatch):

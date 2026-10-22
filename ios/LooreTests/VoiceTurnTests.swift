@@ -30,6 +30,14 @@ final class FakeVoiceBackend: VoiceBackend {
         return try startResult.get()
     }
 
+    /// `next_chunk_index` nil: the turn continues from the listed chunk count.
+    var claimResult: Result<StreamingClaimResponse, Error> = .success(StreamingClaimResponse(nextChunkIndex: nil))
+    var claimed: [String] = []
+    func claimSession(sessionId: String) async throws -> StreamingClaimResponse {
+        claimed.append(sessionId)
+        return try claimResult.get()
+    }
+
     func uploadURL(sessionId: String) -> URL { URL(string: "http://test/\(sessionId)/audio-chunk")! }
 
     func finalize(sessionId: String, totalChunks: Int, parentId: Int?, model: String?, entry: String?) async throws {
@@ -129,6 +137,13 @@ final class FakeRecorder: VoiceRecording {
         if let startError { throw startError }
         elapsed = elapsedOffset + 3
     }
+    func startHoldingChunks(sessionId: String, uploadURL: URL, firstChunkIndex: Int,
+                            elapsedOffset: Double) throws {
+        calls.append("start \(sessionId) holding from \(firstChunkIndex)")
+        if let startError { throw startError }
+        elapsed = elapsedOffset + 3
+    }
+    func releaseHeldChunks(firstChunkIndex: Int) { calls.append("release from \(firstChunkIndex)") }
     var resumeError: Error?
     func pause() { calls.append("pause") }
     func resume() throws {
@@ -256,9 +271,10 @@ final class VoiceTurnTests: XCTestCase {
         XCTAssertTrue(condition(), "timed out waiting: \(what)")
     }
 
-    private func status(_ s: String, llm: Int? = nil, content: String = "hello there", warning: String? = nil) throws -> StreamingSessionStatus {
+    private func status(_ s: String, llm: Int? = nil, user: Int? = nil, content: String = "hello there", warning: String? = nil) throws -> StreamingSessionStatus {
         var json = #"{"session_id":"sid-1","streaming_status":"\#(s)","content":"\#(content)","chunks":[]"#
         if let llm { json += #","llm_node_id":\#(llm)"# }
+        if let user { json += #","user_node_id":\#(user)"# }
         if let warning { json += #","warning":"\#(warning)""# }
         return try decode(StreamingSessionStatus.self, json + "}")
     }
@@ -1259,9 +1275,55 @@ final class VoiceTurnTests: XCTestCase {
             #"{"id":3,"session_id":"old","parent_id":9,"label":"Voice","content":"","chunk_count":4,"has_stored_chunks":true,"streaming_mime_type":"audio/mp4"}"#)
         turn.resumeInterrupted(draft)
         await wait("recording") { turn.state == .recording }
-        XCTAssertEqual(recorder.calls, ["start old from 4"])
+        // #388: the recorder starts holding its chunks, then the claim releases them.
+        XCTAssertEqual(recorder.calls, ["start old holding from 4", "release from 4"])
         XCTAssertFalse(backend.log.contains { $0.hasPrefix("init") })
         XCTAssertEqual(turn.threadParentId, 9)
+        XCTAssertEqual(backend.claimed, ["old"])
+    }
+
+    // #388: the claim names where the continuation starts (a chunk stored
+    // since the listing, or a hole left by a failed upload).
+    func testResumingContinuesFromTheIndexTheClaimNames() async throws {
+        backend.claimResult = .success(StreamingClaimResponse(nextChunkIndex: 6))
+        let draft = try decode(InterruptedDraft.self,
+            #"{"id":3,"session_id":"old","parent_id":9,"label":"Voice","content":"","chunk_count":4,"has_stored_chunks":true,"streaming_mime_type":"audio/mp4"}"#)
+        turn.resumeInterrupted(draft)
+        await wait("recording") { turn.state == .recording }
+        XCTAssertEqual(recorder.calls, ["start old holding from 4", "release from 6"])
+    }
+
+    // #388: a continue whose microphone cannot start never claims the session,
+    // so the device that has it keeps it.
+    func testAMicrophoneThatCannotStartNeverClaims() async throws {
+        recorder.startError = NSError(domain: "mic", code: 1)
+        let draft = try decode(InterruptedDraft.self,
+            #"{"id":3,"session_id":"old","chunk_count":4,"streaming_mime_type":"audio/mp4"}"#)
+        turn.resumeInterrupted(draft)
+        await wait("back to idle") { turn.state == .idle }
+        XCTAssertEqual(backend.claimed, [])
+    }
+
+    // #388: another device is still recording it: the held chunks are dropped.
+    func testARefusedClaimSendsNothing() async throws {
+        let body = ServerErrorBody(error: "This recording is still in progress in another tab or on another device.",
+                                   code: "session_live")
+        backend.claimResult = .failure(APIError.server(status: 409, body: body))
+        let draft = try decode(InterruptedDraft.self,
+            #"{"id":3,"session_id":"old","chunk_count":4,"streaming_mime_type":"audio/mp4"}"#)
+        turn.resumeInterrupted(draft)
+        await wait("back to idle") { turn.state == .idle }
+        XCTAssertEqual(recorder.calls, ["start old holding from 4", "cancel"])
+        XCTAssertEqual(notices.toasts, ["This recording is still in progress in another tab or on another device."])
+    }
+
+    // #388: the session was continued elsewhere while this phone held it.
+    func testATakenOverFinalizeSaysTheRecordingContinuedElsewhere() async throws {
+        backend.finalizeError = APIError.server(status: 409,
+                                                body: ServerErrorBody(error: "x", code: RecordingDevice.takenOverCode))
+        await recordAndStop()
+        await wait("ended") { turn.state == .idle }
+        XCTAssertEqual(notices.toasts.last, RecordingDevice.takenOverMessage)
     }
 
     func testWebMDraftCannotBeResumedNatively() throws {
@@ -1345,6 +1407,18 @@ final class VoiceTurnTests: XCTestCase {
         XCTAssertEqual(turn.gleanAnchor, 101, "the server starts it from the failed reply's parent")
         XCTAssertTrue(turn.canGlean)
         XCTAssertEqual(turn.lockScreenGlean, .ready)
+    }
+
+    func testCancellingTheReplyStartsGleanUnderTheUsersMessage() async throws {
+        gleanSession()
+        backend.statuses = [try status("completed", llm: 101, user: 100)]
+        backend.llmStatuses[101] = [try llm(101, "processing")]
+        await recordAndStop()
+        await wait("entry saved") { turn.showsGleanButton }
+        XCTAssertFalse(turn.canGlean, "disabled while the reply is still coming")
+        turn.cancelProcessing()
+        XCTAssertEqual(turn.gleanAnchor, 100, "the reply will not be used: Glean reads the message")
+        XCTAssertTrue(turn.canGlean)
     }
 
     func testAContinuedGleanThreadOffersGleanAtOnce() {

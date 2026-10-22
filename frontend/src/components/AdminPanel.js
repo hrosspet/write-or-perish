@@ -3,6 +3,7 @@ import XLookupConfirmDialog from "./XLookupConfirmDialog";
 import PurgeDataDialog from "./PurgeDataDialog";
 import AdminDeleteAccountDialog from "./AdminDeleteAccountDialog";
 import ProfileBuildConfirmDialog from "./ProfileBuildConfirmDialog";
+import IntentionsReplaceDialog from "./IntentionsReplaceDialog";
 import AdminRefusalDialog, { REFUSAL_TITLES } from "./AdminRefusalDialog";
 import { offeredModels } from "./ModelSelector";
 import { FaTimesCircle, FaFilter, FaCaretDown, FaCaretUp, FaEye, FaEyeSlash } from "react-icons/fa";
@@ -115,12 +116,13 @@ const adminSelectStyle = {
   appearance: "none",
 };
 
-function AdminPolls() {
+export function AdminPolls() {
   const [polls, setPolls] = useState([]);
   const [question, setQuestion] = useState("");
   const [models, setModels] = useState([]);
   const [modelId, setModelId] = useState("");
   const [dataSource, setDataSource] = useState("derived");
+  const [audience, setAudience] = useState(""); // usernames; empty = everyone
   const [responses, setResponses] = useState({}); // poll_id -> array
   const [pollsError, setPollsError] = useState("");
 
@@ -158,13 +160,23 @@ function AdminPolls() {
 
   const createPoll = async () => {
     if (!question.trim() || !modelId) return;
+    const names = audience
+      .split(/[\s,]+/)
+      .map((n) => n.replace(/^@/, ""))
+      .filter(Boolean);
+    if (audience.trim() && names.length === 0) {
+      setPollsError("No usernames in the audience field.");
+      return;
+    }
     try {
       await api.post("/admin/polls", {
         question,
         model_id: modelId,
         data_source: dataSource,
+        audience_usernames: names,
       });
       setQuestion("");
+      setAudience("");
       fetchPolls();
     } catch (err) {
       setPollsError(err.response?.data?.error || "Failed to create poll.");
@@ -227,6 +239,15 @@ function AdminPolls() {
             <option key={s.value} value={s.value}>{s.label}</option>
           ))}
         </select>
+        <input
+          type="text"
+          value={audience}
+          onChange={(e) => setAudience(e.target.value)}
+          placeholder="Only these users (usernames)"
+          title="Leave empty to send to everyone"
+          aria-label="Only these users"
+          style={{ padding: "8px", width: "190px" }}
+        />
         <button onClick={createPoll}>Create poll</button>
       </div>
       {pollsError && <div style={{ color: "var(--error)" }}>{pollsError}</div>}
@@ -241,6 +262,11 @@ function AdminPolls() {
                   (s) => s.value === p.data_source) || POLL_DATA_SOURCES[0]
                 ).label.toLowerCase()}
               </span>
+              {p.audience && (
+                <span style={{ color: "var(--text-muted)", fontSize: "0.8rem" }}>
+                  {" "}— only {p.audience.join(", ")}
+                </span>
+              )}
               {p.closed_at && (
                 <em style={{ color: "var(--text-muted)" }}> (closed)</em>
               )}
@@ -587,6 +613,11 @@ function AdminPanel() {
   // Build profile on a user held by the refusal backoff (#368): the
   // confirmation dialog's user, or null.
   const [buildAsk, setBuildAsk] = useState(null);
+  // Infer intentions refused because the user's own version is current
+  // (#412): { userId, username, mode, cancelPending, versionId, changedBy,
+  // changedAt } for the confirmation dialog, or null.
+  const [intentionsAsk, setIntentionsAsk] = useState(null);
+  const closeIntentionsAsk = useCallback(() => setIntentionsAsk(null), []);
   // "Purge data" (#268): the user row whose dry run / confirmation is
   // open, or null.
   const [purgeAsk, setPurgeAsk] = useState(null);
@@ -675,10 +706,15 @@ function AdminPanel() {
 
   // mode: "batch" (default, ~50% cheaper, hours) | "sync" (full price, minutes).
   // cancelPending: cancel the user's in-flight batch first, then start.
-  const inferIntentions = async (userId, mode = "batch", cancelPending = false) => {
+  // replace: { versionId, changedAt } of the user's version the admin
+  // confirmed replacing in the dialog (#412); without it, or after the user
+  // changed that version again, the backend refuses when one is current.
+  const inferIntentions = async (userId, mode = "batch", cancelPending = false,
+                                 replace = null) => {
     try {
       const res = await api.post(`/admin/users/${userId}/infer_intentions`, {
         mode, cancel_pending: cancelPending,
+        ...(replace ? { replace_version_id: replace.versionId, replace_changed_at: replace.changedAt } : {}),
       });
       patchIntent(userId, {
         taskId: res.data.task_id, mode, status: "queued", error: null, result: null,
@@ -687,6 +723,15 @@ function AdminPanel() {
       });
       if (res.data.cancelled) refreshStatuses();
     } catch (err) {
+      const data = err.response?.data;
+      if (data?.code === "intentions_edited") {
+        const u = users.find((x) => x.id === userId);
+        setIntentionsAsk({
+          userId, username: u?.username, mode, cancelPending,
+          versionId: data.version_id, changedBy: data.changed_by, changedAt: data.changed_at,
+        });
+        return;
+      }
       if (showRefusal(err, userId)) return;
       patchIntent(userId, { error: err.response?.data?.error || "Error starting intentions run." });
     }
@@ -794,6 +839,7 @@ function AdminPanel() {
     else if (p.status === "completed") {
       const r = p.result || {};
       if (r.stage === "batch submitted") main = "Intentions: batch submitted — the Profile column follows it from here";
+      else if (r.kept_user_edit) main = `${kind} not saved: the user changed their intentions while it ran, and their version is kept ($${(r.cost_usd || 0).toFixed(2)} billed)`;
       else main = `Intentions v${r.version} saved${r.mode === "sync" ? " now" : ""} (${r.model_id}, ${(r.llm_tokens || 0).toLocaleString()} tokens, $${(r.cost_usd || 0).toFixed(2)})`;
     }
     if (!main && !cancelNote) return null;
@@ -1190,6 +1236,16 @@ function AdminPanel() {
           buildProfile(ask.id, true);
         }}
       />
+      <IntentionsReplaceDialog
+        ask={intentionsAsk}
+        onClose={closeIntentionsAsk}
+        onConfirm={() => {
+          const ask = intentionsAsk;
+          setIntentionsAsk(null);
+          inferIntentions(ask.userId, ask.mode, ask.cancelPending,
+            { versionId: ask.versionId, changedAt: ask.changedAt });
+        }}
+      />
       <AdminRefusalDialog refusal={refusal} onClose={() => setRefusal(null)} />
       <PurgeDataDialog user={purgeAsk} onClose={closePurge} onStarted={() => fetchUsers()} />
       <AdminDeleteAccountDialog user={deleteAsk} onClose={closeDelete} onStarted={() => fetchUsers()} />
@@ -1401,10 +1457,14 @@ function AdminPanel() {
                 )}
                 {u.intentions && u.intentions.state !== "generating" && (
                   <div style={{ color: u.intentions.state === "failed" ? "var(--error)" : "var(--text-muted)" }}
-                       title={u.intentions.state === "failed" ? "The last intentions run gave up (batch failed twice, or the output was cut off before any text) — check the worker log, then re-run (batch or now)" : u.intentions.last_created_at ? `latest intentions version ${u.intentions.last_created_at}` : undefined}>
+                       title={u.intentions.state === "failed"
+                         ? "The last intentions run gave up (batch failed twice, or the output was cut off before any text) — check the worker log, then re-run (batch or now)"
+                         : u.intentions.state === "kept"
+                           ? "The last intentions run was not saved: the user changed their intentions while it ran, and their version is the current one. Its cost is logged."
+                           : u.intentions.last_created_at ? `latest intentions version ${u.intentions.last_created_at}` : undefined}>
                     {u.intentions.state === "failed"
                       ? <>✗ intentions failed</>
-                      : <>✓ intentions v{u.intentions.versions}</>}
+                      : <>✓ intentions v{u.intentions.versions}{u.intentions.state === "kept" ? " · the user's version kept" : ""}</>}
                   </div>
                 )}
                 {u.prefilled_handle && (

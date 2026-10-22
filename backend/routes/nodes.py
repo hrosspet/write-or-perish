@@ -657,6 +657,9 @@ def serialize_node_recursive(n, user_id=None, parent_user_id=None):
         "username": n.user.username if n.user else "Unknown",
         "llm_model": n.llm_model,
         "origin": n.origin,
+        # So the page can tell a failed or cancelled reply from one that
+        # answers its parent (#416): only the latter hides LLM Response.
+        "llm_task_status": n.llm_task_status,
         "descendant_count": descendant_count,
         "user_id": n.user_id,
         "parent_user_id": parent_user_id,
@@ -1169,6 +1172,9 @@ def _focal_own_fields(node, viewer_id):
         "llm_model": node.llm_model,
         "origin": node.origin,
         "llm_task_status": node.llm_task_status,
+        # An audio upload is a placeholder until transcription finishes;
+        # the page offers no reply to it before then (#416).
+        "transcription_status": node.transcription_status,
         "has_original_audio": bool(node.audio_original_url or node.streaming_transcription),
         # Whether this node has GENERATED TTS audio (distinct from an
         # original voice recording). Drives the "regenerate audio?" edit
@@ -1558,6 +1564,13 @@ def get_node(node_id):
         "glean_thread": is_glean_root(
             ancestor_nodes[-1] if ancestor_nodes else node),
     }
+    # A long entry is saved as a chain of parts, and its reply goes under
+    # the last one: on an earlier part, the owner's page looks there for
+    # a reply. The subtree is prefetched above, so this costs no query.
+    from backend.utils.node_split import split_chain_tip
+    tip = split_chain_tip(node)
+    if tip is not node and is_node_owner(node, current_user.id):
+        node_data["split_tip_id"] = tip.id
     # The owner opened a finished Read reply (FeedRender.opened_at, once).
     # Last, because it commits: the payload above is built.
     if focal.get("read_reply"):
@@ -1813,6 +1826,13 @@ def request_llm_response(node_id):
             "error": "You can only request an AI response on your own "
                      "nodes. Reply first, then generate on your reply.",
         }), 403
+
+    # A long entry is saved as a chain of parts: asked on any part, the
+    # reply goes under the last one, so it reads the whole entry. The
+    # parts are the same author's (split_chain_tip), so the check above
+    # holds for the tip.
+    from backend.utils.node_split import split_chain_tip
+    parent_node = split_chain_tip(parent_node)
 
     # Get and validate the model from request body
     data = request.get_json() or {}
@@ -2306,8 +2326,16 @@ def get_transcription_status(node_id):
         # A Text-mode upload's reply (#342) and why one was skipped, so
         # the form can land on the entry with ?awaitLlm or say why not.
         # Owner only: a warning can say the owner hit the spend cap.
+        # A long transcript is split into a chain; tip_id is its last
+        # part, as POST /nodes/ returns it: the node to open and to ask
+        # a reply under.
+        from backend.utils.node_split import split_chain_tip
         from backend.utils.task_warnings import load_task_warnings
-        reply = _reply_below_transcript(node)
+        tip = split_chain_tip(node)
+        payload["tip_id"] = tip.id
+        reply = next((c for c in tip.children
+                      if c.node_type == "llm" and c.deleted_at is None),
+                     None)
         if reply is not None:
             payload["llm_node_id"] = reply.id
         warnings = load_task_warnings(node)
@@ -2316,31 +2344,6 @@ def get_transcription_status(node_id):
     response = jsonify(payload)
     response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
     return response
-
-
-def _reply_below_transcript(node, max_parts=50):
-    """The LLM reply under an uploaded transcript, or None. A long
-    transcript is split into a serial chain (node_split: each part the
-    only child of the previous, created_at +1 ms), and the reply hangs
-    under the chain's tip. Only split parts are walked, never a later
-    reply the user wrote."""
-    from datetime import timedelta
-    parts_end = (node.created_at or datetime.utcnow()) + timedelta(seconds=1)
-    current = node
-    for _ in range(max_parts):
-        children = Node.query.filter(
-            Node.parent_id == current.id, Node.deleted_at.is_(None)).all()
-        llm = [c for c in children if c.node_type == "llm"]
-        if llm:
-            return llm[0]
-        if len(children) != 1:
-            return None
-        part = children[0]
-        if (part.user_id != node.user_id or part.created_at is None
-                or part.created_at > parts_end):
-            return None
-        current = part
-    return None
 
 
 @nodes_bp.route("/<int:node_id>/llm-status", methods=["GET"])

@@ -465,6 +465,61 @@ def test_a_failed_item_stays_stale_and_is_retried_once_then_stops(
     assert _check(rc)["submitted"] == 1
 
 
+def test_an_expired_openai_batch_saves_and_bills_what_finished(
+        app, rc, world, monkeypatch):
+    """#419, through the real collect helper with the OpenAI SDK faked:
+    the batch expired with one request finished. OpenAI bills it and
+    returns it, so it is saved with a cost row on its owner; the request
+    that never ran fails unbilled, at once, like any failed item."""
+    import json
+    import types
+    from types import SimpleNamespace
+    from backend.utils import llm_batch
+    done = _user("done", preferred_model=OPENAI_MODEL)
+    late = _user("late", preferred_model=OPENAI_MODEL)
+    assert _check(rc)["submitted"] == 2
+    [job] = RecentContextBatchJob.query.all()
+    assert job.provider_key == "openai:gpt-6-astra"
+
+    client = MagicMock()
+    client.batches.retrieve.return_value = SimpleNamespace(
+        status="expired", created_at=1000, expired_at=1000 + 86400,
+        output_file_id="file-out", error_file_id="file-err",
+        request_counts=SimpleNamespace(total=2, completed=1, failed=1))
+    files = {
+        "file-out": [{"custom_id": f"recent_context_{done.id}", "response": {
+            "status_code": 200, "body": {
+                "choices": [{"message": {"content": "FINISHED SUMMARY"},
+                             "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 1000,
+                          "completion_tokens": 100}}}}],
+        "file-err": [{"custom_id": f"recent_context_{late.id}",
+                      "response": None, "error": {
+                          "code": "batch_expired", "message": "not run"}}],
+    }
+    client.files.content.side_effect = lambda fid: SimpleNamespace(
+        content="".join(json.dumps(e) + "\n" for e in files[fid]).encode())
+    fake = types.ModuleType("openai")
+    fake.OpenAI = MagicMock(return_value=client)
+    monkeypatch.setitem(sys.modules, "openai", fake)
+    monkeypatch.setattr(rc, "batch_check_and_collect",
+                        llm_batch.batch_check_and_collect)
+
+    assert rc._collect_recent_context_batches() == {
+        "collected": 1, "abandoned": 0}
+
+    log = APICostLog.query.one()
+    assert (log.user_id, log.model_id) == (done.id, OPENAI_MODEL)
+    # 1000 in x $10 + 100 out x $50 = 15000 microdollars, halved for batch.
+    assert log.cost_microdollars == 7500
+    assert _shown_summary(done).endswith("FINISHED SUMMARY")
+    assert _shown_summary(late) is None
+    _db.session.expire_all()
+    outcomes = {i["user_id"]: (i["outcome"], i["billed"])
+                for i in RecentContextBatchJob.query.one().items}
+    assert outcomes == {done.id: ("saved", True), late.id: ("failed", False)}
+
+
 def test_an_empty_cut_off_result_is_billed_refused_and_backs_off(
         app, rc, world, monkeypatch):
     from backend.utils.refusal_backoff import REFUSED_REF

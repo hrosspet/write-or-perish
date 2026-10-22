@@ -282,6 +282,16 @@ def account_failure_kind(exc, model_call=True):
     return None
 
 
+def account_failure_kind_of_error(provider, status, error):
+    """account_failure_kind for an error that arrives as data rather than
+    as an exception: a batch request's error object ({type, code,
+    message, details}) and its HTTP status (None when there is none)."""
+    error = error if isinstance(error, dict) else {}
+    if provider == "anthropic":
+        return _anthropic_account_kind(status, error, model_call=True)
+    return _openai_account_kind(status, error.get("code"), error.get("type"))
+
+
 def provider_error_detail(exc):
     """What the provider said, for the admin alert: HTTP status, error
     type and code, message, request id. Account errors carry no user
@@ -528,7 +538,7 @@ def _keepalive_socket_options():
     return options
 
 
-def model_input_cap(model_cfg, max_output_tokens=None):
+def model_input_cap(model_cfg, max_output_tokens=None, price_tier=True):
     """Input tokens one prompt may carry on this model — the tightest of:
 
     - the context window minus the output reserve (both labs count input
@@ -539,12 +549,16 @@ def model_input_cap(model_cfg, max_output_tokens=None):
     - ``long_context_threshold``, the pricing tier above which the whole
       request is repriced (OpenAI: 272k input → ×2 input, ×1.5 output).
       The profile pipeline never plans a prompt across it (#259).
+      ``price_tier=False`` leaves it out, for a job that reads the whole
+      archive in one call (intentions).
     """
     cfg = model_cfg or {}
     out = min(max_output_tokens or DEFAULT_MAX_OUTPUT_TOKENS,
               cfg.get("max_output_tokens", DEFAULT_MAX_OUTPUT_TOKENS))
     cap = cfg.get("context_window", 200_000) - out
-    for key in ("max_input_tokens", "long_context_threshold"):
+    keys = ("max_input_tokens", "long_context_threshold") if price_tier \
+        else ("max_input_tokens",)
+    for key in keys:
         value = cfg.get(key)
         if value:
             cap = min(cap, int(value))
