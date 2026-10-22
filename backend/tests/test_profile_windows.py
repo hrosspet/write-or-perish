@@ -1192,39 +1192,133 @@ def test_a_set_in_flight_after_an_edit_on_its_final_sends_nothing_more(
 
 
 # ── 13. spend ─────────────────────────────────────────────────────────────
+# Peter, 2026-10-22: "send it and let the cap stop it halfway. It will
+# self-heal the following month". The estimate is logged, never a gate; the
+# per-user cap holds the next submission once the user is over the limit.
 
-def test_a_build_over_the_headroom_is_held(world):
+def _block_email(monkeypatch):
+    import backend.utils.email as em
+    sent = MagicMock()
+    monkeypatch.setattr(em, "send_user_spend_block_email", sent)
+    return sent
+
+
+def _spend(user, usd, created_at=None):
+    row = APICostLog(user_id=user.id, model_id="claude-haiku-5.5",
+                     request_type="profile_batch", input_tokens=1,
+                     output_tokens=1,
+                     cost_microdollars=int(round(usd * 1_000_000)))
+    if created_at is not None:
+        row.created_at = created_at
+    db.session.add(row)
+    db.session.commit()
+
+
+def _last_month():
+    from backend.utils.spend import month_start
+    return month_start() - timedelta(days=1)
+
+
+def test_a_build_over_the_headroom_goes_out(world, monkeypatch):
+    estimates = []
+    real = pw.estimate_cost_usd
+    monkeypatch.setattr(pw, "estimate_cost_usd", lambda *a, **k: (
+        estimates.append(real(*a, **k)) or estimates[-1]))
     world.corpus = _windows_corpus(10)
     u = _user(profile_needs_full_regen=True, monthly_spend_limit_usd=0.01)
     _advance(u)
     db.session.refresh(u)
-    assert world.provider.submits == []
-    assert u.profile_cap_held is True
-    assert u.profile_seed_error.startswith(pw.HOLD_NOTE)
-    assert u.profile_batch_pending is False
-
-
-def test_a_build_under_the_headroom_goes_out(world):
-    world.corpus = _windows_corpus(3)
-    u = _user(profile_needs_full_regen=True, monthly_spend_limit_usd=100)
-    _advance(u)
+    assert estimates and estimates[0] > 0.01     # over the headroom
     assert len(world.provider.submits) == 1
+    assert all("_w" in r["custom_id"] for r in world.provider.requests())
+    assert u.profile_cap_held is False
+    assert u.profile_seed_error is None
 
 
-def test_a_cap_reached_between_windows_and_final_holds_the_final(world):
+def test_a_final_over_the_headroom_under_the_cap_goes_out(world):
     u = _user(monthly_spend_limit_usd=1)
     rows = _set_of(u, 5)
     _corpus_for(world, rows)
-    db.session.add(APICostLog(user_id=u.id, model_id="claude-haiku-5.5",
-                              request_type="profile_batch",
-                              input_tokens=1, output_tokens=1,
-                              cost_microdollars=999_000))
-    db.session.commit()
+    _spend(u, 0.999)                  # under the cap, short of the final
     _advance(u)
+    assert len(_merge_reqs(world)) == 1
+    db.session.refresh(u)
+    assert u.profile_cap_held is False
+
+
+def test_a_cap_reached_between_windows_and_final_holds_the_final(
+        world, monkeypatch):
+    _block_email(monkeypatch)
+    u = _user(monthly_spend_limit_usd=1)
+    rows = _set_of(u, 5)
+    _corpus_for(world, rows)
+    _spend(u, 1.0)
+    assert _advance(u) == "held"
     assert world.provider.submits == []
     db.session.refresh(u)
     assert u.profile_cap_held is True
-    assert u.profile_seed_error.startswith(pw.HOLD_NOTE)
+    assert u.profile_seed_error is None          # no note of its own
+    assert u.profile_batch_pending is False
+
+
+@pytest.mark.parametrize("lift", ["next_month", "raised_limit"])
+def test_a_build_held_at_the_cap_resumes_when_the_cap_lifts(
+        app, world, monkeypatch, lift):
+    """Windows collected and the user over the cap: the groups and the
+    final are held. Once the month turns (or the admin raises the limit)
+    the hourly seeder resumes the set from its saved windows, and the
+    final is saved."""
+    from backend.utils.spend import current_month, reconcile_user_spend_block
+    _block_email(monkeypatch)
+    app.config["PROFILE_MERGE_GROUP_SIZE"] = 2
+    world.corpus = _windows_corpus(4)
+    u = _user(profile_needs_full_regen=True, monthly_spend_limit_usd=1)
+    _advance(u)
+    windows_sent = [r["custom_id"] for r in world.provider.requests()]
+    assert len(windows_sent) >= 3
+    assert all("_w" in c for c in windows_sent)
+    _poll()                                      # the windows are saved
+    assert len(_rows(u, "window")) == len(windows_sent)
+    _spend(u, 1.0)                               # the cap is reached
+    n = len(world.provider.submits)
+
+    assert _advance(u) == "held"                 # the poller's advance
+    assert len(world.provider.submits) == n
+    u = db.session.get(User, u.id)
+    assert u.profile_cap_held is True
+    assert u.profile_batch_pending is False
+    dispatches = pw.advance_profile_windows.apply_async.call_count
+    assert pb._seed_profile_batches() == 0       # hourly pass, still capped
+    assert len(world.provider.submits) == n
+    assert pw.advance_profile_windows.apply_async.call_count == dispatches
+    assert db.session.get(User, u.id).profile_cap_held is True
+
+    u = db.session.get(User, u.id)
+    if lift == "next_month":
+        APICostLog.query.filter_by(user_id=u.id).update(
+            {"created_at": _last_month()})
+        u.spend_blocked_month = current_month(_last_month())
+    else:
+        u.monthly_spend_limit_usd = 100.0
+        assert reconcile_user_spend_block(u, app.config)["blocked"] is False
+    db.session.commit()
+
+    pb._seed_profile_batches()                   # hourly pass
+    assert (pw.advance_profile_windows.apply_async.call_count
+            == dispatches + 1)
+    u = db.session.get(User, u.id)
+    assert pw.advance(u.id, u.profile_generation_task_id) == "submitted"
+    resumed = [r["custom_id"] for r in world.provider.requests()]
+    assert len(world.provider.submits) == n + 1
+    assert resumed and not any("_w" in c for c in resumed)
+    assert any("_g" in c for c in resumed)       # windows are not re-read
+    assert db.session.get(User, u.id).profile_cap_held is False
+    _poll()
+    _finish(world, u)
+    finals = [f for f in _rows(u, "integration") if f.window_set]
+    assert len(finals) == 1
+    assert len(_rows(u, "window")) == len(windows_sent)
+    assert pw._visible_profile(u.id).id == finals[0].id   # the profile
 
 
 # ── 14. R7, R11 ───────────────────────────────────────────────────────────
