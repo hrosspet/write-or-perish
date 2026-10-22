@@ -69,7 +69,11 @@ def _newest_readable(model, user_id, *criteria):
 def _derived_context(user):
     """The newest AI-readable profile, recent context and intentions."""
     parts = []
-    profile = _newest_readable(UserProfile, user.id)
+    # The user's current profile, never a large build's window or group
+    # (#545): one window's version covers one period only.
+    from backend.utils.profile_versions import current_profile_query
+    profile = current_profile_query(user.id).filter(
+        UserProfile.ai_usage.in_(AI_ALLOWED)).first()
     if profile:
         parts.append("## User profile\n\n" + profile.get_content())
     recent = _newest_readable(UserRecentContext, user.id)

@@ -613,6 +613,11 @@ def test_windows_are_hidden_while_the_build_runs(world):
     assert get_latest_profile(u)["id"] == old.id
     from backend.routes.export_data import _latest_profile_snapshot
     assert _latest_profile_snapshot(u)["id"] == old.id
+    # Poll drafts' derived context (review of #589, finding 2).
+    from backend.tasks import poll_draft
+    context = poll_draft._derived_context(u)
+    assert "Synthetic surface old." in context
+    assert "EVENTS IN THIS WINDOW" not in context
     assert current_profile_version(u.id) == before
     assert [p.id for p in visible_profiles_query(u.id)] == [old.id]
 
