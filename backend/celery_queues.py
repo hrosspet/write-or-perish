@@ -76,6 +76,9 @@ TASK_QUEUES = {
     "backend.tasks.profile_batch.seed_profile_batches": _B,
     "backend.tasks.profile_batch.seed_profile_batch_for_user": _B,
     "backend.tasks.profile_batch.poll_profile_batches": _B,
+    # A large build's window set (#545): renders and submits its windows,
+    # groups and final; minutes for a few hundred windows.
+    "backend.tasks.profile_windows.advance_profile_windows": _B,
     "backend.tasks.recent_context.check_pending_recent_context_updates": _B,
     "backend.tasks.recent_context.collect_recent_context_batches": _B,
     "backend.tasks.recent_context.generate_recent_context": _B,

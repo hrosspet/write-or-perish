@@ -75,6 +75,7 @@ def test_the_work_users_wait_for_is_interactive():
         assert cq.TASK_QUEUES["backend.tasks." + name] == cq.INTERACTIVE_QUEUE
     for name in ("exports.update_user_profile",
                  "profile_batch.poll_profile_batches",
+                 "profile_windows.advance_profile_windows",
                  "chat_imports.import_conversations",
                  "imports.refresh_community_archive_snapshot",
                  "external_digest.sweep_external_digests"):
