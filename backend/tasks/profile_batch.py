@@ -173,36 +173,60 @@ def _held_users(flag, exclude_ids):
     ).all() if u.id not in exclude_ids]
 
 
-# ── work waiting for a full provider queue (Peter, 2026-11-03) ──────────
+# ── batch profile work waiting for a later pass (Peter, 2026-11-03) ─────
 # The hourly seeder's cohort leaves out accounts not yet activated (the
-# pre-filled Beta cohort), so profile work a full queue sent back would
-# wait there until activation. As for the spend cap's hold: remember it,
-# and the hourly seeder sends it again for such accounts too.
+# pre-filled Beta cohort), so profile work that waits for a later pass
+# would wait there until activation: work a full queue sent back, a step
+# or final waiting out a refusal backoff, a window stopped for a day
+# after provider failures, a failed step re-seeded next cycle. As for
+# the spend cap's hold: remember it, and the hourly seeder sends it again
+# for such accounts too, after the same gates (backoff, stops, attempt
+# limits), which this hold leaves exactly as they are.
 
-def _hold_for_queue(user_ids):
-    """Remember that a full provider queue sent these users' batch profile
-    work back (a refused submit, or a batch failed on the queue limit)."""
+def _hold_work(user_ids):
+    """Remember that these users' batch profile work waits for a later
+    pass (a full queue, a failed or refused step, a refused merge)."""
     changed = False
     for user_id in set(user_ids):
         u = User.query.get(user_id)
-        if u is not None and not u.profile_queue_held:
-            u.profile_queue_held = True
+        if u is not None and not u.profile_work_held:
+            u.profile_work_held = True
             changed = True
     if changed:
         db.session.commit()
 
 
-def _release_queue_hold(user):
-    if user.profile_queue_held:
-        user.profile_queue_held = False
-        db.session.commit()
+def _release_work_hold(user, done=False):
+    """Release the hold: ``done`` when the work went out; otherwise only
+    when nothing waits for time to pass (``_work_waits``): a gate that is
+    closed for the backoff hour or a window's provider stop is not
+    "nothing left to do"."""
+    if not user.profile_work_held:
+        return
+    if not done and _work_waits(user):
+        return
+    user.profile_work_held = False
+    db.session.commit()
 
 
-def _queue_held_users(exclude_ids):
-    """Users whose batch profile work waits for a full queue, outside the
+def _work_waits(user):
+    """Whether the user's batch profile work waits for time to pass: the
+    refusal backoff's hour after a first refused output, or a window of
+    the user's set stopped for a day after provider failures. A refusal
+    stop that only a new version lifts is not waiting: the build gave up
+    (the admin column and Sentry show it), and the hold goes."""
+    n, until, _stopped = refusal_backoff.profile_backoff_state(user.id)
+    if n and until is not None and until > datetime.utcnow():
+        return True
+    from backend.tasks import profile_windows
+    return profile_windows.provider_stop_waits(user)
+
+
+def _work_held_users(exclude_ids):
+    """Users whose batch profile work waits for a later pass, outside the
     hourly cohort, by the cap hold's rule: not deleted, and approved or
     never deactivated (a deactivated account stays paused)."""
-    return _held_users(User.profile_queue_held, exclude_ids)
+    return _held_users(User.profile_work_held, exclude_ids)
 
 
 def _model_for(user):
@@ -788,11 +812,10 @@ def _submit_requests(built, keys):
             # wait), so a refusal that lasts (a spend limit) does not have
             # the whole set rendered again every hour. Nothing to poll, and
             # no collected_at: it does not re-dispatch the advance at once.
-            if waiting:
-                # Sent again by the hourly seeder, also for an account not
-                # yet activated (its cohort leaves those out).
-                _hold_for_queue(i["user_id"] for i in items
-                                if i.get("kind") != "intentions")
+            # Re-seeded next cycle: by the hourly seeder, also for an
+            # account not yet activated (its cohort leaves those out).
+            _hold_work(i["user_id"] for i in items
+                       if i.get("kind") != "intentions")
             set_items = [dict(i, outcome="missing") for i in items
                          if i.get("kind") in SET_ITEM_KINDS]
             if set_items and not waiting:
@@ -809,7 +832,7 @@ def _submit_requests(built, keys):
             if u:
                 u.profile_batch_pending = True
                 u.profile_cap_held = False
-                u.profile_queue_held = False
+                u.profile_work_held = False
         db.session.commit()
         submitted += len(items)
         logger.info(f"Profile batch {batch_id} ({provider_key}): "
@@ -869,6 +892,8 @@ def _fail_job(job, reason):
         if u:
             u.profile_batch_pending = False
             u.profile_batch_attempts = (u.profile_batch_attempts or 0) + 1
+            if item.get("kind") != "intentions":
+                u.profile_work_held = True   # re-seeded next cycle
     db.session.commit()
     logger.warning(f"Profile batch {job.batch_id} failed ({reason})")
     _advance_users(advance_users)
@@ -963,9 +988,9 @@ def _seed_profile_batches(users=None, ignore_backoff=False):
         # lifts: a pre-filled account not yet activated is outside the
         # eligible cohort, and its build started from an immediate seed.
         users += _cap_held_users({u.id for u in users})
-        # Plus the work a full provider queue sent back, by the same rule
-        # (Peter, 2026-11-03).
-        users += _queue_held_users({u.id for u in users})
+        # Plus the profile work waiting for a later pass (a full queue, a
+        # refusal backoff, a stop), by the same rule (Peter, 2026-11-03).
+        users += _work_held_users({u.id for u in users})
     for user in users:
         if user.profile_batch_pending:
             continue
@@ -992,7 +1017,7 @@ def _seed_profile_batches(users=None, ignore_backoff=False):
             continue
         if not _should_seed(user, ignore_backoff=ignore_backoff):
             _release_cap_hold(user)   # nothing (left) to resume
-            _release_queue_hold(user)
+            _release_work_hold(user)
             continue
         try:
             # A build that plans into two or more chunks, or the next step
@@ -1026,7 +1051,7 @@ def _seed_profile_batches(users=None, ignore_backoff=False):
             _hold_for_cap(user)   # the builder's own check blocked them
         else:
             _release_cap_hold(user)
-            _release_queue_hold(user)
+            _release_work_hold(user)
     return _submit_requests(built, keys)
 
 
@@ -1185,13 +1210,14 @@ def _poll_profile_batches():
                 # (the hold brings in an account not yet activated). No
                 # batch attempt, so no full-price fallback.
                 user.profile_batch_pending = False
-                user.profile_queue_held = True
+                user.profile_work_held = True
                 db.session.commit()
                 continue
             if result is None:
                 user.profile_batch_attempts = (
                     user.profile_batch_attempts or 0) + 1
                 user.profile_batch_pending = False
+                user.profile_work_held = True   # re-seeded next cycle
                 db.session.commit()
                 logger.warning(
                     f"Batch item failed for user {user.id} "
@@ -1207,9 +1233,12 @@ def _poll_profile_batches():
                 # Counts as a failed attempt like a provider-side error:
                 # the step produced nothing, retries stay bounded, and
                 # the progress endpoint reports the chain as failed.
+                # Re-seeded after the refusal backoff, also for an account
+                # not yet activated.
                 user.profile_batch_attempts = (
                     user.profile_batch_attempts or 0) + 1
                 user.profile_batch_pending = False
+                user.profile_work_held = True
                 db.session.commit()
                 continue
             if nxt:
@@ -1255,7 +1284,7 @@ def _poll_profile_batches():
                 if u is not None:
                     u.profile_batch_pending = bool(
                         profile_windows.inflight_items(user_id))
-                    u.profile_queue_held = True
+                    u.profile_work_held = True
             db.session.commit()
         _advance_users(advance_users)
 

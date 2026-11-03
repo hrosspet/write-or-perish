@@ -178,7 +178,7 @@ class User(db.Model, UserMixin):
     # provider's batch queue was full (a refused submit, or an OpenAI batch
     # failed on its enqueued-token limit). The hourly seeder sends it again,
     # also for a pre-filled account not yet activated, as for the cap hold.
-    profile_queue_held = db.Column(
+    profile_work_held = db.Column(
         db.Boolean, nullable=False, default=False,
         server_default=db.text("false"))
     # Measured billed input tokens per stored content unit (Node.token_count)

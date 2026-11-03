@@ -1298,7 +1298,7 @@ def advance(user_id, task_id):
             db.session.commit()
             if outcome == "idle":
                 # Nothing of the set is due: no queue-full work waits.
-                _batch._release_queue_hold(user)
+                _batch._release_work_hold(user)
             if outcome not in ("off", "error", "held") and (
                     redispatch or _collected_since(user_id, started)):
                 dispatch_advance(user)
@@ -1550,10 +1550,35 @@ def collect(job, items, results, queue_full=False):
                 outcome = "error"
             outcomes[item["custom_id"]] = outcome
         _report_notes(user, notes)
+        if any(outcomes.get(i["custom_id"]) in WAITING_OUTCOMES
+               for i in user_items):
+            # Something of the set waits for a later pass (a retry, the
+            # refusal backoff, a provider stop): the hourly seeder sends
+            # it again also for an account not yet activated.
+            _batch._hold_work([user_id])
     job.items = [dict(i, outcome=outcomes[i["custom_id"]])
                  if i.get("custom_id") in outcomes else i
                  for i in job.items or []]
     return users
+
+
+# Outcomes that leave work of the set for a later pass (a refused merge
+# is "refused" too).
+WAITING_OUTCOMES = CONTENT_FAILURES + PROVIDER_FAILURES
+
+
+def provider_stop_waits(user):
+    """Whether a window of the user's set waits out a provider stop (a day
+    after three failed submissions, ``provider_stop_until``). Reads
+    metadata only."""
+    if not enabled():
+        return False
+    try:
+        set_id, base, _fresh = resolve_set(user)
+        return bool(set_state(user, set_id, base).stopped)
+    except Exception:  # pragma: no cover — a hold is never worth a crash
+        logger.exception("User %s: reading the set's stops failed", user.id)
+        return False
 
 
 def _report_notes(user, notes):

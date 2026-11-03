@@ -1060,7 +1060,7 @@ def _prefill_not_activated(**kw):
 def test_an_unactivated_prefill_sent_back_by_a_full_queue_is_resent_hourly(
         app, monkeypatch):
     """Peter, 2026-11-03 ("yes, implement it pls"): work a full queue sent
-    back is remembered (profile_queue_held), and the hourly seeder sends it
+    back is remembered (profile_work_held), and the hourly seeder sends it
     again also for a pre-fill not yet activated, which its cohort leaves
     out. A successful submit clears the mark."""
     from backend.utils.llm_batch import SubmittedBatches
@@ -1081,7 +1081,7 @@ def test_an_unactivated_prefill_sent_back_by_a_full_queue_is_resent_hourly(
     monkeypatch.setattr(pb, "batch_submit", full)
     assert pb._seed_profile_batches(users=[u]) == 0      # the immediate seed
     user = User.query.get(u.id)
-    assert user.profile_queue_held is True
+    assert user.profile_work_held is True
     assert (user.profile_batch_attempts or 0) == 0
     sent = []
     monkeypatch.setattr(pb, "batch_submit", lambda reqs, keys, kind: (
@@ -1090,7 +1090,7 @@ def test_an_unactivated_prefill_sent_back_by_a_full_queue_is_resent_hourly(
     assert [r["custom_id"] for r in sent[0]["anthropic"]][0].startswith(
         f"profile_{u.id}_")
     user = User.query.get(u.id)
-    assert user.profile_queue_held is False and user.profile_batch_pending
+    assert user.profile_work_held is False and user.profile_batch_pending
 
 
 def test_a_deactivated_account_held_for_the_queue_stays_paused(
@@ -1098,7 +1098,7 @@ def test_a_deactivated_account_held_for_the_queue_stays_paused(
     """Deactivation is the admin's pause switch: a deactivated account
     whose work a full queue sent back is not sent again."""
     app.config["PROFILE_USE_BATCH"] = True
-    u = _prefill_not_activated(profile_queue_held=True)
+    u = _prefill_not_activated(profile_work_held=True)
     u.deactivated_at = datetime.utcnow()
     db.session.commit()
     sent = []
@@ -1106,17 +1106,17 @@ def test_a_deactivated_account_held_for_the_queue_stays_paused(
         sent.append(reqs) or {k: f"b-{k}" for k in reqs}))
     pb._seed_profile_batches()
     assert sent == []
-    assert User.query.get(u.id).profile_queue_held is True
+    assert User.query.get(u.id).profile_work_held is True
 
 
 def test_a_queue_hold_with_nothing_left_to_do_is_released(app, monkeypatch):
     app.config["PROFILE_USE_BATCH"] = True
-    u = _prefill_not_activated(profile_queue_held=True)
+    u = _prefill_not_activated(profile_work_held=True)
     u.profile_needs_full_regen = False
     db.session.commit()
     monkeypatch.setattr(pb, "_should_seed", lambda user, **k: False)
     pb._seed_profile_batches()
-    assert User.query.get(u.id).profile_queue_held is False
+    assert User.query.get(u.id).profile_work_held is False
 
 
 def test_a_submit_refused_on_a_full_queue_alone_is_a_failed_attempt(
@@ -1183,8 +1183,40 @@ def test_a_batch_failed_on_a_full_queue_is_not_a_batch_attempt(
     user = User.query.get(u.id)
     assert user.profile_batch_attempts == pb.MAX_BATCH_ATTEMPTS - 1
     assert user.profile_batch_pending is False
+    assert user.profile_work_held is True      # sent again by the seeder
     assert ProfileBatchJob.query.get(job.id).status == "failed"
     assert UserProfile.query.filter_by(user_id=u.id).count() == 1
+
+
+def test_a_refused_chained_step_is_held_for_the_seeder(app, monkeypatch):
+    """Peter, 2026-11-03 ("yes pls"): a refused step waits out the refusal
+    backoff and is re-seeded after it, by the hourly seeder, also for an
+    account not yet activated: the account is held. The backoff and the
+    attempt count are unchanged."""
+    u = _user()
+    prev = _prev_profile(u, datetime(2026, 5, 1))
+    job, item = _chunk_job(u, prev)
+    monkeypatch.setattr(pb, "batch_check_and_collect", lambda bids, keys: (
+        {item["custom_id"]: {"content": "", "input_tokens": 100,
+                             "output_tokens": 32000, "truncated": True}},
+        {}, {}))
+    pb._poll_profile_batches()
+    user = User.query.get(u.id)
+    assert user.profile_batch_attempts == 1
+    assert user.profile_work_held is True
+    from backend.utils import refusal_backoff
+    assert refusal_backoff.profile_in_backoff(u.id)
+
+
+def test_the_seeder_releases_a_hold_when_the_builder_has_nothing(
+        app, monkeypatch):
+    app.config["PROFILE_USE_BATCH"] = True
+    u = _prefill_not_activated(profile_work_held=True)
+    monkeypatch.setattr(pb, "_should_seed", lambda user, **k: True)
+    monkeypatch.setattr(pb, "_build_next_profile_request",
+                        lambda user, **k: None)
+    pb._seed_profile_batches()
+    assert User.query.get(u.id).profile_work_held is False
 
 
 def _queue_full_except(pending_batch_id):

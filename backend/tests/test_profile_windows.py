@@ -1996,7 +1996,7 @@ def test_an_unactivated_prefills_window_sent_back_by_a_full_queue_is_resent(
         app, world, monkeypatch):
     """Peter, 2026-11-03 ("yes, implement it pls"): a pre-filled account
     not yet activated is outside the hourly cohort; a window batch a full
-    queue sent back marks it (profile_queue_held), the hourly seeder
+    queue sent back marks it (profile_work_held), the hourly seeder
     dispatches its advance, and the successful submit clears the mark."""
     world.corpus = Corpus(50)
     u = _one_chunk_user(app, profile_force_batch=True,
@@ -2010,7 +2010,7 @@ def test_an_unactivated_prefills_window_sent_back_by_a_full_queue_is_resent(
     _advance(u)
     _poll()
     db.session.refresh(u)
-    assert u.profile_queue_held is True and not u.profile_batch_pending
+    assert u.profile_work_held is True and not u.profile_batch_pending
     other.status = "collected"
     db.session.commit()
     pw.advance_profile_windows.apply_async.reset_mock()
@@ -2019,9 +2019,138 @@ def test_an_unactivated_prefills_window_sent_back_by_a_full_queue_is_resent(
     assert [c.args[0] for c in calls] == [(u.id,)]
     pw.advance(u.id, calls[0].kwargs["task_id"])         # the task it sent
     db.session.refresh(u)
-    assert u.profile_queue_held is False and u.profile_batch_pending
+    assert u.profile_work_held is False and u.profile_batch_pending
     assert [r["api_model"] for r in world.provider.requests()] == [
         "gpt-6-luna"]
+
+
+def _unactivated_prefill(app):
+    u = _one_chunk_user(app, profile_force_batch=True,
+                        prefilled_handle="someone")
+    u.approved = False
+    db.session.commit()
+    return u
+
+
+def _respond_final_with(world, final_text):
+    """Windows answer with a good version; a final with
+    ``final_text(custom_id)`` (the fake provider answers every request it
+    has seen on each poll, so the answer depends on the attempt's id)."""
+    def respond(cid, req):
+        content = (_good(tag=cid) if "_w" in cid else final_text(cid))
+        return {"content": content, "input_tokens": 1000,
+                "output_tokens": 500, "batch": True}
+    world.provider.respond = respond
+
+
+def _hour_later():
+    """The refusal backoff's hour has passed: the cost rows are moved two
+    hours back, and the saved versions three, so the refusals still count
+    as a streak after the last saved version."""
+    for row in APICostLog.query.all():
+        row.created_at = row.created_at - timedelta(hours=2)
+    for row in UserProfile.query.all():
+        row.created_at = row.created_at - timedelta(hours=3)
+    db.session.commit()
+
+
+def _hourly_seed_dispatches(u):
+    pw.advance_profile_windows.apply_async.reset_mock()
+    pb._seed_profile_batches()
+    calls = pw.advance_profile_windows.apply_async.call_args_list
+    return [c for c in calls if c.args[0] == (u.id,)]
+
+
+def test_an_unactivated_prefills_refused_final_is_retried_after_the_backoff(
+        app, world):
+    """Peter, 2026-11-03 ("yes pls"), the reviewer's case: the refused
+    final waits out the backoff hour, and then the hourly seeder (whose
+    cohort leaves the account out) sends it again because the account is
+    held. The backoff itself is unchanged."""
+    world.corpus = Corpus(50)
+    u = _unactivated_prefill(app)
+    _respond_final_with(world, lambda cid: _good(
+        events=cid.endswith("_f_1"), tag=cid))   # the first one refused
+    _advance(u)
+    _poll()                                       # the window
+    _advance(u)
+    _poll()                                       # the final, refused
+    assert _items("final")[0]["outcome"] == "refused"
+    _advance(u)                                   # the advance it dispatched
+    db.session.refresh(u)
+    assert u.profile_work_held is True and not _finals(u)
+    assert _hourly_seed_dispatches(u) == []       # within the backoff hour
+    _hour_later()
+    calls = _hourly_seed_dispatches(u)
+    assert len(calls) == 1
+    pw.advance(u.id, calls[0].kwargs["task_id"])  # the final goes out again
+    _poll()
+    db.session.refresh(u)
+    assert len(_finals(u)) == 1 and u.profile_work_held is False
+
+
+def test_an_unactivated_prefills_failed_window_is_resent_by_the_seeder(
+        app, world):
+    """A window of an unactivated prefill that failed (the advance that
+    would resend it at once may be lost): the account is held, and the
+    hourly seeder dispatches its advance."""
+    world.corpus = Corpus(50)
+    u = _unactivated_prefill(app)
+    world.provider.respond = lambda cid, req: {
+        "content": "I can't help with that.", "input_tokens": 1000,
+        "output_tokens": 20, "batch": True}
+    _advance(u)
+    _poll()
+    assert _items("window")[0]["outcome"] == "invalid"
+    db.session.refresh(u)
+    assert u.profile_work_held is True
+    assert len(_hourly_seed_dispatches(u)) == 1
+
+
+def test_a_deactivated_account_with_held_work_stays_paused(app, world):
+    world.corpus = Corpus(50)
+    u = _unactivated_prefill(app)
+    u.profile_work_held = True
+    u.deactivated_at = datetime.utcnow()
+    db.session.commit()
+    assert _hourly_seed_dispatches(u) == []
+
+
+def test_giving_up_after_the_refusal_limit_releases_the_hold(app, world):
+    """A final refused twice in a row stops (the refusal rule, unchanged):
+    nothing waits any more, the hold goes, and the stop shows."""
+    world.corpus = Corpus(50)
+    u = _unactivated_prefill(app)
+    _respond_final_with(world, lambda cid: _good(events=True, tag=cid))
+    _advance(u)
+    _poll()
+    _advance(u)
+    _poll()                                       # refused once
+    _advance(u)
+    db.session.refresh(u)
+    assert u.profile_work_held is True
+    _hour_later()
+    calls = _hourly_seed_dispatches(u)
+    pw.advance(u.id, calls[0].kwargs["task_id"])
+    _poll()                                       # refused again: stopped
+    _advance(u)
+    db.session.refresh(u)
+    assert u.profile_seed_error.startswith("Stopped")
+    assert u.profile_work_held is False
+    assert _hourly_seed_dispatches(u) == []
+
+
+def test_a_held_set_with_nothing_due_is_released_by_its_advance(
+        app, world):
+    world.corpus = Corpus(50)
+    u = _one_chunk_user(app)
+    _finish(world, u)
+    assert len(_finals(u)) == 1
+    u.profile_work_held = True
+    db.session.commit()
+    assert _advance(u) == "idle"
+    db.session.refresh(u)
+    assert u.profile_work_held is False
 
 
 def test_a_window_batch_over_the_limit_by_itself_stops_and_shows(
