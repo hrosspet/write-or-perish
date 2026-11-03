@@ -205,6 +205,8 @@ def world(app, monkeypatch):
                         lambda *a, **k: w.provider.submit(*a, **k))
     monkeypatch.setattr(pb, "batch_check_and_collect",
                         lambda *a, **k: w.provider.collect(*a, **k))
+    # The poller's listing shows nothing: each job is polled on its own.
+    monkeypatch.setattr(pb, "list_batches", lambda *a, **k: {})
     # The continue rule on the synthetic corpus: rows after the cutoff
     # that existed when the window was rendered.
     monkeypatch.setattr(pw, "_unread_before", lambda user, cutoff, boundary: (
@@ -1840,6 +1842,64 @@ def test_a_one_window_build_whose_window_is_given_up_sends_no_final(
     db.session.refresh(u)
     assert u.profile_seed_error == pw.NOTHING_READ_NOTE
     assert not pw.set_work_due(u, ex.profile_update_base(u.id))
+
+
+def test_a_window_refused_on_a_full_queue_waits_and_is_never_stopped(
+        app, world, monkeypatch):
+    """The provider refuses the create (its batch queue is full): nothing
+    is recorded against the window, so no number of such refusals stops
+    or skips it; once the queue has room the build goes through."""
+    from backend.utils.llm_batch import SubmittedBatches
+    world.corpus = Corpus(50)
+    u = _one_chunk_user(app)
+
+    def full(*a, **k):
+        out = SubmittedBatches()
+        out.queue_full.update(world.provider.submit(*a, **k))
+        return out
+    monkeypatch.setattr(pb, "batch_submit", full)
+    for _ in range(pb.MAX_BATCH_ATTEMPTS + 2):
+        _advance(u)
+    assert not ProfileBatchJob.query.count()       # no "missing" records
+    assert pw.attempt_history(u.id) == {}
+    db.session.refresh(u)
+    assert u.profile_needs_full_regen and not u.profile_batch_pending
+    assert (u.profile_batch_attempts or 0) == 0
+    monkeypatch.setattr(pb, "batch_submit",
+                        lambda *a, **k: world.provider.submit(*a, **k))
+    _finish(world, u)
+    assert len(_finals(u)) == 1
+
+
+def test_a_window_batch_failed_on_a_full_queue_waits(app, world,
+                                                     monkeypatch):
+    """OpenAI fails the batch on its enqueued-token limit: the items get
+    the outcome "queue_full", which neither stops nor skips the window,
+    and no advance is dispatched at once (the queue is still full)."""
+    from backend.utils.llm_batch import CollectedResults
+    world.corpus = Corpus(50)
+    u = _one_chunk_user(app)
+
+    def full(bids, keys, known=None):
+        out = CollectedResults()
+        out.queue_full.update(bids)
+        return out, {}, {}
+    monkeypatch.setattr(pb, "batch_check_and_collect", full)
+    for _ in range(pw._content_attempts() + 2):
+        _advance(u)
+        pw.advance_profile_windows.apply_async.reset_mock()
+        _poll()
+        pw.advance_profile_windows.apply_async.assert_not_called()
+    jobs = ProfileBatchJob.query.all()
+    assert {j.status for j in jobs} == {"failed"}
+    assert {i["outcome"] for j in jobs for i in j.items} == {"queue_full"}
+    assert not _rows(u, "window_skip")
+    state = pw.set_state(u, pw.resolve_set(u)[0], None)
+    assert state.due and not state.stopped
+    monkeypatch.setattr(pb, "batch_check_and_collect",
+                        lambda *a, **k: world.provider.collect(*a, **k))
+    _finish(world, u)
+    assert len(_finals(u)) == 1
 
 
 def test_progress_labels_for_a_one_window_build(app):

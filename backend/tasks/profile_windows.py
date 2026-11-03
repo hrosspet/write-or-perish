@@ -1493,13 +1493,24 @@ def _notify_prefill_set_complete(user, set_id):
         logger.exception(f"User {user.id}: pre-fill-complete notification failed")
 
 
-def collect(job, items, results):
+def collect(job, items, results, queue_full=False):
     """Save the collected results of a job's window, group and final items
     and write each item's outcome back onto the job ("saved", "missing",
     "error", "refused", "invalid", "truncated", "superseded", "dropped"),
     which is the attempt history the next advance reads. Returns the ids
     of the users whose sets should advance; the poller dispatches them
-    after it commits the job."""
+    after it commits the job.
+
+    ``queue_full``: the batch failed only because the provider's queue was
+    full (Peter, 2026-11-03). Every item gets the outcome "queue_full",
+    which is neither a content nor a provider failure, so nothing is
+    stopped or skipped; nobody is advanced at once (the queue is still
+    full), and the hourly seeder sends the work again."""
+    if queue_full:
+        job.items = [dict(i, outcome="queue_full")
+                     if i.get("kind") in ITEM_KINDS else i
+                     for i in job.items or []]
+        return set()
     outcomes = {}
     users = set()
     by_user = {}

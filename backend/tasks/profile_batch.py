@@ -38,7 +38,7 @@ from backend.utils.privacy import account_allows_ai
 from backend.utils import refusal_backoff
 from backend.utils.llm_batch import (
     BATCH_JOB_MAX_AGE, batch_submit, batch_check_and_collect,
-    apply_batch_key_override)
+    apply_batch_key_override, batch_ended, list_batches)
 # Module reference, not `from ... import names`: exports imports
 # celery_app, which imports this module to register its tasks. When a
 # web request touches backend.tasks.exports FIRST (e.g. POST
@@ -703,25 +703,38 @@ def _submit_requests(built, keys):
                             b["request"].get("endpoint"))
         items_by_key.setdefault(key, []).append(b["meta"])
 
-    # Provider keys refused for an account reason (llm_batch.SubmittedBatches;
-    # a plain dict from a stand-in has none).
+    # Provider keys refused for an account reason, and refused because the
+    # provider's batch queue or rate limit is full (llm_batch
+    # .SubmittedBatches; a plain dict from a stand-in has neither).
     account_refused = getattr(batch_ids, "account_refused", None) or set()
+    queue_full = getattr(batch_ids, "queue_full", None) or set()
     now = datetime.utcnow()
     submitted = 0
     for provider_key, items in items_by_key.items():
         batch_id = batch_ids.get(provider_key)
         if not batch_id:
             refused = provider_key in account_refused
+            # A full provider queue (Peter, 2026-11-03: "as many accounts
+            # in the queue as the provider allows"): the items wait for
+            # the next seed or advance pass. No batch attempt (which would
+            # move an unpinned user to the full-price path after
+            # MAX_BATCH_ATTEMPTS), no refusal backoff, and no "missing"
+            # outcome for a window set's items (which would stop a window
+            # for a day after three).
+            waiting = provider_key in queue_full
             logger.warning(
                 f"Batch submit failed for {provider_key}; "
                 f"{len(items)} item(s) not in flight"
                 + ("; refused for an account reason (reported), "
-                   "not counted as a batch attempt" if refused else ""))
+                   "not counted as a batch attempt" if refused else "")
+                + ("; the provider's batch queue is full, they wait for "
+                   "the next pass (no batch attempt counted)"
+                   if waiting else ""))
             for item in items:
                 u = User.query.get(item["user_id"])
                 if u:
                     u.profile_batch_pending = False
-                    if not refused:
+                    if not (refused or waiting):
                         u.profile_batch_attempts = (
                             (u.profile_batch_attempts or 0) + 1)
             # A window set's items (#545) that never went out are recorded
@@ -732,7 +745,7 @@ def _submit_requests(built, keys):
             # no collected_at: it does not re-dispatch the advance at once.
             set_items = [dict(i, outcome="missing") for i in items
                          if i.get("kind") in SET_ITEM_KINDS]
-            if set_items:
+            if set_items and not waiting:
                 db.session.add(ProfileBatchJob(
                     provider_key=provider_key, batch_id="unsubmitted",
                     status="failed", items=set_items, submitted_at=now))
@@ -998,18 +1011,42 @@ def _poll_profile_batches():
     keys = apply_batch_key_override(
         get_api_keys_for_usage(config, 'chat'), config)
     next_built = []
-    for job in ProfileBatchJob.query.filter_by(status="pending").all():
+    jobs = ProfileBatchJob.query.filter_by(status="pending").all()
+    now = datetime.utcnow()
+    live = [j for j in jobs if now - j.submitted_at <= BATCH_STALE_AFTER]
+    # Every pending job's status from the providers' list endpoints, many
+    # per call (Peter, 2026-11-03: "I just don't want to spam them with
+    # querying for results thousands of times per minute"); a job the
+    # listing does not show is polled on its own, as before.
+    listed = list_batches(
+        [(j.provider_key, j.batch_id) for j in live], keys,
+        oldest=min((j.submitted_at for j in live), default=None)) \
+        if live else {}
+    for job in jobs:
         if datetime.utcnow() - job.submitted_at > BATCH_STALE_AFTER:
             _fail_job(job, "stale")
             continue
+        batch = listed.get(job.batch_id)
         try:
-            results, still_pending, _ = batch_check_and_collect(
-                {job.provider_key: job.batch_id}, keys)
+            if batch is None:
+                results, still_pending, _ = batch_check_and_collect(
+                    {job.provider_key: job.batch_id}, keys)
+            elif not batch_ended(job.provider_key, batch):
+                continue  # not ended yet, and no call made for it
+            else:
+                results, still_pending, _ = batch_check_and_collect(
+                    {job.provider_key: job.batch_id}, keys,
+                    known={job.batch_id: batch})
         except Exception as e:
             logger.warning(f"Poll failed for batch {job.batch_id}: {e}")
             continue
         if job.provider_key in still_pending:
             continue  # not ended yet
+        # The batch failed only because the provider's queue was full
+        # (OpenAI's enqueued-token limit): its items wait for the next
+        # pass, with no attempt counted (Peter, 2026-11-03).
+        queue_full = job.provider_key in (
+            getattr(results, "queue_full", None) or ())
         # An admin "Cancel batch" may have landed while the provider call
         # above was in flight: re-read the row, and never collect (or
         # overflow-resubmit) a job that is no longer pending.
@@ -1057,6 +1094,12 @@ def _poll_profile_batches():
                     logger.error(f"Apply intentions result failed for user "
                                  f"{user.id}: {e}", exc_info=True)
                 continue
+            if result is None and queue_full:
+                # Nothing ran: the next seed pass builds the step again.
+                # No batch attempt, so no full-price fallback.
+                user.profile_batch_pending = False
+                db.session.commit()
+                continue
             if result is None:
                 user.profile_batch_attempts = (
                     user.profile_batch_attempts or 0) + 1
@@ -1103,8 +1146,14 @@ def _poll_profile_batches():
         advance_users = set()
         if set_items:
             from backend.tasks import profile_windows
-            advance_users = profile_windows.collect(job, set_items, results)
-        job.status = "collected"
+            advance_users = profile_windows.collect(
+                job, set_items, results, queue_full=queue_full)
+        if queue_full:
+            logger.warning(
+                f"Profile batch {job.batch_id} ({job.provider_key}) failed "
+                f"on the provider's full queue: {len(job.items or [])} "
+                f"item(s) wait for the next pass, no attempt counted")
+        job.status = "failed" if queue_full else "collected"
         job.collected_at = datetime.utcnow()
         db.session.commit()
         _advance_users(advance_users)

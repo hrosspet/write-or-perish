@@ -33,6 +33,9 @@ def wired(app, monkeypatch, tmp_path):  # noqa: F811
     monkeypatch.setattr(lb, "batch_submit", lambda by_provider, keys, kind: (
         submitted.append(by_provider) or {"anthropic": f"b-{len(submitted)}"}))
     monkeypatch.setattr(lb, "apply_batch_key_override", lambda keys, cfg: keys)
+    # The poller's listing shows nothing: each job is polled on its own.
+    import backend.tasks.profile_batch as _pb
+    monkeypatch.setattr(_pb, "list_batches", lambda *a, **k: {})
     monkeypatch.setattr(rc, "_count_total_eligible_tokens", lambda uid: 1000)
     # Default: the counted prompt fits the context comfortably.
     import backend.llm_providers as lp
