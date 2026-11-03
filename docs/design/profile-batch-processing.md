@@ -196,6 +196,21 @@ Key properties:
   pending `ProfileBatchJob`s.
 - **Reuses PR #181's rule**: clear `profile_needs_full_regen` after the first
   committed chunk (here, the poller does it instead of the inline loop).
+- **Statuses by listing (2026-11-03).** Before the loop, the poller reads
+  every pending job's status from the providers' list endpoints
+  (`llm_batch.list_batches`: Anthropic `GET /v1/messages/batches`, 1,000 a
+  page, newest first; OpenAI `GET /v1/batches`, 100 a page, every batch of
+  the organisation, matched by id). It pages until every pending batch is
+  found, the pages run out, 50 pages, or the listing has passed the oldest
+  pending job's submission by an hour (only while the batches it sees come
+  newest first; OpenAI documents no order). A job still in progress costs
+  no call of its own; an ended one is collected from the listed object
+  (`batch_check_and_collect(..., known=...)`); a job the listing does not
+  show, or every job when a listing fails, is polled on its own as before.
+  Peter: "I want to have as many accounts in the queue as the provider
+  allows. I just don't want to spam them with querying for results
+  thousands of times per minute." The recent-context, digest and
+  poll-draft collectors still retrieve per job.
 
 ## Accounting
 
@@ -243,6 +258,7 @@ updates. That leaves **essentially all failures transient**:
 | **Stuck `pending`** (no terminal status) | provider | staleness check (mirror `_is_task_stale`): `submitted_at` older than N h → mark failed, clear guard, re-seed. |
 | **Double-collect** (poller crash mid-tick) | infra | idempotent: a chunk whose `source_data_cutoff` already has a child profile is skipped; job flips to `collected` atomically. |
 | **Not selected for batch** (`use_batch(user)` false) | — | the synchronous path (PR #181) runs unchanged — the permanent fallback. |
+| **Provider queue full** (2026-11-03) | a run that fills the provider's batch queue on purpose | wait, never a failure: an Anthropic create refused with a 429 that is not the spend cap, or an OpenAI create refused on the enqueued-token limit (`SubmittedBatches.queue_full`), and an OpenAI batch failed in validation with `token_limit_exceeded` (`CollectedResults.queue_full`). No batch attempt (so no full-price fallback), no refusal backoff, no "missing" outcome for a window set (outcome `queue_full`), no immediate advance; the next seed pass sends the work again. Logged as a warning, no Sentry event. |
 
 **Retry policy:** since failures are transient, the primary mechanism is simply
 **re-seed via batch next cycle**, bounded by `profile_batch_attempts` (≈3) plus
@@ -465,3 +481,58 @@ same advance (`window_hand_off`), so accounts off the batch path use it too.
 flight is not seen by that set (as for a chained build's first chunk). A
 revert from the history during a build is merged into the final as a full
 profile.
+
+### One-chunk builds as one window (2026-11-03)
+
+Code: `profile_windows.wants_window_build` / `one_chunk_windows`,
+`exports.single_integration_messages`,
+`backend/prompts/profile_single_integration.txt`.
+
+**When it applies.** A from-scratch build (no update base: a first build, a
+step of the provisional ladder, a full rebuild) that fits one chunk on the
+user's chat model, where the switch of that model's provider is on:
+`PROFILE_ONE_CHUNK_WINDOW_OPENAI` (default on: GPT-6 Luna, then GPT-6.1 Sol)
+and `PROFILE_ONE_CHUNK_WINDOW_ANTHROPIC` (default off: Haiku 5.5, then Opus
+5.5, is undecided). Peter: "the events paragraph is definitely needed"
+(in one test window, 0 of 3 plain-prompt Luna versions kept a key recent
+event the writing states, 2 of 2 with the paragraph did), and "we need one
+more step to convert it into the final profile". A chained update that fits one chunk is not affected.
+
+**The build.** A window set of one window, read by the version model with
+the events paragraph, then a final over that one version: two Batch rounds,
+one after the other, so a first profile takes two batch turnarounds instead
+of one. Like every window build it pins the account to Batch.
+
+**The final's prompt.** A final whose only input is one window version (no
+base, no version of the user's) uses `profile_single_integration.txt`: "a
+profile of the user", the events list moved into the Surface Map with its
+dates and left out as a section, the length the structure asks for, the
+newest value of a fact that changed, and no fact, outcome or trend the
+version does not give. The many-version prompt (`profile_integration.txt`)
+is unchanged; its "series of profile updates" of 80k-110k tokens and its
+trajectory request leaked into 2 of 6 single-version finals on 2026-11-03,
+and its "keep the structure" kept the events list as a fourth section in 2
+of 2 Opus finals. Not on the prompts page and not replaced by a user's own
+integration prompt (written for many versions); the user's own generation
+prompt shapes it, as in every merge. A one-window set with a version of the
+user's merges both with the many-version prompt (two inputs, "Written by
+the user on D"): the user's edit wins.
+
+**Checks.** Every final (one window or many) is refused when it has an
+`EVENTS IN THIS WINDOW` heading (`profile_output_problem(final=True)`); the
+integration rule then retries it once after an hour. No many-version merge
+of the 2026-10-21/22 tests had one (0 of 32 outputs). A set whose final
+inputs are all skipped windows (the one window declined twice) sends no
+final: a merge of the skip note alone would become the profile. The admin
+column says "Stopped: every window of the profile build was given up".
+
+**Later builds.** A set below one full chunk is provisional: the ladder
+rebuilds it from scratch at its next step (a new set), and the 80k gate
+does not add windows to it. From one full chunk on, its updates are the
+set's (one more window, a final over all windows with the many-version
+prompt), as for a large build.
+
+**Live check, 2026-11-03** (window 23's two events versions, standard API,
+$0.26): with the single-version prompt, Sol at high effort and Opus each
+wrote three maps and no fourth section in 4 of 4 finals, with none of the
+many-version wording; Opus still added one unsupported status in 1 of 2.
