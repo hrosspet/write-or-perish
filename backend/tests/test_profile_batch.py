@@ -1013,16 +1013,62 @@ def test_submit_refused_for_an_account_reason_is_not_a_batch_attempt(app, monkey
 # just don't want to spam them with querying for results thousands of
 # times per minute."
 
-def test_a_full_provider_queue_at_submit_is_not_a_batch_attempt(
-        app, monkeypatch):
-    """The provider refuses the create because its batch queue is full:
-    the items wait for the next seed pass, never counted towards the
-    full-price fallback."""
+def _other_pending(provider_key, batch_id="other"):
+    """Another account's batch of ours, pending in the same queue."""
+    other = _user()
+    job = ProfileBatchJob(
+        provider_key=provider_key, batch_id=batch_id, status="pending",
+        items=[{"custom_id": f"profile_{other.id}_x", "user_id": other.id,
+                "kind": "chunk", "prev_profile_id": None,
+                "model_id": "test-model"}],
+        submitted_at=datetime.utcnow())
+    db.session.add(job)
+    db.session.commit()
+    return job
+
+
+def _seed_refused_on_a_full_queue(app, monkeypatch):
     from backend.utils.llm_batch import SubmittedBatches
     u = _user(profile_needs_full_regen=True,
               profile_batch_attempts=pb.MAX_BATCH_ATTEMPTS - 1)
     app.config["PROFILE_USE_BATCH"] = True
     db.session.commit()
+    _remaining(monkeypatch, 90000)
+    monkeypatch.setattr(pb._exports, "build_user_export_content",
+                        MagicMock(return_value=_chunk("DATA")))
+    monkeypatch.setattr(pb._exports, "_load_prompt",
+                        lambda *a, **k: "G {user_export}")
+
+    def full(reqs, keys, kind):
+        out = SubmittedBatches()
+        out.queue_full.update(reqs)  # "anthropic"
+        return out
+    monkeypatch.setattr(pb, "batch_submit", full)
+    return u
+
+
+def test_a_submit_refused_on_a_full_queue_alone_is_a_failed_attempt(
+        app, monkeypatch):
+    """Review of #596: with no other batch of ours in that queue, the
+    limit refuses the submission by itself, and waiting would never end:
+    it counts as a failed attempt, as before the queue rule."""
+    u = _seed_refused_on_a_full_queue(app, monkeypatch)
+    pb._seed_profile_batches(users=[u])
+    assert User.query.get(u.id).profile_batch_attempts == (
+        pb.MAX_BATCH_ATTEMPTS)
+
+
+def test_a_full_provider_queue_at_submit_is_not_a_batch_attempt(
+        app, monkeypatch):
+    """The provider refuses the create because its batch queue is full
+    (other batches of ours wait in it): the items wait for the next seed
+    pass, never counted towards the full-price fallback."""
+    from backend.utils.llm_batch import SubmittedBatches
+    u = _user(profile_needs_full_regen=True,
+              profile_batch_attempts=pb.MAX_BATCH_ATTEMPTS - 1)
+    app.config["PROFILE_USE_BATCH"] = True
+    db.session.commit()
+    _other_pending("anthropic")
     _remaining(monkeypatch, 90000)
     monkeypatch.setattr(pb._exports, "build_user_export_content",
                         MagicMock(return_value=_chunk("DATA")))
@@ -1057,18 +1103,55 @@ def test_a_batch_failed_on_a_full_queue_is_not_a_batch_attempt(
     job, item = _chunk_job(u, prev)
     job.provider_key = "openai:gpt-x"
     db.session.commit()
-
-    def full(bids, keys, known=None):
-        out = CollectedResults()
-        out.queue_full.add("openai:gpt-x")
-        return out, {}, {}
-    monkeypatch.setattr(pb, "batch_check_and_collect", full)
+    # Another account's batch for the same model, on another endpoint.
+    _other_pending("openai:gpt-x:responses")
+    monkeypatch.setattr(pb, "batch_check_and_collect", _queue_full_except(
+        "other"))
     pb._poll_profile_batches()
     user = User.query.get(u.id)
     assert user.profile_batch_attempts == pb.MAX_BATCH_ATTEMPTS - 1
     assert user.profile_batch_pending is False
     assert ProfileBatchJob.query.get(job.id).status == "failed"
     assert UserProfile.query.filter_by(user_id=u.id).count() == 1
+
+
+def _queue_full_except(pending_batch_id):
+    """A collect stand-in: every batch failed on a full queue, except
+    ``pending_batch_id``, which is still in progress."""
+    from backend.utils.llm_batch import CollectedResults
+
+    def collect(bids, keys, known=None):
+        out = CollectedResults()
+        if pending_batch_id in bids.values():
+            return out, dict(bids), {}
+        out.queue_full.update(bids)
+        return out, {}, {}
+    return collect
+
+
+def test_a_batch_over_the_limit_by_itself_is_a_failed_attempt(
+        app, monkeypatch):
+    """Review of #596: an OpenAI batch failed on the enqueued-token limit
+    with no other batch of ours queued for that model is larger than the
+    limit by itself. It would fail on every pass, so it counts as a failed
+    attempt and logs an error (a Sentry event), as before the queue rule.
+    Another model's pending batch does not count."""
+    u = _user(profile_batch_attempts=0)
+    prev = _prev_profile(u, datetime(2026, 5, 1))
+    job, _item = _chunk_job(u, prev)
+    job.provider_key = "openai:gpt-x"
+    db.session.commit()
+    _other_pending("openai:gpt-y")
+    monkeypatch.setattr(pb, "batch_check_and_collect", _queue_full_except(
+        "other"))
+    log = MagicMock()
+    monkeypatch.setattr(pb, "logger", log)
+    pb._poll_profile_batches()
+    user = User.query.get(u.id)
+    assert user.profile_batch_attempts == 1
+    assert ProfileBatchJob.query.get(job.id).status == "collected"
+    assert any("larger than the limit" in str(c.args[0])
+               for c in log.error.call_args_list)
 
 
 def test_the_poller_reads_statuses_from_the_listing(app, monkeypatch):

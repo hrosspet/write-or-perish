@@ -722,6 +722,15 @@ def _submit_requests(built, keys):
             # outcome for a window set's items (which would stop a window
             # for a day after three).
             waiting = provider_key in queue_full
+            if waiting and not _queue_holds_others(provider_key):
+                # Nothing else of ours is queued there: the provider's
+                # limit refuses this submission by itself. A failed
+                # attempt, and an error event, as before the queue rule.
+                waiting = False
+                logger.error(
+                    f"Batch submit for {provider_key} refused on the "
+                    f"provider's queue limit with no other batch of ours "
+                    f"queued: counted as a failed attempt")
             logger.warning(
                 f"Batch submit failed for {provider_key}; "
                 f"{len(items)} item(s) not in flight"
@@ -833,6 +842,25 @@ def _advance_users(user_ids):
         except Exception as e:
             logger.error(f"Dispatching the profile window advance for user "
                          f"{user_id} failed: {type(e).__name__}")
+
+
+def _queue_of(provider_key):
+    """The provider queue a batch waits in: "anthropic", or the OpenAI
+    model (its enqueued-token limit is per model, whatever the endpoint)."""
+    key = provider_key or ""
+    return key[:-len(":responses")] if key.endswith(":responses") else key
+
+
+def _queue_holds_others(provider_key, exclude_job_id=None):
+    """Whether another profile batch of ours is pending in the same
+    provider queue. A queue-full refusal is waited out only then: with
+    nothing else of ours queued, the batch is larger than the limit by
+    itself (an OpenAI batch over the model's enqueued-token limit), and
+    waiting would never end, so it counts as a failed attempt and shows,
+    as before the queue-full rule (review of #596)."""
+    queue = _queue_of(provider_key)
+    return any(j.id != exclude_job_id and _queue_of(j.provider_key) == queue
+               for j in ProfileBatchJob.query.filter_by(status="pending"))
 
 
 def _clear_stuck_pending():
@@ -1047,6 +1075,17 @@ def _poll_profile_batches():
         # pass, with no attempt counted (Peter, 2026-11-03).
         queue_full = job.provider_key in (
             getattr(results, "queue_full", None) or ())
+        if queue_full and not _queue_holds_others(job.provider_key, job.id):
+            # Nothing else of ours is queued for that model: the batch is
+            # over the enqueued-token limit by itself and would fail on
+            # every pass. Its items fail as before the queue rule (an
+            # attempt counted; a window stops after three), and it shows.
+            queue_full = False
+            logger.error(
+                f"Profile batch {job.batch_id} ({job.provider_key}) failed "
+                f"on the enqueued-token limit with no other batch of ours "
+                f"queued: the batch is larger than the limit; its items "
+                f"count as failed")
         # An admin "Cancel batch" may have landed while the provider call
         # above was in flight: re-read the row, and never collect (or
         # overflow-resubmit) a job that is no longer pending.
@@ -1156,6 +1195,18 @@ def _poll_profile_batches():
         job.status = "failed" if queue_full else "collected"
         job.collected_at = datetime.utcnow()
         db.session.commit()
+        if queue_full and set_items:
+            # Nothing of these window sets is in flight any more (unless a
+            # user has another job pending): clear the flag as the chained
+            # branch does, so "Build profile" and an import's seed are not
+            # held, and the hourly R7 clean-up has nothing to report.
+            from backend.tasks import profile_windows
+            for user_id in {i["user_id"] for i in set_items}:
+                u = User.query.get(user_id)
+                if u is not None:
+                    u.profile_batch_pending = bool(
+                        profile_windows.inflight_items(user_id))
+            db.session.commit()
         _advance_users(advance_users)
 
     _submit_requests(next_built, keys)

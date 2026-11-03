@@ -27,11 +27,14 @@ out one Batch round trip at a time. Instead:
 
 A from-scratch build that fits ONE chunk on the user's chat model takes
 this path too where its provider's PROFILE_ONE_CHUNK_WINDOW_* is on
-(Peter, 2026-11-03; OpenAI on, Anthropic off): a set of one window, read
-with the events paragraph, and a final that rewrites that one version as
+(Peter, 2026-11-03; both on by default): a set of windows at the version
+model's cap, read with the events paragraph. One window (every OpenAI
+one-chunk build; an Anthropic one up to Haiku's 100k tier, about 30.6k
+units at the tweets ratio) gets a final that rewrites that one version as
 the profile with the single-version integration prompt
-(exports.single_integration_messages). Two Batch rounds, one after the
-other. Its later updates are the set's, as for a large build.
+(exports.single_integration_messages); two to five Haiku windows are
+merged as any set is. Two Batch rounds, one after the other. Later
+updates are the set's, as for a large build.
 
 A user's writing reaches only models of their own chat model's provider:
 the version and merge models are per provider, checked at boot and again

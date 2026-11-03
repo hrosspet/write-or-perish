@@ -258,7 +258,7 @@ updates. That leaves **essentially all failures transient**:
 | **Stuck `pending`** (no terminal status) | provider | staleness check (mirror `_is_task_stale`): `submitted_at` older than N h → mark failed, clear guard, re-seed. |
 | **Double-collect** (poller crash mid-tick) | infra | idempotent: a chunk whose `source_data_cutoff` already has a child profile is skipped; job flips to `collected` atomically. |
 | **Not selected for batch** (`use_batch(user)` false) | — | the synchronous path (PR #181) runs unchanged — the permanent fallback. |
-| **Provider queue full** (2026-11-03) | a run that fills the provider's batch queue on purpose | wait, never a failure: an Anthropic create refused with a 429 that is not the spend cap, or an OpenAI create refused on the enqueued-token limit (`SubmittedBatches.queue_full`), and an OpenAI batch failed in validation with `token_limit_exceeded` (`CollectedResults.queue_full`). No batch attempt (so no full-price fallback), no refusal backoff, no "missing" outcome for a window set (outcome `queue_full`), no immediate advance; the next seed pass sends the work again. Logged as a warning, no Sentry event. |
+| **Provider queue full** (2026-11-03) | a run that fills the provider's batch queue on purpose | wait, never a failure: an Anthropic create refused with a 429 that is not the spend cap, or an OpenAI create refused on the enqueued-token limit (`SubmittedBatches.queue_full`), and an OpenAI batch failed in validation with `token_limit_exceeded` (`CollectedResults.queue_full`). No batch attempt (so no full-price fallback), no refusal backoff, no "missing" outcome for a window set (outcome `queue_full`, and `profile_batch_pending` cleared), no immediate advance; the next seed pass sends the work again. Logged as a warning, no Sentry event. Only while another profile batch of ours is pending in the same queue (OpenAI: the same model, whose enqueued-token limit it is): with nothing else of ours queued, the batch is over the limit by itself and would fail on every pass, so it counts as a failed attempt and logs an error, as before (review of #596). |
 
 **Retry policy:** since failures are transient, the primary mechanism is simply
 **re-seed via batch next cycle**, bounded by `profile_batch_attempts` (≈3) plus
@@ -492,11 +492,22 @@ Code: `profile_windows.wants_window_build` / `one_chunk_windows`,
 step of the provisional ladder, a full rebuild) that fits one chunk on the
 user's chat model, where the switch of that model's provider is on:
 `PROFILE_ONE_CHUNK_WINDOW_OPENAI` (default on: GPT-6 Luna, then GPT-6.1 Sol)
-and `PROFILE_ONE_CHUNK_WINDOW_ANTHROPIC` (default off: Haiku 5.5, then Opus
-5.5, is undecided). Peter: "the events paragraph is definitely needed"
-(in one test window, 0 of 3 plain-prompt Luna versions kept a key recent
-event the writing states, 2 of 2 with the paragraph did), and "we need one
-more step to convert it into the final profile". A chained update that fits one chunk is not affected.
+and `PROFILE_ONE_CHUNK_WINDOW_ANTHROPIC` (default on: Haiku 5.5, then Opus
+5.5; Peter, 2026-11-03: "yes, we should do the same for Ant"). Peter: "the
+events paragraph is definitely needed" (in one test window, 0 of 3
+plain-prompt Luna versions kept a key recent event the writing states, 2
+of 2 with the paragraph did), and "we need one more step to convert it
+into the final profile".
+
+**Window counts.** The windows keep #589's sizing at the version model's
+cap. Luna's 272k tier holds every OpenAI one-chunk build in one window.
+Haiku's 100k tier holds about 30.6k units at the tweets ratio (3.1 tokens
+a unit) and about 43.2k at the threads ratio (2.2), so an Anthropic build
+of one Opus chunk (up to 135k units) is one Haiku window and Opus's
+single-version integration below that, else two to five windows (two to
+four at the threads ratio) and the many-version Opus merge. On Anthropic
+the window path then mostly starts at two Haiku windows, which is #595's
+proposal. A chained update that fits one chunk is not affected.
 
 **The build.** A window set of one window, read by the version model with
 the events paragraph, then a final over that one version: two Batch rounds,

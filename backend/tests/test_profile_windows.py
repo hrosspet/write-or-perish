@@ -1601,30 +1601,72 @@ def test_the_one_chunk_switch_is_per_provider(app, world):
 
 
 def test_the_shipped_one_chunk_defaults(app, world, monkeypatch):
-    """OpenAI on (Luna + Sol, decided); Anthropic off until Peter decides:
-    an Anthropic user's one-chunk build is one call on the chat model with
-    the plain prompt, as before."""
+    """Both providers on (Peter, 2026-11-03: "yes, we should do the same
+    for Ant"): the seeder hands a one-chunk build of either provider to
+    the window advance instead of a chained chunk."""
     from backend.config import Config
     assert Config.PROFILE_ONE_CHUNK_WINDOW_OPENAI is True
-    assert Config.PROFILE_ONE_CHUNK_WINDOW_ANTHROPIC is False
+    assert Config.PROFILE_ONE_CHUNK_WINDOW_ANTHROPIC is True
     for key in ("PROFILE_ONE_CHUNK_WINDOW_OPENAI",
                 "PROFILE_ONE_CHUNK_WINDOW_ANTHROPIC"):
         app.config[key] = getattr(Config, key)
     world.corpus = Corpus(50)
     monkeypatch.setattr(pb._exports, "count_remaining_units",
                         lambda uid, cutoff=None: world.corpus.count(uid, cutoff))
-    anth = _user(profile_needs_full_regen=True)
-    _seed(anth)
-    meta = _items()[0]
-    assert meta["kind"] == "chunk" and meta["generation_type"] == "initial"
-    text = world.provider.requests()[0]["messages"][0]["content"][0]["text"]
-    assert "EVENTS IN THIS WINDOW" not in text
-    pw.advance_profile_windows.apply_async.assert_not_called()
-    oai = _user(preferred_model="gpt-6-astra", profile_needs_full_regen=True)
-    _seed(oai)
-    pw.advance_profile_windows.apply_async.assert_called_once()
-    db.session.refresh(oai)
-    assert oai.profile_batch_pending and oai.profile_force_batch
+    for n, model in enumerate((None, "gpt-6-astra"), 1):
+        u = _user(preferred_model=model, profile_needs_full_regen=True)
+        _seed(u)
+        assert world.provider.submits == []      # no chained chunk
+        assert pw.advance_profile_windows.apply_async.call_count == n
+        db.session.refresh(u)
+        assert u.profile_batch_pending and u.profile_force_batch
+
+
+@pytest.mark.parametrize("units_k, ratio, windows", [
+    (30, 3.1, 1),      # under one Haiku window at the tweets ratio
+    (31, 3.1, 2),
+    (100, 3.1, 4),
+    (134, 3.1, 5),     # the largest one-chunk build on Opus
+    (40, None, 1),     # the threads prior (2.2): about 43.2k a window
+])
+def test_an_anthropic_one_chunk_build_in_haiku_windows(
+        app, world, units_k, ratio, windows):
+    """Haiku windows keep #589's sizing at its 100k-token tier (about 30.6k
+    units at the tweets ratio). A build of one Opus chunk is one Haiku
+    window and Opus's single-version integration below that, else two to
+    five windows and the many-version Opus merge."""
+    from backend.utils.chunk_plan import max_units_for_cap
+    app.config["PROFILE_ONE_CHUNK_WINDOW_ANTHROPIC"] = True
+    app.config["PROFILE_MERGE_STRUCTURE"] = "flat"
+    kw = ({"profile_token_ratio": ratio,
+           "profile_token_ratio_family": "claude_new"} if ratio else {})
+    u = _user(profile_needs_full_regen=True, **kw)
+    world.corpus = Corpus(units_k)
+    if ratio == 3.1:
+        assert round(max_units_for_cap(100_000, ratio)) == 30_645
+    # One chunk on the chat model (Opus): the switch decides.
+    assert pw.wants_window_build(u)
+    app.config["PROFILE_ONE_CHUNK_WINDOW_ANTHROPIC"] = False
+    assert not pw.wants_window_build(u)
+    app.config["PROFILE_ONE_CHUNK_WINDOW_ANTHROPIC"] = True
+    _advance(u)
+    window_reqs = world.provider.requests()
+    assert len(window_reqs) == windows
+    assert {r["api_model"] for r in window_reqs} == {"claude-haiku-5-5"}
+    _poll()
+    rows = _rows(u, "window")
+    assert len(rows) == windows
+    _advance(u)
+    final = [r for r in _all_requests(world) if "_f_" in r["custom_id"]]
+    assert len(final) == 1 and final[0]["api_model"] == "claude-opus-5-5"
+    if windows == 1:
+        assert final[0]["messages"] == (
+            pw._exports.single_integration_messages(u.id, rows[0]))
+    else:
+        assert final[0]["messages"] == pw._exports._integration_messages(
+            u.id, rows, independent=True)
+    _poll()
+    assert len(_finals(u)) == 1
 
 
 def test_the_sync_task_hands_a_one_chunk_build_to_the_advance(app, world):
@@ -1844,14 +1886,40 @@ def test_a_one_window_build_whose_window_is_given_up_sends_no_final(
     assert not pw.set_work_due(u, ex.profile_update_base(u.id))
 
 
+def _other_batch(provider_key="openai:gpt-6-luna"):
+    """Another account's batch of ours, pending in the same queue."""
+    other = _user()
+    job = ProfileBatchJob(
+        provider_key=provider_key, batch_id="other", status="pending",
+        items=[{"custom_id": f"profile_{other.id}_x", "user_id": other.id,
+                "kind": "window", "set": "zz", "start": None}],
+        submitted_at=datetime.utcnow())
+    db.session.add(job)
+    db.session.commit()
+    return job
+
+
+def _queue_full_except_other(bids, keys, known=None):
+    """A collect stand-in: every batch failed on a full queue, except the
+    other account's batch ("other"), which is still in progress."""
+    from backend.utils.llm_batch import CollectedResults
+    out = CollectedResults()
+    if "other" in bids.values():
+        return out, dict(bids), {}
+    out.queue_full.update(bids)
+    return out, {}, {}
+
+
 def test_a_window_refused_on_a_full_queue_waits_and_is_never_stopped(
         app, world, monkeypatch):
-    """The provider refuses the create (its batch queue is full): nothing
-    is recorded against the window, so no number of such refusals stops
-    or skips it; once the queue has room the build goes through."""
+    """The provider refuses the create (its batch queue is full, other
+    batches of ours wait in it): nothing is recorded against the window,
+    so no number of such refusals stops or skips it; once the queue has
+    room the build goes through."""
     from backend.utils.llm_batch import SubmittedBatches
     world.corpus = Corpus(50)
     u = _one_chunk_user(app)
+    other = _other_batch()
 
     def full(*a, **k):
         out = SubmittedBatches()
@@ -1860,11 +1928,13 @@ def test_a_window_refused_on_a_full_queue_waits_and_is_never_stopped(
     monkeypatch.setattr(pb, "batch_submit", full)
     for _ in range(pb.MAX_BATCH_ATTEMPTS + 2):
         _advance(u)
-    assert not ProfileBatchJob.query.count()       # no "missing" records
+    assert ProfileBatchJob.query.count() == 1     # no "missing" records
     assert pw.attempt_history(u.id) == {}
     db.session.refresh(u)
     assert u.profile_needs_full_regen and not u.profile_batch_pending
     assert (u.profile_batch_attempts or 0) == 0
+    other.status = "collected"
+    db.session.commit()
     monkeypatch.setattr(pb, "batch_submit",
                         lambda *a, **k: world.provider.submit(*a, **k))
     _finish(world, u)
@@ -1873,33 +1943,77 @@ def test_a_window_refused_on_a_full_queue_waits_and_is_never_stopped(
 
 def test_a_window_batch_failed_on_a_full_queue_waits(app, world,
                                                      monkeypatch):
-    """OpenAI fails the batch on its enqueued-token limit: the items get
-    the outcome "queue_full", which neither stops nor skips the window,
-    and no advance is dispatched at once (the queue is still full)."""
-    from backend.utils.llm_batch import CollectedResults
+    """OpenAI fails the batch on its enqueued-token limit while other
+    batches of ours are queued: the items get the outcome "queue_full",
+    which neither stops nor skips the window, and no advance is
+    dispatched at once (the queue is still full)."""
     world.corpus = Corpus(50)
     u = _one_chunk_user(app)
-
-    def full(bids, keys, known=None):
-        out = CollectedResults()
-        out.queue_full.update(bids)
-        return out, {}, {}
-    monkeypatch.setattr(pb, "batch_check_and_collect", full)
+    other = _other_batch()
+    monkeypatch.setattr(pb, "batch_check_and_collect",
+                        _queue_full_except_other)
     for _ in range(pw._content_attempts() + 2):
         _advance(u)
         pw.advance_profile_windows.apply_async.reset_mock()
         _poll()
         pw.advance_profile_windows.apply_async.assert_not_called()
-    jobs = ProfileBatchJob.query.all()
+    jobs = [j for j in ProfileBatchJob.query.all() if j.id != other.id]
     assert {j.status for j in jobs} == {"failed"}
     assert {i["outcome"] for j in jobs for i in j.items} == {"queue_full"}
     assert not _rows(u, "window_skip")
     state = pw.set_state(u, pw.resolve_set(u)[0], None)
     assert state.due and not state.stopped
+    other.status = "collected"
+    db.session.commit()
     monkeypatch.setattr(pb, "batch_check_and_collect",
                         lambda *a, **k: world.provider.collect(*a, **k))
     _finish(world, u)
     assert len(_finals(u)) == 1
+
+
+def test_a_queue_full_window_batch_clears_the_pending_flag(app, world,
+                                                           monkeypatch):
+    """Review of #596 (its reproduction): after a window batch fails on a
+    full queue nothing of the user's is in flight, so the flag is
+    cleared: the seeder (and "Build profile") reaches the user at once,
+    with no hourly clean-up of a stuck flag."""
+    world.corpus = Corpus(50)
+    u = _one_chunk_user(app)
+    _other_batch()
+    monkeypatch.setattr(pb, "batch_check_and_collect",
+                        _queue_full_except_other)
+    _advance(u)
+    _poll()
+    db.session.refresh(u)
+    assert pw.inflight_items(u.id) == []
+    assert u.profile_batch_pending is False
+    pw.advance_profile_windows.apply_async.reset_mock()
+    _seed(u)
+    pw.advance_profile_windows.apply_async.assert_called_once()
+
+
+def test_a_window_batch_over_the_limit_by_itself_stops_and_shows(
+        app, world, monkeypatch):
+    """Review of #596: a batch failed on the enqueued-token limit with no
+    other batch of ours queued for that model is over the limit by
+    itself: its window counts provider failures as before the queue rule,
+    so it stops after three and the admin column says so."""
+    world.corpus = Corpus(50)
+    u = _one_chunk_user(app)
+    _other_batch("openai:gpt-6.1-sol:responses")   # another model's queue
+    monkeypatch.setattr(pb, "batch_check_and_collect",
+                        _queue_full_except_other)
+    monkeypatch.setattr(pw, "_report", lambda title, **tags: None)
+    for _ in range(int(app.config["PROFILE_VERSION_PROVIDER_ATTEMPTS"])):
+        _advance(u)
+        _poll()
+    outcomes = [i["outcome"] for j in ProfileBatchJob.query.all()
+                for i in j.items if i["user_id"] == u.id]
+    assert outcomes == ["missing"] * 3
+    db.session.refresh(u)
+    assert u.profile_seed_error.startswith(pw.STOP_NOTE)
+    state = pw.set_state(u, pw.resolve_set(u)[0], None)
+    assert state.stopped and not state.due
 
 
 def test_progress_labels_for_a_one_window_build(app):

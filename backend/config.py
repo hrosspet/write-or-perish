@@ -147,14 +147,18 @@ class Config:
     # paragraph) and one integration of that version by the merge model
     # (profile_single_integration.txt), which is the user's profile. Off,
     # it is one call on the chat model with the plain generation prompt,
-    # as before. OpenAI on (GPT-6 Luna, then GPT-6.1 Sol); Anthropic off
-    # until Peter decides on Haiku 5.5, then Opus 5.5. Updates of a
-    # chained profile are not affected.
+    # as before. Both on (Peter, 2026-11-03: "yes, we should do the same
+    # for Ant"). OpenAI: GPT-6 Luna, then GPT-6.1 Sol. Anthropic: Haiku
+    # 5.5 windows at its 100k-token tier (about 30.6k units at the tweets
+    # ratio, 43k at the threads ratio), so a build of one Opus chunk (up
+    # to 135k units) is one Haiku window and Opus's single-version
+    # integration below that, else 2-5 windows and the many-version Opus
+    # merge. Updates of a chained profile are not affected.
     PROFILE_ONE_CHUNK_WINDOW_OPENAI = (
         os.environ.get("PROFILE_ONE_CHUNK_WINDOW_OPENAI") or "true"
     ).lower() in ("1", "true", "yes")
     PROFILE_ONE_CHUNK_WINDOW_ANTHROPIC = (
-        os.environ.get("PROFILE_ONE_CHUNK_WINDOW_ANTHROPIC") or "false"
+        os.environ.get("PROFILE_ONE_CHUNK_WINDOW_ANTHROPIC") or "true"
     ).lower() in ("1", "true", "yes")
     # Reasoning effort sent with an OpenAI merge request (a Responses
     # batch request's "reasoning.effort"). One of PROFILE_REASONING_EFFORTS
