@@ -1296,6 +1296,9 @@ def advance(user_id, task_id):
             user.profile_generation_task_dispatched_at = None
             user.profile_batch_pending = bool(inflight_items(user_id))
             db.session.commit()
+            if outcome == "idle":
+                # Nothing of the set is due: no queue-full work waits.
+                _batch._release_queue_hold(user)
             if outcome not in ("off", "error", "held") and (
                     redispatch or _collected_since(user_id, started)):
                 dispatch_advance(user)

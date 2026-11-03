@@ -1047,6 +1047,78 @@ def _seed_refused_on_a_full_queue(app, monkeypatch):
     return u
 
 
+def _prefill_not_activated(**kw):
+    """A pre-filled account its owner has not activated yet: outside the
+    hourly seeder's eligible cohort."""
+    u = _user(profile_force_batch=True, profile_needs_full_regen=True,
+              prefilled_handle="someone", **kw)
+    u.approved = False
+    db.session.commit()
+    return u
+
+
+def test_an_unactivated_prefill_sent_back_by_a_full_queue_is_resent_hourly(
+        app, monkeypatch):
+    """Peter, 2026-11-03 ("yes, implement it pls"): work a full queue sent
+    back is remembered (profile_queue_held), and the hourly seeder sends it
+    again also for a pre-fill not yet activated, which its cohort leaves
+    out. A successful submit clears the mark."""
+    from backend.utils.llm_batch import SubmittedBatches
+    app.config["PROFILE_USE_BATCH"] = True
+    u = _prefill_not_activated()
+    _other_pending("anthropic")
+    assert u.id not in {x.id for x in User.profile_eligible_query().all()}
+    _remaining(monkeypatch, 90000)
+    monkeypatch.setattr(pb._exports, "build_user_export_content",
+                        MagicMock(return_value=_chunk("DATA")))
+    monkeypatch.setattr(pb._exports, "_load_prompt",
+                        lambda *a, **k: "G {user_export}")
+
+    def full(reqs, keys, kind):
+        out = SubmittedBatches()
+        out.queue_full.update(reqs)
+        return out
+    monkeypatch.setattr(pb, "batch_submit", full)
+    assert pb._seed_profile_batches(users=[u]) == 0      # the immediate seed
+    user = User.query.get(u.id)
+    assert user.profile_queue_held is True
+    assert (user.profile_batch_attempts or 0) == 0
+    sent = []
+    monkeypatch.setattr(pb, "batch_submit", lambda reqs, keys, kind: (
+        sent.append(reqs) or {k: f"b-{k}" for k in reqs}))
+    assert pb._seed_profile_batches() == 1               # the hourly seed
+    assert [r["custom_id"] for r in sent[0]["anthropic"]][0].startswith(
+        f"profile_{u.id}_")
+    user = User.query.get(u.id)
+    assert user.profile_queue_held is False and user.profile_batch_pending
+
+
+def test_a_deactivated_account_held_for_the_queue_stays_paused(
+        app, monkeypatch):
+    """Deactivation is the admin's pause switch: a deactivated account
+    whose work a full queue sent back is not sent again."""
+    app.config["PROFILE_USE_BATCH"] = True
+    u = _prefill_not_activated(profile_queue_held=True)
+    u.deactivated_at = datetime.utcnow()
+    db.session.commit()
+    sent = []
+    monkeypatch.setattr(pb, "batch_submit", lambda reqs, keys, kind: (
+        sent.append(reqs) or {k: f"b-{k}" for k in reqs}))
+    pb._seed_profile_batches()
+    assert sent == []
+    assert User.query.get(u.id).profile_queue_held is True
+
+
+def test_a_queue_hold_with_nothing_left_to_do_is_released(app, monkeypatch):
+    app.config["PROFILE_USE_BATCH"] = True
+    u = _prefill_not_activated(profile_queue_held=True)
+    u.profile_needs_full_regen = False
+    db.session.commit()
+    monkeypatch.setattr(pb, "_should_seed", lambda user, **k: False)
+    pb._seed_profile_batches()
+    assert User.query.get(u.id).profile_queue_held is False
+
+
 def test_a_submit_refused_on_a_full_queue_alone_is_a_failed_attempt(
         app, monkeypatch):
     """Review of #596: with no other batch of ours in that queue, the

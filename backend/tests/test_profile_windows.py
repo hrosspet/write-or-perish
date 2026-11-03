@@ -1992,6 +1992,38 @@ def test_a_queue_full_window_batch_clears_the_pending_flag(app, world,
     pw.advance_profile_windows.apply_async.assert_called_once()
 
 
+def test_an_unactivated_prefills_window_sent_back_by_a_full_queue_is_resent(
+        app, world, monkeypatch):
+    """Peter, 2026-11-03 ("yes, implement it pls"): a pre-filled account
+    not yet activated is outside the hourly cohort; a window batch a full
+    queue sent back marks it (profile_queue_held), the hourly seeder
+    dispatches its advance, and the successful submit clears the mark."""
+    world.corpus = Corpus(50)
+    u = _one_chunk_user(app, profile_force_batch=True,
+                        prefilled_handle="someone")
+    u.approved = False
+    db.session.commit()
+    assert u.id not in {x.id for x in User.profile_eligible_query().all()}
+    other = _other_batch()
+    monkeypatch.setattr(pb, "batch_check_and_collect",
+                        _queue_full_except_other)
+    _advance(u)
+    _poll()
+    db.session.refresh(u)
+    assert u.profile_queue_held is True and not u.profile_batch_pending
+    other.status = "collected"
+    db.session.commit()
+    pw.advance_profile_windows.apply_async.reset_mock()
+    pb._seed_profile_batches()                           # the hourly seed
+    calls = pw.advance_profile_windows.apply_async.call_args_list
+    assert [c.args[0] for c in calls] == [(u.id,)]
+    pw.advance(u.id, calls[0].kwargs["task_id"])         # the task it sent
+    db.session.refresh(u)
+    assert u.profile_queue_held is False and u.profile_batch_pending
+    assert [r["api_model"] for r in world.provider.requests()] == [
+        "gpt-6-luna"]
+
+
 def test_a_window_batch_over_the_limit_by_itself_stops_and_shows(
         app, world, monkeypatch):
     """Review of #596: a batch failed on the enqueued-token limit with no

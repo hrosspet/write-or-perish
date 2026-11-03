@@ -174,6 +174,13 @@ class User(db.Model, UserMixin):
     profile_cap_held = db.Column(
         db.Boolean, nullable=False, default=False,
         server_default=db.text("false"))
+    # True while this user's batch profile work waits because the
+    # provider's batch queue was full (a refused submit, or an OpenAI batch
+    # failed on its enqueued-token limit). The hourly seeder sends it again,
+    # also for a pre-filled account not yet activated, as for the cap hold.
+    profile_queue_held = db.Column(
+        db.Boolean, nullable=False, default=False,
+        server_default=db.text("false"))
     # Measured billed input tokens per stored content unit (Node.token_count)
     # on the user's last profile chunk, tagged with the tokenizer family it
     # was measured on (backend/tasks/exports.TOKENIZER_FAMILIES). The chunk
