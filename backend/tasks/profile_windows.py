@@ -1568,14 +1568,20 @@ WAITING_OUTCOMES = CONTENT_FAILURES + PROVIDER_FAILURES
 
 
 def provider_stop_waits(user):
-    """Whether a window of the user's set waits out a provider stop (a day
-    after three failed submissions, ``provider_stop_until``). Reads
-    metadata only."""
+    """Whether a window, group or final of the user's set waits out a
+    provider stop (a day after three failed submissions,
+    ``provider_stop_until``). Reads metadata only."""
     if not enabled():
         return False
     try:
+        history = attempt_history(user.id)
+        now = datetime.utcnow()
+        if any(key[0] in ("group", "final")
+               and provider_stop_until(history, key, now) is not None
+               for key in history):
+            return True
         set_id, base, _fresh = resolve_set(user)
-        return bool(set_state(user, set_id, base).stopped)
+        return bool(set_state(user, set_id, base, history, now).stopped)
     except Exception:  # pragma: no cover — a hold is never worth a crash
         logger.exception("User %s: reading the set's stops failed", user.id)
         return False

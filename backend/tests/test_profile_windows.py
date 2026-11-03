@@ -2140,6 +2140,84 @@ def test_giving_up_after_the_refusal_limit_releases_the_hold(app, world):
     assert _hourly_seed_dispatches(u) == []
 
 
+def _a_day_later():
+    """The provider stop's day has passed: every job is moved 25 h back."""
+    for job in ProfileBatchJob.query.all():
+        job.submitted_at = job.submitted_at - timedelta(hours=25)
+        if job.collected_at:
+            job.collected_at = job.collected_at - timedelta(hours=25)
+    db.session.commit()
+
+
+def _missing_three_times(u, marker):
+    """Collect rounds until the merge whose custom id holds ``marker`` has
+    failed at the provider three times (no result), running each advance
+    the collector dispatched."""
+    for _ in range(int(pw._setting("PROFILE_VERSION_PROVIDER_ATTEMPTS", 3))):
+        _advance(u)
+        _poll()
+    _advance(u)                       # finds the merge stopped: idle
+    outcomes = [i["outcome"] for i in _items()
+                if marker in i["custom_id"]]
+    assert outcomes == ["missing"] * 3
+
+
+def test_an_unactivated_prefills_stopped_final_is_resent_after_the_day(
+        app, world, monkeypatch):
+    """Review of #596 (its reproduction): a final failed at the provider
+    three times waits out the day's stop with the hold kept, and the
+    hourly seeder then sends it again for an account not yet activated.
+    The stop itself is unchanged."""
+    monkeypatch.setattr(pw, "_report", lambda title, **tags: None)
+    world.corpus = Corpus(50)
+    u = _unactivated_prefill(app)
+    world.provider.respond = lambda cid, req: None if "_f_" in cid else {
+        "content": _good(tag=cid), "input_tokens": 1000,
+        "output_tokens": 500, "batch": True}
+    _advance(u)
+    _poll()                                       # the window is saved
+    _missing_three_times(u, "_f_")
+    db.session.refresh(u)
+    assert u.profile_work_held is True
+    # Within the day the stop holds: an hourly pass sends nothing, and the
+    # hold stays.
+    n = len(world.provider.submits)
+    for c in _hourly_seed_dispatches(u):
+        pw.advance(u.id, c.kwargs["task_id"])
+    db.session.refresh(u)
+    assert len(world.provider.submits) == n and u.profile_work_held is True
+    _a_day_later()
+    calls = _hourly_seed_dispatches(u)
+    assert len(calls) == 1
+    assert pw.advance(u.id, calls[0].kwargs["task_id"]) == "submitted"
+    assert [r["custom_id"] for r in world.provider.requests()][-1].endswith(
+        "_f_4")
+
+
+def test_an_unactivated_prefills_stopped_group_is_resent_after_the_day(
+        app, world, monkeypatch):
+    """The same for a group of a grouped set."""
+    monkeypatch.setattr(pw, "_report", lambda title, **tags: None)
+    app.config["PROFILE_MERGE_GROUP_SIZE"] = 2       # structure "grouped"
+    u = _user(profile_force_batch=True, prefilled_handle="someone")
+    u.approved = False
+    db.session.commit()
+    rows = _set_of(u, 3)
+    _corpus_for(world, rows)
+    world.provider.respond = lambda cid, req: None if "_g" in cid else {
+        "content": _good(events=False, tag=cid), "input_tokens": 1000,
+        "output_tokens": 500, "batch": True}
+    _missing_three_times(u, "_g1_")
+    db.session.refresh(u)
+    assert u.profile_work_held is True
+    _a_day_later()
+    calls = _hourly_seed_dispatches(u)
+    assert len(calls) == 1
+    assert pw.advance(u.id, calls[0].kwargs["task_id"]) == "submitted"
+    assert [r["custom_id"] for r in world.provider.requests()][-1].endswith(
+        "_g1_4")
+
+
 def test_a_held_set_with_nothing_due_is_released_by_its_advance(
         app, world):
     world.corpus = Corpus(50)
