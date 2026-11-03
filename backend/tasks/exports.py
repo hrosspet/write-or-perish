@@ -1327,7 +1327,9 @@ def profile_structure_instructions(gen_template):
 # ── Independent versions of a large build (#545) ─────────────────────────
 # Peter's paragraph, exact text, as tested on 2026-10-21/22 (Luna and Haiku
 # runs). It goes into the generation prompt of a window version only: a
-# build that fits one chunk, an update and every merge never see it.
+# chained build that fits one chunk, an update and every merge never see
+# it. A from-scratch build that fits one chunk gets it where its
+# provider's PROFILE_ONE_CHUNK_WINDOW_* is on, as a one-window set.
 EVENTS_IN_WINDOW_PARAGRAPH = (
     "After the Light Map, add a final section headed "
     "`### EVENTS IN THIS WINDOW`: a dated list of what happened and what "
@@ -1355,8 +1357,8 @@ def window_generation_template(user_id):
     experiments put it (after the "## OUTPUT" instruction and its blank
     line). A prompt without that line gets it before the line holding
     {user_export}; a prompt with neither, at the end. Inserted here, not
-    written into the file: a one-chunk build must not get it, the prompts
-    page shows the file, and a user's own prompt gets it too."""
+    written into the file: a chained one-chunk build must not get it, the
+    prompts page shows the file, and a user's own prompt gets it too."""
     template = _load_prompt("profile_generation.txt", user_id=user_id)
     inserted = EVENTS_IN_WINDOW_PARAGRAPH + "\n\n"
     lines = template.splitlines(keepends=True)
@@ -1370,7 +1372,7 @@ def window_generation_template(user_id):
     return template.rstrip() + "\n\n" + EVENTS_IN_WINDOW_PARAGRAPH + "\n"
 
 
-def profile_output_problem(text, template, events=False):
+def profile_output_problem(text, template, events=False, final=False):
     """Why a model output is not a profile, or None. The reason names a
     missing part, never the output's text, so it can be logged.
 
@@ -1380,17 +1382,23 @@ def profile_output_problem(text, template, events=False):
     anywhere in the heading, so "### SECTION 2: SHADOW MAP" passes. With
     ``events`` (a window version) it also has exactly one heading holding
     "EVENTS IN THIS WINDOW". A model that declines in plain text, with no
-    refusal flag (2 of 53 Haiku versions, 2026-10-22), fails this."""
+    refusal flag (2 of 53 Haiku versions, 2026-10-22), fails this.
+
+    With ``final`` (a window set's final merge, the user's profile) it has
+    no such heading: the events belong in the maps. Opus 5.5 kept the
+    version's events list as a fourth section in 2 of 2 single-version
+    integrations on 2026-11-03; no many-version merge did."""
     headings = [line.upper() for line in (text or "").splitlines()
                 if line.lstrip().startswith("#")]
     asked = (template or "").upper()
     for name in PROFILE_MAP_HEADINGS:
         if name in asked and not any(name in h for h in headings):
             return f"no {name} heading"
-    if events:
-        n = sum(1 for h in headings if EVENTS_HEADING in h)
-        if n != 1:
-            return f"{n} {EVENTS_HEADING} headings"
+    n = sum(1 for h in headings if EVENTS_HEADING in h)
+    if events and n != 1:
+        return f"{n} {EVENTS_HEADING} headings"
+    if final and n:
+        return f"an {EVENTS_HEADING} heading in a final profile"
     return None
 
 
@@ -1675,6 +1683,48 @@ def _integration_messages(user_id, chain, cumulative=False,
         "content": [{"type": "text", "text": integration_prompt}]
     })
     return messages
+
+
+# The integration of a window set that holds ONE window and nothing else
+# (Peter, 2026-11-03): a from-scratch build that fits one chunk is read as
+# one window version (events paragraph included), and the merge model
+# rewrites that version as the profile. The many-version prompt speaks of
+# "a series of profile updates" of 80k-110k tokens each and of their
+# trajectory, wording that leaked into 2 of 6 single-version finals, and it
+# asks to keep the inputs' structure, which kept the events list as a
+# fourth section (Opus, 2 of 2). Not on the prompts page and not a user's
+# own: like the events paragraph, it only exists on this path.
+SINGLE_INTEGRATION_PROMPT_FILE = "profile_single_integration.txt"
+
+
+def single_integration_prompt(user_id):
+    """The single-version integration prompt, with the user's generation
+    prompt's structure instructions (``profile_structure_instructions``)
+    embedded as the many-version prompt embeds them. Read from the prompts
+    directory the registered prompts' defaults come from
+    (utils/prompts.PROMPTS_DIR)."""
+    from backend.utils.prompts import PROMPTS_DIR
+    path = os.path.join(PROMPTS_DIR, SINGLE_INTEGRATION_PROMPT_FILE)
+    with open(path, "r", encoding="utf-8") as f:
+        template = f.read()
+    gen_template = _load_prompt("profile_generation.txt", user_id=user_id)
+    return template.replace(
+        "{profile_generation_prompt}",
+        profile_structure_instructions(gen_template))
+
+
+def single_integration_messages(user_id, version):
+    """The messages of a one-window set's final: the window version under
+    its independent label (as ``_integration_messages`` with
+    ``independent`` labels it), then ``single_integration_prompt``."""
+    start = _first_writing_date(user_id, version.source_data_cutoff)
+    label = "\n".join(_independent_label(1, version, start))
+    return [
+        {"role": "user", "content": [{
+            "type": "text", "text": f"{label}\n\n{version.get_content()}"}]},
+        {"role": "user", "content": [{
+            "type": "text", "text": single_integration_prompt(user_id)}]},
+    ]
 
 
 def _do_integration(self, user, model_id, last_iterative_profile_id,

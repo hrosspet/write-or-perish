@@ -25,6 +25,14 @@ out one Batch round trip at a time. Instead:
 - Later updates of such a profile add windows to the same set and redo
   only the newest group and the final.
 
+A from-scratch build that fits ONE chunk on the user's chat model takes
+this path too where its provider's PROFILE_ONE_CHUNK_WINDOW_* is on
+(Peter, 2026-11-03; OpenAI on, Anthropic off): a set of one window, read
+with the events paragraph, and a final that rewrites that one version as
+the profile with the single-version integration prompt
+(exports.single_integration_messages). Two Batch rounds, one after the
+other. Its later updates are the set's, as for a large build.
+
 A user's writing reaches only models of their own chat model's provider:
 the version and merge models are per provider, checked at boot and again
 here (``profile_models_for``).
@@ -57,8 +65,8 @@ from backend.llm_providers import (
     DEFAULT_MAX_OUTPUT_TOKENS, LLMProvider, EmptyTruncatedOutputError,
     model_input_cap)
 from backend.utils.chunk_plan import (
-    UPDATE_THRESHOLD_UNITS, max_units_for_cap, next_window_budget,
-    plan_chunks)
+    CHUNK_TARGET_UNITS, UPDATE_THRESHOLD_UNITS, max_units_for_cap,
+    next_window_budget, plan_chunks)
 from backend.utils.api_keys import get_api_keys_for_usage
 from backend.utils.error_privacy import describe_exception
 from backend.utils.hidden_rows import WritingOnHold, writing_on_hold
@@ -117,12 +125,27 @@ FIT_SAFETY = 0.97
 
 STOP_NOTE = "Stopped: a profile chunk failed at the provider"
 MERGE_STOP_NOTE = "Stopped: a profile merge is over the merge model's cap"
+NOTHING_READ_NOTE = ("Stopped: every window of the profile build was given "
+                     "up; no profile from it")
 
 
 def enabled():
     """The kill switch (PROFILE_INDEPENDENT_VERSIONS). An app config
     without the key (the unit tests' bare apps) has it off."""
     return bool(current_app.config.get("PROFILE_INDEPENDENT_VERSIONS", False))
+
+
+def one_chunk_windows(user):
+    """Whether a from-scratch build of this user that fits one chunk is a
+    one-window set: PROFILE_ONE_CHUNK_WINDOW_<PROVIDER> of the provider of
+    the user's chat model. An app config without the key has it off, as
+    has a provider without profile models."""
+    supported = current_app.config.get("SUPPORTED_MODELS") or {}
+    provider = (supported.get(_batch._model_for(user)) or {}).get("provider")
+    if provider not in ("anthropic", "openai"):
+        return False
+    return bool(current_app.config.get(
+        f"PROFILE_ONE_CHUNK_WINDOW_{provider.upper()}", False))
 
 
 def _setting(key, default):
@@ -394,8 +417,12 @@ def set_state(user, set_id, base, history=None, now=None):
     when the last window was rendered (the continue rule, a build cut by
     the render budget or a restart), or the 80k gate's worth of new
     writing (an update), or anything at all on a set with no windows yet.
-    A range with nothing to read in it is not missing. A range whose
-    window failed at the provider too often waits (``stopped``)."""
+    The 80k gate does not apply to a provisional set (it covers less than
+    one full chunk, ``exports.profile_is_provisional``: a small one-window
+    build): the provisional ladder rebuilds it from scratch instead, as it
+    does a chained provisional profile. A range with nothing to read in it
+    is not missing. A range whose window failed at the provider too often
+    waits (``stopped``)."""
     history = attempt_history(user.id, now) if history is None else history
     inflight = [i for i in inflight_items(user.id) if i.get("set") == set_id]
     windows = set_windows(user.id, set_id)
@@ -426,9 +453,11 @@ def set_state(user, set_id, base, history=None, now=None):
         ranges.append((cursor, None))
     else:
         last = entries[-1]
+        provisional = (last.cumulative or 0) < CHUNK_TARGET_UNITS
         if (_unread_before(user, last.cutoff, last.rendered_at)
-                or _exports.count_remaining_units(user.id, cursor)
-                >= UPDATE_THRESHOLD_UNITS):
+                or (not provisional
+                    and _exports.count_remaining_units(user.id, cursor)
+                    >= UPDATE_THRESHOLD_UNITS)):
             ranges.append((cursor, None))
     for start, end in ranges:
         units = (_exports.count_remaining_units(
@@ -454,6 +483,7 @@ class MergePlan:
     final_inputs: list = None                        # None: not due
     user_version: object = None
     waiting: bool = False                            # something in flight
+    nothing_read: bool = False                       # every input skipped
 
 
 def _group_size():
@@ -541,7 +571,10 @@ def merge_plan(user, state, grouped=None):
     than every member; a slice of one window is not merged. The final is
     due when every window is in, every group is current, nothing of the
     set is in flight, and the set has no final yet over these same inputs
-    and the same version of the user's."""
+    and the same version of the user's. A final whose inputs are all
+    skipped windows (a one-window build whose window was given up) is not
+    sent: there is nothing to merge, and a merge of the skip note alone
+    would be saved as the user's profile (``nothing_read``)."""
     plan = MergePlan()
     from backend.utils.profile_versions import latest_set_final
     final = latest_set_final(user.id, state.set_id)
@@ -595,6 +628,9 @@ def merge_plan(user, state, grouped=None):
     version = user_version_for(user, state.set_id, windows)
     inputs = ([base] if base is not None else []) + mid
     inputs = _with_user_version(inputs, version, base)
+    if all(p.generation_type == "window_skip" for p in inputs):
+        plan.nothing_read = True
+        return plan
     tip = windows[-1]
     if (final is not None and final.parent_profile_id == tip.id
             and final.merged_profile_id == (version.id if version else None)
@@ -605,7 +641,15 @@ def merge_plan(user, state, grouped=None):
     return plan
 
 
+def single_version(inputs):
+    """Whether a merge's inputs are one window version and nothing else
+    (no base, no version of the user's): a one-window set's final."""
+    return len(inputs) == 1 and inputs[0].generation_type == "window"
+
+
 def _merge_messages(user, inputs):
+    if single_version(inputs):
+        return _exports.single_integration_messages(user.id, inputs[0])
     return _exports._integration_messages(user.id, inputs, independent=True)
 
 
@@ -648,8 +692,10 @@ def wants_window_build(user):
     profile adds windows and re-merges), else when the remainder after the
     update base (all the writing, for a full rebuild) plans into two or
     more chunks on the user's chat model, as the chained pipeline plans
-    it. A build that fits one chunk, and a chained update that does, take
-    the chained path unchanged."""
+    it. A from-scratch build (no update base) that fits one chunk is a
+    window set too where its provider's switch is on
+    (``one_chunk_windows``); else it takes the chained path, as does a
+    chained update that fits one chunk, unchanged."""
     if not enabled() or not account_allows_ai(user):
         return False
     if inflight_items(user.id):
@@ -664,7 +710,9 @@ def wants_window_build(user):
     remaining = _exports.count_remaining_units(
         user.id, prev.source_data_cutoff if prev is not None else None)
     k, _size = plan_chunks(remaining, max_units=max_units_for_cap(cap, rho))
-    return k >= 2
+    if k >= 2:
+        return True
+    return k == 1 and prev is None and one_chunk_windows(user)
 
 
 # ── the spend estimate ────────────────────────────────────────────────────
@@ -1095,6 +1143,12 @@ def next_work(user, models, keys, deadline):
             else merge_plan(user, state))
     if not (state.due or state.stopped or plan.groups
             or plan.final_inputs is not None):
+        if plan.nothing_read and not (user.profile_seed_error or "").startswith(
+                NOTHING_READ_NOTE):
+            # Shown in the admin Profile column; the skip itself was
+            # reported to Sentry. The next saved version clears it.
+            user.profile_seed_error = NOTHING_READ_NOTE
+            db.session.commit()
         return "idle"
     if state.stopped:
         start, end, until = state.stopped[0]
@@ -1356,7 +1410,8 @@ def _collect_merge(user, item, result, job, gen_template, history, notes):
         _exports.refuse_truncated_profile(
             user, item["model_id"], response, f"batch {kind}", batch=True,
             problem=_exports.profile_output_problem(
-                response.get("content"), gen_template))
+                response.get("content"), gen_template,
+                final=(kind == "final")))
     except EmptyTruncatedOutputError:
         return "refused"
     start, cutoff = _dt(item.get("start")), _dt(item.get("cutoff"))

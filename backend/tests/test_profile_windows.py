@@ -818,15 +818,23 @@ def test_refused_submissions_stop_rendering_after_the_third(world):
 
 # ── 9. merges ─────────────────────────────────────────────────────────────
 
+# The coverage of one window of a large build in these fixtures: a Haiku
+# window is about 43k units, a Luna window up to about 108k.
+WINDOW_UNITS = 40_000
+
+
 def _set_of(user, n, set_id="set1", base=None, start=T0, step=None,
-            created=None):
-    """``n`` saved windows of one set, contiguous, a day each."""
+            created=None, units=WINDOW_UNITS):
+    """``n`` saved windows of one set, contiguous, a day each, each
+    covering ``units`` (cumulative coverage, as a large build's windows
+    have: a set below CHUNK_TARGET_UNITS is provisional, and the ladder,
+    not the 80k gate, rebuilds it)."""
     step = step or timedelta(days=1)
     rows, cum = [], (base.source_tokens_used if base else 0)
     prev = base.source_data_cutoff if base else None
     for i in range(n):
         cutoff = start + step * (i + 1)
-        cum += 1000
+        cum += units
         row = UserProfile(
             user_id=user.id, generated_by="claude-haiku-5.5", tokens_used=0,
             generation_type="window", window_set=set_id, covers_start=prev,
@@ -1499,3 +1507,354 @@ def test_the_estimate_for_a_large_anthropic_build(app, world):
     # estimate with it.
     app.config["PROFILE_MERGE_STRUCTURE"] = "flat"
     assert pw.estimate_cost_usd(u, state, models, (n, 14_100_000)) == est
+
+
+# ── 14. a from-scratch build that fits one chunk (Peter, 2026-11-03) ──────
+# One window version (with the events paragraph) and one integration of it
+# by the merge model, where the provider's PROFILE_ONE_CHUNK_WINDOW_* is on.
+
+def _one_chunk_user(app, **kw):
+    """An OpenAI user with a from-scratch build due, the OpenAI switch on
+    and the shipped merge structure."""
+    app.config["PROFILE_ONE_CHUNK_WINDOW_OPENAI"] = True
+    app.config["PROFILE_MERGE_STRUCTURE"] = "flat"
+    kw.setdefault("profile_needs_full_regen", True)
+    return _user(preferred_model="gpt-6-astra", **kw)
+
+
+def _finals(user):
+    return [f for f in _rows(user, "integration") if f.window_set]
+
+
+def _all_requests(world):
+    return [r for s in world.provider.submits for rs in s.values()
+            for r in rs]
+
+
+def test_a_one_chunk_build_is_one_window_and_its_integration(app, world):
+    world.corpus = Corpus(50)                    # 50k units: one chunk
+    u = _one_chunk_user(app)
+    assert pw.wants_window_build(u)
+    _advance(u)
+    reqs = world.provider.requests()
+    assert len(reqs) == 1 and reqs[0]["api_model"] == "gpt-6-luna"
+    assert ex.EVENTS_IN_WINDOW_PARAGRAPH in (
+        reqs[0]["messages"][0]["content"][0]["text"])
+    assert _items("window")[0]["total"] == 1
+    _poll()
+    windows = _rows(u, "window")
+    assert len(windows) == 1 and windows[0].covers_start is None
+    from backend.routes.dashboard import get_latest_profile
+    assert get_latest_profile(u) is None         # no profile until the final
+    _advance(u)
+    final_reqs = [r for r in _all_requests(world) if "_f_" in r["custom_id"]]
+    assert len(final_reqs) == 1
+    req = final_reqs[0]
+    assert req["api_model"] == "gpt-6.1-sol"
+    assert req["endpoint"] == "/v1/responses"
+    msgs = req["messages"]
+    assert msgs == pw._exports.single_integration_messages(u.id, windows[0])
+    assert len(msgs) == 2
+    label, stored = msgs[0]["content"][0]["text"].split("\n\n", 1)
+    assert label == ("Profile No. 1\n- Covers the writing from 2024-01-01 "
+                     "to 2024-01-03")
+    assert stored == windows[0].get_content()
+    assert DATE_LINE_RE.match(stored)
+    assert msgs[1]["content"][0]["text"] == (
+        pw._exports.single_integration_prompt(u.id))
+    _poll()
+    finals = _finals(u)
+    assert len(finals) == 1
+    f = finals[0]
+    assert (f.window_set, f.parent_profile_id) == (
+        windows[0].window_set, windows[0].id)
+    assert f.generated_by == "gpt-6.1-sol"
+    assert f.source_tokens_used == windows[0].source_tokens_used == 50_000
+    assert get_latest_profile(u)["id"] == f.id
+    # Done: nothing more goes out.
+    n = len(world.provider.submits)
+    _advance(u)
+    assert len(world.provider.submits) == n
+    # The user's writing reached their own provider's models only.
+    assert {r["api_model"] for r in _all_requests(world)} == {
+        "gpt-6-luna", "gpt-6.1-sol"}
+
+
+def test_the_one_chunk_switch_is_per_provider(app, world):
+    world.corpus = Corpus(50)
+    oai = _user(preferred_model="gpt-6-astra", profile_needs_full_regen=True)
+    anth = _user(profile_needs_full_regen=True)
+    # A config without the keys: the chained path for both.
+    assert not pw.wants_window_build(oai)
+    assert not pw.wants_window_build(anth)
+    app.config["PROFILE_ONE_CHUNK_WINDOW_OPENAI"] = True
+    assert pw.wants_window_build(oai) and not pw.wants_window_build(anth)
+    app.config["PROFILE_ONE_CHUNK_WINDOW_ANTHROPIC"] = True
+    assert pw.wants_window_build(anth)
+    app.config["PROFILE_ONE_CHUNK_WINDOW_OPENAI"] = False
+    assert not pw.wants_window_build(oai)
+    # The kill switch turns it off with the rest of the window path.
+    app.config["PROFILE_INDEPENDENT_VERSIONS"] = False
+    assert not pw.wants_window_build(anth)
+
+
+def test_the_shipped_one_chunk_defaults(app, world, monkeypatch):
+    """OpenAI on (Luna + Sol, decided); Anthropic off until Peter decides:
+    an Anthropic user's one-chunk build is one call on the chat model with
+    the plain prompt, as before."""
+    from backend.config import Config
+    assert Config.PROFILE_ONE_CHUNK_WINDOW_OPENAI is True
+    assert Config.PROFILE_ONE_CHUNK_WINDOW_ANTHROPIC is False
+    for key in ("PROFILE_ONE_CHUNK_WINDOW_OPENAI",
+                "PROFILE_ONE_CHUNK_WINDOW_ANTHROPIC"):
+        app.config[key] = getattr(Config, key)
+    world.corpus = Corpus(50)
+    monkeypatch.setattr(pb._exports, "count_remaining_units",
+                        lambda uid, cutoff=None: world.corpus.count(uid, cutoff))
+    anth = _user(profile_needs_full_regen=True)
+    _seed(anth)
+    meta = _items()[0]
+    assert meta["kind"] == "chunk" and meta["generation_type"] == "initial"
+    text = world.provider.requests()[0]["messages"][0]["content"][0]["text"]
+    assert "EVENTS IN THIS WINDOW" not in text
+    pw.advance_profile_windows.apply_async.assert_not_called()
+    oai = _user(preferred_model="gpt-6-astra", profile_needs_full_regen=True)
+    _seed(oai)
+    pw.advance_profile_windows.apply_async.assert_called_once()
+    db.session.refresh(oai)
+    assert oai.profile_batch_pending and oai.profile_force_batch
+
+
+def test_the_sync_task_hands_a_one_chunk_build_to_the_advance(app, world):
+    world.corpus = Corpus(50)
+    u = _one_chunk_user(app)
+    result = ex.window_hand_off(u, "sync-task-1")
+    assert result is not None and result["status"] == "completed"
+    assert [r["api_model"] for r in world.provider.requests()] == [
+        "gpt-6-luna"]
+
+
+def test_a_chained_one_chunk_update_stays_chained_with_the_switch_on(
+        app, world):
+    world.corpus = Corpus(85, start=T0 + timedelta(days=400))
+    u = _one_chunk_user(app, profile_needs_full_regen=False)
+    _profile(u, gen_type="update", cutoff=T0 + timedelta(days=1),
+             units=100_000)
+    assert not pw.wants_window_build(u)
+
+
+def test_the_single_version_prompt(app):
+    u = _user()
+    prompt = ex.single_integration_prompt(u.id)
+    gen = ex._load_prompt("profile_generation.txt", user_id=u.id)
+    structure = ex.profile_structure_instructions(gen)
+    assert prompt.count(structure) == 1
+    own = prompt.replace(structure, "")
+    assert "{" not in own and "}" not in own
+    assert own.startswith("The above is a profile of the user")
+    assert prompt.endswith(
+        '\n\n## OUTPUT\nGenerate the profile now. No preamble, no '
+        'meta-commentary. Begin directly with "### SURFACE MAP"')
+    # (a) none of the many-version wording that leaked into finals.
+    for phrase in ("series", "update", "80k", "110k", "unif", "trajectory",
+                   "evolution", "months", "Profile No"):
+        assert phrase not in own, phrase
+    # (b) the events list is named, moved into the Surface Map, left out.
+    assert '"### EVENTS IN THIS WINDOW"' in own
+    assert "into the Surface Map, each with its date" in own
+    assert "with no events section" in own
+    # (c) no claims of the merge model's own.
+    assert "add no fact, outcome or trend of your own" in own
+    assert ex.EVENTS_IN_WINDOW_PARAGRAPH not in prompt
+
+
+def test_the_single_version_prompt_embeds_the_users_own_structure(
+        app, monkeypatch):
+    """The user's own generation prompt shapes the profile, as in every
+    merge; their own integration prompt (written for many versions) does
+    not replace this one."""
+    own_gen = "My own maps.\n\n## OUTPUT\nGo.\n\n## INPUT\n{user_export}"
+    own_integ = ("MY OWN INTEGRATION {profile_generation_prompt}\n\n"
+                 "## OUTPUT\nGo.")
+    import backend.utils.prompts as prompts
+    monkeypatch.setattr(prompts, "get_user_prompt", lambda uid, key: {
+        "profile_generation": own_gen,
+        "profile_integration": own_integ}.get(key))
+    u = _user()
+    prompt = ex.single_integration_prompt(u.id)
+    assert "My own maps." in prompt and "## INPUT" not in prompt
+    assert "MY OWN INTEGRATION" not in prompt
+    w = _profile(u, gen_type="window", window_set="s", covers_start=None)
+    many = ex._integration_messages(u.id, [w, w], independent=True)
+    assert many[-1]["content"][0]["text"].startswith("MY OWN INTEGRATION")
+
+
+def test_the_many_version_prompt_is_unchanged(app, world):
+    """#586's prompt file, byte for byte, and a set of two windows (a
+    one-window build after its first update) is merged with it."""
+    import hashlib
+    path = os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))), "prompts", "profile_integration.txt")
+    with open(path, "rb") as fh:
+        assert hashlib.sha256(fh.read()).hexdigest() == (
+            "2d12819e3c450c74c0c65db1b3a70516eb1a9272b99c0eb786c47568f27a4e52")
+    app.config["PROFILE_MERGE_STRUCTURE"] = "flat"
+    u = _user(preferred_model="gpt-6-astra")
+    rows = _set_of(u, 2)
+    _corpus_for(world, rows)
+    _advance(u)
+    msgs = _merge_reqs(world)[0]["messages"]
+    assert msgs == pw._exports._integration_messages(
+        u.id, rows, independent=True)
+    assert msgs[-1]["content"][0]["text"] != ex.single_integration_prompt(
+        u.id)
+    assert not pw.single_version(rows) and pw.single_version(rows[:1])
+
+
+def test_output_problem_rejects_an_events_section_in_a_final():
+    gen = "SURFACE MAP SHADOW MAP LIGHT MAP"
+    assert ex.profile_output_problem(_good(events=False), gen,
+                                     final=True) is None
+    assert ex.profile_output_problem(_good(events=True), gen, final=True) == (
+        "an EVENTS IN THIS WINDOW heading in a final profile")
+    lower = _good(events=False) + "\n## Events in this window\n- x\n"
+    assert ex.profile_output_problem(lower, gen, final=True)
+    # A group or a chained step is not checked for it; a window has one.
+    assert ex.profile_output_problem(_good(events=True), gen) is None
+    assert ex.profile_output_problem(_good(events=True), gen,
+                                     events=True) is None
+
+
+def test_a_final_with_an_events_section_is_refused(app, world):
+    world.corpus = Corpus(50)
+    u = _one_chunk_user(app)
+    world.provider.respond = lambda cid, req: {
+        "content": _good(events=True, tag=cid), "input_tokens": 1000,
+        "output_tokens": 500, "batch": True}
+    _advance(u)
+    _poll()
+    assert len(_rows(u, "window")) == 1
+    _advance(u)
+    costs = APICostLog.query.filter_by(user_id=u.id).count()
+    _poll()
+    assert _items("final")[0]["outcome"] == "refused"
+    assert not _finals(u)
+    assert APICostLog.query.filter_by(user_id=u.id).count() == costs + 1
+    # The integration rule: no retry within the hour.
+    n = len(world.provider.submits)
+    _advance(u)
+    assert len(world.provider.submits) == n
+
+
+def test_an_edit_during_a_one_window_build_is_merged_in_its_final(
+        app, world):
+    """The user's edit wins: a version the user saves while the window is
+    in the batch is merged into the final, with the many-version prompt
+    (two inputs) and its "Written by the user" label."""
+    world.corpus = Corpus(50)
+    u = _one_chunk_user(app)
+    old = _profile(u, gen_type="initial", cutoff=T0 + timedelta(hours=10),
+                   units=5_000)
+    _advance(u)                                  # the window goes out
+    edit = _edit(u, old)
+    _poll()
+    windows = _rows(u, "window")
+    assert len(windows) == 1
+    _advance(u)
+    msgs = _merge_reqs(world)[0]["messages"]
+    assert len(msgs) == 3
+    labels = [m["content"][0]["text"].split("\n\n", 1)[0] for m in msgs[:-1]]
+    assert "Written by the user" in labels[0]
+    assert msgs == pw._exports._integration_messages(
+        u.id, [edit, windows[0]], independent=True)
+    _poll()
+    finals = _finals(u)
+    assert len(finals) == 1 and finals[0].merged_profile_id == edit.id
+
+
+def test_a_provisional_one_window_set_is_rebuilt_from_scratch(
+        app, world, monkeypatch):
+    """The ladder, not the 80k gate, replaces a provisional one-window
+    set, as it replaces a chained provisional profile."""
+    world.corpus = Corpus(5)                     # 5k units: the first rung
+    u = _one_chunk_user(app)
+    _finish(world, u)
+    first = _finals(u)
+    assert len(first) == 1
+    tip = ex.profile_update_base(u.id)
+    assert tip.generation_type == "window" and ex.profile_is_provisional(tip)
+    world.corpus.add(85, start=datetime.utcnow() + timedelta(days=2))
+    assert not pw.set_work_due(u, tip)
+    tip.created_at = datetime.utcnow() - timedelta(hours=2)
+    db.session.commit()
+    for mod in (ex, pw._exports, pb._exports):
+        monkeypatch.setattr(mod, "_estimate_source_tokens",
+                            lambda user: world.corpus.count(user.id))
+    assert pb._should_seed(u) is True
+    db.session.refresh(u)
+    assert u.profile_needs_full_regen
+    assert pw.wants_window_build(u)
+    _finish(world, u)
+    finals = _finals(u)
+    assert len(finals) == 2
+    assert finals[-1].window_set != first[0].window_set
+    newest = [w for w in _rows(u, "window")
+              if w.window_set == finals[-1].window_set]
+    assert len(newest) == 1 and newest[0].covers_start is None
+    assert newest[0].source_tokens_used == 90_000
+
+
+def test_a_one_window_set_past_the_ladder_is_updated_as_a_set(app, world):
+    """Its later updates are the set's: one more window, and a final over
+    both windows with the many-version prompt."""
+    world.corpus = Corpus(100)                   # one chunk, past the ladder
+    u = _one_chunk_user(app)
+    _finish(world, u)
+    assert len(_rows(u, "window")) == 1 and len(_finals(u)) == 1
+    world.corpus.add(85, start=datetime.utcnow() + timedelta(days=2))
+    assert pw.wants_window_build(u)
+    _finish(world, u)
+    windows = _rows(u, "window")
+    assert len(windows) == 2
+    assert windows[1].covers_start == windows[0].source_data_cutoff
+    final_req = [r for r in _all_requests(world)
+                 if "_f_" in r["custom_id"]][-1]
+    assert final_req["messages"] == pw._exports._integration_messages(
+        u.id, windows, independent=True)
+    assert len(_finals(u)) == 2
+
+
+def test_a_one_window_build_whose_window_is_given_up_sends_no_final(
+        app, world, monkeypatch):
+    """Nothing was read, so nothing is merged: a merge of the skip note
+    alone would be saved as the user's profile."""
+    monkeypatch.setattr(pw, "_report", lambda title, **tags: None)
+    world.corpus = Corpus(50)
+    u = _one_chunk_user(app)
+    world.provider.respond = lambda cid, req: {
+        "content": "I can't help with that.", "input_tokens": 1000,
+        "output_tokens": 20, "batch": True}
+    _finish(world, u)
+    assert len(_rows(u, "window_skip")) == 1 and not _rows(u, "window")
+    assert not _items("final") and not _finals(u)
+    db.session.refresh(u)
+    assert u.profile_seed_error == pw.NOTHING_READ_NOTE
+    assert not pw.set_work_due(u, ex.profile_update_base(u.id))
+
+
+def test_progress_labels_for_a_one_window_build(app):
+    from backend.routes import export_data as ed
+    u = _user(profile_batch_pending=True)
+    for kind, extra, message, progress in (
+            ("window", {"total": 1}, "Generating profile", 20),
+            ("final", {"inputs": [7]}, "Generating profile", 95),
+            ("final", {"inputs": [7, 8]}, "Integrating profile versions",
+             95)):
+        ProfileBatchJob.query.delete()
+        db.session.add(ProfileBatchJob(
+            provider_key="openai:gpt-6-luna", batch_id="b", status="pending",
+            items=[dict({"custom_id": "c", "user_id": u.id, "kind": kind},
+                        **extra)]))
+        db.session.commit()
+        out = ed._batch_progress(u)
+        assert (out["message"], out["progress"]) == (message, progress)

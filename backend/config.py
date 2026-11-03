@@ -141,6 +141,21 @@ class Config:
         os.environ.get("PROFILE_MERGE_MODEL_ANTHROPIC") or "claude-opus-5.5")
     PROFILE_MERGE_MODEL_OPENAI = (
         os.environ.get("PROFILE_MERGE_MODEL_OPENAI") or "gpt-6.1-sol")
+    # A from-scratch build that fits ONE chunk on the user's chat model,
+    # per provider of that chat model (Peter, 2026-11-03): on, it is a
+    # window set of one window (the version model, with the events
+    # paragraph) and one integration of that version by the merge model
+    # (profile_single_integration.txt), which is the user's profile. Off,
+    # it is one call on the chat model with the plain generation prompt,
+    # as before. OpenAI on (GPT-6 Luna, then GPT-6.1 Sol); Anthropic off
+    # until Peter decides on Haiku 5.5, then Opus 5.5. Updates of a
+    # chained profile are not affected.
+    PROFILE_ONE_CHUNK_WINDOW_OPENAI = (
+        os.environ.get("PROFILE_ONE_CHUNK_WINDOW_OPENAI") or "true"
+    ).lower() in ("1", "true", "yes")
+    PROFILE_ONE_CHUNK_WINDOW_ANTHROPIC = (
+        os.environ.get("PROFILE_ONE_CHUNK_WINDOW_ANTHROPIC") or "false"
+    ).lower() in ("1", "true", "yes")
     # Reasoning effort sent with an OpenAI merge request (a Responses
     # batch request's "reasoning.effort"). One of PROFILE_REASONING_EFFORTS
     # (checked at boot). "high" (2026-10-22): on identical input Sol kept
