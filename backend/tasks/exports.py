@@ -12,7 +12,7 @@ from backend.extensions import db
 from backend.llm_providers import (
     LLMProvider, PromptTooLongError, DEFAULT_MAX_OUTPUT_TOKENS,
     model_input_cap, is_empty_truncated, is_refused,
-    EmptyTruncatedOutputError)
+    EmptyTruncatedOutputError, policy_block_code)
 
 from backend.utils.tokens import (
     approximate_token_count, reduce_export_tokens, format_date_metadata,
@@ -414,7 +414,8 @@ def _call_llm_with_retries(self, model_id, prompt_text, user_id,
         try:
             response = LLMProvider.get_completion(model_id, messages,
                                                   api_keys,
-                                                  max_tokens=max_tokens)
+                                                  max_tokens=max_tokens,
+                                                  user_id=user_id)
             return response
         except PromptTooLongError as e:
             if attempt == MAX_RETRIES:
@@ -750,7 +751,8 @@ def _do_merge(self, user, model_id, base, version, api_keys):
     self.update_state(state='PROGRESS', meta={
         'progress': 85, 'status': 'Merging your own version'
     })
-    response = LLMProvider.get_completion(model_id, messages, api_keys)
+    response = LLMProvider.get_completion(model_id, messages, api_keys,
+                                          user_id=user.id)
     refuse_truncated_profile(user, model_id, response, "merge")
     _discard_if_base_moved(user, model_id, base.id, response, "merge")
     return response["content"], save_merge(
@@ -1024,6 +1026,22 @@ def update_user_profile(self, user_id: int, model_id: str,
                         "was saved while it ran", user_id)
             return None
         except Exception as e:
+            code = policy_block_code(e)
+            if code:
+                # Final (Peter, 2026-11-04): the block's cost row stops
+                # the hourly trigger for this user; already reported by
+                # the provider call.
+                db.session.rollback()
+                stopped = User.query.get(user_id)
+                if stopped:
+                    stopped.profile_seed_error = (
+                        f"Stopped: the provider's content-policy filter "
+                        f"blocked the profile update ({code}); runs again "
+                        f"only after Build profile with the override"
+                    )[:255]
+                refusal_backoff.record_policy_block(
+                    user_id, "profile", model_id, code, "profile update",
+                    report=False)
             logger.error(
                 f"Profile update error for user {user_id}: {e}",
                 exc_info=True
@@ -1410,7 +1428,8 @@ def _do_integration(self, user, model_id, last_iterative_profile_id,
         'progress': 90, 'status': 'Integrating profile versions'
     })
 
-    response = LLMProvider.get_completion(model_id, messages, api_keys)
+    response = LLMProvider.get_completion(model_id, messages, api_keys,
+                                          user_id=user.id)
     refuse_truncated_profile(user, model_id, response, "integration")
     _discard_if_base_moved(user, model_id, last_iterative_profile_id,
                            response, "integration")
@@ -1866,6 +1885,11 @@ def maybe_trigger_incremental_profile_update(user, ignore_backoff=False):
     # After a refused (cut-off) output the gates below stay open — nothing
     # was saved — so without this the same billed call repeats hourly (#368).
     if not ignore_backoff and refusal_backoff.profile_in_backoff(user.id):
+        return None
+    # A content-policy block stops it for good, an import's trigger
+    # included: the blocked writing would go out again (Peter, 2026-11-04).
+    if refusal_backoff.policy_block_for(
+            user.id, refusal_backoff.PROFILE_REQUEST_TYPES):
         return None
 
     latest_profile = profile_update_base(user.id)

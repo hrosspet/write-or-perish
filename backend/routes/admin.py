@@ -114,16 +114,26 @@ def _profile_backoff_map():
     """{user_id: {state, refusals, until}} for users whose profile job is
     held by the refusal backoff (#368, utils/refusal_backoff.py): "waiting"
     after one cut-off output in a row (until = when the next try is
-    allowed), "stopped" after two. Users not held are left out. Two
-    queries: the refused profile cost rows (rare) and each of their
-    users' newest saved version."""
+    allowed), "stopped" after two, "blocked" (with ``code``) after a
+    content-policy block. Users not held are left out. Two queries: the
+    refused profile cost rows (rare) and each of their users' newest
+    saved version; plus one per user with a policy block (rarer)."""
     from backend.models import UserProfile
     from backend.utils import refusal_backoff as rb
+    blocked = {}
+    for (uid,) in db.session.query(APICostLog.user_id).filter(
+            APICostLog.request_type.in_(rb.PROFILE_REQUEST_TYPES),
+            APICostLog.request_ref.like(
+                rb.POLICY_BLOCK_REF_PREFIX + "%")).distinct().all():
+        code = rb.policy_block_for(uid, rb.PROFILE_REQUEST_TYPES)
+        if code:
+            blocked[uid] = {"state": "blocked", "code": code,
+                            "refusals": 0, "until": None}
     refused = db.session.query(APICostLog.user_id, APICostLog.created_at).filter(
         APICostLog.request_type.in_(rb.PROFILE_REQUEST_TYPES),
         APICostLog.request_ref == rb.REFUSED_REF).all()
     if not refused:
-        return {}
+        return blocked
     uids = {uid for uid, _ in refused}
     last_saved = dict(db.session.query(
         UserProfile.user_id, func.max(UserProfile.created_at)).filter(
@@ -144,6 +154,7 @@ def _profile_backoff_map():
         if now < until:
             out[uid] = {"state": "waiting", "refusals": n,
                         "until": iso_utc(until)}
+    out.update(blocked)
     return out
 
 
@@ -377,7 +388,9 @@ def build_profile(user_id):
     output the build waits, after two it is stopped — unless the JSON body
     has ``"force": true``, which the admin sends after confirming the
     dialog the Users tab shows for a held user. A saved version then ends
-    the stop."""
+    the stop. A content-policy block's stop (refusal_backoff.policy_block_for)
+    is lifted by nothing else: only this confirmed override sends the
+    blocked request again."""
     user = User.query.get_or_404(user_id)
     # Same refusal as pre-fill: this button usually follows one (#346).
     # Checked here only: the seeder it dispatches also serves the user's
@@ -393,6 +406,11 @@ def build_profile(user_id):
     db.session.commit()
     from backend.tasks.profile_batch import seed_profile_batch_for_user
     if force:
+        # The one action that sends a content-policy-blocked profile
+        # request again (Peter, 2026-11-04): the admin confirmed it.
+        from backend.utils import refusal_backoff
+        refusal_backoff.lift_policy_block(
+            user.id, "profile_batch", refusal_backoff.PROFILE_REQUEST_TYPES)
         seed_profile_batch_for_user.delay(user.id, ignore_backoff=True)
     else:
         seed_profile_batch_for_user.delay(user.id)
