@@ -2402,26 +2402,226 @@ def test_a_blocked_window_of_an_account_without_ai_writes_no_skip_row(
     assert len(world.provider.submits) == submits
 
 
+def _age_jobs(days):
+    for job in ProfileBatchJob.query.all():
+        job.submitted_at -= timedelta(days=days)
+        if job.collected_at:
+            job.collected_at -= timedelta(days=days)
+    db.session.commit()
+
+
+def _unblock(world, monkeypatch):
+    monkeypatch.setattr(pb, "batch_check_and_collect",
+                        lambda *a, **k: world.provider.collect(*a, **k))
+
+
+def _overlaps(item, blocked):
+    """Whether a window item's range (start, cutoff] meets the blocked
+    window's."""
+    s, c = pw._dt(item["start"]), pw._dt(item["cutoff"])
+    bs, bc = pw._dt(blocked["start"]), pw._dt(blocked["cutoff"])
+    lo = max(s or datetime.min, bs or datetime.min)
+    hi = min(c or datetime.max, bc or datetime.max)
+    return lo < hi
+
+
+def _blocked_build(world, monkeypatch, marker, corpus=None, user=None):
+    """Build a set whose window ``marker`` is blocked, to its final; then
+    the provider blocks nothing more. Returns (user, blocked item)."""
+    world.corpus = corpus or _windows_corpus(3)
+    _policy_reports(monkeypatch)
+    _blocking(world, monkeypatch, marker)
+    u = user or _user(profile_needs_full_regen=True)
+    _build(world, u)
+    [blocked] = [i for i in _items("window") if i.get("outcome") == "blocked"]
+    _unblock(world, monkeypatch)
+    return u, blocked
+
+
+def _never_resent(u, blocked, before):
+    """No window sent after ``before`` meets the blocked range, and the
+    newest set skips exactly that range without a request."""
+    new = _items("window")[before:]
+    assert not [i for i in new if _overlaps(i, blocked)], [
+        (i["start"], i["cutoff"]) for i in new]
+    tip_set = ex.profile_update_base(u.id).window_set
+    skips = [r for r in _rows(u, "window_skip") if r.window_set == tip_set]
+    assert [(pw._iso(r.covers_start), pw._iso(r.source_data_cutoff))
+            for r in skips] == [(blocked["start"], blocked["cutoff"])]
+    return new
+
+
+def test_the_blocked_range_is_remembered_for_good(world, monkeypatch):
+    from backend.models import ProfileBlockedRange
+    u, blocked = _blocked_build(world, monkeypatch, "_w2_")
+    [row] = ProfileBlockedRange.query.filter_by(user_id=u.id).all()
+    assert (pw._iso(row.range_start), pw._iso(row.range_end)) == (
+        blocked["start"], blocked["cutoff"])
+    assert row.code == "bio_policy" and row.lifted_at is None
+    assert pw.blocked_ranges(u.id) == [(row.range_start, row.range_end)]
+
+
+def test_cut_around_blocked():
+    d = [datetime(2024, 1, i) for i in range(1, 10)]
+    cut = pw.cut_around_blocked
+    assert cut(d[0], d[8], []) == [(False, d[0], d[8])]
+    assert cut(d[0], d[8], [(d[2], d[4])]) == [
+        (False, d[0], d[2]), (True, d[2], d[4]), (False, d[4], d[8])]
+    assert cut(None, None, [(None, d[3])]) == [
+        (True, None, d[3]), (False, d[3], None)]
+    # Clipped to the range; a range that ends inside a blocked one.
+    assert cut(d[3], d[5], [(d[2], d[7])]) == [(True, d[3], d[5])]
+    assert cut(d[3], None, [(d[1], d[2]), (d[4], d[5])]) == [
+        (False, d[3], d[4]), (True, d[4], d[5]), (False, d[5], None)]
+
+
 def test_a_rebuilt_set_skips_a_blocked_window_without_a_request(
         world, monkeypatch):
+    u, blocked = _blocked_build(world, monkeypatch, "_w1_")
+    before = len(_items("window"))
+    u.profile_needs_full_regen = True      # e.g. Build profile
+    db.session.commit()
+    _build(world, u)
+    assert _never_resent(u, blocked, before)
+    assert len({r.window_set for r in _rows(u, "window_skip")}) == 2
+
+
+def test_an_import_of_older_writing_does_not_resend_a_blocked_range(
+        world, monkeypatch):
+    """Review of #596: an import of older writing rebuilds from scratch
+    and shifts every window start; the blocked range is still skipped
+    exactly."""
+    u, blocked = _blocked_build(world, monkeypatch, "_w2_")
+    assert blocked["start"] is not None
+    older = [(T0 - timedelta(hours=30 - i), 1000) for i in range(30)]
+    world.corpus.rows = older + world.corpus.rows
+    action, _v = ex.revert_profile_for_import(u.id, older[0][0])
+    assert action == "full"
+    db.session.commit()
+    before = len(_items("window"))
+    _build(world, u)
+    assert _never_resent(u, blocked, before)
+    assert _finals(u)
+
+
+@pytest.mark.parametrize("days", [0, 8])
+def test_new_writing_and_a_rebuild_do_not_resend_a_blocked_range(
+        world, monkeypatch, days):
+    """Review of #596: new writing resizes the windows of a rebuild (also
+    one Build profile starts without the dialog), within the attempt
+    history or long after it."""
+    u, blocked = _blocked_build(world, monkeypatch, "_w2_")
+    world.corpus.add(len(world.corpus.rows) // 5)
+    _age_jobs(days)
+    u.profile_needs_full_regen = True
+    db.session.commit()
+    before = len(_items("window"))
+    _build(world, u)
+    assert _never_resent(u, blocked, before)
+
+
+def test_an_import_inside_a_blocked_range_is_skipped_with_it(
+        world, monkeypatch):
+    u, blocked = _blocked_build(world, monkeypatch, "_w2_")
+    bs, bc = pw._dt(blocked["start"]), pw._dt(blocked["cutoff"])
+    inside = bs + (bc - bs) / 2 + timedelta(minutes=7)
+    world.corpus.rows = sorted(world.corpus.rows + [(inside, 1000)])
+    action, _v = ex.revert_profile_for_import(u.id, inside)
+    db.session.commit()
+    u.profile_needs_full_regen = True
+    db.session.commit()
+    before = len(_items("window"))
+    _build(world, u)
+    assert _never_resent(u, blocked, before)
+
+
+def test_ai_turned_back_on_long_after_does_not_resend_a_blocked_range(
+        world, monkeypatch):
+    """Review of #596: AI usage switched off while the batch ran (no skip
+    row) and back on more than the attempt history later: the range is
+    remembered all the same and skipped without a request."""
     world.corpus = _windows_corpus(3)
     _policy_reports(monkeypatch)
     _blocking(world, monkeypatch, "_w1_")
     u = _user(profile_needs_full_regen=True)
     _advance(u)
+    u.default_ai_usage = "none"
+    db.session.commit()
     _poll()
-    first_requests = len(_window_requests(world))
-    # A rebuild from scratch (e.g. Build profile) within the attempt
-    # history: the same first window is skipped again, never sent.
-    monkeypatch.setattr(pb, "batch_check_and_collect",
-                        lambda *a, **k: world.provider.collect(*a, **k))
+    [blocked] = [i for i in _items("window") if i.get("outcome") == "blocked"]
+    assert not _rows(u, "window_skip")
+    assert pw.blocked_ranges(u.id)          # recorded with AI off
+    _unblock(world, monkeypatch)
+    u.default_ai_usage = "chat"
+    db.session.commit()
+    _age_jobs(8)
+    before = len(_items("window"))
+    _build(world, u)
+    assert _never_resent(u, blocked, before)
+    assert _finals(u)
+
+
+def _ladder_ready(world, monkeypatch, u, days):
+    world.corpus.add(20, start=datetime.utcnow() + timedelta(days=2))
+    for p in UserProfile.query.filter_by(user_id=u.id).all():
+        p.created_at = datetime.utcnow() - timedelta(days=days)
+    db.session.commit()
+    for mod in (ex, pw._exports, pb._exports):
+        monkeypatch.setattr(mod, "_estimate_source_tokens",
+                            lambda user: world.corpus.count(user.id))
+    monkeypatch.setattr(pb, "MIN_INACTIVITY", timedelta(0))
+
+
+@pytest.mark.parametrize("days", [2, 8])
+def test_the_ladder_rebuild_skips_only_the_blocked_range(
+        app, world, monkeypatch, days):
+    """Review of #596: a one-window set whose window was blocked built no
+    profile; new writing takes it up the provisional ladder, within the
+    attempt history or after it. The rebuild skips exactly the blocked
+    range and reads the new writing, so a profile is built from it."""
+    u, blocked = _blocked_build(world, monkeypatch, "_w", corpus=Corpus(5),
+                                user=_one_chunk_user(app))
+    assert not _finals(u)
+    _ladder_ready(world, monkeypatch, u, days)
+    if days > 7:
+        _age_jobs(days)
+    assert pb._should_seed(u)
+    before = len(_items("window"))
+    _build(world, u)
+    new = _never_resent(u, blocked, before)
+    assert new and all(pw._dt(i["start"]) >= pw._dt(blocked["cutoff"])
+                       for i in new)
+    assert _finals(u)
+
+
+def test_lifting_the_blocked_ranges_reads_them_again(world, monkeypatch):
+    """The one way to resend a blocked window: lift_blocked_ranges from a
+    shell. No button does it."""
+    u, blocked = _blocked_build(world, monkeypatch, "_w2_")
+    assert pw.lift_blocked_ranges(u.id) == 1
+    assert pw.blocked_ranges(u.id) == []
     u.profile_needs_full_regen = True
     db.session.commit()
+    before = len(_items("window"))
     _advance(u)
-    new = _window_requests(world)[first_requests:]
-    assert new and not any("_w1_" in cid for cid in new)
-    sets = {r.window_set for r in _rows(u, "window_skip")}
-    assert len(sets) == 2
+    assert [i for i in _items("window")[before:] if _overlaps(i, blocked)]
+
+
+def test_a_blocked_chained_chunk_is_remembered_as_a_blocked_range(
+        app, monkeypatch):
+    """A chained step's chunk blocked by the filter (#597 stops the
+    account) is remembered as a range too, so a later window build cuts
+    around it."""
+    from backend.models import ProfileBlockedRange
+    u = _user()
+    prev = _profile(u, gen_type="update", cutoff=T0)
+    item = {"custom_id": "c1", "user_id": u.id, "kind": "chunk",
+            "prev_profile_id": prev.id, "model_id": "claude-opus-5.5",
+            "source_data_cutoff": (T0 + timedelta(days=3)).isoformat()}
+    _policy_reports(monkeypatch)
+    pb._stop_for_policy_block(u, item, "bio_policy")
+    [row] = ProfileBlockedRange.query.filter_by(user_id=u.id).all()
+    assert (row.range_start, row.range_end) == (T0, T0 + timedelta(days=3))
 
 
 def test_a_policy_blocked_final_stops_the_account(world, monkeypatch):
@@ -2578,6 +2778,8 @@ def test_the_backfill_records_old_missing_blocks_and_the_set_finishes(
     assert len(_rows(u, "window_skip")) == 1
     assert APICostLog.query.filter_by(
         user_id=u.id, request_ref="policy_block:bio_policy").count() == 2
+    # The durable range record a later window plan cuts around.
+    assert pw.blocked_ranges(u.id) == [(None, pw._dt(attempts[0]["cutoff"]))]
     # Idempotent: a second run finds nothing more.
     again = mod.find_blocks(client_for=lambda: client, out=lines.append)
     assert again == []
@@ -2625,3 +2827,5 @@ def test_the_backfill_leaves_accounts_without_ai_without_a_skip_row(
     [attempt] = [i for i in _items("window") if i["start"] is None]
     assert attempt["outcome"] == "blocked"
     assert not _rows(u, "window_skip")
+    # The range is remembered all the same.
+    assert pw.blocked_ranges(u.id) == [(None, pw._dt(attempt["cutoff"]))]

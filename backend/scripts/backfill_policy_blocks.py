@@ -13,17 +13,19 @@ would be sent again. No block row exists for these items.
 This script finds them and records each block the way the new collect path
 does (``profile_windows.collect``):
 
-- a blocked window gets a window_skip row in its place (only for its
-  newest attempt, so a skip row never lands in an older set) and a $0 block
-  record that stops nothing (``profile_windows.skip_blocked_window``); the
+- a blocked window's range is remembered for good
+  (``profile_windows.record_blocked_range``: every later window plan cuts
+  around it), a window_skip row takes its place (only for its newest
+  attempt, so a skip row never lands in an older set) and a $0 block
+  record stops nothing (``profile_windows.skip_blocked_window``); the
   account's set is then merged without it on the next pass;
 - a blocked group or final stops the account's build
   (``profile_windows.stop_for_blocked_merge``);
 - every such item's outcome becomes "blocked" (with ``policy_code``), so the
   window is never sent again and no provider stop counts it.
 
-Accounts whose AI usage no longer allows AI get no skip row (the item's
-outcome and the block record only). It scans the ProfileBatchJob rows
+Accounts whose AI usage no longer allows AI get no skip row (the range,
+the item's outcome and the block record only). It scans the ProfileBatchJob rows
 submitted in the last --days whose window-set items have a provider-failure
 outcome ("missing" or "error") on an OpenAI batch, retrieves each batch and
 reads its error file. An item whose error code is not a policy code (an
@@ -133,6 +135,7 @@ def record_blocks(found, apply=False, out=print):
         out(f"job {job.id} batch {job.batch_id} user {item['user_id']} "
             f"{kind} {item.get('start') or 'start'}..{item.get('cutoff')} "
             f"{code} -> blocked"
+            + (" + range" if kind == "window" else "")
             + (" + skip row" if skip else "")
             + ("" if allowed else " (AI usage does not allow AI: no skip row)")
             + ("" if kind == "window" else " + account stopped"))
@@ -140,10 +143,16 @@ def record_blocks(found, apply=False, out=print):
         if not apply or user is None:
             continue
         if kind == "window":
-            if skip:
+            if newest.get((item["user_id"], item.get("start"))) \
+                    == item.get("custom_id"):
+                # The range record, the skip row (unless AI is off or the
+                # set was superseded) and the $0 record.
                 pw.skip_blocked_window(user, item, code, report=False)
             else:
                 from backend.utils import refusal_backoff
+                pw.record_blocked_range(
+                    user.id, pw._dt(item.get("start")),
+                    pw._dt(item.get("cutoff")), code, item.get("model_id"))
                 refusal_backoff.record_policy_block(
                     user.id, pw.WINDOW_BLOCK_REQUEST_TYPE, item.get("model_id"),
                     code, "profile window", report=False)

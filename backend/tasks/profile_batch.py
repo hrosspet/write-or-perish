@@ -902,6 +902,17 @@ def _stop_for_policy_block(user, item, code):
     refusal_backoff.record_policy_block(
         user.id, "profile_batch", item.get("model_id"), code,
         f"profile batch {item.get('kind') or 'step'}")
+    if item.get("kind") == "chunk" and item.get("source_data_cutoff"):
+        # The chunk's writing is remembered as a blocked range: a later
+        # build (after the admin's override, on the window path) skips it
+        # (profile_windows.cut_around_blocked).
+        from backend.tasks import profile_windows
+        prev = (db.session.get(UserProfile, item["prev_profile_id"])
+                if item.get("prev_profile_id") else None)
+        profile_windows.record_blocked_range(
+            user.id, prev.source_data_cutoff if prev is not None else None,
+            datetime.fromisoformat(item["source_data_cutoff"]), code,
+            item.get("model_id"))
 
 
 def _fail_job(job, reason):

@@ -465,17 +465,27 @@ is never sent again automatically. A blocked **window** is skipped
 profile"): a `window_skip` row takes its place over its real range, a $0
 record of the block stops nothing (request type `profile_window`), the
 admin column says "Skipped window <start>..<cutoff>: provider policy block
-(bio_policy)", and the merges run over the other windows. A rebuilt set
-within the attempt history skips that window again without a request; an
-account whose AI usage no longer allows AI gets no skip row; a set whose
-windows are all skipped sends no final. A blocked **group or final**
+(bio_policy)", and the merges run over the other windows. The range
+itself is remembered for good, per user, whatever the account's AI usage
+(`ProfileBlockedRange`, no lookback): every later window plan, in any
+set, cuts around it (`cut_around_blocked`): a window ends where the
+blocked range starts, the next begins where it ends, and exactly that
+range, entries imported into it later included, gets a `window_skip` row
+without a request. So no rebuild resends it: an import that shifts the
+windows, new writing that resizes them, the provisional ladder, Build
+profile, or AI usage turned back on. Only `lift_blocked_ranges(user_id)`,
+from a shell, lets it be read again; no button does. An account whose AI
+usage does not allow AI gets no skip row (the range is recorded); a set
+whose windows are all skipped sends no final. A blocked chained chunk
+(the account stops, #597) is remembered as a range too. A blocked **group or final**
 cannot be skipped: it is recorded as a profile block
 (`refusal_backoff.record_policy_block`), `profile_seed_error` names it,
 and the account builds nothing further (`next_work` returns "blocked",
 also when the block is collected while an advance runs) until
 `refusal_backoff.lift_policy_block`: the admin's confirmed Build profile.
 `scripts/backfill_policy_blocks.py` records the blocks collected as
-"missing" before this code, from the batches' error files.
+"missing" before this code, from the batches' error files, with the
+same range records.
 
 **Running it.** `dispatch_advance` claims the per-user guard
 (`profile_generation_task_id`), sets `profile_batch_pending` and pins the

@@ -63,7 +63,8 @@ from sqlalchemy.orm import defer
 
 from backend.celery_app import celery, flask_app
 from backend.extensions import db
-from backend.models import User, UserProfile, ProfileBatchJob, Node
+from backend.models import (
+    User, UserProfile, ProfileBatchJob, ProfileBlockedRange, Node)
 from backend.llm_providers import (
     DEFAULT_MAX_OUTPUT_TOKENS, LLMProvider, EmptyTruncatedOutputError,
     model_input_cap)
@@ -94,7 +95,9 @@ PROVIDER_FAILURES = ("missing", "error")
 # 2026-11-04). Neither a content nor a provider failure, and never sent
 # again automatically. A blocked WINDOW is skipped: a window_skip row
 # takes its place and the build goes on over the other windows (Peter,
-# 2026-11-04: "skip the flagged windows, but finish their profile"). A
+# 2026-11-04: "skip the flagged windows, but finish their profile"), and
+# its range is remembered for good (ProfileBlockedRange), so every later
+# window plan cuts around it (cut_around_blocked). A
 # blocked GROUP or FINAL cannot be skipped: it stops the account's build
 # (refusal_backoff.policy_block_for) until the admin's confirmed Build
 # profile lifts the stop.
@@ -922,9 +925,12 @@ def fit_window(user, model_id, keys, cap, cur, budget, end, prompt_fn,
 def _render_windows(user, state, models, sub, history, deadline):
     """Plan and render every due range into window requests, oldest
     first, exactly as the chain loop sizes its chunks, but at the version
-    model's cap. Returns "partial" when the render budget ran out (the
-    rendered windows are submitted and a new task renders the rest), else
-    None."""
+    model's cap. A due range is first cut around the user's blocked
+    ranges (``cut_around_blocked``): a window ends where a blocked range
+    starts, the next begins where it ends, and the blocked range itself
+    gets a window_skip row without a request. Returns "partial" when the
+    render budget ran out (the rendered windows are submitted and a new
+    task renders the rest), else None."""
     template = _exports.window_generation_template(user.id)
     cap = _cap(models.version)
     rho = _exports.tokens_per_unit(user, models.version)
@@ -934,111 +940,142 @@ def _render_windows(user, state, models, sub, history, deadline):
     planned = sum(plan_chunks(units, max_units=max_units)[0]
                   for _s, _e, units in state.due)
     total = len(state.windows) + len(state.windows_in_flight) + planned
+    blocked = blocked_ranges(user.id)
     n = 0
     for rng in list(state.due):
         start, end, _units = rng
-        cur = start
         cumulative, stats = _cumulative_before(state, start)
         rendered = False
-        while True:
-            remaining = (_exports.count_remaining_units(
-                user.id, cur, created_before=_after(end))
-                if end is not None else
-                _exports.count_remaining_units(user.id, cur))
-            if remaining <= 0:
-                break
-            _k, _size, budget = next_window_budget(
-                remaining, max_units=max_units)
-            rendered_at = datetime.utcnow()
+        for is_blocked, piece_start, piece_end in cut_around_blocked(
+                start, end, blocked):
+            if is_blocked:
+                units = _units_in(user, piece_start, piece_end)
+                if units <= 0:
+                    continue
+                cumulative += units
+                _save_skip(user, {
+                    "user_id": user.id, "kind": "window",
+                    "set": state.set_id,
+                    "base_id": (state.base.id if state.base is not None
+                                else None),
+                    "start": _iso(piece_start), "cutoff": _iso(piece_end),
+                    "earliest": _iso(
+                        piece_start or _exports._first_writing_date(
+                            user.id, piece_end)),
+                    "units": units, "cumulative": cumulative,
+                    "origin_stats": stats,
+                    "rendered_at": _iso(datetime.utcnow()),
+                    "model_id": models.version})
+                sub.skipped += 1
+                rendered = True
+                logger.info("User %s: profile set %s: blocked range %s..%s "
+                            "skipped without a request", user.id,
+                            state.set_id, _iso(piece_start) or "start",
+                            _iso(piece_end))
+                continue
+            cur, end_ = piece_start, piece_end
+            while True:
+                remaining = _units_in(user, cur, end_)
+                if remaining <= 0:
+                    break
+                _k, _size, budget = next_window_budget(
+                    remaining, max_units=max_units)
+                rendered_at = datetime.utcnow()
 
-            def _prompt(chunk):
-                return template.replace(
-                    "{user_export}", _exports.chunk_content_for_prompt(chunk))
+                def _prompt(chunk):
+                    return template.replace(
+                        "{user_export}",
+                        _exports.chunk_content_for_prompt(chunk))
 
-            fitted = fit_window(user, models.version, keys, cap, cur,
-                                budget, end, _prompt, rho)
-            if fitted is None:
-                if not rendered:
-                    # Units are counted in the range but nothing in it
-                    # renders (for example threads holding only a system
-                    # prompt, or tombstones): it is covered, so the set
-                    # can complete and its final go out.
-                    logger.info("User %s: profile set %s: the range %s..%s "
-                                "counts %s units but renders nothing; "
-                                "counted as covered", user.id, state.set_id,
-                                _iso(start) or "start", _iso(end) or "end",
-                                remaining)
-                    state.due.remove(rng)
-                break
-            rendered = True
-            chunk, prompt, tokens, fits = fitted
-            cutoff = chunk["latest_node_created_at"]
-            units = chunk["unit_count"]
-            cumulative += units
-            stats = _exports.merge_origin_stats(
-                stats, chunk.get("origin_stats"))
-            key = _attempt_key("window", _iso(cur))
-            attempts = len(history.get(key, ()))
-            n += 1
-            meta = {
-                "user_id": user.id, "kind": "window", "set": state.set_id,
-                "base_id": state.base.id if state.base is not None else None,
-                "n": n, "total": total, "attempt": attempts + 1,
-                "start": _iso(cur), "cutoff": _iso(cutoff),
-                "earliest": _iso(chunk.get("earliest_node_created_at")),
-                "units": units, "cumulative": cumulative,
-                "origin_stats": stats, "rendered_at": _iso(rendered_at),
-                "model_id": models.version,
-            }
-            if not fits:
-                # One entry larger than the version model's cap: never cut,
-                # never sent across the cap's price tier. Given up, loudly.
-                _save_skip(user, meta)
-                sub.skipped += 1
-                _report("Profile window over the version model's cap",
-                        user_id=user.id, set=state.set_id, start=_iso(cur),
-                        end=_iso(cutoff), model=models.version,
-                        tokens=tokens, cap=cap, reason="over cap")
-            elif _count(history, key, (POLICY_BLOCKED,)):
-                # The provider's content-policy filter blocked this window
-                # before (a rebuilt set, or a skip row that was never
-                # written): skipped again without a request.
-                _save_skip(user, meta)
-                sub.skipped += 1
-                _report("Profile window skipped after a provider policy "
-                        "block", user_id=user.id, set=state.set_id,
-                        start=_iso(cur), end=_iso(cutoff),
-                        model=models.version, reason="policy block")
-            elif _count(history, key, CONTENT_FAILURES) >= _content_attempts():
-                # The same window failed twice before, in this set or an
-                # earlier one: give it up without another call.
-                _save_skip(user, meta)
-                sub.skipped += 1
-                _report("Profile window skipped after repeated failures",
-                        user_id=user.id, set=state.set_id,
-                        start=_iso(cur), end=_iso(cutoff),
-                        model=models.version, reason="earlier failures")
-            elif provider_stop_until(history, key) is not None:
-                pass   # waits; the range stays missing
-            else:
-                cid = f"profile_{user.id}_{state.set_id}_w{n}_{attempts + 1}"
-                meta["custom_id"] = cid
-                sub.add(provider, _request(
-                    models, models.version, cid,
-                    [{"role": "user", "content": [
-                        {"type": "text", "text": prompt}]}]), meta)
-                if sub.failed:
-                    # A slice was refused at submission: nothing rendered
-                    # after it would go out in this run.
-                    return None
-            cur = cutoff
-            if end is not None and cutoff is not None and cutoff >= end:
-                break
-            if time.monotonic() > deadline:
-                logger.info("User %s: render budget used after %d windows; "
-                            "the rest goes to a new task", user.id, n)
-                return "partial"
+                fitted = fit_window(user, models.version, keys, cap, cur,
+                                    budget, end_, _prompt, rho)
+                if fitted is None:
+                    break
+                rendered = True
+                chunk, prompt, tokens, fits = fitted
+                cutoff = chunk["latest_node_created_at"]
+                units = chunk["unit_count"]
+                cumulative += units
+                stats = _exports.merge_origin_stats(
+                    stats, chunk.get("origin_stats"))
+                key = _attempt_key("window", _iso(cur))
+                attempts = len(history.get(key, ()))
+                n += 1
+                meta = {
+                    "user_id": user.id, "kind": "window",
+                    "set": state.set_id,
+                    "base_id": (state.base.id if state.base is not None
+                                else None),
+                    "n": n, "total": total, "attempt": attempts + 1,
+                    "start": _iso(cur), "cutoff": _iso(cutoff),
+                    "earliest": _iso(chunk.get("earliest_node_created_at")),
+                    "units": units, "cumulative": cumulative,
+                    "origin_stats": stats, "rendered_at": _iso(rendered_at),
+                    "model_id": models.version,
+                }
+                if not fits:
+                    # One entry larger than the version model's cap: never
+                    # cut, never sent across the cap's price tier. Given
+                    # up, loudly.
+                    _save_skip(user, meta)
+                    sub.skipped += 1
+                    _report("Profile window over the version model's cap",
+                            user_id=user.id, set=state.set_id,
+                            start=_iso(cur), end=_iso(cutoff),
+                            model=models.version, tokens=tokens, cap=cap,
+                            reason="over cap")
+                elif (_count(history, key, CONTENT_FAILURES)
+                        >= _content_attempts()):
+                    # The same window failed twice before, in this set or
+                    # an earlier one: give it up without another call.
+                    _save_skip(user, meta)
+                    sub.skipped += 1
+                    _report("Profile window skipped after repeated failures",
+                            user_id=user.id, set=state.set_id,
+                            start=_iso(cur), end=_iso(cutoff),
+                            model=models.version, reason="earlier failures")
+                elif provider_stop_until(history, key) is not None:
+                    pass   # waits; the range stays missing
+                else:
+                    cid = (f"profile_{user.id}_{state.set_id}_w{n}_"
+                           f"{attempts + 1}")
+                    meta["custom_id"] = cid
+                    sub.add(provider, _request(
+                        models, models.version, cid,
+                        [{"role": "user", "content": [
+                            {"type": "text", "text": prompt}]}]), meta)
+                    if sub.failed:
+                        # A slice was refused at submission: nothing
+                        # rendered after it would go out in this run.
+                        return None
+                cur = cutoff
+                if end_ is not None and cutoff is not None and cutoff >= end_:
+                    break
+                if time.monotonic() > deadline:
+                    logger.info("User %s: render budget used after %d "
+                                "windows; the rest goes to a new task",
+                                user.id, n)
+                    return "partial"
+        if not rendered:
+            # Units are counted in the range but nothing in it renders
+            # (for example threads holding only a system prompt, or
+            # tombstones): it is covered, so the set can complete and its
+            # final go out.
+            logger.info("User %s: profile set %s: the range %s..%s counts "
+                        "units but renders nothing; counted as covered",
+                        user.id, state.set_id, _iso(start) or "start",
+                        _iso(end) or "end")
+            state.due.remove(rng)
     return None
+
+
+def _units_in(user, start, end):
+    """Stored units of the writing after ``start`` up to ``end``
+    inclusive (None: to the newest)."""
+    if end is not None:
+        return _exports.count_remaining_units(
+            user.id, start, created_before=_after(end))
+    return _exports.count_remaining_units(user.id, start)
 
 
 def _merge_config_tag():
@@ -1264,17 +1301,106 @@ def _skip_note(item, code):
             f"({code})")[:255]
 
 
+def record_blocked_range(user_id, start, end, code, model_id=None):
+    """Remember, for good, that the writing after ``start`` (None: from
+    the first writing) up to ``end`` was blocked: every later window plan
+    cuts around it (``cut_around_blocked``). Recorded whatever the
+    account's AI usage. Once per range. Commits."""
+    if end is None:
+        return None
+    row = ProfileBlockedRange.query.filter_by(
+        user_id=user_id, range_start=start, range_end=end,
+        lifted_at=None).first()
+    if row is None:
+        row = ProfileBlockedRange(user_id=user_id, range_start=start,
+                                  range_end=end, code=code or "unknown",
+                                  model_id=model_id)
+        db.session.add(row)
+        db.session.commit()
+    return row
+
+
+def blocked_ranges(user_id):
+    """[(start, end)] of the user's blocked ranges not lifted, by start."""
+    rows = (ProfileBlockedRange.query
+            .with_entities(ProfileBlockedRange.range_start,
+                           ProfileBlockedRange.range_end)
+            .filter(ProfileBlockedRange.user_id == user_id,
+                    ProfileBlockedRange.lifted_at.is_(None)).all())
+    return sorted(((s, e) for s, e in rows),
+                  key=lambda r: (r[0] or datetime.min, r[1]))
+
+
+def lift_blocked_ranges(user_id):
+    """Let the user's blocked ranges be read again: the next window plan
+    sends that writing to the provider once more. The one way to resend a
+    blocked window, from a shell only: no button does it (Peter,
+    2026-11-04, skip the flagged windows). Returns how many were
+    lifted. Commits."""
+    n = ProfileBlockedRange.query.filter(
+        ProfileBlockedRange.user_id == user_id,
+        ProfileBlockedRange.lifted_at.is_(None)).update(
+        {ProfileBlockedRange.lifted_at: datetime.utcnow()},
+        synchronize_session=False)
+    db.session.commit()
+    return n
+
+
+def _max_start(a, b):
+    """The later of two range starts, None standing for the first
+    writing."""
+    if a is None:
+        return b
+    if b is None:
+        return a
+    return max(a, b)
+
+
+def _min_end(a, b):
+    """The earlier of two range ends, None standing for the newest
+    writing."""
+    if a is None:
+        return b
+    if b is None:
+        return a
+    return min(a, b)
+
+
+def cut_around_blocked(start, end, ranges):
+    """The range (start, end] (start None: from the first writing; end
+    None: to the newest) cut around the blocked ``ranges`` [(start, end)],
+    as [(blocked, piece_start, piece_end)] in order: a piece to read ends
+    where a blocked range starts, the blocked piece is exactly the overlap,
+    and the next piece to read begins where it ends."""
+    pieces, lo = [], start
+    for r_start, r_end in sorted(ranges,
+                                 key=lambda r: (r[0] or datetime.min, r[1])):
+        a, b = _max_start(lo, r_start), _min_end(end, r_end)
+        if a is not None and not a < b:
+            continue   # no overlap
+        if a is not None and (lo is None or a > lo):
+            pieces.append((False, lo, a))
+        pieces.append((True, a, b))
+        lo = b
+        if end is not None and lo >= end:
+            return pieces
+    pieces.append((False, lo, end))
+    return pieces
+
+
 def skip_blocked_window(user, item, code, report=True):
-    """A window the provider's content-policy filter blocked: a
-    window_skip row in its place, so the set's other windows are merged
-    without it and its range is never sent again, and a $0 record of the
-    block that stops nothing (WINDOW_BLOCK_REQUEST_TYPE). No skip row for
-    an account that no longer allows AI, nor for a set the user's own
-    version superseded (as for a window's result); none twice for the
-    same range. Shared by collect() and scripts/backfill_policy_blocks.py.
-    Returns the skip row written, or None."""
+    """A window the provider's content-policy filter blocked: its range is
+    remembered for good (``record_blocked_range``, also for an account
+    whose AI usage is off), a window_skip row takes its place, so the
+    set's other windows are merged without it, and a $0 record of the
+    block stops nothing (WINDOW_BLOCK_REQUEST_TYPE). No skip row for an
+    account that no longer allows AI, nor for a set the user's own version
+    superseded (as for a window's result); none twice for the same range.
+    Shared by collect() and scripts/backfill_policy_blocks.py. Returns the
+    skip row written, or None."""
     row = None
     start, cutoff = _dt(item.get("start")), _dt(item.get("cutoff"))
+    record_blocked_range(user.id, start, cutoff, code, item.get("model_id"))
     if (account_allows_ai(user) and item.get("set")
             and not set_superseded(user, item["set"])
             and not UserProfile.query.filter(
