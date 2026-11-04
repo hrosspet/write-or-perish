@@ -417,6 +417,15 @@ def _build_next_profile_request(user, allow_chunk=True, chunk_num=1):
     # incremental machinery.
     remaining = _exports.count_remaining_units(user.id, cutoff) if allow_chunk else 0
     if remaining > 0:
+        from backend.tasks import profile_windows
+        if profile_windows.meets_blocked(user.id, cutoff):
+            # A chained chunk would hold a blocked range whole; only the
+            # window path cuts around it (wants_window_build routes the
+            # build there; with the window path switched off nothing is
+            # built). Never sent.
+            logger.warning(f"User {user.id}: the writing after {cutoff} "
+                           f"meets a blocked range; no chained chunk")
+            return None
         cfg = current_app.config["SUPPORTED_MODELS"].get(model_id) or {}
         input_cap = model_input_cap(cfg, DEFAULT_MAX_OUTPUT_TOKENS)
         rho = _exports.tokens_per_unit(user, model_id)
@@ -483,6 +492,11 @@ def _build_next_profile_request(user, allow_chunk=True, chunk_num=1):
                         chunk.get("origin_stats")),
                     "source_data_cutoff": (
                         latest_ts.isoformat() if latest_ts else None),
+                    # The chunk's first entry: where a blocked range
+                    # starts if the provider blocks it.
+                    "earliest": (chunk["earliest_node_created_at"].isoformat()
+                                 if chunk.get("earliest_node_created_at")
+                                 else None),
                     # When the window was rendered: the saved version's
                     # continue-rule boundary (data written after it is
                     # organic growth).
@@ -907,12 +921,12 @@ def _stop_for_policy_block(user, item, code):
         # build (after the admin's override, on the window path) skips it
         # (profile_windows.cut_around_blocked).
         from backend.tasks import profile_windows
-        prev = (db.session.get(UserProfile, item["prev_profile_id"])
-                if item.get("prev_profile_id") else None)
+        start, end = profile_windows.blocked_range_of(item)
+        if not item.get("earliest") and item.get("prev_profile_id"):
+            prev = db.session.get(UserProfile, item["prev_profile_id"])
+            start = prev.source_data_cutoff if prev is not None else None
         profile_windows.record_blocked_range(
-            user.id, prev.source_data_cutoff if prev is not None else None,
-            datetime.fromisoformat(item["source_data_cutoff"]), code,
-            item.get("model_id"))
+            user.id, start, end, code, item.get("model_id"))
 
 
 def _fail_job(job, reason):

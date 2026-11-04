@@ -716,7 +716,9 @@ def wants_window_build(user):
     it. A from-scratch build (no update base) that fits one chunk is a
     window set too where its provider's switch is on
     (``one_chunk_windows``); else it takes the chained path, as does a
-    chained update that fits one chunk, unchanged."""
+    chained update that fits one chunk, unchanged. A remainder that meets
+    a blocked range always takes the window path, the only one that cuts
+    around it."""
     if not enabled() or not account_allows_ai(user):
         return False
     if inflight_items(user.id):
@@ -724,6 +726,11 @@ def wants_window_build(user):
     prev = (None if user.profile_needs_full_regen
             else _exports.profile_update_base(user.id))
     if prev is not None and prev.generation_type in WINDOW_TYPES:
+        return True
+    if meets_blocked(user.id, prev.source_data_cutoff
+                     if prev is not None else None):
+        # Only the window path cuts around a blocked range; a chained
+        # chunk would hold it whole.
         return True
     chat_model = _batch._model_for(user)
     cap = _cap(chat_model)
@@ -1320,6 +1327,38 @@ def record_blocked_range(user_id, start, end, code, model_id=None):
     return row
 
 
+def blocked_range_of(item):
+    """(start, end) of the writing a blocked window or chunk held: from
+    just before its earliest entry (the item's ``earliest``) to its
+    cutoff, so writing imported later before that entry, which was never
+    sent, is read by the next plan. An item without ``earliest`` (sent
+    before it was recorded) falls back to its start."""
+    earliest = _dt(item.get("earliest"))
+    start = (earliest - timedelta(microseconds=1) if earliest is not None
+             else _dt(item.get("start")))
+    return start, _dt(item.get("cutoff") or item.get("source_data_cutoff"))
+
+
+def meets_blocked(user_id, start, end=None):
+    """Whether the writing after ``start`` (None: from the first writing)
+    up to ``end`` (None: the newest) meets a blocked range not lifted."""
+    for r_start, r_end in blocked_ranges(user_id):
+        a, b = _max_start(start, r_start), _min_end(end, r_end)
+        if a is None or a < b:
+            return True
+    return False
+
+
+def remainder_meets_blocked(user):
+    """Whether the writing the user's next build reads (after the update
+    base; all of it for a full rebuild) meets a blocked range: such a
+    build must take the window path, which cuts around it."""
+    prev = (None if user.profile_needs_full_regen
+            else _exports.profile_update_base(user.id))
+    return meets_blocked(
+        user.id, prev.source_data_cutoff if prev is not None else None)
+
+
 def blocked_ranges(user_id):
     """[(start, end)] of the user's blocked ranges not lifted, by start."""
     rows = (ProfileBlockedRange.query
@@ -1400,7 +1439,8 @@ def skip_blocked_window(user, item, code, report=True):
     skip row written, or None."""
     row = None
     start, cutoff = _dt(item.get("start")), _dt(item.get("cutoff"))
-    record_blocked_range(user.id, start, cutoff, code, item.get("model_id"))
+    record_blocked_range(user.id, *blocked_range_of(item), code,
+                         item.get("model_id"))
     if (account_allows_ai(user) and item.get("set")
             and not set_superseded(user, item["set"])
             and not UserProfile.query.filter(

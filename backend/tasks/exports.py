@@ -979,6 +979,15 @@ def window_hand_off(user, task_id, integrate_only=False):
         return None
     from backend.tasks import profile_windows
     if not profile_windows.wants_window_build(user):
+        if profile_windows.remainder_meets_blocked(user):
+            # The window path is off, and the chunk loop would send a
+            # blocked range whole: nothing is built.
+            logger.warning("User %s: the writing to read meets a blocked "
+                           "range and the window path is off; no profile "
+                           "update", user.id)
+            return {"user_id": user.id, "profile_id": None,
+                    "status": "completed",
+                    "message": "Skipped: the writing meets a blocked range"}
         return None
     return profile_windows.run_advance_inline(user, task_id)
 

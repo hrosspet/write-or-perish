@@ -151,8 +151,8 @@ def record_blocks(found, apply=False, out=print):
             else:
                 from backend.utils import refusal_backoff
                 pw.record_blocked_range(
-                    user.id, pw._dt(item.get("start")),
-                    pw._dt(item.get("cutoff")), code, item.get("model_id"))
+                    user.id, *pw.blocked_range_of(item), code,
+                    item.get("model_id"))
                 refusal_backoff.record_policy_block(
                     user.id, pw.WINDOW_BLOCK_REQUEST_TYPE, item.get("model_id"),
                     code, "profile window", report=False)

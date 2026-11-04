@@ -477,7 +477,13 @@ profile, or AI usage turned back on. Only `lift_blocked_ranges(user_id)`,
 from a shell, lets it be read again; no button does. An account whose AI
 usage does not allow AI gets no skip row (the range is recorded); a set
 whose windows are all skipped sends no final. A blocked chained chunk
-(the account stops, #597) is remembered as a range too. A blocked **group or final**
+(the account stops, #597) is remembered as a range too. A range runs
+from just before the blocked window's (or chunk's) earliest entry to its
+cutoff, so older writing imported later, never sent, is read. Only the
+window path cuts around a range, so a build whose remainder meets one
+always takes it (`wants_window_build`); the chained batch builder builds
+no chunk that meets one, and the synchronous task builds nothing then
+(with the window path switched off, such an account gets no update). A blocked **group or final**
 cannot be skipped: it is recorded as a profile block
 (`refusal_backoff.record_policy_block`), `profile_seed_error` names it,
 and the account builds nothing further (`next_work` returns "blocked",

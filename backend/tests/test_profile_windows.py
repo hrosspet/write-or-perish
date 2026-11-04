@@ -2419,7 +2419,7 @@ def _overlaps(item, blocked):
     """Whether a window item's range (start, cutoff] meets the blocked
     window's."""
     s, c = pw._dt(item["start"]), pw._dt(item["cutoff"])
-    bs, bc = pw._dt(blocked["start"]), pw._dt(blocked["cutoff"])
+    bs, bc = pw.blocked_range_of(blocked)
     lo = max(s or datetime.min, bs or datetime.min)
     hi = min(c or datetime.max, bc or datetime.max)
     return lo < hi
@@ -2438,6 +2438,12 @@ def _blocked_build(world, monkeypatch, marker, corpus=None, user=None):
     return u, blocked
 
 
+def _range(blocked):
+    """The blocked range a blocked window item leaves: from just before
+    its earliest entry to its cutoff."""
+    return pw.blocked_range_of(blocked)
+
+
 def _never_resent(u, blocked, before):
     """No window sent after ``before`` meets the blocked range, and the
     newest set skips exactly that range without a request."""
@@ -2447,7 +2453,7 @@ def _never_resent(u, blocked, before):
     tip_set = ex.profile_update_base(u.id).window_set
     skips = [r for r in _rows(u, "window_skip") if r.window_set == tip_set]
     assert [(pw._iso(r.covers_start), pw._iso(r.source_data_cutoff))
-            for r in skips] == [(blocked["start"], blocked["cutoff"])]
+            for r in skips] == [tuple(pw._iso(x) for x in _range(blocked))]
     return new
 
 
@@ -2455,8 +2461,10 @@ def test_the_blocked_range_is_remembered_for_good(world, monkeypatch):
     from backend.models import ProfileBlockedRange
     u, blocked = _blocked_build(world, monkeypatch, "_w2_")
     [row] = ProfileBlockedRange.query.filter_by(user_id=u.id).all()
-    assert (pw._iso(row.range_start), pw._iso(row.range_end)) == (
-        blocked["start"], blocked["cutoff"])
+    # From just before the window's earliest entry, not its start.
+    assert (row.range_start, row.range_end) == (
+        pw._dt(blocked["earliest"]) - timedelta(microseconds=1),
+        pw._dt(blocked["cutoff"]))
     assert row.code == "bio_policy" and row.lifted_at is None
     assert pw.blocked_ranges(u.id) == [(row.range_start, row.range_end)]
 
@@ -2779,7 +2787,8 @@ def test_the_backfill_records_old_missing_blocks_and_the_set_finishes(
     assert APICostLog.query.filter_by(
         user_id=u.id, request_ref="policy_block:bio_policy").count() == 2
     # The durable range record a later window plan cuts around.
-    assert pw.blocked_ranges(u.id) == [(None, pw._dt(attempts[0]["cutoff"]))]
+    assert pw.blocked_ranges(u.id) == [_range(attempts[0])]
+    assert _range(attempts[0])[0] is not None
     # Idempotent: a second run finds nothing more.
     again = mod.find_blocks(client_for=lambda: client, out=lines.append)
     assert again == []
@@ -2828,4 +2837,94 @@ def test_the_backfill_leaves_accounts_without_ai_without_a_skip_row(
     assert attempt["outcome"] == "blocked"
     assert not _rows(u, "window_skip")
     # The range is remembered all the same.
-    assert pw.blocked_ranges(u.id) == [(None, pw._dt(attempt["cutoff"]))]
+    assert pw.blocked_ranges(u.id) == [_range(attempt)]
+
+
+# ── review of 07a3f1d7 ────────────────────────────────────────────────────
+
+def test_older_writing_imported_before_a_blocked_first_window_is_read(
+        world, monkeypatch):
+    """A blocked first window is remembered from just before its earliest
+    entry, not "from the first writing": older writing imported later,
+    which was never sent, is read by the rebuild; the blocked range is
+    still skipped exactly."""
+    u, blocked = _blocked_build(world, monkeypatch, "_w1_")
+    assert blocked["start"] is None
+    older = [(T0 - timedelta(days=300 - i), 1000) for i in range(30)]
+    world.corpus.rows = older + world.corpus.rows
+    action, _v = ex.revert_profile_for_import(u.id, older[0][0])
+    assert action == "full"
+    db.session.commit()
+    before = len(_items("window"))
+    _build(world, u)
+    new = _never_resent(u, blocked, before)
+    read_older = [i for i in new if i["start"] is None
+                  or pw._dt(i["start"]) < T0]
+    assert read_older
+    assert sum(i["units"] for i in new
+               if pw._dt(i["cutoff"]) < T0) == 30_000
+    assert _finals(u)
+
+
+def test_a_superseded_update_window_block_never_reaches_a_chained_chunk(
+        world, monkeypatch):
+    """Review of 07a3f1d7: the user saves a version on the set's final
+    while an update window is in the batch, and that window is blocked.
+    Its set is superseded (no skip row), and the rest fits one chunk on
+    the user's version; the build must still take the window path, which
+    cuts around the blocked range, never a chained chunk holding it."""
+    _policy_reports(monkeypatch)
+    u = _user()
+    rows, final = _update_in_flight(world, u)
+    w = [i for i in _items("window") if "outcome" not in i][0]
+    _blocking(world, monkeypatch, w["custom_id"])
+    _edit(u, final)
+    _poll()
+    [w] = [i for i in _items("window") if i["custom_id"] == w["custom_id"]]
+    assert w["outcome"] == "blocked"
+    assert pw.blocked_ranges(u.id) == [_range(w)]
+    assert pw.wants_window_build(u) is True
+    _unblock(world, monkeypatch)
+    for p in UserProfile.query.filter_by(user_id=u.id).all():
+        p.created_at -= timedelta(days=8)
+    db.session.commit()
+    monkeypatch.setattr(pb, "MIN_INACTIVITY", timedelta(0))
+    monkeypatch.setattr(pb, "_new_token_count",
+                        lambda user, cutoff: world.corpus.count(user.id,
+                                                                cutoff))
+    n_jobs = ProfileBatchJob.query.count()
+    before = len(_items("window"))
+    for _ in range(4):
+        _seed(u)
+        db.session.refresh(u)
+        if u.profile_generation_task_id:
+            pw.advance(u.id, u.profile_generation_task_id)
+        if ProfileBatchJob.query.filter_by(status="pending").count():
+            _poll()
+    # The chained builder refuses it outright too.
+    assert pb._build_next_profile_request(u) is None or \
+        pb._build_next_profile_request(u)["meta"]["kind"] != "chunk"
+    jobs = ProfileBatchJob.query.order_by(ProfileBatchJob.id).all()[n_jobs:]
+    assert not [i for j in jobs for i in j.items if i.get("kind") == "chunk"]
+    assert not [i for i in _items("window")[before:] if _overlaps(i, w)]
+
+
+def test_no_chained_chunk_or_sync_build_meets_a_blocked_range(
+        app, world, monkeypatch):
+    """With the window path switched off, nothing that would hold a
+    blocked range is built: the chained batch builder returns no chunk,
+    and the synchronous task's hand-off builds nothing."""
+    from backend.utils import refusal_backoff  # noqa: F401
+    world.corpus = Corpus(50)
+    monkeypatch.setattr(pb._exports, "count_remaining_units",
+                        lambda uid, cutoff=None, **k: world.corpus.count(
+                            uid, cutoff))
+    u = _user(profile_needs_full_regen=True)
+    pw.record_blocked_range(u.id, T0 + timedelta(hours=5),
+                            T0 + timedelta(hours=9), "bio_policy")
+    app.config["PROFILE_INDEPENDENT_VERSIONS"] = False
+    assert pw.wants_window_build(u) is False
+    assert pb._build_next_profile_request(u) is None
+    result = ex.window_hand_off(u, "task-1")
+    assert result is not None and result["profile_id"] is None
+    assert not world.provider.submits
