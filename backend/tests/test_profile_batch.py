@@ -2741,6 +2741,34 @@ def test_only_the_lift_ends_a_policy_block(app):
         "bio_policy"
 
 
+def test_sync_profile_trigger_holds_a_policy_block_import_included(
+        app, monkeypatch):
+    """Off the batch path, an import hands off to
+    maybe_trigger_profile_update directly (routes/import_data): a block
+    of the synchronous profile job stops that dispatch too."""
+    from backend.utils import refusal_backoff
+    u = _user()
+    db.session.commit()
+    refusal_backoff.record_policy_block(
+        u.id, "profile", "test-model", "bio_policy", "profile update",
+        report=False)
+    dispatch = MagicMock()
+    monkeypatch.setattr(pb._exports, "update_user_profile", dispatch)
+
+    assert pb._exports.maybe_trigger_profile_update(u.id) is None
+    assert pb._exports.maybe_trigger_profile_update(
+        u.id, force_full_regen=True) is None
+    assert pb._exports.maybe_trigger_incremental_profile_update(
+        u, ignore_backoff=True) is None
+    dispatch.delay.assert_not_called()
+
+    refusal_backoff.lift_policy_block(
+        u.id, "profile", refusal_backoff.PROFILE_REQUEST_TYPES)
+    dispatch.delay.return_value = MagicMock(id="task-1")
+    assert pb._exports.maybe_trigger_profile_update(
+        u.id, force_full_regen=True) == "task-1"
+
+
 def test_poll_policy_blocked_intentions_item_is_not_resubmitted(
         app, monkeypatch):
     from backend.tasks import intentions as intentions_mod

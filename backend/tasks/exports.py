@@ -1794,6 +1794,14 @@ def maybe_trigger_profile_update(user_id, model_id=None,
         logger.info(f"Skipping profile update for user {user_id}: writing "
                     "on hold for deletion")
         return None
+    # A content-policy block stops it for good, the import hand-off
+    # included: the blocked writing would go out again (Peter, 2026-11-04).
+    code = refusal_backoff.policy_block_for(
+        user_id, refusal_backoff.PROFILE_REQUEST_TYPES)
+    if code:
+        logger.info(f"Skipping profile update for user {user_id}: the "
+                    f"provider's content-policy filter blocked it ({code})")
+        return None
 
     # Check concurrency guard
     if user.profile_generation_task_id:
