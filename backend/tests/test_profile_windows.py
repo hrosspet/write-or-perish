@@ -2388,3 +2388,38 @@ def test_a_policy_blocked_merge_is_its_own_outcome(world, monkeypatch, kind):
     assert _advance(u) == "blocked"
     assert pb._should_seed(u) is False
     assert len(world.provider.submits) == submits
+
+
+def test_a_block_collected_while_the_advance_runs_is_not_resent(
+        world, monkeypatch):
+    """Review of #596: the poller collects a blocked window after the
+    advance's first block check but before it reads what is in flight.
+    The window is no longer in flight and has no row, so without a second
+    check its range would be rendered and submitted again."""
+    world.corpus = _windows_corpus(4)
+    _policy_reports(monkeypatch)
+    _blocking(world, monkeypatch, "_w2_")
+    u = _user(profile_needs_full_regen=True)
+    _advance(u)
+    assert ProfileBatchJob.query.filter_by(status="pending").count()
+    submits = len(world.provider.submits)
+
+    real_history = pw.attempt_history
+    polled = []
+
+    def poll_meanwhile(user_id, now=None):
+        if not polled:
+            polled.append(user_id)
+            # The poller's dispatch finds the guard held by this advance.
+            monkeypatch.setattr(pb, "_advance_users", lambda ids: None)
+            _poll()
+        return real_history(user_id, now)
+    monkeypatch.setattr(pw, "attempt_history", poll_meanwhile)
+
+    assert _advance(u) == "blocked"
+    assert polled == [u.id]
+    assert not ProfileBatchJob.query.filter_by(status="pending").count()
+    assert len(world.provider.submits) == submits
+    [blocked] = [i for i in _items("window") if i.get("outcome") == "blocked"]
+    assert [i for i in _items("window")
+            if i["start"] == blocked["start"]] == [blocked]

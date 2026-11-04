@@ -1158,6 +1158,15 @@ def next_work(user, models, keys, deadline):
                 user, _visible_profile(user.id)) is not None:
             db.session.commit()
     state = set_state(user, set_id, base, history)
+    # Again after the in-flight items are read: the poller may have
+    # collected a blocked item since the check at the top. It commits the
+    # block's row before the job stops being pending, so a blocked item
+    # that set_state no longer sees in flight is seen here, and its range
+    # or final is not rendered again (review of #596).
+    code = _policy_blocked(user)
+    if code:
+        _show_policy_stop(user, code)
+        return POLICY_BLOCKED
     plan = (MergePlan() if merge_stopped(user)
             else merge_plan(user, state))
     if not (state.due or state.stopped or plan.groups
