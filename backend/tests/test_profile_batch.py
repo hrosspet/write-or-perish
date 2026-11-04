@@ -2637,3 +2637,171 @@ def test_rebuild_stops_after_a_merge_step_that_crosses_the_cap(
     assert u.profile_batch_attempts == 0
     assert u.profile_cap_held is True
     assert prefill_sent == []
+
+
+# ── content-policy blocks (2026-11-04) ──────────────────────────────────
+# A step the provider's content-policy filter blocked is final: it is not
+# a batch attempt (attempts lead to the synchronous path, which would send
+# it again), and the job stays stopped through the hourly seeder, imports
+# and saved versions until the admin's confirmed Build profile.
+
+class _Collected(dict):
+    """A collect result with blocked items, as llm_batch returns it."""
+
+    def __init__(self, results=(), blocked=None):
+        super().__init__(results)
+        self.blocked = blocked or {}
+
+
+def _blocked_poll(monkeypatch, item, code="bio_policy"):
+    reports = []
+    from backend.utils import refusal_backoff
+    monkeypatch.setattr(refusal_backoff, "report_policy_block",
+                        lambda *a: reports.append(a))
+    monkeypatch.setattr(pb, "batch_check_and_collect", lambda bids, keys: (
+        _Collected(blocked={item["custom_id"]: code}), {}, {}))
+    submit = MagicMock(return_value={})
+    monkeypatch.setattr(pb, "batch_submit", submit)
+    pb._poll_profile_batches()
+    return reports, submit
+
+
+def test_poll_policy_blocked_step_stops_the_profile_job(app, monkeypatch):
+    u = _user(profile_force_batch=True)
+    prev = _prev_profile(u, datetime(2026, 5, 1))
+    job, item = _chunk_job(u, prev)
+
+    reports, submit = _blocked_poll(monkeypatch, item)
+
+    u = User.query.get(u.id)
+    assert u.profile_batch_pending is False
+    assert (u.profile_batch_attempts or 0) == 0   # never the sync path
+    assert "content-policy" in u.profile_seed_error
+    assert "bio_policy" in u.profile_seed_error
+    row = APICostLog.query.filter_by(user_id=u.id).one()
+    assert row.request_ref == "policy_block:bio_policy"
+    assert row.cost_microdollars == 0 and row.request_type == "profile_batch"
+    assert reports == [(u.id, "bio_policy", "test-model",
+                        "profile batch chunk")]
+    submit.assert_not_called()
+    assert ProfileBatchJob.query.get(job.id).status == "collected"
+
+
+def test_policy_block_holds_the_seeder_until_the_confirmed_override(app):
+    from backend.utils import refusal_backoff
+    u = _user(profile_needs_full_regen=True)
+    db.session.commit()
+    refusal_backoff.record_policy_block(
+        u.id, "profile_batch", "test-model", "bio_policy", "test",
+        report=False)
+    assert pb._should_seed(u) is False
+    # An import's seed skips the refusal backoff, not the block.
+    assert pb._should_seed(u, ignore_backoff=True) is False
+    # A saved version (a user's edit, a revert) does not lift it either.
+    _prev_profile(u, datetime(2026, 6, 1))
+    db.session.commit()
+    assert pb._should_seed(u, ignore_backoff=True) is False
+    # Only the admin's confirmed Build profile lifts it.
+    assert refusal_backoff.lift_policy_block(
+        u.id, "profile_batch",
+        refusal_backoff.PROFILE_REQUEST_TYPES) == "bio_policy"
+    assert pb._should_seed(u, ignore_backoff=True) is True
+    assert refusal_backoff.lift_policy_block(
+        u.id, "profile_batch", refusal_backoff.PROFILE_REQUEST_TYPES) is None
+
+
+def test_only_the_lift_ends_a_policy_block(app):
+    """A billed call of the job saved after the block (another window of
+    the same build, say) does not lift it; the lift does, and a block
+    after the lift stops the job again."""
+    from backend.utils import refusal_backoff as rb
+    u = _user(profile_needs_full_regen=True)
+    db.session.commit()
+    rb.record_policy_block(u.id, "profile_batch", "test-model",
+                           "invalid_prompt", "test", report=False)
+    assert rb.policy_block_for(
+        u.id, rb.PROFILE_REQUEST_TYPES) == "invalid_prompt"
+    assert rb.profile_in_backoff(u.id) is True
+    db.session.add(APICostLog(
+        user_id=u.id, model_id="test-model", request_type="profile_batch",
+        input_tokens=1, output_tokens=1, cost_microdollars=1,
+        created_at=datetime.utcnow() + timedelta(seconds=1)))
+    db.session.commit()
+    assert rb.policy_block_for(
+        u.id, rb.PROFILE_REQUEST_TYPES) == "invalid_prompt"
+    APICostLog.query.update({"created_at": datetime.utcnow()
+                             - timedelta(minutes=5)})
+    db.session.commit()
+    rb.lift_policy_block(u.id, "profile_batch", rb.PROFILE_REQUEST_TYPES)
+    assert rb.policy_block_for(u.id, rb.PROFILE_REQUEST_TYPES) is None
+    assert pb._should_seed(u) is True
+    rb.record_policy_block(u.id, "profile_batch", "test-model",
+                           "bio_policy", "test", report=False)
+    assert rb.policy_block_for(u.id, rb.PROFILE_REQUEST_TYPES) == \
+        "bio_policy"
+
+
+def test_sync_profile_trigger_holds_a_policy_block_import_included(
+        app, monkeypatch):
+    """Off the batch path, an import hands off to
+    maybe_trigger_profile_update directly (routes/import_data): a block
+    of the synchronous profile job stops that dispatch too."""
+    from backend.utils import refusal_backoff
+    u = _user()
+    db.session.commit()
+    refusal_backoff.record_policy_block(
+        u.id, "profile", "test-model", "bio_policy", "profile update",
+        report=False)
+    dispatch = MagicMock()
+    monkeypatch.setattr(pb._exports, "update_user_profile", dispatch)
+
+    assert pb._exports.maybe_trigger_profile_update(u.id) is None
+    assert pb._exports.maybe_trigger_profile_update(
+        u.id, force_full_regen=True) is None
+    assert pb._exports.maybe_trigger_incremental_profile_update(
+        u, ignore_backoff=True) is None
+    dispatch.delay.assert_not_called()
+
+    refusal_backoff.lift_policy_block(
+        u.id, "profile", refusal_backoff.PROFILE_REQUEST_TYPES)
+    dispatch.delay.return_value = MagicMock(id="task-1")
+    assert pb._exports.maybe_trigger_profile_update(
+        u.id, force_full_regen=True) == "task-1"
+
+
+def test_poll_policy_blocked_intentions_item_is_not_resubmitted(
+        app, monkeypatch):
+    from backend.tasks import intentions as intentions_mod
+    u = _user()
+    db.session.commit()
+    item = {"custom_id": f"int-u{u.id}", "user_id": u.id,
+            "kind": "intentions", "budget": 1000, "resubmitted": False}
+    job = ProfileBatchJob(provider_key="openai:gpt-x", batch_id="bi-1",
+                          status="pending", items=[dict(item)],
+                          submitted_at=datetime.utcnow())
+    db.session.add(job)
+    db.session.commit()
+    resubmitted = []
+    monkeypatch.setattr(intentions_mod, "handle_failed_intentions_item",
+                        lambda *a: resubmitted.append(a))
+
+    reports, _ = _blocked_poll(monkeypatch, item)
+
+    assert resubmitted == []
+    assert ProfileBatchJob.query.get(job.id).items[0]["gave_up"] is True
+    assert [r[1] for r in reports] == ["bio_policy"]
+
+
+def test_submit_names_the_user_of_each_request(app, monkeypatch):
+    u = _user()
+    db.session.commit()
+    sent = []
+    monkeypatch.setattr(pb, "batch_submit", lambda reqs, keys, kind: (
+        sent.append(reqs) or {}))
+    pb._submit_requests([{
+        "provider": "openai",
+        "request": {"custom_id": "c1", "model_id": "m", "api_model": "gpt-x",
+                    "messages": [], "max_tokens": 10},
+        "meta": {"custom_id": "c1", "user_id": u.id, "kind": "chunk"},
+    }], {})
+    assert sent[0]["openai"][0]["user_id"] == u.id

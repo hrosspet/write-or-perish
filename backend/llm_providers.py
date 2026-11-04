@@ -16,6 +16,10 @@ from anthropic import Anthropic
 from openai import OpenAI
 from flask import current_app
 
+from backend.utils.llm_batch import BatchItemPolicyBlocked, is_policy_block
+from backend.utils.refusal_backoff import report_policy_block
+from backend.utils.safety_identifier import openai_safety_identifier
+
 logger = logging.getLogger(__name__)
 
 # Room for thinking AND the answer. Models that always think (Opus 5.5)
@@ -391,6 +395,21 @@ def _openai_request_error(exc):
             or _openai_mid_stream_error(exc))
 
 
+def policy_block_code(exc):
+    """The provider's code when *exc* is a request its content-policy
+    filter blocked (llm_batch.OPENAI_POLICY_BLOCK_CODES, e.g. bio_policy):
+    a live OpenAI call's 400 or failed stream, or a batch item's
+    BatchItemPolicyBlocked. None for any other error. Such a request is
+    never sent again automatically (Peter, 2026-11-04)."""
+    if isinstance(exc, BatchItemPolicyBlocked):
+        return exc.code
+    if isinstance(exc, (openai.APIError, OpenAIStreamError)):
+        code = getattr(exc, "code", None)
+        if is_policy_block(code):
+            return code
+    return None
+
+
 def _retryable_stream_error(exc):
     """A failure that happened after the stream started, which the SDK does
     not retry: a raw transport error from reading the body, an Anthropic
@@ -598,7 +617,8 @@ class LLMProvider:
                        output_schema: dict = None,
                        cache_comparison_response_id: str = None,
                        listener: StreamListener = None,
-                       output_schema_name: str = None) -> dict:
+                       output_schema_name: str = None,
+                       user_id: int = None) -> dict:
         """
         Generate a completion using the specified model.
 
@@ -619,6 +639,9 @@ class LLMProvider:
             listener: Optional StreamListener that gets the reply's text
                 and tool-call starts while it streams (#367). The return
                 value is the same with or without one.
+            user_id: The Loore user the call is made for. OpenAI calls
+                carry its safety identifier (utils/safety_identifier.py);
+                None sends the system one.
 
         Returns:
             Dict with:
@@ -654,7 +677,8 @@ class LLMProvider:
                 context_window=config.get("context_window"),
                 output_schema=output_schema,
                 cache_comparison_response_id=cache_comparison_response_id,
-                listener=listener, output_schema_name=output_schema_name)
+                listener=listener, output_schema_name=output_schema_name,
+                user_id=user_id)
         elif provider == "anthropic":
             return LLMProvider._call_anthropic(
                 api_model, messages, api_keys["anthropic"], max_tokens,
@@ -671,7 +695,8 @@ class LLMProvider:
                      output_schema: dict = None,
                      cache_comparison_response_id: str = None,
                      listener: StreamListener = None,
-                     output_schema_name: str = None) -> dict:
+                     output_schema_name: str = None,
+                     user_id: int = None) -> dict:
         """
         Call OpenAI via the Responses API (/v1/responses).
 
@@ -690,6 +715,9 @@ class LLMProvider:
             cache_comparison_response_id: baseline response id for Prompt
                 Cache Diagnostics (#348); the caller has checked the model
                 supports it
+            user_id: the Loore user the call is for: the request carries
+                its safety identifier, and a content-policy block is
+                reported under it
 
         Returns:
             Dict with content, total_tokens, and tool_calls
@@ -719,6 +747,11 @@ class LLMProvider:
             # The Responses API defaults to store=True (response persisted
             # on OpenAI's side); chat completions didn't store — keep that.
             store=False,
+            # Which Loore user the request is for, as a keyed hash, so
+            # OpenAI can act on that user rather than the whole account
+            # (Peter, 2026-11-04). A typed parameter from openai 1.99 on
+            # (the pin is >=2.44).
+            safety_identifier=openai_safety_identifier(user_id),
         )
         # #189: a stable per-conversation key improves OpenAI's automatic
         # prefix-cache routing (best-effort; no behavior change otherwise).
@@ -788,6 +821,11 @@ class LLMProvider:
                 response = _send()
         except (openai.APIError, OpenAIStreamError) as e:
             if not _openai_request_error(e):
+                raise
+            code = policy_block_code(e)
+            if code:
+                # Final: the callers never send it again on their own.
+                report_policy_block(user_id, code, model, "live call")
                 raise
             mapped = LLMProvider._openai_overflow_error(
                 e, input_items, context_window)

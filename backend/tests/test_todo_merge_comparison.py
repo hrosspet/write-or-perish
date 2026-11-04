@@ -470,8 +470,10 @@ def test_rebuilds_each_merges_inputs_as_the_task_built_them(history,
                 cmp.build_merge_messages(prompt, P2, M1),
                 cmp.build_merge_messages(prompt, P1, V1)]
     assert [m for _, m, _ in provider.calls] == expected
-    # Called exactly like the task: no max_tokens or other options.
-    assert all(model == "gpt-6-luna" and kwargs == {}
+    # Called exactly like the task: no max_tokens or other options,
+    # only the user the call is for (the OpenAI safety identifier).
+    assert all(model == "gpt-6-luna"
+               and kwargs == {"user_id": history["peter"].id}
                for model, _, kwargs in provider.calls)
 
     records = _jsonl(out)
@@ -965,7 +967,8 @@ def test_every_call_uses_the_current_prompt_and_builder(
                for m in merges for r in m["runs"])
     from backend.utils.todo_merge_edits import TODO_EDITS_SCHEMA
     assert all(kwargs == {"output_schema": TODO_EDITS_SCHEMA,
-                          "output_schema_name": "todo_edits"}
+                          "output_schema_name": "todo_edits",
+                          "user_id": history["peter"].id}
                for _, _, kwargs in provider.calls)
 
 
@@ -1129,7 +1132,7 @@ def test_current_prompt_uses_the_tasks_apply_function(
     seen = []
 
     def fake_run(provider, model_id, messages, api_keys, current_todo,
-                 run=None):
+                 run=None, user_id=None):
         seen.append((model_id, current_todo))
         run.merged = current_todo + "\n- [ ] from the task"
         return run
