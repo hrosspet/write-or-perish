@@ -266,6 +266,7 @@ updates. That leaves **essentially all failures transient**:
 | **Stuck `pending`** (no terminal status) | provider | staleness check (mirror `_is_task_stale`): `submitted_at` older than N h → mark failed, clear guard, re-seed. |
 | **Double-collect** (poller crash mid-tick) | infra | idempotent: a chunk whose `source_data_cutoff` already has a child profile is skipped; job flips to `collected` atomically. |
 | **Not selected for batch** (`use_batch(user)` false) | — | the synchronous path (PR #181) runs unchanged — the permanent fallback. |
+| **Content-policy block** (2026-11-04) | the provider's content-policy filter refuses a request (HTTP 400, e.g. `bio_policy`, in the batch's error file) | final, never resent automatically: a chained step is not a batch attempt (no full-price fallback); a window set's item gets the outcome `blocked`; the account's profile build stops until the admin's confirmed Build profile (`refusal_backoff.lift_policy_block`). |
 
 **Retry policy:** since failures are transient, the primary mechanism is simply
 **re-seed via batch next cycle**, bounded by `profile_batch_attempts` (≈3) plus
@@ -461,7 +462,20 @@ renders nothing (threads holding only a system prompt) counts as covered.
 Expired and cancelled OpenAI batches
 have their finished results collected (#419); profile jobs are stale after
 25 h. Merges keep the integration rule (one retry after an hour, then
-stopped).
+stopped). Policy block (2026-11-04): a window, group or final the
+provider's content-policy filter blocked (`bio_policy` and the other
+`llm_batch.OPENAI_POLICY_BLOCK_CODES`, read from the batch's error file)
+gets the outcome `blocked`, which is neither a content nor a provider
+failure. It is recorded as a $0 cost row and a Sentry event
+(`refusal_backoff.record_policy_block`), `profile_seed_error` names the
+item ("Stopped: the provider's policy filter blocked window
+<start>..<end> (bio_policy)"), and the account builds nothing further:
+`next_work` returns "blocked" before rendering, the seeder's gate and the
+set's work check say no, and no stop expires. Only
+`refusal_backoff.lift_policy_block` lifts it: the admin's confirmed Build
+profile (which rebuilds the set from scratch and so sends every window
+again), or a call from a shell, after which the next advance sends the
+blocked range again.
 
 **Running it.** `dispatch_advance` claims the per-user guard
 (`profile_generation_task_id`), sets `profile_batch_pending` and pins the

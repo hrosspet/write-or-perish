@@ -1606,3 +1606,120 @@ def test_the_estimate_for_a_large_anthropic_build(app, world):
     # estimate with it.
     app.config["PROFILE_MERGE_STRUCTURE"] = "flat"
     assert pw.estimate_cost_usd(u, state, models, (n, 14_100_000)) == est
+
+
+# ── content-policy blocks (2026-11-04) ───────────────────────────────────
+# A window, group or final the provider's content-policy filter blocked
+# is final: its own outcome, never a provider failure, never resent by
+# the seeder, the poll path or the 24 h stop expiry, and the account
+# builds nothing further until the admin's confirmed Build profile lifts
+# the stop.
+
+def _blocking(world, monkeypatch, marker):
+    """batch_check_and_collect that reports every item whose custom_id
+    contains ``marker`` as blocked (bio_policy), as llm_batch does."""
+    from backend.utils.llm_batch import CollectedResults
+
+    def collect(batch_ids, keys, known=None):
+        results, pending, durations = world.provider.collect(batch_ids, keys)
+        out = CollectedResults()
+        for cid, res in results.items():
+            if marker in cid:
+                out.blocked[cid] = "bio_policy"
+            else:
+                out[cid] = res
+        return out, pending, durations
+    monkeypatch.setattr(pb, "batch_check_and_collect", collect)
+
+
+def _policy_reports(monkeypatch):
+    from backend.utils import refusal_backoff
+    reports = []
+    monkeypatch.setattr(refusal_backoff, "report_policy_block",
+                        lambda *a: reports.append(a))
+    return reports
+
+
+def test_a_policy_blocked_window_stops_the_account_for_good(
+        world, monkeypatch):
+    from backend.models import APICostLog
+    from backend.utils import refusal_backoff as rb
+    world.corpus = _windows_corpus(3)
+    reports = _policy_reports(monkeypatch)
+    _blocking(world, monkeypatch, "_w1_")
+    u = _user(profile_needs_full_regen=True)
+
+    _advance(u)
+    windows_sent = len(_items("window"))
+    assert windows_sent >= 2
+    # Every OpenAI or Anthropic request names its user.
+    assert {r["user_id"] for r in world.provider.requests()} == {u.id}
+    _poll()
+
+    [blocked] = [i for i in _items("window") if i.get("outcome") == "blocked"]
+    assert blocked["start"] is None
+    # The other windows of the batch are saved.
+    assert len(_rows(u, "window")) == windows_sent - 1
+    db.session.refresh(u)
+    assert u.profile_seed_error.startswith(pw.POLICY_STOP_NOTE + " window")
+    assert "bio_policy" in u.profile_seed_error
+    row = APICostLog.query.filter_by(
+        user_id=u.id, request_ref="policy_block:bio_policy").one()
+    assert row.cost_microdollars == 0
+    assert [r[:2] for r in reports] == [(u.id, "bio_policy")]
+    # Not a provider failure: no stop that expires.
+    history = pw.attempt_history(u.id)
+    assert pw.provider_stop_until(history, ("window", None)) is None
+
+    # Nothing further goes out: not the window, not the rest of the set,
+    # not a merge; not from the advance, the hourly seeder or an import's
+    # seed; not a day later.
+    submits = len(world.provider.submits)
+    assert _advance(u) == "blocked"
+    assert pb._should_seed(u) is False
+    assert _seed(u) == 0
+    for job in ProfileBatchJob.query.all():
+        job.submitted_at -= timedelta(days=2)
+        job.collected_at = (job.collected_at or job.submitted_at) \
+            - timedelta(days=2)
+    db.session.commit()
+    assert _advance(u) == "blocked"
+    assert _seed(u) == 0
+    assert len(world.provider.submits) == submits
+    assert not _rows(u, "integration")
+    assert not pw.set_work_due(u, ex.profile_update_base(u.id))
+    # The note stays (a saved window clears profile_seed_error).
+    db.session.refresh(u)
+    assert u.profile_seed_error.startswith(pw.POLICY_STOP_NOTE)
+
+    # The admin's confirmed Build profile lifts the stop: the next pass
+    # sends the blocked range again (and a block again stops it again).
+    rb.lift_policy_block(u.id, "profile_batch", rb.PROFILE_REQUEST_TYPES)
+    u.profile_needs_full_regen = False
+    db.session.commit()
+    assert _advance(u) == "submitted"
+    resent = [r for r in world.provider.requests() if "_w" in r["custom_id"]]
+    assert resent
+    assert any(i["start"] is None and i.get("outcome") is None
+               for i in _items("window"))
+
+
+@pytest.mark.parametrize("kind", ["final"])
+def test_a_policy_blocked_merge_is_its_own_outcome(world, monkeypatch, kind):
+    reports = _policy_reports(monkeypatch)
+    u = _user()
+    rows = _set_of(u, 5, created=datetime.utcnow())
+    _corpus_for(world, rows)
+    _blocking(world, monkeypatch, "_f_")
+    _advance(u)
+    _poll()
+    [item] = _items(kind)
+    assert item["outcome"] == "blocked"
+    db.session.refresh(u)
+    assert u.profile_seed_error.startswith(
+        pw.POLICY_STOP_NOTE + " final merge")
+    assert [r[1] for r in reports] == ["bio_policy"]
+    submits = len(world.provider.submits)
+    assert _advance(u) == "blocked"
+    assert pb._should_seed(u) is False
+    assert len(world.provider.submits) == submits

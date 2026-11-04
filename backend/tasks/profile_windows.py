@@ -62,7 +62,7 @@ from backend.utils.chunk_plan import (
 from backend.utils.api_keys import get_api_keys_for_usage
 from backend.utils.error_privacy import describe_exception
 from backend.utils.hidden_rows import WritingOnHold, writing_on_hold
-from backend.utils.llm_batch import apply_batch_key_override
+from backend.utils.llm_batch import apply_batch_key_override, blocked_items
 from backend.utils.privacy import AI_ALLOWED, account_allows_ai
 from backend.utils.profile_versions import (
     WINDOW_TYPES, current_profile_query)
@@ -78,6 +78,13 @@ logger = get_task_logger(__name__)
 ITEM_KINDS = ("window", "group", "final")
 CONTENT_FAILURES = ("refused", "invalid", "truncated")
 PROVIDER_FAILURES = ("missing", "error")
+# The provider's content-policy filter blocked the item (an error code in
+# llm_batch.OPENAI_POLICY_BLOCK_CODES, e.g. bio_policy; Peter,
+# 2026-11-04). Neither a content nor a provider failure: it is never
+# retried, never waits out a stop, and it stops the account's whole
+# build (refusal_backoff.policy_block_for) until the admin's confirmed
+# Build profile lifts the stop.
+POLICY_BLOCKED = "blocked"
 
 # ── Heuristics (named here, flagged in the PR) ────────────────────────────
 # How far back the attempt history reaches. Long enough to span a batch's
@@ -122,6 +129,7 @@ FIT_SAFETY = 0.97
 HOLD_NOTE = "Waiting for spend headroom"
 STOP_NOTE = "Stopped: a profile chunk failed at the provider"
 MERGE_STOP_NOTE = "Stopped: a profile merge is over the merge model's cap"
+POLICY_STOP_NOTE = "Stopped: the provider's policy filter blocked"
 
 
 def enabled():
@@ -634,7 +642,7 @@ def set_work_due(user, tip):
     interval check. Reads metadata only."""
     if not enabled() or tip is None or tip.generation_type not in WINDOW_TYPES:
         return False
-    if inflight_items(user.id):
+    if inflight_items(user.id) or _policy_blocked(user):
         return False
     base = (db.session.get(UserProfile, tip.parent_profile_id)
             if tip.parent_profile_id else None)
@@ -1107,7 +1115,15 @@ def next_work(user, models, keys, deadline, wait_for_imports=True):
     are ready, in one submission: windows for every missing range, the
     groups whose windows are all in, and the final when everything is.
     Returns "submitted", "partial" (render budget used; the caller hands
-    the rest to a new task), "idle", "held", "waiting" or "failed"."""
+    the rest to a new task), "idle", "held", "waiting", "blocked" (a
+    content-policy block stops the account's build) or "failed"."""
+    code = _policy_blocked(user)
+    if code:
+        # Nothing goes out for this account, not the blocked item and not
+        # the rest of its set, until the admin's confirmed Build profile
+        # lifts the stop (Peter, 2026-11-04).
+        _show_policy_stop(user, code)
+        return POLICY_BLOCKED
     if wait_for_imports and _batch.import_settling(user):
         # The user is importing (#598): nothing goes out until the imports
         # stop, so the next import is read by the same windows and merges.
@@ -1185,6 +1201,46 @@ def next_work(user, models, keys, deadline, wait_for_imports=True):
     # A pass that only gave windows up still changed the set: the caller
     # runs another pass, which may find the final due.
     return "submitted" if (sub.sent or sub.skipped) else "idle"
+
+
+def _policy_blocked(user):
+    """The code of the content-policy block that stops this account's
+    profile build, or None (refusal_backoff.policy_block_for)."""
+    return refusal_backoff.policy_block_for(
+        user.id, refusal_backoff.PROFILE_REQUEST_TYPES)
+
+
+def _policy_note(item, code):
+    """The admin Profile column's note for a blocked item: which window,
+    group or final, and the code."""
+    span = f"{item.get('start') or 'start'}..{item.get('cutoff') or 'end'}"
+    what = {"window": "window", "group": "group merge",
+            "final": "final merge"}.get(item.get("kind"), "request")
+    return (f"{POLICY_STOP_NOTE} {what} {span} ({code}); no automatic "
+            f"resend, Build profile with the override sends it again")[:255]
+
+
+def _show_policy_stop(user, code):
+    """Keep the block's note in the admin Profile column: a window of the
+    same batch saved after the block clears profile_seed_error. The note
+    names the newest blocked item of the attempt history, else only the
+    code."""
+    if (user.profile_seed_error or "").startswith(POLICY_STOP_NOTE):
+        return
+    blocked = [(when, key) for key, entries in attempt_history(user.id).items()
+               for outcome, when in entries if outcome == POLICY_BLOCKED]
+    if blocked:
+        _when, key = max(blocked, key=lambda b: b[0])
+        kind = key[0]
+        item = {"kind": kind, "start": key[1],
+                "cutoff": key[2] if len(key) > 2 else None}
+        note = _policy_note(item, code)
+    else:
+        note = (f"{POLICY_STOP_NOTE} a profile request ({code}); no "
+                f"automatic resend, Build profile with the override sends "
+                f"it again")[:255]
+    user.profile_seed_error = note
+    db.session.commit()
 
 
 # ── the advance task ──────────────────────────────────────────────────────
@@ -1295,7 +1351,8 @@ def advance(user_id, task_id, wait_for_imports=True):
             user.profile_generation_task_dispatched_at = None
             user.profile_batch_pending = bool(inflight_items(user_id))
             db.session.commit()
-            if outcome not in ("off", "error", "held", "waiting") and (
+            if outcome not in ("off", "error", "held", "waiting",
+                               POLICY_BLOCKED) and (
                     redispatch or _collected_since(user_id, started)):
                 dispatch_advance(user, wait_for_imports)
     logger.info("User %s: profile window advance: %s", user_id, outcome)
@@ -1500,10 +1557,17 @@ def collect(job, items, results):
     "error", "refused", "invalid", "truncated", "superseded", "dropped"),
     which is the attempt history the next advance reads. Returns the ids
     of the users whose sets should advance; the poller dispatches them
-    after it commits the job."""
+    after it commits the job.
+
+    An item the provider's content-policy filter blocked (``results``'
+    ``blocked``, llm_batch.blocked_items) gets the outcome "blocked": the
+    block is recorded and reported (refusal_backoff.record_policy_block),
+    which stops the account's build, and nothing sends it again on its own
+    (Peter, 2026-11-04)."""
     outcomes = {}
     users = set()
     by_user = {}
+    blocked = blocked_items(results)
     for item in items:
         by_user.setdefault(item["user_id"], []).append(item)
     for user_id, user_items in by_user.items():
@@ -1515,8 +1579,12 @@ def collect(job, items, results):
         template = _exports.window_generation_template(user_id)
         gen_template = _exports._load_prompt(
             "profile_generation.txt", user_id=user_id)
-        notes = {"skipped": [], "stopped": []}
+        notes = {"skipped": [], "stopped": [], "blocked": []}
         for item in user_items:
+            if item["custom_id"] in blocked:
+                outcomes[item["custom_id"]] = POLICY_BLOCKED
+                notes["blocked"].append((item, blocked[item["custom_id"]]))
+                continue
             result = results.get(item["custom_id"])
             try:
                 if item["kind"] == "window":
@@ -1560,3 +1628,14 @@ def _report_notes(user, notes):
                 user_id=user.id, set=first.get("set"), windows=len(stopped),
                 start=first.get("start") or "start", end=first.get("cutoff"),
                 model=first.get("model_id"), reason="provider")
+    if notes.get("blocked"):
+        # Recorded after the user's other items: a window of the same
+        # batch saved after the block would clear the note. The block's
+        # note outranks a provider stop's.
+        for item, code in notes["blocked"]:
+            refusal_backoff.record_policy_block(
+                user.id, "profile_batch", item.get("model_id"), code,
+                f"profile {item.get('kind')}")
+        item, code = notes["blocked"][0]
+        user.profile_seed_error = _policy_note(item, code)
+        db.session.commit()
