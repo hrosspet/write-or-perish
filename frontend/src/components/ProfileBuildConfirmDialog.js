@@ -78,6 +78,9 @@ function ProfileBuildConfirmDialog({ open, username, backoff, onConfirm, onClose
 
   if (!open) return null;
 
+  // A content-policy block (the provider's filter refused the request):
+  // only this confirmed build sends it again.
+  const blocked = backoff?.state === "blocked";
   const stopped = backoff?.state === "stopped";
   const what = stopped
     ? `failed ${backoff?.refusals || 2} times in a row`
@@ -90,8 +93,20 @@ function ProfileBuildConfirmDialog({ open, username, backoff, onConfirm, onClose
       <div onClick={(e) => e.stopPropagation()} style={cardStyle}>
         <h2 style={titleStyle}>Build the profile anyway?</h2>
         <div style={bodyStyle}>
-          Profile generation for {username} {what} (cut-off or empty
-          output). {hold} Start another build anyway?
+          {blocked ? (
+            <>
+              The provider's content-policy filter blocked a profile
+              request for {username} ({backoff?.code}). It is stopped:
+              nothing sends it again on its own, and the same writing is
+              likely to be blocked again. Each blocked request counts
+              against Loore's account with the provider. Send it anyway?
+            </>
+          ) : (
+            <>
+              Profile generation for {username} {what} (cut-off or empty
+              output). {hold} Start another build anyway?
+            </>
+          )}
         </div>
         <div style={buttonRowStyle}>
           <button
@@ -99,7 +114,11 @@ function ProfileBuildConfirmDialog({ open, username, backoff, onConfirm, onClose
             style={{ ...buttonBaseStyle, color: "var(--accent)" }}
           >
             <div style={{ fontWeight: 500 }}>Build now</div>
-            <div style={subStyle}>A billed batch call; if it is cut off again, the profile job stops.</div>
+            <div style={subStyle}>
+              {blocked
+                ? "A batch call; if it is blocked again, the profile job stops again."
+                : "A billed batch call; if it is cut off again, the profile job stops."}
+            </div>
           </button>
           <button
             onClick={onClose}

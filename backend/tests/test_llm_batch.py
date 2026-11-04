@@ -732,6 +732,8 @@ def test_batch_submit_openai_responses_endpoint_and_effort(monkeypatch):
     assert line["body"] == {
         "model": "gpt-x", "max_output_tokens": 700, "store": False,
         "reasoning": {"effort": "high"},
+        # No user_id on the request: the system identifier (2026-11-04).
+        "safety_identifier": "loore-system",
         "input": [{"role": "user", "content": [
             {"type": "input_text", "text": "merge"}]}]}
 
@@ -973,3 +975,170 @@ def test_an_openai_batch_failed_on_the_enqueued_token_limit_is_queue_full(
     results, _still, _ = batch_check_and_collect(
         {"openai:gpt-6-luna": "o1"}, KEYS)
     assert results.queue_full == set()
+
+
+# ── content-policy blocks and safety identifiers (2026-11-04) ───────────
+# A request the provider's content-policy filter blocks comes back as a
+# 400 with a code such as bio_policy, in the batch's ERROR file (not its
+# output file). The collectors read it, name the block, and log the code
+# and type only. Every OpenAI request carries the user's safety
+# identifier.
+
+from backend.utils.llm_batch import (  # noqa: E402
+    BatchItemPolicyBlocked,
+    blocked_items,
+    openai_batch_submit_one,
+)
+from backend.utils.safety_identifier import (  # noqa: E402
+    SYSTEM_SAFETY_IDENTIFIER, openai_safety_identifier,
+)
+
+_BLOCK_MESSAGE = "This content was flagged. If this seems wrong, rephrase."
+
+
+def _error_line(custom_id, code="bio_policy", status=400):
+    return json.dumps({"custom_id": custom_id, "error": None, "response": {
+        "status_code": status, "request_id": "req_1", "body": {"error": {
+            "message": _BLOCK_MESSAGE, "type": "invalid_request_error",
+            "param": None, "code": code}}}})
+
+
+def _files(mapping):
+    """files.content stand-in: file id -> lines."""
+    def content(file_id):
+        lines = mapping.get(file_id, [])
+        return SimpleNamespace(content=("\n".join(lines) + "\n").encode())
+    return content
+
+
+def _captured_jsonl(client):
+    sent = []
+
+    def create(file=None, purpose=None):
+        sent.extend(json.loads(line) for line in file.read().decode()
+                    .splitlines() if line.strip())
+        return SimpleNamespace(id="file-1")
+    client.files.create.side_effect = create
+    return sent
+
+
+def test_batch_submit_sends_each_users_safety_identifier(monkeypatch):
+    client = MagicMock()
+    sent = _captured_jsonl(client)
+    client.batches.create.return_value = SimpleNamespace(id="b-oai")
+    _install_fake_sdks(monkeypatch, openai_client=client)
+
+    batch_submit({"openai": [
+        {"custom_id": "a", "model_id": "gpt", "api_model": "gpt-x",
+         "messages": [{"role": "user", "content": "hi"}], "user_id": 7},
+        {"custom_id": "b", "model_id": "gpt", "api_model": "gpt-x",
+         "messages": [{"role": "user", "content": "hi"}]},
+    ]}, KEYS, "profile")
+
+    by_id = {line["custom_id"]: line["body"] for line in sent}
+    assert by_id["a"]["safety_identifier"] == openai_safety_identifier(7)
+    assert by_id["b"]["safety_identifier"] == SYSTEM_SAFETY_IDENTIFIER
+    # The request dict's user_id is not a body field.
+    assert "user_id" not in by_id["a"]
+
+
+def test_one_item_submit_sends_the_safety_identifier(monkeypatch):
+    client = MagicMock()
+    sent = _captured_jsonl(client)
+    client.batches.create.return_value = SimpleNamespace(id="b-oai")
+    _install_fake_sdks(monkeypatch, openai_client=client)
+
+    openai_batch_submit_one("k", "node-7", "gpt-x",
+                            [{"role": "user", "content": "hi"}], 100,
+                            user_id=42)
+
+    assert sent[0]["body"]["safety_identifier"] == openai_safety_identifier(42)
+
+
+def test_collect_one_policy_block_in_the_error_file(monkeypatch, caplog):
+    client = MagicMock()
+    client.batches.retrieve.return_value = SimpleNamespace(
+        status="completed", request_counts="counts", output_file_id=None,
+        error_file_id="ef-1")
+    client.files.content.side_effect = _files({"ef-1": [_error_line("node-7")]})
+    _install_fake_sdks(monkeypatch, openai_client=client)
+
+    with caplog.at_level("WARNING"), \
+            pytest.raises(BatchItemPolicyBlocked) as info:
+        openai_batch_collect_one("k", "b-oai", "node-7")
+
+    assert info.value.code == "bio_policy"
+    assert info.value.error_type == "invalid_request_error"
+    assert isinstance(info.value, BatchItemFailed)
+    # Logged by code and type, never the provider's message.
+    assert "bio_policy" in caplog.text
+    assert "invalid_request_error" in caplog.text
+    assert _BLOCK_MESSAGE not in caplog.text
+
+
+def test_collect_one_other_error_in_the_error_file_is_a_plain_failure(
+        monkeypatch):
+    client = MagicMock()
+    client.batches.retrieve.return_value = SimpleNamespace(
+        status="completed", request_counts="counts", output_file_id="of-1",
+        error_file_id="ef-1")
+    client.files.content.side_effect = _files({
+        "of-1": [_oai_output_line("someone-else")],
+        "ef-1": [_error_line("node-7", code="server_error", status=500)]})
+    _install_fake_sdks(monkeypatch, openai_client=client)
+
+    with pytest.raises(BatchItemFailed, match="server_error") as info:
+        openai_batch_collect_one("k", "b-oai", "node-7")
+    assert not isinstance(info.value, BatchItemPolicyBlocked)
+
+
+def test_collect_one_policy_block_in_the_output_file(monkeypatch):
+    client = MagicMock()
+    client.batches.retrieve.return_value = SimpleNamespace(
+        status="completed", request_counts="counts", output_file_id="of-1")
+    client.files.content.side_effect = _files({
+        "of-1": [_error_line("node-7", code="invalid_prompt")]})
+    _install_fake_sdks(monkeypatch, openai_client=client)
+
+    with pytest.raises(BatchItemPolicyBlocked) as info:
+        openai_batch_collect_one("k", "b-oai", "node-7")
+    assert info.value.code == "invalid_prompt"
+
+
+def test_collect_names_the_blocked_items(monkeypatch):
+    client = MagicMock()
+    client.batches.retrieve.return_value = SimpleNamespace(
+        status="completed", request_counts="counts", created_at=1000.0,
+        completed_at=1100.0, output_file_id="of-1", error_file_id="ef-1")
+    ok = json.dumps({"custom_id": "ok", "response": {"status_code": 200,
+                     "body": {"choices": [{"message": {"content": "P"}}],
+                              "usage": {"prompt_tokens": 1,
+                                        "completion_tokens": 1}}}})
+    client.files.content.side_effect = _files({
+        "of-1": [ok, _error_line("in-output", code="invalid_prompt")],
+        "ef-1": [_error_line("flagged"),
+                 _error_line("outage", code="server_error", status=500)]})
+    _install_fake_sdks(monkeypatch, openai_client=client)
+
+    results, pending, _ = batch_check_and_collect({"openai:gpt-x": "b"}, KEYS)
+
+    assert pending == {}
+    assert set(results) == {"ok"}
+    assert blocked_items(results) == {"flagged": "bio_policy",
+                                      "in-output": "invalid_prompt"}
+
+
+def test_collect_reads_the_error_file_of_an_expired_batch(monkeypatch):
+    client = MagicMock()
+    client.batches.retrieve.return_value = SimpleNamespace(
+        status="expired", request_counts="counts", output_file_id=None,
+        error_file_id="ef-1", created_at=1000.0, completed_at=None)
+    client.files.content.side_effect = _files({"ef-1": [_error_line("x")]})
+    _install_fake_sdks(monkeypatch, openai_client=client)
+
+    results, _, _ = batch_check_and_collect({"openai:gpt-x": "b"}, KEYS)
+    assert blocked_items(results) == {"x": "bio_policy"}
+
+
+def test_blocked_items_of_a_plain_dict_is_empty():
+    assert blocked_items({"a": {}}) == {}

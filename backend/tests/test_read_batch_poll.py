@@ -117,7 +117,7 @@ def _script(monkeypatch, tmp_path, collect, render=None, cancel=None):
     # The harness stubs llm_providers, which makes this constant a mock.
     monkeypatch.setattr(_llm_task_mod, "DEFAULT_MAX_OUTPUT_TOKENS", 10000)
     calls = {"collect": [], "submit": [], "cancel": [], "chain": 0,
-             "render": 0}
+             "render": 0, "submit_user_ids": []}
 
     def _cancel(key, batch_id):
         calls["cancel"].append((key, batch_id))
@@ -132,8 +132,9 @@ def _script(monkeypatch, tmp_path, collect, render=None, cancel=None):
     monkeypatch.setattr(llm_batch, "openai_batch_collect_one", _collect)
 
     def _submit(key, custom_id, api_model, messages, max_tokens,
-                output_schema=None):
+                output_schema=None, user_id=None):
         calls["submit"].append(custom_id)
+        calls["submit_user_ids"].append(user_id)
         return "batch_9"
     monkeypatch.setattr(llm_batch, "openai_batch_submit_one", _submit)
 
@@ -214,6 +215,8 @@ def test_submit_records_the_key_type(app, monkeypatch, tmp_path):  # noqa: F811
         _run(task, alice, read, llm_node)
 
     assert calls["submit"] == [f"node-{llm_node.id}"]
+    # The request names the user it is for (OpenAI safety identifier).
+    assert calls["submit_user_ids"] == [alice.id]
     assert calls["collect"] == []
     assert calls["render"] == 1
     assert task.retries == [{"countdown": POLL, "max_retries": MAX_POLLS}]
@@ -269,6 +272,35 @@ def test_provider_verdict_fails_the_node(app, monkeypatch, tmp_path):  # noqa: F
     node = _reload(llm_node.id)
     assert node.llm_task_status == "failed"
     assert "expired" in node.llm_task_error
+
+
+def test_policy_block_fails_the_node_is_reported_and_not_resubmitted(
+        app, monkeypatch, tmp_path):  # noqa: F811
+    """2026-11-04: the provider's content-policy filter blocked the item.
+    The node fails like any verdict, nothing submits the turn again, and
+    the block is reported with tags only."""
+    from backend.utils import refusal_backoff
+    from backend.utils.llm_batch import BatchItemPolicyBlocked
+    reports = []
+    monkeypatch.setattr(refusal_backoff, "report_policy_block",
+                        lambda *a: reports.append(a))
+
+    def blocked():
+        raise BatchItemPolicyBlocked(
+            "The provider's content-policy filter blocked batch item "
+            "node-1 (bio_policy)", code="bio_policy")
+    calls = _script(monkeypatch, tmp_path, collect=blocked)
+    alice, read, llm_node = _read_thread()
+    task = _Task()
+
+    with pytest.raises(BatchItemPolicyBlocked):
+        _run(task, alice, read, llm_node)
+
+    assert task.retries == [] and calls["submit"] == []
+    node = _reload(llm_node.id)
+    assert node.llm_task_status == "failed"
+    assert "bio_policy" in node.llm_task_error
+    assert [(r[0], r[1]) for r in reports] == [(alice.id, "bio_policy")]
 
 
 def test_poll_cap_fails_the_node(app, monkeypatch, tmp_path):  # noqa: F811
@@ -935,7 +967,7 @@ def test_empty_render_still_asks_for_the_feed_shape(app, monkeypatch, tmp_path):
     schemas = []
 
     def _submit(key, custom_id, api_model, messages, max_tokens,
-                output_schema=None):
+                output_schema=None, user_id=None):
         schemas.append(output_schema)
         return "batch_9"
     monkeypatch.setattr(llm_batch, "openai_batch_submit_one", _submit)

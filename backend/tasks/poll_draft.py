@@ -30,6 +30,7 @@ from backend.utils.cost import llm_cost_log_fields
 from backend.llm_providers import is_empty_truncated, is_refused
 from backend.utils.llm_batch import (
     batch_submit, batch_check_and_collect, apply_batch_key_override,
+    blocked_items,
 )
 from backend.utils.tokens import approximate_token_count
 
@@ -144,6 +145,8 @@ def _build_request(resp):
         "messages": messages,
         "max_tokens": MAX_DRAFT_TOKENS,
         "provider": model_cfg["provider"],
+        # The user the request is for: its OpenAI safety identifier.
+        "user_id": resp.user_id,
     }
 
 
@@ -297,9 +300,19 @@ def _collect_poll_draft_batches():
         if still_pending:
             continue
 
-        # Batch ended: every item either has a result or failed.
+        # Batch ended: every item either has a result or failed. A failed
+        # draft is never sent again on its own (the user can ask again or
+        # write it); a content-policy block is reported as well.
+        blocked = blocked_items(results)
         for item in job.items:
             result = results.get(item["custom_id"])
+            if item["custom_id"] in blocked:
+                from backend.utils.refusal_backoff import report_policy_block
+                resp = PollResponse.query.get(item["response_id"])
+                report_policy_block(
+                    resp.user_id if resp else None,
+                    blocked[item["custom_id"]], item.get("model_id"),
+                    "poll draft batch")
             if result:
                 _save_draft_result(item, result)
             else:

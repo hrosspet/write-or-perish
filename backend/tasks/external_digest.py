@@ -32,7 +32,7 @@ from backend.models import (
     UserArtifact,
 )
 from backend.llm_providers import (
-    LLMProvider, ProviderAccountError, is_refused)
+    LLMProvider, ProviderAccountError, is_refused, policy_block_code)
 from backend.utils.api_keys import get_api_keys_for_usage
 from backend.utils.cost import llm_cost_log_fields
 from backend.utils import refusal_backoff
@@ -40,7 +40,7 @@ from backend.utils.refusal_backoff import REFUSED_REF
 from backend.utils.privacy import account_allows_ai
 from backend.utils.llm_batch import (
     BATCH_JOB_MAX_AGE, apply_batch_key_override, batch_check_and_collect,
-    batch_submit,
+    batch_submit, blocked_items,
 )
 from backend.utils.timefmt import user_local_hour
 
@@ -322,6 +322,8 @@ def _submit_digest_batch(users):
             "api_model": model_cfg["api_model"],
             "messages": [{"role": "user", "content": prompt_text}],
             "max_tokens": DIGEST_MAX_TOKENS,
+            # The user the request is for: its OpenAI safety identifier.
+            "user_id": user.id,
         })
         meta_by_custom_id[custom_id] = {
             "custom_id": custom_id,
@@ -422,8 +424,17 @@ def _collect_digest_batches():
             continue
 
         # Batch ended: every item either has a result or failed. A
-        # failed item leaves its user stale, so the next sweep retries.
+        # failed item leaves its user stale, so the next sweep retries,
+        # unless the provider's content-policy filter blocked it: that
+        # is final (Peter, 2026-11-04), and the block's cost row stops
+        # the sweep for this user (refusal_backoff.digest_in_backoff).
+        blocked = blocked_items(results)
         for item in job.items:
+            if item["custom_id"] in blocked:
+                refusal_backoff.record_policy_block(
+                    item["user_id"], "external_digest", item["model_id"],
+                    blocked[item["custom_id"]], "external digest batch")
+                continue
             result = results.get(item["custom_id"])
             digest_text = ((result or {}).get("content") or "").strip()
             if result and is_refused(result):
@@ -497,7 +508,7 @@ def rebuild_external_digest(self, user_id, force=False):
         }]
         try:
             response = LLMProvider.get_completion(
-                model_id, messages, api_keys)
+                model_id, messages, api_keys, user_id=user_id)
         except Exception as exc:
             logger.warning(
                 "External digest generation failed for user %s: %s",
@@ -505,6 +516,15 @@ def rebuild_external_digest(self, user_id, force=False):
             # An account failure (#369) lasts until someone fixes the
             # account: no retry; it is already reported.
             if isinstance(exc, ProviderAccountError):
+                raise
+            # A content-policy block is final (Peter, 2026-11-04): not
+            # retried, and its cost row stops the nightly sweep for this
+            # user (already reported by the provider call).
+            code = policy_block_code(exc)
+            if code:
+                refusal_backoff.record_policy_block(
+                    user_id, "external_digest", model_id, code,
+                    "external digest rebuild", report=False)
                 raise
             raise self.retry(exc=exc)
 

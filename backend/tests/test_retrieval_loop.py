@@ -747,6 +747,35 @@ def test_continuation_account_failure_is_not_retried(
         real_providers.ProviderAccountError.USER_MESSAGE
 
 
+def test_continuation_policy_block_is_not_retried(
+        app, monkeypatch, real_providers):
+    """2026-11-04: a request the provider's content-policy filter blocked
+    would be blocked again, so the continuation does not resend it."""
+    from backend.utils.llm_batch import BatchItemPolicyBlocked
+    alice, system, user_node, llm_node = _build_chain("textmode")
+    _mk_artifact(alice.id, "reading-list", "books", title="Reading List")
+    monkeypatch.setattr(_llm_task_mod, "CONTINUATION_RETRY_DELAYS", (0, 0))
+
+    _ScriptedProvider.reset([
+        _resp("Let me pull that up.", tool_calls=[{
+            "id": "t1", "name": "read_artifact",
+            "input": {"kind": "reading-list"},
+        }]),
+        BatchItemPolicyBlocked("blocked (bio_policy)", code="bio_policy"),
+        _resp("never sent"),
+    ])
+
+    with pytest.raises(BatchItemPolicyBlocked):
+        generate_llm_response(
+            _FakeSelf(), user_node.id, llm_node.id, "gpt-5", alice.id,
+            source_mode="textmode",
+        )
+
+    assert len(_ScriptedProvider.calls) == 2
+    cont = Node.query.get(_fresh(llm_node.id).continuation_node_id)
+    assert cont.llm_task_status == "failed"
+
+
 def test_read_full_by_entry_id_resolves_and_continues(app):
     """read_full with a numeric entry id (query intent, explicit): the
     full node content is injected and the model answers with it in the

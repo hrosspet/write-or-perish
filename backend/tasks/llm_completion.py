@@ -54,7 +54,9 @@ from backend.utils.cost import llm_cost_log_fields
 from backend.utils.cache_diagnostics import (
     ConversationCacheDiagnostics, system_prefix_hash,
 )
-from backend.utils.llm_batch import BatchItemFailed, BatchItemCancelled
+from backend.utils.llm_batch import (
+    BatchItemFailed, BatchItemCancelled, BatchItemPolicyBlocked,
+)
 from backend.utils.ca_feed import (
     CA_CHAT_TURN_NOTE, CA_READ_AGAIN_TURN, CA_TWEETS_CHAT_STUB,
     FEED_AI_USAGE, READ_FURTHER_MARKER,
@@ -315,6 +317,17 @@ def _account_failure(exc):
                   "ProviderAccountError", None)
     return (isinstance(cls, type) and issubclass(cls, BaseException)
             and isinstance(exc, cls))
+
+
+def _policy_block(exc):
+    """The provider's code when *exc* is a request its content-policy
+    filter blocked (llm_providers.policy_block_code), else None. Such a
+    request is never sent again automatically (Peter, 2026-11-04). Looked
+    up at call time, like _provider_failure."""
+    fn = getattr(sys.modules.get("backend.llm_providers"),
+                 "policy_block_code", None)
+    code = fn(exc) if callable(fn) else None
+    return code if isinstance(code, str) else None
 
 
 def _raise_for_account_failure(exc, provider, model=None, model_call=True,
@@ -2714,6 +2727,14 @@ def _ca_batch_poll(task, llm_node, parent_node, meta, entry, user_id):
             raise
         _withdraw_batch_reply(llm_node, meta, entry)
         return "withdrawn", None
+    except BatchItemPolicyBlocked as e:
+        # The provider's verdict like any BatchItemFailed: the node fails
+        # and nothing submits the turn again on its own. Reported with
+        # tags only (Peter, 2026-11-04).
+        from backend.utils.refusal_backoff import report_policy_block
+        report_policy_block(user_id, e.code, entry.get("model"),
+                            "read batch")
+        raise
     except Exception as e:
         # A poll refused for an account reason (a revoked key, say) is
         # reported (#369) and, like any other failed poll, asked again by
@@ -2762,9 +2783,11 @@ def _ca_batch_poll(task, llm_node, parent_node, meta, entry, user_id):
 
 def _ca_batch_submit(task, llm_node, model_id, api_model, messages,
                      api_key, key_type, model_config, ca_refs=None,
-                     provider="anthropic"):
+                     provider="anthropic", user_id=None):
     """Submit the turn as a one-item batch, record the "_batch" entry on
-    the node and re-queue the task for its first poll. Never returns."""
+    the node and re-queue the task for its first poll. Never returns.
+    ``user_id``: the user the turn is for (an OpenAI request carries its
+    safety identifier)."""
     from backend.utils import llm_batch
     submit_one = {
         "anthropic": llm_batch.anthropic_batch_submit_one,
@@ -2775,10 +2798,12 @@ def _ca_batch_submit(task, llm_node, model_id, api_model, messages,
         DEFAULT_MAX_OUTPUT_TOKENS)
     custom_id = f"node-{llm_node.id}"
     from backend.utils.ca_feed import FEED_SCHEMA
+    extra = {"user_id": user_id} if provider == "openai" else {}
     try:
         batch_id = submit_one(
             api_key, custom_id, api_model, messages, max_tokens,
-            output_schema=FEED_SCHEMA if ca_refs is not None else None)
+            output_schema=FEED_SCHEMA if ca_refs is not None else None,
+            **extra)
     except Exception as e:
         # A spend limit, billing or the key refuses the submit like a
         # live call: the user gets the readable error, the admin an
@@ -4595,6 +4620,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                                 output_schema=feed_schema,
                                 cache_comparison_response_id=baseline_id,
                                 listener=listener,
+                                user_id=user_id,
                             )),
                         stream=feed_schema is None)
                     if needs_ca:
@@ -4840,7 +4866,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 _ca_batch_submit(
                     self, llm_node, model_id, api_model, messages,
                     batch_keys[provider], key_type, model_config,
-                    ca_refs=ca_refs, provider=provider)
+                    ca_refs=ca_refs, provider=provider, user_id=user_id)
 
             if source_mode not in ("textmode", "voice"):
                 # Single-shot: one model call, one node, no within-turn loop.
@@ -5098,6 +5124,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                                 prompt_cache_key=f"loore-t{thread_root_id}",
                                 cache_comparison_response_id=baseline_id,
                                 listener=listener,
+                                user_id=user_id,
                             ))
 
                     def _call_continuation():
@@ -5147,8 +5174,11 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                             response = _call_continuation()
                             break
                         except Exception as cont_exc:
+                            # Nor a content-policy block: the same
+                            # request would be blocked again.
                             if (retry_delay is None
-                                    or _account_failure(cont_exc)):
+                                    or _account_failure(cont_exc)
+                                    or _policy_block(cont_exc)):
                                 raise
                             logger.warning(
                                 "Continuation call failed (%s); retrying "

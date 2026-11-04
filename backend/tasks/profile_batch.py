@@ -38,7 +38,7 @@ from backend.utils.privacy import account_allows_ai
 from backend.utils import refusal_backoff
 from backend.utils.llm_batch import (
     BATCH_JOB_MAX_AGE, batch_submit, batch_check_and_collect,
-    apply_batch_key_override, batch_ended, list_batches)
+    apply_batch_key_override, batch_ended, blocked_items, list_batches)
 # Module reference, not `from ... import names`: exports imports
 # celery_app, which imports this module to register its tasks. When a
 # web request touches backend.tasks.exports FIRST (e.g. POST
@@ -275,7 +275,15 @@ def _should_seed(user, ignore_backoff=False):
     ignore_backoff: skip the refusal backoff (wait and stop) — only for a
     seed an import dispatches (the import is new input) or the admin
     "Build profile" button sends after the admin confirmed the override
-    (voice review, 2026-10-01)."""
+    (voice review, 2026-10-01).
+
+    A content-policy block's stop holds whatever ``ignore_backoff`` says:
+    an import does not lift it, since the blocked writing would go out
+    again with the new; the admin's confirmed Build profile lifts it
+    first (refusal_backoff.lift_policy_block; Peter, 2026-11-04)."""
+    if refusal_backoff.policy_block_for(
+            user.id, refusal_backoff.PROFILE_REQUEST_TYPES):
+        return False
     # The refusal backoff outranks every gate, the regen flag included: a
     # refused chunk leaves them all open, and a pinned (force-batch)
     # account is never stopped by MAX_BATCH_ATTEMPTS (#368). This also
@@ -753,7 +761,9 @@ def _submit_requests(built, keys):
         return 0
     requests_by_provider = {}
     for b in built:
-        requests_by_provider.setdefault(b["provider"], []).append(b["request"])
+        # The user the request is for: its OpenAI safety identifier.
+        requests_by_provider.setdefault(b["provider"], []).append(
+            dict(b["request"], user_id=b["meta"]["user_id"]))
 
     batch_ids = batch_submit(requests_by_provider, keys, "profile")
 
@@ -872,6 +882,26 @@ def _notify_prefill_complete(user):
             tip.source_tokens_used or 0, bool(user.approved))
     except Exception:
         logger.exception(f"User {user.id}: pre-fill-complete notification failed")
+
+
+POLICY_BLOCK_NOTE = ("Stopped: the provider's content-policy filter "
+                     "blocked the profile {kind} ({code}); runs again "
+                     "only after Build profile with the override")
+
+
+def _stop_for_policy_block(user, item, code):
+    """A profile step the provider's content-policy filter blocked: final
+    (Peter, 2026-11-04). Not a batch attempt (attempts lead to the
+    synchronous path, which would send it again); the block's cost row
+    stops the job for this user (refusal_backoff.policy_block_for) and
+    the admin Profile column says why."""
+    user.profile_batch_pending = False
+    user.profile_seed_error = POLICY_BLOCK_NOTE.format(
+        kind=item.get("kind") or "step", code=code)[:255]
+    db.session.commit()
+    refusal_backoff.record_policy_block(
+        user.id, "profile_batch", item.get("model_id"), code,
+        f"profile batch {item.get('kind') or 'step'}")
 
 
 def _fail_job(job, reason):
@@ -1166,6 +1196,7 @@ def _poll_profile_batches():
             continue
 
         set_items = []
+        blocked = blocked_items(results)
         for item in job.items:
             user = User.query.get(item["user_id"])
             if not user:
@@ -1189,7 +1220,13 @@ def _poll_profile_batches():
                 # but never touches the profile pending/attempt flags.
                 from backend.tasks import intentions as intentions_mod
                 try:
-                    if result is None:
+                    if item["custom_id"] in blocked:
+                        # A content-policy block is final: no resubmit.
+                        intentions_mod.mark_intentions_item_gave_up(item, job)
+                        refusal_backoff.report_policy_block(
+                            user.id, blocked[item["custom_id"]],
+                            intentions_mod.MODEL_ID, "intentions batch")
+                    elif result is None:
                         intentions_mod.handle_failed_intentions_item(user, item, job, keys)
                     else:
                         intentions_mod.apply_intentions_item(user, item, result)
@@ -1204,6 +1241,9 @@ def _poll_profile_batches():
                 except Exception as e:
                     logger.error(f"Apply intentions result failed for user "
                                  f"{user.id}: {e}", exc_info=True)
+                continue
+            if item["custom_id"] in blocked:
+                _stop_for_policy_block(user, item, blocked[item["custom_id"]])
                 continue
             if result is None and queue_full:
                 # Nothing ran: the next seed pass builds the step again
