@@ -2274,11 +2274,12 @@ def test_progress_labels_for_a_one_window_build(app):
 
 
 # ── content-policy blocks (2026-11-04) ───────────────────────────────────
-# A window, group or final the provider's content-policy filter blocked
-# is final: its own outcome, never a provider failure, never resent by
-# the seeder, the poll path or the 24 h stop expiry, and the account
-# builds nothing further until the admin's confirmed Build profile lifts
-# the stop.
+# An item the provider's content-policy filter blocked is never sent
+# again automatically. A blocked window is skipped (a window_skip row in
+# its place) and the profile is finished from the other windows (Peter:
+# "skip the flagged windows, but finish their profile"). A blocked group
+# or final cannot be skipped: the account's build stops until the admin's
+# confirmed Build profile lifts it.
 
 def _blocking(world, monkeypatch, marker):
     """batch_check_and_collect that reports every item whose custom_id
@@ -2305,10 +2306,14 @@ def _policy_reports(monkeypatch):
     return reports
 
 
-def test_a_policy_blocked_window_stops_the_account_for_good(
+def _window_requests(world):
+    return [r["custom_id"] for s in world.provider.submits
+            for reqs in s.values() for r in reqs if "_w" in r["custom_id"]]
+
+
+def test_a_policy_blocked_window_is_skipped_and_the_profile_finished(
         world, monkeypatch):
     from backend.models import APICostLog
-    from backend.utils import refusal_backoff as rb
     world.corpus = _windows_corpus(3)
     reports = _policy_reports(monkeypatch)
     _blocking(world, monkeypatch, "_w1_")
@@ -2317,60 +2322,109 @@ def test_a_policy_blocked_window_stops_the_account_for_good(
     _advance(u)
     windows_sent = len(_items("window"))
     assert windows_sent >= 2
-    # Every OpenAI or Anthropic request names its user.
+    # Every request names its user (the OpenAI safety identifier).
     assert {r["user_id"] for r in world.provider.requests()} == {u.id}
     _poll()
 
     [blocked] = [i for i in _items("window") if i.get("outcome") == "blocked"]
     assert blocked["start"] is None
-    # The other windows of the batch are saved.
+    # A skip row in the blocked window's place, over its real range.
+    [skip] = _rows(u, "window_skip")
+    assert skip.covers_start is None
+    assert skip.source_data_cutoff == pw._dt(blocked["cutoff"])
+    assert skip.get_content().endswith(ex.WINDOW_SKIPPED_TEXT)
     assert len(_rows(u, "window")) == windows_sent - 1
     db.session.refresh(u)
-    assert u.profile_seed_error.startswith(pw.POLICY_STOP_NOTE + " window")
-    assert "bio_policy" in u.profile_seed_error
+    assert u.profile_seed_error == (
+        f"Skipped window start..{blocked['cutoff']}: provider policy block "
+        f"(bio_policy)")
+    # Recorded ($0) and reported, but nothing is stopped.
     row = APICostLog.query.filter_by(
         user_id=u.id, request_ref="policy_block:bio_policy").one()
+    assert row.request_type == pw.WINDOW_BLOCK_REQUEST_TYPE
     assert row.cost_microdollars == 0
     assert [r[:2] for r in reports] == [(u.id, "bio_policy")]
-    # Not a provider failure: no stop that expires.
-    history = pw.attempt_history(u.id)
-    assert pw.provider_stop_until(history, ("window", None)) is None
+    from backend.utils import refusal_backoff as rb
+    assert rb.policy_block_for(u.id, rb.PROFILE_REQUEST_TYPES) is None
 
-    # Nothing further goes out: not the window, not the rest of the set,
-    # not a merge; not from the advance, the hourly seeder or an import's
-    # seed; not a day later.
-    submits = len(world.provider.submits)
-    assert _advance(u) == "blocked"
-    assert pb._should_seed(u) is False
-    assert _seed(u) == 0
+    # The next passes finish the profile over the other windows (the skip
+    # row is one of the final's inputs) and never resend the window.
+    windows_before = len(_window_requests(world))
+    _build(world, u)
+    assert len(_window_requests(world)) == windows_before
+    [final] = _rows(u, "integration")
+    final_item = [i for i in _items("final") if i.get("outcome") == "saved"][-1]
+    assert skip.id in final_item["inputs"]
+    assert final.window_set == skip.window_set
+    # Days later nothing resends it either.
     for job in ProfileBatchJob.query.all():
         job.submitted_at -= timedelta(days=2)
-        job.collected_at = (job.collected_at or job.submitted_at) \
-            - timedelta(days=2)
     db.session.commit()
-    assert _advance(u) == "blocked"
-    assert _seed(u) == 0
+    assert _advance(u) == "idle"
+    assert len(_window_requests(world)) == windows_before
+
+
+def test_every_window_blocked_builds_no_profile(world, monkeypatch):
+    world.corpus = _windows_corpus(2)
+    _policy_reports(monkeypatch)
+    _blocking(world, monkeypatch, "_w")
+    u = _user(profile_needs_full_regen=True)
+    _advance(u)
+    windows_sent = len(_items("window"))
+    _poll()
+    assert len(_rows(u, "window_skip")) == windows_sent
+    assert not _rows(u, "window")
+    submits = len(world.provider.submits)
+    assert _advance(u) == "idle"
+    # No final over skip rows alone; the account shows why.
     assert len(world.provider.submits) == submits
-    assert not _rows(u, "integration")
-    assert not pw.set_work_due(u, ex.profile_update_base(u.id))
-    # The note stays (a saved window clears profile_seed_error).
+    assert not _items("final") and not _rows(u, "integration")
     db.session.refresh(u)
-    assert u.profile_seed_error.startswith(pw.POLICY_STOP_NOTE)
+    assert u.profile_seed_error == pw.NOTHING_READ_NOTE
+    assert pb._should_seed(u) is False
 
-    # The admin's confirmed Build profile lifts the stop: the next pass
-    # sends the blocked range again (and a block again stops it again).
-    rb.lift_policy_block(u.id, "profile_batch", rb.PROFILE_REQUEST_TYPES)
-    u.profile_needs_full_regen = False
+
+def test_a_blocked_window_of_an_account_without_ai_writes_no_skip_row(
+        world, monkeypatch):
+    world.corpus = _windows_corpus(3)
+    _policy_reports(monkeypatch)
+    _blocking(world, monkeypatch, "_w1_")
+    u = _user(profile_needs_full_regen=True)
+    _advance(u)
+    u.default_ai_usage = "none"       # switched while the batch ran
     db.session.commit()
-    assert _advance(u) == "submitted"
-    resent = [r for r in world.provider.requests() if "_w" in r["custom_id"]]
-    assert resent
-    assert any(i["start"] is None and i.get("outcome") is None
-               for i in _items("window"))
+    _poll()
+    [blocked] = [i for i in _items("window") if i.get("outcome") == "blocked"]
+    assert blocked["start"] is None
+    assert not _rows(u, "window_skip")
+    submits = len(world.provider.submits)
+    assert _advance(u) == "off"
+    assert len(world.provider.submits) == submits
 
 
-@pytest.mark.parametrize("kind", ["final"])
-def test_a_policy_blocked_merge_is_its_own_outcome(world, monkeypatch, kind):
+def test_a_rebuilt_set_skips_a_blocked_window_without_a_request(
+        world, monkeypatch):
+    world.corpus = _windows_corpus(3)
+    _policy_reports(monkeypatch)
+    _blocking(world, monkeypatch, "_w1_")
+    u = _user(profile_needs_full_regen=True)
+    _advance(u)
+    _poll()
+    first_requests = len(_window_requests(world))
+    # A rebuild from scratch (e.g. Build profile) within the attempt
+    # history: the same first window is skipped again, never sent.
+    monkeypatch.setattr(pb, "batch_check_and_collect",
+                        lambda *a, **k: world.provider.collect(*a, **k))
+    u.profile_needs_full_regen = True
+    db.session.commit()
+    _advance(u)
+    new = _window_requests(world)[first_requests:]
+    assert new and not any("_w1_" in cid for cid in new)
+    sets = {r.window_set for r in _rows(u, "window_skip")}
+    assert len(sets) == 2
+
+
+def test_a_policy_blocked_final_stops_the_account(world, monkeypatch):
     reports = _policy_reports(monkeypatch)
     u = _user()
     rows = _set_of(u, 5, created=datetime.utcnow())
@@ -2378,28 +2432,38 @@ def test_a_policy_blocked_merge_is_its_own_outcome(world, monkeypatch, kind):
     _blocking(world, monkeypatch, "_f_")
     _advance(u)
     _poll()
-    [item] = _items(kind)
+    [item] = _items("final")
     assert item["outcome"] == "blocked"
     db.session.refresh(u)
+    # The real cutoff of the final, not "..end".
     assert u.profile_seed_error.startswith(
-        pw.POLICY_STOP_NOTE + " final merge")
+        f"{pw.POLICY_STOP_NOTE} final merge start..{item['cutoff']} "
+        f"(bio_policy)")
     assert [r[1] for r in reports] == ["bio_policy"]
     submits = len(world.provider.submits)
     assert _advance(u) == "blocked"
     assert pb._should_seed(u) is False
     assert len(world.provider.submits) == submits
+    # A later save clears the column; the advance restores the note with
+    # the real cutoff.
+    u.profile_seed_error = None
+    db.session.commit()
+    assert _advance(u) == "blocked"
+    db.session.refresh(u)
+    assert f"start..{item['cutoff']}" in u.profile_seed_error
 
 
 def test_a_block_collected_while_the_advance_runs_is_not_resent(
         world, monkeypatch):
-    """Review of #596: the poller collects a blocked window after the
+    """Review of #596: the poller collects a blocked final after the
     advance's first block check but before it reads what is in flight.
-    The window is no longer in flight and has no row, so without a second
-    check its range would be rendered and submitted again."""
-    world.corpus = _windows_corpus(4)
+    The final is no longer in flight, so without a second check it would
+    be submitted again."""
     _policy_reports(monkeypatch)
-    _blocking(world, monkeypatch, "_w2_")
-    u = _user(profile_needs_full_regen=True)
+    u = _user()
+    rows = _set_of(u, 5, created=datetime.utcnow())
+    _corpus_for(world, rows)
+    _blocking(world, monkeypatch, "_f_")
     _advance(u)
     assert ProfileBatchJob.query.filter_by(status="pending").count()
     submits = len(world.provider.submits)
@@ -2420,6 +2484,144 @@ def test_a_block_collected_while_the_advance_runs_is_not_resent(
     assert polled == [u.id]
     assert not ProfileBatchJob.query.filter_by(status="pending").count()
     assert len(world.provider.submits) == submits
-    [blocked] = [i for i in _items("window") if i.get("outcome") == "blocked"]
-    assert [i for i in _items("window")
-            if i["start"] == blocked["start"]] == [blocked]
+    assert [i["outcome"] for i in _items("final")] == ["blocked"]
+
+
+# ── the lab backfill (scripts/backfill_policy_blocks.py) ─────────────────
+
+def _backfill_module():
+    import importlib.util
+    path = os.path.join(os.path.dirname(__file__), "..", "scripts",
+                        "backfill_policy_blocks.py")
+    spec = importlib.util.spec_from_file_location("backfill_policy_blocks",
+                                                  path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _openai_world(app, world):
+    """A user on an OpenAI chat model (windows on Luna), a 3-window corpus."""
+    u = _user(preferred_model="gpt-6-astra", profile_needs_full_regen=True)
+    world.corpus = _windows_corpus(3)
+    return u
+
+
+def test_the_backfill_records_old_missing_blocks_and_the_set_finishes(
+        app, world, monkeypatch):
+    """Under the old code a blocked first window came back "missing" three
+    times. The backfill reads each batch's error file: the policy-coded
+    attempts become "blocked" with one skip row, an ordinary 500 stays
+    "missing"; the next pass sends the final, never the window."""
+    import json as _json
+    from types import SimpleNamespace
+    from backend.models import APICostLog
+    mod = _backfill_module()
+    _policy_reports(monkeypatch)
+    u = _openai_world(app, world)
+    world.provider.respond = lambda cid, req: (
+        None if "_w1_" in cid else {"content": _good(tag=cid),
+                                    "input_tokens": 1, "output_tokens": 1,
+                                    "batch": True})
+    for _ in range(3):
+        _advance(u)
+        _poll()
+    attempts = [i for i in _items("window") if i["start"] is None]
+    assert [i["outcome"] for i in attempts] == ["missing"] * 3
+    assert all(j.provider_key.startswith("openai:")
+               for j in ProfileBatchJob.query.all())
+    # The provider's error files: the first two attempts were blocked,
+    # the third was an outage.
+    codes = {attempts[0]["custom_id"]: "bio_policy",
+             attempts[1]["custom_id"]: "bio_policy",
+             attempts[2]["custom_id"]: "server_error"}
+    by_batch = {}
+    for job in ProfileBatchJob.query.all():
+        for item in job.items:
+            if item["custom_id"] in codes:
+                by_batch[job.batch_id] = item["custom_id"]
+
+    class _Files:
+        def content(self, file_id):
+            cid = file_id[len("ef-"):]
+            code = codes[cid]
+            line = _json.dumps({"custom_id": cid, "response": {
+                "status_code": 500 if code == "server_error" else 400,
+                "body": {"error": {"code": code, "message": "x",
+                                   "type": "invalid_request_error"}}}})
+            return SimpleNamespace(content=(line + "\n").encode())
+
+    class _Batches:
+        def retrieve(self, batch_id):
+            cid = by_batch.get(batch_id)
+            return SimpleNamespace(
+                status="completed", error_file_id=f"ef-{cid}" if cid else None)
+
+    client = SimpleNamespace(batches=_Batches(), files=_Files())
+    lines = []
+
+    found = mod.find_blocks(client_for=lambda: client, out=lines.append)
+    assert [(item["custom_id"], code) for _j, item, code in found] == [
+        (attempts[0]["custom_id"], "bio_policy"),
+        (attempts[1]["custom_id"], "bio_policy")]
+    # Dry run: printed, nothing written.
+    assert mod.record_blocks(found, apply=False, out=lines.append) == 2
+    assert not _rows(u, "window_skip")
+    assert {i["outcome"] for i in _items("window")
+            if i["start"] is None} == {"missing"}
+    assert all("bio_policy" in line for line in lines)
+    assert not any("message" in line for line in lines)
+
+    mod.record_blocks(found, apply=True, out=lines.append)
+    assert [i["outcome"] for i in _items("window") if i["start"] is None] \
+        == ["blocked", "blocked", "missing"]
+    assert len(_rows(u, "window_skip")) == 1
+    assert APICostLog.query.filter_by(
+        user_id=u.id, request_ref="policy_block:bio_policy").count() == 2
+    # Idempotent: a second run finds nothing more.
+    again = mod.find_blocks(client_for=lambda: client, out=lines.append)
+    assert again == []
+    assert len(_rows(u, "window_skip")) == 1
+
+    # The new code finishes the profile without the window.
+    world.provider.respond = lambda cid, req: {
+        "content": _good(events="_w" in cid, tag=cid), "input_tokens": 1,
+        "output_tokens": 1, "batch": True}
+    windows_before = sum(1 for i in _items("window") if i["start"] is None)
+    _build(world, u)
+    assert sum(1 for i in _items("window") if i["start"] is None) \
+        == windows_before
+    assert len(_rows(u, "integration")) == 1
+
+
+def test_the_backfill_leaves_accounts_without_ai_without_a_skip_row(
+        app, world, monkeypatch):
+    import json as _json
+    from types import SimpleNamespace
+    mod = _backfill_module()
+    _policy_reports(monkeypatch)
+    u = _openai_world(app, world)
+    world.provider.respond = lambda cid, req: (
+        None if "_w1_" in cid else {"content": _good(tag=cid),
+                                    "input_tokens": 1, "output_tokens": 1,
+                                    "batch": True})
+    _advance(u)
+    _poll()
+    [attempt] = [i for i in _items("window") if i["start"] is None]
+    job = [j for j in ProfileBatchJob.query.all()
+           if any(i["custom_id"] == attempt["custom_id"] for i in j.items)][0]
+    u.default_ai_usage = "none"
+    db.session.commit()
+    line = _json.dumps({"custom_id": attempt["custom_id"], "response": {
+        "status_code": 400, "body": {"error": {"code": "bio_policy"}}}})
+    client = SimpleNamespace(
+        batches=SimpleNamespace(retrieve=lambda bid: SimpleNamespace(
+            status="completed",
+            error_file_id="ef-1" if bid == job.batch_id else None)),
+        files=SimpleNamespace(content=lambda fid: SimpleNamespace(
+            content=(line + "\n").encode())))
+    found = mod.find_blocks(client_for=lambda: client, out=lambda s: None)
+    mod.record_blocks(found, apply=True, out=lambda s: None)
+    [attempt] = [i for i in _items("window") if i["start"] is None]
+    assert attempt["outcome"] == "blocked"
+    assert not _rows(u, "window_skip")

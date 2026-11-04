@@ -258,7 +258,7 @@ updates. That leaves **essentially all failures transient**:
 | **Stuck `pending`** (no terminal status) | provider | staleness check (mirror `_is_task_stale`): `submitted_at` older than N h → mark failed, clear guard, re-seed. |
 | **Double-collect** (poller crash mid-tick) | infra | idempotent: a chunk whose `source_data_cutoff` already has a child profile is skipped; job flips to `collected` atomically. |
 | **Not selected for batch** (`use_batch(user)` false) | — | the synchronous path (PR #181) runs unchanged — the permanent fallback. |
-| **Content-policy block** (2026-11-04) | the provider's content-policy filter refuses a request (HTTP 400, e.g. `bio_policy`, in the batch's error file) | final, never resent automatically: a chained step is not a batch attempt (no full-price fallback); a window set's item gets the outcome `blocked`; the account's profile build stops until the admin's confirmed Build profile (`refusal_backoff.lift_policy_block`). |
+| **Content-policy block** (2026-11-04) | the provider's content-policy filter refuses a request (HTTP 400, e.g. `bio_policy`, in the batch's error file) | final, never resent automatically: a chained step is not a batch attempt (no full-price fallback) and stops the account; a window set's item gets the outcome `blocked`: a window is skipped (`window_skip` row) and the profile finished without it, a group or final stops the account's profile build until the admin's confirmed Build profile (`refusal_backoff.lift_policy_block`). |
 | **Provider queue full** (2026-11-03) | a run that fills the provider's batch queue on purpose | wait, never a failure: an Anthropic create refused with a 429 that is not the spend cap, or an OpenAI create refused on the enqueued-token limit (`SubmittedBatches.queue_full`), and an OpenAI batch failed in validation with `token_limit_exceeded` (`CollectedResults.queue_full`). No batch attempt (so no full-price fallback), no refusal backoff, no "missing" outcome for a window set (outcome `queue_full`, and `profile_batch_pending` cleared), no immediate advance; the next seed pass sends the work again. `User.profile_work_held` remembers it (next row). Logged as a warning, no Sentry event. Only while another profile batch of ours is pending in the same queue (OpenAI: the same model, whose enqueued-token limit it is): with nothing else of ours queued, the batch is over the limit by itself and would fail on every pass, so it counts as a failed attempt and logs an error, as before (review of #596). |
 | **Work waiting outside the hourly cohort** (2026-11-03) | the hourly seeder's cohort leaves out accounts not yet activated (the pre-filled Beta cohort) | `User.profile_work_held` marks batch profile work that waits for a later pass: a full queue, a refused or failed chained step, a set item that failed (a refused final waits out the refusal backoff's hour; a window may wait out a day's provider stop), a refused submit, a stale job. The hourly seeder adds held accounts to its pass by the spend-cap hold's rule (not deleted; approved or never deactivated, so a deactivated account stays paused), after the same gates: the backoff, the stops and the attempt limits are unchanged. Cleared when the work goes out, or when nothing is left to do and nothing waits for time to pass (a refusal stop that only a new version lifts counts as given up). Peter: "yes, implement it pls", "yes pls". |
 
@@ -456,20 +456,26 @@ renders nothing (threads holding only a system prompt) counts as covered.
 Expired and cancelled OpenAI batches
 have their finished results collected (#419); profile jobs are stale after
 25 h. Merges keep the integration rule (one retry after an hour, then
-stopped). Policy block (2026-11-04): a window, group or final the
-provider's content-policy filter blocked (`bio_policy` and the other
+stopped). Policy block (2026-11-04): an item the provider's
+content-policy filter blocked (`bio_policy` and the other
 `llm_batch.OPENAI_POLICY_BLOCK_CODES`, read from the batch's error file)
-gets the outcome `blocked`, which is neither a content nor a provider
-failure. It is recorded as a $0 cost row and a Sentry event
-(`refusal_backoff.record_policy_block`), `profile_seed_error` names the
-item ("Stopped: the provider's policy filter blocked window
-<start>..<end> (bio_policy)"), and the account builds nothing further:
-`next_work` returns "blocked" before rendering, the seeder's gate and the
-set's work check say no, and no stop expires. Only
-`refusal_backoff.lift_policy_block` lifts it: the admin's confirmed Build
-profile (which rebuilds the set from scratch and so sends every window
-again), or a call from a shell, after which the next advance sends the
-blocked range again.
+gets the outcome `blocked`, neither a content nor a provider failure, and
+is never sent again automatically. A blocked **window** is skipped
+(Peter, 2026-11-04: "skip the flagged windows, but finish their
+profile"): a `window_skip` row takes its place over its real range, a $0
+record of the block stops nothing (request type `profile_window`), the
+admin column says "Skipped window <start>..<cutoff>: provider policy block
+(bio_policy)", and the merges run over the other windows. A rebuilt set
+within the attempt history skips that window again without a request; an
+account whose AI usage no longer allows AI gets no skip row; a set whose
+windows are all skipped sends no final. A blocked **group or final**
+cannot be skipped: it is recorded as a profile block
+(`refusal_backoff.record_policy_block`), `profile_seed_error` names it,
+and the account builds nothing further (`next_work` returns "blocked",
+also when the block is collected while an advance runs) until
+`refusal_backoff.lift_policy_block`: the admin's confirmed Build profile.
+`scripts/backfill_policy_blocks.py` records the blocks collected as
+"missing" before this code, from the batches' error files.
 
 **Running it.** `dispatch_advance` claims the per-user guard
 (`profile_generation_task_id`), sets `profile_batch_pending` and pins the

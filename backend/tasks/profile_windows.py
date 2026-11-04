@@ -91,11 +91,17 @@ CONTENT_FAILURES = ("refused", "invalid", "truncated")
 PROVIDER_FAILURES = ("missing", "error")
 # The provider's content-policy filter blocked the item (an error code in
 # llm_batch.OPENAI_POLICY_BLOCK_CODES, e.g. bio_policy; Peter,
-# 2026-11-04). Neither a content nor a provider failure: it is never
-# retried, never waits out a stop, and it stops the account's whole
-# build (refusal_backoff.policy_block_for) until the admin's confirmed
-# Build profile lifts the stop.
+# 2026-11-04). Neither a content nor a provider failure, and never sent
+# again automatically. A blocked WINDOW is skipped: a window_skip row
+# takes its place and the build goes on over the other windows (Peter,
+# 2026-11-04: "skip the flagged windows, but finish their profile"). A
+# blocked GROUP or FINAL cannot be skipped: it stops the account's build
+# (refusal_backoff.policy_block_for) until the admin's confirmed Build
+# profile lifts the stop.
 POLICY_BLOCKED = "blocked"
+# The cost row's request type of a skipped window's block: a $0 record of
+# the block that is not one of PROFILE_REQUEST_TYPES, so it stops nothing.
+WINDOW_BLOCK_REQUEST_TYPE = "profile_window"
 
 # ── Heuristics (named here, flagged in the PR) ────────────────────────────
 # How far back the attempt history reaches. Long enough to span a batch's
@@ -138,6 +144,7 @@ MERGE_STOP_NOTE = "Stopped: a profile merge is over the merge model's cap"
 NOTHING_READ_NOTE = ("Stopped: every window of the profile build was given "
                      "up; no profile from it")
 POLICY_STOP_NOTE = "Stopped: the provider's policy filter blocked"
+POLICY_SKIP_NOTE = "Skipped window"
 
 
 def enabled():
@@ -992,6 +999,16 @@ def _render_windows(user, state, models, sub, history, deadline):
                         user_id=user.id, set=state.set_id, start=_iso(cur),
                         end=_iso(cutoff), model=models.version,
                         tokens=tokens, cap=cap, reason="over cap")
+            elif _count(history, key, (POLICY_BLOCKED,)):
+                # The provider's content-policy filter blocked this window
+                # before (a rebuilt set, or a skip row that was never
+                # written): skipped again without a request.
+                _save_skip(user, meta)
+                sub.skipped += 1
+                _report("Profile window skipped after a provider policy "
+                        "block", user_id=user.id, set=state.set_id,
+                        start=_iso(cur), end=_iso(cutoff),
+                        model=models.version, reason="policy block")
             elif _count(history, key, CONTENT_FAILURES) >= _content_attempts():
                 # The same window failed twice before, in this set or an
                 # earlier one: give it up without another call.
@@ -1132,10 +1149,11 @@ def next_work(user, models, keys, deadline):
     groups whose windows are all in, and the final when everything is.
     Returns "submitted", "partial" (render budget used; the caller hands
     the rest to a new task), "idle", "held", "blocked" (a content-policy
-    block stops the account's build) or "failed"."""
+    block of a group or final stops the account's build) or "failed"."""
     code = _policy_blocked(user)
     if code:
-        # Nothing goes out for this account, not the blocked item and not
+        # A blocked group or final (a blocked window is skipped instead):
+        # nothing goes out for this account, not the blocked merge and not
         # the rest of its set, until the admin's confirmed Build profile
         # lifts the stop (Peter, 2026-11-04).
         _show_policy_stop(user, code)
@@ -1227,30 +1245,74 @@ def _policy_blocked(user):
         user.id, refusal_backoff.PROFILE_REQUEST_TYPES)
 
 
+def _span(item):
+    return f"{item.get('start') or 'start'}..{item.get('cutoff') or 'end'}"
+
+
 def _policy_note(item, code):
-    """The admin Profile column's note for a blocked item: which window,
-    group or final, and the code."""
-    span = f"{item.get('start') or 'start'}..{item.get('cutoff') or 'end'}"
-    what = {"window": "window", "group": "group merge",
-            "final": "final merge"}.get(item.get("kind"), "request")
-    return (f"{POLICY_STOP_NOTE} {what} {span} ({code}); no automatic "
-            f"resend, Build profile with the override sends it again")[:255]
+    """The admin Profile column's note for a blocked group or final."""
+    what = {"group": "group merge", "final": "final merge"}.get(
+        item.get("kind"), "request")
+    return (f"{POLICY_STOP_NOTE} {what} {_span(item)} ({code}); no "
+            f"automatic resend, Build profile with the override sends it "
+            f"again")[:255]
+
+
+def _skip_note(item, code):
+    """The admin Profile column's note for a skipped window."""
+    return (f"{POLICY_SKIP_NOTE} {_span(item)}: provider policy block "
+            f"({code})")[:255]
+
+
+def skip_blocked_window(user, item, code, report=True):
+    """A window the provider's content-policy filter blocked: a
+    window_skip row in its place, so the set's other windows are merged
+    without it and its range is never sent again, and a $0 record of the
+    block that stops nothing (WINDOW_BLOCK_REQUEST_TYPE). No skip row for
+    an account that no longer allows AI, nor for a set the user's own
+    version superseded (as for a window's result); none twice for the
+    same range. Shared by collect() and scripts/backfill_policy_blocks.py.
+    Returns the skip row written, or None."""
+    row = None
+    start, cutoff = _dt(item.get("start")), _dt(item.get("cutoff"))
+    if (account_allows_ai(user) and item.get("set")
+            and not set_superseded(user, item["set"])
+            and not UserProfile.query.filter(
+                UserProfile.user_id == user.id,
+                UserProfile.window_set == item["set"],
+                UserProfile.covers_start == start,
+                UserProfile.source_data_cutoff == cutoff,
+                UserProfile.generation_type.in_(WINDOW_TYPES)).first()):
+        row = _save_skip(user, item)
+    refusal_backoff.record_policy_block(
+        user.id, WINDOW_BLOCK_REQUEST_TYPE, item.get("model_id"), code,
+        "profile window", report=report)
+    return row
+
+
+def stop_for_blocked_merge(user, item, code, report=True):
+    """A group or final the provider's content-policy filter blocked: it
+    cannot be skipped (it is what makes the profile), so the account's
+    build stops (a PROFILE_REQUEST_TYPES block row) until the admin's
+    confirmed Build profile lifts it. Shared like skip_blocked_window."""
+    refusal_backoff.record_policy_block(
+        user.id, "profile_batch", item.get("model_id"), code,
+        f"profile {item.get('kind')}", report=report)
 
 
 def _show_policy_stop(user, code):
     """Keep the block's note in the admin Profile column: a window of the
     same batch saved after the block clears profile_seed_error. The note
-    names the newest blocked item of the attempt history, else only the
-    code."""
+    names the newest blocked group or final of the attempt history (only
+    those stop the build), else only the code."""
     if (user.profile_seed_error or "").startswith(POLICY_STOP_NOTE):
         return
     blocked = [(when, key) for key, entries in attempt_history(user.id).items()
-               for outcome, when in entries if outcome == POLICY_BLOCKED]
+               for outcome, when in entries
+               if outcome == POLICY_BLOCKED and key[0] in ("group", "final")]
     if blocked:
         _when, key = max(blocked, key=lambda b: b[0])
-        kind = key[0]
-        item = {"kind": kind, "start": key[1],
-                "cutoff": key[2] if len(key) > 2 else None}
+        item = {"kind": key[0], "start": key[1], "cutoff": key[2]}
         note = _policy_note(item, code)
     else:
         note = (f"{POLICY_STOP_NOTE} a profile request ({code}); no "
@@ -1573,10 +1635,11 @@ def collect(job, items, results, queue_full=False):
     after it commits the job.
 
     An item the provider's content-policy filter blocked (``results``'
-    ``blocked``, llm_batch.blocked_items) gets the outcome "blocked": the
-    block is recorded and reported (refusal_backoff.record_policy_block),
-    which stops the account's build, and nothing sends it again on its own
-    (Peter, 2026-11-04).
+    ``blocked``, llm_batch.blocked_items) gets the outcome "blocked" and is
+    never sent again on its own; the block is recorded and reported. A
+    window is skipped (``skip_blocked_window``) and the build goes on; a
+    group or final stops the account's build (``stop_for_blocked_merge``;
+    Peter, 2026-11-04).
 
     ``queue_full``: the batch failed only because the provider's queue was
     full (Peter, 2026-11-03). Every item gets the outcome "queue_full",
@@ -1664,6 +1727,20 @@ def provider_stop_waits(user):
 
 
 def _report_notes(user, notes):
+    """After a job's items of one user: Sentry reports and the admin
+    Profile column's note. Notes by weight: a skipped window's, then a
+    provider stop's, then a blocked merge's (which stops the build)."""
+    blocked = notes.get("blocked") or []
+    windows = [(i, c) for i, c in blocked if i.get("kind") == "window"]
+    merges = [(i, c) for i, c in blocked if i.get("kind") != "window"]
+    # Recorded after the user's other items: a window of the same batch
+    # saved after the block would clear the note.
+    for item, code in windows:
+        skip_blocked_window(user, item, code)
+    if windows:
+        item, code = windows[0]
+        user.profile_seed_error = _skip_note(item, code)
+        db.session.commit()
     for item, problem in notes["skipped"]:
         _report("Profile window skipped after repeated failures",
                 user_id=user.id, set=item.get("set"),
@@ -1683,14 +1760,9 @@ def _report_notes(user, notes):
                 user_id=user.id, set=first.get("set"), windows=len(stopped),
                 start=first.get("start") or "start", end=first.get("cutoff"),
                 model=first.get("model_id"), reason="provider")
-    if notes.get("blocked"):
-        # Recorded after the user's other items: a window of the same
-        # batch saved after the block would clear the note. The block's
-        # note outranks a provider stop's.
-        for item, code in notes["blocked"]:
-            refusal_backoff.record_policy_block(
-                user.id, "profile_batch", item.get("model_id"), code,
-                f"profile {item.get('kind')}")
-        item, code = notes["blocked"][0]
+    for item, code in merges:
+        stop_for_blocked_merge(user, item, code)
+    if merges:
+        item, code = merges[0]
         user.profile_seed_error = _policy_note(item, code)
         db.session.commit()
