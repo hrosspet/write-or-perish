@@ -2928,3 +2928,106 @@ def test_no_chained_chunk_or_sync_build_meets_a_blocked_range(
     result = ex.window_hand_off(u, "task-1")
     assert result is not None and result["profile_id"] is None
     assert not world.provider.submits
+
+
+# ── backfill: a blocked window another attempt saved (lab dry run) ────────
+
+def _error_file_client(errors):
+    """A fake OpenAI client whose batches' error files hold ``errors``
+    {batch_id: (custom_id, code)}."""
+    import json as _json
+    from types import SimpleNamespace
+
+    def retrieve(batch_id):
+        return SimpleNamespace(
+            status="completed",
+            error_file_id=f"ef-{batch_id}" if batch_id in errors else None)
+
+    def content(file_id):
+        cid, code = errors[file_id[len("ef-"):]]
+        line = _json.dumps({"custom_id": cid, "response": {
+            "status_code": 400, "body": {"error": {
+                "code": code, "type": "invalid_request_error"}}}})
+        return SimpleNamespace(content=(line + "\n").encode())
+    return SimpleNamespace(batches=SimpleNamespace(retrieve=retrieve),
+                           files=SimpleNamespace(content=content))
+
+
+def _job_of(custom_id):
+    return [j for j in ProfileBatchJob.query.all()
+            if any(i["custom_id"] == custom_id for i in j.items)][0]
+
+
+def _assert_saved_window_kept(u, mod, errors, blocked_cid):
+    """The backfill marks the blocked attempt and records its range, but
+    writes no skip row, keeps the saved version, and starts nothing."""
+    windows = {r.id for r in _rows(u, "window")}
+    finals = len(_finals(u))
+    lines = []
+    found = mod.find_blocks(client_for=lambda: _error_file_client(errors),
+                            out=lines.append)
+    assert [item["custom_id"] for _j, item, _c in found] == [blocked_cid]
+    mod.record_blocks(found, apply=False, out=lines.append)
+    assert "+ skip row" not in lines[-1]
+    assert "another attempt was saved" in lines[-1]
+    mod.record_blocks(found, apply=True, out=lambda s: None)
+    blocked = [i for i in _items("window") if i["custom_id"] == blocked_cid][0]
+    assert blocked["outcome"] == "blocked"
+    assert not _rows(u, "window_skip")
+    assert {r.id for r in _rows(u, "window")} == windows
+    assert pw.blocked_ranges(u.id) == [_range(blocked)]
+    assert len(_finals(u)) == finals
+    return blocked
+
+
+def test_the_backfill_keeps_a_window_saved_after_its_blocked_attempt(
+        app, world, monkeypatch):
+    """Lab dry run: the old poller resent a blocked window and the resend
+    was saved ("missing", then "saved", same set). No skip row, the saved
+    version and the profile stay; the range is recorded; nothing is
+    re-merged or sent."""
+    mod = _backfill_module()
+    _policy_reports(monkeypatch)
+    u = _openai_world(app, world)
+    world.provider.respond = lambda cid, req: (
+        None if ("_w1_" in cid and cid.endswith("_1")) else {
+            "content": _good(events="_w" in cid, tag=cid),
+            "input_tokens": 1, "output_tokens": 1, "batch": True})
+    _build(world, u)
+    attempts = [i for i in _items("window") if i["start"] is None]
+    assert [i["outcome"] for i in attempts] == ["missing", "saved"]
+    assert len(_finals(u)) == 1
+    first = attempts[0]
+    _assert_saved_window_kept(
+        u, mod, {_job_of(first["custom_id"]).batch_id:
+                 (first["custom_id"], "bio_policy")}, first["custom_id"])
+    submits = len(world.provider.submits)
+    assert _advance(u) == "idle"
+    assert len(world.provider.submits) == submits
+    assert [i["outcome"] for i in _items("window")
+            if i["start"] is None] == ["blocked", "saved"]
+
+
+def test_the_backfill_keeps_a_saved_window_when_a_later_duplicate_was_blocked(
+        app, world, monkeypatch):
+    """The other order: the window was saved, and a later duplicate of it
+    in the same set was blocked."""
+    mod = _backfill_module()
+    _policy_reports(monkeypatch)
+    u = _openai_world(app, world)
+    _build(world, u)
+    [saved] = [i for i in _items("window") if i["start"] is None]
+    assert saved["outcome"] == "saved" and len(_finals(u)) == 1
+    dup = dict(saved, custom_id=saved["custom_id"] + "_dup",
+               outcome="missing")
+    db.session.add(ProfileBatchJob(
+        provider_key=_job_of(saved["custom_id"]).provider_key,
+        batch_id="batch_dup", status="collected", items=[dup],
+        submitted_at=datetime.utcnow(), collected_at=datetime.utcnow()))
+    db.session.commit()
+    _assert_saved_window_kept(
+        u, mod, {"batch_dup": (dup["custom_id"], "bio_policy")},
+        dup["custom_id"])
+    submits = len(world.provider.submits)
+    assert _advance(u) == "idle"
+    assert len(world.provider.submits) == submits

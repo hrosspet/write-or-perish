@@ -1438,7 +1438,7 @@ def skip_blocked_window(user, item, code, report=True):
     Shared by collect() and scripts/backfill_policy_blocks.py. Returns the
     skip row written, or None."""
     row = None
-    start, cutoff = _dt(item.get("start")), _dt(item.get("cutoff"))
+    start = _dt(item.get("start"))
     record_blocked_range(user.id, *blocked_range_of(item), code,
                          item.get("model_id"))
     if (account_allows_ai(user) and item.get("set")
@@ -1447,8 +1447,9 @@ def skip_blocked_window(user, item, code, report=True):
                 UserProfile.user_id == user.id,
                 UserProfile.window_set == item["set"],
                 UserProfile.covers_start == start,
-                UserProfile.source_data_cutoff == cutoff,
                 UserProfile.generation_type.in_(WINDOW_TYPES)).first()):
+        # No row of the set starts there yet: a version saved by another
+        # attempt (whatever its cutoff) is kept, never replaced.
         row = _save_skip(user, item)
     refusal_backoff.record_policy_block(
         user.id, WINDOW_BLOCK_REQUEST_TYPE, item.get("model_id"), code,
@@ -1901,10 +1902,10 @@ def _report_notes(user, notes):
     merges = [(i, c) for i, c in blocked if i.get("kind") != "window"]
     # Recorded after the user's other items: a window of the same batch
     # saved after the block would clear the note.
-    for item, code in windows:
-        skip_blocked_window(user, item, code)
-    if windows:
-        item, code = windows[0]
+    skipped = [(item, code) for item, code in windows
+               if skip_blocked_window(user, item, code) is not None]
+    if skipped:
+        item, code = skipped[0]
         user.profile_seed_error = _skip_note(item, code)
         db.session.commit()
     for item, problem in notes["skipped"]:
