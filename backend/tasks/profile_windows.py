@@ -1339,6 +1339,9 @@ def next_work(user, keys, deadline, wait_for_imports=True):
     state = set_state(user, set_id, base, history)
     plan = (MergePlan() if merge_stopped(user)
             else merge_plan(user, state))
+    if not (state.due or state.stopped or plan.groups
+            or plan.final_inputs is not None):
+        return "idle"
     # The models of this pass and the providers the writing may reach
     # (Peter, 2026-11-05).
     cross = cross_provider_allowed(user)
@@ -1346,9 +1349,6 @@ def next_work(user, keys, deadline, wait_for_imports=True):
     models = pass_models(user, state, chained_base, cross)
     providers = ({"anthropic", "openai"} if cross
                  else {models.provider})
-    if not (state.due or state.stopped or plan.groups
-            or plan.final_inputs is not None):
-        return "idle"
     if state.stopped:
         start, end, until = state.stopped[0]
         note = (f"{STOP_NOTE} {_count(history, _attempt_key('window', _iso(start)), PROVIDER_FAILURES)} "
