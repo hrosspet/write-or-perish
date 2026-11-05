@@ -448,11 +448,20 @@ database: the set (in-flight items, a full-rebuild flag, the set whose tip
 is the update base, or a new set), its missing ranges, the due groups and
 the final; checks the spend cap (a user over their limit is held,
 `profile_cap_held`, and the hourly seeder resumes the set when the month
-turns or the admin raises the limit); logs the estimated cost of the rest;
-renders and submits. The estimate is not a gate (Peter, 2026-10-22: "send
-it and let the cap stop it halfway"): all of a build's windows go out in
-one submission, so the cap can only hold the merges after them, and while
-the user is capped it also blocks their replies until the 1st. It holds no pipeline lock; past
+turns or the admin raises the limit); estimates the cost of the rest;
+renders and submits. A pass with windows to read goes out only when the
+estimate (the windows and the merges after them, at Batch prices, with the
+measured mean output per call: Peter, 2026-11-05, the expected cost, "Better
+err on the job going through leading to $2-$3 overshoot, than postponing it
+for a month") fits into what is left of the user's monthly limit; else
+nothing is sent, the build waits (`profile_cap_held`, admin note "Waiting
+for spend headroom: the build needs about $X; $S of $L used this month")
+and the hourly seeder tries it again until the month turns or the limit is
+raised. A user with no limit is not gated. Merges alone are held only by
+the cap (Peter, 2026-10-22: "send it and let the cap stop it halfway"):
+all of a build's windows go out in one submission, so the cap can only
+hold the merges after them, and while the user is capped it also blocks
+their replies until the 1st. It holds no pipeline lock; past
 `PROFILE_WINDOW_RENDER_SECONDS` it submits what it has and dispatches a
 new task. The poller collects window, group and final items (`collect`) and
 dispatches the advance; the hourly seeder routes builds to it
