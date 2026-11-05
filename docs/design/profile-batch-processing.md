@@ -210,7 +210,10 @@ finished, or an entry was written in Loore after it, less than 30 minutes
 ago (imported entries keep their own dates, so the newest entry alone does
 not show an import). A Twitter import marks the time at its start and
 after each committed batch. Once the imports are quiet the mark is cleared
-and the usual gates decide. A second import inside the window marks again
+and the usual gates decide, with the import's override of the refusal
+backoff (an import's build skips the wait and the stop, voice review
+2026-10-01), also when the import's own seed found an entry written after
+the import and left the build to the hourly pass. A second import inside the window marks again
 and schedules its own seed; the first one's seed then finds the imports
 settling and does nothing, so both imports go into one build. The window
 advance (`next_work`) holds a set's windows and merges the same way. The

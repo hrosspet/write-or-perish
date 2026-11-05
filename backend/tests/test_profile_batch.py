@@ -2937,3 +2937,29 @@ def test_the_admins_build_does_not_wait_for_the_imports(app, monkeypatch):
     _later(5)
     assert pb._seed_profile_batches(users=[u], ignore_backoff=True) == 1
     assert len(submitted) == 1
+
+
+def test_an_import_after_the_refusal_stop_still_builds_when_an_entry_followed(
+        app, monkeypatch):
+    """The profile job is in the refusal stop (two refusals in a row), which
+    an import's build skips (voice review, 2026-10-01). An entry written
+    10 minutes after the import makes the import's own seed find the
+    imports settling; the first hourly pass after the quiet period builds
+    with the import's override, not the stop."""
+    u, scheduled, submitted = _import_harness(monkeypatch)
+    for days in (30, 29):
+        _refusal(u, timedelta(days=days))
+    assert pb._should_seed(u) is False                # the stop holds
+    pb.seed_after_import(u)
+    _later(10)
+    n = Node(user_id=u.id, node_type="user", ai_usage="chat",
+             token_count=10, created_at=_Clock.at)
+    n.set_content("written in Loore")
+    db.session.add(n)
+    db.session.commit()
+    _later(20)                                        # the import's seed
+    assert _deferred_seed(u) == 0
+    _later(25)                                        # 35 min after the entry
+    assert pb._seed_profile_batches() == 1            # the hourly pass
+    assert len(submitted) == 1
+    assert User.query.get(u.id).profile_import_quiet_from is None

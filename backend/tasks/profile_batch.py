@@ -986,20 +986,27 @@ def _seed_profile_batches(users=None, ignore_backoff=False,
             continue  # exhausted → synchronous last-resort handles it
         # (force-batch users keep retrying here every cycle instead:
         # they must never fall back to the full-price sync path)
+        # An import's build waits until the imports stop (#598).
+        imports_done = False
         if wait_for_imports:
-            # An import's build waits until the imports stop (#598); the
-            # mark is cleared once they have, and the gates below decide.
             if import_settling(user):
                 continue
-            if user.profile_import_quiet_from is not None:
-                user.profile_import_quiet_from = None
-                db.session.commit()
+            imports_done = user.profile_import_quiet_from is not None
         # The per-user monthly spend cap, checked as the synchronous task
         # checks it on entry. The builder below settles it too.
         if user_is_capped(user):
             _hold_for_cap(user)
             continue
-        if not _should_seed(user, ignore_backoff=ignore_backoff):
+        if imports_done:
+            # The imports are quiet: the mark goes, and the gates below
+            # decide with the import's override of the refusal backoff, as
+            # an import's seed always had (voice review, 2026-10-01). The
+            # deferred seed carries it too, but finds nothing to do when an
+            # entry written after the import extended the wait.
+            user.profile_import_quiet_from = None
+            db.session.commit()
+        if not _should_seed(user,
+                            ignore_backoff=ignore_backoff or imports_done):
             _release_cap_hold(user)   # nothing (left) to resume
             continue
         try:
