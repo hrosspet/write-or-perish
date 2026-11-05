@@ -42,6 +42,8 @@ PROFILE_MODEL_KEYS = (
     ("PROFILE_MERGE_MODEL_ANTHROPIC", "anthropic"),
     ("PROFILE_MERGE_MODEL_OPENAI", "openai"),
 )
+PROFILE_CROSS_PROVIDER_KEYS = ("PROFILE_VERSION_MODEL_CROSS_PROVIDER",
+                               "PROFILE_MERGE_MODEL_CROSS_PROVIDER")
 PROFILE_REASONING_EFFORTS = ("none", "minimal", "low", "medium", "high",
                              "xhigh")
 
@@ -62,6 +64,16 @@ def validate_profile_models(config):
         if not cfg or cfg.get("deprecated") or cfg.get("provider") != provider:
             raise RuntimeError(
                 f"{key}={model_id!r} is not an active {provider} model.")
+    # The cross-provider pair (public-only writing, or the user's consent):
+    # any provider, but an active model.
+    for key in PROFILE_CROSS_PROVIDER_KEYS:
+        model_id = config.get(key)
+        if not model_id:
+            continue
+        cfg = supported.get(model_id) or {}
+        if (not cfg or cfg.get("deprecated")
+                or cfg.get("provider") not in ("anthropic", "openai")):
+            raise RuntimeError(f"{key}={model_id!r} is not an active model.")
     effort = config.get("PROFILE_MERGE_REASONING_EFFORT_OPENAI")
     if effort and effort not in PROFILE_REASONING_EFFORTS:
         raise RuntimeError(

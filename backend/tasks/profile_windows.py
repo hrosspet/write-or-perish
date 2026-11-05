@@ -25,20 +25,31 @@ out one Batch round trip at a time. Instead:
 - Later updates of such a profile add windows to the same set and redo
   only the newest group and the final.
 
+Which models read the writing (Peter, 2026-11-05):
+
+- A pass with more than one window to read: the version and merge models
+  of the provider of the user's chat model (Haiku 5.5 and Opus 5.5, or
+  GPT-6 Luna and GPT-6.1 Sol at high effort), unless every entry the
+  build can read is public (a pre-fill, the lab) or the user agreed to
+  both providers (User.profile_both_providers): then GPT-6 Luna writes the
+  versions and Opus 5.5 merges them (``profile_models_for``).
+- A regular update of a merged set, one window to read: the user's chat
+  model writes a chained update of the set's newest profile (the update
+  prompt, as main's chained path), which stands in the window's place, and
+  the same model runs the group and final merges after it
+  (``chained_update_base``, ``chained_models_for``).
+
 A from-scratch build that fits ONE chunk on the user's chat model takes
 this path too where its provider's PROFILE_ONE_CHUNK_WINDOW_* is on
-(Peter, 2026-11-03; both on by default): a set of windows at the version
-model's cap, read with the events paragraph. One window (every OpenAI
-one-chunk build; an Anthropic one up to Haiku's 100k tier, about 30.6k
-units at the tweets ratio) gets a final that rewrites that one version as
-the profile with the single-version integration prompt
-(exports.single_integration_messages); two to five Haiku windows are
-merged as any set is. Two Batch rounds, one after the other. Later
-updates are the set's, as for a large build.
+(Peter, 2026-11-03; both on by default): one window read with the events
+paragraph, and a final that rewrites that one version as the profile with
+the single-version integration prompt (exports.single_integration_messages).
+Two Batch rounds, one after the other. Later updates are the set's, as for
+a large build.
 
-A user's writing reaches only models of their own chat model's provider:
-the version and merge models are per provider, checked at boot and again
-here (``profile_models_for``).
+Without public-only writing or the user's consent, a user's writing
+reaches only models of their own chat model's provider: checked at boot,
+per pass, and again for every request before it is sent (_Submission).
 
 State lives in the database, as on the chained batch path: the set's rows
 (window, window_skip, group, final), the items of pending ProfileBatchJob
@@ -78,6 +89,8 @@ from backend.utils.llm_batch import apply_batch_key_override, blocked_items
 from backend.utils.privacy import AI_ALLOWED, account_allows_ai
 from backend.utils.profile_versions import (
     WINDOW_TYPES, current_profile_query)
+from backend.utils.profile_providers import (  # noqa: F401 (re-exported)
+    PUBLIC_PROVENANCES, note_private_read, writing_is_public_only)
 from backend.utils import refusal_backoff
 from backend.utils.tokens import approximate_token_count, format_date_metadata
 # Module references (see profile_batch's note): exports and profile_batch
@@ -88,6 +101,11 @@ from backend.tasks import profile_batch as _batch
 logger = get_task_logger(__name__)
 
 ITEM_KINDS = ("window", "group", "final")
+# A regular one-window update of a merged set, written as a chained update
+# by the user's chat model (Peter, 2026-11-05). Stands in the window's
+# place in the set's merges; one of profile_versions.WINDOW_TYPES.
+CHAINED_TYPE = "window_update"
+
 CONTENT_FAILURES = ("refused", "invalid", "truncated")
 PROVIDER_FAILURES = ("missing", "error")
 # The provider's content-policy filter blocked the item (an error code in
@@ -112,10 +130,16 @@ WINDOW_BLOCK_REQUEST_TYPE = "profile_window"
 # job rows stays small.
 ATTEMPT_LOOKBACK = timedelta(days=7)
 # Output tokens one window version costs, by version model, for the cost
-# estimate logged before each submission: the measured upper ends (Haiku
-# 5.5 thinks by default: 7-16k output tokens per version on 2026-10-22;
-# Luna 2.1-3.2k on 2026-10-21).
-EXPECTED_OUTPUT = {"claude-haiku-5.5": 16_000, "gpt-6-luna": 3_500}
+# estimate a build's windows must fit (Peter, 2026-11-05: the expected
+# cost, not a worst case): the measured means. Haiku 5.5 thinks by
+# default: 11.0k on average over 53 versions (7.1-15.8k, 2026-10-22);
+# Luna 2.4-2.7k on average in the three events runs (201 versions,
+# 1.6-4.2k, 2026-10-21/22). The default is for a version model nobody
+# measured.
+EXPECTED_OUTPUT = {"claude-haiku-5.5": 11_000, "gpt-6-luna": 2_500,
+                   # A chained update by Opus 5.5: 7.1k on average over 26
+                   # update steps (5.0-8.7k, 2026-11-05).
+                   "claude-opus-5.5": 7_000}
 DEFAULT_EXPECTED_OUTPUT = 6_000
 # Merge input tokens per version, measured: 53 Haiku versions came to
 # 247,885 tokens in one Opus merge (4.7k each); a Luna version is about
@@ -123,12 +147,17 @@ DEFAULT_EXPECTED_OUTPUT = 6_000
 MERGE_TOKENS_PER_VERSION = {"claude-haiku-5.5": 4_700, "gpt-6-luna": 2_000}
 DEFAULT_MERGE_TOKENS_PER_VERSION = 4_700
 # Fixed parts of a request, for the estimate: the window prompt's template,
-# the merge prompt, and a merge's output (a profile is about 2-3k tokens
-# plus thinking). With a reasoning effort set, a merge is estimated at the
-# full output cap.
+# the merge prompt, and a merge's output, the measured typical size: Opus
+# 5.5 merges wrote 3.3-5.1k output tokens, about 3.9k on average (14
+# merges, 2026-10-21 to 11-03); GPT-6.1 Sol at high effort 2.8k, its
+# reasoning included (2026-10-22).
 WINDOW_PROMPT_OVERHEAD_TOKENS = 3_000
+# A chained update's fixed part: the update template (3.5k tokens,
+# measured 2026-11-05) and the profile it updates (a final of 2-3k tokens,
+# a chained version up to about 4.5k).
+CHAINED_PROMPT_OVERHEAD_TOKENS = 8_000
 MERGE_PROMPT_TOKENS = 4_000
-MERGE_OUTPUT_TOKENS = 6_000
+MERGE_OUTPUT_TOKENS = 4_000
 # The token count of a merge is checked exactly only when the character
 # estimate is below this many times the cap; above it the merge is over
 # the cap without asking the counting endpoint.
@@ -142,6 +171,7 @@ SET_ID_HEX = 12
 FIT_ROUNDS = 8
 FIT_SAFETY = 0.97
 
+HOLD_NOTE = "Waiting for spend headroom"
 STOP_NOTE = "Stopped: a profile chunk failed at the provider"
 MERGE_STOP_NOTE = "Stopped: a profile merge is over the merge model's cap"
 NOTHING_READ_NOTE = ("Stopped: every window of the profile build was given "
@@ -177,30 +207,72 @@ def _setting(key, default):
 # ── models ────────────────────────────────────────────────────────────────
 
 class ProfileModelError(RuntimeError):
-    """No version or merge model of the user's own provider is set."""
+    """No version or merge model of the user's own provider is set, or a
+    request would reach a provider the user's writing may not reach."""
 
 
 @dataclass
 class Models:
-    provider: str
+    provider: str            # the provider of the user's chat model
     version: str
     merge: str
     merge_effort: str = None
+    cross: bool = False      # the cross-provider pair (public or consent)
+    chained: bool = False    # a regular update by the user's chat model
 
 
-def profile_models_for(user):
-    """The version and merge models for this user's build: the settings of
-    the provider of their chat model (``default_model_for``). Each must be
-    that provider's model; anything else raises, so a user's writing never
-    reaches another provider (also checked at boot). A user who switches
-    provider gets the new provider's models from the next step on; the
-    windows the other provider's model wrote are still merged, as chained
-    versions are after a switch."""
-    supported = current_app.config.get("SUPPORTED_MODELS") or {}
-    chat_model = _batch._model_for(user)
-    provider = (supported.get(chat_model) or {}).get("provider")
+def _provider_of(model_id):
+    return _model_cfg(model_id).get("provider")
+
+
+def _users_provider(user):
+    provider = _provider_of(_batch._model_for(user))
     if provider not in ("anthropic", "openai"):
         raise ProfileModelError(f"no profile models for provider {provider!r}")
+    return provider
+
+
+def cross_provider_allowed(user):
+    """Whether this user's build may use both providers' models: they
+    agreed (User.profile_both_providers, #599), or their writing is public
+    only (``writing_is_public_only``)."""
+    return bool(user.profile_both_providers) or writing_is_public_only(user)
+
+
+def chained_models_for(user):
+    """A regular update of a merged set: the user's chat model writes the
+    chained version and runs the merges after it (Peter, 2026-11-05)."""
+    chat_model = _batch._model_for(user)
+    return Models(_users_provider(user), chat_model, chat_model,
+                  chained=True)
+
+
+def profile_models_for(user, cross=False):
+    """The version and merge models for a pass with more than one window.
+    By default the settings of the provider of the user's chat model
+    (``default_model_for``): each must be that provider's model, anything
+    else raises, so a user's writing never reaches another provider (also
+    checked at boot). With ``cross`` (``cross_provider_allowed``) the
+    cross-provider pair, GPT-6 Luna and Opus 5.5 by default. A user who
+    switches provider gets the new provider's models from the next step
+    on; the windows the other provider's model wrote are still merged, as
+    chained versions are after a switch."""
+    supported = current_app.config.get("SUPPORTED_MODELS") or {}
+    provider = _users_provider(user)
+    if cross:
+        version = current_app.config.get(
+            "PROFILE_VERSION_MODEL_CROSS_PROVIDER")
+        merge = current_app.config.get("PROFILE_MERGE_MODEL_CROSS_PROVIDER")
+        for model_id in (version, merge):
+            if (supported.get(model_id) or {}).get("provider") not in (
+                    "anthropic", "openai"):
+                raise ProfileModelError(
+                    f"profile model {model_id!r} is not set up")
+        effort = None
+        if _provider_of(merge) == "openai":
+            effort = current_app.config.get(
+                "PROFILE_MERGE_REASONING_EFFORT_OPENAI") or None
+        return Models(provider, version, merge, effort, cross=True)
     suffix = provider.upper()
     version = current_app.config.get(f"PROFILE_VERSION_MODEL_{suffix}")
     merge = current_app.config.get(f"PROFILE_MERGE_MODEL_{suffix}")
@@ -496,6 +568,49 @@ def set_state(user, set_id, base, history=None, now=None):
     return state
 
 
+def chained_update_base(user, state, fresh):
+    """The profile a regular update of this set builds on, or None when
+    the pass is not one (Peter, 2026-11-05: "for 1 window updates on prod
+    I'd like to use the chained version"). A regular update: the set
+    exists, nothing of it is in flight or stopped, its only missing range
+    is the writing after its last window, and that range plans into one
+    chunk on the user's chat model, as the chained path plans it. The base
+    is the set's newest chained version when the last window is one, else
+    the set's final merged over the last window (the only profile that
+    covers all the writing). A set still being built (no final over its
+    last window) reads its windows independently."""
+    if (fresh or len(state.due) != 1 or state.stopped
+            or state.windows_in_flight or not state.windows):
+        return None
+    start, end, units = state.due[0]
+    tip = state.windows[-1]
+    if end is not None or start != tip.source_data_cutoff:
+        return None
+    if tip.generation_type == CHAINED_TYPE:
+        base = tip
+    else:
+        from backend.utils.profile_versions import latest_set_final
+        base = latest_set_final(user.id, state.set_id)
+        if base is None or base.parent_profile_id != tip.id:
+            return None
+    chat_model = _batch._model_for(user)
+    k, _size = plan_chunks(units, max_units=max_units_for_cap(
+        _cap(chat_model), _exports.tokens_per_unit(user, chat_model)))
+    return base if k == 1 else None
+
+
+def pass_models(user, state, chained_base, cross):
+    """The models of this pass: the user's chat model for a regular update
+    (``chained_base``) and for the merges after one (the set's last window
+    is a chained version), else the version and merge models of
+    ``profile_models_for``."""
+    if chained_base is not None or (
+            not state.due and state.windows
+            and state.windows[-1].generation_type == CHAINED_TYPE):
+        return chained_models_for(user)
+    return profile_models_for(user, cross=cross)
+
+
 # ── merge planning ────────────────────────────────────────────────────────
 
 @dataclass
@@ -749,23 +864,23 @@ def estimate_cost_usd(user, state, models, plan_windows, plan=None):
     """Dollars the rest of the build costs at Batch prices: the windows
     still to read (``plan_windows``: (count, units)) and the merges after
     them, or, with no window left to read, the merges due now (``plan``).
-    From the measured sizes above; an estimate for the log, not a bill and
-    not a gate (the spend cap holds the next submission instead)."""
+    The expected cost, from the measured typical sizes above, not a worst
+    case: Peter, 2026-11-05, "Better err on the job going through leading
+    to $2-$3 overshoot, than postponing it for a month". Not a bill."""
     from backend.utils.cost import calculate_llm_cost_microdollars
     n_new, units_new = plan_windows
     rho = _exports.tokens_per_unit(user, models.version)
     cost = 0
     if n_new:
         # Priced per (average) window: a price tier applies per request.
+        overhead = (CHAINED_PROMPT_OVERHEAD_TOKENS if models.chained
+                    else WINDOW_PROMPT_OVERHEAD_TOKENS)
         cost += n_new * calculate_llm_cost_microdollars(
-            models.version,
-            int(units_new * rho / n_new + WINDOW_PROMPT_OVERHEAD_TOKENS),
+            models.version, int(units_new * rho / n_new + overhead),
             EXPECTED_OUTPUT.get(models.version, DEFAULT_EXPECTED_OUTPUT),
             batch=True)
     per_version = MERGE_TOKENS_PER_VERSION.get(
         models.version, DEFAULT_MERGE_TOKENS_PER_VERSION)
-    output = (DEFAULT_MAX_OUTPUT_TOKENS if models.merge_effort
-              else MERGE_OUTPUT_TOKENS)
     size = _group_size()
     calls = []   # versions per merge call
     if n_new or state.windows_in_flight:
@@ -778,7 +893,9 @@ def estimate_cost_usd(user, state, models, plan_windows, plan=None):
             groups = math.ceil(n_after / size)
             current = len(_set_rows(user.id, state.set_id, ("group",)))
             to_build = max(1, groups - max(0, min(current, groups - 1)))
-            calls += [size] * to_build
+            # The newest groups are built; only the last can be short.
+            calls += [min(size, n_after - size * i)
+                      for i in range(groups - to_build, groups)]
             calls.append(groups + 2)
         else:
             calls.append(n_after + 2)
@@ -789,18 +906,47 @@ def estimate_cost_usd(user, state, models, plan_windows, plan=None):
     for versions in calls:
         cost += calculate_llm_cost_microdollars(
             models.merge, versions * per_version + MERGE_PROMPT_TOKENS,
-            output, batch=True)
+            MERGE_OUTPUT_TOKENS, batch=True)
     return cost / 1e6
 
 
-def _hold(user):
-    """Hold the set's next submission for the spend cap: the user is over
-    their monthly limit. Nothing is submitted; the hourly seeder resumes the
-    set once the block lifts (profile_cap_held: the month turns or the admin
-    raises the limit). What is in flight is collected and saved meanwhile."""
+def _hold(user, needed=None, spent=None, limit=None):
+    """Hold the set's next submission: the user is over their monthly
+    limit (the spend cap), or, with ``needed``, the windows due and the
+    merges after them are estimated at more than what is left of the limit.
+    Nothing is submitted; the hourly seeder resumes the set once there is
+    room (profile_cap_held: the month turns or the admin raises the limit).
+    What is in flight is collected and saved meanwhile. A wait on the
+    estimate says so in the admin Profile column, with the amount."""
     _batch._hold_for_cap(user)
-    logger.warning("User %s: spend-capped; no profile window step", user.id)
+    if needed is None:
+        logger.warning("User %s: spend-capped; no profile window step",
+                       user.id)
+        return "held"
+    note = (f"{HOLD_NOTE}: the build needs about ${needed:.2f}; "
+            f"${spent:.2f} of ${limit:.2f} used this month")
+    first = not (user.profile_seed_error or "").startswith(HOLD_NOTE)
+    user.profile_seed_error = note[:255]
+    db.session.commit()
+    (logger.error if first else logger.info)(
+        "User %s: profile build waits: needs about $%.2f, $%.2f of $%.2f "
+        "used this month", user.id, needed, spent, limit)
     return "held"
+
+
+def _short_of_headroom(user, estimate):
+    """(spent, limit) in dollars when ``estimate`` does not fit into what
+    is left of the user's monthly spend limit this month, else None. A user
+    with no limit (0) is never short."""
+    from backend.utils.spend import (
+        get_user_month_spend_microdollars, get_user_spend_limit_usd)
+    limit = get_user_spend_limit_usd(user, current_app.config) or 0
+    if limit <= 0:
+        return None
+    spent = get_user_month_spend_microdollars(user.id) / 1e6
+    if estimate > limit - spent:
+        return spent, limit
+    return None
 
 
 # ── requests ──────────────────────────────────────────────────────────────
@@ -866,8 +1012,10 @@ class _Submission:
     """Requests collected for one user's submission, sent in slices of
     PROFILE_BATCH_MAX_BYTES, every slice in the same run."""
 
-    def __init__(self, keys):
+    def __init__(self, keys, providers):
         self.keys = keys
+        # The providers this user's writing may reach in this pass.
+        self.providers = set(providers)
         self.built = []
         self.size = 0
         self.sent = 0
@@ -876,6 +1024,11 @@ class _Submission:
         self.max_bytes = int(_setting("PROFILE_BATCH_MAX_BYTES", 100_000_000))
 
     def add(self, provider, request, meta):
+        if provider not in self.providers:
+            # The hard line (Peter, 2026-10-02 and 2026-11-05): never sent.
+            raise ProfileModelError(
+                f"user {meta.get('user_id')}: a profile request to "
+                f"{provider} is not allowed for this user's writing")
         self.built.append({"provider": provider, "request": request,
                            "meta": meta})
         self.size += _request_bytes(request)
@@ -929,7 +1082,8 @@ def fit_window(user, model_id, keys, cap, cur, budget, end, prompt_fn,
     return last
 
 
-def _render_windows(user, state, models, sub, history, deadline):
+def _render_windows(user, state, models, sub, history, deadline,
+                    chained_base=None):
     """Plan and render every due range into window requests, oldest
     first, exactly as the chain loop sizes its chunks, but at the version
     model's cap. A due range is first cut around the user's blocked
@@ -937,8 +1091,17 @@ def _render_windows(user, state, models, sub, history, deadline):
     starts, the next begins where it ends, and the blocked range itself
     gets a window_skip row without a request. Returns "partial" when the
     render budget ran out (the rendered windows are submitted and a new
-    task renders the rest), else None."""
+    task renders the rest), else None.
+
+    With ``chained_base`` (a regular update, chained_update_base) the one
+    window is a chained update of that profile: the update prompt over the
+    profile and the window, as main's chained path builds it, by the
+    user's chat model (``models``). One window per pass: a remainder that
+    did not fit is chained on this version in the next pass."""
     template = _exports.window_generation_template(user.id)
+    if chained_base is not None:
+        update_template = _exports.build_update_template(user.id)
+        base_content = _exports.update_base_content(chained_base)
     cap = _cap(models.version)
     rho = _exports.tokens_per_unit(user, models.version)
     max_units = max_units_for_cap(cap, rho)
@@ -990,6 +1153,11 @@ def _render_windows(user, state, models, sub, history, deadline):
                 rendered_at = datetime.utcnow()
 
                 def _prompt(chunk):
+                    if chained_base is not None:
+                        return _exports.build_chunk_prompt(
+                            update_template, base_content,
+                            chained_base.source_tokens_used or 0, chunk,
+                            chained_base.source_origin_stats)
                     return template.replace(
                         "{user_export}",
                         _exports.chunk_content_for_prompt(chunk))
@@ -1013,13 +1181,19 @@ def _render_windows(user, state, models, sub, history, deadline):
                     "set": state.set_id,
                     "base_id": (state.base.id if state.base is not None
                                 else None),
-                    "n": n, "total": total, "attempt": attempts + 1,
+                    "n": n,
+                    "total": None if chained_base is not None else total,
+                    "attempt": attempts + 1,
                     "start": _iso(cur), "cutoff": _iso(cutoff),
                     "earliest": _iso(chunk.get("earliest_node_created_at")),
                     "units": units, "cumulative": cumulative,
                     "origin_stats": stats, "rendered_at": _iso(rendered_at),
                     "model_id": models.version,
+                    "generation_type": ("window" if chained_base is None
+                                        else CHAINED_TYPE),
                 }
+                if chained_base is not None:
+                    meta["chained_base_id"] = chained_base.id
                 if not fits:
                     # One entry larger than the version model's cap: never
                     # cut, never sent across the cap's price tier. Given
@@ -1044,7 +1218,8 @@ def _render_windows(user, state, models, sub, history, deadline):
                 elif provider_stop_until(history, key) is not None:
                     pass   # waits; the range stays missing
                 else:
-                    cid = (f"profile_{user.id}_{state.set_id}_w{n}_"
+                    tag = "w" if chained_base is None else "u"
+                    cid = (f"profile_{user.id}_{state.set_id}_{tag}{n}_"
                            f"{attempts + 1}")
                     meta["custom_id"] = cid
                     sub.add(provider, _request(
@@ -1055,6 +1230,10 @@ def _render_windows(user, state, models, sub, history, deadline):
                         # A slice was refused at submission: nothing
                         # rendered after it would go out in this run.
                         return None
+                if chained_base is not None:
+                    # One chained window per pass: a remainder that did
+                    # not fit is chained on this version in the next pass.
+                    return None
                 cur = cutoff
                 if end_ is not None and cutoff is not None and cutoff >= end_:
                     break
@@ -1187,13 +1366,14 @@ def _merge_requests(user, state, models, sub, keys, history):
     return False
 
 
-def next_work(user, models, keys, deadline):
+def next_work(user, keys, deadline, wait_for_imports=True):
     """One pass: everything of the user's set that is due and whose inputs
     are ready, in one submission: windows for every missing range, the
     groups whose windows are all in, and the final when everything is.
     Returns "submitted", "partial" (render budget used; the caller hands
-    the rest to a new task), "idle", "held", "blocked" (a content-policy
-    block of a group or final stops the account's build) or "failed"."""
+    the rest to a new task), "idle", "held", "waiting", "blocked" (a
+    content-policy block of a group or final stops the account's build) or
+    "failed"."""
     code = _policy_blocked(user)
     if code:
         # A blocked group or final (a blocked window is skipped instead):
@@ -1202,6 +1382,11 @@ def next_work(user, models, keys, deadline):
         # lifts the stop (Peter, 2026-11-04).
         _show_policy_stop(user, code)
         return POLICY_BLOCKED
+    if wait_for_imports and _batch.import_settling(user):
+        # The user is importing (#598): nothing goes out until the imports
+        # stop, so the next import is read by the same windows and merges.
+        # The import's deferred seed or the hourly seeder resumes the set.
+        return "waiting"
     set_id, base, fresh = resolve_set(user)
     if fresh and not wants_window_build(user):
         # A set is started only for a build that plans into two or more
@@ -1240,6 +1425,18 @@ def next_work(user, models, keys, deadline):
             user.profile_seed_error = NOTHING_READ_NOTE
             db.session.commit()
         return "idle"
+    # The models of this pass and the providers the writing may reach
+    # (Peter, 2026-11-05).
+    cross = cross_provider_allowed(user)
+    # A pass over writing that is not public-only marks the user for good.
+    if not user.profile_private_read:
+        note_private_read(user)
+        if user.profile_private_read:
+            db.session.commit()
+    chained_base = chained_update_base(user, state, fresh)
+    models = pass_models(user, state, chained_base, cross)
+    providers = ({"anthropic", "openai"} if cross
+                 else {models.provider})
     if state.stopped:
         start, end, until = state.stopped[0]
         note = (f"{STOP_NOTE} {_count(history, _attempt_key('window', _iso(start)), PROVIDER_FAILURES)} "
@@ -1256,20 +1453,29 @@ def next_work(user, models, keys, deadline):
     plan_windows = (sum(plan_chunks(u, max_units=max_units)[0]
                         for _s, _e, u in state.due),
                     sum(u for _s, _e, u in state.due))
-    # Logged, not enforced (Peter, 2026-10-22): the build goes out whatever
-    # its estimate, and the spend cap above holds the next submission once
-    # the user is over their limit.
     estimate = estimate_cost_usd(user, state, models, plan_windows, plan)
+    if state.due:
+        # Windows go out only when the windows and the merges after them
+        # are expected to fit into what is left of the user's monthly limit
+        # (Peter, 2026-11-05); else the build waits until the month turns
+        # or the limit is raised. Merges alone are held by the spend cap
+        # above (Peter, 2026-10-22: "let the cap stop it halfway").
+        short = _short_of_headroom(user, estimate)
+        if short is not None:
+            return _hold(user, estimate, *short)
+        if (user.profile_seed_error or "").startswith(HOLD_NOTE):
+            user.profile_seed_error = None
+            db.session.commit()
     logger.info("User %s: profile set %s: %d windows saved, %d in flight, "
                 "%d ranges to read (about %d windows), estimate $%.2f",
                 user.id, set_id, len(state.windows),
                 len(state.windows_in_flight), len(state.due),
                 plan_windows[0], estimate)
-    sub = _Submission(keys)
+    sub = _Submission(keys, providers)
     outcome = None
     if state.due:
         outcome = _render_windows(user, state, models, sub, history,
-                                  deadline)
+                                  deadline, chained_base)
     if outcome != "partial" and not sub.failed:
         _merge_requests(user, state, models, sub, keys, history)
     sub.flush()
@@ -1501,17 +1707,21 @@ def _claim(user, task_id):
     db.session.commit()
 
 
-def dispatch_advance(user):
+def dispatch_advance(user, wait_for_imports=True):
     """Start the advance task for ``user`` unless one is running (the
     per-user guard, profile_generation_task_id; a running task checks the
-    state again before it exits). Returns the task id or None."""
+    state again before it exits). Returns the task id or None.
+    ``wait_for_imports``: hold the work while the user's imports settle
+    (#598); False for a build the admin started."""
     if user is None:
         return None
     if user.profile_generation_task_id and not _exports._is_task_stale(user):
         return None
     task_id = uuid4().hex
     _claim(user, task_id)
-    advance_profile_windows.apply_async((user.id,), task_id=task_id)
+    advance_profile_windows.apply_async(
+        (user.id,) if wait_for_imports else (user.id, False),
+        task_id=task_id)
     return task_id
 
 
@@ -1524,7 +1734,8 @@ def run_advance_inline(user, task_id):
         return {"user_id": user.id, "profile_id": None,
                 "status": "completed", "message": "A build is running"}
     _claim(user, task_id)
-    outcome = advance(user.id, task_id)
+    # The synchronous path starts its builds at once, imports or not.
+    outcome = advance(user.id, task_id, wait_for_imports=False)
     return {"user_id": user.id, "profile_id": None, "status": "completed",
             "message": f"Independent versions on the Batch API: {outcome}"}
 
@@ -1540,13 +1751,14 @@ def _collected_since(user_id, since):
                for job in jobs for item in job.items or [])
 
 
-def advance(user_id, task_id):
+def advance(user_id, task_id, wait_for_imports=True):
     """The advance: derive what the user's set needs from the database and
     submit it, up to twice (work that came due while it ran is not
     stranded). Idempotent: work in flight is excluded, and a redelivery
     after a kill renders again (nothing was submitted, or what was is in
     flight). Clears its guard at the end; re-dispatches itself when the
-    render budget ran out or a job of the user's was collected meanwhile."""
+    render budget ran out or a job of the user's was collected meanwhile.
+    ``wait_for_imports``: see dispatch_advance."""
     user = db.session.get(User, user_id)
     if user is None or user.profile_generation_task_id != task_id:
         return "superseded"
@@ -1557,7 +1769,6 @@ def advance(user_id, task_id):
         if not account_allows_ai(user) or writing_on_hold(user_id):
             outcome = "off"
         else:
-            models = profile_models_for(user)
             cfg = current_app.config
             keys = apply_batch_key_override(
                 get_api_keys_for_usage(cfg, "chat"), cfg)
@@ -1565,7 +1776,7 @@ def advance(user_id, task_id):
                 _setting("PROFILE_WINDOW_RENDER_SECONDS", 2400))
             submitted = False
             for _ in range(2):
-                outcome = next_work(user, models, keys, deadline)
+                outcome = next_work(user, keys, deadline, wait_for_imports)
                 if outcome == "partial":
                     redispatch = True
                 if outcome != "submitted":
@@ -1593,20 +1804,21 @@ def advance(user_id, task_id):
             if outcome == "idle":
                 # Nothing of the set is due: no queue-full work waits.
                 _batch._release_work_hold(user)
-            if outcome not in ("off", "error", "held", POLICY_BLOCKED) and (
+            if outcome not in ("off", "error", "held", "waiting",
+                               POLICY_BLOCKED) and (
                     redispatch or _collected_since(user_id, started)):
-                dispatch_advance(user)
+                dispatch_advance(user, wait_for_imports)
     logger.info("User %s: profile window advance: %s", user_id, outcome)
     return outcome
 
 
 @celery.task(bind=True, acks_late=True, reject_on_worker_lost=True)
-def advance_profile_windows(self, user_id):
+def advance_profile_windows(self, user_id, wait_for_imports=True):
     """Render, check and submit what the user's window set needs now.
     Holds only the per-user guard, never the batch pipeline lock: a render
     of a few hundred windows takes minutes."""
     with flask_app.app_context():
-        return advance(user_id, self.request.id)
+        return advance(user_id, self.request.id, wait_for_imports)
 
 
 # ── collection (called by the poller) ─────────────────────────────────────
@@ -1622,8 +1834,24 @@ def _window_problem(response, template):
     return None
 
 
-def _collect_window(user, item, result, job, history, template, notes):
+def _chained_problem(response, gen_template):
+    """A chained update's output check: the three maps of the generation
+    prompt, as for a merge; no events section (the update prompt asks for
+    none)."""
+    if response.get("truncated"):
+        return "truncated"
+    if response.get("refused"):
+        return "refused"
+    if _exports.profile_output_problem(response.get("content"), gen_template):
+        return "invalid"
+    return None
+
+
+def _collect_window(user, item, result, job, history, template, notes,
+                    gen_template=None):
     key = _item_key(item)
+    gen_type = item.get("generation_type") or "window"
+    chained = gen_type == CHAINED_TYPE
     if result is None:
         n = _count(history, key, PROVIDER_FAILURES) + 1
         if n >= int(_setting("PROFILE_VERSION_PROVIDER_ATTEMPTS", 3)):
@@ -1637,7 +1865,7 @@ def _collect_window(user, item, result, job, history, template, notes):
     start, cutoff = _dt(item.get("start")), _dt(item.get("cutoff"))
     existing = UserProfile.query.filter_by(
         user_id=user.id, window_set=item["set"], covers_start=start,
-        source_data_cutoff=cutoff, generation_type="window").filter(
+        source_data_cutoff=cutoff, generation_type=gen_type).filter(
         UserProfile.created_at >= job.submitted_at).first()
     if existing is not None:
         return "saved"
@@ -1651,7 +1879,8 @@ def _collect_window(user, item, result, job, history, template, notes):
         _exports.discard_step_output(user, item["model_id"], response,
                                      "profile window", batch=True)
         return "superseded"
-    problem = _window_problem(response, template)
+    problem = (_chained_problem(response, gen_template) if chained
+               else _window_problem(response, template))
     if problem:
         # Billed: the cost row is written. Not marked refused for the
         # user-level backoff, which would stop a build of hundreds of
@@ -1664,15 +1893,20 @@ def _collect_window(user, item, result, job, history, template, notes):
             _save_skip(user, item)
             notes["skipped"].append((item, problem))
         return problem
+    # A chained version covers all the writing to its cutoff: its date line
+    # says so ("Covers data through B"). Its parent is the set's base, as a
+    # window's (resolve_set reads the set's base from its tip); the profile
+    # it updated is in its job item ("chained_base_id").
     _exports._save_profile(
         user, item["model_id"], response["content"], response,
         source_tokens_used=item.get("cumulative"), source_data_cutoff=cutoff,
-        generation_type="window", parent_profile_id=item.get("base_id"),
+        generation_type=gen_type, parent_profile_id=item.get("base_id"),
         batch=True, source_origin_stats=item.get("origin_stats"),
         source_rendered_at=_dt(item.get("rendered_at")),
         window_set=item["set"], covers_start=start,
-        date_line_start=start or _dt(item.get("earliest")),
-        date_line_tokens=item.get("units"))
+        date_line_start=(None if chained
+                         else start or _dt(item.get("earliest"))),
+        date_line_tokens=None if chained else item.get("units"))
     _exports.record_token_ratio(user, item["model_id"], item.get("units"),
                                 response.get("input_tokens"))
     if item.get("base_id") is None and user.profile_needs_full_regen:
@@ -1843,7 +2077,8 @@ def collect(job, items, results, queue_full=False):
             try:
                 if item["kind"] == "window":
                     outcome = _collect_window(user, item, result, job,
-                                              history, template, notes)
+                                              history, template, notes,
+                                              gen_template)
                 else:
                     outcome = _collect_merge(user, item, result, job,
                                              gen_template, history, notes)

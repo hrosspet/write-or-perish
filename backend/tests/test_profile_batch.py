@@ -1451,7 +1451,10 @@ def test_immediate_seed_defers_when_lock_held(app, monkeypatch):
 
     monkeypatch.setattr(pb, "batch_pipeline_lock", lambda: Held())
     seeded = []
-    monkeypatch.setattr(pb, "_seed_profile_batches", lambda users=None, ignore_backoff=False: seeded.append([x.id for x in users]) or 1)
+    monkeypatch.setattr(
+        pb, "_seed_profile_batches",
+        lambda users=None, ignore_backoff=False, after_import=False: (
+            seeded.append([x.id for x in users]) or 1))
     assert pb._seed_profile_batch_for_user_impl(u.id) is None
     assert seeded == []
     monkeypatch.setattr(pb, "batch_pipeline_lock", lambda: Free())
@@ -3095,3 +3098,155 @@ def test_submit_names_the_user_of_each_request(app, monkeypatch):
         "meta": {"custom_id": "c1", "user_id": u.id, "kind": "chunk"},
     }], {})
     assert sent[0]["openai"][0]["user_id"] == u.id
+
+
+# ── an import's build waits for the imports to stop (#598) ──────────────
+# Peter, 2026-11-05: an import only marks the account; the build starts
+# after the existing 30-minute inactivity window (MIN_INACTIVITY), so an
+# import that follows within it is read by the same build.
+
+class _Clock(datetime):
+    at = datetime(2026, 11, 5, 12, 0)
+
+    @classmethod
+    def utcnow(cls):
+        return cls.at
+
+
+def _later(minutes):
+    _Clock.at += timedelta(minutes=minutes)
+
+
+def _import_harness(monkeypatch):
+    """A batch account whose import asked for a rebuild, on a clock the
+    test moves: the scheduled seeds are recorded, the submissions too."""
+    monkeypatch.setattr(pb, "datetime", _Clock)
+    _Clock.at = datetime(2026, 11, 5, 12, 0)
+    scheduled = MagicMock()
+    monkeypatch.setattr(pb.seed_profile_batch_for_user, "apply_async",
+                        scheduled)
+    _remaining(monkeypatch, 14_000_000)
+    monkeypatch.setattr(pb._exports, "build_user_export_content",
+                        MagicMock(return_value=_chunk("DATA")))
+    monkeypatch.setattr(pb._exports, "_load_prompt",
+                        lambda *a, **k: "G {user_export}")
+    submitted = []
+    monkeypatch.setattr(pb, "batch_submit", lambda reqs, keys, kind: (
+        submitted.append(reqs) or {k: f"b-{k}" for k in reqs}))
+    u = _user(profile_force_batch=True, profile_needs_full_regen=True)
+    db.session.commit()
+    return u, scheduled, submitted
+
+
+def _deferred_seed(user):
+    """The seed an import scheduled, once its countdown has run."""
+    return pb._seed_profile_batches(users=[User.query.get(user.id)],
+                                    ignore_backoff=True, after_import=True)
+
+
+def test_a_second_import_within_30_minutes_gets_one_build_after_it(
+        app, monkeypatch):
+    u, scheduled, submitted = _import_harness(monkeypatch)
+    pb.seed_after_import(u)                   # the first import finishes
+    _later(20)
+    pb.seed_after_import(u)                   # a second one, 20 min later
+    assert [c.args for c in scheduled.call_args_list] == [
+        ((u.id,), {"ignore_backoff": True, "after_import": True})] * 2
+    assert [c.kwargs for c in scheduled.call_args_list] == [
+        {"countdown": 30 * 60}] * 2
+
+    _later(10)                                # the first seed comes due
+    assert _deferred_seed(u) == 0
+    assert pb._seed_profile_batches() == 0    # an hourly pass meanwhile
+    assert submitted == []
+    assert User.query.get(u.id).profile_import_quiet_from is not None
+
+    _later(20)                                # the second seed comes due
+    assert _deferred_seed(u) == 1
+    assert len(submitted) == 1
+    u = User.query.get(u.id)
+    assert u.profile_batch_pending is True
+    assert u.profile_import_quiet_from is None
+
+
+def test_an_import_with_nothing_after_it_is_built_after_30_minutes(
+        app, monkeypatch):
+    u, scheduled, submitted = _import_harness(monkeypatch)
+    pb.seed_after_import(u)
+    _later(29)
+    assert pb._seed_profile_batches() == 0    # inside the quiet period
+    assert submitted == []
+    _later(1)
+    assert pb._seed_profile_batches() == 1    # the hourly pass, or the seed
+    assert len(submitted) == 1
+
+
+def test_a_running_import_holds_the_build(app, monkeypatch, tmp_path):
+    from backend.utils import conversation_stash as cs
+    from backend.utils import twitter_archive
+    monkeypatch.setattr(twitter_archive, "STASH_ROOT", tmp_path / "imports")
+    u, scheduled, submitted = _import_harness(monkeypatch)
+    token = "a" * 20
+    assert cs.acquire_lock(u.id, "task-1", token, "chatgpt")[0] is True
+    _later(120)                     # the import runs for hours
+    assert pb._seed_profile_batches() == 0
+    assert _deferred_seed(u) == 0
+    assert submitted == []
+
+    cs.release_lock(u.id, "task-1")
+    pb.seed_after_import(u)         # it finishes: its hand-off marks it
+    _later(15)
+    assert pb._seed_profile_batches() == 0
+    _later(15)
+    assert pb._seed_profile_batches() == 1
+    assert len(submitted) == 1
+
+
+def test_an_entry_written_after_the_import_extends_the_quiet_period(
+        app, monkeypatch):
+    u, scheduled, submitted = _import_harness(monkeypatch)
+    pb.seed_after_import(u)
+    _later(20)
+    n = Node(user_id=u.id, node_type="user", ai_usage="chat",
+             token_count=10, created_at=_Clock.at)
+    n.set_content("written in Loore")
+    db.session.add(n)
+    db.session.commit()
+    _later(15)                      # 35 min after the import, 15 after it
+    assert _deferred_seed(u) == 0
+    _later(15)
+    assert pb._seed_profile_batches() == 1
+
+
+def test_the_admins_build_does_not_wait_for_the_imports(app, monkeypatch):
+    u, scheduled, submitted = _import_harness(monkeypatch)
+    pb.seed_after_import(u)
+    _later(5)
+    assert pb._seed_profile_batches(users=[u], ignore_backoff=True) == 1
+    assert len(submitted) == 1
+
+
+def test_an_import_after_the_refusal_stop_still_builds_when_an_entry_followed(
+        app, monkeypatch):
+    """The profile job is in the refusal stop (two refusals in a row), which
+    an import's build skips (voice review, 2026-10-01). An entry written
+    10 minutes after the import makes the import's own seed find the
+    imports settling; the first hourly pass after the quiet period builds
+    with the import's override, not the stop."""
+    u, scheduled, submitted = _import_harness(monkeypatch)
+    for days in (30, 29):
+        _refusal(u, timedelta(days=days))
+    assert pb._should_seed(u) is False                # the stop holds
+    pb.seed_after_import(u)
+    _later(10)
+    n = Node(user_id=u.id, node_type="user", ai_usage="chat",
+             token_count=10, created_at=_Clock.at)
+    n.set_content("written in Loore")
+    db.session.add(n)
+    db.session.commit()
+    _later(20)                                        # the import's seed
+    assert _deferred_seed(u) == 0
+    _later(25)                                        # 35 min after the entry
+    assert pb._seed_profile_batches() == 1            # the hourly pass
+    assert len(submitted) == 1
+    assert User.query.get(u.id).profile_import_quiet_from is None

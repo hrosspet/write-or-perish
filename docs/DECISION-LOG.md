@@ -2556,6 +2556,60 @@ Kinds (one per entry and per table row):
 - **Source:** Claude Code session 2026-10-22 (Opus 5.5)
 - **Applies to:** #590
 
+### 2026-10-22 · Haiku's versions on sensitive passages: test one prompt line
+
+- **Kind:** testing
+- **Situation:** Haiku 5.5's versions left out Peter's own qualifiers on two sensitive passages that the GPT-6 Luna versions kept, and the Opus merge carried the misreading into the profile. Offered a test: one line in the version prompt asking for the writer's own terms on sensitive subjects, three Haiku windows rebuilt and one Opus merge (about $1.20).
+- **Prediction:** run the test (55 %); accept Haiku as it is (25 %); Sonnet versions for Anthropic users (15 %).
+- **Peter:** "yes, haiku test seems alright"
+- **Score:** hit.
+- **Source:** Claude Code session 2026-10-22 (Opus 5.5)
+- **Applies to:** #589
+
+### 2026-10-22 · The qualifiers test's merge: rerun or decide
+
+- **Kind:** testing
+- **Situation:** with the line, the three versions kept the writer's terms, but the one Opus merge left both passages out and wrote "he" instead of "you". Offered two more merges over the same 53 versions (about $2.20): a repeat, and one with a matching line in the merge prompt; or put the version line into #589 now; or leave Haiku as it is.
+- **Prediction:** the two merges (60 %); the line into #589 now (15 %); leave it (10 %); Sonnet versions (15 %).
+- **Peter:** "Yeah, I think it's subject to variation and we should re-run. Pls go with the two more merges."
+- **Score:** hit. Both merges dropped the passages again; the cause was the changed versions, not chance.
+- **Source:** Claude Code session 2026-10-22 (Opus 5.5)
+- **Applies to:** #589
+
+### 2026-11-05 · #589's cost estimate: a margin on the spend cap
+
+- **Kind:** cost
+- **Situation:** Peter revised his answer of 2026-10-22 (entries "#589: a build over the user's spend headroom" and "#589's hold on a build's cost estimate"): "we should make at least a rough estimate how much the to-be-submitted job will cost and whether it can reasonably fit into the cap · there should be enough room for estimation error, running a few dollars over the cap is fine for batch profile generation. But this check should prevent really large jobs when the user is at cap, or close to it". Recorded it in Loore as: hold the build when the estimate is more than $5 above the remaining headroom.
+- **Decision:** a $5 margin above the remaining headroom before a build is held.
+- **Peter:** "no, this is wrong. The estimate should fit into the cap. But I said we're fine overshooting the cap little bit, in case the estimate is too crude. Better err on the job going through leading to $2-$3 overshoot, than postponing it for a month"
+- **Score:** miss. Built as: the expected cost (measured mean output per call) must fit the remaining headroom, with no margin.
+- **Why it missed:** the tolerance he gave for a crude estimate was turned into a margin on the gate. His point was where the estimate's error should fall: towards sending.
+- **Source:** Claude Code session 2026-11-05 (Opus 5.5)
+- **Applies to:** #589
+- **Rule:** candidate: an estimate that gates a job is the expected cost, not a padded one; when unsure, let the job through.
+
+### 2026-11-05 · Builds after imports (#598): now, and where
+
+- **Kind:** product scope
+- **Situation:** Peter asked that an import only mark the profile as needing a build and that the build start after a quiet period (filed as #598). Asked whether to build it now, as a PR stacked on #589.
+- **Prediction:** build now, stacked on #589 (55 %); file only and build later (30 %); a different window or trigger (15 %).
+- **Peter:** "could we build it within this PR?"
+- **Score:** hit. Built now, inside #589 rather than stacked on it.
+- **Source:** Claude Code session 2026-11-05 (Opus 5.5)
+- **Applies to:** #589, #598
+
+### 2026-11-05 · #598's quiet period: a new hour or the existing 30 minutes
+
+- **Kind:** UX
+- **Situation:** how long after the last import a profile build waits.
+- **Prediction:** proposed 1 hour since the last import finished, as a new setting.
+- **Peter:** "there is a pre-existing inactivity window in the code. I believe it's 30 minutes. I'd use the same here"
+- **Score:** miss. Built with `MIN_INACTIVITY` (30 minutes), which already gated profile updates.
+- **Why it missed:** proposed a number before searching the code for an existing inactivity window.
+- **Source:** Claude Code session 2026-11-05 (Opus 5.5)
+- **Applies to:** #589, #598
+- **Rule:** candidate: before proposing a new threshold, look for the one the code already uses for the same kind of wait.
+
 ## Decided by the builder
 
 Choices that agents flagged in PRs and that the builder decided because a rule above already covers them (Peter, 2026-10-02: decide what the log supports, raise only real judgement calls). Each is also recorded on its PR, or in the session where Peter asked. The Decided column holds only the builder's part; a rule or decision of Peter's goes in the Rule column. Questions raised to Peter instead are not listed; his answers become entries. Model is the model that wrote the PR (its Co-Authored-By line). Result is "accepted by merge (PR #N, date)" once the PR has merged and Peter didn't correct the choice, "pending" until it merges, and "corrected → entry <title>" when he overrules it; the entry is then scored as a miss.
@@ -2800,6 +2854,14 @@ Choices that agents flagged in PRs and that the builder decided because a rule a
 | 2026-10-22 | #589 | testing | When Haiku 5.5 is good enough to write Anthropic users' versions | Set before the evaluation: the Sol bar applied to Haiku. Against the Luna events final with an Opus merge (33 core facts, 1 wrong): at least 30 core facts, at most 2 wrong, specific maps, at least 15 of 18 sub-headings; refusals noted as a risk. Haiku scored 31, 0 wrong, 18 of 18, and is the default in #589 | "potentially Haiku if accuracy allows" (Peter, 2026-10-22); the Sol thresholds he accepted (2026-10-21); every added heuristic is named | Opus 5.5 | pending |
 | 2026-10-22 | #589 | product scope | The merge structure of a set of independent versions | `flat`: one merge while all versions fit under the merge model's input cap, groups of 30 above it; switched from `grouped` after the 149-version test. Flat: 32 of 41 core facts, 1 wrong, 18 of 18 sub-headings. Grouped: 34 (4 of them borderline), 0 wrong core facts, 3 other errors, 13 of 18 sub-headings, $0.50 more. Grouped met the bar set before the test (within 3 core facts and 1 wrong core fact of flat); flat was chosen on the other errors, the sub-headings and the cost | Fixed groups with only the newest merged again (Peter, 2026-10-20), now above the cap only; every added heuristic is named | Opus 5.5 | pending |
 | 2026-10-22 | #589 | cost | The merge model for OpenAI users | GPT-6.1 Sol at high reasoning effort, although no OpenAI merge reached the bar Opus sets: on the same versions Sol at its default effort kept 25 of 41 core facts, at high effort 27, GPT-6 Astra 26 and Opus 33, none of them with errors; Sol costs a fifth of Astra. A prompt asking for about 650 tokens a section was no clear gain (30 and 26 in two runs, against 26 for a repeat without it). Under Needs Peter in #589 | A user's model is theirs (an OpenAI user's merge stays with OpenAI); Quality first, for now | Opus 5.5 | hit: accepted by Peter (2026-10-22), entry "#589: OpenAI merges by Sol at high effort" |
+| 2026-11-05 | #589 | cost | Which passes the estimate gate covers | Every pass with windows to read: a first build, an import on a set, an update's windows, a retried window; windows in flight are not counted again | Peter, 2026-11-05: estimate the to-be-submitted job | Opus 5.5 | pending |
+| 2026-11-05 | #589 | cost | The output each call is priced at in the estimate | Measured mean output (Haiku 11k tokens, Luna 2.5k, merges 4k), the last group at its real size | Peter, 2026-11-05: err towards the job going through | Opus 5.5 | pending |
+| 2026-11-05 | #589 | UX | How a build held by the estimate is shown | The admin note and Sentry error from before 2026-10-22, cleared when the windows go out | Reuse what the code had | Opus 5.5 | pending |
+| 2026-11-05 | #589 | UX | Where #598's quiet period is measured from | The later of the last import's finish and the newest entry written after it; a running import holds the build | Peter, 2026-11-05: reuse the 30-minute window | Opus 5.5 | pending |
+| 2026-11-05 | #589 | reliability | An import while the profile job is in the refusal stop | The import's seed still skips the stop once the quiet period is over | An import seeds and skips the refusal stop (Peter, 2026-10-01) | Opus 5.5 | pending |
+| 2026-11-05 | #589 | product scope | Which starts skip #598's wait | The admin's Build profile, pre-fills and the synchronous path start at once | Admin actions are explicit | Opus 5.5 | pending |
+| 2026-11-05 | #589 | user-facing text | The import dialog's line about the wait | Shown only when the build was deferred and a build is due | Calm over clever | Opus 5.5 | pending |
+| 2026-11-05 | #589 | provider | A window, group or final blocked by the content-policy filter | Outcome `blocked`: a $0 cost row, a Sentry event, a note in the admin column, the account's build stops; ported from #596 | A content-policy block is final (#597) | Opus 5.5 | pending |
 
 ## Backfilled decisions
 

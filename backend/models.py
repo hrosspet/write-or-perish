@@ -181,6 +181,26 @@ class User(db.Model, UserMixin):
     profile_work_held = db.Column(
         db.Boolean, nullable=False, default=False,
         server_default=db.text("false"))
+    # When the user's last import finished (or a Twitter import last
+    # committed a batch), while the profile build it leads to waits for
+    # the imports to stop (#598): the batch seeder builds only after
+    # MIN_INACTIVITY with no import and no new entry, and clears it then.
+    profile_import_quiet_from = db.Column(db.DateTime, nullable=True)
+    # The user agreed that their writing may reach both providers' models
+    # for a large profile build (Peter, 2026-11-05; the question that sets
+    # it is #599, no UI yet). False: a build reads private writing only
+    # with models of the provider of the user's chat model.
+    profile_both_providers = db.Column(
+        db.Boolean, nullable=False, default=False,
+        server_default=db.text("false"))
+    # Set for good once a profile pass read writing of this user that is
+    # not public-only (utils/profile_providers.note_private_read): their
+    # profiles may hold private writing even after those entries are
+    # purged, so the user's builds never count as public-only again.
+    # Nothing clears it automatically.
+    profile_private_read = db.Column(
+        db.Boolean, nullable=False, default=False,
+        server_default=db.text("false"))
     # Measured billed input tokens per stored content unit (Node.token_count)
     # on the user's last profile chunk, tagged with the tokenizer family it
     # was measured on (backend/tasks/exports.TOKENIZER_FAMILIES). The chunk

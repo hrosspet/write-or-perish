@@ -162,6 +162,8 @@ def app(monkeypatch):
         PROFILE_MERGE_MODEL_ANTHROPIC="claude-opus-5.5",
         PROFILE_MERGE_MODEL_OPENAI="gpt-6.1-sol",
         PROFILE_MERGE_REASONING_EFFORT_OPENAI="",
+        PROFILE_VERSION_MODEL_CROSS_PROVIDER="gpt-6-luna",
+        PROFILE_MERGE_MODEL_CROSS_PROVIDER="claude-opus-5.5",
         PROFILE_MERGE_STRUCTURE="grouped", PROFILE_MERGE_GROUP_SIZE=30,
         PROFILE_VERSION_CONTENT_ATTEMPTS=2,
         PROFILE_VERSION_PROVIDER_ATTEMPTS=3,
@@ -410,7 +412,14 @@ def test_boot_check_rejects_cross_provider_deprecated_and_unknown():
         "PROFILE_MERGE_MODEL_ANTHROPIC": "claude-opus-5.5",
         "PROFILE_MERGE_MODEL_OPENAI": "gpt-6.1-sol",
         "PROFILE_MERGE_REASONING_EFFORT_OPENAI": "high"})
+    # The cross-provider pair may be of either provider.
+    validate_profile_models({
+        **base, "PROFILE_VERSION_MODEL_CROSS_PROVIDER": "gpt-6-luna",
+        "PROFILE_MERGE_MODEL_CROSS_PROVIDER": "claude-opus-5.5"})
     for key, bad in (("PROFILE_MERGE_MODEL_OPENAI", "claude-opus-5.5"),
+                     ("PROFILE_VERSION_MODEL_CROSS_PROVIDER", "gpt-7-nope"),
+                     ("PROFILE_MERGE_MODEL_CROSS_PROVIDER",
+                      "claude-sonnet-4.5"),
                      ("PROFILE_VERSION_MODEL_ANTHROPIC", "claude-sonnet-4.5"),
                      ("PROFILE_VERSION_MODEL_OPENAI", "gpt-7-nope"),
                      ("PROFILE_MERGE_REASONING_EFFORT_OPENAI", "max")):
@@ -429,6 +438,8 @@ def test_the_shipped_profile_model_defaults_pass():
     assert Config.PROFILE_MERGE_REASONING_EFFORT_OPENAI == "high"
     assert Config.PROFILE_MERGE_STRUCTURE == "flat"
     assert Config.PROFILE_MERGE_GROUP_SIZE == 30
+    assert Config.PROFILE_VERSION_MODEL_CROSS_PROVIDER == "gpt-6-luna"
+    assert Config.PROFILE_MERGE_MODEL_CROSS_PROVIDER == "claude-opus-5.5"
 
 
 def test_openai_merge_carries_the_configured_effort(app, world):
@@ -1006,11 +1017,15 @@ def test_an_update_redoes_only_the_newest_group_and_the_final(world):
     n = len(world.provider.submits)
     assert pw.wants_window_build(u)
     _finish(world, u)
-    sent = [r["custom_id"] for s in world.provider.submits[n:]
+    reqs = [r for s in world.provider.submits[n:]
             for rs in s.values() for r in rs]
-    windows = [c for c in sent if "_w" in c]
+    sent = [r["custom_id"] for r in reqs]
+    # A regular update (Peter, 2026-11-05): one chained version by the
+    # user's chat model, and the merges after it by the same model.
+    assert not [c for c in sent if "_w" in c]
+    assert len([c for c in sent if "_u" in c]) == 1
+    assert {r["model_id"] for r in reqs} == {"claude-opus-5.5"}
     groups = [c for c in sent if "_g" in c]
-    assert 1 <= len(windows) <= 2
     assert len(groups) == 1                      # the newest group only
     assert sum(1 for c in sent if "_f_" in c) == 1
     new_groups = [g for g in _rows(u, "group") if g.id not in groups_before]
@@ -1203,8 +1218,10 @@ def test_a_set_in_flight_after_an_edit_on_its_final_sends_nothing_more(
 
 # ── 13. spend ─────────────────────────────────────────────────────────────
 # Peter, 2026-10-22: "send it and let the cap stop it halfway. It will
-# self-heal the following month". The estimate is logged, never a gate; the
-# per-user cap holds the next submission once the user is over the limit.
+# self-heal the following month": the per-user cap holds the next
+# submission once the user is over the limit. Peter, 2026-11-05: windows go
+# out only when the expected cost of the windows and the merges after them
+# fits into what is left of the limit; else the build waits.
 
 def _block_email(monkeypatch):
     import backend.utils.email as em
@@ -1229,23 +1246,99 @@ def _last_month():
     return month_start() - timedelta(days=1)
 
 
-def test_a_build_over_the_headroom_goes_out(world, monkeypatch):
-    estimates = []
-    real = pw.estimate_cost_usd
-    monkeypatch.setattr(pw, "estimate_cost_usd", lambda *a, **k: (
-        estimates.append(real(*a, **k)) or estimates[-1]))
+def _fixed_estimate(monkeypatch, usd):
+    monkeypatch.setattr(pw, "estimate_cost_usd", lambda *a, **k: usd)
+
+
+def test_a_build_over_the_headroom_waits_and_sends_nothing(world):
     world.corpus = _windows_corpus(10)
     u = _user(profile_needs_full_regen=True, monthly_spend_limit_usd=0.01)
-    _advance(u)
+    assert _advance(u) == "held"
+    assert world.provider.submits == []
     db.session.refresh(u)
-    assert estimates and estimates[0] > 0.01     # over the headroom
+    assert u.profile_cap_held is True              # the seeder resumes it
+    assert u.profile_seed_error.startswith(pw.HOLD_NOTE)
+    assert "$0.00 of $0.01 used this month" in u.profile_seed_error
+    assert u.profile_batch_pending is False
+
+
+@pytest.mark.parametrize("limit, sent", [(4.99, False), (5.00, True)])
+def test_the_estimate_must_fit_into_the_headroom(world, monkeypatch,
+                                                 limit, sent):
+    """$2 spent this month and an estimate of $3: a limit of $5 leaves
+    exactly enough and the windows go out; $4.99 leaves a cent too little
+    and the build waits, with the amount in the admin column."""
+    _fixed_estimate(monkeypatch, 3.00)
+    world.corpus = _windows_corpus(4)
+    u = _user(profile_needs_full_regen=True, monthly_spend_limit_usd=limit)
+    _spend(u, 2.00)
+    outcome = _advance(u)
+    db.session.refresh(u)
+    if sent:
+        assert outcome == "submitted"
+        assert len(world.provider.submits) == 1
+        assert all("_w" in r["custom_id"] for r in world.provider.requests())
+        assert u.profile_cap_held is False
+        assert u.profile_seed_error is None
+    else:
+        assert outcome == "held"
+        assert world.provider.submits == []
+        assert u.profile_seed_error == (
+            f"{pw.HOLD_NOTE}: the build needs about $3.00; "
+            "$2.00 of $4.99 used this month")
+
+
+def test_a_user_without_a_limit_is_not_gated(world, monkeypatch):
+    _fixed_estimate(monkeypatch, 1000.0)
+    world.corpus = _windows_corpus(4)
+    u = _user(profile_needs_full_regen=True)        # no limit of their own
+    _spend(u, 50.0)
+    assert _advance(u) == "submitted"
+    assert len(world.provider.submits) == 1
+
+
+@pytest.mark.parametrize("lift", ["next_month", "raised_limit"])
+def test_a_build_waiting_on_its_estimate_goes_out_when_there_is_room(
+        app, world, monkeypatch, lift):
+    """The build waits; the hourly seeder tries it again and it waits
+    again; once the month turns (or the admin raises the limit) the next
+    hourly pass submits its windows and the note is gone."""
+    _fixed_estimate(monkeypatch, 3.00)
+    world.corpus = _windows_corpus(4)
+    u = _user(profile_needs_full_regen=True, monthly_spend_limit_usd=4.99)
+    _spend(u, 2.00)
+    assert _advance(u) == "held"
+
+    def hourly():
+        before = pw.advance_profile_windows.apply_async.call_count
+        pb._seed_profile_batches()
+        assert pw.advance_profile_windows.apply_async.call_count == before + 1
+        user = db.session.get(User, u.id)
+        return pw.advance(user.id, user.profile_generation_task_id)
+
+    assert hourly() == "held"                       # still no room
+    assert world.provider.submits == []
+    user = db.session.get(User, u.id)
+    assert user.profile_seed_error.startswith(pw.HOLD_NOTE)
+
+    if lift == "next_month":
+        APICostLog.query.filter_by(user_id=u.id).update(
+            {"created_at": _last_month()})
+    else:
+        user.monthly_spend_limit_usd = 10.0
+    db.session.commit()
+
+    assert hourly() == "submitted"
     assert len(world.provider.submits) == 1
     assert all("_w" in r["custom_id"] for r in world.provider.requests())
-    assert u.profile_cap_held is False
-    assert u.profile_seed_error is None
+    user = db.session.get(User, u.id)
+    assert user.profile_cap_held is False
+    assert user.profile_seed_error is None
 
 
 def test_a_final_over_the_headroom_under_the_cap_goes_out(world):
+    """Merges with no window to read are held by the spend cap only, not
+    by the estimate (Peter, 2026-10-22: "let the cap stop it halfway")."""
     u = _user(monthly_spend_limit_usd=1)
     rows = _set_of(u, 5)
     _corpus_for(world, rows)
@@ -1329,6 +1422,35 @@ def test_a_build_held_at_the_cap_resumes_when_the_cap_lifts(
     assert len(finals) == 1
     assert len(_rows(u, "window")) == len(windows_sent)
     assert pw._visible_profile(u.id).id == finals[0].id   # the profile
+
+
+def test_a_window_build_waits_while_the_user_imports(world):
+    """#598: while an import's quiet period runs, the advance sends
+    nothing (no windows, no merges); once it is over, the windows go out."""
+    world.corpus = _windows_corpus(4)
+    u = _user(profile_needs_full_regen=True,
+              profile_import_quiet_from=datetime.utcnow())
+    assert _advance(u) == "waiting"
+    assert world.provider.submits == []
+    assert pw.advance_profile_windows.apply_async.call_count == 1
+    u = db.session.get(User, u.id)
+    u.profile_import_quiet_from = datetime.utcnow() - timedelta(minutes=30)
+    db.session.commit()
+    assert _advance(u) == "submitted"
+    assert len(world.provider.submits) == 1
+
+
+def test_the_admins_window_build_does_not_wait_for_the_imports(world):
+    world.corpus = _windows_corpus(4)
+    u = _user(profile_needs_full_regen=True,
+              profile_import_quiet_from=datetime.utcnow())
+    _seed(u)                                   # admin Build profile
+    dispatch = pw.advance_profile_windows.apply_async.call_args
+    assert dispatch.args[0] == (u.id, False)
+    u = db.session.get(User, u.id)
+    assert pw.advance(u.id, u.profile_generation_task_id,
+                      *dispatch.args[0][1:]) == "submitted"
+    assert len(world.provider.submits) == 1
 
 
 # ── 14. R7, R11 ───────────────────────────────────────────────────────────
@@ -1496,15 +1618,15 @@ def test_the_seeder_gate_opens_for_a_set_whose_final_is_due(world):
 
 
 def test_the_estimate_for_a_large_anthropic_build(app, world):
-    """About $2.9 of Haiku windows (each under its 100k tier) plus about $4
-    of Opus merges for 14.1M units: the estimate prices every request in
-    its own tier."""
+    """At the expected sizes, about $2.5 of Haiku windows (each under its
+    100k tier) plus about $3.8 of Opus merges for 14.1M units: the
+    estimate prices every request in its own tier."""
     u = _user()
     models = pw.profile_models_for(u)
     state = pw.SetState("s", None, [], [], [])
     n = 330
     est = pw.estimate_cost_usd(u, state, models, (n, 14_100_000))
-    assert 5 < est < 10
+    assert 5.5 < est < 7
     # Flat falls back to groups above the merge model's cap, and the
     # estimate with it.
     app.config["PROFILE_MERGE_STRUCTURE"] = "flat"
@@ -1849,8 +1971,10 @@ def test_a_provisional_one_window_set_is_rebuilt_from_scratch(
 
 
 def test_a_one_window_set_past_the_ladder_is_updated_as_a_set(app, world):
-    """Its later updates are the set's: one more window, and a final over
-    both windows with the many-version prompt."""
+    """Its later updates are the set's. A regular one-window update is a
+    chained update by the user's chat model (Peter, 2026-11-05), which
+    stands in the window's place, and the final over the window and the
+    chained version runs on the chat model with the many-version prompt."""
     world.corpus = Corpus(100)                   # one chunk, past the ladder
     u = _one_chunk_user(app)
     _finish(world, u)
@@ -1858,13 +1982,14 @@ def test_a_one_window_set_past_the_ladder_is_updated_as_a_set(app, world):
     world.corpus.add(85, start=datetime.utcnow() + timedelta(days=2))
     assert pw.wants_window_build(u)
     _finish(world, u)
-    windows = _rows(u, "window")
-    assert len(windows) == 2
-    assert windows[1].covers_start == windows[0].source_data_cutoff
+    [window] = _rows(u, "window")
+    [chained] = _rows(u, "window_update")
+    assert chained.covers_start == window.source_data_cutoff
     final_req = [r for r in _all_requests(world)
                  if "_f_" in r["custom_id"]][-1]
     assert final_req["messages"] == pw._exports._integration_messages(
-        u.id, windows, independent=True)
+        u.id, [window, chained], independent=True)
+    assert final_req["api_model"] == "gpt-6-astra"
     assert len(_finals(u)) == 2
 
 
@@ -3031,3 +3156,427 @@ def test_the_backfill_keeps_a_saved_window_when_a_later_duplicate_was_blocked(
     submits = len(world.provider.submits)
     assert _advance(u) == "idle"
     assert len(world.provider.submits) == submits
+
+
+# ── which models read the writing (Peter, 2026-11-05) ────────────────────
+# More than one window: the user's provider's pair (Haiku / Opus, Luna /
+# Sol), or Luna / Opus when the writing is public only or the user agreed
+# to both providers. A regular one-window update: a chained version by the
+# user's chat model, and the merges after it by the same model.
+
+def _node(user, provenance=None, privacy="private", parent=None,
+          owner=None, deleted=False):
+    n = Node(user_id=(owner or user).id, node_type="user", ai_usage="chat",
+             token_count=10, privacy_level=privacy, provenance=provenance,
+             parent_id=parent.id if parent else None, created_at=T0)
+    if deleted:
+        n.deleted_at = datetime.utcnow()
+    n.set_content("synthetic")
+    db.session.add(n)
+    db.session.commit()
+    return n
+
+
+def _prefilled(**kw):
+    u = _user(**kw)
+    _node(u, provenance="prefill_ca")
+    _node(u, provenance="prefill_x")
+    return u
+
+
+def test_public_only_writing_is_read_from_metadata(app):
+    assert pw.writing_is_public_only(_user()) is False      # nothing yet
+    assert pw.writing_is_public_only(_prefilled()) is True
+
+    u = _prefilled()
+    _node(u)                                   # one private entry
+    assert pw.writing_is_public_only(u) is False
+    u = _prefilled()
+    _node(u, deleted=True)                     # a deleted private one too
+    assert pw.writing_is_public_only(u) is False
+    u = _prefilled()
+    _node(u, provenance="archive_upload")      # an own export: not vouched
+    assert pw.writing_is_public_only(u) is False
+
+    u = _prefilled(public_sharing_enabled=True)
+    _node(u, privacy="public")
+    assert pw.writing_is_public_only(u) is True
+    u.public_sharing_enabled = False           # not public any more
+    db.session.commit()
+    assert pw.writing_is_public_only(u) is False
+
+    other = _user()
+    u = _prefilled()
+    _node(other, provenance="prefill_ca", parent=_node(u, "prefill_ca"))
+    assert pw.writing_is_public_only(u) is False   # someone's reply
+    u = _prefilled()
+    _node(u, provenance="prefill_ca", parent=_node(other, "prefill_ca"))
+    assert pw.writing_is_public_only(u) is False   # a reply to someone
+
+    u = _prefilled()
+    _profile(u, generated_by="user", gen_type="initial")
+    assert pw.writing_is_public_only(u) is False   # the user's own text
+    from backend.models import UserPrompt
+    u = _prefilled()
+    db.session.add(UserPrompt(user_id=u.id, prompt_key="profile_generation",
+                              title="t", content="my prompt"))
+    db.session.commit()
+    assert pw.writing_is_public_only(u) is False
+
+
+def test_the_model_table(app):
+    anth, oai = _user(), _user(preferred_model="gpt-6-astra")
+    for user, own in ((anth, ("claude-haiku-5.5", "claude-opus-5.5")),
+                      (oai, ("gpt-6-luna", "gpt-6.1-sol"))):
+        assert pw.cross_provider_allowed(user) is False
+        m = pw.profile_models_for(user, cross=False)
+        assert (m.version, m.merge, m.cross) == own + (False,)
+        m = pw.profile_models_for(user, cross=True)
+        assert (m.version, m.merge, m.cross) == (
+            "gpt-6-luna", "claude-opus-5.5", True)
+        assert m.merge_effort is None          # Opus takes none
+    c = pw.chained_models_for(oai)
+    assert (c.version, c.merge, c.chained) == ("gpt-6-astra", "gpt-6-astra",
+                                               True)
+    c = pw.chained_models_for(anth)
+    assert (c.version, c.merge) == ("claude-opus-5.5", "claude-opus-5.5")
+    # Consent, or public-only writing, allows the cross-provider pair.
+    assert pw.cross_provider_allowed(_user(profile_both_providers=True))
+    assert pw.cross_provider_allowed(_prefilled())
+
+
+def _all_reqs(world, since=0):
+    return [(provider, r) for sub in world.provider.submits[since:]
+            for provider, reqs in sub.items() for r in reqs]
+
+
+def _build_then_update(world, user):
+    """A large build, then a regular update of 85k units after it."""
+    world.corpus = _windows_corpus(4)
+    _finish(world, user)
+    assert [f for f in _rows(user, "integration") if f.window_set]
+    n = len(world.provider.submits)
+    world.corpus.add(85, start=datetime.utcnow() + timedelta(days=2))
+    _finish(world, user)
+    return n
+
+
+@pytest.mark.parametrize("chat, provider, version, merge", [
+    ("gpt-6-astra", "openai", "gpt-6-luna", "gpt-6.1-sol"),
+    (None, "anthropic", "claude-haiku-5.5", "claude-opus-5.5")])
+def test_private_writing_never_reaches_the_other_provider(
+        world, chat, provider, version, merge):
+    """The hard line (Peter, 2026-11-05): an OpenAI user's private writing
+    never gets an Anthropic call, and an Anthropic user's never an OpenAI
+    one: not for a large build's windows and merges, not for a regular
+    update and its merges."""
+    u = _user(preferred_model=chat, profile_needs_full_regen=True)
+    _node(u)                                   # one private entry
+    n = _build_then_update(world, u)
+    assert {p for p, _r in _all_reqs(world)} == {provider}
+    build = {r["model_id"] for sub in world.provider.submits[:n]
+             for reqs in sub.values() for r in reqs}
+    assert build == {version, merge}
+    chat_model = chat or "claude-opus-5.5"
+    update = _all_reqs(world, n)
+    assert {r["model_id"] for _p, r in update} == {chat_model}
+    assert any("_u" in r["custom_id"] for _p, r in update)
+    assert any("_f_" in r["custom_id"] for _p, r in update)
+    assert len([f for f in _rows(u, "integration") if f.window_set]) == 2
+
+
+@pytest.mark.parametrize("how", ["public_only", "consent"])
+def test_public_or_agreed_writing_takes_luna_and_opus(world, how):
+    u = (_prefilled(profile_needs_full_regen=True) if how == "public_only"
+         else _user(profile_needs_full_regen=True, profile_both_providers=True))
+    if how == "consent":
+        _node(u)                               # private, but agreed
+    world.corpus = _windows_corpus(4)
+    _finish(world, u)
+    by_kind = {}
+    for provider, r in _all_reqs(world):
+        kind = "window" if "_w" in r["custom_id"] else "merge"
+        by_kind.setdefault(kind, set()).add((provider, r["model_id"]))
+    assert by_kind["window"] == {("openai", "gpt-6-luna")}
+    assert by_kind["merge"] == {("anthropic", "claude-opus-5.5")}
+
+
+def test_a_request_to_a_provider_not_allowed_is_never_sent(world):
+    sub = pw._Submission({}, {"openai"})
+    with pytest.raises(pw.ProfileModelError):
+        sub.add("anthropic", {"custom_id": "c"}, {"user_id": 1})
+    assert sub.built == []
+
+
+def test_a_regular_update_chains_on_the_newest_profile(world):
+    """The base: after a windows build the set's final; after a regular
+    update its chained version. The chained version is the update prompt
+    over that profile and the new window, saved as a window_update with
+    "Covers data through" and merged in the window's place, labelled as a
+    profile of all the writing."""
+    u = _user(profile_needs_full_regen=True)
+    _build_then_update(world, u)
+    first_final = [f for f in _rows(u, "integration") if f.window_set][0]
+    [chained] = _rows(u, "window_update")
+    [item] = [i for i in _items("window") if "_u" in i["custom_id"]]
+    assert item["chained_base_id"] == first_final.id
+    # Its parent is the set's base, as a window's: the merges after it do
+    # not read the earlier final as a base.
+    assert chained.parent_profile_id is None
+    assert chained.get_content().startswith("[Covers data through ")
+    [update_req] = [r for _p, r in _all_reqs(world)
+                    if "_u" in r["custom_id"]]
+    prompt = update_req["messages"][0]["content"][0]["text"]
+    assert first_final.get_content() in prompt          # {existing_profile}
+    assert ex.EVENTS_IN_WINDOW_PARAGRAPH not in prompt
+    final = [f for f in _rows(u, "integration") if f.window_set][-1]
+    merge = [r for s in world.provider.submits for rs in s.values()
+             for r in rs if r["custom_id"].endswith("_f_1")][-1]
+    labels = [m["content"][0]["text"].split("\n\n")[0]
+              for m in merge["messages"][:-1]]
+    assert labels[-1].startswith("Profile No. ")
+    assert "- Covers all the writing from" in labels[-1]
+    assert "- Updates a profile of all the writing up to" in labels[-1]
+    assert final.parent_profile_id == chained.id
+
+    # The next update chains on the chained version.
+    world.corpus.add(85, start=datetime.utcnow() + timedelta(days=20))
+    _finish(world, u)
+    second = [i for i in _items("window") if "_u" in i["custom_id"]][-1]
+    assert second["chained_base_id"] == chained.id
+    assert len(_rows(u, "window_update")) == 2
+
+
+def test_a_retried_window_of_a_build_is_not_a_chained_update(world):
+    """A set still being built (no final over its last window) reads its
+    windows independently, with the build's models."""
+    u = _user()
+    rows = _set_of(u, 3)
+    _corpus_for(world, rows)
+    world.corpus.add(85)
+    state = pw.set_state(u, "set1", None)
+    assert state.due
+    assert pw.chained_update_base(u, state, False) is None
+
+
+def test_the_estimate_prices_the_chained_update_at_the_chat_model(
+        world, monkeypatch):
+    import backend.utils.cost as cost
+    u = _user(preferred_model="gpt-6-astra", profile_needs_full_regen=True)
+    world.corpus = _windows_corpus(4)
+    _finish(world, u)
+    world.corpus.add(85, start=datetime.utcnow() + timedelta(days=2))
+    priced = []
+    real = cost.calculate_llm_cost_microdollars
+    monkeypatch.setattr(cost, "calculate_llm_cost_microdollars",
+                        lambda model_id, *a, **k: (
+                            priced.append(model_id) or real(model_id, *a, **k)))
+    _advance(u)
+    assert priced and set(priced) == {"gpt-6-astra"}
+
+
+def test_every_chained_version_keeps_its_place_in_the_merges(world):
+    """Peter, 2026-11-05: "The last version of a chain is heavily biased
+    towards the last window. All chained versions should go to the
+    merge." After each of ten regular updates the final reads the build's
+    windows and every chained version so far, each in its window's place,
+    and never an earlier final as a base: a chained row's parent is the
+    set's base, as a window's."""
+    u = _user()
+    rows = _set_of(u, 5)
+    _corpus_for(world, rows)
+    _finish(world, u)
+    for k in range(10):
+        world.corpus.add(85, start=datetime.utcnow() + timedelta(days=2 + 10 * k))
+        _finish(world, u)
+        final_item = _items("final")[-1]
+        inputs = [db.session.get(UserProfile, pid)
+                  for pid in final_item["inputs"]]
+        assert [p.generation_type for p in inputs] == (
+            ["window"] * 5 + ["window_update"] * (k + 1))
+        assert [p.id for p in inputs[5:]] == [
+            r.id for r in _rows(u, "window_update")]
+    assert len([f for f in _rows(u, "integration") if f.window_set]) == 11
+
+
+# ── public-only, after review (2026-11-05) ────────────────────────────────
+# "A user is public-only only if nothing private was ever read for them."
+
+def test_an_entry_edited_through_the_node_route_is_private(app, monkeypatch):
+    """Review finding 1: PUT /api/nodes/<id> keeps a pre-filled entry's
+    provenance; the NodeVersion row the edit writes makes it private."""
+    from flask_login import LoginManager
+    import backend.routes.nodes as nodes_module
+    monkeypatch.setattr(
+        "backend.utils.context_artifacts.sync_context_artifacts",
+        lambda *a, **k: None)
+    login_manager = LoginManager(app)
+
+    @login_manager.user_loader
+    def load_user(user_id):
+        return db.session.get(User, int(user_id))
+
+    app.register_blueprint(nodes_module.nodes_bp, url_prefix="/api/nodes")
+    u = _prefilled(prefilled_handle="alice")
+    tweet = Node.query.filter_by(user_id=u.id).first()
+    assert pw.writing_is_public_only(u) is True
+    client = app.test_client()
+    with client.session_transaction() as sess:
+        sess["_user_id"] = str(u.id)
+        sess["_fresh"] = True
+    res = client.put(f"/api/nodes/{tweet.id}",
+                     json={"content": "my own words now"})
+    assert res.status_code == 200
+    db.session.expire_all()
+    assert db.session.get(Node, tweet.id).provenance == "prefill_ca"
+    assert pw.writing_is_public_only(db.session.get(User, u.id)) is False
+
+
+def test_a_deleted_fetched_entry_whose_text_was_wiped_is_private(app):
+    u = _prefilled(prefilled_handle="alice")
+    gone = _node(u, provenance="prefill_x", deleted=True)
+    assert pw.writing_is_public_only(u) is True     # its history is there
+    gone.content = None                             # the cleanup's wipe
+    db.session.commit()
+    assert pw.writing_is_public_only(u) is False
+
+
+def test_profiles_count_only_when_they_read_pre_filled_tweets(app):
+    from backend.utils.profile_providers import profiles_public_only
+    tweets = {"twitter": {"nodes": 2, "tokens": 20}}
+    u = _prefilled(prefilled_handle="alice")
+    _profile(u, source_origin_stats=tweets)
+    assert pw.writing_is_public_only(u) is True
+    _profile(u, source_origin_stats=None)           # no record: private
+    assert profiles_public_only(u) is False
+    v = _prefilled(prefilled_handle="bob")
+    _profile(v, source_origin_stats={**tweets, "loore": {"nodes": 1,
+                                                          "tokens": 5}})
+    assert pw.writing_is_public_only(v) is False    # read Loore writing
+    w = _prefilled()                                # not a pre-fill
+    _profile(w, source_origin_stats=tweets)         # (an own upload?)
+    assert pw.writing_is_public_only(w) is False
+
+
+def test_a_purged_private_base_never_reaches_the_other_provider(world):
+    """Review finding 2: an OpenAI user's profile was built by GPT-6 Astra
+    from private Loore entries, which were deleted and purged; only
+    pre-filled tweets remain. The next build of two or more windows takes
+    that profile as its base: it must stay with OpenAI."""
+    u = _user(preferred_model="gpt-6-astra", prefilled_handle="alice")
+    _node(u, provenance="prefill_ca")
+    base = _profile(u, gen_type="update", cutoff=T0,
+                    generated_by="gpt-6-astra", text=_good(
+                        events=False, tag="PRIVATE-BASE"),
+                    source_origin_stats={"loore": {"nodes": 9,
+                                                   "tokens": 900}})
+    world.corpus = _windows_corpus(4)
+    _finish(world, u)
+    assert {p for p, _r in _all_reqs(world)} == {"openai"}
+    merges = [r for _p, r in _all_reqs(world) if "_f_" in r["custom_id"]]
+    assert merges and all(r["model_id"] == "gpt-6.1-sol" for r in merges)
+    texts = [m["content"][0]["text"] for r in merges for m in r["messages"]]
+    assert any("PRIVATE-BASE" in t for t in texts)    # merged, on Sol
+
+
+@pytest.mark.parametrize("consent", [False, True])
+def test_a_pass_over_private_writing_marks_the_user_for_good(world, consent):
+    """The sticky mark: a pass that read private writing (with consent,
+    too) leaves the user private after those entries are gone and the
+    consent is withdrawn."""
+    u = _user(prefilled_handle="alice", profile_needs_full_regen=True,
+              profile_both_providers=consent)
+    _node(u, provenance="prefill_ca")
+    private = _node(u)
+    world.corpus = _windows_corpus(4)
+    _advance(u)
+    u = db.session.get(User, u.id)
+    assert u.profile_private_read is True
+    db.session.delete(private)                      # purged
+    u.profile_both_providers = False
+    db.session.commit()
+    from backend.utils.profile_providers import entries_public_only
+    assert entries_public_only(u) is True
+    assert pw.writing_is_public_only(u) is False
+    assert pw.cross_provider_allowed(u) is False
+
+
+def test_a_public_only_pass_does_not_mark_the_user(world):
+    from backend.utils.profile_providers import note_private_read
+    u = _prefilled(prefilled_handle="alice")
+    note_private_read(u)
+    assert u.profile_private_read is False
+    _node(u)
+    note_private_read(u)
+    assert u.profile_private_read is True
+
+
+# ── accounts someone signed into; the backfill of the mark ───────────────
+# An account that ever uploaded its own archive is private: public-only
+# needs an account nobody has signed into (utils/activity.sign_in_status).
+
+@pytest.mark.parametrize("record", ["last_seen", "terms", "older"])
+def test_an_account_someone_signed_into_is_private(app, record):
+    tweets = {"twitter": {"nodes": 2, "tokens": 20}}
+    u = _prefilled(prefilled_handle="alice")
+    _profile(u, source_origin_stats=tweets)
+    assert pw.writing_is_public_only(u) is True
+    if record == "last_seen":
+        u.last_seen_at = datetime.utcnow()
+    elif record == "terms":
+        u.accepted_terms_at = datetime.utcnow()
+    else:                       # older than the sign-in record: unknown
+        u.created_at = datetime(2026, 8, 1)
+    db.session.commit()
+    assert pw.writing_is_public_only(u) is False
+    assert pw.cross_provider_allowed(u) is False
+
+
+def test_before_the_backfill_only_verified_pre_fills_are_public(app):
+    """The mark starts false for every account from before it: until the
+    backfill runs, an account that someone signed into, with pre-filled
+    tweets and profiles that read only them, is private; a pre-fill
+    nobody signed into is public."""
+    tweets = {"twitter": {"nodes": 2, "tokens": 20}}
+    used = _prefilled(prefilled_handle="alice")
+    _profile(used, source_origin_stats=tweets)
+    used.last_seen_at = datetime(2026, 9, 1)
+    waiting = _prefilled(prefilled_handle="bob")
+    _profile(waiting, source_origin_stats=tweets)
+    db.session.commit()
+    assert used.profile_private_read is False      # not backfilled yet
+    assert pw.writing_is_public_only(used) is False
+    assert pw.writing_is_public_only(waiting) is True
+
+
+def test_the_backfill_marks_what_it_cannot_vouch_for(app):
+    from backend.scripts import backfill_profile_private_read as bf
+    tweets = {"twitter": {"nodes": 2, "tokens": 20}}
+    signed_in = _prefilled(prefilled_handle="a", last_seen_at=T0)
+    deleted_private = _prefilled(prefilled_handle="b")
+    _node(deleted_private, deleted=True)
+    public_loore = _prefilled(prefilled_handle="c",
+                              public_sharing_enabled=True)
+    _node(public_loore, privacy="public")      # public now; before? unknown
+    loore_profile = _prefilled(prefilled_handle="d")
+    _profile(loore_profile, source_origin_stats={"loore": {"nodes": 1,
+                                                           "tokens": 5}})
+    clean = _prefilled(prefilled_handle="e")
+    _profile(clean, source_origin_stats=tweets)
+    empty = _user()                            # a pre-fill still to come
+    already = _user(profile_private_read=True)
+    out = []
+    marked = bf.run(apply=False, out=out.append)
+    assert set(marked) == {signed_in.id, deleted_private.id,
+                           public_loore.id, loore_profile.id}
+    assert "dry run" in out[-1]
+    assert not User.query.filter(User.id.in_(marked),
+                                 User.profile_private_read.is_(True)).count()
+    assert bf.run(apply=True, out=out.append) == marked
+    db.session.expire_all()
+    for uid in marked + [already.id]:
+        assert db.session.get(User, uid).profile_private_read is True
+    for user in (clean, empty):
+        assert db.session.get(User, user.id).profile_private_read is False
+    assert pw.writing_is_public_only(db.session.get(User, clean.id))
+    assert bf.run(apply=True, out=out.append) == []    # idempotent

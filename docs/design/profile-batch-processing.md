@@ -212,6 +212,32 @@ Key properties:
   thousands of times per minute." The recent-context, digest and
   poll-draft collectors still retrieve per job.
 
+**An import's build waits for the imports to stop (#598, Peter
+2026-11-05).** On the batch path an import does not seed at once. Its
+hand-off (`routes/import_data._hand_off_profile_update_after_import`)
+still invalidates what the import touches (re-tip or the regen flag), then
+`seed_after_import` records `User.profile_import_quiet_from` and schedules
+one seed (`seed_profile_batch_for_user`, `after_import=True`) for
+`MIN_INACTIVITY` (30 minutes, the existing inactivity window) later. The
+hourly pass and that seed build nothing while `import_settling`: a ChatGPT
+or Claude import is running (its lock is fresh), or the last import
+finished, or an entry was written in Loore after it, less than 30 minutes
+ago (imported entries keep their own dates, so the newest entry alone does
+not show an import). A Twitter import marks the time at its start and
+after each committed batch. Once the imports are quiet the mark is cleared
+and the usual gates decide, with the import's override of the refusal
+backoff (an import's build skips the wait and the stop, voice review
+2026-10-01), also when the import's own seed found an entry written after
+the import and left the build to the hourly pass. A second import inside the window marks again
+and schedules its own seed; the first one's seed then finds the imports
+settling and does nothing, so both imports go into one build. The window
+advance (`next_work`) holds a set's windows and merges the same way. The
+admin's Build profile and a pre-fill seed at once, and the synchronous path
+(accounts off the batch path) dispatches at once as before. The import's
+result carries `profile_waits_for_imports` when a build is due, and the
+import dialog says the profile will be built once the user has stopped
+importing for 30 minutes.
+
 ## Accounting
 
 `batch_check_and_collect` returns real `input_tokens`/`output_tokens` per item,
@@ -396,14 +422,72 @@ window of the user goes out in one Batch submission, split into several
 batches only above `PROFILE_BATCH_MAX_BYTES` (100 MB), all submitted in the
 same task run.
 
-**Models.** Per provider of the user's chat model, never another
-provider's: `PROFILE_VERSION_MODEL_ANTHROPIC` / `_OPENAI` (Haiku 5.5 / GPT-6
-Luna) and `PROFILE_MERGE_MODEL_ANTHROPIC` / `_OPENAI` (Opus 5.5 / GPT-6.1
-Sol), checked at boot (`validate_profile_models`) and again per build
-(`profile_models_for`). An OpenAI merge is a Batch request on
-`/v1/responses` with the live call's body and
-`PROFILE_MERGE_REASONING_EFFORT_OPENAI` as `reasoning.effort` (default
+**Models (Peter, 2026-11-05).** Chosen per pass (`pass_models`):
+
+| Pass | Versions | Merges |
+|---|---|---|
+| More than one window, private writing, no consent | `PROFILE_VERSION_MODEL_ANTHROPIC` / `_OPENAI` (Haiku 5.5 / GPT-6 Luna) | `PROFILE_MERGE_MODEL_ANTHROPIC` / `_OPENAI` (Opus 5.5 / GPT-6.1 Sol at `PROFILE_MERGE_REASONING_EFFORT_OPENAI`) |
+| More than one window, public-only writing or `User.profile_both_providers` | `PROFILE_VERSION_MODEL_CROSS_PROVIDER` (GPT-6 Luna) | `PROFILE_MERGE_MODEL_CROSS_PROVIDER` (Opus 5.5) |
+| A regular update of a merged set: one window to read | the user's chat model, chained | the user's chat model |
+
+Public-only (`utils/profile_providers.writing_is_public_only`, metadata
+only, any doubt counts as private; nothing private may ever have been read
+for the user):
+
+- nobody has ever signed into the account (`utils/activity.sign_in_status`
+  "never": no sign-in or terms acceptance on record, on an account newer
+  than that record), so it never uploaded its own archive: a pre-fill
+  waiting for its owner or a lab account built from the Community
+  Archive. An account that ever uploaded its own archive is private;
+- every entry of the user, deleted ones included, came from the Community
+  Archive or the X API (`Node.provenance` `prefill_ca` / `prefill_x`) with
+  its text unchanged since (no `NodeVersion` row, which the node route
+  writes on every edit; a deleted one whose text and history the cleanup
+  wiped counts as private), or is public while the user shares publicly;
+- no other user's entry is a parent or a reply of theirs, and no profile
+  prompt is their own;
+- every profile row of the user records its sources
+  (`source_origin_stats`) as pre-filled tweets alone (`twitter`) on an
+  account Loore pre-filled, and none is the user's own text: a purged
+  entry leaves its origin in the rows that read it, and a row without the
+  record counts as private;
+- `User.profile_private_read` is not set. A batch submission, a saved
+  version and a window pass set it for good when the user's entries are
+  not public-only (`note_private_read`), consent or not; nothing clears it.
+  `backend/scripts/backfill_profile_private_read.py` (dry run by default,
+  `--apply`, metadata only, idempotent) sets it for the accounts from
+  before it that the rules above cannot vouch for. The check does not
+  depend on that run. `profile_both_providers`
+(default false, no UI; #599 asks the question) is the user's consent.
+Without either, every model of a pass is of the provider of the user's
+chat model: checked at boot (`validate_profile_models`), per pass
+(`profile_models_for`) and for every request before it is queued
+(`_Submission.add` raises). An OpenAI merge is a Batch request on
+`/v1/responses` with the live call's body (and, for the provider pair,
+`PROFILE_MERGE_REASONING_EFFORT_OPENAI` as `reasoning.effort`, default
 `high`); windows stay on `/v1/chat/completions`.
+
+**A regular update of a merged set (Peter, 2026-11-05).** When the set's
+only missing range is the writing after its last window, nothing of it is
+in flight, and that range plans into one chunk on the user's chat model
+(`chained_update_base`), the window is not read on its own: the user's
+chat model writes a chained update, main's update prompt
+(`build_update_template`, `build_chunk_prompt`) over the set's newest
+profile and the window. The base is the set's final over its last window,
+or, when the last window is itself a chained update, that version. The
+output is checked for the three maps (no events section) and saved as a
+`window_update` row with `[Covers data through B (N tokens)]`, parent the
+set's base as a window's (the profile it updated is in its job item). It
+stands in the window's place in the group and final merges, which the chat
+model runs, and is labelled there as a profile of all the writing: "Covers
+all the writing from <start> to B" and "Updates a profile of all the
+writing up to A with the writing from A to B". Every chained version keeps
+its place in later merges (Peter, 2026-11-05: "The last version of a chain
+is heavily biased towards the last window. All chained versions should go
+to the merge"). A set
+still being built (no final over its last window) reads a retried window
+independently, with the build's models. One window per pass: a remainder
+that did not fit is chained on the new version in the next pass.
 
 **Rows.** `UserProfile.window_set` (12 hex characters) and `covers_start`.
 `window`: one window's version, its text starting with
@@ -501,11 +585,20 @@ database: the set (in-flight items, a full-rebuild flag, the set whose tip
 is the update base, or a new set), its missing ranges, the due groups and
 the final; checks the spend cap (a user over their limit is held,
 `profile_cap_held`, and the hourly seeder resumes the set when the month
-turns or the admin raises the limit); logs the estimated cost of the rest;
-renders and submits. The estimate is not a gate (Peter, 2026-10-22: "send
-it and let the cap stop it halfway"): all of a build's windows go out in
-one submission, so the cap can only hold the merges after them, and while
-the user is capped it also blocks their replies until the 1st. It holds no pipeline lock; past
+turns or the admin raises the limit); estimates the cost of the rest;
+renders and submits. A pass with windows to read goes out only when the
+estimate (the windows and the merges after them, at Batch prices, with the
+measured mean output per call: Peter, 2026-11-05, the expected cost, "Better
+err on the job going through leading to $2-$3 overshoot, than postponing it
+for a month") fits into what is left of the user's monthly limit; else
+nothing is sent, the build waits (`profile_cap_held`, admin note "Waiting
+for spend headroom: the build needs about $X; $S of $L used this month")
+and the hourly seeder tries it again until the month turns or the limit is
+raised. A user with no limit is not gated. Merges alone are held only by
+the cap (Peter, 2026-10-22: "send it and let the cap stop it halfway"):
+all of a build's windows go out in one submission, so the cap can only
+hold the merges after them, and while the user is capped it also blocks
+their replies until the 1st. It holds no pipeline lock; past
 `PROFILE_WINDOW_RENDER_SECONDS` it submits what it has and dispatches a
 new task. The poller collects window, group and final items (`collect`) and
 dispatches the advance; the hourly seeder routes builds to it

@@ -141,6 +141,17 @@ class Config:
         os.environ.get("PROFILE_MERGE_MODEL_ANTHROPIC") or "claude-opus-5.5")
     PROFILE_MERGE_MODEL_OPENAI = (
         os.environ.get("PROFILE_MERGE_MODEL_OPENAI") or "gpt-6.1-sol")
+    # The pair for a build whose writing may reach either provider: every
+    # entry is public (a pre-fill from the Community Archive or the X API,
+    # the lab), or the user agreed to both providers
+    # (User.profile_both_providers). Peter, 2026-11-05: "luna for versions,
+    # opus 5.5 for merges is preferred". Checked at boot as active models.
+    PROFILE_VERSION_MODEL_CROSS_PROVIDER = (
+        os.environ.get("PROFILE_VERSION_MODEL_CROSS_PROVIDER")
+        or "gpt-6-luna")
+    PROFILE_MERGE_MODEL_CROSS_PROVIDER = (
+        os.environ.get("PROFILE_MERGE_MODEL_CROSS_PROVIDER")
+        or "claude-opus-5.5")
     # A from-scratch build that fits ONE chunk on the user's chat model,
     # per provider of that chat model (Peter, 2026-11-03): on, it is a
     # window set of one window (the version model, with the events
