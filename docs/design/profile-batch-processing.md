@@ -438,10 +438,14 @@ profile and the window. The base is the set's final over its last window,
 or, when the last window is itself a chained update, that version. The
 output is checked for the three maps (no events section) and saved as a
 `window_update` row with `[Covers data through B (N tokens)]`, parent the
-profile it updated. It stands in the window's place in the group and final
-merges, which the chat model runs, and is labelled there as a profile of
-all the writing: "Covers all the writing from <start> to B" and "Updates a
-profile of all the writing up to A with the writing from A to B". A set
+set's base as a window's (the profile it updated is in its job item). It
+stands in the window's place in the group and final merges, which the chat
+model runs, and is labelled there as a profile of all the writing: "Covers
+all the writing from <start> to B" and "Updates a profile of all the
+writing up to A with the writing from A to B". Every chained version keeps
+its place in later merges (Peter, 2026-11-05: "The last version of a chain
+is heavily biased towards the last window. All chained versions should go
+to the merge"). A set
 still being built (no final over its last window) reads a retried window
 independently, with the build's models. One window per pass: a remainder
 that did not fit is chained on the new version in the next pass.

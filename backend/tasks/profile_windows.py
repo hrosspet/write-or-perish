@@ -1636,14 +1636,13 @@ def _collect_window(user, item, result, job, history, template, notes,
             notes["skipped"].append((item, problem))
         return problem
     # A chained version covers all the writing to its cutoff: its date line
-    # says so ("Covers data through B"), and its parent is the profile it
-    # updated.
+    # says so ("Covers data through B"). Its parent is the set's base, as a
+    # window's (resolve_set reads the set's base from its tip); the profile
+    # it updated is in its job item ("chained_base_id").
     _exports._save_profile(
         user, item["model_id"], response["content"], response,
         source_tokens_used=item.get("cumulative"), source_data_cutoff=cutoff,
-        generation_type=gen_type,
-        parent_profile_id=(item.get("chained_base_id") if chained
-                           else item.get("base_id")),
+        generation_type=gen_type, parent_profile_id=item.get("base_id"),
         batch=True, source_origin_stats=item.get("origin_stats"),
         source_rendered_at=_dt(item.get("rendered_at")),
         window_set=item["set"], covers_start=start,

@@ -1902,7 +1902,9 @@ def test_a_regular_update_chains_on_the_newest_profile(world):
     [chained] = _rows(u, "window_update")
     [item] = [i for i in _items("window") if "_u" in i["custom_id"]]
     assert item["chained_base_id"] == first_final.id
-    assert chained.parent_profile_id == first_final.id
+    # Its parent is the set's base, as a window's: the merges after it do
+    # not read the earlier final as a base.
+    assert chained.parent_profile_id is None
     assert chained.get_content().startswith("[Covers data through ")
     [update_req] = [r for _p, r in _all_reqs(world)
                     if "_u" in r["custom_id"]]
@@ -1953,3 +1955,27 @@ def test_the_estimate_prices_the_chained_update_at_the_chat_model(
                             priced.append(model_id) or real(model_id, *a, **k)))
     _advance(u)
     assert priced and set(priced) == {"gpt-6-astra"}
+
+
+def test_every_chained_version_keeps_its_place_in_the_merges(world):
+    """Peter, 2026-11-05: "The last version of a chain is heavily biased
+    towards the last window. All chained versions should go to the
+    merge." After each of ten regular updates the final reads the build's
+    windows and every chained version so far, each in its window's place,
+    and never an earlier final as a base: a chained row's parent is the
+    set's base, as a window's."""
+    u = _user()
+    rows = _set_of(u, 5)
+    _corpus_for(world, rows)
+    _finish(world, u)
+    for k in range(10):
+        world.corpus.add(85, start=datetime.utcnow() + timedelta(days=2 + 10 * k))
+        _finish(world, u)
+        final_item = _items("final")[-1]
+        inputs = [db.session.get(UserProfile, pid)
+                  for pid in final_item["inputs"]]
+        assert [p.generation_type for p in inputs] == (
+            ["window"] * 5 + ["window_update"] * (k + 1))
+        assert [p.id for p in inputs[5:]] == [
+            r.id for r in _rows(u, "window_update")]
+    assert len([f for f in _rows(u, "integration") if f.window_set]) == 11
