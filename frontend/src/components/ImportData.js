@@ -848,6 +848,13 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
                   imported. There was nothing to write.
                 </p>
               )}
+              {importResult.profile_waits_for_imports && (
+                <p style={{ fontFamily: "var(--sans)", fontWeight: 300, fontSize: "0.88rem", color: "var(--text-secondary)", margin: "0 0 1.4rem" }}>
+                  Your profile will be built from this import once you have
+                  stopped importing for 30 minutes, so anything else you
+                  import now goes into the same build.
+                </p>
+              )}
             </>
           )}
           <button

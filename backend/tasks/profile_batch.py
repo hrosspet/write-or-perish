@@ -150,6 +150,55 @@ def _hold_for_cap(user):
         db.session.commit()
 
 
+# ── an import's build waits for the imports to stop (#598) ────────────────
+# Peter, 2026-11-05: an import only marks the account as needing a build;
+# the build starts after the same 30-minute inactivity window as the other
+# gates (MIN_INACTIVITY), so a second import shortly after the first is
+# read by the same build instead of a wasted one.
+
+
+def mark_import_activity(user_id):
+    """Record import activity for the quiet period: an import finished, or
+    a Twitter import committed a batch (a running one)."""
+    User.query.filter_by(id=user_id).update(
+        {"profile_import_quiet_from": datetime.utcnow()},
+        synchronize_session=False)
+    db.session.commit()
+
+
+def import_settling(user, now=None):
+    """Whether the user's imports have not been quiet for MIN_INACTIVITY:
+    a ChatGPT or Claude import is running (its lock is fresh), or the last
+    import finished, or an entry was written in Loore after it, less than
+    MIN_INACTIVITY ago. Imported entries keep their own dates, so the
+    newest entry alone does not show an import."""
+    from backend.utils import conversation_stash
+    try:
+        if conversation_stash.running_job(user.id) is not None:
+            return True
+    except Exception:  # an unreadable lock is not a running import
+        logger.exception(f"User {user.id}: import lock unreadable")
+    since = user.profile_import_quiet_from
+    if since is None:
+        return False
+    last_node = (Node.query.filter_by(user_id=user.id)
+                 .order_by(Node.created_at.desc()).first())
+    if last_node is not None and last_node.created_at > since:
+        since = last_node.created_at
+    return (now or datetime.utcnow()) - since < MIN_INACTIVITY
+
+
+def seed_after_import(user):
+    """The batch path's import hand-off: mark the import and seed once the
+    quiet period has passed. A later import marks again and schedules its
+    own seed; a seed that finds the imports still settling does nothing,
+    and the hourly seeder (with the same gate) covers what it leaves."""
+    mark_import_activity(user.id)
+    seed_profile_batch_for_user.apply_async(
+        (user.id,), {"ignore_backoff": True, "after_import": True},
+        countdown=int(MIN_INACTIVITY.total_seconds()))
+
+
 def _release_cap_hold(user):
     if user.profile_cap_held:
         user.profile_cap_held = False
@@ -890,11 +939,17 @@ def seed_profile_batches():
                 _seed_profile_batches()
 
 
-def _seed_profile_batches(users=None, ignore_backoff=False):
+def _seed_profile_batches(users=None, ignore_backoff=False,
+                          after_import=False):
     """Impl — runs inside an active app context (testable directly).
     ``users`` restricts the cohort (immediate seed for one user); the
     default is every profile-eligible user. ``ignore_backoff`` is for an
-    import's seed and a confirmed admin override only (see _should_seed)."""
+    import's seed and a confirmed admin override only (see _should_seed).
+
+    The hourly pass and an import's deferred seed (``after_import``) build
+    nothing for a user whose imports are still settling (#598,
+    import_settling); an immediate seed the admin sends (Build profile,
+    pre-fill) does not wait for them."""
     from backend.utils.spend import user_is_capped
     config = current_app.config
     if config.get("PROFILE_UPDATES_PAUSED"):
@@ -903,6 +958,8 @@ def _seed_profile_batches(users=None, ignore_backoff=False):
     keys = apply_batch_key_override(
         get_api_keys_for_usage(config, 'chat'), config)
     built = []
+    # The hourly pass and an import's seed wait for the imports to stop.
+    wait_for_imports = users is None or after_import
     if users is None:
         _clear_stuck_pending()
         users = User.profile_eligible_query().all()
@@ -929,6 +986,14 @@ def _seed_profile_batches(users=None, ignore_backoff=False):
             continue  # exhausted → synchronous last-resort handles it
         # (force-batch users keep retrying here every cycle instead:
         # they must never fall back to the full-price sync path)
+        if wait_for_imports:
+            # An import's build waits until the imports stop (#598); the
+            # mark is cleared once they have, and the gates below decide.
+            if import_settling(user):
+                continue
+            if user.profile_import_quiet_from is not None:
+                user.profile_import_quiet_from = None
+                db.session.commit()
         # The per-user monthly spend cap, checked as the synchronous task
         # checks it on entry. The builder below settles it too.
         if user_is_capped(user):
@@ -943,7 +1008,8 @@ def _seed_profile_batches(users=None, ignore_backoff=False):
             # advance task renders outside this pass's lock.
             from backend.tasks import profile_windows
             if profile_windows.wants_window_build(user):
-                profile_windows.dispatch_advance(user)
+                profile_windows.dispatch_advance(
+                    user, wait_for_imports=wait_for_imports)
                 continue
             # An integration retry builds only the integration, never a
             # chunk over organic growth since the chain's last render.
@@ -973,7 +1039,8 @@ def _seed_profile_batches(users=None, ignore_backoff=False):
 
 
 @celery.task(bind=True, max_retries=20, default_retry_delay=30)
-def seed_profile_batch_for_user(self, user_id, ignore_backoff=False):
+def seed_profile_batch_for_user(self, user_id, ignore_backoff=False,
+                                after_import=False):
     """Immediate seed for one user (admin pre-fill): same gates as the
     hourly seeder, without waiting for it. Returns the number actually
     put in flight (0 when the provider rejected the submit).
@@ -987,9 +1054,13 @@ def seed_profile_batch_for_user(self, user_id, ignore_backoff=False):
 
     ignore_backoff: the seed an import dispatches, or the admin "Build
     profile" button after the admin confirmed the override, skips the
-    refusal backoff (_should_seed). Everything else respects it."""
+    refusal backoff (_should_seed). Everything else respects it.
+
+    after_import: the seed an import schedules (seed_after_import), which
+    waits for the imports to stop like the hourly pass (#598)."""
     with flask_app.app_context():
-        n = _seed_profile_batch_for_user_impl(user_id, ignore_backoff)
+        n = _seed_profile_batch_for_user_impl(user_id, ignore_backoff,
+                                              after_import)
         if n is None:
             logger.info(f"User {user_id}: immediate seed deferred (pass in "
                         f"progress); retry {self.request.retries + 1}")
@@ -997,7 +1068,8 @@ def seed_profile_batch_for_user(self, user_id, ignore_backoff=False):
         return n
 
 
-def _seed_profile_batch_for_user_impl(user_id, ignore_backoff=False):
+def _seed_profile_batch_for_user_impl(user_id, ignore_backoff=False,
+                                      after_import=False):
     """Impl — runs inside an active app context. None = lock held (caller
     retries); otherwise the number of requests put in flight."""
     user = User.query.get(user_id)
@@ -1006,7 +1078,8 @@ def _seed_profile_batch_for_user_impl(user_id, ignore_backoff=False):
     with batch_pipeline_lock() as ok:
         if not ok:
             return None
-        n = _seed_profile_batches(users=[user], ignore_backoff=ignore_backoff)
+        n = _seed_profile_batches(users=[user], ignore_backoff=ignore_backoff,
+                                  after_import=after_import)
     logger.info(f"User {user_id}: immediate batch seed → {n} request(s)")
     return n
 

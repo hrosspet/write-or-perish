@@ -1102,12 +1102,17 @@ def _merge_requests(user, state, models, sub, keys, history):
     return False
 
 
-def next_work(user, models, keys, deadline):
+def next_work(user, models, keys, deadline, wait_for_imports=True):
     """One pass: everything of the user's set that is due and whose inputs
     are ready, in one submission: windows for every missing range, the
     groups whose windows are all in, and the final when everything is.
     Returns "submitted", "partial" (render budget used; the caller hands
-    the rest to a new task), "idle", "held" or "failed"."""
+    the rest to a new task), "idle", "held", "waiting" or "failed"."""
+    if wait_for_imports and _batch.import_settling(user):
+        # The user is importing (#598): nothing goes out until the imports
+        # stop, so the next import is read by the same windows and merges.
+        # The import's deferred seed or the hourly seeder resumes the set.
+        return "waiting"
     set_id, base, fresh = resolve_set(user)
     if fresh and not wants_window_build(user):
         # A set is started only for a build that plans into two or more
@@ -1194,17 +1199,21 @@ def _claim(user, task_id):
     db.session.commit()
 
 
-def dispatch_advance(user):
+def dispatch_advance(user, wait_for_imports=True):
     """Start the advance task for ``user`` unless one is running (the
     per-user guard, profile_generation_task_id; a running task checks the
-    state again before it exits). Returns the task id or None."""
+    state again before it exits). Returns the task id or None.
+    ``wait_for_imports``: hold the work while the user's imports settle
+    (#598); False for a build the admin started."""
     if user is None:
         return None
     if user.profile_generation_task_id and not _exports._is_task_stale(user):
         return None
     task_id = uuid4().hex
     _claim(user, task_id)
-    advance_profile_windows.apply_async((user.id,), task_id=task_id)
+    advance_profile_windows.apply_async(
+        (user.id,) if wait_for_imports else (user.id, False),
+        task_id=task_id)
     return task_id
 
 
@@ -1217,7 +1226,8 @@ def run_advance_inline(user, task_id):
         return {"user_id": user.id, "profile_id": None,
                 "status": "completed", "message": "A build is running"}
     _claim(user, task_id)
-    outcome = advance(user.id, task_id)
+    # The synchronous path starts its builds at once, imports or not.
+    outcome = advance(user.id, task_id, wait_for_imports=False)
     return {"user_id": user.id, "profile_id": None, "status": "completed",
             "message": f"Independent versions on the Batch API: {outcome}"}
 
@@ -1233,13 +1243,14 @@ def _collected_since(user_id, since):
                for job in jobs for item in job.items or [])
 
 
-def advance(user_id, task_id):
+def advance(user_id, task_id, wait_for_imports=True):
     """The advance: derive what the user's set needs from the database and
     submit it, up to twice (work that came due while it ran is not
     stranded). Idempotent: work in flight is excluded, and a redelivery
     after a kill renders again (nothing was submitted, or what was is in
     flight). Clears its guard at the end; re-dispatches itself when the
-    render budget ran out or a job of the user's was collected meanwhile."""
+    render budget ran out or a job of the user's was collected meanwhile.
+    ``wait_for_imports``: see dispatch_advance."""
     user = db.session.get(User, user_id)
     if user is None or user.profile_generation_task_id != task_id:
         return "superseded"
@@ -1258,7 +1269,8 @@ def advance(user_id, task_id):
                 _setting("PROFILE_WINDOW_RENDER_SECONDS", 2400))
             submitted = False
             for _ in range(2):
-                outcome = next_work(user, models, keys, deadline)
+                outcome = next_work(user, models, keys, deadline,
+                                    wait_for_imports)
                 if outcome == "partial":
                     redispatch = True
                 if outcome != "submitted":
@@ -1283,20 +1295,20 @@ def advance(user_id, task_id):
             user.profile_generation_task_dispatched_at = None
             user.profile_batch_pending = bool(inflight_items(user_id))
             db.session.commit()
-            if outcome not in ("off", "error", "held") and (
+            if outcome not in ("off", "error", "held", "waiting") and (
                     redispatch or _collected_since(user_id, started)):
-                dispatch_advance(user)
+                dispatch_advance(user, wait_for_imports)
     logger.info("User %s: profile window advance: %s", user_id, outcome)
     return outcome
 
 
 @celery.task(bind=True, acks_late=True, reject_on_worker_lost=True)
-def advance_profile_windows(self, user_id):
+def advance_profile_windows(self, user_id, wait_for_imports=True):
     """Render, check and submit what the user's window set needs now.
     Holds only the per-user guard, never the batch pipeline lock: a render
     of a few hundred windows takes minutes."""
     with flask_app.app_context():
-        return advance(user_id, self.request.id)
+        return advance(user_id, self.request.id, wait_for_imports)
 
 
 # ── collection (called by the poller) ─────────────────────────────────────

@@ -1399,6 +1399,35 @@ def test_a_build_held_at_the_cap_resumes_when_the_cap_lifts(
     assert pw._visible_profile(u.id).id == finals[0].id   # the profile
 
 
+def test_a_window_build_waits_while_the_user_imports(world):
+    """#598: while an import's quiet period runs, the advance sends
+    nothing (no windows, no merges); once it is over, the windows go out."""
+    world.corpus = _windows_corpus(4)
+    u = _user(profile_needs_full_regen=True,
+              profile_import_quiet_from=datetime.utcnow())
+    assert _advance(u) == "waiting"
+    assert world.provider.submits == []
+    assert pw.advance_profile_windows.apply_async.call_count == 1
+    u = db.session.get(User, u.id)
+    u.profile_import_quiet_from = datetime.utcnow() - timedelta(minutes=30)
+    db.session.commit()
+    assert _advance(u) == "submitted"
+    assert len(world.provider.submits) == 1
+
+
+def test_the_admins_window_build_does_not_wait_for_the_imports(world):
+    world.corpus = _windows_corpus(4)
+    u = _user(profile_needs_full_regen=True,
+              profile_import_quiet_from=datetime.utcnow())
+    _seed(u)                                   # admin Build profile
+    dispatch = pw.advance_profile_windows.apply_async.call_args
+    assert dispatch.args[0] == (u.id, False)
+    u = db.session.get(User, u.id)
+    assert pw.advance(u.id, u.profile_generation_task_id,
+                      *dispatch.args[0][1:]) == "submitted"
+    assert len(world.provider.submits) == 1
+
+
 # ── 14. R7, R11 ───────────────────────────────────────────────────────────
 
 def test_a_stuck_pending_flag_is_cleared_and_a_live_one_kept(

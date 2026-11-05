@@ -744,11 +744,12 @@ def test_import_invalidates_only_the_versions_it_touches(app, monkeypatch):
     sync = MagicMock(return_value="sync-task")
     monkeypatch.setattr(ex, "maybe_trigger_profile_update", sync)
     seed = MagicMock()
-    monkeypatch.setattr(pb.seed_profile_batch_for_user, "delay", seed)
+    monkeypatch.setattr(pb.seed_profile_batch_for_user, "apply_async", seed)
     hand_off = import_data._hand_off_profile_update_after_import
     cutoffs = [datetime(2026, 1, 10), datetime(2026, 2, 10), datetime(2026, 3, 10)]
 
-    # Batch account (prod): re-tip at v1, seed now, no full regen.
+    # Batch account (prod): re-tip at v1, seed once the imports stop
+    # (#598), no full regen.
     app.config["PROFILE_USE_BATCH"] = True
     u = _make_user("batch_import")
     _db.session.commit()
@@ -758,7 +759,9 @@ def test_import_invalidates_only_the_versions_it_touches(app, monkeypatch):
     assert tip.generation_type == "revert" and tip.parent_profile_id == v[0].id
     assert tip.source_data_cutoff == cutoffs[0] and tip.source_rendered_at is not None
     assert User.query.get(u.id).profile_needs_full_regen is False
-    assert seed.call_args.args == (u.id,) and sync.call_count == 0
+    assert seed.call_args.args[0] == (u.id,) and sync.call_count == 0
+    assert seed.call_args.kwargs == {"countdown": 30 * 60}
+    assert User.query.get(u.id).profile_import_quiet_from is not None
     # v2 and v3 stay as history; the chain now walks copy → v1.
     assert [p.id for p in ex._collect_iterative_chain(tip.id)] == [v[0].id, tip.id]
 
@@ -771,8 +774,7 @@ def test_import_invalidates_only_the_versions_it_touches(app, monkeypatch):
     assert _tip(w).generation_type == "update"                  # nothing re-tipped
 
     # Newer than the tip: nothing invalidated and nothing re-tipped; the
-    # seeding gate is evaluated right away (an immediate seed, whose gates
-    # decide) instead of at the next hourly beat.
+    # seeding gate decides when the deferred seed runs.
     x = _make_user("batch_newer")
     _db.session.commit()
     vx = _chain(x, cutoffs)
@@ -788,10 +790,11 @@ def test_import_invalidates_only_the_versions_it_touches(app, monkeypatch):
     _db.session.commit()
     seed.reset_mock()
     assert hand_off(y, None, 50_000) is None
-    assert seed.call_args.args == (y.id,)
     # An import's seed skips the refusal backoff (#368): a build it
-    # triggers runs even if the profile job is waiting or stopped.
-    assert seed.call_args.kwargs == {"ignore_backoff": True}
+    # triggers runs even if the profile job is waiting or stopped. It
+    # waits for the imports to stop like the hourly seeder (#598).
+    assert seed.call_args.args == (
+        (y.id,), {"ignore_backoff": True, "after_import": True})
     assert User.query.get(y.id).profile_needs_full_regen is False
 
     # Sync account: same decisions, dispatched directly.
@@ -814,6 +817,37 @@ def test_import_invalidates_only_the_versions_it_touches(app, monkeypatch):
     fresh = _make_user("sync_fresh")
     _db.session.commit()
     assert import_data._maybe_update_profile_after_import(fresh.id, None, 50_000) == "gated"
+
+
+def test_the_import_result_says_when_the_profile_waits_for_the_imports(
+        app, monkeypatch):
+    """#598: on the batch path the import's result says that the profile
+    is built once the imports stop, when a build is due; not on the
+    synchronous path, and not before the hand-off marked the import."""
+    from backend.routes import import_data
+    import backend.tasks.exports as ex
+    import backend.tasks.profile_batch as pb
+    monkeypatch.setattr(pb.seed_profile_batch_for_user, "apply_async",
+                        MagicMock())
+    monkeypatch.setattr(ex, "maybe_trigger_profile_update",
+                        MagicMock(return_value="sync-task"))
+    cutoffs = [datetime(2026, 1, 10), datetime(2026, 2, 10)]
+    app.config["PROFILE_USE_BATCH"] = True
+    u = _make_user("waits_batch")
+    _db.session.commit()
+    _chain(u, cutoffs)
+    assert import_data._profile_waits_for_imports(u.id) is False
+    import_data._hand_off_profile_update_after_import(
+        u, datetime(2025, 12, 1), 2_000)          # a rebuild is due
+    assert import_data._profile_waits_for_imports(u.id) is True
+
+    app.config["PROFILE_USE_BATCH"] = False
+    s = _make_user("waits_sync")
+    _db.session.commit()
+    _chain(s, cutoffs)
+    import_data._hand_off_profile_update_after_import(
+        s, datetime(2025, 12, 1), 2_000)
+    assert import_data._profile_waits_for_imports(s.id) is False
 
 
 def test_prefill_impl_imports_pins_batch_and_reports(app, monkeypatch):
@@ -1056,7 +1090,7 @@ def test_import_revert_walks_the_current_chain_not_all_history(app, monkeypatch)
     import backend.tasks.exports as ex
     import backend.tasks.profile_batch as pb
     seed = MagicMock()
-    monkeypatch.setattr(pb.seed_profile_batch_for_user, "delay", seed)
+    monkeypatch.setattr(pb.seed_profile_batch_for_user, "apply_async", seed)
     app.config["PROFILE_USE_BATCH"] = True
     u = _make_user("ladder_import")
     _db.session.commit()
@@ -1076,7 +1110,7 @@ def test_import_revert_walks_the_current_chain_not_all_history(app, monkeypatch)
     import_data._hand_off_profile_update_after_import(u, datetime(2026, 2, 1), 2_000)
     assert User.query.get(u.id).profile_needs_full_regen is True
     assert _tip(u).id == vb.id                                   # nothing re-tipped
-    assert seed.call_args.args == (u.id,)
+    assert seed.call_args.args[0] == (u.id,)
 
     # Cutoff exactly on the earliest imported second: that version is invalid.
     w = _make_user("edge_second")

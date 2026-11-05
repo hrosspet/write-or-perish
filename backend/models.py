@@ -174,6 +174,11 @@ class User(db.Model, UserMixin):
     profile_cap_held = db.Column(
         db.Boolean, nullable=False, default=False,
         server_default=db.text("false"))
+    # When the user's last import finished (or a Twitter import last
+    # committed a batch), while the profile build it leads to waits for
+    # the imports to stop (#598): the batch seeder builds only after
+    # MIN_INACTIVITY with no import and no new entry, and clears it then.
+    profile_import_quiet_from = db.Column(db.DateTime, nullable=True)
     # Measured billed input tokens per stored content unit (Node.token_count)
     # on the user's last profile chunk, tagged with the tokenizer family it
     # was measured on (backend/tasks/exports.TOKENIZER_FAMILIES). The chunk
