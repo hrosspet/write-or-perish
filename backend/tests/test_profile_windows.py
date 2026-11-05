@@ -2091,3 +2091,74 @@ def test_a_public_only_pass_does_not_mark_the_user(world):
     _node(u)
     note_private_read(u)
     assert u.profile_private_read is True
+
+
+# ── accounts someone signed into; the backfill of the mark ───────────────
+# An account that ever uploaded its own archive is private: public-only
+# needs an account nobody has signed into (utils/activity.sign_in_status).
+
+@pytest.mark.parametrize("record", ["last_seen", "terms", "older"])
+def test_an_account_someone_signed_into_is_private(app, record):
+    tweets = {"twitter": {"nodes": 2, "tokens": 20}}
+    u = _prefilled(prefilled_handle="alice")
+    _profile(u, source_origin_stats=tweets)
+    assert pw.writing_is_public_only(u) is True
+    if record == "last_seen":
+        u.last_seen_at = datetime.utcnow()
+    elif record == "terms":
+        u.accepted_terms_at = datetime.utcnow()
+    else:                       # older than the sign-in record: unknown
+        u.created_at = datetime(2026, 8, 1)
+    db.session.commit()
+    assert pw.writing_is_public_only(u) is False
+    assert pw.cross_provider_allowed(u) is False
+
+
+def test_before_the_backfill_only_verified_pre_fills_are_public(app):
+    """The mark starts false for every account from before it: until the
+    backfill runs, an account that someone signed into, with pre-filled
+    tweets and profiles that read only them, is private; a pre-fill
+    nobody signed into is public."""
+    tweets = {"twitter": {"nodes": 2, "tokens": 20}}
+    used = _prefilled(prefilled_handle="alice")
+    _profile(used, source_origin_stats=tweets)
+    used.last_seen_at = datetime(2026, 9, 1)
+    waiting = _prefilled(prefilled_handle="bob")
+    _profile(waiting, source_origin_stats=tweets)
+    db.session.commit()
+    assert used.profile_private_read is False      # not backfilled yet
+    assert pw.writing_is_public_only(used) is False
+    assert pw.writing_is_public_only(waiting) is True
+
+
+def test_the_backfill_marks_what_it_cannot_vouch_for(app):
+    from backend.scripts import backfill_profile_private_read as bf
+    tweets = {"twitter": {"nodes": 2, "tokens": 20}}
+    signed_in = _prefilled(prefilled_handle="a", last_seen_at=T0)
+    deleted_private = _prefilled(prefilled_handle="b")
+    _node(deleted_private, deleted=True)
+    public_loore = _prefilled(prefilled_handle="c",
+                              public_sharing_enabled=True)
+    _node(public_loore, privacy="public")      # public now; before? unknown
+    loore_profile = _prefilled(prefilled_handle="d")
+    _profile(loore_profile, source_origin_stats={"loore": {"nodes": 1,
+                                                           "tokens": 5}})
+    clean = _prefilled(prefilled_handle="e")
+    _profile(clean, source_origin_stats=tweets)
+    empty = _user()                            # a pre-fill still to come
+    already = _user(profile_private_read=True)
+    out = []
+    marked = bf.run(apply=False, out=out.append)
+    assert set(marked) == {signed_in.id, deleted_private.id,
+                           public_loore.id, loore_profile.id}
+    assert "dry run" in out[-1]
+    assert not User.query.filter(User.id.in_(marked),
+                                 User.profile_private_read.is_(True)).count()
+    assert bf.run(apply=True, out=out.append) == marked
+    db.session.expire_all()
+    for uid in marked + [already.id]:
+        assert db.session.get(User, uid).profile_private_read is True
+    for user in (clean, empty):
+        assert db.session.get(User, user.id).profile_private_read is False
+    assert pw.writing_is_public_only(db.session.get(User, clean.id))
+    assert bf.run(apply=True, out=out.append) == []    # idempotent

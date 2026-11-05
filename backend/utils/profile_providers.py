@@ -21,7 +21,7 @@ PUBLIC_PROVENANCES = ("prefill_ca", "prefill_x")
 PREFILL_ORIGIN = "twitter"
 
 
-def entries_public_only(user):
+def entries_public_only(user, public_privacy=True):
     """Whether every entry a build can read for this user is public:
 
     - each entry of the user (their own and the AI replies they own,
@@ -34,12 +34,14 @@ def entries_public_only(user):
       reads the threads the user took part in);
     - no profile prompt is their own.
 
-    A user with no entries is not public-only."""
+    A user with no entries is not public-only. ``public_privacy=False``
+    counts only fetched entries as public (the backfill's reading of the
+    writing before this rule existed)."""
     from backend.utils.privacy import PrivacyLevel
     mine = or_(Node.user_id == user.id, Node.human_owner_id == user.id)
     fetched = func.coalesce(Node.provenance, "").in_(PUBLIC_PROVENANCES)
     public = fetched
-    if user.public_sharing_enabled:
+    if public_privacy and user.public_sharing_enabled:
         public = or_(public, func.coalesce(Node.privacy_level, "")
                      == PrivacyLevel.PUBLIC.value)
     if db.session.query(Node.id).filter(mine).first() is None:
@@ -92,15 +94,51 @@ def profiles_public_only(user):
     return True
 
 
+def never_signed_in(user):
+    """Whether nobody has ever signed into this account, as far as the
+    record can tell (utils/activity.sign_in_status "never"): no sign-in
+    and no terms acceptance on record, on an account newer than that
+    record. An own archive upload needs a signed-in session, so such an
+    account never uploaded one: a pre-fill waiting for its owner, or a
+    lab account built from the Community Archive. Any other account
+    counts as one that may have uploaded its own archive."""
+    from backend.utils.activity import sign_in_status
+    return sign_in_status(user) == "never"
+
+
 def writing_is_public_only(user):
     """Whether everything a build of this user can read is public, so its
-    windows and merges may go to either provider: the user's entries
-    (``entries_public_only``) and every profile row
-    (``profiles_public_only``), and no profile pass has ever read private
-    writing for them (User.profile_private_read, sticky)."""
-    if user.profile_private_read:
+    windows and merges may go to either provider: an account nobody has
+    signed into (``never_signed_in``; an account that ever uploaded its
+    own archive is private), the user's entries (``entries_public_only``)
+    and every profile row (``profiles_public_only``), and no profile pass
+    has ever read private writing for them (User.profile_private_read,
+    sticky; backfilled for the accounts that existed before it,
+    scripts/backfill_profile_private_read.py). Every part only pushes
+    towards private, and none depends on the backfill having run."""
+    if user.profile_private_read or not never_signed_in(user):
         return False
     return entries_public_only(user) and profiles_public_only(user)
+
+
+def needs_private_mark(user):
+    """The backfill's test for an account from before the mark: someone
+    signed in (it may have uploaded its own archive), an entry that is
+    not an unchanged pre-filled tweet (deleted ones included), or a
+    profile row not proven to have read pre-filled tweets alone. An
+    account with no entries and no profile rows that nobody signed into
+    is left unmarked (a pre-fill still to come)."""
+    if not never_signed_in(user):
+        return True
+    has_entries = db.session.query(Node.id).filter(or_(
+        Node.user_id == user.id, Node.human_owner_id == user.id)).first()
+    has_profiles = UserProfile.query.filter_by(user_id=user.id).first()
+    if has_entries is None and has_profiles is None:
+        return False
+    if has_entries is not None and not entries_public_only(
+            user, public_privacy=False):
+        return True
+    return not profiles_public_only(user)
 
 
 def note_private_read(user):

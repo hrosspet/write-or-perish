@@ -417,6 +417,11 @@ Public-only (`utils/profile_providers.writing_is_public_only`, metadata
 only, any doubt counts as private; nothing private may ever have been read
 for the user):
 
+- nobody has ever signed into the account (`utils/activity.sign_in_status`
+  "never": no sign-in or terms acceptance on record, on an account newer
+  than that record), so it never uploaded its own archive: a pre-fill
+  waiting for its owner or a lab account built from the Community
+  Archive. An account that ever uploaded its own archive is private;
 - every entry of the user, deleted ones included, came from the Community
   Archive or the X API (`Node.provenance` `prefill_ca` / `prefill_x`) with
   its text unchanged since (no `NodeVersion` row, which the node route
@@ -431,7 +436,11 @@ for the user):
   record counts as private;
 - `User.profile_private_read` is not set. A batch submission, a saved
   version and a window pass set it for good when the user's entries are
-  not public-only (`note_private_read`), consent or not; nothing clears it. `profile_both_providers`
+  not public-only (`note_private_read`), consent or not; nothing clears it.
+  `backend/scripts/backfill_profile_private_read.py` (dry run by default,
+  `--apply`, metadata only, idempotent) sets it for the accounts from
+  before it that the rules above cannot vouch for. The check does not
+  depend on that run. `profile_both_providers`
 (default false, no UI; #599 asks the question) is the user's consent.
 Without either, every model of a pass is of the provider of the user's
 chat model: checked at boot (`validate_profile_models`), per pass
