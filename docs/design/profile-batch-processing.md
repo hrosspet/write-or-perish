@@ -405,14 +405,46 @@ window of the user goes out in one Batch submission, split into several
 batches only above `PROFILE_BATCH_MAX_BYTES` (100 MB), all submitted in the
 same task run.
 
-**Models.** Per provider of the user's chat model, never another
-provider's: `PROFILE_VERSION_MODEL_ANTHROPIC` / `_OPENAI` (Haiku 5.5 / GPT-6
-Luna) and `PROFILE_MERGE_MODEL_ANTHROPIC` / `_OPENAI` (Opus 5.5 / GPT-6.1
-Sol), checked at boot (`validate_profile_models`) and again per build
-(`profile_models_for`). An OpenAI merge is a Batch request on
-`/v1/responses` with the live call's body and
-`PROFILE_MERGE_REASONING_EFFORT_OPENAI` as `reasoning.effort` (default
+**Models (Peter, 2026-11-05).** Chosen per pass (`pass_models`):
+
+| Pass | Versions | Merges |
+|---|---|---|
+| More than one window, private writing, no consent | `PROFILE_VERSION_MODEL_ANTHROPIC` / `_OPENAI` (Haiku 5.5 / GPT-6 Luna) | `PROFILE_MERGE_MODEL_ANTHROPIC` / `_OPENAI` (Opus 5.5 / GPT-6.1 Sol at `PROFILE_MERGE_REASONING_EFFORT_OPENAI`) |
+| More than one window, public-only writing or `User.profile_both_providers` | `PROFILE_VERSION_MODEL_CROSS_PROVIDER` (GPT-6 Luna) | `PROFILE_MERGE_MODEL_CROSS_PROVIDER` (Opus 5.5) |
+| A regular update of a merged set: one window to read | the user's chat model, chained | the user's chat model |
+
+Public-only (`writing_is_public_only`, metadata only, any doubt counts as
+private): every entry of the user, deleted ones included, came from the
+Community Archive or the X API (`Node.provenance` `prefill_ca` /
+`prefill_x`) or is public while the user shares publicly; no other user's
+entry is a parent or a reply of theirs; no profile version is the user's
+own text and no profile prompt is their own. `profile_both_providers`
+(default false, no UI; #599 asks the question) is the user's consent.
+Without either, every model of a pass is of the provider of the user's
+chat model: checked at boot (`validate_profile_models`), per pass
+(`profile_models_for`) and for every request before it is queued
+(`_Submission.add` raises). An OpenAI merge is a Batch request on
+`/v1/responses` with the live call's body (and, for the provider pair,
+`PROFILE_MERGE_REASONING_EFFORT_OPENAI` as `reasoning.effort`, default
 `high`); windows stay on `/v1/chat/completions`.
+
+**A regular update of a merged set (Peter, 2026-11-05).** When the set's
+only missing range is the writing after its last window, nothing of it is
+in flight, and that range plans into one chunk on the user's chat model
+(`chained_update_base`), the window is not read on its own: the user's
+chat model writes a chained update, main's update prompt
+(`build_update_template`, `build_chunk_prompt`) over the set's newest
+profile and the window. The base is the set's final over its last window,
+or, when the last window is itself a chained update, that version. The
+output is checked for the three maps (no events section) and saved as a
+`window_update` row with `[Covers data through B (N tokens)]`, parent the
+profile it updated. It stands in the window's place in the group and final
+merges, which the chat model runs, and is labelled there as a profile of
+all the writing: "Covers all the writing from <start> to B" and "Updates a
+profile of all the writing up to A with the writing from A to B". A set
+still being built (no final over its last window) reads a retried window
+independently, with the build's models. One window per pass: a remainder
+that did not fit is chained on the new version in the next pass.
 
 **Rows.** `UserProfile.window_set` (12 hex characters) and `covers_start`.
 `window`: one window's version, its text starting with
