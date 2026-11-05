@@ -426,8 +426,9 @@ same task run.
 
 | Pass | Versions | Merges |
 |---|---|---|
+| A from-scratch build that fits one window on the chat model, private writing, no consent (#596) | the user's chat model, with the events paragraph | the user's chat model, single-version prompt |
 | More than one window, private writing, no consent | `PROFILE_VERSION_MODEL_ANTHROPIC` / `_OPENAI` (Haiku 5.5 / GPT-6 Luna) | `PROFILE_MERGE_MODEL_ANTHROPIC` / `_OPENAI` (Opus 5.5 / GPT-6.1 Sol at `PROFILE_MERGE_REASONING_EFFORT_OPENAI`) |
-| More than one window, public-only writing or `User.profile_both_providers` | `PROFILE_VERSION_MODEL_CROSS_PROVIDER` (GPT-6 Luna) | `PROFILE_MERGE_MODEL_CROSS_PROVIDER` (Opus 5.5) |
+| Any from-scratch or multi-window build, public-only writing or `User.profile_both_providers` | `PROFILE_VERSION_MODEL_CROSS_PROVIDER` (GPT-6 Luna) | `PROFILE_MERGE_MODEL_CROSS_PROVIDER` (Opus 5.5; the single-version prompt for one window) |
 | A regular update of a merged set: one window to read | the user's chat model, chained | the user's chat model |
 
 Public-only (`utils/profile_providers.writing_is_public_only`, metadata
@@ -621,28 +622,49 @@ Code: `profile_windows.wants_window_build` / `one_chunk_windows`,
 **When it applies.** A from-scratch build (no update base: a first build, a
 step of the provisional ladder, a full rebuild) that fits one chunk on the
 user's chat model, where the switch of that model's provider is on:
-`PROFILE_ONE_CHUNK_WINDOW_OPENAI` (default on: GPT-6 Luna, then GPT-6.1 Sol)
-and `PROFILE_ONE_CHUNK_WINDOW_ANTHROPIC` (default on: Haiku 5.5, then Opus
-5.5; Peter, 2026-11-03: "yes, we should do the same for Ant"). Peter: "the
-events paragraph is definitely needed" (in one test window, 0 of 3
-plain-prompt Luna versions kept a key recent event the writing states, 2
-of 2 with the paragraph did), and "we need one more step to convert it
-into the final profile".
+`PROFILE_ONE_CHUNK_WINDOW_OPENAI` and `PROFILE_ONE_CHUNK_WINDOW_ANTHROPIC`
+(both default on; Peter, 2026-11-03: "yes, we should do the same for
+Ant"). The switch decides the path only (two steps, or main's one chained
+call); the models come from `pass_models`. Peter: "the events paragraph is
+definitely needed" (in one test window, 0 of 3 plain-prompt Luna versions
+kept a key recent event the writing states, 2 of 2 with the paragraph
+did), and "we need one more step to convert it into the final profile".
 
-**Window counts.** The windows keep #589's sizing at the version model's
-cap. Luna's 272k tier holds every OpenAI one-chunk build in one window.
-Haiku's 100k tier holds about 30.6k units at the tweets ratio (3.1 tokens
-a unit) and about 43.2k at the threads ratio (2.2), so an Anthropic build
-of one Opus chunk (up to 135k units) is one Haiku window and Opus's
-single-version integration below that, else two to five windows (two to
-four at the threads ratio) and the many-version Opus merge. On Anthropic
-the window path then mostly starts at two Haiku windows, which is #595's
-proposal. A chained update that fits one chunk is not affected.
+**Models and window counts (Peter, 2026-11-05).** The window count comes
+from the user's chat model first, as `wants_window_build` decides the path
+(`plan_chunks` at the planner's 90k-unit target and the chat model's cap):
 
-**The build.** A window set of one window, read by the version model with
-the events paragraph, then a final over that one version: two Batch rounds,
-one after the other, so a first profile takes two batch turnarounds instead
-of one. Like every window build it pins the account to Batch.
+- Private writing, no consent, one chunk on the chat model
+  (`one_window_pass`): one window sized for the chat model, read by the
+  chat model, and the single-version integration by the chat model
+  (`single_models_for`; no reasoning-effort parameter on an OpenAI chat
+  model, as the live replies send none). Peter: "for 1 window updates on
+  prod I'd like to use the chained version we just tested, with user
+  preferred model producing both the version and the merge". On Opus 5.5
+  one chunk holds up to about 135k units (the count rounds at 1.5 times
+  the 90k target); on GPT-6 Astra or GPT-6.1 Sol (272k tier) about 108k at
+  the tweets ratio (2.4 tokens a unit) and 135k at the threads prior.
+- Private writing, no consent, two or more chunks on the chat model: the
+  provider's pair, as any large build (Haiku 5.5 windows at its 100k tier
+  and the Opus 5.5 merge; GPT-6 Luna windows and the GPT-6.1 Sol merge).
+- Public-only writing (a pre-fill, the lab) or a user who agreed to both
+  providers: GPT-6 Luna versions and the Opus 5.5 merge at any size, the
+  windows sized for Luna's 272k tier (Peter's rule names "prefill, lab").
+  One Luna window gets Opus's single-version integration; more get the
+  many-version merge.
+- The models are chosen again on each pass: a pre-fill whose owner signs
+  in after Luna read the window counts as private from then on, so its
+  integration runs on the user's chat model.
+
+Before 2026-11-05 this path used each provider's pair (GPT-6 Luna, then
+GPT-6.1 Sol; Haiku 5.5 windows, then Opus 5.5); that is replaced by the
+rules above.
+
+**The build.** A window set of one window (or a few Luna windows for
+public-only writing), read with the events paragraph, then a final over
+that version: two Batch rounds, one after the other, so a first profile
+takes two batch turnarounds instead of one. Like every window build it
+pins the account to Batch.
 
 **The final's prompt.** A final whose only input is one window version (no
 base, no version of the user's) uses `profile_single_integration.txt`: "a
@@ -670,8 +692,9 @@ column says "Stopped: every window of the profile build was given up".
 **Later builds.** A set below one full chunk is provisional: the ladder
 rebuilds it from scratch at its next step (a new set), and the 80k gate
 does not add windows to it. From one full chunk on, its updates are the
-set's (one more window, a final over all windows with the many-version
-prompt), as for a large build.
+set's: a regular one-window update is a chained update by the user's chat
+model in the window's place, and the chat model merges the window and the
+chained version with the many-version prompt (#589's rule of 2026-11-05).
 
 **Live check, 2026-11-03** (window 23's two events versions, standard API,
 $0.26): with the single-version prompt, Sol at high effort and Opus each
