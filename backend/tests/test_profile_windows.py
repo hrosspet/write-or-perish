@@ -62,6 +62,7 @@ class Corpus:
         self.renders = []
         self.hot = set()   # row timestamps that render 10x their units
         self.silent = set()   # rows that are counted but render nothing
+        self.origin = "loore"   # the rows' origin in the chunk's stats
 
     def add(self, n, units=1000, start=None, step=timedelta(hours=1)):
         start = start or (self.rows[-1][0] + step)
@@ -95,8 +96,8 @@ class Corpus:
                 "latest_node_created_at": picked[-1][0],
                 "earliest_node_created_at": picked[0][0],
                 "node_count": len(picked), "node_ids": set(),
-                "origin_stats": {"loore": {"nodes": len(picked),
-                                           "tokens": total}}}
+                "origin_stats": {self.origin: {"nodes": len(picked),
+                                               "tokens": total}}}
 
 
 class Provider:
@@ -1634,8 +1635,9 @@ def test_the_estimate_for_a_large_anthropic_build(app, world):
 
 
 # ── 14. a from-scratch build that fits one chunk (Peter, 2026-11-03) ──────
-# One window version (with the events paragraph) and one integration of it
-# by the merge model, where the provider's PROFILE_ONE_CHUNK_WINDOW_* is on.
+# One window version (with the events paragraph) and one integration of it,
+# where the provider's PROFILE_ONE_CHUNK_WINDOW_* is on. Private writing:
+# the user's chat model for both steps (Peter, 2026-11-05).
 
 def _one_chunk_user(app, **kw):
     """An OpenAI user with a from-scratch build due, the OpenAI switch on
@@ -1661,7 +1663,7 @@ def test_a_one_chunk_build_is_one_window_and_its_integration(app, world):
     assert pw.wants_window_build(u)
     _advance(u)
     reqs = world.provider.requests()
-    assert len(reqs) == 1 and reqs[0]["api_model"] == "gpt-6-luna"
+    assert len(reqs) == 1 and reqs[0]["api_model"] == "gpt-6-astra"
     assert ex.EVENTS_IN_WINDOW_PARAGRAPH in (
         reqs[0]["messages"][0]["content"][0]["text"])
     assert _items("window")[0]["total"] == 1
@@ -1674,8 +1676,10 @@ def test_a_one_chunk_build_is_one_window_and_its_integration(app, world):
     final_reqs = [r for r in _all_requests(world) if "_f_" in r["custom_id"]]
     assert len(final_reqs) == 1
     req = final_reqs[0]
-    assert req["api_model"] == "gpt-6.1-sol"
+    assert req["api_model"] == "gpt-6-astra"
     assert req["endpoint"] == "/v1/responses"
+    # No reasoning effort on the chat model, as the live replies send.
+    assert "reasoning_effort" not in req
     msgs = req["messages"]
     assert msgs == pw._exports.single_integration_messages(u.id, windows[0])
     assert len(msgs) == 2
@@ -1692,16 +1696,15 @@ def test_a_one_chunk_build_is_one_window_and_its_integration(app, world):
     f = finals[0]
     assert (f.window_set, f.parent_profile_id) == (
         windows[0].window_set, windows[0].id)
-    assert f.generated_by == "gpt-6.1-sol"
+    assert f.generated_by == "gpt-6-astra"
     assert f.source_tokens_used == windows[0].source_tokens_used == 50_000
     assert get_latest_profile(u)["id"] == f.id
     # Done: nothing more goes out.
     n = len(world.provider.submits)
     _advance(u)
     assert len(world.provider.submits) == n
-    # The user's writing reached their own provider's models only.
-    assert {r["api_model"] for r in _all_requests(world)} == {
-        "gpt-6-luna", "gpt-6.1-sol"}
+    # The user's writing reached their own chat model only.
+    assert {r["api_model"] for r in _all_requests(world)} == {"gpt-6-astra"}
 
 
 def test_the_one_chunk_switch_is_per_provider(app, world):
@@ -1744,51 +1747,65 @@ def test_the_shipped_one_chunk_defaults(app, world, monkeypatch):
         assert u.profile_batch_pending and u.profile_force_batch
 
 
-@pytest.mark.parametrize("units_k, ratio, windows", [
-    (30, 3.1, 1),      # under one Haiku window at the tweets ratio
-    (31, 3.1, 2),
-    (100, 3.1, 4),
-    (134, 3.1, 5),     # the largest one-chunk build on Opus
-    (40, None, 1),     # the threads prior (2.2): about 43.2k a window
+@pytest.mark.parametrize("units_k, ratio", [
+    (30, 3.1), (31, 3.1), (100, 3.1),
+    (134, 3.1),        # the largest one-chunk build on Opus
+    (40, None),        # the threads prior
 ])
-def test_an_anthropic_one_chunk_build_in_haiku_windows(
-        app, world, units_k, ratio, windows):
-    """Haiku windows keep #589's sizing at its 100k-token tier (about 30.6k
-    units at the tweets ratio). A build of one Opus chunk is one Haiku
-    window and Opus's single-version integration below that, else two to
-    five windows and the many-version Opus merge."""
-    from backend.utils.chunk_plan import max_units_for_cap
+def test_an_anthropic_one_chunk_build_is_one_window_on_the_chat_model(
+        app, world, units_k, ratio):
+    """A build that fits one chunk on the chat model (Opus 5.5, rounded at
+    the planner's 90k target) is one window on Opus and Opus's
+    single-version integration (Peter, 2026-11-05: the user's model
+    writes both), at any size up to that chunk; no Haiku window."""
     app.config["PROFILE_ONE_CHUNK_WINDOW_ANTHROPIC"] = True
     app.config["PROFILE_MERGE_STRUCTURE"] = "flat"
     kw = ({"profile_token_ratio": ratio,
            "profile_token_ratio_family": "claude_new"} if ratio else {})
     u = _user(profile_needs_full_regen=True, **kw)
     world.corpus = Corpus(units_k)
-    if ratio == 3.1:
-        assert round(max_units_for_cap(100_000, ratio)) == 30_645
-    # One chunk on the chat model (Opus): the switch decides.
+    # One chunk on the chat model (Opus): the switch decides the path.
     assert pw.wants_window_build(u)
     app.config["PROFILE_ONE_CHUNK_WINDOW_ANTHROPIC"] = False
     assert not pw.wants_window_build(u)
     app.config["PROFILE_ONE_CHUNK_WINDOW_ANTHROPIC"] = True
     _advance(u)
     window_reqs = world.provider.requests()
-    assert len(window_reqs) == windows
-    assert {r["api_model"] for r in window_reqs} == {"claude-haiku-5-5"}
+    assert len(window_reqs) == 1
+    assert window_reqs[0]["api_model"] == "claude-opus-5-5"
+    assert _items("window")[0]["units"] == units_k * 1000
     _poll()
-    rows = _rows(u, "window")
-    assert len(rows) == windows
+    [row] = _rows(u, "window")
     _advance(u)
     final = [r for r in _all_requests(world) if "_f_" in r["custom_id"]]
     assert len(final) == 1 and final[0]["api_model"] == "claude-opus-5-5"
-    if windows == 1:
-        assert final[0]["messages"] == (
-            pw._exports.single_integration_messages(u.id, rows[0]))
-    else:
-        assert final[0]["messages"] == pw._exports._integration_messages(
-            u.id, rows, independent=True)
+    assert final[0]["messages"] == (
+        pw._exports.single_integration_messages(u.id, row))
     _poll()
     assert len(_finals(u)) == 1
+    assert {r["api_model"] for r in _all_requests(world)} == {
+        "claude-opus-5-5"}
+
+
+def test_a_build_of_two_chat_model_chunks_takes_the_providers_pair(
+        app, world):
+    """Just above one Opus chunk (136k units round to two) the build has
+    more than one window: Haiku windows at its 100k tier and the Opus
+    merge of several versions (#589's rule for private writing)."""
+    app.config["PROFILE_ONE_CHUNK_WINDOW_ANTHROPIC"] = True
+    app.config["PROFILE_MERGE_STRUCTURE"] = "flat"
+    u = _user(profile_needs_full_regen=True, profile_token_ratio=3.1,
+              profile_token_ratio_family="claude_new")
+    world.corpus = Corpus(136)
+    _finish(world, u)
+    windows = [r for r in _all_requests(world) if "_w" in r["custom_id"]]
+    assert len(windows) == 5
+    assert {r["api_model"] for r in windows} == {"claude-haiku-5-5"}
+    [final] = [r for r in _all_requests(world) if "_f_" in r["custom_id"]]
+    assert final["api_model"] == "claude-opus-5-5"
+    rows = _rows(u, "window")
+    assert final["messages"] == pw._exports._integration_messages(
+        u.id, rows, independent=True)
 
 
 def test_the_sync_task_hands_a_one_chunk_build_to_the_advance(app, world):
@@ -1797,7 +1814,7 @@ def test_the_sync_task_hands_a_one_chunk_build_to_the_advance(app, world):
     result = ex.window_hand_off(u, "sync-task-1")
     assert result is not None and result["status"] == "completed"
     assert [r["api_model"] for r in world.provider.requests()] == [
-        "gpt-6-luna"]
+        "gpt-6-astra"]
 
 
 def test_a_chained_one_chunk_update_stays_chained_with_the_switch_on(
@@ -2011,8 +2028,9 @@ def test_a_one_window_build_whose_window_is_given_up_sends_no_final(
     assert not pw.set_work_due(u, ex.profile_update_base(u.id))
 
 
-def _other_batch(provider_key="openai:gpt-6-luna"):
-    """Another account's batch of ours, pending in the same queue."""
+def _other_batch(provider_key="openai:gpt-6-astra"):
+    """Another account's batch of ours, pending in the same queue (the
+    one-chunk user's chat model, GPT-6 Astra, reads the window)."""
     other = _user()
     job = ProfileBatchJob(
         provider_key=provider_key, batch_id="other", status="pending",
@@ -2146,7 +2164,7 @@ def test_an_unactivated_prefills_window_sent_back_by_a_full_queue_is_resent(
     db.session.refresh(u)
     assert u.profile_work_held is False and u.profile_batch_pending
     assert [r["api_model"] for r in world.provider.requests()] == [
-        "gpt-6-luna"]
+        "gpt-6-astra"]
 
 
 def _unactivated_prefill(app):
@@ -3580,3 +3598,136 @@ def test_the_backfill_marks_what_it_cannot_vouch_for(app):
         assert db.session.get(User, user.id).profile_private_read is False
     assert pw.writing_is_public_only(db.session.get(User, clean.id))
     assert bf.run(apply=True, out=out.append) == []    # idempotent
+
+
+# ── #596's paths under the rules of 2026-11-05: the hard line ────────────
+# A one-window build from scratch and a small build of more than one
+# window, for an Anthropic and an OpenAI user with private writing: every
+# request goes to the user's own provider. A public-only pre-fill: GPT-6
+# Luna versions and the Opus 5.5 integration, at any size. When in doubt
+# (the owner signed in before the final), private.
+
+def _one_chunk_switches(app):
+    app.config["PROFILE_ONE_CHUNK_WINDOW_OPENAI"] = True
+    app.config["PROFILE_ONE_CHUNK_WINDOW_ANTHROPIC"] = True
+    app.config["PROFILE_MERGE_STRUCTURE"] = "flat"
+
+
+@pytest.mark.parametrize("chat, provider", [
+    ("gpt-6-astra", "openai"), (None, "anthropic")])
+def test_a_private_one_window_build_stays_on_the_chat_model(
+        app, world, chat, provider):
+    _one_chunk_switches(app)
+    u = _user(preferred_model=chat, profile_needs_full_regen=True)
+    _node(u)                                   # one private entry
+    assert not pw.cross_provider_allowed(u)
+    world.corpus = Corpus(50)
+    _finish(world, u)
+    chat_model = chat or "claude-opus-5.5"
+    reqs = _all_reqs(world)
+    assert {p for p, _r in reqs} == {provider}
+    assert {r["model_id"] for _p, r in reqs} == {chat_model}
+    [window] = [r for _p, r in reqs if "_w" in r["custom_id"]]
+    assert ex.EVENTS_IN_WINDOW_PARAGRAPH in (
+        window["messages"][0]["content"][0]["text"])
+    [final] = [r for _p, r in reqs if "_f_" in r["custom_id"]]
+    [row] = _rows(u, "window")
+    assert final["messages"] == ex.single_integration_messages(u.id, row)
+    assert "reasoning_effort" not in final
+    [profile] = _finals(u)
+    assert profile.generated_by == chat_model
+    db.session.refresh(u)
+    assert u.profile_private_read is True
+
+
+@pytest.mark.parametrize("chat, provider, version, merge", [
+    ("gpt-6-astra", "openai", "gpt-6-luna", "gpt-6.1-sol"),
+    (None, "anthropic", "claude-haiku-5.5", "claude-opus-5.5")])
+def test_a_private_small_multi_window_build_stays_on_its_provider(
+        app, world, chat, provider, version, merge):
+    """Two chunks on the chat model (140k units): the provider's pair."""
+    _one_chunk_switches(app)
+    u = _user(preferred_model=chat, profile_needs_full_regen=True)
+    _node(u)
+    world.corpus = Corpus(140)
+    assert pw.wants_window_build(u)
+    assert not pw.one_window_pass(u, pw.set_state(u, "s", None))
+    _finish(world, u)
+    reqs = _all_reqs(world)
+    assert {p for p, _r in reqs} == {provider}
+    windows = [r for _p, r in reqs if "_w" in r["custom_id"]]
+    merges = [r for _p, r in reqs if "_w" not in r["custom_id"]]
+    assert len(windows) >= 2
+    assert {r["model_id"] for r in windows} == {version}
+    assert {r["model_id"] for r in merges} == {merge}
+    assert len(_finals(u)) == 1
+
+
+def _public_prefill(world, monkeypatch, units_k, **kw):
+    """A pre-filled account nobody signed into, whose writing is tweets
+    Loore fetched (public only), with ``units_k`` thousand units."""
+    import backend.utils.email as email
+    monkeypatch.setattr(email, "send_admin_prefill_complete_notification",
+                        lambda *a, **k: None)
+    u = _prefilled(profile_needs_full_regen=True, prefilled_handle="someone",
+                   **kw)
+    world.corpus = Corpus(units_k)
+    world.corpus.origin = "twitter"            # pre-filled tweets
+    return u
+
+
+@pytest.mark.parametrize("chat, units_k, ratio, n_windows", [
+    ("gpt-6-astra", 50, None, 1),   # one window: Opus, single-version
+    (None, 50, None, 1),
+    (None, 130, 2.4, 2),            # one Opus chunk, two Luna windows
+])
+def test_a_public_only_prefill_takes_luna_and_opus(
+        app, world, monkeypatch, chat, units_k, ratio, n_windows):
+    """Rule 2 names pre-fills and the lab: GPT-6 Luna for versions, Opus
+    5.5 for merges, also when the writing fits one chunk on the chat
+    model (no Sol, and not the chat model). The windows are sized for
+    Luna."""
+    _one_chunk_switches(app)
+    kw = ({"profile_token_ratio": ratio,
+           "profile_token_ratio_family": "o200k"} if ratio else {})
+    u = _public_prefill(world, monkeypatch, units_k, preferred_model=chat,
+                        **kw)
+    assert pw.cross_provider_allowed(u)
+    assert pw.wants_window_build(u)
+    _finish(world, u)
+    reqs = _all_reqs(world)
+    windows = {(p, r["model_id"]) for p, r in reqs if "_w" in r["custom_id"]}
+    assert windows == {("openai", "gpt-6-luna")}
+    assert len(_rows(u, "window")) == n_windows
+    [final] = [(p, r) for p, r in reqs if "_f_" in r["custom_id"]]
+    assert (final[0], final[1]["model_id"]) == ("anthropic",
+                                                "claude-opus-5.5")
+    assert "reasoning_effort" not in final[1]
+    rows = _rows(u, "window")
+    expected = (ex.single_integration_messages(u.id, rows[0])
+                if n_windows == 1 else
+                ex._integration_messages(u.id, rows, independent=True))
+    assert final[1]["messages"] == expected
+    db.session.refresh(u)
+    assert u.profile_private_read is False
+
+
+def test_a_prefill_signed_into_before_its_final_is_integrated_privately(
+        app, world, monkeypatch):
+    """When in doubt, private: the owner of an OpenAI pre-fill signs in
+    after Luna read the window, so the integration runs on their chat
+    model, never on Opus."""
+    _one_chunk_switches(app)
+    u = _public_prefill(world, monkeypatch, 50, preferred_model="gpt-6-astra")
+    _advance(u)
+    assert {(p, r["model_id"]) for p, r in _all_reqs(world)} == {
+        ("openai", "gpt-6-luna")}
+    _poll()
+    u.last_seen_at = datetime.utcnow()         # someone signed in
+    db.session.commit()
+    assert not pw.cross_provider_allowed(u)
+    n = len(world.provider.submits)
+    _advance(u)
+    [final] = _all_reqs(world, n)
+    assert final[0] == "openai" and final[1]["model_id"] == "gpt-6-astra"
+    assert "_f_" in final[1]["custom_id"]

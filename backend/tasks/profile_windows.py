@@ -25,27 +25,33 @@ out one Batch round trip at a time. Instead:
 - Later updates of such a profile add windows to the same set and redo
   only the newest group and the final.
 
-Which models read the writing (Peter, 2026-11-05):
+A from-scratch build that fits ONE chunk on the user's chat model takes
+this path too where its provider's PROFILE_ONE_CHUNK_WINDOW_* is on
+(Peter, 2026-11-03; both on by default): its writing is read as a window
+version with the events paragraph, and a final rewrites that version as
+the profile with the single-version integration prompt
+(exports.single_integration_messages). Two Batch rounds, one after the
+other. Later updates are the set's, as for a large build.
 
-- A pass with more than one window to read: the version and merge models
-  of the provider of the user's chat model (Haiku 5.5 and Opus 5.5, or
-  GPT-6 Luna and GPT-6.1 Sol at high effort), unless every entry the
-  build can read is public (a pre-fill, the lab) or the user agreed to
-  both providers (User.profile_both_providers): then GPT-6 Luna writes the
-  versions and Opus 5.5 merges them (``profile_models_for``).
+Which models read the writing (Peter, 2026-11-05), chosen per pass
+(``pass_models``):
+
+- A from-scratch build that fits one window on the user's chat model,
+  writing that may reach only the user's provider: the chat model reads
+  the window and writes the final (``one_window_pass``,
+  ``single_models_for``).
+- More than one window, writing that may reach only the user's provider:
+  the version and merge models of the provider of the user's chat model
+  (Haiku 5.5 and Opus 5.5, or GPT-6 Luna and GPT-6.1 Sol at high effort).
+- Every entry the build can read is public (a pre-fill, the lab) or the
+  user agreed to both providers (User.profile_both_providers): GPT-6 Luna
+  writes the versions and Opus 5.5 merges them, whatever the number of
+  windows (``profile_models_for`` with ``cross``).
 - A regular update of a merged set, one window to read: the user's chat
   model writes a chained update of the set's newest profile (the update
   prompt, as main's chained path), which stands in the window's place, and
   the same model runs the group and final merges after it
   (``chained_update_base``, ``chained_models_for``).
-
-A from-scratch build that fits ONE chunk on the user's chat model takes
-this path too where its provider's PROFILE_ONE_CHUNK_WINDOW_* is on
-(Peter, 2026-11-03; both on by default): one window read with the events
-paragraph, and a final that rewrites that one version as the profile with
-the single-version integration prompt (exports.single_integration_messages).
-Two Batch rounds, one after the other. Later updates are the set's, as for
-a large build.
 
 Without public-only writing or the user's consent, a user's writing
 reaches only models of their own chat model's provider: checked at boot,
@@ -187,10 +193,13 @@ def enabled():
 
 
 def one_chunk_windows(user):
-    """Whether a from-scratch build of this user that fits one chunk is a
-    one-window set: PROFILE_ONE_CHUNK_WINDOW_<PROVIDER> of the provider of
-    the user's chat model. An app config without the key has it off, as
-    has a provider without profile models."""
+    """Whether a from-scratch build of this user that fits one chunk on
+    their chat model takes the window path (a window version with the
+    events paragraph, then the single-version integration) rather than
+    main's one chained call: PROFILE_ONE_CHUNK_WINDOW_<PROVIDER> of the
+    provider of the user's chat model. It decides the path only; the
+    models come from ``pass_models``. An app config without the key has
+    it off, as has a provider without profile models."""
     supported = current_app.config.get("SUPPORTED_MODELS") or {}
     provider = (supported.get(_batch._model_for(user)) or {}).get("provider")
     if provider not in ("anthropic", "openai"):
@@ -247,8 +256,24 @@ def chained_models_for(user):
                   chained=True)
 
 
+def single_models_for(user):
+    """A from-scratch build that fits one window on the user's chat model,
+    over writing that may reach only the user's provider: the chat model
+    reads the window, with the events paragraph, and rewrites that version
+    as the profile with the single-version prompt. Peter, 2026-11-05: "for
+    1 window updates on prod I'd like to use the chained version we just
+    tested, with user preferred model producing both the version and the
+    merge"; 2026-11-03: "the events paragraph is definitely needed" and
+    "then we need one more step to convert it into the final profile". No
+    reasoning-effort parameter on an OpenAI chat model, as for the merges
+    after a regular update (the live replies send none)."""
+    chat_model = _batch._model_for(user)
+    return Models(_users_provider(user), chat_model, chat_model)
+
+
 def profile_models_for(user, cross=False):
-    """The version and merge models for a pass with more than one window.
+    """The version and merge models for a pass with more than one window,
+    and with ``cross`` for any window pass that is not a regular update.
     By default the settings of the provider of the user's chat model
     (``default_model_for``): each must be that provider's model, anything
     else raises, so a user's writing never reaches another provider (also
@@ -599,15 +624,55 @@ def chained_update_base(user, state, fresh):
     return base if k == 1 else None
 
 
+def _fits_one_chat_window(user, units):
+    """Whether ``units`` of writing plan into one chunk on the user's chat
+    model, as the chained path plans it (and wants_window_build)."""
+    chat_model = _batch._model_for(user)
+    k, _size = plan_chunks(units, max_units=max_units_for_cap(
+        _cap(chat_model), _exports.tokens_per_unit(user, chat_model)))
+    return k == 1
+
+
+def one_window_pass(user, state):
+    """Whether this pass belongs to a from-scratch build (no base) that
+    fits one window on the user's chat model: all its writing is still to
+    read and plans into one chunk on the chat model (the window pass), or
+    its one window is saved or in flight, starts at the first writing,
+    covers no more than one such chunk, and nothing more is to read (the
+    final). The count comes from the chat model, as wants_window_build
+    decides the path, so the window is sized for the chat model too. A
+    build of more, or one that a blocked range cut into several windows,
+    is not one."""
+    if state.base is not None:
+        return False
+    if not state.entries:
+        if len(state.due) != 1:
+            return False
+        start, end, units = state.due[0]
+        return (start is None and end is None
+                and _fits_one_chat_window(user, units))
+    if len(state.entries) != 1 or state.due:
+        return False
+    entry = state.entries[0]
+    return (entry.start is None
+            and _fits_one_chat_window(user, entry.cumulative or 0))
+
+
 def pass_models(user, state, chained_base, cross):
-    """The models of this pass: the user's chat model for a regular update
-    (``chained_base``) and for the merges after one (the set's last window
-    is a chained version), else the version and merge models of
-    ``profile_models_for``."""
+    """The models of this pass (Peter, 2026-11-05): the user's chat model
+    for a regular update (``chained_base``) and for the merges after one
+    (the set's last window is a chained version); the chat model for both
+    steps of a from-scratch build that fits one window on it, unless the
+    writing may reach both providers (``one_window_pass``); else the
+    version and merge models of ``profile_models_for``: the user's
+    provider's pair, or Luna and Opus for public-only writing or a user
+    who agreed to both providers, whatever the number of windows."""
     if chained_base is not None or (
             not state.due and state.windows
             and state.windows[-1].generation_type == CHAINED_TYPE):
         return chained_models_for(user)
+    if not cross and one_window_pass(user, state):
+        return single_models_for(user)
     return profile_models_for(user, cross=cross)
 
 

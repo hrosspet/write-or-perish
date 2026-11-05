@@ -1731,8 +1731,10 @@ def _integration_messages(user_id, chain, cumulative=False,
 
 # The integration of a window set that holds ONE window and nothing else
 # (Peter, 2026-11-03): a from-scratch build that fits one chunk is read as
-# one window version (events paragraph included), and the merge model
-# rewrites that version as the profile. The many-version prompt speaks of
+# one window version (events paragraph included), and a second call
+# rewrites that version as the profile: the user's chat model, or Opus 5.5
+# for public-only writing or a user who agreed to both providers
+# (profile_windows.pass_models, 2026-11-05). The many-version prompt speaks of
 # "a series of profile updates" of 80k-110k tokens each and of their
 # trajectory, wording that leaked into 2 of 6 single-version finals, and it
 # asks to keep the inputs' structure, which kept the events list as a

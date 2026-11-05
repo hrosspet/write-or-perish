@@ -153,18 +153,17 @@ class Config:
         os.environ.get("PROFILE_MERGE_MODEL_CROSS_PROVIDER")
         or "claude-opus-5.5")
     # A from-scratch build that fits ONE chunk on the user's chat model,
-    # per provider of that chat model (Peter, 2026-11-03): on, it is a
-    # window set of one window (the version model, with the events
-    # paragraph) and one integration of that version by the merge model
-    # (profile_single_integration.txt), which is the user's profile. Off,
-    # it is one call on the chat model with the plain generation prompt,
-    # as before. Both on (Peter, 2026-11-03: "yes, we should do the same
-    # for Ant"). OpenAI: GPT-6 Luna, then GPT-6.1 Sol. Anthropic: Haiku
-    # 5.5 windows at its 100k-token tier (about 30.6k units at the tweets
-    # ratio, 43k at the threads ratio), so a build of one Opus chunk (up
-    # to 135k units) is one Haiku window and Opus's single-version
-    # integration below that, else 2-5 windows and the many-version Opus
-    # merge. Updates of a chained profile are not affected.
+    # per provider of that chat model (Peter, 2026-11-03): on, it is read
+    # as a window version with the events paragraph and then rewritten as
+    # the profile with the single-version prompt
+    # (profile_single_integration.txt), two Batch rounds; off, it is one
+    # call on the chat model with the plain generation prompt, as before.
+    # Both on (Peter, 2026-11-03: "yes, we should do the same for Ant").
+    # The switch decides the path only; the models come from the rules of
+    # 2026-11-05 (profile_windows.pass_models): the user's chat model for
+    # both steps, or, when every entry is public or the user agreed to
+    # both providers, the cross-provider pair above. Updates of a chained
+    # profile are not affected.
     PROFILE_ONE_CHUNK_WINDOW_OPENAI = (
         os.environ.get("PROFILE_ONE_CHUNK_WINDOW_OPENAI") or "true"
     ).lower() in ("1", "true", "yes")
