@@ -197,6 +197,29 @@ Key properties:
 - **Reuses PR #181's rule**: clear `profile_needs_full_regen` after the first
   committed chunk (here, the poller does it instead of the inline loop).
 
+**An import's build waits for the imports to stop (#598, Peter
+2026-11-05).** On the batch path an import does not seed at once. Its
+hand-off (`routes/import_data._hand_off_profile_update_after_import`)
+still invalidates what the import touches (re-tip or the regen flag), then
+`seed_after_import` records `User.profile_import_quiet_from` and schedules
+one seed (`seed_profile_batch_for_user`, `after_import=True`) for
+`MIN_INACTIVITY` (30 minutes, the existing inactivity window) later. The
+hourly pass and that seed build nothing while `import_settling`: a ChatGPT
+or Claude import is running (its lock is fresh), or the last import
+finished, or an entry was written in Loore after it, less than 30 minutes
+ago (imported entries keep their own dates, so the newest entry alone does
+not show an import). A Twitter import marks the time at its start and
+after each committed batch. Once the imports are quiet the mark is cleared
+and the usual gates decide. A second import inside the window marks again
+and schedules its own seed; the first one's seed then finds the imports
+settling and does nothing, so both imports go into one build. The window
+advance (`next_work`) holds a set's windows and merges the same way. The
+admin's Build profile and a pre-fill seed at once, and the synchronous path
+(accounts off the batch path) dispatches at once as before. The import's
+result carries `profile_waits_for_imports` when a build is due, and the
+import dialog says the profile will be built once the user has stopped
+importing for 30 minutes.
+
 ## Accounting
 
 `batch_check_and_collect` returns real `input_tokens`/`output_tokens` per item,
