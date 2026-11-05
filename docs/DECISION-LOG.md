@@ -2610,6 +2610,99 @@ Kinds (one per entry and per table row):
 - **Applies to:** #589, #598
 - **Rule:** candidate: before proposing a new threshold, look for the one the code already uses for the same kind of wait.
 
+### 2026-11-05 · Testing the Opus finals and the merge prompt
+
+- **Kind:** testing
+- **Situation:** after the Opus-versions runs, proposed a free check of the Opus finals on the sensitive passages and the Shadow Map's tone, and a test of two merge-prompt changes (a recency rule and longer sections), four merges each on Batch, about $2–3.
+- **Prediction:** the free check (85 %); the merge-prompt test (65 %).
+- **Peter:** "1 and 2: yes"
+- **Score:** hit + hit.
+- **Source:** Claude Code session 2026-11-05 (Opus 5.5)
+- **Applies to:** #589
+
+### 2026-11-05 · Three more merges of the Opus versions
+
+- **Kind:** testing
+- **Situation:** the core-fact gap between prod and the Opus-windows final was within the variation of a single merge. Offered three more merges of the same 26 versions, about $0.75.
+- **Prediction:** yes (60 %).
+- **Peter:** "yes pls, run it"
+- **Score:** hit. The four merges spread over 6 core facts; their mean matched prod.
+- **Source:** Claude Code session 2026-11-05 (Opus 5.5)
+- **Applies to:** #589
+
+### 2026-11-05 · The version model for imports when only one provider may be used
+
+- **Kind:** cost
+- **Situation:** Opus 5.5 versions matched prod on facts and had none of Haiku's misreadings, but cost about $50 once for a 14M-unit import against about $7 with Haiku. Recommended Opus versions for Anthropic users.
+- **Prediction:** Opus versions for everything (45 %); Haiku for imports, Opus for writing done in Loore (25 %).
+- **Peter:** "I'd keep haiku 5.5 for users, who didn't allow both providers. It's for imports only anyway. Regular prod updates will get Opus in that case"
+- **Score:** miss.
+- **Why it missed:** weighed facts per window over a one-time cost; Peter's frame is that imports are a one-time background read and regular updates carry the quality.
+- **Source:** Claude Code session 2026-11-05 (Opus 5.5)
+- **Applies to:** #589, #596
+
+### 2026-11-05 · An OpenAI user's preferred model
+
+- **Kind:** provider
+- **Situation:** describing the single-provider path for OpenAI users, stated that "the user's preferred model" would mean GPT-6.1 Sol versions.
+- **Decision:** treated Sol as an OpenAI user's preferred model.
+- **Peter:** "you are getting this repeatedly wrong. Sol is not likely to be set as a user preferred model. Astra is the frontier model and I'm confident it will get it approx similarly well as Opus 5.5"
+- **Score:** miss.
+- **Why it missed:** equated the model #589 uses for OpenAI merges with the model users choose; GPT-6 Astra is the OpenAI counterpart of Opus 5.5.
+- **Source:** Claude Code session 2026-11-05 (Opus 5.5)
+- **Applies to:** #589
+
+### 2026-11-05 · The merge of a one-window chained update
+
+- **Kind:** product scope
+- **Situation:** Peter wants one-window updates chained, with the user's preferred model writing the version and the merge. A large profile has too many versions for one integration call. Options: (a) #589's group and final merges with the chained version in place of an independent one; (b) a two-input merge; (c) no merge.
+- **Prediction:** (a), recommended (50 %).
+- **Peter:** "a)"
+- **Score:** hit.
+- **Source:** Claude Code session 2026-11-05 (Opus 5.5)
+- **Applies to:** #589
+
+### 2026-11-05 · The merge of a one-window chained update: ask or decide
+
+- **Kind:** escalation
+- **Situation:** as in the entry before.
+- **Decision:** asked Peter instead of deciding.
+- **Peter:** "log this as a miss, I think it was clear and it was also your recommendation, you shouldn't have need to ask me" · "you should also log a hit with your recommendation of (a) to be fair. You predicted it correctly to be the best option, you should just have been more confident and not escalate it to me"
+- **Score:** miss.
+- **Why it missed:** the recommendation followed from his rules; low confidence (50 %) was read as a reason to ask.
+- **Source:** Claude Code session 2026-11-05 (Opus 5.5)
+- **Applies to:** #589
+
+### 2026-11-05 · #596 follows the new rules after #589
+
+- **Kind:** process
+- **Situation:** #596 (built in another session, stacked on #589) hardcoded Haiku windows for small Anthropic builds and Luna then Sol for the lab. Recommended building the new rules into #589 first and then updating #596.
+- **Prediction:** update #596 after #589 (55 %).
+- **Peter:** "yes to both"
+- **Score:** hit.
+- **Source:** Claude Code session 2026-11-05 (Opus 5.5)
+- **Applies to:** #589, #596
+
+### 2026-11-05 · Only the newest chained version in the merges
+
+- **Kind:** product scope
+- **Situation:** the #589 builder kept every chained version of the regular updates in later group and final merges. Overrode it: only the newest chained version, to keep the merge input bounded.
+- **Decision:** only the newest chained version takes part in merges (sent to the builder; nothing was pushed).
+- **Peter:** "no, this is wrong. The last version of a chain is heavily biased towards the last window. All chained versions should go to the merge"
+- **Score:** miss. The builder's original choice stands.
+- **Why it missed:** treated a chained version as a summary of all the writing; the integration step was added on 2026-02-24 because the last chained version over-indexes on the most recent chunk.
+- **Source:** Claude Code session 2026-11-05 (Opus 5.5)
+- **Applies to:** #589
+
+### 2026-11-05 · Starting the lab during a provider policy review
+
+- **Kind:** release/ops
+- **Situation:** the stopped lab VM had to be started to read batch metadata for a provider support request. Its worker could have run queued tasks that call the provider. Asked whether to start it.
+- **Prediction:** start it (70 %).
+- **Peter:** "the jobs should have already finished on lab and the regular ones should be turned off · start the lab, check this is correct, and then pls proceed"
+- **Score:** hit. The lab's profile driver was still enabled at boot; it ran for 6 seconds and sent nothing. It is now disabled.
+- **Source:** Claude Code session 2026-11-05 (Opus 5.5)
+
 ## Decided by the builder
 
 Choices that agents flagged in PRs and that the builder decided because a rule above already covers them (Peter, 2026-10-02: decide what the log supports, raise only real judgement calls). Each is also recorded on its PR, or in the session where Peter asked. The Decided column holds only the builder's part; a rule or decision of Peter's goes in the Rule column. Questions raised to Peter instead are not listed; his answers become entries. Model is the model that wrote the PR (its Co-Authored-By line). Result is "accepted by merge (PR #N, date)" once the PR has merged and Peter didn't correct the choice, "pending" until it merges, and "corrected → entry <title>" when he overrules it; the entry is then scored as a miss.
@@ -2862,6 +2955,13 @@ Choices that agents flagged in PRs and that the builder decided because a rule a
 | 2026-11-05 | #589 | product scope | Which starts skip #598's wait | The admin's Build profile, pre-fills and the synchronous path start at once | Admin actions are explicit | Opus 5.5 | pending |
 | 2026-11-05 | #589 | user-facing text | The import dialog's line about the wait | Shown only when the build was deferred and a build is due | Calm over clever | Opus 5.5 | pending |
 | 2026-11-05 | #589 | provider | A window, group or final blocked by the content-policy filter | Outcome `blocked`: a $0 cost row, a Sentry event, a note in the admin column, the account's build stops; ported from #596 | A content-policy block is final (#597) | Opus 5.5 | pending |
+| 2026-11-05 | #589 | privacy | How "public only" is decided | From metadata: every entry pre-filled and unedited (no `NodeVersion`), no profile row with other sources, no sticky private mark, and an account nobody signed into; anything else is private | A user's writing never reaches the other provider unless public-only or consented; when in doubt, private | Opus 5.5 | pending |
+| 2026-11-05 | #589 | privacy | The consent flag | `User.profile_both_providers`, default false, no UI (#599 builds the question) | The user's provider is theirs | Opus 5.5 | pending |
+| 2026-11-05 | #589 | privacy | Existing accounts before the private mark exists | A backfill script after deploy marks every account with private data; until then signed-in accounts count as private | When in doubt, private | Opus 5.5 | pending |
+| 2026-11-05 | #589 | product scope | What counts as a regular update | A merged set with nothing in flight whose only new range plans into one chunk on the chat model | Peter, 2026-11-05: one-window updates are chained | Opus 5.5 | pending |
+| 2026-11-05 | #589 | data safety | The parent of a chained version | The set's base, with the profile it updated kept in its job item, so no earlier final is merged in again | Fix the cause | Opus 5.5 | pending |
+| 2026-11-05 | #596 | provider | A one-window build of public-only writing | GPT-6 Luna, then Opus 5.5 | Peter, 2026-11-05: public-only data gets Luna for versions and Opus for merges | Opus 5.5 | pending |
+| 2026-11-05 | #596 | provider | A one-window build of private writing | The user's chat model for the version and the integration | Peter, 2026-11-05: Haiku is for imports; one window uses the preferred model | Opus 5.5 | pending |
 
 ## Backfilled decisions
 
