@@ -22,9 +22,12 @@ from backend.models import UserProfile
 # The rows of a large build's window set (#545, tasks/profile_windows.py)
 # are intermediates too: a "window" is one window's version, built from
 # that window alone; a "window_skip" marks a window given up after its
-# outputs failed; a "group" merges consecutive windows. They are never the
-# user's profile: only the set's final "integration" is.
-WINDOW_TYPES = ("window", "window_skip")
+# outputs failed; a "window_update" is a regular one-window update, written
+# by the user's chat model as a chained update of the set's newest profile
+# and standing in the window's place in the merges (Peter, 2026-11-05); a
+# "group" merges consecutive windows. They are never the user's profile:
+# only the set's final "integration" is.
+WINDOW_TYPES = ("window", "window_skip", "window_update")
 SET_INTERNAL_TYPES = WINDOW_TYPES + ("group",)
 PROFILE_HISTORY_HIDDEN_TYPES = ("iterative", "update") + SET_INTERNAL_TYPES
 

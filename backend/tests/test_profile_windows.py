@@ -162,6 +162,8 @@ def app(monkeypatch):
         PROFILE_MERGE_MODEL_ANTHROPIC="claude-opus-5.5",
         PROFILE_MERGE_MODEL_OPENAI="gpt-6.1-sol",
         PROFILE_MERGE_REASONING_EFFORT_OPENAI="",
+        PROFILE_VERSION_MODEL_CROSS_PROVIDER="gpt-6-luna",
+        PROFILE_MERGE_MODEL_CROSS_PROVIDER="claude-opus-5.5",
         PROFILE_MERGE_STRUCTURE="grouped", PROFILE_MERGE_GROUP_SIZE=30,
         PROFILE_VERSION_CONTENT_ATTEMPTS=2,
         PROFILE_VERSION_PROVIDER_ATTEMPTS=3,
@@ -408,7 +410,14 @@ def test_boot_check_rejects_cross_provider_deprecated_and_unknown():
         "PROFILE_MERGE_MODEL_ANTHROPIC": "claude-opus-5.5",
         "PROFILE_MERGE_MODEL_OPENAI": "gpt-6.1-sol",
         "PROFILE_MERGE_REASONING_EFFORT_OPENAI": "high"})
+    # The cross-provider pair may be of either provider.
+    validate_profile_models({
+        **base, "PROFILE_VERSION_MODEL_CROSS_PROVIDER": "gpt-6-luna",
+        "PROFILE_MERGE_MODEL_CROSS_PROVIDER": "claude-opus-5.5"})
     for key, bad in (("PROFILE_MERGE_MODEL_OPENAI", "claude-opus-5.5"),
+                     ("PROFILE_VERSION_MODEL_CROSS_PROVIDER", "gpt-7-nope"),
+                     ("PROFILE_MERGE_MODEL_CROSS_PROVIDER",
+                      "claude-sonnet-4.5"),
                      ("PROFILE_VERSION_MODEL_ANTHROPIC", "claude-sonnet-4.5"),
                      ("PROFILE_VERSION_MODEL_OPENAI", "gpt-7-nope"),
                      ("PROFILE_MERGE_REASONING_EFFORT_OPENAI", "max")):
@@ -427,6 +436,8 @@ def test_the_shipped_profile_model_defaults_pass():
     assert Config.PROFILE_MERGE_REASONING_EFFORT_OPENAI == "high"
     assert Config.PROFILE_MERGE_STRUCTURE == "flat"
     assert Config.PROFILE_MERGE_GROUP_SIZE == 30
+    assert Config.PROFILE_VERSION_MODEL_CROSS_PROVIDER == "gpt-6-luna"
+    assert Config.PROFILE_MERGE_MODEL_CROSS_PROVIDER == "claude-opus-5.5"
 
 
 def test_openai_merge_carries_the_configured_effort(app, world):
@@ -996,11 +1007,15 @@ def test_an_update_redoes_only_the_newest_group_and_the_final(world):
     n = len(world.provider.submits)
     assert pw.wants_window_build(u)
     _finish(world, u)
-    sent = [r["custom_id"] for s in world.provider.submits[n:]
+    reqs = [r for s in world.provider.submits[n:]
             for rs in s.values() for r in rs]
-    windows = [c for c in sent if "_w" in c]
+    sent = [r["custom_id"] for r in reqs]
+    # A regular update (Peter, 2026-11-05): one chained version by the
+    # user's chat model, and the merges after it by the same model.
+    assert not [c for c in sent if "_w" in c]
+    assert len([c for c in sent if "_u" in c]) == 1
+    assert {r["model_id"] for r in reqs} == {"claude-opus-5.5"}
     groups = [c for c in sent if "_g" in c]
-    assert 1 <= len(windows) <= 2
     assert len(groups) == 1                      # the newest group only
     assert sum(1 for c in sent if "_f_" in c) == 1
     new_groups = [g for g in _rows(u, "group") if g.id not in groups_before]
@@ -1723,3 +1738,218 @@ def test_a_policy_blocked_merge_is_its_own_outcome(world, monkeypatch, kind):
     assert _advance(u) == "blocked"
     assert pb._should_seed(u) is False
     assert len(world.provider.submits) == submits
+
+
+# ── which models read the writing (Peter, 2026-11-05) ────────────────────
+# More than one window: the user's provider's pair (Haiku / Opus, Luna /
+# Sol), or Luna / Opus when the writing is public only or the user agreed
+# to both providers. A regular one-window update: a chained version by the
+# user's chat model, and the merges after it by the same model.
+
+def _node(user, provenance=None, privacy="private", parent=None,
+          owner=None, deleted=False):
+    n = Node(user_id=(owner or user).id, node_type="user", ai_usage="chat",
+             token_count=10, privacy_level=privacy, provenance=provenance,
+             parent_id=parent.id if parent else None, created_at=T0)
+    if deleted:
+        n.deleted_at = datetime.utcnow()
+    n.set_content("synthetic")
+    db.session.add(n)
+    db.session.commit()
+    return n
+
+
+def _prefilled(**kw):
+    u = _user(**kw)
+    _node(u, provenance="prefill_ca")
+    _node(u, provenance="prefill_x")
+    return u
+
+
+def test_public_only_writing_is_read_from_metadata(app):
+    assert pw.writing_is_public_only(_user()) is False      # nothing yet
+    assert pw.writing_is_public_only(_prefilled()) is True
+
+    u = _prefilled()
+    _node(u)                                   # one private entry
+    assert pw.writing_is_public_only(u) is False
+    u = _prefilled()
+    _node(u, deleted=True)                     # a deleted private one too
+    assert pw.writing_is_public_only(u) is False
+    u = _prefilled()
+    _node(u, provenance="archive_upload")      # an own export: not vouched
+    assert pw.writing_is_public_only(u) is False
+
+    u = _prefilled(public_sharing_enabled=True)
+    _node(u, privacy="public")
+    assert pw.writing_is_public_only(u) is True
+    u.public_sharing_enabled = False           # not public any more
+    db.session.commit()
+    assert pw.writing_is_public_only(u) is False
+
+    other = _user()
+    u = _prefilled()
+    _node(other, provenance="prefill_ca", parent=_node(u, "prefill_ca"))
+    assert pw.writing_is_public_only(u) is False   # someone's reply
+    u = _prefilled()
+    _node(u, provenance="prefill_ca", parent=_node(other, "prefill_ca"))
+    assert pw.writing_is_public_only(u) is False   # a reply to someone
+
+    u = _prefilled()
+    _profile(u, generated_by="user", gen_type="initial")
+    assert pw.writing_is_public_only(u) is False   # the user's own text
+    from backend.models import UserPrompt
+    u = _prefilled()
+    db.session.add(UserPrompt(user_id=u.id, prompt_key="profile_generation",
+                              title="t", content="my prompt"))
+    db.session.commit()
+    assert pw.writing_is_public_only(u) is False
+
+
+def test_the_model_table(app):
+    anth, oai = _user(), _user(preferred_model="gpt-6-astra")
+    for user, own in ((anth, ("claude-haiku-5.5", "claude-opus-5.5")),
+                      (oai, ("gpt-6-luna", "gpt-6.1-sol"))):
+        assert pw.cross_provider_allowed(user) is False
+        m = pw.profile_models_for(user, cross=False)
+        assert (m.version, m.merge, m.cross) == own + (False,)
+        m = pw.profile_models_for(user, cross=True)
+        assert (m.version, m.merge, m.cross) == (
+            "gpt-6-luna", "claude-opus-5.5", True)
+        assert m.merge_effort is None          # Opus takes none
+    c = pw.chained_models_for(oai)
+    assert (c.version, c.merge, c.chained) == ("gpt-6-astra", "gpt-6-astra",
+                                               True)
+    c = pw.chained_models_for(anth)
+    assert (c.version, c.merge) == ("claude-opus-5.5", "claude-opus-5.5")
+    # Consent, or public-only writing, allows the cross-provider pair.
+    assert pw.cross_provider_allowed(_user(profile_both_providers=True))
+    assert pw.cross_provider_allowed(_prefilled())
+
+
+def _all_reqs(world, since=0):
+    return [(provider, r) for sub in world.provider.submits[since:]
+            for provider, reqs in sub.items() for r in reqs]
+
+
+def _build_then_update(world, user):
+    """A large build, then a regular update of 85k units after it."""
+    world.corpus = _windows_corpus(4)
+    _finish(world, user)
+    assert [f for f in _rows(user, "integration") if f.window_set]
+    n = len(world.provider.submits)
+    world.corpus.add(85, start=datetime.utcnow() + timedelta(days=2))
+    _finish(world, user)
+    return n
+
+
+@pytest.mark.parametrize("chat, provider, version, merge", [
+    ("gpt-6-astra", "openai", "gpt-6-luna", "gpt-6.1-sol"),
+    (None, "anthropic", "claude-haiku-5.5", "claude-opus-5.5")])
+def test_private_writing_never_reaches_the_other_provider(
+        world, chat, provider, version, merge):
+    """The hard line (Peter, 2026-11-05): an OpenAI user's private writing
+    never gets an Anthropic call, and an Anthropic user's never an OpenAI
+    one: not for a large build's windows and merges, not for a regular
+    update and its merges."""
+    u = _user(preferred_model=chat, profile_needs_full_regen=True)
+    _node(u)                                   # one private entry
+    n = _build_then_update(world, u)
+    assert {p for p, _r in _all_reqs(world)} == {provider}
+    build = {r["model_id"] for sub in world.provider.submits[:n]
+             for reqs in sub.values() for r in reqs}
+    assert build == {version, merge}
+    chat_model = chat or "claude-opus-5.5"
+    update = _all_reqs(world, n)
+    assert {r["model_id"] for _p, r in update} == {chat_model}
+    assert any("_u" in r["custom_id"] for _p, r in update)
+    assert any("_f_" in r["custom_id"] for _p, r in update)
+    assert len([f for f in _rows(u, "integration") if f.window_set]) == 2
+
+
+@pytest.mark.parametrize("how", ["public_only", "consent"])
+def test_public_or_agreed_writing_takes_luna_and_opus(world, how):
+    u = (_prefilled(profile_needs_full_regen=True) if how == "public_only"
+         else _user(profile_needs_full_regen=True, profile_both_providers=True))
+    if how == "consent":
+        _node(u)                               # private, but agreed
+    world.corpus = _windows_corpus(4)
+    _finish(world, u)
+    by_kind = {}
+    for provider, r in _all_reqs(world):
+        kind = "window" if "_w" in r["custom_id"] else "merge"
+        by_kind.setdefault(kind, set()).add((provider, r["model_id"]))
+    assert by_kind["window"] == {("openai", "gpt-6-luna")}
+    assert by_kind["merge"] == {("anthropic", "claude-opus-5.5")}
+
+
+def test_a_request_to_a_provider_not_allowed_is_never_sent(world):
+    sub = pw._Submission({}, {"openai"})
+    with pytest.raises(pw.ProfileModelError):
+        sub.add("anthropic", {"custom_id": "c"}, {"user_id": 1})
+    assert sub.built == []
+
+
+def test_a_regular_update_chains_on_the_newest_profile(world):
+    """The base: after a windows build the set's final; after a regular
+    update its chained version. The chained version is the update prompt
+    over that profile and the new window, saved as a window_update with
+    "Covers data through" and merged in the window's place, labelled as a
+    profile of all the writing."""
+    u = _user(profile_needs_full_regen=True)
+    _build_then_update(world, u)
+    first_final = [f for f in _rows(u, "integration") if f.window_set][0]
+    [chained] = _rows(u, "window_update")
+    [item] = [i for i in _items("window") if "_u" in i["custom_id"]]
+    assert item["chained_base_id"] == first_final.id
+    assert chained.parent_profile_id == first_final.id
+    assert chained.get_content().startswith("[Covers data through ")
+    [update_req] = [r for _p, r in _all_reqs(world)
+                    if "_u" in r["custom_id"]]
+    prompt = update_req["messages"][0]["content"][0]["text"]
+    assert first_final.get_content() in prompt          # {existing_profile}
+    assert ex.EVENTS_IN_WINDOW_PARAGRAPH not in prompt
+    final = [f for f in _rows(u, "integration") if f.window_set][-1]
+    merge = [r for s in world.provider.submits for rs in s.values()
+             for r in rs if r["custom_id"].endswith("_f_1")][-1]
+    labels = [m["content"][0]["text"].split("\n\n")[0]
+              for m in merge["messages"][:-1]]
+    assert labels[-1].startswith("Profile No. ")
+    assert "- Covers all the writing from" in labels[-1]
+    assert "- Updates a profile of all the writing up to" in labels[-1]
+    assert final.parent_profile_id == chained.id
+
+    # The next update chains on the chained version.
+    world.corpus.add(85, start=datetime.utcnow() + timedelta(days=20))
+    _finish(world, u)
+    second = [i for i in _items("window") if "_u" in i["custom_id"]][-1]
+    assert second["chained_base_id"] == chained.id
+    assert len(_rows(u, "window_update")) == 2
+
+
+def test_a_retried_window_of_a_build_is_not_a_chained_update(world):
+    """A set still being built (no final over its last window) reads its
+    windows independently, with the build's models."""
+    u = _user()
+    rows = _set_of(u, 3)
+    _corpus_for(world, rows)
+    world.corpus.add(85)
+    state = pw.set_state(u, "set1", None)
+    assert state.due
+    assert pw.chained_update_base(u, state, False) is None
+
+
+def test_the_estimate_prices_the_chained_update_at_the_chat_model(
+        world, monkeypatch):
+    import backend.utils.cost as cost
+    u = _user(preferred_model="gpt-6-astra", profile_needs_full_regen=True)
+    world.corpus = _windows_corpus(4)
+    _finish(world, u)
+    world.corpus.add(85, start=datetime.utcnow() + timedelta(days=2))
+    priced = []
+    real = cost.calculate_llm_cost_microdollars
+    monkeypatch.setattr(cost, "calculate_llm_cost_microdollars",
+                        lambda model_id, *a, **k: (
+                            priced.append(model_id) or real(model_id, *a, **k)))
+    _advance(u)
+    assert priced and set(priced) == {"gpt-6-astra"}

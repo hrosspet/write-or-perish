@@ -25,9 +25,23 @@ out one Batch round trip at a time. Instead:
 - Later updates of such a profile add windows to the same set and redo
   only the newest group and the final.
 
-A user's writing reaches only models of their own chat model's provider:
-the version and merge models are per provider, checked at boot and again
-here (``profile_models_for``).
+Which models read the writing (Peter, 2026-11-05):
+
+- A pass with more than one window to read: the version and merge models
+  of the provider of the user's chat model (Haiku 5.5 and Opus 5.5, or
+  GPT-6 Luna and GPT-6.1 Sol at high effort), unless every entry the
+  build can read is public (a pre-fill, the lab) or the user agreed to
+  both providers (User.profile_both_providers): then GPT-6 Luna writes the
+  versions and Opus 5.5 merges them (``profile_models_for``).
+- A regular update of a merged set, one window to read: the user's chat
+  model writes a chained update of the set's newest profile (the update
+  prompt, as main's chained path), which stands in the window's place, and
+  the same model runs the group and final merges after it
+  (``chained_update_base``, ``chained_models_for``).
+
+Without public-only writing or the user's consent, a user's writing
+reaches only models of their own chat model's provider: checked at boot,
+per pass, and again for every request before it is sent (_Submission).
 
 State lives in the database, as on the chained batch path: the set's rows
 (window, window_skip, group, final), the items of pending ProfileBatchJob
@@ -76,6 +90,13 @@ from backend.tasks import profile_batch as _batch
 logger = get_task_logger(__name__)
 
 ITEM_KINDS = ("window", "group", "final")
+# A regular one-window update of a merged set, written as a chained update
+# by the user's chat model (Peter, 2026-11-05). Stands in the window's
+# place in the set's merges; one of profile_versions.WINDOW_TYPES.
+CHAINED_TYPE = "window_update"
+# Node.provenance values that are public by construction (models.Node):
+# Loore fetched the tweets from the Community Archive or the X API.
+PUBLIC_PROVENANCES = ("prefill_ca", "prefill_x")
 CONTENT_FAILURES = ("refused", "invalid", "truncated")
 PROVIDER_FAILURES = ("missing", "error")
 # The provider's content-policy filter blocked the item (an error code in
@@ -98,7 +119,10 @@ ATTEMPT_LOOKBACK = timedelta(days=7)
 # Luna 2.4-2.7k on average in the three events runs (201 versions,
 # 1.6-4.2k, 2026-10-21/22). The default is for a version model nobody
 # measured.
-EXPECTED_OUTPUT = {"claude-haiku-5.5": 11_000, "gpt-6-luna": 2_500}
+EXPECTED_OUTPUT = {"claude-haiku-5.5": 11_000, "gpt-6-luna": 2_500,
+                   # A chained update by Opus 5.5: 7.1k on average over 26
+                   # update steps (5.0-8.7k, 2026-11-05).
+                   "claude-opus-5.5": 7_000}
 DEFAULT_EXPECTED_OUTPUT = 6_000
 # Merge input tokens per version, measured: 53 Haiku versions came to
 # 247,885 tokens in one Opus merge (4.7k each); a Luna version is about
@@ -111,6 +135,10 @@ DEFAULT_MERGE_TOKENS_PER_VERSION = 4_700
 # merges, 2026-10-21 to 11-03); GPT-6.1 Sol at high effort 2.8k, its
 # reasoning included (2026-10-22).
 WINDOW_PROMPT_OVERHEAD_TOKENS = 3_000
+# A chained update's fixed part: the update template (3.5k tokens,
+# measured 2026-11-05) and the profile it updates (a final of 2-3k tokens,
+# a chained version up to about 4.5k).
+CHAINED_PROMPT_OVERHEAD_TOKENS = 8_000
 MERGE_PROMPT_TOKENS = 4_000
 MERGE_OUTPUT_TOKENS = 4_000
 # The token count of a merge is checked exactly only when the character
@@ -146,30 +174,117 @@ def _setting(key, default):
 # ── models ────────────────────────────────────────────────────────────────
 
 class ProfileModelError(RuntimeError):
-    """No version or merge model of the user's own provider is set."""
+    """No version or merge model of the user's own provider is set, or a
+    request would reach a provider the user's writing may not reach."""
 
 
 @dataclass
 class Models:
-    provider: str
+    provider: str            # the provider of the user's chat model
     version: str
     merge: str
     merge_effort: str = None
+    cross: bool = False      # the cross-provider pair (public or consent)
+    chained: bool = False    # a regular update by the user's chat model
 
 
-def profile_models_for(user):
-    """The version and merge models for this user's build: the settings of
-    the provider of their chat model (``default_model_for``). Each must be
-    that provider's model; anything else raises, so a user's writing never
-    reaches another provider (also checked at boot). A user who switches
-    provider gets the new provider's models from the next step on; the
-    windows the other provider's model wrote are still merged, as chained
-    versions are after a switch."""
-    supported = current_app.config.get("SUPPORTED_MODELS") or {}
-    chat_model = _batch._model_for(user)
-    provider = (supported.get(chat_model) or {}).get("provider")
+def _provider_of(model_id):
+    return _model_cfg(model_id).get("provider")
+
+
+def _users_provider(user):
+    provider = _provider_of(_batch._model_for(user))
     if provider not in ("anthropic", "openai"):
         raise ProfileModelError(f"no profile models for provider {provider!r}")
+    return provider
+
+
+def writing_is_public_only(user):
+    """Whether everything a build of this user can read is public, so its
+    windows and merges may go to either provider (Peter, 2026-11-05: a
+    pre-fill, the lab). From metadata only, never the content; any doubt
+    counts as private:
+
+    - every entry of the user (their own and the AI replies they own,
+      deleted ones included, since an earlier version may have read them)
+      was fetched from a public source (PUBLIC_PROVENANCES), or is public
+      while the user shares publicly;
+    - no entry of someone else is a parent or a reply of theirs (the
+      export reads the threads the user took part in);
+    - no profile version is the user's own text and no profile prompt is
+      their own.
+
+    A user with no entries is not public-only."""
+    from sqlalchemy import func, not_
+    from sqlalchemy.orm import aliased
+    from backend.models import UserPrompt
+    from backend.utils.privacy import PrivacyLevel
+    mine = or_(Node.user_id == user.id, Node.human_owner_id == user.id)
+    public = func.coalesce(Node.provenance, "").in_(PUBLIC_PROVENANCES)
+    if user.public_sharing_enabled:
+        public = or_(public, func.coalesce(Node.privacy_level, "")
+                     == PrivacyLevel.PUBLIC.value)
+    if db.session.query(Node.id).filter(mine).first() is None:
+        return False
+    if db.session.query(Node.id).filter(mine, not_(public)).first():
+        return False
+    other = aliased(Node)
+    owner = func.coalesce(other.human_owner_id, other.user_id)
+    if db.session.query(Node.id).join(
+            other, Node.parent_id == other.id).filter(
+            mine, owner != user.id).first():
+        return False
+    if db.session.query(Node.id).join(
+            other, other.parent_id == Node.id).filter(
+            mine, owner != user.id).first():
+        return False
+    if UserProfile.query.filter_by(
+            user_id=user.id, generated_by="user").first() is not None:
+        return False
+    return UserPrompt.query.filter_by(user_id=user.id).first() is None
+
+
+def cross_provider_allowed(user):
+    """Whether this user's build may use both providers' models: they
+    agreed (User.profile_both_providers, #599), or their writing is public
+    only (``writing_is_public_only``)."""
+    return bool(user.profile_both_providers) or writing_is_public_only(user)
+
+
+def chained_models_for(user):
+    """A regular update of a merged set: the user's chat model writes the
+    chained version and runs the merges after it (Peter, 2026-11-05)."""
+    chat_model = _batch._model_for(user)
+    return Models(_users_provider(user), chat_model, chat_model,
+                  chained=True)
+
+
+def profile_models_for(user, cross=False):
+    """The version and merge models for a pass with more than one window.
+    By default the settings of the provider of the user's chat model
+    (``default_model_for``): each must be that provider's model, anything
+    else raises, so a user's writing never reaches another provider (also
+    checked at boot). With ``cross`` (``cross_provider_allowed``) the
+    cross-provider pair, GPT-6 Luna and Opus 5.5 by default. A user who
+    switches provider gets the new provider's models from the next step
+    on; the windows the other provider's model wrote are still merged, as
+    chained versions are after a switch."""
+    supported = current_app.config.get("SUPPORTED_MODELS") or {}
+    provider = _users_provider(user)
+    if cross:
+        version = current_app.config.get(
+            "PROFILE_VERSION_MODEL_CROSS_PROVIDER")
+        merge = current_app.config.get("PROFILE_MERGE_MODEL_CROSS_PROVIDER")
+        for model_id in (version, merge):
+            if (supported.get(model_id) or {}).get("provider") not in (
+                    "anthropic", "openai"):
+                raise ProfileModelError(
+                    f"profile model {model_id!r} is not set up")
+        effort = None
+        if _provider_of(merge) == "openai":
+            effort = current_app.config.get(
+                "PROFILE_MERGE_REASONING_EFFORT_OPENAI") or None
+        return Models(provider, version, merge, effort, cross=True)
     suffix = provider.upper()
     version = current_app.config.get(f"PROFILE_VERSION_MODEL_{suffix}")
     merge = current_app.config.get(f"PROFILE_MERGE_MODEL_{suffix}")
@@ -459,6 +574,49 @@ def set_state(user, set_id, base, history=None, now=None):
     return state
 
 
+def chained_update_base(user, state, fresh):
+    """The profile a regular update of this set builds on, or None when
+    the pass is not one (Peter, 2026-11-05: "for 1 window updates on prod
+    I'd like to use the chained version"). A regular update: the set
+    exists, nothing of it is in flight or stopped, its only missing range
+    is the writing after its last window, and that range plans into one
+    chunk on the user's chat model, as the chained path plans it. The base
+    is the set's newest chained version when the last window is one, else
+    the set's final merged over the last window (the only profile that
+    covers all the writing). A set still being built (no final over its
+    last window) reads its windows independently."""
+    if (fresh or len(state.due) != 1 or state.stopped
+            or state.windows_in_flight or not state.windows):
+        return None
+    start, end, units = state.due[0]
+    tip = state.windows[-1]
+    if end is not None or start != tip.source_data_cutoff:
+        return None
+    if tip.generation_type == CHAINED_TYPE:
+        base = tip
+    else:
+        from backend.utils.profile_versions import latest_set_final
+        base = latest_set_final(user.id, state.set_id)
+        if base is None or base.parent_profile_id != tip.id:
+            return None
+    chat_model = _batch._model_for(user)
+    k, _size = plan_chunks(units, max_units=max_units_for_cap(
+        _cap(chat_model), _exports.tokens_per_unit(user, chat_model)))
+    return base if k == 1 else None
+
+
+def pass_models(user, state, chained_base, cross):
+    """The models of this pass: the user's chat model for a regular update
+    (``chained_base``) and for the merges after one (the set's last window
+    is a chained version), else the version and merge models of
+    ``profile_models_for``."""
+    if chained_base is not None or (
+            not state.due and state.windows
+            and state.windows[-1].generation_type == CHAINED_TYPE):
+        return chained_models_for(user)
+    return profile_models_for(user, cross=cross)
+
+
 # ── merge planning ────────────────────────────────────────────────────────
 
 @dataclass
@@ -695,9 +853,10 @@ def estimate_cost_usd(user, state, models, plan_windows, plan=None):
     cost = 0
     if n_new:
         # Priced per (average) window: a price tier applies per request.
+        overhead = (CHAINED_PROMPT_OVERHEAD_TOKENS if models.chained
+                    else WINDOW_PROMPT_OVERHEAD_TOKENS)
         cost += n_new * calculate_llm_cost_microdollars(
-            models.version,
-            int(units_new * rho / n_new + WINDOW_PROMPT_OVERHEAD_TOKENS),
+            models.version, int(units_new * rho / n_new + overhead),
             EXPECTED_OUTPUT.get(models.version, DEFAULT_EXPECTED_OUTPUT),
             batch=True)
     per_version = MERGE_TOKENS_PER_VERSION.get(
@@ -833,8 +992,10 @@ class _Submission:
     """Requests collected for one user's submission, sent in slices of
     PROFILE_BATCH_MAX_BYTES, every slice in the same run."""
 
-    def __init__(self, keys):
+    def __init__(self, keys, providers):
         self.keys = keys
+        # The providers this user's writing may reach in this pass.
+        self.providers = set(providers)
         self.built = []
         self.size = 0
         self.sent = 0
@@ -843,6 +1004,11 @@ class _Submission:
         self.max_bytes = int(_setting("PROFILE_BATCH_MAX_BYTES", 100_000_000))
 
     def add(self, provider, request, meta):
+        if provider not in self.providers:
+            # The hard line (Peter, 2026-10-02 and 2026-11-05): never sent.
+            raise ProfileModelError(
+                f"user {meta.get('user_id')}: a profile request to "
+                f"{provider} is not allowed for this user's writing")
         self.built.append({"provider": provider, "request": request,
                            "meta": meta})
         self.size += _request_bytes(request)
@@ -896,13 +1062,23 @@ def fit_window(user, model_id, keys, cap, cur, budget, end, prompt_fn,
     return last
 
 
-def _render_windows(user, state, models, sub, history, deadline):
+def _render_windows(user, state, models, sub, history, deadline,
+                    chained_base=None):
     """Plan and render every due range into window requests, oldest
     first, exactly as the chain loop sizes its chunks, but at the version
     model's cap. Returns "partial" when the render budget ran out (the
     rendered windows are submitted and a new task renders the rest), else
-    None."""
+    None.
+
+    With ``chained_base`` (a regular update, chained_update_base) the one
+    window is a chained update of that profile: the update prompt over the
+    profile and the window, as main's chained path builds it, by the
+    user's chat model (``models``). One window per pass: a remainder that
+    did not fit is chained on this version in the next pass."""
     template = _exports.window_generation_template(user.id)
+    if chained_base is not None:
+        update_template = _exports.build_update_template(user.id)
+        base_content = _exports.update_base_content(chained_base)
     cap = _cap(models.version)
     rho = _exports.tokens_per_unit(user, models.version)
     max_units = max_units_for_cap(cap, rho)
@@ -929,6 +1105,11 @@ def _render_windows(user, state, models, sub, history, deadline):
             rendered_at = datetime.utcnow()
 
             def _prompt(chunk):
+                if chained_base is not None:
+                    return _exports.build_chunk_prompt(
+                        update_template, base_content,
+                        chained_base.source_tokens_used or 0, chunk,
+                        chained_base.source_origin_stats)
                 return template.replace(
                     "{user_export}", _exports.chunk_content_for_prompt(chunk))
 
@@ -960,13 +1141,18 @@ def _render_windows(user, state, models, sub, history, deadline):
             meta = {
                 "user_id": user.id, "kind": "window", "set": state.set_id,
                 "base_id": state.base.id if state.base is not None else None,
-                "n": n, "total": total, "attempt": attempts + 1,
+                "n": n, "total": None if chained_base is not None else total,
+                "attempt": attempts + 1,
                 "start": _iso(cur), "cutoff": _iso(cutoff),
                 "earliest": _iso(chunk.get("earliest_node_created_at")),
                 "units": units, "cumulative": cumulative,
                 "origin_stats": stats, "rendered_at": _iso(rendered_at),
                 "model_id": models.version,
+                "generation_type": ("window" if chained_base is None
+                                    else CHAINED_TYPE),
             }
+            if chained_base is not None:
+                meta["chained_base_id"] = chained_base.id
             if not fits:
                 # One entry larger than the version model's cap: never cut,
                 # never sent across the cap's price tier. Given up, loudly.
@@ -988,7 +1174,9 @@ def _render_windows(user, state, models, sub, history, deadline):
             elif provider_stop_until(history, key) is not None:
                 pass   # waits; the range stays missing
             else:
-                cid = f"profile_{user.id}_{state.set_id}_w{n}_{attempts + 1}"
+                tag = "w" if chained_base is None else "u"
+                cid = (f"profile_{user.id}_{state.set_id}_{tag}{n}_"
+                       f"{attempts + 1}")
                 meta["custom_id"] = cid
                 sub.add(provider, _request(
                     models, models.version, cid,
@@ -998,6 +1186,8 @@ def _render_windows(user, state, models, sub, history, deadline):
                     # A slice was refused at submission: nothing rendered
                     # after it would go out in this run.
                     return None
+            if chained_base is not None:
+                return None
             cur = cutoff
             if end is not None and cutoff is not None and cutoff >= end:
                 break
@@ -1110,7 +1300,7 @@ def _merge_requests(user, state, models, sub, keys, history):
     return False
 
 
-def next_work(user, models, keys, deadline, wait_for_imports=True):
+def next_work(user, keys, deadline, wait_for_imports=True):
     """One pass: everything of the user's set that is due and whose inputs
     are ready, in one submission: windows for every missing range, the
     groups whose windows are all in, and the final when everything is.
@@ -1149,6 +1339,13 @@ def next_work(user, models, keys, deadline, wait_for_imports=True):
     state = set_state(user, set_id, base, history)
     plan = (MergePlan() if merge_stopped(user)
             else merge_plan(user, state))
+    # The models of this pass and the providers the writing may reach
+    # (Peter, 2026-11-05).
+    cross = cross_provider_allowed(user)
+    chained_base = chained_update_base(user, state, fresh)
+    models = pass_models(user, state, chained_base, cross)
+    providers = ({"anthropic", "openai"} if cross
+                 else {models.provider})
     if not (state.due or state.stopped or plan.groups
             or plan.final_inputs is not None):
         return "idle"
@@ -1186,11 +1383,11 @@ def next_work(user, models, keys, deadline, wait_for_imports=True):
                 user.id, set_id, len(state.windows),
                 len(state.windows_in_flight), len(state.due),
                 plan_windows[0], estimate)
-    sub = _Submission(keys)
+    sub = _Submission(keys, providers)
     outcome = None
     if state.due:
         outcome = _render_windows(user, state, models, sub, history,
-                                  deadline)
+                                  deadline, chained_base)
     if outcome != "partial" and not sub.failed:
         _merge_requests(user, state, models, sub, keys, history)
     sub.flush()
@@ -1317,7 +1514,6 @@ def advance(user_id, task_id, wait_for_imports=True):
         if not account_allows_ai(user) or writing_on_hold(user_id):
             outcome = "off"
         else:
-            models = profile_models_for(user)
             cfg = current_app.config
             keys = apply_batch_key_override(
                 get_api_keys_for_usage(cfg, "chat"), cfg)
@@ -1325,8 +1521,7 @@ def advance(user_id, task_id, wait_for_imports=True):
                 _setting("PROFILE_WINDOW_RENDER_SECONDS", 2400))
             submitted = False
             for _ in range(2):
-                outcome = next_work(user, models, keys, deadline,
-                                    wait_for_imports)
+                outcome = next_work(user, keys, deadline, wait_for_imports)
                 if outcome == "partial":
                     redispatch = True
                 if outcome != "submitted":
@@ -1381,8 +1576,24 @@ def _window_problem(response, template):
     return None
 
 
-def _collect_window(user, item, result, job, history, template, notes):
+def _chained_problem(response, gen_template):
+    """A chained update's output check: the three maps of the generation
+    prompt, as for a merge; no events section (the update prompt asks for
+    none)."""
+    if response.get("truncated"):
+        return "truncated"
+    if response.get("refused"):
+        return "refused"
+    if _exports.profile_output_problem(response.get("content"), gen_template):
+        return "invalid"
+    return None
+
+
+def _collect_window(user, item, result, job, history, template, notes,
+                    gen_template=None):
     key = _item_key(item)
+    gen_type = item.get("generation_type") or "window"
+    chained = gen_type == CHAINED_TYPE
     if result is None:
         n = _count(history, key, PROVIDER_FAILURES) + 1
         if n >= int(_setting("PROFILE_VERSION_PROVIDER_ATTEMPTS", 3)):
@@ -1396,7 +1607,7 @@ def _collect_window(user, item, result, job, history, template, notes):
     start, cutoff = _dt(item.get("start")), _dt(item.get("cutoff"))
     existing = UserProfile.query.filter_by(
         user_id=user.id, window_set=item["set"], covers_start=start,
-        source_data_cutoff=cutoff, generation_type="window").filter(
+        source_data_cutoff=cutoff, generation_type=gen_type).filter(
         UserProfile.created_at >= job.submitted_at).first()
     if existing is not None:
         return "saved"
@@ -1410,7 +1621,8 @@ def _collect_window(user, item, result, job, history, template, notes):
         _exports.discard_step_output(user, item["model_id"], response,
                                      "profile window", batch=True)
         return "superseded"
-    problem = _window_problem(response, template)
+    problem = (_chained_problem(response, gen_template) if chained
+               else _window_problem(response, template))
     if problem:
         # Billed: the cost row is written. Not marked refused for the
         # user-level backoff, which would stop a build of hundreds of
@@ -1423,15 +1635,21 @@ def _collect_window(user, item, result, job, history, template, notes):
             _save_skip(user, item)
             notes["skipped"].append((item, problem))
         return problem
+    # A chained version covers all the writing to its cutoff: its date line
+    # says so ("Covers data through B"), and its parent is the profile it
+    # updated.
     _exports._save_profile(
         user, item["model_id"], response["content"], response,
         source_tokens_used=item.get("cumulative"), source_data_cutoff=cutoff,
-        generation_type="window", parent_profile_id=item.get("base_id"),
+        generation_type=gen_type,
+        parent_profile_id=(item.get("chained_base_id") if chained
+                           else item.get("base_id")),
         batch=True, source_origin_stats=item.get("origin_stats"),
         source_rendered_at=_dt(item.get("rendered_at")),
         window_set=item["set"], covers_start=start,
-        date_line_start=start or _dt(item.get("earliest")),
-        date_line_tokens=item.get("units"))
+        date_line_start=(None if chained
+                         else start or _dt(item.get("earliest"))),
+        date_line_tokens=None if chained else item.get("units"))
     _exports.record_token_ratio(user, item["model_id"], item.get("units"),
                                 response.get("input_tokens"))
     if item.get("base_id") is None and user.profile_needs_full_regen:
@@ -1589,7 +1807,8 @@ def collect(job, items, results):
             try:
                 if item["kind"] == "window":
                     outcome = _collect_window(user, item, result, job,
-                                              history, template, notes)
+                                              history, template, notes,
+                                              gen_template)
                 else:
                     outcome = _collect_merge(user, item, result, job,
                                              gen_template, history, notes)

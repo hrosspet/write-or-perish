@@ -1615,10 +1615,23 @@ def _independent_label(i, profile, start):
     writing from A to B", A being where it starts (the start of the
     writing for the set's first window). Any other input (the set's base,
     a version the user wrote) is a full profile: "Covers all the writing
-    from <start> to B". A version the user wrote also says when."""
+    from <start> to B". So is a chained update in the set
+    ("window_update"), which also says which writing it added. A version
+    the user wrote also says when."""
     from backend.utils.profile_versions import SET_INTERNAL_TYPES
     cutoff = profile.source_data_cutoff
-    if profile.generation_type in SET_INTERNAL_TYPES:
+    if profile.generation_type == "window_update":
+        # A chained update in a window set (Peter, 2026-11-05): a profile
+        # of all the writing to its cutoff, not one window among the
+        # others, so its label says so and names the writing it added.
+        since = _day(start) if start and cutoff and start <= cutoff \
+            else "the start"
+        lines = [f"Profile No. {i}",
+                 f"- Covers all the writing from {since} to {_day(cutoff)}",
+                 f"- Updates a profile of all the writing up to "
+                 f"{_day(profile.covers_start)} with the writing from "
+                 f"{_day(profile.covers_start)} to {_day(cutoff)}"]
+    elif profile.generation_type in SET_INTERNAL_TYPES:
         since = _day(profile.covers_start or start)
         lines = [f"Profile No. {i}",
                  f"- Covers the writing from {since} to {_day(cutoff)}"]

@@ -303,8 +303,8 @@ def _should_seed(user, ignore_backoff=False):
         return True
     # A large build's window set with a range still to read, a group or
     # its final due (tasks/profile_windows, #545).
-    if latest is not None and latest.generation_type in ("window",
-                                                         "window_skip"):
+    from backend.utils.profile_versions import WINDOW_TYPES
+    if latest is not None and latest.generation_type in WINDOW_TYPES:
         from backend.tasks import profile_windows
         if profile_windows.set_work_due(user, latest):
             return True
