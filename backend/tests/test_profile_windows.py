@@ -1193,8 +1193,10 @@ def test_a_set_in_flight_after_an_edit_on_its_final_sends_nothing_more(
 
 # ── 13. spend ─────────────────────────────────────────────────────────────
 # Peter, 2026-10-22: "send it and let the cap stop it halfway. It will
-# self-heal the following month". The estimate is logged, never a gate; the
-# per-user cap holds the next submission once the user is over the limit.
+# self-heal the following month": the per-user cap holds the next
+# submission once the user is over the limit. Peter, 2026-11-05: windows go
+# out only when the expected cost of the windows and the merges after them
+# fits into what is left of the limit; else the build waits.
 
 def _block_email(monkeypatch):
     import backend.utils.email as em
@@ -1219,23 +1221,99 @@ def _last_month():
     return month_start() - timedelta(days=1)
 
 
-def test_a_build_over_the_headroom_goes_out(world, monkeypatch):
-    estimates = []
-    real = pw.estimate_cost_usd
-    monkeypatch.setattr(pw, "estimate_cost_usd", lambda *a, **k: (
-        estimates.append(real(*a, **k)) or estimates[-1]))
+def _fixed_estimate(monkeypatch, usd):
+    monkeypatch.setattr(pw, "estimate_cost_usd", lambda *a, **k: usd)
+
+
+def test_a_build_over_the_headroom_waits_and_sends_nothing(world):
     world.corpus = _windows_corpus(10)
     u = _user(profile_needs_full_regen=True, monthly_spend_limit_usd=0.01)
-    _advance(u)
+    assert _advance(u) == "held"
+    assert world.provider.submits == []
     db.session.refresh(u)
-    assert estimates and estimates[0] > 0.01     # over the headroom
+    assert u.profile_cap_held is True              # the seeder resumes it
+    assert u.profile_seed_error.startswith(pw.HOLD_NOTE)
+    assert "$0.00 of $0.01 used this month" in u.profile_seed_error
+    assert u.profile_batch_pending is False
+
+
+@pytest.mark.parametrize("limit, sent", [(4.99, False), (5.00, True)])
+def test_the_estimate_must_fit_into_the_headroom(world, monkeypatch,
+                                                 limit, sent):
+    """$2 spent this month and an estimate of $3: a limit of $5 leaves
+    exactly enough and the windows go out; $4.99 leaves a cent too little
+    and the build waits, with the amount in the admin column."""
+    _fixed_estimate(monkeypatch, 3.00)
+    world.corpus = _windows_corpus(4)
+    u = _user(profile_needs_full_regen=True, monthly_spend_limit_usd=limit)
+    _spend(u, 2.00)
+    outcome = _advance(u)
+    db.session.refresh(u)
+    if sent:
+        assert outcome == "submitted"
+        assert len(world.provider.submits) == 1
+        assert all("_w" in r["custom_id"] for r in world.provider.requests())
+        assert u.profile_cap_held is False
+        assert u.profile_seed_error is None
+    else:
+        assert outcome == "held"
+        assert world.provider.submits == []
+        assert u.profile_seed_error == (
+            f"{pw.HOLD_NOTE}: the build needs about $3.00; "
+            "$2.00 of $4.99 used this month")
+
+
+def test_a_user_without_a_limit_is_not_gated(world, monkeypatch):
+    _fixed_estimate(monkeypatch, 1000.0)
+    world.corpus = _windows_corpus(4)
+    u = _user(profile_needs_full_regen=True)        # no limit of their own
+    _spend(u, 50.0)
+    assert _advance(u) == "submitted"
+    assert len(world.provider.submits) == 1
+
+
+@pytest.mark.parametrize("lift", ["next_month", "raised_limit"])
+def test_a_build_waiting_on_its_estimate_goes_out_when_there_is_room(
+        app, world, monkeypatch, lift):
+    """The build waits; the hourly seeder tries it again and it waits
+    again; once the month turns (or the admin raises the limit) the next
+    hourly pass submits its windows and the note is gone."""
+    _fixed_estimate(monkeypatch, 3.00)
+    world.corpus = _windows_corpus(4)
+    u = _user(profile_needs_full_regen=True, monthly_spend_limit_usd=4.99)
+    _spend(u, 2.00)
+    assert _advance(u) == "held"
+
+    def hourly():
+        before = pw.advance_profile_windows.apply_async.call_count
+        pb._seed_profile_batches()
+        assert pw.advance_profile_windows.apply_async.call_count == before + 1
+        user = db.session.get(User, u.id)
+        return pw.advance(user.id, user.profile_generation_task_id)
+
+    assert hourly() == "held"                       # still no room
+    assert world.provider.submits == []
+    user = db.session.get(User, u.id)
+    assert user.profile_seed_error.startswith(pw.HOLD_NOTE)
+
+    if lift == "next_month":
+        APICostLog.query.filter_by(user_id=u.id).update(
+            {"created_at": _last_month()})
+    else:
+        user.monthly_spend_limit_usd = 10.0
+    db.session.commit()
+
+    assert hourly() == "submitted"
     assert len(world.provider.submits) == 1
     assert all("_w" in r["custom_id"] for r in world.provider.requests())
-    assert u.profile_cap_held is False
-    assert u.profile_seed_error is None
+    user = db.session.get(User, u.id)
+    assert user.profile_cap_held is False
+    assert user.profile_seed_error is None
 
 
 def test_a_final_over_the_headroom_under_the_cap_goes_out(world):
+    """Merges with no window to read are held by the spend cap only, not
+    by the estimate (Peter, 2026-10-22: "let the cap stop it halfway")."""
     u = _user(monthly_spend_limit_usd=1)
     rows = _set_of(u, 5)
     _corpus_for(world, rows)
@@ -1486,15 +1564,15 @@ def test_the_seeder_gate_opens_for_a_set_whose_final_is_due(world):
 
 
 def test_the_estimate_for_a_large_anthropic_build(app, world):
-    """About $2.9 of Haiku windows (each under its 100k tier) plus about $4
-    of Opus merges for 14.1M units: the estimate prices every request in
-    its own tier."""
+    """At the expected sizes, about $2.5 of Haiku windows (each under its
+    100k tier) plus about $3.8 of Opus merges for 14.1M units: the
+    estimate prices every request in its own tier."""
     u = _user()
     models = pw.profile_models_for(u)
     state = pw.SetState("s", None, [], [], [])
     n = 330
     est = pw.estimate_cost_usd(u, state, models, (n, 14_100_000))
-    assert 5 < est < 10
+    assert 5.5 < est < 7
     # Flat falls back to groups above the merge model's cap, and the
     # estimate with it.
     app.config["PROFILE_MERGE_STRUCTURE"] = "flat"

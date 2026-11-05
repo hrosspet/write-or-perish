@@ -85,10 +85,13 @@ PROVIDER_FAILURES = ("missing", "error")
 # job rows stays small.
 ATTEMPT_LOOKBACK = timedelta(days=7)
 # Output tokens one window version costs, by version model, for the cost
-# estimate logged before each submission: the measured upper ends (Haiku
-# 5.5 thinks by default: 7-16k output tokens per version on 2026-10-22;
-# Luna 2.1-3.2k on 2026-10-21).
-EXPECTED_OUTPUT = {"claude-haiku-5.5": 16_000, "gpt-6-luna": 3_500}
+# estimate a build's windows must fit (Peter, 2026-11-05: the expected
+# cost, not a worst case): the measured means. Haiku 5.5 thinks by
+# default: 11.0k on average over 53 versions (7.1-15.8k, 2026-10-22);
+# Luna 2.4-2.7k on average in the three events runs (201 versions,
+# 1.6-4.2k, 2026-10-21/22). The default is for a version model nobody
+# measured.
+EXPECTED_OUTPUT = {"claude-haiku-5.5": 11_000, "gpt-6-luna": 2_500}
 DEFAULT_EXPECTED_OUTPUT = 6_000
 # Merge input tokens per version, measured: 53 Haiku versions came to
 # 247,885 tokens in one Opus merge (4.7k each); a Luna version is about
@@ -96,12 +99,13 @@ DEFAULT_EXPECTED_OUTPUT = 6_000
 MERGE_TOKENS_PER_VERSION = {"claude-haiku-5.5": 4_700, "gpt-6-luna": 2_000}
 DEFAULT_MERGE_TOKENS_PER_VERSION = 4_700
 # Fixed parts of a request, for the estimate: the window prompt's template,
-# the merge prompt, and a merge's output (a profile is about 2-3k tokens
-# plus thinking). With a reasoning effort set, a merge is estimated at the
-# full output cap.
+# the merge prompt, and a merge's output, the measured typical size: Opus
+# 5.5 merges wrote 3.3-5.1k output tokens, about 3.9k on average (14
+# merges, 2026-10-21 to 11-03); GPT-6.1 Sol at high effort 2.8k, its
+# reasoning included (2026-10-22).
 WINDOW_PROMPT_OVERHEAD_TOKENS = 3_000
 MERGE_PROMPT_TOKENS = 4_000
-MERGE_OUTPUT_TOKENS = 6_000
+MERGE_OUTPUT_TOKENS = 4_000
 # The token count of a merge is checked exactly only when the character
 # estimate is below this many times the cap; above it the merge is over
 # the cap without asking the counting endpoint.
@@ -115,6 +119,7 @@ SET_ID_HEX = 12
 FIT_ROUNDS = 8
 FIT_SAFETY = 0.97
 
+HOLD_NOTE = "Waiting for spend headroom"
 STOP_NOTE = "Stopped: a profile chunk failed at the provider"
 MERGE_STOP_NOTE = "Stopped: a profile merge is over the merge model's cap"
 
@@ -673,8 +678,9 @@ def estimate_cost_usd(user, state, models, plan_windows, plan=None):
     """Dollars the rest of the build costs at Batch prices: the windows
     still to read (``plan_windows``: (count, units)) and the merges after
     them, or, with no window left to read, the merges due now (``plan``).
-    From the measured sizes above; an estimate for the log, not a bill and
-    not a gate (the spend cap holds the next submission instead)."""
+    The expected cost, from the measured typical sizes above, not a worst
+    case: Peter, 2026-11-05, "Better err on the job going through leading
+    to $2-$3 overshoot, than postponing it for a month". Not a bill."""
     from backend.utils.cost import calculate_llm_cost_microdollars
     n_new, units_new = plan_windows
     rho = _exports.tokens_per_unit(user, models.version)
@@ -688,8 +694,6 @@ def estimate_cost_usd(user, state, models, plan_windows, plan=None):
             batch=True)
     per_version = MERGE_TOKENS_PER_VERSION.get(
         models.version, DEFAULT_MERGE_TOKENS_PER_VERSION)
-    output = (DEFAULT_MAX_OUTPUT_TOKENS if models.merge_effort
-              else MERGE_OUTPUT_TOKENS)
     size = _group_size()
     calls = []   # versions per merge call
     if n_new or state.windows_in_flight:
@@ -702,7 +706,9 @@ def estimate_cost_usd(user, state, models, plan_windows, plan=None):
             groups = math.ceil(n_after / size)
             current = len(_set_rows(user.id, state.set_id, ("group",)))
             to_build = max(1, groups - max(0, min(current, groups - 1)))
-            calls += [size] * to_build
+            # The newest groups are built; only the last can be short.
+            calls += [min(size, n_after - size * i)
+                      for i in range(groups - to_build, groups)]
             calls.append(groups + 2)
         else:
             calls.append(n_after + 2)
@@ -713,18 +719,47 @@ def estimate_cost_usd(user, state, models, plan_windows, plan=None):
     for versions in calls:
         cost += calculate_llm_cost_microdollars(
             models.merge, versions * per_version + MERGE_PROMPT_TOKENS,
-            output, batch=True)
+            MERGE_OUTPUT_TOKENS, batch=True)
     return cost / 1e6
 
 
-def _hold(user):
-    """Hold the set's next submission for the spend cap: the user is over
-    their monthly limit. Nothing is submitted; the hourly seeder resumes the
-    set once the block lifts (profile_cap_held: the month turns or the admin
-    raises the limit). What is in flight is collected and saved meanwhile."""
+def _hold(user, needed=None, spent=None, limit=None):
+    """Hold the set's next submission: the user is over their monthly
+    limit (the spend cap), or, with ``needed``, the windows due and the
+    merges after them are estimated at more than what is left of the limit.
+    Nothing is submitted; the hourly seeder resumes the set once there is
+    room (profile_cap_held: the month turns or the admin raises the limit).
+    What is in flight is collected and saved meanwhile. A wait on the
+    estimate says so in the admin Profile column, with the amount."""
     _batch._hold_for_cap(user)
-    logger.warning("User %s: spend-capped; no profile window step", user.id)
+    if needed is None:
+        logger.warning("User %s: spend-capped; no profile window step",
+                       user.id)
+        return "held"
+    note = (f"{HOLD_NOTE}: the build needs about ${needed:.2f}; "
+            f"${spent:.2f} of ${limit:.2f} used this month")
+    first = not (user.profile_seed_error or "").startswith(HOLD_NOTE)
+    user.profile_seed_error = note[:255]
+    db.session.commit()
+    (logger.error if first else logger.info)(
+        "User %s: profile build waits: needs about $%.2f, $%.2f of $%.2f "
+        "used this month", user.id, needed, spent, limit)
     return "held"
+
+
+def _short_of_headroom(user, estimate):
+    """(spent, limit) in dollars when ``estimate`` does not fit into what
+    is left of the user's monthly spend limit this month, else None. A user
+    with no limit (0) is never short."""
+    from backend.utils.spend import (
+        get_user_month_spend_microdollars, get_user_spend_limit_usd)
+    limit = get_user_spend_limit_usd(user, current_app.config) or 0
+    if limit <= 0:
+        return None
+    spent = get_user_month_spend_microdollars(user.id) / 1e6
+    if estimate > limit - spent:
+        return spent, limit
+    return None
 
 
 # ── requests ──────────────────────────────────────────────────────────────
@@ -1112,10 +1147,19 @@ def next_work(user, models, keys, deadline):
     plan_windows = (sum(plan_chunks(u, max_units=max_units)[0]
                         for _s, _e, u in state.due),
                     sum(u for _s, _e, u in state.due))
-    # Logged, not enforced (Peter, 2026-10-22): the build goes out whatever
-    # its estimate, and the spend cap above holds the next submission once
-    # the user is over their limit.
     estimate = estimate_cost_usd(user, state, models, plan_windows, plan)
+    if state.due:
+        # Windows go out only when the windows and the merges after them
+        # are expected to fit into what is left of the user's monthly limit
+        # (Peter, 2026-11-05); else the build waits until the month turns
+        # or the limit is raised. Merges alone are held by the spend cap
+        # above (Peter, 2026-10-22: "let the cap stop it halfway").
+        short = _short_of_headroom(user, estimate)
+        if short is not None:
+            return _hold(user, estimate, *short)
+        if (user.profile_seed_error or "").startswith(HOLD_NOTE):
+            user.profile_seed_error = None
+            db.session.commit()
     logger.info("User %s: profile set %s: %d windows saved, %d in flight, "
                 "%d ranges to read (about %d windows), estimate $%.2f",
                 user.id, set_id, len(state.windows),
