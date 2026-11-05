@@ -80,6 +80,8 @@ from backend.utils.llm_batch import apply_batch_key_override, blocked_items
 from backend.utils.privacy import AI_ALLOWED, account_allows_ai
 from backend.utils.profile_versions import (
     WINDOW_TYPES, current_profile_query)
+from backend.utils.profile_providers import (  # noqa: F401 (re-exported)
+    PUBLIC_PROVENANCES, note_private_read, writing_is_public_only)
 from backend.utils import refusal_backoff
 from backend.utils.tokens import approximate_token_count, format_date_metadata
 # Module references (see profile_batch's note): exports and profile_batch
@@ -94,9 +96,7 @@ ITEM_KINDS = ("window", "group", "final")
 # by the user's chat model (Peter, 2026-11-05). Stands in the window's
 # place in the set's merges; one of profile_versions.WINDOW_TYPES.
 CHAINED_TYPE = "window_update"
-# Node.provenance values that are public by construction (models.Node):
-# Loore fetched the tweets from the Community Archive or the X API.
-PUBLIC_PROVENANCES = ("prefill_ca", "prefill_x")
+
 CONTENT_FAILURES = ("refused", "invalid", "truncated")
 PROVIDER_FAILURES = ("missing", "error")
 # The provider's content-policy filter blocked the item (an error code in
@@ -197,51 +197,6 @@ def _users_provider(user):
     if provider not in ("anthropic", "openai"):
         raise ProfileModelError(f"no profile models for provider {provider!r}")
     return provider
-
-
-def writing_is_public_only(user):
-    """Whether everything a build of this user can read is public, so its
-    windows and merges may go to either provider (Peter, 2026-11-05: a
-    pre-fill, the lab). From metadata only, never the content; any doubt
-    counts as private:
-
-    - every entry of the user (their own and the AI replies they own,
-      deleted ones included, since an earlier version may have read them)
-      was fetched from a public source (PUBLIC_PROVENANCES), or is public
-      while the user shares publicly;
-    - no entry of someone else is a parent or a reply of theirs (the
-      export reads the threads the user took part in);
-    - no profile version is the user's own text and no profile prompt is
-      their own.
-
-    A user with no entries is not public-only."""
-    from sqlalchemy import func, not_
-    from sqlalchemy.orm import aliased
-    from backend.models import UserPrompt
-    from backend.utils.privacy import PrivacyLevel
-    mine = or_(Node.user_id == user.id, Node.human_owner_id == user.id)
-    public = func.coalesce(Node.provenance, "").in_(PUBLIC_PROVENANCES)
-    if user.public_sharing_enabled:
-        public = or_(public, func.coalesce(Node.privacy_level, "")
-                     == PrivacyLevel.PUBLIC.value)
-    if db.session.query(Node.id).filter(mine).first() is None:
-        return False
-    if db.session.query(Node.id).filter(mine, not_(public)).first():
-        return False
-    other = aliased(Node)
-    owner = func.coalesce(other.human_owner_id, other.user_id)
-    if db.session.query(Node.id).join(
-            other, Node.parent_id == other.id).filter(
-            mine, owner != user.id).first():
-        return False
-    if db.session.query(Node.id).join(
-            other, other.parent_id == Node.id).filter(
-            mine, owner != user.id).first():
-        return False
-    if UserProfile.query.filter_by(
-            user_id=user.id, generated_by="user").first() is not None:
-        return False
-    return UserPrompt.query.filter_by(user_id=user.id).first() is None
 
 
 def cross_provider_allowed(user):
@@ -1345,6 +1300,11 @@ def next_work(user, keys, deadline, wait_for_imports=True):
     # The models of this pass and the providers the writing may reach
     # (Peter, 2026-11-05).
     cross = cross_provider_allowed(user)
+    # A pass over writing that is not public-only marks the user for good.
+    if not user.profile_private_read:
+        note_private_read(user)
+        if user.profile_private_read:
+            db.session.commit()
     chained_base = chained_update_base(user, state, fresh)
     models = pass_models(user, state, chained_base, cross)
     providers = ({"anthropic", "openai"} if cross

@@ -186,6 +186,14 @@ class User(db.Model, UserMixin):
     profile_both_providers = db.Column(
         db.Boolean, nullable=False, default=False,
         server_default=db.text("false"))
+    # Set for good once a profile pass read writing of this user that is
+    # not public-only (utils/profile_providers.note_private_read): their
+    # profiles may hold private writing even after those entries are
+    # purged, so the user's builds never count as public-only again.
+    # Nothing clears it automatically.
+    profile_private_read = db.Column(
+        db.Boolean, nullable=False, default=False,
+        server_default=db.text("false"))
     # Measured billed input tokens per stored content unit (Node.token_count)
     # on the user's last profile chunk, tagged with the tokenizer family it
     # was measured on (backend/tasks/exports.TOKENIZER_FAMILIES). The chunk

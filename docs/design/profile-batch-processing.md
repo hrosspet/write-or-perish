@@ -413,12 +413,25 @@ same task run.
 | More than one window, public-only writing or `User.profile_both_providers` | `PROFILE_VERSION_MODEL_CROSS_PROVIDER` (GPT-6 Luna) | `PROFILE_MERGE_MODEL_CROSS_PROVIDER` (Opus 5.5) |
 | A regular update of a merged set: one window to read | the user's chat model, chained | the user's chat model |
 
-Public-only (`writing_is_public_only`, metadata only, any doubt counts as
-private): every entry of the user, deleted ones included, came from the
-Community Archive or the X API (`Node.provenance` `prefill_ca` /
-`prefill_x`) or is public while the user shares publicly; no other user's
-entry is a parent or a reply of theirs; no profile version is the user's
-own text and no profile prompt is their own. `profile_both_providers`
+Public-only (`utils/profile_providers.writing_is_public_only`, metadata
+only, any doubt counts as private; nothing private may ever have been read
+for the user):
+
+- every entry of the user, deleted ones included, came from the Community
+  Archive or the X API (`Node.provenance` `prefill_ca` / `prefill_x`) with
+  its text unchanged since (no `NodeVersion` row, which the node route
+  writes on every edit; a deleted one whose text and history the cleanup
+  wiped counts as private), or is public while the user shares publicly;
+- no other user's entry is a parent or a reply of theirs, and no profile
+  prompt is their own;
+- every profile row of the user records its sources
+  (`source_origin_stats`) as pre-filled tweets alone (`twitter`) on an
+  account Loore pre-filled, and none is the user's own text: a purged
+  entry leaves its origin in the rows that read it, and a row without the
+  record counts as private;
+- `User.profile_private_read` is not set. A batch submission, a saved
+  version and a window pass set it for good when the user's entries are
+  not public-only (`note_private_read`), consent or not; nothing clears it. `profile_both_providers`
 (default false, no UI; #599 asks the question) is the user's consent.
 Without either, every model of a pass is of the provider of the user's
 chat model: checked at boot (`validate_profile_models`), per pass

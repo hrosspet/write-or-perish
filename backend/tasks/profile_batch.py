@@ -748,6 +748,12 @@ def _submit_requests(built, keys):
     built = unique
     if not built:
         return 0
+    # The users whose writing these requests read: a user whose entries
+    # are not public-only is marked for good (utils/profile_providers).
+    from backend.utils.profile_providers import note_private_read
+    for uid in {b["meta"]["user_id"] for b in built}:
+        note_private_read(db.session.get(User, uid))
+    db.session.commit()
     requests_by_provider = {}
     for b in built:
         # The user the request is for: its OpenAI safety identifier.

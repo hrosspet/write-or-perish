@@ -470,6 +470,10 @@ def _save_profile(user, model_id, profile_text, response,
     # admin column showed for it.
     if user.profile_seed_error:
         user.profile_seed_error = None
+    # A version read the user's writing: one that is not public-only marks
+    # the user for good (utils/profile_providers).
+    from backend.utils.profile_providers import note_private_read
+    note_private_read(user)
 
     new_profile = UserProfile(
         user_id=user.id, generated_by=model_id,

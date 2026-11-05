@@ -1979,3 +1979,115 @@ def test_every_chained_version_keeps_its_place_in_the_merges(world):
         assert [p.id for p in inputs[5:]] == [
             r.id for r in _rows(u, "window_update")]
     assert len([f for f in _rows(u, "integration") if f.window_set]) == 11
+
+
+# ── public-only, after review (2026-11-05) ────────────────────────────────
+# "A user is public-only only if nothing private was ever read for them."
+
+def test_an_entry_edited_through_the_node_route_is_private(app, monkeypatch):
+    """Review finding 1: PUT /api/nodes/<id> keeps a pre-filled entry's
+    provenance; the NodeVersion row the edit writes makes it private."""
+    from flask_login import LoginManager
+    import backend.routes.nodes as nodes_module
+    monkeypatch.setattr(
+        "backend.utils.context_artifacts.sync_context_artifacts",
+        lambda *a, **k: None)
+    login_manager = LoginManager(app)
+
+    @login_manager.user_loader
+    def load_user(user_id):
+        return db.session.get(User, int(user_id))
+
+    app.register_blueprint(nodes_module.nodes_bp, url_prefix="/api/nodes")
+    u = _prefilled(prefilled_handle="alice")
+    tweet = Node.query.filter_by(user_id=u.id).first()
+    assert pw.writing_is_public_only(u) is True
+    client = app.test_client()
+    with client.session_transaction() as sess:
+        sess["_user_id"] = str(u.id)
+        sess["_fresh"] = True
+    res = client.put(f"/api/nodes/{tweet.id}",
+                     json={"content": "my own words now"})
+    assert res.status_code == 200
+    db.session.expire_all()
+    assert db.session.get(Node, tweet.id).provenance == "prefill_ca"
+    assert pw.writing_is_public_only(db.session.get(User, u.id)) is False
+
+
+def test_a_deleted_fetched_entry_whose_text_was_wiped_is_private(app):
+    u = _prefilled(prefilled_handle="alice")
+    gone = _node(u, provenance="prefill_x", deleted=True)
+    assert pw.writing_is_public_only(u) is True     # its history is there
+    gone.content = None                             # the cleanup's wipe
+    db.session.commit()
+    assert pw.writing_is_public_only(u) is False
+
+
+def test_profiles_count_only_when_they_read_pre_filled_tweets(app):
+    from backend.utils.profile_providers import profiles_public_only
+    tweets = {"twitter": {"nodes": 2, "tokens": 20}}
+    u = _prefilled(prefilled_handle="alice")
+    _profile(u, source_origin_stats=tweets)
+    assert pw.writing_is_public_only(u) is True
+    _profile(u, source_origin_stats=None)           # no record: private
+    assert profiles_public_only(u) is False
+    v = _prefilled(prefilled_handle="bob")
+    _profile(v, source_origin_stats={**tweets, "loore": {"nodes": 1,
+                                                          "tokens": 5}})
+    assert pw.writing_is_public_only(v) is False    # read Loore writing
+    w = _prefilled()                                # not a pre-fill
+    _profile(w, source_origin_stats=tweets)         # (an own upload?)
+    assert pw.writing_is_public_only(w) is False
+
+
+def test_a_purged_private_base_never_reaches_the_other_provider(world):
+    """Review finding 2: an OpenAI user's profile was built by GPT-6 Astra
+    from private Loore entries, which were deleted and purged; only
+    pre-filled tweets remain. The next build of two or more windows takes
+    that profile as its base: it must stay with OpenAI."""
+    u = _user(preferred_model="gpt-6-astra", prefilled_handle="alice")
+    _node(u, provenance="prefill_ca")
+    base = _profile(u, gen_type="update", cutoff=T0,
+                    generated_by="gpt-6-astra", text=_good(
+                        events=False, tag="PRIVATE-BASE"),
+                    source_origin_stats={"loore": {"nodes": 9,
+                                                   "tokens": 900}})
+    world.corpus = _windows_corpus(4)
+    _finish(world, u)
+    assert {p for p, _r in _all_reqs(world)} == {"openai"}
+    merges = [r for _p, r in _all_reqs(world) if "_f_" in r["custom_id"]]
+    assert merges and all(r["model_id"] == "gpt-6.1-sol" for r in merges)
+    texts = [m["content"][0]["text"] for r in merges for m in r["messages"]]
+    assert any("PRIVATE-BASE" in t for t in texts)    # merged, on Sol
+
+
+@pytest.mark.parametrize("consent", [False, True])
+def test_a_pass_over_private_writing_marks_the_user_for_good(world, consent):
+    """The sticky mark: a pass that read private writing (with consent,
+    too) leaves the user private after those entries are gone and the
+    consent is withdrawn."""
+    u = _user(prefilled_handle="alice", profile_needs_full_regen=True,
+              profile_both_providers=consent)
+    _node(u, provenance="prefill_ca")
+    private = _node(u)
+    world.corpus = _windows_corpus(4)
+    _advance(u)
+    u = db.session.get(User, u.id)
+    assert u.profile_private_read is True
+    db.session.delete(private)                      # purged
+    u.profile_both_providers = False
+    db.session.commit()
+    from backend.utils.profile_providers import entries_public_only
+    assert entries_public_only(u) is True
+    assert pw.writing_is_public_only(u) is False
+    assert pw.cross_provider_allowed(u) is False
+
+
+def test_a_public_only_pass_does_not_mark_the_user(world):
+    from backend.utils.profile_providers import note_private_read
+    u = _prefilled(prefilled_handle="alice")
+    note_private_read(u)
+    assert u.profile_private_read is False
+    _node(u)
+    note_private_read(u)
+    assert u.profile_private_read is True
