@@ -487,7 +487,8 @@ def test_one_call_asks_for_structured_output():
     assert call["model_id"] == "claude-opus-5.5"
     assert call["messages"] == MESSAGES
     assert call["kwargs"] == {"output_schema": tme.TODO_EDITS_SCHEMA,
-                              "output_schema_name": "todo_edits"}
+                              "output_schema_name": "todo_edits",
+                              "user_id": None}
     assert run.stats() == {
         "calls": 1, "retries": 0, "edits_applied": 1, "full_write": False,
         "format_errors": 0, "anchor_errors": 0, "rewrite_refusals": 0,

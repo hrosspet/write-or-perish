@@ -66,6 +66,124 @@ class BatchItemCancelled(BatchItemFailed):
     the poll that asked for the cancel."""
 
 
+# ── Content-policy blocks (Peter, 2026-11-04) ───────────────────────────
+# OpenAI's content-policy filter answers a request it blocks with HTTP 400,
+# type invalid_request_error, and one of these codes (in a batch, the line
+# lands in the batch's error file, not its output file). The same request
+# is blocked again, and every blocked request counts against the account,
+# so a block is final: no caller sends the item again on its own.
+# Codes: bio_policy (seen in batch error files), invalid_prompt ("flagged
+# as potentially violating our usage policy") and
+# image_content_policy_violation, all three in the SDK's ResponseError
+# code list (openai.types.responses.ResponseError, openai>=2.44).
+OPENAI_POLICY_BLOCK_CODES = (
+    "bio_policy", "invalid_prompt", "image_content_policy_violation")
+
+
+def is_policy_block(code):
+    """Whether a provider error code is a content-policy block."""
+    return code in OPENAI_POLICY_BLOCK_CODES
+
+
+class BatchItemPolicyBlocked(BatchItemFailed):
+    """The provider's content-policy filter blocked the item (an error
+    code in OPENAI_POLICY_BLOCK_CODES, e.g. bio_policy). A verdict like
+    its parent, and final: the caller records the block and never sends
+    the item again automatically. ``code``: the provider's error code."""
+
+    def __init__(self, message, code=None, error_type=None):
+        super().__init__(message)
+        self.code = code
+        self.error_type = error_type
+
+
+def openai_item_error(entry):
+    """(status_code, code, type) of an OpenAI batch result line (output
+    or error file) that is not a usable 200, else None. The error object
+    is the response body's ``error`` or, for a request that never got a
+    response, the line's own ``error``."""
+    response = entry.get("response") or {}
+    body = response.get("body") or {}
+    status = response.get("status_code")
+    error = body.get("error") if isinstance(body, dict) else None
+    if not isinstance(error, dict) or not error:
+        error = entry.get("error") if isinstance(entry.get("error"), dict) \
+            else None
+    if status == 200 and not error and not entry.get("error"):
+        return None
+    error = error or {}
+    return status, error.get("code"), error.get("type")
+
+
+def _log_item_error(batch_id, custom_id, status, code, etype):
+    """Log a failed item by status, code and type only: never the
+    request, and not the provider's message."""
+    log.warning("OpenAI batch %s item %s failed: status=%s code=%s type=%s%s",
+                batch_id, custom_id, status, code, etype,
+                " (content-policy block)" if is_policy_block(code) else "")
+
+
+def _raise_item_error(batch_id, custom_id, status, code, etype, message=None,
+                      logged=False):
+    if not logged:
+        _log_item_error(batch_id, custom_id, status, code, etype)
+    if is_policy_block(code):
+        raise BatchItemPolicyBlocked(
+            f"The provider's content-policy filter blocked batch item "
+            f"{custom_id} ({code})", code=code, error_type=etype)
+    raise BatchItemFailed(
+        f"Batch item {custom_id} failed: status={status} code={code} "
+        f"type={etype}" + (f": {message}" if message else ""))
+
+
+def _file_lines(client, file_id):
+    """The JSON lines of a batch output or error file."""
+    raw = client.files.content(file_id).content.decode()
+    for line in raw.splitlines():
+        if not line.strip():
+            continue
+        try:
+            yield json.loads(line)
+        except ValueError:
+            log.warning("Unreadable line in batch file %s", file_id)
+
+
+def openai_batch_errors(client, batch_id, batch):
+    """{custom_id: (status_code, code, type)} from an ended batch's error
+    file, where OpenAI writes the requests that failed with a non-200
+    status; {} when the batch has none. Each is logged (code and type)."""
+    error_file_id = getattr(batch, "error_file_id", None)
+    if not error_file_id or not isinstance(error_file_id, str):
+        return {}
+    errors = {}
+    for entry in _file_lines(client, error_file_id):
+        cid = entry.get("custom_id")
+        err = openai_item_error(entry)
+        if cid is None or err is None:
+            continue
+        errors[cid] = err
+        _log_item_error(batch_id, cid, *err)
+    return errors
+
+
+class CollectedResults(dict):
+    """The results batch_check_and_collect returns, by custom_id, plus
+    ``blocked``: {custom_id: code} of the items the provider's
+    content-policy filter blocked (OPENAI_POLICY_BLOCK_CODES). Such an
+    item has no result, and its caller must not send it again. A plain
+    dict from a stand-in has no ``blocked``; read it with
+    ``blocked_items(results)``."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.blocked = {}
+
+
+def blocked_items(results):
+    """{custom_id: code} of the policy-blocked items of a collect."""
+    return getattr(results, "blocked", None) or {}
+
+
 def _note_account_failure(exc, provider, model=None, api_key=None):
     """Report a submit refused for an account reason — a spend limit,
     billing, the key (#369) — to the admin, as a live call's would be.
@@ -183,7 +301,13 @@ def batch_submit(requests_by_provider, api_keys, phase=None):
     # --- OpenAI: one batch per model (all requests must share a model) ---
     openai_reqs = requests_by_provider.get("openai", [])
     if openai_reqs:
+        from backend.utils.safety_identifier import openai_safety_identifier
         client = OpenAI(api_key=api_keys["openai"])
+        without_user = sum(1 for r in openai_reqs if r.get("user_id") is None)
+        if without_user:
+            log.warning(f"{without_user} OpenAI batch request(s) without a "
+                        f"user_id ({phase}): sent with the system safety "
+                        f"identifier")
         # One batch per model and endpoint.
         by_model = {}
         for req in openai_reqs:
@@ -226,6 +350,10 @@ def batch_submit(requests_by_provider, api_keys, phase=None):
                             }
                             if effort:
                                 body["reasoning_effort"] = effort
+                        # Both endpoints: which Loore user the request is
+                        # for (Peter, 2026-11-04).
+                        body["safety_identifier"] = openai_safety_identifier(
+                            req.get("user_id"))
                         line = {
                             "custom_id": req["custom_id"],
                             "method": "POST",
@@ -278,12 +406,15 @@ def batch_check_and_collect(batch_ids, api_keys):
             a batch result exactly like a live one (#286).
         still_pending: dict of batch_ids still processing
         batch_durations: dict mapping provider key -> duration in seconds
+    results_by_custom_id is a CollectedResults: its ``blocked`` names the
+    OpenAI items the provider's content-policy filter blocked, read from
+    the batch's error file (and any non-200 line of its output file).
     """
     from anthropic import Anthropic
     from openai import OpenAI
     from backend.llm_providers import TRUNCATED_STOP_REASONS
 
-    results = {}
+    results = CollectedResults()
     still_pending = {}
     batch_durations = {}
 
@@ -343,6 +474,12 @@ def batch_check_and_collect(batch_ids, api_keys):
                                     "cancelled"):
                 still_pending[key] = batch_id
                 continue
+            # The requests that failed with a non-200 status are in the
+            # error file, whatever the batch's end state.
+            for cid, (_status, code, _etype) in openai_batch_errors(
+                    client, batch_id, batch).items():
+                if is_policy_block(code):
+                    results.blocked[cid] = code
             if batch.status != "completed":
                 # An expired or cancelled batch still carries the results
                 # of the requests that finished by then, and those were
@@ -401,8 +538,11 @@ def batch_check_and_collect(batch_ids, api_keys):
                         "batch": True,
                     }
                 else:
-                    log.warning(f"OpenAI batch item {cid}: "
-                                f"status={resp.get('status_code')}")
+                    err = openai_item_error(entry) or (
+                        resp.get("status_code"), None, None)
+                    _log_item_error(batch_id, cid, *err)
+                    if is_policy_block(err[1]):
+                        results.blocked[cid] = err[1]
 
     return results, still_pending, batch_durations
 
@@ -541,17 +681,20 @@ def _responses_input(messages):
 
 
 def openai_batch_submit_one(api_key, custom_id, api_model, messages,
-                            max_tokens, output_schema=None):
+                            max_tokens, output_schema=None, user_id=None):
     """Submit ONE conversation as a one-item OpenAI batch against the
     Responses endpoint (the live path uses Responses too, so the input
     shape and model support match). ``output_schema`` becomes a strict
-    JSON-schema text format. Returns the batch id."""
+    JSON-schema text format. ``user_id``: the Loore user the request is
+    for (its safety identifier). Returns the batch id."""
     from openai import OpenAI
+    from backend.utils.safety_identifier import openai_safety_identifier
     body = {
         "model": api_model,
         "input": _responses_input(messages),
         "max_output_tokens": max_tokens,
         "store": False,
+        "safety_identifier": openai_safety_identifier(user_id),
     }
     if output_schema:
         body["text"] = {"format": {
@@ -598,8 +741,10 @@ def openai_batch_collect_one(api_key, batch_id, custom_id):
     the responses of the requests that had completed by then, and those
     are billed, so the item is collected whenever it is in the output.
     Raises BatchItemCancelled when the batch was cancelled before the
-    item ran (not billed) and BatchItemFailed for any other terminal
-    state without a usable response for the item."""
+    item ran (not billed), BatchItemPolicyBlocked when the provider's
+    content-policy filter blocked it (its code read from the batch's
+    error file), and BatchItemFailed for any other terminal state
+    without a usable response for the item."""
     from openai import OpenAI
     client = OpenAI(api_key=api_key)
     batch = client.batches.retrieve(batch_id)
@@ -609,17 +754,18 @@ def openai_batch_collect_one(api_key, batch_id, custom_id):
         return batch.status, None
     output_file_id = getattr(batch, "output_file_id", None)
     if output_file_id:
-        raw = client.files.content(output_file_id).content.decode()
-        for line in raw.strip().splitlines():
-            entry = json.loads(line)
+        for entry in _file_lines(client, output_file_id):
             if entry.get("custom_id") != custom_id:
                 continue
             response = entry.get("response") or {}
             body = response.get("body") or {}
-            if response.get("status_code") != 200 or entry.get("error"):
-                raise BatchItemFailed(
-                    f"Batch item {custom_id} failed: "
-                    f"{entry.get('error') or body.get('error')}")
+            err = openai_item_error(entry)
+            if err is not None:
+                error = entry.get("error") or body.get("error") or {}
+                _raise_item_error(
+                    batch_id, custom_id, *err,
+                    message=(error.get("message")
+                             if isinstance(error, dict) else None))
             content = ""
             refused = False
             for item in body.get("output") or []:
@@ -649,6 +795,11 @@ def openai_batch_collect_one(api_key, batch_id, custom_id):
                 "batch": True,
                 "batch_id": batch_id,
             }
+    # Not in the output file: a request that failed with a non-200 status
+    # is in the error file.
+    error = openai_batch_errors(client, batch_id, batch).get(custom_id)
+    if error is not None:
+        _raise_item_error(batch_id, custom_id, *error, logged=True)
     if batch.status == "cancelled":
         raise BatchItemCancelled(
             f"OpenAI batch {batch_id} cancelled before item {custom_id} ran")
