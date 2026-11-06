@@ -292,9 +292,16 @@ def test_update_artifact_tool_creates_and_versions(app):
         assert r1["status"] == "success"
         assert r1["created"] is True
 
+        assert r1["version"] == 1
+        assert r1["previous_version"] is None
+
+        # A change to an existing artifact names the version it is based
+        # on (#604).
         r2 = _run_tool(app, "update_artifact",
-                       {"kind": "memory", "updated_content": "fact A+B"}, uid)
+                       {"kind": "memory", "updated_content": "fact A+B",
+                        "base_version": 1}, uid)
         assert r2["created"] is False
+        assert (r2["version"], r2["previous_version"]) == (2, 1)
         assert UserArtifact.latest_for(uid, "memory").get_content() == "fact A+B"
         assert UserArtifact.query.filter_by(
             user_id=uid, kind="memory").count() == 2
@@ -1042,16 +1049,20 @@ def test_artifacts_context_resolution_pinned_vs_latest(app):
         _db.session.commit()
 
         # Pinned: only memory v1 (the node binding wins)
+        # Each inline copy starts with its version (#604).
         memory, scratchpad, intentions, index = get_user_artifacts_context(
             uid, pinned_node=node)
-        assert memory == "mem-v1"
+        assert memory == (
+            "[memory · v1, as of the start of this conversation]\nmem-v1")
         assert scratchpad == ""
         assert intentions == ""
 
         # Fallback (no pinned node): latest of everything
         memory, scratchpad, intentions, index = get_user_artifacts_context(uid)
-        assert memory == "mem-v1"
-        assert scratchpad == "pad-v1"
+        assert memory.endswith("]\nmem-v1")
+        assert scratchpad == (
+            "[scratchpad · v1, as of the start of this conversation]\n"
+            "pad-v1")
         assert "reading-list" in index
 
 
@@ -1120,7 +1131,9 @@ def test_ai_preferences_content_reads_artifact_only(app):
         # The UserArtifact is the source of truth.
         _mk_artifact(uid, "ai_preferences", "folded prefs",
                      title="AI Interaction Preferences")
-        assert get_user_ai_preferences_content(uid) == "folded prefs"
+        assert get_user_ai_preferences_content(uid) == (
+            "[ai_preferences · v1, as of the start of this conversation]\n"
+            "folded prefs")
 
 
 def test_intentions_ambient_not_in_index(app):
@@ -1282,3 +1295,62 @@ def test_switching_the_account_to_train_changes_no_existing_artifact(
     assert client.post(
         f"/api/artifacts/memory/revert/{old_id}").status_code in (200, 201)
     assert UserArtifact.latest_for(user.id, "memory").ai_usage == "chat"
+
+
+# ── "Show changes" on an artifact write (#604) ──────────────────────────
+
+def _changes(client, version_id, **query):
+    qs = "&".join(f"{k}={v}" for k, v in query.items())
+    return client.get(f"/api/artifacts/versions/{version_id}/changes"
+                      + (f"?{qs}" if qs else ""))
+
+
+def test_changes_diff_the_write_against_its_stored_previous(app, client):
+    uid = User.query.first().id
+    v1 = _mk_artifact(uid, "memory", "## Facts\n- has a dog\n- in Prague")
+    v2 = _mk_artifact(uid, "memory", "## Facts\n- has two dogs\n- in Prague")
+
+    r = _changes(client, v2.id, **{"from": v1.id})
+    assert r.status_code == 200
+    data = r.get_json()
+    assert (data["kind"], data["title"]) == ("memory", "Memory")
+    assert (data["version_number"], data["previous_version_number"]) == (2, 1)
+    assert data["lines"] == [
+        {"type": "same", "text": "## Facts"},
+        {"type": "del", "text": "- has a dog"},
+        {"type": "add", "text": "- has two dogs"},
+        {"type": "same", "text": "- in Prague"},
+    ]
+    # Without ?from: the version just before it.
+    assert _changes(client, v2.id).get_json() == data
+
+
+def test_changes_of_a_creation_are_its_whole_text(app, client):
+    uid = User.query.first().id
+    v1 = _mk_artifact(uid, "reading-list", "1. Dune\n2. Solaris")
+    data = _changes(client, v1.id).get_json()
+    assert (data["version_number"], data["previous_version_number"]) == (
+        1, None)
+    assert data["lines"] == [{"type": "add", "text": "1. Dune"},
+                             {"type": "add", "text": "2. Solaris"}]
+
+
+def test_changes_are_the_owners_only_with_no_admin_path(app, client):
+    me = User.query.first()
+    me.is_admin = True
+    other = User(username="other")
+    _db.session.add(other)
+    _db.session.commit()
+    theirs_v1 = _mk_artifact(other.id, "memory", "THEIR OLD TEXT")
+    theirs_v2 = _mk_artifact(other.id, "memory", "THEIR NEW TEXT")
+    mine = _mk_artifact(me.id, "memory", "my text")
+    my_list = _mk_artifact(me.id, "reading-list", "1. Dune")
+
+    for r in (_changes(client, theirs_v2.id),
+              _changes(client, theirs_v2.id, **{"from": theirs_v1.id}),
+              _changes(client, mine.id, **{"from": theirs_v1.id}),
+              _changes(client, mine.id, **{"from": my_list.id}),
+              _changes(client, mine.id, **{"from": mine.id}),
+              _changes(client, 999999)):
+        assert r.status_code == 404
+        assert b"THEIR" not in r.data
