@@ -505,6 +505,13 @@ def _generate_tts_chunks(task, entity, text, target_dir, audio_storage_root,
     # metadata, #145). Rows left by an earlier run that failed (a streamed
     # voice reply's TTS, #367) would collide on the chunk index.
     chunk_fk = {chunk_fk_attr: entity.id}
+    # The speech this run replaces may still be playing. Mark its folders
+    # changed, so the nightly sweep (utils/audio_sweep.py) waits a day
+    # before it deletes the old files this run does not overwrite.
+    from backend.utils.audio_storage import mark_speech_superseded
+    old_urls = [entity.audio_tts_url] + [
+        u for (u,) in db.session.query(TTSChunk.audio_url).filter_by(**chunk_fk)]
+    mark_speech_superseded(entity, old_urls, root=AUDIO_ROOT)
     TTSChunk.query.filter_by(**chunk_fk).delete(synchronize_session=False)
     created_chunks = []
     for i, (_chunk, section_title, section_index) in enumerate(chunk_specs):
