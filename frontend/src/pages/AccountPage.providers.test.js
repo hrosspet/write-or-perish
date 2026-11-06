@@ -74,6 +74,16 @@ test('changing it saves the answer', async () => {
   await waitFor(() => expect(mockUserCtx.setUser).toHaveBeenCalledWith(updated));
 });
 
+test('a failed save says so and shows the answer still saved', async () => {
+  mockPut.mockRejectedValue(new Error('offline'));
+  renderPage({ profile_both_providers: true });
+  fireEvent.change(setting(), { target: { value: 'one' } });
+  expect(mockPut).toHaveBeenCalledWith('/dashboard/user', { profile_both_providers: false });
+  expect(await screen.findByRole('alert')).toHaveTextContent("Couldn't save your answer");
+  expect(setting()).toHaveValue('both');
+  expect(mockUserCtx.setUser).not.toHaveBeenCalled();
+});
+
 test('a changed default model asks while never answered', async () => {
   mockPut.mockResolvedValue({ data: { user: {
     ...baseUser, preferred_model: 'gpt-6-astra', profile_provider: 'openai',

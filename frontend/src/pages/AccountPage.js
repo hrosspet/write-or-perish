@@ -256,6 +256,7 @@ export default function AccountPage() {
   const [aiUsageSaving, setAiUsageSaving] = useState(false);
   const [craftSaving, setCraftSaving] = useState(false);
   const [providersSaving, setProvidersSaving] = useState(false);
+  const [providersError, setProvidersError] = useState("");
   // The both-providers question (#599) after a preferred-model change,
   // while the user has never answered it (user.ask_both_providers.model).
   const [askProviders, setAskProviders] = useState(false);
@@ -318,6 +319,21 @@ export default function AccountPage() {
     },
     [setUser]
   );
+
+  // The both-providers answer (#599) says when it did not save: a user
+  // who changes yes to no must know if the no did not reach the server.
+  const saveBothProviders = async (value) => {
+    setProvidersSaving(true);
+    setProvidersError("");
+    try {
+      const res = await api.put("/dashboard/user", { profile_both_providers: value });
+      if (res.data.user) setUser(res.data.user);
+    } catch (e) {
+      setProvidersError("Couldn't save your answer. Please try again.");
+    } finally {
+      setProvidersSaving(false);
+    }
+  };
 
   const saveField = async (field, value, setSaving) => {
     setSaving(true);
@@ -677,10 +693,7 @@ export default function AccountPage() {
           value={user.profile_both_providers === true ? "both"
             : user.profile_both_providers === false ? "one" : ""}
           disabled={providersSaving}
-          onChange={(e) =>
-            saveField("profile_both_providers", e.target.value === "both",
-              setProvidersSaving)
-          }
+          onChange={(e) => saveBothProviders(e.target.value === "both")}
           style={selectStyle}
         >
           {user.profile_both_providers == null && (
@@ -689,6 +702,11 @@ export default function AccountPage() {
           <option value="both">Anthropic and OpenAI</option>
           <option value="one">{ownProviderName(user)} only</option>
         </select>
+        {providersError && (
+          <div role="alert" style={{ ...helperStyle, color: "var(--accent)" }}>
+            {providersError}
+          </div>
+        )}
         <div style={helperStyle}>
           Loore builds your profile from your writing in the background.
           With both, when there is a lot of writing to read, such as after
