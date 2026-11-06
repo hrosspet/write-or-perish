@@ -94,6 +94,14 @@ def app():
         sys.modules[k] = mod
 
 
+@pytest.fixture(autouse=True)
+def _audio_root(tmp_path, monkeypatch):
+    # The cleanup deletes a node's audio folders; keep it off the repo's
+    # data/audio (test_deleted_node_audio.py covers the files).
+    from backend.utils import audio_storage
+    monkeypatch.setattr(audio_storage, "AUDIO_STORAGE_ROOT", tmp_path)
+
+
 @pytest.fixture
 def alice(app):
     u = User(username="alice", twitter_id="alice-twitter-id")
