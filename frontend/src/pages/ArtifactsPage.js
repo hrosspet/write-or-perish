@@ -4,10 +4,13 @@ import MarkdownBody from '../components/MarkdownBody';
 import IntentionsView from '../components/IntentionsView';
 import api from '../api';
 import ArtifactsNav from '../components/ArtifactsNav';
+import BubbleKebabMenu from '../components/BubbleKebabMenu';
+import DeleteConfirmDialog from '../components/DeleteConfirmDialog';
 import VersionHistoryDrawer from '../components/VersionHistoryDrawer';
+import { useToast } from '../contexts/ToastContext';
 import useSubmitShortcut from '../hooks/useSubmitShortcut';
 import useEscapeKey from '../hooks/useEscapeKey';
-import { compareArtifacts } from '../utils/artifactKinds';
+import { compareArtifacts, neighborAfterDelete } from '../utils/artifactKinds';
 import { useCheckboxToggle, useTaskInsert } from '../utils/markdown';
 import { formatDate } from '../utils/date';
 
@@ -32,7 +35,12 @@ export default function ArtifactsPage() {
   const { kind: kindParam } = useParams();
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
+  const { addToast } = useToast();
   const [artifacts, setArtifacts] = useState([]);
+  // Kinds the user deleted (#603): a link to one says so instead of
+  // opening an empty artifact under its name.
+  const [deletedKinds, setDeletedKinds] = useState([]);
+  const [confirmDelete, setConfirmDelete] = useState(false);
   const [activeKind, setActiveKind] = useState(kindParam || 'memory');
   const [versionNumber, setVersionNumber] = useState(null);
   const [pendingNav, setPendingNav] = useState(null);
@@ -58,6 +66,7 @@ export default function ArtifactsPage() {
     try {
       const res = await api.get('/artifacts');
       setArtifacts(res.data.artifacts);
+      setDeletedKinds(res.data.deleted_kinds || []);
       setLoading(false);
     } catch (err) {
       console.error('Failed to load artifacts:', err);
@@ -71,12 +80,17 @@ export default function ArtifactsPage() {
 
   // View ping for the admin Activity tab — once per kind per visit,
   // fire-and-forget (a failure must never affect the page).
+  // Not for a deleted artifact (#603): a view of it would name it again
+  // after the cleanup removed its views. So the ping waits for the list.
   const viewedKindsRef = useRef(new Set());
+  const activeDeleted = deletedKinds.includes(activeKind)
+    && !artifacts.some((a) => a.kind === activeKind);
   useEffect(() => {
-    if (!activeKind || creatingKind || viewedKindsRef.current.has(activeKind)) return;
+    if (loading || !activeKind || creatingKind || activeDeleted
+        || viewedKindsRef.current.has(activeKind)) return;
     viewedKindsRef.current.add(activeKind);
     api.post(`/artifacts/${activeKind}/viewed`).catch(() => {});
-  }, [activeKind, creatingKind]);
+  }, [activeKind, creatingKind, loading, activeDeleted]);
 
   // Deep-link: /artifacts/:kind selects that artifact (e.g. predictions, or
   // a custom one opened from the nav dropdown). Switching kinds always
@@ -144,8 +158,9 @@ export default function ArtifactsPage() {
   const handleTaskInsert = useTaskInsert(getArtifactContent, setArtifactContent, saveArtifactContent);
 
   // Surface a kind that has no row yet (not a default, not created) as an
-  // empty, editable artifact so deep links never land on a blank page.
-  const synthetic = !artifacts.some((a) => a.kind === activeKind)
+  // empty, editable artifact so deep links never land on a blank page —
+  // unless the user deleted it (#603): that link says so instead.
+  const synthetic = !artifacts.some((a) => a.kind === activeKind) && !activeDeleted
     ? {
         id: null, kind: activeKind, title: titleFromKind(activeKind),
         content: '', generated_by: null, created_at: null,
@@ -264,6 +279,51 @@ export default function ArtifactsPage() {
     }
   };
 
+  // Edit from the version badge or the ⋮ menu: the same form.
+  const startEdit = () => {
+    if (editing || !active) return;
+    setEditing(true);
+    setEditContent(active.content || '');
+    setEditDescription(active.description || '');
+  };
+
+  // Delete (#603): a soft delete of every version on the server. The
+  // tab to the right is selected next (the left one when it was the
+  // last), and the URL follows.
+  const handleConfirmDelete = async () => {
+    const target = active;
+    setConfirmDelete(false);
+    if (!target) return;
+    const next = neighborAfterDelete(tabArtifacts, target.kind);
+    try {
+      await api.delete(`/artifacts/${target.kind}`);
+    } catch (err) {
+      addToast((err.response && err.response.data && err.response.data.error)
+        || 'Could not delete the artifact.', 4000);
+      return;
+    }
+    addToast(`${target.title} deleted`, 3000);
+    setArtifacts((prev) => prev.filter((a) => a.kind !== target.kind));
+    setDeletedKinds((prev) => (prev.includes(target.kind) ? prev : [...prev, target.kind]));
+    window.dispatchEvent(new CustomEvent('loore_artifacts_changed', {
+      detail: { deletedKind: target.kind },
+    }));
+    if (next) {
+      // Selected in the same render as the removal, so the page never
+      // shows the deleted kind's "was deleted" state in between.
+      setActiveKind(next.kind);
+      navigate(`/artifacts/${next.kind}`, { replace: true });
+    }
+    fetchArtifacts();
+  };
+
+  const menuItems = active ? [
+    { label: 'Edit', action: startEdit, color: 'var(--text-primary)' },
+    ...(active.deletable
+      ? [{ label: 'Delete', action: () => setConfirmDelete(true), color: 'var(--accent)' }]
+      : []),
+  ] : [];
+
   const generatedByLabel = (g) => {
     if (!g) return null;
     if (g === 'user' || g === 'manual') return 'edited manually';
@@ -293,15 +353,9 @@ export default function ArtifactsPage() {
         </h1>
 
         {active && !creatingKind && active.created_at && (
-          <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flex: '1 1 auto' }}>
             <button
-              onClick={() => {
-                if (!editing) {
-                  setEditing(true);
-                  setEditContent(active.content || '');
-                  setEditDescription(active.description || '');
-                }
-              }}
+              onClick={startEdit}
               title="Edit"
               style={{
                 background: 'none', border: 'none',
@@ -333,6 +387,17 @@ export default function ArtifactsPage() {
             >
               history
             </button>
+            {/* ⋮ at the right end of the meta line (#603): Edit, and
+                Delete for custom artifacts. Hidden while the edit form
+                is open, so a delete never drops a draft. */}
+            {!editing && (
+              <BubbleKebabMenu
+                inline
+                visible
+                items={menuItems}
+                style={{ marginLeft: 'auto' }}
+              />
+            )}
           </div>
         )}
 
@@ -476,6 +541,25 @@ export default function ArtifactsPage() {
           </div>
         )
       )}
+
+      {/* A link to an artifact the user deleted (#603). */}
+      {activeDeleted && !creatingKind && (
+        <p style={{
+          textAlign: 'center', padding: '40px 0', margin: 0,
+          color: 'var(--text-muted)', fontFamily: 'var(--sans)',
+          fontSize: '0.9rem', fontWeight: 300,
+        }}>
+          This artifact was deleted.
+        </p>
+      )}
+
+      <DeleteConfirmDialog
+        open={confirmDelete && !!active}
+        mode="artifact"
+        itemTitle={active ? active.title : ''}
+        onClose={() => setConfirmDelete(false)}
+        onConfirm={handleConfirmDelete}
+      />
 
       {pendingNav && (
         <div style={{

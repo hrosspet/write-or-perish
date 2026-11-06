@@ -71,6 +71,9 @@ const buttonBaseStyle = {
  *     by the Log card kebab.
  *   - "reference": a saved reference (#232) — not a node, nothing
  *     nests under it. Single Delete button.
+ *   - "artifact": a custom artifact (#603) with all its versions;
+ *     `itemTitle` names it. Single Delete button. Like node deletion,
+ *     the copy does not mention the grace period.
  *   - "prompt": follow-up shown when the confirmed delete would leave a
  *     text/voice session with only its system prompt alive. Asks
  *     whether to delete the prompt as well. `listedIn` names where the
@@ -86,6 +89,7 @@ function DeleteConfirmDialog({
   mode = "single",
   hasChildren = false,
   listedIn = "your Log",
+  itemTitle = "",
   onClose,
   onConfirm,
 }) {
@@ -154,6 +158,33 @@ function DeleteConfirmDialog({
       <>
         It leaves your saved references and search. The original stays
         where it is.
+      </>
+    );
+    buttons = (
+      <>
+        <button
+          onClick={() => onConfirm({ withDescendants: false })}
+          style={{ ...buttonBaseStyle, color: "var(--accent)" }}
+        >
+          Delete
+        </button>
+        <button
+          onClick={onClose}
+          style={{ ...buttonBaseStyle, color: "var(--text-secondary)" }}
+        >
+          Cancel
+        </button>
+      </>
+    );
+  } else if (mode === "artifact") {
+    title = "Delete artifact?";
+    body = (
+      <>
+        <strong style={{ fontWeight: 400, color: "var(--text-primary)" }}>
+          {itemTitle}
+        </strong>{" "}
+        and its version history will be removed. The AI will no longer
+        see it.
       </>
     );
     buttons = (
