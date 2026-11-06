@@ -24,6 +24,9 @@ from backend.utils.own_entries import has_own_entries
 from backend.utils.user_purge import deletion_status
 from backend.utils.account_deletion import account_deletion_info
 from backend.utils.glean import glean_user_fields
+from backend.utils.profile_providers import (
+    both_providers_answer, both_providers_ask, profile_provider,
+    set_both_providers)
 
 logger = logging.getLogger(__name__)
 dashboard_bp = Blueprint("dashboard_bp", __name__)
@@ -128,6 +131,14 @@ def _serialize_current_user():
         # shows the switch); enabled = the switch's effective value,
         # which every Glean card and button keys off.
         **glean_user_fields(current_user),
+        # Both providers for background tasks (#599): the user's answer
+        # (null: never answered), the provider a no keeps them to, and
+        # where the client asks now (profile_providers.both_providers_ask).
+        "profile_both_providers": both_providers_answer(current_user),
+        "profile_both_providers_answered_at": iso_utc(
+            current_user.profile_both_providers_answered_at),
+        "profile_provider": profile_provider(current_user),
+        "ask_both_providers": both_providers_ask(current_user),
         # "Delete all my writing" (#268): a scheduled deletion shows
         # its date and a way to cancel on every page.
         "data_deletion": deletion_status(current_user.id),
@@ -445,6 +456,16 @@ def update_user():
         if model_id and not is_chat_model(model_id):
             return jsonify({"error": f"Model not offered: {model_id}"}), 400
         current_user.preferred_model = model_id
+
+    # The user's own answer to the both-providers question (#599), from
+    # the dialog or the Account page. Strictly true or false: no admin
+    # path sets it, and nothing else does.
+    if "profile_both_providers" in data:
+        val = data["profile_both_providers"]
+        if not isinstance(val, bool):
+            return jsonify({"error": "profile_both_providers must be "
+                                     "true or false."}), 400
+        set_both_providers(current_user, val)
 
     if "default_privacy_level" in data:
         val = data["default_privacy_level"]

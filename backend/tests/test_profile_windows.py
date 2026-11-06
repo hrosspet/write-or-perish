@@ -3519,6 +3519,140 @@ def test_a_pass_over_private_writing_marks_the_user_for_good(world, consent):
     assert pw.cross_provider_allowed(u) is False
 
 
+def _withdraw(user):
+    """The user's no (#599), written as another request would: a Core
+    UPDATE, so the pass's loaded User object still says yes."""
+    db.session.execute(User.__table__.update()
+                       .where(User.__table__.c.id == user.id)
+                       .values(profile_both_providers=False,
+                               profile_both_providers_answered_at=(
+                                   datetime.utcnow())))
+
+
+def _consenting_build_with_windows_in(world, chat):
+    """A user who said yes, whose GPT-6 Luna windows of a 4-window build
+    are collected; the merges are due next. Returns the user and the
+    number of submissions so far."""
+    u = _user(preferred_model=chat, profile_needs_full_regen=True,
+              profile_both_providers=True,
+              profile_both_providers_answered_at=datetime.utcnow())
+    _node(u)                                   # private, but agreed
+    world.corpus = _windows_corpus(4)
+    _advance(u)
+    windows = _all_reqs(world)
+    assert windows and {(p, r["model_id"]) for p, r in windows} == {
+        ("openai", "gpt-6-luna")}
+    _poll()
+    return u, len(world.provider.submits)
+
+
+def _no_before_the_pass_picks_models(monkeypatch, user):
+    """The user's no, committed elsewhere just before the next pass
+    computes its models, while this pass's session still holds the User
+    it loaded with the yes (merge_plan runs right before the models are
+    picked, with no commit in between)."""
+    real = pw.merge_plan
+    said = []
+
+    def merge_plan_then_no(*a, **k):
+        if not said:
+            said.append(True)
+            _withdraw(user)
+        return real(*a, **k)
+    monkeypatch.setattr(pw, "merge_plan", merge_plan_then_no)
+    return said
+
+
+@pytest.mark.parametrize("chat, provider, merge", [
+    ("gpt-6-astra", "openai", "gpt-6.1-sol"),
+    (None, "anthropic", "claude-opus-5.5")])
+def test_a_withdrawn_yes_applies_from_the_next_pass(
+        world, monkeypatch, chat, provider, merge):
+    """#599: a user who said yes and then no gets their own provider from
+    the next pass on, also when the pass's session still holds the User it
+    loaded with the yes (the consent is read from the database). The
+    windows already sent under the yes are merged by their provider's
+    merge model, and nothing more reaches the other provider."""
+    u, n = _consenting_build_with_windows_in(world, chat)
+    said = _no_before_the_pass_picks_models(monkeypatch, u)
+    assert u.profile_both_providers is True    # the loaded object
+    _finish(world, u)
+    assert said
+    after = _all_reqs(world, n)
+    assert after, "the merges went out"
+    assert {p for p, _r in after} == {provider}
+    assert {r["model_id"] for _p, r in after} == {merge}
+    assert [f for f in _rows(u, "integration") if f.window_set]
+
+
+def test_a_no_during_a_pass_sends_no_token_count_to_the_other_provider(
+        world, monkeypatch):
+    """#599, review finding 1: an OpenAI user said yes, their Luna windows
+    are in, and the merges are due on Opus 5.5. A no given after the pass
+    picked its models must stop the merge prompts (written from the
+    user's writing) before they reach Anthropic, also the token count
+    that checks them against the merge model's cap."""
+    u, n = _consenting_build_with_windows_in(world, "gpt-6-astra")
+    counted = []
+    import backend.llm_providers as lp
+    monkeypatch.setattr(lp.LLMProvider, "count_tokens", staticmethod(
+        lambda model_id, messages, k: counted.append(model_id)))
+    real = pw.chained_update_base
+
+    def models_then_no(*a, **k):
+        out = real(*a, **k)
+        _withdraw(u)                   # after the pass computed `cross`
+        return out
+    monkeypatch.setattr(pw, "chained_update_base", models_then_no)
+    assert _advance(u) == "partial"
+    assert "claude-opus-5.5" not in counted
+    assert len(world.provider.submits) == n       # nothing sent
+    monkeypatch.setattr(pw, "chained_update_base", real)
+    _finish(world, u)
+    after = _all_reqs(world, n)
+    assert after and {p for p, _r in after} == {"openai"}
+    assert {r["model_id"] for _p, r in after} == {"gpt-6.1-sol"}
+    assert "claude-opus-5.5" not in counted
+
+
+def test_a_no_given_while_a_pass_renders_stops_it_before_sending(
+        world, monkeypatch):
+    """#599: rendering a pass can take many minutes. A no given meanwhile
+    is read again before the slice is sent: nothing rendered under the yes
+    goes to the other provider, and the next pass renders the windows for
+    the user's own provider."""
+    u = _user(profile_needs_full_regen=True, profile_both_providers=True,
+              profile_both_providers_answered_at=datetime.utcnow())
+    _node(u)
+    world.corpus = _windows_corpus(4)
+    export = world.corpus.export
+    said_no = []
+
+    def render_then_no(*a, **k):
+        out = export(*a, **k)
+        if not said_no:
+            said_no.append(True)
+            _withdraw(u)
+        return out
+    monkeypatch.setattr(pw._exports, "build_user_export_content",
+                        render_then_no)
+    assert _advance(u) == "partial"
+    assert world.provider.submits == []
+    assert not _items()                        # nothing in flight
+    _finish(world, u)
+    reqs = _all_reqs(world)
+    assert reqs and {p for p, _r in reqs} == {"anthropic"}
+    by_kind = {("window" if "_w" in r["custom_id"] else "merge",
+                r["model_id"]) for _p, r in reqs}
+    assert by_kind == {("window", "claude-haiku-5.5"),
+                       ("merge", "claude-opus-5.5")}
+
+
+def test_a_submission_without_a_recheck_sends_as_before(world):
+    sub = pw._Submission({}, {"anthropic"})
+    assert sub.recheck is None and not sub.withdrawn
+
+
 def test_a_public_only_pass_does_not_mark_the_user(world):
     from backend.utils.profile_providers import note_private_read
     u = _prefilled(prefilled_handle="alice")

@@ -963,6 +963,8 @@ def confirm_import():
             "thread_count": thread_count,
             "profile_update_task_id": profile_update_task_id,
             "profile_waits_for_imports": profile_waits,
+            "ask_both_providers": _ask_both_providers(
+                current_user.id, ai_usage, nodes_created + nodes_restored),
             "created": nodes_created,
             "skipped": nodes_skipped,
             "restored": nodes_restored,
@@ -1558,6 +1560,8 @@ def create_twitter_nodes(user_id, rows, total, import_type, include_replies,
         "thread_count": thread_count,
         "profile_update_task_id": profile_update_task_id,
         "profile_waits_for_imports": profile_waits,
+        "ask_both_providers": _ask_both_providers(
+            user_id, ai_usage, nodes_created + nodes_restored),
         "created": nodes_created,
         "skipped": nodes_skipped,
         "empty": nodes_empty,
@@ -1638,6 +1642,17 @@ def _hand_off_profile_update_after_import(user_obj, earliest_ts, imported_tokens
             user_obj, ignore_backoff=True)
     return maybe_trigger_profile_update(
         user_obj.id, force_full_regen=(action == "full"))
+
+
+def _ask_both_providers(user_id, ai_usage, added):
+    """Whether the import's result asks the both-providers question (#599,
+    profile_providers.ask_after_import): an import that added entries AI
+    may read, for a user who never answered or said no at least 30 days
+    ago. Never a user who said yes."""
+    from backend.utils.profile_providers import ask_after_import
+    if not added:
+        return False
+    return ask_after_import(db.session.get(User, user_id), ai_usage, added)
 
 
 def _profile_waits_for_imports(user_id):
@@ -2567,6 +2582,9 @@ def _run_conversation_import(user_id, token, task_id, options, *,
         "thread_count": state["thread_count"],
         "profile_update_task_id": profile_update_task_id,
         "profile_waits_for_imports": profile_waits,
+        "ask_both_providers": _ask_both_providers(
+            user_id, options.get("ai_usage", "none"),
+            state["created"] + state["restored"]),
         "created": state["created"],
         "skipped": state["skipped"] - state["updated"],
         "restored": state["restored"],

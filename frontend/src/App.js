@@ -38,6 +38,7 @@ import CommonsPage from "./pages/CommonsPage";
 import PublicThreadPage from "./pages/PublicThreadPage";
 import ProfileGenerationWatcher from "./components/ProfileGenerationWatcher";
 import UpdatesModal from "./components/UpdatesModal";
+import BothProvidersDialog from "./components/BothProvidersDialog";
 import PromptsPage from "./pages/PromptsPage";
 import PromptDetailPage from "./pages/PromptDetailPage";
 import SearchModal from "./components/SearchModal";
@@ -45,6 +46,7 @@ import api from "./api";
 import { useUser } from "./contexts/UserContext";
 import { AudioProvider } from "./contexts/AudioContext";
 import { useSessionUpdates } from "./hooks/useSessionUpdates";
+import { useBothProvidersQuestion } from "./hooks/useBothProvidersQuestion";
 
 // /u/:username/:slug — human-readable permalink (#228). Resolves the slug
 // to a node id; logged-out visitors keep the pretty URL and get the public
@@ -139,6 +141,11 @@ function App() {
   // opens the updates modal. Never for a session that starts on /welcome
   // (#392).
   const [updates, clearUpdates] = useSessionUpdates(user, pathname);
+  // The both-providers question (#599) on opening Loore: never over
+  // another dialog, a recording, or a Voice or Text session.
+  const [askProviders, closeAskProviders] = useBothProvidersQuestion(
+    user, pathname,
+    showTerms || !!updates || showNewEntry || showSearch || !!openingNode);
 
   // When the user info is loaded, check if they have accepted the terms.
   useEffect(() => {
@@ -218,8 +225,12 @@ function App() {
         />
       )}
 
-      {updates && !showTerms && (
+      {updates && !showTerms && !askProviders && (
         <UpdatesModal data={updates} onClose={clearUpdates} />
+      )}
+
+      {askProviders && !showTerms && (
+        <BothProvidersDialog onClose={closeAskProviders} />
       )}
 
         <ProfileGenerationWatcher />
