@@ -708,10 +708,10 @@ export default function AccountPage() {
           </div>
         )}
         <div style={helperStyle}>
-          Loore builds your profile from your writing in the background.
-          With both, when there is a lot of writing to read, such as after
-          an import, OpenAI's models read your writing in parts and
-          Anthropic's Claude combines those parts into your profile.
+          Loore does some work in the background, such as building your
+          profile from your writing. In our tests, using both gave the best
+          results. With both, your writing can be read by OpenAI's and
+          Anthropic's models.
           With {ownProviderName(user)} only, all of
           it stays with {ownProviderName(user)}
           {user.profile_both_providers == null
