@@ -691,9 +691,10 @@ export default function AccountPage() {
         </select>
         <div style={helperStyle}>
           Loore builds your profile from your writing in the background.
-          With Anthropic and OpenAI, when there is a lot of writing to read,
-          such as after an import, part of the work runs on OpenAI's models
-          and part on Anthropic's. With {ownProviderName(user)} only, all of
+          With both, when there is a lot of writing to read, such as after
+          an import, OpenAI's models read your writing in parts and
+          Anthropic's Claude combines those parts into your profile.
+          With {ownProviderName(user)} only, all of
           it stays with {ownProviderName(user)}
           {user.profile_both_providers == null
             ? ", as it does until you answer." : "."}

@@ -50,6 +50,7 @@ test('before an answer nothing is selected', () => {
   expect(setting()).toHaveValue('');
   expect(screen.getByRole('option', { name: 'Not answered yet' })).toBeDisabled();
   expect(screen.getByRole('option', { name: 'Anthropic only' })).toBeInTheDocument();
+  expect(screen.getByText(/OpenAI's models read your writing in parts and Anthropic's Claude combines those parts into your profile\./)).toBeInTheDocument();
 });
 
 test.each([[true, 'both'], [false, 'one']])(

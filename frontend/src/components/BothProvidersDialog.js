@@ -32,7 +32,7 @@ export function bothProvidersText(own) {
   return {
     title: "Use both Anthropic and OpenAI?",
     ask: `Loore builds your profile from your writing in the background. Is it fine with you if we use both Anthropic and OpenAI for this, or do you want to stick to ${own}?`,
-    both: "With both, when there is a lot of writing to read, such as after an import, part of the work runs on OpenAI's models and part on Anthropic's. In our tests, this gave the best profiles.",
+    both: "With both, when there is a lot of writing to read, such as after an import, OpenAI's models read your writing in parts and Anthropic's Claude combines those parts into your profile. In our tests, this gave the best profiles.",
     one: `With ${own} only, all of it stays with ${own}, as it does now.`,
     note: "Replies use your default model either way.",
     yes: "Use both",

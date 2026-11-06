@@ -31,6 +31,8 @@ test('the two answers look the same and name the user\'s provider', () => {
   expect(both.getAttribute('style')).toBe(keep.getAttribute('style'));
   expect(screen.getByText(/do you want to stick to Anthropic\?/)).toBeInTheDocument();
   expect(screen.getByText(/With Anthropic only, all of it stays with Anthropic/)).toBeInTheDocument();
+  // The user can tell that their writing itself goes to OpenAI.
+  expect(screen.getByText(/OpenAI's models read your writing in parts and Anthropic's Claude combines those parts into your profile\./)).toBeInTheDocument();
 });
 
 test('an OpenAI user keeps to OpenAI', () => {
