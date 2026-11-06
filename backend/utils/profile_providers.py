@@ -6,12 +6,18 @@ can read for them is public, or when they agreed to both providers
 (User.profile_both_providers, #599). "Public only" is decided from
 metadata, never from the content, and any doubt counts as private.
 Everything here only ever pushes a user towards private.
+
+The question that asks the user (#599) and the rules for when it is
+asked are at the end of this module (``both_providers_ask``).
 """
+from datetime import datetime, timedelta
+
+from flask import current_app
 from sqlalchemy import func, not_, or_
 from sqlalchemy.orm import aliased
 
 from backend.extensions import db
-from backend.models import Node, NodeVersion, UserProfile, UserPrompt
+from backend.models import Node, NodeVersion, User, UserProfile, UserPrompt
 
 # Node.provenance values that are public by construction (models.Node):
 # Loore fetched the tweets from the Community Archive or the X API.
@@ -150,3 +156,112 @@ def note_private_read(user):
         return
     if not entries_public_only(user):
         user.profile_private_read = True
+
+
+# ── The question (#599, Peter 2026-11-05) ────────────────────────────────
+# "Is it fine for you if we use both Anthropic and OpenAI for the
+# background tasks, or do you want to stick to just one of them?"
+# Until a user says yes, their writing goes to their own provider only.
+
+# After a no, an import asks again only once the no is at least this old
+# (Peter, 2026-11-05: "at least a month old"; a month read as 30 days).
+REASK_AFTER_NO = timedelta(days=30)
+
+# Where the client asks: "model" when the user changes their preferred
+# model on the Account page, "visit" when they open Loore, "import" on an
+# import's result.
+ASK_CONTEXTS = ("model", "visit", "import")
+
+
+def agreed_to_both(user):
+    """The user's yes as the database holds it now, not as this session
+    loaded it: a no given while a profile pass runs counts from the next
+    check (every slice of requests is checked again before it is sent)."""
+    if user is None or user.id is None:
+        return False
+    value = (db.session.query(User.profile_both_providers)
+             .filter(User.id == user.id).scalar())
+    return bool(value)
+
+
+def both_providers_answer(user):
+    """True (both), False (one provider) or None (never answered: "we
+    don't know", not "no")."""
+    if user is None or user.profile_both_providers_answered_at is None:
+        return None
+    return bool(user.profile_both_providers)
+
+
+def set_both_providers(user, value, now=None):
+    """Record the user's own answer and when they gave it. The caller
+    commits."""
+    user.profile_both_providers = bool(value)
+    user.profile_both_providers_answered_at = now or datetime.utcnow()
+
+
+def has_entries(user_id):
+    """Whether the user has made at least one entry, written in Loore or
+    imported (Peter: "after the 1st reflection", and an import counts):
+    a user node that is not deleted and not the prompt node a Voice, Text
+    or Glean session starts with. Metadata only; stops at the first row."""
+    return db.session.query(Node.id).filter(
+        Node.user_id == user_id, Node.node_type == "user",
+        Node.deleted_at.is_(None), Node.prompt_key.is_(None),
+    ).first() is not None
+
+
+def profile_provider(user):
+    """The provider of the user's preferred model (else the default
+    model): "anthropic" or "openai", the one a no keeps them to."""
+    from backend.utils.llm_nodes import default_model_for
+    models = current_app.config.get("SUPPORTED_MODELS") or {}
+    return (models.get(default_model_for(user)) or {}).get("provider")
+
+
+def both_providers_ask(user, now=None):
+    """Where the client should ask the question now, by context
+    (ASK_CONTEXTS). The rules (Peter, 2026-11-05):
+
+    - never a user who said yes;
+    - never an account whose AI usage is None (no job runs for it);
+    - "model": the user has never answered;
+    - "visit": the user has never answered and has at least one entry,
+      written or imported;
+    - "import": the user has never answered, or said no at least
+      REASK_AFTER_NO ago.
+
+    Closing the question without an answer records nothing, so the next
+    occasion asks again. The client decides which page may show it (never
+    during a recording or a Voice or Text session)."""
+    from backend.utils.privacy import account_allows_ai
+    ask = dict.fromkeys(ASK_CONTEXTS, False)
+    if user is None or not account_allows_ai(user):
+        return ask
+    answered = user.profile_both_providers_answered_at
+    if answered is None:
+        ask["model"] = True
+        ask["import"] = True
+        ask["visit"] = has_entries(user.id)
+        return ask
+    if user.profile_both_providers:
+        return ask
+    now = now or datetime.utcnow()
+    ask["import"] = now - answered >= REASK_AFTER_NO
+    return ask
+
+
+def ask_after_import(user, ai_usage, added):
+    """Whether an import's result asks the question: the import added
+    entries that AI may read (its AI usage allows it), and the "import"
+    rule of ``both_providers_ask`` holds. Best-effort: False on any
+    error, so an import's result never fails over it."""
+    from backend.utils.privacy import AI_ALLOWED
+    if not added or ai_usage not in AI_ALLOWED:
+        return False
+    try:
+        return bool(both_providers_ask(user)["import"])
+    except Exception:
+        db.session.rollback()
+        current_app.logger.warning(
+            "Both-providers check after import failed", exc_info=False)
+        return False

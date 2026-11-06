@@ -180,12 +180,18 @@ class User(db.Model, UserMixin):
     # MIN_INACTIVITY with no import and no new entry, and clears it then.
     profile_import_quiet_from = db.Column(db.DateTime, nullable=True)
     # The user agreed that their writing may reach both providers' models
-    # for a large profile build (Peter, 2026-11-05; the question that sets
-    # it is #599, no UI yet). False: a build reads private writing only
-    # with models of the provider of the user's chat model.
+    # for a large profile build (Peter, 2026-11-05). Set only by the user's
+    # own answer to the question of #599 (the dialog, or Account), through
+    # PUT /dashboard/user. False: a build reads private writing only with
+    # models of the provider of the user's preferred model.
     profile_both_providers = db.Column(
         db.Boolean, nullable=False, default=False,
         server_default=db.text("false"))
+    # When the user last answered that question (UTC). NULL: never
+    # answered, which is "we don't know", not "no"; the flag above is then
+    # false. The rules for asking read it
+    # (utils/profile_providers.both_providers_ask).
+    profile_both_providers_answered_at = db.Column(db.DateTime, nullable=True)
     # Set for good once a profile pass read writing of this user that is
     # not public-only (utils/profile_providers.note_private_read): their
     # profiles may hold private writing even after those entries are

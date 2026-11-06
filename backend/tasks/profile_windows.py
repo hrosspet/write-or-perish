@@ -42,6 +42,9 @@ Which models read the writing (Peter, 2026-11-05):
 Without public-only writing or the user's consent, a user's writing
 reaches only models of their own chat model's provider: checked at boot,
 per pass, and again for every request before it is sent (_Submission).
+The consent is read from the database at each check, and a pass that may
+cross providers checks it again before each slice goes out, so a user who
+withdraws their yes (#599) gets their own provider from that moment.
 
 State lives in the database, as on the chained batch path: the set's rows
 (window, window_skip, group, final), the items of pending ProfileBatchJob
@@ -81,7 +84,8 @@ from backend.utils.privacy import AI_ALLOWED, account_allows_ai
 from backend.utils.profile_versions import (
     WINDOW_TYPES, current_profile_query)
 from backend.utils.profile_providers import (  # noqa: F401 (re-exported)
-    PUBLIC_PROVENANCES, note_private_read, writing_is_public_only)
+    PUBLIC_PROVENANCES, agreed_to_both, note_private_read,
+    writing_is_public_only)
 from backend.utils import refusal_backoff
 from backend.utils.tokens import approximate_token_count, format_date_metadata
 # Module references (see profile_batch's note): exports and profile_batch
@@ -201,9 +205,17 @@ def _users_provider(user):
 
 def cross_provider_allowed(user):
     """Whether this user's build may use both providers' models: they
-    agreed (User.profile_both_providers, #599), or their writing is public
-    only (``writing_is_public_only``)."""
-    return bool(user.profile_both_providers) or writing_is_public_only(user)
+    agreed (User.profile_both_providers, #599, read from the database at
+    the time of the check, so a no counts from the next check), or their
+    writing is public only (``writing_is_public_only``)."""
+    return agreed_to_both(user) or writing_is_public_only(user)
+
+
+def allowed_providers(user, models):
+    """The providers this user's writing may reach now: both, or the
+    provider of their preferred model (``models.provider``)."""
+    return ({"anthropic", "openai"} if cross_provider_allowed(user)
+            else {models.provider})
 
 
 def chained_models_for(user):
@@ -947,18 +959,31 @@ class _Submission:
     """Requests collected for one user's submission, sent in slices of
     PROFILE_BATCH_MAX_BYTES, every slice in the same run."""
 
-    def __init__(self, keys, providers):
+    def __init__(self, keys, providers, recheck=None):
         self.keys = keys
         # The providers this user's writing may reach in this pass.
         self.providers = set(providers)
+        # Returns the providers allowed now; called before each slice is
+        # sent, since rendering a pass can take many minutes (#599).
+        self.recheck = recheck
         self.built = []
         self.size = 0
         self.sent = 0
         self.skipped = 0     # windows given up, saved as window_skip rows
         self.failed = False
+        # The user withdrew a yes to both providers (or their writing
+        # stopped being public only) while the pass rendered: nothing more
+        # goes out in this pass, and the next one plans again.
+        self.withdrawn = False
         self.max_bytes = int(_setting("PROFILE_BATCH_MAX_BYTES", 100_000_000))
 
+    @property
+    def stopped(self):
+        return self.failed or self.withdrawn
+
     def add(self, provider, request, meta):
+        if self.stopped:
+            return          # nothing more goes out in this pass
         if provider not in self.providers:
             # The hard line (Peter, 2026-10-02 and 2026-11-05): never sent.
             raise ProfileModelError(
@@ -971,9 +996,24 @@ class _Submission:
             self.flush()
 
     def flush(self):
-        if not self.built or self.failed:
+        if not self.built or self.stopped:
             self.built, self.size = [], 0
             return
+        if self.recheck is not None:
+            allowed = set(self.recheck())
+            if any(b["provider"] not in allowed for b in self.built):
+                # A no given while this pass rendered: the slice is
+                # dropped unsent (nothing is in flight for it), and the
+                # next pass renders it again for the user's own provider.
+                logger.info("User %s: profile requests to %s withdrawn "
+                            "before sending; the next pass plans again",
+                            self.built[0]["meta"].get("user_id"),
+                            sorted({b["provider"] for b in self.built}
+                                   - allowed))
+                self.providers &= allowed
+                self.withdrawn = True
+                self.built, self.size = [], 0
+                return
         n = _batch._submit_requests(self.built, self.keys)
         if n < len(self.built):
             self.failed = True
@@ -1137,9 +1177,10 @@ def _render_windows(user, state, models, sub, history, deadline,
                     models, models.version, cid,
                     [{"role": "user", "content": [
                         {"type": "text", "text": prompt}]}]), meta)
-                if sub.failed:
-                    # A slice was refused at submission: nothing rendered
-                    # after it would go out in this run.
+                if sub.stopped:
+                    # A slice was refused at submission, or withdrawn
+                    # before it: nothing rendered after it would go out in
+                    # this run.
                     return None
             if chained_base is not None:
                 return None
@@ -1309,6 +1350,10 @@ def next_work(user, keys, deadline, wait_for_imports=True):
     models = pass_models(user, state, chained_base, cross)
     providers = ({"anthropic", "openai"} if cross
                  else {models.provider})
+    # A pass that may cross providers checks again before each slice is
+    # sent: a no given while it renders counts at once (#599).
+    recheck = ((lambda: allowed_providers(user, models)) if cross
+               else None)
     if state.stopped:
         start, end, until = state.stopped[0]
         note = (f"{STOP_NOTE} {_count(history, _attempt_key('window', _iso(start)), PROVIDER_FAILURES)} "
@@ -1343,17 +1388,19 @@ def next_work(user, keys, deadline, wait_for_imports=True):
                 user.id, set_id, len(state.windows),
                 len(state.windows_in_flight), len(state.due),
                 plan_windows[0], estimate)
-    sub = _Submission(keys, providers)
+    sub = _Submission(keys, providers, recheck)
     outcome = None
     if state.due:
         outcome = _render_windows(user, state, models, sub, history,
                                   deadline, chained_base)
-    if outcome != "partial" and not sub.failed:
+    if outcome != "partial" and not sub.stopped:
         _merge_requests(user, state, models, sub, keys, history)
     sub.flush()
     if sub.failed:
         return "failed"
-    if outcome == "partial":
+    if outcome == "partial" or sub.withdrawn:
+        # Withdrawn: a new task plans the rest with the providers allowed
+        # now (the user's own, after a no).
         return "partial"
     # A pass that only gave windows up still changed the set: the caller
     # runs another pass, which may find the final due.
