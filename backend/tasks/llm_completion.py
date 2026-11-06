@@ -151,11 +151,22 @@ def _render_variant(user_id):
     would keep serving the archive-search guidance for the TTL, telling
     the model to use a tool that left the list on the same restart.
     The `u` part is the account's AI-usage setting, which licenses the
-    artifacts index (#326): it changes the verdict, not the text."""
+    artifacts index (#326): it changes the verdict, not the text.
+    The `d` part is when the user last deleted an artifact (#603): the
+    artifacts index of a render stored before a delete still lists the
+    artifact, so a delete takes a fresh key and the next turn renders
+    the index without it. Absent until the user's first delete, so the
+    keys of everyone else stay as they were. Both render paths (the
+    generation loop and the pre-warm's render_system_message) compute
+    the variant before they read the artifacts, so a render that still
+    saw the artifact is never stored under a key from after the delete."""
+    from backend.utils.artifact_deletion import deletion_stamp
+    deleted = deletion_stamp(user_id)
     return (f"a{int(archive_search_enabled(flask_app.config))}"
             f"u{_account_ai_usage(user_id)}"
             f"s{int(_share_enabled_for_user(user_id))}"
-            f"e{int(_external_references_for_user(user_id))}")
+            f"e{int(_external_references_for_user(user_id))}"
+            + (f"d{deleted}" if deleted else ""))
 
 
 def _system_render_variant(system_node, user_id):
@@ -1277,6 +1288,8 @@ def _retrieval_injection_text(tr, user_id, with_labels=False, licence=None):
     """
     name = tr.get("name")
     if name == "read_artifact":
+        # Deleted since the call (#603): "no longer available"
+        # (stored_version reads live versions only).
         artifact = stored_version(tr.get("artifact_id"), user_id)
         if artifact is None or artifact.ai_usage not in AI_ALLOWED:
             return None
@@ -1729,7 +1742,7 @@ def _prefetch_replayed_versions(node_chain, user_id):
     if not ids:
         return
     from backend.utils.encryption import prefetch_deks
-    rows = UserArtifact.query.filter(
+    rows = UserArtifact.live().filter(
         UserArtifact.id.in_(ids), UserArtifact.user_id == user_id).all()
     prefetch_deks(row.content for row in rows)
 

@@ -147,7 +147,7 @@ def _save(user, content, input_tokens, output_tokens, total_tokens, batch):
     artifact.set_content(content)
     db.session.add(artifact)
     db.session.commit()
-    version = UserArtifact.query.filter_by(user_id=user.id, kind=KIND).count()
+    version = UserArtifact.version_count(user.id, KIND)
     return {"version": version, "cost_usd": round(cost / 1e6, 4),
             "llm_tokens": total_tokens, "batch": batch}
 

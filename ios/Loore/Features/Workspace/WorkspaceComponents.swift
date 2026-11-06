@@ -6,15 +6,17 @@ import SwiftUI
 
 /// The Artifacts tab root: one workspace whose document switches in place
 /// (web `/profile`, `/todo`, `/artifacts/:kind` sharing `ArtifactsNav`).
+/// It also carries out the bubbles' menus (#603): Edit opens a document's edit
+/// form, Delete asks, deletes and opens the next bubble.
 struct WorkspaceView: View {
     /// When set, the view shows this document instead of the router's (a
     /// workspace route pushed on another tab).
     var pinned: WorkspaceDocument?
     @Environment(AppState.self) private var app
     @State private var local: WorkspaceDocument?
+    @State private var actions = WorkspaceActions()
 
     var body: some View {
-        let document = local ?? pinned ?? app.router.workspace
         Group {
             switch document {
             case .profile:
@@ -29,40 +31,71 @@ struct WorkspaceView: View {
                     .id("artifact-create")
             }
         }
+        .environment(actions)
         .navigationBarTitleDisplayMode(.inline)
+        .looreDialog(isPresented: Binding(get: { actions.deleteTarget != nil },
+                                          set: { if !$0 { actions.deleteTarget = nil } })) {
+            if let target = actions.deleteTarget {
+                DeleteConfirmDialog(mode: .artifact(title: WorkspaceMenu.label(target),
+                                                    unsavedEdits: actions.unsavedKind == target.kind),
+                                    onConfirm: { _ in delete(target) },
+                                    onCancel: { actions.deleteTarget = nil })
+            }
+        }
+    }
+
+    private var document: WorkspaceDocument {
+        local ?? pinned ?? app.router.workspace
     }
 
     private func select(_ document: WorkspaceDocument) {
+        // An edit chosen for another document does not outlive this switch.
+        if actions.editRequest != document { actions.editRequest = nil }
         if pinned != nil {
             local = document
         } else {
             app.router.workspace = document
         }
     }
+
+    /// Deletes every version; then the bubble leaves the row and, when it was
+    /// open, the next bubble opens in the same update (so the page never shows
+    /// "This artifact was deleted." in between). An error leaves everything as it was.
+    private func delete(_ target: ArtifactDoc) {
+        actions.deleteTarget = nil
+        let title = WorkspaceMenu.label(target)
+        Task {
+            switch await app.artifacts.delete(target.kind, api: app.api) {
+            case .failed(let message):
+                app.toasts.show(message, duration: 4)
+            case .deleted:
+                let row = WorkspaceMenu.bubbles(app.artifacts.artifacts)
+                let next = WorkspaceMenu.selection(afterDeleting: target.kind, active: document, row: row)
+                withAnimation(LooreMotion.quick) {
+                    app.artifacts.markDeleted(target.kind)
+                    if let next { select(next) }
+                }
+                app.toasts.show("\(title) deleted", duration: 3)
+                app.signals.post(.artifactsChanged)
+            }
+        }
+    }
 }
 
 /// The wrapped row of bubbles (web `ArtifactsNav`): Profile, Intentions, Todo,
-/// the built-in kinds, custom kinds by title, then "+".
+/// the built-in kinds, custom kinds by title, then "+". A long press opens a
+/// bubble's menu (#603, `WorkspaceMenu.items`); a tap selects.
 struct ArtifactsNavRow: View {
     let active: WorkspaceDocument
     let onSelect: (WorkspaceDocument) -> Void
     @Environment(AppState.self) private var app
+    @Environment(WorkspaceActions.self) private var actions: WorkspaceActions?
 
     var body: some View {
-        let artifacts = app.artifacts.artifacts
-        let byKind = Dictionary(artifacts.map { ($0.kind, $0) }, uniquingKeysWith: { first, _ in first })
-        let pinned = ArtifactKinds.builtinKindOrder.filter { $0 != "intentions" }.compactMap { byKind[$0] }
-        let custom = artifacts.filter { !ArtifactKinds.isBuiltinKind($0.kind) }
-            .sorted { ArtifactKinds.titleSortsBefore($0.title.isEmpty ? $0.kind : $0.title,
-                                                    $1.title.isEmpty ? $1.kind : $1.title) }
         FlowLayout(spacing: 8, lineSpacing: 8) {
-            bubble("Profile", document: .profile)
-            if let intentions = byKind["intentions"] { artifactBubble(intentions) }
-            bubble("Todo", document: .todo)
-            ForEach(pinned) { artifactBubble($0) }
-            ForEach(custom) { artifactBubble($0) }
-            bubble("+", document: .create)
-                .accessibilityLabel("Create a new artifact")
+            ForEach(WorkspaceMenu.bubbles(app.artifacts.artifacts)) { bubble in
+                withMenu(bubble)
+            }
         }
         .padding(.bottom, 20)
         .task { await app.artifacts.refresh(api: app.api) }
@@ -71,26 +104,73 @@ struct ArtifactsNavRow: View {
         }
     }
 
-    private func artifactBubble(_ artifact: ArtifactDoc) -> some View {
-        bubble(artifact.title.isEmpty ? artifact.kind : artifact.title, document: .artifact(artifact.kind))
-            .accessibilityHint(artifact.description ?? "")
+    @ViewBuilder private func withMenu(_ bubble: WorkspaceBubble) -> some View {
+        let items = actions == nil ? [] : WorkspaceMenu.items(for: bubble)
+        if items.isEmpty {
+            button(bubble)
+        } else {
+            button(bubble)
+                // The lifted preview is the capsule, not its bounding rectangle.
+                .contentShape(.contextMenuPreview, Capsule())
+                .contextMenu {
+                    Button { edit(bubble) } label: { Label("Edit", systemImage: "pencil") }
+                    if items.contains(.delete), let artifact = bubble.artifact {
+                        Button(role: .destructive) { requestDelete(artifact) } label: {
+                            Label("Delete", systemImage: "trash")
+                        }
+                    }
+                }
+                .accessibilityAction(named: "Edit") { edit(bubble) }
+                .modifier(DeleteAccessibilityAction(artifact: items.contains(.delete) ? bubble.artifact : nil,
+                                                    perform: requestDelete))
+        }
     }
 
-    private func bubble(_ title: String, document: WorkspaceDocument) -> some View {
+    private func button(_ bubble: WorkspaceBubble) -> some View {
+        let document = bubble.document
         let isActive = active == document
         return Button { if !isActive || document == .create { onSelect(document) } } label: {
-            Text(title)
+            Text(bubble.title)
                 .font(LooreFont.sans(12.8, .light))
                 .foregroundStyle(isActive ? LooreColor.textPrimary : LooreColor.textMuted)
                 .padding(.vertical, 6)
                 .padding(.horizontal, 14)
-                .background(isActive ? LooreColor.bgCard : Color.clear, in: Capsule())
+                // The page colour rather than clear: the same in the row, and the
+                // menu's lifted preview does not show the system platter.
+                .background(isActive ? LooreColor.bgCard : LooreColor.bgDeep, in: Capsule())
                 .overlay(Capsule().strokeBorder(isActive ? LooreColor.accent : LooreColor.border, lineWidth: 1))
                 .contentShape(Capsule())
         }
         .buttonStyle(.plain)
         .accessibilityAddTraits(isActive ? .isSelected : [])
-        .accessibilityIdentifier("artifactsNav.\(title)")
+        .accessibilityLabel(document == .create ? "Create a new artifact" : bubble.title)
+        .accessibilityHint(bubble.artifact?.description ?? "")
+        .accessibilityIdentifier("artifactsNav.\(bubble.title)")
+    }
+
+    /// Opens the document's edit form: selects it first when another one is open
+    /// (through the page's unsaved-changes guard).
+    private func edit(_ bubble: WorkspaceBubble) {
+        actions?.editRequest = bubble.document
+        if bubble.document != active { onSelect(bubble.document) }
+    }
+
+    private func requestDelete(_ artifact: ArtifactDoc) {
+        actions?.deleteTarget = artifact
+    }
+}
+
+/// VoiceOver's "Delete" action on a bubble that can be deleted.
+private struct DeleteAccessibilityAction: ViewModifier {
+    let artifact: ArtifactDoc?
+    let perform: (ArtifactDoc) -> Void
+
+    func body(content: Content) -> some View {
+        if let artifact {
+            content.accessibilityAction(named: "Delete") { perform(artifact) }
+        } else {
+            content
+        }
     }
 }
 

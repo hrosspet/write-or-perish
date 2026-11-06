@@ -385,6 +385,37 @@ def test_after_a_reply_is_deleted_the_next_write_is_replayed_in_full(app):  # no
                        "text:\n## Facts\n- has two dogs\n- lives in Brno")
 
 
+def test_a_deleted_artifact_is_never_replayed_labelled_or_counted(app):  # noqa: F811
+    """#603: once the user deletes a custom artifact, a later turn shows
+    none of its text, and a new artifact of that kind starts at v1."""
+    from backend.utils.artifact_deletion import soft_delete_artifact
+    alice, system = _thread()
+    interim, final = _turn(alice, system, "Start a list.", [
+        _resp("Starting it.", tool_calls=[
+            {"id": "c1", "name": "update_artifact",
+             "input": {"kind": "plans",
+                       "updated_content": "- SECRET PLAN"}}]),
+        _resp("Started."),
+    ])
+    assert soft_delete_artifact(alice.id, "plans") == 1
+    _db.session.commit()
+
+    _turn(alice, final, "And now?", [_resp("Gone.")])
+    raw = _ScriptedProvider.calls[0]["raw"]
+    assert "SECRET PLAN" not in json.dumps(raw)
+    assert _answers(raw) == "'plans' was saved, but that version no longer exists."
+    entry = json.loads(interim.tool_calls_meta)[0]
+    report = _llm_task_mod._artifact_write_report(entry, alice.id)
+    assert "SECRET PLAN" not in report and "v1" not in report
+
+    again = _mk_artifact(alice.id, "plans", "- a new list")
+    _db.session.commit()
+    from backend.utils.artifact_versions import version_number
+    assert version_number(again) == 1
+    assert _llm_task_mod.inline_artifact_text(again).startswith(
+        "[plans · v1,")
+
+
 def test_a_write_recorded_before_versions_names_no_number(app):  # noqa: F811
     alice = _mk_user("alice", approved=True, plan="alpha")
     row = _mk_artifact(alice.id, "memory", "a fact")

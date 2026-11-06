@@ -8,9 +8,9 @@ names the version a write is based on (update_artifact's base_version).
 
 Ids of versions are kept in plaintext tool_calls_meta (an update's
 artifact_id and previous_artifact_id); their content never is. Every
-reader of such an id fetches the row through ``stored_version``, so a
-rule on which versions may still be read (a deleted one, #605) is added
-in one place.
+reader of such an id fetches the row through ``stored_version``, which
+reads live versions only: a deleted artifact (#603) is never replayed,
+labelled, diffed or served.
 """
 import difflib
 import re
@@ -21,20 +21,20 @@ from backend.models import UserArtifact
 
 
 def _versions_query(user_id, kind):
-    """The versions of *kind* the numbering counts. #605 (deleting an
-    artifact) restricts this to the versions that are not deleted."""
-    return UserArtifact.query.filter(
+    """The versions of *kind* the numbering counts: the live ones, as the
+    artifacts page counts them (a deleted artifact, #603, starts again at
+    v1)."""
+    return UserArtifact.live().filter(
         UserArtifact.user_id == user_id, UserArtifact.kind == kind)
 
 
 def stored_version(artifact_id, user_id):
-    """The version *artifact_id* points at, when it is *user_id*'s;
-    otherwise (no such row, someone else's) None. For ids kept elsewhere:
-    tool_calls_meta entries and the Actions-taken diff request. Callers
-    still check the row's ai_usage before its text reaches a model."""
-    if artifact_id is None:
-        return None
-    row = UserArtifact.query.get(artifact_id)
+    """The version *artifact_id* points at, when it is *user_id*'s and not
+    deleted (#603); otherwise (no such row, deleted, someone else's)
+    None. For ids kept elsewhere: tool_calls_meta entries and the
+    Actions-taken diff request. Callers still check the row's ai_usage
+    before its text reaches a model."""
+    row = UserArtifact.get_live(artifact_id)
     if row is None or row.user_id != user_id:
         return None
     return row

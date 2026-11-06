@@ -1354,3 +1354,23 @@ def test_changes_are_the_owners_only_with_no_admin_path(app, client):
               _changes(client, 999999)):
         assert r.status_code == 404
         assert b"THEIR" not in r.data
+
+
+def test_changes_of_a_deleted_artifact_are_not_served(app, client):
+    """#603: a deleted artifact's versions are not diffed, from either
+    side; a new one of that kind starts at v1 with nothing before it."""
+    from backend.utils.artifact_deletion import soft_delete_artifact
+    uid = User.query.first().id
+    v1 = _mk_artifact(uid, "plans", "OLD PLAN")
+    v2 = _mk_artifact(uid, "plans", "NEWER PLAN")
+    soft_delete_artifact(uid, "plans")
+    _db.session.commit()
+    again = _mk_artifact(uid, "plans", "a new list")
+
+    for r in (_changes(client, v2.id), _changes(client, v2.id, **{"from": v1.id}),
+              _changes(client, again.id, **{"from": v2.id})):
+        assert r.status_code == 404
+        assert b"PLAN" not in r.data
+    data = _changes(client, again.id).get_json()
+    assert (data["version_number"], data["previous_version_number"]) == (1, None)
+    assert data["lines"] == [{"type": "add", "text": "a new list"}]

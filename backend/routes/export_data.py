@@ -324,10 +324,11 @@ def _artifact_ref_lines(node, user_id):
 
     # ai_preferences is a UserArtifact (#158 Slice 5) → it flows through the
     # user_artifact loop below as [Artifact 'ai_preferences' vN].
+    # get_user_artifacts() and live() leave deleted versions out (#603).
     for kind, artifact in sorted(node.get_user_artifacts().items()):
         if artifact.user_id != user_id:
             continue
-        artifact_ver = UserArtifact.query.filter(
+        artifact_ver = UserArtifact.live().filter(
             UserArtifact.user_id == artifact.user_id,
             UserArtifact.kind == kind,
             UserArtifact.created_at <= artifact.created_at,
@@ -1656,7 +1657,8 @@ def build_user_export_content(
                             artifact.ai_usage,
                             f"archive {kind} artifact {artifact.id}",
                             row=artifact)
-                    art_ver = UserArtifact.query.filter(
+                    # Live versions only (#603), as get_user_artifacts.
+                    art_ver = UserArtifact.live().filter(
                         UserArtifact.user_id == artifact.user_id,
                         UserArtifact.kind == kind,
                         UserArtifact.created_at <= artifact.created_at,
