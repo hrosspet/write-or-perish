@@ -18,6 +18,7 @@ struct TodoPage: View {
     let onSelect: (WorkspaceDocument) -> Void
 
     @Environment(AppState.self) private var app
+    @Environment(WorkspaceActions.self) private var actions: WorkspaceActions?
     @Environment(\.scenePhase) private var scenePhase
     @State private var model = TodoModel()
     @State private var editing = false
@@ -43,7 +44,9 @@ struct TodoPage: View {
         .task {
             model.app = app
             await fetchTodo()
+            takeEditRequest()
         }
+        .onChange(of: actions?.editRequest) { _, _ in takeEditRequest() }
         .onChange(of: app.signals.todoChanged) { _, _ in Task { await fetchTodo() } }
         .onChange(of: scenePhase) { _, phase in
             if phase == .active, !editing { Task { await fetchTodo() } }
@@ -147,13 +150,9 @@ struct TodoPage: View {
             Text("No todo list yet. Create one to track your tasks.")
                 .font(LooreFont.sans(14.4, .regular))
                 .foregroundStyle(LooreColor.textMuted)
-            Button("Create Todo") {
-                editContent = Self.createTemplate
-                editBase = nil
-                editing = true
-            }
-            .buttonStyle(.looreFilled)
-            .accessibilityIdentifier("todo.create")
+            Button("Create Todo", action: openCreateEditor)
+                .buttonStyle(.looreFilled)
+                .accessibilityIdentifier("todo.create")
         }
         .multilineTextAlignment(.center)
         .fixedSize(horizontal: false, vertical: true)
@@ -197,6 +196,19 @@ struct TodoPage: View {
     private func fetchTodo() async {
         let fresh = await model.fetch()
         if let fresh, !editing { editContent = fresh.content }
+    }
+
+    /// Edit chosen in the Todo bubble's menu (#603): the form the version chip
+    /// opens, or "Create Todo"'s when there is no list yet; once the list has loaded.
+    private func takeEditRequest() {
+        guard !model.loading, actions?.takeEditRequest(for: .todo) == true, !editing else { return }
+        if let todo { openEditor(on: todo) } else { openCreateEditor() }
+    }
+
+    private func openCreateEditor() {
+        editContent = Self.createTemplate
+        editBase = nil
+        editing = true
     }
 
     private func openEditor(on todo: TodoDoc) {
